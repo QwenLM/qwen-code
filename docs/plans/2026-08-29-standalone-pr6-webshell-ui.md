@@ -120,6 +120,17 @@ everywhere):
   `createSession({ sessionContext: { kind: 'standalone' }, approvalMode? })`
   only — never the generic helper's `sourceType`/`worktree`/`branch`
   payload. Tests assert the exact request body for both branches.
+- **Every new-session caller passes explicit intent** (review P1): global
+  New Chat, current-session New Chat, `/new`, `/clear`, the new-session
+  suggestion, and the shell API all reach the same `createNewSession()`
+  today, and Goals passes an undefined cwd while needing workspace — with a
+  workspace active context, the callee cannot distinguish global standalone
+  creation from current-session workspace inheritance. The caller contract
+  becomes an explicit intent: `{ kind: 'global' }` (Home/global New Chat →
+  standalone when capable), `{ kind: 'inherit' }` (current-session
+  entries), or an explicit `{ kind: 'workspace', cwd }` (project New Chat,
+  Goals). Intent is never inferred from an undefined cwd or current state,
+  and every real callsite is covered by tests.
 - **Project-scoped New Chat** — `handleNewSession(wsCwd)`
   (`WebShellSidebar.tsx:5514`) → `createNewSession(workspaceCwd)`;
   unchanged, pending context `{ kind: 'workspace', cwd }`.
@@ -130,19 +141,25 @@ everywhere):
 - **Git** — `resolveSessionForWorkspace` (`App.tsx:6661`) and the composer
   git chips (gated by `gitModeEligible`, `App.tsx:6763`); stays
   workspace-bound.
-- **Current-session New Chat** — `createNewSession()` inherits the active
-  `connection.sessionContext`: standalone → pending standalone, workspace →
-  pending workspace with the current cwd (today's behavior). A Live current
-  session routes through the existing Live-specific `startLive('new')` path
-  (`client/live/useLiveVoice`), never a silent remap to standalone — the
-  routing contract's "inherit explicit context" row stays intact (review
-  P1).
-- **Split view excludes standalone sessions in PR6** (review P1): pane
-  identity is persisted as bare `sessionId` strings (split URL,
-  sessionStorage) and pane ownership derives from workspace catalogs, so a
-  standalone pane has no context source after a cold split URL or refresh
-  and would fall through to workspace resolution. Standalone rows get no
-  split entry point; context-bearing pane descriptors are a follow-up.
+- **Current-session New Chat** (`{ kind: 'inherit' }`) — inherits the
+  active `connection.sessionContext`: standalone → pending standalone,
+  workspace → pending workspace with the current cwd (today's behavior). A
+  Live current session routes through the existing Live-specific
+  `startLive('new')` path (`client/live/useLiveVoice`) before any clearing,
+  never a silent remap to standalone — the routing contract's "inherit
+  explicit context" row stays intact (review P1).
+- **Split view excludes standalone sessions in PR6, at every ingress**
+  (review P1): pane identity is persisted as bare `sessionId` strings
+  (split URL, sessionStorage) and pane ownership derives from workspace
+  catalogs, so a standalone pane has no context source after a cold split
+  URL or refresh and would fall through to workspace resolution. Blocking
+  only the Recents row is insufficient — the global footer button can seed
+  the current `connection.sessionId`, and `?split=`, sessionStorage
+  restoration, and externally controlled `splitSessionIds` can all inject a
+  bare standalone ID. PR6 disables the global Split View entry for
+  non-workspace effective contexts and rejects or sanitizes standalone IDs
+  at every seed, URL, storage, and controlled-prop boundary before panes
+  mount. Context-bearing pane descriptors are a follow-up.
 - **Context propagation** — `WorkspaceSessionProvider`
   (`components/WorkspaceSessionProvider.tsx`) still passes legacy
   `workspaceCwd` into `DaemonSessionProvider`; PR6 passes the resolved
@@ -317,11 +334,20 @@ upward through `onSessionIdChange` (`App.tsx:8282`) so `main.tsx` can
   session. Legacy context-free links keep today's workspace resolution —
   standalone sessions did not exist before this feature, so no migration is
   needed.
-- A `context=standalone` cold load resolves only after the standalone read
-  path is ready, and then only through exact `getStandaloneSession`
-  semantics: a summary loads the session, not-found shows the existing
-  missing-session UI (`connection.missingSession` →
-  `showMissingSessionState`). It never guesses the primary workspace.
+- **Resolution happens at the root, before the session provider mounts**
+  (review P1): `main.tsx` passes the URL sessionId into
+  `WorkspaceSessionProvider`, which mounts `DaemonSessionProvider` outside
+  App — with no explicit context, `resolveProviderSessionContext` would
+  inherit the primary workspace and start a workspace restore before any
+  App-level lookup exists. The root therefore parses and validates
+  `context` alongside the session id, passes the explicit context through
+  `WorkspaceSessionProvider`, and for `context=standalone` suppresses
+  provider session loading until exact `getStandaloneSession` lookup
+  selects the route: a summary mounts the provider with
+  `{ kind: 'standalone' }`, not-found shows the existing missing-session
+  UI (`connection.missingSession` → `showMissingSessionState`). It never
+  guesses the primary workspace, and a cold-load test asserts zero
+  workspace-load requests.
 - **A `creating` lookup must reach a terminal state** (review P2): the
   resolver polls exact lookup with bounded backoff (e.g. up to 30 s, capped
   attempts) and then stops at an explicit **Retry** action; it never hangs
@@ -330,9 +356,9 @@ upward through `onSessionIdChange` (`App.tsx:8282`) so `main.tsx` can
   the provider's generation guard only orders loads after they start, but
   exact lookup and polling happen before `loadSession`, so a delayed
   `creating` poll resolving after the user opened another session would
-  start a load that incorrectly wins. An App-level route-resolution token
-  is invalidated on every navigation and checked before each poll and
-  immediately before `loadSession`.
+  start a load that incorrectly wins. A route-resolution token held by the
+  root resolver (above the provider) is invalidated on every navigation and
+  checked before each poll and immediately before `loadSession`.
 - **Fail-closed edge cases** (review P2): a `?context=standalone` link
   carrying a conflicting `?workspace=` parameter is rejected, not
   reconciled; on a daemon without the capability, a standalone link shows
@@ -368,9 +394,17 @@ Render the typed PR5 state instead of parsing strings:
   existing compromised path instead of recreating it, so no Repair action
   is offered — the user gets terminal guidance (export the transcript,
   delete the session) instead.
-- `standaloneSession.creationRecovery` → outcome-unknown banner exposing
-  the reserved UUID with a "check status" retry that performs exact lookup,
-  plus a terminal error path when lookup reports not-found.
+- `standaloneSession.creationRecovery` → a complete outcome-unknown
+  recovery state machine (review P1). The provider publishes the reserved
+  UUID as `connection.sessionId` without an attached session, so
+  `ensureSessionForPrompt` would no-op on the existing id while submission
+  fails on the empty session ref — ordinary submission and unconfirmed
+  new-session actions are therefore blocked while recovery is unresolved.
+  The owner-guarded **Check Status** action performs exact lookup with
+  transitions for every recovery state: `creating` → bounded polling;
+  `existing` → load and attach the same id; `absent` → an explicit
+  user-triggered retry (never an automatic create); `unknown` → a
+  persistent recovery UI. All four transitions are tested.
 - Delete responses carrying `fileCleanupPending` → non-blocking notice that
   file cleanup will finish automatically; the transcript is already gone.
 
@@ -423,6 +457,18 @@ Unit/component (vitest, `packages/web-shell`):
   (review P1).
 - Archived standalone lane lists and refreshes after lifecycle actions;
   partial-success batch envelopes handled per action (review P2).
+- Cold `context=standalone` load issues zero workspace-load requests, with
+  resolution completed at the root before the provider mounts (review P1).
+- Every new-session callsite passes explicit intent; no path infers intent
+  from an undefined cwd or current state (review P1).
+- Split View ingresses: footer entry disabled for non-workspace effective
+  contexts; `?split=<standalone-id>`, sessionStorage restoration, and
+  controlled-prop injection rejected or sanitized before panes mount
+  (review P1).
+- Outcome-unknown recovery: all four states (creating / existing / absent /
+  unknown) transition correctly, ordinary submission and unconfirmed
+  new-session actions are blocked while recovery is unresolved, and no
+  automatic re-create ever fires (review P1).
 
 E2E (Playwright, `packages/web-shell/client/e2e`):
 
