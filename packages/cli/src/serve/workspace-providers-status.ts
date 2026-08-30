@@ -34,6 +34,7 @@ import {
   sanitizeProviderBaseUrl,
 } from '../utils/acpModelUtils.js';
 import { buildModelReasoningConfigPreview } from '../acp-integration/model-configuration.js';
+import { buildAcpModelDisplayFields } from '../acp-integration/acp-model-display.js';
 import { snapshotProcessEnv } from './env-snapshot.js';
 
 const debugLogger = createDebugLogger('WORKSPACE_PROVIDERS_STATUS');
@@ -145,7 +146,10 @@ function buildWorkspaceProvidersStatus(
         : undefined;
     const approvalMode = resolveApprovalMode(settings);
     const providers = new Map<string, ServeWorkspaceProviderStatus>();
-    for (const option of modelOptions) {
+    const displayFields = buildAcpModelDisplayFields(modelOptions);
+    for (let i = 0; i < modelOptions.length; i++) {
+      const option = modelOptions[i]!;
+      const display = displayFields[i]!;
       const { model, effectiveModelId, modelId } = option;
       if (model.isRuntimeModel) continue;
       const authType = String(model.authType);
@@ -173,13 +177,12 @@ function buildWorkspaceProvidersStatus(
                 model.registryBaseUrl ?? model.baseUrl,
               )?.generationConfig.thinkingMandatory === true,
           });
+      const description = display.description ?? undefined;
       const providerModel: ServeWorkspaceProviderModel = {
         modelId,
         baseModelId: parseAcpBaseModelId(effectiveModelId),
-        name: model.label,
-        ...(model.description !== undefined
-          ? { description: model.description }
-          : {}),
+        name: display.name,
+        ...(description !== undefined ? { description } : {}),
         contextLimit: model.contextWindowSize ?? tokenLimit(effectiveModelId),
         ...(model.modalities !== undefined
           ? { modalities: model.modalities }

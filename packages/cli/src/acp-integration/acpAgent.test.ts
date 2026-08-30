@@ -7132,7 +7132,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
             {
               modelId: 'qwen-plus(qwen)',
               baseModelId: 'qwen-plus',
-              name: 'Qwen Plus',
+              name: 'qwen-plus',
               description: 'General coding model',
               contextLimit: 65_536,
               baseUrl: 'https://api.example.com',
@@ -9189,6 +9189,95 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       context.state.models.availableModels.map((model) => model.modelId),
     ).toEqual(modelIds);
     expect(context.state.models.currentModelId).toBe(modelIds[1]);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('emits bare model id and _meta.qwen for Token Plan labels', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const { buildAcpModelOptions } = await import('../utils/acpModelUtils.js');
+    const models = [
+      {
+        id: 'qwen3.7-max',
+        label: '[ModelStudio Token Plan] qwen3.7-max',
+        authType: AuthType.USE_OPENAI,
+        contextWindowSize: 1_000_000,
+        baseUrl: 'https://token.example/v1',
+        registryBaseUrl: 'https://token.example/v1',
+      },
+      {
+        id: 'qwen3.7-max',
+        label: '[ModelStudio Coding Plan] qwen3.7-max',
+        authType: AuthType.USE_OPENAI,
+        contextWindowSize: 1_000_000,
+        baseUrl: 'https://coding.example/v1',
+        registryBaseUrl: 'https://coding.example/v1',
+      },
+    ];
+    const innerConfig = await setupSessionMocks(sessionId);
+    Object.assign(innerConfig, {
+      getModel: vi.fn().mockReturnValue('qwen3.7-max'),
+      getAuthType: vi.fn().mockReturnValue(AuthType.USE_OPENAI),
+      getCurrentModelRegistryBaseUrl: vi
+        .fn()
+        .mockReturnValue('https://token.example/v1'),
+      getAllConfiguredModels: vi.fn().mockReturnValue(models),
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    const session = (await agent.newSession({
+      cwd: '/tmp',
+      mcpServers: [],
+    })) as {
+      models: {
+        currentModelId: string;
+        availableModels: Array<{
+          modelId: string;
+          name: string;
+          description: string | null;
+          _meta?: {
+            contextLimit?: number;
+            qwen?: { providerLabel?: string; legacyName?: string };
+          };
+        }>;
+      };
+      configOptions: Array<{
+        id: string;
+        options: Array<{ value: string; name: string; description?: string }>;
+      }>;
+    };
+
+    const expectedIds = buildAcpModelOptions(models).map((o) => o.modelId);
+    expect(session.models.availableModels.map((m) => m.modelId)).toEqual(
+      expectedIds,
+    );
+    expect(session.models.availableModels.map((m) => m.name)).toEqual([
+      'qwen3.7-max · Token Plan',
+      'qwen3.7-max · Coding Plan',
+    ]);
+    expect(session.models.availableModels[0]?._meta).toMatchObject({
+      contextLimit: 1_000_000,
+      qwen: {
+        providerLabel: 'Token Plan',
+        legacyName: '[ModelStudio Token Plan] qwen3.7-max',
+      },
+    });
+    const modelOption = session.configOptions.find((o) => o.id === 'model');
+    expect(modelOption?.options.map((o) => o.name)).toEqual(
+      session.models.availableModels.map((m) => m.name),
+    );
 
     mockConnectionState.resolve();
     await agentPromise;

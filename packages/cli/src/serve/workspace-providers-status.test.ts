@@ -382,7 +382,7 @@ describe('createWorkspaceProvidersStatusProvider', () => {
       {
         modelId: 'custom-model(openai)',
         baseModelId: 'custom-model',
-        name: 'Idealab Current',
+        name: 'custom-model',
         baseUrl: 'https://idealab.example/v1',
         isCurrent: true,
       },
@@ -447,13 +447,22 @@ describe('createWorkspaceProvidersStatusProvider', () => {
 
     const result = await provider(workspace, false);
     const models = result.providers.flatMap((p) => p.models);
-    const defaultModel = models.find((m) => m.name === 'Shared Default');
+    const sharedModels = models.filter(
+      (m) =>
+        m.baseModelId === 'shared-model' || m.modelId.includes('shared-model'),
+    );
+    const defaultModel = sharedModels.find(
+      (m) => m.baseUrl !== 'https://proxy.example/v1',
+    );
+    const proxyModel = sharedModels.find(
+      (m) => m.baseUrl === 'https://proxy.example/v1',
+    );
 
     expect(result.current?.modelId).toBe(defaultModel?.modelId);
     expect(defaultModel?.isCurrent).toBe(true);
-    expect(
-      models.find((m) => m.baseUrl === 'https://proxy.example/v1')?.isCurrent,
-    ).toBe(false);
+    expect(defaultModel?.name).toMatch(/^shared-model/);
+    expect(defaultModel?.name).not.toContain('Shared Default');
+    expect(proxyModel?.isCurrent).toBe(false);
   });
 
   it('uses the auth-specific env model when settings.model.name is absent', async () => {
@@ -639,6 +648,34 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     expect(JSON.stringify(result)).toContain('https://broken.example/v1');
     expect(JSON.stringify(result)).not.toContain('sec ret');
     expect(result.initialized).toBe(false);
+  });
+
+  it('emits short model names for prefixed install labels', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      model: { name: 'qwen3.7-max' },
+      modelProviders: {
+        openai: [
+          {
+            id: 'qwen3.7-max',
+            name: '[ModelStudio Token Plan] qwen3.7-max',
+            baseUrl: 'https://token.example/v1',
+          },
+        ],
+      },
+    });
+
+    const result = await provider(workspace, false);
+    const tokenModel = result.providers
+      .flatMap((p) => p.models)
+      .find((m) => m.modelId === 'qwen3.7-max(openai)');
+    expect(tokenModel).toMatchObject({
+      modelId: 'qwen3.7-max(openai)',
+      name: 'qwen3.7-max',
+      description: 'Token Plan',
+    });
+    expect(tokenModel?.name).not.toContain('ModelStudio');
   });
 
   async function writeUserSettings(settings: Record<string, unknown>) {

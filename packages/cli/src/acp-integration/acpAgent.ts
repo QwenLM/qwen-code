@@ -300,6 +300,7 @@ import {
 } from '../i18n/languageUtils.js';
 import { runWithAcpRuntimeOutputDir } from './runtimeOutputDirContext.js';
 import { ACP_ERROR_CODES } from './errorCodes.js';
+import { buildAcpModelDisplayFields } from './acp-model-display.js';
 import { runExitCleanup } from '../utils/cleanup.js';
 import { startNonInteractiveOpenAILogHousekeeping } from '../services/housekeeping/scheduler.js';
 import { appEvents, AppEvent } from '../utils/events.js';
@@ -6989,8 +6990,11 @@ class QwenAgent implements Agent {
           )
         : undefined;
       const providers = new Map<string, ServeWorkspaceProviderStatus>();
+      const displayFields = buildAcpModelDisplayFields(modelOptions);
 
-      for (const option of modelOptions) {
+      for (let i = 0; i < modelOptions.length; i++) {
+        const option = modelOptions[i]!;
+        const display = displayFields[i]!;
         const { model, effectiveModelId, modelId } = option;
         const authType = String(model.authType);
         let provider = providers.get(authType);
@@ -7018,13 +7022,12 @@ class QwenAgent implements Agent {
                     model.registryBaseUrl ?? model.baseUrl,
                   )?.generationConfig.thinkingMandatory === true,
               });
+        const description = display.description ?? undefined;
         const providerModel: ServeWorkspaceProviderModel = {
           modelId,
           baseModelId: parseAcpBaseModelId(effectiveModelId),
-          name: model.label,
-          ...(model.description !== undefined
-            ? { description: model.description }
-            : {}),
+          name: display.name,
+          ...(description !== undefined ? { description } : {}),
           contextLimit: model.contextWindowSize ?? tokenLimit(effectiveModelId),
           ...(model.modalities !== undefined
             ? { modalities: model.modalities }
@@ -13171,14 +13174,26 @@ class QwenAgent implements Agent {
         : config.getCurrentModelRegistryBaseUrl?.(),
     );
 
-    const mappedAvailableModels = modelOptions.map(({ model, modelId }) => ({
-      modelId,
-      name: model.label,
-      description: model.description ?? null,
-      _meta: {
-        contextLimit: model.contextWindowSize ?? tokenLimit(model.id),
-      },
-    }));
+    const displayFields = buildAcpModelDisplayFields(modelOptions);
+    const mappedAvailableModels = modelOptions.map(({ model, modelId }, i) => {
+      const display = displayFields[i]!;
+      const qwen: { providerLabel?: string; legacyName?: string } = {};
+      if (display.providerLabel) {
+        qwen.providerLabel = display.providerLabel;
+      }
+      if (display.legacyName) {
+        qwen.legacyName = display.legacyName;
+      }
+      return {
+        modelId,
+        name: display.name,
+        description: display.description ?? null,
+        _meta: {
+          contextLimit: model.contextWindowSize ?? tokenLimit(model.id),
+          ...(Object.keys(qwen).length > 0 ? { qwen } : {}),
+        },
+      };
+    });
 
     return {
       currentModelId,
@@ -13233,11 +13248,15 @@ class QwenAgent implements Agent {
       options: modeOptions,
     };
 
-    const configModelOptions = modelOptions.map(({ model, modelId }) => ({
-      value: modelId,
-      name: model.label,
-      description: model.description ?? '',
-    }));
+    const displayFields = buildAcpModelDisplayFields(modelOptions);
+    const configModelOptions = modelOptions.map(({ modelId }, i) => {
+      const display = displayFields[i]!;
+      return {
+        value: modelId,
+        name: display.name,
+        description: display.description ?? '',
+      };
+    });
 
     const modelConfigOption: SessionConfigOption = {
       id: 'model',
