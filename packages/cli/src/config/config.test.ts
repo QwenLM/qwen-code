@@ -8,6 +8,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
+  GOAL_DEFAULT_TOKEN_BUDGET,
   ToolNames,
   DEFAULT_QWEN_MODEL,
   OutputFormat,
@@ -1256,6 +1257,29 @@ describe('loadCliConfig', () => {
       const config = await loadCliConfig(settings, argv);
 
       expect(config.getUsageStatisticsEnabled()).toBe(expected);
+    });
+  });
+
+  describe('model.goalTokenBudget', () => {
+    it('carries the setting into the Goal budget grant', async () => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+
+      const config = await loadCliConfig(
+        { model: { goalTokenBudget: 1_234 } },
+        argv,
+      );
+
+      expect(config.getGoalTokenBudgetGrant()).toBe(1_234);
+    });
+
+    it('arms the built-in default when the setting is unset', async () => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+
+      const config = await loadCliConfig({}, argv);
+
+      expect(config.getGoalTokenBudgetGrant()).toBe(GOAL_DEFAULT_TOKEN_BUDGET);
     });
   });
 

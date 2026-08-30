@@ -1602,7 +1602,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: undefined as number | undefined,
         description:
-          'Autonomous spend window armed on each new Goal, in tokens as counted by the Goal meter (totalTokenCount summed over every model call the Goal makes in its own turns; side queries and checkpoint verification are not metered). When a Goal spends its window it gets one wind-down turn to hand off, then stops until you resume it, which arms another window. Unset uses the built-in default of 30,000,000. Set 0 to run Goals with no budget. Negative or fractional values are ignored with a warning.',
+          'Autonomous spend window armed on each new Goal, in tokens as counted by the Goal meter (totalTokenCount summed over every model call the Goal makes in its own turns; side queries and checkpoint verification are not metered). When a Goal spends its window it gets one wind-down turn to hand off, then stops until you resume it, which arms another window. Unset uses the built-in default of 30,000,000. Set 0 to run Goals with no budget; -1 is accepted as the same opt-out, like the other budget settings. Other negative or fractional values fall back to the default (recorded in the debug log file).',
         showInDialog: false,
       },
       maxToolCalls: {

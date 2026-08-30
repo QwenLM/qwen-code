@@ -3139,21 +3139,28 @@ describe('Server Config (config.ts)', () => {
       expect(runtime.getSnapshot().goal).toMatchObject({ tokenBudget: 1_234 });
     });
 
-    it('runs Goals with no budget when goalTokenBudget is 0', async () => {
-      // 0 maps to the runtime's non-finite opt-out: the created Goal carries
-      // no `tokenBudget` field at all, so nothing non-finite is persisted.
-      const config = new Config({
-        ...baseParams,
-        chatRecording: true,
-        goalTokenBudget: 0,
-      });
-      expect(config.getGoalTokenBudgetGrant()).toBe(Number.POSITIVE_INFINITY);
+    it.each([
+      ['0', 0],
+      ['-1', -1],
+    ] as const)(
+      'runs Goals with no budget when goalTokenBudget is %s',
+      async (_label, goalTokenBudget) => {
+        // 0 and its -1 alias map to the runtime's non-finite opt-out: the
+        // created Goal carries no `tokenBudget` field at all, so nothing
+        // non-finite is persisted.
+        const config = new Config({
+          ...baseParams,
+          chatRecording: true,
+          goalTokenBudget,
+        });
+        expect(config.getGoalTokenBudgetGrant()).toBe(Number.POSITIVE_INFINITY);
 
-      const runtime = config.getGoalRuntime();
-      await runtime.dispatch({ action: 'create', objective: 'ship' });
+        const runtime = config.getGoalRuntime();
+        await runtime.dispatch({ action: 'create', objective: 'ship' });
 
-      expect(runtime.getSnapshot().goal).not.toHaveProperty('tokenBudget');
-    });
+        expect(runtime.getSnapshot().goal).not.toHaveProperty('tokenBudget');
+      },
+    );
 
     it.each([
       ['absent', undefined],
@@ -3184,10 +3191,14 @@ describe('Server Config (config.ts)', () => {
     it('normalizes the goalTokenBudget setting', () => {
       expect(normalizeGoalTokenBudget(400_000)).toBe(400_000);
       expect(normalizeGoalTokenBudget(0)).toBe(Number.POSITIVE_INFINITY);
+      // -1 is the opt-out alias for 0, matching the sibling budget
+      // settings where -1 means unlimited.
+      expect(normalizeGoalTokenBudget(-1)).toBe(Number.POSITIVE_INFINITY);
+      expect(isValidGoalTokenBudget(-1)).toBe(true);
       for (const invalid of [
         undefined,
         null,
-        -1,
+        -2,
         1.5,
         Number.NaN,
         '12',
@@ -3200,6 +3211,94 @@ describe('Server Config (config.ts)', () => {
       }
       expect(isValidGoalTokenBudget(0)).toBe(true);
       expect(isValidGoalTokenBudget(30_000_000)).toBe(true);
+    });
+
+    it('records the invalid-goalTokenBudget fallback in the debug log', async () => {
+      // The fallback notice lives in the debug log file (enabled via
+      // QWEN_DEBUG_LOG_FILE / --debug), not on a user-visible channel.
+      const previousDebugLogFileEnv = process.env['QWEN_DEBUG_LOG_FILE'];
+      const sessionId = 'goal-budget-warning-session';
+      const mkdirSpy = vi
+        .spyOn(fs.promises, 'mkdir')
+        .mockResolvedValue(undefined);
+      const appendFileSpy = vi
+        .spyOn(fs.promises, 'appendFile')
+        .mockResolvedValue(undefined);
+
+      try {
+        process.env['QWEN_DEBUG_LOG_FILE'] = '1';
+        resetDebugLoggingState();
+
+        new Config({ ...baseParams, sessionId, goalTokenBudget: -5 });
+
+        await vi.waitFor(() =>
+          expect(appendFileSpy).toHaveBeenCalledWith(
+            Storage.getDebugLogPath(sessionId),
+            expect.stringMatching(
+              /Ignoring invalid goalTokenBudget -5:.*using the default of 30000000/,
+            ),
+            'utf8',
+          ),
+        );
+      } finally {
+        mkdirSpy.mockRestore();
+        appendFileSpy.mockRestore();
+        resetDebugLoggingState();
+        setDebugLogSession(null);
+        if (previousDebugLogFileEnv === undefined) {
+          delete process.env['QWEN_DEBUG_LOG_FILE'];
+        } else {
+          process.env['QWEN_DEBUG_LOG_FILE'] = previousDebugLogFileEnv;
+        }
+      }
+    });
+
+    it('keeps the goalTokenBudget debug warning silent for absent, valid, and opt-out values', async () => {
+      const previousDebugLogFileEnv = process.env['QWEN_DEBUG_LOG_FILE'];
+      const sessionId = 'goal-budget-warning-session';
+      const mkdirSpy = vi
+        .spyOn(fs.promises, 'mkdir')
+        .mockResolvedValue(undefined);
+      const appendFileSpy = vi
+        .spyOn(fs.promises, 'appendFile')
+        .mockResolvedValue(undefined);
+
+      try {
+        process.env['QWEN_DEBUG_LOG_FILE'] = '1';
+        resetDebugLoggingState();
+
+        for (const goalTokenBudget of [undefined, 0, 1_234, -1]) {
+          new Config({ ...baseParams, sessionId, goalTokenBudget });
+          // Let any fire-and-forget debug write settle before the next case.
+          await new Promise((resolve) => setImmediate(resolve));
+        }
+        expect(
+          appendFileSpy.mock.calls.filter((call) =>
+            String(call[1]).includes('Ignoring invalid goalTokenBudget'),
+          ),
+        ).toHaveLength(0);
+
+        // Control case: the channel is live in this test, so the silence
+        // above is meaningful.
+        new Config({ ...baseParams, sessionId, goalTokenBudget: -5 });
+        await vi.waitFor(() =>
+          expect(appendFileSpy).toHaveBeenCalledWith(
+            Storage.getDebugLogPath(sessionId),
+            expect.stringContaining('Ignoring invalid goalTokenBudget -5'),
+            'utf8',
+          ),
+        );
+      } finally {
+        mkdirSpy.mockRestore();
+        appendFileSpy.mockRestore();
+        resetDebugLoggingState();
+        setDebugLogSession(null);
+        if (previousDebugLogFileEnv === undefined) {
+          delete process.env['QWEN_DEBUG_LOG_FILE'];
+        } else {
+          process.env['QWEN_DEBUG_LOG_FILE'] = previousDebugLogFileEnv;
+        }
+      }
     });
 
     it('bills Goal turns through the canonical chat recorder', async () => {

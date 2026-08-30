@@ -1017,8 +1017,9 @@ export interface ConfigParameters {
   /**
    * Autonomous spend window armed on each new Goal, in `tokensUsed` tokens
    * (`totalTokenCount` summed per Goal-turn model call). `0` runs Goals with
-   * no budget; absent or invalid falls back to `GOAL_DEFAULT_TOKEN_BUDGET`.
-   * See `normalizeGoalTokenBudget`.
+   * no budget, and `-1` is accepted as an alias for `0`, matching the sibling
+   * settings where `-1` means unlimited; absent or invalid falls back to
+   * `GOAL_DEFAULT_TOKEN_BUDGET`. See `normalizeGoalTokenBudget`.
    */
   goalTokenBudget?: number;
   /**
@@ -1444,19 +1445,26 @@ export function validateMaxSessionTurns(value: number | undefined): number {
  *
  * A positive integer is the grant. `0` opts out -- the runtime treats a
  * non-finite grant as "arm nothing", and a Goal with no `tokenBudget` field
- * runs unbounded, so the opt-out never has to persist `Infinity`. Anything
- * else (absent, negative, fractional, NaN, non-number) is the default; the
- * caller decides whether that deserves a warning via `isValidGoalTokenBudget`.
+ * runs unbounded, so the opt-out never has to persist `Infinity`. `-1` is an
+ * alias for `0`, matching the sibling budget settings where `-1` means
+ * unlimited. Anything else (absent, other negative, fractional, NaN,
+ * non-number) is the default; the caller decides whether that deserves a
+ * warning via `isValidGoalTokenBudget`.
  */
 export function normalizeGoalTokenBudget(value: unknown): number {
-  if (value === 0) return Number.POSITIVE_INFINITY;
+  if (value === 0 || value === -1) return Number.POSITIVE_INFINITY;
   return isValidGoalTokenBudget(value) ? value : GOAL_DEFAULT_TOKEN_BUDGET;
 }
 
-/** True for the values `normalizeGoalTokenBudget` honours as written. */
+/**
+ * True for the values `normalizeGoalTokenBudget` honours (`-1` as the
+ * opt-out alias for `0`); false for the values that fall back to the default.
+ */
 export function isValidGoalTokenBudget(value: unknown): value is number {
   return (
-    typeof value === 'number' && Number.isInteger(value) && value >= 0
+    typeof value === 'number' &&
+    Number.isInteger(value) &&
+    (value >= 0 || value === -1)
   );
 }
 
@@ -2584,13 +2592,15 @@ export class Config {
     this.fileDiscoveryService = params.fileDiscoveryService ?? null;
     this.bugCommand = params.bugCommand;
     this.maxSessionTurns = validateMaxSessionTurns(params.maxSessionTurns);
-    this.goalTokenBudgetGrant = normalizeGoalTokenBudget(params.goalTokenBudget);
+    this.goalTokenBudgetGrant = normalizeGoalTokenBudget(
+      params.goalTokenBudget,
+    );
     if (
       params.goalTokenBudget !== undefined &&
       !isValidGoalTokenBudget(params.goalTokenBudget)
     ) {
       this.debugLogger.warn(
-        `Ignoring invalid goalTokenBudget ${String(params.goalTokenBudget)}: expected a non-negative integer; using the default of ${GOAL_DEFAULT_TOKEN_BUDGET}.`,
+        `Ignoring invalid goalTokenBudget ${String(params.goalTokenBudget)}: expected a non-negative integer or -1 (no budget); using the default of ${GOAL_DEFAULT_TOKEN_BUDGET}.`,
       );
     }
     this.maxSubagentDepth = normalizeMaxSubagentDepth(params.maxSubagentDepth);
@@ -5505,7 +5515,7 @@ export class Config {
   /**
    * The autonomous spend window armed on each new Goal, as the runtime's
    * `tokenBudgetGrant`: a positive integer, or `Infinity` when the operator
-   * set `goalTokenBudget` to `0` (Goals then run unbounded).
+   * set `goalTokenBudget` to `0` or `-1` (Goals then run unbounded).
    */
   getGoalTokenBudgetGrant(): number {
     return this.goalTokenBudgetGrant;
