@@ -608,3 +608,57 @@ describe('EmbeddedApp host wiring', () => {
     }
   });
 });
+
+describe('web shell permission decision messages', () => {
+  function installShellApi(
+    api: Record<string, unknown>,
+  ): Record<string, unknown> {
+    const props = mocks.embeddedProps.current;
+    expect(props).not.toBeNull();
+    const shellRef = (props as CapturedProps)['shellRef'] as {
+      current: unknown;
+    };
+    expect(shellRef).toBeTruthy();
+    shellRef.current = api;
+    return api;
+  }
+
+  async function dispatchDecision(decision: string, source: Window | null) {
+    await act(async () => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'webShellPermissionDecision',
+            data: { decision },
+          },
+          source,
+        }),
+      );
+      await Promise.resolve();
+    });
+  }
+
+  it('forwards platform-delivered decisions to the web shell', async () => {
+    await renderApp();
+    const respondToPendingPermission = vi.fn().mockResolvedValue(true);
+    installShellApi({ respondToPendingPermission });
+
+    await dispatchDecision('allow', null);
+
+    expect(respondToPendingPermission).toHaveBeenCalledWith('allow');
+  });
+
+  it('ignores decisions posted by a window source such as a sandboxed iframe', async () => {
+    await renderApp();
+    const respondToPendingPermission = vi.fn().mockResolvedValue(true);
+    installShellApi({ respondToPendingPermission });
+
+    // MCP apps and artifact previews run in scriptable sandboxed iframes
+    // inside this webview; they can postMessage to the top window and must
+    // not be able to vote on the pending approval.
+    await dispatchDecision('allow', window);
+    await dispatchDecision('reject', window);
+
+    expect(respondToPendingPermission).not.toHaveBeenCalled();
+  });
+});

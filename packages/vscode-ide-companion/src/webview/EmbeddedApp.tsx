@@ -323,10 +323,13 @@ export function EmbeddedApp() {
   const [switchingSessionId, setSwitchingSessionId] = useState<string>();
   const [creatingSession, setCreatingSession] = useState(false);
   const [editingMessage, setEditingMessage] = useState<EditingMessage>();
-  const latestSubmittedPromptRef = useRef<{
-    sessionId: string;
-    prompt: string;
-  } | undefined>(undefined);
+  const latestSubmittedPromptRef = useRef<
+    | {
+        sessionId: string;
+        prompt: string;
+      }
+    | undefined
+  >(undefined);
   const sessionSwitchStartedAtRef = useRef(0);
   const sessionSwitchTimerRef = useRef<
     ReturnType<typeof setTimeout> | undefined
@@ -530,9 +533,7 @@ export function EmbeddedApp() {
         vscode.postMessage({ type: 'closeDiff', data: { path } });
       }
       const hasPendingDiffPermission = pendingIds.size > 0;
-      if (
-        webShellPermissionPendingRef.current !== hasPendingDiffPermission
-      ) {
+      if (webShellPermissionPendingRef.current !== hasPendingDiffPermission) {
         webShellPermissionPendingRef.current = hasPendingDiffPermission;
         vscode.postMessage({
           type: 'webShellPermissionState',
@@ -659,6 +660,11 @@ export function EmbeddedApp() {
         // would be invisible — show it over the transcript instead.
         if (runtimeRef.current) setHostNotice({ tone: 'error', text });
       } else if (message.type === 'webShellPermissionDecision') {
+        // Permission decisions are security-sensitive: only accept the
+        // platform-delivered shape (source === null). Sandboxed iframes in
+        // this webview (MCP apps, artifact previews) can postMessage to this
+        // window too, and they must not be able to vote on approvals.
+        if (event.source !== null) return;
         const decision = (message.data as { decision?: unknown } | null)
           ?.decision;
         if (decision === 'allow' || decision === 'reject') {
