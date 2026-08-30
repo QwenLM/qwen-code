@@ -4110,6 +4110,17 @@ export class CoreToolScheduler {
     );
     if (!still) return;
 
+    // Guard: a PreToolUse-'ask' bounce re-enters awaiting_approval, so the
+    // guard above alone would let this stale round-1 resolution answer the
+    // BOUNCED confirmation. The accept path would flow resolution.content
+    // through _applyInlineModify (bounced edit details are type 'edit', and
+    // that path does not check hideModify) and execute IDE-panel content
+    // the hook never reviewed on the hook-skipping re-execution; the
+    // reject path would cancel a prompt the user never answered. Only the
+    // bounce's own confirmation may resolve a bounced call — the round-1
+    // diff is closed by resolveDiffFromCli regardless.
+    if (this.bouncedAwaitingApproval.has(callId)) return;
+
     if (resolution.status === 'accepted') {
       // When content is unchanged, skip the inline modify path so that
       // the original tool params (e.g. partial old_string for edit tool)
@@ -4428,12 +4439,20 @@ export class CoreToolScheduler {
             hideAlwaysAllow: true,
             hideModify: true,
             warnings: [hookReason, ...(editDetails.warnings ?? [])],
-            onConfirm: (outcome) =>
+            onConfirm: (outcome, payload) =>
               this.handleConfirmationResponse(
                 callId,
                 editDetails.onConfirm,
                 outcome,
                 signal,
+                // Forward the host's denial reason (the stream-json
+                // permissionController sends { cancelMessage } on deny) but
+                // keep the modify channel closed: hideModify is set above,
+                // so a payload's newContent must not rewrite the
+                // hook-reviewed content on a bounce.
+                payload?.cancelMessage
+                  ? { cancelMessage: payload.cancelMessage }
+                  : undefined,
               ),
           };
         }

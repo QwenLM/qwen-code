@@ -11315,6 +11315,7 @@ describe('CoreToolScheduler telemetry spans', () => {
     shouldAvoidPermissionPrompts?: boolean;
     experimentalZedIntegration?: boolean;
     approvalMode?: ApprovalMode;
+    ideMode?: boolean;
     includeSensitiveSpanAttributes?: boolean;
     sensitiveSpanAttributeMaxLength?: number;
     onToolCallsUpdate?: ReturnType<typeof vi.fn>;
@@ -11386,7 +11387,7 @@ describe('CoreToolScheduler telemetry spans', () => {
       getInputFormat: () => options.inputFormat ?? InputFormat.TEXT,
       getExperimentalZedIntegration: () =>
         options.experimentalZedIntegration ?? false,
-      getIdeMode: () => false,
+      getIdeMode: () => options.ideMode ?? false,
       getShouldAvoidPermissionPrompts: () =>
         options.shouldAvoidPermissionPrompts ?? false,
       getTelemetryIncludeSensitiveSpanAttributes: () =>
@@ -13105,6 +13106,155 @@ describe('CoreToolScheduler telemetry spans', () => {
       hideModify: true,
       warnings: ['review protected file'],
     });
+  });
+
+  it('forwards the host denial reason when a bounced edit confirmation is cancelled', async () => {
+    const execute = vi.fn();
+    const messageBus = askMessageBus('review protected file');
+    const { onToolCallsUpdate, onAllToolCallsComplete } = await scheduleWithAsk(
+      {
+        messageBus,
+        execute,
+        tools: [new MockEditTool()],
+      },
+    );
+
+    const waiting = (await waitForStatus(
+      onToolCallsUpdate,
+      'awaiting_approval',
+    )) as WaitingToolCall;
+    expect(waiting.confirmationDetails.type).toBe('edit');
+
+    // stream-json hosts deny with a reason: permissionController calls
+    // onConfirm(Cancel, { cancelMessage }). The bounced edit wrapper must
+    // forward the payload like the info fallback (and the pre-PR synthetic
+    // prompt) instead of dropping it.
+    await waiting.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.Cancel,
+      { cancelMessage: 'host policy: no edits' },
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+    const completed = onAllToolCallsComplete.mock.calls.at(
+      -1,
+    )?.[0] as ToolCall[];
+    expect(completed[0].status).toBe('cancelled');
+    expect(execute).not.toHaveBeenCalled();
+    // The host's reason — not the generic 'User did not allow tool call' —
+    // must reach the model via the cancelled response.
+    expect(
+      JSON.stringify((completed[0] as { response?: unknown }).response),
+    ).toContain('host policy: no edits');
+  });
+
+  it('refuses a stale round-1 IDE resolution for a bounced edit confirmation', async () => {
+    // Round-1 edit confirmation (DEFAULT mode, IDE diffing on) opens the
+    // IDE diff. The user approves via the scheduler path; the PreToolUse
+    // hook returns 'ask' and the call bounces back to awaiting_approval.
+    // Only THEN does the round-1 openDiff resolve — with edited panel
+    // content — mirroring ToolConfirmationMessage.handleConfirm, which
+    // fires onConfirm before awaiting resolveDiffFromCli. That stale
+    // resolution must not answer the bounced confirmation: without the
+    // bouncedAwaitingApproval guard its content would flow through
+    // _applyInlineModify and execute with the hook never re-consulted.
+    let resolveIdeDiff!: (r: { status: 'accepted'; content: string }) => void;
+    const ideDiffResolution = new Promise<{
+      status: 'accepted';
+      content: string;
+    }>((resolve) => {
+      resolveIdeDiff = resolve;
+    });
+    vi.mocked(IdeClient.getInstance).mockResolvedValue(
+      mockIdeClient as unknown as IdeClient,
+    );
+    mockIdeClient.isDiffingEnabled.mockReturnValue(true);
+    mockIdeClient.openDiff.mockReset();
+    mockIdeClient.openDiff.mockReturnValue(ideDiffResolution);
+
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'ok',
+      returnDisplay: 'ok',
+    });
+    const messageBus = askMessageBus('review protected file');
+    const awaitingSnapshots: ToolCallConfirmationDetails[] = [];
+    const onToolCallsUpdate = vi.fn((calls: ToolCall[]) => {
+      for (const call of calls) {
+        if (
+          call.request.callId === 'stale-ide-bounce' &&
+          call.status === 'awaiting_approval'
+        ) {
+          awaitingSnapshots.push(call.confirmationDetails);
+        }
+      }
+    });
+    const { scheduler, onAllToolCallsComplete } = buildScheduler({
+      tools: [new MockEditTool(execute)],
+      messageBus,
+      disableHooks: false,
+      approvalMode: ApprovalMode.DEFAULT,
+      ideMode: true,
+      onToolCallsUpdate,
+    });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'stale-ide-bounce',
+          name: 'mockEditTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-stale-ide-bounce',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    // Round-1 confirmation opened the IDE diff.
+    await vi.waitFor(() => {
+      expect(awaitingSnapshots).toHaveLength(1);
+    });
+    expect(mockIdeClient.openDiff).toHaveBeenCalledTimes(1);
+    const round1 = awaitingSnapshots[0];
+
+    // Approve round-1 via the scheduler path; the hook ask bounces the
+    // call back to awaiting_approval with its own edit confirmation.
+    await round1.onConfirm(ToolConfirmationOutcome.ProceedOnce);
+    await vi.waitFor(() => {
+      expect(awaitingSnapshots).toHaveLength(2);
+    });
+    const bounced = awaitingSnapshots[1];
+    expect(bounced).toMatchObject({ type: 'edit', hideModify: true });
+
+    // The stale round-1 IDE diff now resolves as accepted with edited
+    // panel content. It must be refused — the call stays parked on the
+    // bounced confirmation with the hook-reviewed content untouched.
+    resolveIdeDiff({ status: 'accepted', content: 'STALE-PANEL-CONTENT' });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(execute).not.toHaveBeenCalled();
+    expect(awaitingSnapshots).toHaveLength(2);
+    expect(
+      (awaitingSnapshots.at(-1) as { newContent?: string }).newContent,
+    ).toBe('new content');
+
+    // The bounced confirmation is the only valid resolver: approving it
+    // executes exactly once (and the hook does not re-fire).
+    await bounced.onConfirm(ToolConfirmationOutcome.ProceedOnce);
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+    const completed = onAllToolCallsComplete.mock.calls.at(
+      -1,
+    )?.[0] as ToolCall[];
+    expect(completed[0].status).toBe('success');
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(preToolUseCallCount(messageBus)).toBe(1);
+
+    // Leave the module-level IDE mocks the way this test found them.
+    mockIdeClient.openDiff.mockReset();
+    mockIdeClient.isDiffingEnabled.mockReset();
+    vi.mocked(IdeClient.getInstance).mockReset();
   });
 
   it('creates new confirmation details when a tool bounces after approval', async () => {
