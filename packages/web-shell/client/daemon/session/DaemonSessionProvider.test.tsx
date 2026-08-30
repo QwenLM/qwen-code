@@ -14017,9 +14017,15 @@ describe('DaemonSessionProvider', () => {
 
   it('marks a live restored-prompt terminal incomplete while an unowned live-journal marker remains', async () => {
     const terminalDelivered = createDeferred<void>();
+    const nextTerminal = createDeferred<void>();
+    const nextTerminalDelivered = createDeferred<void>();
     const session = createMockSession({
       sessionId: 'session-truncated-restored-live',
       hasActivePrompt: true,
+      submitPrompt: vi.fn(async () => ({
+        promptId: 'prompt-2',
+        lastEventId: 12,
+      })),
       replaySnapshot: {
         compactedReplay: [
           {
@@ -14085,12 +14091,35 @@ describe('DaemonSessionProvider', () => {
           data: { promptId: 'prompt-1', stopReason: 'end_turn' },
         } satisfies DaemonEvent;
         terminalDelivered.resolve();
+        await nextTerminal.promise;
+        yield {
+          id: 13,
+          v: 1,
+          type: 'session_update',
+          promptId: 'prompt-2',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'complete next answer' },
+            },
+          },
+        } satisfies DaemonEvent;
+        yield {
+          id: 14,
+          v: 1,
+          type: 'turn_complete',
+          promptId: 'prompt-2',
+          data: { promptId: 'prompt-2', stopReason: 'end_turn' },
+        } satisfies DaemonEvent;
+        nextTerminalDelivered.resolve();
       },
     });
     sdkMocks.sessions.push(session);
 
     const settlements: DaemonPromptSettledEvent[] = [];
+    let actions: DaemonUiSessionActions | undefined;
     function Harness() {
+      actions = useDaemonActions();
       useDaemonPromptSettled((event) => settlements.push(event));
       return null;
     }
@@ -14107,6 +14136,38 @@ describe('DaemonSessionProvider', () => {
         promptId: 'prompt-1',
         outcome: 'completed',
         transcriptComplete: false,
+      }),
+    ]);
+
+    let nextPrompt: Promise<unknown> | undefined;
+    await act(async () => {
+      nextPrompt = requireActions(actions).sendPrompt('next turn');
+      await flushPromises();
+    });
+    await act(async () => {
+      nextTerminal.resolve();
+      await nextTerminalDelivered.promise;
+      await flushPromises();
+    });
+    const pendingNextPrompt = nextPrompt;
+    if (!pendingNextPrompt) throw new Error('next prompt was not started');
+    await act(async () => {
+      await expect(pendingNextPrompt).resolves.toEqual({
+        stopReason: 'end_turn',
+      });
+    });
+
+    expect(settlements).toEqual([
+      expect.objectContaining({
+        sessionId: session.sessionId,
+        promptId: 'prompt-1',
+        transcriptComplete: false,
+      }),
+      expect.objectContaining({
+        sessionId: session.sessionId,
+        promptId: 'prompt-2',
+        outcome: 'completed',
+        transcriptComplete: true,
       }),
     ]);
   });

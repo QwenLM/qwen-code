@@ -1111,6 +1111,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     new Set(),
   );
   const publishedPromptSettlementsRef = useRef<Set<string>>(new Set());
+  const settledLiveJournalMarkerIdsRef = useRef<Set<string>>(new Set());
   const promptSettlementSource = useMemo<DaemonPromptSettlementSource>(
     () => ({
       subscribe(listener) {
@@ -1159,6 +1160,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       const settlement = repair.pendingSettlement;
       if (!settlement) return;
       repair.pendingSettlement = undefined;
+      if (!transcriptComplete && repair.markerBlockId !== undefined) {
+        settledLiveJournalMarkerIdsRef.current.add(repair.markerBlockId);
+      }
       publishPromptSettlement({ ...settlement, transcriptComplete });
     },
     [publishPromptSettlement],
@@ -1417,6 +1421,25 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     const dispatchTranscriptNow = (events: DaemonUiEvent | DaemonUiEvent[]) => {
       flushTranscriptSync();
       store.dispatch(events);
+    };
+    const claimCommittedLiveJournalMarkers = () => {
+      const markerIds = store
+        .getSnapshot()
+        .blocks.flatMap((block) =>
+          block.kind === 'status' &&
+          block.source === 'history_truncated' &&
+          isRecord(block.data) &&
+          block.data['scope'] === 'live_journal'
+            ? [block.id]
+            : [],
+        );
+      let claimed = false;
+      for (const markerId of markerIds) {
+        if (settledLiveJournalMarkerIdsRef.current.has(markerId)) continue;
+        settledLiveJournalMarkerIdsRef.current.add(markerId);
+        claimed = true;
+      }
+      return { claimed, present: markerIds.length > 0 };
     };
     // Drop buffered events. Used before `store.reset()`: pending events belong
     // to the epoch the reset is discarding, so flushing them would be wrong.
@@ -2060,6 +2083,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             const previousSessionId = lastSessionIdRef.current;
             if (previousSessionId !== nextSession.sessionId) {
               clearNotices();
+              settledLiveJournalMarkerIdsRef.current.clear();
             }
             // Defer store.reset() until right before replay dispatch
             // (after the await below) so that reset + dispatch share a
@@ -2678,11 +2702,19 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 repair.terminalSeen = true;
                 queueMicrotask(tryLiveJournalRepair);
               } else {
+                const replayHasLiveJournalMarker =
+                  replayEvents.some(isLiveJournalMarker);
+                const claimedMarkers = replayHasLiveJournalMarker
+                  ? claimCommittedLiveJournalMarkers()
+                  : undefined;
                 publishPromptSettlement({
                   ...settlement,
                   transcriptComplete:
                     !activeSession.replayDegraded &&
-                    !replayEvents.some(isLiveJournalMarker),
+                    !(
+                      claimedMarkers?.claimed ||
+                      (replayHasLiveJournalMarker && !claimedMarkers?.present)
+                    ),
                 });
               }
             }
@@ -3399,15 +3431,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 queueMicrotask(tryLiveJournalRepair);
               }
               if (settlement && !settlementDelayedForRepair) {
-                const committedTranscriptHasLiveJournalMarker = store
-                  .getSnapshot()
-                  .blocks.some(
-                    (block) =>
-                      block.kind === 'status' &&
-                      block.source === 'history_truncated' &&
-                      isRecord(block.data) &&
-                      block.data['scope'] === 'live_journal',
-                  );
+                const { claimed: committedTranscriptHasLiveJournalMarker } =
+                  claimCommittedLiveJournalMarkers();
                 publishPromptSettlement(
                   committedTranscriptHasLiveJournalMarker
                     ? { ...settlement, transcriptComplete: false }
