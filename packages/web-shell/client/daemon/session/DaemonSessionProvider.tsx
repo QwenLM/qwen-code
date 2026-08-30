@@ -4810,7 +4810,10 @@ function normalizeGoalStatusEvent(event: DaemonEvent): DaemonUiEvent | null {
   if (!isRecord(meta)) return null;
   const status = normalizeGoalStatus(meta['goalStatus']);
   if (status) {
-    return createGoalStatusUiEvent(event, status);
+    return createGoalStatusUiEvent(
+      event,
+      restoreCanonicalGoalStatusKind(status, meta['goalState']),
+    );
   }
 
   const terminal = normalizeGoalTerminal(meta['goalTerminal']);
@@ -4848,6 +4851,18 @@ function createGoalStatusUiEvent(
   };
 }
 
+function restoreCanonicalGoalStatusKind(
+  status: Record<string, unknown>,
+  goalState: unknown,
+): Record<string, unknown> {
+  // V2 updates pair a legacy card with canonical state. Keep the legacy wire
+  // value stable for older clients while restoring its precise Web Shell label.
+  if (status['kind'] !== 'aborted' || !isRecord(goalState)) return status;
+  const goal = goalState['goal'];
+  if (!isRecord(goal) || goal['status'] !== 'usage_limited') return status;
+  return { ...status, kind: 'usage_limited' };
+}
+
 function normalizeGoalStatus(value: unknown): Record<string, unknown> | null {
   if (!isRecord(value)) return null;
   const kind = getString(value, 'kind');
@@ -4857,6 +4872,7 @@ function normalizeGoalStatus(value: unknown): Record<string, unknown> | null {
     kind !== 'achieved' &&
     kind !== 'failed' &&
     kind !== 'aborted' &&
+    kind !== 'usage_limited' &&
     // Rejecting 'paused' made every surface keep showing a paused goal as
     // actively running: the card never rendered and the active-goal
     // derivation fell back to the previous 'set' card.

@@ -60,6 +60,35 @@ describe('SystemMessage — prompt_cancelled marker', () => {
   });
 });
 
+describe('SystemMessage — goal status', () => {
+  it.each([
+    ['en', 'Goal usage limited', 'Last check: token budget reached'],
+    ['zh-CN', '目标用量受限', '上次检查: token budget reached'],
+  ] as const)(
+    'renders a usage-limited goal distinctly in %s',
+    (language, title, reason) => {
+      const container = render(
+        <SystemMessage
+          content=""
+          variant="info"
+          source="goal"
+          data={{
+            kind: 'usage_limited',
+            condition: 'finish the evaluation',
+            lastReason: 'token budget reached',
+          }}
+        />,
+        language,
+      );
+
+      expect(container.textContent).toContain(title);
+      expect(container.textContent).toContain(reason);
+      expect(container.textContent).not.toContain('Goal aborted');
+      expect(container.textContent).not.toContain('目标已中止');
+    },
+  );
+});
+
 describe('SystemMessage — vision bridge notice', () => {
   it('localizes a cancelled notice with egress details', () => {
     const container = render(

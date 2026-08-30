@@ -3176,6 +3176,80 @@ describe('DaemonSessionProvider', () => {
     });
   });
 
+  it('restores usage-limited semantics from canonical goal state metadata', async () => {
+    const session = createMockSession({
+      events: async function* goalStatusEvents() {
+        yield {
+          id: 13,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: '' },
+              _meta: {
+                goalState: {
+                  v: 2,
+                  activity: 'idle',
+                  goal: {
+                    goalId: 'goal-limited',
+                    revision: 2,
+                    objective: 'finish the evaluation',
+                    status: 'usage_limited',
+                    limitKind: 'token_budget',
+                    evidenceCursor: { recordId: 'goal-record' },
+                    turnCount: 4,
+                    activeTimeMs: 5000,
+                    tokensUsed: 1000,
+                    createdAt: 1234,
+                    updatedAt: 2345,
+                    lastReason: 'token budget reached',
+                  },
+                },
+                goalStatus: {
+                  kind: 'aborted',
+                  condition: 'finish the evaluation',
+                  iterations: 4,
+                  durationMs: 5000,
+                  lastReason: 'token budget reached',
+                },
+              },
+            },
+          },
+        };
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+
+    function Harness() {
+      blocks = useDaemonTranscriptBlocks();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      autoReconnect: false,
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(blocks).toContainEqual(
+      expect.objectContaining({
+        kind: 'status',
+        source: 'goal',
+        data: {
+          kind: 'usage_limited',
+          condition: 'finish the evaluation',
+          iterations: 4,
+          durationMs: 5000,
+          lastReason: 'token budget reached',
+        },
+      }),
+    );
+  });
+
   it('does not overwrite a streamed goal update with the session-load snapshot', async () => {
     const pendingGoal = createDeferred<GoalStateResponse>();
     const streamedGoal: GoalStateResponse['snapshot'] = {
