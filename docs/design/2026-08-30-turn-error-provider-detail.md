@@ -47,17 +47,20 @@ Because the plain-text shape (`data.details`) already surfaces through the
 existing extractor, only the JSON-parsed shape loses its detail. The gap is a
 missing branch in one helper, not an absent wire field.
 
-`extractErrorMessage` has exactly five call sites, all in `acp-bridge`, and
-all are display or log surfaces with no string-matching behavioral consumer:
+`extractErrorMessage` has eight call sites, all in `bridge.ts`:
 
-| Call site                                   | Surface                                                                            |
-| ------------------------------------------- | ---------------------------------------------------------------------------------- |
-| `bridge.ts` `broadcastTurnError`            | `turn_error` event message, `entry.turnError`, refresh replay, turn-status overlay |
-| `bridge.ts` `sendPrompt` forward-failed log | daemon stderr                                                                      |
-| `bridge.ts` cancel-forward-failed log       | daemon stderr                                                                      |
-| `bridge.ts` approval-mode restore log       | daemon stderr                                                                      |
-| `bridge.ts` channel quarantine log          | daemon stderr                                                                      |
-| `transcript-replay.ts` tool-result replay   | restored transcript error text                                                     |
+| Call site                                   | Surface                                             |
+| ------------------------------------------- | --------------------------------------------------- |
+| `broadcastTurnError`                        | `turn_error`, `entry.turnError`, and refresh replay |
+| timed-out `newSession` cleanup quarantine   | daemon stderr                                       |
+| two `model_switch_failed` publishers        | SSE event message                                   |
+| approval-mode restore                       | daemon stderr                                       |
+| timed-out session-action cleanup quarantine | daemon stderr                                       |
+| `sendPrompt` forward failure                | daemon stderr                                       |
+| pending-prompt cancel-forward failure       | daemon stderr                                       |
+
+`transcript-replay.ts` defines a separate local helper with the same name;
+it is not a call site of the bridge helper and is untouched by this change.
 
 `classifyTurnErrorKind` exact-matches the message against `terminated`; that
 error arrives via the plain-text `data.details` shape and is unaffected by
@@ -68,17 +71,16 @@ adding a nested-`error` branch.
 Extend `extractJsonRpcErrorDetail` in `packages/acp-bridge/src/bridge.ts`
 with one more fallback: after the existing `data` string / `data.details` /
 `data.message` checks, read a nested `data.error` — accepting either a plain
-string or an object with a string `message` (mirroring the desktop client's
-`getAcpErrorDetail`, which has shipped the same precedence for ACP internal
-errors). Update the `extractErrorMessage` doc comment to name the
+string or an object with a string `message` while preserving the existing
+top-level precedence. Update the `extractErrorMessage` doc comment to name the
 `data.error.message` shape as the ACP SDK's JSON-parsed-message artifact.
 
 That is the entire production change. `broadcastTurnError` then publishes the
-provider's own message as `turn_error.data.message`, and every downstream
-surface — the Web Shell transcript error block, the live-state `turnError`
-summary, refresh replay, `DaemonClient`'s `DaemonHttpError`, and the daemon
-stderr logs — shows the real reason with no wire schema change and no
-SDK/webui/desktop edits.
+provider's own message as `turn_error.data.message`. The Web Shell transcript
+error block, live-state `turnError` summary, refresh replay, and SDK consumers
+of that `turn_error` (including `DaemonHttpError`) then receive the real reason
+with no wire schema change and no SDK or webui edits. The separate
+turn-status overlay normalization path is unchanged.
 
 Result for the motivating failure: the transcript shows
 `The engine is currently overloaded, please try again later` instead of
@@ -91,13 +93,13 @@ Result for the motivating failure: the transcript shows
   `DaemonTurnErrorData`, the UI normalizer, transcript block types, and the
   webui adapter. That preserves the generic `message` for hypothetical
   string matchers but costs four packages of churn for the same user-visible
-  result. Every actual `message` consumer is enumerated above and is a
-  display/log surface, so enriching `message` directly is safe and minimal.
-- **Precedence matches desktop.** Top-level `details`/`message` win over the
-  nested `error.message`, identical to `formatQwenAcpErrorMessage`'s
-  `getAcpErrorDetail` in
-  `packages/desktop/packages/shared/src/agent/qwen-agent.ts`. One consistent
-  de-facto contract for ACP `-32603` data across clients.
+  result. The eight bridge call sites above are display, log, or event
+  surfaces. The only behavioral check on the extracted message recognizes
+  `terminated`, which already arrives through `data.details`, so enriching
+  the nested shape is safe and minimal.
+- **Preserve existing precedence.** A string `data`, top-level `details`, or
+  top-level `message` continues to win over the new nested `error.message`
+  fallback.
 - **No new length bound.** The existing `data.details` path is already
   unbounded, so a pathological provider blob flows today; this change keeps
   parity instead of inventing a second policy. Render-side control-character
@@ -130,8 +132,10 @@ Result for the motivating failure: the transcript shows
 
 ## Open questions
 
-- Should `normalizeTurnResultError` (turn-status polling overlay) also carry
-  the provider `type` (e.g. `engine_overloaded_error`) as a structured code?
-  Deferred — current overlay consumers only display `message`.
+- Should the separate `normalizeTurnResultError` path used by turn-status
+  polling also extract provider detail or carry the provider `type` (e.g.
+  `engine_overloaded_error`) as a structured code? Deferred — this PR only
+  changes bridge extraction for `turn_error`; the terminal overlay may still
+  retain the generic `Internal error`.
 - If provider blobs prove unwieldy in practice, where should the length cap
   live — the bridge extractor or the event publisher? Deferred until observed.
