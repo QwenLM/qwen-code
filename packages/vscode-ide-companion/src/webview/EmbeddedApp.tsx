@@ -661,10 +661,12 @@ export function EmbeddedApp() {
         if (runtimeRef.current) setHostNotice({ tone: 'error', text });
       } else if (message.type === 'webShellPermissionDecision') {
         // Permission decisions are security-sensitive: only accept the
-        // platform-delivered shape (source === null). Sandboxed iframes in
-        // this webview (MCP apps, artifact previews) can postMessage to this
-        // window too, and they must not be able to vote on approvals.
-        if (event.source !== null) return;
+        // host-relayed shape. Extension-host messages reach this frame via
+        // the webview preload frame, so their source is window.parent;
+        // sandboxed iframes in this webview (MCP apps, artifact previews)
+        // post from their own child windows and must not be able to vote
+        // on approvals.
+        if (event.source !== window.parent) return;
         const decision = (message.data as { decision?: unknown } | null)
           ?.decision;
         if (decision === 'allow' || decision === 'reject') {

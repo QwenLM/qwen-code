@@ -638,26 +638,49 @@ describe('web shell permission decision messages', () => {
     });
   }
 
-  it('forwards platform-delivered decisions to the web shell', async () => {
+  it('forwards host-relayed decisions to the web shell', async () => {
     await renderApp();
     const respondToPendingPermission = vi.fn().mockResolvedValue(true);
     installShellApi({ respondToPendingPermission });
 
-    await dispatchDecision('allow', null);
+    // Extension-host messages arrive via the webview preload frame, i.e.
+    // with this frame's parent as their source.
+    await dispatchDecision('allow', window.parent);
 
     expect(respondToPendingPermission).toHaveBeenCalledWith('allow');
   });
 
-  it('ignores decisions posted by a window source such as a sandboxed iframe', async () => {
+  it('ignores decisions posted by a nested iframe window', async () => {
     await renderApp();
     const respondToPendingPermission = vi.fn().mockResolvedValue(true);
     installShellApi({ respondToPendingPermission });
 
     // MCP apps and artifact previews run in scriptable sandboxed iframes
-    // inside this webview; they can postMessage to the top window and must
-    // not be able to vote on the pending approval.
-    await dispatchDecision('allow', window);
-    await dispatchDecision('reject', window);
+    // inside this webview; they can postMessage to this window and must
+    // not be able to vote on the pending approval. Their source is their
+    // own child window, not the preload parent frame.
+    const iframe = document.createElement('iframe');
+    document.body.appendChild(iframe);
+    try {
+      const childWindow = iframe.contentWindow;
+      expect(childWindow).not.toBeNull();
+      await dispatchDecision('allow', childWindow as Window);
+      await dispatchDecision('reject', childWindow as Window);
+    } finally {
+      iframe.remove();
+    }
+
+    expect(respondToPendingPermission).not.toHaveBeenCalled();
+  });
+
+  it('ignores decisions delivered without a source window', async () => {
+    await renderApp();
+    const respondToPendingPermission = vi.fn().mockResolvedValue(true);
+    installShellApi({ respondToPendingPermission });
+
+    // Fail closed on synthetic deliveries: real host messages always carry
+    // the preload frame as their source.
+    await dispatchDecision('allow', null);
 
     expect(respondToPendingPermission).not.toHaveBeenCalled();
   });
