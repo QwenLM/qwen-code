@@ -82,6 +82,14 @@ describe('built-in output styles', () => {
     );
   });
 
+  it('falls back to the generic reminder for a style with an empty one', () => {
+    // Style files arrive in the follow-up PR; an empty `turnReminder:` key
+    // must not render a reminder with no guidance in it.
+    expect(getOutputStyleTurnReminder({ ...LAYERED, turnReminder: '' })).toBe(
+      `Layered output style is active. ${DEFAULT_OUTPUT_STYLE_TURN_REMINDER}`,
+    );
+  });
+
   it('has no duplicate names', () => {
     const names = BUILT_IN_OUTPUT_STYLES.map((style) =>
       style.name.toLowerCase(),

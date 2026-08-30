@@ -186,7 +186,7 @@ export function getOutputStyleTurnReminder(
   style: OutputStyleDefinition,
 ): string {
   return `${style.name} output style is active. ${
-    style.turnReminder ?? DEFAULT_OUTPUT_STYLE_TURN_REMINDER
+    style.turnReminder || DEFAULT_OUTPUT_STYLE_TURN_REMINDER
   }`;
 }
 
