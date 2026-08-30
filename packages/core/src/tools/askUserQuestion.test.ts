@@ -22,6 +22,7 @@ describe('AskUserQuestionTool', () => {
       getChatRecordingService: vi.fn(),
       getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
       getInputFormat: vi.fn().mockReturnValue(undefined),
+      getSdkMode: vi.fn().mockReturnValue(false),
     } as unknown as Config;
 
     tool = new AskUserQuestionTool(mockConfig);
@@ -229,13 +230,28 @@ describe('AskUserQuestionTool', () => {
     });
 
     it('requires the dialog for ACP hosts that run non-interactively', () => {
+      // stream-json only has a responder once the SDK control system is up,
+      // so this arm has to say so explicitly — without getSdkMode() the case
+      // reads as "ACP" but actually pins direct mode.
       (mockConfig.isInteractive as Mock).mockReturnValue(false);
       (mockConfig.getInputFormat as Mock).mockReturnValue('stream-json');
+      (mockConfig.getSdkMode as Mock).mockReturnValue(true);
       expect(tool.build(params).requiresUserInteraction?.()).toBe(true);
 
+      (mockConfig.getSdkMode as Mock).mockReturnValue(false);
       (mockConfig.getInputFormat as Mock).mockReturnValue(undefined);
       (mockConfig.getExperimentalZedIntegration as Mock).mockReturnValue(true);
       expect(tool.build(params).requiresUserInteraction?.()).toBe(true);
+    });
+
+    it('does not require a dialog in stream-json direct mode, which has no responder', () => {
+      // No control system is built for a plain first stdin frame, so nothing
+      // can answer a confirmation round. Claiming a host here parks the turn
+      // in awaiting_approval forever.
+      (mockConfig.isInteractive as Mock).mockReturnValue(false);
+      (mockConfig.getInputFormat as Mock).mockReturnValue('stream-json');
+      (mockConfig.getSdkMode as Mock).mockReturnValue(false);
+      expect(tool.build(params).requiresUserInteraction?.()).toBe(false);
     });
 
     it('does not require a dialog in headless mode, where nothing can prompt', () => {
