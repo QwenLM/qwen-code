@@ -124,7 +124,9 @@ export function buildModelEntries(
       }
       if (mode !== 'fast' && model.fastOnly) continue;
       if (mode !== 'voice' && model.voiceOnly) continue;
-      if (mode !== 'vision' && model.visionOnly) continue;
+      // ink keeps visionOnly models in vision AND image mode
+      // (ModelDialog.tsx: isVisionModelMode || isImageModelMode || !m.visionOnly).
+      if (mode !== 'vision' && mode !== 'image' && model.visionOnly) continue;
     }
     const key =
       model.isRuntimeModel && model.runtimeSnapshotId

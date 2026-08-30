@@ -154,6 +154,13 @@ describe('buildModelEntries', () => {
       imageOnly: true,
     },
     {
+      id: 'dual1',
+      label: 'Dual vision/image',
+      authType: AuthType.USE_OPENAI,
+      visionOnly: true,
+      supportsImageGeneration: true,
+    },
+    {
       id: 'oauth1',
       label: 'OAuth',
       authType: AuthType.QWEN_OAUTH,
@@ -202,13 +209,15 @@ describe('buildModelEntries', () => {
         models) as Config['getAllConfiguredModels'],
       getAuthType: () => AuthType.USE_OPENAI,
       resolveImageGenerationModel: ((selector: string) =>
-        selector.includes('img1')
+        selector.includes('img1') || selector.includes('dual1')
           ? { model: 'img1', baseUrl: 'https://img.example', apiKeyEnv: 'K' }
           : undefined) as Config['resolveImageGenerationModel'],
     } as Partial<Config>);
+    // dual1 is visionOnly AND image-capable: ink keeps it in the image
+    // selector (isVisionModelMode || isImageModelMode || !m.visionOnly).
     expect(
       buildModelEntries(config, 'image').map((entry) => entry.modelId),
-    ).toEqual(['img1']);
+    ).toEqual(['img1', 'dual1']);
   });
 
   it('shows QWEN_OAUTH models only under that auth type', () => {

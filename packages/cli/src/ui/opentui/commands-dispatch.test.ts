@@ -424,6 +424,38 @@ describe('startup-window registry self-heal', () => {
     });
   });
 
+  it('a signal aborted before the action race skips the action entirely (R3-5)', async () => {
+    // ESC lands while the registry reload is still in flight: by the time
+    // the re-parse reaches the action race the signal is already aborted,
+    // and a late 'abort' listener never fires — the action's side effects
+    // must not run on the cancelled submission.
+    const action = vi.fn(() => ({
+      type: 'message',
+      messageType: 'info',
+      content: 'side effects ran',
+    }));
+    let resolveLoad: (commands: SlashCommand[]) => void = () => {};
+    loadInteractiveCommandsMock.mockReturnValue(
+      new Promise<SlashCommand[]>((resolve) => {
+        resolveLoad = resolve;
+      }),
+    );
+    const host = createFakeHost();
+    const dispatcher = new OpenTuiSlashDispatcher(
+      host,
+      servicesWithSkillManager(() => ({})),
+      [stub({ name: 'help' })],
+    );
+
+    const pending = dispatcher.handle('/greet world');
+    dispatcher.cancel();
+    resolveLoad([stub({ name: 'greet', action })]);
+    const outcome = await pending;
+
+    expect(outcome).toEqual({ kind: 'handled' });
+    expect(action).not.toHaveBeenCalled();
+  });
+
   it('waits for the skill manager to appear before reloading the registry', async () => {
     loadInteractiveCommandsMock.mockResolvedValue([skillCommand()]);
     const host = createFakeHost();

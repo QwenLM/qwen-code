@@ -663,10 +663,16 @@ export class OpenTuiSlashDispatcher {
               { once: true },
             );
           });
-          const result = await Promise.race([
-            commandToExecute.action(fullCommandContext, args),
-            abortPromise,
-          ]);
+          // A pre-aborted signal must skip the action entirely: an 'abort'
+          // listener registered after the signal already aborted never
+          // fires, so the race would otherwise await the action's side
+          // effects (session rotation, telemetry reset) before discarding.
+          const result = abortController.signal.aborted
+            ? undefined
+            : await Promise.race([
+                commandToExecute.action(fullCommandContext, args),
+                abortPromise,
+              ]);
 
           if (abortController.signal.aborted) {
             return { kind: 'handled' };
