@@ -1278,6 +1278,10 @@ jobs:
               chmod +x "$proxy_bin/git"
             fi
 
+            local real_date
+            real_date="$(command -v date || echo date)"
+            export QWEN_CI_REAL_DATE="$real_date"
+
             export PATH="$proxy_bin:$PATH"
             unset HTTPS_PROXY https_proxy HTTP_PROXY http_proxy
 
@@ -1934,12 +1938,23 @@ jobs:
               # No skew tolerance here, unlike the pair branch below: this
               # branch accepts a LONE back-push — the exact shape of the
               # run's OWN triggering force-push, which predates START_TS by
-              # only the dispatch latency. A genuine mid-run revert
-              # postdates run start; a skew-shifted one degrades to the
-              # visible red failure the lost-record branch documents.
+              # only the dispatch latency. The record exists only because a
+              # watcher poll observed the departure, and the poll loop
+              # sleeps SALVAGE_POLL_SECONDS BEFORE its first poll, so a
+              # genuine watcher-recorded back-push postdates run start by
+              # at least one poll interval — require that margin: it also
+              # refuses the triggering event when the GitHub server clock
+              # runs ahead of the runner clock. A genuine cede lost to
+              # skew degrades to the visible red failure the lost-record
+              # branch documents. The conversion reads QWEN_CI_REAL_DATE —
+              # captured before the $proxy_bin PATH prepend, mirroring
+              # QWEN_CI_REAL_GH: bare `date` resolves through the
+              # agent-writable prepend, and a planted `date` answering -d
+              # with a future epoch lifts the triggering event past any
+              # bound (R16-3).
               while read -r before after at; do
-                at="$(date -d "$at" +%s 2>/dev/null || echo 0)"
-                [ "$at" -ge "$START_TS" ] || continue
+                at="$("${QWEN_CI_REAL_DATE:-date}" -d "$at" +%s 2>/dev/null || echo 0)"
+                [ "$at" -ge "$(( START_TS + SALVAGE_POLL_SECONDS ))" ] || continue
                 if [ "$after" = "${EXPECTED_HEAD_SHA:-}" ]; then
                   return 0
                 fi
@@ -1956,7 +1971,7 @@ jobs:
             # cede stays a visible red failure while a forged one suppresses
             # the review silently.
             while read -r before after at; do
-              at="$(date -d "$at" +%s 2>/dev/null || echo 0)"
+              at="$("${QWEN_CI_REAL_DATE:-date}" -d "$at" +%s 2>/dev/null || echo 0)"
               [ "$at" -ge "$(( START_TS - 15 ))" ] || continue
               if [ "$departed" = "1" ] && [ "$after" = "${EXPECTED_HEAD_SHA:-}" ]; then
                 return 0

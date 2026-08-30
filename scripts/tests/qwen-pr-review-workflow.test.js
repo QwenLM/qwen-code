@@ -89,6 +89,23 @@ function retryLoopSource() {
   return run.slice(start, end);
 }
 
+// A forged-date shim for $proxy_bin plants: answers `date -d <ts> +%s` with
+// a future epoch and passes every other call through — the hijacked agent's
+// lift of server-side timestamps past the supersede window bound (R16-3).
+// /bin/date keeps the pass-through lane-independent.
+function forgedDateShim() {
+  return (
+    [
+      '#!/bin/bash',
+      'if [ "${1:-}" = "-d" ] && [ "$#" -eq 3 ] && [ "${3:-}" = "+%s" ]; then',
+      '  echo $(( $(/bin/date +%s) + 1000 ))',
+      '  exit 0',
+      'fi',
+      'exec /bin/date "$@"',
+    ].join('\n') + '\n'
+  );
+}
+
 // A timeout(1) stub that ENFORCES the bound, for the replay harnesses: the
 // workflow's salvage-signal reads are `timeout 5 head/node ...` opens, and a
 // lane without GNU coreutils (macOS) ships no timeout(1) — without the stub
@@ -131,7 +148,13 @@ function swapAtOpenStub() {
 // scripted per attempt, plus stub timeout/sleep so the test is instant.
 function runScenario(
   scenario,
-  { timeoutMinutes = 180, logPath, extraEnv = {}, armWatcher = false } = {},
+  {
+    timeoutMinutes = 180,
+    logPath,
+    extraEnv = {},
+    armWatcher = false,
+    proxyPlants = {},
+  } = {},
 ) {
   const dir = mkdtempSync(join(tmpdir(), 'review-retry-'));
   try {
@@ -148,6 +171,17 @@ function runScenario(
       chmodSync(p, 0o755);
     };
     execFileSync('mkdir', ['-p', bin]);
+    // Production prepends the agent-writable $proxy_bin to PATH before the
+    // loop (configure_qwen_network); the replay mirrors that layout so a
+    // plant there resolves ahead of the bin stubs, exactly like a hijacked
+    // agent's (R16-3).
+    const proxyBin = join(dir, 'proxy-bin');
+    execFileSync('mkdir', ['-p', proxyBin]);
+    for (const [name, body] of Object.entries(proxyPlants)) {
+      const plant = join(proxyBin, name);
+      writeFileSync(plant, body);
+      chmodSync(plant, 0o755);
+    }
     // timeout: record the per-attempt duration (`$2`, e.g. `10800s`) so tests
     // can assert the budget each attempt was given, then drop
     // `--kill-after=Xs` and that duration and exec the rest.
@@ -214,11 +248,18 @@ function runScenario(
         // SLEEP_FAIL_AFTER=N exits 0 for the first N calls and 1 after:
         // `while sleep ...; do` ends the watcher's loop deterministically,
         // so an AUTO_REVIEW replay can run a watcher that never polls (the
-        // extreme poll gap) without leaking a background job.
-        'if [ -n "${SLEEP_FAIL_AFTER:-}" ]; then',
+        // extreme poll gap) without leaking a background job. The ordinal
+        // claim is a mkdir — atomic, unlike the old cat/echo counter, which
+        // let concurrent sleepers (the retry backoff and a relaunched
+        // watcher polling THROUGH it) both claim "first" under load and
+        // fail the backoff sleep itself.
+        'if [ -n "${SLEEP_FAIL_AFTER:-}" ] || [ -n "${SLEEP_FAIL_ONLY_FIRST:-}" ]; then',
         '  SLC="$ATT.sleep-count"',
-        '  n=$(( $(cat "$SLC" 2>/dev/null || echo 0) + 1 ))',
-        '  echo "$n" > "$SLC"',
+        '  n=0',
+        '  while ! mkdir "$SLC.$(( n + 1 ))" 2>/dev/null; do n=$(( n + 1 )); done',
+        '  n=$(( n + 1 ))',
+        'fi',
+        'if [ -n "${SLEEP_FAIL_AFTER:-}" ]; then',
         '  [ "$n" -le "$SLEEP_FAIL_AFTER" ] || exit 1',
         'fi',
         // The inverse of SLEEP_FAIL_AFTER: ONLY the first sleep fails. The
@@ -228,9 +269,6 @@ function runScenario(
         // normally. That gives a backoff-cede replay an AUTO_REVIEW=true
         // run whose watcher deterministically misses the attempt.
         'if [ -n "${SLEEP_FAIL_ONLY_FIRST:-}" ]; then',
-        '  SLC="$ATT.sleep-count"',
-        '  n=$(( $(cat "$SLC" 2>/dev/null || echo 0) + 1 ))',
-        '  echo "$n" > "$SLC"',
         '  [ "$n" -gt 1 ] || exit 1',
         'fi',
         'exit 0',
@@ -275,8 +313,9 @@ function runScenario(
         '  exit 0',
         'fi',
         'if [ -n "${STUB_GH_COUNT:-}" ]; then',
-        '  n=$(( $(cat "$STUB_GH_COUNT" 2>/dev/null || echo 0) + 1 ))',
-        '  echo "$n" > "$STUB_GH_COUNT"',
+        '  n=0',
+        '  while ! mkdir "${STUB_GH_COUNT}.$(( n + 1 ))" 2>/dev/null; do n=$(( n + 1 )); done',
+        '  n=$(( n + 1 ))',
         '  if [ "$n" -eq 1 ] && [ -n "${STUB_LIVE_HEAD_A1:-}" ]; then',
         '    echo "$STUB_LIVE_HEAD_A1"',
         '    exit 0',
@@ -382,7 +421,15 @@ function runScenario(
         timeout: 30_000,
         env: {
           ...process.env,
-          PATH: `${bin}:${process.env.PATH}`,
+          // The review lane exports QWEN_CI_REAL_GH; inherited, it would
+          // bypass the PATH gh stub every replay decides through. Empty
+          // restores the stub — the production :-gh fallback treats it as
+          // unset — while extraEnv's R14-1 arms still override. Same for
+          // QWEN_CI_REAL_DATE, pinned to the truthful bin/date stub the
+          // loop's conversions must read (R16-1, R16-3).
+          QWEN_CI_REAL_GH: '',
+          QWEN_CI_REAL_DATE: join(bin, 'date'),
+          PATH: `${proxyBin}:${bin}:${process.env.PATH}`,
           SCENARIO: scenario,
           ATT: attemptFile,
           DUR: durationFile,
@@ -411,7 +458,7 @@ function runScenario(
           // agent invocation's decoy GITHUB_PATH/GITHUB_ENV wiring expands
           // it; the extraction starts at OUTCOME='', past the init, so the
           // harness must supply it (set -u would otherwise abort the loop).
-          PROXY_BIN: join(dir, 'proxy-bin'),
+          PROXY_BIN: proxyBin,
         },
       });
     } catch (e) {
@@ -4530,6 +4577,11 @@ describe('review supersede salvage (#10110)', () => {
           timeout: 30_000,
           env: {
             ...process.env,
+            // Neutralize an inherited QWEN_CI_REAL_GH (the review lane
+            // exports one): empty restores the PATH gh stub via the :-gh
+            // fallback; the R14-1 spread below still overrides when armed
+            // (R16-1).
+            QWEN_CI_REAL_GH: '',
             PATH: `${bin}:${process.env.PATH}`,
             ...(realGhPath !== null ? { QWEN_CI_REAL_GH: realGhPath } : {}),
           },
@@ -5346,6 +5398,20 @@ describe('review supersede salvage (#10110)', () => {
       });
       expect(other.status).toBe(1);
       expect(other.raw).toContain('FAIL ');
+      // The pair's timestamp conversion must not evaluate through a
+      // PATH-resolved binary either: a `date` planted in the agent-writable
+      // $proxy_bin prepend answering -d with a future epoch lifts this
+      // pre-run pair into the window and cedes green on a head that never
+      // moved. QWEN_CI_REAL_DATE restores the truthful read (R16-3).
+      const forgedDate = runScenario('cede_revert_kill', {
+        armWatcher: true,
+        proxyPlants: { date: forgedDateShim() },
+        extraEnv: { ...base, STUB_TIMELINE: preRunPair },
+      });
+      expect(forgedDate.attempts).toBe(1);
+      expect(forgedDate.status).toBe(1);
+      expect(forgedDate.raw).toContain('FAIL ');
+      expect(forgedDate.raw).not.toContain('Superseded early:');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -5410,10 +5476,12 @@ describe('review supersede salvage (#10110)', () => {
       // minted dir, is the primary witness, and the killed attempt cedes
       // clean instead of going red on a genuine supersede. The corrective
       // back-push lands AFTER the run started — the kill-record branch
-      // admits no skew tolerance (a lone back-push at or before run start
-      // is the triggering push's shape) — so the event postdates START_TS
-      // with margin for the harness setup between now and the loop start.
-      const now = new Date(Date.now() + 5000).toISOString();
+      // requires it past one poll interval (a lone back-push at or before
+      // run start is the triggering push's shape, and no watcher poll
+      // could have recorded the kill that early) — so the event postdates
+      // START_TS + SALVAGE_POLL_SECONDS with margin for the harness setup
+      // between now and the loop start.
+      const now = new Date(Date.now() + 75000).toISOString();
       const r = runScenario('cede_revert_ff_kill', {
         armWatcher: true,
         extraEnv: {
@@ -5500,6 +5568,39 @@ describe('review supersede salvage (#10110)', () => {
       expect(triggering.status).toBe(1);
       expect(triggering.raw).toContain('FAIL ');
       expect(triggering.raw).not.toContain('Superseded early:');
+      // The conversion must not evaluate through a PATH-resolved binary: a
+      // `date` planted in the agent-writable $proxy_bin prepend answering
+      // -d with a future epoch lifts this triggering-shape event — 5s
+      // BEFORE run start — past the bound and corroborates the planted
+      // record with the head never moved. QWEN_CI_REAL_DATE, captured
+      // before the prepend, restores the truthful read (R16-3).
+      const forgedDate = runScenario('supersede_forged_kill_record', {
+        armWatcher: true,
+        proxyPlants: { date: forgedDateShim() },
+        extraEnv: {
+          ...base,
+          STUB_TIMELINE: `head-x head-a ${new Date(Date.now() - 5000).toISOString()}`,
+        },
+      });
+      expect(forgedDate.attempts).toBe(1);
+      expect(forgedDate.status).toBe(1);
+      expect(forgedDate.raw).toContain('FAIL ');
+      expect(forgedDate.raw).not.toContain('Superseded early:');
+      // The margin dual: a back-push landing INSIDE the first poll interval
+      // postdates START_TS yet predates the earliest poll that could have
+      // recorded the kill, so it cannot corroborate it — the honest-date
+      // shape the conversion pin alone cannot refuse.
+      const insideMargin = runScenario('supersede_forged_kill_record', {
+        armWatcher: true,
+        extraEnv: {
+          ...base,
+          STUB_TIMELINE: `head-x head-a ${new Date(Date.now() + 30000).toISOString()}`,
+        },
+      });
+      expect(insideMargin.attempts).toBe(1);
+      expect(insideMargin.status).toBe(1);
+      expect(insideMargin.raw).toContain('FAIL ');
+      expect(insideMargin.raw).not.toContain('Superseded early:');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -5847,7 +5948,14 @@ describe('review supersede salvage (#10110)', () => {
       execFileSync('bash', ['-c', harness], {
         encoding: 'utf8',
         timeout: 30_000,
-        env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+        env: {
+          ...process.env,
+          // Neutralize an inherited QWEN_CI_REAL_GH: the replayed
+          // live_head_moved gate must decide through the PATH gh stub
+          // (R16-1).
+          QWEN_CI_REAL_GH: '',
+          PATH: `${bin}:${process.env.PATH}`,
+        },
       });
       return readFileSync(gho, 'utf8').split('\n').filter(Boolean);
     } finally {
