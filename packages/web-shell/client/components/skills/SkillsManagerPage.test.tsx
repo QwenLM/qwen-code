@@ -9,7 +9,7 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { DaemonWorkspaceSkillStatus } from '@qwen-code/webui/daemon-react-sdk';
+import type { DaemonWorkspaceSkillStatus } from '@qwen-code/web-shell/daemon-react-sdk';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -35,7 +35,7 @@ const { skillsState, workspaceState } = vi.hoisted(() => ({
   },
 }));
 
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useSkills: () => skillsState.current,
   useWorkspace: () => workspaceState.current,
 }));

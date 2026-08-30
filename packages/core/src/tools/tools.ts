@@ -284,12 +284,15 @@ export abstract class DeclarativeTool<
    *   - undefined: fall back to raw params (only safe when the tool is
    *     known to have no sensitive params)
    *
-   * Default is the empty-string sentinel — fail-closed: a third-party
-   * MCP tool (or any tool that has not opted in) does not leak its raw
-   * parameters (potentially containing API keys, tokens, file contents)
-   * into the classifier LLM prompt. Tools that want their args inspected
-   * by the classifier for safety judgement should override this and
-   * return an object with only the security-relevant fields.
+   * Default is the empty-string sentinel — fail-closed: a tool that has
+   * not opted in does not leak its raw parameters (potentially containing
+   * API keys, tokens, file contents) into the classifier LLM prompt.
+   * Tools that want their args inspected by the classifier for safety
+   * judgement should override this and return an object with only the
+   * security-relevant fields. Note that `DiscoveredMCPTool` overrides
+   * this and forwards a bounded projection of every MCP call's arguments
+   * by default (see `mcp-classifier-input.ts`; opt out with
+   * `permissions.autoMode.mcp.forwardArguments: false`).
    */
   toAutoClassifierInput(
     _params: TParams,
@@ -634,6 +637,7 @@ export interface AgentResultDisplay {
   subagentColor?: string;
   taskDescription: string;
   taskPrompt: string;
+  executionMode?: 'foreground' | 'background';
   status: 'running' | 'completed' | 'failed' | 'cancelled' | 'background';
   terminateReason?: string;
   result?: string;

@@ -1075,7 +1075,7 @@ export class SessionService {
         ) {
           continue;
         }
-        return this.extractCreationMetadataFromRecords(records);
+        return this.extractCreationMetadataFromFile(filePath, records);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
         this.warn(
@@ -1850,6 +1850,89 @@ export class SessionService {
     };
   }
 
+  private extractCreationMetadataFromFile(
+    filePath: string,
+    records: ChatRecord[],
+    tailBuffer?: Buffer,
+  ): {
+    parentSessionId?: string;
+    sourceType?: string;
+    sourceId?: string;
+  } {
+    const metadata = this.extractCreationMetadataFromRecords(records);
+    if (metadata.sourceType !== undefined) return metadata;
+
+    const tailSource = this.readSessionSourceFromTail(filePath, tailBuffer);
+    if (tailSource.sourceType === undefined) return metadata;
+    return {
+      ...metadata,
+      ...tailSource,
+    };
+  }
+
+  private readSessionSourceFromTail(
+    filePath: string,
+    scratchBuffer?: Buffer,
+  ): { sourceType?: string; sourceId?: string } {
+    let fd: number | undefined;
+    try {
+      const fileSize = fs.statSync(filePath).size;
+      if (fileSize === 0) return {};
+      const readStart = Math.max(0, fileSize - TAIL_READ_SIZE);
+      const readLength = Math.min(fileSize, TAIL_READ_SIZE);
+      const buffer =
+        scratchBuffer && scratchBuffer.length >= readLength
+          ? scratchBuffer
+          : Buffer.alloc(readLength);
+
+      fd = fs.openSync(filePath, 'r');
+      const bytesRead = fs.readSync(fd, buffer, 0, readLength, readStart);
+      let firstSegmentIsPartial = false;
+      if (readStart > 0) {
+        const peek = Buffer.alloc(1);
+        fs.readSync(fd, peek, 0, 1, readStart - 1);
+        firstSegmentIsPartial = peek[0] !== 0x0a;
+      }
+
+      const lines = buffer.toString('utf8', 0, bytesRead).split('\n');
+      if (firstSegmentIsPartial) lines.shift();
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const trimmed = lines[i].trim();
+        if (!trimmed) continue;
+        let record: ChatRecord;
+        try {
+          record = JSON.parse(trimmed) as ChatRecord;
+        } catch {
+          continue;
+        }
+        if (record.type !== 'system' || record.subtype !== 'session_source') {
+          continue;
+        }
+        const payload = record.systemPayload as
+          | { sourceType?: unknown; sourceId?: unknown }
+          | undefined;
+        if (typeof payload?.sourceType !== 'string') continue;
+        return {
+          sourceType: payload.sourceType,
+          ...(typeof payload.sourceId === 'string'
+            ? { sourceId: payload.sourceId }
+            : {}),
+        };
+      }
+      return {};
+    } catch {
+      return {};
+    } finally {
+      if (fd !== undefined) {
+        try {
+          fs.closeSync(fd);
+        } catch {
+          // Best-effort after the metadata result has already been decided.
+        }
+      }
+    }
+  }
+
   /**
    * Public accessor: returns both the current custom title and its source
    * for a given session. Used by `ChatRecordingService` on resume to
@@ -2220,7 +2303,11 @@ export class SessionService {
         readResult.complete,
         tailBuffer,
       );
-      const source = this.extractCreationMetadataFromRecords(records);
+      const source = this.extractCreationMetadataFromFile(
+        filePath,
+        records,
+        tailBuffer,
+      );
       items.push({
         sessionId: firstRecord.sessionId,
         cwd: firstRecord.cwd,
@@ -2287,7 +2374,7 @@ export class SessionService {
       return undefined;
     }
     const titleInfo = this.readSessionTitleInfoFromFile(filePath);
-    const source = this.extractCreationMetadataFromRecords(records);
+    const source = this.extractCreationMetadataFromFile(filePath, records);
     const prompt = this.extractFirstPromptFromRecords(records);
     return {
       sessionId: firstRecord.sessionId,
@@ -3042,6 +3129,34 @@ export class SessionService {
     };
   }
 
+  /**
+   * Unarchiving surfaces this session in the active picker again, so if its
+   * stored title is already held by an active session — reachable when a
+   * session was branched to a duplicate name while this one sat archived,
+   * outside the uniqueness scan — give it the next free suffix before the
+   * move so the two don't read as one entry. A collision-free title is left
+   * untouched.
+   */
+  private async retitleIfCollidesWithActive(
+    sessionId: string,
+    archivedFilePath: string,
+  ): Promise<void> {
+    const currentTitle = await this.readSessionDisplayNameFromFile(
+      archivedFilePath,
+    ).catch(() => undefined);
+    if (!currentTitle) return;
+    const normalizedTitle = currentTitle.toLowerCase().trim();
+    const activeTitles = new Set(
+      (
+        await this.findSessionTitlesByPrefixInState(normalizedTitle, 'active')
+      ).map((title) => title.toLowerCase().trim()),
+    );
+    if (!activeTitles.has(normalizedTitle)) return;
+    const baseName = normalizeDerivedBranchTitle(currentTitle) ?? currentTitle;
+    const uniqueTitle = await computeUniqueBranchTitle(baseName, this);
+    await this.renameSession(sessionId, uniqueTitle, 'auto', 'archived');
+  }
+
   async unarchiveSessions(
     sessionIds: string[],
     options: UnarchiveSessionsOptions = {},
@@ -3116,6 +3231,7 @@ export class SessionService {
         await options.assertStorageUnchanged?.();
         options.assertCanMutate?.();
         this.assertMaintainableSessionUnchanged(sessionId, snapshot);
+        await this.retitleIfCollidesWithActive(sessionId, sourcePath);
         try {
           fs.renameSync(sourcePath, targetPath);
         } catch (error) {
@@ -3868,8 +3984,10 @@ export class SessionService {
 
   /**
    * Returns the picker display names in this project that start with `prefix`
-   * (case-insensitive). Single project-wide scan — meant to replace
-   * repeated `findSessionsByTitle()` probes when the caller needs to
+   * (case-insensitive). Scans both the active and archived chats
+   * directories — an archived session's display name must still be counted
+   * as taken, or unarchiving it can surface a duplicate (#9990). Meant to
+   * replace repeated `findSessionsByTitle()` probes when the caller needs to
    * pick the first free numeric suffix in memory.
    *
    * Matches the session picker by preferring `customTitle` and falling back
@@ -3880,8 +3998,23 @@ export class SessionService {
    */
   async findSessionTitlesByPrefix(prefix: string): Promise<string[]> {
     const normalizedPrefix = prefix.toLowerCase().trim();
+    const [active, archived] = await Promise.all([
+      this.findSessionTitlesByPrefixInState(normalizedPrefix, 'active'),
+      this.findSessionTitlesByPrefixInState(normalizedPrefix, 'archived'),
+    ]);
+    // A session file can exist in both `chats/` and `chats/archive/` at once
+    // (the 'conflict' location `unarchiveSessions`/`archiveSessions` know how
+    // to resolve, reachable via an interrupted move); when it does, both
+    // scans read the same file and its title would otherwise appear twice.
+    return [...new Set([...active, ...archived])];
+  }
+
+  private async findSessionTitlesByPrefixInState(
+    normalizedPrefix: string,
+    archiveState: SessionArchiveState,
+  ): Promise<string[]> {
     const titles: string[] = [];
-    const chatsDir = this.getChatsDir();
+    const chatsDir = this.getChatsDirForState(archiveState);
 
     let fileNames: string[];
     try {

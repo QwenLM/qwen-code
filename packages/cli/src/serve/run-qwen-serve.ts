@@ -80,7 +80,11 @@ import { createBridgeFileSystemAdapter } from './bridge-file-system-adapter.js';
 // the run-qwen-serve chunk. The launcher is only needed after listen().
 import { PathMutexRegistry } from './fs/path-mutex-registry.js';
 import { isDeepHealthQuery } from './health-query.js';
-import { isLoopbackBind } from './loopback-binds.js';
+import {
+  hostAssignsIpv6Loopback,
+  isOwnInterfaceAddress,
+} from './local-bind-addresses.js';
+import { isHostGateLoopback, isLoopbackBind } from './loopback-binds.js';
 import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
 import { resolveWebShellDir } from './web-shell-resolver.js';
 import { resolveServeToken } from './serve-token.js';
@@ -108,6 +112,7 @@ import {
   getServeProtocolVersions,
   SERVE_CAPABILITY_REGISTRY,
 } from './capabilities.js';
+import { isNativeDirectoryPickerAvailable } from './native-directory-picker.js';
 import {
   EXTERNAL_TOOL_GUARD_PROVIDER_ATTACHED_VALUE,
   EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
@@ -678,22 +683,134 @@ function workspaceRuntimeEffectiveEnv(
   return runtime.env.effectiveEnv ?? daemonEnv;
 }
 
+function canonicalIpLiteral(host: string): string | undefined {
+  const inner =
+    host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host;
+  try {
+    const hostname = new URL(
+      `http://${inner.includes(':') ? `[${inner}]` : inner}`,
+    ).hostname;
+    const canonical =
+      hostname.startsWith('[') && hostname.endsWith(']')
+        ? hostname.slice(1, -1)
+        : hostname;
+    return isIP(canonical) === 0 ? undefined : canonical;
+  } catch {
+    return undefined;
+  }
+}
+
 export function formatChannelWorkerDaemonUrl(
   host: string,
   port: number,
   tls = false,
+  boundFamily?: 'IPv4' | 'IPv6',
+  ipv6LoopbackAssigned: boolean = hostAssignsIpv6Loopback(),
 ): string {
   const scheme = tls ? 'https' : 'http';
   const normalized = host.trim().toLowerCase();
-  if (
-    normalized === '' ||
-    normalized === '0.0.0.0' ||
-    normalized === '::' ||
-    normalized === '[::]'
-  ) {
+  const canonicalIp = canonicalIpLiteral(normalized);
+  // R7-7: the loopback an IPv6 wildcard bind is dialled back on follows what
+  // the host ASSIGNS, not the bind spelling. Node keeps such sockets
+  // dual-stack (libuv pins `IPV6_V6ONLY=0` unless `ipv6Only` is requested,
+  // so `net.ipv6.bindv6only` never reaches this listener), so both loopbacks
+  // usually reach it — but an IPv4-less host has only `::1`, and a host that
+  // binds `::` while its loopback carries no `::1` (e.g.
+  // `net.ipv6.conf.lo.disable_ipv6=1`) has only `127.0.0.1`. The old
+  // spelling-based rule handed the latter `[::1]`, and the first worker's
+  // `fetch failed` exited the daemon. The v4 wildcard keeps v4 loopback:
+  // measured against `0.0.0.0`, `dial ::1` is ECONNREFUSED.
+  //
+  // An EMPTY --hostname decides by the socket that actually bound, not by
+  // spelling (R10-1): Node's `_listen2` tries the IPv6 unspecified address
+  // for it and falls back to `0.0.0.0` when IPv6 is unavailable, so on the
+  // fallback host the socket is IPv4 while the spelling said IPv6 — handing
+  // workers `[::1]` there dialled an address nothing listens on, and the
+  // first worker's failure exited the daemon. Explicit `::`/`[::]` and
+  // `0.0.0.0` keep their spelling-based family mapping: those binds fail
+  // loud when their family is unavailable, so the spelling cannot lie about
+  // them.
+  const v6Loopback = ipv6LoopbackAssigned
+    ? `${scheme}://[::1]:${port}`
+    : `${scheme}://127.0.0.1:${port}`;
+  if (normalized === '') {
+    return boundFamily === 'IPv4'
+      ? `${scheme}://127.0.0.1:${port}`
+      : v6Loopback;
+  }
+  if (canonicalIp === '::') {
+    return v6Loopback;
+  }
+  // The v4 wildcard's IPv4-mapped spelling `::ffff:0.0.0.0` canonicalizes to
+  // `::ffff:0:0` (WHATWG URL serializes the mapped form by dropping the
+  // dotted quad), so it matches neither wildcard above. Node binds it as a
+  // WORKING wildcard (R14-2): measured on this Node, the socket reports
+  // family IPv6 yet serves v4 loopback — `dial 127.0.0.1` -> ok while
+  // `dial ::1` -> ECONNREFUSED — so it maps to v4 loopback, NOT `[::1]`,
+  // and an operator who copied the address from `ss`/`netstat` (which render
+  // v4 connections on dual-stack sockets as `::ffff:...`) gets channels
+  // that start instead of a boot refusal.
+  if (canonicalIp === '0.0.0.0' || canonicalIp === '::ffff:0:0') {
     return `${scheme}://127.0.0.1:${port}`;
   }
   return `${scheme}://${formatHostForUrl(host)}:${port}`;
+}
+
+/**
+ * Refuse a channel boot whose worker URL this host cannot answer.
+ *
+ * Workers run on the daemon's own machine and dial the address it actually
+ * bound. Loopback is not a fallback: `--hostname 192.168.1.100` binds that
+ * socket ONLY, so a worker sent to `127.0.0.1` gets `ECONNREFUSED`. A bind
+ * this host cannot certify as its own — a DNS name, or a literal on no local
+ * interface — passes every other boot check and then throws inside each
+ * worker: the first one's failure exits the daemon, and channels added later
+ * restart-loop while `/health` stays green. Name it once, at boot.
+ */
+export function assertChannelWorkerDaemonUrlIsLocal(
+  workerDaemonUrl: string,
+  hostname: string,
+): void {
+  let host: string;
+  try {
+    host = new URL(workerDaemonUrl).hostname;
+  } catch {
+    // A zone-scoped bind (`fe80::1%eth0`) arrives percent-encoded and WHATWG
+    // URL rejects zone IDs outright, so the worker pipeline cannot carry it
+    // even though this host answers on the address — refuse with the named
+    // boot diagnostic instead of a raw ERR_INVALID_URL.
+    throw new Error(
+      `Channels cannot start: --hostname "${hostname}" cannot be carried in ` +
+        `a worker URL (a zone-scoped address has no spelling the URL parser ` +
+        `accepts). Bind to loopback, to the wildcard (0.0.0.0 / ::), or to ` +
+        `a zone-less literal address of one of this machine's interfaces.`,
+    );
+  }
+  if (isHostGateLoopback(host)) return;
+  if (isLoopbackBind(host)) {
+    // A wide 127/8 bind passes `isLoopbackBind` and the kernel routes it to
+    // loopback, but the primary Host gate answers only the spellings in
+    // `LOOPBACK_BINDS` — every other 127.x.y.z gets 403 before a route.
+    // Order matters: this refusal must run BEFORE the own-interface escape
+    // below — a wide loopback address can be assigned to a local interface
+    // (`ip addr add 127.0.0.2/8 dev lo`), and the gate 403s it either way.
+    throw new Error(
+      `Channels cannot start: --hostname "${hostname}" is a loopback ` +
+        `address the daemon's Host header gate refuses (it answers only ` +
+        `127.0.0.1, localhost, and [::1]), so channel workers cannot reach ` +
+        `the daemon on it. Bind to one of those spellings, to the wildcard ` +
+        `(0.0.0.0 / ::), or to a literal address of one of this machine's ` +
+        `interfaces.`,
+    );
+  }
+  if (isOwnInterfaceAddress(host)) return;
+  throw new Error(
+    `Channels cannot start: --hostname "${hostname}" is not a loopback bind ` +
+      `and does not name an address on this host, so channel workers have no ` +
+      `local URL to reach the daemon on. Bind to loopback, to the wildcard ` +
+      `(0.0.0.0 / ::), or to a literal address of one of this machine's ` +
+      `interfaces.`,
+  );
 }
 
 export interface WorkerTlsTrustFailure {
@@ -920,9 +1037,14 @@ export function describeWorkerTlsTrustGaps(opts: {
   // leaf (what the `mkcert` flow this project documents produces) never
   // terminates the chain — unless something else in the worker's bundle
   // carries the issuer that does.
+  // One clock for the whole report: the walk's issuer preference and the
+  // per-member validity flags below must judge the same sampled instant, or
+  // the walk can anchor through a certificate the report then contradicts.
+  const now = Date.now();
   const anchorPath = walkWorkerAnchorPath(
     x509,
     workerTrustStore,
+    now,
     // The `servingBlocks === undefined` fallback prepends the leaf too, but
     // that file already reports its own gap below and the workers receive it
     // verbatim; only the partial-read case needs the distinction.
@@ -1113,7 +1235,6 @@ export function describeWorkerTlsTrustGaps(opts: {
   // `X509Certificate.verify` checks signatures only and never consults dates,
   // so an expired root or intermediate anchors "fine" here while every worker
   // handshake fails CERT_HAS_EXPIRED. Boot validation covers the leaf alone.
-  const now = Date.now();
   for (const member of anchorPath.path) {
     if (member.fingerprint256 === x509.fingerprint256) continue;
     const subject = member.subject.replace(/\r?\n/g, ', ');
@@ -1134,20 +1255,22 @@ export function describeWorkerTlsTrustGaps(opts: {
       );
       continue;
     }
-    if (new Date(member.validTo).getTime() < now) {
-      gaps.push(
-        `--tls-cert "${opts.certPath}" chains through "${subject}", which ` +
-          `expired on ${member.validTo} — every worker handshake to the ` +
-          `daemon will fail CERT_HAS_EXPIRED. Renew that chain member and ` +
-          `restart.`,
-      );
-    } else if (new Date(member.validFrom).getTime() > now) {
-      gaps.push(
-        `--tls-cert "${opts.certPath}" chains through "${subject}", which is ` +
-          `not yet valid (validFrom: ${member.validFrom}) — every worker ` +
-          `handshake to the daemon will fail CERT_NOT_YET_VALID. Check that ` +
-          `chain member's notBefore date or the system clock.`,
-      );
+    if (!certValidAt(member, now)) {
+      if (new Date(member.validTo).getTime() < now) {
+        gaps.push(
+          `--tls-cert "${opts.certPath}" chains through "${subject}", which ` +
+            `expired on ${member.validTo} — every worker handshake to the ` +
+            `daemon will fail CERT_HAS_EXPIRED. Renew that chain member and ` +
+            `restart.`,
+        );
+      } else {
+        gaps.push(
+          `--tls-cert "${opts.certPath}" chains through "${subject}", which is ` +
+            `not yet valid (validFrom: ${member.validFrom}) — every worker ` +
+            `handshake to the daemon will fail CERT_NOT_YET_VALID. Check that ` +
+            `chain member's notBefore date or the system clock.`,
+        );
+      }
     }
   }
   const host = workerDialHost(opts.daemonUrl);
@@ -1335,6 +1458,14 @@ function cannotIssueCertificates(cert: X509Certificate): boolean {
   return !isV1Certificate(cert) && keyUsage === undefined;
 }
 
+/** Whether `cert`'s validity window contains `now`. */
+function certValidAt(cert: X509Certificate, now: number): boolean {
+  return (
+    new Date(cert.validFrom).getTime() <= now &&
+    new Date(cert.validTo).getTime() >= now
+  );
+}
+
 function isSelfSignedCert(x509: X509Certificate): boolean {
   if (x509.subject !== x509.issuer) return false;
   try {
@@ -1464,6 +1595,12 @@ function walkWorkerAnchorPath(
   leaf: X509Certificate,
   chain: readonly X509Certificate[],
   /**
+   * The instant the report samples trust at. The issuer preference must judge
+   * the same clock the caller's per-member validity flags do, or the walk can
+   * anchor through a certificate the report then contradicts.
+   */
+  now: number,
+  /**
    * Whether `leaf` is a certificate the workers' loader actually hands them.
    * It is not when the caller had to PREPEND the boot-parsed leaf because the
    * serving file's own block is not one the loader takes.
@@ -1533,11 +1670,19 @@ function walkWorkerAnchorPath(
         : { anchored: true, path };
     }
     walked.add(current.fingerprint256);
-    const issuer: X509Certificate | undefined = chain.find(
+    const issuers = chain.filter(
       (candidate) =>
         !walked.has(candidate.fingerprint256) &&
         certIssuedBy(current, candidate),
     );
+    // A renewed CA leaves two certificates in the bundle that share a subject
+    // AND a key, so both verify what they issued. Taking whichever one came
+    // first reported the expired copy as the path the handshake depends on and
+    // told the operator to renew a CA they had already renewed, while the
+    // merged bundle authorizes through the renewed copy. OpenSSL may use
+    // either, so prefer the copy that is usable now.
+    const issuer: X509Certificate | undefined =
+      issuers.find((candidate) => certValidAt(candidate, now)) ?? issuers[0];
     // `certIssuedBy` asks only "did this sign that": name match plus signature.
     // OpenSSL asks a second question of every certificate it uses AS an issuer,
     // and answering only the first is how a chain that walks THROUGH an
@@ -1972,6 +2117,14 @@ export interface RunQwenServeDeps {
     opts: CreateChannelWorkerSupervisorOptions,
   ) => ChannelWorkerSupervisor;
   workerTlsTrustVerifier?: typeof verifyWorkerTlsTrust;
+  /**
+   * Test/embed override for the boot-time certification that the channel
+   * worker daemon URL is local to this host. Production refuses a bind the
+   * host cannot answer through `assertChannelWorkerDaemonUrlIsLocal`; tests
+   * inject a recorder to pin that boot runs the certification before
+   * starting workers.
+   */
+  channelWorkerUrlCertifier?: typeof assertChannelWorkerDaemonUrlIsLocal;
   channelServicePidfile?: ChannelServicePidfile;
   workspaceRegistrationStore?: WorkspaceRegistrationStore;
   /** Test/embed override; production uses the private user Conversations root. */
@@ -2165,6 +2318,7 @@ function currentServeFeaturesForRunQwenServe(
   sessionArtifactsPersistenceAvailable: boolean,
   currentSessionSchedulingAvailable: boolean,
   env: Readonly<Record<string, string | undefined>>,
+  nativeDirectoryPickerAvailable: boolean,
 ): string[] {
   return getAdvertisedServeFeatures(undefined, {
     requireAuth: opts.requireAuth === true,
@@ -2191,8 +2345,10 @@ function currentServeFeaturesForRunQwenServe(
     channelManagementAvailable: true,
     persistentWorkspaceRegistrationAvailable: true,
     workspaceRuntimeRemovalAvailable: true,
-    // Advertise the same WS feature flags as the runtime path (serve-features.ts)
-    // so the bootstrap `/capabilities` window doesn't briefly under-report them.
+    // Advertise the same host-conditional and WS feature flags as the runtime
+    // path (serve-features.ts) so the bootstrap `/capabilities` window doesn't
+    // briefly under-report them.
+    nativeDirectoryPickerAvailable,
     clientMcpOverWsEnabled: opts.clientMcpOverWs === true,
     cdpTunnelOverWsEnabled: opts.cdpTunnelOverWs === true,
     browserAutomationMcpAvailable: isBrowserAutomationMcpAvailable(opts, env),
@@ -2208,6 +2364,7 @@ function createBootstrapCapabilities(input: {
   currentSessionSchedulingAvailable: boolean;
   permissionPolicy: PermissionPolicy | undefined;
   env: Readonly<Record<string, string | undefined>>;
+  nativeDirectoryPickerAvailable: boolean;
 }): CapabilitiesEnvelope {
   return {
     v: CAPABILITIES_SCHEMA_VERSION,
@@ -2222,6 +2379,7 @@ function createBootstrapCapabilities(input: {
       input.sessionArtifactsPersistenceAvailable,
       input.currentSessionSchedulingAvailable,
       input.env,
+      input.nativeDirectoryPickerAvailable,
     ),
     modelServices: [],
     workspaceCwd: input.boundWorkspace,
@@ -2442,6 +2600,11 @@ function createBootstrapServeApp(input: {
     onHealthServed,
   } = input;
   const app = express();
+  // The probe stats `/dev/console` (macOS) or scans `PATH` for `zenity`
+  // (Linux), and both bootstrap endpoints below rebuild their envelope per
+  // request, so evaluate it once here — the runtime path likewise probes once,
+  // at `createApp` time (server.ts).
+  const nativeDirectoryPickerAvailable = isNativeDirectoryPickerAvailable();
 
   installSameOriginOriginStrip(app, getPort);
   if (opts.allowOrigins && opts.allowOrigins.length > 0) {
@@ -2502,6 +2665,7 @@ function createBootstrapServeApp(input: {
         currentSessionSchedulingAvailable,
         permissionPolicy,
         env: process.env,
+        nativeDirectoryPickerAvailable,
       }),
     );
   });
@@ -2641,6 +2805,7 @@ function createBootstrapServeApp(input: {
           sessionArtifactsPersistenceAvailable,
           currentSessionSchedulingAvailable,
           process.env,
+          nativeDirectoryPickerAvailable,
         ),
       },
       runtime: {
@@ -8215,7 +8380,17 @@ async function runQwenServeImpl(
             opts.hostname,
             actualPort,
             tlsOptions !== undefined,
+            typeof addr === 'object' &&
+              addr &&
+              (addr.family === 'IPv4' || addr.family === 'IPv6')
+              ? addr.family
+              : undefined,
           );
+
+          (
+            deps.channelWorkerUrlCertifier ??
+            assertChannelWorkerDaemonUrlIsLocal
+          )(workerDaemonUrl, opts.hostname);
           if (
             tlsOptions &&
             tlsCertPath &&

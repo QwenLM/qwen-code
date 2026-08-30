@@ -164,6 +164,7 @@ import type {
 import {
   DAEMON_UI_DEBUG_REASONS,
   DAEMON_UI_UNRECOGNIZED_DIAGNOSTIC_REASONS,
+  isTaskExecutionMode,
   selectUnrecognizedDiagnostics,
   UNRECOGNIZED_DIAGNOSTICS_LIMIT,
 } from '../../src/daemon/index.js';
@@ -753,5 +754,24 @@ describe('unrecognized-diagnostic sidechannel public surface (#8823)', () => {
     expectTypeOf<DaemonEntryUnrecognizedDiagnostic>().toHaveProperty(
       'debugReason',
     );
+  });
+});
+
+describe('task executionMode guard public surface', () => {
+  it('pins the fail-closed literal whitelist at the daemon entry', () => {
+    // webui's projection (`projectSubagentToolUpdate`) and the web-shell
+    // adapter (`daemonToolBlockToToolCall`) both import this guard from
+    // @qwen-code/sdk/daemon; a dropped re-export is a compile error for
+    // them, and a widened or narrowed literal set silently re-routes live
+    // vs recorded classification. Pin the runtime behavior here the way
+    // DAEMON_UI_DEBUG_REASONS pins its closed union.
+    expect(typeof isTaskExecutionMode).toBe('function');
+    expect(isTaskExecutionMode('foreground')).toBe(true);
+    expect(isTaskExecutionMode('background')).toBe(true);
+    expect(isTaskExecutionMode('detached')).toBe(false);
+    expect(isTaskExecutionMode('')).toBe(false);
+    expect(isTaskExecutionMode(undefined)).toBe(false);
+    expect(isTaskExecutionMode(42)).toBe(false);
+    expect(isTaskExecutionMode({})).toBe(false);
   });
 });
