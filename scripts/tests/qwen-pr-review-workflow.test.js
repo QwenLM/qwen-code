@@ -39,6 +39,18 @@ const botLogin =
     .jobs['review-config'].steps.find((s) => s.name === 'Set review constants')
     ?.run.match(/bot_login=([A-Za-z0-9-]+)/)?.[1] ?? '';
 
+describe('qwen pr review runner routing', () => {
+  it('isolates the long-running review job on the agent pool', () => {
+    const runsOn = String(parse(workflow).jobs['review-pr']['runs-on']);
+
+    expect(runsOn).toContain('["self-hosted", "linux", "x64", "ecs-agent"]');
+    expect(runsOn).toContain('["ubuntu-latest"]');
+    expect(runsOn).toContain("github.repository == 'QwenLM/qwen-code'");
+    expect(runsOn).toContain("vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true'");
+    expect(runsOn).not.toContain('ecs-qwen');
+  });
+});
+
 function runReviewStep() {
   const doc = parse(workflow);
   const step = doc.jobs['review-pr'].steps.find((s) => s.name === 'Run review');

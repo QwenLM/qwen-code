@@ -9905,25 +9905,21 @@ exit 1
     );
   });
 
-  it('runs heavy autofix jobs on the ECS pool with hosted fallback', () => {
+  it('isolates agent jobs from builds with hosted fallback', () => {
     const workflowAndSkill = `${workflow}\n${readAutofixSkill()}`;
 
-    // Each heavy job routes to the persistent ECS pool (every target is
-    // live-gated to write+ internal authors and the ECS pool ships docker),
-    // with a hosted fallback for forks of this repo and when ECS routing is
-    // disabled. PR-family events additionally need a same-repo head or a
-    // write+ author — the fleet's ECS routing guard (ci.yml's classify_pr).
-    // Pin the exact expression so neither the repository guard nor the
-    // hosted fallback can be dropped silently.
+    // Agent execution uses the dedicated pool while the trusted-base build
+    // remains on the general ECS pool. Both retain the hosted fallback for
+    // forks and when ECS routing is disabled. Pin the exact expressions so
+    // neither the trust guard nor the fallback can be dropped silently.
     const ecsRunsOn =
       "runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''[\"OWNER\",\"MEMBER\",\"COLLABORATOR\"]''), github.event.pull_request.author_association))) && fromJSON(''[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]'') || fromJSON(''[\"ubuntu-latest\"]'') }}'";
-    const heavyJobRunsOn = {
-      'issue-autofix': issueAutofixJob,
-      'build-cli': buildCliJob,
-      'review-address': reviewAddressJob,
-    };
-    for (const runsOn of Object.values(heavyJobRunsOn)) {
-      expect(runsOn).toContain(ecsRunsOn);
+    const agentRunsOn = ecsRunsOn.replace('ecs-qwen', 'ecs-agent');
+    expect(buildCliJob).toContain(ecsRunsOn);
+    for (const agentJob of [issueAutofixJob, reviewAddressJob]) {
+      const runsOn = agentJob.match(/runs-on: .*/)?.[0] ?? '';
+      expect(runsOn).toBe(agentRunsOn);
+      expect(runsOn).not.toContain('ecs-qwen');
     }
     // The widened runner-environment guard is what lets ECS-routed runs pass
     // 'Check runner environment' at all — pin the accepted set in both jobs
