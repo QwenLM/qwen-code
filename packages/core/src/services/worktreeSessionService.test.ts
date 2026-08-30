@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -19,6 +19,16 @@ import {
 import { Storage } from '../config/storage.js';
 import { writeRuntimeStatus } from '../utils/runtimeStatus.js';
 
+const fsMocks = vi.hoisted(() => ({
+  readFile: vi.fn<typeof import('node:fs/promises').readFile>(),
+}));
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  fsMocks.readFile.mockImplementation(actual.readFile);
+  return { ...actual, readFile: fsMocks.readFile };
+});
+
 const sample: WorktreeSession = {
   slug: 'my-feature',
   worktreePath: '/repo/.qwen/worktrees/my-feature',
@@ -32,6 +42,7 @@ let tmpDir: string;
 let filePath: string;
 
 beforeEach(async () => {
+  fsMocks.readFile.mockClear();
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'wt-session-test-'));
   filePath = path.join(tmpDir, 'test.worktree.json');
 });
@@ -41,6 +52,29 @@ afterEach(async () => {
 });
 
 describe('readWorktreeSession', () => {
+  it('propagates the caller abort reason', async () => {
+    const controller = new AbortController();
+    const reason = new Error('worktree sidecar read cancelled');
+    controller.abort(reason);
+
+    await expect(
+      readWorktreeSession(filePath, { signal: controller.signal }),
+    ).rejects.toBe(reason);
+  });
+
+  it('passes the caller signal to the file read', async () => {
+    await fs.writeFile(filePath, JSON.stringify(sample), 'utf-8');
+    const controller = new AbortController();
+
+    await expect(
+      readWorktreeSession(filePath, { signal: controller.signal }),
+    ).resolves.toEqual(sample);
+    expect(fsMocks.readFile).toHaveBeenLastCalledWith(filePath, {
+      encoding: 'utf-8',
+      signal: controller.signal,
+    });
+  });
+
   it('returns null when file does not exist', async () => {
     expect(await readWorktreeSession(filePath)).toBeNull();
   });

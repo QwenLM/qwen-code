@@ -5,7 +5,7 @@
  */
 
 import type React from 'react';
-import { useRef } from 'react';
+import { type RefObject, useRef } from 'react';
 import { type DOMElement, Box, Text, useBoxMetrics } from 'ink';
 import { theme } from '../semantic-colors.js';
 import { ContextUsageDisplay } from './ContextUsageDisplay.js';
@@ -22,7 +22,7 @@ import { useUIState } from '../contexts/UIStateContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { useVimModeState } from '../contexts/VimModeContext.js';
-import { GeminiSpinner } from './GeminiRespondingSpinner.js';
+import { Spinner } from './RespondingSpinner.js';
 import {
   GoalPill,
   isLiveGoalSnapshot,
@@ -49,7 +49,11 @@ const PasteProgressBar: React.FC<{ progress: PasteProgress }> = ({
   );
 };
 
-export const Footer: React.FC = () => {
+interface FooterProps {
+  containerRef?: RefObject<DOMElement | null>;
+}
+
+export const Footer: React.FC<FooterProps> = ({ containerRef }) => {
   const uiState = useUIState();
   const config = useConfig();
   const settings = useSettings();
@@ -125,11 +129,11 @@ export const Footer: React.FC = () => {
     <ShellModeIndicator />
   ) : configInitMessage ? (
     <Text color={theme.text.secondary}>
-      <GeminiSpinner /> {configInitMessage}
+      <Spinner /> {configInitMessage}
     </Text>
   ) : uiState.startupIdeConnectionStatus.state === 'connecting' ? (
     <Text color={theme.text.secondary}>
-      <GeminiSpinner /> {t('IDE connecting... context may be unavailable')}
+      <Spinner /> {t('IDE connecting... context may be unavailable')}
     </Text>
   ) : uiState.startupIdeConnectionStatus.state === 'failed' ? (
     <Text color={theme.status.warning}>
@@ -209,6 +213,7 @@ export const Footer: React.FC = () => {
   // (bottom), right section has indicators. Status line and hints coexist.
   return (
     <Box
+      ref={containerRef}
       flexDirection={isNarrow ? 'column' : 'row'}
       justifyContent={isNarrow ? 'flex-start' : 'space-between'}
       width="100%"

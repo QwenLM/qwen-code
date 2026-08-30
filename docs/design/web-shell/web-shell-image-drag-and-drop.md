@@ -4,6 +4,9 @@
 
 针对 [#8321](https://github.com/QwenLM/qwen-code/issues/8321) 的实现方案。初始实现由
 `48d1e1d69` 落地，review 修正由 `afb55ebae` 补齐 admission、恢复和资源边界。
+其中队列展示和 admission 失败语义已由
+[Web Shell backend-authoritative queue display](../web-shell-backend-authoritative-queue-display.md)
+取代；下文相关内容仅保留为历史记录。
 
 该功能只补齐 Web Shell composer 的图片拖放入口，并复用现有图片粘贴、
 附件预览、prompt 提交和多模态模型链路。daemon wire format、ACP、Core 和公开
@@ -499,11 +502,16 @@ oversized placeholder。它们验证既有服务端契约；Web Shell helper 测
 候选顺序和 encoded-data 剩余预算。
 
 BMP 以 `image/bmp` 进入缩略图 data URL 和 daemon image block。Core 的
-`SUPPORTED_IMAGE_MIME_TYPES` 明确包含 `image/bmp`，`ImageTokenizer` 解析 BMP 尺寸，
-OpenAI converter 把启用 image modality 的 `inlineData` 原样构造成
-`data:image/bmp;base64,...`；Gemini 路径保留相同 `inlineData`。因此 V1 不在浏览器转码。
-浏览器若不能解码缩略图，不影响附件数据传输，但 E2E 必须覆盖 Chromium 解码，
-Firefox/Linux 必须完成人工验收。
+`SUPPORTED_IMAGE_MIME_TYPES` 明确包含 `image/bmp`，OpenAI converter 把启用 image modality 的
+`inlineData` 原样构造成 `data:image/bmp;base64,...`；Gemini 路径保留相同 `inlineData`。
+因此 V1 不在浏览器转码。
+
+> **2026-08-24 同步注记（PR #9676）**：request-tokenizer 估计器簇（含 `ImageTokenizer`
+> 及其 BMP 尺寸解析）已作为孤儿代码删除。BMP 支持现在仅依赖 `SUPPORTED_IMAGE_MIME_TYPES`
+> 接受清单与 converter 透传；token 计数使用 `compactionInputSlimming.ts` 中的固定
+> `DEFAULT_IMAGE_TOKEN_ESTIMATE`。下文对 BMP 路径的 E2E/人工验收要求不变。
+> 浏览器若不能解码缩略图，不影响附件数据传输，但 E2E 必须覆盖 Chromium 解码，
+> Firefox/Linux 必须完成人工验收。
 
 提交后的 user transcript 还经过 `isSafeImageSrc`，因此其被动位图 data-URI allowlist 必须
 加入精确的 `image/bmp;base64,`，否则 composer 预览可见而 user message 会静默隐藏 BMP。
@@ -631,8 +639,8 @@ Web Shell 输入层静默改变格式。
 
 BMP 的下游回归不只停在 mock HTTP 入参：在既有 ACP session prompt 转换测试中加入
 `image/bmp`，验证最终 Core canonical content 保持
-`inlineData.mimeType === 'image/bmp'`；OpenAI/Gemini converter/tokenizer 聚焦测试验证
-各自既有图片路径，Anthropic 聚焦测试明确断言 BMP 转为 unsupported-media 文本。daemon
+`inlineData.mimeType === 'image/bmp'`；OpenAI/Gemini converter 聚焦测试验证
+各自既有图片路径（tokenizer 估计器簇已随 PR #9676 删除，见上文同步注记），Anthropic 聚焦测试明确断言 BMP 转为 unsupported-media 文本。daemon
 已有结构化 `413` 测试，Core 已有 inline-media within/over limit 测试；本功能不复制
 production 限制，只确认 Web Shell 对这些既有失败语义的状态保留。
 

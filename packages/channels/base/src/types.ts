@@ -59,7 +59,10 @@ export interface ChannelConfig {
   clientSecret?: string;
   senderPolicy: SenderPolicy;
   allowedUsers: string[];
+  /** Channel routing scope. `thread` is retained for existing configurations only. */
   sessionScope: SessionScope;
+  /** Retain an owner-scoped catalog of named sessions in daemon-managed mode. */
+  multiSession?: boolean;
   cwd: string;
   approvalMode?: string;
   instructions?: string;
@@ -106,6 +109,8 @@ export interface Envelope {
   chatId: string;
   chatName?: string;
   text: string;
+  /** User-authored text to display when `text` contains model-only context. */
+  displayText?: string;
   threadId?: string;
   /** Platform-specific message ID for response correlation. */
   messageId?: string;
@@ -514,7 +519,10 @@ export interface ChannelPlugin {
   /** Serializable metadata for safe configuration management. */
   management?: ChannelManagementDescriptor;
 
-  /** Default session scope for this channel type (applied when config omits sessionScope). */
+  /**
+   * Default Channel routing scope (applied when config omits sessionScope).
+   * `thread` is retained for existing configurations only.
+   */
   defaultSessionScope?: SessionScope;
 
   /** Create a channel adapter instance. */

@@ -46,17 +46,17 @@ The `type` must match a channel type registered by an installed extension. Check
 
 All standard channel options work with custom channels:
 
-| Option         | Description                                    |
-| -------------- | ---------------------------------------------- |
-| `senderPolicy` | `allowlist`, `pairing`, or `open`              |
-| `allowedUsers` | Static allowlist of sender IDs                 |
-| `sessionScope` | `user`, `thread`, or `single`                  |
-| `cwd`          | Working directory for the agent                |
-| `instructions` | Prepended to the first message of each session |
-| `model`        | Model override for the channel                 |
-| `groupPolicy`  | `disabled`, `allowlist`, `pairing`, or `open`  |
-| `dmPolicy`     | `open` or `disabled`                           |
-| `groups`       | Per-group settings                             |
+| Option         | Description                                                                                        |
+| -------------- | -------------------------------------------------------------------------------------------------- |
+| `senderPolicy` | `allowlist`, `pairing`, or `open`                                                                  |
+| `allowedUsers` | Static allowlist of sender IDs                                                                     |
+| `sessionScope` | `user`, `chat_thread`, or `single`; legacy `thread` remains compatible for existing configurations |
+| `cwd`          | Working directory for the agent                                                                    |
+| `instructions` | Prepended to the first message of each session                                                     |
+| `model`        | Model override for the channel                                                                     |
+| `groupPolicy`  | `disabled`, `allowlist`, `pairing`, or `open`                                                      |
+| `dmPolicy`     | `open` or `disabled`                                                                               |
+| `groups`       | Per-group settings                                                                                 |
 
 See [Overview](./overview) for details on each option.
 

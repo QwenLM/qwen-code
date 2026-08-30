@@ -5,7 +5,7 @@
  */
 
 import fs from 'node:fs/promises';
-import type { Metadata } from 'sharp';
+import type { Metadata, SharpConstructor } from 'sharp';
 
 const IMAGE_VIEW_MAX_EDGE = 1568;
 const IMAGE_VIEW_MAX_PATCHES = 1568;
@@ -42,7 +42,7 @@ interface ImageSize {
 interface PreparedImage {
   bytes: Buffer;
   metadata: Metadata;
-  sharp: typeof import('sharp');
+  sharp: SharpConstructor;
 }
 
 export type ImageViewErrorCode =
@@ -116,15 +116,9 @@ async function prepareImage(
   signal: AbortSignal,
 ): Promise<PreparedImage> {
   signal.throwIfAborted();
-  let sharp: typeof import('sharp');
+  let sharp: SharpConstructor;
   try {
-    // sharp is a CJS `export =` module, so the callable is on `.default`
-    // at runtime even though NodeNext types collapse that namespace away.
-    sharp = (
-      (await import('sharp')) as unknown as {
-        default: typeof import('sharp');
-      }
-    ).default;
+    sharp = (await import('sharp')).default;
   } catch {
     throw new ImageViewError(
       'renderer_unavailable',

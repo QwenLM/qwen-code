@@ -11,7 +11,7 @@ import {
   watchRepoBranch,
   type GitWorkingTreeStatus,
 } from '@qwen-code/qwen-code-core';
-import type { AcpSessionBridge } from './acp-session-bridge.js';
+import type { WorkspaceEventPublisher } from './acp-session-bridge.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import { WorkspaceGitState } from './workspace-git-state.js';
 
@@ -51,7 +51,7 @@ function summary(
 
 function bridgeWith(publishWorkspaceEvent = vi.fn()) {
   return {
-    bridge: { publishWorkspaceEvent } as unknown as AcpSessionBridge,
+    bridge: { publishWorkspaceEvent } satisfies WorkspaceEventPublisher,
     publishWorkspaceEvent,
   };
 }
@@ -81,7 +81,7 @@ describe('WorkspaceGitState', () => {
     await expect(
       state.getStatus('/workspace', {
         publishWorkspaceEvent,
-      } as unknown as AcpSessionBridge),
+      } satisfies WorkspaceEventPublisher),
     ).resolves.toEqual({
       v: 2,
       workspaceCwd: '/workspace',
@@ -123,7 +123,7 @@ describe('WorkspaceGitState', () => {
         '/workspace',
         {
           publishWorkspaceEvent: vi.fn(),
-        } as unknown as AcpSessionBridge,
+        } satisfies WorkspaceEventPublisher,
         { wait: true },
       ),
     ).resolves.toEqual({
@@ -139,7 +139,7 @@ describe('WorkspaceGitState', () => {
     const state = new WorkspaceGitState();
     const bridge = {
       publishWorkspaceEvent: vi.fn(),
-    } as unknown as AcpSessionBridge;
+    } satisfies WorkspaceEventPublisher;
 
     const [first, second] = await Promise.all([
       state.getStatus('/plain', bridge),
@@ -160,7 +160,7 @@ describe('WorkspaceGitState', () => {
     const state = new WorkspaceGitState();
     const bridge = {
       publishWorkspaceEvent: vi.fn(),
-    } as unknown as AcpSessionBridge;
+    } satisfies WorkspaceEventPublisher;
 
     await expect(state.getStatus('/retry', bridge)).rejects.toThrow(
       'git unavailable',
@@ -193,7 +193,7 @@ describe('WorkspaceGitState', () => {
     const state = new WorkspaceGitState();
     const bridge = {
       publishWorkspaceEvent: vi.fn(),
-    } as unknown as AcpSessionBridge;
+    } satisfies WorkspaceEventPublisher;
 
     const status = await state.getStatus('/workspace', bridge, { wait: true });
     expect(status).toMatchObject({
@@ -232,7 +232,7 @@ describe('WorkspaceGitState', () => {
     const state = new WorkspaceGitState();
     const bridge = {
       publishWorkspaceEvent: vi.fn(),
-    } as unknown as AcpSessionBridge;
+    } satisfies WorkspaceEventPublisher;
 
     const status = await state.getStatus('/workspace', bridge, { wait: true });
     expect(status).not.toHaveProperty('operation');
@@ -258,7 +258,7 @@ describe('WorkspaceGitState', () => {
     const state = new WorkspaceGitState();
     const bridge = {
       publishWorkspaceEvent: vi.fn(),
-    } as unknown as AcpSessionBridge;
+    } satisfies WorkspaceEventPublisher;
 
     await expect(
       state.getStatus('/workspace', bridge, { wait: true }),
@@ -278,7 +278,7 @@ describe('WorkspaceGitState', () => {
     const state = new WorkspaceGitState();
     const bridge = {
       publishWorkspaceEvent: vi.fn(),
-    } as unknown as AcpSessionBridge;
+    } satisfies WorkspaceEventPublisher;
     await state.getStatus('/first', bridge);
     await state.getStatus('/second', bridge);
 
@@ -302,7 +302,7 @@ describe('WorkspaceGitState', () => {
     const state = new WorkspaceGitState();
     const bridge = {
       publishWorkspaceEvent: vi.fn(),
-    } as unknown as AcpSessionBridge;
+    } satisfies WorkspaceEventPublisher;
 
     const first = state.getStatus('/same', bridge);
     state.disposeWorkspace('/same');
