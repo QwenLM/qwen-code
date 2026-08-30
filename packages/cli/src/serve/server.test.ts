@@ -162,6 +162,7 @@ import type {
   ServeWorkspaceToolsStatus,
 } from '@qwen-code/acp-bridge/status';
 import { CAPABILITIES_SCHEMA_VERSION, type ServeOptions } from './types.js';
+import { MAX_REGISTERED_WORKSPACES } from './workspace-inputs.js';
 import { isValidSessionId } from '../config/config.js';
 import type { DaemonLogger } from './daemon-logger.js';
 import { FsError, type WorkspaceFileSystemFactory } from './fs/index.js';
@@ -4122,6 +4123,27 @@ describe('createServeApp', () => {
       expect(configuredResponse.body.limits.sessionRestoreTimeoutMs).toBe(
         90_000,
       );
+    });
+
+    it('advertises the effective workspace registration cap', async () => {
+      const defaultResponse = await request(
+        createServeApp(baseOpts, undefined, { bridge: fakeBridge() }),
+      )
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(defaultResponse.body.limits.maxRegisteredWorkspaces).toBe(
+        MAX_REGISTERED_WORKSPACES,
+      );
+
+      const raisedResponse = await request(
+        createServeApp(baseOpts, undefined, {
+          bridge: fakeBridge(),
+          maxRegisteredWorkspaces: 100,
+        }),
+      )
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(raisedResponse.body.limits.maxRegisteredWorkspaces).toBe(100);
     });
 
     it('advertises session generation only when every bridge supports it', async () => {

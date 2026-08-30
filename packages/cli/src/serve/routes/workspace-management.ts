@@ -75,6 +75,12 @@ export interface WorkspaceManagementRouteDeps {
     signal?: AbortSignal,
   ) => Promise<string | undefined>;
   reservedWorkspaceRoots?: readonly string[];
+  /**
+   * Effective workspace registration cap. Defaults to
+   * `MAX_REGISTERED_WORKSPACES`; `runQwenServe` passes the value resolved
+   * from `QWEN_SERVE_MAX_WORKSPACES`.
+   */
+  maxRegisteredWorkspaces?: number;
 }
 
 export interface WorkspaceRemovalActivity {
@@ -133,6 +139,8 @@ export function registerWorkspaceManagementRoutes(
     pickWorkspaceDirectory: pickWorkspaceDirectoryOverride,
     reservedWorkspaceRoots = [],
   } = deps;
+  const maxRegisteredWorkspaces =
+    deps.maxRegisteredWorkspaces ?? MAX_REGISTERED_WORKSPACES;
   const pickWorkspaceDirectory =
     pickWorkspaceDirectoryOverride ?? pickNativeDirectory;
   const canonicalizeIfPresent = (candidate: string): string => {
@@ -267,7 +275,7 @@ export function registerWorkspaceManagementRoutes(
     if (nestingConflict) {
       throw new Error('Workspace path nests with an existing workspace');
     }
-    if (projectedWorkspaceCount() >= MAX_REGISTERED_WORKSPACES) {
+    if (projectedWorkspaceCount() >= maxRegisteredWorkspaces) {
       throw new Error('Workspace registration limit reached');
     }
   };
@@ -311,7 +319,7 @@ export function registerWorkspaceManagementRoutes(
         if (nestingConflict) {
           throw new Error('Workspace path nests with an existing workspace');
         }
-        if (projectedWorkspaceCount() >= MAX_REGISTERED_WORKSPACES) {
+        if (projectedWorkspaceCount() >= maxRegisteredWorkspaces) {
           throw new Error('Workspace registration limit reached');
         }
         workspaceRegistry.add(runtime!);
@@ -457,7 +465,7 @@ export function registerWorkspaceManagementRoutes(
       });
       return;
     }
-    if (projectedWorkspaceCount() >= MAX_REGISTERED_WORKSPACES) {
+    if (projectedWorkspaceCount() >= maxRegisteredWorkspaces) {
       res.status(409).json({
         error: 'Workspace registration limit reached',
         code: 'workspace_limit_reached',
@@ -936,7 +944,7 @@ export function registerWorkspaceManagementRoutes(
           const alreadyPersisted = persistedWorkspaces.length > 0;
           if (
             !alreadyPersisted &&
-            snapshot.workspaces.length >= MAX_REGISTERED_WORKSPACES - 1
+            snapshot.workspaces.length >= maxRegisteredWorkspaces - 1
           ) {
             res.status(409).json({
               error: 'Workspace registration limit reached',
@@ -1067,7 +1075,7 @@ export function registerWorkspaceManagementRoutes(
         return;
       }
 
-      if (projectedWorkspaceCount() >= MAX_REGISTERED_WORKSPACES) {
+      if (projectedWorkspaceCount() >= maxRegisteredWorkspaces) {
         res.status(409).json({
           error: 'Workspace registration limit reached',
           code: 'workspace_limit_reached',

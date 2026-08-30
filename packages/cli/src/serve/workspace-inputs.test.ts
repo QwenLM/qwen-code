@@ -10,9 +10,12 @@ import * as path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   DuplicateWorkspaceInputError,
+  MAX_REGISTERED_WORKSPACES,
+  MAX_REGISTERED_WORKSPACES_ENV,
   MissingWorkspaceInputError,
   MultipleWorkspaceInputError,
   NestedWorkspaceInputError,
+  resolveMaxRegisteredWorkspaces,
   resolveSingleWorkspaceInput,
   resolveWorkspaceInputs,
 } from './workspace-inputs.js';
@@ -143,5 +146,38 @@ describe('resolveWorkspaceInputs', () => {
     expect(() => resolveWorkspaceInputs([parent, child])).toThrow(
       NestedWorkspaceInputError,
     );
+  });
+});
+
+describe('resolveMaxRegisteredWorkspaces', () => {
+  it('returns the built-in default when the env var is absent or blank', () => {
+    expect(resolveMaxRegisteredWorkspaces({})).toBe(MAX_REGISTERED_WORKSPACES);
+    expect(
+      resolveMaxRegisteredWorkspaces({ [MAX_REGISTERED_WORKSPACES_ENV]: '' }),
+    ).toBe(MAX_REGISTERED_WORKSPACES);
+    expect(
+      resolveMaxRegisteredWorkspaces({ [MAX_REGISTERED_WORKSPACES_ENV]: '  ' }),
+    ).toBe(MAX_REGISTERED_WORKSPACES);
+  });
+
+  it('accepts a positive integer override', () => {
+    expect(
+      resolveMaxRegisteredWorkspaces({ [MAX_REGISTERED_WORKSPACES_ENV]: '1' }),
+    ).toBe(1);
+    expect(
+      resolveMaxRegisteredWorkspaces({
+        [MAX_REGISTERED_WORKSPACES_ENV]: ' 100 ',
+      }),
+    ).toBe(100);
+  });
+
+  it('throws on malformed values so a typo fails the boot loudly', () => {
+    for (const raw of ['0', '-1', '2.5', 'abc', 'NaN']) {
+      expect(() =>
+        resolveMaxRegisteredWorkspaces({
+          [MAX_REGISTERED_WORKSPACES_ENV]: raw,
+        }),
+      ).toThrow(`Invalid ${MAX_REGISTERED_WORKSPACES_ENV}="${raw}"`);
+    }
   });
 });

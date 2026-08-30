@@ -19,6 +19,7 @@ import {
   type ServeOptions,
 } from '../types.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
+import { MAX_REGISTERED_WORKSPACES } from '../workspace-inputs.js';
 
 interface RegisterCapabilitiesRoutesDeps {
   qwenCodeVersion?: string;
@@ -32,6 +33,8 @@ interface RegisterCapabilitiesRoutesDeps {
   maxPendingPromptsPerSession: ServeOptions['maxPendingPromptsPerSession'];
   sessionRestoreTimeoutMs: number;
   languageCodes: string[];
+  /** Effective registration cap resolved from `QWEN_SERVE_MAX_WORKSPACES`. */
+  maxRegisteredWorkspaces?: number;
 }
 
 export function registerCapabilitiesRoutes(
@@ -73,6 +76,8 @@ export function registerCapabilitiesRoutes(
           activePrimary?.bridge.permissionPolicy ?? deps.permissionPolicy,
       },
       limits: {
+        maxRegisteredWorkspaces:
+          deps.maxRegisteredWorkspaces ?? MAX_REGISTERED_WORKSPACES,
         maxPendingPromptsPerSession: advertisedMaxPendingPromptsPerSession(
           deps.maxPendingPromptsPerSession,
         ),

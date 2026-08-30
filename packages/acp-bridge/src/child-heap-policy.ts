@@ -99,8 +99,13 @@ export interface ChildHeapPolicy {
 export function createChildHeapPolicy(options: {
   budget: DaemonMemoryBudget;
   mode: ChildHeapMode;
+  /**
+   * Effective workspace registration cap (`QWEN_SERVE_MAX_WORKSPACES`).
+   * Bounds the modeled child count; defaults to `MAX_DAEMON_WORKSPACES`.
+   */
+  maxWorkspaces?: number;
 }): ChildHeapPolicy {
-  const { budget, mode } = options;
+  const { budget, mode, maxWorkspaces = MAX_DAEMON_WORKSPACES } = options;
   let refusals = 0;
 
   // A FIXED partition, not a share of the pool divided by the children live
@@ -116,7 +121,7 @@ export function createChildHeapPolicy(options: {
   // reads as its *default* heap, roughly 4 GB, against a pool of nothing.
   const admissible = Math.min(
     Math.floor(budget.childPoolMb / MIN_CHILD_HEAP_MB),
-    MAX_DAEMON_WORKSPACES,
+    maxWorkspaces,
   );
   // `floor(pool / admissible) >= MIN_CHILD_HEAP_MB` by construction, but the
   // legacy cap is `floor(available / 2)` and is under the floor whenever

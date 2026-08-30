@@ -475,6 +475,11 @@ export interface CapabilitiesEnvelope {
    * `null` means the operator explicitly disabled that cap.
    */
   limits?: {
+    /**
+     * Effective workspace registration cap (`QWEN_SERVE_MAX_WORKSPACES`,
+     * default 25). Additive — older daemons omit it.
+     */
+    maxRegisteredWorkspaces?: number;
     maxPendingPromptsPerSession?: number | null;
     maxSessionsPerWorkspace?: number | null;
     maxTotalSessions?: number | null;

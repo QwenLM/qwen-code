@@ -823,6 +823,28 @@ describe('POST /workspaces', () => {
     }
   });
 
+  it('honors a registration cap override (QWEN_SERVE_MAX_WORKSPACES)', async () => {
+    const target = await mkdtemp(join(REAL_DIR, 'qws-cap-override-'));
+    try {
+      // Cap 1 leaves no room beside the single registered workspace. The
+      // registry primary sits outside REAL_DIR so the target does not trip
+      // the nesting guard before the cap check.
+      const { app } = createApp({
+        workspaceRegistry: createMockRegistry([
+          makeRuntime('/workspace-primary'),
+        ]),
+        maxRegisteredWorkspaces: 1,
+      });
+
+      const res = await request(app).post('/workspaces').send({ cwd: target });
+
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('workspace_limit_reached');
+    } finally {
+      await rm(target, { recursive: true, force: true });
+    }
+  });
+
   it('sealing waits for construction and disposes an unregistered runtime once', async () => {
     const parent = await mkdtemp(join(REAL_DIR, 'qws-scratch-route-'));
     try {

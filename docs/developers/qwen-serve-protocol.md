@@ -711,6 +711,8 @@ runtime routes return `503`.
 
 `limits.maxTotalSessions` is additive. `null` means the effective daemon-wide fresh-session cap is disabled. When several startup/restored workspaces are present, `--max-total-sessions` is omitted, and `maxSessionsPerWorkspace` is finite, the daemon derives the effective total cap once as `maxSessionsPerWorkspace * startupWorkspaceCount`; later dynamic registration does not recompute it. When set, it limits fresh session creation across the daemon and reports total-limit failures with the existing `session_limit_exceeded` error shape plus `scope: "total"`.
 
+`limits.maxRegisteredWorkspaces` is additive and reports the effective workspace registration cap (`QWEN_SERVE_MAX_WORKSPACES`, default `25`). The cap governs startup `--workspace` entries, `POST /workspaces` registration (which answers `409` with `code: "workspace_limit_reached"` when the cap is reached), and the persisted registration store. Older daemons omit the field; clients should treat absence as the historical default of `25`.
+
 `runtime.channel.live` reports the ACP bridge channel inside the daemon. It is
 not the channel-adapter worker. Daemon-managed channels use
 `runtime.channelWorker`, whose `state` is one of `disabled`, `starting`,
@@ -1023,6 +1025,7 @@ path-free `daemon_log_degraded` warning to the normal status rollup.
     "..."
   ],
   "limits": {
+    "maxRegisteredWorkspaces": 25,
     "maxPendingPromptsPerSession": 5,
     "maxSessionsPerWorkspace": 32,
     "maxTotalSessions": 64,

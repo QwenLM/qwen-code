@@ -381,6 +381,34 @@ describe('WorkspaceRegistrationStore', () => {
     await expect(store.read()).resolves.toMatchObject({ workspaces });
   });
 
+  it('honors a registration cap override (QWEN_SERVE_MAX_WORKSPACES)', async () => {
+    const home = await tempHome();
+    // Cap 3 -> at most 2 secondary registrations beside the primary.
+    const store = new WorkspaceRegistrationStore('/work/primary', home, 3);
+    await expect(store.add('/work/secondary-0')).resolves.toBe(true);
+    await expect(store.add('/work/secondary-1')).resolves.toBe(true);
+    await expect(store.add('/work/overflow')).rejects.toThrow(
+      /limit of 2 reached/,
+    );
+
+    // A snapshot written under a larger cap is rejected at load time once the
+    // daemon boots with a smaller one.
+    await fs.mkdir(path.dirname(store.filePath), { recursive: true });
+    await fs.writeFile(
+      store.filePath,
+      JSON.stringify({
+        schemaVersion: 1,
+        primaryWorkspace: '/work/primary',
+        workspaces: [
+          '/work/secondary-0',
+          '/work/secondary-1',
+          '/work/secondary-2',
+        ],
+      }),
+    );
+    await expect(store.read()).rejects.toThrow(/exceeds 2 entries/);
+  });
+
   it('rejects a symlink store', async () => {
     const home = await tempHome();
     const store = new WorkspaceRegistrationStore('/work/primary', home);
