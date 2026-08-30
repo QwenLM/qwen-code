@@ -10,6 +10,7 @@ import * as fs from 'node:fs';
 import { X509Certificate } from 'node:crypto';
 import { createServer } from 'node:http';
 import * as https from 'node:https';
+import * as net from 'node:net';
 import type { AddressInfo } from 'node:net';
 import * as tls from 'node:tls';
 import { describe, it, expect, vi, afterEach, afterAll } from 'vitest';
@@ -17,6 +18,7 @@ import express from 'express';
 import {
   createLazyBridgeProxy,
   extractContextFilename,
+  assertChannelWorkerDaemonUrlIsLocal,
   formatChannelWorkerDaemonUrl,
   describeWorkerTlsTrustGaps,
   InvalidPolicyConfigError,
@@ -32,12 +34,15 @@ import {
   waitForRuntimeStartingForShutdown,
 } from './run-qwen-serve.js';
 import { isBrowserAutomationMcpAvailable } from './cdp-mcp-command.js';
+import * as nativeDirectoryPicker from './native-directory-picker.js';
 import { loadServeFastPathEnvironment } from './fast-path-settings.js';
 import { loadEnvironment } from '../config/environment.js';
 import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
 import { isLoopbackBind } from './loopback-binds.js';
+import { isOwnInterfaceAddress } from './local-bind-addresses.js';
 import { ChannelDeliveryAuthorizationStore } from './channel-delivery-authorization.js';
 import * as acpBridge from '@qwen-code/acp-bridge/bridge';
+import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
 import {
   journalGrowthPoolMb,
   resolveDaemonMemoryBudget,
@@ -95,6 +100,7 @@ afterEach(() => {
   // try/finally cleanup would otherwise leak the figure into later
   // memory-budget tests.
   mockTotalMemBytes.value = undefined;
+  mockNetworkInterfaces.value = undefined;
 });
 
 afterAll(() => {
@@ -481,6 +487,7 @@ function makeRuntimeBridge(): HttpAcpBridge {
     getEventRing: vi.fn().mockReturnValue({ getAll: () => [] }),
     resume: vi.fn(),
     preheat: vi.fn().mockResolvedValue(undefined),
+    invokeWorkspaceCommand: vi.fn().mockResolvedValue({ configsFailed: 0 }),
     sessionCount: 0,
     pendingPermissionCount: 0,
     activePromptCount: 0,
@@ -644,16 +651,22 @@ const mockChannelWorkerEnabledState = vi.hoisted(() => ({
 const mockTotalMemBytes = vi.hoisted(() => ({
   value: undefined as number | undefined,
 }));
+const mockNetworkInterfaces = vi.hoisted(() => ({
+  value: undefined as NodeJS.Dict<os.NetworkInterfaceInfo[]> | undefined,
+}));
 
 vi.mock('node:os', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:os')>();
   // Mock both the named and the default export: consumers do
   // `import os from 'node:os'`, which a bare spread would leave unmocked.
   const totalmem = () => mockTotalMemBytes.value ?? actual.totalmem();
+  const networkInterfaces = () =>
+    mockNetworkInterfaces.value ?? actual.networkInterfaces();
   return {
     ...actual,
     totalmem,
-    default: { ...actual, totalmem },
+    networkInterfaces,
+    default: { ...actual, totalmem, networkInterfaces },
   };
 });
 
@@ -1247,15 +1260,200 @@ describe('subSessionConcurrencyCapsFromSettings', () => {
   });
 });
 
+const dialLoopback = (
+  host: string,
+  port: number,
+): Promise<{ ok: boolean; code?: string }> =>
+  new Promise((resolve) => {
+    const socket = net.connect({ host, port, autoSelectFamily: false }, () => {
+      socket.destroy();
+      resolve({ ok: true });
+    });
+    socket.on('error', (err: NodeJS.ErrnoException) => {
+      socket.destroy();
+      resolve({ ok: false, code: err.code });
+    });
+    socket.setTimeout(2000, () => {
+      socket.destroy();
+      resolve({ ok: false, code: 'ETIMEDOUT' });
+    });
+  });
+
+const listenOn = (options: net.ListenOptions): Promise<net.Server> =>
+  new Promise((resolve, reject) => {
+    const server = net.createServer((connection) => connection.end());
+    server.once('error', reject);
+    server.listen(options, () => resolve(server));
+  });
+
 describe('formatChannelWorkerDaemonUrl', () => {
-  it.each(['', '0.0.0.0', '::', '[::]'])(
-    'uses loopback when the daemon binds wildcard host %j',
+  it('uses IPv4 loopback for the IPv4 wildcard bind', () => {
+    expect(formatChannelWorkerDaemonUrl('0.0.0.0', 4170)).toBe(
+      'http://127.0.0.1:4170',
+    );
+  });
+
+  it.each(['0', '0.0'])(
+    'canonicalizes IPv4 wildcard spelling %j before choosing loopback',
     (host) => {
       expect(formatChannelWorkerDaemonUrl(host, 4170)).toBe(
         'http://127.0.0.1:4170',
       );
     },
   );
+
+  // R7-7: the IPv6 wildcard's dial-back loopback follows what the host
+  // ASSIGNS — `[::1]` when the host carries it (an IPv4-less host has no
+  // other loopback). Node keeps the bound socket dual-stack (libuv pins
+  // IPV6_V6ONLY=0), so the `net.ipv6.bindv6only` sysctl never changes this.
+  it.each(['::', '[::]'])(
+    'uses IPv6 loopback for the IPv6 wildcard host %j when the host assigns ::1',
+    (host) => {
+      expect(
+        formatChannelWorkerDaemonUrl(host, 4170, false, undefined, true),
+      ).toBe('http://[::1]:4170');
+    },
+  );
+
+  // The other half of R7-7 (#9406): a host that binds `::` while its
+  // loopback carries no `::1` (e.g. `net.ipv6.conf.lo.disable_ipv6=1`)
+  // reaches the dual-stack socket only through `127.0.0.1` — the old
+  // spelling-based `[::1]` dialled an address nothing owned there, and the
+  // first worker's `fetch failed` exited the daemon.
+  it.each(['::', '[::]'])(
+    'falls back to IPv4 loopback for the IPv6 wildcard host %j when the host carries no ::1',
+    (host) => {
+      expect(
+        formatChannelWorkerDaemonUrl(host, 4170, false, undefined, false),
+      ).toBe('http://127.0.0.1:4170');
+    },
+  );
+
+  // R10-1: `listen(port, '')` tries the IPv6 unspecified address first and
+  // falls back to binding `0.0.0.0` when IPv6 is unavailable, so an empty
+  // --hostname decides by the socket that actually bound, not by spelling —
+  // on the fallback host the old spelling-based rule handed workers `[::1]`,
+  // which nothing listened on, and the first worker's failure exited the
+  // daemon. Explicit `::`/`0.0.0.0` keep their spelling-based mapping: those
+  // binds fail loud when their family is unavailable.
+  it('uses IPv6 loopback for an empty hostname on an IPv6 socket when the host assigns ::1', () => {
+    expect(formatChannelWorkerDaemonUrl('', 4170, false, undefined, true)).toBe(
+      'http://[::1]:4170',
+    );
+    expect(formatChannelWorkerDaemonUrl('', 4170, false, 'IPv6', true)).toBe(
+      'http://[::1]:4170',
+    );
+  });
+
+  it('falls back to IPv4 loopback for an empty hostname on an IPv6 socket when the host carries no ::1', () => {
+    expect(
+      formatChannelWorkerDaemonUrl('', 4170, false, undefined, false),
+    ).toBe('http://127.0.0.1:4170');
+    expect(formatChannelWorkerDaemonUrl('', 4170, false, 'IPv6', false)).toBe(
+      'http://127.0.0.1:4170',
+    );
+  });
+
+  it('falls back to IPv4 loopback for an empty hostname on an IPv4-bound socket', () => {
+    expect(formatChannelWorkerDaemonUrl('', 4170, false, 'IPv4')).toBe(
+      'http://127.0.0.1:4170',
+    );
+    expect(formatChannelWorkerDaemonUrl('', 4170, true, 'IPv4')).toBe(
+      'https://127.0.0.1:4170',
+    );
+  });
+
+  it.each(['::0', '0::0', '[::0]', '0:0:0:0:0:0:0:0'])(
+    'canonicalizes IPv6 wildcard spelling %j before choosing loopback',
+    (host) => {
+      expect(
+        formatChannelWorkerDaemonUrl(host, 4170, false, undefined, true),
+      ).toBe('http://[::1]:4170');
+    },
+  );
+
+  // R14-2: the v4 wildcard's IPv4-mapped spelling canonicalizes to
+  // `::ffff:0:0` (WHATWG URL serializes `[::ffff:0.0.0.0]` by dropping the
+  // dotted quad), so it matches NEITHER wildcard branch above and used to
+  // fall through to the raw literal — which `assertChannelWorkerDaemonUrlIsLocal`
+  // then refused, even though Node binds it as a working wildcard. The
+  // mapping is v4 loopback, NOT `[::1]`: measured against such a bind,
+  // `dial 127.0.0.1` -> ok while `dial ::1` -> ECONNREFUSED even though
+  // the socket reports family IPv6.
+  it.each([
+    '::ffff:0.0.0.0',
+    '::ffff:0:0',
+    '[::ffff:0.0.0.0]',
+    '[::ffff:0:0]',
+    '::FFFF:0.0.0.0',
+  ])('uses IPv4 loopback for the v4-mapped wildcard spelling %j', (host) => {
+    expect(formatChannelWorkerDaemonUrl(host, 4170)).toBe(
+      'http://127.0.0.1:4170',
+    );
+    expect(formatChannelWorkerDaemonUrl(host, 4170, true)).toBe(
+      'https://127.0.0.1:4170',
+    );
+  });
+
+  // The oracle for the mappings above: a real socket per bind shape, dialled
+  // at the address the worker is actually handed. The certification reads
+  // the host's interface table, so whichever loopback it picks IS assigned
+  // and the dial must succeed on every host where the bind itself succeeds —
+  // including runners that bind `::` yet carry no `::1`, the one state where
+  // the old spelling-based mapping was wrong (#9406). There is no v6-only
+  // arm: the daemon listens via `server.listen(port, host)`, and libuv pins
+  // IPV6_V6ONLY=0 unless `ipv6Only` is requested, so the product never binds
+  // a v6-only wildcard socket (`net.ipv6.bindv6only` cannot change that).
+  it('hands workers a loopback address the bound socket really answers', async () => {
+    for (const [bind, listenOptions] of [
+      ['::', { host: '::', port: 0 }],
+      ['0.0.0.0', { host: '0.0.0.0', port: 0 }],
+      // R14-2: the v4-mapped wildcard binds a WORKING wildcard that serves
+      // v4 loopback only — measured here through the same dial the workers
+      // use; mutating the mapping to `[::1]` reddens this arm.
+      ['::ffff:0.0.0.0', { host: '::ffff:0.0.0.0', port: 0 }],
+      // R10-1: the daemon's real bind shape for an empty --hostname. The
+      // loopback family is read from the socket that actually bound, so on a
+      // host without IPv6 this same arm binds 0.0.0.0 and exercises the
+      // IPv4 fallback instead.
+      ['', { host: '', port: 0 }],
+    ] as const) {
+      let server: net.Server;
+      try {
+        server = await listenOn(listenOptions);
+      } catch {
+        // No AF_INET6 (or no AF_INET) on this runner: nothing to measure.
+        continue;
+      }
+      try {
+        const addr = server.address() as AddressInfo;
+        const certified = new URL(
+          formatChannelWorkerDaemonUrl(
+            bind,
+            addr.port,
+            false,
+            bind === '' && (addr.family === 'IPv4' || addr.family === 'IPv6')
+              ? addr.family
+              : undefined,
+          ),
+        );
+        // URL keeps IPv6 literals bracketed; net.connect wants them bare.
+        const dialHost = certified.hostname.replace(/^\[|\]$/g, '');
+        const dial = await dialLoopback(dialHost, addr.port);
+        expect({
+          bind: listenOptions,
+          certified: certified.host,
+          dial,
+        }).toEqual({
+          bind: listenOptions,
+          certified: certified.host,
+          dial: { ok: true },
+        });
+      } finally {
+        await new Promise((resolve) => server.close(resolve));
+      }
+    }
+  });
 
   it('formats concrete IPv6 hosts for URLs', () => {
     expect(formatChannelWorkerDaemonUrl('::1', 4170)).toBe('http://[::1]:4170');
@@ -1275,6 +1473,140 @@ describe('formatChannelWorkerDaemonUrl', () => {
     expect(formatChannelWorkerDaemonUrl('::1', 4170, true)).toBe(
       'https://[::1]:4170',
     );
+  });
+});
+
+describe('assertChannelWorkerDaemonUrlIsLocal', () => {
+  it('accepts loopback and wildcard-rewritten worker URLs', () => {
+    for (const host of [
+      '',
+      '0',
+      '0.0',
+      '0.0.0.0',
+      '::',
+      '::0',
+      '0::0',
+      '[::]',
+      '[::0]',
+      '0:0:0:0:0:0:0:0',
+      '127.0.0.1',
+      '::1',
+      '::ffff:0.0.0.0',
+      '::ffff:0:0',
+    ]) {
+      expect(() =>
+        assertChannelWorkerDaemonUrlIsLocal(
+          formatChannelWorkerDaemonUrl(host, 4170, true),
+          host,
+        ),
+      ).not.toThrow();
+    }
+  });
+
+  it("accepts a concrete bind on one of this host's own interfaces", () => {
+    const ownAddress = Object.values(os.networkInterfaces())
+      .flatMap((entries) => entries ?? [])
+      .find((entry) => entry.family === 'IPv4' && !entry.internal)?.address;
+    // A machine with no non-loopback IPv4 interface cannot exercise this.
+    if (!ownAddress) return;
+    expect(() =>
+      assertChannelWorkerDaemonUrlIsLocal(
+        formatChannelWorkerDaemonUrl(ownAddress, 4170, true),
+        ownAddress,
+      ),
+    ).not.toThrow();
+  });
+
+  it('refuses a bind this host cannot answer, naming the hostname', () => {
+    expect(() =>
+      assertChannelWorkerDaemonUrlIsLocal(
+        formatChannelWorkerDaemonUrl('203.0.113.7', 4170, true),
+        '203.0.113.7',
+      ),
+    ).toThrow(/Channels cannot start: --hostname "203\.0\.113\.7"/);
+  });
+
+  it('refuses a DNS-name bind — resolving it is not on the worker startup path', () => {
+    expect(() =>
+      assertChannelWorkerDaemonUrlIsLocal(
+        formatChannelWorkerDaemonUrl('daemon.internal', 4170, true),
+        'daemon.internal',
+      ),
+    ).toThrow(/does not name an address on this host/);
+  });
+
+  it('accepts all IPv4 loopback spellings the Host gate can answer', () => {
+    for (const host of ['127.0.0.2', '127.0.1.1', '127.255.255.254']) {
+      expect(() =>
+        assertChannelWorkerDaemonUrlIsLocal(
+          formatChannelWorkerDaemonUrl(host, 4170, true),
+          host,
+        ),
+      ).not.toThrow();
+    }
+  });
+
+  it('accepts an assigned wide loopback', () => {
+    mockNetworkInterfaces.value = {
+      lo: [
+        {
+          address: '127.0.0.1',
+          netmask: '255.0.0.0',
+          family: 'IPv4',
+          mac: '00:00:00:00:00:00',
+          internal: true,
+          cidr: '127.0.0.1/8',
+        },
+        {
+          address: '127.0.0.2',
+          netmask: '255.0.0.0',
+          family: 'IPv4',
+          mac: '00:00:00:00:00:00',
+          internal: true,
+          cidr: '127.0.0.2/8',
+        },
+        {
+          address: '::1',
+          netmask: 'ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff',
+          family: 'IPv6',
+          mac: '00:00:00:00:00:00',
+          internal: true,
+          cidr: '::1/128',
+          scopeid: 0,
+        },
+      ],
+    };
+    expect(isOwnInterfaceAddress('127.0.0.2')).toBe(true);
+    expect(() =>
+      assertChannelWorkerDaemonUrlIsLocal('http://127.0.0.2:8080', '127.0.0.2'),
+    ).not.toThrow();
+  });
+
+  it('accepts the canonical loopback spellings', () => {
+    for (const host of ['localhost', 'LOCALHOST', '127.0.0.1', '[::1]']) {
+      expect(() =>
+        assertChannelWorkerDaemonUrlIsLocal(
+          formatChannelWorkerDaemonUrl(host, 4170, true),
+          host,
+        ),
+      ).not.toThrow();
+    }
+  });
+
+  // A zone-scoped link-local bind (`fe80::…%eth0`) is an address this host
+  // answers on, but `formatHostForUrl` percent-encodes the zone into the
+  // worker URL and WHATWG URL rejects zone IDs outright — so the parse
+  // inside the guard used to throw a raw `ERR_INVALID_URL` instead of the
+  // named boot diagnostic. Refuse it with an actionable message: the worker
+  // pipeline cannot carry a zone.
+  it('refuses a zone-scoped bind with the named diagnostic, not a raw URL error', () => {
+    const hostname = 'fe80::1%eth0';
+    expect(() =>
+      assertChannelWorkerDaemonUrlIsLocal(
+        formatChannelWorkerDaemonUrl(hostname, 4170, true),
+        hostname,
+      ),
+    ).toThrow(/Channels cannot start: --hostname "fe80::1%eth0"/);
   });
 });
 
@@ -1990,6 +2322,73 @@ DBgH1Rq+scl7kyyxeucobVMtUWK6eJRwZ5gfsrpeMH0nqCJLj7s80WMNL9BLojPm
 rv3eIL/tayAWGZDmOpAiQdZn5pxv2jCLmv06Ae4=
 -----END CERTIFICATE-----
 `;
+// A renewed root — two self-signed certificates sharing a
+// subject AND a key, so both verify the leaf — with the SHORT-lived copy
+// first in the bundle. The greedy first-match walk picked the expired copy
+// and claimed every handshake fails CERT_HAS_EXPIRED while the merged bundle
+// authorizes through the renewed one.
+const TEST_TLS_CERT_FULLCHAIN_RENEWED_ROOT = `-----BEGIN CERTIFICATE-----
+MIIDNDCCAhygAwIBAgIUO1dPcT+RFrKO9eAvR7RprjWBRZswDQYJKoZIhvcNAQEL
+BQAwJDEiMCAGA1UEAwwZcXdlbiByZW5ld2VkIHRlc3Qgcm9vdCBDQTAgFw0yNjA4
+MTkxMjEyMjBaGA8yMTI2MDcyNjEyMTIyMFowFDESMBAGA1UEAwwJbG9jYWxob3N0
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvXioBNIbk+BxfkQYG51E
+4VpH2dEvI7CSVtDb9hCr6ejdrsOmIMuHgQoFNrj33WGVovXwqoUsy74j666mXwIU
+E4uXM2kObg5rgmdT010CtqVk10NQ2zVP8HfocwvhfsGc+pXxIG3llLsEfEE4Sz6H
+opapxI0J0KVngEiJtQ1pQ7ETmowE1ox9pHXg+uWNiWOfdSOffoEBdlbckl/LpPHq
+JMzB7bDvKKl7Oj1/0mQjO/vVkPeFsyO0wUSzbo7RrEYfCq9ehZIHHkhTCDLZyy5x
+DtPrvyq31LqQYdfFpM2r9hjIrAn4y9SjbrudLY7/mLAQ90gIO8/++CYfEUR7OOTY
+gQIDAQABo2wwajAaBgNVHREEEzARhwR/AAABgglsb2NhbGhvc3QwDAYDVR0TAQH/
+BAIwADAdBgNVHQ4EFgQUkteOCy+vH/p/7mLACkjh+sYr+YswHwYDVR0jBBgwFoAU
+dNjaHx6CZDrwtW6UMTPqfrILgpAwDQYJKoZIhvcNAQELBQADggEBAGPSIBGUmoNm
+ofVSh+2KNJhc5RzePoGUCBJa9wKa8RIpNGhIlKyD5UqvDXuQIK5GxpQ2B/B2T1zq
+oyQFT1cvAedW4FbgvdF45IUAsuQmtArTduL7vawgAOW3NAZl8Ib6D8UM/bMZuMZl
+78Nu8Amzuti1e4hIYceAFfs8HxgHPOhjA9O4TMr/A6hwHKsnR8CQTGE06lDkRa6p
+R3EjMxkYWwzZm+3jaJlpkmxc4u2ouW5Ve7BAyCRb5afl9HD7TA/gLnPk6Z+EKbS9
+avt2q89TDSohaR3fNGbSxWmyq6+gl/8c12kQZABY6FvvUAgfxMURCIoNhgTqJCNk
+SJzaW9y9p4M=
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIDOTCCAiGgAwIBAgIUFK4nnxLsa266COSbMQBio3y2to0wDQYJKoZIhvcNAQEL
+BQAwJDEiMCAGA1UEAwwZcXdlbiByZW5ld2VkIHRlc3Qgcm9vdCBDQTAeFw0yNjA4
+MTkxMjEyMjBaFw0yNjA4MjIxMjEyMjBaMCQxIjAgBgNVBAMMGXF3ZW4gcmVuZXdl
+ZCB0ZXN0IHJvb3QgQ0EwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQC1
+WejFH2aVeBrJU/U9sMpdNxYDKB267SM7NckZwvukM/yw8uNTBnFTFmK0MMb18TVA
+uxp12+gN1EYxgSHLQQbTHy6sGk8g8XOhbJmL5CM0OSSQ3o7lVI14hbMSLa4IoTpw
+snTU/xH6FbT4F7MZc3rtKLLheymaZGaNvGGwZ6hQYSdjQxge1RLtUHqwsKR9utwF
+FNxm7EmRrDRHuoxJofQGZORyUHwLZ4X0gLjO1BHNp3qcLfMXh3NM5zmgwwi0rO/u
+7M3dv5MPz+EokG1ZdMywdOjYeMZMHKO8id75mmH7sKtePbsMyKbyNK+WtYqdsCSe
+mhmwKLUwLPsXprwngzRTAgMBAAGjYzBhMB0GA1UdDgQWBBR02NofHoJkOvC1bpQx
+M+p+sguCkDAfBgNVHSMEGDAWgBR02NofHoJkOvC1bpQxM+p+sguCkDAPBgNVHRMB
+Af8EBTADAQH/MA4GA1UdDwEB/wQEAwIBBjANBgkqhkiG9w0BAQsFAAOCAQEAryag
+ROvm/WygCrsuMoeZvzGM+hIwYpq1nuOGput0zQUAqFQhyUistLCNBQ3zGxdRFEV9
+FWIjBO3XdJArzc/34OWH28OOrf5OD24aXg3aK97NHk8RWCkx9AEU6mP3IAjgGnGy
+Qnj3CXnEAXRkDG7iCgM0jrW6gjgXvt4Ytb5WqxuqkUUOjboa5Ib01mI1QUobSqA5
+q3YiuRtwWCjJN5AyTHQnczRQU9GMcCaBd6d1Hs5DHx1dqYj5Vd6SDoUJojkydPiB
+gux1cYPewfQh1p2SX6YLKRHheooVp1mgXju1x81nPl80cXsErrlFYLo7rVhjabNR
+uhzf6T5xCyhBjj2XWA==
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIDOzCCAiOgAwIBAgIURuDBy7kKe3JAEkySJTgKilHa8ecwDQYJKoZIhvcNAQEL
+BQAwJDEiMCAGA1UEAwwZcXdlbiByZW5ld2VkIHRlc3Qgcm9vdCBDQTAgFw0yNjA4
+MTkxMjEyMjBaGA8yMTI2MDcyNjEyMTIyMFowJDEiMCAGA1UEAwwZcXdlbiByZW5l
+d2VkIHRlc3Qgcm9vdCBDQTCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEB
+ALVZ6MUfZpV4GslT9T2wyl03FgMoHbrtIzs1yRnC+6Qz/LDy41MGcVMWYrQwxvXx
+NUC7GnXb6A3URjGBIctBBtMfLqwaTyDxc6FsmYvkIzQ5JJDejuVUjXiFsxItrgih
+OnCydNT/EfoVtPgXsxlzeu0osuF7KZpkZo28YbBnqFBhJ2NDGB7VEu1QerCwpH26
+3AUU3GbsSZGsNEe6jEmh9AZk5HJQfAtnhfSAuM7UEc2nepwt8xeHc0znOaDDCLSs
+7+7szd2/kw/P4SiQbVl0zLB06Nh4xkwco7yJ3vmaYfuwq149uwzIpvI0r5a1ip2w
+JJ6aGbAotTAs+xemvCeDNFMCAwEAAaNjMGEwHQYDVR0OBBYEFHTY2h8egmQ68LVu
+lDEz6n6yC4KQMB8GA1UdIwQYMBaAFHTY2h8egmQ68LVulDEz6n6yC4KQMA8GA1Ud
+EwEB/wQFMAMBAf8wDgYDVR0PAQH/BAQDAgEGMA0GCSqGSIb3DQEBCwUAA4IBAQCj
+1C2V2wPvByLc9hmmx247jZs+kKiNmVW6HIEieTbRAgEr2X+sE3DGDdvxs9N7cBKW
+hrrxW0DKfi86M3cqM3Z4+hpOyPukRpGF6MSuK+Z09gN/Mr8fHcpGqY37GdcREEbt
+eSR8whZQy7mxoNBgPgDUa5dusMsemhkvQtT0kJNBo3mrVdxMrbT/iMqPHDnfUB5P
+JuqlSTd6kmII8MLMkOPnlrBLE/IiMnpeq5bPbNqWJ3jSOWB0Y5urevXlhLvhhkZi
+mfaYUhXXxhzIHbSGiqWkLbZH0m1OB7jZXhlee02W/9i/vmdFNBIAxTAfshB0X9d+
+CLo3gjYAPFzEeGqHNP3E
+-----END CERTIFICATE-----
+`;
+
 const CROSS_ROOT_1 = `-----BEGIN CERTIFICATE-----
 MIIBkTCCATagAwIBAgIUeT/d3GHNmHzQitzyLZ3Yru0BnuIwCgYIKoZIzj0EAwIw
 DTELMAkGA1UEAwwCUjEwHhcNMjYwODIwMTQwNjQ0WhcNMzYwODE3MTQwNjQ0WjAN
@@ -2280,6 +2679,23 @@ describe.skipIf(!loaderOracleAvailable)('describeWorkerTlsTrustGaps', () => {
     return `${blocks!.at(-1)}\n`;
   };
 
+  /** The renewed-root bundle minus its long-lived twin. */
+  const leafPlusShortTwinOnlyPem = (): string => {
+    const blocks = TEST_TLS_CERT_FULLCHAIN_RENEWED_ROOT.match(
+      /-----BEGIN CERTIFICATE-----[^-]*-----END CERTIFICATE-----/g,
+    );
+    // Index 1 must hold the short-lived twin the boundary clock sits on;
+    // a reordered fixture would silently un-pin the notAfter edge below.
+    const shortTwin = new X509Certificate(blocks![1]);
+    if (
+      new Date(shortTwin.validTo).getTime() !==
+      new Date('2026-08-22T12:12:20Z').getTime()
+    ) {
+      throw new Error('renewed-root fixture order changed');
+    }
+    return `${blocks![0]}\n${blocks![1]}\n`;
+  };
+
   it('reports nothing for a self-signed cert covering the dialled host', () => {
     expect(
       describeWorkerTlsTrustGaps({
@@ -2435,6 +2851,124 @@ describe.skipIf(!loaderOracleAvailable)('describeWorkerTlsTrustGaps', () => {
     expect(gaps[0]).toContain(
       "unless the issuing CA is already in the workers' default trust store",
     );
+  });
+
+  // The false-alarm direction: the walk took whichever copy
+  // of a renewed CA came first and reported the expired one as the path the
+  // handshake relies on. OpenSSL may use either; preferring the usable one
+  // keeps the diagnostic from sending operators to renew a CA they already
+  // renewed. The clock is moved past the short-lived copy only.
+  it('prefers a usable issuer over an expired same-subject twin', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2030-01-01T00:00:00Z'));
+    try {
+      expect(
+        describeWorkerTlsTrustGaps({
+          cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_RENEWED_ROOT),
+          certPath: '/certs/fullchain.pem',
+          daemonUrl,
+        }),
+      ).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // One-clock witnesses: the walk's issuer preference and the per-member
+  // validity flags must judge the SAME instant the report samples. The
+  // straddle test hands that one sample an instant inside the short-lived
+  // twin's window and poisons any second sample with an instant past it —
+  // two clocks would anchor through the short root AND tell the operator
+  // to renew it, the false CERT_HAS_EXPIRED this PR removes. Sample order
+  // routes the clocks, not a stack-name match on the module-private walk,
+  // so a rename cannot silently no-op the guard. The boundary tests freeze
+  // the clock on each edge of that window, where the expired/not-yet-valid
+  // flags flip, so a one-sided edit to either predicate fails instead of
+  // passing silently years away from any boundary.
+  it('judges the walk and the report at one sampled instant', () => {
+    const insideWindow = new Date('2026-08-20T00:00:00Z').getTime();
+    const pastWindow = new Date('2026-08-25T00:00:00Z').getTime();
+    // Production passes the serving file as certSourcePath; mirror that.
+    // The temp-file fallback spends a Date.now sample of its own
+    // (graceful-fs retry timing), which would shift the poison below.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-one-clock-'));
+    const certSourcePath = path.join(dir, 'fullchain.pem');
+    fs.writeFileSync(certSourcePath, TEST_TLS_CERT_FULLCHAIN_RENEWED_ROOT, {
+      mode: 0o600,
+    });
+    let samples = 0;
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => {
+      samples += 1;
+      return samples === 1 ? insideWindow : pastWindow;
+    });
+    try {
+      expect(
+        describeWorkerTlsTrustGaps({
+          cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_RENEWED_ROOT),
+          certPath: '/certs/fullchain.pem',
+          certSourcePath,
+          daemonUrl,
+        }),
+      ).toEqual([]);
+      // A second sample IS the regression: the walk and the report judging
+      // different instants. Fail on it even when the gap happens not to.
+      expect(samples).toBe(1);
+    } finally {
+      clock.mockRestore();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('agrees on the exact instant the short-lived twin expires', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-22T12:12:20Z'));
+    try {
+      expect(
+        describeWorkerTlsTrustGaps({
+          cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_RENEWED_ROOT),
+          certPath: '/certs/fullchain.pem',
+          daemonUrl,
+        }),
+      ).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // The notAfter edge is pinned only when the expiring twin is the walk's
+  // ONLY issuer: with the long-lived twin in the bundle, a strict `>` in
+  // certValidAt re-anchors through it and still reports no gaps one
+  // instant early — the same false CERT_HAS_EXPIRED class this PR removes.
+  it('still anchors at the exact notAfter when the short twin is the only issuer', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-22T12:12:20Z'));
+    try {
+      expect(
+        describeWorkerTlsTrustGaps({
+          cert: Buffer.from(leafPlusShortTwinOnlyPem()),
+          certPath: '/certs/fullchain.pem',
+          daemonUrl,
+        }),
+      ).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('agrees on the exact instant the short-lived twin becomes valid', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-19T12:12:20Z'));
+    try {
+      expect(
+        describeWorkerTlsTrustGaps({
+          cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_RENEWED_ROOT),
+          certPath: '/certs/fullchain.pem',
+          daemonUrl,
+        }),
+      ).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('names an expired chain member the signature-only walk accepts', () => {
@@ -6487,7 +7021,7 @@ describe('runQwenServe runtime startup failures', () => {
   it('does not advertise browser automation MCP without an active CDP tunnel', async () => {
     const features = await readBrowserMcpFeatureFlagsForEnv(
       undefined,
-      'https://example.com',
+      'http://localhost:5173',
       '/opt/qwen-cdp-mcp-adapter',
     );
 
@@ -6796,6 +7330,7 @@ describe('runQwenServe runtime startup failures', () => {
       sensitiveSpanAttributeMaxLength: 1024 * 1024,
     });
     let runtimeMounted = false;
+    let reloadedRuntimeValue = 'reloaded';
     vi.spyOn(settingsRuntime, 'loadSettings').mockImplementation(
       () =>
         ({
@@ -6806,7 +7341,9 @@ describe('runQwenServe runtime startup failures', () => {
                 : '.runtime-boot',
             },
             env: {
-              QWEN_TEST_RUNTIME_VALUE: runtimeMounted ? 'reloaded' : 'boot',
+              QWEN_TEST_RUNTIME_VALUE: runtimeMounted
+                ? reloadedRuntimeValue
+                : 'boot',
             },
           },
         }) as unknown as ReturnType<typeof settingsRuntime.loadSettings>,
@@ -6832,6 +7369,10 @@ describe('runQwenServe runtime startup failures', () => {
             route: string;
             workspaceCwd: string;
           }): Promise<unknown>;
+          reloadModelProviders(ctx: {
+            route: string;
+            workspaceCwd: string;
+          }): Promise<unknown>;
         }
       | undefined;
     let primaryRuntimeEnv:
@@ -6852,6 +7393,8 @@ describe('runQwenServe runtime startup failures', () => {
       },
     );
 
+    const bridge = makeRuntimeBridge();
+
     const handle = await runQwenServe(
       {
         port: 0,
@@ -6862,7 +7405,7 @@ describe('runQwenServe runtime startup failures', () => {
         serveWebShell: false,
       },
       {
-        bridge: makeRuntimeBridge(),
+        bridge,
         bootSettings: {},
         daemonLogBaseDir: path.join(tmpDir, 'debug'),
         resolveOnListen: true,
@@ -6894,6 +7437,50 @@ describe('runQwenServe runtime startup failures', () => {
       expect(capturedRuntimeEnv['QWEN_TEST_RELOAD_LEAK']).toBeUndefined();
       expect(primaryRuntime?.sessionRuntimeBaseDir).toBe(pinnedRuntimeBaseDir);
       expect(capturedRuntimeEnv['QWEN_RUNTIME_DIR']).toBe(pinnedRuntimeBaseDir);
+
+      reloadedRuntimeValue = 'hot-synced';
+      await expect(
+        workspace!.reloadModelProviders({
+          route: 'POST /workspace/auth/provider',
+          workspaceCwd: tmpDir,
+        }),
+      ).resolves.toEqual({ status: 'applied' });
+      expect(capturedRuntimeEnv['QWEN_TEST_RUNTIME_VALUE']).toBe('hot-synced');
+      expect(bridge.invokeWorkspaceCommand).toHaveBeenCalledWith(
+        'qwen/control/workspace/model-providers/reload',
+        { cwd: tmpDir },
+        { timeoutMs: 30_000 },
+      );
+      expect(primaryRuntime?.sessionRuntimeBaseDir).toBe(pinnedRuntimeBaseDir);
+      expect(capturedRuntimeEnv['QWEN_RUNTIME_DIR']).toBe(pinnedRuntimeBaseDir);
+
+      vi.mocked(bridge.invokeWorkspaceCommand).mockRejectedValueOnce(
+        new SessionNotFoundError(tmpDir),
+      );
+      await expect(
+        workspace!.reloadModelProviders({
+          route: 'POST /workspace/auth/provider',
+          workspaceCwd: tmpDir,
+        }),
+      ).resolves.toEqual({ status: 'deferred' });
+      vi.mocked(bridge.invokeWorkspaceCommand).mockResolvedValueOnce({
+        configsFailed: 1,
+      });
+      await expect(
+        workspace!.reloadModelProviders({
+          route: 'POST /workspace/auth/provider',
+          workspaceCwd: tmpDir,
+        }),
+      ).resolves.toEqual({ status: 'failed' });
+      vi.mocked(bridge.invokeWorkspaceCommand).mockRejectedValueOnce(
+        new Error('child reload failed'),
+      );
+      await expect(
+        workspace!.reloadModelProviders({
+          route: 'POST /workspace/auth/provider',
+          workspaceCwd: tmpDir,
+        }),
+      ).resolves.toEqual({ status: 'failed' });
     } finally {
       if (originalBase === undefined) {
         delete process.env['QWEN_TEST_BOOT_BASE'];
@@ -6938,16 +7525,21 @@ describe('runQwenServe runtime startup failures', () => {
           },
         }) as unknown as ReturnType<typeof settingsRuntime.loadSettings>,
     );
-    vi.spyOn(settingsRuntime, 'reloadEnvironment').mockReturnValue({
-      updatedKeys: [],
-      removedKeys: [],
-    });
+    let failReloadRead = false;
+    const reloadEnvironment = vi
+      .spyOn(settingsRuntime, 'reloadEnvironment')
+      .mockImplementation(() => ({
+        updatedKeys: [],
+        removedKeys: [],
+        ...(failReloadRead ? { envFileReadFailed: true } : {}),
+      }));
     vi.spyOn(trustedFoldersRuntime, 'getWorkspaceTrustStatus').mockReturnValue({
       effective: { state: 'trusted' },
     } as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>);
     const buildRuntimeEnvironmentActual =
       environmentRuntime.buildRuntimeEnvironment;
     let failReloadBuild = false;
+    let failEnvFileRead = false;
     vi.spyOn(environmentRuntime, 'buildRuntimeEnvironment').mockImplementation(
       (
         ...args: Parameters<typeof environmentRuntime.buildRuntimeEnvironment>
@@ -6955,12 +7547,25 @@ describe('runQwenServe runtime startup failures', () => {
         if (failReloadBuild) {
           throw new Error('runtime env rebuild failed');
         }
-        return buildRuntimeEnvironmentActual(...args);
+        const result = buildRuntimeEnvironmentActual(...args);
+        return failEnvFileRead
+          ? {
+              ...result,
+              envFileReadFailed: true,
+              envFileReadFailures: [
+                { path: path.join(tmpDir, '.env'), error: 'read failed' },
+              ],
+            }
+          : result;
       },
     );
     let workspace:
       | {
           reload(ctx: {
+            route: string;
+            workspaceCwd: string;
+          }): Promise<unknown>;
+          reloadModelProviders(ctx: {
             route: string;
             workspaceCwd: string;
           }): Promise<unknown>;
@@ -6982,6 +7587,7 @@ describe('runQwenServe runtime startup failures', () => {
     );
 
     const logBaseDir = path.join(tmpDir, 'debug');
+    const bridge = makeRuntimeBridge();
     const handle = await runQwenServe(
       {
         port: 0,
@@ -6992,7 +7598,7 @@ describe('runQwenServe runtime startup failures', () => {
         serveWebShell: false,
       },
       {
-        bridge: makeRuntimeBridge(),
+        bridge,
         bootSettings: {},
         daemonLogBaseDir: logBaseDir,
         resolveOnListen: true,
@@ -7008,10 +7614,20 @@ describe('runQwenServe runtime startup failures', () => {
       expect(capturedRuntimeEnv['QWEN_TEST_RUNTIME_VALUE']).toBe('boot');
 
       failReloadBuild = true;
-      await workspace!.reload({
-        route: 'POST /workspace/reload',
-        workspaceCwd: tmpDir,
-      });
+      await expect(
+        workspace!.reloadModelProviders({
+          route: 'POST /workspace/auth/provider',
+          workspaceCwd: tmpDir,
+        }),
+      ).resolves.toEqual({ status: 'failed' });
+      expect(reloadEnvironment).not.toHaveBeenCalled();
+      await expect(
+        workspace!.reload({
+          route: 'POST /workspace/reload',
+          workspaceCwd: tmpDir,
+        }),
+      ).resolves.toMatchObject({ runtimeEnvironmentApplied: false });
+      expect(reloadEnvironment).not.toHaveBeenCalled();
 
       expect(primaryRuntimeEnv!.effectiveEnv).toBe(capturedRuntimeEnv);
       expect(capturedRuntimeEnv['QWEN_TEST_RUNTIME_VALUE']).toBe('boot');
@@ -7020,10 +7636,42 @@ describe('runQwenServe runtime startup failures', () => {
       );
 
       failReloadBuild = false;
-      await workspace!.reload({
-        route: 'POST /workspace/reload',
-        workspaceCwd: tmpDir,
-      });
+      await expect(
+        workspace!.reload({
+          route: 'POST /workspace/reload',
+          workspaceCwd: tmpDir,
+        }),
+      ).resolves.toMatchObject({ runtimeEnvironmentApplied: true });
+      expect(reloadEnvironment).toHaveBeenCalledOnce();
+      expect(primaryRuntimeEnv!.effectiveEnv).toBe(capturedRuntimeEnv);
+      expect(capturedRuntimeEnv['QWEN_TEST_RUNTIME_VALUE']).toBe('reloaded');
+      expect(primaryRuntimeEnv!.fallbackReason).toBeUndefined();
+
+      failReloadRead = true;
+      await expect(
+        workspace!.reloadModelProviders({
+          route: 'POST /workspace/auth/provider',
+          workspaceCwd: tmpDir,
+        }),
+      ).resolves.toEqual({ status: 'failed' });
+      expect(reloadEnvironment).toHaveBeenCalledTimes(2);
+      expect(reloadEnvironment).toHaveBeenLastCalledWith(
+        expect.any(Object),
+        tmpDir,
+        true,
+        { failClosedOnEnvFileReadError: true },
+      );
+      expect(capturedRuntimeEnv['QWEN_TEST_RUNTIME_VALUE']).toBe('reloaded');
+
+      failReloadRead = false;
+      failEnvFileRead = true;
+      await expect(
+        workspace!.reloadModelProviders({
+          route: 'POST /workspace/auth/provider',
+          workspaceCwd: tmpDir,
+        }),
+      ).resolves.toEqual({ status: 'failed' });
+      expect(reloadEnvironment).toHaveBeenCalledTimes(2);
       expect(primaryRuntimeEnv!.effectiveEnv).toBe(capturedRuntimeEnv);
       expect(capturedRuntimeEnv['QWEN_TEST_RUNTIME_VALUE']).toBe('reloaded');
       expect(primaryRuntimeEnv!.fallbackReason).toBeUndefined();
@@ -7033,7 +7681,7 @@ describe('runQwenServe runtime startup failures', () => {
       const logPath = path.join(logBaseDir, 'daemon', 'daemon.log');
       const log = fs.readFileSync(logPath, 'utf8');
       expect(log).toContain(
-        'failed to rebuild runtime env snapshot after daemon env reload; preserving previous runtime env',
+        'failed to rebuild runtime env snapshot before daemon env reload; preserving previous runtime env',
       );
     } finally {
       if (!closed) {
@@ -7057,6 +7705,8 @@ describe('runQwenServe runtime startup failures', () => {
       sensitiveSpanAttributeMaxLength: 1024 * 1024,
     });
     let runtimeMounted = false;
+    let providerRuntimeMutation = false;
+    let failEnvFileRead = false;
     vi.spyOn(settingsRuntime, 'loadSettings').mockImplementation(
       (...args: Parameters<typeof settingsRuntime.loadSettings>) => {
         const workspace = args[0];
@@ -7074,20 +7724,44 @@ describe('runQwenServe runtime startup failures', () => {
               [isSecondary
                 ? 'QWEN_TEST_SECONDARY_ENV'
                 : 'QWEN_TEST_PRIMARY_ENV']: runtimeMounted
-                ? 'reloaded'
+                ? failEnvFileRead
+                  ? 'partial'
+                  : providerRuntimeMutation
+                    ? 'provider-reloaded'
+                    : 'reloaded'
                 : 'boot',
             },
           },
         } as unknown as ReturnType<typeof settingsRuntime.loadSettings>;
       },
     );
-    vi.spyOn(settingsRuntime, 'reloadEnvironment').mockReturnValue({
-      updatedKeys: ['QWEN_TEST_SECONDARY_ENV'],
-      removedKeys: [],
-    });
+    const reloadEnvironment = vi
+      .spyOn(settingsRuntime, 'reloadEnvironment')
+      .mockReturnValue({
+        updatedKeys: ['QWEN_TEST_SECONDARY_ENV'],
+        removedKeys: [],
+      });
     vi.spyOn(trustedFoldersRuntime, 'getWorkspaceTrustStatus').mockReturnValue({
       effective: { state: 'trusted' },
     } as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>);
+    const buildRuntimeEnvironmentActual =
+      environmentRuntime.buildRuntimeEnvironment;
+    vi.spyOn(environmentRuntime, 'buildRuntimeEnvironment').mockImplementation(
+      (
+        ...args: Parameters<typeof environmentRuntime.buildRuntimeEnvironment>
+      ) => {
+        const result = buildRuntimeEnvironmentActual(...args);
+        return failEnvFileRead
+          ? {
+              ...result,
+              envFileReadFailed: true,
+              envFileReadFailures: [
+                { path: path.join(secondary, '.env'), error: 'read failed' },
+              ],
+            }
+          : result;
+      },
+    );
     vi.spyOn(acpBridge, 'createAcpSessionBridge')
       .mockReturnValueOnce(
         makeRuntimeBridge() as ReturnType<
@@ -7142,10 +7816,13 @@ describe('runQwenServe runtime startup failures', () => {
       );
       expect(env.effectiveEnv?.['QWEN_RUNTIME_DIR']).toBe(pinnedRuntimeBaseDir);
 
-      await secondaryRuntime!.workspaceService.reload({
-        route: 'POST /workspace/reload',
-        workspaceCwd: secondary,
-      });
+      await expect(
+        secondaryRuntime!.workspaceService.reload({
+          route: 'POST /workspace/reload',
+          workspaceCwd: secondary,
+        }),
+      ).resolves.toMatchObject({ runtimeEnvironmentApplied: true });
+      expect(reloadEnvironment).toHaveBeenCalledOnce();
 
       expect(env.overlayKeys).toBe(overlayKeys);
       expect(env.envFilePaths).toBe(envFilePaths);
@@ -7155,6 +7832,32 @@ describe('runQwenServe runtime startup failures', () => {
         pinnedRuntimeBaseDir,
       );
       expect(env.effectiveEnv?.['QWEN_RUNTIME_DIR']).toBe(pinnedRuntimeBaseDir);
+
+      providerRuntimeMutation = true;
+      await expect(
+        secondaryRuntime!.workspaceService.reloadModelProviders({
+          route: 'POST /workspace/auth/provider',
+          workspaceCwd: secondary,
+        }),
+      ).resolves.toEqual({ status: 'applied' });
+      expect(reloadEnvironment).toHaveBeenCalledOnce();
+      expect(env.effectiveEnv?.['QWEN_TEST_SECONDARY_ENV']).toBe(
+        'provider-reloaded',
+      );
+
+      failEnvFileRead = true;
+      await expect(
+        secondaryRuntime!.workspaceService.reload({
+          route: 'POST /workspace/reload',
+          workspaceCwd: secondary,
+        }),
+      ).resolves.toMatchObject({ runtimeEnvironmentApplied: false });
+      expect(reloadEnvironment).toHaveBeenCalledOnce();
+      expect(env.effectiveEnv?.['QWEN_TEST_SECONDARY_ENV']).toBe(
+        'provider-reloaded',
+      );
+      expect(env.envFileReadFailed).toBe(false);
+      expect(env.envFileReadFailures).toEqual([]);
     } finally {
       await handle.close();
       if (originalRuntimeDir === undefined) {
@@ -7795,7 +8498,7 @@ describe('runQwenServe runtime startup failures', () => {
   it('keeps browser MCP features disabled for non-extension origins when the env flag is unset', async () => {
     const features = await readBrowserMcpFeatureFlagsForEnv(
       undefined,
-      'https://example.com',
+      'http://localhost:5173',
     );
 
     expect(features).not.toContain('client_mcp_over_ws');
@@ -10268,6 +10971,61 @@ describe('runQwenServe runtime startup failures', () => {
     }
   });
 
+  it.each([true, false])(
+    'mirrors the native directory picker probe on the bootstrap envelopes (available: %s)',
+    async (available) => {
+      tmpDir = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qws-bootstrap-picker-')),
+      );
+      // Keep the runtime from mounting so the bootstrap `/capabilities` and
+      // `/daemon/status` envelopes stay the ones being served.
+      vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(() => {
+        throw new Error('runtime boom');
+      });
+      const probe = vi
+        .spyOn(nativeDirectoryPicker, 'isNativeDirectoryPickerAvailable')
+        .mockReturnValue(available);
+      const handle = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          maxSessions: 1,
+          serveWebShell: false,
+        },
+        { resolveOnListen: true },
+      );
+      try {
+        await expect(handle.runtimeReady).rejects.toThrow('runtime boom');
+        const probeCallsAfterBoot = probe.mock.calls.length;
+        const capabilities = (await (
+          await fetch(`${handle.url}/capabilities`)
+        ).json()) as { features: string[] };
+        const status = (await (
+          await fetch(`${handle.url}/daemon/status`)
+        ).json()) as { capabilities: { features: string[] } };
+        if (available) {
+          expect(capabilities.features).toContain('native_directory_picker');
+          expect(status.capabilities.features).toContain(
+            'native_directory_picker',
+          );
+        } else {
+          expect(capabilities.features).not.toContain(
+            'native_directory_picker',
+          );
+          expect(status.capabilities.features).not.toContain(
+            'native_directory_picker',
+          );
+        }
+        // Probed once while the bootstrap app was built, not per request.
+        expect(probe.mock.calls.length).toBe(probeCallsAfterBoot);
+      } finally {
+        await handle.close();
+      }
+    },
+  );
+
   it('shuts down a bridge when runtime mounting fails after bridge creation', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-partial-fail-')),
@@ -11265,6 +12023,195 @@ describe('runQwenServe channel worker supervisor', () => {
       const opts = factory.mock.calls[0]![0];
       expect(opts.tlsCaCertPath).toBe(certPath);
       expect(opts.daemonUrl).toMatch(/^https:\/\//);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('certifies the channel worker daemon URL at boot before workers start', async () => {
+    // Deleting the assertChannelWorkerDaemonUrlIsLocal call site in
+    // ensureChannelWorkerManager leaves this uncalled (mutation M3 in the
+    // #9406 review): the direct-call suite above never observes the boot
+    // path, so pin the boot wiring itself.
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-url-certify-')),
+    );
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+    });
+    const factory = makeReadyWorkerFactory(worker);
+    const channelWorkerUrlCertifier = vi.fn();
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        bridge: makeFakeBridge(),
+        channelWorkerSupervisorFactory: factory,
+        channelServicePidfile: makePidfileDeps(),
+        channelWorkerUrlCertifier,
+      },
+    );
+
+    try {
+      await handle.runtimeReady;
+      expect(channelWorkerUrlCertifier).toHaveBeenCalledTimes(1);
+      const [daemonUrl, hostname] = channelWorkerUrlCertifier.mock.calls[0]!;
+      expect(hostname).toBe('127.0.0.1');
+      expect(daemonUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+      expect(factory).toHaveBeenCalled();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('preserves localhost in the TLS channel worker daemon URL after resolving the bind', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-localhost-tls-')),
+    );
+    const certPath = path.join(tmpDir, 'cert.pem');
+    const keyPath = path.join(tmpDir, 'key.pem');
+    fs.writeFileSync(certPath, TEST_TLS_CERT);
+    fs.writeFileSync(keyPath, TEST_TLS_KEY);
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+    });
+    const factory = makeReadyWorkerFactory(worker);
+    const channelWorkerUrlCertifier = vi.fn();
+    const bindHostnameLookup = vi.fn(async () => ({
+      address: '127.0.0.1',
+      family: 4,
+    }));
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: 'localhost',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        tlsCert: certPath,
+        tlsKey: keyPath,
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        bridge: makeFakeBridge(),
+        bindHostnameLookup,
+        channelWorkerSupervisorFactory: factory,
+        channelServicePidfile: makePidfileDeps(),
+        channelWorkerUrlCertifier,
+      },
+    );
+
+    try {
+      await handle.runtimeReady;
+      expect(bindHostnameLookup).toHaveBeenCalledWith('localhost');
+      expect(channelWorkerUrlCertifier).toHaveBeenCalledTimes(1);
+      const [daemonUrl, hostname] = channelWorkerUrlCertifier.mock.calls[0]!;
+      expect(hostname).toBe('localhost');
+      expect(daemonUrl).toMatch(/^https:\/\/localhost:\d+$/);
+      expect(factory.mock.calls[0]![0].daemonUrl).toBe(daemonUrl);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('keeps the resolved address in a non-TLS channel worker daemon URL', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-localhost-http-')),
+    );
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+    });
+    const factory = makeReadyWorkerFactory(worker);
+    const channelWorkerUrlCertifier = vi.fn();
+    const bindHostnameLookup = vi.fn(async () => ({
+      address: '127.0.0.1',
+      family: 4,
+    }));
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: 'localhost',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        bridge: makeFakeBridge(),
+        bindHostnameLookup,
+        channelWorkerSupervisorFactory: factory,
+        channelServicePidfile: makePidfileDeps(),
+        channelWorkerUrlCertifier,
+      },
+    );
+
+    try {
+      await handle.runtimeReady;
+      expect(bindHostnameLookup).toHaveBeenCalledWith('localhost');
+      expect(channelWorkerUrlCertifier).toHaveBeenCalledTimes(1);
+      const [daemonUrl, hostname] = channelWorkerUrlCertifier.mock.calls[0]!;
+      expect(hostname).toBe('127.0.0.1');
+      expect(daemonUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+      expect(factory.mock.calls[0]![0].daemonUrl).toBe(daemonUrl);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('fails the channel boot when the worker URL certification refuses the bind', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-url-refuse-')),
+    );
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+    });
+    const factory = makeReadyWorkerFactory(worker);
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        bridge: makeFakeBridge(),
+        channelWorkerSupervisorFactory: factory,
+        channelServicePidfile: makePidfileDeps(),
+        resolveOnListen: true,
+        channelWorkerUrlCertifier: () => {
+          throw new Error(
+            'Channels cannot start: --hostname "127.0.0.1" is not a ' +
+              'loopback bind',
+          );
+        },
+      },
+    );
+
+    try {
+      await expect(handle.runtimeReady).rejects.toThrow(
+        /Channels cannot start/,
+      );
+      expect(factory).not.toHaveBeenCalled();
     } finally {
       await handle.close();
     }
