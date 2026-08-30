@@ -260,6 +260,7 @@ export async function activate(context: vscode.ExtensionContext) {
           if (provider?.hasPendingPermission()) {
             provider.respondToPendingPermission('allow', {
               fromDiffEditor: !!docUri && docUri.scheme === DIFF_SCHEME,
+              uri: docUri,
             });
           }
         }
@@ -280,6 +281,7 @@ export async function activate(context: vscode.ExtensionContext) {
           if (provider?.hasPendingPermission()) {
             provider.respondToPendingPermission('cancel', {
               fromDiffEditor: !!docUri && docUri.scheme === DIFF_SCHEME,
+              uri: docUri,
             });
           }
         }

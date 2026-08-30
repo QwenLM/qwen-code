@@ -30,6 +30,7 @@ import { createImagePathResolver } from '../utils/imageHandler.js';
 import { isDiscontinuedModel } from '../utils/discontinuedModel.js';
 import { type ApprovalModeValue } from '../../types/approvalModeValueTypes.js';
 import { isAuthenticationRequiredError } from '../../utils/authErrors.js';
+import { shouldResolveAgainstWorkspace } from '../../utils/file-path.js';
 import { getErrorMessage } from '../../utils/errorMessage.js';
 import {
   applyProviderInstallPlanToFile,
@@ -156,6 +157,9 @@ export class WebViewProvider {
   private pendingPermissionRequest: RequestPermissionRequest | null = null;
   private pendingPermissionResolve: ((optionId: string) => void) | null = null;
   private webShellPermissionPending = false;
+  // Resolved original paths of the permission diffs the web shell is waiting
+  // on; diff-editor votes only count when they target one of these.
+  private webShellPermissionPendingPaths = new Set<string>();
   // Track a pending ask user question request and its resolver
   private pendingAskUserQuestionRequest: AskUserQuestionRequest | null = null;
   private pendingAskUserQuestionResolve:
@@ -207,6 +211,7 @@ export class WebViewProvider {
     this.conversationStore = new ConversationStore(context);
     this.panelManager = new PanelManager(extensionUri, () => {
       this.webShellPermissionPending = false;
+      this.webShellPermissionPendingPaths.clear();
       // Panel dispose callback — unblock any pending ACP Promises
       if (this.pendingPermissionResolve) {
         this.pendingPermissionResolve('cancel');
@@ -1935,12 +1940,24 @@ export class WebViewProvider {
     webview: vscode.Webview,
   ): Promise<boolean> {
     if (message.type === 'webShellPermissionState') {
-      this.webShellPermissionPending =
-        (message.data as { pending?: unknown } | undefined)?.pending === true;
+      const stateData = message.data as
+        | { pending?: unknown; paths?: unknown }
+        | undefined;
+      this.webShellPermissionPending = stateData?.pending === true;
+      const rawPaths =
+        this.webShellPermissionPending && Array.isArray(stateData?.paths)
+          ? (stateData.paths as unknown[])
+          : [];
+      this.webShellPermissionPendingPaths = new Set(
+        rawPaths
+          .filter((entry): entry is string => typeof entry === 'string')
+          .map((entry) => this.resolveWebShellPermissionPath(entry)),
+      );
       return true;
     }
     if (message.type === 'webShellSessionChanged') {
       this.webShellPermissionPending = false;
+      this.webShellPermissionPendingPaths.clear();
       const data = message.data as
         | { sessionId?: unknown; workspaceCwd?: unknown }
         | undefined;
@@ -1956,6 +1973,7 @@ export class WebViewProvider {
     }
     if (message.type === 'webShellReady') {
       this.webShellPermissionPending = false;
+      this.webShellPermissionPendingPaths.clear();
       const workspaceCwd =
         (vscode.window.activeTextEditor
           ? vscode.workspace.getWorkspaceFolder(
@@ -2391,19 +2409,42 @@ export class WebViewProvider {
    * Simulate selecting a permission option while a request drawer is open.
    * The choice can be a concrete optionId or a shorthand intent.
    */
+  /**
+   * Resolve a path reported by the web shell the same way the showDiff
+   * command resolves it before handing it to the diff manager, so the stored
+   * value matches the qwen-diff document's fsPath.
+   */
+  private resolveWebShellPermissionPath(filePath: string): string {
+    let resolved = filePath;
+    if (shouldResolveAgainstWorkspace(filePath)) {
+      const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+      if (workspaceFolder) {
+        resolved = vscode.Uri.joinPath(workspaceFolder.uri, filePath).fsPath;
+      }
+    }
+    return path.normalize(resolved);
+  }
+
   respondToPendingPermission(
     choice: { optionId: string } | 'accept' | 'allow' | 'reject' | 'cancel',
-    context?: { fromDiffEditor?: boolean },
+    context?: { fromDiffEditor?: boolean; uri?: vscode.Uri },
   ): void {
     // Web-shell approvals may only be voted from the permission diff itself.
     // `qwen.diff.isVisible` is also true on the user's original file while a
-    // diff is open, so without this guard Ctrl+S (or the check/cross title
-    // buttons) on that file would silently approve/reject an edit the user
-    // may never have looked at instead of saving it.
+    // diff is open, and other qwen-diff editors (stacked approvals, diffs
+    // left over from other sessions) may be open at the same time, so the
+    // vote only counts when the triggering document is one of the diffs the
+    // web shell is actually waiting on. Without this guard Ctrl+S (or the
+    // check/cross title buttons) anywhere else would silently approve/reject
+    // an edit the user may never have looked at.
     if (
       this.webShellPermissionPending &&
       typeof choice === 'string' &&
-      context?.fromDiffEditor
+      context?.fromDiffEditor &&
+      context.uri !== undefined &&
+      this.webShellPermissionPendingPaths.has(
+        path.normalize(context.uri.fsPath),
+      )
     ) {
       const decision =
         choice === 'accept' || choice === 'allow'

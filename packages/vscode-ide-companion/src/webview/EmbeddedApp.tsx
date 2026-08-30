@@ -341,6 +341,9 @@ export function EmbeddedApp() {
   const transcriptBlocksRef = useRef<readonly DaemonTranscriptBlock[]>([]);
   const openPermissionDiffsRef = useRef(new Map<string, string>());
   const webShellPermissionPendingRef = useRef(false);
+  // Sorted join of the permission-diff paths last reported to the host, so
+  // the host keeps its vote gate in sync even while pending stays true.
+  const webShellPermissionPathsKeyRef = useRef('');
   const focusedPermissionRequestIdRef = useRef<string | undefined>(undefined);
   const contextMenuRowKeyRef = useRef<string | null>(null);
   const previousActiveFilePathRef = useRef<string | undefined>(undefined);
@@ -497,11 +500,15 @@ export function EmbeddedApp() {
       vscode.postMessage({ type: 'closeDiff', data: { path } });
     }
     openPermissionDiffsRef.current.clear();
-    if (webShellPermissionPendingRef.current) {
+    if (
+      webShellPermissionPendingRef.current ||
+      webShellPermissionPathsKeyRef.current !== ''
+    ) {
       webShellPermissionPendingRef.current = false;
+      webShellPermissionPathsKeyRef.current = '';
       vscode.postMessage({
         type: 'webShellPermissionState',
-        data: { pending: false },
+        data: { pending: false, paths: [] },
       });
     }
   }, [vscode]);
@@ -533,11 +540,25 @@ export function EmbeddedApp() {
         vscode.postMessage({ type: 'closeDiff', data: { path } });
       }
       const hasPendingDiffPermission = pendingIds.size > 0;
-      if (webShellPermissionPendingRef.current !== hasPendingDiffPermission) {
+      // Paths the web shell is still waiting on; the host only accepts votes
+      // coming from these diffs, so keep the list in sync with the pending
+      // set even while the pending flag itself does not change.
+      const pendingPaths: string[] = [];
+      for (const requestId of pendingIds) {
+        const pendingPath = openPermissionDiffsRef.current.get(requestId);
+        if (pendingPath) pendingPaths.push(pendingPath);
+      }
+      pendingPaths.sort();
+      const pendingPathsKey = pendingPaths.join('\n');
+      if (
+        webShellPermissionPendingRef.current !== hasPendingDiffPermission ||
+        webShellPermissionPathsKeyRef.current !== pendingPathsKey
+      ) {
         webShellPermissionPendingRef.current = hasPendingDiffPermission;
+        webShellPermissionPathsKeyRef.current = pendingPathsKey;
         vscode.postMessage({
           type: 'webShellPermissionState',
-          data: { pending: hasPendingDiffPermission },
+          data: { pending: hasPendingDiffPermission, paths: pendingPaths },
         });
       }
       if (

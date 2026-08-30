@@ -2423,15 +2423,23 @@ describe('WebViewProvider web-shell permission bridge', () => {
     vi.restoreAllMocks();
   });
 
-  async function setupPendingWebShellPermission() {
+  const PENDING_DIFF_PATH = '/workspace/src/app.ts';
+
+  async function setupPendingWebShellPermission(
+    paths: readonly string[] = [PENDING_DIFF_PATH],
+  ) {
     const setup = await setupAttachedProvider({
       captureMessageHandler: true,
     });
     await setup.messageHandler?.({
       type: 'webShellPermissionState',
-      data: { pending: true },
+      data: { pending: true, paths: [...paths] },
     });
     return setup;
+  }
+
+  function diffUri(fsPath: string): never {
+    return { scheme: 'qwen-diff', fsPath } as never;
   }
 
   function decisionCalls(postMessage: ReturnType<typeof vi.fn>) {
@@ -2441,10 +2449,13 @@ describe('WebViewProvider web-shell permission bridge', () => {
     );
   }
 
-  it('routes accept to the webview when triggered from a qwen diff editor', async () => {
+  it('routes accept to the webview when triggered from the pending permission diff', async () => {
     const { postMessage, provider } = await setupPendingWebShellPermission();
 
-    provider.respondToPendingPermission('allow', { fromDiffEditor: true });
+    provider.respondToPendingPermission('allow', {
+      fromDiffEditor: true,
+      uri: diffUri(PENDING_DIFF_PATH),
+    });
 
     expect(postMessage).toHaveBeenCalledWith({
       type: 'webShellPermissionDecision',
@@ -2455,11 +2466,53 @@ describe('WebViewProvider web-shell permission bridge', () => {
   it('routes cancel as a reject decision', async () => {
     const { postMessage, provider } = await setupPendingWebShellPermission();
 
-    provider.respondToPendingPermission('cancel', { fromDiffEditor: true });
+    provider.respondToPendingPermission('cancel', {
+      fromDiffEditor: true,
+      uri: diffUri(PENDING_DIFF_PATH),
+    });
 
     expect(postMessage).toHaveBeenCalledWith({
       type: 'webShellPermissionDecision',
       data: { decision: 'reject' },
+    });
+  });
+
+  it('does not vote when a different qwen-diff editor is accepted', async () => {
+    const { postMessage, provider } = await setupPendingWebShellPermission();
+
+    // Stacked approvals and diffs left over from other sessions share the
+    // qwen-diff scheme; accepting one of them must not vote on a pending
+    // approval for another file.
+    provider.respondToPendingPermission('allow', {
+      fromDiffEditor: true,
+      uri: diffUri('/workspace/src/other.ts'),
+    });
+
+    expect(decisionCalls(postMessage)).toHaveLength(0);
+  });
+
+  it('resolves workspace-relative pending paths before matching', async () => {
+    // Earlier suites reassign workspaceFolders without restoring it; pin the
+    // resolution root this assertion depends on.
+    (
+      vscode.workspace as unknown as {
+        workspaceFolders: Array<{ uri: { fsPath: string } }>;
+      }
+    ).workspaceFolders = [{ uri: { fsPath: '/workspace-root' } }];
+
+    const { postMessage, provider } = await setupPendingWebShellPermission([
+      'src/app.ts',
+    ]);
+
+    provider.respondToPendingPermission('allow', {
+      fromDiffEditor: true,
+      // The diff manager opens documents with the resolved absolute path.
+      uri: diffUri('/workspace-root/src/app.ts'),
+    });
+
+    expect(postMessage).toHaveBeenCalledWith({
+      type: 'webShellPermissionDecision',
+      data: { decision: 'allow' },
     });
   });
 
@@ -2480,6 +2533,7 @@ describe('WebViewProvider web-shell permission bridge', () => {
 
     setup.provider.respondToPendingPermission('allow', {
       fromDiffEditor: true,
+      uri: diffUri(PENDING_DIFF_PATH),
     });
 
     expect(decisionCalls(setup.postMessage)).toHaveLength(0);

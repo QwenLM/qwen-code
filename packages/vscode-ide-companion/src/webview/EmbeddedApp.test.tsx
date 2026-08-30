@@ -481,6 +481,60 @@ describe('EmbeddedApp host wiring', () => {
         source: 'web-shell',
       },
     });
+    expect(postMessagesOfType('webShellPermissionState').at(-1)).toEqual({
+      type: 'webShellPermissionState',
+      data: { pending: true, paths: ['/workspace/new.ts'] },
+    });
+  });
+
+  it('keeps host permission-state paths in sync while pending stays true', async () => {
+    const props = await renderApp();
+    const onTranscriptChange = callback<(blocks: unknown[]) => void>(
+      props,
+      'onTranscriptChange',
+    );
+    const permissionBlock = (id: string, path: string) => ({
+      id,
+      kind: 'permission',
+      requestId: id,
+      title: path,
+      options: [],
+      preview: { kind: 'key_value', rows: [] },
+      toolCall: {
+        content: [{ type: 'diff', path, oldText: 'old', newText: 'new' }],
+      },
+    });
+
+    await act(async () => {
+      onTranscriptChange([
+        permissionBlock('req-a', '/workspace/a.ts'),
+        permissionBlock('req-b', '/workspace/b.ts'),
+      ]);
+      await Promise.resolve();
+    });
+
+    expect(postMessagesOfType('webShellPermissionState').at(-1)).toEqual({
+      type: 'webShellPermissionState',
+      data: {
+        pending: true,
+        paths: ['/workspace/a.ts', '/workspace/b.ts'],
+      },
+    });
+
+    await act(async () => {
+      onTranscriptChange([
+        { ...permissionBlock('req-a', '/workspace/a.ts'), resolved: true },
+        permissionBlock('req-b', '/workspace/b.ts'),
+      ]);
+      await Promise.resolve();
+    });
+
+    // pending stays true, but the host vote gate must shrink to the
+    // remaining diff so a stale accept cannot vote on the wrong approval.
+    expect(postMessagesOfType('webShellPermissionState').at(-1)).toEqual({
+      type: 'webShellPermissionState',
+      data: { pending: true, paths: ['/workspace/b.ts'] },
+    });
   });
 
   it('routes auth and session-change host actions to the extension', async () => {
