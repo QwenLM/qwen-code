@@ -492,6 +492,7 @@ async function setupAttachedProvider(options?: {
   context?: unknown;
 }) {
   let messageHandler: WebViewMessageHandler | undefined;
+  const viewDisposeListeners: Array<() => void> = [];
 
   const postMessage = vi.fn();
   const webview = {
@@ -521,12 +522,21 @@ async function setupAttachedProvider(options?: {
       webview,
       visible: true,
       onDidChangeVisibility: vi.fn(() => ({ dispose: vi.fn() })),
-      onDidDispose: vi.fn(() => ({ dispose: vi.fn() })),
+      onDidDispose: vi.fn((listener: () => void) => {
+        viewDisposeListeners.push(listener);
+        return { dispose: vi.fn() };
+      }),
     } as never,
     'qwen-code.chatView.sidebar',
   );
 
-  return { webview, postMessage, provider, messageHandler };
+  return {
+    webview,
+    postMessage,
+    provider,
+    messageHandler,
+    viewDisposeListeners,
+  };
 }
 
 beforeEach(() => {
@@ -2530,5 +2540,45 @@ describe('WebViewProvider web-shell permission bridge', () => {
       type: 'webShellPermissionDecision',
       data: { decision: 'allow', requestId: 'req-1' },
     });
+  });
+
+  it('reports hasPendingPermission from the webview-pushed state', async () => {
+    const setup = await setupAttachedProvider({ captureMessageHandler: true });
+
+    // The extension command gate consults hasPendingPermission() before
+    // asking the provider to vote; it must track the state the webview
+    // pushes, not only the legacy ACP resolver.
+    expect(setup.provider.hasPendingPermission()).toBe(false);
+
+    await setup.messageHandler?.({
+      type: 'webShellPermissionState',
+      data: { pending: true, paths: [PENDING_DIFF_PATH] },
+    });
+    expect(setup.provider.hasPendingPermission()).toBe(true);
+
+    await setup.messageHandler?.({
+      type: 'webShellPermissionState',
+      data: { pending: false, paths: [] },
+    });
+    expect(setup.provider.hasPendingPermission()).toBe(false);
+  });
+
+  it('clears the pending flag when the hosting view is disposed', async () => {
+    const setup = await setupAttachedProvider({ captureMessageHandler: true });
+
+    await setup.messageHandler?.({
+      type: 'webShellPermissionState',
+      data: { pending: true, paths: [PENDING_DIFF_PATH] },
+    });
+    expect(setup.provider.hasPendingPermission()).toBe(true);
+
+    for (const listener of setup.viewDisposeListeners) listener();
+
+    // Without a webview there is no route for the decision; leaving the
+    // flag true would let a diff-editor accept find hasPendingPermission()
+    // true, skip the vote, and close the diff while the daemon stays
+    // blocked. The panel dispose path already resets it; the view-hosted
+    // path must too.
+    expect(setup.provider.hasPendingPermission()).toBe(false);
   });
 });

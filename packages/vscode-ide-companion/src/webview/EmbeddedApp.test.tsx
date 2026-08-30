@@ -538,6 +538,61 @@ describe('EmbeddedApp host wiring', () => {
     });
   });
 
+  it('posts pending: false when pending permission diffs are torn down', async () => {
+    const props = await renderApp();
+    const onTranscriptChange = callback<(blocks: unknown[]) => void>(
+      props,
+      'onTranscriptChange',
+    );
+
+    await act(async () => {
+      onTranscriptChange([
+        {
+          id: 'perm-a',
+          kind: 'permission',
+          requestId: 'req-a',
+          title: 'update a.ts',
+          options: [],
+          preview: { kind: 'key_value', rows: [] },
+          toolCall: {
+            content: [
+              {
+                type: 'diff',
+                path: '/workspace/a.ts',
+                oldText: 'old',
+                newText: 'new',
+              },
+            ],
+          },
+        },
+      ]);
+      await Promise.resolve();
+    });
+
+    expect(postMessagesOfType('webShellPermissionState').at(-1)).toEqual({
+      type: 'webShellPermissionState',
+      data: { pending: true, paths: ['/workspace/a.ts'] },
+    });
+
+    // Closing the host tab/view unmounts the app. The teardown must tell
+    // the extension the pending set is gone; otherwise the vote gate stays
+    // open for an approval the user can no longer see.
+    const { container, root } = mounted.splice(mounted.length - 1, 1)[0];
+    await act(async () => {
+      root.unmount();
+      await Promise.resolve();
+    });
+    container.remove();
+
+    expect(postMessagesOfType('webShellPermissionState').at(-1)).toEqual({
+      type: 'webShellPermissionState',
+      data: { pending: false, paths: [] },
+    });
+    expect(postMessagesOfType('closeDiff')).toEqual([
+      { type: 'closeDiff', data: { path: '/workspace/a.ts' } },
+    ]);
+  });
+
   it('routes auth and session-change host actions to the extension', async () => {
     const props = await renderApp();
 

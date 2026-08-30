@@ -65,6 +65,12 @@ interface DiffInfo {
   leftDocUri: vscode.Uri;
   rightDocUri: vscode.Uri;
   permissionRequestId?: string;
+  /**
+   * Whether the right-hand side was opened read-only. Reuse must match on
+   * this too: refocusing a writable twin for a read-only approval (or vice
+   * versa) would hand one flow the other flow's edit semantics.
+   */
+  readOnly: boolean;
 }
 
 /**
@@ -115,12 +121,15 @@ export class DiffManager {
    * @param filePath Path to the file being diffed
    * @param oldContent The original content (left side)
    * @param newContent The modified content (right side)
+   * @param readOnly Writability the requester needs; only diffs with the
+   * same writability are reusable
    * @returns True if a diff view with the same content already exists, false otherwise
    */
   private hasExistingDiff(
     filePath: string,
     oldContent: string,
     newContent: string,
+    readOnly: boolean,
     permissionRequestId?: string,
   ): boolean {
     for (const diffInfo of this.diffDocuments.values()) {
@@ -128,6 +137,7 @@ export class DiffManager {
         diffInfo.originalFilePath === filePath &&
         diffInfo.oldContent === oldContent &&
         diffInfo.newContent === newContent &&
+        diffInfo.readOnly === readOnly &&
         diffInfo.permissionRequestId === permissionRequestId
       ) {
         return true;
@@ -139,16 +149,19 @@ export class DiffManager {
   /**
    * Finds an existing diff view for the given file path and focuses it
    * @param filePath Path to the file being diffed
+   * @param readOnly Only diffs opened with the same writability are eligible
    * @returns True if an existing diff view was found and focused, false otherwise
    */
   private async focusExistingDiff(
     filePath: string,
+    readOnly: boolean,
     permissionRequestId?: string,
   ): Promise<boolean> {
     const normalizedPath = path.normalize(filePath);
     for (const [, diffInfo] of this.diffDocuments.entries()) {
       if (
         diffInfo.originalFilePath === normalizedPath &&
+        diffInfo.readOnly === readOnly &&
         diffInfo.permissionRequestId === permissionRequestId
       ) {
         const rightDocUri = diffInfo.rightDocUri;
@@ -204,17 +217,21 @@ export class DiffManager {
   ): Promise<void> {
     const haveOld = typeof b === 'string';
     const resolvedOptions = haveOld ? options : b;
+    const readOnly = resolvedOptions?.readOnly === true;
     const oldContent = haveOld ? a : await this.readOldContentFromFs(filePath);
     const newContent = haveOld ? (b as string) : a;
     const normalizedPath = path.normalize(filePath);
     const key = this.makeKey(normalizedPath, oldContent, newContent);
 
-    // Check if a diff view with the same content already exists
+    // Check if a diff view with the same content, writability, and permission
+    // owner already exists. A read-only approval must never be deduped onto a
+    // writable diff, and two permission requests must not share a diff.
     if (
       this.hasExistingDiff(
         normalizedPath,
         oldContent,
         newContent,
+        readOnly,
         resolvedOptions?.permissionRequestId,
       )
     ) {
@@ -230,6 +247,7 @@ export class DiffManager {
       // Outside the dedupe window: softly focus the existing diff
       await this.focusExistingDiff(
         normalizedPath,
+        readOnly,
         resolvedOptions?.permissionRequestId,
       );
       this.recentlyShown.set(key, now);
@@ -257,6 +275,7 @@ export class DiffManager {
       newContent,
       leftDocUri,
       rightDocUri,
+      readOnly,
       permissionRequestId: resolvedOptions?.permissionRequestId,
     });
 
@@ -291,7 +310,7 @@ export class DiffManager {
     // content before accepting; that only round-trips when an IDE-mode
     // resolver consumes the edited text. Read-only callers (web-shell
     // permission approvals) would silently lose edits, so keep them locked.
-    if (!resolvedOptions?.readOnly) {
+    if (!readOnly) {
       await vscode.commands.executeCommand(
         'workbench.action.files.setActiveEditorWriteableInSession',
       );
