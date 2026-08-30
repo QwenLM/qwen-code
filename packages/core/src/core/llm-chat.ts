@@ -511,6 +511,9 @@ function hasDisplayableStreamOutput(
     (part) =>
       (typeof part.text === 'string' && part.text.length > 0) ||
       part.functionCall !== undefined ||
+      part.executableCode !== undefined ||
+      part.codeExecutionResult !== undefined ||
+      part.fileData !== undefined ||
       (typeof part.inlineData?.data === 'string' &&
         part.inlineData.data.length > 0 &&
         part.inlineData.mimeType?.trim().toLowerCase().startsWith('image/')),

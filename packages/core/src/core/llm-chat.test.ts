@@ -12,7 +12,7 @@ import type {
   GenerateContentResponse,
   Part,
 } from '@google/genai';
-import { ApiError, FinishReason } from '@google/genai';
+import { ApiError, FinishReason, Language } from '@google/genai';
 import { AuthType, type ContentGenerator } from './contentGenerator.js';
 import {
   LlmChat,
@@ -12482,6 +12482,47 @@ describe('LlmChat', async () => {
     expect(callOrder).toEqual(['exact', 'ordinary']);
   });
 
+  it('releases the next queued send when exact-route resolution fails', async () => {
+    const routeError = new Error('route resolution failed');
+    vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+      resolveForModel: vi.fn().mockRejectedValue(routeError),
+    } as unknown as ReturnType<typeof mockConfig.getBaseLlmClient>);
+    vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+      (async function* () {
+        yield {
+          candidates: [
+            {
+              content: {
+                role: 'model',
+                parts: [{ text: 'second response' }],
+              },
+              finishReason: 'STOP',
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+      })(),
+    );
+
+    const failedSend = chat.sendMessageStream(
+      'broken-model\0',
+      { message: 'first' },
+      'prompt-exact-failure',
+    );
+    const queuedSend = chat.sendMessageStream(
+      'ordinary-model',
+      { message: 'second' },
+      'prompt-after-exact-failure',
+    );
+
+    await expect(failedSend).rejects.toBe(routeError);
+    const stream = await queuedSend;
+    for await (const _ of stream) {
+      // consume
+    }
+
+    expect(chat.getLastModelMessageText()).toBe('second response');
+  });
+
   describe('Model Resolution', () => {
     const mockResponse = {
       candidates: [
@@ -15099,6 +15140,42 @@ describe('LlmChat', async () => {
       );
       expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
       expect(recordedText(recordAssistantTurn)).toBe('visible escalation');
+    });
+
+    it('persists visible executable code when the provider fails', async () => {
+      const recordAssistantTurn = vi.fn();
+      const recordingChat = chatWithRecorder(recordAssistantTurn);
+      const codePart: Part = {
+        executableCode: { language: Language.PYTHON, code: 'print(1)' },
+      };
+      const streams = [
+        makeStream([makeChunk([{ text: 'prefix' }], 'MAX_TOKENS')]),
+        (async function* () {
+          yield makeChunk([codePart]);
+          throw new Error('provider disconnected');
+        })(),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await recordingChat.sendMessageStream(
+        'gemini-pro',
+        { message: 'write and run code' },
+        'escalated-provider-error-executable-code',
+      );
+      await expect(async () => {
+        for await (const _event of stream) {
+          // Consume until the provider error propagates.
+        }
+      }).rejects.toThrow('provider disconnected');
+
+      expect(recordingChat.getHistory().at(-1)?.parts).toEqual([codePart]);
+      expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+      expect(recordAssistantTurn.mock.calls[0]![0].message).toEqual(
+        recordingChat.getHistory().at(-1)?.parts,
+      );
     });
 
     it('escalates an empty MAX_TOKENS response instead of retrying it as an empty stream', async () => {
