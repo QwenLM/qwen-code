@@ -4508,7 +4508,7 @@ describe('ChannelBase', () => {
       }
     });
 
-    it('keeps a collected named turn bound and drops it after reset', async () => {
+    it('keeps a collected named turn bound across a selected-task reset', async () => {
       const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
       let finishFirst!: (response: string) => void;
       let finishClassification!: (result: {
@@ -4715,6 +4715,69 @@ describe('ChannelBase', () => {
       }
     });
 
+    it('reports when cancellation has no selected task', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      const ch = createChannel({ multiSession: true }, { stateDir });
+      try {
+        await ch.handleInbound(envelope({ text: '/session new review' }));
+        await ch.handleInbound(envelope({ text: '/session close review' }));
+        vi.mocked(bridge.cancelSession).mockClear();
+
+        await ch.handleInbound(envelope({ text: '/session cancel' }));
+
+        expect(bridge.cancelSession).not.toHaveBeenCalled();
+        expect(ch.sent.at(-1)!.text).toBe('No task is currently selected.');
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('does not cancel a closed named task', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      const ch = createChannel({ multiSession: true }, { stateDir });
+      try {
+        await ch.handleInbound(envelope({ text: '/session new review' }));
+        await ch.handleInbound(envelope({ text: '/session close review' }));
+        vi.mocked(bridge.cancelSession).mockClear();
+
+        await ch.handleInbound(envelope({ text: '/session cancel review' }));
+
+        expect(bridge.cancelSession).not.toHaveBeenCalled();
+        expect(ch.sent.at(-1)!.text).toBe('Task "review" is closed.');
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('reports when cancelling an active named task fails', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      let finishPrompt!: (response: string) => void;
+      vi.mocked(bridge.prompt).mockImplementationOnce(
+        () =>
+          new Promise<string>((resolve) => {
+            finishPrompt = resolve;
+          }),
+      );
+      vi.mocked(bridge.cancelSession).mockRejectedValueOnce(
+        new Error('cancel failed'),
+      );
+      const ch = createChannel({ multiSession: true }, { stateDir });
+      try {
+        await ch.handleInbound(envelope({ text: '/session new review' }));
+        const prompt = ch.handleInbound(envelope({ text: 'review it' }));
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+
+        await ch.handleInbound(envelope({ text: '/session cancel' }));
+
+        expect(bridge.cancelSession).toHaveBeenCalledWith('s-1');
+        expect(ch.sent.at(-1)!.text).toBe('Failed to cancel task "review".');
+        finishPrompt('done');
+        await prompt;
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
     it('sanitizes an unknown task name before reporting cancellation failure', async () => {
       const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
       const ch = createChannel({ multiSession: true }, { stateDir });
@@ -4777,6 +4840,47 @@ describe('ChannelBase', () => {
           { outcome: { outcome: 'selected', optionId: 'once' } },
         );
         expect(ch.sent.at(-1)!.text).toBe('[review] Permission approved.');
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('rejects bare permission commands when no named task is selected', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      const ch = createChannel({ multiSession: true }, { stateDir });
+      try {
+        await ch.handleInbound(envelope({ text: '/session new review' }));
+        await ch.dispatchPermissionRequest({
+          requestId: 'req-review',
+          sessionId: 's-1',
+          request: {
+            toolCall: { title: 'Review changes' },
+            options: [
+              { optionId: 'once', kind: 'allow_once', name: 'Allow once' },
+            ],
+          },
+        });
+        const namedSessions = (
+          ch as unknown as {
+            namedSessions: {
+              current: () => Promise<undefined>;
+            };
+          }
+        ).namedSessions;
+        vi.spyOn(namedSessions, 'current').mockResolvedValueOnce(undefined);
+        vi.mocked(bridge.respondToPermission!).mockClear();
+
+        await ch.handleInbound(envelope({ text: '/approve' }));
+
+        expect(bridge.respondToPermission).not.toHaveBeenCalled();
+        expect(ch.sent.at(-1)!.text).toBe(
+          'No task is currently selected. Use an explicit request ID to answer a named task.',
+        );
+
+        await ch.handleInbound(envelope({ text: '/approve req-review' }));
+        expect(bridge.respondToPermission).toHaveBeenCalledWith('req-review', {
+          outcome: { outcome: 'selected', optionId: 'once' },
+        });
       } finally {
         rmSync(stateDir, { recursive: true, force: true });
       }

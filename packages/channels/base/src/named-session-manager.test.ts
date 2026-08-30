@@ -345,25 +345,6 @@ describe('NamedSessionManager', () => {
     ]);
   });
 
-  it('does not resolve an expected session after the selection changes', async () => {
-    const named = manager();
-    const review = await named.create(alice, 'review');
-    const feature = await named.create(alice, 'feature');
-    vi.mocked(bridge.loadSession).mockClear();
-
-    await expect(named.resolve(alice, review.sessionId)).resolves.toBe(
-      undefined,
-    );
-
-    await expect(named.current(alice)).resolves.toEqual(
-      expect.objectContaining({
-        name: 'feature',
-        sessionId: feature.sessionId,
-      }),
-    );
-    expect(bridge.loadSession).not.toHaveBeenCalled();
-  });
-
   it('reloads a reserved task without changing the current selection', async () => {
     const named = manager();
     const review = await named.create(alice, 'review');
@@ -442,7 +423,7 @@ describe('NamedSessionManager', () => {
         active: false,
       }),
     );
-    await expect(named.lookup(alice)).resolves.toEqual(
+    await expect(named.current(alice)).resolves.toEqual(
       expect.objectContaining({ name: 'feature', active: true }),
     );
     await expect(

@@ -165,12 +165,9 @@ export class NamedSessionManager {
 
   resolve(
     input: NamedSessionOwnerInput,
-    expectedSessionId?: string,
     reserve?: (sessionId: string) => () => void,
   ): Promise<string | undefined> {
-    return this.withOwnerLock(input, () =>
-      this.resolveLocked(input, expectedSessionId, reserve),
-    );
+    return this.withOwnerLock(input, () => this.resolveLocked(input, reserve));
   }
 
   resolveAfterPreparation(
@@ -189,7 +186,7 @@ export class NamedSessionManager {
       try {
         return {
           status: 'resolved',
-          sessionId: await this.resolveLocked(input, undefined, reserve),
+          sessionId: await this.resolveLocked(input, reserve),
         };
       } catch (error) {
         return { status: 'resolve_error', error };
@@ -223,13 +220,12 @@ export class NamedSessionManager {
 
   lookup(
     input: NamedSessionOwnerInput,
-    name?: string,
+    name: string,
   ): Promise<NamedSessionSelection | undefined> {
     return this.withOwnerLock(input, async () => {
       const owner = await this.ensureOwner(input, false);
-      const taskName = name ?? owner?.activeTaskName;
-      if (!owner || !taskName) return undefined;
-      const task = this.findTask(owner, taskName);
+      if (!owner) return undefined;
+      const task = this.findTask(owner, name);
       return task ? this.selection(owner, task) : undefined;
     });
   }
@@ -594,7 +590,6 @@ export class NamedSessionManager {
 
   private async resolveLocked(
     input: NamedSessionOwnerInput,
-    expectedSessionId?: string,
     reserve?: (sessionId: string) => () => void,
   ): Promise<string | undefined> {
     const owner = await this.ensureOwner(input, true);
@@ -602,12 +597,6 @@ export class NamedSessionManager {
     const task = this.findTask(owner, owner.activeTaskName);
     if (!task || task.status !== 'open') {
       throw new Error('The selected Channel task is unavailable.');
-    }
-    if (
-      expectedSessionId !== undefined &&
-      task.sessionId !== expectedSessionId
-    ) {
-      return undefined;
     }
     const release = reserve?.(task.sessionId);
     try {

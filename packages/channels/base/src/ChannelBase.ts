@@ -2975,10 +2975,12 @@ export abstract class ChannelBase {
       );
       return true;
     }
+    const namedSessions = this.namedSessions;
+    const bareNamedCommand = namedSessions !== undefined && args.trim() === '';
     let selectedTask: NamedSessionSelection | undefined;
-    if (this.namedSessions && args.trim() === '') {
+    if (bareNamedCommand) {
       try {
-        selectedTask = await this.namedSessions.lookup(
+        selectedTask = await namedSessions.current(
           this.namedSessionOwner(envelope),
         );
       } catch (error) {
@@ -2989,9 +2991,7 @@ export abstract class ChannelBase {
     const lookup = this.pendingPermissionForEnvelope(
       envelope,
       args,
-      this.namedSessions && args.trim() === ''
-        ? (selectedTask?.sessionId ?? null)
-        : undefined,
+      bareNamedCommand ? (selectedTask?.sessionId ?? null) : undefined,
     );
     if (lookup.kind === 'ambiguous') {
       const requestList = lookup.requestIds
@@ -3191,7 +3191,6 @@ export abstract class ChannelBase {
     try {
       const sessionId = await namedSessions.resolve(
         this.namedSessionOwner(envelope),
-        undefined,
         (resolvedSessionId) => {
           const binding = this.bindNamedTurn(envelope, resolvedSessionId);
           return () => this.releaseNamedTurnBinding(binding);
@@ -3359,7 +3358,9 @@ export abstract class ChannelBase {
         case 'cancel': {
           if (parts.length > 1) break;
           const taskName = parts[0];
-          const task = await namedSessions.lookup(owner, taskName);
+          const task = taskName
+            ? await namedSessions.lookup(owner, taskName)
+            : await namedSessions.current(owner);
           if (!task) {
             await this.sendThreadMessage(
               envelope.chatId,
@@ -5935,7 +5936,6 @@ export abstract class ChannelBase {
       try {
         sessionId = await this.namedSessions.resolve(
           this.namedSessionOwner(envelope),
-          undefined,
           (resolvedSessionId) => {
             const binding = this.bindNamedTurn(envelope, resolvedSessionId);
             namedTurn = binding;
