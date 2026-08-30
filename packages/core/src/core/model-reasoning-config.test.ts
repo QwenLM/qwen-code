@@ -60,7 +60,7 @@ describe('resolveModelReasoningConfiguration', () => {
   ])('keeps the Qwen manifest independent of provider route', (route) => {
     const expected = {
       thinking: true,
-      efforts: ['low', 'medium', 'xhigh'],
+      efforts: ['low', 'medium', 'high', 'xhigh'],
       defaultEffort: 'xhigh',
     };
     expect(

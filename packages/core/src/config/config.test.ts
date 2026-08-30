@@ -6109,6 +6109,61 @@ describe('Server Config (config.ts)', () => {
       expect(config.getReasoningEffort()).toBe('high');
     });
 
+    it('preserves an effort while transiting a mandatory default-only model', async () => {
+      const config = new Config({
+        ...baseParams,
+        generationConfig: { reasoning: { effort: 'high' } },
+      });
+      const authType = AuthType.USE_OPENAI;
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          apiKey: 'test-key',
+          model: 'qwen3.8-max',
+          authType,
+        } as ContentGeneratorConfig,
+        sources: {},
+      });
+      await config.refreshAuth(authType);
+
+      config.getModelsConfig().getGenerationConfig().reasoning = false;
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          apiKey: 'test-key',
+          model: 'kimi-k2.7-code',
+          authType,
+          baseUrl: 'https://api.moonshot.cn/v1',
+          thinkingMandatory: true,
+          reasoning: false,
+        } as ContentGeneratorConfig,
+        sources: { reasoning: { kind: 'modelProviders' } },
+      });
+      await config.refreshAuth(authType);
+      expect(config.getReasoningEffort()).toBeUndefined();
+      expect(config.getContentGeneratorConfig().reasoning).toBeUndefined();
+      expect(
+        config.getModelsConfig().getGenerationConfig().reasoning,
+      ).toBeUndefined();
+
+      config.getModelsConfig().getGenerationConfig().reasoning = undefined;
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          apiKey: 'test-key',
+          model: 'qwen3.8-max',
+          authType,
+        } as ContentGeneratorConfig,
+        sources: {},
+      });
+      await config.refreshAuth(authType);
+
+      expect(config.getReasoningEffort()).toBe('high');
+      expect(config.getContentGeneratorConfig().reasoning).toEqual({
+        effort: 'high',
+      });
+      expect(config.getModelsConfig().getGenerationConfig().reasoning).toEqual({
+        effort: 'high',
+      });
+    });
+
     it.each([
       {
         name: 'drops a preset disable on hot-update',

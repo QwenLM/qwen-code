@@ -94,7 +94,7 @@ const QWEN_CONFIGURATIONS: Readonly<
   'qwen3.7-max': TOGGLE_ONLY,
   'qwen3.8-max': {
     thinking: true,
-    efforts: ['low', 'medium', 'xhigh'],
+    efforts: ['low', 'medium', 'high', 'xhigh'],
     defaultEffort: 'xhigh',
   },
 };

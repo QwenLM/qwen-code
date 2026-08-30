@@ -7907,7 +7907,12 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       {
         id: 'reasoning_effort',
         currentValue: 'xhigh',
-        options: [{ value: 'low' }, { value: 'medium' }, { value: 'xhigh' }],
+        options: [
+          { value: 'low' },
+          { value: 'medium' },
+          { value: 'high' },
+          { value: 'xhigh' },
+        ],
         _meta: {
           'qwenCode/reasoning': {
             defaultEffort: 'xhigh',
@@ -8132,7 +8137,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     const innerConfig = await setupSessionMocks(sessionId);
     const generation: {
       reasoning?: false | { effort?: string; budget_tokens?: number };
-    } = { reasoning: { effort: 'high', budget_tokens: 4096 } };
+    } = { reasoning: { effort: 'max', budget_tokens: 4096 } };
     innerConfig.getModel = vi.fn().mockReturnValue('qwen3.8-max');
     innerConfig.getContentGeneratorConfig = vi.fn(() => generation);
     innerConfig.getReasoningEffort = vi.fn(() =>
@@ -8170,7 +8175,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       expect(
         session.configOptions.filter((item) => item.id === 'effort'),
       ).toEqual([]);
-      expect(reasoningOption?.currentValue).toBe('high');
+      expect(reasoningOption?.currentValue).toBe('max');
       expect(reasoningOption?.options.map(({ value }) => value)).toContain(
         'default',
       );
@@ -8223,11 +8228,12 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         session.configOptions.filter((item) => item.id === 'effort'),
       ).toEqual([]);
       expect(option).toMatchObject({
-        currentValue: 'xhigh',
+        currentValue: 'high',
         options: [
           { value: 'none' },
           { value: 'low' },
           { value: 'medium' },
+          { value: 'high' },
           { value: 'xhigh' },
         ],
       });
@@ -8265,16 +8271,27 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           ?.currentValue,
       ).toBe('medium');
 
+      const high = (await agent.setSessionConfigOption({
+        sessionId,
+        configId: 'reasoning_effort',
+        value: 'high',
+      })) as SetSessionConfigOptionResponse;
+      expect(generation.reasoning).toEqual({ effort: 'high' });
+      expect(
+        high.configOptions.find((item) => item.id === 'reasoning_effort')
+          ?.currentValue,
+      ).toBe('high');
+
       await expect(
         agent.setSessionConfigOption({
           sessionId,
           configId: 'reasoning_effort',
-          value: 'high',
+          value: 'max',
         }),
       ).rejects.toThrow(
-        'Unknown reasoning effort: high. Choose one of: none, low, medium, xhigh',
+        'Unknown reasoning effort: max. Choose one of: none, low, medium, high, xhigh',
       );
-      expect(generation.reasoning).toEqual({ effort: 'medium' });
+      expect(generation.reasoning).toEqual({ effort: 'high' });
     } finally {
       mockConnectionState.resolve();
       await agentPromise;
@@ -8325,6 +8342,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           { value: 'none' },
           { value: 'low' },
           { value: 'medium' },
+          { value: 'high' },
           { value: 'xhigh' },
         ],
       });
@@ -8438,6 +8456,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           { value: 'none' },
           { value: 'low' },
           { value: 'medium' },
+          { value: 'high' },
           { value: 'xhigh' },
         ],
       });
@@ -9130,7 +9149,12 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       );
       expect(option).toMatchObject({
         currentValue: 'medium',
-        options: [{ value: 'low' }, { value: 'medium' }, { value: 'xhigh' }],
+        options: [
+          { value: 'low' },
+          { value: 'medium' },
+          { value: 'high' },
+          { value: 'xhigh' },
+        ],
         _meta: {
           'qwenCode/reasoning': {
             defaultEffort: 'xhigh',
@@ -9157,7 +9181,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           value: 'none',
         }),
       ).rejects.toThrow(
-        'Unknown reasoning effort: none. Choose one of: low, medium, xhigh',
+        'Unknown reasoning effort: none. Choose one of: low, medium, high, xhigh',
       );
       expect(generation.reasoning).toEqual({ effort: 'xhigh' });
     } finally {

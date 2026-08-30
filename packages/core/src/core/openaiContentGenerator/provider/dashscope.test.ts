@@ -738,7 +738,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
                 ? {
                     low: 'low',
                     medium: 'medium',
-                    high: 'xhigh',
+                    high: 'high',
                     xhigh: 'xhigh',
                     max: 'xhigh',
                   }[effort]
@@ -1019,9 +1019,30 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       expect(result['reasoning']).toBeUndefined();
     });
 
-    // 'qwen3.8-max' itself is covered by the reasoning registry, which
-    // normalizes the tier silently; the wire-layer ceiling below applies to
-    // the family variants that fall back to the tiered-wire mapping.
+    it('ships high identically for the qwen3.8-max canonical and alias ids', () => {
+      const buildEffort = (model: string): unknown => {
+        const generator = new DashScopeOpenAICompatibleProvider(
+          {
+            ...mockContentGeneratorConfig,
+            model,
+            reasoning: { effort: 'high' },
+          } as ContentGeneratorConfig,
+          mockCliConfig,
+        );
+        const result = generator.buildRequest(
+          { ...baseRequest, model },
+          'test-prompt-id',
+        ) as unknown as Record<string, unknown>;
+        return result['reasoning_effort'];
+      };
+
+      expect(buildEffort('qwen3.8-max')).toBe('high');
+      expect(buildEffort('qwen3.8-max-latest')).toBe('high');
+    });
+
+    // 'qwen3.8-max' itself is covered by the reasoning registry; the
+    // wire-layer ceiling below applies to family variants that fall back to
+    // the tiered-wire mapping.
     describe.each([
       'qwen3.8-max-preview',
       'qwen3.8-max-latest',
@@ -1703,13 +1724,13 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         'test-prompt-id',
       ) as unknown as Record<string, unknown>;
 
-      expect(result['reasoning_effort']).toBe('xhigh');
+      expect(result['reasoning_effort']).toBe('high');
       expect(result['enable_thinking']).toBeUndefined();
       expect(mockDebugLogger.warn).toHaveBeenCalledWith(
         'DashScope: dropped conflicting thinking knobs',
         {
           model: 'qwen3.8-max',
-          reasoningEffort: 'xhigh',
+          reasoningEffort: 'high',
           dropped: ['enable_thinking'],
         },
       );
@@ -1766,7 +1787,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         'DashScope: dropped conflicting thinking knobs',
         {
           model: 'qwen3.8-max',
-          reasoningEffort: 'xhigh',
+          reasoningEffort: 'high',
           dropped: ['reasoning_effort'],
         },
       );
@@ -1796,7 +1817,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         'DashScope: dropped conflicting thinking knobs',
         {
           model: 'qwen3.8-max',
-          reasoningEffort: 'xhigh',
+          reasoningEffort: 'high',
           dropped: ['reasoning_effort'],
         },
       );
@@ -1950,7 +1971,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         'DashScope: dropped conflicting thinking knobs',
         {
           model: 'qwen3.8-max',
-          reasoningEffort: 'xhigh',
+          reasoningEffort: 'high',
           dropped: ['enable_thinking', 'thinking_budget'],
         },
       );

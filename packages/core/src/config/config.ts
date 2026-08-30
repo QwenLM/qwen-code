@@ -5203,6 +5203,21 @@ export class Config {
     if (!override) {
       return;
     }
+    const clearPinnedDisable = (
+      cfg: { reasoning?: ContentGeneratorConfig['reasoning'] } | undefined,
+    ): void => {
+      if (cfg && cfg.reasoning === false) {
+        cfg.reasoning = undefined;
+      }
+    };
+    const clearPinnedDisables = (): void => {
+      clearPinnedDisable(this.contentGeneratorConfig);
+      const runtimeCfg = getRuntimeContentGenerator()?.contentGeneratorConfig;
+      if (runtimeCfg && runtimeCfg !== this.contentGeneratorConfig) {
+        clearPinnedDisable(runtimeCfg);
+      }
+      clearPinnedDisable(this.modelsConfig?.getGenerationConfig());
+    };
     if (override.type === 'disabled') {
       const cfg = this.contentGeneratorConfig;
       const reasoning = resolveModelReasoningConfiguration({
@@ -5216,24 +5231,29 @@ export class Config {
         // `reasoning: false` it re-pinned — the rebuild may have resolved a
         // positive block for the new model (e.g. a user-authored preset),
         // which wholesale clearing would clobber.
-        const clearPinnedDisable = (
-          c: { reasoning?: ContentGeneratorConfig['reasoning'] } | undefined,
-        ): void => {
-          if (c && c.reasoning === false) {
-            c.reasoning = undefined;
-          }
-        };
-        clearPinnedDisable(this.contentGeneratorConfig);
-        const runtimeCfg = getRuntimeContentGenerator()?.contentGeneratorConfig;
-        if (runtimeCfg && runtimeCfg !== this.contentGeneratorConfig) {
-          clearPinnedDisable(runtimeCfg);
-        }
-        clearPinnedDisable(this.modelsConfig?.getGenerationConfig());
+        clearPinnedDisables();
         this.reasoningOverride = undefined;
         return;
       }
       this.setReasoningDisabled(true);
       return;
+    }
+    if (override.type === 'effort') {
+      const cfg = this.contentGeneratorConfig;
+      if (
+        usesMandatoryReasoningDefaultOnly({
+          modelId: cfg.model,
+          authType: cfg.authType,
+          baseUrl: cfg.baseUrl,
+          thinkingMandatory: cfg.thinkingMandatory,
+        })
+      ) {
+        // This target exposes only its mandatory provider default. Remove an
+        // incompatible preset disable without replacing the saved effort, so
+        // a later tier-capable model can restore it.
+        clearPinnedDisables();
+        return;
+      }
     }
     if (this.contentGeneratorConfig.reasoning === false) {
       this.setReasoningDisabled(false);

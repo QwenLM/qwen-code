@@ -306,7 +306,12 @@ describe('createWorkspaceProvidersStatusProvider', () => {
       {
         id: 'reasoning_effort',
         currentValue: 'xhigh',
-        options: [{ value: 'low' }, { value: 'medium' }, { value: 'xhigh' }],
+        options: [
+          { value: 'low' },
+          { value: 'medium' },
+          { value: 'high' },
+          { value: 'xhigh' },
+        ],
         _meta: {
           'qwenCode/reasoning': {
             defaultEffort: 'xhigh',

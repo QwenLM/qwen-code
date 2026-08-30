@@ -19,7 +19,7 @@ describe('model configuration manifest', () => {
     expect(getModelConfiguration('qwen3.8-max')).toEqual({
       reasoning: {
         thinking: true,
-        efforts: ['low', 'medium', 'xhigh'],
+        efforts: ['low', 'medium', 'high', 'xhigh'],
         defaultEffort: 'xhigh',
       },
     });
@@ -36,6 +36,7 @@ describe('model configuration manifest', () => {
         { value: 'none' },
         { value: 'low' },
         { value: 'medium' },
+        { value: 'high' },
         { value: 'xhigh' },
       ],
       _meta: {
@@ -51,7 +52,12 @@ describe('model configuration manifest', () => {
       }),
     ).toMatchObject({
       currentValue: 'xhigh',
-      options: [{ value: 'low' }, { value: 'medium' }, { value: 'xhigh' }],
+      options: [
+        { value: 'low' },
+        { value: 'medium' },
+        { value: 'high' },
+        { value: 'xhigh' },
+      ],
       _meta: {
         'qwenCode/reasoning': {
           defaultEffort: 'xhigh',
@@ -61,14 +67,17 @@ describe('model configuration manifest', () => {
     });
   });
 
-  it.each(['high', 'max'] as const)(
-    'presents inherited %s as the qwen3.8-max xhigh alias',
-    (effort) => {
-      expect(
-        buildModelReasoningConfigOption('qwen3.8-max', { effort }),
-      ).toMatchObject({ currentValue: 'xhigh' });
-    },
-  );
+  it('preserves inherited high for qwen3.8-max', () => {
+    expect(
+      buildModelReasoningConfigOption('qwen3.8-max', { effort: 'high' }),
+    ).toMatchObject({ currentValue: 'high' });
+  });
+
+  it('presents inherited max as the qwen3.8-max xhigh alias', () => {
+    expect(
+      buildModelReasoningConfigOption('qwen3.8-max', { effort: 'max' }),
+    ).toMatchObject({ currentValue: 'xhigh' });
+  });
 
   it.each([
     undefined,
