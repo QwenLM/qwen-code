@@ -5305,7 +5305,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           data: {
             sessionId: entry.sessionId,
             requestedModelId: modelId,
-            error: err instanceof Error ? err.message : String(err),
+            error: extractErrorMessage(err),
           },
           ...(originatorClientId ? { originatorClientId } : {}),
         });
@@ -11814,7 +11814,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           data: {
             sessionId: entry.sessionId,
             requestedModelId: req.modelId,
-            error: err instanceof Error ? err.message : String(err),
+            error: extractErrorMessage(err),
           },
           ...(originatorClientId ? { originatorClientId } : {}),
         });
