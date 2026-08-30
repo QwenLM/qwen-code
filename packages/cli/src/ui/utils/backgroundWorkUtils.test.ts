@@ -284,6 +284,7 @@ describe('describeBlockingBackgroundWork (#8741)', () => {
     expect(joined).not.toContain('shell_2');
     expect(joined).not.toContain('wf_3');
     expect(summary?.hasTaskEntries).toBe(true);
+    expect(summary?.hasInspectableWorkflowRuns).toBe(true);
     expect(summary?.hasStartingWorkflowRuns).toBe(false);
   });
 
@@ -338,7 +339,7 @@ describe('describeBlockingBackgroundWork (#8741)', () => {
     expect(message).toContain('  [wf_starting] (starting)');
     // `/workflows` reads registry.list(), which a reservation has not
     // entered — pointing there would name a list that cannot show it.
-    expect(message).not.toContain('/workflows');
+    expect(message).not.toContain('Use ');
     expect(message).toContain('Retry once the run has finished starting.');
   });
 
@@ -494,6 +495,7 @@ describe('buildBackgroundWorkBlockedMessage (#8741)', () => {
     expect(message.startsWith(base)).toBe(true);
     expect(message).toContain('[shell_1]');
     expect(message).toContain('Use /tasks to inspect them, then retry.');
+    expect(message).not.toContain('Retry once the run has finished starting.');
   });
 
   it('points at /workflows when only workflow runs block', () => {
