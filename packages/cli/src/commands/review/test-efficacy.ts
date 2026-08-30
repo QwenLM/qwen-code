@@ -61,7 +61,7 @@ import {
 import { createRequire } from 'node:module';
 import { dirname, join, isAbsolute, resolve, sep } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
-import { probeWorktreePath } from './lib/paths.js';
+import { inertPath, probeWorktreePath } from './lib/paths.js';
 // `discardWorktree` moved to `lib/worktree.ts` when `base-tree` needed the same
 // stale-sweep-then-remove step (its rationale lives there, with the helper), and
 // `exposeDependencies` followed it when `scratch-tree` needed the same
@@ -82,6 +82,7 @@ import {
   type ContainerRuntime,
 } from './lib/sandboxed-exec.js';
 import {
+  type LocalFilterScreen,
   discardWorktree,
   exposeDependencies,
   localFilterCommands,
@@ -1571,6 +1572,23 @@ function probeContainer(
   };
 }
 
+/**
+ * The screened keys, flattened and bounded, for a refusal message.
+ *
+ * Both halves matter: `inertPath` because a config subsection name legally
+ * carries control and format characters that `--get-regexp` prints verbatim,
+ * and these strings land in the agent-facing report; the cap because the list
+ * comes from an attacker-writable file and an unbounded join is its own
+ * denial-of-service. The count is kept so a truncated list still says how much
+ * it is not showing.
+ */
+function screenKeyList(screen: LocalFilterScreen): string {
+  const shown = screen.keys.map(inertPath).join(', ');
+  return screen.total > screen.keys.length
+    ? `${shown} (capped enumeration: ${screen.keys.length} shown of ${screen.total})`
+    : shown;
+}
+
 function restoreProbeTreeTracked(probeTree: string): string | null {
   if (!existsSync(join(probeTree, '.git'))) {
     return `${probeTree} carries no .git, so there is no commit to put it back to`;
@@ -1654,10 +1672,10 @@ function restoreProbeTreeTracked(probeTree: string): string | null {
   // failure as a tripwire that fires on every healthy run.
   const filters = localFilterCommands(probeTree);
   if (filters.unreadable) {
-    return `the repository's local config file ${filters.unreadable} could not be read to the end, so whether this tree's restore would EXECUTE a content filter is unknown`;
+    return `the repository's local config file ${inertPath(filters.unreadable)} could not be read to the end, so whether this tree's restore would EXECUTE a content filter is unknown`;
   }
   if (filters.keys.length > 0) {
-    return `the repository's local config defines content filter(s) ${filters.keys.join(', ')}, which this tree's restore would EXECUTE`;
+    return `the repository's local config defines content filter(s) ${screenKeyList(filters)}, which this tree's restore would EXECUTE`;
   }
   // `core.fsmonitor` runs a command on BOTH of these, and the config that sets
   // it lives in the tree they are cleaning: the residue probe empties it for
@@ -2997,7 +3015,7 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
         const revertFilters = localFilterCommands(probeTree);
         if (revertFilters.unreadable) {
           throw new Error(
-            `the repository's local config file ${revertFilters.unreadable} ` +
+            `the repository's local config file ${inertPath(revertFilters.unreadable)} ` +
               'could not be read to the end, so whether this revert would ' +
               'EXECUTE a content filter is unknown',
           );
@@ -3005,7 +3023,7 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
         if (revertFilters.keys.length > 0) {
           throw new Error(
             "the repository's local config defines content filter(s) " +
-              `${revertFilters.keys.join(', ')}, which this revert's checkout ` +
+              `${screenKeyList(revertFilters)}, which this revert's checkout ` +
               'would EXECUTE',
           );
         }

@@ -581,6 +581,20 @@ function trackedIgnoreSources(
 export const RESIDUE_PATH_CAP = 12;
 
 /**
+ * Caps for the config screen, which reads attacker-writable files.
+ *
+ * `MAX_SCREEN_KEYS` bounds what a refusal REPORTS — the message names the
+ * first keys and the caller says how many more; an unbounded join is its own
+ * denial-of-service, the same rule the `unreadable` field follows by naming
+ * one file rather than a list. `MAX_SCREEN_CANDIDATES` bounds what the screen
+ * READS: one synchronous spawn per registered worktree, on a directory a
+ * probe can fill. Both fail closed — past the candidate bound the screen
+ * refuses, because skipping would let filler entries hide a real filter.
+ */
+export const MAX_SCREEN_KEYS = RESIDUE_PATH_CAP;
+export const MAX_SCREEN_CANDIDATES = 256;
+
+/**
  * The repo-local `filter.<name>` COMMANDS, when any are defined.
  *
  * A checkout EXECUTES these whenever it rewrites a file, and disabling hooks
@@ -594,7 +608,7 @@ export const RESIDUE_PATH_CAP = 12;
  * a completeness map — widening the screen means adding a call site, and the
  * count above is what has one.
  *
- * The planting surface is two plain writes a probe can
+ * The planting surface this screen covers is two plain writes a probe can
  * make into the COMMON dir this command's report calls shared:
  * `git config filter.evil.smudge CMD` and one line appended to
  * `$(git rev-parse --git-path info/attributes)`. discard and cleanup never
@@ -603,14 +617,25 @@ export const RESIDUE_PATH_CAP = 12;
  * planted by reviewing a malicious PR, measured live. The two local config
  * files are checked with `--file` rather than merged config because filters
  * in the user's global config (git-lfs is the common one) are the user's own
- * contract, exactly like any git command they run — while a probe's planting
- * surface is the repo-local files. The state cannot be told apart from a
+ * contract, exactly like any git command they run. That is a deliberate
+ * TRADE, not a claim that repo-local files are all a probe can reach: probe
+ * code runs as the user, so `git config --global` is open to it, and a filter
+ * planted there is read by every checkout here and never seen by this screen.
+ * Refusing on merged config is not the answer — `git lfs install` writes
+ * `filter.lfs.clean` globally, and refusing on that is permanent refusal for
+ * every contributor who has git-lfs. The state cannot be told apart from a
  * filter the user set deliberately, and cannot be safely wiped, so a hit is a
  * refusal upstream, not a cleanup here.
  */
 export interface LocalFilterScreen {
-  /** The repo-local `filter.<name>` command keys found, when any are defined. */
+  /**
+   * The repo-local `filter.<name>` command keys found, capped at
+   * `MAX_SCREEN_KEYS`. `total` says how many there were before the cap, so a
+   * refusal can name what it is not showing instead of silently shortening.
+   */
   keys: string[];
+  /** How many distinct keys the screen found, before the cap on `keys`. */
+  total: number;
   /**
    * The first candidate file the screen could not read to completion, when one
    * stopped it — otherwise null.
@@ -635,7 +660,7 @@ export function localFilterCommands(worktree: string): LocalFilterScreen {
   if (files.error || files.status !== 0 || typeof files.stdout !== 'string') {
     // Not a usable repository from here: the checkout this screen guards has
     // nothing to run in either, and its own failure is the caller's answer.
-    return { keys: [], unreadable: null };
+    return { keys: [], total: 0, unreadable: null };
   }
   const [commonDir, gitDir] = files.stdout.trim().split('\n');
   const common = resolve(worktree, commonDir);
@@ -650,14 +675,35 @@ export function localFilterCommands(worktree: string): LocalFilterScreen {
   // planted there executed during the reset while this function reported the
   // repository clean. The admin directory is one `readdir`, and a filter in
   // any of these is a plant whichever tree carries it.
+  //
+  // Bounded, and fail closed over the bound. Each entry costs one synchronous
+  // `git config` spawn below, and the admin directory is the same never-wiped
+  // surface the filter itself is planted in: M empty `worktrees/<e>/` dirs are
+  // M spawns on EVERY screen call, which is once per mutant. A healthy repo
+  // carries O(shards) entries. Past the cap the screen has not read what it
+  // was asked to read, so it refuses rather than walking a plant's filler —
+  // and refusing beats skipping, which would let filler hide a real filter.
+  let worktreeEntries: string[] | null = null;
   try {
-    for (const entry of readdirSync(join(common, 'worktrees'))) {
-      candidates.push(join(common, 'worktrees', entry, 'config.worktree'));
+    worktreeEntries = readdirSync(join(common, 'worktrees'));
+  } catch (e) {
+    // ENOENT is the ordinary "no linked worktrees registered" — the two
+    // candidates above are all of it. Anything else is a directory this
+    // screen could NOT walk while git still opens each `config.worktree` by
+    // direct path (the search bit alone suffices), so a swallowed EACCES
+    // would answer clean on candidates that were never read. Refuse instead:
+    // this is the directory-level twin of the per-file readability gate below.
+    if ((e as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+      return { keys: [], total: 0, unreadable: join(common, 'worktrees') };
     }
-  } catch {
-    // No linked worktrees registered: the two candidates above are all of it.
   }
-  const found: string[] = [];
+  if (worktreeEntries && worktreeEntries.length > MAX_SCREEN_CANDIDATES) {
+    return { keys: [], total: 0, unreadable: join(common, 'worktrees') };
+  }
+  for (const entry of worktreeEntries ?? []) {
+    candidates.push(join(common, 'worktrees', entry, 'config.worktree'));
+  }
+  const found = new Set<string>();
   let unreadable: string | null = null;
   for (const file of candidates) {
     if (!existsSync(file)) continue;
@@ -713,10 +759,20 @@ export function localFilterCommands(worktree: string): LocalFilterScreen {
     if (r.status === 1 || typeof r.stdout !== 'string') continue;
     for (const line of r.stdout.split('\n')) {
       const key = line.split(/\s+/)[0];
-      if (key && !found.includes(key)) found.push(key);
+      // A Set, not `Array.includes`: the values here are attacker-written and
+      // the 64 MiB ceiling above admits millions of distinct keys, so a linear
+      // membership test per line is quadratic on exactly the input this screen
+      // exists to survive. (Measured: 100k keys took 144 s as an array scan and
+      // 53 ms as a Set — and the 1 MiB default this raised from used to hide it
+      // by ENOBUFS-killing git and skipping the loop entirely.)
+      if (key) found.add(key);
     }
   }
-  return { keys: found, unreadable };
+  return {
+    keys: [...found].slice(0, MAX_SCREEN_KEYS),
+    total: found.size,
+    unreadable,
+  };
 }
 
 /**

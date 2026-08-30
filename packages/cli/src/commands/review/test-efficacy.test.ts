@@ -716,6 +716,37 @@ describe('restoreProbeTreeTracked, through runOneMutant', () => {
     }
   });
 
+  it('refuses when git cannot PARSE a candidate config — not "clean"', () => {
+    // The readability gate above answers "can this process open it"; this is
+    // the other half — a file that opens fine and that git then dies on. A
+    // malformed section header exits 128 (not the 1 that means "no key
+    // matched"), so a screen that only distinguished 0 from non-0 would skip
+    // the file and report the repository clean on a config it never read.
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-malformed-'));
+    const isolation = isolateHostGitConfig();
+    try {
+      writeFileSync(join(dir, 'a.ts'), 'gone.clear();\n');
+      asCheckout(dir);
+      // Unclosed section header — a regular, readable file git refuses to parse.
+      writeFileSync(
+        join(dir, '.git', 'config.worktree'),
+        '[filter "evil"\n\tsmudge = cat\n',
+      );
+
+      const r = runOneMutant(
+        dir,
+        { file: 'a.ts', line: 1, statement: 'gone.clear();' },
+        ['a.test.ts'],
+      );
+
+      expect(r.verdict).toBe('inconclusive');
+      expect(r.detail).toContain('could not be read to the end');
+    } finally {
+      isolation.dispose();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('refuses to run when the index hides a tracked file from the restore', () => {
     // `checkout --force` SILENTLY skips a file carrying skip-worktree, and
     // `clean` never touches a tracked file — so a bit the guest suite sets with

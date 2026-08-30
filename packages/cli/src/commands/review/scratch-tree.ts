@@ -55,6 +55,7 @@ import {
 } from './lib/paths.js';
 import { shellQuotePath } from './lib/shell-quote.js';
 import {
+  MAX_SCREEN_KEYS,
   RESIDUE_PATH_CAP,
   discardWorktree,
   exposeDependencies,
@@ -435,6 +436,7 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
   if (filters.keys.length > 0) {
     return unavailable(
       `the repository's local config defines content filter(s) ${filters.keys
+        .slice(0, MAX_SCREEN_KEYS)
         .map(inertPath)
         .join(', ')} — ` +
         'the checkouts this command runs would EXECUTE them (hooks are disabled, ' +

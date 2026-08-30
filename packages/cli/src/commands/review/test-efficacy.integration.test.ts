@@ -970,26 +970,13 @@ process.stdout.write(JSON.stringify({
       `#!/usr/bin/env node
 import path from 'node:path';
 const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
-// Same positive-control semantics as the default fake: the injected
-// always-failing test must actually fail, or the run re-classes to
-// control-failed and never reaches the revert this test is about.
-const st = (f) => {
-  try {
-    return fs.readFileSync(f, 'utf8').includes('QWEN-REVIEW-POSITIVE-CONTROL')
-      ? 'failed'
-      : 'passed';
-  } catch {
-    return 'passed';
-  }
-};
 const results = files.map((f) => ({
   name: path.resolve(f),
-  assertionResults: [{ status: st(f) }],
+  assertionResults: [{ status: 'passed' }],
 }));
-const failed = results.filter((r) => r.assertionResults[0].status === 'failed').length;
 process.stdout.write(JSON.stringify({
-  numPassedTests: results.length - failed,
-  numFailedTests: failed,
+  numPassedTests: results.length,
+  numFailedTests: 0,
   testResults: results,
 }));
 `,

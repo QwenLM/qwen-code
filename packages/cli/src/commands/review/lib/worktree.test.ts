@@ -32,8 +32,11 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { isolateHostGitConfig } from './test-utils.js';
 import {
+  MAX_SCREEN_CANDIDATES,
+  MAX_SCREEN_KEYS,
   discardWorktree,
   exposeDependencies,
+  localFilterCommands,
   sanitizedGitEnv,
   worktreeCreateFailureDetail,
   worktreeResidue,
@@ -1883,5 +1886,112 @@ describe('worktreeCreateFailureDetail', () => {
     expect(worktreeCreateFailureDetail('probe', 'boom', '')).toBe(
       'probe worktree could not be created: boom',
     );
+  });
+});
+
+describe('localFilterCommands', () => {
+  let dir: string;
+  let isolation: { dispose: () => void };
+
+  const initRepo = (d: string) => {
+    execFileSync('git', ['init', '-q', '-b', 'main', '--template=', '.'], {
+      cwd: d,
+    });
+  };
+
+  beforeEach(() => {
+    isolation = isolateHostGitConfig();
+    dir = mkdtempSync(join(tmpdir(), 'qwen-screen-'));
+    initRepo(dir);
+  });
+
+  afterEach(() => {
+    try {
+      chmodSync(join(dir, '.git', 'worktrees'), 0o755);
+    } catch {
+      // Not every case creates it; rmSync below is the cleanup either way.
+    }
+    isolation.dispose();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('finds a repo-local filter and reports the total', () => {
+    execFileSync('git', ['config', 'filter.evil.smudge', 'cat'], { cwd: dir });
+
+    const screen = localFilterCommands(dir);
+
+    expect(screen.keys).toEqual(['filter.evil.smudge']);
+    expect(screen.total).toBe(1);
+    expect(screen.unreadable).toBeNull();
+  });
+
+  it('caps the reported keys and keeps the pre-cap total', () => {
+    // The keys come from an attacker-writable file that cleanup never wipes;
+    // an unbounded list is its own denial-of-service in the refusal message.
+    let cfg = '';
+    for (let i = 0; i < MAX_SCREEN_KEYS + 5; i++) {
+      cfg += `[filter "evil${i}"]\n\tsmudge = cat\n`;
+    }
+    appendFileSync(join(dir, '.git', 'config'), cfg);
+
+    const screen = localFilterCommands(dir);
+
+    expect(screen.keys).toHaveLength(MAX_SCREEN_KEYS);
+    expect(screen.total).toBe(MAX_SCREEN_KEYS + 5);
+    // Still names a real planted key — a cap that reported none would be a
+    // refusal nobody can act on.
+    expect(screen.keys[0]).toMatch(/^filter\.evil\d+\.smudge$/);
+  });
+
+  it('refuses past the candidate cap instead of walking a plant\'s filler', () => {
+    // Each entry costs one synchronous `git config` spawn, on every screen
+    // call — once per mutant. Skipping past the bound would let filler hide a
+    // real filter behind it, so the screen refuses.
+    for (let i = 0; i <= MAX_SCREEN_CANDIDATES; i++) {
+      mkdirSync(join(dir, '.git', 'worktrees', `filler-${i}`), {
+        recursive: true,
+      });
+    }
+
+    const screen = localFilterCommands(dir);
+
+    expect(screen.unreadable).toBe(join(dir, '.git', 'worktrees'));
+    expect(screen.keys).toEqual([]);
+  });
+
+  it('refuses when the worktrees admin dir cannot be read', () => {
+    // git opens each `worktrees/<e>/config.worktree` by direct path — the
+    // search bit alone suffices — so a readdir that fails with EACCES means
+    // the screen never saw candidates git will still honour. Swallowing that
+    // as "no linked worktrees" answers clean on a config it did not read.
+    const admin = join(dir, '.git', 'worktrees');
+    mkdirSync(admin, { recursive: true });
+    chmodSync(admin, 0o111);
+
+    const screen = localFilterCommands(dir);
+
+    expect(screen.unreadable).toBe(admin);
+  });
+
+  it('stays clean on a repo with no linked worktrees at all', () => {
+    // ENOENT on the admin dir is the ordinary case and must NOT refuse.
+    expect(existsSync(join(dir, '.git', 'worktrees'))).toBe(false);
+
+    const screen = localFilterCommands(dir);
+
+    expect(screen).toEqual({ keys: [], total: 0, unreadable: null });
+  });
+
+  it('refuses a candidate git cannot parse', () => {
+    // Opens fine, and git then dies on it with exit 128 — not the exit 1 that
+    // means "no key matched".
+    writeFileSync(
+      join(dir, '.git', 'config.worktree'),
+      '[filter "evil"\n\tsmudge = cat\n',
+    );
+
+    const screen = localFilterCommands(dir);
+
+    expect(screen.unreadable).toBe(join(dir, '.git', 'config.worktree'));
   });
 });
