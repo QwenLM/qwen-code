@@ -2047,7 +2047,8 @@ export class LlmChat {
    */
   private pendingPartialAssistantTurnIndex: number | null = null;
   private pendingPartialAssistantRecord:
-    Parameters<ChatRecordingService['recordAssistantTurn']>[0] | null = null;
+    | Parameters<ChatRecordingService['recordAssistantTurn']>[0]
+    | null = null;
 
   /**
    * MAX_TOKENS output-recovery turns whose durable JSONL record is deferred.
@@ -4022,7 +4023,8 @@ export class LlmChat {
         let activeRecoveryHistoryMutationVersion: number | undefined;
         let activeRecoveryVisibleParts: Part[] = [];
         let activeRecoveryVisibleTokens:
-          GenerateContentResponseUsageMetadata | undefined;
+          | GenerateContentResponseUsageMetadata
+          | undefined;
         const activeRecoveryAttemptIsCurrent = () =>
           self.historyMutationVersion ===
             activeRecoveryHistoryMutationVersion &&
@@ -4346,7 +4348,8 @@ export class LlmChat {
             const escalatedHistoryMutationVersion = self.historyMutationVersion;
             let escalatedVisibleParts: Part[] = [];
             let escalatedVisibleTokens:
-              GenerateContentResponseUsageMetadata | undefined;
+              | GenerateContentResponseUsageMetadata
+              | undefined;
             let escalatedAttemptCommitted = false;
             abandonEscalatedAttempt = () => {
               if (escalatedAttemptCommitted) {
@@ -5560,17 +5563,32 @@ export class LlmChat {
 
   setHistory(history: Content[]): void {
     this.historyMutationVersion++;
+    const previousHistory = this.history;
     const deferredTarget = this.deferredMaxTokensRecordTarget;
     const activeRecoveryUser = this.activeRecoveryUserContent;
     const activeRecoveryModel = this.activeRecoveryModelContent;
+    const deferredTargetIndex = deferredTarget
+      ? previousHistory.indexOf(deferredTarget)
+      : -1;
+    const activeRecoveryUserIndex = activeRecoveryUser
+      ? previousHistory.indexOf(activeRecoveryUser)
+      : -1;
+    const activeRecoveryModelIndex = activeRecoveryModel
+      ? previousHistory.indexOf(activeRecoveryModel)
+      : -1;
     this.history = history;
     const findReplacement = (
       target: Content | undefined,
       label: string,
+      previousIndex: number,
     ): Content | undefined => {
       if (!target) return undefined;
       const identical = history.find((entry) => entry === target);
       if (identical) return identical;
+      const positional = history[previousIndex];
+      if (positional && isDeepStrictEqual(positional, target)) {
+        return positional;
+      }
       let equivalent: Content | undefined;
       for (const entry of history) {
         if (!isDeepStrictEqual(entry, target)) continue;
@@ -5588,6 +5606,7 @@ export class LlmChat {
     const replacementTarget = findReplacement(
       deferredTarget,
       'deferred model turn',
+      deferredTargetIndex,
     );
     if (deferredTarget && replacementTarget?.role === 'model') {
       this.deferredMaxTokensRecordTarget = replacementTarget;
@@ -5600,6 +5619,7 @@ export class LlmChat {
     const replacementRecoveryUser = findReplacement(
       activeRecoveryUser,
       'active recovery user turn',
+      activeRecoveryUserIndex,
     );
     if (replacementRecoveryUser?.role === 'user') {
       this.activeRecoveryUserContent = replacementRecoveryUser;
@@ -5607,6 +5627,7 @@ export class LlmChat {
     const replacementRecoveryModel = findReplacement(
       activeRecoveryModel,
       'active recovery model turn',
+      activeRecoveryModelIndex,
     );
     if (replacementRecoveryModel?.role === 'model') {
       this.activeRecoveryModelContent = replacementRecoveryModel;
@@ -5617,7 +5638,8 @@ export class LlmChat {
     // a model turn at the stale index in the replacement history and
     // splice an entry that has nothing to do with the original partial
     // push, corrupting the conversation. Settle the paired deferred record
-    // against an exact surviving object or a unique equivalent clone.
+    // against an exact surviving object, its equivalent at the same position,
+    // or a unique equivalent clone.
     this.clearPendingPartialState();
     this.redactApprovedPlansFromLoadedHistory();
     this.settleDeferredMaxTokensRecords();
@@ -5865,7 +5887,8 @@ export class LlmChat {
     let usageMetadata: GenerateContentResponseUsageMetadata | undefined;
     let coercedUsage: Partial<GenerateContentResponseUsageMetadata> | undefined;
     let deferredRecord:
-      Parameters<ChatRecordingService['recordAssistantTurn']>[0] | undefined;
+      | Parameters<ChatRecordingService['recordAssistantTurn']>[0]
+      | undefined;
 
     let hasToolCall = false;
     let hasFinishReason = false;

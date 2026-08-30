@@ -15733,8 +15733,27 @@ describe('LlmChat', async () => {
     it('records one merged turn on the non-escalation recovery path', async () => {
       // No discarded initial attempt here (model does not escalate), so the
       // truncated turn is deferred directly and merged with its continuation.
-      const recordAssistantTurn = vi.fn();
-      const recordingChat = chatWithRecorder(recordAssistantTurn);
+      const persisted: ChatRecord[] = [];
+      Object.assign(mockConfig, { getResumedSessionData: () => undefined });
+      const recorder = new ChatRecordingService(mockConfig);
+      recorder.activate({
+        sessionId: 'test-session-id',
+        isReleased: false,
+        appendJsonLine: vi.fn(async (record: ChatRecord) => {
+          persisted.push(record);
+        }),
+        assertOwnedAndUnchanged: vi.fn(),
+        release: vi.fn(),
+        sealForHandoff: vi.fn(),
+      } as unknown as Parameters<ChatRecordingService['activate']>[0]);
+      recorder.recordUserMessage([{ text: 'write a long essay' }]);
+      const recordingChat = new LlmChat(
+        mockConfig,
+        config,
+        [],
+        recorder,
+        uiTelemetryService,
+      );
       const streams = [
         makeStream([makeChunk([{ text: 'Hello' }], 'MAX_TOKENS')]),
         makeStream([makeChunk([{ text: ' ending.' }], 'STOP')]),
@@ -15759,8 +15778,16 @@ describe('LlmChat', async () => {
         .parts?.map((part) => ('text' in part ? part.text : ''))
         .join('');
       expect(historyText).toBe('Hello ending.');
-      expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
-      expect(recordedText(recordAssistantTurn)).toBe(historyText);
+      await recorder.flush();
+      expect(
+        persisted.filter((record) => record.type === 'assistant'),
+      ).toHaveLength(1);
+      expect(persisted.at(-1)?.message?.parts?.[0]?.text).toBe(historyText);
+      const prepared = prepareTranscriptRecords(persisted);
+      const resumed = buildApiHistoryFromConversation({
+        messages: prepared.records as ChatRecord[],
+      });
+      expect(resumed).toEqual(recordingChat.getHistory());
     });
 
     it('still records the truncated turn once when recovery is skipped for a functionCall', async () => {
@@ -17304,6 +17331,40 @@ describe('LlmChat', async () => {
         baseModel,
       );
       expect(internal.deferredMaxTokensRecordTarget).toBe(baseModel);
+    });
+
+    it('rebinds a deferred record by position when turns are equivalent', () => {
+      const recordAssistantTurn = vi.fn();
+      const target: Content = { role: 'model', parts: [{ text: 'same' }] };
+      const duplicate: Content = { role: 'model', parts: [{ text: 'same' }] };
+      const recordingChat = new LlmChat(
+        mockConfig,
+        config,
+        [{ role: 'user', parts: [{ text: 'q' }] }, target, duplicate],
+        {
+          recordAssistantTurn,
+        } as unknown as ConstructorParameters<typeof LlmChat>[3],
+        uiTelemetryService,
+      );
+      const internal = recordingChat as unknown as {
+        deferredMaxTokensRecords: Array<{
+          record: Parameters<ChatRecordingService['recordAssistantTurn']>[0];
+          modelContent: Content;
+        }>;
+        deferredMaxTokensRecordTarget: Content | undefined;
+      };
+      internal.deferredMaxTokensRecords = [
+        {
+          record: { model: 'gemini-3-pro', message: [{ text: 'same' }] },
+          modelContent: target,
+        },
+      ];
+      internal.deferredMaxTokensRecordTarget = target;
+
+      recordingChat.setHistory(structuredClone(recordingChat.getHistory()));
+
+      expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+      expect(recordedText(recordAssistantTurn)).toBe('same');
     });
 
     it('coalesceRecoveryPairs rejects a role-mismatched tail atomically', () => {
