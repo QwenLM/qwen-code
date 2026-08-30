@@ -4,5 +4,8 @@ self-hosted-runner:
     - 'ecs-win'
     - 'ecs-update-sg'
     - 'ecs-update-64c'
+    - 'ecs-update-hk-1'
+    - 'ecs-update-hk-2'
+    - 'ecs-update-hk-3'
 
 config-variables: null
