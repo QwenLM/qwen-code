@@ -1792,7 +1792,11 @@ jobs:
                 && timeout 5 node -e 'const fs=require("fs");const fd=fs.openSync(process.argv[1],"r");if(fs.fstatSync(fd).size>2097152)process.exit(1);const v=JSON.parse(fs.readFileSync(fd,"utf8"));if(typeof v!=="object"||v===null||Array.isArray(v))process.exit(1);' "$COMPOSED_ARTIFACT" 2>/dev/null; then
                 write_signal "${SALVAGE_DIR}/compose-seen" '' || true
               fi
-              live_head="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefOid --jq '.headRefOid' 2>/dev/null)" || continue
+              # QWEN_CI_REAL_GH pin (full rationale at live_head_moved):
+              # bare `gh` resolves through the agent-writable $proxy_bin
+              # PATH prepend, so a planted gh could forge the move this
+              # poll decides on.
+              live_head="$("${QWEN_CI_REAL_GH:-gh}" pr view "$PR_NUMBER" --repo "$REPO" --json headRefOid --jq '.headRefOid' 2>/dev/null)" || continue
               if [ -z "$live_head" ] || [ "$live_head" = "$EXPECTED_HEAD_SHA" ]; then
                 continue
               fi
@@ -1858,10 +1862,19 @@ jobs:
           # is forgeable, and a forged cede suppresses the whole review with
           # the job green and no replacement run queued. Re-read the live
           # head at decision time instead: only a REAL move justifies
-          # ceding; an unreadable or unmoved head falls through.
+          # ceding; an unreadable or unmoved head falls through. The read
+          # goes through QWEN_CI_REAL_GH — the absolute real-gh path
+          # captured before the wrapper existed, the same pin
+          # guard_pr_write uses: bare `gh` resolves via PATH through the
+          # agent-writable $proxy_bin prepend, so a hijacked agent could
+          # plant a gh that reports a forged move and cedes this run to
+          # itself. The :-gh fallback keeps the replay harnesses'
+          # PATH-shadowed stubs in charge where the variable is unset; in
+          # production it can only apply when no gh exists at all, and
+          # the read then fails the same way.
           live_head_moved() {
             local live
-            live="$(gh pr view "${PR_NUMBER:-}" --repo "${REPO:-}" --json headRefOid --jq '.headRefOid' 2>/dev/null || true)"
+            live="$("${QWEN_CI_REAL_GH:-gh}" pr view "${PR_NUMBER:-}" --repo "${REPO:-}" --json headRefOid --jq '.headRefOid' 2>/dev/null || true)"
             [ -n "$live" ] && [ "$live" != "${EXPECTED_HEAD_SHA:-}" ]
           }
           # The supersede/moved-to files carry a head SHA this step
@@ -1893,14 +1906,17 @@ jobs:
           # returns to a head it left by force-push, so a force-push that
           # landed BACK on the expected head during this run is the
           # move-then-revert signature; timeline events are server-side —
-          # the reviewed agent cannot forge them. A match cedes clean; an
+          # the reviewed agent cannot forge them while the read goes
+          # through QWEN_CI_REAL_GH instead of a gh planted in the
+          # agent-writable $proxy_bin PATH prepend (live_head_moved
+          # carries the full rationale). A match cedes clean; an
           # unavailable or silent timeline keeps the red failure.
           supersede_reverted_during_run() {
             local owner repo events before after at departed=0
             owner="${REPO:-}"
             repo="${owner##*/}"
             owner="${owner%%/*}"
-            events="$(gh api graphql -f query='query($owner:String!, $repo:String!, $number:Int!) { repository(owner: $owner, name: $repo) { pullRequest(number: $number) { timelineItems(last: 25, itemTypes: [HEAD_REF_FORCE_PUSHED_EVENT]) { nodes { ... on HeadRefForcePushedEvent { createdAt beforeCommit { oid } afterCommit { oid } } } } } } }' -F owner="$owner" -F repo="$repo" -F number="${PR_NUMBER:-}" --jq '.data.repository.pullRequest.timelineItems.nodes[]? | (.beforeCommit.oid // "") + " " + (.afterCommit.oid // "") + " " + (.createdAt // "")' 2>/dev/null)" || return 1
+            events="$("${QWEN_CI_REAL_GH:-gh}" api graphql -f query='query($owner:String!, $repo:String!, $number:Int!) { repository(owner: $owner, name: $repo) { pullRequest(number: $number) { timelineItems(last: 25, itemTypes: [HEAD_REF_FORCE_PUSHED_EVENT]) { nodes { ... on HeadRefForcePushedEvent { createdAt beforeCommit { oid } afterCommit { oid } } } } } } }' -F owner="$owner" -F repo="$repo" -F number="${PR_NUMBER:-}" --jq '.data.repository.pullRequest.timelineItems.nodes[]? | (.beforeCommit.oid // "") + " " + (.afterCommit.oid // "") + " " + (.createdAt // "")' 2>/dev/null)" || return 1
             [ -n "$events" ] || return 1
             # The watcher's kill record covers the modal supersede shape —
             # a normal fast-forward departure emits no force-push event, so

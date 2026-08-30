@@ -4379,6 +4379,8 @@ describe('review supersede salvage (#10110)', () => {
     emptyFirstPoll = false,
     attemptStartRaw = null,
     removeSalvageDir = false,
+    realGhHead = null,
+    sleepFailAfter = null,
   } = {}) {
     const dir = mkdtempSync(join(tmpdir(), 'review-watcher-'));
     // Stubs and logs live OUTSIDE SALVAGE_DIR: the delete variant removes it
@@ -4418,7 +4420,22 @@ describe('review supersede salvage (#10110)', () => {
         writeFileSync(p, body);
         chmodSync(p, 0o755);
       };
-      write('sleep', '#!/bin/bash\nexit 0\n');
+      // sleepFailAfter bounds the poll loop for no-decision replays
+      // (a truthful, unmoved head never exits the loop on its own):
+      // the (N+1)th sleep fails and `while sleep ...; do` ends clean.
+      write(
+        'sleep',
+        sleepFailAfter === null
+          ? '#!/bin/bash\nexit 0\n'
+          : [
+              '#!/bin/bash',
+              `count_file="${side}/sleep-count"`,
+              'n=$(( $(cat "$count_file" 2>/dev/null || echo 0) + 1 ))',
+              'echo "$n" > "$count_file"',
+              `[ "$n" -le ${sleepFailAfter} ] || exit 1`,
+              'exit 0',
+            ].join('\n') + '\n',
+      );
       write(
         'gh',
         failFirstPoll || emptyFirstPoll
@@ -4434,6 +4451,19 @@ describe('review supersede salvage (#10110)', () => {
             ].join('\n') + '\n'
           : `#!/bin/bash\necho "${liveHead}"\n`,
       );
+      // R14-1 dual: the truthful gh the decision sites must read via
+      // QWEN_CI_REAL_GH while PATH's `gh` lies — mirroring production,
+      // where QWEN_CI_REAL_GH is captured before the wrapper exists and
+      // bare `gh` resolves through the agent-writable $proxy_bin PATH
+      // prepend a hijacked agent can overwrite.
+      let realGhPath = null;
+      if (realGhHead !== null) {
+        const realBin = join(side, 'realbin');
+        mkdirSync(realBin);
+        realGhPath = join(realBin, 'gh');
+        writeFileSync(realGhPath, `#!/bin/bash\necho "${realGhHead}"\n`);
+        chmodSync(realGhPath, 0o755);
+      }
       write('pkill', `#!/bin/bash\necho "$*" >> "${pkillLog}"\n`);
       // The watcher's bounded reads (timeout 5 node/head ...) need a
       // timeout(1) on every lane: macOS ships none, and a missing binary
@@ -4487,7 +4517,11 @@ describe('review supersede salvage (#10110)', () => {
         execFileSync('bash', ['-c', harness], {
           encoding: 'utf8',
           timeout: 30_000,
-          env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+          env: {
+            ...process.env,
+            PATH: `${bin}:${process.env.PATH}`,
+            ...(realGhPath !== null ? { QWEN_CI_REAL_GH: realGhPath } : {}),
+          },
         });
       } catch {
         // A watcher that dies before its one-shot decision (errexit on a
@@ -4743,6 +4777,24 @@ describe('review supersede salvage (#10110)', () => {
     expect(empty.superseded).toBe('head-b');
     expect(empty.pkilled).toBe(true);
     expect(empty.marker).toBeNull();
+  });
+
+  it('ignores a planted PATH gh reporting a moved head when the real gh refutes it (replayed watcher)', () => {
+    // R14-1: bare `gh` in the poll resolves through the agent-writable
+    // $proxy_bin PATH prepend, so a hijacked agent plants a gh that
+    // reports a forged move — SUPERSEDE_FILE and the pkill land within
+    // one poll. The poll must read QWEN_CI_REAL_GH: the truthful head
+    // never trips the decision, and sleepFailAfter ends the loop after
+    // three uneventful polls.
+    const r = runWatcher({
+      liveHead: 'head-b',
+      realGhHead: 'head-a',
+      sleepFailAfter: 3,
+    });
+    expect(r.superseded).toBeNull();
+    expect(r.marker).toBeNull();
+    expect(r.movedTo).toBeNull();
+    expect(r.pkilled).toBe(false);
   });
 
   it('stops acting past the budget plus grace (replayed watcher)', () => {
@@ -5045,6 +5097,42 @@ describe('review supersede salvage (#10110)', () => {
     }
   });
 
+  it('does not cede when a planted PATH gh reports a moved head the real gh refutes (replayed loop)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'review-salvage-'));
+    try {
+      const supersedeFile = join(dir, 'superseded');
+      writeFileSync(supersedeFile, 'head-b');
+      // R14-1: bare `gh` at the cede sites resolves through the
+      // agent-writable $proxy_bin PATH prepend, so a hijacked agent
+      // plants a gh reporting a forged move and cedes the run to itself
+      // with the head never moved. The decision must read
+      // QWEN_CI_REAL_GH — the truthful stub refutes the move and the
+      // review completes. SLEEP_FAIL_AFTER=0 ends the armed watcher
+      // before its first poll so the top-of-loop site is the only
+      // decision in the replay.
+      const realBin = join(dir, 'realbin');
+      mkdirSync(realBin);
+      const realGh = join(realBin, 'gh');
+      writeFileSync(realGh, '#!/bin/bash\necho "head-a"\n');
+      chmodSync(realGh, 0o755);
+      const r = runScenario('success', {
+        armWatcher: true,
+        extraEnv: {
+          SUPERSEDE_FILE: supersedeFile,
+          EXPECTED_HEAD_SHA: 'head-a',
+          STUB_LIVE_HEAD: 'head-b',
+          SLEEP_FAIL_AFTER: '0',
+          QWEN_CI_REAL_GH: realGh,
+        },
+      });
+      expect(r.raw).not.toContain('Superseded early:');
+      expect(r.line).toBe('OK outcome=success');
+      expect(r.attempts).toBe(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('does not cede to a supersede file forged mid-attempt when the head never moved (replayed loop)', () => {
     const dir = mkdtempSync(join(tmpdir(), 'review-salvage-'));
     try {
@@ -5247,6 +5335,53 @@ describe('review supersede salvage (#10110)', () => {
       });
       expect(other.status).toBe(1);
       expect(other.raw).toContain('FAIL ');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not cede a reverted supersede to a forged timeline served by a planted gh (replayed loop)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'review-salvage-'));
+    try {
+      const supersedeFile = join(dir, 'superseded');
+      writeFileSync(supersedeFile, 'head-b');
+      // R14-1: the timeline witness is only unforgeable while the read
+      // bypasses the agent-writable $proxy_bin PATH prepend — a planted
+      // gh answers the graphql query with the full move-then-revert pair
+      // while the real timeline is silent. The read must go through
+      // QWEN_CI_REAL_GH: the empty real timeline refuses the cede and
+      // the killed attempt keeps its red failure.
+      const realBin = join(dir, 'realbin');
+      mkdirSync(realBin);
+      const realGh = join(realBin, 'gh');
+      writeFileSync(
+        realGh,
+        [
+          '#!/bin/bash',
+          'if [ "${1:-}" = "api" ]; then',
+          '  exit 0',
+          'fi',
+          'echo "head-a"',
+        ].join('\n') + '\n',
+      );
+      chmodSync(realGh, 0o755);
+      const now = new Date().toISOString();
+      const r = runScenario('cede_revert_kill', {
+        armWatcher: true,
+        extraEnv: {
+          SUPERSEDE_FILE: supersedeFile,
+          EXPECTED_HEAD_SHA: 'head-a',
+          STUB_LIVE_HEAD: 'head-a',
+          REPO: 'o/r',
+          SLEEP_FAIL_AFTER: '0',
+          STUB_TIMELINE: `head-a head-x ${now}\nhead-x head-a ${now}`,
+          QWEN_CI_REAL_GH: realGh,
+        },
+      });
+      expect(r.attempts).toBe(1);
+      expect(r.status).toBe(1);
+      expect(r.raw).toContain('FAIL ');
+      expect(r.raw).not.toContain('Superseded early:');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
