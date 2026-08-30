@@ -7651,9 +7651,17 @@ export class Config {
     return true;
   }
 
-  /** Hands the parked approval to the client at the turn boundary, once. */
-  takePendingGoalProposal(): PendingGoalProposal | undefined {
+  /** Hands the parked approval to its owning turn, or clears it explicitly. */
+  takePendingGoalProposal(
+    expectedTurnKey?: string,
+  ): PendingGoalProposal | undefined {
     const proposal = this.pendingGoalProposal;
+    if (
+      expectedTurnKey !== undefined &&
+      proposal?.turnKey !== expectedTurnKey
+    ) {
+      return undefined;
+    }
     this.pendingGoalProposal = undefined;
     return proposal;
   }

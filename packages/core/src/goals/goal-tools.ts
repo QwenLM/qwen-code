@@ -15,7 +15,7 @@ import type { PermissionDecision } from '../permissions/types.js';
 import { ApprovalMode } from '../config/config.js';
 import { StructuredToolError } from '../tools/priorReadEnforcement.js';
 import { ToolErrorType } from '../tools/tool-error.js';
-import { getInvocationContext } from '../utils/invocation-context.js';
+import { promptIdContext } from '../utils/promptIdContext.js';
 import {
   GoalConflictError,
   GoalInvalidTransitionError,
@@ -620,9 +620,8 @@ export interface PendingGoalProposal {
   objective: string;
   /**
    * The `prompt_id` of the turn whose dialog approved it. Only that turn's
-   * terminal boundary may set the Goal; any other frame that finds it parked
-   * discards it. This is what keeps a cancelled or hook-blocked turn from
-   * leaking its approval into a later Notification, Cron, or user turn.
+   * terminal boundary may set or discard the Goal; unrelated frames leave it
+   * parked for its owner. A new real user query clears any stale approval.
    */
   turnKey: string;
 }
@@ -839,7 +838,7 @@ class ProposeGoalInvocation extends BaseToolInvocation<
     // it here would strip the rest of the turn of its Goal permit. The
     // approval is bound to this turn's prompt id so no other frame can
     // apply it.
-    const turnKey = getInvocationContext()?.promptId;
+    const turnKey = promptIdContext.getStore();
     if (!turnKey) {
       return this.errorResult(
         PROPOSE_GOAL_NO_TURN_MESSAGE,

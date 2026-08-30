@@ -3023,12 +3023,26 @@ describe('Server Config (config.ts)', () => {
         }),
       ).toBe(false);
       expect(config.hasPendingGoalProposal()).toBe(true);
-      expect(config.takePendingGoalProposal()).toEqual({
+      expect(config.takePendingGoalProposal('turn-2')).toBeUndefined();
+      expect(config.hasPendingGoalProposal()).toBe(true);
+      expect(config.takePendingGoalProposal('turn-1')).toEqual({
         objective: 'first',
         turnKey: 'turn-1',
       });
       expect(config.hasPendingGoalProposal()).toBe(false);
       expect(config.takePendingGoalProposal()).toBeUndefined();
+
+      expect(
+        config.setPendingGoalProposal({
+          objective: 'explicitly cleared',
+          turnKey: 'turn-3',
+        }),
+      ).toBe(true);
+      expect(config.takePendingGoalProposal()).toEqual({
+        objective: 'explicitly cleared',
+        turnKey: 'turn-3',
+      });
+      expect(config.hasPendingGoalProposal()).toBe(false);
     });
 
     it('clears a parked proposal when the session Goal runtime is replaced', () => {

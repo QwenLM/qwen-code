@@ -27,6 +27,7 @@ import {
   setActiveGoal,
 } from '../goals/activeGoalStore.js';
 import { GOAL_HOOK_ID_OUTPUT_KEY } from '../goals/goalHook.js';
+import type { PendingGoalProposal } from '../goals/goal-tools.js';
 
 const turnMocks = vi.hoisted(() => ({
   constructors: [] as unknown[][],
@@ -92,6 +93,27 @@ async function collectOutcome(stream: AsyncGenerator<unknown>) {
   } catch (error) {
     return { events, error };
   }
+}
+
+function pendingGoalProposalStore(initial?: PendingGoalProposal) {
+  let pending = initial;
+  return {
+    get: () => pending,
+    set: (proposal: PendingGoalProposal) => {
+      pending = proposal;
+    },
+    take: vi.fn((expectedTurnKey?: string) => {
+      const proposal = pending;
+      if (
+        expectedTurnKey !== undefined &&
+        proposal?.turnKey !== expectedTurnKey
+      ) {
+        return undefined;
+      }
+      pending = undefined;
+      return proposal;
+    }),
+  };
 }
 
 type GoalStateEvent = Extract<
@@ -249,6 +271,7 @@ function setupGoalClient() {
     getUserContentPushCount: vi.fn(() => 0),
     getHistory: vi.fn(() => []),
     getHistoryLength: vi.fn(() => 0),
+    stripOrphanedUserEntriesFromHistory: vi.fn(() => []),
   } as unknown as LlmChat;
   client['drainPendingAddedMcpToolsReminder'] = vi.fn();
   client['drainSkillAndCommandReminders'] = vi.fn(async () => undefined);
@@ -598,7 +621,10 @@ describe('LlmClient Goal admission', () => {
         pending = { objective: 'ship it', turnKey: 'real-user-key' };
         return emptyStream();
       })
-      .mockImplementation(emptyStream);
+      .mockImplementationOnce(() => {
+        expect(runtime.dispatch).not.toHaveBeenCalled();
+        return emptyStream();
+      });
     const getSteerInput = vi
       .fn()
       .mockResolvedValueOnce({
@@ -633,19 +659,18 @@ describe('LlmClient Goal admission', () => {
       activity: 'idle',
       goal: null,
     });
-    let pending: { objective: string; turnKey: string } | undefined;
+    const store = pendingGoalProposalStore();
     Object.assign(config, {
-      takePendingGoalProposal: vi.fn(() => {
-        const proposal = pending;
-        pending = undefined;
-        return proposal;
-      }),
+      takePendingGoalProposal: store.take,
       getUsageStatisticsEnabled: vi.fn(() => false),
       getSkipNextSpeakerCheck: vi.fn(() => true),
     });
     turnMocks.run
       .mockImplementationOnce(async function* () {
-        pending = { objective: 'stale proposal', turnKey: 'failed-user-key' };
+        store.set({
+          objective: 'stale proposal',
+          turnKey: 'failed-user-key',
+        });
         yield {
           type: LlmEventType.Error,
           value: { error: { status: 500 } },
@@ -661,6 +686,7 @@ describe('LlmClient Goal admission', () => {
         { type: SendMessageType.UserQuery },
       ),
     );
+    expect(store.get()).toBeUndefined();
     await drain(
       client.sendMessageStream(
         [{ text: 'background notification' }],
@@ -770,50 +796,283 @@ describe('LlmClient Goal admission', () => {
     });
   });
 
-  it('drops an approval parked by another turn instead of settling it', async () => {
-    // A turn cancelled during tool execution never reaches a settle or
-    // discard site (that path does not flow through sendMessageStream), and
-    // a hook-blocked or recursive frame can return without either. Whatever
-    // left it parked, the next frame to settle is not the proposing turn:
-    // its prompt id differs, so the approval is dropped, never applied under
-    // a Notification/Cron turn the user did not start.
+  it.each(['terminal', 'aborted', 'throwing', 'side-query'] as const)(
+    'leaves the owner approval parked through a foreign %s turn',
+    async (exit) => {
+      const { client, config, runtime } = setupGoalClient();
+      nextSpeakerMocks.check.mockResolvedValue({ next_speaker: 'user' });
+      vi.mocked(runtime.getSnapshot).mockReturnValue({
+        v: 2,
+        activity: 'idle',
+        goal: null,
+      });
+      const store = pendingGoalProposalStore({
+        objective: 'approved earlier',
+        turnKey: 'owner-key',
+      });
+      Object.assign(config, {
+        takePendingGoalProposal: store.take,
+        getMaxSessionTurns: vi.fn(() => 0),
+        getUsageStatisticsEnabled: vi.fn(() => false),
+      });
+
+      if (exit === 'aborted') {
+        const controller = new AbortController();
+        controller.abort();
+        await client['settlePendingGoalProposal'](
+          true,
+          controller.signal,
+          async () => runtime,
+          'foreign-key',
+        );
+      } else {
+        if (exit === 'throwing') {
+          turnMocks.run.mockImplementationOnce(() => {
+            throw new Error('provider exploded');
+          });
+        }
+        const foreignTurn = drain(
+          client.sendMessageStream(
+            [{ text: 'background task finished' }],
+            new AbortController().signal,
+            'foreign-key',
+            exit === 'side-query'
+              ? {
+                  type: SendMessageType.UserQuery,
+                  isConcurrentSideQuery: true,
+                }
+              : { type: SendMessageType.Notification },
+          ),
+        );
+        if (exit === 'throwing') {
+          await expect(foreignTurn).rejects.toThrow('provider exploded');
+        } else {
+          await foreignTurn;
+        }
+      }
+
+      expect(store.take).toHaveBeenCalledWith('foreign-key');
+      expect(store.get()).toEqual({
+        objective: 'approved earlier',
+        turnKey: 'owner-key',
+      });
+      expect(runtime.dispatch).not.toHaveBeenCalled();
+
+      await client['settlePendingGoalProposal'](
+        true,
+        new AbortController().signal,
+        async () => runtime,
+        'owner-key',
+      );
+
+      expect(store.get()).toBeUndefined();
+      expect(runtime.dispatch).toHaveBeenCalledWith({
+        action: 'create',
+        objective: 'approved earlier',
+      });
+    },
+  );
+
+  it('clears a stale approval before a blocked user query', async () => {
     const { client, config, runtime } = setupGoalClient();
-    // Same shape as the settling tests above, so this frame reaches the
-    // bottom-of-try settle site rather than an early exit.
-    nextSpeakerMocks.check.mockResolvedValue({ next_speaker: 'user' });
+    const store = pendingGoalProposalStore({
+      objective: 'stale approval',
+      turnKey: 'cancelled-key',
+    });
+    Object.assign(config, { takePendingGoalProposal: store.take });
+    vi.mocked(config.getDisableAllHooks).mockReturnValue(false);
+    vi.mocked(config.hasHooksForEvent).mockImplementation(
+      (event) => event === 'UserPromptSubmit',
+    );
+    vi.mocked(config.getMessageBus).mockReturnValue({
+      request: vi.fn(async () => ({
+        output: { decision: 'block', reason: 'policy denied' },
+      })),
+    } as unknown as ReturnType<Config['getMessageBus']>);
+
+    const events = await collect(
+      client.sendMessageStream(
+        [{ text: 'replacement query' }],
+        new AbortController().signal,
+        'replacement-key',
+        { type: SendMessageType.UserQuery },
+      ),
+    );
+
+    expect(store.take).toHaveBeenNthCalledWith(1);
+    expect(store.get()).toBeUndefined();
+    expect(runtime.dispatch).not.toHaveBeenCalled();
+    expect(events).toContainEqual({
+      type: LlmEventType.UserPromptSubmitBlocked,
+      value: {
+        reason: 'policy denied',
+        originalPrompt: 'replacement query',
+      },
+    });
+  });
+
+  it('clears a stale approval before a retry chain', async () => {
+    const { client, config, runtime } = setupGoalClient();
     vi.mocked(runtime.getSnapshot).mockReturnValue({
       v: 2,
       activity: 'idle',
       goal: null,
     });
-    let pending: { objective: string; turnKey: string } | undefined = {
-      objective: 'approved earlier',
-      turnKey: 'cancelled-user-key',
-    };
-    const takePendingGoalProposal = vi.fn(() => {
-      const proposal = pending;
-      pending = undefined;
-      return proposal;
+    const store = pendingGoalProposalStore({
+      objective: 'stale approval',
+      turnKey: 'cancelled-key',
     });
     Object.assign(config, {
-      takePendingGoalProposal,
-      getMaxSessionTurns: vi.fn(() => 0),
+      takePendingGoalProposal: store.take,
+      getSkipNextSpeakerCheck: vi.fn(() => true),
       getUsageStatisticsEnabled: vi.fn(() => false),
     });
 
     await drain(
       client.sendMessageStream(
-        [{ text: 'background task finished' }],
+        [{ text: 'retry the interrupted request' }],
         new AbortController().signal,
-        'notification-key',
-        { type: SendMessageType.Notification },
+        'retry-key',
+        { type: SendMessageType.Retry },
       ),
     );
 
-    expect(takePendingGoalProposal).toHaveBeenCalled();
-    expect(pending).toBeUndefined();
+    expect(store.take).toHaveBeenNthCalledWith(1);
+    expect(store.get()).toBeUndefined();
     expect(runtime.dispatch).not.toHaveBeenCalled();
   });
+
+  it.each(['blocked', 'throwing'] as const)(
+    '%s owner ToolResult hook closes its parked approval',
+    async (hookExit) => {
+      const { client, config, runtime } = setupGoalClient();
+      vi.mocked(runtime.getSnapshot).mockReturnValue({
+        v: 2,
+        activity: 'idle',
+        goal: null,
+      });
+      const store = pendingGoalProposalStore({
+        objective: 'ship it',
+        turnKey: 'owner-key',
+      });
+      Object.assign(config, {
+        takePendingGoalProposal: store.take,
+        getDisableAllHooks: vi.fn(() => false),
+        hasHooksForEvent: vi.fn((event) => event === 'UserPromptSubmit'),
+        getMessageBus: vi.fn(
+          () =>
+            ({
+              request: vi.fn(async () => {
+                if (hookExit === 'throwing') {
+                  throw new Error('hook exploded');
+                }
+                return {
+                  output: { decision: 'block', reason: 'policy denied' },
+                };
+              }),
+            }) as unknown as ReturnType<Config['getMessageBus']>,
+        ),
+      });
+
+      const ownerStream = client.sendMessageStream(
+        [
+          {
+            functionResponse: {
+              name: 'propose_goal',
+              response: { output: 'approved' },
+            },
+          },
+        ],
+        new AbortController().signal,
+        'owner-key',
+        { type: SendMessageType.ToolResult },
+      );
+      let events: unknown[] = [];
+      if (hookExit === 'throwing') {
+        await expect(drain(ownerStream)).rejects.toThrow('hook exploded');
+      } else {
+        events = await collect(ownerStream);
+      }
+
+      expect(store.get()).toBeUndefined();
+      if (hookExit === 'blocked') {
+        expect(runtime.dispatch).toHaveBeenCalledWith({
+          action: 'create',
+          objective: 'ship it',
+        });
+        expect(eventIndex(events, LlmEventType.GoalState)).toBeLessThan(
+          eventIndex(events, LlmEventType.UserPromptSubmitBlocked),
+        );
+      } else {
+        expect(runtime.dispatch).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  it.each(['Stop-hook', 'next-speaker'] as const)(
+    'settles after a blocked %s continuation ends the owner turn',
+    async (continuation) => {
+      const { client, config, runtime } = setupGoalClient();
+      vi.mocked(runtime.getSnapshot).mockReturnValue({
+        v: 2,
+        activity: 'idle',
+        goal: null,
+      });
+      const store = pendingGoalProposalStore();
+      let userPromptSubmitCount = 0;
+      const messageBus = {
+        request: vi.fn(async (request: { eventName: string }) => {
+          if (request.eventName === 'Stop') {
+            return {
+              output: { decision: 'block', reason: 'Keep working' },
+              stopHookCount: 1,
+            };
+          }
+          userPromptSubmitCount += 1;
+          return userPromptSubmitCount === 1
+            ? { output: {} }
+            : { output: { decision: 'block', reason: 'policy denied' } };
+        }),
+      };
+      Object.assign(config, {
+        takePendingGoalProposal: store.take,
+        getDisableAllHooks: vi.fn(() => false),
+        hasHooksForEvent: vi.fn(
+          (event) =>
+            event === 'UserPromptSubmit' ||
+            (continuation === 'Stop-hook' && event === 'Stop'),
+        ),
+        getMessageBus: vi.fn(
+          () => messageBus as unknown as ReturnType<Config['getMessageBus']>,
+        ),
+        getUsageStatisticsEnabled: vi.fn(() => false),
+      });
+      if (continuation === 'next-speaker') {
+        nextSpeakerMocks.check.mockResolvedValue({ next_speaker: 'model' });
+      }
+      turnMocks.run.mockImplementationOnce(() => {
+        store.set({ objective: 'ship it', turnKey: 'owner-key' });
+        return emptyStream();
+      });
+
+      await drain(
+        client.sendMessageStream(
+          [{ text: 'set a goal for this' }],
+          new AbortController().signal,
+          'owner-key',
+          { type: SendMessageType.UserQuery },
+        ),
+      );
+
+      expect(turnMocks.run).toHaveBeenCalledOnce();
+      expect(store.get()).toBeUndefined();
+      expect(runtime.dispatch).toHaveBeenCalledTimes(1);
+      expect(runtime.dispatch).toHaveBeenCalledWith({
+        action: 'create',
+        objective: 'ship it',
+      });
+    },
+  );
 
   it('discards a proposal still parked when the next user query starts', async () => {
     // The proposing turn was cancelled before its boundary; the approval must

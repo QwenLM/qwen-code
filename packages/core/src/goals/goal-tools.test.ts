@@ -34,7 +34,7 @@ import {
 import { ApprovalMode } from '../config/config.js';
 import { ToolConfirmationOutcome } from '../tools/tools.js';
 import { ToolErrorType } from '../tools/tool-error.js';
-import { runWithInvocationContext } from '../utils/invocation-context.js';
+import { promptIdContext } from '../utils/promptIdContext.js';
 import { goalTurnContext } from './goal-turn-context.js';
 import {
   emptyGoalSnapshot,
@@ -1527,14 +1527,10 @@ describe('UpdateGoalTool', () => {
 });
 
 describe('ProposeGoalTool', () => {
-  const TURN = {
-    version: 1 as const,
-    sessionId: 'session-1',
-    promptId: 'user-turn-key',
-  };
-  /** Runs the tool the way the scheduler does: inside the turn's invocation context. */
+  const TURN_KEY = 'user-turn-key';
+  /** Runs the tool inside the prompt-id context established by the scheduler. */
   const execute = (invocation: ReturnType<ProposeGoalTool['build']>) =>
-    runWithInvocationContext(TURN, () =>
+    promptIdContext.run(TURN_KEY, () =>
       invocation.execute(new AbortController().signal),
     );
 
@@ -1716,7 +1712,7 @@ describe('ProposeGoalTool', () => {
       ToolConfirmationOutcome.ProceedOnce,
     );
 
-    // No invocation context: the settle boundary could not tell this
+    // No scheduler prompt-id context: the settle boundary could not tell this
     // approval apart from a stale one, so it is refused instead of parked.
     const result = await invocation.execute(new AbortController().signal);
 

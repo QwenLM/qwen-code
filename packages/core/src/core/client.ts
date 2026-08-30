@@ -207,6 +207,8 @@ export interface SendMessageOptions {
   type: SendMessageType;
   /** User-submitted text captured before prompt expansion. */
   submittedPrompt?: string;
+  /** A UserQuery running beside an active turn, without replacing its state. */
+  isConcurrentSideQuery?: boolean;
   /** Returns user input waiting to steer the active turn at a model boundary. */
   getSteerInput?: (signal: AbortSignal) => Promise<SteerInput | undefined>;
   /** Steer lease already appended to this request, settled after history push. */
@@ -851,25 +853,10 @@ export class LlmClient {
   ): Promise<void> {
     const take = this.config.takePendingGoalProposal;
     if (typeof take !== 'function') return;
-    if (signal.aborted) {
-      take.call(this.config);
-      return;
-    }
-    if (!turnEnded) return;
-    const proposal = take.call(this.config);
+    if (!turnEnded && !signal.aborted) return;
+    const proposal = take.call(this.config, turnKey);
     if (!proposal) return;
-    // The approval is bound to the turn that produced it. A frame settling
-    // under any other prompt id -- a Notification, Cron, or Teammate turn, the
-    // user's next query, a hook-blocked or recursive frame -- is not that
-    // turn, however it got here, so the approval is dropped rather than
-    // applied under work the user never started. This one comparison is what
-    // the per-exit-path discards approximate.
-    if (proposal.turnKey !== turnKey) {
-      debugLogger.debug(
-        `Dropping an approved Goal proposal parked by turn ${proposal.turnKey}: it surfaced in turn ${turnKey}`,
-      );
-      return;
-    }
+    if (signal.aborted) return;
     const runtime = await loadGoalRuntime(false);
     if (!runtime) {
       debugLogger.debug(
@@ -3027,6 +3014,17 @@ export class LlmClient {
       strippedRetryEntries = [];
     };
 
+    if (
+      (messageType === SendMessageType.UserQuery &&
+        !options?.isConcurrentSideQuery) ||
+      messageType === SendMessageType.Retry
+    ) {
+      // A propose_goal approval is applied when its own turn ends. One still
+      // parked when a new user/retry chain starts belongs to a turn that ended
+      // without settling, so clear it before the replacement chain can exit.
+      this.config.takePendingGoalProposal?.();
+    }
+
     if (messageType === SendMessageType.Retry) {
       strippedRetryEntries = this.stripOrphanedUserEntriesFromHistory() ?? [];
       // The matching dangling-`functionCall` repair runs inside
@@ -3145,6 +3143,19 @@ export class LlmClient {
           } else {
             endCurrentInteraction('cancelled');
           }
+          await this.settlePendingGoalProposal(
+            true,
+            signal,
+            async (required) => {
+              const runtime = await loadGoalRuntime(required);
+              if (runtime) bindGoalStateEvents(runtime);
+              return runtime;
+            },
+            prompt_id,
+          );
+          for (const goalEvent of takePendingGoalEvents()) {
+            yield goalEvent;
+          }
           yield {
             type: LlmEventType.UserPromptSubmitBlocked,
             value: {
@@ -3188,6 +3199,7 @@ export class LlmClient {
         signal.aborted ? undefined : userPromptSubmitFailureMessage,
         signal.aborted ? undefined : getErrorType(error),
       );
+      this.config.takePendingGoalProposal?.(prompt_id);
       for (const goalEvent of await finalizeInterruptedGoalTurn()) {
         yield goalEvent;
       }
@@ -3217,11 +3229,6 @@ export class LlmClient {
         goalOrigin = 'runtime';
       } else if (messageType === SendMessageType.UserQuery) {
         goalOrigin = 'user';
-        // A propose_goal approval is applied when its own turn ends. One
-        // still parked when the next real user query starts belongs to a
-        // turn the user cancelled; starting a loop from it now would
-        // surprise them.
-        this.config.takePendingGoalProposal?.();
       }
 
       const goalRequiresPermit = goalRuntime
@@ -3271,6 +3278,7 @@ export class LlmClient {
         signal.aborted ? undefined : 'Goal turn admission failed',
         signal.aborted ? undefined : getErrorType(error),
       );
+      this.config.takePendingGoalProposal?.(prompt_id);
       for (const goalEvent of await finalizeInterruptedGoalTurn()) {
         yield goalEvent;
       }
@@ -4465,6 +4473,15 @@ export class LlmClient {
           if (!hasToolCalls) {
             endCurrentInteraction(signal.aborted ? 'cancelled' : 'ok');
           }
+          await this.settlePendingGoalProposal(
+            !hasToolCalls,
+            signal,
+            loadGoalRuntime,
+            prompt_id,
+          );
+          for (const goalEvent of takePendingGoalEvents()) {
+            yield goalEvent;
+          }
           // Preserve the pending prefetch: the inner Hook turn we just
           // yielded may have produced tool calls, and the caller's next
           // ToolResult turn still needs to consume the recall result.
@@ -4593,6 +4610,15 @@ export class LlmClient {
           if (!hasToolCalls) {
             endCurrentInteraction(signal.aborted ? 'cancelled' : 'ok');
           }
+          await this.settlePendingGoalProposal(
+            !hasToolCalls,
+            signal,
+            loadGoalRuntime,
+            prompt_id,
+          );
+          for (const goalEvent of takePendingGoalEvents()) {
+            yield goalEvent;
+          }
           // Preserve the pending prefetch: same reasoning as the
           // `return hookTurn` site above — the recursive Hook turn may
           // have produced tool calls whose ToolResult turn still needs
@@ -4692,7 +4718,7 @@ export class LlmClient {
       // `return turn`. Catches uncaught exceptions and guards against
       // future early-return sites that forget to call cancel.
       if (!normalCompletion) {
-        this.config.takePendingGoalProposal?.();
+        this.config.takePendingGoalProposal?.(prompt_id);
         this.cancelPendingMemoryPrefetch(
           signal?.aborted ? 'abort' : 'no_safe_delivery_point',
         );
