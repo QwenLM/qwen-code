@@ -806,4 +806,25 @@ describe('web shell permission decision messages', () => {
 
     expect(respondToPendingPermission).not.toHaveBeenCalled();
   });
+
+  it('surfaces a notice when the shell resolves the vote to false', async () => {
+    await renderApp();
+    const respondToPendingPermission = vi.fn().mockResolvedValue(false);
+    installShellApi({ respondToPendingPermission });
+    const { container } = mounted[mounted.length - 1];
+
+    await dispatchDecision('allow', window.parent);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(respondToPendingPermission).toHaveBeenCalledWith('req-1', 'allow');
+    // A resolved `false` must not die silently: it covers both the benign
+    // race (the approval was resolved elsewhere one tick earlier) and hung
+    // votes (e.g. while catching up after a session switch). Notify the
+    // user without the hard-error state reset of `handleShellError`.
+    expect(container.textContent).toContain(
+      'The approval decision could not be applied.',
+    );
+  });
 });

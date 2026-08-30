@@ -701,7 +701,32 @@ export function EmbeddedApp() {
             requestId,
             decision,
           );
-          void response?.catch(handleShellError);
+          if (!response) {
+            // The shell is not mounted yet, so the vote would die without a
+            // rejection for `.catch` to see.
+            if (runtimeRef.current) {
+              setHostNotice({
+                tone: 'info',
+                text: t('permission.voteNotApplied'),
+              });
+            }
+          } else {
+            void response
+              .then((handled) => {
+                // A resolved `false` drops the vote as silently as a
+                // rejection would — e.g. while catching up after a session
+                // switch — but it is also the normal result when the
+                // approval was resolved elsewhere one tick earlier. Notify
+                // without the hard-error state reset of `handleShellError`.
+                if (!handled) {
+                  setHostNotice({
+                    tone: 'info',
+                    text: t('permission.voteNotApplied'),
+                  });
+                }
+              })
+              .catch(handleShellError);
+          }
         }
       } else if (message.type === 'error') {
         const text = (message.data as { message?: unknown } | null)?.message;
