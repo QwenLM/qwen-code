@@ -1308,7 +1308,9 @@ jobs:
     # serialize this job behind the hour-long unit run.
     if: "${{ !cancelled() && needs.classify_pr.outputs.skip_ci != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}"
     runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
-    timeout-minutes: 30
+    # Dependency installation alone can exceed 30 minutes on a contended shared
+    # ECS host, before the separately bounded 20-minute integration step starts.
+    timeout-minutes: 60
     permissions:
       contents: 'read'
     steps:
