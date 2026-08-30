@@ -7171,17 +7171,43 @@ export const useLlmStream = (
       };
       const submissionSettlement: SteerInput | undefined =
         drainedSteer || drainedTeammates
-          ? {
-              parts: drainedSteer?.parts ?? [],
-              accept: () => {
-                drainedSteer?.accept();
-                settleDrainedTeammates(true);
-              },
-              restore: () => {
-                drainedSteer?.restore();
-                settleDrainedTeammates(false);
-              },
-            }
+          ? (() => {
+              // Mirror the client-driven SteerInput settlement contract
+              // (resolveSteeredMessagesForSend): core settles a steer input
+              // only through accept()/restore(), so the carrier must fire the
+              // onAccept/onRestore hand-back hooks submitQuery installs on it
+              // — otherwise the strip/hand-back/undo machinery for hook-path
+              // drains never runs (R52-1). Carry the drain's routing metadata
+              // through as well so core's steerRouteOverride / retry-store
+              // reads see the drain's outcome instead of stale pre-drain
+              // state. `settled` keeps settlement exactly-once: core settles
+              // each input at most once, but accept()/restore() are also
+              // invoked from the onDelivered/onDeliveryFailed CLI paths
+              // outside that guard.
+              let settled = false;
+              const carrier: SteerInput = {
+                parts: drainedSteer?.parts ?? [],
+                retryParts: drainedSteer?.retryParts,
+                mediaRouted: drainedSteer?.mediaRouted,
+                routeSelector: drainedSteer?.routeSelector,
+                overrideCleared: drainedSteer?.overrideCleared,
+                accept: () => {
+                  if (settled) return;
+                  settled = true;
+                  drainedSteer?.accept();
+                  settleDrainedTeammates(true);
+                  carrier.onAccept?.();
+                },
+                restore: () => {
+                  if (settled) return;
+                  settled = true;
+                  drainedSteer?.restore();
+                  settleDrainedTeammates(false);
+                  carrier.onRestore?.();
+                },
+              };
+              return carrier;
+            })()
           : undefined;
 
       if (continuationWasCancelled()) {
