@@ -29,6 +29,11 @@ export default defineConfig({
     },
   },
   test: {
+    // Shared ECS hosts can pause an otherwise healthy test past Vitest's 5s
+    // default when several CI runners on the same machine are busy.
+    testTimeout: process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
+      ? 60_000
+      : undefined,
     reporters: ['default'],
     silent: true,
     coverage: {

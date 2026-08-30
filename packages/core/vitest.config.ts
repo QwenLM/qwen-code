@@ -14,7 +14,9 @@ export default defineConfig({
     // or WASM-load-bound tests (e.g. the web-tree-sitter lazy runtime, tar
     // extraction) blow 5s purely under contention, not from any logic fault.
     // Assertions still fail instantly; only the timeout ceiling grows.
-    testTimeout: 15000,
+    testTimeout: process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
+      ? 60_000
+      : 15_000,
     // ECS hosts run several jobs at once; leave capacity for neighboring jobs.
     maxWorkers: process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
       ? '25%'

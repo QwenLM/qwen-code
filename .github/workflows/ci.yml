@@ -209,7 +209,10 @@ jobs:
     # unit tests.
     if: "${{ !cancelled() && github.event_name != 'schedule' }}"
     runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
-    timeout-minutes: 60
+    # Shared ECS hosts can stretch the normally 25-minute lane beyond an hour
+    # while tests are still making progress. Keep a finite ceiling without
+    # turning host contention into a false cancellation.
+    timeout-minutes: 90
     outputs:
       ci_profile: '${{ steps.ci_profile.outputs.ci_profile }}'
     permissions:

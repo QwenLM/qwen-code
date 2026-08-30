@@ -40,6 +40,10 @@ const LANES = ['test_macos', 'test_windows'];
 const PUSH_JOBS = ['classify_pr', 'test'];
 const condOf = (job) => String(ci.jobs[job].if ?? '');
 
+it('keeps the shared Linux test lane above its observed contention budget', () => {
+  expect(ci.jobs.test['timeout-minutes']).toBe(90);
+});
+
 // One helper for both "an <event> run reaches exactly these jobs" invariants.
 //
 // It decides by EVALUATING each gate for the event, not by looking for tokens
