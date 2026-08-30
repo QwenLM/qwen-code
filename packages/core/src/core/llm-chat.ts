@@ -4489,15 +4489,18 @@ export class LlmChat {
           if (isInvalidArgumentError(error.message)) return false;
         }
 
+        // Interactive rate-limit retries belong to the surrounding stream
+        // loop. It emits retryInfo for the TUI countdown, honors Retry-After,
+        // and rolls back partial output before replaying the request. Retrying
+        // them here first would make the wait invisible and multiply attempts.
+        // Preserve the explicitly requested unattended persistent behavior.
+        if (isRateLimitError(error, extraRetryErrorCodes)) {
+          return persistentMode;
+        }
+
         const status = getErrorStatus(error);
         if (status === 400) return false;
-        if (status === 429) return true;
         if (status && status >= 500 && status < 600) return true;
-
-        // Honor provider-specific rate-limit codes (e.g. DashScope) so a custom
-        // predicate does not silently drop them — the default path checks these
-        // via defaultShouldRetry, but a custom shouldRetryOnError bypasses it.
-        if (isRateLimitError(error, extraRetryErrorCodes)) return true;
 
         // Transient network errors (ECONNRESET, ETIMEDOUT, etc.) carry no HTTP
         // status and would otherwise fall through every predicate above.

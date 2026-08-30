@@ -361,7 +361,13 @@ export class ContentGenerationPipeline {
           // returning text/html with HTTP 200).
           const createPromise = this.client.chat.completions.create(
             openaiRequest,
-            { signal: perRequestAc.signal },
+            {
+              signal: perRequestAc.signal,
+              // Streaming retries are owned by LlmChat, which can expose the
+              // retry countdown and safely roll back partial output. Letting
+              // the SDK retry here creates an invisible nested retry budget.
+              maxRetries: 0,
+            },
           );
 
           // withResponse() is available on APIPromise (the OpenAI SDK's
