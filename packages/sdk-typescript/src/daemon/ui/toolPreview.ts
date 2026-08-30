@@ -40,12 +40,15 @@ export function createDaemonToolPreview(
   if (isRecord(input)) {
     const nestedInput = input['rawInput'] ?? input['input'] ?? input['args'];
     if (nestedInput !== undefined && nestedInput !== input) {
+      const meta = isRecord(input['_meta']) ? input['_meta'] : undefined;
       const nested = createDaemonToolPreview(
         nestedInput,
         {
           title: opts.title ?? getFirstString(input, ['title']),
           toolName:
-            opts.toolName ?? getFirstString(input, ['toolName', 'name']),
+            opts.toolName ??
+            getFirstString(input, ['toolName', 'name']) ??
+            (meta ? getFirstString(meta, ['toolName']) : undefined),
           toolKind: opts.toolKind ?? getFirstString(input, ['kind']),
         },
         depth + 1,
@@ -323,6 +326,7 @@ function detectFileDiff(
   const oldText = getFirstString(input, [
     'oldText',
     'old_text',
+    'old_string',
     'old_str',
     'old_string',
     'oldString',
@@ -339,6 +343,7 @@ function detectFileDiff(
   const explicitNewText = getFirstString(input, [
     'newText',
     'new_text',
+    'new_string',
     'new_str',
     'new_string',
     'newString',

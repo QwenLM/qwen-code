@@ -87,6 +87,8 @@ interface MessageListProps {
   /** Click an uploaded image in a user message to preview it in the right panel. */
   onImagePreview?: (src: string, alt?: string) => void;
   onAttachmentPreview?: (file: AttachmentPreviewRequest) => void;
+  onInsightReportOpen?: (path: string) => void;
+  onEditUserMessage?: (targetTurnIndex: number, content: string) => void;
   loadingTranscript?: boolean;
   catchingUp?: boolean;
   hasOlderHistory?: boolean;
@@ -2734,6 +2736,8 @@ export const MessageList = memo(
       onShowContextDetail,
       onImagePreview,
       onAttachmentPreview,
+      onInsightReportOpen,
+      onEditUserMessage,
       loadingTranscript,
       catchingUp,
       hasOlderHistory = false,
@@ -2780,6 +2784,18 @@ export const MessageList = memo(
     const { t } = useI18n();
     const transcriptRenderMode = useTranscriptRenderMode();
     const compactMode = useContext(CompactModeContext);
+    const editableUserTurn = useMemo(() => {
+      const turnIndexById = new Map<string, number>();
+      let lastId: string | undefined;
+      let turnIndex = 0;
+      for (const message of messages) {
+        if (message.role !== 'user') continue;
+        turnIndexById.set(message.id, turnIndex);
+        lastId = message.id;
+        turnIndex += 1;
+      }
+      return { lastId, turnIndexById };
+    }, [messages]);
     // Render-phase caches below are reusable only against this post-commit
     // identity. An abandoned render cannot advance it, so its cache writes are
     // rejected by the next committed render.
@@ -5300,6 +5316,10 @@ export const MessageList = memo(
             displayItem.message.role === 'assistant'
               ? displayItem.message.branchRecordId
               : undefined;
+          const editableUserContent =
+            displayItem.message.role === 'user'
+              ? displayItem.message.content
+              : undefined;
 
           return (
             <MessageItem
@@ -5308,6 +5328,24 @@ export const MessageList = memo(
               onShowContextDetail={onShowContextDetail}
               onImagePreview={onImagePreview}
               onAttachmentPreview={onAttachmentPreview}
+              onInsightReportOpen={onInsightReportOpen}
+              onEditUserMessage={
+                onEditUserMessage &&
+                !isResponding &&
+                !hasOlderHistory &&
+                !historyCapacityReached &&
+                displayItem.message.role === 'user' &&
+                editableUserContent !== undefined &&
+                displayItem.message.id === editableUserTurn.lastId
+                  ? () =>
+                      onEditUserMessage(
+                        editableUserTurn.turnIndexById.get(
+                          displayItem.message.id,
+                        ) ?? 0,
+                        editableUserContent,
+                      )
+                  : undefined
+              }
               workspaceCwd={workspaceCwd}
               showRetryHint={showRetryHint}
               onRetryClick={onRetryClick}
@@ -5368,6 +5406,11 @@ export const MessageList = memo(
         onShowContextDetail,
         onImagePreview,
         onAttachmentPreview,
+        onInsightReportOpen,
+        onEditUserMessage,
+        editableUserTurn,
+        hasOlderHistory,
+        historyCapacityReached,
         generateContent,
         headerOffset,
         visibleItems,

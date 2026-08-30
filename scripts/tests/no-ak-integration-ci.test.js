@@ -551,7 +551,7 @@ describe('no-AK integration CI wiring', () => {
     );
     expect(smokeWorkflow).toContain('npm run test:ci');
     expect(smokeWorkflow).not.toContain(
-      'npm run test:ci --workspaces --if-present --parallel',
+      'npm run test:ci --workspaces --if-present',
     );
     // Same ordering as the gate: autocrlf off before the checkout, the `./`
     // configure action after it.

@@ -1,7 +1,8 @@
 {
   "compilerOptions": {
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "esModuleInterop": true,
     "target": "ES2022",
     "lib": ["ES2022", "dom"],
     "jsx": "react-jsx",
