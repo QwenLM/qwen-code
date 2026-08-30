@@ -464,6 +464,13 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
    * Apply the skill's side effects — `allowedTools` session allow rules and
    * frontmatter hooks — when the folder-trust gate allows it. Idempotent:
    * both underlying registrations dedup already-applied entries.
+   *
+   * The gate has two sides. This is the way in; a project skill's grants
+   * are additionally marked trust-gated, and both the permission manager
+   * and the hook event handler re-read `isTrustedFolder()` at decision
+   * time, so a trust revoked mid-session (an IDE trust notification flips it
+   * live) suspends the already-applied hooks and allow rules without a
+   * restart, and a trust granted again restores them.
    */
   private applySideEffects(skill: SkillConfig): void {
     if (!canApplySkillSideEffects(skill, this.config)) {
@@ -476,6 +483,7 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
     applySkillAllowedTools(
       this.config.getPermissionManager(),
       skill.allowedTools,
+      { trustGated: skill.level === 'project' },
     );
     this.registerHooks(skill);
   }
@@ -487,7 +495,11 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
       skillName: skill.name,
     });
     if (!skill.hooks) {
-      debugLogger.warn(`Skill "${this.params.skill}" has no hooks to register`);
+      // Re-run on every invocation (the gate is re-evaluated each time), so
+      // a hookless skill would otherwise WARN on every use of it.
+      debugLogger.debug(
+        `Skill "${this.params.skill}" has no hooks to register`,
+      );
       return;
     }
     const hookSystem = this.config.getHookSystem();
@@ -506,7 +518,14 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
         `Registered ${hookCount} hooks from skill "${this.params.skill}"`,
       );
     } else {
-      debugLogger.warn(`No hooks registered from skill "${this.params.skill}"`);
+      // Zero is the expected outcome of every re-invocation: the hooks are
+      // already registered and `registerSkillHooks` dedups them (it logs
+      // each skip at debug level). Not a warning — a steady-state WARN
+      // claiming "no hooks registered" over hooks that are firing sends
+      // whoever reads the log after a phantom failure.
+      debugLogger.debug(
+        `No new hooks registered from skill "${this.params.skill}" (already registered or none registrable)`,
+      );
     }
   }
 

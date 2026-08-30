@@ -517,8 +517,16 @@ describe('SkillCommandLoader', () => {
       await commands[0].action?.({} as CommandContext, '');
 
       expect(mockAddSessionAllowRule).toHaveBeenCalledTimes(2);
-      expect(mockAddSessionAllowRule).toHaveBeenNthCalledWith(1, 'Bash(git *)');
-      expect(mockAddSessionAllowRule).toHaveBeenNthCalledWith(2, 'Edit');
+      expect(mockAddSessionAllowRule).toHaveBeenNthCalledWith(
+        1,
+        'Bash(git *)',
+        {
+          trustGated: false,
+        },
+      );
+      expect(mockAddSessionAllowRule).toHaveBeenNthCalledWith(2, 'Edit', {
+        trustGated: false,
+      });
     });
 
     it('does not grant when the skill declares no allowedTools', async () => {

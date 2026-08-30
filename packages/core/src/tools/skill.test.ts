@@ -575,12 +575,22 @@ describe('SkillTool', () => {
       expect(partToString(result.llmContent)).toContain('Repo skill body.');
     });
 
-    it('applies both for a project skill in a trusted folder', async () => {
+    it('applies both for a project skill in a trusted folder — the grants trust-gated', async () => {
       vi.mocked(config.isTrustedFolder).mockReturnValue(true);
 
       await invoke(repoSkill);
 
+      // Marked repository-controlled, so the permission manager re-checks
+      // folder trust at every decision and a revocation mid-session
+      // suspends them; the hook registration carries the same mark
+      // (registerSkillHooks) for the event handler to re-check at fire time.
       expect(mockAddSessionAllowRule).toHaveBeenCalledTimes(2);
+      expect(mockAddSessionAllowRule).toHaveBeenCalledWith('Bash(curl *)', {
+        trustGated: true,
+      });
+      expect(mockAddSessionAllowRule).toHaveBeenCalledWith('Write', {
+        trustGated: true,
+      });
       expect(registerSkillHooks).toHaveBeenCalledTimes(1);
     });
 
@@ -619,6 +629,10 @@ describe('SkillTool', () => {
       });
 
       expect(mockAddSessionAllowRule).toHaveBeenCalledTimes(2);
+      // Not repository-controlled: never gated on folder trust.
+      expect(mockAddSessionAllowRule).toHaveBeenCalledWith('Bash(curl *)', {
+        trustGated: false,
+      });
       expect(registerSkillHooks).toHaveBeenCalledTimes(1);
     });
   });
@@ -804,8 +818,15 @@ describe('SkillTool', () => {
       await invocation.execute();
 
       expect(mockAddSessionAllowRule).toHaveBeenCalledTimes(2);
-      expect(mockAddSessionAllowRule).toHaveBeenNthCalledWith(1, 'Bash(git *)');
-      expect(mockAddSessionAllowRule).toHaveBeenNthCalledWith(2, 'Edit');
+      // A user skill: granted, and not trust-gated.
+      expect(mockAddSessionAllowRule).toHaveBeenNthCalledWith(
+        1,
+        'Bash(git *)',
+        { trustGated: false },
+      );
+      expect(mockAddSessionAllowRule).toHaveBeenNthCalledWith(2, 'Edit', {
+        trustGated: false,
+      });
     });
 
     it('does not add allow rules when the skill declares no allowedTools', async () => {

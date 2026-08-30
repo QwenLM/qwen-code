@@ -301,16 +301,24 @@ export function canApplySkillSideEffects(
  * gates registration (#10075).
  *
  * No-ops when there is no permission manager or nothing to grant.
+ *
+ * `trustGated` marks the grants as repository-controlled: a project skill's
+ * rules are honoured only while the folder is trusted, re-checked at every
+ * permission decision, so a trust revoked mid-session suspends them without
+ * a restart. Pass `skill.level === 'project'`.
  */
 export function applySkillAllowedTools(
   permissionManager: PermissionManager | null | undefined,
   allowedTools: string[] | undefined,
+  options?: { trustGated?: boolean },
 ): void {
   if (!permissionManager || !allowedTools?.length) {
     return;
   }
   for (const rule of allowedTools) {
-    permissionManager.addSessionAllowRule(rule);
+    permissionManager.addSessionAllowRule(rule, {
+      trustGated: options?.trustGated === true,
+    });
   }
 }
 

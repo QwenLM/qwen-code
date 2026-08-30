@@ -157,6 +157,7 @@ export class SkillCommandLoader implements ICommandLoader {
               applySkillAllowedTools(
                 this.config.getPermissionManager(),
                 skill.allowedTools,
+                { trustGated: skill.level === 'project' },
               );
             } else if (skill.allowedTools?.length) {
               debugLogger.warn(
