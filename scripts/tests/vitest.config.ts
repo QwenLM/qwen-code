@@ -18,6 +18,7 @@ export default defineConfig({
       process.platform === 'win32'
         ? [
             ...configDefaults.exclude,
+            'scripts/tests/e2e-shard-retry.test.js',
             'scripts/tests/pr-self-report-label.test.js',
             // Bash-driven workflow suites cannot run on Windows; pure
             // YAML-parse workflow suites still do.

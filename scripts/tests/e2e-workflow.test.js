@@ -94,13 +94,36 @@ describe('e2e workflow', () => {
     // with sibling shards of the same runs green and the shard green on
     // re-run. The bounded retry absorbs one such transient death; a
     // deterministic test failure fails both attempts and keeps the job red.
-    const runStep = yml.jobs['e2e-test-linux'].steps.find(
-      (step) => step.name === 'Run E2E tests',
+    const steps = yml.jobs['e2e-test-linux'].steps;
+    const runStep = steps.find((step) => step.name === 'Run E2E tests');
+    const epochStep = steps.find(
+      (step) => step.name === 'Record job start epoch',
     );
+
+    it('records the job start epoch before the expensive setup steps', () => {
+      // The retry gate budgets against the whole 60-minute job; an epoch
+      // recorded at the test step would hide ~30 minutes of setup spend.
+      expect(epochStep.run).toContain(
+        'echo "E2E_JOB_START_EPOCH=$(date +%s)" >> "${GITHUB_ENV}"',
+      );
+      expect(steps.indexOf(epochStep)).toBeLessThan(
+        steps.indexOf(
+          steps.find((step) => step.name === 'Install dependencies'),
+        ),
+      );
+    });
 
     it('wraps the sandbox:none shard command in a retryable function', () => {
       expect(runStep.run).toContain('run_shard() {');
-      expect(runStep.run).toContain('npm run test:integration:sandbox:none');
+    });
+
+    it('retries the full shard command, shard and excludes included', () => {
+      // Everything after `--` is forwarded to vitest by the npm script, so
+      // shard and exclude coverage lives only in this argument list. The
+      // excludes are shared verbatim with the docker leg above.
+      expect(runStep.run).toContain(
+        "npm run test:integration:sandbox:none -- --exclude '**/interactive/cron-interactive.test.ts' --exclude '**/channel-plugin.test.ts' --shard='${{ matrix.shard }}'",
+      );
     });
 
     it('retries the sandbox:none shard exactly once', () => {
@@ -109,12 +132,38 @@ describe('e2e workflow', () => {
       // status is the step's, and a third attempt would burn pool time for
       // nothing.
       expect(runStep.run.match(/run_shard/g)).toHaveLength(3);
+      // End-anchored scope: the retry is the group's last command and the
+      // group is the script's last statement. A retry moved outside the
+      // `|| { ... }` would run unconditionally, re-running green shards too.
+      expect(runStep.run).toMatch(/run_shard\s*\n\s*\}\s*\n\s*fi\s*$/);
+    });
+
+    it('gates the retry on the remaining job budget', () => {
+      // The retried run_shard is reachable only behind an elapsed-time check
+      // that exits the step when the job cannot fit another shard. Shape
+      // only — bash itself witnesses the execution semantics in
+      // e2e-shard-retry.test.js.
+      const group = runStep.run.slice(runStep.run.indexOf('run_shard || {'));
+      expect(group).toMatch(/elapsed[\s\S]*exit 1[\s\S]*run_shard\s*\n\s*\}/);
+    });
+
+    it('keeps the run step red when the shard stays red', () => {
+      // continue-on-error sits above the script exit code that every other
+      // witness observes: with it, two failing attempts still report green.
+      // The sandbox-image build step's deliberate continue-on-error stays
+      // untouched — this pins the run step only.
+      expect(runStep['continue-on-error']).toBeUndefined();
     });
 
     it('does not retry the docker leg', () => {
       // Two ~30min docker attempts would outrun the job's timeout-minutes.
       expect(runStep.run.match(/QWEN_SANDBOX=docker vitest run/g)).toHaveLength(
         1,
+      );
+      // Structure, not just count: wrapping the docker command in a
+      // function and calling it twice keeps the literal count at one.
+      expect(runStep.run).not.toMatch(
+        /[A-Za-z_]+\(\)\s*\{[^}]*QWEN_SANDBOX=docker/s,
       );
     });
   });

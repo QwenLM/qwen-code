@@ -71,6 +71,13 @@ jobs:
         node-version:
           - '22.x'
     steps:
+      # The sandbox:none retry gate below budgets against the whole 60-minute
+      # job, not just the test step — setup spent ~29 of those minutes on two
+      # of the runners that motivated the retry. Recording the start here is
+      # what lets the gate see that spend.
+      - name: 'Record job start epoch'
+        run: 'echo "E2E_JOB_START_EPOCH=$(date +%s)" >> "${GITHUB_ENV}"'
+
       # Fail-fast capability preflight (#9556): the docker leg needs a live
       # daemon, and without this check a missing one surfaces only after
       # npm ci + build. Runs on hosted and pool runners alike — both are
@@ -245,10 +252,24 @@ jobs:
             # same runs passed, and the shard passes on re-run. The same
             # transient class the sandbox-image build retry above covers
             # (#10355). A deterministic test failure fails both attempts and
-            # keeps the shard red. The docker leg keeps no retry: two ~30min
-            # attempts would outrun the job's timeout-minutes.
+            # keeps the shard red. The retry is budget-gated on job-elapsed
+            # time: two of those three runs died with ~10-12 of the 60 job
+            # minutes left, less than one shard-time, where a retry can only
+            # be cancelled mid-flight by timeout-minutes. The docker leg
+            # keeps no retry: two ~30min attempts would outrun the job's
+            # timeout-minutes.
             run_shard || {
-              echo "::warning::sandbox:none shard failed on ${RUNNER_NAME:-this runner}; retrying once (transient shared-host pressure class)"
+              elapsed=$(( $(date +%s) - ${E2E_JOB_START_EPOCH:-0} ))
+              # Budget gate: a retry needs a full shard-time inside the job's
+              # timeout-minutes. 3600s minus a 25-minute reserve — the worst
+              # measured shard is ~21min under shared-host pressure — leaves
+              # 2100s; past that, GitHub cancels the retry mid-flight, burns
+              # pool time, and the failure degrades to a timeout signature.
+              if (( elapsed > 2100 )); then
+                echo "::error::sandbox:none shard failed on ${RUNNER_NAME:-this runner} after ${elapsed}s of the 3600s job budget — not enough left for a retry"
+                exit 1
+              fi
+              echo "::warning::sandbox:none shard failed on ${RUNNER_NAME:-this runner} after ${elapsed}s; retrying once (transient shared-host pressure class)"
               run_shard
             }
           fi
