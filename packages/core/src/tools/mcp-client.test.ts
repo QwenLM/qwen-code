@@ -2949,6 +2949,31 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
         expect(await response.text()).toBe('');
       });
 
+      it('treats 404 from optional GET SSE stream as unsupported', async () => {
+        // Spec-compliant Streamable HTTP servers commonly reject the
+        // optional standalone GET/SSE notification stream with 404 (no
+        // route registered for GET) rather than Spring AI's 400 — e.g.
+        // https://mcp.context7.com/mcp and api.githubcopilot.com/mcp/ both
+        // do this, so this isn't specific to any one server implementation.
+        const fetchFn = vi
+          .fn<typeof fetch>()
+          .mockResolvedValue(new Response('not found', { status: 404 }));
+        const fetchWithFallback = createStreamableHttpCompatibilityFetch(
+          'spec-compliant-server',
+          fetchFn,
+        );
+
+        const response = await fetchWithFallback('http://test-server/mcp', {
+          method: 'GET',
+          headers: { Accept: 'text/event-stream' },
+        });
+
+        expect(fetchFn).toHaveBeenCalledTimes(1);
+        expect(response.status).toBe(405);
+        expect(response.statusText).toBe('Method Not Allowed');
+        expect(await response.text()).toBe('');
+      });
+
       it('omits response body diagnostics when the fallback body is empty', async () => {
         const fetchFn = vi
           .fn<typeof fetch>()

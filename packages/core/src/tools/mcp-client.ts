@@ -128,7 +128,7 @@ function bindInvocationContextPolicy(
   }
 }
 
-const STREAMABLE_HTTP_GET_SSE_FALLBACK_STATUSES = new Set([400]);
+const STREAMABLE_HTTP_GET_SSE_FALLBACK_STATUSES = new Set([400, 404]);
 const STREAMABLE_HTTP_GET_SSE_ERROR_BODY_LIMIT = 512;
 
 export function getMcpOAuthDialogInstruction(
