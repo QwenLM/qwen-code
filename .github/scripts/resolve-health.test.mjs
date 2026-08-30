@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, it } from 'node:test';
 import { parse } from 'yaml';
 import {
+  ANSWERABLE_ASSOCIATIONS,
   DEFAULTS,
   HEALTH_MARKER,
   RESULT_MARKER,
@@ -16,6 +17,7 @@ import {
   assess,
   classifyResult,
   decide,
+  fetchPrs,
   findOpenIssue,
   isRequest,
   main,
@@ -37,19 +39,35 @@ const producer = readFileSync(
 
 const BOT = 'qwen-code-dev-bot';
 let nextId = 1000;
-function comment(user, created_at, body, pr = 1, updated_at = created_at) {
+function comment(
+  user,
+  created_at,
+  body,
+  pr = 1,
+  updated_at = created_at,
+  author_association = 'COLLABORATOR',
+) {
   const id = (nextId += 1);
   return {
     id,
     user,
+    author_association,
     created_at,
     updated_at,
     body,
     html_url: `https://github.com/QwenLM/qwen-code/pull/${pr}#issuecomment-${id}`,
   };
 }
-const request = (at, pr, user = 'maintainer', updated_at = at) =>
-  comment(user, at, '@qwen-code /resolve', pr, updated_at);
+// Default COLLABORATOR: the association a maintainer's comment carries, and
+// the only kind the producer would have served — see ANSWERABLE_ASSOCIATIONS.
+const request = (
+  at,
+  pr,
+  user = 'maintainer',
+  updated_at = at,
+  author_association = 'COLLABORATOR',
+) =>
+  comment(user, at, '@qwen-code /resolve', pr, updated_at, author_association);
 const result = (at, sentence, pr) =>
   comment(BOT, at, `${RESULT_MARKER}\n${sentence}\n\nDetails.`, pr);
 
@@ -184,6 +202,36 @@ describe('resolve-health: classification', () => {
     assert.ok(!isRequest(' @qwen-code /resolve'));
     assert.ok(!isRequest('> @qwen-code /resolve'));
     assert.ok(!isRequest('@qwen-code /resolved'));
+  });
+
+  it('pins the producer gate that makes a refused request unanswerable', () => {
+    // ANSWERABLE_ASSOCIATIONS exists because a refused request is silent:
+    // `resolve-pr` runs only when `authorize` says yes, and every step that
+    // could report — `Report result`, `Report skipped request` — lives inside
+    // that job. Should the producer ever answer a refusal, this test fails
+    // and the association gate can be dropped instead of quietly hiding
+    // requests the lane now does report on.
+    const start = producer.indexOf('\n  resolve-pr:');
+    assert.ok(start > 0, 'resolve-pr job not found in the producer');
+    const rest = producer.slice(start + 1);
+    const next = rest.search(/\n {2}[A-Za-z]/);
+    const job = next === -1 ? rest : rest.slice(0, next);
+    assert.match(job, /needs\.authorize\.outputs\.should_review == 'true'/);
+    assert.ok(job.includes("- name: 'Report skipped request'"));
+    assert.ok(job.includes("- name: 'Report result'"));
+    // ...and the permission set that gate applies. The watch's set is wider
+    // on purpose (a read-only collaborator still counts), never narrower.
+    const authorize = producer.slice(
+      producer.indexOf('\n  authorize:'),
+      producer.indexOf('\n  review-pr:'),
+    );
+    assert.match(authorize, /admin\|maintain\|write\)/);
+    for (const association of ANSWERABLE_ASSOCIATIONS) {
+      assert.ok(
+        ['OWNER', 'MEMBER', 'COLLABORATOR'].includes(association),
+        `${association} cannot imply write permission`,
+      );
+    }
   });
 });
 
@@ -459,6 +507,86 @@ describe('resolve-health: assessment', () => {
     assert.equal(b.streak, 1);
   });
 
+  it('does not count a request from someone the lane would refuse', () => {
+    // `resolve-pr` runs only when `authorize` says yes, and that job demands
+    // admin/maintain/write and fails closed; on denial the whole job is
+    // skipped, including its own `Report skipped request` step, so a refused
+    // request gets no result comment at all. Counting it would read a healthy
+    // lane as a dead one — three fork-PR authors asking is the exact
+    // population /resolve exists for, and this happened live on #8169.
+    const denied = ['CONTRIBUTOR', 'FIRST_TIME_CONTRIBUTOR', 'NONE'].map(
+      (association, i) => ({
+        number: 40 + i,
+        state: 'open',
+        comments: [
+          request(
+            '2026-08-27T00:00:00Z',
+            40 + i,
+            'fork-author',
+            '2026-08-27T00:00:00Z',
+            association,
+          ),
+        ],
+      }),
+    );
+    const a = assess(denied, { now });
+    assert.equal(a.unanswered.length, 0);
+    assert.equal(a.alarm, false);
+    // The discriminator: the identical requests from someone the lane would
+    // have served still alarm, so the gate narrows the population without
+    // silencing the signal.
+    const served = denied.map((pr) => ({
+      ...pr,
+      comments: [request('2026-08-27T00:00:00Z', pr.number, 'maintainer')],
+    }));
+    const b = assess(served, { now });
+    assert.equal(b.unanswered.length, 3);
+    assert.equal(b.alarm, true);
+  });
+
+  it('counts every association that can hold write, and no other', () => {
+    // Write access renders as exactly one of these three — the repository
+    // owner as OWNER, an organisation member as MEMBER, anyone granted access
+    // directly as COLLABORATOR — so the set is a superset of "has write" and
+    // dropping the rest can never hide a request the lane would have served.
+    // A missing field is dropped too: the producer denies when it cannot
+    // establish permission, and the watch takes the same direction.
+    const counted = ['OWNER', 'MEMBER', 'COLLABORATOR'];
+    const dropped = [
+      'CONTRIBUTOR',
+      'FIRST_TIME_CONTRIBUTOR',
+      'FIRST_TIMER',
+      'MANNEQUIN',
+      'NONE',
+      '',
+      // The field absent entirely, as an API that stopped returning it would
+      // leave it — not the fixture default.
+      null,
+    ];
+    assert.deepEqual([...ANSWERABLE_ASSOCIATIONS].sort(), [...counted].sort());
+    for (const association of [...counted, ...dropped]) {
+      const req = request(
+        '2026-08-27T00:00:00Z',
+        50,
+        'someone',
+        '2026-08-27T00:00:00Z',
+        association ?? 'COLLABORATOR',
+      );
+      if (association === null) {
+        delete req.author_association;
+      }
+      const a = assess([{ number: 50, state: 'open', comments: [req] }], {
+        now,
+        unansweredThreshold: 1,
+      });
+      assert.equal(
+        a.unanswered.length,
+        counted.includes(association) ? 1 : 0,
+        `association ${association === null ? '(absent)' : association}`,
+      );
+    }
+  });
+
   it('does not count a comment edited into a request', () => {
     // The producer fires on comment creation only; an edit never starts a
     // run, so an edited comment never receives a result and must not be
@@ -540,10 +668,7 @@ describe('resolve-health: assessment', () => {
         {
           number: 29,
           state: 'open',
-          comments: [
-            result('2026-08-25T00:00:00Z', PUSHED, 29),
-            editedFailure,
-          ],
+          comments: [result('2026-08-25T00:00:00Z', PUSHED, 29), editedFailure],
         },
       ],
       { now },
@@ -1062,6 +1187,65 @@ describe('resolve-health: decisions', () => {
   });
 });
 
+describe('resolve-health: reading the comment feed', () => {
+  it('asks the API for the association assess() gates on', () => {
+    // The gate is only as good as the field reaching it: if the jq stops
+    // selecting author_association every request parses as unanswerable and
+    // the signal goes silent, which no assess() test would notice.
+    const calls = [];
+    const gh = (args) => {
+      calls.push(args);
+      if (args[3] === 'search/issues') {
+        return '7\topen\n';
+      }
+      return [
+        [
+          '1',
+          'fork-author',
+          'CONTRIBUTOR',
+          '2026-08-27T00:00:00Z',
+          '2026-08-27T00:00:00Z',
+          'u1',
+          Buffer.from('@qwen-code /resolve').toString('base64'),
+        ].join('\t'),
+        // An empty association column, as `(.author_association // "")`
+        // emits when the API omits the field: the row must still parse
+        // positionally rather than shifting every later field left.
+        [
+          '2',
+          'ghost',
+          '',
+          '2026-08-27T00:10:00Z',
+          '2026-08-27T00:10:00Z',
+          'u2',
+          Buffer.from('@qwen-code /resolve').toString('base64'),
+        ].join('\t'),
+        '',
+      ].join('\n');
+    };
+    const prs = fetchPrs(gh, 'QwenLM/qwen-code', '2026-08-20');
+    const jq = calls[1][calls[1].indexOf('--jq') + 1];
+    assert.match(jq, /author_association/);
+    assert.equal(prs[0].comments[0].author_association, 'CONTRIBUTOR');
+    assert.deepEqual(
+      prs[0].comments.map((c) => [c.author_association, c.created_at]),
+      [
+        ['CONTRIBUTOR', '2026-08-27T00:00:00Z'],
+        ['', '2026-08-27T00:10:00Z'],
+      ],
+    );
+    // ...and the fetched shape flows into assess() unchanged: neither
+    // request is one the lane would have served, so neither is counted.
+    assert.equal(
+      assess(prs, {
+        now: new Date('2026-08-27T12:00:00Z'),
+        unansweredThreshold: 1,
+      }).unanswered.length,
+      0,
+    );
+  });
+});
+
 describe('resolve-health: writes', () => {
   it('creates with the dedup label, comments, and closes through the issues API', () => {
     const calls = [];
@@ -1168,6 +1352,7 @@ describe('resolve-health: end to end against a recording gh', () => {
           [
             '1',
             'maintainer',
+            'COLLABORATOR',
             '2026-08-25T00:00:00Z',
             '2026-08-25T00:00:00Z',
             'u1',
@@ -1176,6 +1361,7 @@ describe('resolve-health: end to end against a recording gh', () => {
           [
             '2',
             BOT,
+            'COLLABORATOR',
             '2026-08-25T00:05:00Z',
             '2026-08-25T00:05:00Z',
             'u2',
@@ -1184,6 +1370,7 @@ describe('resolve-health: end to end against a recording gh', () => {
           [
             '3',
             'maintainer',
+            'COLLABORATOR',
             '2026-08-26T00:00:00Z',
             '2026-08-26T00:00:00Z',
             'u3',
@@ -1192,6 +1379,7 @@ describe('resolve-health: end to end against a recording gh', () => {
           [
             '4',
             BOT,
+            'COLLABORATOR',
             '2026-08-26T00:05:00Z',
             '2026-08-26T00:05:00Z',
             'u4',
@@ -1205,6 +1393,7 @@ describe('resolve-health: end to end against a recording gh', () => {
           [
             '5',
             BOT,
+            'COLLABORATOR',
             '2026-08-26T01:00:00Z',
             '2026-08-26T01:00:00Z',
             'u5',
@@ -1298,6 +1487,7 @@ describe('resolve-health: end to end against a recording gh', () => {
               [
                 c.id,
                 c.user,
+                c.author_association ?? 'COLLABORATOR',
                 c.created_at,
                 c.updated_at ?? c.created_at,
                 c.html_url,
@@ -1430,6 +1620,7 @@ describe('resolve-health: end to end against a recording gh', () => {
           [
             '6',
             'maintainer',
+            'COLLABORATOR',
             '2026-08-26T00:00:00Z',
             '2026-08-26T00:00:00Z',
             'u6',
@@ -1438,6 +1629,7 @@ describe('resolve-health: end to end against a recording gh', () => {
           [
             '7',
             BOT,
+            'COLLABORATOR',
             '2026-08-26T01:00:00Z',
             '2026-08-26T01:00:00Z',
             'u7',

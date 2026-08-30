@@ -122,7 +122,35 @@ function headline(body) {
   return firstLine(body).slice(0, 160);
 }
 
-// prs: [{ number, state, comments: [{ id, user, created_at, updated_at, body, html_url }] }]
+// A request the producer would have refused can never be answered, so it must
+// not read as an unanswered one. `resolve-pr` needs `authorize` to say yes,
+// and that job demands admin/maintain/write and fails closed; on denial the
+// whole job is skipped — including its own `Report skipped request` step — so
+// a refused request gets no result comment, no reaction, nothing at all.
+// Counting it would turn a healthy lane into a dead one: three fork-PR
+// authors asking (the exact population /resolve exists for) would file
+// "0 consecutive failures, 3 unanswered requests" while every maintainer
+// request is being served.
+//
+// `author_association` rides along on the comment payload this watch already
+// reads, and holding write implies one of these three — the repository owner
+// comments as OWNER, an organisation member as MEMBER, anyone granted access
+// directly as COLLABORATOR. Everything else (CONTRIBUTOR,
+// FIRST_TIME_CONTRIBUTOR, FIRST_TIMER, MANNEQUIN, NONE, and a field the API
+// did not return) cannot hold write, so dropping it never hides a request the
+// lane would have answered. Deliberately WIDER than "has write": a read-only
+// collaborator still counts, which leaves a false alarm possible for three of
+// those in one window but keeps the watch from silencing a real outage. The
+// permission API itself is not an option here — it needs a PAT (see
+// qwen-code-pr-review.yml's authorize job), which a scheduled watch has no
+// reason to hold.
+export const ANSWERABLE_ASSOCIATIONS = new Set([
+  'OWNER',
+  'MEMBER',
+  'COLLABORATOR',
+]);
+
+// prs: [{ number, state, comments: [{ id, user, author_association, created_at, updated_at, body, html_url }] }]
 export function assess(prs, options = {}) {
   const opts = { ...DEFAULTS, ...options };
   const now = opts.now instanceof Date ? opts.now : new Date();
@@ -179,6 +207,9 @@ export function assess(prs, options = {}) {
         // The producer fires on comment creation only; a comment edited into
         // request shape never ran and never gets a result comment.
         c.updated_at === c.created_at &&
+        // ...and only from someone the producer would have served: see
+        // ANSWERABLE_ASSOCIATIONS.
+        ANSWERABLE_ASSOCIATIONS.has(c.author_association) &&
         isRequest(c.body),
     );
     for (const req of requests) {
@@ -336,7 +367,7 @@ export function renderIssueBody(assessment, options = {}) {
     stateMarker(stateOf(assessment)),
     '`@qwen-code /resolve` is failing in a row. Its baseline is ~84% of agent runs pushing a resolution, so a streak this long almost always means the lane itself is broken — an npm `latest` that does not resolve, a sandbox image that was never published, a workflow file that no longer parses — not the conflicts. Re-running requests will not help until the cause is fixed.',
     '',
-    'How to read the outcomes: `infra_failed` means the agent step ended without running (install, model endpoint, timeout, cancellation — open the workflow run linked from the comment); `agent_failed` means the agent ran and gave up or failed verification; `push_failed` means it resolved the conflict but the push was rejected for a reason a retry repeats (token scope, fork permissions); `unknown` means the result comment used wording this watch does not recognise — check for a producer change. A request with no result comment at all usually means the workflow never started (an invalid workflow file produces exactly that, with no run to look at).',
+    'How to read the outcomes: `infra_failed` means the agent step ended without running (install, model endpoint, timeout, cancellation — open the workflow run linked from the comment); `agent_failed` means the agent ran and gave up or failed verification; `push_failed` means it resolved the conflict but the push was rejected for a reason a retry repeats (token scope, fork permissions); `unknown` means the result comment used wording this watch does not recognise — check for a producer change. A request with no result comment at all usually means the workflow never started (an invalid workflow file produces exactly that, with no run to look at); only requests from someone the lane would have served are counted, since it refuses anyone without write access in silence.',
     '',
     renderReport(assessment, options),
     'This issue is maintained by `.github/workflows/qwen-resolve-health.yml`; it comments when the picture changes and closes itself once a `/resolve` succeeds again.',
@@ -481,16 +512,30 @@ export function fetchPrs(gh, repo, since) {
         'per_page=100',
         '--paginate',
         '--jq',
-        '.[] | [.id, .user.login, .created_at, .updated_at, .html_url, (.body // "" | @base64)] | @tsv',
+        '.[] | [.id, .user.login, (.author_association // ""), .created_at, .updated_at, .html_url, (.body // "" | @base64)] | @tsv',
       ]),
-    ).map(([id, user, created_at, updated_at, html_url, body]) => ({
-      id: Number(id),
-      user,
-      created_at,
-      updated_at,
-      html_url,
-      body: b64(body),
-    })),
+    ).map(
+      ([
+        id,
+        user,
+        author_association,
+        created_at,
+        updated_at,
+        html_url,
+        body,
+      ]) => ({
+        id: Number(id),
+        user,
+        // Empty when the API omitted it, which ANSWERABLE_ASSOCIATIONS reads
+        // as "not answerable" — the same direction the producer's authorize
+        // job takes when it cannot establish permission.
+        author_association,
+        created_at,
+        updated_at,
+        html_url,
+        body: b64(body),
+      }),
+    ),
   }));
 }
 
