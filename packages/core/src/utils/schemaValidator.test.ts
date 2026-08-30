@@ -846,6 +846,32 @@ describe('SchemaValidator', () => {
         }),
       ).toBe(true);
     });
+
+    it('enforces two distinct schemas that share one top-level $id', () => {
+      const sharedId = 'https://qwen-code.test/schemaValidator/duplicate-id';
+      const schemaA = {
+        $id: sharedId,
+        type: 'object',
+        properties: { value: { type: 'string', maxLength: 10 } },
+      };
+      // A DISTINCT schema object reusing the same top-level $id (e.g. two
+      // tools generated from one template, or a registry rebuilt after an
+      // MCP reconnect/refresh).
+      const schemaB = {
+        $id: sharedId,
+        type: 'object',
+        properties: { value: { type: 'string', maxLength: 10 } },
+      };
+
+      expect(SchemaValidator.canEnforce(schemaA)).toBe(true);
+      expect(SchemaValidator.canEnforce(schemaB)).toBe(true);
+
+      // Validation must still enforce constraints on the rebuilt schema
+      // object instead of silently skipping it.
+      expect(
+        SchemaValidator.validate(schemaB, { value: 'a'.repeat(50) }),
+      ).not.toBeNull();
+    });
   });
 
   describe('non-string to string coercion', () => {

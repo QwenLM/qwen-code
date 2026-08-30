@@ -20,6 +20,13 @@ const Ajv2020Class = (Ajv2020Pkg as any).default || Ajv2020Pkg;
 const debugLogger = createDebugLogger('SchemaValidator');
 
 const ajvOptions = {
+  // Don't register compiled schemas by `$id`. These instances are
+  // module-level and shared; if a second, distinct schema object carries
+  // the same top-level `$id` (two MCP tools generated from one template,
+  // or a registry rebuilt after an MCP reconnect/refresh), Ajv would throw
+  // "schema with key or id ... already exists" and the bare catch would
+  // silently turn enforcement/relaxation off for that schema.
+  addUsedSchema: false,
   // See: https://ajv.js.org/options.html#strict-mode-options
   // strictSchema defaults to true and prevents use of JSON schemas that
   // include unrecognized keywords. The JSON schema spec specifically allows
@@ -47,6 +54,10 @@ const ajvOptions = {
 };
 
 const strictCompileOptions = {
+  // Same rationale as `ajvOptions`: keep compile() idempotent for
+  // `$id`-bearing schemas so a distinct schema object reusing a `$id`
+  // doesn't collide in the shared strict instances.
+  addUsedSchema: false,
   strictSchema: true,
   strictRequired: false,
   strictTypes: false,
