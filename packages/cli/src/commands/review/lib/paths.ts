@@ -9,9 +9,16 @@
 // preferences resolve under Storage's project directory. Use `path.join`
 // rather than string concatenation so Windows backslashes are produced.
 
-import { existsSync, realpathSync, statSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  realpathSync,
+  statSync,
+} from 'node:fs';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { Storage } from '@qwen-code/qwen-code-core';
+import { sanitizeFilenameComponent, Storage } from '@qwen-code/qwen-code-core';
 import { safeTarget } from '../../../utils/paths.js';
 
 /**
@@ -41,6 +48,160 @@ export function assertWritableOutPath(out: string): void {
 export const REVIEW_TMP_DIR = join('.qwen', 'tmp');
 export const REVIEWS_DIR = join('.qwen', 'reviews');
 export const REVIEW_CACHE_DIR = join('.qwen', 'review-cache');
+
+/**
+ * Where a generated review fan-out script has to live.
+ *
+ * Not a choice: `Workflow({scriptPath})` loads through
+ * `readWorkflowFileSecurely`, which realpaths the file and accepts only the
+ * two saved-workflow directories and the generated-scripts root,
+ * `Storage.getGeneratedWorkflowsDir()` = `<projectDir>/workflows/generated`.
+ * The saved directories are out: every `.js` in them is also a `/<name>`
+ * slash command, and a review's fan-out has no business in the user's
+ * command namespace. The generated root is reached through the same env the
+ * harness exports for the transcript readers — `QWEN_CODE_PROJECT_DIR` is
+ * `storage.getProjectDir()` of the session that will dispatch the script —
+ * so the writer and the loader compute the same directory by construction.
+ * Nested one level per session, so a session's scripts can be swept as a
+ * unit and two sessions reviewing in one project never share a file.
+ */
+export const GENERATED_WORKFLOWS_SUBDIR = join('workflows', 'generated');
+
+/** Subdirectory of the generated root that review scripts live under. */
+export const REVIEW_WORKFLOWS_SUBDIR = 'review';
+
+/** Filename prefix for generated fan-out scripts. */
+export const REVIEW_WORKFLOW_PREFIX = 'qwen-review-';
+
+/**
+ * Why a generated script has nowhere to go. Never conflated with a bad plan:
+ * the env contract is the harness's, not the caller's.
+ */
+export class GeneratedWorkflowDirUnavailableError extends Error {}
+
+function projectDirFromEnv(env: NodeJS.ProcessEnv): string {
+  const projectDir = env['QWEN_CODE_PROJECT_DIR']?.trim();
+  if (!projectDir) {
+    throw new GeneratedWorkflowDirUnavailableError(
+      'the CLI did not export QWEN_CODE_PROJECT_DIR, so there is no directory ' +
+        'the Workflow tool would load a generated script from. Run this ' +
+        'command from inside a qwen session.',
+    );
+  }
+  return projectDir;
+}
+
+/**
+ * The per-session directory name. The sanitized prefix keeps the directory
+ * readable and swept by the same rules as the harness's transcript dirs,
+ * but sanitizing is lossy — `sess.1` and `sess_1` both flatten to
+ * `sess_1` — so the digest of the RAW id is what keeps two concurrent
+ * sessions apart: without it they would select the same script target for
+ * the same plan, and the later atomic rename would dispatch one session's
+ * roster, rules, and worktree pin to the other.
+ */
+function reviewSessionDirName(session: string): string {
+  const digest = createHash('sha256').update(session).digest('hex').slice(0, 8);
+  return `${sanitizeFilenameComponent(session)}-${digest}`;
+}
+
+/**
+ * The directory this session's generated review scripts live in:
+ * `$QWEN_CODE_PROJECT_DIR/workflows/generated/review/<session>`.
+ *
+ * Read from the environment, never from an argument, for the same reason the
+ * transcript readers do: a path the model can choose is a path the model can
+ * point somewhere the loader will refuse. The session component is sanitized
+ * exactly as the harness sanitizes its transcript directory, so a session id
+ * carrying a dot lands in a directory that exists.
+ */
+export function reviewWorkflowsDir(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const session = env['QWEN_CODE_SESSION_ID']?.trim();
+  return join(
+    projectDirFromEnv(env),
+    GENERATED_WORKFLOWS_SUBDIR,
+    REVIEW_WORKFLOWS_SUBDIR,
+    session ? reviewSessionDirName(session) : 'no-session',
+  );
+}
+
+/**
+ * The writer half of the loader's canonical-containment policy.
+ * `readWorkflowFileSecurely` realpaths the script and refuses one outside
+ * the trusted roots — and refuses a symlinked root outright — so a writer
+ * that follows a link writes the script (embedding every review prompt)
+ * where the loader will not read it, outside the root it was meant to stay
+ * inside. Refuses a symlinked directory from the generated root down to the
+ * session dir, creates the session dir, then proves the canonical session
+ * dir stays under the canonical root. Call BEFORE building briefs or prompt
+ * records: delivery evidence for a script that then has nowhere safe to go
+ * would read to the coverage gate as a launched fan-out.
+ */
+export function ensureWritableReviewWorkflowsDir(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const projectDir = projectDirFromEnv(env);
+  const dir = reviewWorkflowsDir(env);
+  const root = join(projectDir, GENERATED_WORKFLOWS_SUBDIR);
+  for (const component of [root, join(root, REVIEW_WORKFLOWS_SUBDIR), dir]) {
+    let isLink = false;
+    try {
+      isLink = lstatSync(component).isSymbolicLink();
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      break; // absent — the mkdir below creates it as a real directory
+    }
+    if (isLink) {
+      throw new Error(
+        `refusing to write a generated review script through the symlinked ` +
+          `directory '${component}' — it would land outside the ` +
+          'generated-workflows root the Workflow loader trusts.',
+      );
+    }
+  }
+  mkdirSync(dir, { recursive: true });
+  const realDir = realpathSync(dir);
+  const realRoot = realpathSync(root);
+  if (realDir !== realRoot && !realDir.startsWith(realRoot + sep)) {
+    throw new Error(
+      `refusing to write a generated review script: the canonical session ` +
+        `directory '${realDir}' escapes the canonical generated-workflows ` +
+        `root '${realRoot}'.`,
+    );
+  }
+  return dir;
+}
+
+/**
+ * The generated fan-out script for one plan.
+ *
+ * Named by a digest of the plan path so two reviews running in one session
+ * do not overwrite each other's script, and so re-running `emit-workflow`
+ * for the same review replaces its own file rather than accumulating.
+ */
+export function reviewWorkflowScriptPath(
+  planPath: string,
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const resolved = resolve(planPath);
+  // Canonicalize an EXISTING plan before hashing: macOS spells the same
+  // file `/var/...` and `/private/var/...`, and the loader canonicalizes
+  // with realpath too — hashing the raw spelling would name one plan two
+  // scripts (and break the identity a relative vs absolute path must keep).
+  let canonical = resolved;
+  try {
+    canonical = realpathSync(resolved);
+  } catch {
+    // Not on disk — nothing to canonicalize; the read fails on its own terms.
+  }
+  const digest = createHash('sha256')
+    .update(canonical)
+    .digest('hex')
+    .slice(0, 10);
+  return join(reviewWorkflowsDir(env), `${REVIEW_WORKFLOW_PREFIX}${digest}.js`);
+}
 
 /**
  * Filename prefix for review-worktree lease files under `REVIEW_TMP_DIR`.

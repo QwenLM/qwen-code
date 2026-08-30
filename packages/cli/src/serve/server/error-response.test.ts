@@ -16,6 +16,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { sendBridgeError } from './error-response.js';
 import { DaemonDrainingError } from './session-archive.js';
+import { BridgeTimeoutError } from '../acp-session-bridge.js';
 import { StandaloneSessionServiceError } from '../conversations/standalone-session-service.js';
 import { ConversationRuntimeOwnershipError } from '../conversations/conversation-runtime-errors.js';
 import type { DaemonLogger } from '../daemon-logger.js';
@@ -69,6 +70,34 @@ describe('sendBridgeError session writer errors', () => {
       code: 'daemon_draining',
       errorKind: 'daemon_draining',
     });
+  });
+
+  it('maps session initialization timeouts with the public retry contract', () => {
+    const { response, status, json, set } = responseMock();
+    const error = new BridgeTimeoutError('newSession', 10_000);
+
+    sendBridgeError(response, error);
+
+    expect(set).toHaveBeenCalledWith('Retry-After', '10');
+    expect(status).toHaveBeenCalledWith(504);
+    expect(json).toHaveBeenCalledWith({
+      error: error.message,
+      code: 'init_timeout',
+      errorKind: 'init_timeout',
+      retryable: true,
+      timeoutMs: 10_000,
+    });
+  });
+
+  it('leaves non-session-initialization bridge timeouts on the generic path', () => {
+    const { response, status, json, set } = responseMock();
+    const error = new BridgeTimeoutError('initialize', 10_000);
+
+    sendBridgeError(response, error);
+
+    expect(set).not.toHaveBeenCalled();
+    expect(status).toHaveBeenCalledWith(500);
+    expect(json).toHaveBeenCalledWith({ error: error.message });
   });
 
   it.each([

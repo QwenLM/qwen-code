@@ -24,6 +24,37 @@ const windowId = Number(process.env.COMPUTER_USE_WINDOW ?? "");
 const configured =
   Number.isInteger(pid) && pid > 0 && Number.isInteger(windowId) && windowId > 0;
 
+test("default authorization follows the ComputerUse owner lifetime", async () => {
+  const computer = await ComputerUse.create({
+    session: `computer-use-owner-lifetime-${process.pid}`,
+  });
+  try {
+    await computer.listApps();
+    const session = await computer.sessionInfo();
+    assert.ok(
+      session.expiresInSeconds > 24n * 60n * 60n,
+      `default session unexpectedly has a short TTL: ${session.expiresInSeconds}`,
+    );
+  } finally {
+    await computer.close();
+  }
+});
+
+test("finite authorization remains an explicit opt-in", async () => {
+  const computer = await ComputerUse.create({
+    session: `computer-use-finite-lifetime-${process.pid}`,
+    sessionTtlSeconds: 60,
+    idleTtlSeconds: 30,
+  });
+  try {
+    await computer.listApps();
+    const session = await computer.sessionInfo();
+    assert.ok(session.expiresInSeconds <= 30n);
+  } finally {
+    await computer.close();
+  }
+});
+
 test(
   "wrapper drives revision v1 against a live native target",
   { skip: !configured && "set COMPUTER_USE_PID/WINDOW to run" },
