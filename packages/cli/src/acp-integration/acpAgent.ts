@@ -227,7 +227,9 @@ import { createLoadedSettingsAdapter } from '../config/loadedSettingsAdapter.js'
 import { isCompatibleLiveSessionSource } from '../runtime/live-session-source.js';
 import {
   getConversationDirectoryName,
+  hasVerifiableInode,
   isSameConversationPath,
+  isSameDirectoryIdentity,
 } from '../utils/conversation-directory-identity.js';
 import type { ApprovalModeValue } from './session/types.js';
 import { z } from 'zod';
@@ -3241,6 +3243,26 @@ function isOwnerOnlyDirectory(stats: Stats): boolean {
   return (stats.mode & 0o077) === 0;
 }
 
+/**
+ * Deliberately local, NOT the module's `hasRootIdentity`: the wire
+ * expectation payload `{ device, inode }` carries no `inodeVerifiable`
+ * field, so verifiability must keep being derived from `inode !== 0` here
+ * (the parser admits only safe integers >= 0, so the two derivations
+ * coincide). The comparison itself must stay in lockstep with
+ * `hasRootIdentity` in utils/conversation-directory-identity.ts.
+ */
+function hasExpectedManagedDirectoryIdentity(
+  stats: Stats,
+  expected: { device: number; inode: number },
+): boolean {
+  const inodeVerifiable = hasVerifiableInode(stats.ino);
+  return (
+    stats.dev === expected.device &&
+    inodeVerifiable === (expected.inode !== 0) &&
+    (!inodeVerifiable || stats.ino === expected.inode)
+  );
+}
+
 function hasOnlyKeys(
   value: Record<string, unknown>,
   keys: readonly string[],
@@ -3358,10 +3380,8 @@ async function assertManagedConversationDirectoryIdentity(
     !isOwnerOnlyDirectory(rootBefore) ||
     !isOwnerOnlyDirectory(rootAfter) ||
     !isSameConversationPath(canonicalRoot, expectation.root.canonicalPath) ||
-    rootBefore.dev !== expectation.root.device ||
-    rootBefore.ino !== expectation.root.inode ||
-    rootAfter.dev !== expectation.root.device ||
-    rootAfter.ino !== expectation.root.inode
+    !hasExpectedManagedDirectoryIdentity(rootBefore, expectation.root) ||
+    !hasExpectedManagedDirectoryIdentity(rootAfter, expectation.root)
   ) {
     throw managedConversationDirectoryError(false);
   }
@@ -3382,10 +3402,8 @@ async function assertManagedConversationDirectoryIdentity(
     !isOwnerOnlyDirectory(childBefore) ||
     !isOwnerOnlyDirectory(childAfter) ||
     !isSameConversationPath(canonicalChild, expectation.child.canonicalPath) ||
-    childBefore.dev !== expectation.child.device ||
-    childBefore.ino !== expectation.child.inode ||
-    childAfter.dev !== expectation.child.device ||
-    childAfter.ino !== expectation.child.inode
+    !hasExpectedManagedDirectoryIdentity(childBefore, expectation.child) ||
+    !hasExpectedManagedDirectoryIdentity(childAfter, expectation.child)
   ) {
     throw managedConversationDirectoryError(false);
   }
@@ -10156,16 +10174,16 @@ class QwenAgent implements Agent {
           if (
             !isOwnerOnlyDirectory(rootBefore) ||
             !isOwnerOnlyDirectory(rootAfter) ||
-            rootBefore.dev !== rootAfter.dev ||
-            rootBefore.ino !== rootAfter.ino ||
+            !isSameDirectoryIdentity(rootBefore, rootAfter) ||
             (conversationDirectoryExpectation !== undefined &&
               (!isSameConversationPath(
                 canonicalRoot,
                 conversationDirectoryExpectation.root.canonicalPath,
               ) ||
-                rootAfter.dev !==
-                  conversationDirectoryExpectation.root.device ||
-                rootAfter.ino !== conversationDirectoryExpectation.root.inode))
+                !hasExpectedManagedDirectoryIdentity(
+                  rootAfter,
+                  conversationDirectoryExpectation.root,
+                )))
           ) {
             if (conversationDirectoryExpectation !== undefined) {
               throw managedConversationDirectoryError(false);
@@ -10198,17 +10216,16 @@ class QwenAgent implements Agent {
           if (
             !isOwnerOnlyDirectory(targetBefore) ||
             !isOwnerOnlyDirectory(targetAfter) ||
-            targetBefore.dev !== targetAfter.dev ||
-            targetBefore.ino !== targetAfter.ino ||
+            !isSameDirectoryIdentity(targetBefore, targetAfter) ||
             (conversationDirectoryExpectation !== undefined &&
               (!isSameConversationPath(
                 canonicalPath,
                 conversationDirectoryExpectation.child.canonicalPath,
               ) ||
-                targetAfter.dev !==
-                  conversationDirectoryExpectation.child.device ||
-                targetAfter.ino !==
-                  conversationDirectoryExpectation.child.inode)) ||
+                !hasExpectedManagedDirectoryIdentity(
+                  targetAfter,
+                  conversationDirectoryExpectation.child,
+                ))) ||
             relativeTarget.length === 0 ||
             relativeTarget.startsWith('..') ||
             path.isAbsolute(relativeTarget) ||
@@ -10239,11 +10256,12 @@ class QwenAgent implements Agent {
           }
           if (
             !isOwnerOnlyDirectory(rootFinal) ||
-            rootFinal.dev !== rootAfter.dev ||
-            rootFinal.ino !== rootAfter.ino ||
+            !isSameDirectoryIdentity(rootFinal, rootAfter) ||
             (conversationDirectoryExpectation !== undefined &&
-              (rootFinal.dev !== conversationDirectoryExpectation.root.device ||
-                rootFinal.ino !== conversationDirectoryExpectation.root.inode))
+              !hasExpectedManagedDirectoryIdentity(
+                rootFinal,
+                conversationDirectoryExpectation.root,
+              ))
           ) {
             if (conversationDirectoryExpectation !== undefined) {
               throw managedConversationDirectoryError(false);
