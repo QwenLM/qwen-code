@@ -47,6 +47,7 @@ import { CompressionStatus } from '../core/turn.js';
 import type { ChatRecord } from './chatRecordingService.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 import { moveSessionPrSidecar } from './session-pr-service.js';
+import { SessionWriterLostError } from './session-writer-lease.js';
 
 vi.mock('./usageHistoryService.js', () => ({
   prepareUsageBeforeTranscriptDeletion: vi.fn().mockResolvedValue({
@@ -59,7 +60,6 @@ vi.mock('node:path');
 vi.mock('../utils/paths.js');
 vi.mock('../utils/runtimeStatus.js');
 vi.mock('../utils/jsonl-utils.js');
-// Keep the real merge logic; only the sidecar I/O is controlled per test.
 // The archive-transition move is mocked here: it runs real filesystem
 // locks, which this suite's mocked-fs environment cannot host — its
 // semantics (rename, split-pair merge, lock coverage) are pinned in
@@ -67,8 +67,6 @@ vi.mock('../utils/jsonl-utils.js');
 vi.mock('./session-pr-service.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./session-pr-service.js')>()),
   moveSessionPrSidecar: vi.fn().mockResolvedValue(undefined),
-  readSessionPrs: vi.fn(),
-  writeSessionPrs: vi.fn(),
 }));
 
 describe('SessionService', () => {
@@ -1830,6 +1828,56 @@ describe('SessionService', () => {
       expect(unlinkSyncSpy).not.toHaveBeenCalled();
     });
 
+    it('finishes committed deletion cleanup after the generation closes', async () => {
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+      const assertCanMutate = vi
+        .fn()
+        .mockImplementationOnce(() => undefined)
+        .mockImplementation(() => {
+          throw new Error('generation changed');
+        });
+      const assertCleanupOwned = vi.fn();
+      const removeOrganizationSpy = vi
+        .spyOn(SessionOrganizationService.prototype, 'removeSession')
+        .mockImplementation(async (_sessionId, options) => {
+          options?.assertCanCommit?.();
+        });
+
+      await expect(
+        sessionService.removeSession(sessionIdA, {
+          assertCanMutate,
+          assertCleanupOwned,
+        }),
+      ).resolves.toBe(true);
+
+      expect(assertCanMutate).toHaveBeenCalledOnce();
+      expect(assertCleanupOwned).toHaveBeenCalledTimes(6);
+      expect(removeOrganizationSpy).toHaveBeenCalledWith(sessionIdA, {
+        assertCanCommit: assertCleanupOwned,
+      });
+      expect(rmSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`file-history/${sessionIdA}`),
+        { recursive: true, force: true },
+      );
+    });
+
+    it('stops committed deletion cleanup after writer ownership is lost', async () => {
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+      const ownershipLost = new Error('writer ownership lost');
+
+      await expect(
+        sessionService.removeSession(sessionIdA, {
+          assertCanMutate: vi.fn(),
+          assertCleanupOwned: () => {
+            throw ownershipLost;
+          },
+        }),
+      ).rejects.toBe(ownershipLost);
+
+      expect(unlinkSyncSpy).toHaveBeenCalledTimes(2);
+      expect(rmSyncSpy).not.toHaveBeenCalled();
+    });
+
     it('does not commit usage when transcript deletion fails', async () => {
       vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
       const unlinkError = Object.assign(new Error('permission denied'), {
@@ -2535,7 +2583,7 @@ describe('SessionService', () => {
       ).toBe(true);
     });
 
-    it('passes the generation fence to an asynchronous pr-sidecar commit', async () => {
+    it('passes cleanup ownership to an asynchronous pr-sidecar commit', async () => {
       mockActiveSessionOnly();
       existsSyncSpy.mockImplementation((filePath) => {
         const value = filePath.toString();
@@ -2545,18 +2593,49 @@ describe('SessionService', () => {
         );
       });
       const assertCanMutate = vi.fn();
+      const assertCleanupOwned = vi.fn();
 
       const result = await sessionService.archiveSessions([sessionIdA], {
         assertCanMutate,
+        assertCleanupOwned,
       });
 
       expect(result.errors).toEqual([]);
-      // The locked sidecar move carries the generation fence so an
-      // asynchronous commit cannot land between the transition's checks.
+      expect(assertCanMutate).toHaveBeenCalledOnce();
+      // The locked sidecar move carries the cleanup-ownership fence so an
+      // asynchronous commit cannot land after ownership was lost.
       expect(moveSessionPrSidecar).toHaveBeenCalledWith(
         expect.stringContaining(`/chats/${sessionIdA}.pr.json`),
         expect.stringContaining(`/chats/archive/${sessionIdA}.pr.json`),
-        assertCanMutate,
+        assertCleanupOwned,
+      );
+    });
+
+    it('does not swallow writer ownership loss during a pr-sidecar commit', async () => {
+      mockActiveSessionOnly();
+      existsSyncSpy.mockImplementation((filePath) => {
+        const value = filePath.toString();
+        return (
+          value.endsWith(`/chats/${sessionIdA}.pr.json`) ||
+          value.endsWith(`/chats/archive/${sessionIdA}.pr.json`)
+        );
+      });
+      // The locked move runs the ownership fence inside the lock; a loss
+      // surfaces as its rejection and must not be downgraded to a warning.
+      const ownershipLost = new SessionWriterLostError();
+      vi.mocked(moveSessionPrSidecar).mockRejectedValueOnce(ownershipLost);
+      const assertCleanupOwned = vi.fn();
+
+      const result = await sessionService.archiveSessions([sessionIdA], {
+        assertCanMutate: vi.fn(),
+        assertCleanupOwned,
+      });
+
+      expect(result.errors[0]?.error).toBe(ownershipLost);
+      expect(moveSessionPrSidecar).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/${sessionIdA}.pr.json`),
+        expect.stringContaining(`/chats/archive/${sessionIdA}.pr.json`),
+        assertCleanupOwned,
       );
     });
 
@@ -2593,7 +2672,7 @@ describe('SessionService', () => {
       );
     });
 
-    it('rechecks the generation before moving the active worktree sidecar', async () => {
+    it('finishes moving active sidecars after the generation closes', async () => {
       mockActiveSessionOnly();
       mockActiveWorktreeSidecarOnly();
       const generationChanged = new Error('generation changed');
@@ -2603,12 +2682,40 @@ describe('SessionService', () => {
         .mockImplementation(() => {
           throw generationChanged;
         });
+      const assertCleanupOwned = vi.fn();
 
       const result = await sessionService.archiveSessions([sessionIdA], {
         assertCanMutate,
+        assertCleanupOwned,
       });
 
-      expect(result.errors[0]?.error).toBe(generationChanged);
+      expect(result.archived).toEqual([sessionIdA]);
+      expect(result.errors).toEqual([]);
+      expect(assertCanMutate).toHaveBeenCalledOnce();
+      expect(assertCleanupOwned).toHaveBeenCalled();
+      expect(renameSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/${sessionIdA}.jsonl`),
+        expect.stringContaining(`/chats/archive/${sessionIdA}.jsonl`),
+      );
+      expect(renameSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/${sessionIdA}.worktree.json`),
+        expect.stringContaining(`/chats/archive/${sessionIdA}.worktree.json`),
+      );
+    });
+
+    it('stops archive sidecar cleanup after writer ownership is lost', async () => {
+      mockActiveSessionOnly();
+      mockActiveWorktreeSidecarOnly();
+      const ownershipLost = new Error('writer ownership lost');
+
+      const result = await sessionService.archiveSessions([sessionIdA], {
+        assertCanMutate: vi.fn(),
+        assertCleanupOwned: () => {
+          throw ownershipLost;
+        },
+      });
+
+      expect(result.errors[0]?.error).toBe(ownershipLost);
       expect(renameSyncSpy).toHaveBeenCalledWith(
         expect.stringContaining(`/chats/${sessionIdA}.jsonl`),
         expect.stringContaining(`/chats/archive/${sessionIdA}.jsonl`),
@@ -2705,6 +2812,48 @@ describe('SessionService', () => {
         expect.stringContaining(`${sessionIdA}.ledger.jsonl`),
         expect.anything(),
       );
+    });
+
+    it('does not append a prompt ledger after writer ownership is lost', async () => {
+      mockActiveSessionOnly();
+      const sourceLedger =
+        '{"v":1,"promptId":"p1","state":"in_flight","at":1}\n';
+      const originalDestination =
+        '{"v":1,"promptId":"p0","state":"committed","at":0}\n';
+      let destinationLedger = originalDestination;
+      let sourceExists = true;
+      vi.spyOn(fs, 'readFileSync').mockReturnValue(sourceLedger);
+      vi.spyOn(fs, 'appendFileSync').mockImplementation(
+        (_filePath, contents) => {
+          destinationLedger += contents.toString();
+        },
+      );
+      unlinkSyncSpy.mockImplementation((filePath) => {
+        if (filePath.toString().endsWith(`/chats/${sessionIdA}.ledger.jsonl`)) {
+          sourceExists = false;
+        }
+      });
+      existsSyncSpy.mockImplementation((filePath) =>
+        filePath.toString().endsWith(`${sessionIdA}.ledger.jsonl`),
+      );
+      const ownershipLost = new SessionWriterLostError();
+      const assertCleanupOwned = vi
+        .fn()
+        .mockImplementationOnce(() => undefined)
+        .mockImplementationOnce(() => undefined)
+        .mockImplementation(() => {
+          throw ownershipLost;
+        });
+
+      const result = await sessionService.archiveSessions([sessionIdA], {
+        assertCanMutate: vi.fn(),
+        assertCleanupOwned,
+      });
+
+      expect(result.errors[0]?.error).toBe(ownershipLost);
+      expect(destinationLedger).toBe(originalDestination);
+      expect(sourceExists).toBe(true);
+      expect(assertCleanupOwned).toHaveBeenCalledTimes(3);
     });
 
     it('should not move worktree sidecar when archiving JSONL fails', async () => {
@@ -2812,6 +2961,31 @@ describe('SessionService', () => {
       });
       expect(prepareUsageBeforeTranscriptDeletion).not.toHaveBeenCalled();
       expect(commitUsageBeforeTranscriptDeletion).not.toHaveBeenCalled();
+    });
+
+    it('finishes archive conflict cleanup after the generation closes', async () => {
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+      const assertCanMutate = vi
+        .fn()
+        .mockImplementationOnce(() => undefined)
+        .mockImplementation(() => {
+          throw new Error('generation changed');
+        });
+      const assertCleanupOwned = vi.fn();
+
+      const result = await sessionService.archiveSessions([sessionIdA], {
+        resolveConflicts: true,
+        assertCanMutate,
+        assertCleanupOwned,
+      });
+
+      expect(result).toMatchObject({
+        archived: [sessionIdA],
+        resolvedConflicts: [sessionIdA],
+        errors: [],
+      });
+      expect(assertCanMutate).toHaveBeenCalledOnce();
+      expect(assertCleanupOwned).toHaveBeenCalledTimes(3);
     });
   });
 
@@ -2944,6 +3118,31 @@ describe('SessionService', () => {
       expect(commitUsageBeforeTranscriptDeletion).not.toHaveBeenCalled();
     });
 
+    it('finishes unarchive conflict cleanup after the generation closes', async () => {
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+      const assertCanMutate = vi
+        .fn()
+        .mockImplementationOnce(() => undefined)
+        .mockImplementation(() => {
+          throw new Error('generation changed');
+        });
+      const assertCleanupOwned = vi.fn();
+
+      const result = await sessionService.unarchiveSessions([sessionIdA], {
+        resolveConflicts: true,
+        assertCanMutate,
+        assertCleanupOwned,
+      });
+
+      expect(result).toMatchObject({
+        unarchived: [sessionIdA],
+        resolvedConflicts: [sessionIdA],
+        errors: [],
+      });
+      expect(assertCanMutate).toHaveBeenCalledOnce();
+      expect(assertCleanupOwned).toHaveBeenCalledTimes(3);
+    });
+
     it('should recreate active chats directory before moving archived sessions', async () => {
       mockArchivedSessionOnly();
 
@@ -3030,7 +3229,7 @@ describe('SessionService', () => {
       );
     });
 
-    it('rechecks the generation before moving the archived worktree sidecar', async () => {
+    it('finishes moving archived sidecars after the generation closes', async () => {
       mockArchivedSessionOnly();
       mockArchivedWorktreeSidecarOnly();
       const generationChanged = new Error('generation changed');
@@ -3040,12 +3239,40 @@ describe('SessionService', () => {
         .mockImplementation(() => {
           throw generationChanged;
         });
+      const assertCleanupOwned = vi.fn();
 
       const result = await sessionService.unarchiveSessions([sessionIdA], {
         assertCanMutate,
+        assertCleanupOwned,
       });
 
-      expect(result.errors[0]?.error).toBe(generationChanged);
+      expect(result.unarchived).toEqual([sessionIdA]);
+      expect(result.errors).toEqual([]);
+      expect(assertCanMutate).toHaveBeenCalledOnce();
+      expect(assertCleanupOwned).toHaveBeenCalled();
+      expect(renameSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/archive/${sessionIdA}.jsonl`),
+        expect.stringContaining(`/chats/${sessionIdA}.jsonl`),
+      );
+      expect(renameSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/archive/${sessionIdA}.worktree.json`),
+        expect.stringContaining(`/chats/${sessionIdA}.worktree.json`),
+      );
+    });
+
+    it('stops unarchive sidecar cleanup after writer ownership is lost', async () => {
+      mockArchivedSessionOnly();
+      mockArchivedWorktreeSidecarOnly();
+      const ownershipLost = new Error('writer ownership lost');
+
+      const result = await sessionService.unarchiveSessions([sessionIdA], {
+        assertCanMutate: vi.fn(),
+        assertCleanupOwned: () => {
+          throw ownershipLost;
+        },
+      });
+
+      expect(result.errors[0]?.error).toBe(ownershipLost);
       expect(renameSyncSpy).toHaveBeenCalledWith(
         expect.stringContaining(`/chats/archive/${sessionIdA}.jsonl`),
         expect.stringContaining(`/chats/${sessionIdA}.jsonl`),
@@ -6576,10 +6803,12 @@ describe('SessionService', () => {
       sessionId: string,
       title: string,
       sessionCwd: string = cwd,
+      state: 'active' | 'archived' = 'active',
     ) => {
       const chatsDir = realPath.join(
         service['storage'].getProjectDir(),
         'chats',
+        ...(state === 'archived' ? ['archive'] : []),
       );
       fs.mkdirSync(chatsDir, { recursive: true });
       const file = realPath.join(chatsDir, `${sessionId}.jsonl`);
@@ -6635,6 +6864,78 @@ describe('SessionService', () => {
       await expect(
         service.getSessionDisplayName('11111111-1111-1111-1111-111111111111'),
       ).resolves.toBe('my-branch(1)');
+    });
+
+    it('also returns titles from archived sessions, so unarchiving cannot surface a duplicate', async () => {
+      seedSessionWithTitle(
+        '11111111-1111-1111-1111-111111111111',
+        'my-branch(1)',
+      );
+      seedSessionWithTitle(
+        '22222222-2222-2222-2222-222222222222',
+        'my-branch(2)',
+        cwd,
+        'archived',
+      );
+
+      const titles = await service.findSessionTitlesByPrefix('my-branch(');
+
+      expect(new Set(titles)).toEqual(
+        new Set(['my-branch(1)', 'my-branch(2)']),
+      );
+    });
+
+    it('deduplicates a title held by the same session in both active and archived state', async () => {
+      // getSessionLocation's 'conflict' state (reachable via an interrupted
+      // move) leaves one session file in both chats/ and chats/archive/;
+      // both scans read it and must not report its title twice.
+      seedSessionWithTitle(
+        '11111111-1111-1111-1111-111111111111',
+        'my-branch(1)',
+        cwd,
+        'active',
+      );
+      seedSessionWithTitle(
+        '11111111-1111-1111-1111-111111111111',
+        'my-branch(1)',
+        cwd,
+        'archived',
+      );
+
+      const titles = await service.findSessionTitlesByPrefix('my-branch(');
+
+      expect(titles).toEqual(['my-branch(1)']);
+    });
+
+    it('skips archived sessions from other projects (collisions stay project-scoped)', async () => {
+      seedSessionWithTitle(
+        '11111111-1111-1111-1111-111111111111',
+        'shared(1)',
+        cwd,
+        'archived',
+      );
+      seedSessionWithTitle(
+        '22222222-2222-2222-2222-222222222222',
+        'shared(2)',
+        '/some/other/project',
+        'archived',
+      );
+
+      const titles = await service.findSessionTitlesByPrefix('shared(');
+      expect(titles).toEqual(['shared(1)']);
+    });
+
+    it('computeUniqueBranchTitle skips a suffix already taken by an archived session', async () => {
+      seedSessionWithTitle(
+        '11111111-1111-1111-1111-111111111111',
+        'my-branch(1)',
+        cwd,
+        'archived',
+      );
+
+      const title = await computeUniqueBranchTitle('my-branch', service);
+
+      expect(title).toBe('my-branch(2)');
     });
 
     it('returns empty when chats directory does not exist', async () => {
@@ -6722,6 +7023,192 @@ describe('SessionService', () => {
       await expect(service.getSessionDisplayName(sessionId)).resolves.toBe(
         '创建 MR 描述生成 Skill(1)',
       );
+    });
+
+    it('uses the picker prompt for an archived session with no custom title', async () => {
+      const sessionId = '11111111-1111-1111-1111-111111111111';
+      const archiveDir = realPath.join(
+        service['storage'].getProjectDir(),
+        'chats',
+        'archive',
+      );
+      fs.mkdirSync(archiveDir, { recursive: true });
+      const file = realPath.join(archiveDir, `${sessionId}.jsonl`);
+      fs.writeFileSync(
+        file,
+        JSON.stringify({
+          uuid: 'u1',
+          parentUuid: null,
+          sessionId,
+          type: 'user',
+          timestamp: '2026-04-22T00:00:00.000Z',
+          cwd,
+          version: 'test',
+          message: { role: 'user', parts: [{ text: 'archived-prompt(1)' }] },
+        }) + '\n',
+      );
+
+      const titles =
+        await service.findSessionTitlesByPrefix('archived-prompt(');
+      expect(titles).toEqual(['archived-prompt(1)']);
+    });
+  });
+
+  describe('unarchiveSessions title collision', () => {
+    // Real disk again (see the findSessionTitlesByPrefix describe above):
+    // exercising the actual retitle-then-move needs a real renameSync and a
+    // real writeLineSync, neither of which that describe's setup restores
+    // (it only needed read paths).
+    let realTmpDir: string;
+    let realPath: typeof import('node:path');
+    let service: SessionService;
+    let cwd: string;
+
+    beforeEach(async () => {
+      const realOs = await import('node:os');
+      realPath = await vi.importActual<typeof import('node:path')>('node:path');
+      const actualPaths =
+        await vi.importActual<typeof import('../utils/paths.js')>(
+          '../utils/paths.js',
+        );
+      const actualJsonl = await vi.importActual<
+        typeof import('../utils/jsonl-utils.js')
+      >('../utils/jsonl-utils.js');
+
+      vi.mocked(path.join).mockImplementation(
+        realPath.join as unknown as typeof path.join,
+      );
+      vi.mocked(path.dirname).mockImplementation(
+        realPath.dirname as unknown as typeof path.dirname,
+      );
+      vi.mocked(path.isAbsolute).mockImplementation(
+        realPath.isAbsolute as unknown as typeof path.isAbsolute,
+      );
+      vi.mocked(path.resolve).mockImplementation(
+        realPath.resolve as unknown as typeof path.resolve,
+      );
+      vi.mocked(getProjectHash).mockImplementation(actualPaths.getProjectHash);
+      const mockedPaths = (await import('../utils/paths.js')) as unknown as {
+        sanitizeCwd: (cwd: string) => string;
+      };
+      mockedPaths.sanitizeCwd = actualPaths.sanitizeCwd;
+      vi.mocked(jsonl.read).mockImplementation(actualJsonl.read);
+      vi.mocked(jsonl.readLines).mockImplementation(actualJsonl.readLines);
+      vi.mocked(jsonl.writeLineSync).mockImplementation(
+        actualJsonl.writeLineSync,
+      );
+
+      vi.mocked(readdirSyncSpy).mockRestore?.();
+      vi.mocked(statSyncSpy).mockRestore?.();
+      vi.mocked(statPromiseSpy).mockRestore?.();
+      vi.mocked(unlinkSyncSpy).mockRestore?.();
+      vi.mocked(rmSyncSpy).mockRestore?.();
+      vi.mocked(renameSyncSpy).mockRestore?.();
+
+      realTmpDir = fs.mkdtempSync(
+        realPath.join(realOs.tmpdir(), 'unarchive-title-collision-'),
+      );
+      process.env['QWEN_RUNTIME_DIR'] = realTmpDir;
+      cwd = process.cwd();
+      service = new SessionService(cwd);
+    });
+
+    afterEach(() => {
+      delete process.env['QWEN_RUNTIME_DIR'];
+      try {
+        fs.rmSync(realTmpDir, { recursive: true, force: true });
+      } catch {
+        // best-effort
+      }
+    });
+
+    const seedSessionWithTitle = (
+      sessionId: string,
+      title: string,
+      state: 'active' | 'archived' = 'active',
+    ) => {
+      const chatsDir = realPath.join(
+        service['storage'].getProjectDir(),
+        'chats',
+        ...(state === 'archived' ? ['archive'] : []),
+      );
+      fs.mkdirSync(chatsDir, { recursive: true });
+      const file = realPath.join(chatsDir, `${sessionId}.jsonl`);
+      const lines = [
+        {
+          uuid: 'u1',
+          parentUuid: null,
+          sessionId,
+          type: 'user',
+          timestamp: '2026-04-22T00:00:00.000Z',
+          cwd,
+          version: 'test',
+          message: { role: 'user', parts: [{ text: 'hello' }] },
+        },
+        {
+          uuid: 'u2',
+          parentUuid: 'u1',
+          sessionId,
+          type: 'system',
+          subtype: 'custom_title',
+          timestamp: '2026-04-22T00:00:01.000Z',
+          cwd,
+          version: 'test',
+          systemPayload: { customTitle: title, titleSource: 'manual' },
+        },
+      ];
+      fs.writeFileSync(
+        file,
+        lines.map((l) => JSON.stringify(l)).join('\n') + '\n',
+      );
+      return file;
+    };
+
+    it('retitles an archived session before unarchiving it into a title an active session already holds', async () => {
+      seedSessionWithTitle(
+        '11111111-1111-1111-1111-111111111111',
+        'my-branch(1)',
+        'active',
+      );
+      seedSessionWithTitle(
+        '22222222-2222-2222-2222-222222222222',
+        'my-branch(1)',
+        'archived',
+      );
+
+      const result = await service.unarchiveSessions([
+        '22222222-2222-2222-2222-222222222222',
+      ]);
+
+      expect(result.unarchived).toEqual([
+        '22222222-2222-2222-2222-222222222222',
+      ]);
+      expect(result.errors).toEqual([]);
+      await expect(
+        service.getSessionDisplayName('11111111-1111-1111-1111-111111111111'),
+      ).resolves.toBe('my-branch(1)');
+      await expect(
+        service.getSessionDisplayName('22222222-2222-2222-2222-222222222222'),
+      ).resolves.toBe('my-branch(2)');
+    });
+
+    it('leaves the title untouched when unarchiving does not collide', async () => {
+      seedSessionWithTitle(
+        '33333333-3333-3333-3333-333333333333',
+        'unrelated-branch',
+        'archived',
+      );
+
+      const result = await service.unarchiveSessions([
+        '33333333-3333-3333-3333-333333333333',
+      ]);
+
+      expect(result.unarchived).toEqual([
+        '33333333-3333-3333-3333-333333333333',
+      ]);
+      await expect(
+        service.getSessionDisplayName('33333333-3333-3333-3333-333333333333'),
+      ).resolves.toBe('unrelated-branch');
     });
   });
 
@@ -6971,6 +7458,32 @@ describe('SessionService', () => {
       });
       expect(await service.readCreationMetadata(sessionId)).toEqual({
         parentSessionId: 'parent-abc',
+        sourceType: 'scheduled_task',
+        sourceId: 'task-123',
+      });
+    });
+
+    it('rehydrates source metadata appended after the head scan window', async () => {
+      const sessionId = '78777777-7777-4777-8777-777777777777';
+      const lines: Array<Record<string, unknown>> = [
+        userLine(sessionId, 'hello'),
+      ];
+      for (let i = 0; i < 11; i++) {
+        lines.push({
+          ...userLine(sessionId, `filler-${i}`),
+          uuid: `filler-${i}`,
+        });
+      }
+      lines.push(sessionSourceLine(sessionId));
+      writeSession(sessionId, lines);
+
+      const result = await service.listSessions();
+
+      expect(findItem(result.items, sessionId)).toMatchObject({
+        sourceType: 'scheduled_task',
+        sourceId: 'task-123',
+      });
+      expect(await service.readCreationMetadata(sessionId)).toMatchObject({
         sourceType: 'scheduled_task',
         sourceId: 'task-123',
       });

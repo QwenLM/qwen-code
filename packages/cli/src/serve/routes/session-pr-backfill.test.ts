@@ -3801,26 +3801,22 @@ describe('registerSessionPrBackfillRoutes', () => {
   }
 
   it('isolates a failing workspace and still backfills the rest', async () => {
+    const broken = await seedTrustedBackfillWorkspace();
     const seeded = await seedTrustedBackfillWorkspace();
-    // A regular file where a workspace cwd belongs makes the chats-dir
-    // readdir throw ENOTDIR (a non-ENOENT error the session enumeration
-    // rethrows); the route must isolate that workspace's failure instead
-    // of failing the whole request.
-    const brokenParent = await fsp.mkdtemp(
-      path.join(os.tmpdir(), 'qwen-pr-backfill-broken-'),
-    );
-    const brokenCwd = path.join(brokenParent, 'workspace-file');
-    await fsp.writeFile(brokenCwd, 'not a directory', 'utf8');
+    const closedGuard = createWorkspaceGenerationGuard();
+    closedGuard.close();
+    Object.assign(broken.runtime, {
+      workspaceId: 'broken',
+      primary: false,
+      generationGuard: closedGuard,
+    });
     fetchGitHubPullRequestsMock.mockResolvedValue({
       kind: 'ok',
       pullRequests: [pr(123, 'worktree-pr-123')],
     });
     const app = express();
     registerSessionPrBackfillRoutes(app, {
-      workspaceRegistry: registry([
-        runtime('broken', brokenCwd, true),
-        seeded.runtime,
-      ]),
+      workspaceRegistry: registry([broken.runtime, seeded.runtime]),
       sendBridgeError,
       mutate: passthroughMutate,
     });
@@ -3830,10 +3826,17 @@ describe('registerSessionPrBackfillRoutes', () => {
 
       expect(response.status).toBe(200);
       expect(response.body.workspaces).toHaveLength(2);
-      const broken = response.body.workspaces.find(
-        (w: { workspaceCwd: string }) => w.workspaceCwd === brokenCwd,
+      const brokenResult = response.body.workspaces.find(
+        (w: { workspaceCwd: string }) =>
+          w.workspaceCwd === broken.runtime.workspaceCwd,
       );
-      expect(broken.error).toContain('ENOTDIR');
+      // Pin the exact guard message: expect.any(String) also matches an
+      // unrelated error, leaving this isolation path uncovered if the
+      // failure mechanism changes (WorkspaceGenerationClosedError,
+      // workspace-registry.ts).
+      expect(brokenResult.error).toBe(
+        'Workspace runtime generation is no longer active.',
+      );
       const good = response.body.workspaces.find(
         (w: { workspaceCwd: string }) =>
           w.workspaceCwd === seeded.runtime.workspaceCwd,
@@ -3842,8 +3845,8 @@ describe('registerSessionPrBackfillRoutes', () => {
       expect(good).toMatchObject({ scanned: 1, bound: 1 });
       expect(response.body).toMatchObject({ v: 1, scanned: 1, bound: 1 });
     } finally {
+      await broken.cleanup();
       await seeded.cleanup();
-      await fsp.rm(brokenParent, { recursive: true, force: true });
     }
   });
 
