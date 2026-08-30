@@ -43,6 +43,18 @@ export class DiffContentProvider implements vscode.TextDocumentContentProvider {
   }
 }
 
+/** Options controlling how a diff editor is opened. */
+export interface ShowDiffOptions {
+  /**
+   * Open the right-hand (proposed) side as read-only. Use this when the
+   * approval flow cannot round-trip user edits: the approving daemon tool
+   * applies its own proposed content, so an editable right side would
+   * silently discard anything the user typed (e.g. web-shell permission
+   * diffs opened while IDE mode is off).
+   */
+  readOnly?: boolean;
+}
+
 // Information about a diff view that is currently open.
 interface DiffInfo {
   originalFilePath: string;
@@ -162,13 +174,23 @@ export class DiffManager {
    * If only newContent is provided, the old content will be read from the
    * filesystem (empty string when file does not exist).
    */
-  async showDiff(filePath: string, newContent: string): Promise<void>;
+  async showDiff(
+    filePath: string,
+    newContent: string,
+    options?: ShowDiffOptions,
+  ): Promise<void>;
   async showDiff(
     filePath: string,
     oldContent: string,
     newContent: string,
+    options?: ShowDiffOptions,
   ): Promise<void>;
-  async showDiff(filePath: string, a: string, b?: string): Promise<void> {
+  async showDiff(
+    filePath: string,
+    a: string,
+    b?: string,
+    options?: ShowDiffOptions,
+  ): Promise<void> {
     const haveOld = typeof b === 'string';
     const oldContent = haveOld ? a : await this.readOldContentFromFs(filePath);
     const newContent = haveOld ? (b as string) : a;
@@ -242,9 +264,15 @@ export class DiffManager {
         preserveFocus: true,
       },
     );
-    await vscode.commands.executeCommand(
-      'workbench.action.files.setActiveEditorWriteableInSession',
-    );
+    // The writeable-in-session flag exists so users can adjust the proposed
+    // content before accepting; that only round-trips when an IDE-mode
+    // resolver consumes the edited text. Read-only callers (web-shell
+    // permission approvals) would silently lose edits, so keep them locked.
+    if (!options?.readOnly) {
+      await vscode.commands.executeCommand(
+        'workbench.action.files.setActiveEditorWriteableInSession',
+      );
+    }
 
     this.recentlyShown.set(key, Date.now());
   }

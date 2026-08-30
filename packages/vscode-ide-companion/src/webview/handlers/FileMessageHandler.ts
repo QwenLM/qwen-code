@@ -628,6 +628,10 @@ export class FileMessageHandler extends BaseMessageHandler {
         path: (data.path as string) || '',
         oldText: (data.oldText as string) || '',
         newText: (data.newText as string) || '',
+        // Web-shell permission diffs cannot send edited content back to the
+        // daemon: the approving tool applies its own proposed content. Open
+        // them read-only so hand edits cannot be silently discarded.
+        readOnly: data.source === 'web-shell',
       });
     } catch (error) {
       logger.error('[FileMessageHandler] Failed to open diff:', error);

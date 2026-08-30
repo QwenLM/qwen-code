@@ -78,11 +78,18 @@ export function registerNewCommands(
   disposables.push(
     vscode.commands.registerCommand(
       showDiffCommand,
-      async (args: { path: string; oldText: string; newText: string }) => {
+      async (args: {
+        path: string;
+        oldText: string;
+        newText: string;
+        readOnly?: boolean;
+      }) => {
         try {
           const absolutePath = resolveWorkspaceRelativePath(args.path);
           log(`[Command] Showing diff for ${absolutePath}`);
-          await diffManager.showDiff(absolutePath, args.oldText, args.newText);
+          await diffManager.showDiff(absolutePath, args.oldText, args.newText, {
+            readOnly: args.readOnly === true,
+          });
         } catch (error) {
           const errorMsg = getErrorMessage(error);
           log(`[Command] Error showing diff: ${errorMsg}`);
