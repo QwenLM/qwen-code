@@ -103,9 +103,9 @@ type InitialActivation =
   | { scope: 'workspace'; workspaceId: string };
 ```
 
-The daemon install endpoint accepts HTTPS Git, GitHub Release, and npm sources
-under the public network policy. SSH and local/link sources remain local CLI
-features. Update preserves the extension id,
+The daemon install endpoint accepts HTTPS Git, GitHub Release, npm, and
+absolute-path local sources. SSH and link sources remain local CLI features.
+Update preserves the extension id,
 manifest name, settings, and activation policy. “Already current” is a
 successful `updated: false` result. Uninstall is idempotent and removes both the
 artifact and policy.
