@@ -68,9 +68,11 @@ function pullRequestKey(
   } catch {
     return undefined;
   }
-  const match = /^\/([^/]+)\/([^/]+)\/pull\/(\d+)(?:\/|$)/.exec(
-    parsed.pathname,
-  );
+  // GitHub also serves `/pull/N.diff` and `/pull/N.patch`.
+  const match =
+    /^\/([^/]+)\/([^/]+)\/pull\/(\d+)(?:\/|\.diff$|\.patch$|$)/.exec(
+      parsed.pathname,
+    );
   if (!match) return undefined;
   const host = parsed.hostname.replace(/^www\./, '');
   return {
@@ -425,12 +427,11 @@ export async function refreshWorkspaceSessionPrStates(
     }
     for (const entry of target.issueEntries) {
       const fetched = numberToFetch.get(entry.number);
-      if (
-        fetched?.issues !== undefined &&
-        samePullRequest(fetched.url, entry.url)
-      ) {
+      if (fetched !== undefined && samePullRequest(fetched.url, entry.url)) {
         // Written under the entry's own url: the sidecar's canonical gate
-        // would drop a `/files`-spelled binding's snapshot otherwise.
+        // would drop a `/files`-spelled binding's state or snapshot
+        // otherwise — the state too, so a lookup outage never leaves such
+        // a binding's badge stale.
         states.set(entry.number, { ...fetched, url: entry.url });
       } else if (entry.merged && (convergeMerged || isForeign(entry.url))) {
         // No lookup will ever snapshot this merged binding; an empty

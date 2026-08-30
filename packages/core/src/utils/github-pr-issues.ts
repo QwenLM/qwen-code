@@ -50,9 +50,12 @@ export type FetchGitHubPullRequestIssuesResult =
   | { kind: 'failed'; message: string; gitRoot: string };
 
 // gh resolves the `{owner}`/`{repo}` placeholders before any request; these
-// are its diagnostics when the workspace has no usable GitHub remote.
+// are its diagnostics when the workspace has no usable GitHub remote. Only
+// the structural wordings: a GH_HOST mismatch ("… correspond to the GH_HOST
+// environment variable") is an environment problem that must stay a
+// transient failure, never a reason to retire bindings.
 const GH_REPO_UNRESOLVED_PATTERN =
-  /no git remotes found|point to a known GitHub host|error parsing "(owner|name)" value/i;
+  /no git remotes found|point to a known GitHub host/i;
 
 /**
  * One aliased `pullRequest(number:)` lookup per number against the repository

@@ -325,8 +325,7 @@ describe('fetchGitHubPullRequestIssues', () => {
     // no contract, so each alternative is pinned on its own.
     for (const stderr of [
       'no git remotes found\n',
-      'error parsing "owner" value: could not determine the repository',
-      'error parsing "name" value: could not determine the repository',
+      'error parsing "owner" value: no git remotes found',
       'none of the git remotes configured for this repository point to a known GitHub host',
     ]) {
       mockGh(() => ({ error: new Error('exit 1'), stderr }));
@@ -334,6 +333,19 @@ describe('fetchGitHubPullRequestIssues', () => {
         kind: 'repo_unresolved',
       });
     }
+    // A GH_HOST pointing at another host is an environment problem: gh's
+    // own message says unsetting the variable fixes it, so it must stay a
+    // transient failure and never retire bindings.
+    mockGh(() => ({
+      error: new Error('exit 1'),
+      stderr:
+        'error parsing "owner" value: none of the git remotes configured for this repository correspond to the GH_HOST environment variable. Try adding a matching remote or unsetting the variable.',
+    }));
+    expect(await fetchGitHubPullRequestIssues(dir, undefined, [1])).toEqual({
+      kind: 'failed',
+      message: expect.stringContaining('GH_HOST'),
+      gitRoot: dir,
+    });
   });
 
   it('maps a repository GitHub no longer serves to repo_unresolved', async () => {

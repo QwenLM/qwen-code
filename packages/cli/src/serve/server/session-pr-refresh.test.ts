@@ -1239,20 +1239,60 @@ describe('refreshWorkspaceSessionPrStates', () => {
     }
   });
 
-  it('applies fetched issues to a binding spelled with a non-canonical url', async () => {
-    // The bind path accepts any http(s) url: `/files`, `www.`, `http:` all
-    // name the same PR and must receive its issues, not a false empty
-    // snapshot (which would be permanent for a merged binding).
+  it('applies fetched issues to bindings spelled with non-canonical urls', async () => {
+    // The bind path accepts any http(s) url: `/files`, `www.`, `http:`,
+    // `.diff`, `.patch` all name the same PR and must receive its issues,
+    // not a false empty snapshot (which would be permanent for a merged
+    // binding).
+    await seedSession(SESSION_A);
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    const spellings: Array<[number, string]> = [
+      [42, 'http://www.github.com/O/R/pull/42/files'],
+      [43, 'https://github.com/o/r/pull/43.diff'],
+      [44, 'https://github.com/o/r/pull/44.patch'],
+    ];
+    for (const [number, url] of spellings) {
+      await upsertSessionPr(prPath, { number, url, state: 'merged' });
+    }
+    fetchGitHubPullRequestIssuesMock.mockResolvedValue(
+      prIssues(spellings.map(([number]) => [number, [closingIssue(number)]])),
+    );
+
+    expect(await refreshWorkspaceSessionPrStates(runtime)).toEqual({
+      scanned: 1,
+      updated: 3,
+    });
+    const persisted = await readSessionPrs(prPath);
+    for (const [number, url] of spellings) {
+      expect(persisted?.find((entry) => entry.number === number)).toMatchObject(
+        { url, issues: [closingIssue(number)] },
+      );
+    }
+  });
+
+  it('refreshes the state of a non-canonically spelled binding during a lookup outage', async () => {
+    // The list query reports the canonical url; the write must still ride
+    // the entry's own spelling or the sidecar's canonical gate drops it and
+    // the badge stays open for as long as the lookup keeps failing.
     await seedSession(SESSION_A);
     const prPath = sessionService.getPrSessionPathForArchiveState(
       SESSION_A,
       'active',
     );
     const url = 'http://www.github.com/O/R/pull/42/files';
-    await upsertSessionPr(prPath, { number: 42, url, state: 'merged' });
-    fetchGitHubPullRequestIssuesMock.mockResolvedValue(
-      prIssues([[42, [closingIssue(7)]]]),
-    );
+    await upsertSessionPr(prPath, { number: 42, url, state: 'open' });
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(42, 'merged')],
+    });
+    fetchGitHubPullRequestIssuesMock.mockResolvedValue({
+      kind: 'failed',
+      message: 'HTTP 502',
+      gitRoot: workspaceCwd,
+    });
 
     expect(await refreshWorkspaceSessionPrStates(runtime)).toEqual({
       scanned: 1,
@@ -1260,8 +1300,9 @@ describe('refreshWorkspaceSessionPrStates', () => {
     });
     expect((await readSessionPrs(prPath))?.[0]).toMatchObject({
       url,
-      issues: [closingIssue(7)],
+      state: 'merged',
     });
+    expect((await readSessionPrs(prPath))?.[0]?.issues).toBeUndefined();
   });
 
   it('converges a merged foreign binding during a lookup outage', async () => {
