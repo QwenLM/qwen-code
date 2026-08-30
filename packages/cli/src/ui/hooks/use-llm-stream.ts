@@ -185,6 +185,17 @@ function finishReasonInfoMessage(
 ): string | undefined {
   if (!reason) return undefined;
   return FINISH_REASON_INFO_MESSAGES[reason];
+/**
+ * A queued teammate→leader message. `modelText` is the full nonce-tagged
+ * envelope sent to the leader's model; `display` is the compact `● …`
+ * line shown to the user in its place — the same two-text split the
+ * unified notification queue uses, so teammate reports don't dump the
+ * whole raw envelope into the conversation as a user bubble.
+ */
+interface TeammateQueueEntry {
+  modelText: string;
+  display: string;
+  displayed?: boolean;
 }
 
 interface ToolContinuationOwner {
@@ -412,6 +423,7 @@ enum StreamProcessingStatus {
 interface StreamProcessingResult {
   status: StreamProcessingStatus;
   scheduledToolContinuation: boolean;
+  userPromptBlocked: boolean;
 }
 
 const EDIT_TOOL_NAMES = new Set([
@@ -710,6 +722,66 @@ export const useLlmStream = (
     },
     [goalQueueRef],
   );
+  // Teammate message queue. Declared here (above `handleCompletedTools`)
+  // because the tool-round boundary drains it (#8172): in a multi-round
+  // task `streamingState` never reaches Idle between rounds, so waiting
+  // for the Idle drain would hold teammate messages for the whole task.
+  const teammateQueueRef = useRef<TeammateQueueEntry[]>([]);
+  const [teammateTrigger, setTeammateTrigger] = useState(0);
+  // A TeamManager swap invalidates every teammate batch of the outgoing
+  // team — the queued ones AND the ones already drained but not yet
+  // settled (in flight inside a tool-round submission). The swap handler
+  // clears the queue; this generation counter covers the in-flight ones:
+  // every drain captures the generation, and both its restore and its
+  // settlement refuse to act on the queue/journal once it has moved.
+  const teammateQueueGenerationRef = useRef(0);
+  // Shared drain protocol for both delivery paths (tool-round boundary
+  // and Idle fallback): splice the pending batch, render one compact
+  // `● …` notification line per report (the full envelope goes only to
+  // the model), and hand back an idempotent restore that requeues the
+  // batch and re-arms the Idle drain. Keeping this in one place stops
+  // the display contract and the restore policy from drifting between
+  // the two call sites. What each call site does with the batch AFTER
+  // draining (submission shape, acceptance/restore settlement) stays at
+  // the call site, because the two paths genuinely differ there.
+  const drainTeammateQueue = useCallback((): {
+    entries: TeammateQueueEntry[];
+    restore: () => void;
+    generation: number;
+  } => {
+    const generation = teammateQueueGenerationRef.current;
+    const entries = teammateQueueRef.current.splice(0);
+    for (const entry of entries) {
+      if (!entry.displayed) {
+        addItem(
+          { type: 'notification' as const, text: entry.display },
+          Date.now(),
+        );
+        entry.displayed = true;
+      }
+    }
+    let settled = false;
+    const restore = () => {
+      if (settled || entries.length === 0) return;
+      settled = true;
+      if (teammateQueueGenerationRef.current !== generation) {
+        debugLogger.debug(
+          `dropping ${entries.length} drained teammate message(s): team changed while in flight`,
+        );
+        return;
+      }
+      // A TeamManager swap moved the generation while this batch was in
+      // flight: the entries belong to a team that no longer exists, so
+      // requeueing them would submit them into the NEW team's session
+      // (the swap handler clears only the queue, not this closure).
+      // Drop them instead — the same fate as the queued entries the swap
+      // handler clears.
+      teammateQueueRef.current.unshift(...entries);
+      // Re-arm the Idle drain in case no further state change happens.
+      setTeammateTrigger((n) => n + 1);
+    };
+    return { entries, restore, generation };
+  }, [addItem]);
   const lastPromptRef = useRef<PartListUnion | null>(null);
   // Records the USER history item that THIS turn's prepareQueryForLlm
   // added (if any). Reset to null at the start of every turn (including
@@ -741,6 +813,34 @@ export const useLlmStream = (
   const turnSawContentEventRef = useRef(false);
   const lastPromptErroredRef = useRef(false);
   const goalTerminalErrorRef = useRef(false);
+  // Envelope parts stripped from `lastPromptRef` when their drained
+  // teammate batch was ACCEPTED (the push landed, so the envelopes are in
+  // the session history and a retry must not re-send them). The debt is
+  // re-attached in `retryLastPrompt` when — and only when — the pushed
+  // entry is a trailing orphan at retry time, i.e. the accepted round
+  // failed terminally BEFORE producing content: the Retry path pops that
+  // orphan entry before re-pushing the stored payload, so a payload still
+  // missing its envelopes would silently lose them while the delivery
+  // journal claims delivered. Consumption is gated on admission: the
+  // evaluation runs inside `retryLastPrompt` only after the admission
+  // gate is known to pass, and the consumed records transfer into a
+  // settlement carrier on the retry's own submission, which records debt
+  // for the retry's re-pushed entry when its push lands — so an envelope
+  // that survives one retry is still protected if a later, different
+  // payload's retry orphans it again.
+  //
+  // Each record also carries `pushedEntryParts` — the parts of the pushed
+  // history entry as captured at accept time — as an identity fingerprint
+  // for the retry-time match. Envelope texts alone are not an identity:
+  // teammate envelopes are deterministic machine text (e.g. repeated
+  // `<team_error>` notices), so a byte-identical resend can orphan a
+  // YOUNGER entry while this debt's own entry sits safely mid-history —
+  // a text-only match would then re-attach the debt and deliver the
+  // report twice. The fingerprint carries the entry's tool-response
+  // parts (unique callIds), which a colliding younger entry cannot share.
+  const boundaryEnvelopeRetryDebtRef = useRef<
+    Array<{ envelopeParts: Part[]; pushedEntryParts: Part[] }>
+  >([]);
 
   // Wrapper around addItem that attaches timestamp to gemini items for display.
   // Only 'gemini' (new assistant turn) gets a timestamp; 'gemini_content'
@@ -2842,6 +2942,7 @@ export const useLlmStream = (
       let llmMessageBuffer = '';
       let thoughtBuffer = '';
       let scheduledToolContinuation = false;
+      let userPromptBlocked = false;
       let assistantOutputStarted =
         pendingHistoryItemRef.current?.type === 'gemini' ||
         pendingHistoryItemRef.current?.type === 'gemini_content';
@@ -3106,6 +3207,7 @@ export const useLlmStream = (
               return {
                 status: StreamProcessingStatus.UserCancelled,
                 scheduledToolContinuation: false,
+                userPromptBlocked,
               };
             case ServerLlmEventType.Error:
               flushBufferedStreamEvents();
@@ -3304,6 +3406,7 @@ export const useLlmStream = (
               break;
             case ServerLlmEventType.UserPromptSubmitBlocked:
               flushBufferedStreamEvents();
+              userPromptBlocked = true;
               handleUserPromptSubmitBlockedEvent(
                 event.value,
                 userMessageTimestamp,
@@ -3423,6 +3526,7 @@ export const useLlmStream = (
           return {
             status: StreamProcessingStatus.Completed,
             scheduledToolContinuation: false,
+            userPromptBlocked,
           };
         }
 
@@ -3542,6 +3646,7 @@ export const useLlmStream = (
       return {
         status: StreamProcessingStatus.Completed,
         scheduledToolContinuation,
+        userPromptBlocked,
       };
     },
     [
@@ -4561,7 +4666,11 @@ export const useLlmStream = (
             handleLoopDetectedEvent();
           }
 
-          if (lastPromptErroredRef.current || goalTerminalErrorRef.current) {
+          if (
+            lastPromptErroredRef.current ||
+            goalTerminalErrorRef.current ||
+            processingResult.userPromptBlocked
+          ) {
             metadata?.onDeliveryFailed?.();
           } else {
             metadata?.onDelivered?.();
@@ -4742,6 +4851,235 @@ export const useLlmStream = (
   );
 
   /**
+   * Remove trailing parts from `lastPromptRef` whose texts match the given
+   * envelope texts in order. Shared by the boundary settlement and the
+   * Ctrl+Y retry carrier, which both need to un-bake reattached envelopes
+   * from the stored retry payload. No-op unless the stored payload is an
+   * array actually ending with those parts (a later submission may have
+   * overwritten it).
+   */
+  const stripTrailingTextsFromLastPrompt = useCallback((texts: string[]) => {
+    if (texts.length === 0) return;
+    const lastPrompt = lastPromptRef.current;
+    if (!Array.isArray(lastPrompt)) return;
+    const cut = lastPrompt.length - texts.length;
+    if (
+      cut >= 0 &&
+      texts.every((text, i) => {
+        const part = lastPrompt[cut + i];
+        return (
+          typeof part === 'object' &&
+          part !== null &&
+          'text' in part &&
+          part.text === text
+        );
+      })
+    ) {
+      lastPromptRef.current = cut > 0 ? lastPrompt.slice(0, cut) : null;
+    }
+  }, []);
+
+  /**
+   * Identity fingerprint for envelope retry debt: capture the pushed
+   * history entry carrying these envelope parts (accept fires after the
+   * push landed). The youngest entry containing every envelope text is the
+   * one just pushed — a concurrent push can only displace the scan when it
+   * carries byte-identical envelope texts, which the fingerprint's
+   * tool-response parts then still distinguish at retry time. History
+   * unreadable ⇒ fall back to the envelope parts alone (the
+   * pre-fingerprint containment match).
+   */
+  const capturePushedTeammateEntry = useCallback(
+    (envelopeParts: Part[]): Part[] => {
+      try {
+        const history = llmClient?.getHistoryShallow?.() ?? [];
+        for (let i = history.length - 1; i >= 0; i--) {
+          const candidate = history[i]?.parts ?? [];
+          if (
+            envelopeParts.every((part) =>
+              candidate.some((p) => p.text === part.text),
+            )
+          ) {
+            return candidate;
+          }
+        }
+      } catch (error) {
+        debugLogger.warn(
+          `Failed to capture pushed teammate entry for retry debt: ${error}`,
+        );
+      }
+      return envelopeParts;
+    },
+    [llmClient],
+  );
+
+  /**
+   * Re-attach accepted-boundary envelope parts to a Ctrl+Y retry payload
+   * when the history entry carrying them is about to be popped by the
+   * Retry path.
+   *
+   * Settlement stripped those parts from `lastPromptRef` on accept because
+   * the push put them in the session history. But an accepted round can
+   * still fail terminally BEFORE producing content (e.g. a 503 after
+   * exhausted retries), leaving the pushed entry as a trailing orphan that
+   * `sendMessageStream` pops for a Retry before re-pushing the stored
+   * payload — and a landing push suppresses `restoreStrippedRetryEntries`.
+   * Re-sending the payload without the envelopes would then silently lose
+   * them while the delivery journal claims delivered.
+   *
+   * Mirror the pop's walk (`GeminiChat.stripOrphanedUserEntriesFromHistory`):
+   * trailing user entries, stopping at the first model entry or a *pure*
+   * system-reminder entry (which the pop preserves). A debt batch is
+   * re-appended only when its pushed entry is one of those trailing
+   * orphans — exactly the case where the pop is about to drop it. If the
+   * accepted round produced content instead, the entry is not a trailing
+   * orphan, nothing matches, and the payload stays stripped so the leader
+   * does not see the same report twice.
+   *
+   * The match keys on the debt record's `pushedEntryParts` fingerprint
+   * (the pushed entry captured at accept time), not on envelope text
+   * alone: teammate envelopes are deterministic machine text, and a
+   * byte-identical resend can orphan a YOUNGER entry while the debt's own
+   * entry sits mid-history. The fingerprint's tool-response parts (unique
+   * callIds) keep a colliding younger entry from claiming the debt.
+   *
+   * String payloads are retried too (Idle Teammate/Notification drains and
+   * plain user prompts store strings in `lastPromptRef`), so debt is
+   * evaluated for ANY payload shape; a string query is wrapped into its
+   * single text part only when something is actually re-attached.
+   *
+   * Returns the (possibly extended) query plus the CONSUMED debt records —
+   * the ones whose pushed entry matched a trailing orphan and whose
+   * envelopes were re-attached. `retryLastPrompt` transfers those records
+   * into a settlement carrier on the retry's own submission so the
+   * protection follows the envelopes into the retry's re-pushed entry;
+   * the debt ref itself is cleared here, which is safe because the call
+   * site runs only after the submission admission gate is known to pass
+   * (a gate-rejected retry must not discard debt). Unmatched records are
+   * dropped: their pushed entry is no longer a trailing orphan, so the
+   * pop can never drop it and its protection expires. When the history
+   * scan fails the debt stays untouched so a later retry can still
+   * evaluate it.
+   */
+  const reattachOrphanedRetryEnvelopes = useCallback(
+    (
+      query: PartListUnion,
+    ): {
+      query: PartListUnion;
+      consumed: Array<{ envelopeParts: Part[]; pushedEntryParts: Part[] }>;
+    } => {
+      const debt = boundaryEnvelopeRetryDebtRef.current;
+      if (debt.length === 0) {
+        return { query, consumed: [] };
+      }
+      const samePart = (a: Part, b: Part): boolean => {
+        if (typeof a.text === 'string' || typeof b.text === 'string') {
+          return typeof a.text === 'string' && a.text === b.text;
+        }
+        try {
+          return JSON.stringify(a) === JSON.stringify(b);
+        } catch {
+          return false;
+        }
+      };
+      // Contiguous-subsequence match: the fingerprint is the pushed entry
+      // as captured at accept time; the candidate is an orphan entry the
+      // pop is about to drop. Subsequence (not full-array equality) keeps
+      // the match tolerant of parts core appends around the fingerprint
+      // (e.g. plan-exit notices) and degrades to an envelope-text
+      // containment match when accept-time history was unreadable and the
+      // fingerprint fell back to the envelope parts only.
+      const entryCarriesFingerprint = (
+        candidate: Part[],
+        fingerprint: Part[],
+      ): boolean => {
+        if (fingerprint.length === 0 || candidate.length < fingerprint.length) {
+          return false;
+        }
+        for (
+          let start = 0;
+          start + fingerprint.length <= candidate.length;
+          start++
+        ) {
+          if (
+            fingerprint.every((part, offset) =>
+              samePart(part, candidate[start + offset]!),
+            )
+          ) {
+            return true;
+          }
+        }
+        return false;
+      };
+      const orphanedEntries: Part[][] = [];
+      try {
+        const history = llmClient?.getHistoryShallow?.() ?? [];
+        for (let i = history.length - 1; i >= 0; i--) {
+          const entry = history[i];
+          if (!entry || entry.role !== 'user') break;
+          const parts = entry.parts ?? [];
+          // Structural-guard mirror of core's `isSystemReminderContent`:
+          // a pure system-reminder entry terminates the pop, so nothing
+          // behind it is orphaned.
+          const pureSystemReminder =
+            parts.length > 0 &&
+            parts.every(
+              (part) =>
+                typeof part.text === 'string' &&
+                part.text.startsWith('<system-reminder>') &&
+                part.text.trimEnd().endsWith('</system-reminder>'),
+            );
+          if (pureSystemReminder) break;
+          orphanedEntries.push(parts);
+        }
+      } catch (error) {
+        // History unavailable: keep the stripped payload rather than fail
+        // the retry, and leave the debt untouched so a later retry can
+        // still evaluate it.
+        debugLogger.warn(
+          `Failed to scan history for orphaned teammate envelopes: ${error}`,
+        );
+        return { query, consumed: [] };
+      }
+      // Consume the debt now: the caller has already verified that the
+      // submission admission gate will pass, so the only outcomes are a
+      // landing push (the consumed records transfer into the retry's
+      // settlement carrier) or a pre-push exit (the carrier restores the
+      // records). Either way no protection is dropped on the floor.
+      boundaryEnvelopeRetryDebtRef.current = [];
+      const consumed: Array<{
+        envelopeParts: Part[];
+        pushedEntryParts: Part[];
+      }> = [];
+      const reattach: Part[] = [];
+      for (const record of debt) {
+        if (
+          orphanedEntries.some((parts) =>
+            entryCarriesFingerprint(parts, record.pushedEntryParts),
+          )
+        ) {
+          reattach.push(...record.envelopeParts);
+          consumed.push(record);
+        }
+        // Unmatched records expire: their pushed entry is no longer a
+        // trailing orphan (model content landed after it, or it is gone),
+        // so the Retry path's pop can never drop it.
+      }
+      if (reattach.length === 0) {
+        return { query, consumed };
+      }
+      // `query` may be a string or contain string parts (Idle Teammate/
+      // Notification drains and plain prompts); normalize to Part[] only
+      // when something is actually re-attached.
+      const base: Part[] = (Array.isArray(query) ? query : [query]).map(
+        (part) => (typeof part === 'string' ? { text: part } : part),
+      );
+      return { query: [...base, ...reattach], consumed };
+    },
+    [llmClient],
+  );
+
+  /**
    * Retries the last failed prompt when the user presses Ctrl+Y.
    *
    * Activation conditions for Ctrl+Y shortcut:
@@ -4778,6 +5116,20 @@ export const useLlmStream = (
       return;
     }
 
+    // Admission-gate pre-check. The debt evaluation below CONSUMES the
+    // retry-debt records, but `submitQuery` early-returns at its admission
+    // gate when a submission is already in flight — a Retry is never a
+    // turn continuation nor a concurrent /btw, so for this submit type the
+    // gate rejects exactly when `isSubmittingQueryRef` is set. Consuming
+    // the debt before that gate (as argument evaluation) would permanently
+    // discard it for a lease-rejected Ctrl+Y; bail first and keep the debt
+    // for the next attempt. The check is synchronous with the gate inside
+    // `submitQuery` (no await in between), so nothing can flip the lease
+    // in the window.
+    if (isSubmittingQueryRef.current) {
+      return;
+    }
+
     const lastPrompt = lastPromptRef.current;
     if (!lastPrompt || !lastPromptErroredRef.current) {
       addItem(
@@ -4792,8 +5144,76 @@ export const useLlmStream = (
 
     clearRetryCountdown();
 
-    await submitQuery(lastPrompt, SendMessageType.Retry);
-  }, [streamingState, addItem, clearRetryCountdown, submitQuery]);
+    const { query: retryQuery, consumed } =
+      reattachOrphanedRetryEnvelopes(lastPrompt);
+    // The re-attached envelopes are baked into THIS retry's push. Without
+    // protecting the retry's own entry the same loss shape repeats one
+    // retry later: the retry can also fail terminally before content, and
+    // a later retry of a DIFFERENT payload then pops the retry's orphaned
+    // entry — dropping the envelopes while the journal claims delivered.
+    // The attached carrier is settled by GeminiClient right next to the
+    // push (the same protocol the boundary settlement uses): accept
+    // records debt for the retry's re-pushed entry; restore re-records
+    // the consumed records under their original fingerprints after
+    // stripping the envelopes back out of `lastPromptRef` (core re-adds
+    // popped orphan entries as-is when the push never landed, so the
+    // original fingerprints stay valid, while the stored retry payload
+    // must not carry the envelopes twice).
+    const retryEnvelopeSettlement: SteerInput | undefined =
+      consumed.length === 0
+        ? undefined
+        : {
+            parts: [],
+            accept: () => {
+              // Mirror the boundary settlement and this carrier's own
+              // restore: the re-attached envelopes landed in the session
+              // history with the retry's push, so un-bake them from the
+              // stored payload before re-recording debt. Without the
+              // strip, each accept→fail-before-content→Ctrl+Y cycle
+              // re-attaches the envelopes onto a base that still carries
+              // them, appending one duplicate copy per cycle.
+              stripTrailingTextsFromLastPrompt(
+                consumed.flatMap((record) =>
+                  record.envelopeParts.map((part) => part.text ?? ''),
+                ),
+              );
+              for (const record of consumed) {
+                boundaryEnvelopeRetryDebtRef.current.push({
+                  envelopeParts: record.envelopeParts,
+                  pushedEntryParts: capturePushedTeammateEntry(
+                    record.envelopeParts,
+                  ),
+                });
+              }
+            },
+            restore: () => {
+              stripTrailingTextsFromLastPrompt(
+                consumed.flatMap((record) =>
+                  record.envelopeParts.map((part) => part.text ?? ''),
+                ),
+              );
+              for (const record of consumed) {
+                boundaryEnvelopeRetryDebtRef.current.push(record);
+              }
+            },
+          };
+    await submitQuery(
+      retryQuery,
+      SendMessageType.Retry,
+      undefined,
+      retryEnvelopeSettlement
+        ? { steerInput: retryEnvelopeSettlement }
+        : undefined,
+    );
+  }, [
+    streamingState,
+    addItem,
+    clearRetryCountdown,
+    submitQuery,
+    reattachOrphanedRetryEnvelopes,
+    capturePushedTeammateEntry,
+    stripTrailingTextsFromLastPrompt,
+  ]);
 
   const preemptGoalTurn = useCallback((reason: string) => {
     const active = activeGoalAdmissionRef.current;
@@ -5779,8 +6199,142 @@ export const useLlmStream = (
         }
       }
 
+      // Teammate messages get the same round-boundary delivery (#8172):
+      // waiting for `streamingState === Idle` holds them for the entire
+      // multi-round task because back-to-back tool rounds never reach
+      // Idle. Append after the tool-response parts (same ordering as
+      // steer above) so `tool_result` blocks lead the user message. The
+      // Idle drain stays as the fallback for turns that end without
+      // another tool round.
+      let drainedTeammates: ReturnType<typeof drainTeammateQueue> | undefined;
+      if (
+        !continuationOwner?.survivesGenerationChange &&
+        !continuationWasCancelled() &&
+        teammateQueueRef.current.length > 0
+      ) {
+        drainedTeammates = drainTeammateQueue();
+        debugLogger.debug(
+          `draining ${drainedTeammates.entries.length} teammate message(s) into tool-round submission`,
+        );
+        responsesToSend.push(
+          ...drainedTeammates.entries.map((entry) => ({
+            text: entry.modelText,
+          })),
+        );
+      }
+      // Settle the drained batch exactly once. The settlement carrier below
+      // is passed through the existing `steerInput` option so GeminiClient
+      // settles it next to the actual history push: acceptance compares the
+      // user-content push counter against the snapshot GeminiChat publishes
+      // on the request immediately before that push (no await between the
+      // snapshot and the push), and any exit that provably never pushed
+      // (hook block, cancel or failure before the push) restores the
+      // carrier unconditionally instead of consulting the global counter —
+      // a concurrent /btw push can therefore not supply the observed push.
+      const settleDrainedTeammates = (accepted: boolean) => {
+        if (!drainedTeammates || drainedTeammates.entries.length === 0) {
+          return;
+        }
+        const { entries, restore, generation } = drainedTeammates;
+        drainedTeammates = undefined;
+        const envelopeTexts = entries.map((entry) => entry.modelText);
+        // A TeamManager swap moved the generation while this batch was in
+        // flight: it belongs to the outgoing team no matter how it now
+        // settles, and must not be journaled into, or recorded as retry
+        // debt against, the NEW team's session. (The restore side of this
+        // guard lives in `drainTeammateQueue`'s restore itself.)
+        const swapped = teammateQueueGenerationRef.current !== generation;
+        // The envelopes are baked into the Ctrl+Y retry payload either way:
+        // `submitQuery` stored `finalQueryToSend` (envelope parts included)
+        // in `lastPromptRef` before the client call settled. Strip them on
+        // BOTH outcomes — a restored batch is redelivered by the Idle
+        // fallback, and an accepted batch is already in the session
+        // history, so a retry that re-sends them would hand the leader the
+        // identical report twice (accepted-then-failed-mid-stream retry,
+        // or retry + Idle drain after a restore). The trailing-match guard
+        // inside the helper keeps this a no-op when settlement fires before
+        // `submitQuery` stored the payload (cancel and preempt paths below)
+        // or after a later submission overwrote it. One exception to
+        // "already in the session history": an accepted round can still
+        // fail terminally BEFORE any content, leaving the pushed entry as
+        // a trailing orphan that the Retry path pops before re-pushing the
+        // payload. The accept branch records retry debt
+        // (`boundaryEnvelopeRetryDebtRef`) so `retryLastPrompt` re-attaches
+        // the envelopes exactly when that orphan pop would drop them.
+        if (accepted) {
+          stripTrailingTextsFromLastPrompt(envelopeTexts);
+          if (swapped) {
+            debugLogger.debug(
+              `dropping ${entries.length} accepted teammate message(s): team changed while in flight`,
+            );
+            return;
+          }
+          // The envelopes are in the session history; requeueing them
+          // would deliver them twice. Record the delivery instead, the
+          // same `recordNotification` journaling the hook-exempt
+          // SendMessageType.Teammate path gives Idle deliveries, so a
+          // resumed session restores the `● …` item and the envelopes
+          // stay in the reconstructed model context.
+          debugLogger.debug(
+            `recording ${entries.length} boundary-delivered teammate message(s)`,
+          );
+          config.getChatRecordingService?.()?.recordNotification?.(
+            entries.map((entry) => ({ text: entry.modelText })),
+            entries.map((entry) => entry.display).join('; '),
+            undefined,
+            toolGoalBinding?.permit,
+          );
+          // See `boundaryEnvelopeRetryDebtRef`: if this accepted round
+          // still fails terminally before any content, the pushed entry
+          // becomes the trailing orphan the Retry path pops, and a payload
+          // without these envelopes would lose them. Record the debt
+          // UNCONDITIONALLY, not only when the strip above matched: a
+          // concurrent submission admitted during the time-to-first-token
+          // window can overwrite `lastPromptRef` before this settlement
+          // fires, and the orphan pop drops the pushed entry regardless
+          // of what `lastPromptRef` holds at retry time — gating the debt
+          // on the strip match would silently drop the envelopes in that
+          // case while the journal still claims delivered. The retry-time
+          // orphan check keeps double delivery impossible: envelopes are
+          // only re-attached when the pushed entry really is the trailing
+          // orphan the pop is about to drop.
+          const envelopeParts = entries.map((entry) => ({
+            text: entry.modelText,
+          }));
+          boundaryEnvelopeRetryDebtRef.current.push({
+            envelopeParts,
+            pushedEntryParts: capturePushedTeammateEntry(envelopeParts),
+          });
+          return;
+        }
+        // The submission never reached the model (cancelled/preempted
+        // before send, admission failure, hook block): hand the batch
+        // back to the queue for the Idle fallback — unless a swap
+        // invalidated it, see the restore-side guard.
+        debugLogger.debug(
+          `restoring ${entries.length} teammate message(s) after failed/cancelled submission`,
+        );
+        restore();
+        stripTrailingTextsFromLastPrompt(envelopeTexts);
+      };
+      const submissionSettlement: SteerInput | undefined =
+        drainedSteer || drainedTeammates
+          ? {
+              parts: drainedSteer?.parts ?? [],
+              accept: () => {
+                drainedSteer?.accept();
+                settleDrainedTeammates(true);
+              },
+              restore: () => {
+                drainedSteer?.restore();
+                settleDrainedTeammates(false);
+              },
+            }
+          : undefined;
+
       if (continuationWasCancelled()) {
         drainedSteer?.restore();
+        settleDrainedTeammates(false);
         if (toolGoalBinding) {
           await failClosedGoalTurn(
             toolGoalBinding,
@@ -5792,6 +6346,7 @@ export const useLlmStream = (
       }
       if (toolGoalBinding?.controller.signal.aborted) {
         drainedSteer?.restore();
+        settleDrainedTeammates(false);
         await failClosedGoalTurn(
           toolGoalBinding,
           'Goal tool continuation was preempted',
@@ -5801,9 +6356,10 @@ export const useLlmStream = (
       }
 
       await submitQuery(responsesToSend, SendMessageType.ToolResult, promptId, {
-        steerInput: drainedSteer,
-        onDelivered: drainedSteer?.accept,
+        steerInput: submissionSettlement,
+        onDelivered: () => submissionSettlement?.accept(),
         onAdmissionFailed: () => {
+          submissionSettlement?.restore();
           endToolInteraction(
             'error',
             'tool continuation admission failed',
@@ -5811,7 +6367,7 @@ export const useLlmStream = (
           );
         },
         onDeliveryFailed: () => {
-          drainedSteer?.restore();
+          submissionSettlement?.restore();
           endToolInteraction(
             'error',
             'tool continuation delivery failed',
@@ -5833,9 +6389,12 @@ export const useLlmStream = (
       addItem,
       dualOutput,
       resolveDrainedSteerMessages,
+      drainTeammateQueue,
       bindGoalTurn,
       failClosedGoalTurn,
       releaseGoalTurn,
+      stripTrailingTextsFromLastPrompt,
+      capturePushedTeammateEntry,
     ],
   );
 
@@ -6301,15 +6860,9 @@ export const useLlmStream = (
   ]);
 
   // ─── Teammate message integration ─────────────────────────
-  // Each entry carries the full nonce-tagged envelope (`modelText`,
-  // sent to the leader's model) and a compact `display` line (shown
-  // to the user in its place) — the same two-text split the unified
-  // notification queue uses, so teammate reports no longer dump the
-  // whole raw envelope into the conversation as a user bubble.
-  const teammateQueueRef = useRef<
-    Array<{ modelText: string; display: string; displayed?: boolean }>
-  >([]);
-  const [teammateTrigger, setTeammateTrigger] = useState(0);
+  // The queue state (`teammateQueueRef` / `teammateTrigger`) is declared
+  // near the top of the hook so `handleCompletedTools` can drain it at
+  // tool-round boundaries (#8172).
 
   // Subscribe to TeamManager's leader message callback.
   // Track the bound manager so we can detach the callback
@@ -6331,6 +6884,13 @@ export const useLlmStream = (
         // remount re-binds the same manager (boundManager is null here)
         // and preserves the queue.
         teammateQueueRef.current.length = 0;
+        // The queue clear only covers entries still queued. A batch
+        // already drained into an in-flight tool-round submission lives
+        // in that submission's settlement closure; moving the generation
+        // makes its restore drop the batch and its settlement skip the
+        // journal/debt, so it cannot resurface in the new team's session
+        // either.
+        teammateQueueGenerationRef.current += 1;
       }
       boundManager = manager;
       if (manager) {
@@ -6376,31 +6936,19 @@ export const useLlmStream = (
       runOutsideAgentContext(() => {
         const admission = claimSystemGoalTurn();
         if (!admission.ready) return;
-        const batch = teammateQueueRef.current.splice(0);
-        // Render one compact `● …` line per teammate report; the full
-        // envelope goes only to the model (the USER bubble is suppressed
-        // for SendMessageType.Teammate in prepareQueryForLlm).
-        for (const entry of batch) {
-          if (!entry.displayed) {
-            addItem(
-              { type: 'notification' as const, text: entry.display },
-              Date.now(),
-            );
-            entry.displayed = true;
-          }
-        }
+        // Shared drain protocol with the tool-round boundary: splice +
+        // one compact `● …` line per report (the full envelope goes only
+        // to the model; the USER bubble is suppressed for
+        // SendMessageType.Teammate in prepareQueryForLlm) +
+        // idempotent requeue/restore.
+        const { entries: batch, restore } = drainTeammateQueue();
         const modelText = batch.map((e) => e.modelText).join('\n\n');
         const display = batch.map((e) => e.display).join('; ');
         void submitQuery(modelText, SendMessageType.Teammate, undefined, {
           notificationDisplayText: display,
-          onAdmissionFailed: () => {
-            teammateQueueRef.current.unshift(...batch);
-          },
+          onAdmissionFailed: restore,
           claimGoalTurn: admission.claimGoalTurn,
-          onGoalClaimDeferred: () => {
-            teammateQueueRef.current.unshift(...batch);
-            setTeammateTrigger((n) => n + 1);
-          },
+          onGoalClaimDeferred: restore,
         }).catch((error) => {
           debugLogger.warn('Failed to admit teammate notification', error);
         });
@@ -6410,7 +6958,7 @@ export const useLlmStream = (
     streamingState,
     submitQuery,
     teammateTrigger,
-    addItem,
+    drainTeammateQueue,
     claimSystemGoalTurn,
     goalQueuePendingCount,
   ]);

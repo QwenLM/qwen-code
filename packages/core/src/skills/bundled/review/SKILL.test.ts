@@ -171,6 +171,61 @@ describe('bundled review skill', () => {
     );
   });
 
+  it('pins the pre-verify carried-ledger dedup as a mechanical step (#10105)', () => {
+    const body = coreBody();
+    // The command, not prose: the whole point is that the model is out of
+    // the matching loop, in the spirit of the script-lint gate.
+    expect(body).toContain('review dedup-candidates --plan');
+    // The kept list is what shards — a run that shards the raw union pays
+    // the verify cost the step exists to end.
+    expect(body).toContain(
+      "**Build the verify shards from the report's `kept` list only.**",
+    );
+    // The safe-to-be-wrong direction, both halves: the severity guard and
+    // the posting-layer backstop.
+    expect(body).toContain(
+      'a Critical candidate never drops against a non-Critical entry',
+    );
+    expect(body).toContain(
+      "the posting layer's duplicate drop remains the backstop",
+    );
+    // A dropped candidate's claim survives through the Step 6 ruling — the
+    // sentence that licenses dropping it at all.
+    expect(body).toContain(
+      'a matched posted finding is a ledger entry Step 6 still rules on',
+    );
+    // The pair's reporting transition routes its fresh findings through the
+    // same command (the string occurs in BOTH pair bullets, pinned below),
+    // or the leak reopens the first time a convergence pair reports.
+    expect(body).toContain('the report accumulates within the round');
+    // The ordering the transition owes: the carried-ledger dedup runs BEFORE
+    // the pair's findings merge into the cumulative list, and only its
+    // `kept` list merges. Merging first and deduping after strands every
+    // dropped candidate in the list under its `— [unverified]` tag — never
+    // sharded, never verdict-ruled — and the tag backstop relaunches the
+    // very verifier this step exists to save (or a budget-refused relaunch
+    // leaves the tag for `compose-review` to cap the verdict on).
+    expect(body).toContain(
+      "merge ONLY the report's `kept` list into the cumulative list",
+    );
+    expect(body).toContain(
+      'Dropped candidates never enter the cumulative findings file',
+    );
+    // The 3B pair bullet carries the same clause — a large-diff re-review
+    // with open threads is the motivating shape of this feature, and its
+    // transition must shard the deduped `kept` list, not the raw union.
+    const start = body.indexOf('**The convergence pair — 3B');
+    const end = body.indexOf('**Do not write the reverse auditor');
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const section3B = body.slice(start, end);
+    expect(section3B).toContain("Step 4's carried-ledger dedup");
+    expect(section3B).toContain('merge only its `kept` list');
+    expect(section3B).toContain(
+      'dropped candidates never enter the cumulative findings file',
+    );
+  });
+
   it('keeps the language-pitfall and wrapper/proxy checks as dedicated high-effort angles', () => {
     // #9788: both rode inside Agent 1a's line-by-line brief as bullets, and
     // the walk's rhythm diluted them — a checklist pattern-match and a
@@ -450,16 +505,50 @@ describe('bundled review skill', () => {
     // The posture is the reviewer-side brake on the review→fix→re-review
     // bloat loop. Each clause below carries a distinct obligation a later
     // "simplify the prose" edit is most likely to drop: the floor's
-    // round-adaptive default, the never-defer-Criticals rule, the
+    // round-adaptive default, the axes-only Critical deferral rule, the
     // record-not-request contract, and the age-reference/anchor distinction
     // (conflating `commitId` with the ledger `sha` would scope an
     // incremental review past scope a fail-closed round never certified).
     const body = skillBody();
     expect(body).toContain('Through round 5 the floor is `suggestion`');
     expect(body).toContain('**from round 6 it is `critical`**');
+    // A Critical leaves the posting set by its AXES, never by severity, and
+    // only at floor `critical` (#10291): the one deferrable shape is named,
+    // the wrong-result and regression arms are pinned as always posting,
+    // the unclassified arm too, and the rounds-2–5 age rule is kept off
+    // Criticals.
     expect(body).toContain(
-      'A Critical is never deferred — any round, any floor',
+      'A Critical is deferred by its axes, never by its severity — and only at floor `critical`.',
     );
+    expect(body).toContain(
+      '`direction: fails-closed` AND `baseline: new-surface`',
+    );
+    expect(body).toContain('Every other Critical posts');
+    expect(body).toContain('`certifies-falsely` at either baseline');
+    expect(body).toContain('`regression` in either direction');
+    expect(body).toContain('a blocker in doubt posts');
+    // The deferrable-set definition names the Critical shape where it is
+    // introduced, and the deterministic carve-out is scoped to Suggestions.
+    expect(body).toContain(
+      'plus, at floor `critical` only, the fails-closed/new-surface Criticals described below',
+    );
+    expect(body).toContain(
+      'a deterministic Critical the axes classify defers like any other axes-Critical',
+    );
+    // The orchestrator-side no-guess rule — the only instruction keeping the
+    // orchestrator from completing a deferrable pair — pinned like its
+    // verifier-side twin in agent-prompt.test.ts.
+    expect(body).toContain('an axis the verifier omitted stays absent');
+    expect(body).toContain("never fill one in from the finding's prose");
+    expect(body).toContain('a guess on EITHER axis of the pair');
+    // The in-band report copies the axes too — one copy list, not two.
+    expect(body).toContain(
+      '`summary`, `shortSummary`, `failureScenario`, `category`, `direction`, `baseline` — never re-typed',
+    );
+    expect(body).toContain(
+      'the rounds-2–5 code-age rule never touches a Critical',
+    );
+    expect(body).toContain('no issue is filed by the review');
     expect(body).toContain('an **age reference, never an incremental anchor**');
     expect(body).toContain('skip the age rule, not the review');
     // The explicit knob's two directions: `critical` from round 1, and
@@ -771,12 +860,19 @@ describe('bundled review skill', () => {
 
   it('names the deferral channel in the bodyCriticals sources', () => {
     // Revert guard: compose-review relocates a `Critical` entry written
-    // into `deferredSuggestions` into the body Criticals (a Critical is
-    // never deferred); the bodyCriticals bullet must name that mechanical
-    // relocation beside the two model-written sources.
+    // into `deferredSuggestions` into the body Criticals — unless it is the
+    // one shape the floor defers (#10291); the bodyCriticals bullet must
+    // name that mechanical relocation, and its one exception, beside the
+    // two model-written sources.
     const body = skillBody();
     expect(body).toContain(
-      'a `Critical` entry placed in `deferredSuggestions` is relocated here, never deferred',
+      'a `Critical` entry placed in `deferredSuggestions` is relocated here unless the floor is `critical` and the entry is `fails-closed` on `new-surface`',
+    );
+    // The fix-witness invariant on body Criticals carves the deferral
+    // channel out explicitly: its line carries neither witness nor
+    // constraint, and the artifact keeps the full entry.
+    expect(body).toContain(
+      "the deferral channel's disclosed line is the one exception",
     );
   });
 

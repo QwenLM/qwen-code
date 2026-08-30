@@ -404,6 +404,12 @@ export interface ToolDefinition {
   name: string;
   displayName: string;
   description?: string;
+  /**
+   * Registered, but its schema is not in the eager model request — the tool
+   * is reached on demand via `tool_search`. Set for `shouldDefer` tools and
+   * for tools the `tools.eager` allowlist omits (#9827, #10075).
+   */
+  deferred?: boolean;
 }
 
 export interface SkillDefinition {
