@@ -484,6 +484,7 @@ export type {
   DaemonSettingUpdateResult,
   DaemonModelDeleteRequest,
   DaemonModelDeleteResult,
+  DaemonModelProviderRuntimeSyncResult,
   DaemonVoiceAudioInput,
   DaemonVoiceMode,
   DaemonVoiceModelDescriptor,
