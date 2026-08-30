@@ -180,7 +180,7 @@ export function SessionHistoryDropdown({
 
   const filtered = searchQuery.trim()
     ? sessions.filter((session) =>
-        (session.displayName ?? 'Untitled')
+        (session.displayName || t('session.untitled'))
           .toLowerCase()
           .includes(searchQuery.trim().toLowerCase()),
       )
