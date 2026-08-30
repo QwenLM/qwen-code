@@ -37,6 +37,8 @@ import {
   truncateTokenLine,
   userMessageMeta,
 } from './messages.js';
+import { TOOL_STATUS } from '../constants.js';
+import { C } from './theme.js';
 import type { AnsiToken } from '@qwen-code/qwen-code-core';
 import type { LiveToolItem } from './live-session-model.js';
 
@@ -218,6 +220,26 @@ describe('message meta (ink glyph/color parity)', () => {
       summary: 'canceled',
     } as unknown as LiveToolItem;
     expect(toolStatusMeta(item).strikethrough).toBe(true);
+  });
+
+  it('marks the producers. two-L cancelled spelling for strikethrough too (R2-4)', () => {
+    // Both real producers (event adapter tool_call_response and the client
+    // tool-run) emit 'cancelled'; the CANCELED glyph must not fall through
+    // to the red ERROR glyph for them.
+    const item = {
+      kind: 'tool',
+      id: 't',
+      tool: 'run_shell_command',
+      title: 'run_shell_command',
+      output: '',
+      done: true,
+      success: false,
+      summary: 'cancelled',
+    } as unknown as LiveToolItem;
+    const meta = toolStatusMeta(item);
+    expect(meta.strikethrough).toBe(true);
+    expect(meta.glyph).toBe(TOOL_STATUS.CANCELED);
+    expect(meta.color).not.toBe(C.red);
   });
 });
 

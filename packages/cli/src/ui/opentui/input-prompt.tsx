@@ -65,7 +65,7 @@ import path from 'node:path';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
 import type { RecentSlashCommand } from '../hooks/useSlashCompletion.js';
 import type { Suggestion } from '../utils/suggestions.js';
-import { toCodePoints } from '../utils/textUtils.js';
+import { cpLen, toCodePoints } from '../utils/textUtils.js';
 import { C } from './theme.js';
 import { InputHistory } from './input-history.js';
 import { loadInteractiveCommands } from './slash-dispatch.js';
@@ -74,9 +74,13 @@ import {
   EscapeClearModel,
   MAX_SUGGESTIONS_TO_SHOW,
   applyCompletion,
+  codePointIndexToDisplayCol,
+  codePointIndexToDisplayOffset,
   commandCompletionItemsToSuggestions,
   decideSubmit,
   detectCompletionTarget,
+  displayColToCodePointIndex,
+  displayOffsetToCodePointIndex,
   expandPendingPastePlaceholders,
   fileSearchToSuggestions,
   freePastePlaceholderId,
@@ -336,9 +340,9 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     const target = detectCompletionTarget(
       lines,
       cursor.row,
-      cursor.col,
+      displayColToCodePointIndex(lines[cursor.row] ?? '', cursor.col),
       text,
-      cursor.offset,
+      displayOffsetToCodePointIndex(text, cursor.offset),
       commandsRef.current,
     );
 
@@ -466,9 +470,9 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     lines[cursor.row] = line;
     el.setText(lines.join('\n'));
     if (cursorCol !== undefined) {
-      el.setCursor(cursor.row, cursorCol);
+      el.setCursor(cursor.row, codePointIndexToDisplayCol(line, cursorCol));
     } else {
-      el.setCursor(cursor.row, line.length);
+      el.setCursor(cursor.row, codePointIndexToDisplayCol(line, cpLen(line)));
     }
     setTextVersion((v) => v + 1);
   }, []);
@@ -484,9 +488,9 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       const target = detectCompletionTarget(
         lines,
         cursor.row,
-        cursor.col,
+        displayColToCodePointIndex(lines[cursor.row] ?? '', cursor.col),
         text,
-        cursor.offset,
+        displayOffsetToCodePointIndex(text, cursor.offset),
         commandsRef.current,
       );
       if (!target) return;
@@ -580,19 +584,27 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       // character.
       if (pendingPastesRef.current.size > 0) {
         const cursor = el.logicalCursor;
-        const codePoints = toCodePoints(el.plainText);
+        const plainText = el.plainText;
+        const codePoints = toCodePoints(plainText);
+        const cursorCpOffset = displayOffsetToCodePointIndex(
+          plainText,
+          cursor.offset,
+        );
         for (const placeholder of pendingPastesRef.current.keys()) {
-          const placeholderStart = cursor.offset - placeholder.length;
+          const placeholderStart = cursorCpOffset - placeholder.length;
           if (
             placeholderStart >= 0 &&
-            codePoints.slice(placeholderStart, cursor.offset).join('') ===
+            codePoints.slice(placeholderStart, cursorCpOffset).join('') ===
               placeholder
           ) {
             const nextText =
               codePoints.slice(0, placeholderStart).join('') +
-              codePoints.slice(cursor.offset).join('');
+              codePoints.slice(cursorCpOffset).join('');
             el.setText(nextText);
-            el.cursorOffset = placeholderStart;
+            el.cursorOffset = codePointIndexToDisplayOffset(
+              nextText,
+              placeholderStart,
+            );
             pendingPastesRef.current.delete(placeholder);
             const parsedPlaceholder = parsePastePlaceholder(placeholder);
             if (parsedPlaceholder) {
@@ -692,7 +704,10 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       // decideSubmit owns the whitespace guard and the `\`+Enter
       // continuation: a trailing backslash before the caret is removed and
       // becomes a newline instead of submitting (ink InputPrompt parity).
-      const decision = decideSubmit(el.plainText, el.cursorOffset);
+      const decision = decideSubmit(
+        el.plainText,
+        displayOffsetToCodePointIndex(el.plainText, el.cursorOffset),
+      );
       if (decision.kind === 'noop') {
         key.preventDefault();
         return;
@@ -773,6 +788,11 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         completionModeRef.current = CompletionMode.IDLE;
         setSuggestions([]);
         setLoadingSuggestions(false);
+        // Invalidate in-flight searches: an async resolution landing after
+        // the Esc would otherwise re-populate the dismissed dropdown and
+        // turn the next Enter into an accidental suggestion insert.
+        atSearchSeqRef.current++;
+        slashSearchSeqRef.current++;
         return;
       }
       // Pop queued prompts back into the composer before the double-Esc
@@ -855,7 +875,10 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         el.plainText,
         el.lineCount,
         cursor.row,
-        cursor.col,
+        displayColToCodePointIndex(
+          el.plainText.split('\n')[cursor.row] ?? '',
+          cursor.col,
+        ),
       );
       if (decision.kind === 'passthrough') return; // caret moves inside text
       key.preventDefault();
@@ -877,8 +900,11 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         historyRef.current!,
         el.lineCount,
         cursor.row,
-        cursor.col,
-        lastLine.length,
+        displayColToCodePointIndex(
+          el.plainText.split('\n')[cursor.row] ?? '',
+          cursor.col,
+        ),
+        cpLen(lastLine),
       );
       if (decision.kind === 'passthrough') return;
       key.preventDefault();
@@ -897,7 +923,10 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     const el = editorRef.current;
     if (!el) return;
     const text = el.plainText;
-    const decision = decideSubmit(text, el.cursorOffset);
+    const decision = decideSubmit(
+      text,
+      displayOffsetToCodePointIndex(text, el.cursorOffset),
+    );
     if (decision.kind === 'noop') return;
     if (decision.kind === 'newline-continuation') {
       el.deleteCharBackward();

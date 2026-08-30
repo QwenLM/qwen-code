@@ -35,12 +35,16 @@ export type LiveToolItem = Extract<HistoryItem, { kind: 'tool' }> & {
    * (ink TodoDisplay parity) instead of the flattened output text. */
   todos?: TodoItem[];
   /** Structured AnsiOutputDisplay result: the card renders the styled token
-   * grid (ink AnsiOutputText parity) instead of the color-stripped text. */
+   * grid (ink AnsiOutputText parity) instead of the color-stripped output. */
   ansi?: {
     grid: AnsiToken[][];
     totalLines?: number;
     totalBytes?: number;
   };
+  /** Vision-bridge egress disclosure (ink ToolMessage renders the notice
+   * under the result): tells the user their image/prompt left the machine
+   * via the vision model. */
+  visionBridgeNotice?: string;
 };
 
 export type LiveThinkingItem = Extract<HistoryItem, { kind: 'thinking' }> & {
@@ -269,6 +273,9 @@ export function foldLiveEvent(
         if (ev.type === 'tool-result' && ev.diff) next.diff = ev.diff;
         if (ev.type === 'tool-result' && ev.todos) next.todos = ev.todos;
         if (ev.type === 'tool-result' && ev.ansi) next.ansi = ev.ansi;
+        if (ev.type === 'tool-result' && ev.visionBridgeNotice) {
+          next.visionBridgeNotice = ev.visionBridgeNotice;
+        }
         items[i] = next;
       }
       return items;

@@ -298,8 +298,13 @@ export function toolStatusMeta(item: LiveToolItem): ToolStatusMeta {
   if (item.success) {
     return { glyph: TOOL_STATUS.SUCCESS, color: C.green, strikethrough: false };
   }
+  // Both spellings appear in producers: the event adapter and the client
+  // tool-run emit 'cancelled' (two Ls); 'canceled' is kept for any other
+  // source. 'interrupted' is the ESC-abort summary.
   const canceled =
-    item.summary === 'interrupted' || item.summary === 'canceled';
+    item.summary === 'interrupted' ||
+    item.summary === 'canceled' ||
+    item.summary === 'cancelled';
   if (canceled) {
     return { glyph: TOOL_STATUS.CANCELED, color: C.text, strikethrough: true };
   }
