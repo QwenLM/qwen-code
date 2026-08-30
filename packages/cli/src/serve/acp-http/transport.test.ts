@@ -7919,35 +7919,51 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     // own spawnOrAttach would block on bridge.gate and never grant ownership.
     bridge.gate = new Promise<void>((r) => (releaseLoad = r));
     const connStream = await openStream(connId);
-    const got = takeFrames(connStream, 3); // session/new + close reject + load success
-    await new Promise((r) => setTimeout(r, 50));
-    // Load goes in-flight (awaits bridge.gate); pre-await closingSessions empty.
-    void post(connId, {
-      jsonrpc: '2.0',
-      id: 340,
-      method: 'session/load',
-      params: { sessionId: 'sess-1' },
-    });
-    await new Promise((r) => setTimeout(r, 20));
-    // Close starts DURING the load → marks sess-1 closing (awaits closeGate).
-    void post(connId, {
-      jsonrpc: '2.0',
-      id: 341,
-      method: 'session/close',
-      params: { sessionId: 'sess-1' },
-    });
-    await new Promise((r) => setTimeout(r, 20));
-    releaseLoad(); // loadSession resolves after close has been rejected.
-    const frames = (await got) as Array<{
-      id: number;
-      result?: { replayed?: boolean };
-      error?: { code: number; message: string; data?: { errorKind?: string } };
-    }>;
-    const closeReply = frames.find((f) => f.id === 341);
-    expect(closeReply?.error?.code).toBe(-32603);
-    expect(closeReply?.error?.data?.errorKind).toBe('session_archiving');
-    const loadReply = frames.find((f) => f.id === 340);
-    expect(loadReply?.result?.replayed).toBe(true);
+    const reader = frameReader(connStream);
+    const frameTimeoutMs = process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
+      ? 60_000
+      : 2_000;
+    await reader.next(frameTimeoutMs); // session/new reply
+    let loadReply: { id: number; result?: { replayed?: boolean } } | undefined;
+    try {
+      // Load goes in-flight (awaits bridge.gate); pre-await closingSessions empty.
+      void post(connId, {
+        jsonrpc: '2.0',
+        id: 340,
+        method: 'session/load',
+        params: { sessionId: 'sess-1' },
+      });
+      await waitUntil(
+        () =>
+          bridge.loadRequests.some((request) => request.sessionId === 'sess-1'),
+        frameTimeoutMs,
+      );
+      // Close starts DURING the load and is rejected by the archive gate.
+      void post(connId, {
+        jsonrpc: '2.0',
+        id: 341,
+        method: 'session/close',
+        params: { sessionId: 'sess-1' },
+      });
+      const closeReply = (await reader.next(frameTimeoutMs)) as {
+        id: number;
+        error?: {
+          code: number;
+          message: string;
+          data?: { errorKind?: string };
+        };
+      };
+      expect(closeReply).toMatchObject({
+        id: 341,
+        error: { code: -32603, data: { errorKind: 'session_archiving' } },
+      });
+      releaseLoad();
+      loadReply = (await reader.next(frameTimeoutMs)) as typeof loadReply;
+    } finally {
+      releaseLoad();
+      reader.close();
+    }
+    expect(loadReply).toMatchObject({ id: 340, result: { replayed: true } });
     expect(bridge.detached.some((d) => d.sessionId === 'sess-1')).toBe(false);
     expect(bridge.killed).not.toContain('sess-1');
 
