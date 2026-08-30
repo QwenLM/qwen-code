@@ -114,11 +114,15 @@ workspace, whose sessions the sidebar lists itself, gets its counts passed in.
   `{ items: [...] }` selects the chips.
 - `onOpenWorkspaceManagement(target, workspaceCwd)` and
   `onNewWorktreeSession(workspaceCwd)` are new sidebar callbacks; the app
-  wires them to `openPanel` and to a new session armed with worktree intent.
-  The arm is dropped if another session start ran while the creation was in
-  flight, and an armed intent survives a transient git-status gap — only a
+  wires them to `openPanel` and to `createNewSession` with a worktree git
+  intent. The intent is set in the same synchronous step that clears the
+  previous one, so it belongs to that draft from the start: a prompt
+  submitted while the clear is still in flight gets the worktree, and any
+  later session start or draft workspace switch resets it like any other
+  intent. An armed intent survives a transient git-status gap — only a
   session, an untrusted workspace, a no-branch answer or a draft workspace
-  switch clears it.
+  switch clears it, and an intent set while a session already exists is
+  cleared immediately.
 
 ## Follow-ups (layers B and C in the issue)
 

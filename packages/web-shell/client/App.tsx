@@ -6786,11 +6786,14 @@ export function App({
     workspaceTrusted: activeWorkspaceTrusted,
     gitStatus: selectedWorkspaceGitStatus,
   });
+  // Re-run on intent changes as well: an intent set while a session already
+  // exists (or the workspace is untrusted / not a repo) has nothing to apply
+  // to and must not survive into the next draft.
   useEffect(() => {
-    if (gitModeIntentInvalid) {
+    if (gitModeIntentInvalid && gitModeIntent.mode !== 'current') {
       setGitModeIntent({ mode: 'current' });
     }
-  }, [gitModeIntentInvalid]);
+  }, [gitModeIntentInvalid, gitModeIntent]);
   const handleOpenGitDiff = useCallback(() => {
     if (!gitDiffWorkspaceCwd) return;
     setGitDialog({
@@ -8661,16 +8664,33 @@ export function App({
   const createNewSession = useCallback(
     async (
       workspaceCwd?: string,
-      /** Preserve the current full-page view and/or active panel while clearing. */
-      opts?: { keepView?: boolean; keepPanel?: boolean },
+      opts?: {
+        /** Preserve the current full-page view and/or active panel while clearing. */
+        keepView?: boolean;
+        keepPanel?: boolean;
+        /**
+         * Git mode the new draft starts with. Set here, in the same
+         * synchronous step that resets the previous intent, so the very
+         * first prompt — even one submitted while the clear is still in
+         * flight — sees it, and no later arm can land on a draft that has
+         * since been re-targeted or turned into a session.
+         */
+        gitIntent?: SessionGitIntent;
+      },
     ) => {
       const targetWorkspaceCwd = lockedWorkspaceCwd ?? workspaceCwd;
       composerSourceVersionRef.current += 1;
       selectedWorkspaceCwdRef.current = targetWorkspaceCwd;
       setSelectedWorkspaceCwd(targetWorkspaceCwd);
       // Starting a fresh chat drops any pending git mode intent so it never
-      // leaks into the next created session.
-      setGitModeIntent({ mode: 'current' });
+      // leaks into the next created session; a caller-supplied intent takes
+      // its place. The ref is written too so a prompt admitted before the
+      // next render reads the same answer.
+      const nextGitIntent: SessionGitIntent = opts?.gitIntent ?? {
+        mode: 'current',
+      };
+      gitModeIntentRef.current = nextGitIntent;
+      setGitModeIntent(nextGitIntent);
       // Close the drawer before awaiting so a failed createSession() doesn't leave
       // it stuck open with the page scroll still locked, matching loadSidebarSession.
       closeMobileDrawer();
@@ -12671,26 +12691,15 @@ export function App({
                     closeMobileDrawer();
                     openPanel(target);
                   }}
-                  onNewWorktreeSession={async (workspaceCwd) => {
-                    // createNewSession resets the git intent so a stale one
-                    // never leaks into the next session; arm worktree mode
-                    // after it settles so the lazily created session picks
-                    // it up on its first prompt. It bumps the composer
-                    // source version synchronously, and so does every other
-                    // session start — if another one ran while this was
-                    // awaiting, the arm belongs to a draft that no longer
-                    // exists and must not land on whatever came next.
-                    const creating = createNewSession(workspaceCwd);
-                    const armToken = composerSourceVersionRef.current;
-                    const created = await creating;
-                    if (
-                      created &&
-                      composerSourceVersionRef.current === armToken
-                    ) {
-                      setGitModeIntent({ mode: 'worktree' });
-                    }
-                    return created;
-                  }}
+                  onNewWorktreeSession={(workspaceCwd) =>
+                    // The intent travels with the draft it belongs to: set
+                    // inside createNewSession's synchronous step, it is what
+                    // the first prompt reads, and any later session start or
+                    // workspace switch resets it like any other intent.
+                    createNewSession(workspaceCwd, {
+                      gitIntent: { mode: 'worktree' },
+                    })
+                  }
                   branding={sidebarOptions.branding}
                   primaryNav={sidebarOptions.primaryNav}
                   showSessionSourceSwitch={

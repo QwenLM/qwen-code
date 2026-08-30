@@ -1096,6 +1096,7 @@ vi.mock('./components/sidebar/WebShellSidebar', async () => {
       onNewWorktreeSession?: (
         workspaceCwd?: string,
       ) => Promise<boolean> | boolean | void;
+      onSelectWorkspace?: (workspaceCwd: string | undefined) => void;
       onLoadSession?: (sessionId: string) => Promise<void> | void;
       onSelectCurrentSession?: () => void;
       onSessionsDeleted?: (sessionIds: string[]) => void;
@@ -1139,6 +1140,15 @@ vi.mock('./components/sidebar/WebShellSidebar', async () => {
             onClick: () => void props.onNewWorktreeSession?.(),
           },
           'new worktree session',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'select-other-workspace',
+            type: 'button',
+            onClick: () => props.onSelectWorkspace?.('/other'),
+          },
+          'select other workspace',
         ),
         React.createElement(
           'button',
@@ -11170,6 +11180,105 @@ describe('App session callbacks', () => {
     await act(async () => {
       worktreeButton.click();
       newSessionButton.click();
+      await Promise.resolve();
+    });
+    await flush();
+    await flush();
+    expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+      mode: 'current',
+    });
+  });
+
+  it('gives a prompt submitted while the worktree draft is still clearing the worktree', async () => {
+    mockConnection.sessionId = undefined;
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    };
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    let resolveClear: () => void = () => {};
+    mockSessionActions.clearSession.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveClear = resolve;
+        }),
+    );
+    const { container } = renderApp();
+    await flush();
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="new-worktree-session"]',
+        )!
+        .click();
+      await Promise.resolve();
+    });
+    // The clear is still in flight; the intent is already the draft's.
+    expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+      mode: 'worktree',
+    });
+    await act(async () => {
+      resolveClear();
+      await Promise.resolve();
+    });
+    await flush();
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('first prompt');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.createSession).toHaveBeenCalled();
+      });
+    });
+    expect(mockSessionActions.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ worktree: { slug: undefined } }),
+    );
+  });
+
+  it('drops the worktree intent when the draft is re-targeted before it settles', async () => {
+    mockConnection.sessionId = undefined;
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+        { id: 'other', cwd: '/other', primary: false, trusted: true },
+      ],
+    };
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    let resolveClear: () => void = () => {};
+    mockSessionActions.clearSession.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveClear = resolve;
+        }),
+    );
+    const { container } = renderApp();
+    await flush();
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="new-worktree-session"]',
+        )!
+        .click();
+      await Promise.resolve();
+    });
+    // The sidebar re-targets the draft while the clear is still in flight.
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="select-other-workspace"]',
+        )!
+        .click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      resolveClear();
       await Promise.resolve();
     });
     await flush();
