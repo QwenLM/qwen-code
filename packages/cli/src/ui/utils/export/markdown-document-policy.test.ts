@@ -72,6 +72,29 @@ describe('markdown document policy', () => {
     expect(activePolicy.onComplexityLimit).toHaveBeenCalledOnce();
   });
 
+  it.each([
+    ['abrupt-closing comment', `<!-->\n${'a*'.repeat(20_000)}]`],
+    ['comment marker in code span', `\`<!--\`\n${'a*'.repeat(20_000)}]`],
+    ['carriage-return fence model', `~~~\r~~~\r${'a*'.repeat(20_000)}]`],
+    [
+      'fence marker in an HTML block',
+      `<div>\n\`\`\`\n\n${'a*'.repeat(20_000)}]`,
+    ],
+    [
+      'fence marker after an unterminated HTML block tag',
+      `<div\n\`\`\`\n\n${'a*'.repeat(20_000)}]`,
+    ],
+  ])('rejects parser/scanner divergence promptly: %s', (_name, input) => {
+    const activePolicy = policy();
+    const startedAt = performance.now();
+
+    expect(sanitizeMarkdownDocument(input, activePolicy)).toBe(
+      '[markdown omitted: complexity limit exceeded]',
+    );
+    expect(performance.now() - startedAt).toBeLessThan(2_000);
+    expect(activePolicy.onComplexityLimit).toHaveBeenCalledOnce();
+  });
+
   it('keeps flat bracketed logs above the old raw-marker limit', () => {
     const input = Array.from(
       { length: 342 },

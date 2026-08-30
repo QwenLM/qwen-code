@@ -686,9 +686,33 @@ describe('extractTodosFromToolCall', () => {
 
   it('reads todos from args', () => {
     const todos = extractTodosFromToolCall(
-      toolCall({ args: { todos: [item('1', 'A', 'pending')] } }),
+      toolCall({
+        args: {
+          todos: [item('1', 'A', 'pending')],
+          entries: [item('2', 'B', 'completed')],
+        },
+      }),
     );
     expect(todos).toEqual([{ id: '1', content: 'A', status: 'pending' }]);
+  });
+
+  it('reads safe todo preview entries from args', () => {
+    const todos = extractTodosFromToolCall(
+      toolCall({
+        args: {
+          entries: [
+            {
+              content: 'A',
+              status: 'pending',
+              _meta: { qwenTodo: { id: 'a' } },
+            },
+          ],
+        },
+        rawOutput: 'Todos updated',
+      }),
+    );
+
+    expect(todos).toEqual([{ id: 'a', content: 'A', status: 'pending' }]);
   });
 
   it('reads todos from rawOutput.todos', () => {

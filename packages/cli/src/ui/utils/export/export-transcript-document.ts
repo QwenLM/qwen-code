@@ -1499,7 +1499,7 @@ function assertNoForbiddenFields(value: unknown): void {
     if (typeof entry === 'string') {
       const safePathField =
         key !== undefined &&
-        ['path', 'cwd', 'origin', 'projectName'].includes(key);
+        ['path', 'cwd', 'origin', 'projectName', 'repository'].includes(key);
       if (key !== 'data' && containsUnredactedHomePath(entry, !safePathField)) {
         throw new ExportTranscriptDocumentError('home_path_forbidden');
       }
@@ -1919,28 +1919,13 @@ function redactHomePathStructures(value: string): string {
 function redactNonHttpHomePathStructures(value: string): string {
   const rawRedacted = redactRawHomePathStructures(value);
   const encodedRedacted = rawRedacted.replace(
-    /(^|[^A-Za-z0-9%])(%[0-9A-Fa-f]{2}[^\s<>"'\x60]*)/g,
-    (
-      match: string,
-      prefix: string,
-      token: string,
-      offset: number,
-      source: string,
-    ) => {
-      const tokenStart = offset + prefix.length;
-      if (source.slice(0, tokenStart).endsWith('[home]')) return match;
-      let decoded = token;
-      for (let pass = 0; pass < 3; pass += 1) {
-        try {
-          const next = decodeURIComponent(decoded);
-          if (next === decoded) break;
-          decoded = next;
-        } catch {
-          break;
-        }
-      }
+    PERCENT_ENCODED_TOKEN_PATTERN,
+    (token: string, offset: number, source: string) => {
+      const tokenStart = offset;
+      if (source.slice(0, tokenStart).endsWith('[home]')) return token;
+      const decoded = decodePercentToken(token);
       const redacted = redactRawHomePathStructures(decoded);
-      return redacted === decoded ? match : prefix + redacted;
+      return redacted === decoded ? token : redacted;
     },
   );
   return encodedRedacted.replace(
@@ -1988,20 +1973,25 @@ function containsNonHttpHomePath(
 ): boolean {
   if (containsRawHomePath(value)) return true;
   if (!checkPercentEncoding) return false;
-  for (const match of value.matchAll(/%[0-9A-Fa-f]{2}[^\s<>"'\x60]*/g)) {
-    let decoded = match[0];
-    for (let pass = 0; pass < 3; pass += 1) {
-      try {
-        const next = decodeURIComponent(decoded);
-        if (next === decoded) break;
-        decoded = next;
-      } catch {
-        break;
-      }
-    }
-    if (containsRawHomePath(decoded)) return true;
+  for (const match of value.matchAll(PERCENT_ENCODED_TOKEN_PATTERN)) {
+    if (containsRawHomePath(decodePercentToken(match[0]))) return true;
   }
   return false;
+}
+
+const PERCENT_ENCODED_TOKEN_PATTERN = /%[0-9A-Fa-f]{2}[^\s<>"'\x60]*/g;
+
+function decodePercentToken(value: string): string {
+  let decoded = value;
+  for (let pass = 0; pass < 3; pass += 1) {
+    const next = decoded.replace(/%([0-9A-Fa-f]{2})/g, (escape, hex) => {
+      const code = Number.parseInt(hex, 16);
+      return code >= 0x20 && code <= 0x7e ? String.fromCharCode(code) : escape;
+    });
+    if (next === decoded) break;
+    decoded = next;
+  }
+  return decoded;
 }
 
 function containsRawHomePath(value: string): boolean {

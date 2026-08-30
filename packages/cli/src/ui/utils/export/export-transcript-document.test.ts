@@ -341,6 +341,51 @@ describe('ExportTranscriptDocumentV1', () => {
     ]);
   });
 
+  it('redacts encoded home paths without aborting on token prefixes or invalid escapes', () => {
+    const encodedHomePath = '%2Fhome%2Falice';
+    const document = createExportTranscriptDocumentV1(
+      [
+        record('encoded-home-paths', null, {
+          message: {
+            role: 'user',
+            parts: [
+              {
+                text: [
+                  `prefixed=foo${encodedHomePath}`,
+                  `nested=logpath${encodedHomePath}%2Fnotes.txt`,
+                  'windows=abc%2FUsers%2Fbob',
+                  `assignment=DIR%3D${encodedHomePath}`,
+                  'leading=%%2Fhome%2Falice',
+                  `invalid=x=${encodedHomePath}%%`,
+                ].join('\n'),
+              },
+            ],
+          },
+        }),
+      ],
+      {
+        ...sessionData,
+        metadata: {
+          ...sessionData.metadata,
+          gitRepo: `owner/${encodedHomePath}`,
+        },
+      },
+      EXPORT_OPTIONS,
+    );
+    const text =
+      document.blocks[0]?.kind === 'user' ? document.blocks[0].text : '';
+
+    expect(text).toContain('prefixed=foo[home]');
+    expect(text).toContain('nested=logpath[home]');
+    expect(text).toContain('windows=abc[home]');
+    expect(text).toContain('assignment=DIR=[home]');
+    expect(text).toContain('leading=%[home]');
+    expect(text).toContain('invalid=x=[home]');
+    expect(text).not.toContain(encodedHomePath);
+    expect(text).not.toContain('%2FUsers%2Fbob');
+    expect(document.metadata.repository).toBe(encodedHomePath);
+  });
+
   it('exports qwen-native edit args as a complete file diff', () => {
     const document = createExportTranscriptDocumentV1(
       [

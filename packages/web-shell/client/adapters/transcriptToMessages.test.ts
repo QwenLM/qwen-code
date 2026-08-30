@@ -7,6 +7,7 @@ import type {
   DaemonTranscriptBlock,
   DaemonUserShellTranscriptBlock,
 } from '@qwen-code/sdk/daemon';
+import { extractTodosFromToolCall } from '../utils/todos.js';
 import { transcriptBlocksToDaemonMessages } from './transcriptToMessages.js';
 
 function textBlock(
@@ -2466,6 +2467,46 @@ describe('transcriptBlocksToDaemonMessages', () => {
             },
           },
         ],
+      },
+    ]);
+  });
+
+  it('keeps safe todo preview entries extractable with a text result', () => {
+    const messages = transcriptBlocksToDaemonMessages(
+      [
+        toolBlock('todo-safe', 'todo-call', 'failed', 1, {
+          toolName: 'todo_write',
+          preview: {
+            kind: 'todo_list',
+            entries: [
+              {
+                id: 'implement',
+                content: 'Implement contract',
+                status: 'pending',
+              },
+            ],
+            planId: 'plan-1',
+            revision: 2,
+          },
+          resultPreview: {
+            kind: 'text',
+            text: 'Todo completion blocked',
+          },
+        }),
+      ],
+      { safeToolProjection: true },
+    );
+    const tool =
+      messages[0]?.role === 'tool_group' ? messages[0].tools[0] : undefined;
+
+    expect(tool?.args).toMatchObject({
+      entries: [{ content: 'Implement contract', status: 'pending' }],
+    });
+    expect(tool && extractTodosFromToolCall(tool)).toEqual([
+      {
+        id: 'implement',
+        content: 'Implement contract',
+        status: 'pending',
       },
     ]);
   });

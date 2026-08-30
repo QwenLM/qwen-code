@@ -77,11 +77,11 @@ function parseMarkdown(value: string): MarkdownNode | undefined {
 
 function isMarkdownSourceWithinBudget(value: string): boolean {
   if (value.length > MAX_MARKDOWN_SOURCE_CHARACTERS) return false;
-  const source = sourceOutsideHtmlComments(value);
-  if (source === undefined) return false;
+  const source = value.replace(/\r\n?/g, '\n');
   let inlineDelimiters = 0;
   let bracketDepth = 0;
   let fence: { character: string; length: number } | undefined;
+  let htmlBlock = false;
   for (const line of source.split('\n')) {
     const fenceText = line.replace(/^ {0,3}/, '');
     const fenceRun = /^(`+|~+)/.exec(fenceText)?.[1];
@@ -95,7 +95,9 @@ function isMarkdownSourceWithinBudget(value: string): boolean {
       }
       continue;
     }
-    if (fenceRun && fenceRun.length >= 3) {
+    if (htmlBlock && line.trim() === '') htmlBlock = false;
+    if (!htmlBlock && startsConservativeHtmlBlock(line)) htmlBlock = true;
+    if (!htmlBlock && fenceRun && fenceRun.length >= 3) {
       const character = fenceRun[0];
       const info = fenceText.slice(fenceRun.length);
       if (character !== '`' || !info.includes('`')) {
@@ -151,21 +153,10 @@ function isMarkdownSourceWithinBudget(value: string): boolean {
   return true;
 }
 
-function sourceOutsideHtmlComments(value: string): string | undefined {
-  let result = '';
-  let cursor = 0;
-  while (cursor < value.length) {
-    const start = value.indexOf('<!--', cursor);
-    if (start === -1) return result + value.slice(cursor);
-    result += value.slice(cursor, start);
-    const end = value.indexOf('-->', start + 4);
-    const commentEnd = end === -1 ? value.length : end;
-    const comment = value.slice(start + 4, commentEnd);
-    if (/^ {0,3}(?:`{3,}|~{3,})/m.test(comment)) return undefined;
-    result += comment.replace(/[^\n]/g, '');
-    cursor = end === -1 ? value.length : end + 3;
-  }
-  return result;
+function startsConservativeHtmlBlock(line: string): boolean {
+  return /^ {0,3}<(?:\/?[A-Za-z][A-Za-z0-9-]*(?:\s|\/?>|$)|!--|\?|!\[CDATA\[|![A-Z])/.test(
+    line,
+  );
 }
 
 function walkMarkdown(
