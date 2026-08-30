@@ -185,6 +185,8 @@ function finishReasonInfoMessage(
 ): string | undefined {
   if (!reason) return undefined;
   return FINISH_REASON_INFO_MESSAGES[reason];
+}
+
 /**
  * A queued teammate→leader message. `modelText` is the full nonce-tagged
  * envelope sent to the leader's model; `display` is the compact `● …`
