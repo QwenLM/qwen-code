@@ -468,6 +468,16 @@ export interface AutoModeSettings {
    * auto-approved. Default false.
    */
   classifyAllShell?: boolean;
+  /** AUTO classifier controls for third-party MCP tools. */
+  mcp?: {
+    /**
+     * Forward MCP tool arguments (bounded and truncated) to the AUTO
+     * classifier so it can judge what the agent is about to send to the
+     * server. Default true. When false the classifier sees only the tool
+     * name, which usually results in a conservative block.
+     */
+    forwardArguments?: boolean;
+  };
 }
 
 export interface AccessibilitySettings {
