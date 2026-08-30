@@ -48,28 +48,45 @@ vi.mock('../../config/storage.js', async (importOriginal) => {
   };
 });
 
+// Mock node:fs/promises to allow per-test override of fs.rm.
+// All other functions pass through to the real implementation.
+let rmMockOverride:
+  | ((...args: Parameters<typeof fs.rm>) => Promise<unknown>)
+  | null = null;
 // Optional readFile hook for simulating mid-reclaim I/O failures.
 // While a hook is installed and returns a value, that value is used;
 // otherwise the real readFile runs.
 vi.mock('node:fs/promises', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('node:fs/promises')>();
-  type ReadFileHook = (...args: Parameters<typeof actual.readFile>) => unknown;
+  const original = await importOriginal<typeof import('node:fs/promises')>();
+  type ReadFileHook = (
+    ...args: Parameters<typeof original.readFile>
+  ) => unknown;
   let readFileHook: ReadFileHook | undefined;
   return {
-    ...actual,
+    ...original,
+    default: original,
     __setReadFileHook: (fn: ReadFileHook | undefined) => {
       readFileHook = fn;
     },
-    readFile: (...args: Parameters<typeof actual.readFile>) => {
+    rm: (...args: Parameters<typeof fs.rm>) => {
+      if (rmMockOverride) return rmMockOverride(...args);
+      return original.rm(...args);
+    },
+    readFile: (...args: Parameters<typeof original.readFile>) => {
       const hooked = readFileHook?.(...args);
       if (hooked !== undefined) {
         return hooked;
       }
-      return actual.readFile(...args);
+      return original.readFile(...args);
     },
   };
 });
 
+function setFsRmMock(
+  fn: ((...args: Parameters<typeof fs.rm>) => Promise<unknown>) | null,
+) {
+  rmMockOverride = fn;
+}
 const { __setReadFileHook } = (await import('node:fs/promises')) as unknown as {
   __setReadFileHook: (fn?: unknown) => void;
 };
@@ -387,6 +404,11 @@ describe('file I/O', () => {
   });
 
   describe('deleteTeamDirs', () => {
+    afterEach(() => {
+      setFsRmMock(null);
+      vi.restoreAllMocks();
+    });
+
     it('deletes team and task directories', async () => {
       await writeTeamFile('doomed', makeTeamFile());
       const tasksDir = getTasksDir('doomed');
@@ -401,6 +423,46 @@ describe('file I/O', () => {
 
     it('does not throw for missing directories', async () => {
       await expect(deleteTeamDirs('nonexistent')).resolves.not.toThrow();
+    });
+
+    it('throws AggregateError when both rm calls fail (e.g. EACCES)', async () => {
+      const eaccesError = Object.assign(new Error('permission denied'), {
+        code: 'EACCES',
+      });
+      setFsRmMock(() => Promise.reject(eaccesError));
+
+      const err: unknown = await deleteTeamDirs('any-team').then(
+        () => undefined,
+        (e: unknown) => e,
+      );
+      expect(err).toBeInstanceOf(AggregateError);
+      expect((err as AggregateError).errors).toHaveLength(2);
+      // Member errno/path detail must survive in the wrapper message —
+      // serializers reading only `.message`/`.stack` never see `.errors`.
+      expect((err as AggregateError).message).toContain('permission denied');
+    });
+
+    it('throws AggregateError when both rm calls fail (EIO)', async () => {
+      const eioError = Object.assign(new Error('I/O error'), { code: 'EIO' });
+      setFsRmMock(() => Promise.reject(eioError));
+
+      await expect(deleteTeamDirs('any-team')).rejects.toThrow(AggregateError);
+    });
+
+    it('throws the single error when only the second rm call fails', async () => {
+      const eaccesError = Object.assign(new Error('permission denied'), {
+        code: 'EACCES',
+      });
+      let callCount = 0;
+      setFsRmMock(() => {
+        callCount++;
+        if (callCount === 1) return Promise.resolve();
+        return Promise.reject(eaccesError);
+      });
+
+      await expect(deleteTeamDirs('any-team')).rejects.toThrow(
+        'permission denied',
+      );
     });
   });
 

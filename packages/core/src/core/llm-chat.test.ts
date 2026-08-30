@@ -4616,8 +4616,7 @@ describe('LlmChat', async () => {
         info: {
           originalTokenCount: 100_000,
           newTokenCount: 100_000,
-          compressionStatus:
-            CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT,
+          compressionStatus: CompressionStatus.COMPRESSION_FAILED_API_ERROR,
         },
       });
       vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
@@ -7866,7 +7865,7 @@ describe('LlmChat', async () => {
     it('rolls back the partial assistant turn when an InvalidStreamError fires after a tool_use chunk on the transient-stream retry budget', async () => {
       // Counterpart to the rate-limit rollback above. The
       // transient-stream retry budget (NO_FINISH_REASON /
-      // NO_RESPONSE_TEXT) has its own popPartialIfPushed call site —
+      // NO_RESPONSE_TEXT) has its own popPendingPartialAssistantTurn call site —
       // separate from the rate-limit branch the existing test
       // covers. Without a regression test, that call could be
       // accidentally removed and the rate-limit test would still
@@ -11181,7 +11180,7 @@ describe('LlmChat', async () => {
       // chat-recording JSONL: the failed attempt's `recordAssistantTurn`
       // call must NOT have been flushed, so `--resume` won't rehydrate
       // a model[functionCall] turn the live session correctly discarded.
-      // Without the deferred-flush stash + popPartialIfPushed clear,
+      // Without the deferred-flush stash + popPendingPartialAssistantTurn clear,
       // `recordAssistantTurn` was called twice (once for the partial,
       // once for the success) and only the in-memory pop fixed live
       // history; the durable transcript stayed corrupt.
@@ -11242,7 +11241,7 @@ describe('LlmChat', async () => {
 
         // Exactly one recording: the successful retry's text turn.
         // The failed attempt's partial functionCall must have been
-        // discarded by `popPartialIfPushed` clearing the deferred-flush
+        // discarded by `popPendingPartialAssistantTurn` clearing the deferred-flush
         // stash, never reaching the JSONL.
         expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
         const recordedMessage = recordAssistantTurn.mock.calls[0]![0]
@@ -13546,7 +13545,7 @@ describe('LlmChat', async () => {
     // stripOrphanedUserEntriesFromHistory). If any site forgets, a
     // stale `pendingPartialAssistantTurnIndex` could line up with an
     // unrelated model turn in the post-mutation history and cause
-    // `popPartialIfPushed` to splice the WRONG entry — silently losing
+    // `popPendingPartialAssistantTurn` to splice the WRONG entry — silently losing
     // a real assistant response.
     //
     // The markers are ephemeral within a single sendMessageStream

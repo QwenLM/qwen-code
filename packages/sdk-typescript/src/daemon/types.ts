@@ -2020,6 +2020,7 @@ export interface DaemonWriteMemoryResult {
 }
 
 export type DaemonWorkspaceMemoryRememberContextMode = 'workspace' | 'clean';
+export type DaemonWorkspaceMemoryRememberTargetScope = 'project' | 'user';
 
 export type DaemonWorkspaceMemoryTaskStatus =
   | 'queued'
@@ -2046,6 +2047,7 @@ export interface DaemonWorkspaceMemoryRememberTask {
   taskId: string;
   status: DaemonWorkspaceMemoryTaskStatus;
   contextMode: DaemonWorkspaceMemoryRememberContextMode;
+  scope?: DaemonWorkspaceMemoryRememberTargetScope;
   createdAt: string;
   updatedAt: string;
   result?: DaemonWorkspaceMemoryRememberResult;
@@ -2058,6 +2060,7 @@ export interface DaemonWorkspaceMemoryRememberTask {
 
 export interface DaemonWorkspaceMemoryRememberOptions {
   contextMode?: DaemonWorkspaceMemoryRememberContextMode;
+  scope?: DaemonWorkspaceMemoryRememberTargetScope;
   clientId?: string;
 }
 
@@ -2077,6 +2080,7 @@ export interface DaemonWorkspaceMemoryForgetResult {
 export interface DaemonWorkspaceMemoryForgetTask {
   taskId: string;
   status: DaemonWorkspaceMemoryTaskStatus;
+  scope?: DaemonWorkspaceMemoryRememberTargetScope;
   createdAt: string;
   updatedAt: string;
   result?: DaemonWorkspaceMemoryForgetResult;
@@ -2088,6 +2092,7 @@ export interface DaemonWorkspaceMemoryForgetTask {
 }
 
 export interface DaemonWorkspaceMemoryForgetOptions {
+  scope?: DaemonWorkspaceMemoryRememberTargetScope;
   clientId?: string;
 }
 
@@ -2965,11 +2970,16 @@ export interface DaemonModelDeleteRequest {
   baseUrl?: string;
 }
 
+export interface DaemonModelProviderRuntimeSyncResult {
+  status: 'applied' | 'deferred' | 'failed';
+}
+
 export interface DaemonModelDeleteResult {
   removed: boolean;
   clearedActiveModel: boolean;
   /** True when a committed write targets a restart-required setting. */
   requiresRestart?: boolean;
+  runtimeSync?: DaemonModelProviderRuntimeSyncResult;
 }
 
 export type DaemonVoiceMode = 'hold' | 'tap';
@@ -3415,6 +3425,7 @@ export interface DaemonReloadResponse {
   sessionsRefreshed?: string[];
   sessionsSkipped?: string[];
   childError?: string;
+  runtimeEnvironmentApplied?: boolean;
 }
 
 /** A bounded, credential-redacted adapter startup diagnostic. */
@@ -4017,6 +4028,7 @@ export interface DaemonAuthProviderInstallResult {
   modelId?: string;
   baseUrl?: string;
   message: string;
+  runtimeSync?: DaemonModelProviderRuntimeSyncResult;
 }
 
 /** A frame in the SSE event stream. */

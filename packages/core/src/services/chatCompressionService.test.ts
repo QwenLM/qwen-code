@@ -2062,6 +2062,100 @@ describe('ChatCompressionService', () => {
       expect(mockFirePostCompactEvent).not.toHaveBeenCalled();
     });
 
+    it('should return API error status when the compression side-query fails', async () => {
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'msg1' }] },
+        { role: 'model', parts: [{ text: 'msg2' }] },
+        { role: 'user', parts: [{ text: 'msg3' }] },
+        { role: 'model', parts: [{ text: 'msg4' }] },
+      ];
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
+        100,
+      );
+      vi.mocked(tokenLimit).mockReturnValue(1000);
+
+      const warn = vi.fn();
+      (
+        mockConfig as unknown as {
+          getDebugLogger: () => {
+            warn: typeof warn;
+            debug: ReturnType<typeof vi.fn>;
+          };
+        }
+      ).getDebugLogger = () => ({
+        warn,
+        debug: vi.fn(),
+      });
+      vi.spyOn(sideQueryModule, 'runSideQuery').mockRejectedValue(
+        new Error('context window exceeded'),
+      );
+
+      const result = await service.compress(mockChat, {
+        promptId: mockPromptId,
+        force: true,
+        config: mockConfig,
+        consecutiveFailures: 0,
+        originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
+      });
+
+      expect(result.info.compressionStatus).toBe(
+        CompressionStatus.COMPRESSION_FAILED_API_ERROR,
+      );
+      expect(result.info.newTokenCount).toBe(100);
+      expect(result.newHistory).toBeNull();
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining('compression side-query failed'),
+      );
+      expect(mockFirePostCompactEvent).not.toHaveBeenCalled();
+    });
+
+    it('should rethrow aborts from the compression side-query', async () => {
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'msg1' }] },
+        { role: 'model', parts: [{ text: 'msg2' }] },
+        { role: 'user', parts: [{ text: 'msg3' }] },
+        { role: 'model', parts: [{ text: 'msg4' }] },
+      ];
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
+        100,
+      );
+      vi.mocked(tokenLimit).mockReturnValue(1000);
+
+      const warn = vi.fn();
+      (
+        mockConfig as unknown as {
+          getDebugLogger: () => {
+            warn: typeof warn;
+            debug: ReturnType<typeof vi.fn>;
+          };
+        }
+      ).getDebugLogger = () => ({
+        warn,
+        debug: vi.fn(),
+      });
+      const controller = new AbortController();
+      vi.spyOn(sideQueryModule, 'runSideQuery').mockImplementation(() => {
+        controller.abort();
+        return Promise.reject(new Error('cancelled'));
+      });
+
+      await expect(
+        service.compress(mockChat, {
+          promptId: mockPromptId,
+          force: true,
+          config: mockConfig,
+          consecutiveFailures: 0,
+          originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
+          signal: controller.signal,
+        }),
+      ).rejects.toThrow('cancelled');
+      expect(warn).not.toHaveBeenCalledWith(
+        expect.stringContaining('compression side-query failed'),
+      );
+    });
+
     it('should handle PostCompact hook errors gracefully', async () => {
       const history: Content[] = [
         { role: 'user', parts: [{ text: 'msg1' }] },

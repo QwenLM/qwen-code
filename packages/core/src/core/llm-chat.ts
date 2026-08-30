@@ -105,7 +105,11 @@ import {
   makeChatCompressionEvent,
 } from '../telemetry/types.js';
 import type { UiTelemetryService } from '../telemetry/uiTelemetry.js';
-import { type ChatCompressionInfo, CompressionStatus } from './turn.js';
+import {
+  type ChatCompressionInfo,
+  CompressionStatus,
+  isCompressionFailureStatus,
+} from './turn.js';
 import { getContextLengthExceededInfo } from '../utils/contextLengthError.js';
 import {
   getRequestPayloadTooLargeInfo,
@@ -336,15 +340,6 @@ export function redactStructuredOutputArgsForRecording(
   };
 }
 
-function isCompressionFailureStatus(status: CompressionStatus): boolean {
-  return (
-    status === CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT ||
-    status === CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY ||
-    status === CompressionStatus.COMPRESSION_FAILED_TOKEN_COUNT_ERROR ||
-    status === CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED
-  );
-}
-
 function shouldStopAfterHardRescue(
   shouldForceFromHard: boolean,
   hardLimit: number,
@@ -462,6 +457,24 @@ export interface LlmChatSendOptions {
 
 /** @deprecated Use `LlmChatSendOptions`; retained until a future major release. */
 export type GeminiChatSendOptions = LlmChatSendOptions;
+
+/**
+ * Symbol key under which `sendMessageStream` publishes this send's
+ * acceptance snapshot on the caller's request-parts array immediately
+ * before pushing it into history (array requests only; string requests
+ * cannot carry it — and cannot carry a steer/teammate settlement carrier
+ * either). A caller settling an attached carrier compares the global
+ * user-content push counter against THIS snapshot so the comparison
+ * window around the push is empty: a snapshot taken on the caller side
+ * would still cover the send-lock and `tryCompress` awaits ahead of the
+ * push, where a concurrently admitted send can push and supply the
+ * observed counter growth for a send that then exits before its own
+ * push. Absence of a published snapshot means this send never reached
+ * its push site.
+ */
+export const userContentPushSnapshotKey = Symbol(
+  'LlmChat.userContentPushSnapshot',
+);
 
 interface TryCompressOptions {
   /**
@@ -1571,14 +1584,14 @@ export const ORPHAN_TOOL_USE_REPAIR_REASON =
  * --- Partial-push marker lifecycle ---------------------------------------
  *
  * Set together on (streamError + hasToolCall + hasContent) inside
- * `processStreamResponse`. Cleared together by `popPartialIfPushed` on a
+ * `processStreamResponse`. Cleared together by `popPendingPartialAssistantTurn` on a
  * retryable error rollback, or flushed together to JSONL by the outer
  * `finally` after the retry loop exits. Defense-in-depth: every
  * history-mutation method (clearHistory / addHistory / setHistory /
  * truncateHistory / stripThoughtsFromHistory /
  * stripOrphanedUserEntriesFromHistory) resets both markers in lockstep so
  * a stale index can't shift onto an unrelated model turn and cause
- * `popPartialIfPushed` to splice the wrong entry. Any single-field reset
+ * `popPendingPartialAssistantTurn` to splice the wrong entry. Any single-field reset
  * is a bug.
  * ============================================================================
  */
@@ -2969,6 +2982,18 @@ export class LlmChat {
         }
       }
 
+      // Publish the acceptance snapshot for a caller-side settlement
+      // carrier (see `userContentPushSnapshotKey`) immediately before the
+      // push — no await between the snapshot and this push, so no
+      // concurrent send can supply the counter growth it observes.
+      // `params.message` is the caller's own request array (Turn passes
+      // it through unchanged), so the publication reaches the caller even
+      // though this method never returns on the pre-push error paths.
+      if (Array.isArray(params.message)) {
+        (params.message as unknown as Record<PropertyKey, unknown>)[
+          userContentPushSnapshotKey
+        ] = this.userContentPushCount;
+      }
       // Add user content to history ONCE before any attempts.
       this.history.push(userContent);
       currentUserContent = userContent;
@@ -3895,7 +3920,7 @@ export class LlmChat {
           // Pop the partial `model[fc]` FIRST (if processStreamResponse
           // pushed one before re-throwing), THEN the recovery user turn.
           // Reversed order would strand `OUTPUT_RECOVERY_MESSAGE` as a real
-          // user turn. Index-checked pop mirrors `popPartialIfPushed`
+          // user turn. Index-checked pop mirrors `popPendingPartialAssistantTurn`
           // above — see the design note above
           // `ORPHAN_TOOL_USE_REPAIR_REASON` for the wedge mechanism and
           // the partial-push marker lifecycle.
@@ -4855,7 +4880,7 @@ export class LlmChat {
   clearHistory(): void {
     this.history = [];
     // Any pending partial-push state points into the now-empty history;
-    // resetting prevents `popPartialIfPushed` from splicing whatever
+    // resetting prevents `popPendingPartialAssistantTurn` from splicing whatever
     // shows up at that index in a future send (defense-in-depth — the
     // helper also bounds-checks, but a stale marker that happens to
     // line up with a real model turn could otherwise pop the wrong
@@ -5009,7 +5034,7 @@ export class LlmChat {
     this.history = history;
     // History replacement (compression, /clear, --resume reload) wipes
     // the index basis the partial-push marker was captured against. The
-    // marker MUST be cleared — otherwise `popPartialIfPushed` could find
+    // marker MUST be cleared — otherwise `popPendingPartialAssistantTurn` could find
     // a model turn at the stale index in the replacement history and
     // splice an entry that has nothing to do with the original partial
     // push, corrupting the conversation. Drop the paired deferred-record
@@ -5787,7 +5812,7 @@ export class LlmChat {
       if (streamError !== null) {
         // Stream-error + tool-use partial: defer the JSONL append until
         // the outer retry loop decides whether to roll back this attempt.
-        // If the same send retries successfully, popPartialIfPushed clears
+        // If the same send retries successfully, popPendingPartialAssistantTurn clears
         // this stash and the failed attempt never lands on disk; if the
         // retry path doesn't apply (unretryable break), the stash is
         // flushed at the rethrow site so JSONL stays aligned with the
