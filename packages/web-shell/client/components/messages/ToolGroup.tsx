@@ -139,7 +139,10 @@ function hasDetailView(tool: ACPToolCall): boolean {
   );
 }
 
-function isEditToolName(name: string): boolean {
+function isEditToolName(toolName: string): boolean {
+  // Like every other is*ToolName helper, normalize case here so callers can
+  // pass the raw wire name.
+  const name = toolName.toLowerCase();
   return (
     name === 'edit' ||
     name === 'editfile' ||
@@ -1084,8 +1087,7 @@ export const ToolLine = memo(function ToolLine({
   const mcpApp = getMcpAppDisplay(tool.rawOutput);
   const isForcedExpanded = forceExpanded || Boolean(mcpApp);
   const hasApproval = approval?.toolCallId === tool.callId;
-  const isPendingEditApproval =
-    hasApproval && isEditToolName(tool.toolName.toLowerCase());
+  const isPendingEditApproval = hasApproval && isEditToolName(tool.toolName);
   const [monitorDetailsUnavailable, setMonitorDetailsUnavailable] =
     useState(false);
   const [expanded, setExpanded] = useState(
@@ -1165,11 +1167,7 @@ export const ToolLine = memo(function ToolLine({
           : t('subagent.running');
     const runningMeta = [
       progressLabel,
-      isBackground && !isComplete
-        ? ''
-        : waitingForApproval
-          ? ''
-          : info.elapsed,
+      isBackground && !isComplete ? '' : waitingForApproval ? '' : info.elapsed,
     ]
       .filter(Boolean)
       .join(' · ');
