@@ -4755,6 +4755,19 @@ describe('DaemonClient', () => {
         expected: 'Provider is throttled',
       },
       {
+        name: 'details wins over message',
+        status: 500,
+        body: {
+          error: 'Internal error',
+          code: -32603,
+          data: {
+            details: 'Missing credentials',
+            message: 'Provider is throttled',
+          },
+        },
+        expected: 'Missing credentials',
+      },
+      {
         name: 'string data',
         status: 500,
         body: {
@@ -4765,12 +4778,42 @@ describe('DaemonClient', () => {
         expected: 'Agent stopped',
       },
       {
+        name: 'empty string data',
+        status: 500,
+        body: {
+          error: 'Internal error',
+          code: -32603,
+          data: '',
+        },
+        expected: 'Internal error',
+      },
+      {
         name: 'empty details',
         status: 500,
         body: {
           error: 'Internal error',
           code: -32603,
           data: { details: '' },
+        },
+        expected: 'Internal error',
+      },
+      {
+        name: 'empty details falls back to message',
+        status: 500,
+        body: {
+          error: 'Internal error',
+          code: -32603,
+          data: { details: '', message: 'Provider is throttled' },
+        },
+        expected: 'Provider is throttled',
+      },
+      {
+        name: 'empty message field',
+        status: 500,
+        body: {
+          error: 'Internal error',
+          code: -32603,
+          data: { message: '' },
         },
         expected: 'Internal error',
       },
