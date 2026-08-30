@@ -591,6 +591,19 @@ describe('registerModelProvidersHotReload', () => {
   let merged: Settings;
   let reloadModelProvidersConfig: Mock;
   let config: Config;
+  /** The registry's APPLIED providers config (what the gate diffs against). */
+  let applied: ModelProvidersConfig | undefined;
+
+  function makeModelConfig(initialApplied?: ModelProvidersConfig): void {
+    applied = initialApplied;
+    reloadModelProvidersConfig = vi.fn((next?: ModelProvidersConfig) => {
+      applied = next;
+    });
+    config = {
+      reloadModelProvidersConfig,
+      getModelProvidersConfig: () => applied,
+    } as unknown as Config;
+  }
 
   beforeEach(() => {
     unsubscribe = vi.fn();
@@ -603,8 +616,7 @@ describe('registerModelProvidersHotReload', () => {
 
     merged = {} as Settings;
     settings = { merged } as LoadedSettings;
-    reloadModelProvidersConfig = vi.fn();
-    config = { reloadModelProvidersConfig } as unknown as Config;
+    makeModelConfig(undefined);
   });
 
   it('returns the watcher unsubscribe fn', () => {
@@ -634,6 +646,8 @@ describe('registerModelProvidersHotReload', () => {
     merged.modelProviders = {
       openai: [{ id: 'gpt-x', baseUrl: 'https://x' }],
     } as ModelProvidersConfig;
+    // Boot already applied the boot-time providers.
+    makeModelConfig(merged.modelProviders);
     registerModelProvidersHotReload(watcher, settings, config);
 
     (merged as Settings & { theme?: string }).theme = 'dark';
@@ -663,22 +677,108 @@ describe('registerModelProvidersHotReload', () => {
     expect(reloadModelProvidersConfig).toHaveBeenCalledOnce();
   });
 
-  it('retries the same snapshot on the next event after a throwing reload', async () => {
+  it('surfaces a throwing reload as LogError and retries on the next event', async () => {
+    registerModelProvidersHotReload(watcher, settings, config);
     reloadModelProvidersConfig.mockImplementationOnce(() => {
       throw new Error('rebuild failed');
     });
+
+    const spy = vi.fn();
+    appEvents.on(AppEvent.LogError, spy);
+    try {
+      merged.modelProviders = {
+        openai: [{ id: 'gpt-x', baseUrl: 'https://x' }],
+      } as ModelProvidersConfig;
+      await listener([]);
+
+      // Failure is user-visible, and applied state did NOT advance — the
+      // same edit retries and lands on the next event.
+      expect(spy).toHaveBeenCalledOnce();
+      expect(String(spy.mock.calls[0][0])).toContain(
+        'Failed to reload model provider settings',
+      );
+      await listener([]);
+      expect(reloadModelProvidersConfig).toHaveBeenCalledTimes(2);
+      expect(reloadModelProvidersConfig).toHaveBeenLastCalledWith(
+        merged.modelProviders,
+      );
+      expect(spy).toHaveBeenCalledOnce();
+    } finally {
+      appEvents.off(AppEvent.LogError, spy);
+    }
+  });
+
+  it('reloads after an out-of-band registry rewrite desynced applied state', async () => {
+    const bootProviders = {
+      openai: [{ id: 'gpt-a', baseUrl: 'https://a' }],
+    } as ModelProvidersConfig;
+    merged.modelProviders = bootProviders;
+    makeModelConfig(bootProviders);
     registerModelProvidersHotReload(watcher, settings, config);
 
-    merged.modelProviders = {
-      openai: [{ id: 'gpt-x', baseUrl: 'https://x' }],
+    // Provider-template / ACP flow: settings.setValue updates merged without
+    // a watcher event (self-write), then reloads the registry out-of-band.
+    const outOfBand = {
+      openai: [{ id: 'gpt-b', baseUrl: 'https://b' }],
     } as ModelProvidersConfig;
-    expect(() => listener([])).toThrow('rebuild failed');
+    merged.modelProviders = outOfBand;
+    applied = outOfBand;
 
-    // The snapshot must NOT have advanced — the same edit retries and lands.
+    // User hand-edits settings.json back to the boot value.
+    merged.modelProviders = bootProviders;
     await listener([]);
-    expect(reloadModelProvidersConfig).toHaveBeenCalledTimes(2);
-    expect(reloadModelProvidersConfig).toHaveBeenLastCalledWith(
+
+    // The gate diffs against APPLIED state, so the edit is not skipped even
+    // though it equals an earlier value.
+    expect(reloadModelProvidersConfig).toHaveBeenCalledOnce();
+    expect(reloadModelProvidersConfig).toHaveBeenCalledWith(bootProviders);
+  });
+
+  it('reconciles once at registration for edits that landed before the listener attached', () => {
+    const bootProviders = {
+      openai: [{ id: 'gpt-a', baseUrl: 'https://a' }],
+    } as ModelProvidersConfig;
+    makeModelConfig(bootProviders);
+    // An edit refreshed settings.merged during the loadCliConfig window,
+    // before any listener existed.
+    merged.modelProviders = {
+      openai: [{ id: 'gpt-b', baseUrl: 'https://b' }],
+    } as ModelProvidersConfig;
+
+    registerModelProvidersHotReload(watcher, settings, config);
+
+    expect(reloadModelProvidersConfig).toHaveBeenCalledOnce();
+    expect(reloadModelProvidersConfig).toHaveBeenCalledWith(
       merged.modelProviders,
     );
+  });
+
+  it('emits a one-shot restart notice when providerProtocol drifted from boot', async () => {
+    registerModelProvidersHotReload(watcher, settings, config);
+
+    const spy = vi.fn();
+    appEvents.on(AppEvent.LogError, spy);
+    try {
+      // Combined edit: modelProviders (hot) + providerProtocol (restart-only).
+      merged.providerProtocol = {
+        idealab: 'openai',
+      } as Settings['providerProtocol'];
+      merged.modelProviders = {
+        idealab: [{ id: 'm-1', baseUrl: 'https://x' }],
+      } as ModelProvidersConfig;
+      await listener([]);
+
+      expect(spy).toHaveBeenCalledOnce();
+      expect(String(spy.mock.calls[0][0])).toContain('providerProtocol');
+
+      // A later hot-reload must not re-emit the notice.
+      merged.modelProviders = {
+        idealab: [{ id: 'm-2', baseUrl: 'https://x' }],
+      } as ModelProvidersConfig;
+      await listener([]);
+      expect(spy).toHaveBeenCalledOnce();
+    } finally {
+      appEvents.off(AppEvent.LogError, spy);
+    }
   });
 });

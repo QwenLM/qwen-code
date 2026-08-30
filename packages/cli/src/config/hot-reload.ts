@@ -270,14 +270,23 @@ export function registerMcpHotReload(
  * edits take effect without a session restart (issue #10568). Mirrors
  * {@link registerMcpHotReload}: the watcher already debounces and filters out
  * restart-required keys, so this listener only diffs the merged
- * `modelProviders` against the last applied snapshot and calls the existing
- * reload primitive. The diff gate keeps unrelated settings edits (theme, …)
- * from rebuilding the model registry. Called once at startup, after
- * `settingsWatcher.startWatching()`; returns a disposer that unsubscribes.
+ * `modelProviders` against the registry's APPLIED config (same design as the
+ * MCP listener diffing against `getSettingsMcpServers()`) and calls the
+ * existing reload primitive. The diff gate keeps unrelated settings edits
+ * (theme, …) from rebuilding the model registry. Called once at startup,
+ * after `settingsWatcher.startWatching()`; returns a disposer that
+ * unsubscribes.
+ *
+ * Diffing against applied state (not a listener-local snapshot) keeps the
+ * gate correct when other paths rewrite the registry without a watcher event
+ * (provider-template updates, ACP session reloads), and means a throwing
+ * reload retries on the next event — applied state never advanced.
  *
  * `providerProtocol` stays boot-frozen: it is `requiresRestart` in the
  * schema, so it is passed as `undefined` — `ModelRegistry.reloadModels`
- * preserves the existing protocol map in that case.
+ * preserves the existing protocol map in that case. If the on-disk map
+ * drifted from the boot map anyway (combined edit), a one-shot restart
+ * notice is surfaced so the half-applied state is never silent.
  */
 export function registerModelProvidersHotReload(
   watcher: SettingsWatcher,
@@ -287,21 +296,47 @@ export function registerModelProvidersHotReload(
   modelProvidersDebugLogger.debug(
     'registered modelProviders hot-reload listener on SettingsWatcher',
   );
-  let lastApplied = settings.merged.modelProviders;
-  return watcher.addChangeListener(() => {
+  const bootProtocol = settings.merged.providerProtocol;
+  let protocolDriftNotified = false;
+  const reconcile = () => {
     const next = settings.merged.modelProviders;
-    if (equal(lastApplied ?? {}, next ?? {})) {
+    if (equal(config.getModelProvidersConfig() ?? {}, next ?? {})) {
       return;
+    }
+    if (
+      !protocolDriftNotified &&
+      !equal(bootProtocol ?? {}, settings.merged.providerProtocol ?? {})
+    ) {
+      protocolDriftNotified = true;
+      appEvents.emit(
+        AppEvent.LogError,
+        'providerProtocol changed; protocol mappings for custom providers require a restart to take effect.',
+      );
     }
     modelProvidersDebugLogger.debug(
       'modelProviders changed — reloading model registry',
     );
-    // Advance the snapshot only AFTER a successful reload: if the rebuild
-    // throws (the ACP paths wrap this same primitive in try/catch), the
-    // watcher's Promise.allSettled swallows the error — keeping the old
-    // snapshot lets the next event retry instead of silently dropping the
-    // edit forever.
-    config.reloadModelProvidersConfig(next);
-    lastApplied = next;
-  });
+    try {
+      config.reloadModelProvidersConfig(next);
+    } catch (err) {
+      // Same user-visible surfacing as the MCP listener: without this the
+      // watcher's Promise.allSettled swallows the error with only a debug
+      // warn. Applied state is unchanged, so the next event retries.
+      modelProvidersDebugLogger.error(
+        `reloadModelProvidersConfig threw: ${
+          err instanceof Error ? (err.stack ?? err.message) : String(err)
+        }`,
+      );
+      appEvents.emit(
+        AppEvent.LogError,
+        'Failed to reload model provider settings; the model list may be unchanged. Run with --debug for details.',
+      );
+    }
+  };
+  // Reconcile once at registration: the watcher is armed before
+  // loadCliConfig resolves, so an edit that lands in that window has
+  // already refreshed settings.merged with no listener attached — without
+  // this the registry would silently keep the pre-edit boot value.
+  reconcile();
+  return watcher.addChangeListener(reconcile);
 }
