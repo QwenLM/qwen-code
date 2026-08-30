@@ -20,13 +20,6 @@ const Ajv2020Class = (Ajv2020Pkg as any).default || Ajv2020Pkg;
 const debugLogger = createDebugLogger('SchemaValidator');
 
 const ajvOptions = {
-  // Don't register compiled schemas by `$id`. These instances are
-  // module-level and shared; if a second, distinct schema object carries
-  // the same top-level `$id` (two MCP tools generated from one template,
-  // or a registry rebuilt after an MCP reconnect/refresh), Ajv would throw
-  // "schema with key or id ... already exists" and the bare catch would
-  // silently turn enforcement/relaxation off for that schema.
-  addUsedSchema: false,
   // See: https://ajv.js.org/options.html#strict-mode-options
   // strictSchema defaults to true and prevents use of JSON schemas that
   // include unrecognized keywords. The JSON schema spec specifically allows
@@ -54,10 +47,6 @@ const ajvOptions = {
 };
 
 const strictCompileOptions = {
-  // Same rationale as `ajvOptions`: keep compile() idempotent for
-  // `$id`-bearing schemas so a distinct schema object reusing a `$id`
-  // doesn't collide in the shared strict instances.
-  addUsedSchema: false,
   strictSchema: true,
   strictRequired: false,
   strictTypes: false,
@@ -117,6 +106,39 @@ function getStrictValidator(schema: AnySchema): Ajv {
 }
 
 /**
+ * Evicts a stale `$id` registration from a shared Ajv instance before
+ * compiling, so that a DISTINCT schema object reusing the same top-level
+ * `$id` (two MCP tools generated from one template, or a registry rebuilt
+ * after an MCP reconnect/refresh) cannot make compile() throw
+ * "schema with key or id ... already exists" — which the bare catch in
+ * validate() would turn into silently-skipped validation.
+ *
+ * `$id` registration itself must stay enabled (Ajv's default
+ * `addUsedSchema: true`): `$ref`s that resolve through an absolute `$id`
+ * URI — a schema recursing through its own top-level `$id`, or a
+ * cross-document reference to another registered schema — fail to compile
+ * without it.
+ *
+ * The same-object fast path is preserved: Ajv caches compiled schemas by
+ * object identity, so when the schema registered under the `$id` IS the
+ * one being compiled, the registration is left untouched and compile()
+ * returns the cached validator.
+ */
+function evictStaleSchemaId(validator: Ajv, schema: AnySchema): void {
+  if (typeof schema !== 'object' || schema === null) {
+    return;
+  }
+  const id = (schema as { $id?: unknown }).$id;
+  if (typeof id !== 'string') {
+    return;
+  }
+  const registered = validator.getSchema(id);
+  if (registered && registered.schema !== schema) {
+    validator.removeSchema(id);
+  }
+}
+
+/**
  * Simple utility to validate objects against JSON Schemas.
  * Supports both draft-07 (default) and draft-2020-12 schemas.
  */
@@ -137,8 +159,12 @@ export class SchemaValidator {
 
     try {
       const anySchema = schema as AnySchema;
-      getStrictValidator(anySchema).compile(anySchema);
-      getValidator(anySchema).compile(anySchema);
+      const strictValidator = getStrictValidator(anySchema);
+      evictStaleSchemaId(strictValidator, anySchema);
+      strictValidator.compile(anySchema);
+      const runtimeValidator = getValidator(anySchema);
+      evictStaleSchemaId(runtimeValidator, anySchema);
+      runtimeValidator.compile(anySchema);
       return true;
     } catch {
       return false;
@@ -208,6 +234,7 @@ export class SchemaValidator {
     // This matches LenientJsonSchemaValidator behavior in mcp-client.ts.
     let validate;
     try {
+      evictStaleSchemaId(validator, anySchema);
       validate = validator.compile(anySchema);
     } catch (error) {
       // Schema compilation failed (unsupported version, invalid $ref, etc.)

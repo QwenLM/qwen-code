@@ -874,6 +874,125 @@ describe('SchemaValidator', () => {
     });
   });
 
+  describe('$id registration vs. idempotent compilation', () => {
+    // Both invariants must hold at the same time:
+    // 1. `$id` registration stays enabled so `$ref`s that resolve via an
+    //    absolute `$id` URI (self-recursive and cross-document references)
+    //    still compile — silently skipping them makes validate() return
+    //    null and lets malformed tool arguments through.
+    // 2. A distinct schema object reusing an already-registered `$id`
+    //    (two MCP tools generated from one template, or a registry rebuilt
+    //    after an MCP reconnect/refresh) must not make compile() throw
+    //    "schema with key or id ... already exists".
+    const selfRefSchema = {
+      $id: 'https://qwen-code.test/schemaValidator/self-ref',
+      type: 'object',
+      properties: {
+        name: { type: 'string' },
+        child: { $ref: 'https://qwen-code.test/schemaValidator/self-ref' },
+      },
+    };
+
+    it('compiles and enforces schemas that recurse through their own $id', () => {
+      expect(SchemaValidator.canEnforce(selfRefSchema)).toBe(true);
+      expect(SchemaValidator.compileStrict(selfRefSchema)).toBeNull();
+
+      // An array is not coercible to string, so real enforcement (not the
+      // coercion passes) is what turns this into an error. When compilation
+      // is silently skipped, validate() returns null instead.
+      expect(
+        SchemaValidator.validate(selfRefSchema, {
+          name: 'root',
+          child: { name: [1] },
+        }),
+      ).not.toBeNull();
+
+      // A conforming nested payload still passes.
+      expect(
+        SchemaValidator.validate(selfRefSchema, {
+          name: 'root',
+          child: { name: 'leaf', child: { name: 'deep' } },
+        }),
+      ).toBeNull();
+    });
+
+    it('compiles and enforces schemas with a bare self $ref', () => {
+      const bareSelfRef = {
+        $id: 'https://qwen-code.test/schemaValidator/bare-self-ref',
+        type: 'object',
+        properties: {
+          name: { type: 'string' },
+          child: { $ref: '#' },
+        },
+      };
+      expect(SchemaValidator.canEnforce(bareSelfRef)).toBe(true);
+      expect(
+        SchemaValidator.validate(bareSelfRef, { child: { name: [1] } }),
+      ).not.toBeNull();
+    });
+
+    it('resolves cross-document $refs through a registered $id', () => {
+      const leaf = {
+        $id: 'https://qwen-code.test/schemaValidator/xdoc-leaf',
+        type: 'object',
+        properties: { v: { type: 'string' } },
+      };
+      // Registers `leaf` under its `$id` in the shared instances.
+      expect(SchemaValidator.canEnforce(leaf)).toBe(true);
+
+      const tree = {
+        type: 'object',
+        properties: {
+          leaf: { $ref: 'https://qwen-code.test/schemaValidator/xdoc-leaf' },
+        },
+      };
+      expect(SchemaValidator.canEnforce(tree)).toBe(true);
+      expect(
+        SchemaValidator.validate(tree, { leaf: { v: [1] } }),
+      ).not.toBeNull();
+      expect(SchemaValidator.validate(tree, { leaf: { v: 'ok' } })).toBeNull();
+    });
+
+    it('recompiling same-$id schemas is idempotent without cross-pollution', () => {
+      const sharedId = 'https://qwen-code.test/schemaValidator/repeat-compile';
+      const schema1 = {
+        $id: sharedId,
+        type: 'object',
+        properties: { value: { type: 'string', maxLength: 5 } },
+      };
+
+      // Same object compiled repeatedly across the shared instances.
+      expect(
+        SchemaValidator.validate(schema1, { value: 'a'.repeat(50) }),
+      ).not.toBeNull();
+      expect(SchemaValidator.validate(schema1, { value: 'ok' })).toBeNull();
+      expect(SchemaValidator.canEnforce(schema1)).toBe(true);
+      expect(SchemaValidator.canEnforce(schema1)).toBe(true);
+
+      // A distinct object reusing the same $id with a different constraint
+      // must compile (no "already exists" collision) and enforce ITS OWN
+      // constraints rather than the displaced schema's.
+      const schema2 = {
+        $id: sharedId,
+        type: 'object',
+        properties: { value: { type: 'string', maxLength: 2 } },
+      };
+      expect(SchemaValidator.canEnforce(schema2)).toBe(true);
+      // maxLength 2 rejects 'abc'.
+      expect(
+        SchemaValidator.validate(schema2, { value: 'abc' }),
+      ).not.toBeNull();
+      expect(SchemaValidator.validate(schema2, { value: 'ab' })).toBeNull();
+
+      // The displaced schema object can still be recompiled afterwards and
+      // enforces its own (looser) constraint again.
+      expect(
+        SchemaValidator.validate(schema1, { value: 'abcdef' }),
+      ).not.toBeNull();
+      expect(SchemaValidator.validate(schema1, { value: 'abc' })).toBeNull();
+    });
+  });
+
   describe('non-string to string coercion', () => {
     const schema = {
       type: 'object',
