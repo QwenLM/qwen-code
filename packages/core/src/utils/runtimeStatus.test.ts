@@ -4,7 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { mkdtemp, readFile, rm, writeFile, readdir } from 'node:fs/promises';
+import {
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+  readdir,
+  symlink,
+} from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -12,6 +19,7 @@ import { readPidNamespaceId, readProcStartToken } from './process-liveness.js';
 import {
   RUNTIME_STATUS_SCHEMA_VERSION,
   clearRuntimeStatus,
+  hasActiveRuntimeStatusClaimSync,
   isRuntimeStatusActive,
   readRuntimeStatusClaims,
   readRuntimeStatus,
@@ -64,6 +72,29 @@ describe('runtime status discovery', () => {
     expect(statuses[0]?.workDir).toBe('/relocated');
     expect(incomplete).toBe(false);
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'discovers sidecars by name even when the dirent is a symlink',
+    async () => {
+      const realPath = path.join(tmpDir, 'real.runtime.json');
+      const linkPath = path.join(tmpDir, 'abc.runtime.json');
+      await writeRuntimeStatus(realPath, {
+        sessionId: 'abc',
+        workDir: '/relocated',
+        pid: process.pid,
+      });
+      await symlink(realPath, linkPath);
+
+      const { statuses, incomplete } = await readRuntimeStatusClaims(
+        tmpDir,
+        'abc',
+      );
+
+      expect(statuses.map((status) => status.workDir)).toContain('/relocated');
+      expect(incomplete).toBe(false);
+      expect(hasActiveRuntimeStatusClaimSync(tmpDir)).toBe(true);
+    },
+  );
 
   it('treats foreign-host claims as active keep-only evidence', async () => {
     const claimPath = path.join(tmpDir, 'abc.runtime.json');
@@ -136,6 +167,28 @@ describe('runtime status discovery', () => {
           procStartToken: 'not-this-process:1',
         }),
       ).toBe(false);
+    },
+  );
+
+  it.skipIf(process.platform !== 'linux')(
+    'treats a foreign boot id as active keep-only evidence',
+    () => {
+      const currentNamespace = readPidNamespaceId();
+      expect(currentNamespace).not.toBeNull();
+
+      expect(
+        isRuntimeStatusActive({
+          schemaVersion: RUNTIME_STATUS_SCHEMA_VERSION,
+          pid: process.pid,
+          sessionId: 'abc',
+          workDir: '/remote',
+          hostname: os.hostname(),
+          startedAt: Date.now() / 1000,
+          qwenVersion: null,
+          pidNamespaceId: currentNamespace,
+          procStartToken: '00000000-0000-0000-0000-000000000000:1',
+        }),
+      ).toBe(true);
     },
   );
 

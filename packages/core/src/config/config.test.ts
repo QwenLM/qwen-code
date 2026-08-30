@@ -62,6 +62,7 @@ import {
   sessionIdContext,
 } from '../utils/sessionIdContext.js';
 import { sanitizeCwd } from '../utils/paths.js';
+import { readPidNamespaceId } from '../utils/process-liveness.js';
 import {
   createDebugLogger,
   resetDebugLoggingState,
@@ -2144,17 +2145,23 @@ describe('Server Config (config.ts)', () => {
       writeSpy.mockRestore();
     });
 
-    it('skips the sidecar write when chat recording is disabled', async () => {
-      // No transcript entry is created, so no sidecar should exist for
-      // it either — e.g. ACP bootstrap and workspace-discovery configs.
+    it('writes the runtime sidecar even when chat recording is disabled', async () => {
       const config = new Config({ ...baseParams, chatRecording: false });
+      const sessionId = config.getSessionId();
+      const statusPath = config.storage.getRuntimeStatusPath(sessionId);
       const writeSpy = vi
         .spyOn(runtimeStatus, 'writeRuntimeStatus')
-        .mockResolvedValue('');
+        .mockResolvedValue(statusPath);
 
       await config.initialize();
 
-      expect(writeSpy).not.toHaveBeenCalled();
+      expect(writeSpy).toHaveBeenCalledWith(
+        statusPath,
+        expect.objectContaining({
+          sessionId,
+          workDir: config.getTargetDir(),
+        }),
+      );
 
       writeSpy.mockRestore();
     });
@@ -2233,6 +2240,42 @@ describe('Server Config (config.ts)', () => {
       readSpy.mockRestore();
       writeSpy.mockRestore();
     });
+
+    it.skipIf(process.platform !== 'linux')(
+      'does not demote an equal-pid sidecar from another pid namespace',
+      async () => {
+        const currentNamespace = readPidNamespaceId();
+        expect(currentNamespace).not.toBeNull();
+        const config = new Config(baseParams);
+        const sessionId = config.getSessionId();
+        const statusPath = config.storage.getRuntimeStatusPath(sessionId);
+        config.markRuntimeStatusEnabled();
+        const readSpy = vi
+          .spyOn(runtimeStatus, 'readRuntimeStatus')
+          .mockResolvedValue({
+            schemaVersion: runtimeStatus.RUNTIME_STATUS_SCHEMA_VERSION,
+            pid: process.pid,
+            sessionId,
+            workDir: config.getTargetDir(),
+            hostname: os.hostname(),
+            startedAt: Date.now() / 1000,
+            qwenVersion: null,
+            pidNamespaceId: currentNamespace! + 1,
+            procStartToken: null,
+          });
+        const writeSpy = vi
+          .spyOn(runtimeStatus, 'writeRuntimeStatus')
+          .mockResolvedValue(statusPath);
+
+        await config.shutdown();
+
+        expect(readSpy).toHaveBeenCalledWith(statusPath);
+        expect(writeSpy).not.toHaveBeenCalled();
+
+        readSpy.mockRestore();
+        writeSpy.mockRestore();
+      },
+    );
 
     it('leaves sibling same-session sidecars intact when shutting down', async () => {
       const config = new Config(baseParams);
@@ -7594,7 +7637,7 @@ describe('Server Config (config.ts)', () => {
     cwdSpy.mockRestore();
   });
 
-  it('relocateWorkingDirectory should patch the registry even when the sidecar write failed at startup', async () => {
+  it('relocateWorkingDirectory should heal the sidecar when the startup write failed', async () => {
     // Mirror of the startNewSession divergence pin: registration writes
     // to the global dir, the sidecar to the project's chats/ dir —
     // independent failure domains, so the registered-but-sidecar-off
@@ -7627,7 +7670,14 @@ describe('Server Config (config.ts)', () => {
         name: sessionRegistry.deriveSessionName(newDir, sessionId),
       }),
     );
-    expect(writeRuntimeStatusSpy).not.toHaveBeenCalled();
+    expect(writeRuntimeStatusSpy).toHaveBeenCalledWith(
+      new Storage(newDir).getRuntimeStatusPath(sessionId),
+      {
+        sessionId,
+        workDir: newDir,
+        qwenVersion: null,
+      },
+    );
 
     writeRuntimeStatusSpy.mockRestore();
     patchSessionRecordSpy.mockRestore();

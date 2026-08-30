@@ -1324,6 +1324,15 @@ describe('isTempDirPath', () => {
   });
 
   it.skipIf(process.platform === 'win32')(
+    'does not trust /var/tmp as disposable temp storage',
+    () => {
+      withTmpdir('/var/tmp', () => {
+        expect(isTempDirPath('/var/tmp/myproj')).toBe(false);
+      });
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
     'covers literal /tmp on POSIX even when os.tmpdir() differs',
     () => {
       withTmpdir('/var/folders/zz/aaaaaaaa/T', () => {

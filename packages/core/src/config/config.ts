@@ -234,6 +234,10 @@ import {
   writeRuntimeStatus,
 } from '../utils/runtimeStatus.js';
 import {
+  isSameProcess,
+  readPidNamespaceId,
+} from '../utils/process-liveness.js';
+import {
   deriveSessionName,
   patchSessionRecord,
   unregisterSession,
@@ -2961,31 +2965,24 @@ export class Config {
       options?.signal?.throwIfAborted();
       registerSessionProjectDir(this.sessionId, this.storage.getProjectDir());
       this.sessionProjectDirRegistered = true;
-      // Every process kind that records chat history claims its runtime
-      // sidecar here, at the single session-establishment choke point:
-      // the orphan sweep's pid-liveness gate reads only these sidecars,
-      // so a session that never writes one (headless/ACP/SDK/serve)
-      // has no liveness proof and would be judged dead from file age
-      // alone. Best-effort like the rest of runtime status: a read-only
-      // filesystem degrades to the sweep's freshness gates, it must not
-      // block session startup.
-      if (this.chatRecordingEnabled) {
-        try {
-          await writeRuntimeStatus(
-            this.storage.getRuntimeStatusPath(this.sessionId),
-            {
-              sessionId: this.sessionId,
-              workDir: this.getTargetDir(),
-              qwenVersion: this.cliVersion ?? null,
-            },
-          );
-          // Arm the session-swap refresh for every kind, not just the
-          // interactive UI: /clear, /resume and ACP session switches
-          // must keep the sidecar on the session this pid now serves.
-          this.markRuntimeStatusEnabled();
-        } catch {
-          // ignored: best-effort, never block session startup.
-        }
+      // Runtime status is liveness/membership evidence, not a transcript.
+      // Claim it even when chat recording is disabled; failures still
+      // degrade best-effort and must not block session startup.
+      try {
+        await writeRuntimeStatus(
+          this.storage.getRuntimeStatusPath(this.sessionId),
+          {
+            sessionId: this.sessionId,
+            workDir: this.getTargetDir(),
+            qwenVersion: this.cliVersion ?? null,
+          },
+        );
+        // Arm the session-swap refresh for every kind, not just the
+        // interactive UI: /clear, /resume and ACP session switches
+        // must keep the sidecar on the session this pid now serves.
+        this.markRuntimeStatusEnabled();
+      } catch {
+        // ignored: best-effort, never block session startup.
       }
       await this.initializeInternal(options);
     } catch (error) {
@@ -4482,29 +4479,29 @@ export class Config {
     // so handling the swap centrally covers every same-PID session
     // transition. Best-effort: must never block /clear or /resume.
     //
-    // Only refresh when THIS process established its own sidecar at
-    // startup (Config.initializeOnce). A process whose initial sidecar
-    // write failed (e.g. read-only filesystem) must not delete a
-    // sibling's sidecar that happens to share the outgoing session id
-    // mirrors the kimi-cli "write only when a session is
-    // established for this process" rule.
+    // Always write the new per-pid sidecar: if the startup write failed,
+    // a later session transition can heal this process's membership
+    // evidence. Only clear the previous per-pid sidecar when this process
+    // knows it established one.
     if (isSessionTransition) {
-      if (this.runtimeStatusEnabled) {
-        const newPath = this.storage.getRuntimeStatusPath(this.sessionId);
-        const cliVersion = this.cliVersion ?? null;
-        const workDir = this.targetDir;
-        const newSessionId = this.sessionId;
-        this.queueRuntimeStatusWrite(async () => {
+      const newPath = this.storage.getRuntimeStatusPath(this.sessionId);
+      const cliVersion = this.cliVersion ?? null;
+      const workDir = this.targetDir;
+      const newSessionId = this.sessionId;
+      const shouldClearPrevious = this.runtimeStatusEnabled;
+      this.queueRuntimeStatusWrite(async () => {
+        if (shouldClearPrevious) {
           await clearRuntimeStatus(
             this.storage.getRuntimeStatusPath(previousSessionId),
           );
-          await writeRuntimeStatus(newPath, {
-            sessionId: newSessionId,
-            workDir,
-            qwenVersion: cliVersion,
-          });
+        }
+        await writeRuntimeStatus(newPath, {
+          sessionId: newSessionId,
+          workDir,
+          qwenVersion: cliVersion,
         });
-      }
+        this.markRuntimeStatusEnabled();
+      });
       if (this.sessionRegistryActive) {
         const workDir = this.targetDir;
         const newSessionId = this.sessionId;
@@ -4733,16 +4730,15 @@ export class Config {
     // (see queueSessionRegistryWrite): a sidecar failure on the
     // project filesystem must neither skip the patch nor hang `/cd` on
     // the HOME write. The failure domains are independent.
-    if (this.runtimeStatusEnabled) {
-      const sidecarPath = this.storage.getRuntimeStatusPath(sessionId);
-      this.queueRuntimeStatusWrite(async () => {
-        await writeRuntimeStatus(sidecarPath, {
-          sessionId,
-          workDir,
-          qwenVersion: this.cliVersion ?? null,
-        });
+    const sidecarPath = this.storage.getRuntimeStatusPath(sessionId);
+    this.queueRuntimeStatusWrite(async () => {
+      await writeRuntimeStatus(sidecarPath, {
+        sessionId,
+        workDir,
+        qwenVersion: this.cliVersion ?? null,
       });
-    }
+      this.markRuntimeStatusEnabled();
+    });
     if (this.sessionRegistryActive) {
       this.queueSessionRegistryWrite(async () => {
         // The registry's DIRECTORY column is how a user tells two live
@@ -5971,9 +5967,14 @@ export class Config {
               this.sessionId,
             );
             const status = await readRuntimeStatus(statusPath);
+            const currentNamespace = readPidNamespaceId();
             if (
               status?.pid === process.pid &&
-              status.sessionId === this.sessionId
+              status.sessionId === this.sessionId &&
+              (status.pidNamespaceId == null ||
+                currentNamespace == null ||
+                status.pidNamespaceId === currentNamespace) &&
+              isSameProcess(process.pid, status.procStartToken)
             ) {
               await writeRuntimeStatus(statusPath, {
                 sessionId: this.sessionId,

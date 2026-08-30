@@ -732,8 +732,7 @@ describe('Storage – cleanOrphanProjectDirs', () => {
   let baseDir: string;
   let projectsDir: string;
   let aliveCwd: string;
-  /** A non-temp cwd that never exists (baseDir sits under os.tmpdir(),
-   * which would classify entries as all-temp instead of gone). */
+  /** A temp cwd that never exists. */
   let goneCwd: string;
   let tmpdirSpy: ReturnType<typeof vi.spyOn> | undefined;
 
@@ -800,9 +799,8 @@ describe('Storage – cleanOrphanProjectDirs', () => {
   };
 
   /**
-   * Runs the full disappearance-grace cycle for a gone non-temp entry:
-   * first sweep writes the marker, then age it and sweep again to reach
-   * the deletion. Returns the second sweep's result.
+   * Runs the full disappearance-grace cycle: first sweep writes the marker,
+   * then age it and sweep again to reach deletion.
    */
   const sweepPastMarkerGrace = async (
     entry: string,
@@ -822,25 +820,32 @@ describe('Storage – cleanOrphanProjectDirs', () => {
 
   beforeEach(() => {
     delete process.env['QWEN_RUNTIME_DIR'];
+    mockRealpathSync.mockImplementation((p: unknown) =>
+      actualFs.realpathSync(String(p)),
+    );
+    mockReaddirSync.mockImplementation(
+      (...args: Parameters<typeof actualFs.readdirSync>) =>
+        actualFs.readdirSync(...args),
+    );
+    mockMkdirSync.mockImplementation(
+      (...args: Parameters<typeof actualFs.mkdirSync>) =>
+        actualFs.mkdirSync(...args),
+    );
     // Pin the temp root: the merge-queue legs put the ambient temp root
     // outside the allowlist (POSIX exports TMPDIR=$RUNNER_TEMP; the
     // Windows runner action overrides TEMP/TMP the same way), which would
-    // flip every temp-classification fixture here. POSIX pins /var/tmp,
-    // not /tmp: macOS symlinks /tmp -> /private/tmp, and with the mocked
-    // identity realpathSync the root and fixture realpaths would
-    // diverge. Windows pins C:\Windows\Temp, an OS-known location the
-    // distrust guard accepts.
+    // flip every temp-classification fixture here.
     tmpdirSpy = vi
       .spyOn(os, 'tmpdir')
       .mockReturnValue(
-        process.platform === 'win32' ? 'C:\\Windows\\Temp' : '/var/tmp',
+        process.platform === 'win32' ? 'C:\\Windows\\Temp' : '/tmp',
       );
     baseDir = actualFs.mkdtempSync(path.join(os.tmpdir(), 'storage-orphan-'));
     projectsDir = path.join(baseDir, 'projects');
     actualFs.mkdirSync(projectsDir, { recursive: true });
     aliveCwd = actualFs.mkdtempSync(path.join(os.tmpdir(), 'alive-cwd-'));
     goneCwd = path.join(
-      process.cwd(),
+      os.tmpdir(),
       `qwen-orphan-gone-${Math.random().toString(36).slice(2)}`,
     );
     Storage.setRuntimeBaseDir(baseDir);
@@ -858,7 +863,7 @@ describe('Storage – cleanOrphanProjectDirs', () => {
     actualFs.rmSync(aliveCwd, { recursive: true, force: true });
   });
 
-  it('removes stale entries whose recorded cwd no longer exists', async () => {
+  it('removes stale entries whose temp cwd no longer exists', async () => {
     writeSession('-tmp-gone-sess', goneCwd);
     ageEntry('-tmp-gone-sess');
     const result = await sweepPastMarkerGrace('-tmp-gone-sess');
@@ -867,6 +872,26 @@ describe('Storage – cleanOrphanProjectDirs', () => {
     );
     expect(result.removed).toContain('-tmp-gone-sess');
     expect(result.errors).toEqual([]);
+  });
+
+  it('keeps stale entries whose non-temp cwd no longer exists', async () => {
+    const nonTempGoneCwd = path.join(
+      process.cwd(),
+      `qwen-orphan-gone-${Math.random().toString(36).slice(2)}`,
+    );
+    writeSession('-non-temp-gone', nonTempGoneCwd);
+    ageEntry('-non-temp-gone');
+
+    await Storage.cleanOrphanProjectDirs('current');
+
+    expect(actualFs.existsSync(path.join(projectsDir, '-non-temp-gone'))).toBe(
+      true,
+    );
+    expect(
+      actualFs.existsSync(
+        path.join(projectsDir, '-non-temp-gone', '.qwen-orphan-since'),
+      ),
+    ).toBe(false);
   });
 
   it('keeps a stale entry read by a resume during salvage', async () => {
@@ -1151,20 +1176,17 @@ describe('Storage – cleanOrphanProjectDirs', () => {
     expect(actualFs.existsSync(entry)).toBe(true);
   });
 
-  it('removes stale entries whose only surviving cwds sit under temp roots', async () => {
-    // Crashed temp session whose temp dir survived: it gets the same
-    // marker grace as any other gone-cwd entry — a live-but-idle temp
-    // session must not die on a single sweep — but removal follows once
-    // the marker ages.
+  it('keeps stale entries whose temp cwd still exists', async () => {
     const survived = actualFs.mkdtempSync(
       path.join(os.tmpdir(), 'qwen-temp-survived-'),
     );
     writeSession('-temp-crash', survived);
     ageEntry('-temp-crash');
-    await sweepPastMarkerGrace('-temp-crash');
+    await Storage.cleanOrphanProjectDirs('current');
     expect(actualFs.existsSync(path.join(projectsDir, '-temp-crash'))).toBe(
-      false,
+      true,
     );
+    actualFs.rmSync(survived, { recursive: true, force: true });
   });
 
   it('keeps a live-but-idle temp session at the deletion gate (R11-1)', async () => {
@@ -1187,7 +1209,8 @@ describe('Storage – cleanOrphanProjectDirs', () => {
       workDir: survived,
     });
     ageEntry('-idle-live');
-    await sweepPastMarkerGrace('-idle-live');
+    await Storage.cleanOrphanProjectDirs('current');
+    await Storage.cleanOrphanProjectDirs('current');
     expect(actualFs.existsSync(entry)).toBe(true);
     expect(actualFs.existsSync(path.join(entry, '.qwen-orphan-since'))).toBe(
       false,
@@ -1420,10 +1443,7 @@ describe('Storage – cleanOrphanProjectDirs', () => {
     expect(actualFs.existsSync(entry)).toBe(false);
   });
 
-  it('marks gone non-temp entries first and removes only once the marker ages (R2-2)', async () => {
-    // A vanished non-temp cwd may be a transiently absent mount, so the
-    // first sweep writes a marker instead of deleting; removal happens
-    // only once the marker itself is past the grace window.
+  it('marks gone temp entries first and removes only once the marker ages (R2-2)', async () => {
     writeSession('-marked-gone', goneCwd);
     ageEntry('-marked-gone');
     const marker = path.join(projectsDir, '-marked-gone', '.qwen-orphan-since');
@@ -1449,6 +1469,29 @@ describe('Storage – cleanOrphanProjectDirs', () => {
     expect(actualFs.existsSync(path.join(projectsDir, '-marked-gone'))).toBe(
       false,
     );
+  });
+
+  it('keeps live cwd evidence found behind a symlinked directory', async () => {
+    const entry = path.join(projectsDir, '-symlinked-live');
+    const archiveTarget = actualFs.mkdtempSync(
+      path.join(os.tmpdir(), 'qwen-archive-target-'),
+    );
+    actualFs.mkdirSync(path.join(entry, 'chats'), { recursive: true });
+    actualFs.writeFileSync(
+      path.join(archiveTarget, 'session-1.jsonl'),
+      JSON.stringify({ cwd: process.cwd(), type: 'user' }) + '\n',
+    );
+    actualFs.symlinkSync(archiveTarget, path.join(entry, 'chats', 'archive'));
+    try {
+      ageEntry('-symlinked-live');
+      await Storage.cleanOrphanProjectDirs('current');
+      expect(actualFs.existsSync(entry)).toBe(true);
+      expect(actualFs.existsSync(path.join(entry, '.qwen-orphan-since'))).toBe(
+        false,
+      );
+    } finally {
+      actualFs.rmSync(archiveTarget, { recursive: true, force: true });
+    }
   });
 
   it('runs the salvage hook before removal and reports it (R2-3)', async () => {

@@ -704,25 +704,15 @@ export class Storage {
 
   /**
    * Removes orphaned project snapshot directories under
-   * `<runtime>/projects/` (issue #7906). An entry is orphaned when none
-   * of the working directories recorded in its artifacts (chat logs,
-   * runtime sidecars, archived transcripts) still exists outside OS
-   * temp roots. Entries owned by a still-running session (runtime
-   * sidecar with a live pid) are protected: the entry gate trusts a
-   * sidecar's pid only while the sidecar is younger than the staleness
-   * window (an old pid may have been recycled), but the deletion gate
-   * re-checks pid liveness without that window — an idle session writes
-   * nothing, and a recycled pid can only fail keep-only — so a
-   * live-but-idle session is never removed. Entries with recent file activity — sidecar-less sessions (headless, ACP, SDK,
-   * `qwen serve`) stay protected that way — and `currentProjectId`.
-   * Every other record-bearing entry is marked first and only removed
-   * once the marker has aged past the grace window, so a transiently
-   * absent mount gets its chance to come back and a live-but-idle
-   * temp-rooted session is never removed on a single sweep. Entries
-   * without any readable records are only removed when completely empty
-   * (marker aside) and older than one day; incomplete scans — an
-   * unreadable artifact or one past the per-file byte budget — veto
-   * deletion.
+   * `<runtime>/projects/` (issue #7906). Record-bearing entries are
+   * deletion candidates only when every recorded cwd is a trusted OS temp
+   * path that no longer exists. Non-temp paths, existing temp paths,
+   * foreign path namespaces, live runtime sidecars, recent file activity,
+   * `currentProjectId`, and incomplete evidence all fail closed.
+   *
+   * Candidates are marked first and removed only after the marker grace
+   * window. Entries without any readable records are only removed when
+   * completely empty (marker aside) and older than one day.
    *
    * `onBeforeRemove` runs before each deletion so callers can salvage
    * derived state (e.g. usage summaries) from the transcripts; its
@@ -781,7 +771,7 @@ export class Storage {
         }
         const { cwds, incomplete, keepOnly } =
           Storage.collectRecordedCwds(entryPath);
-        if (keepOnly || cwds.some((cwd) => Storage.isKeepCwd(cwd))) {
+        if (keepOnly || cwds.some((cwd) => !Storage.isRemovableTempCwd(cwd))) {
           Storage.removeOrphanMarker(entryPath);
           continue;
         }
@@ -789,13 +779,9 @@ export class Storage {
           continue;
         }
         if (cwds.length > 0) {
-          // No live non-temp cwd — a crashed temp session, a deleted
-          // worktree, or a real project transiently absent (ejected
-          // media, mount down). One sweep must not decide any of these:
-          // mark first, remove only once the marker itself is older
-          // than the grace window. An immediate remove here would also
-          // hit live-but-idle (>24 h) temp-rooted sessions, whose
-          // sidecar aged past trust and whose appends stopped.
+          // Only disappeared temp-root sessions are in scope for #7906.
+          // Non-temp paths may be absent because of another host, OS path
+          // namespace, or temporarily unavailable mount, so they fail closed.
           if (Storage.orphanMarkerExpired(entryPath, now)) {
             await Storage.removeEntry(
               entryPath,
@@ -868,7 +854,7 @@ export class Storage {
       ) {
         return;
       }
-      if (cwds.some((cwd) => Storage.isKeepCwd(cwd))) {
+      if (cwds.some((cwd) => !Storage.isRemovableTempCwd(cwd))) {
         Storage.removeOrphanMarker(entryPath);
         return;
       }
@@ -989,13 +975,14 @@ export class Storage {
   }
 
   /**
-   * A cwd that still exists outside temp roots, or whose path belongs to a
-   * different OS namespace, vetoes removal.
+   * Deletion is authorized only for the issue #7906 shape: a recorded cwd
+   * that was under a trusted OS temp root and no longer exists.
    */
-  private static isKeepCwd(cwd: string): boolean {
+  private static isRemovableTempCwd(cwd: string): boolean {
     return (
-      Storage.isUnevaluableCwd(cwd) ||
-      (fs.existsSync(cwd) && !isTempDirPath(cwd))
+      !Storage.isUnevaluableCwd(cwd) &&
+      isTempDirPath(cwd) &&
+      !fs.existsSync(cwd)
     );
   }
 
@@ -1025,9 +1012,7 @@ export class Storage {
     for (const dirent of dirents) {
       const entryPath = path.join(dir, dirent.name);
       let vetoed = false;
-      if (dirent.isDirectory()) {
-        vetoed = Storage.scanDirForCwds(entryPath, cwds, depth + 1, state);
-      } else if (dirent.name.endsWith('.jsonl')) {
+      if (dirent.name.endsWith('.jsonl')) {
         vetoed = Storage.scanFileForCwds(entryPath, cwds, state);
       } else if (dirent.name.endsWith('.runtime.json')) {
         const hostname = Storage.readJsonStringField(
@@ -1042,7 +1027,7 @@ export class Storage {
         const cwd = Storage.readJsonStringField(entryPath, 'work_dir', state);
         if (cwd) {
           cwds.add(cwd);
-          vetoed ||= Storage.isKeepCwd(cwd);
+          vetoed ||= !Storage.isRemovableTempCwd(cwd);
         }
       } else if (dirent.name.endsWith('.worktree.json')) {
         // `worktreePath`, not `originalCwd`: the repo root stays alive
@@ -1054,12 +1039,29 @@ export class Storage {
         );
         if (cwd) {
           cwds.add(cwd);
-          vetoed = Storage.isKeepCwd(cwd);
+          vetoed = !Storage.isRemovableTempCwd(cwd);
         }
+      } else if (
+        dirent.isDirectory() ||
+        Storage.isDirectoryLike(entryPath, state)
+      ) {
+        vetoed = Storage.scanDirForCwds(entryPath, cwds, depth + 1, state);
       }
       if (vetoed) return true;
     }
     return false;
+  }
+
+  private static isDirectoryLike(
+    entryPath: string,
+    state: { incomplete: boolean },
+  ): boolean {
+    try {
+      return fs.statSync(entryPath).isDirectory();
+    } catch {
+      state.incomplete = true;
+      return false;
+    }
   }
 
   /** Reads a bounded transcript and records every line's cwd. */
@@ -1084,7 +1086,7 @@ export class Storage {
         const cwd = record['cwd'];
         if (typeof cwd === 'string' && cwd) {
           cwds.add(cwd);
-          if (Storage.isKeepCwd(cwd)) return true;
+          if (!Storage.isRemovableTempCwd(cwd)) return true;
         }
       }
       return false;

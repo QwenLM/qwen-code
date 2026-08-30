@@ -613,8 +613,6 @@ function isSystemOwnedTempRoot(root: string): boolean {
   const systemBases = [
     '/tmp',
     '/private/tmp',
-    '/var/tmp',
-    '/private/var/tmp',
     '/var/folders',
     '/private/var/folders',
     '/run/user',

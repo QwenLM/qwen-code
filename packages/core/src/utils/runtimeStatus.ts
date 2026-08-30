@@ -3,10 +3,10 @@
  * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  *
- * Runtime status sidecar for an active interactive Qwen Code session.
+ * Runtime status sidecar for an active Qwen Code session.
  *
  * This module writes a small JSON file alongside the session's chat log
- * while an interactive session is alive. It exists so that **external**
+ * while a session is alive. It exists so that **external**
  * tools (terminal multiplexers, tab managers, IDE integrations,
  * observability daemons) can answer the question:
  *
@@ -19,13 +19,11 @@
  * cross-platform signal.
  *
  * Lifecycle:
- * - Written on session start (clean launch or resume); the resume case
- *   atomically overwrites whatever the previous PID wrote.
- * - Deleted only when the same PID keeps running while no longer
- *   serving the recorded session, such as `/clear`, `/resume`, or a
- *   daemon process closing one session while staying alive for others.
- *   Crashed processes skip deletion; a liveness check is sufficient
- *   there.
+ * - Written per process on session start (clean launch or resume) at
+ *   `<sessionId>.<pid>.runtime.json`.
+ * - Demoted to `pid: 0` when the same PID stops serving the recorded
+ *   session. Crashed processes skip demotion; a liveness check is
+ *   sufficient there.
  *
  * The file is written via `atomicWriteJSON` (write-to-temp + rename,
  * with in-place fallback when ownership differs).
@@ -41,6 +39,7 @@ import { isNodeError } from './errors.js';
 import {
   isPidAlive,
   isSameProcess,
+  readLocalBootId,
   readPidNamespaceId,
   readProcStartToken,
 } from './process-liveness.js';
@@ -187,7 +186,7 @@ export async function readRuntimeStatusClaims(
   let incomplete = false;
   for (const entry of entries) {
     options.signal?.throwIfAborted();
-    if (!entry.isFile() || !entry.name.endsWith('.runtime.json')) continue;
+    if (!entry.name.endsWith('.runtime.json')) continue;
     const claimPath = path.join(chatsDir, entry.name);
     const status = await readRuntimeStatus(claimPath, options);
     if (status === null) {
@@ -217,7 +216,7 @@ export function hasActiveRuntimeStatusClaimSync(
     return !(isNodeError(error) && error.code === 'ENOENT');
   }
   for (const entry of entries) {
-    if (!entry.isFile() || !entry.name.endsWith('.runtime.json')) continue;
+    if (!entry.name.endsWith('.runtime.json')) continue;
     const claimPath = path.join(chatsDir, entry.name);
     try {
       if (
@@ -243,9 +242,18 @@ export function isRuntimeStatusActive(status: RuntimeStatus): boolean {
   const currentNamespace = readPidNamespaceId();
   if (status.pidNamespaceId != null && currentNamespace != null) {
     if (status.pidNamespaceId !== currentNamespace) return true;
+    if (hasForeignBootId(status.procStartToken)) return true;
     return isSameProcess(status.pid, status.procStartToken);
   }
   return isPidAlive(status.pid);
+}
+
+function hasForeignBootId(procStartToken: string | null | undefined): boolean {
+  if (procStartToken == null) return false;
+  const match = /^([0-9a-f-]+):\d+$/i.exec(procStartToken);
+  if (!match) return false;
+  const localBootId = readLocalBootId();
+  return localBootId !== null && match[1] !== localBootId;
 }
 
 function parseRuntimeStatus(data: unknown): RuntimeStatus | null {
