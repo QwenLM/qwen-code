@@ -142,6 +142,18 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   normalizeModelReasoningEffort: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).normalizeModelReasoningEffort,
+  usesMandatoryReasoningDefaultOnly: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).usesMandatoryReasoningDefaultOnly,
+  SessionTranscriptSnapshotUnavailableError: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).SessionTranscriptSnapshotUnavailableError,
+  SessionTranscriptTooLargeError: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).SessionTranscriptTooLargeError,
+  SessionTranscriptPageTooLargeError: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).SessionTranscriptPageTooLargeError,
   REASONING_EFFORT_TIERS: ['low', 'medium', 'high', 'xhigh', 'max'],
   DEFAULT_STOP_HOOK_BLOCK_CAP: 8,
   DEFAULT_MAX_SUBAGENT_DEPTH: 5,
