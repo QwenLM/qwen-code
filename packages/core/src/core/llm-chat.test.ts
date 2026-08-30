@@ -12671,6 +12671,90 @@ describe('LlmChat', async () => {
     expect(chat.getLastModelMessageText()).toBe('second response');
   });
 
+  it('releases an aborted middle reservation without letting the next send overtake', async () => {
+    let releaseFirstStream!: () => void;
+    const firstStreamGate = new Promise<void>((resolve) => {
+      releaseFirstStream = resolve;
+    });
+    const firstStream = (async function* () {
+      yield {
+        candidates: [
+          {
+            content: { role: 'model', parts: [{ text: 'first response' }] },
+          },
+        ],
+      } as unknown as GenerateContentResponse;
+      await firstStreamGate;
+      yield {
+        candidates: [
+          {
+            content: { role: 'model', parts: [{ text: ' done' }] },
+            finishReason: 'STOP',
+          },
+        ],
+      } as unknown as GenerateContentResponse;
+    })();
+    const thirdStream = (async function* () {
+      yield {
+        candidates: [
+          {
+            content: { role: 'model', parts: [{ text: 'third response' }] },
+            finishReason: 'STOP',
+          },
+        ],
+      } as unknown as GenerateContentResponse;
+    })();
+    vi.mocked(mockContentGenerator.generateContentStream)
+      .mockResolvedValueOnce(firstStream)
+      .mockResolvedValueOnce(thirdStream);
+
+    const first = await chat.sendMessageStream(
+      'test-model',
+      { message: 'first' },
+      'prompt-first',
+    );
+    const firstIterator = first[Symbol.asyncIterator]();
+    await firstIterator.next();
+
+    const abortController = new AbortController();
+    const middle = chat.sendMessageStream(
+      'test-model',
+      {
+        message: 'second',
+        config: { abortSignal: abortController.signal },
+      },
+      'prompt-aborted-middle',
+    );
+    let thirdResolved = false;
+    const third = chat
+      .sendMessageStream(
+        'test-model',
+        { message: 'third' },
+        'prompt-after-aborted-middle',
+      )
+      .then((stream) => {
+        thirdResolved = true;
+        return stream;
+      });
+
+    abortController.abort();
+    await expect(middle).rejects.toMatchObject({ name: 'AbortError' });
+    await Promise.resolve();
+    expect(thirdResolved).toBe(false);
+    expect(mockContentGenerator.generateContentStream).toHaveBeenCalledOnce();
+
+    releaseFirstStream();
+    await firstIterator.next();
+    await firstIterator.next();
+
+    const thirdResolvedStream = await third;
+    for await (const _ of thirdResolvedStream) {
+      // consume
+    }
+    expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(2);
+    expect(chat.getLastModelMessageText()).toBe('third response');
+  });
+
   describe('Model Resolution', () => {
     const mockResponse = {
       candidates: [
@@ -17987,6 +18071,38 @@ describe('LlmChat', async () => {
           thoughtSignature: 'sig-signed',
         },
         { text: 'Answer.' },
+      ]);
+    });
+
+    it('keeps unsigned thought blocks separated by visible content', async () => {
+      const recordingChat = chatWithRecorder(vi.fn());
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        makeStream([
+          makeChunk(
+            [
+              { text: 'First thought.', thought: true },
+              { text: 'Visible.' },
+              { text: 'Second thought.', thought: true },
+              { text: 'Answer.' },
+            ],
+            'STOP',
+          ),
+        ]),
+      );
+
+      const stream = await recordingChat.sendMessageStream(
+        'gemini-3-pro',
+        { message: 'think twice' },
+        'prompt-separated-unsigned-thoughts',
+      );
+      for await (const _event of stream) {
+        // consume
+      }
+
+      expect(recordingChat.getHistory().at(-1)?.parts).toEqual([
+        { text: 'First thought.', thought: true },
+        { text: 'Second thought.', thought: true },
+        { text: 'Visible.Answer.' },
       ]);
     });
 

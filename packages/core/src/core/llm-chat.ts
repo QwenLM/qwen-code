@@ -357,7 +357,10 @@ function buildThoughtContentParts(parts: readonly Part[]): Part[] {
   };
 
   for (const part of parts) {
-    if (!part.thought) continue;
+    if (!part.thought) {
+      flush();
+      continue;
+    }
     const partText = typeof part.text === 'string' ? part.text : '';
     const partSignature = part.thoughtSignature ?? '';
     if (partText && (signature || (partSignature && text))) {
@@ -2877,7 +2880,12 @@ export class LlmChat {
       streamDoneResolver = resolve;
     });
     this.sendPromise = streamDonePromise;
-    await previousSendPromise;
+    try {
+      await waitForAbortable(previousSendPromise, params.config?.abortSignal);
+    } catch (error) {
+      void previousSendPromise.then(streamDoneResolver!);
+      throw error;
+    }
 
     let exactRoute: ResolvedGeneratorForModel | undefined;
     let requestRouteKey: string;
