@@ -69,37 +69,44 @@ function runClassifierTrust(step, { sameRepo, permission, apiFails = false }) {
 }
 
 describe('no-AK integration CI wiring', () => {
-  it('executes the classifier trust decision fail-closed', () => {
-    const workflow = readFileSync(
-      path.join(ROOT, '.github/workflows/ci.yml'),
-      'utf8',
-    );
-    const step = getWorkflowStep(
-      getWorkflowJob(workflow, 'classify_pr'),
-      'Determine classifier trust',
-    );
+  // bash + a Unix ':'-joined PATH + an extensionless shebang stub: the
+  // Windows lane cannot express this fixture (see the exclusion note in
+  // scripts/tests/vitest.config.ts), and this file's other bash-driven
+  // cases already gate to the Linux lane as the authoritative coverage.
+  it.runIf(process.platform === 'linux')(
+    'executes the classifier trust decision fail-closed',
+    () => {
+      const workflow = readFileSync(
+        path.join(ROOT, '.github/workflows/ci.yml'),
+        'utf8',
+      );
+      const step = getWorkflowStep(
+        getWorkflowJob(workflow, 'classify_pr'),
+        'Determine classifier trust',
+      );
 
-    expect(
-      runClassifierTrust(step, {
-        sameRepo: true,
-        permission: '',
-        apiFails: true,
-      }),
-    ).toBe('can_trust_pr_classifier=true');
-    expect(
-      runClassifierTrust(step, { sameRepo: false, permission: 'write' }),
-    ).toBe('can_trust_pr_classifier=true');
-    expect(
-      runClassifierTrust(step, { sameRepo: false, permission: 'read' }),
-    ).toBe('can_trust_pr_classifier=false');
-    expect(
-      runClassifierTrust(step, {
-        sameRepo: false,
-        permission: '',
-        apiFails: true,
-      }),
-    ).toBe('can_trust_pr_classifier=false');
-  });
+      expect(
+        runClassifierTrust(step, {
+          sameRepo: true,
+          permission: '',
+          apiFails: true,
+        }),
+      ).toBe('can_trust_pr_classifier=true');
+      expect(
+        runClassifierTrust(step, { sameRepo: false, permission: 'write' }),
+      ).toBe('can_trust_pr_classifier=true');
+      expect(
+        runClassifierTrust(step, { sameRepo: false, permission: 'read' }),
+      ).toBe('can_trust_pr_classifier=false');
+      expect(
+        runClassifierTrust(step, {
+          sameRepo: false,
+          permission: '',
+          apiFails: true,
+        }),
+      ).toBe('can_trust_pr_classifier=false');
+    },
+  );
 
   it.runIf(process.platform === 'linux')(
     'keeps Linux Unix socket paths short and identity-stable',
