@@ -35,7 +35,11 @@ describe('SDK Java self-hosted workflow guards', () => {
       'if: "${{ runner.environment == \'self-hosted\' }}"',
     );
     expect(block).toContain(
-      'flock --wait 1200 "${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"',
+      'exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"',
+    );
+    expect(block).toContain('flock --wait 1200 9');
+    expect(block).toContain(
+      '::error::sdk-java host lock not acquired within 20 minutes',
     );
     expect(block).toContain(
       'if: "${{ runner.environment == \'github-hosted\' }}"',

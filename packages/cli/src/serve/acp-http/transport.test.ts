@@ -7923,7 +7923,6 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     const frameTimeoutMs = process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
       ? 60_000
       : 2_000;
-    await reader.next(frameTimeoutMs); // session/new reply
     let loadReply: { id: number; result?: { replayed?: boolean } } | undefined;
     try {
       // Load goes in-flight (awaits bridge.gate); pre-await closingSessions empty.
