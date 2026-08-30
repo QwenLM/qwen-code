@@ -7847,9 +7847,16 @@ export const useLlmStream = (
   // guard the splice would drain the queue and submitQuery
   // would early-return, permanently losing those messages.
   useEffect(() => {
+    // While a retryable failure is pending (lastPromptErroredRef armed), a
+    // batch restored by that failure's settlement sits in the queue; draining
+    // it here would re-submit it and clobber the retry store before the user
+    // can press Ctrl+Y, losing the never-pushed payload's only recovery
+    // channel. Defer the drain until the retry channel is consumed (the next
+    // Idle transition after the retry/new prompt clears the flag) (R52-31).
     if (
       streamingState === StreamingState.Idle &&
       !isSubmittingQueryRef.current &&
+      !lastPromptErroredRef.current &&
       teammateQueueRef.current.length > 0
     ) {
       // React can flush this effect after restoring the teammate frame.
