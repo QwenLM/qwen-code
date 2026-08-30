@@ -3501,6 +3501,41 @@ describe('createDaemonWorkspaceService', () => {
   });
 
   describe('reload', () => {
+    it('surfaces a parent runtime environment reload failure', async () => {
+      const publishWorkspaceEvent = vi.fn();
+      const invokeWorkspaceCommand = vi.fn().mockResolvedValue({
+        env: { updatedKeys: ['CHILD_ENV'], removedKeys: [] },
+        changedKeys: ['env'],
+        sessionsRefreshed: ['session-1'],
+        sessionsSkipped: [],
+      });
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          reloadDaemonEnv: vi.fn().mockResolvedValue({
+            updatedKeys: [],
+            removedKeys: [],
+            runtimeEnvironmentApplied: false,
+          }),
+          invokeWorkspaceCommand,
+          publishWorkspaceEvent,
+        }),
+      );
+
+      await expect(svc.reload(makeCtx())).resolves.toMatchObject({
+        childReloaded: true,
+        runtimeEnvironmentApplied: false,
+      });
+      expect(publishWorkspaceEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'settings_reloaded',
+          data: expect.objectContaining({
+            childReloaded: true,
+            runtimeEnvironmentApplied: false,
+          }),
+        }),
+      );
+    });
+
     it('stops before child reload when the runtime generation closes', async () => {
       let generationClosed = false;
       const assertGenerationOpen = vi.fn(() => {
@@ -3531,6 +3566,180 @@ describe('createDaemonWorkspaceService', () => {
       );
       expect(invokeWorkspaceCommand).not.toHaveBeenCalled();
       expect(publishWorkspaceEvent).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('reloadModelProviders', () => {
+    it('uses the provider-specific environment refresh when configured', async () => {
+      const reloadDaemonEnv = vi.fn();
+      const reloadModelProvidersDaemonEnv = vi.fn().mockResolvedValue({
+        updatedKeys: [],
+        removedKeys: [],
+        runtimeEnvironmentApplied: true,
+      });
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          reloadDaemonEnv,
+          reloadModelProvidersDaemonEnv,
+          invokeWorkspaceCommand: vi.fn().mockResolvedValue({
+            configsRefreshed: 1,
+            configsFailed: 0,
+          }),
+        }),
+      );
+
+      await expect(svc.reloadModelProviders(makeCtx())).resolves.toEqual({
+        status: 'applied',
+      });
+      expect(reloadModelProvidersDaemonEnv).toHaveBeenCalledWith(
+        '/workspace',
+        undefined,
+      );
+      expect(reloadDaemonEnv).not.toHaveBeenCalled();
+    });
+
+    it('refreshes the runtime environment before the ACP child', async () => {
+      const reloadDaemonEnv = vi.fn().mockResolvedValue({
+        updatedKeys: ['OPENAI_API_KEY'],
+        removedKeys: [],
+        runtimeEnvironmentApplied: true,
+      });
+      const invokeWorkspaceCommand = vi.fn().mockResolvedValue({
+        configsRefreshed: 3,
+        configsFailed: 0,
+      });
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ reloadDaemonEnv, invokeWorkspaceCommand }),
+      );
+
+      await expect(svc.reloadModelProviders(makeCtx())).resolves.toEqual({
+        status: 'applied',
+      });
+      expect(reloadDaemonEnv).toHaveBeenCalledWith('/workspace', undefined);
+      expect(invokeWorkspaceCommand).toHaveBeenCalledWith(
+        'qwen/control/workspace/model-providers/reload',
+        { cwd: '/workspace' },
+        { timeoutMs: 30_000 },
+      );
+      expect(reloadDaemonEnv.mock.invocationCallOrder[0]).toBeLessThan(
+        invokeWorkspaceCommand.mock.invocationCallOrder[0]!,
+      );
+    });
+
+    it('reports failed when the runtime environment or a child config is degraded', async () => {
+      const invokeWorkspaceCommand = vi.fn().mockResolvedValue({
+        configsRefreshed: 2,
+        configsFailed: 1,
+      });
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          reloadDaemonEnv: vi.fn().mockResolvedValue({
+            updatedKeys: [],
+            removedKeys: [],
+            runtimeEnvironmentApplied: false,
+          }),
+          invokeWorkspaceCommand,
+        }),
+      );
+
+      await expect(svc.reloadModelProviders(makeCtx())).resolves.toEqual({
+        status: 'failed',
+      });
+      expect(invokeWorkspaceCommand).toHaveBeenCalledOnce();
+    });
+
+    it('still refreshes the child when the parent environment reload rejects', async () => {
+      const reloadDaemonEnv = vi
+        .fn()
+        .mockRejectedValue(new Error('environment reload failed'));
+      const invokeWorkspaceCommand = vi.fn().mockResolvedValue({
+        configsRefreshed: 2,
+        configsFailed: 0,
+      });
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ reloadDaemonEnv, invokeWorkspaceCommand }),
+      );
+
+      await expect(svc.reloadModelProviders(makeCtx())).resolves.toEqual({
+        status: 'failed',
+      });
+      expect(invokeWorkspaceCommand).toHaveBeenCalledOnce();
+    });
+
+    it('reports deferred only when no child is live and the parent refresh succeeded', async () => {
+      const invokeWorkspaceCommand = vi
+        .fn()
+        .mockRejectedValue(new SessionNotFoundError('/workspace'));
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          reloadDaemonEnv: vi.fn().mockResolvedValue({
+            updatedKeys: [],
+            removedKeys: [],
+            runtimeEnvironmentApplied: true,
+          }),
+          invokeWorkspaceCommand,
+        }),
+      );
+
+      await expect(svc.reloadModelProviders(makeCtx())).resolves.toEqual({
+        status: 'deferred',
+      });
+    });
+
+    it.each([
+      { runtimeEnvironmentApplied: true, expectedStatus: 'deferred' },
+      { runtimeEnvironmentApplied: false, expectedStatus: 'failed' },
+    ])(
+      'reports $expectedStatus when the ACP channel closes during child refresh',
+      async ({ runtimeEnvironmentApplied, expectedStatus }) => {
+        const invokeWorkspaceCommand = vi
+          .fn()
+          .mockRejectedValue(
+            new BridgeChannelClosedError('mid-request (model providers)'),
+          );
+        const svc = createDaemonWorkspaceService(
+          makeDeps({
+            reloadDaemonEnv: vi.fn().mockResolvedValue({
+              updatedKeys: [],
+              removedKeys: [],
+              runtimeEnvironmentApplied,
+            }),
+            invokeWorkspaceCommand,
+          }),
+        );
+
+        await expect(svc.reloadModelProviders(makeCtx())).resolves.toEqual({
+          status: expectedStatus,
+        });
+      },
+    );
+
+    it('stops before the child when its runtime generation closes', async () => {
+      let generationClosed = false;
+      const assertGenerationOpen = vi.fn(() => {
+        if (generationClosed) throw new Error('generation closed');
+      });
+      const reloadDaemonEnv = vi.fn(async () => {
+        generationClosed = true;
+        return {
+          updatedKeys: [],
+          removedKeys: [],
+          runtimeEnvironmentApplied: true,
+        };
+      });
+      const invokeWorkspaceCommand = vi.fn();
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          assertGenerationOpen,
+          reloadDaemonEnv,
+          invokeWorkspaceCommand,
+        }),
+      );
+
+      await expect(svc.reloadModelProviders(makeCtx())).rejects.toThrow(
+        'generation closed',
+      );
+      expect(invokeWorkspaceCommand).not.toHaveBeenCalled();
     });
   });
 

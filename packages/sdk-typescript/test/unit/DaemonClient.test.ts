@@ -837,35 +837,41 @@ describe('DaemonClient', () => {
   });
 
   describe('deleteModel', () => {
-    it('DELETEs /workspace/models with the target body and client id', async () => {
-      const result = {
-        removed: true,
-        clearedActiveModel: true,
-        requiresRestart: false,
-      };
-      const { fetch, calls } = recordingFetch(() => jsonResponse(200, result));
-      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    it.each([undefined, 'applied', 'deferred', 'failed'] as const)(
+      'DELETEs /workspace/models and accepts runtime sync status %s',
+      async (runtimeSync) => {
+        const result = {
+          removed: true,
+          clearedActiveModel: true,
+          requiresRestart: false,
+          ...(runtimeSync ? { runtimeSync: { status: runtimeSync } } : {}),
+        };
+        const { fetch, calls } = recordingFetch(() =>
+          jsonResponse(200, result),
+        );
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
 
-      await expect(
-        client.deleteModel(
-          {
-            authType: 'openai',
-            modelId: 'gpt-4o',
-            baseUrl: 'https://api.openai.com',
-          },
-          { clientId: 'client-42' },
-        ),
-      ).resolves.toEqual(result);
+        await expect(
+          client.deleteModel(
+            {
+              authType: 'openai',
+              modelId: 'gpt-4o',
+              baseUrl: 'https://api.openai.com',
+            },
+            { clientId: 'client-42' },
+          ),
+        ).resolves.toEqual(result);
 
-      expect(calls[0]?.method).toBe('DELETE');
-      expect(calls[0]?.url).toBe('http://daemon/workspace/models');
-      expect(JSON.parse(calls[0]!.body!)).toEqual({
-        authType: 'openai',
-        modelId: 'gpt-4o',
-        baseUrl: 'https://api.openai.com',
-      });
-      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-42');
-    });
+        expect(calls[0]?.method).toBe('DELETE');
+        expect(calls[0]?.url).toBe('http://daemon/workspace/models');
+        expect(JSON.parse(calls[0]!.body!)).toEqual({
+          authType: 'openai',
+          modelId: 'gpt-4o',
+          baseUrl: 'https://api.openai.com',
+        });
+        expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-42');
+      },
+    );
 
     it('propagates a non-2xx response as a DaemonHttpError', async () => {
       const body = { error: 'model not found', code: 'model_not_found' };
@@ -879,6 +885,134 @@ describe('DaemonClient', () => {
       expect((err as DaemonHttpError).status).toBe(404);
       expect((err as DaemonHttpError).body).toEqual(body);
     });
+
+    it('waits for the complete delete pipeline by default', async () => {
+      vi.useFakeTimers();
+      try {
+        const result = {
+          removed: true,
+          clearedActiveModel: false,
+          requiresRestart: false,
+          runtimeSync: { status: 'failed' as const },
+        };
+        const { fetch } = recordingFetch(
+          (req) =>
+            new Promise<Response>((resolve, reject) => {
+              req.signal?.addEventListener(
+                'abort',
+                () => reject(req.signal?.reason),
+                { once: true },
+              );
+              setTimeout(() => resolve(jsonResponse(200, result)), 55_000);
+            }),
+        );
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+        let settled = false;
+        const deletion = client
+          .deleteModel({ authType: 'openai', modelId: 'gpt-4o' })
+          .finally(() => {
+            settled = true;
+          });
+
+        await vi.advanceTimersByTimeAsync(50_000);
+        expect(settled).toBe(false);
+        await vi.advanceTimersByTimeAsync(5_000);
+        await expect(deletion).resolves.toEqual(result);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('waits for the complete provider-install pipeline by default', async () => {
+      vi.useFakeTimers();
+      try {
+        const result = {
+          v: 1 as const,
+          providerId: 'openai',
+          providerLabel: 'OpenAI',
+          authType: 'openai',
+          message: 'saved',
+          runtimeSync: { status: 'failed' as const },
+        };
+        const { fetch } = recordingFetch(
+          (req) =>
+            new Promise<Response>((resolve, reject) => {
+              req.signal?.addEventListener(
+                'abort',
+                () => reject(req.signal?.reason),
+                { once: true },
+              );
+              setTimeout(() => resolve(jsonResponse(200, result)), 55_000);
+            }),
+        );
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+        let settled = false;
+        const installation = client
+          .installAuthProvider({ providerId: 'openai', apiKey: 'key' })
+          .finally(() => {
+            settled = true;
+          });
+
+        await vi.advanceTimersByTimeAsync(50_000);
+        expect(settled).toBe(false);
+        await vi.advanceTimersByTimeAsync(5_000);
+        await expect(installation).resolves.toEqual(result);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it.each([
+      ['delete', 10, true],
+      ['delete', 0, false],
+      ['install', 10, true],
+      ['install', 0, false],
+    ] as const)(
+      'honors an explicit %s provider mutation timeout of %sms',
+      async (operation, fetchTimeoutMs, shouldAbort) => {
+        vi.useFakeTimers();
+        try {
+          let signal: AbortSignal | undefined;
+          const fetch = vi.fn(
+            (_input: RequestInfo | URL, init?: RequestInit) =>
+              new Promise<Response>((_resolve, reject) => {
+                signal = init?.signal ?? undefined;
+                signal?.addEventListener(
+                  'abort',
+                  () => reject(signal?.reason),
+                  {
+                    once: true,
+                  },
+                );
+              }),
+          );
+          const client = new DaemonClient({
+            baseUrl: 'http://daemon',
+            fetch,
+            fetchTimeoutMs,
+          });
+          const mutation = (
+            operation === 'delete'
+              ? client.deleteModel({
+                  authType: 'openai',
+                  modelId: 'gpt-4o',
+                })
+              : client.installAuthProvider({
+                  providerId: 'openai',
+                  apiKey: 'key',
+                })
+          ).catch((error: unknown) => error);
+
+          await vi.advanceTimersByTimeAsync(10);
+          expect(signal?.aborted ?? false).toBe(shouldAbort);
+          if (shouldAbort) {
+            await expect(mutation).resolves.toBeInstanceOf(Error);
+          }
+        } finally {
+          vi.useRealTimers();
+        }
+      },
+    );
   });
 
   describe('read-only status routes', () => {
