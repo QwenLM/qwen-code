@@ -345,7 +345,7 @@ function buildThoughtContentParts(parts: readonly Part[]): Part[] {
   let signature = '';
   const flush = () => {
     const thoughtText = signature ? text : text.trim();
-    if (thoughtText) {
+    if (thoughtText || signature) {
       const thoughtPart: Part = { text: thoughtText, thought: true };
       if (signature) {
         thoughtPart.thoughtSignature = signature;
@@ -359,12 +359,13 @@ function buildThoughtContentParts(parts: readonly Part[]): Part[] {
   for (const part of parts) {
     if (!part.thought) continue;
     const partText = typeof part.text === 'string' ? part.text : '';
-    if (partText && signature) {
+    const partSignature = part.thoughtSignature ?? '';
+    if (partText && (signature || (partSignature && text))) {
       flush();
     }
     text += partText;
-    if (part.thoughtSignature) {
-      signature += part.thoughtSignature;
+    if (partSignature) {
+      signature += partSignature;
     }
   }
   flush();
@@ -1157,6 +1158,14 @@ function appendRecoveryContinuationParts(
     nextParts.shift();
     if (leadingNonTextParts.length > 0) {
       mergedParts.splice(previousTextIndex, 0, ...leadingNonTextParts);
+    }
+  } else if (previousTextIndex >= 0 && continuationTextIndex < 0) {
+    const leadingThoughtParts: Part[] = [];
+    while (nextParts[0]?.thought) {
+      leadingThoughtParts.push(nextParts.shift()!);
+    }
+    if (leadingThoughtParts.length > 0) {
+      mergedParts.splice(previousTextIndex, 0, ...leadingThoughtParts);
     }
   }
 

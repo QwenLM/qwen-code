@@ -17874,6 +17874,78 @@ describe('LlmChat', async () => {
       );
     });
 
+    it('preserves a signature-only thought block', async () => {
+      const recordAssistantTurn = vi.fn();
+      const recordingChat = chatWithRecorder(recordAssistantTurn);
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        makeStream([
+          makeChunk(
+            [
+              { thought: true, thoughtSignature: 'sig-only' },
+              { text: 'Answer.' },
+            ],
+            'STOP',
+          ),
+        ]),
+      );
+
+      const stream = await recordingChat.sendMessageStream(
+        'gemini-3-pro',
+        { message: 'think' },
+        'prompt-signature-only-thought',
+      );
+      for await (const _event of stream) {
+        // consume
+      }
+
+      expect(recordingChat.getHistory().at(-1)?.parts).toEqual([
+        { text: '', thought: true, thoughtSignature: 'sig-only' },
+        { text: 'Answer.' },
+      ]);
+      expect(recordAssistantTurn.mock.calls[0]![0].message).toEqual(
+        recordingChat.getHistory().at(-1)?.parts,
+      );
+    });
+
+    it('keeps an unsigned thought separate from a following signed block', async () => {
+      const recordingChat = chatWithRecorder(vi.fn());
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        makeStream([
+          makeChunk(
+            [
+              { text: 'Unsigned.', thought: true },
+              {
+                text: 'Signed.',
+                thought: true,
+                thoughtSignature: 'sig-signed',
+              },
+              { text: 'Answer.' },
+            ],
+            'STOP',
+          ),
+        ]),
+      );
+
+      const stream = await recordingChat.sendMessageStream(
+        'gemini-3-pro',
+        { message: 'think twice' },
+        'prompt-unsigned-then-signed-thought',
+      );
+      for await (const _event of stream) {
+        // consume
+      }
+
+      expect(recordingChat.getHistory().at(-1)?.parts).toEqual([
+        { text: 'Unsigned.', thought: true },
+        {
+          text: 'Signed.',
+          thought: true,
+          thoughtSignature: 'sig-signed',
+        },
+        { text: 'Answer.' },
+      ]);
+    });
+
     it('assembles Anthropic thought and signature deltas by block', async () => {
       const recordAssistantTurn = vi.fn();
       const recordingChat = chatWithRecorder(recordAssistantTurn);
@@ -19006,6 +19078,54 @@ describe('LlmChat', async () => {
       expect(thoughtIdx).toBeGreaterThanOrEqual(0);
       expect(mergedTextIdx).toBeGreaterThanOrEqual(0);
       expect(thoughtIdx).toBeLessThan(mergedTextIdx);
+    });
+
+    it('hoists a thought before merged text when the continuation has no text', async () => {
+      const functionCall = {
+        id: 'tool-1',
+        name: 'read_file',
+        args: { path: 'README.md' },
+      };
+      const streams = [
+        makeStream([makeChunk([{ text: 'discarded initial' }], 'MAX_TOKENS')]),
+        makeStream([makeChunk([{ text: 'Hello' }], 'MAX_TOKENS')]),
+        makeStream([
+          makeChunk(
+            [
+              {
+                text: 'reasoning',
+                thought: true,
+                thoughtSignature: 'sig',
+              },
+              { functionCall },
+            ],
+            'STOP',
+          ),
+        ]),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-pro',
+        { message: 'read the file' },
+        'prompt-recovery-thought-tool-order',
+      );
+      for await (const _event of stream) {
+        // consume
+      }
+
+      expect(chat.getHistory().at(-1)?.parts).toEqual([
+        {
+          text: 'reasoning',
+          thought: true,
+          thoughtSignature: 'sig',
+        },
+        { text: 'Hello' },
+        { functionCall },
+      ]);
     });
 
     it('should preserve a coincidental 2-character CJK overlap (byte floor insufficient for CJK)', async () => {
