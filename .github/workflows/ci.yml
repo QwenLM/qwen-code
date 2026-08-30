@@ -211,8 +211,12 @@ jobs:
     runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
     # Shared ECS hosts can stretch the normally 25-minute lane beyond an hour
     # while tests are still making progress. Keep a finite ceiling without
-    # turning host contention into a false cancellation.
-    timeout-minutes: 90
+    # turning host contention into a false cancellation. The extension is
+    # scoped to the pool that shows the contention: fork PRs from untrusted
+    # authors and MAINTAINER_ECS_RUNNER_DISABLED=true fall back to
+    # GitHub-hosted runners (see classify_pr), which keep the pre-contention
+    # ceiling so a genuine hang there does not burn the extra 30 minutes.
+    timeout-minutes: '${{ fromJSON(contains(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'', ''ecs-qwen'') && ''90'' || ''60'') }}'
     outputs:
       ci_profile: '${{ steps.ci_profile.outputs.ci_profile }}'
     permissions:
@@ -1310,7 +1314,9 @@ jobs:
     runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
     # Dependency installation alone can exceed 30 minutes on a contended shared
     # ECS host, before the separately bounded 20-minute integration step starts.
-    timeout-minutes: 60
+    # Same ECS-only scoping as the `test` job: hosted fallback routing keeps
+    # the pre-contention ceiling.
+    timeout-minutes: '${{ fromJSON(contains(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'', ''ecs-qwen'') && ''60'' || ''30'') }}'
     permissions:
       contents: 'read'
     steps:
