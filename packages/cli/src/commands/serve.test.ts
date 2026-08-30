@@ -54,6 +54,10 @@ function buildParser(): Argv {
 }
 
 describe('serve command args', () => {
+  it('documents the complete IPv4 loopback range', async () => {
+    expect(await buildParser().getHelp()).toContain('127.0.0.0/8');
+  });
+
   it('defaults authenticated open to disabled', () => {
     const parsed = buildParser().parseSync('');
     expect(parsed['open-with-auth']).toBe(false);
