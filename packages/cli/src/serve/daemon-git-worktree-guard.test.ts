@@ -1488,12 +1488,11 @@ it -C ${cmdPath(outsideRepo)} reset --hard`,
       return;
     }
     const tabTarget = path.join(temporaryRoot, 'tab\tdir');
-    // Windows file names cannot contain control characters, so the fixture
-    // directory cannot exist there; the guard denies the nonexistent target
+    // Reaching this point means we are on POSIX (win32 returned above);
+    // Windows cannot represent this fixture (control characters are illegal
+    // in its file names), so the guard denies the nonexistent target there
     // all the same and must still strip the tab from its reason.
-    if (process.platform !== 'win32') {
-      await mkdir(path.join(tabTarget, '.git'), { recursive: true });
-    }
+    await mkdir(path.join(tabTarget, '.git'), { recursive: true });
     const controlDenial = await guard(
       request(`git -C '${tabTarget}' reset --hard`),
     );
