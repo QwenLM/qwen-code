@@ -155,6 +155,7 @@ export class WebViewProvider {
   // a diff, auto-allow read/execute, or auto-reject on cancel).
   private pendingPermissionRequest: RequestPermissionRequest | null = null;
   private pendingPermissionResolve: ((optionId: string) => void) | null = null;
+  private webShellPermissionPending = false;
   // Track a pending ask user question request and its resolver
   private pendingAskUserQuestionRequest: AskUserQuestionRequest | null = null;
   private pendingAskUserQuestionResolve:
@@ -205,6 +206,7 @@ export class WebViewProvider {
     this.agentManager = new QwenAgentManager();
     this.conversationStore = new ConversationStore(context);
     this.panelManager = new PanelManager(extensionUri, () => {
+      this.webShellPermissionPending = false;
       // Panel dispose callback — unblock any pending ACP Promises
       if (this.pendingPermissionResolve) {
         this.pendingPermissionResolve('cancel');
@@ -1932,7 +1934,13 @@ export class WebViewProvider {
     message: { type: string; data?: unknown },
     webview: vscode.Webview,
   ): Promise<boolean> {
+    if (message.type === 'webShellPermissionState') {
+      this.webShellPermissionPending =
+        (message.data as { pending?: unknown } | undefined)?.pending === true;
+      return true;
+    }
     if (message.type === 'webShellSessionChanged') {
+      this.webShellPermissionPending = false;
       const data = message.data as
         | { sessionId?: unknown; workspaceCwd?: unknown }
         | undefined;
@@ -1947,6 +1955,7 @@ export class WebViewProvider {
       return true;
     }
     if (message.type === 'webShellReady') {
+      this.webShellPermissionPending = false;
       const workspaceCwd =
         (vscode.window.activeTextEditor
           ? vscode.workspace.getWorkspaceFolder(
@@ -2360,7 +2369,7 @@ export class WebViewProvider {
    * Whether there is a pending permission decision awaiting an option.
    */
   hasPendingPermission(): boolean {
-    return !!this.pendingPermissionResolve;
+    return this.webShellPermissionPending || !!this.pendingPermissionResolve;
   }
 
   /** Get current ACP mode id (if known). */
@@ -2385,6 +2394,22 @@ export class WebViewProvider {
   respondToPendingPermission(
     choice: { optionId: string } | 'accept' | 'allow' | 'reject' | 'cancel',
   ): void {
+    if (this.webShellPermissionPending && typeof choice === 'string') {
+      const decision =
+        choice === 'accept' || choice === 'allow'
+          ? 'allow'
+          : choice === 'cancel' || choice === 'reject'
+            ? 'reject'
+            : undefined;
+      const webview = decision ? this.getActiveWebview() : undefined;
+      if (webview && decision) {
+        void webview.postMessage({
+          type: 'webShellPermissionDecision',
+          data: { decision },
+        });
+        return;
+      }
+    }
     if (!this.pendingPermissionResolve || !this.pendingPermissionRequest) {
       return; // nothing to do
     }

@@ -957,6 +957,10 @@ export interface WebShellApi {
   createNewSession: () => Promise<boolean>;
   /** Open the right panel with a new side-task draft. */
   createSideTask: () => boolean;
+  /** Resolve the currently visible tool approval using the host's native UI. */
+  respondToPendingPermission?: (
+    decision: 'allow' | 'reject',
+  ) => Promise<boolean>;
 }
 
 export type WebShellComposerPlaceholderState = ComposerPlaceholderState;
@@ -9063,6 +9067,33 @@ export function App({
     editorRef.current?.focus();
   }, [dismissNewSessionSuggestion, newSessionSuggestion]);
 
+  const respondToPendingPermission = useCallback(
+    async (decision: 'allow' | 'reject'): Promise<boolean> => {
+      const request = pendingApprovalRef.current;
+      if (!request || isAskUserPermission(request)) {
+        return false;
+      }
+      const preferredKind = decision === 'allow' ? 'allow_once' : 'reject_once';
+      const fallbackKind =
+        decision === 'allow' ? 'allow_always' : 'reject_always';
+      const option =
+        request.options.find((candidate) => candidate.kind === preferredKind) ??
+        request.options.find((candidate) => candidate.kind === fallbackKind) ??
+        request.options.find((candidate) => {
+          const id = candidate.id.toLowerCase();
+          return decision === 'allow'
+            ? id.includes('allow') || id.includes('proceed')
+            : id.includes('reject') || id.includes('cancel');
+        });
+      if (!option) {
+        return false;
+      }
+      await sessionActions.submitPermission(request.id, option.id);
+      return true;
+    },
+    [sessionActions],
+  );
+
   const shellApi = useMemo<WebShellApi>(
     () => ({
       openSplitView: () => {
@@ -9076,6 +9107,7 @@ export function App({
       openSessionDrawer,
       createNewSession: () => createNewSession(),
       createSideTask,
+      respondToPendingPermission,
     }),
     [
       closeMobileDrawer,
@@ -9084,6 +9116,7 @@ export function App({
       openPanel,
       openSessionDrawer,
       requestOpenSplitView,
+      respondToPendingPermission,
     ],
   );
   useEffect(() => {

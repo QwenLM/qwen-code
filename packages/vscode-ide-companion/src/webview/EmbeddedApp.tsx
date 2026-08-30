@@ -337,6 +337,7 @@ export function EmbeddedApp() {
   const currentModelIdRef = useRef<string | undefined>(undefined);
   const transcriptBlocksRef = useRef<readonly DaemonTranscriptBlock[]>([]);
   const openPermissionDiffsRef = useRef(new Map<string, string>());
+  const webShellPermissionPendingRef = useRef(false);
   const focusedPermissionRequestIdRef = useRef<string | undefined>(undefined);
   const contextMenuRowKeyRef = useRef<string | null>(null);
   const previousActiveFilePathRef = useRef<string | undefined>(undefined);
@@ -493,6 +494,13 @@ export function EmbeddedApp() {
       vscode.postMessage({ type: 'closeDiff', data: { path } });
     }
     openPermissionDiffsRef.current.clear();
+    if (webShellPermissionPendingRef.current) {
+      webShellPermissionPendingRef.current = false;
+      vscode.postMessage({
+        type: 'webShellPermissionState',
+        data: { pending: false },
+      });
+    }
   }, [vscode]);
 
   const updateTranscript = useCallback(
@@ -520,6 +528,16 @@ export function EmbeddedApp() {
         if (pendingIds.has(requestId)) continue;
         openPermissionDiffsRef.current.delete(requestId);
         vscode.postMessage({ type: 'closeDiff', data: { path } });
+      }
+      const hasPendingDiffPermission = pendingIds.size > 0;
+      if (
+        webShellPermissionPendingRef.current !== hasPendingDiffPermission
+      ) {
+        webShellPermissionPendingRef.current = hasPendingDiffPermission;
+        vscode.postMessage({
+          type: 'webShellPermissionState',
+          data: { pending: hasPendingDiffPermission },
+        });
       }
       if (
         permissionToFocus &&
@@ -640,6 +658,14 @@ export function EmbeddedApp() {
         // it, `runtime` is set and that branch is gone, so the same failure
         // would be invisible — show it over the transcript instead.
         if (runtimeRef.current) setHostNotice({ tone: 'error', text });
+      } else if (message.type === 'webShellPermissionDecision') {
+        const decision = (message.data as { decision?: unknown } | null)
+          ?.decision;
+        if (decision === 'allow' || decision === 'reject') {
+          const response =
+            shellRef.current?.respondToPendingPermission?.(decision);
+          void response?.catch(handleShellError);
+        }
       } else if (message.type === 'error') {
         const text = (message.data as { message?: unknown } | null)?.message;
         if (typeof text === 'string') setHostNotice({ tone: 'error', text });
@@ -807,7 +833,14 @@ export function EmbeddedApp() {
     window.addEventListener('message', receiveBootstrap);
     vscode.postMessage({ type: 'webShellReady', data: {} });
     return () => window.removeEventListener('message', receiveBootstrap);
-  }, [clearInsight, closeOpenPermissionDiffs, t, updateTranscript, vscode]);
+  }, [
+    clearInsight,
+    closeOpenPermissionDiffs,
+    handleShellError,
+    t,
+    updateTranscript,
+    vscode,
+  ]);
 
   if (!runtime) {
     return (
@@ -1293,6 +1326,7 @@ export function EmbeddedApp() {
           header={{ items: [] }}
           onSessionIdChange={(sessionId) => {
             if (switchingSessionId && sessionId !== switchingSessionId) return;
+            webShellPermissionPendingRef.current = false;
             clearInsight();
             setEditingMessage(undefined);
             vscode.postMessage({

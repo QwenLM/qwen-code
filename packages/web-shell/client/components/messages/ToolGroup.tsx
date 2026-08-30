@@ -139,6 +139,16 @@ function hasDetailView(tool: ACPToolCall): boolean {
   );
 }
 
+function isEditToolName(name: string): boolean {
+  return (
+    name === 'edit' ||
+    name === 'editfile' ||
+    name === 'write' ||
+    name === 'write_file' ||
+    name === 'writefile'
+  );
+}
+
 export function extractDiff(tool: ACPToolCall): string {
   const rawFileDiff = getRawFileDiff(tool);
   if (rawFileDiff) return rawFileDiff;
@@ -1073,10 +1083,15 @@ export const ToolLine = memo(function ToolLine({
   const monitorDetailsAvailable = monitorDetails !== undefined;
   const mcpApp = getMcpAppDisplay(tool.rawOutput);
   const isForcedExpanded = forceExpanded || Boolean(mcpApp);
+  const hasApproval = approval?.toolCallId === tool.callId;
+  const isPendingEditApproval =
+    hasApproval && isEditToolName(tool.toolName.toLowerCase());
   const [monitorDetailsUnavailable, setMonitorDetailsUnavailable] =
     useState(false);
   const [expanded, setExpanded] = useState(
-    () => isForcedExpanded || (!summaryOnly && shouldAutoExpand(tool)),
+    () =>
+      isForcedExpanded ||
+      (!summaryOnly && shouldAutoExpand(tool) && !isPendingEditApproval),
   );
   const monitorDetailsRequestRef = useRef<object | null>(null);
   // Set once the user explicitly toggles this row, so auto-collapse-on-
@@ -1085,7 +1100,10 @@ export const ToolLine = memo(function ToolLine({
 
   useEffect(
     () => {
-      setExpanded(isForcedExpanded || (!summaryOnly && shouldAutoExpand(tool)));
+      setExpanded(
+        isForcedExpanded ||
+          (!summaryOnly && shouldAutoExpand(tool) && !isPendingEditApproval),
+      );
       setMonitorDetailsUnavailable(false);
       monitorDetailsRequestRef.current = null;
       // A new tool identity resets the manual latch.
@@ -1094,6 +1112,7 @@ export const ToolLine = memo(function ToolLine({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [
       isForcedExpanded,
+      isPendingEditApproval,
       monitorDetailsAvailable,
       summaryOnly,
       tool.callId,
@@ -1101,17 +1120,18 @@ export const ToolLine = memo(function ToolLine({
     ],
   );
   const isAgent = isSubAgentToolCall(tool);
-  const hasApproval = approval && approval.toolCallId === tool.callId;
   const hasSubToolApproval =
     !hasApproval &&
     approval?.toolCallId &&
     isAgent &&
     toolContainsCallId(tool, approval.toolCallId);
+  const waitingForApproval = Boolean(hasApproval || hasSubToolApproval);
   const isRunningTool = isActiveToolStatus(tool.status);
   const showsLiveElapsed =
     isRunningTool &&
     !isShellToolName(tool.toolName) &&
-    !isWebFetchToolName(tool.toolName);
+    !isWebFetchToolName(tool.toolName) &&
+    !waitingForApproval;
   const now = useSharedNow(showsLiveElapsed);
 
   // Collapse a regular tool to its one-line summary once it completes
@@ -1145,7 +1165,11 @@ export const ToolLine = memo(function ToolLine({
           : t('subagent.running');
     const runningMeta = [
       progressLabel,
-      isBackground && !isComplete ? '' : info.elapsed,
+      isBackground && !isComplete
+        ? ''
+        : waitingForApproval
+          ? ''
+          : info.elapsed,
     ]
       .filter(Boolean)
       .join(' · ');
@@ -1264,7 +1288,9 @@ export const ToolLine = memo(function ToolLine({
     : fullDescription;
   const displayName = localizeToolDisplayName(tool.toolName, t);
   const elapsed =
-    isShellToolName(tool.toolName) || isWebFetchToolName(tool.toolName)
+    waitingForApproval ||
+    isShellToolName(tool.toolName) ||
+    isWebFetchToolName(tool.toolName)
       ? ''
       : formatElapsed(tool.startTime, isRunningTool ? now : tool.endTime);
 
@@ -1292,7 +1318,7 @@ export const ToolLine = memo(function ToolLine({
   // When a long description is expanded we move it out of the header into a
   // wrapped block below, so the header drops its single-line copy.
   const descExpandable = !isTodo && isDescriptionExpandable(description);
-  const expandable = !isForcedExpanded;
+  const expandable = !isForcedExpanded && !isPendingEditApproval;
   const interactive = opensMonitorDetails || expandable;
   const fallbackToMonitorInline = () => {
     setMonitorDetailsUnavailable(true);
