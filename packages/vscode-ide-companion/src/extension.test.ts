@@ -7,6 +7,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as vscode from 'vscode';
 import { activate } from './extension.js';
+import { ChatProviderRegistry } from './webview/providers/ChatProviderRegistry.js';
 import { IDE_DEFINITIONS, detectIdeFromEnv } from '@qwen-code/qwen-code-core';
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
@@ -370,6 +371,72 @@ describe('activate', () => {
       await activate(context);
 
       expect(showInformationMessageMock).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('diff vote command gate', () => {
+    it('derives fromDiffEditor from the diff scheme and honors the pending gate', async () => {
+      vi.spyOn(global, 'fetch').mockResolvedValue({
+        ok: false,
+        statusText: 'Internal Server Error',
+      } as Response);
+
+      const provider = {
+        hasPendingPermission: vi.fn(() => true),
+        respondToPendingPermission: vi.fn(),
+        dispose: vi.fn(),
+      };
+      const registrySpy = vi
+        .spyOn(ChatProviderRegistry.prototype, 'getPermissionAwareProviders')
+        .mockReturnValue([provider] as never);
+
+      await activate(context);
+
+      const findHandler = (name: string) =>
+        vi
+          .mocked(vscode.commands.registerCommand)
+          .mock.calls.find(([id]) => id === name)?.[1] as
+          | ((uri?: unknown) => void)
+          | undefined;
+      const acceptHandler = findHandler('qwen.diff.accept');
+      expect(acceptHandler).toBeDefined();
+
+      // Accepting the permission diff itself votes, tagged as coming from
+      // the diff editor.
+      const diffUri = {
+        scheme: 'qwen-diff',
+        fsPath: '/workspace/src/app.ts',
+        toString: () => 'qwen-diff:///workspace/src/app.ts',
+      };
+      acceptHandler!(diffUri);
+      expect(provider.respondToPendingPermission).toHaveBeenCalledWith(
+        'allow',
+        { fromDiffEditor: true, uri: diffUri },
+      );
+
+      // Ctrl+S on the user's original workspace file also triggers
+      // qwen.diff.accept while a diff is open; that must not be tagged as a
+      // diff-editor vote, or it would approve an edit the user may never
+      // have looked at.
+      provider.respondToPendingPermission.mockClear();
+      const fileUri = {
+        scheme: 'file',
+        fsPath: '/workspace/src/app.ts',
+        toString: () => 'file:///workspace/src/app.ts',
+      };
+      acceptHandler!(fileUri);
+      expect(provider.respondToPendingPermission).toHaveBeenCalledWith(
+        'allow',
+        { fromDiffEditor: false, uri: fileUri },
+      );
+
+      // Gate: with nothing pending the provider is never asked to vote.
+      provider.respondToPendingPermission.mockClear();
+      provider.hasPendingPermission.mockReturnValue(false);
+      acceptHandler!(diffUri);
+      expect(provider.respondToPendingPermission).not.toHaveBeenCalled();
+
+      registrySpy.mockRestore();
     });
   });
 });
