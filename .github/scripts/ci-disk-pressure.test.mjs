@@ -32,17 +32,49 @@ describe('ci.yml disk-pressure evidence', () => {
     const install = step('Install dependencies').run;
     const npmCi = install.indexOf('npm ci');
 
-    assert.ok(npmCi > install.indexOf('DISK_SAMPLES='));
+    assert.match(
+      install,
+      /DISK_SAMPLES="\$\{RUNNER_TEMP\}\/disk-pressure-samples\.log"/,
+    );
     assert.ok(npmCi > install.indexOf('DFSAMPLE '));
+    assert.match(install, /\( while sleep 10; do sample_disk; done \) &/);
+    assert.ok(npmCi > install.indexOf('( while sleep 10'));
     assert.match(install, /trap .*SAMPLER_PID.* EXIT/);
 
     const tests = step('Run tests and generate reports').run;
-    assert.match(tests, /if \[ ! -s "\$DISK_SAMPLES" \]; then/);
-    assert.match(tests, />> "\$DISK_SAMPLES"/);
+    assert.match(
+      tests,
+      /DISK_SAMPLES="\$\{RUNNER_TEMP\}\/disk-pressure-samples\.log"\nif \[ ! -s "\$DISK_SAMPLES" \]; then\n  echo "DISKCONTEXT .*" > "\$DISK_SAMPLES" 2>\/dev\/null \|\| true\nfi/,
+    );
+    assert.ok(tests.indexOf('export TMPDIR=') > tests.indexOf('DISK_SAMPLES='));
+
+    const sampleFormat = (script) => {
+      const match = script.match(
+        /sample="DFSAMPLE .*\/proc\/meminfo 2>\/dev\/null(?: \|\| true)?\)\]"/,
+      );
+      assert.ok(match);
+      return match[0]
+        .replaceAll('${RUNNER_TEMP:-/tmp}', '${TMPDIR}')
+        .replace(
+          ' /proc/meminfo 2>/dev/null || true)]',
+          ' /proc/meminfo 2>/dev/null)]',
+        );
+    };
+    const headerLine = (script) =>
+      script
+        .split('\n')
+        .find((line) => line.trimStart().startsWith('echo "DISKCONTEXT '))
+        ?.trim();
+    assert.equal(headerLine(install), headerLine(tests));
+    assert.equal(sampleFormat(install), sampleFormat(tests));
 
     const upload = step('Upload disk-pressure samples');
     assert.equal(upload.if, '${{ failure() }}');
     assert.equal(upload.with['if-no-files-found'], 'ignore');
+    assert.equal(
+      upload.with.path,
+      '${{ runner.temp }}/disk-pressure-samples.log',
+    );
   });
 
   it('keeps install failure status while writing the pre-install sample', () => {
@@ -57,6 +89,7 @@ describe('ci.yml disk-pressure evidence', () => {
         ['-e', '-o', 'pipefail', '-c', step('Install dependencies').run],
         {
           encoding: 'utf8',
+          timeout: 30_000,
           env: {
             ...process.env,
             PATH: `${root}:${process.env.PATH}`,
@@ -65,6 +98,7 @@ describe('ci.yml disk-pressure evidence', () => {
         },
       );
 
+      assert.equal(result.error, undefined);
       assert.equal(
         result.status,
         42,
