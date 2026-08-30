@@ -1445,7 +1445,13 @@ export class HookRunner {
     shellType: ShellType,
   ): string {
     debugLogger.debug(`Expanding hook command: ${command} (cwd: ${input.cwd})`);
-    return this.expandProjectDirPlaceholders(command, input.cwd, shellType);
+    const expanded = this.expandProjectDirPlaceholders(
+      command,
+      input.cwd,
+      shellType,
+    );
+    debugLogger.debug(`Expanded hook command: ${expanded}`);
+    return expanded;
   }
 
   /**
@@ -1477,12 +1483,14 @@ export class HookRunner {
     let result = '';
     let lastIndex = 0;
     let match: RegExpExecArray | null;
-    // The character that escapes the next one when not inside single quotes
-    // (bash and PowerShell); cmd's `^` escapes even inside double quotes.
+    // The character that escapes the next one: not inside single quotes for
+    // bash/PowerShell; cmd's `^` additionally loses its escaping power
+    // inside "..." (a caret there is a literal character).
     const escapeChar =
       shellType === 'bash' ? '\\' : shellType === 'powershell' ? '`' : '^';
 
     while ((match = placeholderPattern.exec(command))) {
+      let matchIsEscaped = false;
       for (let i = lastIndex; i < match.index; i++) {
         const ch = command[i];
         if (inComment) {
@@ -1491,9 +1499,22 @@ export class HookRunner {
           }
           continue;
         }
-        if (!inSingleQuote && ch === escapeChar) {
+        if (shellType === 'cmd' && (ch === '\n' || ch === '\r')) {
+          // cmd lexes line-by-line; a stray/odd quote on an earlier line
+          // must not leak its quote state into the next one.
+          inDoubleQuote = false;
+        }
+        if (
+          !inSingleQuote &&
+          (shellType !== 'cmd' || !inDoubleQuote) &&
+          ch === escapeChar
+        ) {
           // The escaped character can't end a quote region or start a
-          // comment — bash's `\'`/`\"`, PowerShell's `` `" ``, cmd's `^&`.
+          // comment — bash's `\'`/`\"`, PowerShell's `` `" ``, cmd's `^&`
+          // outside quotes. cmd's `^` is a literal character inside "...".
+          if (i + 1 === match.index) {
+            matchIsEscaped = true;
+          }
           i++;
           continue;
         }
@@ -1502,11 +1523,14 @@ export class HookRunner {
           !inSingleQuote &&
           !inDoubleQuote &&
           ch === '#' &&
-          (i === 0 || /\s/.test(command[i - 1]))
+          (shellType === 'powershell' ||
+            i === 0 ||
+            /[\s;|&<>()]/.test(command[i - 1]))
         ) {
-          // An unquoted `#` at a word boundary starts a line comment (bash
-          // and PowerShell both use `#`) that runs to the next newline;
-          // nothing inside it is live shell text.
+          // An unquoted `#` starts a line comment that runs to the next
+          // newline; nothing inside it is live shell text. PowerShell
+          // treats any unquoted `#` as a comment start; bash only at a
+          // word boundary (a shell metacharacter or start-of-command).
           inComment = true;
           continue;
         }
@@ -1518,6 +1542,15 @@ export class HookRunner {
       }
       result += command.slice(lastIndex, match.index);
       const afterPlaceholder = placeholderPattern.lastIndex;
+
+      if (matchIsEscaped) {
+        // The placeholder's own `$` was escaped by the author
+        // (`\$QWEN_PROJECT_DIR`); leave it untouched so the shell's own
+        // escaping suppresses expansion as they intended.
+        result += match[0];
+        lastIndex = afterPlaceholder;
+        continue;
+      }
 
       if (inComment) {
         // A placeholder written inside a `#` comment is documentation, not

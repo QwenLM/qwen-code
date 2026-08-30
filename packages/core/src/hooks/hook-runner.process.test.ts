@@ -203,8 +203,11 @@ describe.runIf(process.platform === 'win32')(
         const result = await runner.executeHook(
           {
             type: HookType.Command,
+            // exit codes diverge on the two branches (0 vs 3) since the
+            // supervisor discards hook stdout, so `... else (echo MISSING)`
+            // would leave both outcomes indistinguishable at exit code 0.
             command:
-              'if exist "$QWEN_PROJECT_DIR" (echo FOUND) else (echo MISSING)',
+              'if exist "$QWEN_PROJECT_DIR" (echo FOUND) else (exit 3)',
             source: HooksConfigSource.Project,
           },
           HookEventName.MessageDisplay,

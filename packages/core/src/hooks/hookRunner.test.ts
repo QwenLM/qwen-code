@@ -1194,6 +1194,75 @@ describe('HookRunner', () => {
       );
     });
 
+    it('leaves an escaped placeholder untouched instead of substituting it', async () => {
+      const mockProcess = createMockProcess(0, 'result');
+      mockSpawn.mockImplementation(() => mockProcess);
+
+      const hookConfig: HookConfig = {
+        type: HookType.Command,
+        command: 'echo "export QWEN_PROJECT_DIR=\\$QWEN_PROJECT_DIR"',
+        source: HooksConfigSource.Project,
+        shell: 'bash',
+      };
+
+      await hookRunner.executeHook(
+        hookConfig,
+        HookEventName.PreToolUse,
+        createMockInput({ cwd: '/tmp/project' }),
+      );
+
+      const spawnCall = mockSpawn.mock.calls[0];
+      expect(spawnCall[1][spawnCall[1].length - 1]).toBe(
+        'echo "export QWEN_PROJECT_DIR=\\$QWEN_PROJECT_DIR"',
+      );
+    });
+
+    it('recognizes a bash comment starting right after a shell metacharacter, not just whitespace', async () => {
+      const mockProcess = createMockProcess(0, 'result');
+      mockSpawn.mockImplementation(() => mockProcess);
+
+      const hookConfig: HookConfig = {
+        type: HookType.Command,
+        command: 'echo start;# note "open\nls -d $QWEN_PROJECT_DIR',
+        source: HooksConfigSource.Project,
+        shell: 'bash',
+      };
+
+      await hookRunner.executeHook(
+        hookConfig,
+        HookEventName.PreToolUse,
+        createMockInput({ cwd: '/tmp/my dir' }),
+      );
+
+      const spawnCall = mockSpawn.mock.calls[0];
+      expect(spawnCall[1][spawnCall[1].length - 1]).toBe(
+        'echo start;# note "open\nls -d \'/tmp/my dir\'',
+      );
+    });
+
+    it('recognizes a PowerShell comment starting mid-token, not just at a word boundary', async () => {
+      const mockProcess = createMockProcess(0, 'result');
+      mockSpawn.mockImplementation(() => mockProcess);
+
+      const hookConfig: HookConfig = {
+        type: HookType.Command,
+        command: "echo foo#it's fine\n(Test-Path $GEMINI_PROJECT_DIR)",
+        source: HooksConfigSource.Project,
+        shell: 'powershell',
+      };
+
+      await hookRunner.executeHook(
+        hookConfig,
+        HookEventName.PreToolUse,
+        createMockInput({ cwd: 'C:/proj' }),
+      );
+
+      const spawnCall = mockSpawn.mock.calls[0];
+      expect(spawnCall[1][spawnCall[1].length - 1]).toBe(
+        "echo foo#it's fine\n(Test-Path 'C:/proj')",
+      );
+    });
+
     it('escapes double-quote-sensitive characters when splicing into a bash double-quoted placeholder', async () => {
       const mockProcess = createMockProcess(0, 'result');
       mockSpawn.mockImplementation(() => mockProcess);
@@ -1293,6 +1362,138 @@ describe('HookRunner', () => {
         const spawnCall = mockSpawn.mock.calls[0];
         expect(spawnCall[1][spawnCall[1].length - 1]).toBe(
           '""C:\\proj\\hook.cmd"\necho done"',
+        );
+      } finally {
+        if (previousMsystem === undefined) {
+          delete process.env['MSYSTEM'];
+        } else {
+          process.env['MSYSTEM'] = previousMsystem;
+        }
+        if (previousComSpec === undefined) {
+          delete process.env['ComSpec'];
+        } else {
+          process.env['ComSpec'] = previousComSpec;
+        }
+      }
+    });
+
+    it('does not track a literal single quote as a quote region for cmd', async () => {
+      // hookConfig.shell only overrides to 'bash' | 'powershell'; cmd is only
+      // reachable via the platform's global shell configuration.
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+      const previousMsystem = process.env['MSYSTEM'];
+      const previousComSpec = process.env['ComSpec'];
+      delete process.env['MSYSTEM'];
+      process.env['ComSpec'] = 'C:\\Windows\\System32\\cmd.exe';
+
+      try {
+        const mockProcess = createMockProcess(0, 'result');
+        mockSpawn.mockImplementation(() => mockProcess);
+
+        const hookConfig: HookConfig = {
+          type: HookType.Command,
+          command: 'echo it\'s "$QWEN_PROJECT_DIR"',
+          source: HooksConfigSource.Project,
+        };
+
+        await hookRunner.executeHook(
+          hookConfig,
+          HookEventName.PreToolUse,
+          createMockInput({ cwd: 'C:\\qwen hook' }),
+        );
+
+        // cmd has no single-quote string syntax; the `'` above is literal
+        // and must not desync tracking of the real `"..."` that follows.
+        const spawnCall = mockSpawn.mock.calls[0];
+        expect(spawnCall[1][spawnCall[1].length - 1]).toBe(
+          '"echo it\'s "C:\\qwen hook""',
+        );
+      } finally {
+        if (previousMsystem === undefined) {
+          delete process.env['MSYSTEM'];
+        } else {
+          process.env['MSYSTEM'] = previousMsystem;
+        }
+        if (previousComSpec === undefined) {
+          delete process.env['ComSpec'];
+        } else {
+          process.env['ComSpec'] = previousComSpec;
+        }
+      }
+    });
+
+    it('does not let cmd `^` protect a closing quote, since caret is literal inside "..."', async () => {
+      // hookConfig.shell only overrides to 'bash' | 'powershell'; cmd is only
+      // reachable via the platform's global shell configuration.
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+      const previousMsystem = process.env['MSYSTEM'];
+      const previousComSpec = process.env['ComSpec'];
+      delete process.env['MSYSTEM'];
+      process.env['ComSpec'] = 'C:\\Windows\\System32\\cmd.exe';
+
+      try {
+        const mockProcess = createMockProcess(0, 'result');
+        mockSpawn.mockImplementation(() => mockProcess);
+
+        const hookConfig: HookConfig = {
+          type: HookType.Command,
+          command: 'echo "a^" & echo $QWEN_PROJECT_DIR',
+          source: HooksConfigSource.Project,
+        };
+
+        await hookRunner.executeHook(
+          hookConfig,
+          HookEventName.PreToolUse,
+          createMockInput({ cwd: 'C:\\My Projects' }),
+        );
+
+        const spawnCall = mockSpawn.mock.calls[0];
+        expect(spawnCall[1][spawnCall[1].length - 1]).toBe(
+          '"echo "a^" & echo "C:\\My Projects""',
+        );
+      } finally {
+        if (previousMsystem === undefined) {
+          delete process.env['MSYSTEM'];
+        } else {
+          process.env['MSYSTEM'] = previousMsystem;
+        }
+        if (previousComSpec === undefined) {
+          delete process.env['ComSpec'];
+        } else {
+          process.env['ComSpec'] = previousComSpec;
+        }
+      }
+    });
+
+    it('resets cmd quote tracking on a newline, since cmd lexes line-by-line', async () => {
+      // hookConfig.shell only overrides to 'bash' | 'powershell'; cmd is only
+      // reachable via the platform's global shell configuration.
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+      const previousMsystem = process.env['MSYSTEM'];
+      const previousComSpec = process.env['ComSpec'];
+      delete process.env['MSYSTEM'];
+      process.env['ComSpec'] = 'C:\\Windows\\System32\\cmd.exe';
+
+      try {
+        const mockProcess = createMockProcess(0, 'result');
+        mockSpawn.mockImplementation(() => mockProcess);
+
+        const hookConfig: HookConfig = {
+          type: HookType.Command,
+          command:
+            'REM uses 3" pipe\nif exist $QWEN_PROJECT_DIR\\lock (echo busy) else (echo free)',
+          source: HooksConfigSource.Project,
+        };
+
+        await hookRunner.executeHook(
+          hookConfig,
+          HookEventName.PreToolUse,
+          createMockInput({ cwd: 'C:\\My Project' }),
+        );
+
+        const spawnCall = mockSpawn.mock.calls[0];
+        expect(spawnCall[1][spawnCall[1].length - 1]).toBe(
+          '"REM uses 3" pipe\nif exist "C:\\My Project\\lock" (echo busy) else (echo free)"',
         );
       } finally {
         if (previousMsystem === undefined) {
