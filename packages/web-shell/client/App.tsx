@@ -33,12 +33,15 @@ import {
   type DaemonSessionNotice,
   type DaemonSessionOwnerSnapshot,
   type DaemonReasoningControls,
+  type DaemonProductSessionContext,
   type DaemonStreamingState,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import {
   DaemonHttpError,
   isDaemonTurnError,
+  isStandaloneSessionNotFoundError,
   isStaleBranchPointError,
+  STANDALONE_SESSIONS_CAPABILITY,
 } from '@qwen-code/sdk/daemon';
 import type {
   DaemonInputAnnotation,
@@ -51,6 +54,8 @@ import type {
   DaemonSessionTaskStatus,
   DaemonSessionArtifact,
   DaemonSessionSummary,
+  DaemonStandaloneCreationRecovery,
+  DaemonStandaloneSessionLookup,
   DaemonWorkspaceCapability,
   DaemonWorkspaceGitStatus,
   GoalSnapshotV2,
@@ -58,6 +63,7 @@ import type {
 } from '@qwen-code/sdk/daemon';
 
 import { isGoalGateBlocked as isGoalGateBlockedFor } from './utils/goalGate';
+import { keepWorkspaceSplitSessionIds } from './utils/standalone-session-routing';
 import { type SessionGitIntent } from './components/GitModePopover';
 import { gitModeIntentMustReset } from './utils/gitModeIntent';
 import { LocalControlQrButton } from './components/LocalControlQrButton';
@@ -1000,6 +1006,7 @@ export interface WebShellProps {
     sessionId: string | undefined,
     workspaceId?: string,
     workspaceCwd?: string,
+    sessionContext?: DaemonProductSessionContext,
   ) => void;
   /** Called when the active session id or display name changes. */
   onSessionInfoChange?: (session: {
@@ -1261,6 +1268,7 @@ interface AppProps extends WebShellProps {
 type SessionActionsWithCreate = {
   createSession: (options?: {
     workspaceCwd?: string;
+    sessionContext?: DaemonProductSessionContext;
     approvalMode?: string;
     sourceType?: string;
     worktree?: { slug?: string };
@@ -1274,6 +1282,29 @@ type SessionActionsWithCreate = {
   clearSession: () => Promise<void>;
   releaseSession: (sessionId: string) => Promise<void>;
 };
+
+type NewSessionIntent =
+  | { kind: 'global' }
+  | { kind: 'inherit' }
+  | { kind: 'workspace'; cwd: string };
+
+type StandaloneRecoveryResolution =
+  | 'idle'
+  | 'checking'
+  | 'creating'
+  | 'absent'
+  | 'unknown'
+  | 'archived';
+
+const STANDALONE_RECOVERY_POLL_DELAYS_MS = [250, 500, 1000, 2000, 4000];
+
+function getStandaloneRecoverySessionId(
+  recovery: DaemonStandaloneCreationRecovery | undefined,
+): string | undefined {
+  return recovery?.state === 'existing'
+    ? recovery.session.sessionId
+    : recovery?.sessionId;
+}
 
 type PendingReasoningIntent = {
   modelId: string;
@@ -1305,6 +1336,24 @@ const emptyComposerApi: WebShellComposerApi = {
   clear: () => {},
   submit: () => {},
 };
+
+const NON_WORKSPACE_BLOCKED_COMMANDS = new Set([
+  'agents',
+  'branch',
+  'delete',
+  'diff',
+  'extensions',
+  'log',
+  'memory',
+  'mcp',
+  'prs',
+  'release',
+  'resume',
+  'schedule',
+  'settings',
+  'skills',
+  'tools',
+]);
 
 const EMPTY_BOTTOM_STATUS_ITEMS: readonly WebShellBottomStatusItem[] = [];
 const EMPTY_ADDITIONAL_SLASH_COMMANDS: readonly CommandInfo[] = [];
@@ -2524,6 +2573,12 @@ export function App({
   artifactWorkspaceCwdRef.current = artifactWorkspaceCwd;
   artifactWorkspaceActionsRef.current = artifactWorkspaceActions;
   workspaceCapabilitiesRef.current = workspace.capabilities;
+  const workspaceCapabilitiesReady =
+    workspace.capabilities !== undefined && workspace.status !== 'error';
+  const standaloneSessionsSupported =
+    workspace.capabilities?.features?.includes(
+      STANDALONE_SESSIONS_CAPABILITY,
+    ) === true;
   const dynamicWorkspaceRegistrationSupported =
     workspace.capabilities?.features?.includes(
       'dynamic_workspace_registration',
@@ -2571,9 +2626,64 @@ export function App({
   >(initialSelectedWorkspaceCwd);
   const selectedWorkspaceCwdRef = useRef(selectedWorkspaceCwd);
   selectedWorkspaceCwdRef.current = selectedWorkspaceCwd;
+  const [pendingSessionContext, setPendingSessionContextState] = useState<
+    DaemonProductSessionContext | undefined
+  >(undefined);
+  const pendingSessionContextRef = useRef(pendingSessionContext);
+  const setPendingSessionContext = useCallback(
+    (context: DaemonProductSessionContext | undefined) => {
+      pendingSessionContextRef.current = context;
+      setPendingSessionContextState(context);
+    },
+    [],
+  );
+  const legacyWorkspaceContextCwd =
+    connection.workspaceCwd ||
+    lockedWorkspaceCwd ||
+    selectedWorkspaceCwd ||
+    ordinaryWorkspaces.find((entry) => entry.primary)?.cwd ||
+    workspace.capabilities?.workspaceCwd;
+  const effectiveSessionContext = useMemo(
+    () =>
+      pendingSessionContext ??
+      connection.sessionContext ??
+      (legacyWorkspaceContextCwd
+        ? { kind: 'workspace' as const, cwd: legacyWorkspaceContextCwd }
+        : undefined),
+    [
+      connection.sessionContext,
+      legacyWorkspaceContextCwd,
+      pendingSessionContext,
+    ],
+  );
+  const workspaceContextActive = effectiveSessionContext?.kind === 'workspace';
+  const effectiveStandaloneSession =
+    effectiveSessionContext?.kind === 'standalone'
+      ? connection.standaloneSession
+      : undefined;
+  const standaloneCreationRecovery =
+    effectiveStandaloneSession?.creationRecovery;
+  const standaloneWorkingDirectory =
+    effectiveStandaloneSession?.workingDirectory;
+  const standaloneDirectoryErrorCode = effectiveStandaloneSession?.errorCode;
+  const [standaloneRecoveryResolution, setStandaloneRecoveryResolution] =
+    useState<StandaloneRecoveryResolution>('idle');
+  const [standaloneRepairBusy, setStandaloneRepairBusy] = useState(false);
+  useEffect(() => {
+    setStandaloneRecoveryResolution('idle');
+    setStandaloneRepairBusy(false);
+  }, [connection.sessionId]);
   const [selectedWorkspaceGitStatus, setSelectedWorkspaceGitStatus] = useState<
     DaemonWorkspaceGitStatus | undefined
   >(undefined);
+  /** Git mode intent for the next lazily-created session (branch or worktree). */
+  const [gitModeIntent, setGitModeIntent] = useState<SessionGitIntent>({
+    mode: 'current',
+  });
+  const gitModeIntentRef = useRef(gitModeIntent);
+  useEffect(() => {
+    gitModeIntentRef.current = gitModeIntent;
+  }, [gitModeIntent]);
 
   useEffect(() => {
     if (!workspace.capabilities || !selectedWorkspaceCwd) return;
@@ -2581,10 +2691,23 @@ export function App({
       (entry) => entry.cwd === selectedWorkspaceCwd,
     );
     if (selected?.trusted) return;
+    const primaryCwd = ordinaryWorkspaces.find(
+      (entry) => entry.primary && entry.trusted !== false,
+    )?.cwd;
     composerSourceVersionRef.current += 1;
     selectedWorkspaceCwdRef.current = undefined;
     setSelectedWorkspaceCwd(undefined);
-  }, [ordinaryWorkspaces, selectedWorkspaceCwd, workspace.capabilities]);
+    setPendingSessionContext(
+      primaryCwd ? { kind: 'workspace', cwd: primaryCwd } : undefined,
+    );
+    gitModeIntentRef.current = { mode: 'current' };
+    setGitModeIntent({ mode: 'current' });
+  }, [
+    ordinaryWorkspaces,
+    selectedWorkspaceCwd,
+    setPendingSessionContext,
+    workspace.capabilities,
+  ]);
   // The workspace the chip's status was last fetched for. On a workspace switch
   // we clear the status immediately so the chip never shows the previous repo's
   // branch/dirty counts while the new fetch is in flight; same-workspace
@@ -2642,9 +2765,51 @@ export function App({
     ) {
       return;
     }
+    if (connection.sessionContext?.kind === 'standalone') {
+      workspace.client
+        .getStandaloneSession(sid)
+        .then((summary) => {
+          if (
+            'state' in summary ||
+            sessionStatusRequestRef.current !== requestId ||
+            worktreeSessionKeyRef.current !== sessionKey ||
+            !owner.isCurrent()
+          ) {
+            return;
+          }
+          setSessionWorktree(undefined);
+          setSessionBranch(undefined);
+          setSessionStatusDisplayName(summary.displayName);
+          setCurrentSessionSummary(summary);
+        })
+        .catch(() => {
+          if (
+            sessionStatusRequestRef.current === requestId &&
+            worktreeSessionKeyRef.current === sessionKey &&
+            owner.isCurrent()
+          ) {
+            setSessionStatusDisplayName(undefined);
+            setCurrentSessionSummary(undefined);
+          }
+        });
+      return;
+    }
     workspace.client
       .sessionStatus(sid)
       .then((summary) => {
+        if (connection.sessionContext?.kind === 'live') {
+          if (
+            sessionStatusRequestRef.current === requestId &&
+            worktreeSessionKeyRef.current === sessionKey &&
+            owner.isCurrent()
+          ) {
+            setSessionWorktree(undefined);
+            setSessionBranch(undefined);
+            setSessionStatusDisplayName(summary.displayName);
+            setCurrentSessionSummary(summary);
+          }
+          return;
+        }
         if (
           sessionStatusRequestRef.current === requestId &&
           worktreeSessionKeyRef.current === sessionKey &&
@@ -2698,6 +2863,7 @@ export function App({
     connection.clientId,
     connection.loadingTranscript,
     connection.sessionId,
+    connection.sessionContext,
     connection.status,
     connection.workspaceCwd,
     logicalSessionKey,
@@ -2709,21 +2875,27 @@ export function App({
   // picked for the next session (locked / selected / primary). Computed once
   // and shared by the git-status effect and the Changes-dialog entry point so
   // the chip and the dialog always target the same repo.
-  const activeWorkspaceCwd = useMemo(
-    () =>
-      connection.sessionId
-        ? connection.workspaceCwd
-        : (lockedWorkspaceCwd ??
+  const activeWorkspaceCwd = useMemo(() => {
+    if (!workspaceContextActive) return undefined;
+    const explicitContext = pendingSessionContext ?? connection.sessionContext;
+    if (explicitContext?.kind === 'workspace') {
+      return explicitContext.cwd;
+    }
+    return connection.sessionId
+      ? connection.workspaceCwd
+      : (lockedWorkspaceCwd ??
           selectedWorkspaceCwd ??
-          ordinaryWorkspaces.find((entry) => entry.primary)?.cwd),
-    [
-      connection.sessionId,
-      connection.workspaceCwd,
-      lockedWorkspaceCwd,
-      selectedWorkspaceCwd,
-      ordinaryWorkspaces,
-    ],
-  );
+          ordinaryWorkspaces.find((entry) => entry.primary)?.cwd);
+  }, [
+    connection.sessionId,
+    connection.workspaceCwd,
+    connection.sessionContext,
+    lockedWorkspaceCwd,
+    selectedWorkspaceCwd,
+    ordinaryWorkspaces,
+    pendingSessionContext,
+    workspaceContextActive,
+  ]);
   // Worktree sessions query git status with the worktree path (?cwd=
   // parameter); the chip prefers the live branch from that status, falling
   // back to the creation-time sessionWorktree.branch.
@@ -2913,6 +3085,9 @@ export function App({
   const lastNotifiedSessionIdRef = useRef<string | undefined>(undefined);
   const lastNotifiedWorkspaceIdRef = useRef<string | undefined>(undefined);
   const lastNotifiedWorkspaceCwdRef = useRef<string | undefined>(undefined);
+  const lastNotifiedNonWorkspaceContextRef = useRef<
+    'standalone' | 'live' | undefined
+  >(undefined);
   const displayMessages = useMemo(
     () => buildDisplayMessages(messages, recapMessage),
     [messages, recapMessage],
@@ -3241,12 +3416,32 @@ export function App({
     setArtifactPanelFullscreen(false);
   }, [logicalSessionKey]);
   const sideTasksAvailable =
+    workspaceContextActive &&
     Boolean(connection.sessionId && connection.workspaceCwd) &&
     connection.capabilities?.features.includes(SESSION_SIDE_TASK_FEATURE) ===
       true;
   const webTerminalAvailable =
+    workspaceContextActive &&
     rightPanelItems.includes('terminal') &&
     connection.capabilities?.features.includes('web_terminal') === true;
+  useEffect(() => {
+    if (workspaceContextActive) return;
+    const terminalIds = artifactPanelTabs
+      .filter((tab) => tab.kind === 'terminal')
+      .map((tab) => tab.id);
+    if (terminalIds.length === 0) return;
+    for (const terminalId of terminalIds) releaseWebTerminal(terminalId);
+    setArtifactPanelTabs((tabs) =>
+      tabs.filter((tab) => tab.kind !== 'terminal'),
+    );
+    if (
+      activeArtifactPanelTabId &&
+      terminalIds.includes(activeArtifactPanelTabId)
+    ) {
+      setActiveArtifactPanelTabId(null);
+      setArtifactPanelOpen(false);
+    }
+  }, [activeArtifactPanelTabId, artifactPanelTabs, workspaceContextActive]);
   const [sideTaskCatalog, setSideTaskCatalog] = useState<SideTaskCatalogState>({
     items: [],
     loaded: false,
@@ -5057,13 +5252,30 @@ export function App({
   );
   useEffect(() => {
     if (!connected) return;
+    if (!workspaceContextActive) {
+      loadedSkillsRequestRef.current += 1;
+      setLoadedSkills([]);
+      setLoadedSkillsReady(true);
+      setLoadedSkillsFallback(undefined);
+      return;
+    }
     void reloadLoadedSkills(connection.workspaceCwd);
-  }, [connected, connection.workspaceCwd, reloadLoadedSkills]);
+  }, [
+    connected,
+    connection.workspaceCwd,
+    reloadLoadedSkills,
+    workspaceContextActive,
+  ]);
   const handledSkillMutationKeysRef = useRef(new Set<string>());
   const pendingSkillTogglesByContextRef = useRef(
     new Map<string, Array<{ name: string; enabled: boolean }>>(),
   );
   useEffect(() => {
+    if (!workspaceContextActive) {
+      handledSkillMutationKeysRef.current.clear();
+      pendingSkillTogglesByContextRef.current.clear();
+      return;
+    }
     if (!connected) {
       handledSkillMutationKeysRef.current.clear();
       return;
@@ -5160,6 +5372,7 @@ export function App({
     reloadLoadedSkills,
     workspaceEventSignals?.lastSkillMutation,
     workspaceEventSignals?.skillMutationsByCwd,
+    workspaceContextActive,
   ]);
   useEffect(() => {
     if (!loadedSkillsFallback) return;
@@ -5451,6 +5664,7 @@ export function App({
   // Latest pane list, readable from the shrink-close effect without making it a
   // dependency (it changes on every pane add/remove).
   const splitSessionIdsRef = useRef<string[]>(splitSessionIds);
+  const splitClassificationGenerationRef = useRef(0);
   splitSessionIdsRef.current = splitSessionIds;
   const previousSplitSessionIdsRef = useRef<string[]>(splitSessionIds);
   useEffect(() => {
@@ -5495,6 +5709,40 @@ export function App({
     }
   }, [activePanel]);
   const closePanel = useCallback(() => setActivePanel(null), []);
+  useEffect(() => {
+    if (workspaceContextActive) return;
+    splitClassificationGenerationRef.current += 1;
+    setSplitSessionIds([]);
+    if (
+      activePanel === 'settings' ||
+      activePanel === 'sessions' ||
+      activePanel === 'extensions' ||
+      activePanel === 'mcp' ||
+      activePanel === 'skills' ||
+      activePanel === 'agents' ||
+      activePanel === 'plugins' ||
+      activePanel === 'channels'
+    ) {
+      setActivePanel(null);
+    }
+    setShowResumeDialog(false);
+    setShowDeleteDialog(false);
+    setShowReleaseDialog(false);
+    setShowMemoryDialog(false);
+    setShowAddWorkspaceDialog(false);
+    setGitDialog(undefined);
+    if (modelDialogMode && modelDialogMode !== 'main') {
+      setModelDialogMode(null);
+    }
+    setShowFallbacksDialog(false);
+    if (
+      mainView === 'scheduledTasks' ||
+      mainView === 'goals' ||
+      mainView === 'split'
+    ) {
+      setMainView('chat');
+    }
+  }, [activePanel, mainView, modelDialogMode, workspaceContextActive]);
   const handleUseSkill = useCallback(
     (name: string) => {
       closePanel();
@@ -5555,28 +5803,69 @@ export function App({
     setForceMobileDrawer(true);
     setMobileDrawerOpen(true);
   }, [sidebarOptions.enabled]);
+  const sanitizeSplitSessionIds = useCallback(
+    async (sessionIds: readonly string[]): Promise<string[]> => {
+      const requested = Array.from(new Set(sessionIds.filter(Boolean))).slice(
+        0,
+        MAX_SPLIT_PANES,
+      );
+      if (requested.length === 0) return [];
+      return keepWorkspaceSplitSessionIds(
+        workspace.client,
+        workspace.capabilities,
+        requested,
+      );
+    },
+    [workspace.capabilities, workspace.client],
+  );
   // Open the in-window split view showing 2+ sessions side by side. `splitSessionIds`
   // is the live pane set — SplitView mirrors add/remove back into it via
   // onPanesChange — so it must be preserved across entries, not blindly reset.
   const openSplitView = useCallback(
     (sessionIds?: readonly string[]) => {
+      if (!workspaceContextActive) return;
       setActivePanel(null);
-      setSplitSessionIds((prev) => {
-        // An explicit selection (the overview, or a `?split=` URL) replaces the
-        // split with exactly those sessions.
-        const requested = Array.from(
-          new Set((sessionIds ?? []).filter(Boolean)),
-        ).slice(0, MAX_SPLIT_PANES);
-        if (requested.length > 0) return requested;
-        // No selection (the toolbar "Open Split View" button): restore the split
-        // the user already had so switching away and back doesn't clear it; fall
-        // back to the current session when there is nothing to restore.
-        if (prev.length > 0) return prev;
-        return connection.sessionId ? [connection.sessionId] : [];
+      const requested = Array.from(
+        new Set((sessionIds ?? []).filter(Boolean)),
+      ).slice(0, MAX_SPLIT_PANES);
+      const generation = splitClassificationGenerationRef.current + 1;
+      splitClassificationGenerationRef.current = generation;
+      if (requested.length === 0) {
+        const currentWorkspaceSessionId =
+          connection.sessionId !== undefined &&
+          (connection.sessionContext?.kind === 'workspace' ||
+            (connection.sessionContext === undefined &&
+              connection.workspaceCwd !== undefined))
+            ? connection.sessionId
+            : undefined;
+        setSplitSessionIds((previous) =>
+          previous.length > 0
+            ? previous
+            : currentWorkspaceSessionId
+              ? [currentWorkspaceSessionId]
+              : [],
+        );
+        setMainView('split');
+        return;
+      }
+      void sanitizeSplitSessionIds(requested).then((sanitized) => {
+        if (
+          splitClassificationGenerationRef.current !== generation ||
+          sanitized.length === 0
+        ) {
+          return;
+        }
+        setSplitSessionIds(sanitized);
+        setMainView('split');
       });
-      setMainView('split');
     },
-    [connection.sessionId],
+    [
+      connection.sessionContext,
+      connection.sessionId,
+      connection.workspaceCwd,
+      sanitizeSplitSessionIds,
+      workspaceContextActive,
+    ],
   );
   const externalSplitSignature = useMemo(() => {
     const requested = Array.from(
@@ -5588,6 +5877,7 @@ export function App({
   const onSplitSessionIdsChangeRef = useRef(onSplitSessionIdsChange);
   onSplitSessionIdsChangeRef.current = onSplitSessionIdsChange;
   const requestOpenSplitView = useCallback(() => {
+    if (!workspaceContextActive) return;
     if (!externalSplitControlled) {
       openSplitView();
       return;
@@ -5604,22 +5894,56 @@ export function App({
     externalSplitControlled,
     openSplitView,
     splitSessionIds,
+    workspaceContextActive,
   ]);
   useEffect(() => {
     if (!externalSplitControlled) return;
     const requested = externalSplitSignature
       ? externalSplitSignature.split('\0')
       : [];
-    setSplitSessionIds((prev) =>
-      areSessionIdsEqual(prev, requested) ? prev : requested,
-    );
-    if (requested.length > 0) {
-      setActivePanel((prev) => (prev === null ? prev : null));
-      setMainView((prev) => (prev === 'split' ? prev : 'split'));
-    } else {
-      setMainView((prev) => (prev === 'split' ? 'chat' : prev));
+    const generation = splitClassificationGenerationRef.current + 1;
+    splitClassificationGenerationRef.current = generation;
+    if (requested.length === 0) {
+      setSplitSessionIds([]);
+      setMainView((previous) => (previous === 'split' ? 'chat' : previous));
+      return;
     }
-  }, [externalSplitControlled, externalSplitSignature]);
+    if (!workspaceContextActive) {
+      if (
+        effectiveSessionContext === undefined &&
+        !workspaceCapabilitiesReady
+      ) {
+        return;
+      }
+      setSplitSessionIds([]);
+      setMainView((previous) => (previous === 'split' ? 'chat' : previous));
+      onSplitSessionIdsChangeRef.current?.([]);
+      return;
+    }
+    if (!workspaceCapabilitiesReady) return;
+    void sanitizeSplitSessionIds(requested).then((sanitized) => {
+      if (splitClassificationGenerationRef.current !== generation) return;
+      setSplitSessionIds((previous) =>
+        areSessionIdsEqual(previous, sanitized) ? previous : sanitized,
+      );
+      if (!areSessionIdsEqual(requested, sanitized)) {
+        onSplitSessionIdsChangeRef.current?.(sanitized);
+      }
+      if (sanitized.length > 0) {
+        setActivePanel((previous) => (previous === null ? previous : null));
+        setMainView((previous) => (previous === 'split' ? previous : 'split'));
+      } else {
+        setMainView((previous) => (previous === 'split' ? 'chat' : previous));
+      }
+    });
+  }, [
+    externalSplitControlled,
+    externalSplitSignature,
+    effectiveSessionContext,
+    sanitizeSplitSessionIds,
+    workspaceCapabilitiesReady,
+    workspaceContextActive,
+  ]);
   const handleSplitPanesChange = useCallback(
     (sessionIds: string[]) => {
       const nextIds = new Set(sessionIds);
@@ -5692,6 +6016,7 @@ export function App({
   // view with those sessions on load. Consume the param once so a later reload
   // or exit doesn't force the split back on.
   useEffect(() => {
+    if (!workspace.capabilities) return;
     const ids = parseSplitSessionIds(window.location.search);
     if (ids.length > 0) {
       const url = new URL(window.location.href);
@@ -5709,7 +6034,7 @@ export function App({
     if (externalSplitControlled) return;
     const saved = loadSplitSessions();
     if (saved.length > 0) openSplitView(saved);
-  }, [externalSplitControlled, openSplitView]);
+  }, [externalSplitControlled, openSplitView, workspace.capabilities]);
   // Mirror the live split session set to per-tab storage while the split is the
   // active view, so a refresh restores exactly these panes. Not written when the
   // split is merely folded by a shrink (mainView flips to 'chat' transiently) —
@@ -6079,7 +6404,14 @@ export function App({
   );
   const refreshActiveSessionDisplayName = useCallback(async () => {
     const activeConnection = connectionRef.current;
-    if (!activeConnection.sessionId || !activeConnection.workspaceCwd) return;
+    if (
+      !activeConnection.sessionId ||
+      !activeConnection.workspaceCwd ||
+      (activeConnection.sessionContext &&
+        activeConnection.sessionContext.kind !== 'workspace')
+    ) {
+      return;
+    }
     const owner = sessionOwnerGuard.capture();
     try {
       const page = await loadSessionCatalogOnce(
@@ -6169,7 +6501,10 @@ export function App({
     pushToast('info', t('localCommand.noSession'));
     return false;
   }, [pushToast, t]);
-  const sessionDisplayName = connection.displayName ?? sessionStatusDisplayName;
+  const sessionDisplayName =
+    connection.sessionContext?.kind === 'standalone'
+      ? (sessionStatusDisplayName ?? connection.displayName)
+      : (connection.displayName ?? sessionStatusDisplayName);
   useEffect(() => {
     onSessionInfoChange?.({
       sessionId: connection.sessionId,
@@ -6223,19 +6558,12 @@ export function App({
       }
     | undefined
   >(undefined);
-  /** Git mode intent for the next lazily-created session (branch or worktree). */
-  const [gitModeIntent, setGitModeIntent] = useState<SessionGitIntent>({
-    mode: 'current',
-  });
-  const gitModeIntentRef = useRef(gitModeIntent);
-  useEffect(() => {
-    gitModeIntentRef.current = gitModeIntent;
-  }, [gitModeIntent]);
   const newSessionSuggestionSubmitTokenRef = useRef(0);
   const pendingNewSessionSuggestionSubmitRef = useRef<{
     token: number;
     sourceSessionId: string | undefined;
-    sessionClearCompleted: boolean;
+    mode: 'cleared' | 'live';
+    newSessionReady: boolean;
     submitScheduled: boolean;
   } | null>(null);
   const onSessionCreatedRef = useRef(onSessionCreated);
@@ -6290,25 +6618,52 @@ export function App({
           : undefined;
       const modeId =
         currentModeRef.current || connectionRef.current.currentMode;
-      const primaryWorkspaceCwd = ordinaryWorkspaces.find(
+      const requestedSessionContext =
+        pendingSessionContextRef.current ??
+        connectionRef.current.sessionContext;
+      const availableWorkspaces = workspacesRef.current;
+      const primaryWorkspaceCwd = availableWorkspaces.find(
         (entry) => entry.primary,
       )?.cwd;
       const requestedWorkspaceCwd = selectedWorkspaceCwdRef.current;
       const acceptedWorkspaceCwd = requestedWorkspaceCwd
-        ? ordinaryWorkspaces.find(
+        ? availableWorkspaces.find(
             (entry) =>
-              entry.cwd === requestedWorkspaceCwd && entry.trusted === true,
+              entry.cwd === requestedWorkspaceCwd && entry.trusted !== false,
           )?.cwd
         : undefined;
       const targetWorkspaceCwd =
-        ordinaryWorkspaces.find((entry) => entry.cwd === lockedWorkspaceCwd)
-          ?.cwd ??
-        acceptedWorkspaceCwd ??
-        primaryWorkspaceCwd;
+        requestedSessionContext?.kind === 'workspace'
+          ? (availableWorkspaces.find(
+              (entry) =>
+                entry.cwd === requestedSessionContext.cwd &&
+                entry.trusted !== false,
+            )?.cwd ??
+            (requestedSessionContext.cwd === connectionRef.current.workspaceCwd
+              ? requestedSessionContext.cwd
+              : undefined))
+          : requestedSessionContext?.kind === 'standalone'
+            ? undefined
+            : (availableWorkspaces.find(
+                (entry) => entry.cwd === lockedWorkspaceCwd,
+              )?.cwd ??
+              acceptedWorkspaceCwd ??
+              primaryWorkspaceCwd);
+      if (
+        requestedSessionContext?.kind === 'workspace' &&
+        !targetWorkspaceCwd
+      ) {
+        throw new Error('The selected workspace is unavailable or untrusted');
+      }
+      const creationSessionContext: DaemonProductSessionContext | undefined =
+        requestedSessionContext ??
+        (targetWorkspaceCwd
+          ? { kind: 'workspace', cwd: targetWorkspaceCwd }
+          : undefined);
       const catalogWorkspaceCwd =
-        targetWorkspaceCwd ??
-        workspace.workspaceCwd ??
-        connectionRef.current.workspaceCwd;
+        creationSessionContext?.kind === 'workspace'
+          ? creationSessionContext.cwd
+          : undefined;
       try {
         await createAndAttachSessionForPrompt({
           sessionActions: sessionActions as typeof sessionActions &
@@ -6317,11 +6672,14 @@ export function App({
           reasoningEffort,
           modeId,
           workspaceCwd: targetWorkspaceCwd,
+          sessionContext: creationSessionContext,
           worktree:
+            creationSessionContext?.kind === 'workspace' &&
             gitModeIntentRef.current.mode === 'worktree'
               ? { slug: gitModeIntentRef.current.slug }
               : undefined,
           branch:
+            creationSessionContext?.kind === 'workspace' &&
             gitModeIntentRef.current.mode === 'branch'
               ? { name: gitModeIntentRef.current.name }
               : undefined,
@@ -6356,6 +6714,9 @@ export function App({
           if (pendingReasoningIntentRef.current === reasoningIntent) {
             setPendingReasoningIntent(undefined);
           }
+          if (pendingSessionContextRef.current === requestedSessionContext) {
+            setPendingSessionContext(undefined);
+          }
         });
       } catch (error) {
         if (allocatedSessionId && catalogWorkspaceCwd) {
@@ -6366,7 +6727,9 @@ export function App({
       // One-shot: the picker targets only the *next* new session, so clear
       // it after creation. The next new chat defaults back to the primary
       // workspace unless the user picks one again.
-      setSelectedWorkspaceCwd(undefined);
+      if (creationSessionContext?.kind === 'workspace') {
+        setSelectedWorkspaceCwd(undefined);
+      }
       return allocatedSessionId;
     })();
     createSessionPromiseRef.current = promise;
@@ -6382,9 +6745,8 @@ export function App({
     lockedWorkspaceCwd,
     sessionActions,
     sessionCatalogController,
+    setPendingSessionContext,
     setPendingReasoningIntent,
-    workspace.workspaceCwd,
-    ordinaryWorkspaces,
   ]);
   const onSubmitBeforeRef = useRef(onSubmitBefore);
   onSubmitBeforeRef.current = onSubmitBefore;
@@ -6393,8 +6755,15 @@ export function App({
   const onSlashCommandRef = useRef(onSlashCommand);
   onSlashCommandRef.current = onSlashCommand;
   const getComposerWorkspaceCwd = useCallback(() => {
+    const productContext =
+      pendingSessionContextRef.current ?? connectionRef.current.sessionContext;
+    if (productContext && productContext.kind !== 'workspace') {
+      return undefined;
+    }
     if (connectionRef.current.sessionId) {
-      return connectionRef.current.workspaceCwd;
+      return productContext?.kind === 'workspace'
+        ? productContext.cwd
+        : connectionRef.current.workspaceCwd;
     }
     return (
       workspacesRef.current.find((entry) => entry.cwd === lockedWorkspaceCwd)
@@ -6934,21 +7303,24 @@ export function App({
     dialogOpen || mainView !== 'chat' || artifactPanelFullscreen;
   const mainVoiceTarget = useMemo(
     () =>
-      resolveVoiceWorkspaceTarget({
-        capabilities: workspace.capabilities,
-        intendedCwd: activeWorkspaceCwd,
-        sessionId: connection.sessionId,
-        workspaces:
-          workspace.capabilities?.workspaces || lockedWorkspaceCapability
-            ? ordinaryWorkspaces
-            : undefined,
-      }),
+      workspaceContextActive
+        ? resolveVoiceWorkspaceTarget({
+            capabilities: workspace.capabilities,
+            intendedCwd: activeWorkspaceCwd,
+            sessionId: connection.sessionId,
+            workspaces:
+              workspace.capabilities?.workspaces || lockedWorkspaceCapability
+                ? ordinaryWorkspaces
+                : undefined,
+          })
+        : undefined,
     [
       activeWorkspaceCwd,
       connection.sessionId,
       lockedWorkspaceCapability,
       workspace.capabilities,
       ordinaryWorkspaces,
+      workspaceContextActive,
     ],
   );
   const [voiceUserRevision, setVoiceUserRevision] = useState(0);
@@ -7601,9 +7973,13 @@ export function App({
   }, []);
 
   const workspaceSettingsState = useSettings({
-    autoLoad: true,
+    autoLoad: workspaceContextActive,
+    enabled: workspaceContextActive,
   });
-  const providersState = useProviders({ autoLoad: true });
+  const providersState = useProviders({
+    autoLoad: workspaceContextActive,
+    enabled: workspaceContextActive,
+  });
   // useProviders returns a fresh object each render, but its `reload` identity is
   // stable — pull it out so callbacks can depend on the function alone without
   // re-creating on every render (and without an exhaustive-deps warning).
@@ -7615,10 +7991,14 @@ export function App({
     setModelActionBusy(false);
   }, [logicalSessionKey]);
   const {
-    settings: workspaceSettings,
+    settings: loadedWorkspaceSettings,
     setValue: setWorkspaceSetting,
     reload: reloadWorkspaceSettings,
   } = workspaceSettingsState;
+  const workspaceSettings = useMemo(
+    () => (workspaceContextActive ? loadedWorkspaceSettings : []),
+    [loadedWorkspaceSettings, workspaceContextActive],
+  );
   const liveSetup = useLiveVoiceSetup(
     workspaceSettings.some(
       (setting) => setting.key === 'experimental.liveVoice.enabled',
@@ -8300,7 +8680,11 @@ export function App({
         lastTurnErrorIdRef.current != null
           ? new Error(`Turn error (block ${lastTurnErrorIdRef.current})`)
           : undefined;
-      if (workspaceCwd) {
+      const productContext = connectionRef.current.sessionContext;
+      if (
+        workspaceCwd &&
+        (!productContext || productContext.kind === 'workspace')
+      ) {
         sessionCatalogController.turnCompleted(workspaceCwd, sessionId);
         if (!sessionDisplayName) {
           scheduleDelayedActiveSessionDisplayNameRefresh(
@@ -8363,12 +8747,16 @@ export function App({
 
   useEffect(() => {
     if (connection.loadingTranscript) return;
+    if (connection.standaloneSession?.creationRecovery) {
+      return;
+    }
     if (!connection.sessionId && connection.missingSession) {
       // Keep the dead-session route visible until the user explicitly starts a
       // new chat; clearing it here would immediately hide the recovery state.
       lastNotifiedSessionIdRef.current = connection.sessionId;
       lastNotifiedWorkspaceIdRef.current = undefined;
       lastNotifiedWorkspaceCwdRef.current = undefined;
+      lastNotifiedNonWorkspaceContextRef.current = undefined;
       return;
     }
     const reportedWorkspaceCwd = connection.sessionId
@@ -8382,28 +8770,47 @@ export function App({
       activeWorkspace && !activeWorkspace.primary
         ? activeWorkspace.id
         : undefined;
+    const reportedSessionContext = connection.sessionId
+      ? connection.sessionContext
+      : (pendingSessionContext ?? connection.sessionContext);
+    const nonWorkspaceContext =
+      reportedSessionContext?.kind === 'standalone' ||
+      reportedSessionContext?.kind === 'live'
+        ? reportedSessionContext.kind
+        : undefined;
     if (
       lastNotifiedSessionIdRef.current === connection.sessionId &&
       lastNotifiedWorkspaceIdRef.current === workspaceId &&
-      lastNotifiedWorkspaceCwdRef.current === reportedWorkspaceCwd
+      lastNotifiedWorkspaceCwdRef.current === reportedWorkspaceCwd &&
+      lastNotifiedNonWorkspaceContextRef.current === nonWorkspaceContext
     ) {
       return;
     }
     lastNotifiedSessionIdRef.current = connection.sessionId;
     lastNotifiedWorkspaceIdRef.current = workspaceId;
     lastNotifiedWorkspaceCwdRef.current = reportedWorkspaceCwd;
-    onSessionIdChange?.(
-      connection.sessionId,
-      workspaceId,
-      reportedWorkspaceCwd,
-    );
+    lastNotifiedNonWorkspaceContextRef.current = nonWorkspaceContext;
+    if (nonWorkspaceContext) {
+      onSessionIdChange?.(connection.sessionId, undefined, undefined, {
+        kind: nonWorkspaceContext,
+      });
+    } else {
+      onSessionIdChange?.(
+        connection.sessionId,
+        workspaceId,
+        reportedWorkspaceCwd,
+      );
+    }
   }, [
     connection.missingSession,
     connection.loadingTranscript,
     connection.sessionId,
+    connection.sessionContext,
+    connection.standaloneSession?.creationRecovery,
     connection.workspaceCwd,
     onSessionIdChange,
     activeWorkspaceCwd,
+    pendingSessionContext,
     workspace.capabilities,
     workspaces,
   ]);
@@ -8431,6 +8838,11 @@ export function App({
       };
       if (workspaceCwd) {
         sessionCatalogController.renamed(workspaceCwd, sessionId, displayName);
+      } else if (
+        connectionRef.current.sessionId === sessionId &&
+        connectionRef.current.sessionContext?.kind === 'standalone'
+      ) {
+        setSessionStatusDisplayName(displayName);
       }
     },
     [sessionCatalogController],
@@ -8455,7 +8867,11 @@ export function App({
       reconciled.sessionId === sessionId &&
       reconciled.displayName === displayName;
     if (!alreadyReconciled) {
-      if (connection.workspaceCwd) {
+      if (
+        connection.workspaceCwd &&
+        (!connection.sessionContext ||
+          connection.sessionContext.kind === 'workspace')
+      ) {
         sessionCatalogController.renamed(
           connection.workspaceCwd,
           sessionId,
@@ -8471,6 +8887,7 @@ export function App({
   }, [
     connection.displayName,
     connection.sessionId,
+    connection.sessionContext,
     connection.workspaceCwd,
     logicalSessionKey,
     sessionCatalogController,
@@ -8647,6 +9064,10 @@ export function App({
   const pendingBranchRequestsRef = useRef(new Map<string, Promise<void>>());
   const branchCurrentSession = useCallback(
     (name?: string, atRecordId?: string) => {
+      if (!workspaceContextActive) {
+        pushToast('info', t('session.workspaceActionUnavailable'));
+        return;
+      }
       if (sessionWriteBlocked) return;
       if (!requireActiveSessionForLocalCommand()) return;
       const sourceSessionId = connectionRef.current.sessionId;
@@ -8726,6 +9147,7 @@ export function App({
       store,
       t,
       transcriptReloadSupported,
+      workspaceContextActive,
     ],
   );
   const handleBranchCurrentSession = useCallback(
@@ -8753,22 +9175,96 @@ export function App({
   }, []);
   const createNewSession = useCallback(
     async (
-      workspaceCwd?: string,
+      intent: NewSessionIntent,
+      /** Preserve the current full-page view and/or active panel while clearing. */
       opts?: {
-        /** Preserve the current full-page view and/or active panel while clearing. */
         keepView?: boolean;
         keepPanel?: boolean;
+        allowRecoveryReset?: boolean;
         /**
-         * Git mode the new draft starts with. Set here, in the same
-         * synchronous step that resets the previous intent, so the very
-         * first prompt — even one submitted while the clear is still in
-         * flight — sees it, and no later arm can land on a draft that has
-         * since been re-targeted or turned into a session.
+         * Git mode the new workspace draft starts with. Set here, in the same
+         * synchronous step that resets the previous intent, so the first
+         * prompt sees it even while the clear is still in flight.
          */
         gitIntent?: SessionGitIntent;
       },
     ) => {
-      const targetWorkspaceCwd = lockedWorkspaceCwd ?? workspaceCwd;
+      if (
+        connectionRef.current.standaloneSession?.creationRecovery &&
+        !opts?.allowRecoveryReset
+      ) {
+        pushToast('warning', t('session.recoveryBlocksAction'));
+        return false;
+      }
+      let nextContext: DaemonProductSessionContext | undefined;
+      let availableWorkspaces = workspacesRef.current;
+      if (intent.kind === 'workspace') {
+        nextContext = { kind: 'workspace', cwd: intent.cwd };
+      } else if (lockedWorkspaceCwd) {
+        nextContext = { kind: 'workspace', cwd: lockedWorkspaceCwd };
+      } else if (intent.kind === 'inherit') {
+        nextContext =
+          pendingSessionContextRef.current ??
+          connectionRef.current.sessionContext ??
+          (connectionRef.current.workspaceCwd
+            ? {
+                kind: 'workspace',
+                cwd: connectionRef.current.workspaceCwd,
+              }
+            : undefined);
+        if (nextContext?.kind === 'live') {
+          gitModeIntentRef.current = { mode: 'current' };
+          setGitModeIntent({ mode: 'current' });
+          try {
+            await workspace.client.startLive('new');
+            return true;
+          } catch (error) {
+            reportError(error, 'Failed to start a new Live chat');
+            return false;
+          }
+        }
+      } else {
+        let capabilities = workspaceCapabilitiesRef.current;
+        if (workspace.status === 'error') {
+          if (!refreshWorkspaceCapabilities) {
+            pushToast('info', t('session.capabilitiesFailed'));
+            return false;
+          }
+          try {
+            capabilities = await refreshWorkspaceCapabilities();
+          } catch (error) {
+            reportError(error, t('session.capabilitiesFailed'));
+            return false;
+          }
+        } else if (!workspaceCapabilitiesReady) {
+          pushToast('info', t('common.loading'));
+          return false;
+        }
+        if (!capabilities) {
+          pushToast('info', t('session.capabilitiesFailed'));
+          return false;
+        }
+        availableWorkspaces = (capabilities.workspaces ?? []).filter(
+          (entry) => entry.kind !== 'live',
+        );
+        if (
+          capabilities.features?.includes(STANDALONE_SESSIONS_CAPABILITY) ===
+          true
+        ) {
+          nextContext = { kind: 'standalone' };
+        } else {
+          const primaryCwd = availableWorkspaces.find(
+            (entry) => entry.primary && entry.trusted !== false,
+          )?.cwd;
+          nextContext = primaryCwd
+            ? { kind: 'workspace', cwd: primaryCwd }
+            : undefined;
+        }
+      }
+      const targetWorkspaceCwd =
+        nextContext?.kind === 'workspace' ? nextContext.cwd : undefined;
+      const previousPendingContext = pendingSessionContextRef.current;
+      setPendingSessionContext(nextContext);
       composerSourceVersionRef.current += 1;
       selectedWorkspaceCwdRef.current = targetWorkspaceCwd;
       setSelectedWorkspaceCwd(targetWorkspaceCwd);
@@ -8776,9 +9272,10 @@ export function App({
       // leaks into the next created session; a caller-supplied intent takes
       // its place. The ref is written too so a prompt admitted before the
       // next render reads the same answer.
-      const nextGitIntent: SessionGitIntent = opts?.gitIntent ?? {
-        mode: 'current',
-      };
+      const nextGitIntent: SessionGitIntent =
+        nextContext?.kind === 'workspace'
+          ? (opts?.gitIntent ?? { mode: 'current' })
+          : { mode: 'current' };
       gitModeIntentRef.current = nextGitIntent;
       setGitModeIntent(nextGitIntent);
       // Close the drawer before awaiting so a failed createSession() doesn't leave
@@ -8801,7 +9298,9 @@ export function App({
         focusRequest = scheduleComposerFocus();
         await Promise.all([
           clearPromise,
-          reloadLoadedSkills(targetWorkspaceCwd),
+          nextContext?.kind === 'workspace'
+            ? reloadLoadedSkills(targetWorkspaceCwd)
+            : Promise.resolve(undefined),
         ]);
         // Clear after successful clearSession — if it rejects, the old
         // session's worktree/branch state is preserved.
@@ -8809,6 +9308,7 @@ export function App({
         setSessionBranch(undefined);
         return true;
       } catch (error) {
+        setPendingSessionContext(previousPendingContext);
         if (composerFocusRequestRef.current === focusRequest) {
           composerFocusRequestRef.current += 1;
         }
@@ -8820,10 +9320,17 @@ export function App({
       closeMobileDrawer,
       closePanel,
       lockedWorkspaceCwd,
+      pushToast,
       reportError,
+      refreshWorkspaceCapabilities,
       reloadLoadedSkills,
       scheduleComposerFocus,
+      setPendingSessionContext,
       sessionActions,
+      t,
+      workspaceCapabilitiesReady,
+      workspace.client,
+      workspace.status,
     ],
   );
   /**
@@ -8851,7 +9358,8 @@ export function App({
         }
         if (connectionRef.current.sessionId) {
           if (connectionRef.current.workspaceCwd === targetCwd) return;
-          await createNewSession(workspaceCwd);
+          if (!targetCwd) return;
+          await createNewSession({ kind: 'workspace', cwd: targetCwd });
           return;
         }
         // The composer picker fires for its checked row too; re-selecting
@@ -8862,16 +9370,22 @@ export function App({
         composerSourceVersionRef.current += 1;
         selectedWorkspaceCwdRef.current = workspaceCwd;
         setSelectedWorkspaceCwd(workspaceCwd);
+        setPendingSessionContext(
+          targetCwd ? { kind: 'workspace', cwd: targetCwd } : undefined,
+        );
         // The intent was armed for the previous draft workspace; a switch
         // must not carry a branch/worktree request over to another repo.
-        if (!sameTarget) setGitModeIntent({ mode: 'current' });
+        if (!sameTarget) {
+          gitModeIntentRef.current = { mode: 'current' };
+          setGitModeIntent({ mode: 'current' });
+        }
       } finally {
         if (workspaceSwitchTokenRef.current === token) {
           workspaceSwitchTokenRef.current = null;
         }
       }
     },
-    [createNewSession],
+    [createNewSession, setPendingSessionContext],
   );
 
   /** Refreshes once and switches only from the accepted capability snapshot. */
@@ -9088,20 +9602,31 @@ export function App({
 
       const activeSessionId = connectionRef.current.sessionId;
       if (
-        pending.sourceSessionId !== undefined &&
-        activeSessionId !== undefined &&
-        activeSessionId !== pending.sourceSessionId
+        (pending.mode === 'cleared' &&
+          pending.sourceSessionId !== undefined &&
+          activeSessionId !== undefined &&
+          activeSessionId !== pending.sourceSessionId) ||
+        (pending.mode === 'live' &&
+          activeSessionId !== undefined &&
+          activeSessionId !== pending.sourceSessionId &&
+          connectionRef.current.sessionContext?.kind !== 'live')
       ) {
         pendingNewSessionSuggestionSubmitRef.current = null;
         setIsStartingNewSessionSuggestion(false);
         return;
       }
 
-      if (!pending.sessionClearCompleted) {
+      if (!pending.newSessionReady) {
         return;
       }
 
-      if (activeSessionId !== undefined) {
+      if (
+        pending.mode === 'live'
+          ? activeSessionId === undefined ||
+            activeSessionId === pending.sourceSessionId ||
+            connectionRef.current.sessionContext?.kind !== 'live'
+          : activeSessionId !== undefined
+      ) {
         return;
       }
 
@@ -9118,7 +9643,14 @@ export function App({
         if (!latestPending || latestPending.token !== pending.token) {
           return;
         }
-        if (connectionRef.current.sessionId !== undefined) {
+        const latestSessionId = connectionRef.current.sessionId;
+        if (
+          latestPending.mode === 'live'
+            ? latestSessionId === undefined ||
+              latestSessionId === latestPending.sourceSessionId ||
+              connectionRef.current.sessionContext?.kind !== 'live'
+            : latestSessionId !== undefined
+        ) {
           pendingNewSessionSuggestionSubmitRef.current = null;
           setIsStartingNewSessionSuggestion(false);
           return;
@@ -9151,13 +9683,19 @@ export function App({
     setIsStartingNewSessionSuggestion(true);
     const token = newSessionSuggestionSubmitTokenRef.current + 1;
     newSessionSuggestionSubmitTokenRef.current = token;
+    const mode =
+      (pendingSessionContextRef.current ?? connectionRef.current.sessionContext)
+        ?.kind === 'live'
+        ? 'live'
+        : 'cleared';
     pendingNewSessionSuggestionSubmitRef.current = {
       token,
       sourceSessionId: connectionRef.current.sessionId,
-      sessionClearCompleted: false,
+      mode,
+      newSessionReady: false,
       submitScheduled: false,
     };
-    void createNewSession().then((created) => {
+    void createNewSession({ kind: 'inherit' }).then((created) => {
       const pending = pendingNewSessionSuggestionSubmitRef.current;
       if (!created || pending?.token !== token) {
         if (pending?.token === token) {
@@ -9168,9 +9706,16 @@ export function App({
       }
       pendingNewSessionSuggestionSubmitRef.current = {
         ...pending,
-        sessionClearCompleted: true,
+        newSessionReady: true,
       };
-      onSessionIdChange?.(undefined);
+      if (mode === 'cleared') {
+        const nextContext = pendingSessionContextRef.current;
+        if (nextContext?.kind === 'standalone') {
+          onSessionIdChange?.(undefined, undefined, undefined, nextContext);
+        } else {
+          onSessionIdChange?.(undefined);
+        }
+      }
       flushPendingNewSessionSuggestionSubmit(token);
     });
   }, [
@@ -9258,11 +9803,12 @@ export function App({
         requestOpenSplitView();
       },
       openSessionOverview: () => {
+        if (!workspaceContextActive) return;
         closeMobileDrawer();
         openPanel('sessions');
       },
       openSessionDrawer,
-      createNewSession: () => createNewSession(),
+      createNewSession: () => createNewSession({ kind: 'global' }),
       createSideTask,
       respondToPendingPermission,
     }),
@@ -9274,6 +9820,7 @@ export function App({
       openSessionDrawer,
       requestOpenSplitView,
       respondToPendingPermission,
+      workspaceContextActive,
     ],
   );
   useEffect(() => {
@@ -9290,9 +9837,14 @@ export function App({
     creatingMissingSessionRef.current = true;
     setIsCreatingMissingSession(true);
     try {
-      const success = await createNewSession();
+      const success = await createNewSession({ kind: 'global' });
       if (success) {
-        onSessionIdChange?.(undefined);
+        const nextContext = pendingSessionContextRef.current;
+        if (nextContext?.kind === 'standalone') {
+          onSessionIdChange?.(undefined, undefined, undefined, nextContext);
+        } else {
+          onSessionIdChange?.(undefined);
+        }
       }
     } finally {
       creatingMissingSessionRef.current = false;
@@ -9302,8 +9854,21 @@ export function App({
 
   const sessionOpenInvocationRef = useRef(0);
   const loadSidebarSession = useCallback(
-    async (sessionId: string, workspaceCwd?: string) => {
+    async (
+      sessionId: string,
+      workspaceCwd?: string,
+      sessionContext?: DaemonProductSessionContext,
+    ) => {
       const invocation = ++sessionOpenInvocationRef.current;
+      const previousPendingContext = pendingSessionContextRef.current;
+      const targetContext =
+        sessionContext ??
+        (workspaceCwd
+          ? isKnownLiveWorkspaceCwd(workspaceCwd)
+            ? ({ kind: 'live' } as const)
+            : ({ kind: 'workspace', cwd: workspaceCwd } as const)
+          : undefined);
+      setPendingSessionContext(targetContext);
       composerFocusRequestRef.current += 1;
       setSidebarSwitchingSessionId(sessionId);
       closeMobileDrawer();
@@ -9313,19 +9878,180 @@ export function App({
       // Explicit navigation cancels any pending shrink-fold split restore.
       splitFoldedByShrinkRef.current = false;
       try {
-        await sessionActions.loadSession(sessionId, { workspaceCwd });
+        await sessionActions.loadSession(sessionId, {
+          workspaceCwd:
+            targetContext?.kind === 'workspace'
+              ? targetContext.cwd
+              : targetContext
+                ? undefined
+                : workspaceCwd,
+          sessionContext: targetContext,
+        });
         if (sessionOpenInvocationRef.current === invocation) {
           composerSourceVersionRef.current += 1;
+          setPendingSessionContext(undefined);
         }
       } catch (error) {
         if (sessionOpenInvocationRef.current === invocation) {
           setSidebarSwitchingSessionId(null);
+          setPendingSessionContext(previousPendingContext);
         }
         throw error;
       }
     },
-    [closeMobileDrawer, closePanel, sessionActions],
+    [
+      closeMobileDrawer,
+      closePanel,
+      isKnownLiveWorkspaceCwd,
+      sessionActions,
+      setPendingSessionContext,
+    ],
   );
+
+  const handleCheckStandaloneRecovery = useCallback(async () => {
+    const recovery = connectionRef.current.standaloneSession?.creationRecovery;
+    const sessionId = getStandaloneRecoverySessionId(recovery);
+    if (!sessionId || standaloneRecoveryResolution === 'checking') return;
+    const owner = sessionOwnerGuard.capture();
+    const isCurrent = () =>
+      owner.isCurrent() &&
+      connectionRef.current.sessionId === sessionId &&
+      getStandaloneRecoverySessionId(
+        connectionRef.current.standaloneSession?.creationRecovery,
+      ) === sessionId;
+    setStandaloneRecoveryResolution('checking');
+    try {
+      for (let attempt = 0; ; attempt += 1) {
+        let lookup: DaemonStandaloneSessionLookup;
+        try {
+          lookup = await workspace.client.getStandaloneSession(sessionId);
+        } catch (error) {
+          if (!isCurrent()) return;
+          if (isStandaloneSessionNotFoundError(error)) {
+            setStandaloneRecoveryResolution('absent');
+            return;
+          }
+          setStandaloneRecoveryResolution('unknown');
+          reportError(error, t('session.recoveryCheckFailed'));
+          return;
+        }
+        if (!isCurrent()) return;
+        if (!('state' in lookup)) {
+          if (lookup.isArchived) {
+            setStandaloneRecoveryResolution('archived');
+            return;
+          }
+          await loadSidebarSession(sessionId, undefined, {
+            kind: 'standalone',
+          });
+          return;
+        }
+        const delay = STANDALONE_RECOVERY_POLL_DELAYS_MS[attempt];
+        if (delay === undefined) {
+          setStandaloneRecoveryResolution('creating');
+          return;
+        }
+        await new Promise<void>((resolve) => window.setTimeout(resolve, delay));
+        if (!isCurrent()) return;
+      }
+    } catch (error) {
+      if (!isCurrent()) return;
+      setStandaloneRecoveryResolution('unknown');
+      reportError(error, t('session.recoveryCheckFailed'));
+    }
+  }, [
+    loadSidebarSession,
+    reportError,
+    sessionOwnerGuard,
+    standaloneRecoveryResolution,
+    t,
+    workspace.client,
+  ]);
+
+  const handleUnarchiveRecoveredStandalone = useCallback(async () => {
+    const sessionId = getStandaloneRecoverySessionId(
+      connectionRef.current.standaloneSession?.creationRecovery,
+    );
+    if (!sessionId || standaloneRecoveryResolution === 'checking') return;
+    const owner = sessionOwnerGuard.capture();
+    setStandaloneRecoveryResolution('checking');
+    try {
+      const result = await workspace.client.unarchiveStandaloneSessions([
+        sessionId,
+      ]);
+      if (!owner.isCurrent() || connectionRef.current.sessionId !== sessionId) {
+        return;
+      }
+      if (
+        !result.unarchived.includes(sessionId) &&
+        !result.alreadyActive.includes(sessionId)
+      ) {
+        if (result.notFound.includes(sessionId)) {
+          setStandaloneRecoveryResolution('absent');
+          return;
+        }
+        const failure = result.errors.find(
+          (entry) => entry.sessionId === sessionId,
+        );
+        throw new Error(failure?.message ?? t('session.unarchiveFailed'));
+      }
+      await loadSidebarSession(sessionId, undefined, { kind: 'standalone' });
+    } catch (error) {
+      if (!owner.isCurrent()) return;
+      setStandaloneRecoveryResolution('archived');
+      reportError(error, t('session.unarchiveFailed'));
+    }
+  }, [
+    loadSidebarSession,
+    reportError,
+    sessionOwnerGuard,
+    standaloneRecoveryResolution,
+    t,
+    workspace.client,
+  ]);
+
+  const handleRetryStandaloneCreation = useCallback(() => {
+    void createNewSession({ kind: 'inherit' }, { allowRecoveryReset: true });
+  }, [createNewSession]);
+
+  const handleRepairStandaloneDirectory = useCallback(async () => {
+    const current = connectionRef.current;
+    const sessionId = current.sessionId;
+    if (
+      !sessionId ||
+      current.sessionContext?.kind !== 'standalone' ||
+      current.standaloneSession?.errorCode !== 'working_directory_missing' ||
+      standaloneRepairBusy
+    ) {
+      return;
+    }
+    const owner = sessionOwnerGuard.capture();
+    setStandaloneRepairBusy(true);
+    try {
+      await workspace.client.repairStandaloneSessionDirectory(sessionId);
+      if (!owner.isCurrent() || connectionRef.current.sessionId !== sessionId) {
+        return;
+      }
+      await sessionActions.reloadSession(new AbortController().signal);
+      if (owner.isCurrent() && connectionRef.current.sessionId === sessionId) {
+        pushToast('info', t('session.repairSucceeded'));
+      }
+    } catch (error) {
+      if (owner.isCurrent()) {
+        reportError(error, t('session.repairFailed'));
+      }
+    } finally {
+      if (owner.isCurrent()) setStandaloneRepairBusy(false);
+    }
+  }, [
+    pushToast,
+    reportError,
+    sessionActions,
+    sessionOwnerGuard,
+    standaloneRepairBusy,
+    t,
+    workspace.client,
+  ]);
 
   // Clicking a card in the Session Overview panel switches the current window
   // to that session. loadSidebarSession already closes the panel, so this just
@@ -9335,7 +10061,14 @@ export function App({
       // Explicit navigation cancels any pending shrink-fold split restore.
       splitFoldedByShrinkRef.current = false;
       setMainView('chat');
-      void loadSidebarSession(sessionId, workspaceCwd).catch(
+      const currentContext =
+        pendingSessionContextRef.current ??
+        connectionRef.current.sessionContext;
+      const inheritedContext =
+        workspaceCwd === undefined && currentContext?.kind !== 'workspace'
+          ? currentContext
+          : undefined;
+      void loadSidebarSession(sessionId, workspaceCwd, inheritedContext).catch(
         (error: unknown) => {
           reportError(error, 'Failed to open session');
         },
@@ -9902,6 +10635,23 @@ export function App({
     ) => {
       if (sessionWriteBlockedRef.current) return false;
       if (
+        !workspaceContextActive &&
+        ((images?.length ?? 0) > 0 || (files?.length ?? 0) > 0)
+      ) {
+        pushToast('warning', t('composerAdd.file.attachDisabled'));
+        return false;
+      }
+      if (
+        connectionRef.current.standaloneSession?.creationRecovery ||
+        connectionRef.current.standaloneSession?.errorCode ===
+          'working_directory_missing' ||
+        connectionRef.current.standaloneSession?.errorCode ===
+          'working_directory_compromised'
+      ) {
+        pushToast('warning', t('session.recoveryBlocksAction'));
+        return false;
+      }
+      if (
         unknownPromptAdmissionRef.current?.payloadAvailable &&
         unknownPromptAdmissionRef.current.sessionId ===
           connectionRef.current.sessionId
@@ -10080,6 +10830,18 @@ export function App({
         const match = text.match(SLASH_COMMAND_PATTERN);
         if (match) {
           const cmd = match[1];
+          const standaloneResumeSessionId =
+            cmd === 'resume' && effectiveSessionContext?.kind === 'standalone'
+              ? text.slice(match[0].length).trim()
+              : '';
+          if (
+            !workspaceContextActive &&
+            NON_WORKSPACE_BLOCKED_COMMANDS.has(cmd) &&
+            !standaloneResumeSessionId
+          ) {
+            pushToast('info', t('session.workspaceActionUnavailable'));
+            return true;
+          }
           if (hiddenCommands.has(normalizeHiddenCommand(cmd))) {
             if (commandBlocked) {
               return enqueueBlockedCommand(text);
@@ -10314,6 +11076,13 @@ export function App({
           }
           if (cmd === 'model') {
             const modelArg = text.slice(match[0].length).trim();
+            if (
+              !workspaceContextActive &&
+              /^(?:--fast|--voice|--vision)(?:\s|$)/.test(modelArg)
+            ) {
+              pushToast('info', t('session.workspaceActionUnavailable'));
+              return true;
+            }
             if (modelArg === '--fast') {
               setModelDialogMode('fast');
               return true;
@@ -10683,11 +11452,11 @@ export function App({
             return true;
           }
           if (cmd === 'clear') {
-            createNewSession();
+            void createNewSession({ kind: 'inherit' });
             return true;
           }
           if (cmd === 'new' || cmd === 'reset') {
-            createNewSession();
+            void createNewSession({ kind: 'inherit' });
             return true;
           }
           if (cmd === 'rename') {
@@ -10713,12 +11482,18 @@ export function App({
             const renamedSessionId = connectionRef.current.sessionId;
             const renamedWorkspaceCwd = connectionRef.current.workspaceCwd;
             const owner = sessionOwnerGuard.capture();
-            sessionActions
-              .renameSession(displayName)
+            const renamePromise =
+              effectiveSessionContext?.kind === 'standalone' && renamedSessionId
+                ? workspace.client.renameStandaloneSession(
+                    renamedSessionId,
+                    displayName,
+                  )
+                : sessionActions.renameSession(displayName);
+            renamePromise
               .then(() => {
                 if (renamedSessionId) {
                   reconcileCatalogRename(
-                    renamedWorkspaceCwd,
+                    workspaceContextActive ? renamedWorkspaceCwd : undefined,
                     renamedSessionId,
                     displayName,
                   );
@@ -10732,7 +11507,7 @@ export function App({
                 ]);
               })
               .catch((error: unknown) => {
-                if (renamedWorkspaceCwd) {
+                if (workspaceContextActive && renamedWorkspaceCwd) {
                   sessionCatalogController.invalidateWorkspace(
                     renamedWorkspaceCwd,
                   );
@@ -10745,7 +11520,13 @@ export function App({
           if (cmd === 'resume') {
             const sessionId = text.slice(match[0].length).trim();
             if (sessionId) {
-              loadSidebarSession(sessionId).catch((error: unknown) => {
+              loadSidebarSession(
+                sessionId,
+                undefined,
+                effectiveSessionContext?.kind === 'standalone'
+                  ? { kind: 'standalone' }
+                  : undefined,
+              ).catch((error: unknown) => {
                 reportError(error, 'Failed to load session');
               });
             } else {
@@ -10799,11 +11580,14 @@ export function App({
           }
           if (cmd === 'status' || cmd === 'about') {
             echoLocalCommandIfIdle(text);
-            Promise.all([
-              workspaceActions.loadPreflight().catch(() => null),
-              workspaceActions.loadProviders().catch(() => null),
-              workspaceActions.loadEnv().catch(() => null),
-            ])
+            (workspaceContextActive
+              ? Promise.all([
+                  workspaceActions.loadPreflight().catch(() => null),
+                  workspaceActions.loadProviders().catch(() => null),
+                  workspaceActions.loadEnv().catch(() => null),
+                ])
+              : Promise.resolve([null, null, null] as const)
+            )
               .then(([preflight, providers, env]) => {
                 const sys = collectSystemInfo(preflight, env);
 
@@ -10867,10 +11651,13 @@ export function App({
           if (cmd === 'bug') {
             const bugTitle = text.slice(match[0].length).trim();
             if (echoOrDeferLocalCommand(text, images)) return true;
-            Promise.all([
-              workspaceActions.loadPreflight().catch(() => null),
-              workspaceActions.loadEnv().catch(() => null),
-            ])
+            (workspaceContextActive
+              ? Promise.all([
+                  workspaceActions.loadPreflight().catch(() => null),
+                  workspaceActions.loadEnv().catch(() => null),
+                ])
+              : Promise.resolve([null, null] as const)
+            )
               .then(([preflight, env]) => {
                 const sys = collectSystemInfo(preflight, env);
                 const qwenCodeVersion =
@@ -11063,6 +11850,9 @@ export function App({
       showContextUsage,
       t,
       workspaceActions,
+      workspace.client,
+      workspaceContextActive,
+      effectiveSessionContext,
       updateFailedPrompt,
       updateUnknownPromptAdmission,
       isGoalGateBlocked,
@@ -11571,8 +12361,14 @@ export function App({
     };
   }, [resetEscapeState]);
 
+  const standaloneInteractionBlocked = Boolean(
+    standaloneCreationRecovery ||
+      standaloneDirectoryErrorCode === 'working_directory_missing' ||
+      standaloneDirectoryErrorCode === 'working_directory_compromised',
+  );
   const isDisabled =
     sessionWriteBlocked ||
+    standaloneInteractionBlocked ||
     shouldDisableComposerInput({
       pendingApproval: pendingApproval !== null,
       isPreparingPrompt,
@@ -11775,6 +12571,7 @@ export function App({
 
   const handleCloseAuthDialog = useCallback(() => {
     setShowAuthDialog(false);
+    if (!workspaceContextActive) return;
     // The provider install flow doesn't broadcast a settings change, so refresh
     // the model list on close to surface any newly added models. Log a failed
     // reload (leaves stale model data) rather than swallowing it.
@@ -11784,11 +12581,12 @@ export function App({
         err,
       );
     });
-  }, [reloadProviders]);
+  }, [reloadProviders, workspaceContextActive]);
 
   const handleFallbacksConfirm = useCallback(
     (baseIds: string[]) => {
       setShowFallbacksDialog(false);
+      if (!workspaceContextActive) return;
       setWorkspaceSetting(
         modelSettingScope,
         'modelFallbacks',
@@ -11822,11 +12620,13 @@ export function App({
       reportError,
       store,
       t,
+      workspaceContextActive,
     ],
   );
 
   const handleFastModelSelect = useCallback(
     (modelId: string) => {
+      if (!workspaceContextActive) return;
       if (
         streamingState !== 'idle' ||
         sessionHasActivePromptRef.current ||
@@ -11888,6 +12688,7 @@ export function App({
       modelSettingScope,
       sessionOwnerGuard,
       isGoalGateBlocked,
+      workspaceContextActive,
     ],
   );
 
@@ -11917,6 +12718,7 @@ export function App({
 
   const handleVisionModelSelect = useCallback(
     (modelId: string) => {
+      if (!workspaceContextActive) return;
       // Model IDs from the picker arrive in ACP format: `modelId(authType)`.
       // Core's resolveVisionModelSelection() expects `authType:modelId`.
       const encoded = encodeVisionModelForSetting(modelId);
@@ -11924,7 +12726,13 @@ export function App({
         (error: unknown) => reportError(error, t('model.setVision')),
       );
     },
-    [modelSettingScope, reportError, setWorkspaceSetting, t],
+    [
+      modelSettingScope,
+      reportError,
+      setWorkspaceSetting,
+      t,
+      workspaceContextActive,
+    ],
   );
 
   const modelHandlers: Record<ModelDialogMode, (id: string) => void> = {
@@ -11945,37 +12753,52 @@ export function App({
   }, [modelDialogMode, showFallbacksDialog, showAuthDialog]);
 
   const useWorkspaceSkillSnapshot =
+    workspaceContextActive &&
     loadedSkillsReady &&
     (!connection.sessionId ||
       connection.skills === undefined ||
       (loadedSkillsFallback?.sessionId === connection.sessionId &&
         loadedSkillsFallback.workspaceCwd === connection.workspaceCwd));
-  const composerSkills = useMemo(
-    () =>
-      useWorkspaceSkillSnapshot
-        ? loadedSkills
-        : availableSessionSkillInfos(
+  const composerSkills = useMemo(() => {
+    if (!workspaceContextActive) {
+      return pendingSessionContext === undefined && connection.sessionId
+        ? availableSessionSkillInfos(
             connection.skills ?? [],
             connection.commands ?? [],
-          ),
-    [
-      connection.commands,
-      connection.skills,
-      loadedSkills,
-      useWorkspaceSkillSnapshot,
-    ],
-  );
+          )
+        : [];
+    }
+    return useWorkspaceSkillSnapshot
+      ? loadedSkills
+      : availableSessionSkillInfos(
+          connection.skills ?? [],
+          connection.commands ?? [],
+        );
+  }, [
+    connection.commands,
+    connection.sessionId,
+    connection.skills,
+    loadedSkills,
+    pendingSessionContext,
+    useWorkspaceSkillSnapshot,
+    workspaceContextActive,
+  ]);
   const commands = useMemo(() => {
     const previousSkillNames = new Set(
       (connection.skills ?? []).map((skill) => skill.toLowerCase()),
     );
+    const connectionCommands =
+      !workspaceContextActive &&
+      (pendingSessionContext !== undefined || !connection.sessionId)
+        ? []
+        : (connection.commands ?? []);
     const retainedCommands = useWorkspaceSkillSnapshot
-      ? (connection.commands ?? []).filter(
+      ? connectionCommands.filter(
           (command) =>
             command.source !== 'skill' &&
             !previousSkillNames.has(command.name.toLowerCase()),
         )
-      : (connection.commands ?? []);
+      : connectionCommands;
     const refreshedSkillCommands = useWorkspaceSkillSnapshot
       ? loadedSkills.map((skill) => ({
           name: skill.name,
@@ -11995,6 +12818,11 @@ export function App({
       t,
     )
       .filter(
+        (command) =>
+          workspaceContextActive ||
+          !NON_WORKSPACE_BLOCKED_COMMANDS.has(command.name.toLowerCase()),
+      )
+      .filter(
         (command) => !hiddenCommands.has(normalizeHiddenCommand(command.name)),
       )
       .map((command) => {
@@ -12009,18 +12837,21 @@ export function App({
   }, [
     additionalSlashCommands,
     connection.commands,
+    connection.sessionId,
     connection.skills,
     hiddenCommands,
     loadedSkills,
+    pendingSessionContext,
     sideTasksAvailable,
     t,
     useWorkspaceSkillSnapshot,
+    workspaceContextActive,
   ]);
 
   const welcomeHeaderProps = useMemo(
     () => ({
       version: connection.capabilities?.qwenCodeVersion || '',
-      cwd: connection.workspaceCwd || '',
+      cwd: workspaceContextActive ? connection.workspaceCwd || '' : '',
       currentModel,
       currentMode,
       hideTips: hideTipsSetting?.values.effective === true,
@@ -12031,6 +12862,7 @@ export function App({
       currentModel,
       currentMode,
       hideTipsSetting?.values.effective,
+      workspaceContextActive,
     ],
   );
 
@@ -12394,7 +13226,7 @@ export function App({
               elevated={artifactPanelFullscreen}
             />
           )}
-          {showResumeDialog && (
+          {workspaceContextActive && showResumeDialog && (
             <DialogShell
               title={t('resume.title')}
               size="lg"
@@ -12411,7 +13243,8 @@ export function App({
               />
             </DialogShell>
           )}
-          {modelDialogMode && (
+          {modelDialogMode &&
+            (workspaceContextActive || modelDialogMode === 'main') && (
             <DialogShell
               title={t(MODE_TITLE_KEY[modelDialogMode])}
               size="lg"
@@ -12466,7 +13299,7 @@ export function App({
               <ToolsDialog />
             </DialogShell>
           )}
-          {gitDialog && (
+          {workspaceContextActive && gitDialog && (
             <GitDialog
               key={`${gitDialog.workspaceCwd}:${gitDialog.gitCwd ?? ''}:${gitDialog.view}`}
               workspaceCwd={gitDialog.workspaceCwd}
@@ -12502,7 +13335,7 @@ export function App({
               />
             </DialogShell>
           )}
-          {showMemoryDialog && (
+          {workspaceContextActive && showMemoryDialog && (
             <DialogShell
               title={t('memory.menu')}
               size="lg"
@@ -12571,7 +13404,7 @@ export function App({
               />
             </DialogShell>
           )}
-          {showFallbacksDialog && (
+          {workspaceContextActive && showFallbacksDialog && (
             <DialogShell
               title={t('settings.models.fallbacks.title')}
               size="md"
@@ -12586,7 +13419,7 @@ export function App({
               />
             </DialogShell>
           )}
-          {showDeleteDialog && (
+          {workspaceContextActive && showDeleteDialog && (
             <DialogShell
               title={t('delete.title')}
               size="lg"
@@ -12618,7 +13451,7 @@ export function App({
               />
             </DialogShell>
           )}
-          {showReleaseDialog && (
+          {workspaceContextActive && showReleaseDialog && (
             <DialogShell
               title={t('release.title')}
               size="lg"
@@ -12660,7 +13493,9 @@ export function App({
               />
             </DialogShell>
           )}
-          {!lockedWorkspaceCwd && showAddWorkspaceDialog && (
+          {workspaceContextActive &&
+            !lockedWorkspaceCwd &&
+            showAddWorkspaceDialog && (
             <AddWorkspaceDialog
               onClose={() => setShowAddWorkspaceDialog(false)}
               onAdd={handleAddWorkspace}
@@ -12773,26 +13608,49 @@ export function App({
                     closeMobileDrawer();
                     openPanel('sessions');
                   }}
-                  canOpenSessionsOverview
+                  canOpenSessionsOverview={workspaceContextActive}
                   onOpenSplitView={() => {
                     closeMobileDrawer();
                     openSplitView();
                   }}
-                  canOpenSplitView={isLargeScreen}
+                  canOpenSplitView={isLargeScreen && workspaceContextActive}
                   theme={selectedTheme}
                   onThemeChange={(theme) => {
                     handleThemeChange(theme);
-                    void setWorkspaceSetting(
-                      'workspace',
-                      THEME_SETTING_KEY,
-                      webShellThemeToSettingValue(theme),
-                    );
+                    if (workspaceContextActive) {
+                      void setWorkspaceSetting(
+                        'workspace',
+                        THEME_SETTING_KEY,
+                        webShellThemeToSettingValue(theme),
+                      );
+                    }
                   }}
-                  onNewSession={(workspaceCwd) => createNewSession(workspaceCwd)}
+                  onNewSession={(workspaceCwd) =>
+                    createNewSession(
+                      typeof workspaceCwd === 'string'
+                        ? { kind: 'workspace', cwd: workspaceCwd }
+                        : { kind: 'global' },
+                    )
+                  }
+                  globalNewSessionUsesStandalone={
+                    standaloneSessionsSupported && !lockedWorkspaceCwd
+                  }
                   onLoadSession={(sessionId, workspaceCwd) => {
                     setMainView('chat');
                     return loadSidebarSession(sessionId, workspaceCwd);
                   }}
+                  onLoadStandaloneSession={(sessionId) => {
+                    setMainView('chat');
+                    return loadSidebarSession(
+                      sessionId,
+                      undefined,
+                      { kind: 'standalone' },
+                    );
+                  }}
+                  onStandaloneNotice={(message) =>
+                    pushToast('info', message)
+                  }
+                  projectFeaturesEnabled={workspaceContextActive}
                   onSelectCurrentSession={() => {
                     closeMobileDrawer();
                     setMainView('chat');
@@ -12806,9 +13664,26 @@ export function App({
                   onMobileClose={closeMobileDrawer}
                   selectedWorkspaceCwd={selectedWorkspaceCwd}
                   onSelectWorkspace={(workspaceCwd) => {
+                    const targetWorkspaceCwd =
+                      workspaceCwd ??
+                      workspacesRef.current.find(
+                        (entry) =>
+                          entry.primary && entry.trusted !== false,
+                      )?.cwd;
+                    const sameTarget =
+                      workspaceCwd === selectedWorkspaceCwdRef.current;
+                    composerSourceVersionRef.current += 1;
+                    selectedWorkspaceCwdRef.current = workspaceCwd;
                     setSelectedWorkspaceCwd(workspaceCwd);
-                    // Same one-shot rule as the composer's own selector.
-                    setGitModeIntent({ mode: 'current' });
+                    setPendingSessionContext(
+                      targetWorkspaceCwd
+                        ? { kind: 'workspace', cwd: targetWorkspaceCwd }
+                        : undefined,
+                    );
+                    if (!sameTarget) {
+                      gitModeIntentRef.current = { mode: 'current' };
+                      setGitModeIntent({ mode: 'current' });
+                    }
                   }}
                   onOpenGitDiff={(workspaceCwd) =>
                     setGitDialog({
@@ -12847,15 +13722,26 @@ export function App({
                     closeMobileDrawer();
                     openPanel(target);
                   }}
-                  onNewWorktreeSession={(workspaceCwd) =>
+                  onNewWorktreeSession={(workspaceCwd) => {
                     // The intent travels with the draft it belongs to: set
                     // inside createNewSession's synchronous step, it is what
                     // the first prompt reads, and any later session start or
                     // workspace switch resets it like any other intent.
-                    createNewSession(workspaceCwd, {
-                      gitIntent: { mode: 'worktree' },
-                    })
-                  }
+                    const targetWorkspaceCwd =
+                      workspaceCwd ??
+                      lockedWorkspaceCwd ??
+                      workspacesRef.current.find(
+                        (entry) =>
+                          entry.primary && entry.trusted !== false,
+                      )?.cwd;
+                    if (!targetWorkspaceCwd) return false;
+                    return createNewSession(
+                      { kind: 'workspace', cwd: targetWorkspaceCwd },
+                      {
+                        gitIntent: { mode: 'worktree' },
+                      },
+                    );
+                  }}
                   branding={sidebarOptions.branding}
                   primaryNav={sidebarOptions.primaryNav}
                   showSessionSourceSwitch={
@@ -12913,7 +13799,9 @@ export function App({
                       {renderChatHeader({
                         sessionId: connection.sessionId,
                         sessionName: sessionDisplayName,
-                        workspaceCwd: connection.workspaceCwd,
+                        workspaceCwd: workspaceContextActive
+                          ? connection.workspaceCwd
+                          : undefined,
                         items: chatHeaderItems,
                         environmentPanelOpen: environmentPanelVisible,
                         rightPanelOpen: artifactPanelOpen,
@@ -12929,8 +13817,9 @@ export function App({
                                 ),
                             }
                           : {}),
-                        onOpenLocalControlSettings:
-                          handleOpenLocalControlSettings,
+                        onOpenLocalControlSettings: workspaceContextActive
+                          ? handleOpenLocalControlSettings
+                          : undefined,
                       })}
                     </div>
                   ) : (
@@ -12964,7 +13853,9 @@ export function App({
                           : undefined
                       }
                       onOpenLocalControlSettings={
-                        handleOpenLocalControlSettings
+                        workspaceContextActive
+                          ? handleOpenLocalControlSettings
+                          : undefined
                       }
                     />
                   )}
@@ -13032,7 +13923,8 @@ export function App({
                     </svg>
                   </button>
                 )}
-              {activePanel && (
+              {activePanel &&
+                (workspaceContextActive || activePanel === 'status') && (
                 <section
                   className={styles.panelHost}
                   role="region"
@@ -13078,14 +13970,22 @@ export function App({
                         // split restore.
                         splitFoldedByShrinkRef.current = false;
                         const current = connectionRef.current;
+                        const currentSessionId = current.sessionId;
                         const currentWorkspaceCwd =
                           current.workspaceCwd ||
                           lockedWorkspaceCwd ||
                           workspacesRef.current.find(
                             (entry) => entry.primary,
                           )?.cwd;
+                        if (!currentWorkspaceCwd) {
+                          closePanel();
+                          return;
+                        }
                         const openInvocation = sessionOpenInvocationRef.current;
-                        void createNewSession(currentWorkspaceCwd).then(
+                        void createNewSession({
+                          kind: 'workspace',
+                          cwd: currentWorkspaceCwd,
+                        }).then(
                           (created) => {
                             const latest = connectionRef.current;
                             const latestWorkspaceCwd =
@@ -13099,7 +13999,7 @@ export function App({
                               sessionOpenInvocationRef.current ===
                                 openInvocation &&
                               (latest.sessionId === undefined ||
-                                (latest.sessionId === current.sessionId &&
+                                (latest.sessionId === currentSessionId &&
                                   latestWorkspaceCwd === currentWorkspaceCwd))
                             ) {
                               onSessionIdChange?.(undefined);
@@ -13269,7 +14169,10 @@ export function App({
                             return;
                           }
                           const cleared = await createNewSession(
-                            removed.workspaceCwd || undefined,
+                            {
+                              kind: 'workspace',
+                              cwd: removed.workspaceCwd,
+                            },
                             {
                               keepView: true,
                               keepPanel: true,
@@ -13302,7 +14205,7 @@ export function App({
                   </div>
                 </section>
               )}
-              {mainView === 'scheduledTasks' && (
+              {workspaceContextActive && mainView === 'scheduledTasks' && (
                 <div
                   className={styles.fullPage}
                   data-testid="scheduled-tasks-page"
@@ -13365,7 +14268,16 @@ export function App({
                         // describe the task in natural language; the agent
                         // creates it via its cron_create tool. Focus is deferred
                         // so the new session's composer is mounted/visible first.
-                        void createNewSession().then((created) => {
+                        const targetCwd =
+                          lockedWorkspaceCwd ??
+                          selectedWorkspaceCwd ??
+                          ordinaryWorkspaces.find((entry) => entry.primary)
+                            ?.cwd;
+                        if (!targetCwd) return;
+                        void createNewSession({
+                          kind: 'workspace',
+                          cwd: targetCwd,
+                        }).then((created) => {
                           // If the new session couldn't be started,
                           // createNewSession already surfaced the error — do NOT
                           // prime the (still-current) session with the task
@@ -13396,7 +14308,7 @@ export function App({
                   </div>
                 </div>
               )}
-              {mainView === 'goals' && (
+              {workspaceContextActive && mainView === 'goals' && (
                 <div className={styles.fullPage} data-testid="goals-page">
                   <div className={styles.fullPageHeader}>
                     <button
@@ -13433,9 +14345,16 @@ export function App({
                           connectionRef.current.sessionId === stranded;
                         if (!canReuseStranded) {
                           strandedGoalSessionRef.current = undefined;
-                          const created = await createNewSession(undefined, {
-                            keepView: true,
-                          });
+                          const targetCwd =
+                            lockedWorkspaceCwd ??
+                            selectedWorkspaceCwd ??
+                            ordinaryWorkspaces.find((entry) => entry.primary)
+                              ?.cwd;
+                          if (!targetCwd) return false;
+                          const created = await createNewSession(
+                            { kind: 'workspace', cwd: targetCwd },
+                            { keepView: true },
+                          );
                           if (!created) return false;
                         }
                         const allocationOwner = sessionOwnerGuard.capture();
@@ -13505,7 +14424,7 @@ export function App({
                   </div>
                 </div>
               )}
-              {mainView === 'split' && (
+              {workspaceContextActive && mainView === 'split' && (
                 <div className={styles.fullPage} data-testid="split-view-page">
                   {/* The outer session's approval overlay is suppressed under the
                       split (it would own ghost keyboard shortcuts). If that
@@ -13917,6 +14836,125 @@ export function App({
                             : styles.composer
                         }
                       >
+                        {standaloneCreationRecovery && (
+                          <div
+                            className={styles.composerActionTip}
+                            role="alert"
+                            data-testid="standalone-creation-recovery"
+                          >
+                            <span
+                              className={styles.composerActionTipIcon}
+                              aria-hidden="true"
+                            >
+                              !
+                            </span>
+                            <span className={styles.composerActionTipText}>
+                              {standaloneRecoveryResolution === 'checking'
+                                ? t('session.recoveryChecking')
+                                : standaloneRecoveryResolution === 'creating'
+                                  ? t('session.recoveryStillCreating')
+                                  : standaloneRecoveryResolution === 'absent'
+                                    ? t('session.recoveryAbsent')
+                                    : standaloneRecoveryResolution ===
+                                        'unknown'
+                                      ? t('session.recoveryUnknown')
+                                      : standaloneRecoveryResolution ===
+                                          'archived'
+                                        ? t('session.recoveryArchived')
+                                        : t('session.recoveryPending')}
+                            </span>
+                            <div className={styles.composerActionTipActions}>
+                              {standaloneRecoveryResolution === 'archived' ? (
+                                <button
+                                  type="button"
+                                  className={`${styles.composerActionTipButton} ${styles.composerActionTipButtonPrimary}`}
+                                  onClick={() =>
+                                    void handleUnarchiveRecoveredStandalone()
+                                  }
+                                >
+                                  {t('session.unarchive')}
+                                </button>
+                              ) : (
+                                <button
+                                  type="button"
+                                  className={`${styles.composerActionTipButton} ${styles.composerActionTipButtonPrimary}`}
+                                  disabled={
+                                    standaloneRecoveryResolution === 'checking'
+                                  }
+                                  onClick={() =>
+                                    void handleCheckStandaloneRecovery()
+                                  }
+                                >
+                                  {t('session.checkStatus')}
+                                </button>
+                              )}
+                              {standaloneRecoveryResolution === 'absent' && (
+                                <button
+                                  type="button"
+                                  className={styles.composerActionTipButton}
+                                  onClick={handleRetryStandaloneCreation}
+                                >
+                                  {t('session.retryCreation')}
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        )}
+                        {standaloneWorkingDirectory?.state === 'recreated' && (
+                          <div
+                            className={styles.composerActionTip}
+                            role="status"
+                            data-testid="standalone-directory-recreated"
+                          >
+                            <span
+                              className={styles.composerActionTipIcon}
+                              aria-hidden="true"
+                            >
+                              !
+                            </span>
+                            <span className={styles.composerActionTipText}>
+                              {t('session.directoryRecreated')}
+                            </span>
+                          </div>
+                        )}
+                        {standaloneDirectoryErrorCode ===
+                          'working_directory_missing' && (
+                          <div
+                            className={styles.composerActionTip}
+                            role="alert"
+                            data-testid="standalone-directory-missing"
+                          >
+                            <span className={styles.composerActionTipText}>
+                              {t('session.directoryMissing')}
+                            </span>
+                            <div className={styles.composerActionTipActions}>
+                              <button
+                                type="button"
+                                className={`${styles.composerActionTipButton} ${styles.composerActionTipButtonPrimary}`}
+                                disabled={standaloneRepairBusy}
+                                onClick={() =>
+                                  void handleRepairStandaloneDirectory()
+                                }
+                              >
+                                {standaloneRepairBusy
+                                  ? t('session.repairing')
+                                  : t('session.repair')}
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                        {standaloneDirectoryErrorCode ===
+                          'working_directory_compromised' && (
+                          <div
+                            className={styles.composerActionTip}
+                            role="alert"
+                            data-testid="standalone-directory-compromised"
+                          >
+                            <span className={styles.composerActionTipText}>
+                              {t('session.directoryCompromised')}
+                            </span>
+                          </div>
+                        )}
                         {streamingState !== 'idle' ||
                         sessionHasActivePrompt ? (
                           suppressFailedPromptRetryStreaming ? null : (
@@ -14101,7 +15139,9 @@ export function App({
                           skills={composerSkills}
                           slashCommandCategoryOrder={slashCommandCategoryOrder}
                           autoSubmitSlashCommands={autoSubmitSlashCommands}
-                          builtinAtProviders={builtinAtProviders}
+                          builtinAtProviders={
+                            workspaceContextActive ? builtinAtProviders : false
+                          }
                           atProviders={atProviders}
                           composerTagIcons={composerTagIcons}
                           voiceTarget={
@@ -14117,12 +15157,26 @@ export function App({
                           currentMode={currentMode}
                           sessionWorkflowEnabled={sessionWorkflowEnabled}
                           currentModel={currentModel}
-                          gitBranch={activeGitBranch}
-                          gitWorktree={Boolean(sessionWorktree)}
-                          gitCwd={sessionWorktree?.path}
+                          gitBranch={
+                            workspaceContextActive
+                              ? activeGitBranch
+                              : undefined
+                          }
+                          gitWorktree={
+                            workspaceContextActive && Boolean(sessionWorktree)
+                          }
+                          gitCwd={
+                            workspaceContextActive
+                              ? sessionWorktree?.path
+                              : undefined
+                          }
                           gitModeIntent={gitModeEligible ? gitModeIntent : undefined}
                           onGitModeIntentChange={gitModeEligible ? setGitModeIntent : undefined}
-                          gitStatus={selectedWorkspaceGitStatus}
+                          gitStatus={
+                            workspaceContextActive
+                              ? selectedWorkspaceGitStatus
+                              : undefined
+                          }
                           onOpenGitDiff={
                             gitDiffWorkspaceCwd
                               ? handleOpenGitDiff
@@ -14154,44 +15208,68 @@ export function App({
                                 ? handleWelcomeReasoningEffort
                                 : undefined
                           }
-                          workspaces={composerWorkspaces}
+                          workspaces={
+                            workspaceContextActive
+                              ? composerWorkspaces
+                              : undefined
+                          }
                           selectedWorkspaceCwd={
-                            connection.sessionId
-                              ? ordinaryWorkspaces.find(
-                                  (entry) =>
-                                    entry.cwd === connection.workspaceCwd &&
-                                    !entry.primary,
-                                )?.cwd
-                              : selectedWorkspaceCwd
+                            workspaceContextActive
+                              ? connection.sessionId
+                                ? ordinaryWorkspaces.find(
+                                    (entry) =>
+                                      entry.cwd === connection.workspaceCwd &&
+                                      !entry.primary,
+                                  )?.cwd
+                                : selectedWorkspaceCwd
+                              : undefined
                           }
-                          workspaceSelectionDisabled={false}
+                          workspaceSelectionDisabled={!workspaceContextActive}
                           atWorkspaceCwd={
-                            ordinaryWorkspaces.find(
-                              (entry) => entry.cwd === lockedWorkspaceCwd,
-                            )?.cwd ??
-                            (connection.sessionId
-                              ? isKnownLiveWorkspaceCwd(
-                                  connection.workspaceCwd,
-                                )
-                                ? undefined
-                                : connection.workspaceCwd
-                              : (selectedWorkspaceCwd ??
-                                ordinaryWorkspaces.find(
-                                  (entry) => entry.primary,
-                                )?.cwd))
+                            workspaceContextActive
+                              ? (ordinaryWorkspaces.find(
+                                  (entry) => entry.cwd === lockedWorkspaceCwd,
+                                )?.cwd ??
+                                (connection.sessionId
+                                  ? connection.workspaceCwd
+                                  : (selectedWorkspaceCwd ??
+                                    ordinaryWorkspaces.find(
+                                      (entry) => entry.primary,
+                                    )?.cwd)))
+                              : undefined
                           }
-                          onSelectWorkspace={handleSelectComposerWorkspace}
+                          composerScopeKey={
+                            effectiveSessionContext?.kind === 'standalone'
+                              ? 'standalone'
+                              : effectiveSessionContext?.kind === 'live'
+                                ? 'live'
+                                : undefined
+                          }
+                          workspaceFeaturesEnabled={workspaceContextActive}
+                          onSelectWorkspace={
+                            workspaceContextActive
+                              ? handleSelectComposerWorkspace
+                              : undefined
+                          }
                           scratchWorkspaceSupported={
+                            workspaceContextActive &&
                             scratchWorkspaceRegistrationSupported
                           }
                           existingFolderWorkspaceSupported={
+                            workspaceContextActive &&
                             dynamicWorkspaceRegistrationSupported
                           }
                           workspaceMutationBusy={workspaceMutationBusy}
                           onCreateScratchWorkspace={
-                            handleCreateComposerScratchWorkspace
+                            workspaceContextActive
+                              ? handleCreateComposerScratchWorkspace
+                              : undefined
                           }
-                          onOpenExistingWorkspace={handleOpenExistingWorkspace}
+                          onOpenExistingWorkspace={
+                            workspaceContextActive
+                              ? handleOpenExistingWorkspace
+                              : undefined
+                          }
                           onChatWidthModeChange={handleChatWidthModeChange}
                           sessionId={connection.sessionId}
                           sessionName={sessionDisplayName}
@@ -14297,7 +15375,9 @@ export function App({
                               ? backgroundTasks
                               : []
                           }
-                          hideSettings={hideSettings}
+                          hideSettings={
+                            hideSettings || !workspaceContextActive
+                          }
                           onToggleShortcuts={handleToggleShortcuts}
                           compact={true}
                         />
@@ -14325,13 +15405,23 @@ export function App({
               <EnvironmentPanel
                 floating={!environmentPanelFits}
                 hidden={!environmentPanelVisible || artifactPanelFullscreen}
-                workspaceCwd={sessionWorktree?.path ?? activeWorkspaceCwd}
-                gitWorkspaceCwd={
-                  connection.sessionId ? gitDiffWorkspaceCwd : undefined
+                workspaceCwd={
+                  workspaceContextActive
+                    ? (sessionWorktree?.path ?? activeWorkspaceCwd)
+                    : undefined
                 }
-                gitCwd={sessionWorktree?.path}
-                branch={activeGitBranch}
-                gitStatus={selectedWorkspaceGitStatus}
+                gitWorkspaceCwd={
+                  workspaceContextActive && connection.sessionId
+                    ? gitDiffWorkspaceCwd
+                    : undefined
+                }
+                gitCwd={
+                  workspaceContextActive ? sessionWorktree?.path : undefined
+                }
+                branch={workspaceContextActive ? activeGitBranch : undefined}
+                gitStatus={
+                  workspaceContextActive ? selectedWorkspaceGitStatus : undefined
+                }
                 tasks={sessionTasks}
                 agentTasks={environmentAgentTasks}
                 items={environmentPanelItems}

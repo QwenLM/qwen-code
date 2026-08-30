@@ -417,6 +417,7 @@ function renderSidebar(
     onNewWorktreeSession?: (cwd?: string) => void;
     onOpenAddWorkspace?: () => void;
     onNewSession?: (workspaceCwd?: string) => boolean;
+    globalNewSessionUsesStandalone?: boolean;
     onLoadSession?: (sessionId: string, workspaceCwd?: string) => void;
     workspaces?: DaemonWorkspaceCapability[];
     lockedWorkspaceCwd?: string;
@@ -424,6 +425,7 @@ function renderSidebar(
       render?: (workspace: DaemonWorkspaceCapability) => ReactNode;
     };
     showSessionSourceSwitch?: boolean;
+    projectFeaturesEnabled?: boolean;
     sessionActions?: {
       items?: readonly (
         | 'pin'
@@ -451,6 +453,9 @@ function renderSidebar(
           onOpenSessions={() => {}}
           onOpenSplitView={() => {}}
           onNewSession={overrides.onNewSession ?? (() => false)}
+          globalNewSessionUsesStandalone={
+            overrides.globalNewSessionUsesStandalone
+          }
           onLoadSession={overrides.onLoadSession ?? (() => {})}
           onError={overrides.onError ?? (() => {})}
           selectedWorkspaceCwd={overrides.selectedWorkspaceCwd}
@@ -464,6 +469,7 @@ function renderSidebar(
           lockedWorkspaceCwd={overrides.lockedWorkspaceCwd}
           lockedWorkspace={overrides.lockedWorkspace}
           showSessionSourceSwitch={overrides.showSessionSourceSwitch}
+          projectFeaturesEnabled={overrides.projectFeaturesEnabled}
           sessionActions={overrides.sessionActions}
         />
       </I18nProvider>,
@@ -1601,6 +1607,44 @@ describe('WebShellSidebar workspace removal', () => {
       await Promise.resolve();
     });
     expect(onNewSession).toHaveBeenCalledWith('/tmp/other');
+  });
+
+  it('does not refresh the primary workspace after a standalone global New Task', async () => {
+    const onNewSession = vi.fn(() => true);
+    renderSidebar({
+      globalNewSessionUsesStandalone: true,
+      onNewSession,
+    });
+    const globalNewTask = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="New task"]',
+    );
+    expect(globalNewTask).not.toBeNull();
+
+    await act(async () => {
+      click(globalNewTask!);
+      await Promise.resolve();
+    });
+
+    expect(onNewSession).toHaveBeenCalledWith(undefined);
+    expect(refreshWorkspaceSessionCatalog).not.toHaveBeenCalled();
+  });
+
+  it('hides workspace management navigation outside workspace contexts', () => {
+    connection.capabilities = {
+      ...capabilities,
+      features: [...capabilities.features, 'session_organization'],
+    };
+    workspace.capabilities = connection.capabilities;
+    renderSidebar({ projectFeaturesEnabled: false });
+
+    expect(container.querySelector('button[aria-label="Plugins"]')).toBeNull();
+    expect(container.querySelector('button[aria-label="Channels"]')).toBeNull();
+    expect(container.querySelector('button[aria-label="Settings"]')).toBeNull();
+    expect(workspaceActions.listSessionGroups).not.toHaveBeenCalled();
+    expect(useChannels).toHaveBeenLastCalledWith({
+      autoLoad: false,
+      enabled: false,
+    });
   });
 
   it('shows a native tooltip for the workspace create-group action', async () => {
@@ -3211,9 +3255,11 @@ describe('WebShellSidebar workspace removal', () => {
         branch: cwd === '/tmp/other' ? 'main' : null,
       }),
     }));
+    const onNewSession = vi.fn(() => true);
     const onNewWorktreeSession = vi.fn();
     renderSidebar({
       onOpenGitDiff: vi.fn(),
+      onNewSession,
       onNewWorktreeSession,
       workspaces: [
         ...capabilities.workspaces,
@@ -3238,9 +3284,17 @@ describe('WebShellSidebar workspace removal', () => {
     ).find((element) => element.textContent === 'New worktree task');
     act(() => click(worktree!));
     expect(onNewWorktreeSession).toHaveBeenCalledWith('/tmp/other');
+    await act(async () => {
+      await Promise.resolve();
+    });
     act(() => click(workspaceAction('/tmp/project')!));
     expect(menuItemLabels()).toContain('New task');
     expect(menuItemLabels()).not.toContain('New worktree task');
+    const primaryNewTask = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((element) => element.textContent === 'New task');
+    act(() => click(primaryNewTask!));
+    expect(onNewSession).toHaveBeenCalledWith('/tmp/project');
     act(() => {
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
     });
@@ -3249,6 +3303,32 @@ describe('WebShellSidebar workspace removal', () => {
     act(() => click(workspaceAction('/tmp/plain')!));
     expect(menuItemLabels()).toContain('New task');
     expect(menuItemLabels()).not.toContain('New worktree task');
+  });
+
+  it('passes the explicit primary cwd to a primary workspace worktree task', async () => {
+    const previous = workspace.client.workspaceByCwd.getMockImplementation();
+    workspace.client.workspaceByCwd.mockImplementation((cwd: string) => ({
+      ...(previous?.(cwd) ?? {}),
+      workspaceGit: vi.fn().mockResolvedValue({
+        v: 2,
+        workspaceCwd: cwd,
+        branch: 'main',
+      }),
+    }));
+    const onNewWorktreeSession = vi.fn();
+    renderSidebar({ onNewWorktreeSession });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    act(() => click(workspaceAction('/tmp/project')!));
+    const worktree = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((element) => element.textContent === 'New worktree task');
+    act(() => click(worktree!));
+
+    expect(onNewWorktreeSession).toHaveBeenCalledWith('/tmp/project');
   });
 
   it('treats a failed capabilities refresh after a rename as converged', async () => {
