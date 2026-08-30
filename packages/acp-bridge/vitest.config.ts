@@ -34,6 +34,9 @@ export default defineConfig({
     testTimeout: process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
       ? 60_000
       : undefined,
+    hookTimeout: process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
+      ? 60_000
+      : undefined,
     reporters: ['default'],
     silent: true,
     coverage: {
