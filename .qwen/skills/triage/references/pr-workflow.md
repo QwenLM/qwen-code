@@ -302,11 +302,32 @@ gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body-file /tmp/stag
   empty fetch never reaches the judgment as an empty patch — an
   unfetchable closer is dropped as unverifiable (if no resolved closer
   remains, the unresolved-closer branch below applies), and an
-  unfetchable PR patch aborts the run fail-closed:
+  unfetchable PR patch aborts the run fail-closed — except one class of
+  fetch failure is permanent rather than transient: GitHub's diff
+  endpoint hard-refuses diffs with more than 300 files (HTTP 406
+  `PullRequest.diff too_large`), so every retry fails identically and a
+  bare abort there would leave such a PR with no triage outcome at all,
+  on every run. Route that class to the unresolved-state branch below
+  (flag in the Stage 1 comment and escalate to the maintainer), exactly
+  as an unfetchable closer is treated — the gate reaches a classified
+  outcome without ever judging an unfetchable patch. Do NOT fall back to
+  the `pulls/$PR_NUMBER/files` API for it: that endpoint omits exactly
+  the structure the judgment compares (mode headers, rename pairs, blob
+  hashes), and transiting a 300+-file diff through the agent's context
+  breaks the constant-cost bound this gate exists to enforce:
 
   ```bash
-  gh pr diff "$PR_NUMBER" --repo "$REPO" > /tmp/stage-1pre-pr.patch || exit 1
-  [ -s /tmp/stage-1pre-pr.patch ] || exit 1
+  OVERSIZE=0
+  gh pr diff "$PR_NUMBER" --repo "$REPO" \
+    > /tmp/stage-1pre-pr.patch 2>/tmp/stage-1pre-pr.diff.err || {
+    # HTTP 406 too_large (over 300 files) is permanent — route to the
+    # unresolved-state branch below; any other fetch failure aborts
+    # fail-closed and the next run retries
+    grep -q 'too_large' /tmp/stage-1pre-pr.diff.err && OVERSIZE=1 || exit 1
+  }
+  [ "$OVERSIZE" = 1 ] || [ -s /tmp/stage-1pre-pr.patch ] || exit 1
+  # OVERSIZE=1: skip the closer fetches and the judgment below, take the
+  # unresolved-state branch at the end of this bullet list
   FETCHED_PRS=""
   for MERGED_PR in $MERGED_PRS; do
     # failed or empty: this closer is unverifiable — drop it, never judge
@@ -349,7 +370,30 @@ gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body-file /tmp/stag
     no line-level
     representation (a pure rename, a binary, a mode change, an empty
     file) is covered only by an equivalent change to the same path in
-    the closer's patch. A line the closer's patch both adds and deletes
+    the closer's patch. Equivalence is structural, never path alone —
+    every section, including one that also carries content lines, is
+    compared on the full structure its headers carry, and a matched
+    pair must agree on each of: file existence — a deletion
+    (`deleted file mode` / `+++ /dev/null`) is covered only by a
+    same-path deletion, because a closer that removes the same lines
+    while keeping the file (an emptied result, `index <hash>..e69de29`)
+    leaves the file on the default branch and does not cover the
+    deletion, and symmetrically a creation (`--- /dev/null` /
+    `new file mode`) is covered only by a same-path creation; mode
+    values — wherever a mode header appears (`new file mode`,
+    `deleted file mode`, or an `old mode`/`new mode` pair), with or
+    without content lines, the counterpart must carry the same mode
+    value or values, because a blob encodes content, not mode, so
+    identical content under 100644 does not cover 100755; rename pairs
+    — any section carrying `rename from`/`rename to` headers requires
+    the identical pair in the counterpart, same source and same target,
+    whether or not the section also edits content; blob hashes — a
+    section whose content has no line-level representation (binary,
+    empty file) is covered only when the resulting blob hash from its
+    `index` line matches; and trailing-newline state — the
+    `\ No newline at end of file` marker distinguishes otherwise-identical
+    last lines, and each matched pair must agree on it.
+    A line the closer's patch both adds and deletes
     in that file cancels out and covers neither direction, and the
     quantifiers range over matched sections only, so they never hold
     vacuously — a rename-only diff closes only when its rename section
@@ -374,7 +418,12 @@ gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body-file /tmp/stag
     production line ITS patch does not delete, a line ITS patch adds or
     deletes fewer times than this PR does, any non-production change, or a
     section with no line-level representation (rename, binary, mode change,
-    empty file) ITS patch does not equivalently change at the same path
+    empty file) ITS patch does not equivalently change at the same path —
+    where "equivalently" is the structural test above: a deletion ITS
+    patch does not also perform at the same path
+    (emptying a file is not deleting it), a mode value, a rename from/to
+    pair, a resulting blob hash of a line-less section, or a
+    trailing-newline state ITS counterpart section does not match
     → submit exactly one `CHANGES_REQUESTED` review: name the resolved
     closers,
     name the remaining delta, ask the author to rebase onto the default
@@ -388,7 +437,8 @@ gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body-file /tmp/stag
 
 - No resolved and fetchable closer remains (`$MERGED_PRS` empty — every
   close was manual or by a commit, or every closer is unmerged or from
-  a foreign repository — or every closer fetch failed) → the gate must
+  a foreign repository — or every closer fetch failed), or this PR's own
+  patch is unfetchable (the `OVERSIZE` class above) → the gate must
   never close on ambiguity: flag it in the Stage 1 comment and escalate
   to the maintainer.
 

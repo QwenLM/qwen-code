@@ -7315,6 +7315,21 @@ describe('stage 1-pre duplicate gate', () => {
     );
     expect(section).toContain('at least as many times');
     expect(section).toContain('count occurrences, not set membership');
+    // Structural-equivalence clauses: line-multiset comparison alone discards
+    // everything else a section carries, so a diff whose remaining delta
+    // lives in that structure would be certified "Fully subsumed" and closed
+    // while its change never landed. Each pin is unique to its clause —
+    // removing any one clause must turn its pin red: without the deletion
+    // clause a closer that empties a file covers deleting it, without the
+    // mode clause 100644 covers 100755, without the rename clause A->B
+    // covers A->C, without the blob-hash clause one binary edit covers any
+    // other at the same path, and without the newline clause the
+    // trailing-newline state is invisible.
+    expect(section).toContain('leaves the file on the default branch');
+    expect(section).toContain('the counterpart must carry the same mode');
+    expect(section).toContain('the identical pair in the counterpart');
+    expect(section).toContain('covered only when the resulting blob hash');
+    expect(section).toContain('No newline at end of file');
   });
 
   it('never closes a diff with no production changes', () => {
@@ -7373,6 +7388,12 @@ describe('stage 1-pre duplicate gate', () => {
     expect(section).toContain('fewer times than this PR does');
     expect(section).toContain('any non-production change');
     expect(section).toContain('does not equivalently change at the same path');
+    // The structural criteria are mirrored into the enumeration, keeping it
+    // the exact negation of the subsumption definition.
+    expect(section).toContain(
+      'where "equivalently" is the structural test above',
+    );
+    expect(section).toContain('emptying a file is not deleting it');
   });
 
   it('guards every patch fetch fail-closed', () => {
@@ -7403,6 +7424,25 @@ describe('stage 1-pre duplicate gate', () => {
     expect(section).toContain('*) MERGED_PRS="$MERGED_PRS $MERGED_PR" ;;');
     expect(section).toContain('FETCHED_PRS="$FETCHED_PRS $MERGED_PR"');
     expect(section).toContain('MERGED_PRS="$FETCHED_PRS"');
+  });
+
+  it('routes an unfetchable oversize PR patch to escalation, never a bare abort', () => {
+    // GitHub's diff endpoint hard-refuses diffs with more than 300 files
+    // (HTTP 406 PullRequest.diff too_large) on every retry; a bare abort
+    // would end every Stage 1-pre run on such a PR before closer
+    // resolution — no close, no request-changes, no escalation, on every
+    // run. The oversize class must reach the unresolved-state escalation
+    // exactly as an unfetchable closer does, while every other fetch
+    // failure still fails closed; deleting the routing must turn this red.
+    expect(section).toContain('more than 300 files');
+    expect(section).toContain('too_large');
+    expect(section).toContain(
+      "grep -q 'too_large' /tmp/stage-1pre-pr.diff.err && OVERSIZE=1 || exit 1",
+    );
+    expect(section).toContain('skip the closer fetches and the judgment below');
+    expect(section).toContain(
+      'patch is unfetchable (the `OVERSIZE` class above)',
+    );
   });
 
   it('decides subsumption from two frozen gh pr diff patches, never per-file downloads', () => {
