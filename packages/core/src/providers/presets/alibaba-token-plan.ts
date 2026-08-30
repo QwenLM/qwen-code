@@ -32,13 +32,11 @@ const TOKEN_PLAN_MODELS: ModelSpec[] = [
     modalities: { image: true, video: true },
   },
   { id: 'qwen3.7-max', contextWindowSize: 1000000, enableThinking: true },
-  // Unlike the preview below, the GA model accepts `enable_thinking: false`,
-  // so it must not be marked thinkingMandatory — that would keep thinking on
-  // for side queries that deliberately turn it off.
   {
     id: 'qwen3.8-max',
     contextWindowSize: 1000000,
     enableThinking: true,
+    thinkingMandatory: true,
     modalities: { image: true, video: true },
   },
   {
@@ -114,6 +112,7 @@ export const tokenPlanProvider: ProviderConfig = {
   envKey: TOKEN_PLAN_ENV_KEY,
   models: TOKEN_PLAN_MODELS,
   modelsEditable: true,
+  supportsModelDiscovery: true,
   modelNamePrefix: (baseUrl) =>
     baseUrl === TOKEN_PLAN_GLOBAL_BASE_URL
       ? 'ModelStudio Token Plan for Global/Intl'

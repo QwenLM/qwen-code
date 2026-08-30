@@ -1,19 +1,15 @@
 import {
   forwardRef,
-  useEffect,
   useImperativeHandle,
   useMemo,
   useRef,
-  useState,
   type KeyboardEvent,
 } from 'react';
 import type { DaemonSessionTaskStatus } from '@qwen-code/sdk/daemon';
-import { useConnection } from '@qwen-code/webui/daemon-react-sdk';
+import { useConnection } from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../i18n';
 import { isComposerTask } from '../utils/composerTasks';
 import styles from './StatusBar.module.css';
-
-const GOAL_PILL_INTERVAL_MS = 1000;
 
 export interface StatusBarHandle {
   focusTaskPill(): boolean;
@@ -51,12 +47,6 @@ interface StatusBarProps {
   onOpenTasks?: () => void;
   onReturnToInput?: (text?: string) => void;
   tasks: readonly DaemonSessionTaskStatus[];
-  activeGoal?: {
-    condition: string;
-    setAt: number;
-  } | null;
-  /** Open the Goals page. When omitted the goal pill stays a plain label. */
-  onOpenGoals?: () => void;
   /** Hide the settings gear button (e.g. when /settings is in hiddenSlashCommands). */
   hideSettings?: boolean;
   /** Toggle the keyboard-shortcuts panel (same as typing `?` in the editor). */
@@ -136,16 +126,6 @@ export function getTaskPillLabel(
   );
 }
 
-function formatGoalElapsed(ms: number): string {
-  if (ms < 1000) return '';
-  const seconds = Math.floor(ms / 1000);
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m`;
-  const hours = Math.floor(minutes / 60);
-  return `${hours}h ${minutes % 60}m`;
-}
-
 export const StatusBar = forwardRef<StatusBarHandle, StatusBarProps>(
   function StatusBar(
     {
@@ -156,8 +136,6 @@ export const StatusBar = forwardRef<StatusBarHandle, StatusBarProps>(
       onOpenTasks,
       onReturnToInput,
       tasks,
-      activeGoal,
-      onOpenGoals,
       hideSettings,
       onToggleShortcuts,
       compact = false,
@@ -174,31 +152,15 @@ export const StatusBar = forwardRef<StatusBarHandle, StatusBarProps>(
     const pct = contextWindow > 0 ? (tokenCount / contextWindow) * 100 : 0;
     const pctDisplay = pct.toFixed(1);
     const modeIndicator = getModeIndicator(currentMode, t);
-    const [, setGoalTick] = useState(0);
     const taskPillRef = useRef<HTMLButtonElement>(null);
-
-    useEffect(() => {
-      if (!activeGoal) return;
-      const id = setInterval(
-        () => setGoalTick((tick) => (tick + 1) % 1_000_000),
-        GOAL_PILL_INTERVAL_MS,
-      );
-      return () => clearInterval(id);
-    }, [activeGoal]);
 
     const taskPillLabel = useMemo(() => getTaskPillLabel(tasks, t), [tasks, t]);
     const hasLeftPrefix = !compact && (connected || !!modeIndicator);
-    const goalElapsed = activeGoal
-      ? formatGoalElapsed(Date.now() - activeGoal.setAt)
-      : '';
-    const goalLabel = activeGoal
-      ? `◎ ${t('goal.statusActive')}${goalElapsed ? ` (${goalElapsed})` : ''}`
-      : '';
     const hasLeftContent = !!taskPillLabel || !compact;
     const hasRightContent =
       (!compact && !!currentModel) ||
       (!compact && contextWindow > 0 && tokenCount > 0) ||
-      !!goalLabel;
+      false;
 
     useImperativeHandle(
       ref,
@@ -348,31 +310,6 @@ export const StatusBar = forwardRef<StatusBarHandle, StatusBarProps>(
               </span>
             </button>
           )}
-          {goalLabel &&
-            (onOpenGoals ? (
-              <button
-                type="button"
-                className={styles.goalButton}
-                onClick={onOpenGoals}
-                title={activeGoal?.condition}
-                // The visible label is truncated and the full condition lives
-                // only in `title`, which is a hover tooltip screen readers do
-                // not reliably announce. Name the goal here, but keep the
-                // button's purpose in front of it — the condition alone would
-                // read as a bare string with no hint it opens anything.
-                aria-label={
-                  activeGoal?.condition
-                    ? `${t('sidebar.goals')}: ${activeGoal.condition}`
-                    : t('sidebar.goals')
-                }
-              >
-                <span className={styles.goal}>{goalLabel}</span>
-              </button>
-            ) : (
-              <span className={styles.goal} title={activeGoal?.condition}>
-                {goalLabel}
-              </span>
-            ))}
         </div>
       </div>
     );

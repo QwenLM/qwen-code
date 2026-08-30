@@ -5,8 +5,8 @@
  */
 
 import { createHash } from 'node:crypto';
-import type { ServerGeminiStreamEvent } from '../core/turn.js';
-import { GeminiEventType } from '../core/turn.js';
+import type { ServerLlmStreamEvent } from '../core/turn.js';
+import { LlmEventType } from '../core/turn.js';
 import type { ThoughtSummary } from '../utils/thoughtUtils.js';
 import {
   logLoopDetected,
@@ -18,6 +18,13 @@ import {
   LoopType,
 } from '../telemetry/types.js';
 import type { Config } from '../config/config.js';
+import { getToolCallRepeatKey } from '../tools/tool-call-repeat-key.js';
+
+// Re-exported for existing importers (daemon turn-loop guard); the
+// implementation lives in a leaf module so replay detection in
+// toolCallIdUtils can share it without an import cycle through this
+// service's turn.js dependency.
+export { getToolCallRepeatKey };
 
 // Consecutive identical tool calls (same name + identical args) tolerated
 // before the always-on guard halts the turn. Repeating an identical call
@@ -28,7 +35,54 @@ import type { Config } from '../config/config.js';
 const TOOL_CALL_LOOP_THRESHOLD = 5;
 const CONTENT_LOOP_THRESHOLD = 10;
 const CONTENT_CHUNK_SIZE = 50;
-const MAX_HISTORY_LENGTH = 1000;
+// Cap for the debug-log excerpt of a fired chanting region (~one period,
+// see captureChantExcerpt).
+const CHANT_EXCERPT_MAX_LENGTH = 80;
+// Kept large enough that the long-period rule below can still see
+// PERIODIC_OCCURRENCES_REQUIRED occurrences of a long (~700 char) repeated
+// unit after truncation. The window also bounds the detectable unit length:
+// a retained window holds at most floor((MAX_HISTORY_LENGTH -
+// CONTENT_CHUNK_SIZE) / unitLength) + 1 occurrences of any one gram, which
+// drops below PERIODIC_OCCURRENCES_REQUIRED for units of ~1 KB — the
+// truncated-run path in isPeriodicChunkRepetition admits those once the
+// history saturates. Units longer than ~MAX_HISTORY_LENGTH / 2 cannot
+// accumulate even three in-window occurrences and remain out of reach.
+const MAX_HISTORY_LENGTH = 4000;
+
+// Truncation hysteresis slack. Once the history saturates, the physical
+// trim (which walks the whole contentStats map to re-base stored indices)
+// runs only when the length exceeds MAX_HISTORY_LENGTH by this margin,
+// slicing back to exactly MAX_HISTORY_LENGTH — amortizing the walk over
+// ~TRUNCATION_SLACK appended chars instead of paying it on every streamed
+// event. Purely a memory/mechanics optimization: the detection logic always
+// operates on the logical window of the last MAX_HISTORY_LENGTH chars (see
+// windowStart), so detection decisions are identical regardless of how
+// rarely the physical trim runs. Peak memory is bounded at
+// MAX_HISTORY_LENGTH + TRUNCATION_SLACK chars.
+const TRUNCATION_SLACK = 1000;
+
+// Long-period verbatim repetition detection (issue #1775). A unit repeated
+// verbatim spaces identical CONTENT_CHUNK_SIZE-grams exactly one unit-length
+// apart, which the clustered rule cannot see: its average-distance bound
+// (1.5 * CONTENT_CHUNK_SIZE) only admits repeat units up to ~75 chars, so a
+// chanted multi-sentence block (~300 chars in the report) spins forever.
+// Instead, require a run of occurrences at exactly equal spacing and then
+// verify the spanned region is genuinely periodic with that stride.
+const PERIODIC_OCCURRENCES_REQUIRED = 5;
+// A run whose earlier occurrences may have been truncated away (see
+// isPeriodicChunkRepetition) must still span at least this many equally
+// spaced occurrences before the whole retained region is verified periodic
+// to compensate for the weaker occurrence evidence.
+const PERIODIC_MIN_TRUNCATED_OCCURRENCES = 3;
+// The verified periodic span must be substantial before halting a turn. The
+// verified region grows with the occurrence run (see
+// isPeriodicChunkRepetition), so mid-length units (~76-237 chars) cross the
+// floor after a handful of extra repetitions and long units cross it almost
+// immediately. The floor keeps a small number of short-period repetitions
+// (e.g. a phrase emitted a handful of times before a markdown reset) out of
+// the long-period path while still firing early for long repeated units
+// (~5th repetition for the ~300-char block in the report).
+const MIN_PERIODIC_REGION_LENGTH = 1000;
 
 // Thought tracking
 const THOUGHT_REPEAT_THRESHOLD = 3;
@@ -58,8 +112,9 @@ const SHELL_COMMAND_STAGNATION_THRESHOLD = STAGNATION_THRESHOLD;
 
 // Global tool call duplicate tracking: how many times the same (tool, args)
 // pair must appear across the entire turn (not necessarily consecutively)
-// before it is treated as a loop.
-const GLOBAL_DUPLICATE_THRESHOLD = 6;
+// before it is treated as a loop. Exported so the daemon's turn-loop guard
+// (ACP Session) applies the same stuck-repetition signal as this service.
+export const GLOBAL_DUPLICATE_THRESHOLD = 6;
 
 // Alternating pattern detection: number of complete AB cycles needed to
 // trip the detector (3 cycles = 6 calls: A B A B A B).
@@ -93,26 +148,26 @@ export const DEFAULT_MAX_TOOL_CALLS_PER_TURN = 100;
 const ADAPTIVE_CAP_HARD_MULTIPLIER = 10;
 
 /**
- * Recursively canonicalizes a JSON-compatible value for stable hashing: object
- * keys are sorted (so property insertion order does not change the identity)
- * while array order is preserved. Used by getToolCallKey so two semantically
- * identical tool-call arguments that differ only in field order hash to the
- * same key — otherwise a stuck model could evade the repeat guards just by
- * reordering fields.
+ * Halt predicate of the per-turn tool-call cap, shared with the daemon's
+ * turn-loop guard (ACP Session's recordDaemonToolCalls) so both runtimes
+ * decide identically and cannot drift. `cap` is the resolved effective cap
+ * from getMaxToolCallsPerTurn (Infinity when disabled); `maxKeyRepeat` is
+ * the turn's running max count of any single (tool, args) repeat key.
+ * Returns true when a turn that has emitted `totalCalls` calls must halt:
+ * always past an explicit cap (the released hard-cap contract), and past
+ * the adaptive default cap only on a stuck-repetition signal or at the
+ * hard backstop (see checkTurnToolCallCap).
  */
-function canonicalizeForHash(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    return value.map(canonicalizeForHash);
-  }
-  if (value !== null && typeof value === 'object') {
-    const source = value as Record<string, unknown>;
-    const sorted: Record<string, unknown> = {};
-    for (const key of Object.keys(source).sort()) {
-      sorted[key] = canonicalizeForHash(source[key]);
-    }
-    return sorted;
-  }
-  return value;
+export function shouldHaltOnTurnToolCallCap(
+  totalCalls: number,
+  maxKeyRepeat: number,
+  cap: number,
+  isExplicitCap: boolean,
+): boolean {
+  if (totalCalls <= cap) return false;
+  const hardCap = cap * ADAPTIVE_CAP_HARD_MULTIPLIER;
+  const stuck = maxKeyRepeat >= GLOBAL_DUPLICATE_THRESHOLD;
+  return isExplicitCap || totalCalls > hardCap || stuck;
 }
 
 /**
@@ -198,6 +253,14 @@ export class LoopDetectionService {
   // the user which detector actually fired.
   private lastLoopType: LoopType | null = null;
 
+  // Short excerpt of the repeated region captured when the chanting
+  // detector fires, for debug logging only. Deliberately NOT part of the
+  // LoopDetected event payload: the event contract stays loop_type-only and
+  // the excerpt rides the debug log instead, so a headless reasoning-channel
+  // halt (empty stdout, label-only stderr) leaves an artifact that tells a
+  // true repetition from a misfire.
+  private lastChantExcerpt = '';
+
   constructor(config: Config) {
     this.config = config;
   }
@@ -226,9 +289,7 @@ export class LoopDetectionService {
   }
 
   private getToolCallKey(toolCall: { name: string; args: object }): string {
-    const argsString = JSON.stringify(canonicalizeForHash(toolCall.args));
-    const keyString = `${toolCall.name}:${argsString}`;
-    return createHash('sha256').update(keyString).digest('hex');
+    return getToolCallRepeatKey(toolCall.name, toolCall.args);
   }
 
   /**
@@ -243,7 +304,7 @@ export class LoopDetectionService {
    * @param event - The stream event to process
    * @returns true if any tier detects a loop, false otherwise
    */
-  addAndCheck(event: ServerGeminiStreamEvent): boolean {
+  addAndCheck(event: ServerLlmStreamEvent): boolean {
     if (this.checkAlwaysOnSafeties(event)) {
       return true;
     }
@@ -251,13 +312,13 @@ export class LoopDetectionService {
     return this.addAndCheckHeuristicLoops(event);
   }
 
-  addAndCheckHeuristicLoops(event: ServerGeminiStreamEvent): boolean {
+  addAndCheckHeuristicLoops(event: ServerLlmStreamEvent): boolean {
     if (this.loopDetected || this.disabledForSession) {
       return this.loopDetected;
     }
 
     switch (event.type) {
-      case GeminiEventType.ToolCallRequest: {
+      case LlmEventType.ToolCallRequest: {
         // content chanting only happens in one single stream, reset if there
         // is a tool call in between
         this.resetContentTracking();
@@ -277,7 +338,7 @@ export class LoopDetectionService {
           globalDup || alternating || readFileLoop || actionStagnation;
         break;
       }
-      case GeminiEventType.Retry: {
+      case LlmEventType.Retry: {
         // A retry replays the failed attempt's tool calls (Turn clears
         // pendingToolCalls on retry), so drop the heuristic duplicate counters
         // to avoid firing on a duplicated replay — e.g. 3 identical calls +
@@ -287,15 +348,60 @@ export class LoopDetectionService {
         // streak reset).
         this.globalToolCallCounts.clear();
         this.recentToolCallKeys = [];
+        // A replay (non-continuation) retry also re-streams the failed
+        // attempt's content and reasoning through the chunk detectors: the
+        // transport-replay gate admits thought-only cuts (#7832), and with
+        // deterministic decoding the re-stream is verbatim, so the
+        // accumulated identical copies would fire
+        // CHANTING_IDENTICAL_SENTENCES mid-way through an otherwise healthy
+        // attempt. Reset the stream state the replay duplicates. A
+        // continuation retry (isContinuation) keeps the delivered text and
+        // appends genuinely new output — nothing is re-streamed, so its
+        // state must stay. A genuine chant simply re-accumulates after the
+        // restart.
+        if (!event.isContinuation) {
+          this.resetContentTracking();
+          this.thoughtHistory = [];
+        }
         break;
       }
-      case GeminiEventType.Content: {
+      case LlmEventType.ModelFallback: {
+        // The fallback model restarts the attempt from scratch: Turn clears
+        // pending tool calls and stream consumers discard the failed model's
+        // buffer, so the failed model's streamed content/thought text and
+        // tool-call keys would otherwise mix with the new model's stream and
+        // manufacture repetition runs across the boundary. Mirror the
+        // replay-retry resets.
+        this.globalToolCallCounts.clear();
+        this.recentToolCallKeys = [];
+        this.resetContentTracking();
+        this.thoughtHistory = [];
+        break;
+      }
+      case LlmEventType.Content: {
         this.loopDetected = this.checkContentLoop(event.value);
         break;
       }
-      case GeminiEventType.Thought: {
+      case LlmEventType.Thought: {
         this.trackThought(event.value);
         this.loopDetected = this.checkRepetitiveThoughts();
+        if (!this.loopDetected) {
+          // Also route the thought text into the content-repetition
+          // detector. OpenAI-compatible providers stream reasoning as
+          // thought parts, which getResponseText filters out of Content
+          // events, so a verbatim chant in the thinking stage never reaches
+          // the chunk-hash detectors otherwise. The Thought-only check above
+          // compares whole stream deltas adjacently, which misaligned
+          // chunking defeats — the chunk-hash detectors accumulate the text
+          // across deltas and catch the repetition regardless of chunk
+          // boundaries (issues #9656, #1775). Reasoning text enters through
+          // checkReasoningContentLoop so it can never drive the
+          // markdown/code-block machinery that guards the visible channel.
+          const thoughtText = this.getThoughtText(event.value);
+          if (thoughtText) {
+            this.loopDetected = this.checkReasoningContentLoop(thoughtText);
+          }
+        }
         break;
       }
       default:
@@ -313,7 +419,7 @@ export class LoopDetectionService {
    * explicit in-session disable; the cap is additionally tunable via the
    * `model.maxToolCallsPerTurn` setting.
    */
-  checkAlwaysOnSafeties(event: ServerGeminiStreamEvent): boolean {
+  checkAlwaysOnSafeties(event: ServerLlmStreamEvent): boolean {
     if (this.loopDetected) {
       return true;
     }
@@ -322,7 +428,7 @@ export class LoopDetectionService {
     // count as the rollback floor. The per-turn total accumulates across
     // ToolResult continuations, so the floor must track the last committed
     // round-trip rather than resetting to zero.
-    if (event.type === GeminiEventType.Finished) {
+    if (event.type === LlmEventType.Finished) {
       this.turnToolCallTotalCommitted = this.turnToolCallTotal;
       return false;
     }
@@ -335,7 +441,7 @@ export class LoopDetectionService {
     // cleared (consistent with how the heuristic path clears
     // globalToolCallCounts on retry): the replayed calls re-populate it, and a
     // stuck pattern simply re-accumulates toward the threshold.
-    if (event.type === GeminiEventType.Retry) {
+    if (event.type === LlmEventType.Retry) {
       this.turnToolCallTotal = this.turnToolCallTotalCommitted;
       this.resetToolCallCount();
       this.capKeyCounts.clear();
@@ -343,7 +449,7 @@ export class LoopDetectionService {
       return false;
     }
 
-    if (event.type !== GeminiEventType.ToolCallRequest) {
+    if (event.type !== LlmEventType.ToolCallRequest) {
       return false;
     }
 
@@ -570,6 +676,33 @@ export class LoopDetectionService {
       return false;
     }
 
+    return this.appendToContentHistoryAndAnalyze(content);
+  }
+
+  /**
+   * Entry point for reasoning-stream deltas into the content-repetition
+   * detector. Reasoning text is raw chain-of-thought, never rendered
+   * markdown, so it must skip checkContentLoop's structure heuristics: an
+   * odd number of code fences in a thought would flip the shared
+   * `inCodeBlock` parity — which nothing clears mid-turn — and silently
+   * disable visible-content detection for the rest of the turn, and a
+   * list-item or heading-shaped thought delta would reset the shared
+   * history, erasing already-accumulated content evidence whenever a
+   * provider interleaves thought and content parts. Reasoning deltas are
+   * appended to the shared history and analyzed only.
+   */
+  private checkReasoningContentLoop(content: string): boolean {
+    return this.appendToContentHistoryAndAnalyze(content);
+  }
+
+  /**
+   * Shared append/truncate/analyze tail behind checkContentLoop and
+   * checkReasoningContentLoop, so the history contract lives in one copy:
+   * a future change to the sequence (normalising before append, an extra
+   * reset, different truncation handling) applies to both channels instead
+   * of silently leaving the reasoning path on the old behaviour.
+   */
+  private appendToContentHistoryAndAnalyze(content: string): boolean {
     this.streamContentHistory += content;
 
     this.truncateAndUpdate();
@@ -577,11 +710,34 @@ export class LoopDetectionService {
   }
 
   /**
+   * Start of the logical detection window inside streamContentHistory: the
+   * detection rules may only see the last MAX_HISTORY_LENGTH chars, even
+   * while the physical trim's hysteresis (see truncateAndUpdate) lets the
+   * buffer temporarily hold up to MAX_HISTORY_LENGTH + TRUNCATION_SLACK.
+   * Everything before this offset is treated as already truncated away.
+   */
+  private windowStart(): number {
+    return Math.max(0, this.streamContentHistory.length - MAX_HISTORY_LENGTH);
+  }
+
+  /**
    * Truncates the content history to prevent unbounded memory growth.
    * When truncating, adjusts all stored indices to maintain their relative positions.
+   *
+   * Runs with hysteresis: once saturated, trims only when the length
+   * exceeds the window by TRUNCATION_SLACK, then slices back to exactly
+   * MAX_HISTORY_LENGTH. The index-rebase walk below is Θ(map size), and at
+   * saturation the stride-1 sliding window keeps one entry per position, so
+   * running it per streamed event cost Θ(window) synchronous CPU on the
+   * token-streaming path; the slack amortizes it over appended chars.
+   * Detection semantics are unaffected: the rules only ever see the logical
+   * window (windowStart), which is identical with or without the slack.
    */
   private truncateAndUpdate(): void {
-    if (this.streamContentHistory.length <= MAX_HISTORY_LENGTH) {
+    if (
+      this.streamContentHistory.length <=
+      MAX_HISTORY_LENGTH + TRUNCATION_SLACK
+    ) {
       return;
     }
 
@@ -636,6 +792,20 @@ export class LoopDetectionService {
             this.promptId,
           ),
         );
+        // The LoopDetected event carries only loop_type + prompt_id, and a
+        // reasoning-channel halt prints nothing to stdout — without an
+        // artifact there is no way to tell a true repetition from a
+        // detector misfire. Log one period of the matched region instead of
+        // widening the event contract.
+        if (this.lastChantExcerpt) {
+          this.config
+            .getDebugLogger()
+            .debug(
+              `Loop detection halted on ${LoopType.CHANTING_IDENTICAL_SENTENCES}; ` +
+                `repeated region excerpt (${this.lastChantExcerpt.length} chars): ` +
+                JSON.stringify(this.lastChantExcerpt),
+            );
+        }
         return true;
       }
 
@@ -664,9 +834,29 @@ export class LoopDetectionService {
    *    within a small average distance (≤ 1.5 * chunk size)
    */
   private isLoopDetectedForChunk(chunk: string, hash: string): boolean {
-    const existingIndices = this.contentStats.get(hash);
+    let existingIndices = this.contentStats.get(hash);
 
-    if (!existingIndices) {
+    if (existingIndices) {
+      // The physical truncation runs with hysteresis, so occurrences the
+      // logical window has already passed can linger in the map between
+      // trims. Drop them here — exactly the set a per-event truncation
+      // would have removed — so detection decisions never depend on how
+      // rarely the physical trim runs.
+      const start = this.windowStart();
+      if (existingIndices[0] < start) {
+        let firstKept = 1;
+        while (
+          firstKept < existingIndices.length &&
+          existingIndices[firstKept] < start
+        ) {
+          firstKept++;
+        }
+        existingIndices = existingIndices.slice(firstKept);
+        this.contentStats.set(hash, existingIndices);
+      }
+    }
+
+    if (!existingIndices || existingIndices.length === 0) {
       this.contentStats.set(hash, [this.lastContentIndex]);
       return false;
     }
@@ -677,18 +867,149 @@ export class LoopDetectionService {
 
     existingIndices.push(this.lastContentIndex);
 
-    if (existingIndices.length < CONTENT_LOOP_THRESHOLD) {
+    if (
+      this.isClusteredChunkRepetition(existingIndices) ||
+      this.isPeriodicChunkRepetition(existingIndices)
+    ) {
+      this.lastChantExcerpt = this.captureChantExcerpt(existingIndices);
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * One period of the matched repetition for debug logging: the span
+   * between the last two occurrences (exactly one stride for a verified
+   * periodic run), capped so the log line stays short.
+   */
+  private captureChantExcerpt(occurrences: number[]): string {
+    const start = occurrences[occurrences.length - 2];
+    const stride = occurrences[occurrences.length - 1] - start;
+    if (stride <= 0) {
+      return '';
+    }
+    return this.streamContentHistory.slice(
+      start,
+      start + Math.min(stride, CHANT_EXCERPT_MAX_LENGTH),
+    );
+  }
+
+  /**
+   * The original chunk rule: the most recent CONTENT_LOOP_THRESHOLD
+   * occurrences of an identical chunk cluster within 1.5 chunk lengths.
+   * Only admits repeat units up to ~75 chars (see isPeriodicChunkRepetition
+   * for longer ones).
+   */
+  private isClusteredChunkRepetition(indices: number[]): boolean {
+    if (indices.length < CONTENT_LOOP_THRESHOLD) {
       return false;
     }
 
     // Analyze the most recent occurrences to see if they're clustered closely together
-    const recentIndices = existingIndices.slice(-CONTENT_LOOP_THRESHOLD);
+    const recentIndices = indices.slice(-CONTENT_LOOP_THRESHOLD);
     const totalDistance =
       recentIndices[recentIndices.length - 1] - recentIndices[0];
     const averageDistance = totalDistance / (CONTENT_LOOP_THRESHOLD - 1);
     const maxAllowedDistance = CONTENT_CHUNK_SIZE * 1.5;
 
     return averageDistance <= maxAllowedDistance;
+  }
+
+  /**
+   * Detects verbatim repetition of a long unit (issue #1775): a chant whose
+   * repeated block exceeds the clustered rule's 75-char window, such as the
+   * ~300-char analysis block looped in the report. A unit repeated verbatim
+   * re-emits each of its CONTENT_CHUNK_SIZE-grams at exactly one unit-length
+   * of spacing, so a run of equally-spaced occurrences marks a candidate
+   * period. Equal spacing alone could still interleave varying text between
+   * occurrences, so the spanned region is additionally verified to be
+   * exactly periodic with that stride before firing.
+   *
+   * The candidate run is the longest equally-spaced suffix of the recorded
+   * occurrences, not just the last PERIODIC_OCCURRENCES_REQUIRED: the
+   * verified region grows with the repetition count, which admits units
+   * between the clustered rule's ~75-char bound and the span a fixed
+   * 5-occurrence window can verify (e.g. a 150-char unit crosses
+   * MIN_PERIODIC_REGION_LENGTH at its 8th occurrence).
+   *
+   * Once the history saturates, earlier occurrences can be truncated away,
+   * so a shorter run (>= PERIODIC_MIN_TRUNCATED_OCCURRENCES) is accepted
+   * when the whole retained region — back to the start of the logical
+   * window (windowStart), i.e. exactly the content a fully-trimmed history
+   * retains — is verified periodic with the candidate stride. Without that
+   * escape valve, units of ~1 KB or more could never accumulate
+   * PERIODIC_OCCURRENCES_REQUIRED occurrences inside the window and a
+   * full-paragraph chant would spin the turn forever.
+   */
+  private isPeriodicChunkRepetition(indices: number[]): boolean {
+    if (indices.length < PERIODIC_MIN_TRUNCATED_OCCURRENCES) {
+      return false;
+    }
+
+    const last = indices.length - 1;
+    const stride = indices[last] - indices[last - 1];
+
+    // Extend the run backwards over the longest equally-spaced suffix so
+    // the verified region grows with the repetition count.
+    let first = last;
+    while (first > 0 && indices[first] - indices[first - 1] === stride) {
+      first--;
+    }
+    const runLength = last - first + 1;
+
+    if (runLength >= PERIODIC_OCCURRENCES_REQUIRED) {
+      return this.isRegionPeriodicWithStride(
+        indices[first],
+        indices[last] + CONTENT_CHUNK_SIZE,
+        stride,
+      );
+    }
+
+    // The run may have been truncated by the history window. Accept it only
+    // when the history actually saturated and the entire retained region is
+    // periodic with the candidate stride, so a short run of occurrences in
+    // fresh (untruncated) history still needs the full occurrence count.
+    if (
+      runLength >= PERIODIC_MIN_TRUNCATED_OCCURRENCES &&
+      this.streamContentHistory.length >= MAX_HISTORY_LENGTH
+    ) {
+      return this.isRegionPeriodicWithStride(
+        this.windowStart(),
+        indices[last] + CONTENT_CHUNK_SIZE,
+        stride,
+      );
+    }
+
+    return false;
+  }
+
+  /**
+   * Verifies that streamContentHistory[start, end) is exactly periodic with
+   * the given stride and spans at least MIN_PERIODIC_REGION_LENGTH chars.
+   */
+  private isRegionPeriodicWithStride(
+    start: number,
+    end: number,
+    stride: number,
+  ): boolean {
+    const regionLength = end - start;
+    if (regionLength < MIN_PERIODIC_REGION_LENGTH) {
+      return false;
+    }
+    // Compare in place instead of slicing the region out: near-periodic
+    // chants (the target input class) fail verification repeatedly while
+    // their equally-spaced occurrence runs persist, so once a run reaches
+    // length 5 this check can fire on up to every streamed character, and
+    // a slice would copy up to ~4 KB of history per call.
+    for (let i = 0; i + stride < regionLength; i++) {
+      if (
+        this.streamContentHistory[start + i] !==
+        this.streamContentHistory[start + i + stride]
+      ) {
+        return false;
+      }
+    }
+    return true;
   }
 
   /**
@@ -704,6 +1025,18 @@ export class LoopDetectionService {
       originalIndex + CONTENT_CHUNK_SIZE,
     );
     return originalChunk === currentChunk;
+  }
+
+  /**
+   * Joins a thought summary back into raw text for the content-repetition
+   * detector. For reasoning streamed from OpenAI-compatible providers the
+   * subject is empty and the description is the reasoning delta, so this
+   * yields the reasoning text verbatim.
+   */
+  private getThoughtText(summary: ThoughtSummary): string {
+    return [summary.subject, summary.description]
+      .filter((part) => part.length > 0)
+      .join(' ');
   }
 
   /**
@@ -886,25 +1219,22 @@ export class LoopDetectionService {
    */
   private checkTurnToolCallCap(): boolean {
     this.turnToolCallTotal++;
-    const cap = this.config.getMaxToolCallsPerTurn();
-    if (this.turnToolCallTotal <= cap) {
+    if (
+      !shouldHaltOnTurnToolCallCap(
+        this.turnToolCallTotal,
+        this.capMaxKeyRepeat,
+        this.config.getMaxToolCallsPerTurn(),
+        this.config.isMaxToolCallsPerTurnExplicit(),
+      )
+    ) {
       return false;
     }
-
-    // Over the configured cap. An explicit value is a hard cap; the default is
-    // adaptive (allow productive turns, halt on stuck or the hard backstop).
-    const explicitHardCap = this.config.isMaxToolCallsPerTurnExplicit();
-    const hardCap = cap * ADAPTIVE_CAP_HARD_MULTIPLIER;
-    const stuck = this.capMaxKeyRepeat >= GLOBAL_DUPLICATE_THRESHOLD;
-    if (explicitHardCap || this.turnToolCallTotal > hardCap || stuck) {
-      this.lastLoopType = LoopType.TURN_TOOL_CALL_CAP;
-      logLoopDetected(
-        this.config,
-        new LoopDetectedEvent(LoopType.TURN_TOOL_CALL_CAP, this.promptId),
-      );
-      return true;
-    }
-    return false;
+    this.lastLoopType = LoopType.TURN_TOOL_CALL_CAP;
+    logLoopDetected(
+      this.config,
+      new LoopDetectedEvent(LoopType.TURN_TOOL_CALL_CAP, this.promptId),
+    );
+    return true;
   }
 
   /**
@@ -979,6 +1309,7 @@ export class LoopDetectionService {
     this.resetToolCallCount();
     this.resetContentTracking();
     this.loopDetected = false;
+    this.lastChantExcerpt = '';
 
     // Reset new tracking variables
     this.thoughtHistory = [];

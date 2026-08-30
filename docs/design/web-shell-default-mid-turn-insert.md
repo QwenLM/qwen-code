@@ -15,33 +15,52 @@ turn automatically.
   that it was actually injected into the running turn.
 - The prompt disappears only after that injection event. Acceptance of the
   enqueue request alone is not treated as insertion.
-- If the daemon rejects the mid-turn request, or the active turn becomes idle
-  before injection, the same prompt is submitted as an ordinary next turn.
+- A new client connected to an older daemon keeps its ordinary pending-prompt
+  fallback. Once a query-capable client receives an acceptance, the daemon owns
+  the message: if the active turn becomes idle before injection, it promotes
+  the message into its normal prompt FIFO.
+- Anonymous live-steering messages remain private to the active coordinator.
+  If one misses the final drain before the turn settles, the coordinator starts
+  it as the next collected turn instead of exposing or promoting it as a bare
+  prompt.
 - Commands and prompts with images continue through the ordinary pending-prompt
   path because they cannot be represented by the text-only mid-turn API.
 - The queue no longer exposes a separate insert action.
 
 ## State model
 
-An eligible prompt moves through `submitting` and `queued` mid-turn states.
-Both states keep the row visible. While admission is in flight its actions are
-disabled. Once the daemon returns a stable message id, delete and edit operate
-on the daemon queue rather than only changing local UI: delete removes the row
-after server confirmation, while edit removes it and restores its contents to
-the composer. If the message has already left the daemon queue, the action
-leaves the row intact until the injection event or idle fallback establishes
-its real outcome. An injection event removes the row. Once delete or edit has
-been requested, that message is never resubmitted automatically: an idle
-fallback removes it for delete or restores it to the composer for edit. A
-failed admission or an idle transition atomically claims untouched rows for
-ordinary submission so the two fallback paths cannot submit them twice.
+For a daemon advertising `session_mid_turn_message_query`, the daemon is the
+only owner of an admitted message. The Web Shell does not keep a parallel
+mid-turn queue: it renders the daemon's session snapshot and never resubmits at
+idle, on session switches, or during page teardown. Delete and edit mutate the
+daemon queue by stable message id. Settled ids remain in a bounded
+reconciliation ring so an ambiguous HTTP retry cannot recreate a removed or
+already-injected message. Older daemons keep the legacy local `submitting` and
+`queued` fallback.
 
-The daemon injection event includes stable message ids in addition to the
-originating client id and message text. New clients reconcile by id; text-based
-matching remains as a compatibility fallback for older daemons. Reconciliation
-continues to match only messages from the current client and session,
-preserving independent queues in other Web Shell clients.
+The daemon injection event includes stable message ids and message text. New
+clients reconcile by id; text and originator matching remains as a compatibility
+fallback for older daemons. Stable-id reconciliation is session-wide: every
+attached client sees and may mutate the same daemon-owned queue regardless of
+which client submitted a message.
+These anonymous queue-only coordinator messages are still delivered to the ACP
+child but are excluded from this session-wide event and snapshot surface.
+Daemon queue additions and removals reuse the session pending-prompt change
+events so every connected client refreshes the authoritative snapshots.
+
+The queue and reconciliation rings are process-local. A child-channel exit
+terminates the live session with `session_died`; queued messages are not
+promoted into the removed session or retained across that terminal failure.
 
 Delete and edit are shown only when the daemon advertises
 `session_mid_turn_message_mutation`. This keeps clients compatible with older
 daemons that can accept mid-turn messages but cannot remove them by id.
+
+## Compatibility
+
+`session_mid_turn_message_query` is the ownership boundary. A new client uses
+client-generated message ids and relies on a daemon advertising that feature
+for reconciliation and idle promotion. A new client connected to an older
+daemon keeps the legacy local fallback. Client and daemon versions are deployed
+together otherwise, so a daemon advertising the capability owns every accepted
+mid-turn message.

@@ -30,7 +30,7 @@ import {
   ToolConfirmationOutcome,
 } from './tools.js';
 import { getErrorMessage, isNodeError } from '../utils/errors.js';
-import { truncateToolOutput } from '../utils/truncation.js';
+import { truncateToolOutput } from './truncation.js';
 import {
   CommitAttributionService,
   type StagedFileInfo,
@@ -45,6 +45,7 @@ import type {
 } from '../services/shellExecutionService.js';
 import {
   getShellAbortReasonKind,
+  isSignalTermination,
   ShellExecutionService,
 } from '../services/shellExecutionService.js';
 import {
@@ -72,7 +73,7 @@ import { parse, type ControlOperator } from 'shell-quote';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { checkPriorRead, StructuredToolError } from './priorReadEnforcement.js';
 import {
-  isShellCommandReadOnlyAST,
+  isShellCommandReadOnlyASTInDirectory,
   extractCommandRules,
 } from '../utils/shellAstParser.js';
 import {
@@ -87,6 +88,13 @@ import {
 import { createPatchSmart, getDiffStat } from './diffOptions.js';
 
 const debugLogger = createDebugLogger('SHELL');
+const DEFAULT_SHELL_OUTPUT_THRESHOLD = 30_000;
+
+function getShellOutputThreshold(config: Config): number {
+  return config.isTruncateToolOutputThresholdExplicit()
+    ? config.getTruncateToolOutputThreshold()
+    : DEFAULT_SHELL_OUTPUT_THRESHOLD;
+}
 
 /**
  * Model-facing liveness guidance shared verbatim by both background
@@ -1934,6 +1942,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       await this.config.getFileSystemService().writeTextFile({
         path: edit.filePath,
         content: edit.newContent,
+        toolWriteOrigin: 'shell_sed_edit',
         _meta: edit.meta,
       });
 
@@ -2039,7 +2048,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
     // AST-based read-only detection
     try {
-      const isReadOnly = await isShellCommandReadOnlyAST(command);
+      const isReadOnly = await isShellCommandReadOnlyASTInDirectory(
+        command,
+        this.params.directory || this.config.getTargetDir(),
+      );
       if (isReadOnly) {
         return 'allow';
       }
@@ -2113,7 +2125,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     for (const sub of subCommands) {
       let isReadOnly = false;
       try {
-        isReadOnly = await isShellCommandReadOnlyAST(sub);
+        isReadOnly = await isShellCommandReadOnlyASTInDirectory(sub, cwd);
       } catch {
         // conservative: treat unknown commands as requiring confirmation
       }
@@ -2809,10 +2821,12 @@ export class ShellToolInvocation extends BaseToolInvocation<
     //         cancel). Their own messaging is enough; a "should have
     //         been background" reminder when the agent already knows
     //         the command didn't complete is noise.
-    //       * Suppressed on external signal kills (`result.signal !=
-    //         null` with `aborted: false`, e.g. SIGTERM from container
-    //         shutdown, k8s eviction, OOM killer, sibling reaping the
-    //         process group). `shellExecutionService` only sets
+    //       * Suppressed on external signal kills
+    //         (`isSignalTermination(result.signal)` with `aborted: false`,
+    //         e.g. SIGTERM from container shutdown, k8s eviction, OOM
+    //         killer, or sibling reaping the process group). node-pty's
+    //         clean-exit signal 0 is normalized to null and does not
+    //         suppress this hint. The service only sets
     //         `aborted` when the AbortSignal we passed was triggered,
     //         so external signals fall through to the non-aborted
     //         branch — same rationale as timeout.
@@ -2836,7 +2850,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     const shouldAppendLongRunHint =
       longRunThreshold !== null &&
       !result.aborted &&
-      result.signal === null &&
+      !isSignalTermination(result.signal) &&
       elapsedMs >= longRunThreshold;
     // Observability: the hint decision is otherwise invisible. If a
     // user reports "my 65s command didn't get the hint" or "5s command
@@ -2877,7 +2891,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
             : wasPromoteRefused
               ? 'Command finished before background-promote could be honoured.'
               : 'Command cancelled by user.';
-        } else if (result.signal) {
+        } else if (isSignalTermination(result.signal)) {
           returnDisplayMessage = `Command terminated by signal: ${result.signal}`;
         } else if (result.error) {
           returnDisplayMessage = `Command failed: ${getErrorMessage(
@@ -2896,6 +2910,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // Truncate large output and save full content to a temp file.
     if (typeof llmContent === 'string') {
       const originalLlmContent = llmContent;
+      const outputThreshold = getShellOutputThreshold(this.config);
       const truncatedResult = await truncateToolOutput(
         this.config,
         ShellTool.Name,
@@ -2906,11 +2921,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
         // scheduler) so the long-run hint below is appended OUTSIDE the
         // truncation envelope; the scheduler's sentinel makes its later pass a
         // no-op here. lines: Infinity keeps this char-only so the global line
-        // cap can't undercut the declared 30k char budget — many short lines
+        // cap can't undercut the effective Shell char budget — many short lines
         // (e.g. `find /`, `ls -R`) would otherwise truncate while chars remain.
         {
-          threshold: 30_000,
-          previewChars: 4000,
+          threshold: outputThreshold,
+          previewChars: Math.min(4000, outputThreshold),
           keep: 'both',
           lines: Number.POSITIVE_INFINITY,
         },
@@ -3016,7 +3031,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
               type: ToolErrorType.SHELL_EXECUTE_ERROR,
             },
           }
-        : isShellExitError(this.params.command, result.exitCode)
+        : (!result.aborted && isSignalTermination(result.signal)) ||
+            isShellExitError(this.params.command, result.exitCode)
           ? {
               error: {
                 // Schedulers use error.message as the model-facing response.
@@ -3091,12 +3107,13 @@ export class ShellToolInvocation extends BaseToolInvocation<
       if (pid !== undefined) {
         if (os.platform() === 'win32') {
           try {
-            const taskkillChild = childProcess.spawn('taskkill', [
-              '/pid',
-              String(pid),
-              '/f',
-              '/t',
-            ]);
+            const taskkillChild = childProcess.spawn(
+              'taskkill',
+              ['/pid', String(pid), '/f', '/t'],
+              // The desktop runtime daemon has no console; without this
+              // flag each console-app child allocates a visible window.
+              { windowsHide: true },
+            );
             taskkillChild.on('error', () => {
               /* swallow — already in error path */
             });
@@ -3241,12 +3258,13 @@ export class ShellToolInvocation extends BaseToolInvocation<
       if (pid !== undefined) {
         if (os.platform() === 'win32') {
           try {
-            const taskkillChild = childProcess.spawn('taskkill', [
-              '/pid',
-              String(pid),
-              '/f',
-              '/t',
-            ]);
+            const taskkillChild = childProcess.spawn(
+              'taskkill',
+              ['/pid', String(pid), '/f', '/t'],
+              // The desktop runtime daemon has no console; without this
+              // flag each console-app child allocates a visible window.
+              { windowsHide: true },
+            );
             // Without an 'error' listener on the spawned ChildProcess,
             // a taskkill spawn failure (binary missing, permission
             // denied, etc.) would emit 'error' with no listener — which
@@ -3389,21 +3407,23 @@ export class ShellToolInvocation extends BaseToolInvocation<
     const classifySettle = (
       info: ShellPostPromoteSettleInfo,
     ): { status: 'completed' | 'failed'; failMsg: string | null } => {
-      // Decision table: `error` → fail (spawn-side failure); `exitCode
-      // === 0` → complete; non-zero exitCode → fail; signal-killed
-      // (no exitCode, signal set) → fail with descriptive message;
-      // everything-null → fail with generic message.
+      // Decision table: `error` → fail (spawn-side failure); a non-zero
+      // signal means the process was killed (including node-pty's
+      // `exitCode: 0, signal: N` shape), then `exitCode === 0` → complete;
+      // non-zero exitCode → fail; everything-null → fail with a generic
+      // message.
       if (info.error) return { status: 'failed', failMsg: info.error.message };
+      if (isSignalTermination(info.signal)) {
+        return {
+          status: 'failed',
+          failMsg: `Terminated by signal ${info.signal}`,
+        };
+      }
       if (info.exitCode === 0) return { status: 'completed', failMsg: null };
       if (info.exitCode !== null)
         return {
           status: 'failed',
           failMsg: `Exited with code ${info.exitCode}`,
-        };
-      if (info.signal !== null)
-        return {
-          status: 'failed',
-          failMsg: `Terminated by signal ${info.signal}`,
         };
       // PR-2.5 wave-3: this branch is meant to
       // be unreachable — the service always populates one of
@@ -3426,6 +3446,13 @@ export class ShellToolInvocation extends BaseToolInvocation<
       };
     };
     const transitionRegistry = (info: ShellPostPromoteSettleInfo) => {
+      // `task_stop` aborts the entry before the child necessarily reports
+      // its signal. Preserve the user-intended `cancelled` state instead of
+      // allowing the later signal settle to overwrite it as `failed`.
+      if (entryAc.signal.aborted) {
+        registry.cancel(shellId, info.endTime);
+        return;
+      }
       const cls = classifySettle(info);
       if (cls.status === 'completed') {
         registry.complete(shellId, info.exitCode as number, info.endTime);
@@ -3715,7 +3742,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
           } else if (
             result.error ||
             (result.exitCode !== null && result.exitCode !== 0) ||
-            result.signal !== null
+            isSignalTermination(result.signal)
           ) {
             // Non-zero exit / killed by signal / spawn error all count as failed.
             // Treating them as `completed` would let `/tasks` (and any future
@@ -3723,7 +3750,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
             // `false` command as a success.
             const reason = result.error
               ? result.error.message
-              : result.signal !== null
+              : isSignalTermination(result.signal)
                 ? `terminated by signal ${result.signal}`
                 : `exited with code ${result.exitCode}`;
             registry.fail(shellId, reason, endTime);
@@ -3795,7 +3822,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       const child = childProcess.execFile(
         'git',
         args,
-        { cwd, timeout: 2000 },
+        { cwd, timeout: 2000, windowsHide: true },
         (error, stdout) => {
           if (error) {
             resolve(0);
@@ -3823,7 +3850,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       const child = childProcess.execFile(
         'git',
         ['rev-parse', 'HEAD'],
-        { cwd, timeout: 2000 },
+        { cwd, timeout: 2000, windowsHide: true },
         (error, stdout) => {
           if (error) {
             resolve(null);
@@ -3857,6 +3884,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       const stdout = childProcess.execFileSync('git', ['rev-parse', 'HEAD'], {
         cwd,
         timeout: 2000,
+        windowsHide: true,
         // Discard stderr noise (e.g. "fatal: not a git repository") —
         // the catch-or-empty-output path already covers failure.
         stdio: ['ignore', 'pipe', 'ignore'],
@@ -4091,6 +4119,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
             .execFileSync('git', ['show', `${postHead}:${rel}`], {
               cwd,
               timeout: 2000,
+              windowsHide: true,
               stdio: ['ignore', 'pipe', 'ignore'],
               maxBuffer: 16 * 1024 * 1024,
             })
@@ -4176,7 +4205,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
         const child = childProcess.execFile(
           notesCommand.command,
           notesCommand.args,
-          { cwd, timeout: 5000 },
+          { cwd, timeout: 5000, windowsHide: true },
           (error, stdout, stderr) => {
             const merged = (stdout || '') + (stderr || '');
             if (error) {
@@ -5015,7 +5044,7 @@ export class ShellTool extends BaseDeclarativeTool<
   static Name: string = ToolNames.SHELL;
 
   override get maxOutputChars(): number {
-    return 30_000;
+    return getShellOutputThreshold(this.config);
   }
 
   constructor(private readonly config: Config) {

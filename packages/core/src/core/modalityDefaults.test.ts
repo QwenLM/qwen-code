@@ -155,18 +155,32 @@ describe('defaultModalities', () => {
       expect(defaultModalities('qwen3.7-max')).toEqual({});
     });
 
-    it('returns image + video for qwen3.8-max', () => {
+    it('returns image for qwen3.8-max', () => {
       const m = defaultModalities('qwen3.8-max');
       expect(m.image).toBe(true);
-      expect(m.video).toBe(true);
+      expect(m.video).toBeUndefined();
       expect(m.pdf).toBeUndefined();
       expect(m.audio).toBeUndefined();
     });
 
-    it('returns image + video for qwen3.8-max-preview (provider-prefixed)', () => {
+    it('returns image for qwen3.8-max-preview (provider-prefixed)', () => {
       const m = defaultModalities('bailian-token-plan/qwen3.8-max-preview');
       expect(m.image).toBe(true);
-      expect(m.video).toBe(true);
+    });
+
+    // [Regression] issue-10194 — qwen3.8-flash/plus were classified as text-only
+    it('returns image + video for qwen3.8-flash', () => {
+      expect(defaultModalities('qwen3.8-flash')).toEqual({
+        image: true,
+        video: true,
+      });
+    });
+
+    it('returns image + video for qwen3.8-plus', () => {
+      expect(defaultModalities('qwen3.8-plus')).toEqual({
+        image: true,
+        video: true,
+      });
     });
 
     it('returns image + video for qwen3.6-35b variants', () => {
@@ -190,11 +204,41 @@ describe('defaultModalities', () => {
     it('returns text-only for deepseek-reasoner', () => {
       expect(defaultModalities('deepseek-reasoner')).toEqual({});
     });
+
+    // (QwenLM/qwen-code#10270)
+    it('returns text-only for non-vision deepseek-v4-flash', () => {
+      expect(defaultModalities('deepseek-v4-flash')).toEqual({});
+    });
+
+    it('returns image for deepseek-v4-flash-vision-exp', () => {
+      const m = defaultModalities('deepseek-v4-flash-vision-exp');
+      expect(m.image).toBe(true);
+      expect(m.pdf).toBeUndefined();
+    });
   });
 
   describe('Zhipu GLM', () => {
     it('returns image for glm-4.5v', () => {
       const m = defaultModalities('glm-4.5v');
+      expect(m.image).toBe(true);
+      expect(m.pdf).toBeUndefined();
+    });
+
+    // (QwenLM/qwen-code#10270)
+    it('returns image for glm-4.6v', () => {
+      const m = defaultModalities('glm-4.6v');
+      expect(m.image).toBe(true);
+      expect(m.pdf).toBeUndefined();
+    });
+
+    it('returns image for glm-5v-turbo', () => {
+      const m = defaultModalities('glm-5v-turbo');
+      expect(m.image).toBe(true);
+      expect(m.pdf).toBeUndefined();
+    });
+
+    it('returns image for glm-5.3-flash', () => {
+      const m = defaultModalities('glm-5.3-flash');
       expect(m.image).toBe(true);
       expect(m.pdf).toBeUndefined();
     });
@@ -205,6 +249,10 @@ describe('defaultModalities', () => {
 
     it('returns text-only for glm-4.7', () => {
       expect(defaultModalities('glm-4.7')).toEqual({});
+    });
+
+    it('returns text-only for glm-4.6 (no v suffix)', () => {
+      expect(defaultModalities('glm-4.6')).toEqual({});
     });
   });
 

@@ -5,7 +5,11 @@
  */
 
 import type { WorkflowTask, WorkflowSnapshot } from '@qwen-code/qwen-code-core';
-import { listWorkflowSnapshots } from '@qwen-code/qwen-code-core';
+import {
+  isActiveWorkflowStatus,
+  isTerminalWorkflowStatus,
+  listWorkflowSnapshots,
+} from '@qwen-code/qwen-code-core';
 import type { SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
@@ -17,7 +21,7 @@ import { formatDuration, formatTokenCount } from '../utils/formatters.js';
  * `outputFile`, etc.) are filled with inert values — a snapshot is always
  * terminal, so the controls that read those fields are never reached.
  */
-function snapshotToTask(s: WorkflowSnapshot): WorkflowTask {
+export function snapshotToTask(s: WorkflowSnapshot): WorkflowTask {
   return {
     id: s.runId,
     kind: 'workflow',
@@ -26,10 +30,16 @@ function snapshotToTask(s: WorkflowSnapshot): WorkflowTask {
     meta: s.meta,
     status: s.status,
     currentPhase: null,
+    currentPhaseVisitId: null,
     phases: s.phases ?? [],
+    phaseVisits: s.phaseVisits ?? [],
+    dispatches: s.dispatches ?? [],
+    sourceRunId: s.sourceRunId,
+    startMode: s.startMode,
     agentsDispatched: s.agentsDispatched ?? 0,
     agentsCompleted: s.agentsCompleted ?? 0,
     recentLogs: s.recentLogs ?? [],
+    events: s.events ?? [],
     tokensSpent: s.tokensSpent ?? 0,
     tokenBudgetTotal: s.tokenBudgetTotal ?? null,
     perPhaseTokens: new Map(s.perPhaseTokens ?? []),
@@ -44,7 +54,7 @@ function snapshotToTask(s: WorkflowSnapshot): WorkflowTask {
     outputOffset: 0,
     notified: true,
     abortController: new AbortController(),
-  } as WorkflowTask;
+  };
 }
 
 /**
@@ -152,12 +162,10 @@ function detailLines(entry: WorkflowTask, now: number): string[] {
 export const workflowsCommand: SlashCommand = {
   name: 'workflows',
   get description() {
-    return t(
-      'List active and completed workflow runs (text dump — interactive dialog opens via the footer pill)',
-    );
+    return t('List workflow runs or cooperatively pause/resume a live run');
   },
   get argumentHint() {
-    return t('[runId]');
+    return t('[runId | p <runId>]');
   },
   kind: CommandKind.BUILT_IN,
   // Same triple-mode coverage as `/tasks`: the dialog is richer in
@@ -175,11 +183,112 @@ export const workflowsCommand: SlashCommand = {
     }
     const registry = config.getWorkflowRunRegistry();
     const allEntries = registry.list();
+    const trimmedArgs = (args ?? '').trim();
+    const tokens = trimmedArgs.split(/\s+/);
+
+    if (tokens[0] === 'p') {
+      if (context.executionMode !== 'interactive') {
+        return {
+          type: 'message' as const,
+          messageType: 'error' as const,
+          content:
+            'Workflow pause controls are available only in the interactive TUI.',
+        };
+      }
+      if (tokens.length !== 2 || !tokens[1]) {
+        return {
+          type: 'message' as const,
+          messageType: 'error' as const,
+          content: 'Usage: /workflows p <runId>',
+        };
+      }
+      const runId = tokens[1];
+      let target = registry.get(runId);
+      let fromSnapshot = false;
+      if (!target) {
+        // Fall back to a persisted snapshot — the same source the listing
+        // and detail view merge in. A terminal run evicted from the
+        // in-memory registry (10-entry cap) or left behind by an earlier
+        // CLI process is still known to this command; answering "Unknown
+        // live workflow runId" for it contradicts the listing.
+        const snapshot = (await listWorkflowSnapshots(config)).find(
+          (s) => s.runId === runId,
+        );
+        if (snapshot) {
+          target = snapshotToTask(snapshot);
+          fromSnapshot = true;
+        }
+      }
+      if (!target) {
+        return {
+          type: 'message' as const,
+          messageType: 'error' as const,
+          content: `Unknown live workflow runId: ${runId}`,
+        };
+      }
+      // Terminal status before the foreground gate: a still-retained
+      // terminal foreground run must get the same terminal wording a
+      // snapshot-only hit gets, not the foreground wording (which
+      // implies backgrounding would help — impossible for a run that
+      // already settled).
+      if (isTerminalWorkflowStatus(target.status)) {
+        return {
+          type: 'message' as const,
+          messageType: 'error' as const,
+          content: `Workflow ${runId} is ${target.status} and cannot be paused or resumed.`,
+        };
+      }
+      if (!fromSnapshot && !target.isBackgrounded) {
+        return {
+          type: 'message' as const,
+          messageType: 'error' as const,
+          content:
+            'Foreground workflow runs cannot be paused or resumed; only background runs support cooperative pause.',
+        };
+      }
+      if (target.status === 'pausing') {
+        return {
+          type: 'message' as const,
+          messageType: 'warning' as const,
+          content: `Workflow ${runId} is still pausing; wait until it reaches paused before resuming.`,
+        };
+      }
+      if (target.status === 'running') {
+        return registry.pause(runId)
+          ? {
+              type: 'message' as const,
+              messageType: 'info' as const,
+              content: `Cooperative pause requested for workflow ${runId}.`,
+            }
+          : {
+              type: 'message' as const,
+              messageType: 'error' as const,
+              content: `Workflow ${runId} could not be paused because its state changed.`,
+            };
+      }
+      if (target.status === 'paused') {
+        return registry.resume(runId)
+          ? {
+              type: 'message' as const,
+              messageType: 'info' as const,
+              content: `Resume requested for workflow ${runId}.`,
+            }
+          : {
+              type: 'message' as const,
+              messageType: 'error' as const,
+              content: `Workflow ${runId} could not be resumed because its state changed.`,
+            };
+      }
+      return {
+        type: 'message' as const,
+        messageType: 'error' as const,
+        content: `Workflow ${runId} is ${target.status} and cannot be paused or resumed.`,
+      };
+    }
 
     // Targeted detail view: `/workflows wf_abc123` opens the detail
     // dump for that run if it exists. Reject early on unknown runId so
     // the user sees a clear error instead of an empty listing.
-    const trimmedArgs = (args ?? '').trim();
     if (trimmedArgs.length > 0) {
       let target = registry.get(trimmedArgs);
       if (!target) {
@@ -223,15 +332,15 @@ export const workflowsCommand: SlashCommand = {
     }
 
     const now = Date.now();
-    // Order: running first (oldest startTime first inside the bucket so
+    // Order: active first (oldest startTime first inside the bucket so
     // long-runners stay visible), then terminal by endTime DESC. Mirrors
     // the dialog's two-bucket sort. Snapshots are always terminal, so they
     // only ever join the second bucket.
-    const running = allEntries
-      .filter((e) => e.status === 'running')
+    const active = allEntries
+      .filter((e) => isActiveWorkflowStatus(e.status))
       .sort((a, b) => a.startTime - b.startTime);
     const terminal = [
-      ...allEntries.filter((e) => e.status !== 'running'),
+      ...allEntries.filter((e) => !isActiveWorkflowStatus(e.status)),
       ...snapshotTasks,
     ].sort((a, b) => (b.endTime ?? 0) - (a.endTime ?? 0));
 
@@ -239,18 +348,18 @@ export const workflowsCommand: SlashCommand = {
     if (context.executionMode === 'interactive') {
       lines.push(
         t(
-          'Tip: use `/workflows <runId>` for the per-run detail view (name, description, phase tree, recent logs).',
+          'Tip: use `/workflows p <runId>` or Background tasks + p to cooperatively pause/resume; use `/workflows <runId>` for details.',
         ),
         '',
       );
     }
     lines.push(
-      `Workflow runs (${running.length + terminal.length} total · ${running.length} running)`,
+      `Workflow runs (${active.length + terminal.length} total · ${active.length} active)`,
       '',
     );
-    if (running.length > 0) {
+    if (active.length > 0) {
       lines.push('Active');
-      for (const entry of running) lines.push(rowLine(entry, now));
+      for (const entry of active) lines.push(rowLine(entry, now));
       lines.push('');
     }
     if (terminal.length > 0) {

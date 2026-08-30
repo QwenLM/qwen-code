@@ -11,6 +11,7 @@ import type {
   JSONLMessage,
   UnifiedMessageType,
 } from './types.js';
+import { getUserTranscriptDisplayText } from './userTranscriptDisplay.js';
 
 /**
  * Extract text content from different message formats
@@ -100,12 +101,16 @@ export function adaptJSONLMessages(messages: JSONLMessage[]): UnifiedMessage[] {
     const isLast = isUserType(next);
 
     const type = getMessageType(msg);
+    const userContent = getUserTranscriptDisplayText(msg);
 
     return {
       id: msg.uuid,
       type,
       timestamp: parseTimestamp(msg.timestamp),
-      content: type !== 'tool_call' ? extractContent(msg.message) : undefined,
+      content:
+        type !== 'tool_call'
+          ? (userContent ?? extractContent(msg.message))
+          : undefined,
       toolCall: msg.toolCall,
       isFirst,
       isLast,

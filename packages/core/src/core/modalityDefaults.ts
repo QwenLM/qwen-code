@@ -44,8 +44,10 @@ const MODALITY_PATTERNS: Array<[RegExp, InputModalities]> = [
   [/^qwen3\.5-plus/, { image: true, video: true }],
   [/^qwen3\.6-plus/, { image: true, video: true }],
   [/^qwen3\.7-plus/, { image: true, video: true }],
-  // Qwen Max models (3.8+): image + video support
-  [/^qwen3\.8-max/, { image: true, video: true }],
+  // Qwen 3.8 series: flash/plus support image + video; max supports image only
+  [/^qwen3\.8-flash/, { image: true, video: true }],
+  [/^qwen3\.8-plus/, { image: true, video: true }],
+  [/^qwen3\.8-max/, { image: true }],
   [/^coder-model$/, { image: true, video: true }],
 
   // Qwen VL (vision-language) models: image + video
@@ -59,14 +61,19 @@ const MODALITY_PATTERNS: Array<[RegExp, InputModalities]> = [
   [/^qwen/, {}],
 
   // -------------------
-  // DeepSeek — text-only
+  // DeepSeek — text-only, except explicit vision variants
+  // (QwenLM/qwen-code#10270)
   // -------------------
+  [/^deepseek-.*vision/, { image: true }],
   [/^deepseek/, {}],
 
   // -------------------
-  // Zhipu GLM
+  // Zhipu GLM — v-suffix ids are vision models; others are text-only
+  // (QwenLM/qwen-code#10270)
   // -------------------
-  [/^glm-4\.5v/, { image: true }],
+  [/^glm-[0-9.]+v/, { image: true }],
+  // glm-5.3-flash natively integrates vision input (no v suffix)
+  [/^glm-5\.3-flash/, { image: true }],
   [/^glm-5(?:-|$)/, {}],
   [/^glm-/, {}],
 

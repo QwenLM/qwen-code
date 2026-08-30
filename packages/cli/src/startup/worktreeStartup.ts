@@ -441,7 +441,7 @@ export async function persistStartupWorktreeSidecar(
  * the first user prompt (TUI: INFO history item + reminder prefix; headless:
  * `<system-reminder>` prefix + JSON event; ACP currently exits before
  * reaching this code path — see the `--worktree` × `--acp` mutex check
- * in `gemini.tsx`).
+ * in `llm.tsx`).
  *
  * Mirrors `restoreWorktreeContext`'s contextMessage shape so resumed-with-
  * worktree and started-with-worktree sessions read identically to the model.

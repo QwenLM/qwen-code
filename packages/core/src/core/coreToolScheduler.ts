@@ -8,18 +8,20 @@ import type {
   ToolCallRequestInfo,
   ToolCallResponseInfo,
   ToolExecutionStatus,
+} from './turn.js';
+import type {
   ToolCallConfirmationDetails,
   ToolResult,
   ToolResultDisplay,
-  ToolRegistry,
-  EditorType,
-  Config,
   ToolConfirmationPayload,
   AnyDeclarativeTool,
   AnyToolInvocation,
-  ChatRecordingService,
   ToolArtifact,
-} from '../index.js';
+} from '../tools/tools.js';
+import type { EditorType } from '../utils/editor.js';
+import type { Config } from '../config/config.js';
+import type { ToolRegistry } from '../tools/tool-registry.js';
+import type { ChatRecordingService } from '../services/chatRecordingService.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { sanitizeToolNameForProvider } from '../utils/tool-name-utils.js';
 import { compactToolResultDisplayForHistory } from '../utils/toolResultDisplayCompaction.js';
@@ -37,23 +39,21 @@ import { NotificationType } from '../hooks/types.js';
 import type { PostToolBatchToolCall } from '../hooks/types.js';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
 import {
+  COMBINED_PASS_TOLERANCE_FACTOR,
   truncateLlmContent,
   truncateToolOutput,
   TOOL_OUTPUT_TRUNCATED_PREFIX,
-} from '../utils/truncation.js';
+} from '../tools/truncation.js';
 import {
   finalizeToolResponses,
   toolResponseTextLength,
-} from '../utils/tool-response-finalizer.js';
-import {
-  ToolConfirmationOutcome,
-  ApprovalMode,
-  logToolCall,
-  ToolErrorType,
-  ToolCallEvent,
-  InputFormat,
-  Kind,
-} from '../index.js';
+} from '../tools/tool-response-finalizer.js';
+import { ToolConfirmationOutcome, Kind } from '../tools/tools.js';
+import { ApprovalMode } from '../config/approval-mode.js';
+import { logToolCall } from '../telemetry/loggers.js';
+import { ToolCallEvent } from '../telemetry/types.js';
+import { InputFormat } from '../output/types.js';
+import { ToolErrorType } from '../tools/tool-error.js';
 import type {
   FunctionResponse,
   FunctionResponsePart,
@@ -61,9 +61,11 @@ import type {
   PartListUnion,
 } from '@google/genai';
 import { fileURLToPath } from 'node:url';
-import { ToolNames, ToolNamesMigration } from '../tools/tool-names.js';
+import { isDeepStrictEqual } from 'node:util';
+import { ToolNames, canonicalToolName } from '../tools/tool-names.js';
+import { resolveToolName } from '../permissions/rule-parser.js';
 import { PLAN_EXIT_APPROVED_LLM_CONTENT_PREFIXES } from '../tools/exitPlanMode.js';
-import { approvedPlanRedactionText } from './geminiChat.js';
+import { approvedPlanRedactionText } from './llm-chat.js';
 import * as fsSync from 'node:fs';
 import {
   collectAvailableSkillEntries,
@@ -75,6 +77,13 @@ import {
   promptIdContext,
   todoWorkChainContext,
 } from '../utils/promptIdContext.js';
+import {
+  isToolResultBoundaryDiagnosticsEnabled,
+  observeToolResultBoundary,
+  toolResultBoundaryArtifact,
+  toolResultPartDiagnosticValues,
+  type ToolResultBoundaryValue,
+} from '../tools/tool-result-boundary-diagnostics.js';
 import { unescapePath, PATH_ARG_KEYS } from '../utils/paths.js';
 import type { MemoryPressureMonitor } from '../services/memoryPressureMonitor.js';
 import { CONCURRENCY_SAFE_KINDS, isShellProgressData } from '../tools/tools.js';
@@ -83,7 +92,7 @@ import { parsePositiveIntegerEnv } from '../utils/env.js';
 import {
   isAlreadyTruncated,
   persistAndTruncateToolResult,
-} from '../utils/truncation.js';
+} from '../tools/truncation.js';
 import {
   injectPermissionRulesIfMissing,
   persistPermissionOutcome,
@@ -196,6 +205,7 @@ import {
 } from '../utils/invocation-context.js';
 import { evaluateToolInvocationGuard } from './tool-invocation-guard.js';
 import { goalTurnContext } from '../goals/goal-turn-context.js';
+import { goalToolResultProvenance } from '../goals/goal-tool-result-provenance.js';
 
 const debugLogger = createDebugLogger('TOOL_SCHEDULER');
 
@@ -345,6 +355,7 @@ function setToolSpanFailure(
 ): void {
   try {
     span.setAttribute(TOOL_FAILURE_KIND_ATTRIBUTE, failureKind);
+    span.setAttribute('error.type', failureKind);
     // Always write `success: false` so trace backends can filter tool
     // failures with the same query they use for llm_request spans —
     // mirrors the unconditional `success` attribute on llm_request.
@@ -537,17 +548,6 @@ const FS_PATH_TOOL_NAMES: ReadonlySet<string> = new Set<string>([
   ToolNames.NOTEBOOK_EDIT,
   ToolNames.DISPLAY_IMAGE,
 ]);
-
-/**
- * Resolve a tool name through the legacy-alias migration map (e.g.
- * `search_file_content` → `grep`) to its canonical form. Exported so callers
- * that classify tools by name/kind — the headless partitioner in
- * nonInteractiveCli — resolve the same registry entry the interactive
- * scheduler and executor do, instead of missing on an alias.
- */
-export function canonicalToolName(toolName: string): string {
-  return (ToolNamesMigration as Record<string, string>)[toolName] ?? toolName;
-}
 
 function isFilesystemPathTool(toolName: string): boolean {
   return FS_PATH_TOOL_NAMES.has(canonicalToolName(toolName));
@@ -1216,6 +1216,31 @@ interface CoreToolSchedulerOptions {
    */
   chatRecordingService?: ChatRecordingService;
   onToolResultFullTurnModel?: (model: string) => boolean;
+  /** Lets an outer owner suppress a scheduler result it already emitted. */
+  shouldObserveProducer?: (callId: string) => boolean;
+  /**
+   * Whether the model this scheduler serves was DECLARED the Skill tool.
+   *
+   * The skill-activation reminder must not announce a skill to a model that
+   * cannot invoke one, and the registry cannot answer that: `SKILL` is
+   * registered unconditionally, including for subagents, while a subagent
+   * running an explicit `tools` list may never have it declared — nor is
+   * being declared sufficient, since a fork can keep a declaration it is
+   * forbidden to execute. An owner that filters either passes its own
+   * predicate here.
+   *
+   * It is NOT the predicate behind the startup `<available_skills>` snapshot,
+   * and the two are independent rather than ordered. The snapshot is decided
+   * before any declarations exist, so it answers from configuration; this
+   * answers from the declarations that were sent. Either can say yes where
+   * the other says no — `tools: ['*'], disallowedTools: ['skill']` announces
+   * at startup and is refused here, while a string list carrying an inline
+   * `skill` declaration is the reverse. Do not reason from one to the other.
+   *
+   * Omitted, the scheduler falls back to the registry, which is correct for
+   * an owner that declares whatever it registers.
+   */
+  hasSkillTool?: () => boolean;
 }
 
 // ─── Tool Concurrency Helpers ────────────────────────────────
@@ -1323,6 +1348,61 @@ function partitionToolCalls(calls: ScheduledToolCall[]): ToolBatch[] {
   return partitionByConcurrencySafety(calls, isConcurrencySafe);
 }
 
+function producerInputDropsStructuredContent(
+  input: PartListUnion | null | undefined,
+): boolean {
+  if (input === null || input === undefined || typeof input === 'string') {
+    return false;
+  }
+
+  const contentToProcess =
+    Array.isArray(input) && input.length === 1 ? input[0] : input;
+  if (typeof contentToProcess === 'string') return false;
+
+  const hasOnlyKeys = (part: Part, ...keys: string[]) =>
+    Object.entries(part).every(
+      ([key, value]) => value === undefined || keys.includes(key),
+    );
+  if (Array.isArray(contentToProcess)) {
+    return contentToProcess.some((part) => {
+      if (typeof part === 'string') return false;
+      if (part.text !== undefined) return !hasOnlyKeys(part, 'text');
+      if (part.inlineData !== undefined) {
+        return !hasOnlyKeys(part, 'inlineData');
+      }
+      if (part.fileData !== undefined) return !hasOnlyKeys(part, 'fileData');
+      return true;
+    });
+  }
+
+  if (contentToProcess.functionResponse !== undefined) {
+    return Boolean(contentToProcess.functionResponse.response?.['content']);
+  }
+  if (
+    contentToProcess.inlineData !== undefined ||
+    contentToProcess.fileData !== undefined
+  ) {
+    return !hasOnlyKeys(contentToProcess, 'inlineData', 'fileData');
+  }
+  if (contentToProcess.text !== undefined) {
+    return !hasOnlyKeys(contentToProcess, 'text');
+  }
+  return true;
+}
+
+function producerContentEqual(
+  toolName: string,
+  callId: string,
+  input: PartListUnion | null | undefined,
+  output: PartListUnion,
+): boolean {
+  if (producerInputDropsStructuredContent(input)) return false;
+  return isDeepStrictEqual(
+    convertToFunctionResponse(toolName, callId, input ?? ''),
+    output,
+  );
+}
+
 export class CoreToolScheduler {
   private toolRegistry: ToolRegistry;
   private toolCalls: ToolCall[] = [];
@@ -1334,6 +1414,8 @@ export class CoreToolScheduler {
   private onEditorClose: () => void;
   private chatRecordingService?: ChatRecordingService;
   private onToolResultFullTurnModel?: (model: string) => boolean;
+  private shouldObserveProducer: (callId: string) => boolean;
+  private hasSkillToolOverride?: () => boolean;
   private isFinalizingToolCalls = false;
   private postToolBatchEnabledForBatch = false;
   private postToolBatchSpanCallId: string | undefined;
@@ -1403,6 +1485,8 @@ export class CoreToolScheduler {
     this.onEditorClose = options.onEditorClose;
     this.chatRecordingService = options.chatRecordingService;
     this.onToolResultFullTurnModel = options.onToolResultFullTurnModel;
+    this.shouldObserveProducer = options.shouldObserveProducer ?? (() => true);
+    this.hasSkillToolOverride = options.hasSkillTool;
   }
 
   private get memoryMonitor(): MemoryPressureMonitor | undefined {
@@ -1768,7 +1852,8 @@ export class CoreToolScheduler {
    * second call for the same callId is a no-op.
    *
    * No `metadata` parameter: every caller pre-sets span status via
-   * `setToolSpan{Failure,Cancelled,Ok}` before this call (#4321 review).
+   * `setToolSpan{Failure,Cancelled}` or the success path before this call
+   * (#4321 review).
    */
   private finalizeToolSpan(callId: string, force = false): void {
     // Terminal-state cleanup: drop any PreToolUse 'ask' bounce markers so
@@ -2044,10 +2129,29 @@ export class CoreToolScheduler {
 
     // MCP tool whose server is gone / unconfigured: explain in MCP terms
     // instead of falling through to a Levenshtein suggestion that would surface
-    // unrelated tools (e.g. "did you mean computer_use__click?").
+    // unrelated tools (e.g. "did you mean read_file?").
     const mcpMessage = this.getMcpToolUnavailableMessage(unknownToolName);
     if (mcpMessage) {
       return mcpMessage;
+    }
+
+    // `list_directory` is an opt-in built-in: when it is genuinely unregistered,
+    // say how to turn it on instead of suggesting unrelated tools by edit
+    // distance. Resolve aliases (`ListFiles`, `ReadFolder`, ...) so an aliased
+    // call gets the same explanation — but only once the canonical name is
+    // confirmed absent. The registry is keyed by canonical names while the
+    // lookup that lands here resolves legacy migrations only, so an alias call
+    // misses even when the tool IS enabled; that case must keep the generic
+    // path's "Did you mean list_directory" self-correction.
+    const canonicalName = resolveToolName(unknownToolName);
+    if (
+      canonicalName === ToolNames.LS &&
+      !(await this.toolRegistry.ensureTool(canonicalName))
+    ) {
+      if (this.config.getDisabledTools().has(canonicalName)) {
+        return `Tool "${unknownToolName}" has been disabled for this workspace via the workspace tools toggle. Re-enable it there; the tools.listDirectory.enabled setting only controls whether the tool is registered by default.`;
+      }
+      return `Tool "${unknownToolName}" is a built-in tool that is disabled by default because glob covers directory listing in most cases. Enable it with the tools.listDirectory.enabled setting. Use glob instead.`;
     }
 
     // Standard "not found" message with Levenshtein suggestions
@@ -2265,7 +2369,14 @@ export class CoreToolScheduler {
       }
       const requestsToProcess = dedupeRequestsByCallId(
         Array.isArray(request) ? request : [request],
-      );
+      ).map((item) => ({ ...item, args: structuredClone(item.args) }));
+      // args are cloned at intake: callers pass args that may alias the
+      // model-emitted functionCall part stored in chat history, and
+      // _executeToolCallBody later rewrites PATH_ARG_KEYS on request.args in
+      // place (a persistence the post-'ask' bounce re-execution relies on).
+      // Without the clone those rewrites would leak into history and skew
+      // the (name, args) fingerprints that duplicate-replay detection
+      // derives from it.
       const planModeEntryBoundaryIndex = findPlanModeEntryBatchBoundaryIndex(
         requestsToProcess.map((item) => canonicalToolName(item.name)),
       );
@@ -2360,10 +2471,28 @@ export class CoreToolScheduler {
             const matchingRule = pm.findMatchingDenyRule({
               toolName: canonicalName,
             });
-            const ruleInfo = matchingRule
-              ? ` Matching deny rule: "${matchingRule}".`
-              : '';
-            const permissionErrorMessage = `Qwen Code requires permission to use "${reqInfo.name}", but that permission was declined.${ruleInfo}`;
+            let permissionErrorMessage: string;
+            if (matchingRule) {
+              permissionErrorMessage = `Qwen Code requires permission to use "${reqInfo.name}", but that permission was declined. Matching deny rule: "${matchingRule}".`;
+            } else if (
+              // The legacy `coreTools` allowlist (`--core-tools` / settings
+              // `tools.core`) keeps its hard-disable semantic: an unlisted
+              // core tool is never registered (#9827). Attribute the miss
+              // to the real knob — neither `permissions.allow` (pure
+              // auto-approval since #10075) nor `tools.eager` (which only
+              // defers) can reject a call here, so a rejection without a
+              // deny rule points at the coreTools list. The optional call
+              // keeps scoped PermissionManager shims (installed via `as
+              // unknown as PermissionManager`, e.g.
+              // memory-scoped-agent-config.ts) from throwing until they
+              // grow the delegation.
+              typeof pm.isToolDisabledByCoreToolsAllowList === 'function' &&
+              pm.isToolDisabledByCoreToolsAllowList(canonicalName)
+            ) {
+              permissionErrorMessage = `"${reqInfo.name}" is not listed in the active core tools allowlist (--core-tools or settings tools.core), so the tool is not available. Add it to the core tools list to re-enable it.`;
+            } else {
+              permissionErrorMessage = `Qwen Code requires permission to use "${reqInfo.name}", but that permission was declined.`;
+            }
             newToolCalls.push({
               status: 'error',
               request: reqInfo,
@@ -2878,7 +3007,7 @@ export class CoreToolScheduler {
             // fast-path AUTO call.
             const messages =
               this.config
-                .getGeminiClient?.()
+                .getLlmClient?.()
                 ?.getHistoryTail(MAX_TRANSCRIPT_MESSAGES, false) ?? [];
             const decision = await runInRequestGoalContext(reqInfo, () =>
               evaluateAutoMode({
@@ -3088,7 +3217,7 @@ export class CoreToolScheduler {
                 !this.config.getSdkMode();
               const planModeError = new Error(
                 `Tool blocked by plan mode: "${reqInfo.name}" is not a read-only tool. ` +
-                  `Only read-only tools (read_file, grep_search, glob, list_directory, ` +
+                  `Only read-only tools (read_file, grep_search, glob, ` +
                   `web_fetch, etc.) are allowed in plan mode.` +
                   ` Do NOT retry this tool. ` +
                   (isPlanRequiredTeammate
@@ -4191,10 +4320,10 @@ export class CoreToolScheduler {
     } catch (error) {
       this.bouncedAwaitingApproval.delete(callId);
       this.bouncedToolUseId.delete(callId);
-      // _executeToolCallBody pre-sets span status (OK / FAILURE /
-      // CANCELLED) only AFTER its main try/catch is entered. Throws
-      // from the prelude — for example getMessageBus — happen BEFORE
-      // the `scheduled → executing` transition, so the span would end
+      // _executeToolCallBody records the span outcome only AFTER its main
+      // try/catch is entered: ERROR or CANCELLED, while success remains
+      // UNSET. Throws from the prelude — for example getMessageBus — happen
+      // BEFORE the `scheduled → executing` transition, so the span would end
       // UNSET with no failure_kind AND the tool call would stay in
       // `scheduled` forever (checkAndNotifyCompletion never sees a
       // terminal state). Set failure status + error response here so
@@ -4236,8 +4365,8 @@ export class CoreToolScheduler {
       // a race where a STREAM_JSON client answers the confirmation
       // synchronously and flips status to 'scheduled' before this runs.
       if (!this.bouncedAwaitingApproval.has(callId)) {
-        // _executeToolCallBody pre-sets status (OK / FAILURE / CANCELLED)
-        // via setToolSpan*; finalize without metadata to preserve that.
+        // _executeToolCallBody records the outcome via setToolSpan*; finalize
+        // without metadata to preserve ERROR / UNSET status semantics.
         this.finalizeToolSpan(callId);
       }
       this.memoryMonitor?.scheduleCheck();
@@ -4294,6 +4423,7 @@ export class CoreToolScheduler {
       prompt:
         reason ||
         `A PreToolUse hook requested confirmation before running ${toolName}.`,
+      renderPromptAsPlainText: true,
       hideAlwaysAllow: true,
       onConfirm: (outcome, payload) =>
         this.handleConfirmationResponse(
@@ -4394,6 +4524,41 @@ export class CoreToolScheduler {
     // Get MessageBus for hook execution
     const messageBus = this.config.getMessageBus() as MessageBus | undefined;
     const hooksEnabled = !this.config.getDisableAllHooks();
+    let producerObserved = false;
+    const observeSyntheticProducer = (
+      response: CoreToolCallResponseInfo,
+    ): void => {
+      try {
+        if (producerObserved || !this.shouldObserveProducer(callId)) return;
+        producerObserved = true;
+        observeToolResultBoundary({
+          stage: 'producer',
+          sessionId: this.config.getSessionId(),
+          promptId: scheduledCall.request.prompt_id,
+          toolCallId: callId,
+          toolName: canonicalName,
+          artifacts: [
+            toolResultBoundaryArtifact(
+              response.persistedOutputFiles ?? [],
+              response.artifacts ?? [],
+            ),
+          ],
+          values: () => [
+            ...toolResultPartDiagnosticValues(response.responseParts),
+            ...(typeof response.resultDisplay === 'string'
+              ? [
+                  {
+                    representation: 'display' as const,
+                    value: response.resultDisplay,
+                  },
+                ]
+              : []),
+          ],
+        });
+      } catch {
+        // Diagnostics must not affect tool execution.
+      }
+    };
 
     // PreToolUse Hook — skipped on a post-'ask' re-execution (the hook
     // already ran and the user already confirmed; re-firing would loop).
@@ -4469,6 +4634,7 @@ export class CoreToolScheduler {
           ToolErrorType.EXECUTION_DENIED,
           'not_started',
         );
+        observeSyntheticProducer(errorResponse);
         this.setStatusInternal(callId, 'error', errorResponse);
         setToolSpanFailure(
           span,
@@ -4489,19 +4655,19 @@ export class CoreToolScheduler {
           toolName: canonicalName,
           args: invocation.params as Record<string, unknown>,
           signal,
+          sessionId: this.config.getSessionId(),
+          cwd: this.config.getTargetDir(),
           ...(invocationContext ? { invocationContext } : {}),
         },
       );
       if (signal.aborted) {
-        this.setStatusInternal(
-          callId,
-          'cancelled',
-          createCancelledResponse(
-            scheduledCall.request,
-            'Tool call cancelled before execution.',
-            'not_started',
-          ),
+        const cancelledResponse = createCancelledResponse(
+          scheduledCall.request,
+          'Tool call cancelled before execution.',
+          'not_started',
         );
+        observeSyntheticProducer(cancelledResponse);
+        this.setStatusInternal(callId, 'cancelled', cancelledResponse);
         if (this.toolSpans.has(callId)) {
           setToolSpanCancelled(span);
         }
@@ -4514,6 +4680,7 @@ export class CoreToolScheduler {
           ToolErrorType.EXECUTION_DENIED,
           'not_started',
         );
+        observeSyntheticProducer(errorResponse);
         this.setStatusInternal(callId, 'error', errorResponse);
         setToolSpanFailure(
           span,
@@ -4534,15 +4701,13 @@ export class CoreToolScheduler {
         currentCall.status !== 'error' &&
         currentCall.status !== 'cancelled'
       ) {
-        this.setStatusInternal(
-          callId,
-          'cancelled',
-          createCancelledResponse(
-            scheduledCall.request,
-            'Tool call cancelled before execution.',
-            'not_started',
-          ),
+        const cancelledResponse = createCancelledResponse(
+          scheduledCall.request,
+          'Tool call cancelled before execution.',
+          'not_started',
         );
+        observeSyntheticProducer(cancelledResponse);
+        this.setStatusInternal(callId, 'cancelled', cancelledResponse);
         if (this.toolSpans.has(callId)) {
           setToolSpanCancelled(span);
         }
@@ -4591,6 +4756,8 @@ export class CoreToolScheduler {
     let executionStatus: ToolExecutionStatus = 'not_started';
     let executionSettled = false;
     let execSpan: Span | undefined;
+    let producerToolResult: ToolResult | null | undefined;
+    let observeProducerOutput = observeSyntheticProducer;
     try {
       let promise: Promise<ToolResult>;
 
@@ -4752,6 +4919,92 @@ export class CoreToolScheduler {
       } else {
         toolResult = await promise;
       }
+      producerToolResult = toolResult;
+      observeProducerOutput = (response: CoreToolCallResponseInfo) => {
+        try {
+          if (producerObserved || !this.shouldObserveProducer(callId)) return;
+          producerObserved = true;
+          let producerInputValues: ToolResultBoundaryValue[] | undefined;
+          const getProducerInputValues = () =>
+            (producerInputValues ??= [
+              ...toolResultPartDiagnosticValues(producerToolResult?.llmContent),
+              ...(typeof producerToolResult?.returnDisplay === 'string'
+                ? [
+                    {
+                      representation: 'display' as const,
+                      value: producerToolResult.returnDisplay,
+                    },
+                  ]
+                : []),
+            ]);
+          let producerOutputValues: ToolResultBoundaryValue[] | undefined;
+          const getProducerOutputValues = () =>
+            (producerOutputValues ??= [
+              ...toolResultPartDiagnosticValues(response.responseParts),
+              ...(typeof response.resultDisplay === 'string'
+                ? [
+                    {
+                      representation: 'display' as const,
+                      value: response.resultDisplay,
+                    },
+                  ]
+                : []),
+              ...(typeof response.visionBridgeNotice === 'string'
+                ? [
+                    {
+                      representation: 'display' as const,
+                      value: response.visionBridgeNotice,
+                    },
+                  ]
+                : []),
+            ]);
+          const inputArtifact = toolResultBoundaryArtifact(
+            producerToolResult?.persistedOutputFiles,
+            producerToolResult?.artifacts,
+          );
+          const outputArtifact = toolResultBoundaryArtifact(
+            response.persistedOutputFiles,
+            response.artifacts,
+          );
+          let mutated: boolean | undefined;
+          const isMutated = () =>
+            (mutated ??=
+              producerToolResult == null ||
+              !producerContentEqual(
+                toolName,
+                callId,
+                producerToolResult.llmContent,
+                response.responseParts,
+              ) ||
+              !isDeepStrictEqual(
+                producerToolResult.returnDisplay,
+                response.resultDisplay,
+              ) ||
+              !isDeepStrictEqual(inputArtifact, outputArtifact) ||
+              typeof response.visionBridgeNotice === 'string');
+          const observation = {
+            sessionId: this.config.getSessionId(),
+            promptId: scheduledCall.request.prompt_id,
+            toolCallId: callId,
+            toolName: canonicalName,
+            mutated: isMutated,
+          };
+          observeToolResultBoundary({
+            ...observation,
+            stage: 'producer_input',
+            artifacts: [inputArtifact],
+            values: getProducerInputValues,
+          });
+          observeToolResultBoundary({
+            ...observation,
+            stage: 'producer_output',
+            artifacts: [outputArtifact],
+            values: getProducerOutputValues,
+          });
+        } catch {
+          // Diagnostics must not affect tool execution.
+        }
+      };
       // A tool that observes signal.aborted and resolves with a normal
       // ToolResult (no .error field) would otherwise close the execution
       // sub-span as success while the parent tool span ends as cancelled.
@@ -4825,17 +5078,15 @@ export class CoreToolScheduler {
           }
           failureHookArtifacts = failureHookResult.artifacts;
         }
-        this.setStatusInternal(
-          callId,
-          'cancelled',
-          createCancelledResponse(
-            scheduledCall.request,
-            cancelMessage,
-            executionStatus,
-            failureHookArtifacts,
-            toolResult.persistedOutputFiles,
-          ),
+        const cancelledResponse = createCancelledResponse(
+          scheduledCall.request,
+          cancelMessage,
+          executionStatus,
+          failureHookArtifacts,
+          toolResult.persistedOutputFiles,
         );
+        observeProducerOutput(cancelledResponse);
+        this.setStatusInternal(callId, 'cancelled', cancelledResponse);
         setToolSpanCancelled(span);
         return; // Both code paths should return here
       }
@@ -4850,19 +5101,17 @@ export class CoreToolScheduler {
         if (!signal.aborted || (isTimeout && parentAbortedAtExecutionSettle)) {
           return false;
         }
-        this.setStatusInternal(
-          callId,
-          'cancelled',
-          createCancelledResponse(
-            scheduledCall.request,
-            // Reached only after `execute()` settled with a result.
-            TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE,
-            executionStatus,
-            artifacts,
-            preserved?.persistedOutputFiles,
-            preserved?.visionBridgeNotice,
-          ),
+        const cancelledResponse = createCancelledResponse(
+          scheduledCall.request,
+          // Reached only after `execute()` settled with a result.
+          TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE,
+          executionStatus,
+          artifacts,
+          preserved?.persistedOutputFiles,
+          preserved?.visionBridgeNotice,
         );
+        observeProducerOutput(cancelledResponse);
+        this.setStatusInternal(callId, 'cancelled', cancelledResponse);
         setToolSpanCancelled(span);
         return true;
       };
@@ -4960,6 +5209,7 @@ export class CoreToolScheduler {
             if (persistedOutputFiles !== undefined) {
               errorResponse.persistedOutputFiles = persistedOutputFiles;
             }
+            observeProducerOutput(errorResponse);
             this.setStatusInternal(callId, 'error', errorResponse);
             setToolSpanFailure(
               span,
@@ -5033,11 +5283,12 @@ export class CoreToolScheduler {
           const activatedSkills =
             await skillManager?.matchAndActivateByPaths(candidatePaths);
           if (activatedSkills && activatedSkills.length > 0 && skillManager) {
-            // Subagents share the parent's SkillManager but may run with a
-            // restricted toolsList that excludes SkillTool. Announcing a skill
-            // such a context can't invoke wastes a turn, so gate on whether the
-            // active registry actually exposes SkillTool to the model.
-            const hasSkillTool = !!this.toolRegistry.getTool(ToolNames.SKILL);
+            // Gate on whether SkillTool was DECLARED to the model — the
+            // registry cannot answer that. See `hasSkillTool` in
+            // `CoreToolSchedulerOptions` for the mechanism and the reason.
+            const hasSkillTool = this.hasSkillToolOverride
+              ? this.hasSkillToolOverride()
+              : !!this.toolRegistry.getTool(ToolNames.SKILL);
             if (hasSkillTool) {
               // Render the just-activated skills with their description/whenToUse
               // (the full listing is no longer in the tool description, so the
@@ -5171,7 +5422,7 @@ export class CoreToolScheduler {
             perToolMax !== undefined
               ? Number.POSITIVE_INFINITY
               : this.config.getTruncateToolOutputLines() * 2;
-          if (content.length > baseThreshold * 2) {
+          if (content.length > baseThreshold * COMBINED_PASS_TOLERANCE_FACTOR) {
             try {
               const contentBeforeRecombination = content;
               const recombined = await truncateToolOutput(
@@ -5179,7 +5430,7 @@ export class CoreToolScheduler {
                 toolName,
                 content,
                 {
-                  threshold: baseThreshold * 2,
+                  threshold: baseThreshold * COMBINED_PASS_TOLERANCE_FACTOR,
                   lines: combinedLines,
                   keep: perToolKeep,
                 },
@@ -5281,7 +5532,7 @@ export class CoreToolScheduler {
             // throws here and skips the redaction entirely.
             const savedPlan = fsSync.readFileSync(planPath, 'utf-8');
             const redacted = this.config
-              .getGeminiClient?.()
+              .getLlmClient?.()
               ?.getChat()
               .redactApprovedPlanFromHistory(
                 callId,
@@ -5318,8 +5569,8 @@ export class CoreToolScheduler {
         ) {
           return;
         }
+        observeProducerOutput(successResponse);
         this.setStatusInternal(callId, 'success', successResponse);
-        safeSetStatus(span, { code: SpanStatusCode.OK });
         // Mirrors setToolSpanFailure/setToolSpanCancelled — every tool span
         // ends with an explicit `success` attribute so backends can filter
         // failures the same way they filter llm_request failures.
@@ -5430,7 +5681,7 @@ export class CoreToolScheduler {
           ) {
             return;
           }
-          this.setStatusInternal(callId, 'error', {
+          const timeoutResponse: CoreToolCallResponseInfo = {
             callId,
             responseParts,
             resultDisplay: this.compactResultDisplayForInteractiveHistory(
@@ -5450,7 +5701,9 @@ export class CoreToolScheduler {
               ? { visionBridgeNotice: processedImages.visionBridgeNotice }
               : {}),
             ...(artifacts.length > 0 ? { artifacts } : {}),
-          });
+          };
+          observeProducerOutput(timeoutResponse);
+          this.setStatusInternal(callId, 'error', timeoutResponse);
           setToolSpanFailure(
             span,
             TOOL_FAILURE_KIND_TIMEOUT,
@@ -5558,6 +5811,7 @@ export class CoreToolScheduler {
         ) {
           return;
         }
+        observeProducerOutput(errorResponse);
         this.setStatusInternal(callId, 'error', errorResponse);
         setToolSpanFailure(
           span,
@@ -5646,16 +5900,14 @@ export class CoreToolScheduler {
           }
           failureHookArtifacts = failureHookResult.artifacts;
         }
-        this.setStatusInternal(
-          callId,
-          'cancelled',
-          createCancelledResponse(
-            scheduledCall.request,
-            cancelMessage,
-            executionStatus,
-            failureHookArtifacts,
-          ),
+        const cancelledResponse = createCancelledResponse(
+          scheduledCall.request,
+          cancelMessage,
+          executionStatus,
+          failureHookArtifacts,
         );
+        observeProducerOutput(cancelledResponse);
+        this.setStatusInternal(callId, 'cancelled', cancelledResponse);
         setToolSpanCancelled(span);
         return;
       } else {
@@ -5691,36 +5943,32 @@ export class CoreToolScheduler {
           failureHookArtifacts = failureHookResult.artifacts;
         }
         if (signal.aborted && !executionTimedOut) {
-          this.setStatusInternal(
-            callId,
-            'cancelled',
-            createCancelledResponse(
-              scheduledCall.request,
-              // The abort landed while the failure hook was running; the
-              // tool's own outcome is still what `executionThrew` says.
-              executionThrew
-                ? TOOL_CANCELLED_BEFORE_COMPLETION_MESSAGE
-                : TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE,
-              executionStatus,
-              failureHookArtifacts,
-            ),
+          const cancelledResponse = createCancelledResponse(
+            scheduledCall.request,
+            // The abort landed while the failure hook was running; the
+            // tool's own outcome is still what `executionThrew` says.
+            executionThrew
+              ? TOOL_CANCELLED_BEFORE_COMPLETION_MESSAGE
+              : TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE,
+            executionStatus,
+            failureHookArtifacts,
           );
+          observeProducerOutput(cancelledResponse);
+          this.setStatusInternal(callId, 'cancelled', cancelledResponse);
           setToolSpanCancelled(span);
           return;
         }
-        this.setStatusInternal(
-          callId,
-          'error',
-          createErrorResponse(
-            scheduledCall.request,
-            executionError instanceof Error
-              ? new Error(exceptionErrorMessage)
-              : new Error(String(executionError)),
-            exceptionErrorType,
-            executionStatus,
-            failureHookArtifacts,
-          ),
+        const errorResponse = createErrorResponse(
+          scheduledCall.request,
+          executionError instanceof Error
+            ? new Error(exceptionErrorMessage)
+            : new Error(String(executionError)),
+          exceptionErrorType,
+          executionStatus,
+          failureHookArtifacts,
         );
+        observeProducerOutput(errorResponse);
+        this.setStatusInternal(callId, 'error', errorResponse);
         setToolSpanFailure(
           span,
           TOOL_FAILURE_KIND_TOOL_EXCEPTION,
@@ -5768,7 +6016,11 @@ export class CoreToolScheduler {
       }
       try {
         const batchBudget = this.config.getToolOutputBatchBudget?.();
-        if (batchBudget !== undefined && Number.isFinite(batchBudget)) {
+        if (
+          messageBus &&
+          batchBudget !== undefined &&
+          Number.isFinite(batchBudget)
+        ) {
           completedCalls = await this.applyBatchOutputBudget(completedCalls);
         }
 
@@ -5869,6 +6121,15 @@ export class CoreToolScheduler {
 
         this.recordToolResults(completedCalls);
 
+        // Notify observers that the display list is empty before awaiting the
+        // completion callback: the TUI commits the finalized tool_group to
+        // history inside that callback, which may await the entire next model
+        // turn (#9121). Deferring this notify to the finally block pinned the
+        // completed group at the bottom of the virtualized list until the
+        // next tool call arrived (#9420). Placed immediately before the
+        // callback (no await in between) so the clear and the history commit
+        // land in the same React render.
+        this.notifyToolCallsUpdate();
         if (this.onAllToolCallsComplete) {
           await this.onAllToolCallsComplete(completedCalls);
         }
@@ -5946,8 +6207,13 @@ export class CoreToolScheduler {
   ): Promise<CompletedToolCall[]> {
     const budget =
       this.config.getToolOutputBatchBudget?.() ?? Number.POSITIVE_INFINITY;
-    if (!Number.isFinite(budget) || budget <= 0) return completedCalls;
-
+    const observeFinalizerBoundary = isToolResultBoundaryDiagnosticsEnabled();
+    if (
+      (!Number.isFinite(budget) || budget <= 0) &&
+      !observeFinalizerBoundary
+    ) {
+      return completedCalls;
+    }
     const finalized = await finalizeToolResponses(
       this.config,
       completedCalls.map((call) => ({
@@ -5955,7 +6221,16 @@ export class CoreToolScheduler {
         toolName: call.request.name,
         responseParts: call.response.responseParts,
         persistedOutputFiles: call.response.persistedOutputFiles,
+        artifacts: call.response.artifacts,
       })),
+      new Map(
+        completedCalls.map((call) => [
+          call.request.callId,
+          call.request.prompt_id,
+        ]),
+      ),
+      observeFinalizerBoundary,
+      observeFinalizerBoundary,
     );
 
     return completedCalls.map((call, index) => ({
@@ -5978,34 +6253,22 @@ export class CoreToolScheduler {
         status: call.status,
         executionStatus: call.response.executionStatus,
         resultDisplay: call.response.resultDisplay,
+        persistedOutputFiles: call.response.persistedOutputFiles,
+        artifacts: call.response.artifacts,
         ...(call.response.visionBridgeNotice !== undefined
           ? { visionBridgeNotice: call.response.visionBridgeNotice }
           : {}),
         error: call.response.error,
         errorType: call.response.errorType,
       };
-      const goalContext = call.request.goalContext;
-      if (!goalContext) {
-        this.chatRecordingService.recordToolResult(
-          call.response.responseParts,
-          result,
-        );
-      } else if (
-        call.request.name === ToolNames.GET_GOAL ||
-        call.request.name === ToolNames.UPDATE_GOAL
-      ) {
-        this.chatRecordingService.recordToolResult(
-          call.response.responseParts,
-          result,
-          { goalContext: { ...goalContext }, provenance: 'goal_runtime' },
-        );
-      } else {
-        this.chatRecordingService.recordToolResult(
-          call.response.responseParts,
-          result,
-          { goalContext: { ...goalContext } },
-        );
-      }
+      const goalProvenance = goalToolResultProvenance(call.request);
+      this.chatRecordingService.recordToolResult(
+        call.response.responseParts,
+        result,
+        // Passed only inside a Goal turn, so recording outside one keeps its
+        // two-argument shape.
+        ...(goalProvenance ? ([goalProvenance] as const) : ([] as const)),
+      );
     }
   }
 
@@ -6102,7 +6365,7 @@ export class CoreToolScheduler {
           const fallback = shouldFallback(denialState);
           const messages =
             this.config
-              .getGeminiClient?.()
+              .getLlmClient?.()
               ?.getHistoryTail(MAX_TRANSCRIPT_MESSAGES, false) ?? [];
           const decision = await runInRequestGoalContext(
             pendingTool.request,

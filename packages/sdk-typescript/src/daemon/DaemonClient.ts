@@ -10,6 +10,7 @@ import {
 } from '@qwen-code/acp-bridge/mcpTimeouts';
 import { CHANNEL_CONTROL_DEFAULT_TIMEOUT_MS } from '@qwen-code/acp-bridge/channelControlTimeouts';
 import { DaemonAuthFlow } from './DaemonAuthFlow.js';
+import { isDaemonSessionPrInfo } from './session-pr.js';
 import { DaemonHttpError } from './DaemonHttpError.js';
 import type {
   DaemonSseConnectReason,
@@ -35,8 +36,13 @@ import type {
   DaemonEvent,
   DaemonSessionContextStatus,
   DaemonSessionContextUsageStatus,
+  DaemonSessionConfigOptionResult,
   BranchSessionRequest,
+  DaemonBranchSessionRequest,
+  DaemonBranchSessionResult,
   DaemonBranchedSession,
+  HistoricalBranchSessionRequest,
+  DaemonPersistedBranchedSession,
   DaemonSideTaskSession,
   DaemonForkSessionResult,
   DaemonRestoredSession,
@@ -56,9 +62,11 @@ import type {
   DaemonSessionListPage,
   DaemonSessionListPageOptions,
   DaemonWorkspaceSessionInfo,
+  DaemonWorkspaceSessionLiveState,
   DaemonSessionOrganizationResult,
   DaemonSessionOrganizationUpdate,
   DaemonSessionSummary,
+  DaemonSessionPrInfo,
   DaemonSessionSupportedCommandsStatus,
   DaemonSessionStatsStatus,
   DaemonUsageDashboard,
@@ -72,6 +80,8 @@ import type {
   DaemonWorkspaceFileBytes,
   DaemonWorkspaceFileEditRequest,
   DaemonWorkspaceFileEditResult,
+  DaemonWorkspaceFileUploadRequest,
+  DaemonWorkspaceFileUploadResult,
   DaemonWorkspaceFileWriteRequest,
   DaemonWorkspaceFileWriteResult,
   DaemonWorkspaceAgentDetail,
@@ -113,6 +123,8 @@ import type {
   DaemonWorkspaceRemovalResult,
   DaemonWorkspaceUpdate,
   HeartbeatResult,
+  GoalControlRequest,
+  GoalStateResponse,
   PermissionResponse,
   PromptContentBlock,
   PromptResult,
@@ -150,8 +162,11 @@ import type {
   DaemonMcpManageAction,
   DaemonMcpManageResult,
   DaemonSessionBtwResult,
+  DaemonSessionAttachmentData,
+  DaemonSessionAttachmentReference,
   DaemonSessionGenerationEvent,
   DaemonMidTurnMessageResult,
+  DaemonMidTurnMessagesResult,
   DaemonRemoveMidTurnMessageResult,
   DaemonPendingPromptsResult,
   DaemonRemovePendingPromptResult,
@@ -161,6 +176,7 @@ import type {
   DaemonRuntimeMcpAddResult,
   DaemonRuntimeMcpRemoveResult,
   DaemonToolToggleResult,
+  DaemonSkillBatchToggleResult,
   DaemonSkillToggleResult,
   DaemonSkillInstallRequest,
   DaemonSkillMutationResult,
@@ -175,8 +191,10 @@ import type {
   DaemonWorkspaceExtensionsStatus,
   ExtensionMutationResponse,
   ExtensionInstallRequest,
+  ExtensionArchiveInstallRequest,
   ExtensionManagementInstallRequest,
   ExtensionActivationState,
+  ExtensionWorkspaceBatchActivationState,
   ExtensionCatalog,
   ExtensionInstallResponse,
   ExtensionInteractionResponse,
@@ -212,6 +230,35 @@ import type {
   DaemonUnarchiveSessionsResult,
 } from './types.js';
 import { parseSseStream } from './sse.js';
+import {
+  DaemonStandaloneCreationOutcomeUnknownError,
+  STANDALONE_SESSIONS_CAPABILITY,
+  isStandaloneCreationOutcomeUnknown,
+  isStandaloneSessionNotFoundError,
+  parseArchiveStandaloneSessionsResult,
+  parseDeleteStandaloneSessionsResult,
+  parseRestoredStandaloneSession,
+  parseStandaloneDirectoryResult,
+  parseStandaloneListPage,
+  parseStandaloneLookup,
+  parseStandaloneMetadataResult,
+  parseStandaloneSession,
+  parseUnarchiveStandaloneSessionsResult,
+  type CreateStandaloneSessionOptions,
+  type DaemonArchiveStandaloneSessionsResult,
+  type DaemonDeleteStandaloneSessionsResult,
+  type DaemonRestoredStandaloneSession,
+  type DaemonStandaloneCreationRecovery,
+  type DaemonStandaloneDirectoryResult,
+  type DaemonStandaloneMetadataResult,
+  type DaemonStandaloneSession,
+  type DaemonStandaloneSessionListOptions,
+  type DaemonStandaloneSessionListPage,
+  type DaemonStandaloneSessionLookup,
+  type DaemonStandaloneSessionSummary,
+  type DaemonUnarchiveStandaloneSessionsResult,
+  type RestoreStandaloneSessionRequest,
+} from './standalone-sessions.js';
 
 const WORKSPACE_MEMORY_REMEMBER_PATH = '/workspace/memory/remember';
 const WORKSPACE_MEMORY_FORGET_PATH = '/workspace/memory/forget';
@@ -338,6 +385,8 @@ export interface DaemonClientOptions {
 const DEFAULT_SESSION_LIST_PAGE_SIZE = 20;
 
 const DEFAULT_FETCH_TIMEOUT_MS = 30_000;
+const DEFAULT_SESSION_RESTORE_TIMEOUT_MS = 70_000;
+const SESSION_RESTORE_TIMEOUT_HEADROOM_MS = 10_000;
 const VOICE_TRANSCRIPTION_DEFAULT_TIMEOUT_MS = 65_000;
 const GITHUB_SETUP_DEFAULT_TIMEOUT_MS = 90_000;
 const CHANNEL_NOTIFY_DEFAULT_TIMEOUT_MS = 35_000;
@@ -461,15 +510,47 @@ export class DaemonPendingPromptLimitError extends Error {
   }
 }
 
+export class DaemonSessionIdProtocolError extends Error {
+  constructor(
+    readonly requestedSessionId: string,
+    readonly actualSessionId: string,
+  ) {
+    super(
+      `Daemon returned session "${actualSessionId}" instead of requested session "${requestedSessionId}".`,
+    );
+    this.name = 'DaemonSessionIdProtocolError';
+  }
+}
+
 export interface DaemonTurnError extends DaemonHttpError {
   _daemonTurnError: true;
 }
+
+export const EXTENSION_ARCHIVE_UPLOAD_TIMEOUT_MS = 120_000;
 
 export function isDaemonTurnError(error: unknown): error is DaemonTurnError {
   return (
     typeof error === 'object' &&
     error !== null &&
     (error as { _daemonTurnError?: unknown })._daemonTurnError === true
+  );
+}
+
+export { isDaemonSessionPrInfo } from './session-pr.js';
+
+/**
+ * The daemon rejected a session branch because the requested checkpoint is
+ * no longer on the session's active history path. Daemon action layers and
+ * UI shells both recover from this contract, so the predicate lives here to
+ * keep the copies from drifting.
+ */
+export function isStaleBranchPointError(
+  error: unknown,
+): error is DaemonHttpError {
+  return (
+    error instanceof DaemonHttpError &&
+    error.status === 409 &&
+    (error.body as { code?: unknown } | null)?.code === 'branch_point_invalid'
   );
 }
 
@@ -485,6 +566,11 @@ export interface CreateSessionRequest {
    * `400 workspace_mismatch` `DaemonHttpError`.
    */
   workspaceCwd?: string;
+  /**
+   * UUID v1-v5 to assign to a new thread session. This is creation, not an
+   * idempotent attach; use load/resume after an ambiguous response.
+   */
+  sessionId?: string;
   modelServiceId?: string;
   /**
    * Per-request session-scope override. The production daemon defaults
@@ -534,6 +620,17 @@ export interface RestoreSessionRequest {
   approvalMode?: string;
   /** Latest persisted records to include in the initial load replay. */
   historyPageSize?: number;
+  /** Load-only live-turn replay projection. Omit for the complete journal. */
+  liveReplayMode?: 'full' | 'summary';
+  /** Restore-time attribution for legacy/unattributed sessions. */
+  sourceType?: string;
+  /** Optional source-specific identifier. Requires `sourceType`. */
+  sourceId?: string;
+  /**
+   * Client-side deadline for this restore request. `0` disables the client
+   * timer and relies on the daemon's own restore deadline.
+   */
+  timeoutMs?: number;
 }
 
 export interface PromptRequest {
@@ -626,6 +723,8 @@ export class DaemonClient {
   private readonly token: string | undefined;
   private readonly _fetch: typeof globalThis.fetch;
   private readonly fetchTimeoutMs: number;
+  private readonly hasExplicitFetchTimeout: boolean;
+  private cachedSessionRestoreTimeoutMs: number | undefined;
   private readonly promptLimit: number;
   private readonly promptCounts: Record<string, number> = Object.create(null);
   /**
@@ -670,6 +769,7 @@ export class DaemonClient {
     // before it could complete. The `0` sentinel is the documented
     // disable value, so we collapse all "doesn't make sense" inputs onto
     // it instead of defending the math at every call site.
+    this.hasExplicitFetchTimeout = opts.fetchTimeoutMs !== undefined;
     const raw = opts.fetchTimeoutMs ?? DEFAULT_FETCH_TIMEOUT_MS;
     this.fetchTimeoutMs = Number.isFinite(raw) && raw > 0 ? raw : 0;
     this.promptLimit = normalizePendingPromptLimit(
@@ -1006,7 +1106,7 @@ export class DaemonClient {
   }
 
   async capabilities(): Promise<DaemonCapabilities> {
-    return await this.fetchWithTimeout(
+    const capabilities = await this.fetchWithTimeout(
       `${this.baseUrl}/capabilities`,
       { headers: this.headers() },
       async (res) => {
@@ -1014,6 +1114,15 @@ export class DaemonClient {
         return (await res.json()) as DaemonCapabilities;
       },
     );
+    const restoreTimeoutMs = capabilities.limits?.sessionRestoreTimeoutMs;
+    this.cachedSessionRestoreTimeoutMs =
+      typeof restoreTimeoutMs === 'number' &&
+      Number.isInteger(restoreTimeoutMs) &&
+      restoreTimeoutMs > 0 &&
+      restoreTimeoutMs <= MAX_TIMER_DELAY_MS
+        ? restoreTimeoutMs
+        : undefined;
+    return capabilities;
   }
 
   /**
@@ -1041,7 +1150,7 @@ export class DaemonClient {
 
   async requireCapability(capability: string): Promise<void> {
     const caps = await this.capabilities();
-    if (!caps.features.includes(capability)) {
+    if (!Array.isArray(caps.features) || !caps.features.includes(capability)) {
       throw new DaemonCapabilityMissingError(
         capability,
         `daemon does not advertise the ${capability} feature`,
@@ -1378,6 +1487,38 @@ export class DaemonClient {
     );
   }
 
+  async installExtensionArchive(
+    params: ExtensionArchiveInstallRequest,
+    clientId?: string,
+  ): Promise<ExtensionInstallResponse> {
+    const query = new URLSearchParams({
+      filename: params.filename,
+      consent: String(params.consent === true),
+    });
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/extensions/install-archive?${query}`,
+      {
+        method: 'POST',
+        headers: this.headers(
+          { 'Content-Type': 'application/octet-stream' },
+          clientId,
+        ),
+        body: params.archive,
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'POST /workspace/extensions/install-archive',
+          );
+        }
+        return (await res.json()) as ExtensionInstallResponse;
+      },
+      EXTENSION_ARCHIVE_UPLOAD_TIMEOUT_MS,
+      'rest',
+    );
+  }
+
   async extensionOperationStatus(
     operationId: string,
   ): Promise<ExtensionOperationStatus> {
@@ -1552,6 +1693,23 @@ export class DaemonClient {
     );
   }
 
+  async setExtensionDefaultActivations(
+    extensionNames: readonly string[],
+    state: ExtensionActivationState,
+    clientId?: string,
+  ): Promise<ExtensionMutationResponse> {
+    return await this.jsonRequest<ExtensionMutationResponse>(
+      '/extensions/activation',
+      'PUT /extensions/activation',
+      {
+        method: 'PUT',
+        body: { extensionNames: [...extensionNames], state },
+        clientId,
+        mode: 'rest',
+      },
+    );
+  }
+
   async extensionOperation(
     operationId: string,
     signal?: AbortSignal,
@@ -1673,22 +1831,21 @@ export class DaemonClient {
     } = {},
     clientId?: string,
   ): Promise<DaemonWorkspaceFile> {
-    const url = new URL(`${this.baseUrl}/file`);
-    url.searchParams.set('path', filePath);
+    const query = new URLSearchParams({ path: filePath });
     if (opts.maxBytes !== undefined) {
-      url.searchParams.set('maxBytes', String(opts.maxBytes));
+      query.set('maxBytes', String(opts.maxBytes));
     }
     if (opts.line !== undefined) {
-      url.searchParams.set('line', String(opts.line));
+      query.set('line', String(opts.line));
     }
     if (opts.limit !== undefined) {
-      url.searchParams.set('limit', String(opts.limit));
+      query.set('limit', String(opts.limit));
     }
     if (opts.cursor !== undefined) {
-      url.searchParams.set('cursor', opts.cursor);
+      query.set('cursor', opts.cursor);
     }
     return await this.fetchWithTimeout(
-      url.toString(),
+      `${this.baseUrl}/file?${query.toString()}`,
       { headers: this.headers({}, clientId) },
       async (res) => {
         if (!res.ok) throw await this.failOnError(res, 'GET /file');
@@ -1702,16 +1859,15 @@ export class DaemonClient {
     opts: { offset?: number; maxBytes?: number } = {},
     clientId?: string,
   ): Promise<DaemonWorkspaceFileBytes> {
-    const url = new URL(`${this.baseUrl}/file/bytes`);
-    url.searchParams.set('path', filePath);
+    const query = new URLSearchParams({ path: filePath });
     if (opts.offset !== undefined) {
-      url.searchParams.set('offset', String(opts.offset));
+      query.set('offset', String(opts.offset));
     }
     if (opts.maxBytes !== undefined) {
-      url.searchParams.set('maxBytes', String(opts.maxBytes));
+      query.set('maxBytes', String(opts.maxBytes));
     }
     return await this.fetchWithTimeout(
-      url.toString(),
+      `${this.baseUrl}/file/bytes?${query.toString()}`,
       { headers: this.headers({}, clientId) },
       async (res) => {
         if (!res.ok) throw await this.failOnError(res, 'GET /file/bytes');
@@ -1721,10 +1877,9 @@ export class DaemonClient {
   }
 
   async fileStat(filePath: string): Promise<unknown> {
-    const url = new URL(`${this.baseUrl}/stat`);
-    url.searchParams.set('path', filePath);
+    const query = new URLSearchParams({ path: filePath });
     return await this.fetchWithTimeout(
-      url.toString(),
+      `${this.baseUrl}/stat?${query.toString()}`,
       { headers: this.headers() },
       async (res) => {
         if (!res.ok) throw await this.failOnError(res, 'GET /stat');
@@ -1734,10 +1889,9 @@ export class DaemonClient {
   }
 
   async dirList(dirPath: string): Promise<unknown> {
-    const url = new URL(`${this.baseUrl}/list`);
-    url.searchParams.set('path', dirPath);
+    const query = new URLSearchParams({ path: dirPath });
     return await this.fetchWithTimeout(
-      url.toString(),
+      `${this.baseUrl}/list?${query.toString()}`,
       { headers: this.headers() },
       async (res) => {
         if (!res.ok) throw await this.failOnError(res, 'GET /list');
@@ -1751,10 +1905,9 @@ export class DaemonClient {
    * pick a path outside any registered workspace (e.g. "Add workspace").
    */
   async workspacePathSuggestions(prefix: string): Promise<unknown> {
-    const url = new URL(`${this.baseUrl}/workspace-path-suggestions`);
-    url.searchParams.set('prefix', prefix);
+    const query = new URLSearchParams({ prefix });
     return await this.fetchWithTimeout(
-      url.toString(),
+      `${this.baseUrl}/workspace-path-suggestions?${query.toString()}`,
       { headers: this.headers() },
       async (res) => {
         if (!res.ok) {
@@ -1779,10 +1932,9 @@ export class DaemonClient {
   }
 
   async glob(pattern: string): Promise<unknown> {
-    const url = new URL(`${this.baseUrl}/glob`);
-    url.searchParams.set('pattern', pattern);
+    const query = new URLSearchParams({ pattern });
     return await this.fetchWithTimeout(
-      url.toString(),
+      `${this.baseUrl}/glob?${query.toString()}`,
       { headers: this.headers() },
       async (res) => {
         if (!res.ok) throw await this.failOnError(res, 'GET /glob');
@@ -1824,6 +1976,176 @@ export class DaemonClient {
         if (!res.ok) throw await this.failOnError(res, 'POST /file/edit');
         return (await res.json()) as DaemonWorkspaceFileEditResult;
       },
+    );
+  }
+
+  /**
+   * Upload binary bytes to the workspace. Shared raw-POST core used by both
+   * the legacy-primary `uploadWorkspaceFile` and the workspace-qualified
+   * variant, parameterized by URL path + route label. Keeps auth headers,
+   * timeout/abort composition, progress transport, and `DaemonHttpError`
+   * construction in one place.
+   *
+   * Uses `XMLHttpRequest` when `req.onProgress` is provided (`fetch` exposes
+   * no upload progress); plain `fetch` otherwise. Progress is browser-only:
+   * requesting it where `XMLHttpRequest` is unavailable fails before sending.
+   *
+   * @internal
+   */
+  async uploadFileToPath(
+    uploadPath: string,
+    label: string,
+    req: DaemonWorkspaceFileUploadRequest,
+    clientId?: string,
+  ): Promise<DaemonWorkspaceFileUploadResult> {
+    const query = new URLSearchParams({ path: req.path });
+    const url = `${this.baseUrl}${uploadPath}?${query.toString()}`;
+    const headers = this.headers(
+      { 'Content-Type': 'application/octet-stream' },
+      clientId,
+    );
+    if (req.onProgress) {
+      return await this.uploadWithProgress(url, label, req, headers);
+    }
+    return await this.fetchWithTimeout(
+      url,
+      {
+        method: 'POST',
+        headers,
+        body: req.data,
+        ...(req.signal ? { signal: req.signal } : {}),
+      },
+      async (res) => {
+        if (!res.ok) throw await this.failOnError(res, label);
+        const text = await res.text();
+        let body: unknown;
+        try {
+          body = text ? JSON.parse(text) : undefined;
+        } catch {
+          body = text;
+        }
+        // Match the XHR path's parse-then-shape-check so the two transports
+        // fail identically on malformed 2xx bodies.
+        if (!body || typeof body !== 'object' || !('path' in body)) {
+          throw new Error(`${label}: invalid upload response body`);
+        }
+        return body as DaemonWorkspaceFileUploadResult;
+      },
+      req.timeoutMs,
+      'rest',
+    );
+  }
+
+  private async uploadWithProgress(
+    url: string,
+    label: string,
+    req: DaemonWorkspaceFileUploadRequest,
+    headers: Record<string, string>,
+  ): Promise<DaemonWorkspaceFileUploadResult> {
+    if (typeof XMLHttpRequest === 'undefined') {
+      throw new Error(
+        `${label}: upload progress requires XMLHttpRequest (browser only)`,
+      );
+    }
+    let effectiveTimeoutMs = this.fetchTimeoutMs;
+    if (
+      req.timeoutMs !== undefined &&
+      Number.isFinite(req.timeoutMs) &&
+      req.timeoutMs >= 0
+    ) {
+      effectiveTimeoutMs = req.timeoutMs;
+    }
+    const onProgress = req.onProgress;
+    return await new Promise<DaemonWorkspaceFileUploadResult>(
+      (resolve, reject) => {
+        if (req.signal?.aborted) {
+          reject(
+            req.signal.reason ??
+              new DOMException('The operation was aborted.', 'AbortError'),
+          );
+          return;
+        }
+        const xhr = new XMLHttpRequest();
+        let abortListener: (() => void) | undefined;
+        // Detach the abort listener once the request settles so a long-lived
+        // signal does not retain a reference to this XHR after completion.
+        const cleanup = () => {
+          if (abortListener && req.signal) {
+            req.signal.removeEventListener('abort', abortListener);
+          }
+        };
+        xhr.open('POST', url);
+        for (const [name, value] of Object.entries(headers)) {
+          xhr.setRequestHeader(name, value);
+        }
+        if (effectiveTimeoutMs > 0) xhr.timeout = effectiveTimeoutMs;
+        xhr.upload.onprogress = (event) => {
+          if (event.lengthComputable && onProgress) {
+            onProgress({ loaded: event.loaded, total: event.total });
+          }
+        };
+        xhr.onload = () => {
+          cleanup();
+          let body: unknown;
+          try {
+            body = xhr.responseText ? JSON.parse(xhr.responseText) : undefined;
+          } catch {
+            body = xhr.responseText;
+          }
+          if (xhr.status >= 200 && xhr.status < 300) {
+            // The fetch path rejects non-JSON 2xx bodies (`res.json()`
+            // throws); match it so the two transports fail identically.
+            if (!body || typeof body !== 'object' || !('path' in body)) {
+              reject(new Error(`${label}: invalid upload response body`));
+              return;
+            }
+            resolve(body as DaemonWorkspaceFileUploadResult);
+            return;
+          }
+          const detail =
+            body && typeof body === 'object' && 'error' in body
+              ? String((body as { error: unknown }).error)
+              : `HTTP ${xhr.status}`;
+          reject(new DaemonHttpError(xhr.status, body, `${label}: ${detail}`));
+        };
+        xhr.onerror = () => {
+          cleanup();
+          reject(new Error(`${label}: network request failed`));
+        };
+        xhr.ontimeout = () => {
+          cleanup();
+          reject(new DOMException('timeout', 'TimeoutError'));
+        };
+        xhr.onabort = () => {
+          cleanup();
+          reject(
+            req.signal?.reason ??
+              new DOMException('The operation was aborted.', 'AbortError'),
+          );
+        };
+        if (req.signal) {
+          abortListener = () => xhr.abort();
+          req.signal.addEventListener('abort', abortListener, { once: true });
+        }
+        try {
+          xhr.send(req.data as XMLHttpRequestBodyInit);
+        } catch (error) {
+          cleanup();
+          reject(error);
+        }
+      },
+    );
+  }
+
+  async uploadWorkspaceFile(
+    req: DaemonWorkspaceFileUploadRequest,
+    clientId?: string,
+  ): Promise<DaemonWorkspaceFileUploadResult> {
+    return await this.uploadFileToPath(
+      '/file/upload',
+      'POST /file/upload',
+      req,
+      clientId,
     );
   }
 
@@ -1892,6 +2214,15 @@ export class DaemonClient {
     content: string,
     opts: DaemonWorkspaceMemoryRememberOptions = {},
   ): Promise<DaemonWorkspaceMemoryRememberTask> {
+    if (opts.scope) {
+      // An old daemon silently ignores `scope` and auto-routes the write;
+      // pre-flight so the degradation is a loud capability error instead.
+      await this.requireCapability(
+        opts.scope === 'project'
+          ? 'workspace_memory_remember_project_scope'
+          : 'workspace_memory_remember_user_scope',
+      );
+    }
     return await this.jsonRequest<DaemonWorkspaceMemoryRememberTask>(
       WORKSPACE_MEMORY_REMEMBER_PATH,
       `POST ${WORKSPACE_MEMORY_REMEMBER_PATH}`,
@@ -1900,6 +2231,7 @@ export class DaemonClient {
         body: {
           content,
           contextMode: opts.contextMode ?? 'workspace',
+          ...(opts.scope ? { scope: opts.scope } : {}),
         },
         clientId: opts.clientId,
       },
@@ -1921,12 +2253,20 @@ export class DaemonClient {
     query: string,
     opts: DaemonWorkspaceMemoryForgetOptions = {},
   ): Promise<DaemonWorkspaceMemoryForgetTask> {
+    if (opts.scope) {
+      // Without the tag an old daemon runs an UNSCOPED forget that can
+      // delete entries from both stores — pre-flight instead of degrading.
+      await this.requireCapability('workspace_memory_forget_scope');
+    }
     return await this.jsonRequest<DaemonWorkspaceMemoryForgetTask>(
       WORKSPACE_MEMORY_FORGET_PATH,
       `POST ${WORKSPACE_MEMORY_FORGET_PATH}`,
       {
         method: 'POST',
-        body: { query },
+        body: {
+          query,
+          ...(opts.scope ? { scope: opts.scope } : {}),
+        },
         clientId: opts.clientId,
       },
     );
@@ -2230,10 +2570,272 @@ export class DaemonClient {
 
   // -- Sessions ----------------------------------------------------------
 
+  async createStandaloneSession(
+    options: CreateStandaloneSessionOptions = {},
+  ): Promise<DaemonStandaloneSession> {
+    await this.requireCapability(STANDALONE_SESSIONS_CAPABILITY);
+    const { sessionId: requestedSessionId, ...request } = options;
+    const sessionId = (
+      requestedSessionId ?? globalThis.crypto.randomUUID()
+    ).toLowerCase();
+    try {
+      const response = await this.jsonRequest<unknown>(
+        '/standalone/sessions',
+        'POST /standalone/sessions',
+        {
+          method: 'POST',
+          body: { sessionId, ...request },
+          mode: 'rest',
+        },
+      );
+      return parseStandaloneSession(
+        response,
+        'POST /standalone/sessions',
+        sessionId,
+      );
+    } catch (error) {
+      if (
+        error instanceof DaemonHttpError &&
+        !isStandaloneCreationOutcomeUnknown(error)
+      ) {
+        throw error;
+      }
+      const recovery = await this.recoverStandaloneCreation(sessionId);
+      throw new DaemonStandaloneCreationOutcomeUnknownError(
+        sessionId,
+        recovery,
+        error,
+      );
+    }
+  }
+
+  async listStandaloneSessions(
+    options: DaemonStandaloneSessionListOptions = {},
+  ): Promise<DaemonStandaloneSessionSummary[]> {
+    return (await this.listStandaloneSessionsPage(options)).sessions;
+  }
+
+  async listStandaloneSessionsPage(
+    options: DaemonStandaloneSessionListOptions = {},
+  ): Promise<DaemonStandaloneSessionListPage> {
+    const query = new URLSearchParams();
+    if (options.cursor !== undefined) query.set('cursor', options.cursor);
+    if (options.pageSize !== undefined) {
+      query.set('size', String(options.pageSize));
+    }
+    if (options.archiveState !== undefined) {
+      query.set('archiveState', options.archiveState);
+    }
+    const queryString = query.toString();
+    const suffix = queryString ? `?${queryString}` : '';
+    return await this.standaloneJsonRequest(
+      `/standalone/sessions${suffix}`,
+      'GET /standalone/sessions',
+      parseStandaloneListPage,
+    );
+  }
+
+  async getStandaloneSession(
+    sessionId: string,
+  ): Promise<DaemonStandaloneSessionLookup> {
+    await this.requireCapability(STANDALONE_SESSIONS_CAPABILITY);
+    return await this.getStandaloneSessionUnchecked(sessionId.toLowerCase());
+  }
+
+  async loadStandaloneSession(
+    sessionId: string,
+    request: RestoreStandaloneSessionRequest = {},
+    clientId?: string,
+  ): Promise<DaemonRestoredStandaloneSession> {
+    return await this.restoreStandaloneSession(
+      'load',
+      sessionId,
+      request,
+      clientId,
+    );
+  }
+
+  async resumeStandaloneSession(
+    sessionId: string,
+    request: RestoreStandaloneSessionRequest = {},
+    clientId?: string,
+  ): Promise<DaemonRestoredStandaloneSession> {
+    return await this.restoreStandaloneSession(
+      'resume',
+      sessionId,
+      request,
+      clientId,
+    );
+  }
+
+  async repairStandaloneSessionDirectory(
+    sessionId: string,
+  ): Promise<DaemonStandaloneDirectoryResult> {
+    const normalized = sessionId.toLowerCase();
+    const route = 'POST /standalone/sessions/:id/repair-directory';
+    return await this.standaloneJsonRequest(
+      `/standalone/sessions/${urlEncode(normalized)}/repair-directory`,
+      route,
+      (response) => parseStandaloneDirectoryResult(response, route, normalized),
+      { method: 'POST', body: {} },
+    );
+  }
+
+  async renameStandaloneSession(
+    sessionId: string,
+    displayName: string,
+    clientId?: string,
+  ): Promise<DaemonStandaloneMetadataResult> {
+    const normalized = sessionId.toLowerCase();
+    const route = 'PATCH /standalone/sessions/:id/metadata';
+    return await this.standaloneJsonRequest(
+      `/standalone/sessions/${urlEncode(normalized)}/metadata`,
+      route,
+      (response) => parseStandaloneMetadataResult(response, route, normalized),
+      {
+        method: 'PATCH',
+        body: { displayName },
+        clientId,
+      },
+    );
+  }
+
+  async exportStandaloneSession(
+    sessionId: string,
+    options: { format?: DaemonSessionExportFormat } = {},
+  ): Promise<DaemonSessionExportResult> {
+    await this.requireCapability(STANDALONE_SESSIONS_CAPABILITY);
+    return await this.sessionExportRequest(
+      `/standalone/sessions/${urlEncode(sessionId.toLowerCase())}/export`,
+      'GET /standalone/sessions/:id/export',
+      options,
+    );
+  }
+
+  async archiveStandaloneSessions(
+    sessionIds: string[],
+  ): Promise<DaemonArchiveStandaloneSessionsResult> {
+    return await this.standaloneBatchRequest(
+      'archive',
+      sessionIds,
+      parseArchiveStandaloneSessionsResult,
+    );
+  }
+
+  async unarchiveStandaloneSessions(
+    sessionIds: string[],
+  ): Promise<DaemonUnarchiveStandaloneSessionsResult> {
+    return await this.standaloneBatchRequest(
+      'unarchive',
+      sessionIds,
+      parseUnarchiveStandaloneSessionsResult,
+    );
+  }
+
+  async deleteStandaloneSessions(
+    sessionIds: string[],
+  ): Promise<DaemonDeleteStandaloneSessionsResult> {
+    return await this.standaloneBatchRequest(
+      'delete',
+      sessionIds,
+      parseDeleteStandaloneSessionsResult,
+    );
+  }
+
+  private async standaloneJsonRequest<T>(
+    path: string,
+    route: string,
+    parse: (value: unknown, route: string) => T,
+    options: {
+      method?: string;
+      body?: unknown;
+      clientId?: string;
+      timeoutMs?: number;
+    } = {},
+  ): Promise<T> {
+    await this.requireCapability(STANDALONE_SESSIONS_CAPABILITY);
+    const response = await this.jsonRequest<unknown>(path, route, {
+      ...options,
+      mode: 'rest',
+    });
+    return parse(response, route);
+  }
+
+  private async standaloneBatchRequest<T>(
+    action: 'archive' | 'unarchive' | 'delete',
+    sessionIds: string[],
+    parse: (value: unknown, route: string) => T,
+  ): Promise<T> {
+    const route = `POST /standalone/sessions/${action}`;
+    return await this.standaloneJsonRequest(
+      `/standalone/sessions/${action}`,
+      route,
+      parse,
+      {
+        method: 'POST',
+        body: {
+          sessionIds: sessionIds.map((sessionId) => sessionId.toLowerCase()),
+        },
+      },
+    );
+  }
+
+  private async restoreStandaloneSession(
+    action: 'load' | 'resume',
+    sessionId: string,
+    request: RestoreStandaloneSessionRequest,
+    clientId?: string,
+  ): Promise<DaemonRestoredStandaloneSession> {
+    const normalized = sessionId.toLowerCase();
+    const route = `POST /standalone/sessions/:id/${action}`;
+    const { timeoutMs, ...body } = request;
+    return await this.standaloneJsonRequest(
+      `/standalone/sessions/${urlEncode(normalized)}/${action}`,
+      route,
+      (response) => parseRestoredStandaloneSession(response, route, normalized),
+      {
+        method: 'POST',
+        body,
+        clientId,
+        timeoutMs: this.resolveRestoreTimeoutMs(timeoutMs),
+      },
+    );
+  }
+
+  private async getStandaloneSessionUnchecked(
+    sessionId: string,
+  ): Promise<DaemonStandaloneSessionLookup> {
+    const route = 'GET /standalone/sessions/:id';
+    const response = await this.jsonRequest<unknown>(
+      `/standalone/sessions/${urlEncode(sessionId)}`,
+      route,
+      { mode: 'rest' },
+    );
+    return parseStandaloneLookup(response, route, sessionId);
+  }
+
+  private async recoverStandaloneCreation(
+    sessionId: string,
+  ): Promise<DaemonStandaloneCreationRecovery> {
+    try {
+      const lookup = await this.getStandaloneSessionUnchecked(sessionId);
+      return 'state' in lookup
+        ? { state: 'creating', sessionId }
+        : { state: 'existing', session: lookup };
+    } catch (error) {
+      return isStandaloneSessionNotFoundError(error)
+        ? { state: 'absent', sessionId }
+        : { state: 'unknown', sessionId, error };
+    }
+  }
+
   async createOrAttachSession(
     req: CreateSessionRequest,
     clientId?: string,
   ): Promise<DaemonSession> {
+    if (req.sessionId !== undefined && req.sessionId !== null) {
+      await this.requireCapability('session_id_override');
+    }
     if (req.sourceType !== undefined || req.sourceId !== undefined) {
       await this.requireCapability('session_source_metadata');
     }
@@ -2256,6 +2858,7 @@ export class DaemonClient {
         headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
         body: JSON.stringify({
           cwd: req.workspaceCwd,
+          ...(req.sessionId !== undefined ? { sessionId: req.sessionId } : {}),
           ...(req.modelServiceId ? { modelServiceId: req.modelServiceId } : {}),
           // `!== undefined` (not truthy) so a buggy caller passing
           // `sessionScope: '' | null` doesn't get the field silently
@@ -2279,7 +2882,17 @@ export class DaemonClient {
       },
       async (res) => {
         if (!res.ok) throw await this.failOnError(res, 'POST /session');
-        return (await res.json()) as DaemonSession;
+        const session = (await res.json()) as DaemonSession;
+        if (
+          typeof req.sessionId === 'string' &&
+          session.sessionId !== req.sessionId.toLowerCase()
+        ) {
+          throw new DaemonSessionIdProtocolError(
+            req.sessionId.toLowerCase(),
+            session.sessionId,
+          );
+        }
+        return session;
       },
     );
   }
@@ -2348,6 +2961,26 @@ export class DaemonClient {
       `/workspace/${urlEncode(workspaceCwd)}/sessions?${query.toString()}`,
       'GET /workspace/sessions',
     );
+  }
+
+  /**
+   * Read the memory-only live-state snapshot for a workspace via
+   * `GET /workspaces/:workspace/sessions/live-state`: the complete set of
+   * live sessions with volatile state plus the in-memory catalog version
+   * equality token. Always uses native REST transport (never the pluggable
+   * ACP transport).
+   *
+   * This method deliberately does not pre-flight
+   * `requireCapability('workspace_session_live_state')` — a capability
+   * probe on every poll would double request volume. Consumers preflight
+   * the capability once from their already-loaded capabilities and fall
+   * back to the full session catalog when it is absent.
+   */
+  getWorkspaceSessionLiveState(
+    workspaceCwd: string,
+    opts: { clientId?: string; timeoutMs?: number } = {},
+  ): Promise<DaemonWorkspaceSessionLiveState> {
+    return this.workspaceByCwd(workspaceCwd).getSessionLiveState(opts);
   }
 
   async listSessionGroups(
@@ -2445,24 +3078,24 @@ export class DaemonClient {
 
   async resolveSubagentSession(
     sessionId: string,
-    toolCallId: string,
+    subagentRef: string,
     clientId?: string,
   ): Promise<DaemonSubagentSessionResolution> {
     return await this.jsonRequest<DaemonSubagentSessionResolution>(
-      `/session/${urlEncode(sessionId)}/subagents/${urlEncode(toolCallId)}`,
-      'GET /session/:id/subagents/:toolCallId',
+      `/session/${urlEncode(sessionId)}/subagents/${urlEncode(subagentRef)}`,
+      'GET /session/:id/subagents/:subagentRef',
       { clientId, mode: 'rest' },
     );
   }
 
   async cancelSubagentSession(
     sessionId: string,
-    toolCallId: string,
+    subagentRef: string,
     clientId?: string,
   ): Promise<{ cancelled: boolean }> {
     return await this.jsonRequest<{ cancelled: boolean }>(
-      `/session/${urlEncode(sessionId)}/subagents/${urlEncode(toolCallId)}/cancel`,
-      'POST /session/:id/subagents/:toolCallId/cancel',
+      `/session/${urlEncode(sessionId)}/subagents/${urlEncode(subagentRef)}/cancel`,
+      'POST /session/:id/subagents/:subagentRef/cancel',
       { clientId, mode: 'rest', method: 'POST' },
     );
   }
@@ -2477,24 +3110,41 @@ export class DaemonClient {
 
   async branchSession(
     sessionId: string,
-    req: BranchSessionRequest = {},
+    req: HistoricalBranchSessionRequest,
     clientId?: string,
-  ): Promise<DaemonBranchedSession> {
+  ): Promise<DaemonPersistedBranchedSession>;
+  async branchSession(
+    sessionId: string,
+    req?: BranchSessionRequest,
+    clientId?: string,
+  ): Promise<DaemonBranchedSession>;
+  async branchSession(
+    sessionId: string,
+    req: DaemonBranchSessionRequest,
+    clientId?: string,
+  ): Promise<DaemonBranchSessionResult>;
+  async branchSession(
+    sessionId: string,
+    req: DaemonBranchSessionRequest = {},
+    clientId?: string,
+  ): Promise<DaemonBranchSessionResult> {
     return await this.fetchWithTimeout(
       `${this.baseUrl}/session/${urlEncode(sessionId)}/branch`,
       {
         method: 'POST',
         headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
         body: JSON.stringify({
-          ...(req.name !== undefined ? { name: req.name } : {}),
+          name: req.name,
+          ...('atRecordId' in req ? { atRecordId: req.atRecordId } : {}),
         }),
       },
       async (res) => {
         if (!res.ok) {
           throw await this.failOnError(res, 'POST /session/:id/branch');
         }
-        return (await res.json()) as DaemonBranchedSession;
+        return (await res.json()) as DaemonBranchSessionResult;
       },
+      120_000,
     );
   }
 
@@ -2675,23 +3325,37 @@ export class DaemonClient {
     );
   }
 
-  async sessionGoalClear(
+  sessionGoalClear(
     sessionId: string,
     clientId?: string,
   ): Promise<{ cleared: boolean; condition?: string }> {
-    return await this.fetchWithTimeout(
-      `${this.baseUrl}/session/${urlEncode(sessionId)}/goal/clear`,
-      {
-        method: 'POST',
-        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
-        body: JSON.stringify({}),
-      },
-      async (res) => {
-        if (!res.ok) {
-          throw await this.failOnError(res, 'POST /session/:id/goal/clear');
-        }
-        return (await res.json()) as { cleared: boolean; condition?: string };
-      },
+    return this.jsonRequest<{ cleared: boolean; condition?: string }>(
+      `/session/${urlEncode(sessionId)}/goal/clear`,
+      'POST /session/:id/goal/clear',
+      { method: 'POST', body: {}, clientId },
+    );
+  }
+
+  sessionGoal(
+    sessionId: string,
+    clientId?: string,
+  ): Promise<GoalStateResponse> {
+    return this.jsonRequest<GoalStateResponse>(
+      `/session/${urlEncode(sessionId)}/goal`,
+      'GET /session/:id/goal',
+      { clientId },
+    );
+  }
+
+  sessionGoalControl(
+    sessionId: string,
+    request: GoalControlRequest,
+    clientId?: string,
+  ): Promise<GoalStateResponse> {
+    return this.jsonRequest<GoalStateResponse>(
+      `/session/${urlEncode(sessionId)}/goal`,
+      'POST /session/:id/goal',
+      { method: 'POST', body: request, clientId },
     );
   }
 
@@ -2724,6 +3388,20 @@ export class DaemonClient {
     req: RestoreSessionRequest,
     clientId?: string,
   ): Promise<DaemonRestoredSession> {
+    let sourceType = req.sourceType;
+    let sourceId = req.sourceId;
+    if (req.sourceType !== undefined || req.sourceId !== undefined) {
+      try {
+        await this.requireCapability('session_source_metadata');
+      } catch (error) {
+        if (!(error instanceof DaemonCapabilityMissingError)) {
+          throw error;
+        }
+        sourceType = undefined;
+        sourceId = undefined;
+      }
+    }
+    const timeoutMs = this.resolveRestoreTimeoutMs(req.timeoutMs);
     return await this.fetchWithTimeout(
       `${this.baseUrl}/session/${urlEncode(sessionId)}/${action}`,
       {
@@ -2737,6 +3415,11 @@ export class DaemonClient {
           ...(action === 'load' && req.historyPageSize !== undefined
             ? { historyPageSize: req.historyPageSize }
             : {}),
+          ...(action === 'load' && req.liveReplayMode !== undefined
+            ? { liveReplayMode: req.liveReplayMode }
+            : {}),
+          ...(sourceType !== undefined ? { sourceType } : {}),
+          ...(sourceId !== undefined ? { sourceId } : {}),
         }),
       },
       async (res) => {
@@ -2745,7 +3428,32 @@ export class DaemonClient {
         }
         return (await res.json()) as DaemonRestoredSession;
       },
+      timeoutMs,
     );
+  }
+
+  private resolveRestoreTimeoutMs(
+    perRequestTimeoutMs: number | undefined,
+  ): number {
+    if (perRequestTimeoutMs !== undefined) {
+      if (
+        !Number.isFinite(perRequestTimeoutMs) ||
+        !Number.isInteger(perRequestTimeoutMs) ||
+        perRequestTimeoutMs < 0
+      ) {
+        throw new TypeError(
+          'RestoreSessionRequest.timeoutMs must be a non-negative integer',
+        );
+      }
+      return perRequestTimeoutMs > MAX_TIMER_DELAY_MS ? 0 : perRequestTimeoutMs;
+    }
+    if (this.hasExplicitFetchTimeout) {
+      return this.fetchTimeoutMs > MAX_TIMER_DELAY_MS ? 0 : this.fetchTimeoutMs;
+    }
+    const derived = this.cachedSessionRestoreTimeoutMs
+      ? this.cachedSessionRestoreTimeoutMs + SESSION_RESTORE_TIMEOUT_HEADROOM_MS
+      : DEFAULT_SESSION_RESTORE_TIMEOUT_MS;
+    return derived > MAX_TIMER_DELAY_MS ? 0 : derived;
   }
 
   /**
@@ -2845,7 +3553,7 @@ export class DaemonClient {
    * Generate a one-sentence "where did I leave off"
    * recap of the session. Wraps `generateSessionRecap` (core/services/
    * sessionRecap.ts) via an ACP control-channel ext-method, so the
-   * summary is computed against the active GeminiClient chat history
+   * summary is computed against the active LlmClient chat history
    * inside the daemon's ACP child.
    *
    * Non-strict mutation gate — posture matches `/session/:id/prompt`
@@ -2923,21 +3631,114 @@ export class DaemonClient {
     return (await res.json()) as DaemonSessionBtwResult;
   }
 
+  async uploadSessionAttachment(
+    sessionId: string,
+    data: Blob,
+    name: string,
+    mimeType: string,
+    opts?: { signal?: AbortSignal; clientId?: string },
+  ): Promise<DaemonSessionAttachmentReference> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/attachments?name=${urlEncode(name)}`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': mimeType }, opts?.clientId),
+        body: data,
+        signal: opts?.signal,
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /session/:id/attachments');
+        }
+        return (await res.json()) as DaemonSessionAttachmentReference;
+      },
+    );
+  }
+
+  async readSessionAttachment(
+    sessionId: string,
+    attachmentId: string,
+    opts?: { signal?: AbortSignal; clientId?: string },
+  ): Promise<DaemonSessionAttachmentData> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/attachments/${urlEncode(attachmentId)}`,
+      {
+        method: 'GET',
+        headers: this.headers({}, opts?.clientId),
+        signal: opts?.signal,
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'GET /session/:id/attachments/:attachmentId',
+          );
+        }
+        const bytes = new Uint8Array(await res.arrayBuffer());
+        // This package also targets browsers, where Node's Buffer is absent.
+        // Chunking keeps the spread call below the engine's argument limit.
+        let binary = '';
+        for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+          binary += String.fromCharCode(
+            ...bytes.subarray(offset, offset + 0x8000),
+          );
+        }
+        return {
+          data: btoa(binary),
+          mimeType:
+            res.headers.get('content-type') ?? 'application/octet-stream',
+        };
+      },
+    );
+  }
+
+  async removeSessionAttachment(
+    sessionId: string,
+    attachmentId: string,
+    opts?: { signal?: AbortSignal; clientId?: string },
+  ): Promise<boolean> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/attachments/${urlEncode(attachmentId)}`,
+      {
+        method: 'DELETE',
+        headers: this.headers({}, opts?.clientId),
+        signal: opts?.signal,
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'DELETE /session/:id/attachments/:attachmentId',
+          );
+        }
+        return ((await res.json()) as { removed?: unknown }).removed === true;
+      },
+    );
+  }
+
   /**
    * Queue a user message typed while the session's turn is still running. The
    * ACP child drains it between tool batches so the model sees it before the
-   * turn ends. Resolves `{ accepted: false }` when the session is idle — the
-   * caller should then send the message as a normal next-turn prompt.
+   * turn ends. Every accepted request is daemon-owned; a caller-supplied id
+   * makes ambiguous retries idempotent. `opts.content` carries media content
+   * image blocks alongside the text — pre-flight the
+   * `session_attachments` capability; older daemons ignore the
+   * field and drop the media.
    */
   async enqueueMidTurnMessage(
     sessionId: string,
     message: string,
-    opts?: { signal?: AbortSignal; clientId?: string },
+    opts?: {
+      signal?: AbortSignal;
+      clientId?: string;
+      messageId?: string;
+      content?: PromptContentBlock[];
+    },
   ): Promise<DaemonMidTurnMessageResult> {
     // Route through `fetchWithTimeout` like every other method so a hung daemon
     // can't wedge this promise forever (the caller in `actions.ts` awaits it).
-    // The helper composes any caller `signal` (the turn-scoped abort) WITH its
-    // timeout controller, so the mid-turn-settle abort still propagates.
+    // The helper composes any caller signal with its timeout controller. Legacy
+    // callers use this to cancel a push when the active turn settles.
     return await this.fetchWithTimeout(
       `${this.baseUrl}/session/${urlEncode(sessionId)}/mid-turn-message`,
       {
@@ -2946,7 +3747,13 @@ export class DaemonClient {
           { 'Content-Type': 'application/json' },
           opts?.clientId,
         ),
-        body: JSON.stringify({ message }),
+        body: JSON.stringify({
+          message,
+          messageId: opts?.messageId,
+          ...(opts?.content && opts.content.length > 0
+            ? { content: opts.content }
+            : {}),
+        }),
         signal: opts?.signal,
       },
       async (res) => {
@@ -2980,6 +3787,37 @@ export class DaemonClient {
           );
         }
         return (await res.json()) as DaemonRemoveMidTurnMessageResult;
+      },
+    );
+  }
+
+  /**
+   * Fetch the mid-turn reconciliation snapshot for a session: messages still
+   * waiting in the daemon queue plus bounded terminal id rings.
+   * Callers reconcile against this
+   * instead of resending accepted messages at the idle boundary. Only available
+   * when the daemon advertises `session_mid_turn_message_query` — older
+   * daemons answer 404 and callers keep the legacy behavior.
+   */
+  async getMidTurnMessages(
+    sessionId: string,
+    opts?: { clientId?: string; signal?: AbortSignal },
+  ): Promise<DaemonMidTurnMessagesResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/mid-turn-messages`,
+      {
+        method: 'GET',
+        headers: this.headers({}, opts?.clientId),
+        signal: opts?.signal,
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'GET /session/:id/mid-turn-messages',
+          );
+        }
+        return (await res.json()) as DaemonMidTurnMessagesResult;
       },
     );
   }
@@ -3109,11 +3947,12 @@ export class DaemonClient {
   }
 
   /**
-   * Toggle a user-invocable skill in workspace `skills.disabled` settings.
+   * Update workspace Skill settings by name without requiring a loaded Skill.
    * Active ACP sessions refresh their skill validation and command lists before
    * the response returns; `activation` reports deferred or partial refreshes.
    *
-   * Pre-flight `caps.features.includes('workspace_skill_toggle')` before calling.
+   * Pre-flight
+   * `caps.features.includes('workspace_skill_settings_toggle')` before calling.
    */
   async setWorkspaceSkillEnabled(
     skillName: string,
@@ -3138,6 +3977,37 @@ export class DaemonClient {
           );
         }
         return (await res.json()) as DaemonSkillToggleResult;
+      },
+    );
+  }
+
+  /**
+   * Update workspace Skill settings for up to 100 names in one write.
+   *
+   * Pre-flight
+   * `caps.features.includes('workspace_skill_settings_batch_toggle')` before
+   * calling.
+   */
+  async setWorkspaceSkillsEnabled(
+    skillNames: readonly string[],
+    enabled: boolean,
+    opts?: { clientId?: string },
+  ): Promise<DaemonSkillBatchToggleResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/skills/enable`,
+      {
+        method: 'POST',
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          opts?.clientId,
+        ),
+        body: JSON.stringify({ skillNames, enabled }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /workspace/skills/enable');
+        }
+        return (await res.json()) as DaemonSkillBatchToggleResult;
       },
     );
   }
@@ -4035,6 +4905,19 @@ export class DaemonClient {
     );
   }
 
+  async setSessionConfigOption(
+    sessionId: string,
+    configId: 'reasoning_effort',
+    value: string,
+    clientId?: string,
+  ): Promise<DaemonSessionConfigOptionResult> {
+    return await this.jsonRequest<DaemonSessionConfigOptionResult>(
+      `/session/${urlEncode(sessionId)}/config-option`,
+      'POST /session/:id/config-option',
+      { method: 'POST', body: { configId, value }, clientId },
+    );
+  }
+
   async setSessionLanguage(
     sessionId: string,
     language: string,
@@ -4457,14 +5340,25 @@ export class DaemonClient {
 
   async archiveSessionsData(
     sessionIds: string[],
+    clientIdOrOptions?: string | { resolveConflicts?: boolean },
     clientId?: string,
   ): Promise<DaemonArchiveSessionsResult> {
+    const options =
+      typeof clientIdOrOptions === 'object' ? clientIdOrOptions : undefined;
     return await this.fetchWithTimeout(
       `${this.baseUrl}/sessions/archive`,
       {
         method: 'POST',
-        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
-        body: JSON.stringify({ sessionIds }),
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          typeof clientIdOrOptions === 'string' ? clientIdOrOptions : clientId,
+        ),
+        body: JSON.stringify({
+          sessionIds,
+          ...(options?.resolveConflicts !== undefined
+            ? { resolveConflicts: options.resolveConflicts }
+            : {}),
+        }),
       },
       async (res) => {
         if (res.ok) {
@@ -4477,14 +5371,25 @@ export class DaemonClient {
 
   async unarchiveSessionsData(
     sessionIds: string[],
+    clientIdOrOptions?: string | { resolveConflicts?: boolean },
     clientId?: string,
   ): Promise<DaemonUnarchiveSessionsResult> {
+    const options =
+      typeof clientIdOrOptions === 'object' ? clientIdOrOptions : undefined;
     return await this.fetchWithTimeout(
       `${this.baseUrl}/sessions/unarchive`,
       {
         method: 'POST',
-        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
-        body: JSON.stringify({ sessionIds }),
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          typeof clientIdOrOptions === 'string' ? clientIdOrOptions : clientId,
+        ),
+        body: JSON.stringify({
+          sessionIds,
+          ...(options?.resolveConflicts !== undefined
+            ? { resolveConflicts: options.resolveConflicts }
+            : {}),
+        }),
       },
       async (res) => {
         if (res.ok) {
@@ -4780,7 +5685,7 @@ export class DaemonClient {
    */
   async updateSessionMetadata(
     sessionId: string,
-    metadata: { displayName?: string },
+    metadata: { displayName?: string; pr?: DaemonSessionPrInfo },
     clientId?: string,
   ): Promise<SessionMetadataResult> {
     return await this.fetchWithTimeout(
@@ -4794,10 +5699,20 @@ export class DaemonClient {
         if (res.status === 200) {
           const body = (await res.json()) as {
             displayName?: unknown;
+            prs?: unknown;
           };
-          return typeof body.displayName === 'string'
-            ? { displayName: body.displayName }
-            : {};
+          const result: SessionMetadataResult = {};
+          if (typeof body.displayName === 'string') {
+            result.displayName = body.displayName;
+          }
+          if (Array.isArray(body.prs)) {
+            // Per-entry gate: a buggy or hostile daemon response cannot
+            // surface a non-http(s) url or malformed number downstream (the
+            // tooltip renders these as links). Valid entries survive.
+            const valid = body.prs.filter(isDaemonSessionPrInfo);
+            if (valid.length > 0) result.prs = valid;
+          }
+          return result;
         }
         throw await this.failOnError(res, 'PATCH /session/:id/metadata');
       },
@@ -5483,6 +6398,29 @@ export class WorkspaceDaemonClient {
   }
 
   /**
+   * Read the memory-only live-state snapshot for this workspace: the
+   * complete set of live sessions with volatile state plus the in-memory
+   * catalog version equality token. Always uses native REST transport
+   * (never the pluggable ACP transport).
+   *
+   * This method deliberately does not pre-flight
+   * `requireCapability('workspace_session_live_state')` — a capability
+   * probe on every poll would double request volume. Consumers preflight
+   * the capability once from their already-loaded capabilities and fall
+   * back to the full session catalog when it is absent.
+   */
+  getSessionLiveState(
+    opts: { clientId?: string; timeoutMs?: number } = {},
+  ): Promise<DaemonWorkspaceSessionLiveState> {
+    return this.client.workspaceJsonRequest<DaemonWorkspaceSessionLiveState>(
+      this.workspaceSelector,
+      '/sessions/live-state',
+      'GET /workspaces/:workspace/sessions/live-state',
+      { clientId: opts.clientId, timeoutMs: opts.timeoutMs, mode: 'rest' },
+    );
+  }
+
+  /**
    * Read one page from an active persisted session transcript in this
    * workspace.
    * The daemon performs replay locally without attaching to the session or
@@ -5527,6 +6465,19 @@ export class WorkspaceDaemonClient {
       `/workspaces/${this.workspaceSelector}/session/${urlEncode(sessionId)}/archive/export`,
       'GET /workspaces/:workspace/session/:id/archive/export',
       opts,
+    );
+  }
+
+  updateSessionMetadata(
+    sessionId: string,
+    metadata: { displayName?: string; pr?: DaemonSessionPrInfo },
+    clientId?: string,
+  ): Promise<SessionMetadataResult> {
+    return this.client.workspaceJsonRequest<SessionMetadataResult>(
+      this.workspaceSelector,
+      `/session/${urlEncode(sessionId)}/metadata`,
+      'PATCH /workspaces/:workspace/session/:id/metadata',
+      { method: 'PATCH', body: metadata, clientId, mode: 'rest' },
     );
   }
 
@@ -5603,25 +6554,41 @@ export class WorkspaceDaemonClient {
 
   archiveSessionsData(
     sessionIds: string[],
+    clientIdOrOptions?: string | { resolveConflicts?: boolean },
     clientId?: string,
   ): Promise<DaemonArchiveSessionsResult> {
+    const options =
+      typeof clientIdOrOptions === 'object' ? clientIdOrOptions : undefined;
     return this.post(
       '/sessions/archive',
       'POST /workspaces/:workspace/sessions/archive',
-      { sessionIds },
-      clientId,
+      {
+        sessionIds,
+        ...(options?.resolveConflicts !== undefined
+          ? { resolveConflicts: options.resolveConflicts }
+          : {}),
+      },
+      typeof clientIdOrOptions === 'string' ? clientIdOrOptions : clientId,
     );
   }
 
   unarchiveSessionsData(
     sessionIds: string[],
+    clientIdOrOptions?: string | { resolveConflicts?: boolean },
     clientId?: string,
   ): Promise<DaemonUnarchiveSessionsResult> {
+    const options =
+      typeof clientIdOrOptions === 'object' ? clientIdOrOptions : undefined;
     return this.post(
       '/sessions/unarchive',
       'POST /workspaces/:workspace/sessions/unarchive',
-      { sessionIds },
-      clientId,
+      {
+        sessionIds,
+        ...(options?.resolveConflicts !== undefined
+          ? { resolveConflicts: options.resolveConflicts }
+          : {}),
+      },
+      typeof clientIdOrOptions === 'string' ? clientIdOrOptions : clientId,
     );
   }
 
@@ -5715,6 +6682,18 @@ export class WorkspaceDaemonClient {
     return this.post(
       '/file/edit',
       'POST /workspaces/:workspace/file/edit',
+      req,
+      clientId,
+    );
+  }
+
+  uploadWorkspaceFile(
+    req: DaemonWorkspaceFileUploadRequest,
+    clientId?: string,
+  ): Promise<DaemonWorkspaceFileUploadResult> {
+    return this.client.uploadFileToPath(
+      `/workspaces/${this.workspaceSelector}/file/upload`,
+      'POST /workspaces/:workspace/file/upload',
       req,
       clientId,
     );
@@ -5836,6 +6815,19 @@ export class WorkspaceDaemonClient {
     );
   }
 
+  setWorkspaceSkillsEnabled(
+    skillNames: readonly string[],
+    enabled: boolean,
+    opts?: { clientId?: string },
+  ): Promise<DaemonSkillBatchToggleResult> {
+    return this.post(
+      '/skills/enable',
+      'POST /workspaces/:workspace/skills/enable',
+      { skillNames, enabled },
+      opts?.clientId,
+    );
+  }
+
   restartMcpServer(
     serverName: string,
     opts?: { clientId?: string; entryIndex?: number | '*'; timeoutMs?: number },
@@ -5897,6 +6889,24 @@ export class WorkspaceDaemonClient {
       `/extensions/${urlEncode(extensionId)}/activation`,
       'PUT /workspaces/:workspace/extensions/:extensionId/activation',
       { method: 'PUT', body: { state }, clientId, mode: 'rest' },
+    );
+  }
+
+  setExtensionActivations(
+    extensionNames: readonly string[],
+    state: ExtensionWorkspaceBatchActivationState,
+    clientId?: string,
+  ): Promise<ExtensionMutationResponse> {
+    return this.client.workspaceJsonRequest<ExtensionMutationResponse>(
+      this.workspaceSelector,
+      '/extensions/activation',
+      'PUT /workspaces/:workspace/extensions/activation',
+      {
+        method: 'PUT',
+        body: { extensionNames: [...extensionNames], state },
+        clientId,
+        mode: 'rest',
+      },
     );
   }
 
@@ -6067,9 +7077,34 @@ export function matchTurnEvent(
   promptId: string,
 ): PromptResult | undefined {
   if (event.type === 'turn_complete') {
-    const data = event.data as { promptId?: string; stopReason?: string };
+    const data = event.data as {
+      promptId?: string;
+      stopReason?: string;
+      branchPoint?: {
+        assistantRecordUuid?: unknown;
+        checkpointUuid?: unknown;
+      };
+    };
     if (data.promptId === promptId) {
-      return { stopReason: data.stopReason ?? 'end_turn' };
+      const stopReason = data.stopReason ?? 'end_turn';
+      const candidate = data.branchPoint;
+      const recordUuidPattern =
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+      const branchPoint =
+        stopReason === 'end_turn' &&
+        typeof candidate?.assistantRecordUuid === 'string' &&
+        recordUuidPattern.test(candidate.assistantRecordUuid) &&
+        typeof candidate.checkpointUuid === 'string' &&
+        recordUuidPattern.test(candidate.checkpointUuid)
+          ? {
+              assistantRecordUuid: candidate.assistantRecordUuid,
+              checkpointUuid: candidate.checkpointUuid,
+            }
+          : undefined;
+      return {
+        stopReason,
+        ...(branchPoint ? { branchPoint } : {}),
+      };
     }
   }
   if (event.type === 'turn_error') {

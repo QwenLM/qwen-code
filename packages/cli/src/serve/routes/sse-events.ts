@@ -16,6 +16,7 @@ import { mapDomainErrorToErrorKind } from '@qwen-code/acp-bridge';
 import type { Application } from 'express';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
+import type { ConversationRuntimeActivityGate } from '../conversations/conversation-runtime-activity.js';
 import type { DaemonLogger } from '../daemon-logger.js';
 import {
   SubscriberLimitExceededError,
@@ -33,7 +34,9 @@ import {
   parseMaxQueuedQuery,
 } from '../server/request-helpers.js';
 import { parseEventEpochHeader } from '../sse-last-event-id.js';
+import { omitSkillDetailsForSdkSurface } from '../skill-details-redaction.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
+import { isInternalWorkspaceRuntime } from '../workspace-runtime-visibility.js';
 import { requireSessionRuntime } from './session-runtime.js';
 import {
   parseVirtualSubagentSessionId,
@@ -120,11 +123,13 @@ interface RegisterSseEventsRoutesDeps {
   writerIdleTimeoutMs?: number;
   sendBridgeError: SendBridgeError;
   virtualSubagentSessions?: VirtualSubagentSessions;
+  conversationRuntimeActivity?: ConversationRuntimeActivityGate;
 }
 
 type OmitId<T> = Omit<T, 'id'>;
 
 function formatSseFrame(event: BridgeEvent | OmitId<BridgeEvent>): string {
+  const shaped = omitSkillDetailsForSdkSurface(event);
   // SSE format: id (optional), event (optional), data, blank line.
   // The `id:` line is intentionally omitted when `event.id` is absent —
   // terminal/synthetic frames (e.g. daemon-side `stream_error`) must not
@@ -142,7 +147,7 @@ function formatSseFrame(event: BridgeEvent | OmitId<BridgeEvent>): string {
   // `_meta.serverTimestamp`: EventBus stamps normal session frames when they
   // are published so SSE and load/replay share the same event time. Keep this
   // fallback for synthetic frames that do not pass through EventBus.
-  const existingMeta = (event as { _meta?: Record<string, unknown> })._meta;
+  const existingMeta = (shaped as { _meta?: Record<string, unknown> })._meta;
   const existingServerTimestamp = existingMeta?.['serverTimestamp'];
   const serverTimestamp =
     typeof existingServerTimestamp === 'number' &&
@@ -150,13 +155,13 @@ function formatSseFrame(event: BridgeEvent | OmitId<BridgeEvent>): string {
       ? existingServerTimestamp
       : Date.now();
   const stamped = {
-    ...event,
+    ...shaped,
     _meta: { ...(existingMeta ?? {}), serverTimestamp },
   };
   const dataJson = JSON.stringify(stamped);
   const idLine =
-    'id' in event && event.id !== undefined ? `id: ${event.id}\n` : '';
-  return `${idLine}event: ${event.type}\ndata: ${dataJson}\n\n`;
+    'id' in shaped && shaped.id !== undefined ? `id: ${shaped.id}\n` : '';
+  return `${idLine}event: ${shaped.type}\ndata: ${dataJson}\n\n`;
 }
 
 export function registerSseEventsRoutes(
@@ -340,22 +345,47 @@ export function registerSseEventsRoutes(
       });
       if (!runtime) return;
       const snapshot = req.query['snapshot'] === '1';
-      const iterable = virtualKey
-        ? await deps.virtualSubagentSessions?.subscribe(runtime, sessionId, {
-            signal: abort.signal,
-            lastEventId,
-            ...(maxQueued !== undefined ? { maxQueued } : {}),
-            onSubscriberDiagnostic,
-          })
-        : runtime.bridge.subscribeEvents(sessionId, {
-            signal: abort.signal,
-            lastEventId,
-            ...(eventEpoch !== undefined ? { epoch: eventEpoch } : {}),
-            ...(maxQueued !== undefined ? { maxQueued } : {}),
-            ...(snapshot ? { snapshot: true } : {}),
-            onSubscriberDiagnostic,
-          });
-      if (!iterable) {
+      const openSubscription = async (): Promise<
+        { iter: AsyncIterator<BridgeEvent>; busEpoch?: string } | undefined
+      > => {
+        const iterable = virtualKey
+          ? await deps.virtualSubagentSessions?.subscribe(runtime, sessionId, {
+              signal: abort.signal,
+              lastEventId,
+              ...(maxQueued !== undefined ? { maxQueued } : {}),
+              onSubscriberDiagnostic,
+            })
+          : runtime.bridge.subscribeEvents(sessionId, {
+              signal: abort.signal,
+              lastEventId,
+              ...(eventEpoch !== undefined ? { epoch: eventEpoch } : {}),
+              ...(maxQueued !== undefined ? { maxQueued } : {}),
+              ...(snapshot ? { snapshot: true } : {}),
+              onSubscriberDiagnostic,
+            });
+        if (!iterable) return undefined;
+        const opened = { iter: iterable[Symbol.asyncIterator]() };
+        if (!virtualKey) {
+          try {
+            return {
+              ...opened,
+              busEpoch: runtime.bridge.getSessionEventEpoch(sessionId),
+            };
+          } catch {
+            // A session torn down after subscription degrades to a headerless
+            // stream; the iterator itself will surface the terminal event.
+          }
+        }
+        return opened;
+      };
+      const internalRuntime = isInternalWorkspaceRuntime(runtime);
+      if (internalRuntime && !deps.conversationRuntimeActivity) {
+        throw new Error('Conversations runtime activity gate is unavailable.');
+      }
+      const opened = internalRuntime
+        ? await deps.conversationRuntimeActivity!.run(openSubscription)
+        : await openSubscription();
+      if (!opened) {
         res.status(404).json({
           error: 'Subagent session not found',
           code: 'session_not_found',
@@ -363,7 +393,7 @@ export function registerSseEventsRoutes(
         });
         return;
       }
-      iter = iterable[Symbol.asyncIterator]();
+      iter = opened.iter;
       // Captured while the session entry is known to exist so the header
       // block below can advertise the current epoch without a throwing
       // lookup after the stream is already committed. Virtual subagent
@@ -373,13 +403,7 @@ export function registerSseEventsRoutes(
       // lookup would throw and abort the subscription. A real session torn
       // down between subscribeEvents and this lookup degrades to a
       // headerless stream rather than an error (mirrors the /acp route).
-      if (!virtualKey) {
-        try {
-          busEpoch = runtime.bridge.getSessionEventEpoch(sessionId);
-        } catch {
-          busEpoch = undefined;
-        }
-      }
+      busEpoch = opened.busEpoch;
     } catch (err) {
       // `EventBus` throws `SubscriberLimitExceededError` when the
       // per-session subscriber cap (default 64) is reached.

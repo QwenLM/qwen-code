@@ -38,11 +38,13 @@ export const plugin: ChannelPlugin = {
         label: 'Group Policy',
         kind: 'enum',
         required: true,
-        description: 'Must be "Open" for notifications to flow',
+        description:
+          'Must be "Open", "Allowlist", or "Pairing" for notifications to flow',
         default: 'open',
         options: [
           { value: 'open', label: 'Open' },
           { value: 'allowlist', label: 'Allowlist' },
+          { value: 'pairing', label: 'Pairing' },
           { value: 'disabled', label: 'Disabled' },
         ],
       },

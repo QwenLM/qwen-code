@@ -34,6 +34,8 @@ describe('token plan provider', () => {
       modelIds: getDefaultModelIds(tokenPlanProvider),
     });
 
+    expect(tokenPlanProvider.supportsModelDiscovery).toBe(true);
+
     expect(template.map((model) => model.id)).toEqual([
       'qwen3.7-plus',
       'qwen3.6-plus',
@@ -75,18 +77,17 @@ describe('token plan provider', () => {
         ?.modalities,
     ).toEqual({ image: true, video: true });
     expect(
-      template.find((model) => model.id === 'qwen3.8-max-preview')
-        ?.generationConfig?.modalities,
-    ).toEqual({ image: true, video: true });
-    // The GA model accepts enable_thinking: false, so it carries the family's
-    // multimodal metadata without the preview's thinkingMandatory pin.
-    expect(
       template.find((model) => model.id === 'qwen3.8-max')?.generationConfig,
     ).toEqual({
       extra_body: { enable_thinking: true },
+      thinkingMandatory: true,
       contextWindowSize: 1000000,
       modalities: { image: true, video: true },
     });
+    expect(
+      template.find((model) => model.id === 'qwen3.8-max-preview')
+        ?.generationConfig?.modalities,
+    ).toEqual({ image: true, video: true });
     expect(
       template.find((model) => model.id === 'kimi-k2.5')?.generationConfig
         ?.modalities,

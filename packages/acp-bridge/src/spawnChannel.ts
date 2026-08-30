@@ -8,14 +8,312 @@ import { spawn } from 'node:child_process';
 import * as os from 'node:os';
 import { Readable, Writable } from 'node:stream';
 import { getHeapStatistics } from 'node:v8';
+import { CLIENT_METHODS, type AnyMessage } from '@agentclientprotocol/sdk';
+// The SDK does not export its runtime validators from the package root.
+/* eslint-disable import/no-internal-modules */
+import {
+  zCreateTerminalRequest,
+  zKillTerminalCommandRequest,
+  zReadTextFileRequest,
+  zReleaseTerminalRequest,
+  zRequestPermissionRequest,
+  zSessionNotification,
+  zTerminalOutputRequest,
+  zWaitForTerminalExitRequest,
+  zWriteTextFileRequest,
+} from '@agentclientprotocol/sdk/dist/schema/zod.gen.js';
+/* eslint-enable import/no-internal-modules */
 import type { ChannelFactory } from './channel.js';
 import { redactLogCredentials } from './logRedaction.js';
-import { ndJsonStream, type NdJsonStreamHooks } from './ndJsonStream.js';
+import {
+  NdJsonQueueLimitError,
+  ndJsonStream,
+  type NdJsonMessageObservation,
+  type NdJsonStreamHooks,
+  type NdJsonStreamLimits,
+  validateNdJsonStreamLimits,
+} from './ndJsonStream.js';
 import { MissingCliEntryError } from './status.js';
 import { EXTERNAL_TOOL_GUARD_TOKEN_ENV } from './externalToolGuard.js';
 import { ProcessRegistry } from './process-registry.js';
+import type { ChildHeapPolicy } from './child-heap-policy.js';
+import { estimateJsonStringBytes } from './json-string-bytes.js';
 
 let cachedMemoryArgs: string[] | undefined;
+export const DAEMON_ACP_NDJSON_LIMITS: Readonly<NdJsonStreamLimits> =
+  Object.freeze({
+    maxFrameBytes: 64 * 1024 * 1024,
+    maxQueuedMessages: 256,
+    maxQueuedBytes: 64 * 1024 * 1024,
+  });
+
+const daemonClientParamValidators = new Map<
+  string,
+  { safeParse(value: unknown): { success: boolean } }
+>([
+  [CLIENT_METHODS.fs_read_text_file, zReadTextFileRequest],
+  [CLIENT_METHODS.fs_write_text_file, zWriteTextFileRequest],
+  [CLIENT_METHODS.session_request_permission, zRequestPermissionRequest],
+  [CLIENT_METHODS.session_update, zSessionNotification],
+  [CLIENT_METHODS.terminal_create, zCreateTerminalRequest],
+  [CLIENT_METHODS.terminal_kill, zKillTerminalCommandRequest],
+  [CLIENT_METHODS.terminal_output, zTerminalOutputRequest],
+  [CLIENT_METHODS.terminal_release, zReleaseTerminalRequest],
+  [CLIENT_METHODS.terminal_wait_for_exit, zWaitForTerminalExitRequest],
+]);
+
+function validateDaemonInboundMessage(message: AnyMessage): boolean {
+  if (!('method' in message)) return true;
+  const validator = daemonClientParamValidators.get(message.method);
+  return !validator || validator.safeParse(message.params).success;
+}
+
+class PreparedResponseBudget {
+  private objectCharges = new WeakMap<object, number[]>();
+  private readonly primitiveCharges = new Map<unknown, number[]>();
+  private retainedCount = 0;
+  private retainedBytes = 0;
+  private closed = false;
+
+  constructor(private readonly limits: NdJsonStreamLimits) {}
+
+  reserve(value: unknown): void {
+    if (this.closed) return;
+    const availableBytes = Math.max(
+      0,
+      this.limits.maxQueuedBytes - this.retainedBytes,
+    );
+    const envelopeBytes = Math.min(2_048, this.limits.maxQueuedBytes);
+    const charge =
+      envelopeBytes +
+      estimatePreparedResponseBytes(
+        value,
+        Math.max(0, availableBytes - envelopeBytes),
+      );
+    if (
+      this.retainedCount >= this.limits.maxQueuedMessages ||
+      charge > availableBytes
+    ) {
+      throw new NdJsonQueueLimitError(
+        this.limits.maxQueuedMessages,
+        this.limits.maxQueuedBytes,
+        charge,
+        availableBytes,
+      );
+    }
+    const charges = this.getCharges(value, true);
+    charges.push(charge);
+    this.retainedCount++;
+    this.retainedBytes += charge;
+  }
+
+  releaseMessage(message: unknown): void {
+    if (
+      !isPlainRecord(message) ||
+      Object.hasOwn(message, 'method') ||
+      !Object.hasOwn(message, 'id')
+    ) {
+      return;
+    }
+    const value = Object.hasOwn(message, 'result')
+      ? message['result']
+      : message['error'];
+    const charges = this.getCharges(value, false);
+    if (!charges) return;
+    const charge = charges.shift();
+    if (charge === undefined) return;
+    if (charges.length === 0 && !isObjectValue(value)) {
+      this.primitiveCharges.delete(value);
+    }
+    this.retainedCount--;
+    this.retainedBytes -= charge;
+  }
+
+  close(): void {
+    this.closed = true;
+    this.objectCharges = new WeakMap<object, number[]>();
+    this.primitiveCharges.clear();
+    this.retainedCount = 0;
+    this.retainedBytes = 0;
+  }
+
+  private getCharges(value: unknown, create: true): number[];
+  private getCharges(value: unknown, create: false): number[] | undefined;
+  private getCharges(value: unknown, create: boolean): number[] | undefined {
+    const charges = isObjectValue(value)
+      ? this.objectCharges.get(value)
+      : this.primitiveCharges.get(value);
+    if (charges || !create) return charges;
+    const created: number[] = [];
+    if (isObjectValue(value)) {
+      this.objectCharges.set(value, created);
+    } else {
+      this.primitiveCharges.set(value, created);
+    }
+    return created;
+  }
+}
+
+class OutboundOperationBudget {
+  private retainedCount = 0;
+  private retainedBytes = 0;
+  private generation = 0;
+  private closed = false;
+
+  constructor(private readonly limits: NdJsonStreamLimits) {}
+
+  reserve(value: unknown): () => void {
+    if (this.closed) return () => {};
+    const availableBytes = Math.max(
+      0,
+      this.limits.maxQueuedBytes - this.retainedBytes,
+    );
+    const envelopeBytes = Math.min(2_048, this.limits.maxQueuedBytes);
+    const charge =
+      envelopeBytes +
+      estimatePreparedResponseBytes(
+        value,
+        Math.max(0, availableBytes - envelopeBytes),
+      );
+    if (
+      this.retainedCount >= this.limits.maxQueuedMessages ||
+      charge > availableBytes
+    ) {
+      throw new NdJsonQueueLimitError(
+        this.limits.maxQueuedMessages,
+        this.limits.maxQueuedBytes,
+        charge,
+        availableBytes,
+      );
+    }
+    this.retainedCount++;
+    this.retainedBytes += charge;
+    const generation = this.generation;
+    let active = true;
+    return () => {
+      if (!active) return;
+      active = false;
+      if (this.closed || this.generation !== generation) return;
+      this.retainedCount--;
+      this.retainedBytes -= charge;
+    };
+  }
+
+  close(): void {
+    this.closed = true;
+    this.generation++;
+    this.retainedCount = 0;
+    this.retainedBytes = 0;
+  }
+}
+
+type PreparedResponseEstimationFrame =
+  | { kind: 'value'; value: unknown }
+  | { kind: 'array'; value: unknown[]; index: number }
+  | {
+      kind: 'record';
+      value: Record<string, unknown>;
+      keys: Generator<string, void, unknown>;
+      first: boolean;
+    };
+
+function* enumerableOwnKeys(
+  value: Record<string, unknown>,
+): Generator<string, void, unknown> {
+  for (const key in value) {
+    if (Object.hasOwn(value, key)) yield key;
+  }
+}
+
+function estimatePreparedResponseBytes(value: unknown, limitBytes: number) {
+  let bytes = 0;
+  const stack: PreparedResponseEstimationFrame[] = [{ kind: 'value', value }];
+  const seen = new WeakSet<object>();
+  while (stack.length > 0) {
+    const frame = stack.pop()!;
+    if (frame.kind === 'array') {
+      if (frame.index >= frame.value.length) continue;
+      if (frame.index > 0) bytes++;
+      if (bytes > limitBytes) return limitBytes + 1;
+      const descriptor = Object.getOwnPropertyDescriptor(
+        frame.value,
+        String(frame.index),
+      );
+      if (descriptor?.get || descriptor?.set) return limitBytes + 1;
+      stack.push({ ...frame, index: frame.index + 1 });
+      stack.push({ kind: 'value', value: descriptor?.value });
+      continue;
+    }
+    if (frame.kind === 'record') {
+      const next = frame.keys.next();
+      if (next.done) continue;
+      const descriptor = Object.getOwnPropertyDescriptor(
+        frame.value,
+        next.value,
+      );
+      if (!descriptor || descriptor.get || descriptor.set) {
+        return limitBytes + 1;
+      }
+      bytes +=
+        (frame.first ? 0 : 1) +
+        estimateJsonStringBytes(next.value, Math.max(0, limitBytes - bytes)) +
+        1;
+      if (bytes > limitBytes) return limitBytes + 1;
+      stack.push({ ...frame, first: false });
+      stack.push({ kind: 'value', value: descriptor.value });
+      continue;
+    }
+    const current = frame.value;
+    if (current === null) {
+      bytes += 4;
+    } else if (current === undefined) {
+      bytes += 4;
+    } else if (typeof current === 'string') {
+      bytes += estimateJsonStringBytes(
+        current,
+        Math.max(0, limitBytes - bytes),
+      );
+    } else if (typeof current === 'number') {
+      bytes += 24;
+    } else if (typeof current === 'boolean') {
+      bytes += 5;
+    } else if (Array.isArray(current)) {
+      if (seen.has(current) || Object.hasOwn(current, 'toJSON')) {
+        return limitBytes + 1;
+      }
+      seen.add(current);
+      bytes += 2;
+      stack.push({ kind: 'array', value: current, index: 0 });
+    } else if (isPlainRecord(current)) {
+      if (seen.has(current) || Object.hasOwn(current, 'toJSON')) {
+        return limitBytes + 1;
+      }
+      seen.add(current);
+      bytes += 2;
+      stack.push({
+        kind: 'record',
+        value: current,
+        keys: enumerableOwnKeys(current),
+        first: true,
+      });
+    } else {
+      return limitBytes + 1;
+    }
+    if (bytes > limitBytes) return limitBytes + 1;
+  }
+  return Math.max(1, bytes);
+}
+
+function isObjectValue(value: unknown): value is object {
+  return typeof value === 'object' && value !== null;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (!isObjectValue(value) || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
 export function getAcpMemoryArgs(): string[] {
   if (cachedMemoryArgs) return cachedMemoryArgs;
   const constrainedMemory = (process as { constrainedMemory?: () => number })
@@ -106,8 +404,20 @@ export interface SpawnChannelFactoryOptions {
   onDiagnosticLine?: (line: string, level?: 'info' | 'warn' | 'error') => void;
   extraArgs?: string[];
   pipeHooks?: NdJsonStreamHooks;
+  pipeLimits?: NdJsonStreamLimits;
   sourceEnv?: Readonly<NodeJS.ProcessEnv>;
   processRegistry?: ProcessRegistry;
+  /**
+   * Daemon child-heap policy. Only meaningful together with a **shared**
+   * `processRegistry`: the factory otherwise builds its own, every spawn sees
+   * a concurrent count of 1, and each child is handed the whole pool — the
+   * current overcommit, now with a policy object attesting to it. All three
+   * daemon factories pass the same registry.
+   *
+   * Omitted by every single-child caller (interactive CLI, IDE companion,
+   * direct-embed), which keeps the host-derived ceiling.
+   */
+  childHeapPolicy?: ChildHeapPolicy;
 }
 
 /**
@@ -122,6 +432,7 @@ export interface SpawnChannelFactoryOptions {
 export function createSpawnChannelFactory(
   options: SpawnChannelFactoryOptions = {},
 ): ChannelFactory {
+  if (options.pipeLimits) validateNdJsonStreamLimits(options.pipeLimits);
   const processRegistry = options.processRegistry ?? new ProcessRegistry();
   return async (workspaceCwd, childEnvOverrides) => {
     const sourceEnv = options.sourceEnv ?? process.env;
@@ -135,14 +446,29 @@ export function createSpawnChannelFactory(
       childEnvOverrides,
     );
     childEnv['QWEN_CODE_NO_RELAUNCH'] = 'true';
+    // Marks the child as daemon-spawned so its ACP channel fallback reports
+    // channel=daemon in usage statistics (see cli/src/config/acp-channel-fallback.ts).
+    childEnv['QWEN_CODE_SERVE'] = '1';
 
-    const memoryArgs = getAcpMemoryArgs();
     const execArgs = process.execArgv.filter(
       (a) => !/^--inspect(-brk)?($|=)/.test(a),
     );
+    // Reserve BEFORE deciding: the reservation is what makes this spawn
+    // visible to any other spawn racing it, so the count below includes this
+    // child and two concurrent spawns cannot both be told they are alone.
     const reservation = processRegistry.reserve();
     let child;
+    // Everything between `reserve()` and `attach()` belongs inside this try.
+    // `childHeapPolicy` is a public `createSpawnChannelFactory` option, so an
+    // externally supplied `decide()` can throw; outside the try that would
+    // reject the spawn while leaving the reservation held forever, inflating
+    // `committedProcessCount` for every later spawn.
     try {
+      // Observation only: the policy is asked what it *would* decide so the
+      // refusal count is real, but nothing here acts on the answer — no
+      // derived ceiling reaches the child and no spawn is refused.
+      options.childHeapPolicy?.decide(processRegistry.committedProcessCount);
+      const memoryArgs = getAcpMemoryArgs();
       child = spawn(
         process.execPath,
         [
@@ -155,6 +481,8 @@ export function createSpawnChannelFactory(
         {
           cwd: workspaceCwd,
           stdio: ['pipe', 'pipe', 'pipe'],
+          detached: process.platform !== 'win32',
+          windowsHide: true,
           env: childEnv,
         },
       );
@@ -162,7 +490,7 @@ export function createSpawnChannelFactory(
       reservation.cancel();
       throw error;
     }
-    const trackedChild = reservation.attach(child);
+    const trackedChild = reservation.attach(child, { ownsProcessTree: true });
 
     // Forward child stderr to the daemon's stderr line-by-line, with a
     // `[serve pid=… cwd=…]` prefix on each line so operators can
@@ -191,10 +519,82 @@ export function createSpawnChannelFactory(
 
     const writable = Writable.toWeb(child.stdin) as WritableStream<Uint8Array>;
     const readable = Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>;
-    const stream = ndJsonStream(writable, readable, options.pipeHooks);
+    const preparedResponses = options.pipeLimits
+      ? new PreparedResponseBudget(options.pipeLimits)
+      : undefined;
+    const outboundOperations = options.pipeLimits
+      ? new OutboundOperationBudget(options.pipeLimits)
+      : undefined;
+    let reportTransportFailure: ((error: unknown) => void) | undefined;
+    let transportFailureReported = false;
+    const transportFailed = options.pipeLimits
+      ? new Promise<unknown>((resolve) => {
+          reportTransportFailure = resolve;
+        })
+      : undefined;
+    const failTransport = options.pipeLimits
+      ? (error: unknown) => {
+          if (transportFailureReported) return;
+          transportFailureReported = true;
+          reportTransportFailure?.(error);
+          reportTransportFailure = undefined;
+          preparedResponses?.close();
+          outboundOperations?.close();
+          child.stdout?.destroy();
+          child.stdin?.destroy();
+          void trackedChild.terminate().catch(() => {});
+          options.pipeHooks?.onTransportError?.(error);
+        }
+      : undefined;
+    const pipeHooks = options.pipeLimits
+      ? {
+          ...options.pipeHooks,
+          onMessageObserved: (observation: NdJsonMessageObservation) => {
+            if (observation.direction === 'sent') {
+              preparedResponses?.releaseMessage(observation.message);
+            }
+            options.pipeHooks?.onMessageObserved?.(observation);
+          },
+          onTransportError: failTransport,
+        }
+      : options.pipeHooks;
+    const stream = ndJsonStream(
+      writable,
+      readable,
+      pipeHooks,
+      options.pipeLimits,
+      options.pipeLimits ? validateDaemonInboundMessage : undefined,
+      options.pipeLimits !== undefined,
+    );
 
     return {
       stream,
+      ...(transportFailed ? { transportFailed } : {}),
+      ...(failTransport && options.pipeLimits
+        ? {
+            transportGuard: {
+              maxActiveHandlers: options.pipeLimits.maxQueuedMessages,
+              maxActiveHandlerBytes: options.pipeLimits.maxQueuedBytes,
+              reserveOutboundOperation: (value) => {
+                try {
+                  return outboundOperations?.reserve(value) ?? (() => {});
+                } catch (error) {
+                  failTransport(error);
+                  throw error;
+                }
+              },
+              reservePreparedResponse: (value) => {
+                try {
+                  preparedResponses?.reserve(value);
+                } catch (error) {
+                  failTransport(error);
+                  throw error;
+                }
+              },
+              fail: failTransport,
+            },
+          }
+        : {}),
       kill: () => trackedChild.terminate(),
       killSync: () => trackedChild.killSync(),
       exited: trackedChild.exited,

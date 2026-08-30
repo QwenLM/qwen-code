@@ -571,9 +571,25 @@ export const ToolConfirmationMessage: React.FC<
 
     bodyContent = (
       <Box flexDirection="column" paddingX={1} marginLeft={1}>
-        <Text color={theme.text.link}>
-          <RenderInline text={infoProps.prompt} textColor={theme.text.link} />
-        </Text>
+        {infoProps.renderPromptAsPlainText ? (
+          <MaxSizedBox
+            maxHeight={availableBodyContentHeight()}
+            maxWidth={warningContentWidth}
+            overflowDirection="bottom"
+          >
+            {infoProps.prompt.split('\n').map((line, index) => (
+              <Box key={index}>
+                <Text color={theme.text.link} wrap="wrap">
+                  {line}
+                </Text>
+              </Box>
+            ))}
+          </MaxSizedBox>
+        ) : (
+          <Text color={theme.text.link}>
+            <RenderInline text={infoProps.prompt} textColor={theme.text.link} />
+          </Text>
+        )}
         {displayUrls && infoProps.urls && infoProps.urls.length > 0 && (
           <Box flexDirection="column" marginTop={1}>
             <Text color={theme.text.primary}>{t('URLs to fetch:')}</Text>

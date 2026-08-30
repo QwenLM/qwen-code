@@ -21,8 +21,12 @@ import { parseJsoncObject, updateJsoncContent } from '../utils/jsonc-editor.js';
 import {
   arePathsEquivalent,
   getPathComparisonVariants,
-  isWithinRoot,
 } from './path-comparison.js';
+import {
+  buildTrustPrecedenceRules,
+  resolveTrustDecision,
+  resolveTrustRule,
+} from './trust-precedence.js';
 
 const debugLogger = createDebugLogger('TRUSTED_FOLDERS');
 
@@ -115,50 +119,10 @@ export class LoadedTrustedFolders {
    * @returns
    */
   isPathTrusted(location: string): boolean | undefined {
-    const trustedPaths: string[] = [];
-    const untrustedPaths: string[] = [];
-
-    for (const rule of this.rules) {
-      switch (rule.trustLevel) {
-        case TrustLevel.TRUST_FOLDER:
-          trustedPaths.push(rule.path);
-          break;
-        case TrustLevel.TRUST_PARENT:
-          trustedPaths.push(path.dirname(rule.path));
-          break;
-        case TrustLevel.DO_NOT_TRUST:
-          untrustedPaths.push(rule.path);
-          break;
-        default:
-          // Do nothing for unknown trust levels.
-          break;
-      }
-    }
-
-    const locationVariants = getPathComparisonVariants(location);
-    for (const trustedPath of trustedPaths) {
-      for (const locationVariant of locationVariants) {
-        for (const trustedVariant of getPathComparisonVariants(trustedPath)) {
-          if (isWithinRoot(locationVariant, trustedVariant)) {
-            return true;
-          }
-        }
-      }
-    }
-
-    for (const untrustedPath of untrustedPaths) {
-      for (const locationVariant of locationVariants) {
-        for (const untrustedVariant of getPathComparisonVariants(
-          untrustedPath,
-        )) {
-          if (locationVariant === untrustedVariant) {
-            return false;
-          }
-        }
-      }
-    }
-
-    return undefined;
+    return resolveTrustDecision(
+      buildTrustPrecedenceRules(this.rules),
+      getPathComparisonVariants(location),
+    );
   }
 
   setValue(path: string, trustLevel: TrustLevel): void {
@@ -321,44 +285,20 @@ export function isFolderTrustEnabled(settings: Settings): boolean {
   return folderTrustSetting;
 }
 
-function isWithinRootAcrossVariants(childPath: string, parentPath: string) {
-  for (const childVariant of getPathComparisonVariants(childPath)) {
-    for (const parentVariant of getPathComparisonVariants(parentPath)) {
-      if (isWithinRoot(childVariant, parentVariant)) {
-        return true;
-      }
-    }
-  }
-  return false;
-}
-
-function getExplicitTrustLevel(
+export function getExplicitTrustLevel(
   trustConfig: Record<string, TrustLevel>,
   workspaceCwd: string,
 ): TrustLevel | null {
-  for (const [rulePath, trustLevel] of Object.entries(trustConfig)) {
-    if (
-      trustLevel === TrustLevel.TRUST_FOLDER &&
-      isWithinRootAcrossVariants(workspaceCwd, rulePath)
-    ) {
-      return trustLevel;
-    }
-    if (
-      trustLevel === TrustLevel.TRUST_PARENT &&
-      isWithinRootAcrossVariants(workspaceCwd, path.dirname(rulePath))
-    ) {
-      return trustLevel;
-    }
-  }
-  for (const [rulePath, trustLevel] of Object.entries(trustConfig)) {
-    if (
-      trustLevel === TrustLevel.DO_NOT_TRUST &&
-      arePathsEquivalent(workspaceCwd, rulePath)
-    ) {
-      return trustLevel;
-    }
-  }
-  return null;
+  const winner = resolveTrustRule(
+    buildTrustPrecedenceRules(
+      Object.entries(trustConfig).map(([rulePath, trustLevel]) => ({
+        path: rulePath,
+        trustLevel,
+      })),
+    ),
+    getPathComparisonVariants(workspaceCwd),
+  );
+  return winner?.payload ?? null;
 }
 
 function loadTrustedFoldersWithOverrides(

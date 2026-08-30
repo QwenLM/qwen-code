@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { Readable, Writable } from 'node:stream';
 import { EventEmitter } from 'node:events';
 import {
@@ -14,12 +14,18 @@ import type {
   RequestPermissionRequest,
   RequestPermissionResponse,
 } from '@agentclientprotocol/sdk';
-import type {
-  AvailableCommand,
-  ChannelAgentBridge,
-  ChannelAgentBridgeSessionOptions,
-  ChannelLoopToolHandler,
-  ToolCallEvent,
+import {
+  ACP_PRIVATE_PARENT_CAPABILITY_ENV,
+  ACP_PRIVATE_PARENT_CAPABILITY_META_KEY,
+  CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY,
+  CHANNEL_PROMPT_META_KEY,
+  resolvePromptImages,
+  type AvailableCommand,
+  type ChannelAgentBridge,
+  type ChannelAgentBridgePromptOptions,
+  type ChannelAgentBridgeSessionOptions,
+  type ChannelLoopToolHandler,
+  type ToolCallEvent,
 } from './ChannelAgentBridge.js';
 import {
   CHANNEL_LOOP_MCP_SERVER_NAME,
@@ -105,6 +111,10 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
 
   async start(): Promise<void> {
     const { cliEntryPath, cwd } = this.options;
+    // Private-parent capability: marks this bridge as a trusted ACP parent of
+    // the spawned child so trusted prompt metadata (e.g. the classifier's
+    // display projection) survives the child's untrusted-caller strip.
+    const privateParentCapability = randomBytes(32).toString('base64url');
 
     const args = [
       ...process.execArgv.filter((a) => !/^--inspect(-brk)?($|=)/.test(a)),
@@ -118,7 +128,11 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     this.child = spawn(process.execPath, args, {
       cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, QWEN_CODE_DISABLE_CRON: '1' },
+      env: {
+        ...process.env,
+        QWEN_CODE_DISABLE_CRON: '1',
+        [ACP_PRIVATE_PARENT_CAPABILITY_ENV]: privateParentCapability,
+      },
       shell: false,
     });
 
@@ -184,6 +198,9 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
         this.connection.initialize({
           protocolVersion: PROTOCOL_VERSION,
           clientCapabilities: {},
+          _meta: {
+            [ACP_PRIVATE_PARENT_CAPABILITY_META_KEY]: privateParentCapability,
+          },
         }),
         ACP_START_TIMEOUT_MS,
         `ACP initialization timed out after ${ACP_START_TIMEOUT_MS}ms`,
@@ -231,7 +248,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
   ): Promise<string> {
     const conn = this.ensureConnection();
     await this.registerChannelLoopMcpServer();
-    await conn.loadSession({
+    await conn.unstable_resumeSession({
       sessionId,
       cwd,
       mcpServers: [],
@@ -244,7 +261,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
   async prompt(
     sessionId: string,
     text: string,
-    options?: { imageBase64?: string; imageMimeType?: string },
+    options?: ChannelAgentBridgePromptOptions,
   ): Promise<string> {
     const conn = this.ensureConnection();
 
@@ -267,11 +284,11 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     this.on('responseBoundary', clearChunks);
 
     const prompt: Array<Record<string, unknown>> = [];
-    if (options?.imageBase64 && options.imageMimeType) {
+    for (const image of resolvePromptImages(options)) {
       prompt.push({
         type: 'image',
-        data: options.imageBase64,
-        mimeType: options.imageMimeType,
+        data: image.data,
+        mimeType: image.mimeType,
       });
     }
     prompt.push({ type: 'text', text });
@@ -280,6 +297,14 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       await conn.prompt({
         sessionId,
         prompt: prompt as Array<{ type: 'text'; text: string }>,
+        _meta: {
+          [CHANNEL_PROMPT_META_KEY]: true,
+          ...(options?.displayText !== undefined
+            ? {
+                [CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY]: options.displayText,
+              }
+            : {}),
+        },
       });
     } finally {
       this.off('textChunk', onChunk);
@@ -379,6 +404,12 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
             content.text
           ) {
             this.emit('backgroundResponse', sessionId, content.text);
+          } else if (
+            meta['source'] === 'vision_bridge_notice' &&
+            content?.type === 'text' &&
+            content.text
+          ) {
+            this.emit('textChunk', sessionId, content.text);
           }
           break;
         }

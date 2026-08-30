@@ -27,7 +27,7 @@ import {
 import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
 import { sanitizeChildEnv } from '../utils/sanitize-child-env.js';
 import { formatMemoryUsage } from '../utils/formatters.js';
-import { getShellContextEnvVars } from '../utils/shellContextEnv.js';
+import { getShellContextEnvVars } from './shellContextEnv.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { getShellPagerEnv } from '../utils/shell-pager-env.js';
 
@@ -150,6 +150,18 @@ export type ShellAbortReason =
   | { kind: 'cancel' }
   | { kind: 'background'; shellId?: string };
 
+/**
+ * Returns true only for a real process-signal termination.
+ * node-pty reports signal 0 for a clean exit; the service normalizes that
+ * value to null at its boundary, while this predicate remains defensive for
+ * legacy or mocked result objects.
+ */
+export function isSignalTermination(
+  signal: number | NodeJS.Signals | null,
+): boolean {
+  return signal !== null && signal !== 0;
+}
+
 /** A structured result from a shell command execution. */
 export interface ShellExecutionResult {
   /**
@@ -161,9 +173,15 @@ export interface ShellExecutionResult {
   rawOutput: Buffer;
   /** The combined, decoded output as a string. */
   output: string;
-  /** The process exit code, or null if terminated by a signal. */
+  /**
+   * The process exit code. Child-process signal termination reports null;
+   * PTY signal termination may still carry a numeric exit code.
+   */
   exitCode: number | null;
-  /** The signal that terminated the process, if any. */
+  /**
+   * The non-zero signal that terminated the process, if any. A node-pty
+   * clean-exit signal of 0 is normalized to null at the service boundary.
+   */
   signal: number | null;
   /** An error object if the process failed to spawn. */
   error: Error | null;
@@ -296,8 +314,11 @@ export interface ShellPostPromoteHandlers {
   onData?: (event: ShellOutputEvent) => void;
   /**
    * Fired exactly once when the post-promote child settles — natural
-   * exit (`exitCode` set, `signal: null`), signal kill (`exitCode:
-   * null`, `signal` set), or spawn-side error (`error` set). NOT
+   * child-process exit (`exitCode` set, `signal: null`), natural PTY
+   * exit (`exitCode` set, clean-exit signal normalized to `null`), signal kill (which may carry
+   * `exitCode: 0` with a non-zero signal on PTY, or `exitCode: null`
+   * with a string signal from `child_process`), or spawn-side error
+   * (`error` set). NOT
    * fired for the promote-time resolve itself (that's the
    * `result.promoted` Promise resolution). Callers wire this to the
    * registry's `complete` / `fail` transitions.
@@ -529,6 +550,7 @@ interface ProcessCleanupStrategy {
 // workspace or on PATH could run from these cleanup paths with the CLI's
 // environment — arbitrary code execution out of a benign teardown. See #5873.
 const WINDOWS_TASKKILL = `${process.env['SystemRoot'] || 'C:\\Windows'}\\System32\\taskkill.exe`;
+const WINDOWS_TASKKILL_OPTIONS = { windowsHide: true } as const;
 
 const windowsKillPid = (pid: number, tree: boolean): void => {
   try {
@@ -537,7 +559,7 @@ const windowsKillPid = (pid: number, tree: boolean): void => {
     const args = tree
       ? ['/f', '/t', '/pid', pid.toString()]
       : ['/f', '/pid', pid.toString()];
-    const killer = cpSpawn(WINDOWS_TASKKILL, args);
+    const killer = cpSpawn(WINDOWS_TASKKILL, args, WINDOWS_TASKKILL_OPTIONS);
     // Log (don't crash on) a failed launch: silently swallowing it would let
     // the #5873 pwsh leak quietly return with no diagnostic trail under
     // enterprise lockdown / EMFILE / antivirus interception.
@@ -576,7 +598,11 @@ const windowsStrategy: ProcessCleanupStrategy = {
       // before the process dies (and a sync stderr write would be exit-time
       // noise). The unconditional ptyProcess.kill() below is the mitigation;
       // the runtime reap paths (windowsKillPid), which DO flush, keep logging.
-      spawnSync(WINDOWS_TASKKILL, ['/f', '/t', '/pid', pid.toString()]);
+      spawnSync(
+        WINDOWS_TASKKILL,
+        ['/f', '/t', '/pid', pid.toString()],
+        WINDOWS_TASKKILL_OPTIONS,
+      );
     } catch {
       // ignore
     }
@@ -600,7 +626,7 @@ const windowsStrategy: ProcessCleanupStrategy = {
         }
         // No logging — like killPty, this runs only from the 'exit' handler
         // where an async debug write can't flush before the process dies.
-        spawnSync(WINDOWS_TASKKILL, args);
+        spawnSync(WINDOWS_TASKKILL, args, WINDOWS_TASKKILL_OPTIONS);
       } catch {
         // ignore
       }
@@ -1311,12 +1337,11 @@ export class ShellExecutionService {
         const performCancelKill = async (): Promise<void> => {
           if (!child.pid || exited) return;
           if (isWindows) {
-            const killer = cpSpawn(WINDOWS_TASKKILL, [
-              '/f',
-              '/t',
-              '/pid',
-              child.pid.toString(),
-            ]);
+            const killer = cpSpawn(
+              WINDOWS_TASKKILL,
+              ['/f', '/t', '/pid', child.pid.toString()],
+              WINDOWS_TASKKILL_OPTIONS,
+            );
             // taskkill can fail two ways, and either would otherwise hang the
             // cancel (the abort waits for a child exit that never comes), so
             // fall back to killing the child directly in both:
@@ -1888,7 +1913,7 @@ export class ShellExecutionService {
                   rawOutput: finalBuffer,
                   output: fullOutput,
                   exitCode,
-                  signal: signal ?? null,
+                  signal: signal === 0 ? null : (signal ?? null),
                   error,
                   aborted: abortSignal.aborted,
                   pid: ptyProcess.pid,
@@ -2132,7 +2157,7 @@ export class ShellExecutionService {
                 }) => {
                   firePostSettle({
                     exitCode,
-                    signal: signal ?? null,
+                    signal: signal === 0 ? null : (signal ?? null),
                     endTime: Date.now(),
                   });
                 },
@@ -2291,12 +2316,11 @@ export class ShellExecutionService {
             // cancel path). ptyProcess.kill() alone doesn't tree-kill under
             // ConPTY (microsoft/node-pty#333).
             try {
-              const r = spawnSync(WINDOWS_TASKKILL, [
-                '/f',
-                '/t',
-                '/pid',
-                ptyProcess.pid.toString(),
-              ]);
+              const r = spawnSync(
+                WINDOWS_TASKKILL,
+                ['/f', '/t', '/pid', ptyProcess.pid.toString()],
+                WINDOWS_TASKKILL_OPTIONS,
+              );
               if (r.error || (typeof r.status === 'number' && r.status !== 0)) {
                 debugLogger.warn(
                   `performCancelKill: taskkill failed for pid ${ptyProcess.pid}: ${r.error?.message ?? `exit ${r.status}`}`,

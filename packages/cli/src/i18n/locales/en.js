@@ -192,6 +192,7 @@ export default {
   'toolDisplayName.Agent': 'toolDisplayName.Agent',
   'toolDisplayName.Artifact': 'toolDisplayName.Artifact',
   'toolDisplayName.RecordArtifact': 'toolDisplayName.RecordArtifact',
+  'toolDisplayName.ReportFindings': 'toolDisplayName.ReportFindings',
   'toolDisplayName.DisplayImage': 'toolDisplayName.DisplayImage',
   'toolDisplayName.Skill': 'toolDisplayName.Skill',
   'toolDisplayName.EnterPlanMode': 'toolDisplayName.EnterPlanMode',
@@ -215,6 +216,7 @@ export default {
   'toolDisplayName.TeamDelete': 'toolDisplayName.TeamDelete',
   'toolDisplayName.TeamPlanApproval': 'toolDisplayName.TeamPlanApproval',
   'toolDisplayName.SendMessage': 'toolDisplayName.SendMessage',
+  'toolDisplayName.RequestShutdown': 'toolDisplayName.RequestShutdown',
   'toolDisplayName.StructuredOutput': 'toolDisplayName.StructuredOutput',
   'toolDisplayName.Monitor': 'toolDisplayName.Monitor',
   'toolDisplayName.NotebookEdit': 'toolDisplayName.NotebookEdit',
@@ -765,6 +767,7 @@ export default {
   'Tool Output Truncation Lines': 'Tool Output Truncation Lines',
   'Folder Trust': 'Folder Trust',
   'Tool Schema Compliance': 'Tool Schema Compliance',
+  Unset: 'Unset',
   // Settings enum options
   'Auto (detect from system)': 'Auto (detect from system)',
   'Auto (follow user input)': 'Auto (follow user input)',
@@ -1618,6 +1621,12 @@ export default {
     'Chat history compression did not reduce size. This may indicate issues with the compression prompt.',
   'Could not compress chat history due to a token counting error.':
     'Could not compress chat history due to a token counting error.',
+  'Could not compress chat history because the compression summary was empty.':
+    'Could not compress chat history because the compression summary was empty.',
+  'Could not compress chat history because the compression summary was truncated.':
+    'Could not compress chat history because the compression summary was truncated.',
+  'Could not compress chat history due to an API error.':
+    'Could not compress chat history due to an API error.',
   // ============================================================================
   // Commands - Directory
   // ============================================================================
@@ -1892,6 +1901,7 @@ export default {
   'Ctrl+Q to queue · ↑ to edit queued messages':
     'Ctrl+Q to queue · ↑ to edit queued messages',
   'Enter to steer · Ctrl+Q to queue': 'Enter to steer · Ctrl+Q to queue',
+  '{{count}} queued': '{{count}} queued',
   'Queue message for the next turn': 'Queue message for the next turn',
 
   // ============================================================================
@@ -2047,8 +2057,18 @@ export default {
     'rejected — edit config to re-approve',
   'Background agent needs approval': 'Background agent needs approval',
   'Approve or deny the request above': 'Approve or deny the request above',
+  'from nested agent': 'from nested agent',
   Running: 'Running',
+  Pausing: 'Pausing',
   Paused: 'Paused',
+  'Pause is cooperative; in-flight work may finish before the workflow is paused. An agent call waiting on a tool approval keeps the run in this state and still counts against the active-time limit until the approval is answered.':
+    'Pause is cooperative; in-flight work may finish before the workflow is paused. An agent call waiting on a tool approval keeps the run in this state and still counts against the active-time limit until the approval is answered.',
+  'Paused: no new agents will start; script code between agent calls keeps running. Press p to resume. /clear, /branch, and switching sessions cancel paused runs.':
+    'Paused: no new agents will start; script code between agent calls keeps running. Press p to resume. /clear, /branch, and switching sessions cancel paused runs.',
+  'Pause/resume was rejected; the workflow state changed. Try again.':
+    'Pause/resume was rejected; the workflow state changed. Try again.',
+  'Tip: use `/workflows p <runId>` or Background tasks + p to cooperatively pause/resume; use `/workflows <runId>` for details.':
+    'Tip: use `/workflows p <runId>` or Background tasks + p to cooperatively pause/resume; use `/workflows <runId>` for details.',
   Completed: 'Completed',
   Failed: 'Failed',
   Stopped: 'Stopped',
@@ -2514,6 +2534,17 @@ export default {
     'Save a durable memory to the memory system.',
   'Ask a quick side question without affecting the main conversation':
     'Ask a quick side question without affecting the main conversation',
+  'Get a second opinion on the current conversation from a reviewer model':
+    'Get a second opinion on the current conversation from a reviewer model',
+  'Consulting advisor...': 'Consulting advisor...',
+  'Advisor review failed: {{error}}': 'Advisor review failed: {{error}}',
+  'No conversation context available for /advisor':
+    'No conversation context available for /advisor',
+  'Focus too long (max {{max}} chars)': 'Focus too long (max {{max}} chars)',
+  'Another operation is in progress, wait for it to complete before running /advisor':
+    'Another operation is in progress, wait for it to complete before running /advisor',
+  'No response received.': 'No response received.',
+  'No model configured.': 'No model configured.',
   'Manage Arena sessions': 'Manage Arena sessions',
   'Start an Arena session with multiple models competing on the same task':
     'Start an Arena session with multiple models competing on the same task',
@@ -2817,4 +2848,7 @@ export default {
     'Auto-skill curator changes are disabled in safe mode.',
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.',
+  'Kept model as {{model}}': 'Kept model as {{model}}',
+  'Review messages held from other Qwen Code sessions (accept | deny)':
+    'Review messages held from other Qwen Code sessions (accept | deny)',
 };

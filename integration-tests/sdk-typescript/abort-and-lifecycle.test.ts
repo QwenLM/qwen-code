@@ -5,7 +5,7 @@
 
 /* eslint-disable @typescript-eslint/no-unused-vars */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   query,
   AbortError,
@@ -13,6 +13,7 @@ import {
   isSDKAssistantMessage,
   isSDKPartialAssistantMessage,
   isSDKResultMessage,
+  type SDKMessage,
   type TextBlock,
   type SDKUserMessage,
 } from '@qwen-code/sdk';
@@ -326,6 +327,102 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
         expect(receivedResponse).toBe(true);
         expect(endInputCalled).toBe(true);
       } finally {
+        await q.close();
+        await fakeServer.close();
+      }
+    });
+
+    it('keeps a reusable query alive after interrupting the active turn', async () => {
+      let releaseFirstResponse: () => void = () => {};
+      const firstResponseReady = new Promise<void>((resolve) => {
+        releaseFirstResponse = resolve;
+      });
+      const fakeServer = await startFakeOpenAIServer(
+        async ({ requestIndex }) => {
+          if (requestIndex === 0) {
+            await firstResponseReady;
+            return { content: 'STALE_FIRST_TURN_RESPONSE' };
+          }
+          return { content: 'SECOND_TURN_SURVIVED' };
+        },
+        FAKE_SERVER_OPTIONS,
+      );
+
+      let releaseSecondPrompt: () => void = () => {};
+      const secondPromptReady = new Promise<void>((resolve) => {
+        releaseSecondPrompt = resolve;
+      });
+      const sessionId = crypto.randomUUID();
+      async function* createPrompt(): AsyncIterable<SDKUserMessage> {
+        yield {
+          type: 'user',
+          session_id: sessionId,
+          message: { role: 'user', content: 'first prompt: wait' },
+          parent_tool_use_id: null,
+        };
+        await secondPromptReady;
+        yield {
+          type: 'user',
+          session_id: sessionId,
+          message: { role: 'user', content: 'second prompt: prove reuse' },
+          parent_tool_use_id: null,
+        };
+      }
+
+      const q = query({
+        prompt: createPrompt(),
+        options: {
+          ...SHARED_TEST_OPTIONS,
+          ...fakeModelOptions(fakeServer.baseUrl),
+          cwd: testDir,
+          debug: false,
+        },
+      });
+      const messages: SDKMessage[] = [];
+      let consumeTimeout: ReturnType<typeof setTimeout> | undefined;
+
+      try {
+        const consume = (async () => {
+          for await (const message of q) {
+            messages.push(message);
+          }
+        })();
+
+        await vi.waitFor(
+          () => {
+            expect(fakeServer.requests.length).toBeGreaterThanOrEqual(1);
+          },
+          { timeout: 30_000 },
+        );
+        await q.interrupt();
+        releaseFirstResponse();
+        releaseSecondPrompt();
+        await Promise.race([
+          consume,
+          new Promise<never>((_, reject) => {
+            consumeTimeout = setTimeout(
+              () =>
+                reject(
+                  new Error('Reusable query did not finish after interrupt'),
+                ),
+              30_000,
+            );
+          }),
+        ]);
+
+        const successfulResults = messages.filter(
+          (message) => isSDKResultMessage(message) && !message.is_error,
+        );
+        expect(
+          successfulResults.some((message) =>
+            message.result.includes('SECOND_TURN_SURVIVED'),
+          ),
+        ).toBe(true);
+        expect(fakeServer.requests.length).toBeGreaterThanOrEqual(2);
+      } finally {
+        if (consumeTimeout) clearTimeout(consumeTimeout);
+        releaseFirstResponse();
+        releaseSecondPrompt();
         await q.close();
         await fakeServer.close();
       }
