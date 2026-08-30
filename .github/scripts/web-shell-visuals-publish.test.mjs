@@ -202,7 +202,10 @@ function runHostingBlock(
     runAttempt = '1',
   } = {},
 ) {
-  const dir = mkdtempSync(join(tmpdir(), 'visuals-hosting-'));
+  const scopeRoot = mkdtempSync(join(tmpdir(), 'visuals-hosting-scope-'));
+  const dir = join(scopeRoot, 'fixture');
+  writeFileSync(join(scopeRoot, 'package.json'), '{"type":"commonjs"}\n');
+  mkdirSync(dir);
   try {
     return runHostingBlockIn(dir, hasImages, {
       publicBaseUrl,
@@ -213,7 +216,7 @@ function runHostingBlock(
   } finally {
     // The fixture used to leak a mkdtemp dir per call; capture everything
     // the assertions need inside, then tear it down.
-    rmSync(dir, { recursive: true, force: true });
+    rmSync(scopeRoot, { recursive: true, force: true });
   }
 }
 
@@ -230,6 +233,7 @@ function runHostingBlockIn(
   mkdirSync(runnerTemp, { recursive: true });
   mkdirSync(stage, { recursive: true });
   mkdirSync(join(work, 'scripts'), { recursive: true });
+  writeFileSync(join(work, 'package.json'), '{"type":"module"}\n');
   // The block installs its job-private ossutil copy from here; the stub
   // uploader never executes it, but the install must succeed.
   writeFileSync(join(runnerTemp, 'ossutil'), 'fake ossutil\n');
@@ -240,9 +244,8 @@ function runHostingBlockIn(
   writeFileSync(
     join(work, 'scripts', 'upload-aliyun-oss-assets.js'),
     [
-      "'use strict';",
-      "const { copyFileSync, mkdirSync, writeFileSync } = require('node:fs');",
-      "const { basename, join } = require('node:path');",
+      "import { copyFileSync, mkdirSync, writeFileSync } from 'node:fs';",
+      "import { basename, join } from 'node:path';",
       "if (process.env.OSS_STUB_FAIL === '1') process.exit(1);",
       "const opts = { bucket: '', config: '', prefix: '' };",
       'const assets = [];',

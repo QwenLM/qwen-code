@@ -355,6 +355,7 @@ describe('SettingsWatcher', () => {
       vi.mocked(settings.reloadScopeFromDisk).mockImplementation(
         (scope: SettingScope) => {
           settings.forScope(scope).settings = s({ ui: { theme: 'dark' } });
+          return true;
         },
       );
 
@@ -409,6 +410,7 @@ describe('SettingsWatcher', () => {
       vi.mocked(settings.reloadScopeFromDisk).mockImplementation(
         (scope: SettingScope) => {
           settings.forScope(scope).settings = s({ count: 1 });
+          return true;
         },
       );
 
@@ -431,6 +433,7 @@ describe('SettingsWatcher', () => {
           settings.forScope(scope).settings = s({
             scope: scope.toString(),
           });
+          return true;
         },
       );
 
@@ -467,6 +470,7 @@ describe('SettingsWatcher', () => {
       vi.mocked(settings.reloadScopeFromDisk).mockImplementation(
         (scope: SettingScope) => {
           settings.forScope(scope).settings = s({ newKey: 'newValue' });
+          return true;
         },
       );
 
@@ -488,9 +492,7 @@ describe('SettingsWatcher', () => {
       const userFile = settings.forScope(SettingScope.User);
       userFile.settings = s({ theme: 'dark' });
 
-      vi.mocked(settings.reloadScopeFromDisk).mockImplementation(() => {
-        // no-op: disk matches memory
-      });
+      vi.mocked(settings.reloadScopeFromDisk).mockImplementation(() => true);
 
       fireAllEvent(0, 'change', '/home/user/.qwen/settings.json');
       await vi.advanceTimersByTimeAsync(SettingsWatcher.DEBOUNCE_MS + 10);
@@ -503,9 +505,7 @@ describe('SettingsWatcher', () => {
       const listener = vi.fn();
       watcher.addChangeListener(listener);
 
-      vi.mocked(settings.reloadScopeFromDisk).mockImplementation(() => {
-        // no-op: settings stay the same after stripping comments
-      });
+      vi.mocked(settings.reloadScopeFromDisk).mockImplementation(() => true);
 
       fireAllEvent(0, 'change', '/home/user/.qwen/settings.json');
       await vi.advanceTimersByTimeAsync(SettingsWatcher.DEBOUNCE_MS + 10);
@@ -525,6 +525,7 @@ describe('SettingsWatcher', () => {
 
       vi.mocked(settings.reloadScopeFromDisk).mockImplementation(() => {
         userFile.settings = s({ theme: 'light' });
+        return true;
       });
 
       fireAllEvent(0, 'change', '/home/user/.qwen/settings.json');
@@ -547,6 +548,7 @@ describe('SettingsWatcher', () => {
 
       vi.mocked(settings.reloadScopeFromDisk).mockImplementation(() => {
         userFile.settings = s({ env: { FOO: 'b' } });
+        return true;
       });
 
       fireAllEvent(0, 'change', '/home/user/.qwen/settings.json');
@@ -565,6 +567,7 @@ describe('SettingsWatcher', () => {
 
       vi.mocked(settings.reloadScopeFromDisk).mockImplementation(() => {
         userFile.settings = s({ security: { auth: { apiKey: 'new' } } });
+        return true;
       });
 
       fireAllEvent(0, 'change', '/home/user/.qwen/settings.json');
@@ -583,6 +586,7 @@ describe('SettingsWatcher', () => {
 
       vi.mocked(settings.reloadScopeFromDisk).mockImplementation(() => {
         userFile.settings = s({ ui: { theme: 'light' } });
+        return true;
       });
 
       fireAllEvent(0, 'change', '/home/user/.qwen/settings.json');
@@ -601,6 +605,7 @@ describe('SettingsWatcher', () => {
 
       vi.mocked(settings.reloadScopeFromDisk).mockImplementation(() => {
         userFile.settings = s({ ui: { theme: 'light' }, env: { FOO: 'b' } });
+        return true;
       });
 
       fireAllEvent(0, 'change', '/home/user/.qwen/settings.json');
@@ -619,6 +624,7 @@ describe('SettingsWatcher', () => {
 
       vi.mocked(settings.reloadScopeFromDisk).mockImplementation(() => {
         userFile.settings = s({ someCustomKey: 2 });
+        return true;
       });
 
       fireAllEvent(0, 'change', '/home/user/.qwen/settings.json');
@@ -643,6 +649,7 @@ describe('SettingsWatcher', () => {
         userFile.settings = s({
           mcpServers: { foo: { command: 'a' }, bar: { command: 'b' } },
         });
+        return true;
       });
 
       fireAllEvent(0, 'change', '/home/user/.qwen/settings.json');
@@ -664,6 +671,7 @@ describe('SettingsWatcher', () => {
 
       vi.mocked(settings.reloadScopeFromDisk).mockImplementation(() => {
         userFile.settings = s({ mcp: { excluded: ['a', 'b'] } });
+        return true;
       });
 
       fireAllEvent(0, 'change', '/home/user/.qwen/settings.json');
@@ -688,6 +696,7 @@ describe('SettingsWatcher', () => {
           const file = noFileSettings.forScope(scope);
           file.settings = s({ key: 'value' });
           file.rawJson = '{"key":"value"}';
+          return true;
         },
       );
 
@@ -717,6 +726,7 @@ describe('SettingsWatcher', () => {
           const file = settings.forScope(scope);
           file.settings = {};
           file.rawJson = undefined;
+          return true;
         },
       );
 
@@ -739,6 +749,7 @@ describe('SettingsWatcher', () => {
       vi.mocked(settings.reloadScopeFromDisk).mockImplementation(
         (scope: SettingScope) => {
           settings.forScope(scope).settings = s({ a: 1 });
+          return true;
         },
       );
 
@@ -758,6 +769,7 @@ describe('SettingsWatcher', () => {
       vi.mocked(settings.reloadScopeFromDisk).mockImplementation(
         (scope: SettingScope) => {
           settings.forScope(scope).settings = s({ changed: true });
+          return true;
         },
       );
 
@@ -781,6 +793,7 @@ describe('SettingsWatcher', () => {
       vi.mocked(settings.reloadScopeFromDisk).mockImplementation(
         (scope: SettingScope) => {
           settings.forScope(scope).settings = s({ slow: true });
+          return true;
         },
       );
 
@@ -927,6 +940,7 @@ describe('SettingsWatcher', () => {
       vi.mocked(workspaceOnly.reloadScopeFromDisk).mockImplementation(
         (scope: SettingScope) => {
           workspaceOnly.forScope(scope).settings = s({ promoted: true });
+          return true;
         },
       );
       await vi.advanceTimersByTimeAsync(SettingsWatcher.DEBOUNCE_MS + 10);
@@ -1020,9 +1034,7 @@ describe('SettingsWatcher', () => {
       const listener = vi.fn();
       watcher.addChangeListener(listener);
 
-      vi.mocked(settings.reloadScopeFromDisk).mockImplementation(() => {
-        // reloadScopeFromDisk catches internally, settings unchanged
-      });
+      vi.mocked(settings.reloadScopeFromDisk).mockImplementation(() => false);
 
       fireAllEvent(0, 'change', '/home/user/.qwen/settings.json');
       await vi.advanceTimersByTimeAsync(SettingsWatcher.DEBOUNCE_MS + 10);
@@ -1056,6 +1068,7 @@ describe('SettingsWatcher', () => {
       vi.mocked(settings.reloadScopeFromDisk).mockImplementation(
         (scope: SettingScope) => {
           settings.forScope(scope).settings = s({ pending: true });
+          return true;
         },
       );
 
@@ -1096,6 +1109,7 @@ describe('SettingsWatcher', () => {
         (scope: SettingScope) => {
           callCount++;
           settings.forScope(scope).settings = s({ call: callCount });
+          return true;
         },
       );
 

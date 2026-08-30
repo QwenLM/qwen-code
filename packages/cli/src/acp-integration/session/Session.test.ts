@@ -369,15 +369,76 @@ function setFakeHome(home: string): () => void {
   };
 }
 
-// Helper to create async generator with chunks (avoids memory leak)
+// Helper to create async generator with chunks (avoids memory leak).
+// COMPRESSED events carry `info` instead of `value`.
 function createStreamWithChunks(
-  chunks: Array<{ type: unknown; value: unknown }>,
+  chunks: Array<{ type: unknown; value?: unknown; info?: unknown }>,
 ) {
   return (async function* () {
     for (const chunk of chunks) {
       yield chunk;
     }
   })();
+}
+
+/**
+ * Builds a sendMessageStream mock for the #9529 session-token-limit tests:
+ * the first send streams usage metadata over the 100-token limit those tests
+ * configure (so the count lands in the session's route-scoped cache), and
+ * the second send returns an empty stream.
+ */
+function createOverLimitUsageSendStream() {
+  return vi
+    .fn()
+    .mockResolvedValueOnce(
+      createStreamWithChunks([
+        {
+          type: core.StreamEventType.CHUNK,
+          value: {
+            usageMetadata: {
+              totalTokenCount: 101,
+              promptTokenCount: 101,
+            },
+          },
+        },
+      ]),
+    )
+    .mockResolvedValueOnce(createEmptyStream());
+}
+
+/**
+ * Installs the shared vision-override mock surface for the #9529
+ * override-route tests: the 100-token session limit, the vision/primary
+ * route identity discriminator, the modality and vision-bridge selectors,
+ * and a base LLM client whose `resolveForModel` resolves to the vision
+ * agent. Returns the `resolveForModel` mock so a test can swap in a
+ * rejecting one (the fail-closed path) or assert on its calls.
+ */
+function setupVisionRouteOverrideMocks(
+  mockConfig: Config,
+  resolveForModel?: ReturnType<typeof vi.fn>,
+): ReturnType<typeof vi.fn> {
+  const resolver =
+    resolveForModel ??
+    vi.fn().mockResolvedValue({
+      contentGenerator: {},
+      contentGeneratorConfig: { model: 'vision-agent' },
+      model: 'vision-agent',
+    });
+  mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+  mockConfig.getModelRouteIdentity = vi.fn((model?: string) =>
+    model === 'vision-agent' ? 'route-vision' : 'route-primary',
+  );
+  mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+  mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+    id: 'vision-agent',
+    baseUrl: 'https://vision.example.com/v1',
+    agentCapable: true,
+  });
+  mockConfig.getBaseLlmClient = vi.fn().mockReturnValue({
+    resolveForModel: resolver,
+  });
+  return resolver;
 }
 
 /** Builds provider preparation metadata that arrives before complete arguments. */
@@ -861,6 +922,7 @@ describe('Session', () => {
       getDebugMode: vi.fn().mockReturnValue(false),
       getAuthType: vi.fn().mockImplementation(() => currentAuthType),
       getAllConfiguredModels: vi.fn().mockReturnValue([]),
+      reloadModelProvidersConfig: vi.fn(),
       isCronEnabled: vi.fn().mockReturnValue(false),
       getSessionTokenLimit: vi.fn().mockReturnValue(0),
       getStopHookBlockingCap: vi.fn().mockReturnValue(8),
@@ -924,6 +986,7 @@ describe('Session', () => {
       workspace: { settings: {} },
       setValue: vi.fn(),
       reloadScopeFromDisk: vi.fn(),
+      reloadScopesFromDiskAtomically: vi.fn().mockReturnValue(true),
     } as unknown as LoadedSettings;
 
     getAvailableCommandsSpy = vi.mocked(nonInteractiveCliCommands)
@@ -963,6 +1026,38 @@ describe('Session', () => {
     mockToolRegistry = undefined as unknown as typeof mockToolRegistry;
     vi.restoreAllMocks();
     vi.clearAllTimers();
+  });
+
+  it('reloads model providers from the session-owned settings', () => {
+    const modelProviders = {
+      idealab: [{ id: 'qwen3', baseUrl: 'https://idealab.example/v1' }],
+    };
+    Object.assign(mockSettings.merged, {
+      modelProviders,
+      providerProtocol: { idealab: 'openai' },
+    });
+
+    session.reloadModelProvidersFromDisk();
+
+    expect(mockSettings.reloadScopesFromDiskAtomically).toHaveBeenCalledWith([
+      SettingScope.User,
+      SettingScope.Workspace,
+    ]);
+    expect(mockConfig.reloadModelProvidersConfig).toHaveBeenCalledWith(
+      modelProviders,
+      { idealab: 'openai' },
+    );
+  });
+
+  it('does not apply stale model providers when a settings scope cannot reload', () => {
+    vi.mocked(mockSettings.reloadScopesFromDiskAtomically).mockReturnValueOnce(
+      false,
+    );
+
+    expect(() => session.reloadModelProvidersFromDisk()).toThrow(
+      'Unable to reload model-provider settings from disk.',
+    );
+    expect(mockConfig.reloadModelProvidersConfig).not.toHaveBeenCalled();
   });
 
   it('bounds textual tool results at the live ACP delivery boundary', async () => {
@@ -12993,6 +13088,667 @@ describe('Session', () => {
         );
       });
 
+      it('does not drop a route-B send using a stale route-A token count after a model switch (#9529)', async () => {
+        mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+        // ACP model switches keep the same LlmChat instance, so only the
+        // route identity changes — the chat-instance reset in the session's
+        // token cache never fires (#9529, follow-up to #9454/#9506).
+        let routeIdentity = 'route-a';
+        mockConfig.getModelRouteIdentity = vi.fn(() => routeIdentity);
+
+        // Prompt 1 on route A: an API-reported count lands in the session's
+        // private token cache.
+        mockLlmClient.tryCompressChat.mockResolvedValueOnce({
+          originalTokenCount: 50,
+          newTokenCount: 50,
+          compressionStatus: core.CompressionStatus.NOOP,
+        });
+        mockChat.sendMessageStream = createOverLimitUsageSendStream();
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'first' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+
+        // Switch to route B on the same chat instance.
+        routeIdentity = 'route-b';
+
+        // Prompt 2 on route B reaches the session-token-limit gate without
+        // compression info (compression throws), so the gate falls back to the
+        // cached count. The stale route-A count (101 > 100) must not drop a
+        // route-B send.
+        mockLlmClient.tryCompressChat.mockRejectedValueOnce(
+          new Error('compression rate limited'),
+        );
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'second' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+      });
+
+      it('still intercepts a same-route send whose recorded count exceeds the session token limit (#9529)', async () => {
+        mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+        // The route never changes, so the route-scoped cache must keep the
+        // recorded count and let the gate trip exactly as it did before #9529.
+        mockConfig.getModelRouteIdentity = vi.fn(() => 'route-a');
+
+        mockLlmClient.tryCompressChat.mockResolvedValueOnce({
+          originalTokenCount: 50,
+          newTokenCount: 50,
+          compressionStatus: core.CompressionStatus.NOOP,
+        });
+        mockChat.sendMessageStream = createOverLimitUsageSendStream();
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'first' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+
+        // Same route, compression throws → the gate reads the recorded
+        // same-route count (101 > 100) and must still drop the send.
+        mockLlmClient.tryCompressChat.mockRejectedValueOnce(
+          new Error('compression rate limited'),
+        );
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'second' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'max_tokens' });
+
+        expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'requestRoute=route-a, activeModel=qwen3-code-plus',
+          ),
+        );
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+      });
+
+      it('does not drop a returning route send on a stale count after in-send compression rewrote the history (#9529)', async () => {
+        mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+        let routeIdentity = 'route-a';
+        mockConfig.getModelRouteIdentity = vi.fn(() => routeIdentity);
+
+        // Prompt 1 on route A: an API-reported over-limit count (101) lands
+        // in the session's route-scoped cache.
+        mockLlmClient.tryCompressChat.mockResolvedValueOnce({
+          originalTokenCount: 50,
+          newTokenCount: 50,
+          compressionStatus: core.CompressionStatus.NOOP,
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  usageMetadata: {
+                    totalTokenCount: 101,
+                    promptTokenCount: 101,
+                  },
+                },
+              },
+            ]),
+          )
+          // Prompt 2 on route B trips an in-send compression inside
+          // LlmChat.sendMessageStream (hard-tier rescue / reactive
+          // overflow). LlmChat clears its own keyed counts when it
+          // surfaces the COMPRESSED event; the session's fallback cache
+          // must be invalidated at the same point, or route A's stale
+          // pre-compression count survives the rewrite.
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.COMPRESSED,
+                info: {
+                  originalTokenCount: 101,
+                  newTokenCount: 40,
+                  compressionStatus: core.CompressionStatus.COMPRESSED,
+                },
+              },
+            ]),
+          )
+          // Prompt 3 back on route A: an empty stream.
+          .mockResolvedValueOnce(createEmptyStream());
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'first' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+
+        // Switch to route B on the same chat instance; its send compresses
+        // in-send.
+        routeIdentity = 'route-b';
+        mockLlmClient.tryCompressChat.mockResolvedValueOnce({
+          originalTokenCount: 50,
+          newTokenCount: 50,
+          compressionStatus: core.CompressionStatus.NOOP,
+        });
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'second' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+
+        // Back to route A while compression fails (rate limited): the gate
+        // falls back to the cache, which must no longer hold route A's
+        // stale pre-compression count (101 > 100) — the shared history was
+        // rewritten to 40 tokens by route B's in-send compression, so the
+        // send must go out.
+        routeIdentity = 'route-a';
+        mockLlmClient.tryCompressChat.mockRejectedValueOnce(
+          new Error('compression rate limited'),
+        );
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'third' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(3);
+      });
+
+      it('does not drop a send using another route token count (#9529)', async () => {
+        mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+        let routeIdentity = 'route-a';
+        mockConfig.getModelRouteIdentity = vi.fn(() => routeIdentity);
+
+        mockLlmClient.tryCompressChat.mockResolvedValueOnce({
+          originalTokenCount: 50,
+          newTokenCount: 50,
+          compressionStatus: core.CompressionStatus.NOOP,
+        });
+        mockChat.sendMessageStream = createOverLimitUsageSendStream();
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'first' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+
+        routeIdentity = 'route-b';
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'second' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+      });
+
+      it('does not drop a runtime-scoped override using the active route count (#9529)', async () => {
+        const resolveForModel = setupVisionRouteOverrideMocks(mockConfig);
+
+        mockLlmClient.tryCompressChat
+          .mockResolvedValueOnce({
+            originalTokenCount: 50,
+            newTokenCount: 50,
+            compressionStatus: core.CompressionStatus.NOOP,
+          })
+          .mockRejectedValueOnce(new Error('compression rate limited'));
+        mockChat.sendMessageStream = createOverLimitUsageSendStream();
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'primary route' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [
+              { type: 'text', text: 'look at this' },
+              { type: 'image', mimeType: 'image/png', data: 'iVBORw0KGgo=' },
+            ],
+          }),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+
+        expect(resolveForModel).toHaveBeenCalledWith(
+          'vision-agent\0https://vision.example.com/v1',
+          {
+            failClosed: true,
+          },
+        );
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+      });
+
+      it('fails closed when runtime-scoped route resolution rejects (#9529)', async () => {
+        setupVisionRouteOverrideMocks(
+          mockConfig,
+          vi.fn().mockRejectedValue(new Error('runtime unavailable')),
+        );
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [
+              { type: 'text', text: 'look at this' },
+              { type: 'image', mimeType: 'image/png', data: 'iVBORw0KGgo=' },
+            ],
+          }),
+        ).rejects.toThrow('runtime unavailable');
+
+        expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+      });
+
+      it('records an override send usage under the override route so the next same-override send trips the gate (#9529)', async () => {
+        // Full-turn vision selector: an image turn is sent under the \0 exact
+        // route override — a different route than the active one, driven
+        // through fullTurnModelOverride, which Session.prompt consumes.
+        setupVisionRouteOverrideMocks(mockConfig);
+
+        const visionPrompt: PromptRequest = {
+          sessionId: 'test-session-id',
+          prompt: [
+            { type: 'text', text: 'look at this' },
+            { type: 'image', mimeType: 'image/png', data: 'iVBORw0KGgo=' },
+          ],
+        };
+
+        // First override send goes out (compression info under the limit) and
+        // streams usage metadata over the limit; the count must be recorded
+        // under the override route key, not the active route's.
+        mockLlmClient.tryCompressChat.mockResolvedValueOnce({
+          originalTokenCount: 50,
+          newTokenCount: 50,
+          compressionStatus: core.CompressionStatus.NOOP,
+        });
+        mockChat.sendMessageStream = createOverLimitUsageSendStream();
+
+        await expect(session.prompt(visionPrompt)).resolves.toEqual({
+          stopReason: 'end_turn',
+        });
+        expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
+          'vision-agent\0https://vision.example.com/v1\0',
+          expect.any(Object),
+          expect.any(String),
+        );
+
+        // Second same-override send: compression throws, so the gate falls
+        // back to the cached count — which must be the first send's 101
+        // recorded under the override route (101 > 100 → drop). If the record
+        // had gone under the active route instead, the override-route cache
+        // would be empty and this send would wrongly go out.
+        mockLlmClient.tryCompressChat.mockRejectedValueOnce(
+          new Error('compression rate limited'),
+        );
+
+        await expect(session.prompt(visionPrompt)).resolves.toEqual({
+          stopReason: 'max_tokens',
+        });
+
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+      });
+
+      it('records a Stop-hook continuation usage under the continuation request route so the next same-route send trips the gate (#9529)', async () => {
+        setupVisionRouteOverrideMocks(mockConfig);
+        // The Stop hook blocks the first end-turn so the over-limit usage
+        // arrives on the continuation send inside #runStopContinuation; the
+        // second hook call lets the turn finish.
+        const messageBus = {
+          request: vi
+            .fn()
+            .mockResolvedValueOnce({
+              success: true,
+              output: {
+                decision: 'block',
+                reason: 'Continue after Stop hook',
+              },
+            })
+            .mockResolvedValueOnce({
+              success: true,
+              output: {},
+            }),
+        };
+        mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+        mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+        mockConfig.hasHooksForEvent = vi
+          .fn()
+          .mockImplementation((eventName: string) => eventName === 'Stop');
+        mockChat.getHistory = vi
+          .fn()
+          .mockReturnValue([
+            { role: 'model', parts: [{ text: 'response text' }] },
+          ]);
+        mockChat.getLastModelMessageText = vi
+          .fn()
+          .mockReturnValue('response text');
+
+        const visionPrompt: PromptRequest = {
+          sessionId: 'test-session-id',
+          prompt: [
+            { type: 'text', text: 'look at this' },
+            { type: 'image', mimeType: 'image/png', data: 'iVBORw0KGgo=' },
+          ],
+        };
+
+        // The primary override send completes without usage metadata; the
+        // continuation send then streams the over-limit usage, which must be
+        // recorded under the continuation's request route (the override
+        // route), not the active route's.
+        mockLlmClient.tryCompressChat
+          .mockResolvedValueOnce({
+            originalTokenCount: 50,
+            newTokenCount: 50,
+            compressionStatus: core.CompressionStatus.NOOP,
+          })
+          .mockResolvedValueOnce({
+            originalTokenCount: 50,
+            newTokenCount: 50,
+            compressionStatus: core.CompressionStatus.NOOP,
+          });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  candidates: [
+                    {
+                      content: { parts: [{ text: 'response text' }] },
+                      finishReason: 'STOP',
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  usageMetadata: {
+                    totalTokenCount: 101,
+                    promptTokenCount: 101,
+                  },
+                },
+              },
+            ]),
+          );
+
+        await expect(session.prompt(visionPrompt)).resolves.toEqual({
+          stopReason: 'end_turn',
+        });
+        // Both sends went out under the \0 exact-route override.
+        expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
+          'vision-agent\0https://vision.example.com/v1\0',
+          expect.any(Object),
+          expect.any(String),
+        );
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+
+        // Next same-override send: compression throws, so the gate falls
+        // back to the cached count — which must be the continuation send's
+        // 101 recorded under the override route (101 > 100 → drop). If the
+        // continuation record had gone under the active route instead, the
+        // override-route cache would be empty and this send would wrongly
+        // go out.
+        mockLlmClient.tryCompressChat.mockRejectedValueOnce(
+          new Error('compression rate limited'),
+        );
+
+        await expect(session.prompt(visionPrompt)).resolves.toEqual({
+          stopReason: 'max_tokens',
+        });
+
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+      });
+
+      it('retains a returning route token count after an A-B-A switch (#9529)', async () => {
+        mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+        let routeIdentity = 'route-a';
+        mockConfig.getModelRouteIdentity = vi.fn(() => routeIdentity);
+
+        mockLlmClient.tryCompressChat.mockResolvedValueOnce({
+          originalTokenCount: 50,
+          newTokenCount: 50,
+          compressionStatus: core.CompressionStatus.NOOP,
+        });
+        mockChat.sendMessageStream = createOverLimitUsageSendStream();
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'first' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+
+        routeIdentity = 'route-b';
+        mockLlmClient.tryCompressChat.mockRejectedValueOnce(
+          new Error('compression rate limited'),
+        );
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'second' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+
+        routeIdentity = 'route-a';
+        mockLlmClient.tryCompressChat.mockRejectedValueOnce(
+          new Error('compression rate limited'),
+        );
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'third' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'max_tokens' });
+
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+      });
+
+      it('records a cron tick usage under the request route even if the route switches mid-stream (#9529)', async () => {
+        mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+        let routeIdentity = 'route-a';
+        mockConfig.getModelRouteIdentity = vi.fn(() => routeIdentity);
+
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          start: vi.fn((callback: (job: { prompt: string }) => void) => {
+            callback({ prompt: 'scheduled prompt' });
+          }),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValueOnce(
+            (async function* () {
+              yield {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  usageMetadata: {
+                    totalTokenCount: 101,
+                    promptTokenCount: 101,
+                  },
+                },
+              };
+              // A model switch landing between request and record: the
+              // request route key was captured before this stream started,
+              // so the over-limit usage above must still be keyed under it.
+              routeIdentity = 'route-b';
+            })(),
+          );
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+        });
+
+        await vi.waitFor(() => {
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+          const internals = session as unknown as {
+            lastPromptTokenCount: number;
+            lastPromptTokenCountRouteKey: string | undefined;
+          };
+          expect(internals.lastPromptTokenCountRouteKey).toBe('route-a');
+          expect(internals.lastPromptTokenCount).toBe(101);
+        });
+      });
+
+      it('records a background-notification usage under the request route even if the route switches mid-stream (#9529)', async () => {
+        mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+        let routeIdentity = 'route-a';
+        mockConfig.getModelRouteIdentity = vi.fn(() => routeIdentity);
+
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValueOnce(
+            (async function* () {
+              yield {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  usageMetadata: {
+                    totalTokenCount: 101,
+                    promptTokenCount: 101,
+                  },
+                },
+              };
+              // A model switch landing between request and record: the
+              // request route key was captured before this stream started,
+              // so the over-limit usage above must still be keyed under it.
+              routeIdentity = 'route-b';
+            })(),
+          );
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'start background work' }],
+        });
+
+        const callback = mockBackgroundTaskRegistry.setNotificationCallback.mock
+          .calls[0][0] as (
+          displayText: string,
+          modelText: string,
+          meta: { agentId: string; status: string; toolUseId?: string },
+        ) => void;
+
+        callback(
+          'Background agent "worker" completed.',
+          '<task-notification><status>completed</status></task-notification>',
+          {
+            agentId: 'agent-1',
+            status: 'completed',
+            toolUseId: 'tool-1',
+          },
+        );
+
+        await vi.waitFor(() => {
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+          const internals = session as unknown as {
+            lastPromptTokenCount: number;
+            lastPromptTokenCountRouteKey: string | undefined;
+          };
+          expect(internals.lastPromptTokenCountRouteKey).toBe('route-a');
+          expect(internals.lastPromptTokenCount).toBe(101);
+        });
+      });
+
+      it('evicts the oldest route count once the retained-route budget is exhausted (#9529)', async () => {
+        mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+        let routeIdentity = 'route-0';
+        mockConfig.getModelRouteIdentity = vi.fn(() => routeIdentity);
+
+        // Record an over-limit count under nine distinct route keys on the
+        // same chat instance — one more than the retained-route budget, so
+        // the oldest entry must be evicted instead of growing unbounded.
+        const sendStreamMock = vi.fn();
+        for (let i = 1; i <= 9; i += 1) {
+          sendStreamMock.mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  usageMetadata: {
+                    totalTokenCount: 101,
+                    promptTokenCount: 101,
+                  },
+                },
+              },
+            ]),
+          );
+        }
+        sendStreamMock.mockResolvedValueOnce(createEmptyStream());
+        mockChat.sendMessageStream = sendStreamMock;
+
+        for (let i = 1; i <= 9; i += 1) {
+          routeIdentity = `route-${i}`;
+          mockLlmClient.tryCompressChat.mockResolvedValueOnce({
+            originalTokenCount: 50,
+            newTokenCount: 50,
+            compressionStatus: core.CompressionStatus.NOOP,
+          });
+          await expect(
+            session.prompt({
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: `prompt ${i}` }],
+            }),
+          ).resolves.toEqual({ stopReason: 'end_turn' });
+        }
+
+        // The evicted oldest route (route-1) reads back no cached count, so
+        // a send on it must go out instead of tripping the gate.
+        routeIdentity = 'route-1';
+        mockLlmClient.tryCompressChat.mockRejectedValueOnce(
+          new Error('compression rate limited'),
+        );
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'evicted route' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+
+        // A retained route (route-2) still trips the gate from the cache.
+        routeIdentity = 'route-2';
+        mockLlmClient.tryCompressChat.mockRejectedValueOnce(
+          new Error('compression rate limited'),
+        );
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'retained route' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'max_tokens' });
+
+        // Nine recording sends plus the evicted-route send; the
+        // retained-route send was dropped by the gate.
+        expect(sendStreamMock).toHaveBeenCalledTimes(10);
+      });
+
       it('returns cancelled when automatic compression is aborted', async () => {
         mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
         mockLlmClient.tryCompressChat.mockImplementation(
@@ -13023,6 +13779,93 @@ describe('Session', () => {
           stopReason: 'cancelled',
         });
         expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+        expect(mockChat.addHistory).toHaveBeenCalledWith({
+          role: 'user',
+          parts: expect.any(Array),
+        });
+        expect(mockClient.sessionUpdate).not.toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text:
+                'Session token limit exceeded: 101 tokens > 100 limit. ' +
+                'Please start a new session or increase the sessionTokenLimit in your settings.json.',
+            },
+          },
+        });
+      });
+
+      it('returns cancelled when a cancel lands in the override route-key resolution window (#9529)', async () => {
+        // First override send records an over-limit count under the
+        // override route; on the second same-override send the route-key
+        // resolution outlives a cancel. The abort re-check after the
+        // resolution must win over the session-token-limit gate (101 > 100
+        // cached), which would otherwise mislabel the cancel as
+        // 'max_tokens' and drop the user turn from history.
+        setupVisionRouteOverrideMocks(mockConfig);
+
+        const visionPrompt: PromptRequest = {
+          sessionId: 'test-session-id',
+          prompt: [
+            { type: 'text', text: 'look at this' },
+            { type: 'image', mimeType: 'image/png', data: 'iVBORw0KGgo=' },
+          ],
+        };
+
+        mockLlmClient.tryCompressChat.mockResolvedValueOnce({
+          originalTokenCount: 50,
+          newTokenCount: 50,
+          compressionStatus: core.CompressionStatus.NOOP,
+        });
+        mockChat.sendMessageStream = createOverLimitUsageSendStream();
+
+        await expect(session.prompt(visionPrompt)).resolves.toEqual({
+          stopReason: 'end_turn',
+        });
+
+        // Second same-override send: compression fails so the gate falls
+        // back to the cached over-limit count, and the route-key
+        // resolution hangs until released — the cancel lands inside that
+        // window and the resolver settles only afterwards.
+        mockLlmClient.tryCompressChat.mockRejectedValueOnce(
+          new Error('compression rate limited'),
+        );
+        let releaseRouteResolution!: () => void;
+        const resolveForModel = vi.fn().mockImplementation(
+          () =>
+            new Promise<{
+              contentGenerator: Record<string, never>;
+              contentGeneratorConfig: { model: string };
+              model: string;
+            }>((resolve) => {
+              releaseRouteResolution = () =>
+                resolve({
+                  contentGenerator: {},
+                  contentGeneratorConfig: { model: 'vision-agent' },
+                  model: 'vision-agent',
+                });
+            }),
+        );
+        mockConfig.getBaseLlmClient = vi
+          .fn()
+          .mockReturnValue({ resolveForModel });
+
+        const promptPromise = session.prompt(visionPrompt);
+        await vi.waitFor(() => {
+          expect(resolveForModel).toHaveBeenCalled();
+        });
+
+        await session.cancelPendingPrompt();
+        releaseRouteResolution();
+
+        await expect(promptPromise).resolves.toEqual({
+          stopReason: 'cancelled',
+        });
+        // The send never went out; the cancelled user turn was restored to
+        // history and no token-limit diagnostic was emitted.
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
         expect(mockChat.addHistory).toHaveBeenCalledWith({
           role: 'user',
           parts: expect.any(Array),
@@ -13089,22 +13932,7 @@ describe('Session', () => {
           newTokenCount: 0,
           compressionStatus: core.CompressionStatus.NOOP,
         });
-        mockChat.sendMessageStream = vi
-          .fn()
-          .mockResolvedValueOnce(
-            createStreamWithChunks([
-              {
-                type: core.StreamEventType.CHUNK,
-                value: {
-                  usageMetadata: {
-                    totalTokenCount: 101,
-                    promptTokenCount: 101,
-                  },
-                },
-              },
-            ]),
-          )
-          .mockResolvedValueOnce(createEmptyStream());
+        mockChat.sendMessageStream = createOverLimitUsageSendStream();
 
         await expect(
           session.prompt({
@@ -13122,7 +13950,7 @@ describe('Session', () => {
         expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
       });
 
-      it('falls back to the previous prompt token count when compressed token info is zero', async () => {
+      it('does not gate on the pre-compression count when compressed token info is zero', async () => {
         mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
         mockLlmClient.tryCompressChat
           .mockResolvedValueOnce({
@@ -13135,22 +13963,7 @@ describe('Session', () => {
             newTokenCount: 0,
             compressionStatus: core.CompressionStatus.COMPRESSED,
           });
-        mockChat.sendMessageStream = vi
-          .fn()
-          .mockResolvedValueOnce(
-            createStreamWithChunks([
-              {
-                type: core.StreamEventType.CHUNK,
-                value: {
-                  usageMetadata: {
-                    totalTokenCount: 101,
-                    promptTokenCount: 101,
-                  },
-                },
-              },
-            ]),
-          )
-          .mockResolvedValueOnce(createEmptyStream());
+        mockChat.sendMessageStream = createOverLimitUsageSendStream();
 
         await expect(
           session.prompt({
@@ -13158,14 +13971,19 @@ describe('Session', () => {
             prompt: [{ type: 'text', text: 'first' }],
           }),
         ).resolves.toEqual({ stopReason: 'end_turn' });
+        // The second send arrives with a successful COMPRESSED whose fresh
+        // count is unknown (0). The compression just rewrote the shared
+        // history, so the previously recorded count (101) measures
+        // destroyed history and must not drop the send — mirroring
+        // LlmChat, which clears its keyed counts on COMPRESSED (#9529).
         await expect(
           session.prompt({
             sessionId: 'test-session-id',
             prompt: [{ type: 'text', text: 'second' }],
           }),
-        ).resolves.toEqual({ stopReason: 'max_tokens' });
+        ).resolves.toEqual({ stopReason: 'end_turn' });
 
-        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
       });
 
       it('records prompt token count instead of total token count for later session-limit checks', async () => {
@@ -13210,7 +14028,7 @@ describe('Session', () => {
         expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
       });
 
-      it('resets the session-local token count when the active chat instance changes', async () => {
+      it('resets session-local route counts when the active chat instance changes', async () => {
         const clearedChat = {
           sendMessageStream: vi.fn().mockResolvedValue(createEmptyStream()),
           addHistory: vi.fn(),
@@ -13219,12 +14037,15 @@ describe('Session', () => {
           getLastModelMessageText: vi.fn().mockReturnValue(''),
         } as unknown as LlmChat;
         mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+        let routeIdentity = 'route-a';
+        mockConfig.getModelRouteIdentity = vi.fn(() => routeIdentity);
         mockLlmClient.tryCompressChat
           .mockResolvedValueOnce({
             originalTokenCount: 50,
             newTokenCount: 50,
             compressionStatus: core.CompressionStatus.NOOP,
           })
+          .mockRejectedValueOnce(new Error('compression unavailable'))
           .mockRejectedValueOnce(new Error('compression unavailable'));
         mockChat.sendMessageStream = vi.fn().mockResolvedValueOnce(
           createStreamWithChunks([
@@ -13248,6 +14069,7 @@ describe('Session', () => {
         ).resolves.toEqual({ stopReason: 'end_turn' });
 
         mockLlmClient.getChat.mockReturnValue(clearedChat);
+        routeIdentity = 'route-b';
 
         await expect(
           session.prompt({
@@ -13256,7 +14078,15 @@ describe('Session', () => {
           }),
         ).resolves.toEqual({ stopReason: 'end_turn' });
 
-        expect(clearedChat.sendMessageStream).toHaveBeenCalledTimes(1);
+        routeIdentity = 'route-a';
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'back to route A' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+
+        expect(clearedChat.sendMessageStream).toHaveBeenCalledTimes(2);
       });
 
       it('continues sending when the compression notification fails', async () => {
@@ -33515,65 +34345,70 @@ describe('Session', () => {
       expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
     });
 
-    it('does not count a failed Guard compression or block later automatic work', async () => {
-      rebuildSessionWithGuard();
-      installPendingTodoTool();
-      queuePendingTodoThenNaturalStops();
-      const noCompression = {
-        originalTokenCount: 50,
-        newTokenCount: 50,
-        compressionStatus: core.CompressionStatus.NOOP,
-      };
-      mockLlmClient.tryCompressChat
-        .mockResolvedValueOnce(noCompression)
-        .mockResolvedValueOnce(noCompression)
-        .mockResolvedValueOnce({
-          originalTokenCount: 120,
-          newTokenCount: 120,
-          compressionStatus:
-            core.CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY,
-        })
-        .mockResolvedValue(noCompression);
+    it.each([
+      core.CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY,
+      core.CompressionStatus.COMPRESSION_FAILED_API_ERROR,
+    ])(
+      'does not count a failed Guard compression status %s or block later automatic work',
+      async (compressionStatus) => {
+        rebuildSessionWithGuard();
+        installPendingTodoTool();
+        queuePendingTodoThenNaturalStops();
+        const noCompression = {
+          originalTokenCount: 50,
+          newTokenCount: 50,
+          compressionStatus: core.CompressionStatus.NOOP,
+        };
+        mockLlmClient.tryCompressChat
+          .mockResolvedValueOnce(noCompression)
+          .mockResolvedValueOnce(noCompression)
+          .mockResolvedValueOnce({
+            originalTokenCount: 120,
+            newTokenCount: 120,
+            compressionStatus,
+          })
+          .mockResolvedValue(noCompression);
 
-      await runGuardPrompt();
+        await runGuardPrompt();
 
-      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
-      expect(
-        vi
-          .mocked(mockClient.sessionUpdate)
-          .mock.calls.some(
-            ([params]) =>
-              params.update.sessionUpdate === 'agent_message_chunk' &&
-              params.update._meta?.['source'] === 'todo_stop_guard',
-          ),
-      ).toBe(false);
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+        expect(
+          vi
+            .mocked(mockClient.sessionUpdate)
+            .mock.calls.some(
+              ([params]) =>
+                params.update.sessionUpdate === 'agent_message_chunk' &&
+                params.update._meta?.['source'] === 'todo_stop_guard',
+            ),
+        ).toBe(false);
 
-      const callback =
-        mockBackgroundTaskRegistry.setNotificationCallback.mock.calls.at(
-          -1,
-        )?.[0] as (
-          displayText: string,
-          modelText: string,
-          meta: { agentId: string; status: string },
-        ) => void;
-      callback('independent background done', '<task-notification />', {
-        agentId: 'after-guard-compression-failure',
-        status: 'completed',
-      });
+        const callback =
+          mockBackgroundTaskRegistry.setNotificationCallback.mock.calls.at(
+            -1,
+          )?.[0] as (
+            displayText: string,
+            modelText: string,
+            meta: { agentId: string; status: string },
+          ) => void;
+        callback('independent background done', '<task-notification />', {
+          agentId: 'after-guard-compression-failure',
+          status: 'completed',
+        });
 
-      await vi.waitFor(() => {
-        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(3);
-      });
-      expect(
-        vi
-          .mocked(mockClient.sessionUpdate)
-          .mock.calls.some(
-            ([params]) =>
-              params.update.sessionUpdate === 'agent_message_chunk' &&
-              params.update._meta?.['source'] === 'todo_stop_guard',
-          ),
-      ).toBe(false);
-    });
+        await vi.waitFor(() => {
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(3);
+        });
+        expect(
+          vi
+            .mocked(mockClient.sessionUpdate)
+            .mock.calls.some(
+              ([params]) =>
+                params.update.sessionUpdate === 'agent_message_chunk' &&
+                params.update._meta?.['source'] === 'todo_stop_guard',
+            ),
+        ).toBe(false);
+      },
+    );
 
     it('keeps external Stop hook continuation when Guard compression throws', async () => {
       rebuildSessionWithGuard();

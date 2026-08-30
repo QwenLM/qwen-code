@@ -1434,6 +1434,8 @@ function resolveEagerTools(
  * never sourced from argv, settings, or the environment.
  */
 export interface ProjectRuntimeHostPolicy {
+  /** Host-managed session whose startup cwd is only a placeholder. */
+  provisionalWorkspace?: true;
   /** Session policy that remains authoritative across project changes. */
   cronEnabled?: boolean;
   /**
@@ -1517,7 +1519,10 @@ export function createProjectRuntimeReloader(
           ? {
               allowed: argv.allowedMcpServerNames?.filter(Boolean),
               excluded: undefined,
-              pending: undefined,
+              pending:
+                bareMode || safeMode || approvalMode === ApprovalMode.YOLO
+                  ? undefined
+                  : getPendingGatedMcpServers(assembled, targetDir),
             }
           : recomputeMcpGating(
               nextSettings,
@@ -1527,14 +1532,16 @@ export function createProjectRuntimeReloader(
               approvalMode === ApprovalMode.YOLO,
             );
       const runtimeSettings = nextSettings.merged;
-      const includeDirectories = [
-        ...(bareMode || safeMode
-          ? []
-          : (runtimeSettings.context?.includeDirectories ?? []).map(
-              (directory) => resolveProjectPath(directory, targetDir),
-            )),
-        ...cliIncludeDirectories,
-      ];
+      const includeDirectories = hostPolicy?.provisionalWorkspace
+        ? []
+        : [
+            ...(bareMode || safeMode
+              ? []
+              : (runtimeSettings.context?.includeDirectories ?? []).map(
+                  (directory) => resolveProjectPath(directory, targetDir),
+                )),
+            ...cliIncludeDirectories,
+          ];
       const plansDirectory = runtimeSettings.plansDirectory;
       const coreTools =
         bareMode || safeMode
@@ -1588,8 +1595,9 @@ export function createProjectRuntimeReloader(
         config: {
           trustedFolder: effectiveTrust,
           includeDirectories,
-          loadMemoryFromIncludeDirectories:
-            bareMode || safeMode
+          loadMemoryFromIncludeDirectories: hostPolicy?.provisionalWorkspace
+            ? false
+            : bareMode || safeMode
               ? includeDirectories.length > 0
               : (runtimeSettings.context?.loadFromIncludeDirectories ?? false),
           plansDir: Storage.getPlansDir(targetDir, plansDirectory),
@@ -1803,10 +1811,9 @@ export function createProjectRuntimeReloader(
           if (reloadProcessEnvironment) {
             reloadEnvironment(nextSettings.merged, targetDir, effectiveTrust);
             environmentReloaded = true;
-            preparedRuntime.config.webSearch = resolveWebSearchSettings(
-              runtimeSettings,
-              process.env,
-            );
+            preparedRuntime.config.webSearch = safeMode
+              ? undefined
+              : resolveWebSearchSettings(runtimeSettings, process.env);
             preparedRuntime.config.disabledSlashCommands =
               resolveDisabledSlashCommands(
                 runtimeSettings,
@@ -2522,6 +2529,9 @@ export async function loadCliConfig(
         modelDisablesToolSearch,
         hostPolicy
           ? {
+              ...(provisionalWorkspace
+                ? { provisionalWorkspace: true as const }
+                : {}),
               cronEnabled: hostPolicy.projectRuntimeCronEnabled,
               ownsProcessEnvironment: hostPolicy.ownsProcessEnvironment,
             }

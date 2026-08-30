@@ -17,6 +17,7 @@ import {
   resetHomeEnvBootstrapForTesting,
   type LoadedSettings,
 } from './settings.js';
+import { resetMcpApprovalsForTesting } from './mcpApprovals.js';
 import { AppEvent, appEvents } from '../utils/events.js';
 
 /**
@@ -69,6 +70,7 @@ describe('createProjectRuntimeReloader', () => {
     overrides: {
       bareMode?: boolean;
       safeMode?: boolean;
+      cliIncludeDirectories?: string[];
       modelDisablesToolSearch?: boolean;
       settingsWatcher?: { pauseWorkspaceWatching?: () => Promise<() => void> };
       hostPolicy?: ProjectRuntimeHostPolicy;
@@ -81,7 +83,7 @@ describe('createProjectRuntimeReloader', () => {
       undefined,
       overrides.bareMode ?? false,
       overrides.safeMode ?? false,
-      [],
+      overrides.cliIncludeDirectories ?? [],
       overrides.modelDisablesToolSearch ?? false,
       overrides.hostPolicy,
     );
@@ -101,6 +103,7 @@ describe('createProjectRuntimeReloader', () => {
     previousQwenHome = process.env['QWEN_HOME'];
     process.env['QWEN_HOME'] = path.join(tempDir, 'home');
     resetHomeEnvBootstrapForTesting();
+    resetMcpApprovalsForTesting();
     projectA = path.join(tempDir, 'project-a');
     projectB = path.join(tempDir, 'project-b');
     fs.mkdirSync(projectA, { recursive: true });
@@ -118,6 +121,7 @@ describe('createProjectRuntimeReloader', () => {
       process.env['QWEN_HOME'] = previousQwenHome;
     }
     resetHomeEnvBootstrapForTesting();
+    resetMcpApprovalsForTesting();
     vi.restoreAllMocks();
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
@@ -171,7 +175,7 @@ describe('createProjectRuntimeReloader', () => {
       new Storage(projectB).getWorkspaceSettingsPath(),
     );
     expect(prepared.warnings).toHaveLength(1);
-    expect(prepared.warnings?.[0]).toMatch(/hosts other sessions/);
+    expect(prepared.warnings?.[0]).toMatch(/may host other sessions/);
 
     await prepared.rollback();
     expect(process.env['A_KEY']).toBe('from-a');
@@ -290,6 +294,12 @@ describe('createProjectRuntimeReloader', () => {
     writeProject(projectB, {
       mcp: { allowed: ['db'], excluded: ['fs'] },
     });
+    fs.writeFileSync(
+      path.join(projectB, '.mcp.json'),
+      JSON.stringify({
+        mcpServers: { fs: { command: 'project-server' } },
+      }),
+    );
 
     const prepared = await makeReloader(startupSettings()).prepare(
       projectB,
@@ -300,6 +310,42 @@ describe('createProjectRuntimeReloader', () => {
 
     expect(prepared.config.allowedMcpServers).toEqual(['fs']);
     expect(prepared.config.excludedMcpServers).toBeUndefined();
+    expect(prepared.config.pendingMcpServers).toEqual(['fs']);
+  });
+
+  it('keeps web search disabled after a safe-mode relocation commits', async () => {
+    writeUserSettings({
+      tools: { webSearch: { enabled: true, model: 'qwen3.6-plus' } },
+    });
+    writeProject(projectA, {});
+    writeProject(projectB, {});
+
+    const prepared = await makeReloader(startupSettings(), {
+      safeMode: true,
+    }).prepare(projectB, true, ApprovalMode.DEFAULT, projectA);
+
+    expect(prepared.config.webSearch).toBeUndefined();
+    await prepared.commit();
+    expect(prepared.config.webSearch).toBeUndefined();
+  });
+
+  it('keeps provisional workspace context inputs disabled after relocation', async () => {
+    const cliInclude = path.join(projectA, 'cli-include');
+    writeProject(projectA, {});
+    writeProject(projectB, {
+      context: {
+        includeDirectories: ['target-include'],
+        loadFromIncludeDirectories: true,
+      },
+    });
+
+    const prepared = await makeReloader(startupSettings(), {
+      cliIncludeDirectories: [cliInclude],
+      hostPolicy: { provisionalWorkspace: true },
+    }).prepare(projectB, true, ApprovalMode.DEFAULT, projectA);
+
+    expect(prepared.config.includeDirectories).toEqual([]);
+    expect(prepared.config.loadMemoryFromIncludeDirectories).toBe(false);
   });
 
   it('keeps a bare session trusted after relocation', async () => {

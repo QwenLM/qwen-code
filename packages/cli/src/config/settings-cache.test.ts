@@ -25,6 +25,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   clearSettingsCacheForTesting,
   loadSettingsCached,
+  loadSettingsCachedForSession,
 } from './settings-cache.js';
 import {
   resetEnvironmentTrackingForTesting,
@@ -118,6 +119,44 @@ describe('loadSettingsCached', () => {
     // constructs a new LoadedSettings, so same instance ⇒ no reload ran.
     expect(second).toBe(first);
     expect(second.merged.model?.name).toBe('cached');
+  });
+
+  it('gives each daemon session an isolated mutable settings instance', () => {
+    const otherWorkspace = path.join(tmpRoot, 'project-b');
+    writeJson(
+      workspaceSettingsPath(),
+      versioned({ permissions: { allow: ['rule-a'] } }),
+    );
+    writeJson(
+      workspaceSettingsPath(otherWorkspace),
+      versioned({ permissions: { allow: ['rule-b'] } }),
+    );
+
+    const firstSession = loadSettingsCachedForSession(workspaceDir);
+    const siblingSession = loadSettingsCachedForSession(workspaceDir);
+    const cachedSource = loadSettingsCached(workspaceDir);
+    expect(firstSession).not.toBe(siblingSession);
+    expect(firstSession.workspace).not.toBe(cachedSource.workspace);
+    firstSession.replaceWith(loadSettingsCachedForSession(otherWorkspace));
+
+    expect(firstSession.merged.permissions?.allow).toEqual(['rule-b']);
+    expect(siblingSession.merged.permissions?.allow).toEqual(['rule-a']);
+    expect(loadSettingsCached(workspaceDir)).toBe(cachedSource);
+    expect(cachedSource.merged.permissions?.allow).toEqual(['rule-a']);
+
+    siblingSession.setValue(
+      SettingScope.Workspace,
+      'model.name',
+      'model-from-sibling',
+    );
+    expect(
+      JSON.parse(fs.readFileSync(workspaceSettingsPath(), 'utf8')),
+    ).toMatchObject({ model: { name: 'model-from-sibling' } });
+    expect(
+      JSON.parse(
+        fs.readFileSync(workspaceSettingsPath(otherWorkspace), 'utf8'),
+      ),
+    ).not.toHaveProperty('model');
   });
 
   it('reloads when the user settings file changes', () => {

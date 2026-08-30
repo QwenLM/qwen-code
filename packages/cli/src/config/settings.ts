@@ -648,15 +648,23 @@ export class LoadedSettings {
     this.migratedInMemoryScopes.clear();
   }
 
-  reloadScopeFromDisk(scope: SettingScope): void {
+  reloadScopeFromDisk(scope: SettingScope): boolean {
     const file = this.forScope(scope);
+    if (scope === SettingScope.Workspace && !this.workspaceSettingsActive) {
+      file.settings = {};
+      file.originalSettings = {};
+      file.rawJson = undefined;
+      this._merged = this.computeMergedSettings();
+      return true;
+    }
+    let reloaded = false;
     try {
       if (!fs.existsSync(file.path)) {
         file.settings = {};
         file.originalSettings = {};
         file.rawJson = undefined;
         this._merged = this.computeMergedSettings();
-        return;
+        return true;
       }
 
       const content = fs.readFileSync(file.path, 'utf-8');
@@ -676,6 +684,11 @@ export class LoadedSettings {
         file.settings = resolved;
         file.originalSettings = structuredClone(parsed) as Settings;
         file.rawJson = content;
+        reloaded = true;
+      } else {
+        debugLogger.warn(
+          `reloadScopeFromDisk(${scope}): settings file is not a JSON object, keeping previous settings`,
+        );
       }
     } catch (err) {
       debugLogger.warn(
@@ -683,6 +696,29 @@ export class LoadedSettings {
       );
     }
     this._merged = this.computeMergedSettings();
+    return reloaded;
+  }
+
+  reloadScopesFromDiskAtomically(scopes: readonly SettingScope[]): boolean {
+    const snapshots = scopes.map((scope) => {
+      const file = this.forScope(scope);
+      return {
+        file,
+        settings: structuredClone(file.settings),
+        originalSettings: structuredClone(file.originalSettings),
+        rawJson: file.rawJson,
+      };
+    });
+    const reloaded = scopes.map((scope) => this.reloadScopeFromDisk(scope));
+    if (reloaded.every(Boolean)) return true;
+
+    for (const snapshot of snapshots) {
+      snapshot.file.settings = snapshot.settings;
+      snapshot.file.originalSettings = snapshot.originalSettings;
+      snapshot.file.rawJson = snapshot.rawJson;
+    }
+    this._merged = this.computeMergedSettings();
+    return false;
   }
 
   /**
@@ -704,6 +740,29 @@ export class LoadedSettings {
     }
     return this.workspace.settings.hooks;
   }
+}
+
+export function cloneLoadedSettings(settings: LoadedSettings): LoadedSettings {
+  const cloneFile = (file: SettingsFile): SettingsFile => ({
+    settings: structuredClone(file.settings),
+    originalSettings: structuredClone(file.originalSettings),
+    path: file.path,
+    rawJson: file.rawJson,
+  });
+  const clone = new LoadedSettings(
+    cloneFile(settings.system),
+    cloneFile(settings.systemDefaults),
+    cloneFile(settings.user),
+    cloneFile(settings.workspace),
+    settings.isTrusted,
+    new Set(settings.migratedInMemoryScopes),
+    [...settings.migrationWarnings],
+    settings.corruptedPath,
+    settings.wasRecovered,
+    settings.workspaceSettingsActive,
+  );
+  clone.corruptionDialogDismissed = settings.corruptionDialogDismissed;
+  return clone;
 }
 
 /**

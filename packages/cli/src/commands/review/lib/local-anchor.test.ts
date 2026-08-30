@@ -9,17 +9,33 @@
 // never a throw and never a skip), and the byte slicer is pinned against the
 // re-encode hazard: it must reproduce the exact bytes of the sections it keeps.
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   UNHASHABLE,
   changedSince,
+  isPathProvablyAbsent,
   readLocalCache,
   stateIdOf,
 } from './local-anchor.js';
 import { sliceDiffByLines } from './diff-plan.js';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+  type PathLike,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+
+// Spy-mode interception so the Windows-shaped arms below can force the leaf
+// lstat verdict; everything else delegates to the real implementation.
+vi.mock('node:fs', { spy: true });
+
+const realFs = await vi.importActual<typeof import('node:fs')>('node:fs');
 
 describe('stateIdOf', () => {
   it('is order-independent over files and sensitive to every field', () => {
@@ -193,5 +209,138 @@ describe('sliceDiffByLines', () => {
     expect(
       sliceDiffByLines(diff, [{ startLine: 2, endLine: 9 }]).toString('utf8'),
     ).toBe('b');
+  });
+});
+
+describe('isPathProvablyAbsent', () => {
+  let repo: string;
+
+  beforeEach(() => {
+    repo = mkdtempSync(join(tmpdir(), 'local-anchor-absent-'));
+  });
+
+  afterEach(() => {
+    rmSync(repo, { recursive: true, force: true });
+  });
+
+  it('treats ENOENT under an existing directory as genuine absence', () => {
+    mkdirSync(join(repo, 'src'));
+    expect(isPathProvablyAbsent(repo, join('src', 'missing.ts'))).toBe(true);
+  });
+
+  it('keeps an existing path present', () => {
+    writeFileSync(join(repo, 'present.ts'), 'x\n');
+    expect(isPathProvablyAbsent(repo, 'present.ts')).toBe(false);
+  });
+
+  it('refuses absence under a regular-file component — unmeasurable, not absent', () => {
+    // POSIX raises ENOTDIR for the leaf; Windows raises ENOENT and the
+    // ancestor walk finds the regular FILE as nearest existing ancestor.
+    // Either way the answer is false (R19-2: only ENOENT-proven absence may
+    // exempt a flagged path).
+    writeFileSync(join(repo, 'f'), 'a regular file, not a directory\n');
+    expect(isPathProvablyAbsent(repo, join('f', 'missing.ts'))).toBe(false);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'a symlink-to-directory ancestor still proves absence',
+    () => {
+      mkdirSync(join(repo, 'target'));
+      symlinkSync(join(repo, 'target'), join(repo, 'link'));
+      expect(isPathProvablyAbsent(repo, join('link', 'missing.ts'))).toBe(true);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'a broken symlink ancestor is walked past, not mistaken for a file',
+    () => {
+      symlinkSync(join(repo, 'nowhere'), join(repo, 'broken'));
+      expect(isPathProvablyAbsent(repo, join('broken', 'missing.ts'))).toBe(
+        true,
+      );
+    },
+  );
+
+  // Platform-independent arms of the Windows-shaped walk. On POSIX a leaf
+  // under a regular-file component raises ENOTDIR and exits BEFORE the
+  // ancestor walk, so only a spied lstatSync can force the ENOENT leaf
+  // shape Windows reports for that same path — the exact shape a future
+  // "leaf ENOENT ⇒ absent" simplification would restore while every
+  // real-fs test on every POSIX lane stays green (the R19-3 incident).
+  const errno = (code: string) => Object.assign(new Error(code), { code });
+
+  const withLeafErrno = (leaf: string, code: string, run: () => void) => {
+    vi.mocked(lstatSync).mockImplementation(((p: PathLike) => {
+      if (p === leaf) throw errno(code);
+      return realFs.lstatSync(p);
+    }) as unknown as typeof lstatSync);
+    try {
+      run();
+    } finally {
+      vi.mocked(lstatSync).mockRestore();
+    }
+  };
+
+  it('Windows shape: an ENOENT leaf below a regular-file ancestor stays unmeasurable', () => {
+    writeFileSync(join(repo, 'f'), 'a regular file, not a directory\n');
+    const leaf = join(repo, 'f', 'missing.ts');
+    withLeafErrno(leaf, 'ENOENT', () => {
+      expect(isPathProvablyAbsent(repo, join('f', 'missing.ts'))).toBe(false);
+    });
+  });
+
+  it('Windows shape: an ENOENT leaf below a directory ancestor is genuine absence', () => {
+    mkdirSync(join(repo, 'src'));
+    const leaf = join(repo, 'src', 'missing.ts');
+    withLeafErrno(leaf, 'ENOENT', () => {
+      expect(isPathProvablyAbsent(repo, join('src', 'missing.ts'))).toBe(true);
+    });
+  });
+
+  it('a non-ENOENT leaf error is never absence', () => {
+    writeFileSync(join(repo, 'locked.ts'), 'x\n');
+    const leaf = join(repo, 'locked.ts');
+    withLeafErrno(leaf, 'EACCES', () => {
+      expect(isPathProvablyAbsent(repo, 'locked.ts')).toBe(false);
+    });
+  });
+
+  // R1-6: one enumeration shares its ancestor probes.
+  it('probes a shared missing ancestor chain once, not once per path', () => {
+    // The whole `a/` subtree is unmaterialized, as out-of-cone paths are in
+    // a sparse checkout: without the shared memo, every path re-walks the
+    // same missing chain all the way to the repo root.
+    const memo = new Map<string, boolean>();
+    vi.mocked(statSync).mockClear();
+    expect(isPathProvablyAbsent(repo, join('a', 'b', 'x.ts'), memo)).toBe(true);
+    expect(isPathProvablyAbsent(repo, join('a', 'b', 'y.ts'), memo)).toBe(true);
+    expect(isPathProvablyAbsent(repo, join('a', 'c', 'z.ts'), memo)).toBe(true);
+    // The first path probes a/b, a, then the existing repo root; the second
+    // hits the memoized a/b at once; the third probes only a/c before the
+    // memoized a. Without the memo this is 9 ancestor probes (3 per path).
+    expect(vi.mocked(statSync).mock.calls).toHaveLength(4);
+    // The memo stores only ancestor-walk verdicts — never the leaf lstat.
+    expect(memo.has(join(repo, 'a', 'b', 'x.ts'))).toBe(false);
+  });
+
+  it('a non-ENOENT ancestor probe stays unmeasurable, even through the memo', () => {
+    mkdirSync(join(repo, 'src'));
+    const locked = join(repo, 'src');
+    vi.mocked(statSync).mockImplementation(((p: PathLike) => {
+      if (p === locked) throw errno('EACCES');
+      return realFs.statSync(p);
+    }) as unknown as typeof statSync);
+    try {
+      const memo = new Map<string, boolean>();
+      expect(isPathProvablyAbsent(repo, join('src', 'x.ts'), memo)).toBe(false);
+      // The memoized verdict for the EACCES ancestor IS the refusal: a
+      // sibling path sharing the chain answers the same without re-probing.
+      expect(memo.get(locked)).toBe(false);
+      vi.mocked(statSync).mockClear();
+      expect(isPathProvablyAbsent(repo, join('src', 'y.ts'), memo)).toBe(false);
+      expect(vi.mocked(statSync).mock.calls).toHaveLength(0);
+    } finally {
+      vi.mocked(statSync).mockRestore();
+    }
   });
 });
