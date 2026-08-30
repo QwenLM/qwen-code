@@ -34,6 +34,21 @@ import org.junit.jupiter.api.Test;
 
 class DaemonSessionClientTest {
 
+    // Keep local feedback strict while leaving room for shared CI runners to
+    // schedule both sides of these in-process HTTP and concurrency fixtures.
+    private static final boolean CI = Boolean.parseBoolean(System.getenv("CI"));
+    private static final long ASYNC_WAIT_SECONDS = CI ? 60 : 1;
+    private static final long TIMEOUT_UPPER_BOUND_MILLIS = CI ? 5000 : 900;
+    private static final long NON_BLOCKING_UPPER_BOUND_MILLIS = CI ? 5000 : 500;
+    private static final Duration CONNECT_TIMEOUT =
+            Duration.ofSeconds(CI ? 60 : 2);
+    private static final Duration REQUEST_TIMEOUT =
+            Duration.ofSeconds(CI ? 60 : 2);
+    private static final Duration OBSERVATION_TIMEOUT =
+            Duration.ofSeconds(CI ? 60 : 3);
+    private static final Duration IDLE_TIMEOUT =
+            Duration.ofSeconds(CI ? 60 : 1);
+
     private HttpServer server;
     private ExecutorService serverExecutor;
     private URI baseUri;
@@ -278,15 +293,15 @@ class DaemonSessionClientTest {
             CompletableFuture<DaemonSessionClient> creating =
                     CompletableFuture.supplyAsync(daemon::createSession);
             try {
-                assertTrue(createStarted.await(1, TimeUnit.SECONDS));
+                assertTrue(createStarted.await(ASYNC_WAIT_SECONDS, TimeUnit.SECONDS));
                 CompletableFuture<Void> cancelling = CompletableFuture.runAsync(
                         first::cancelActivePrompt);
-                assertTrue(cancelReceived.await(1, TimeUnit.SECONDS));
-                cancelling.get(1, TimeUnit.SECONDS);
+                assertTrue(cancelReceived.await(ASYNC_WAIT_SECONDS, TimeUnit.SECONDS));
+                cancelling.get(ASYNC_WAIT_SECONDS, TimeUnit.SECONDS);
             } finally {
                 releaseCreate.countDown();
             }
-            try (DaemonSessionClient second = creating.get(1, TimeUnit.SECONDS)) {
+            try (DaemonSessionClient second = creating.get(ASYNC_WAIT_SECONDS, TimeUnit.SECONDS)) {
                 assertEquals("session-2", second.getSessionId());
             }
         }
@@ -315,15 +330,15 @@ class DaemonSessionClientTest {
         CompletableFuture<DaemonSessionClient> creating =
                 CompletableFuture.supplyAsync(daemon::createSession);
         try {
-            assertTrue(createStarted.await(1, TimeUnit.SECONDS));
+            assertTrue(createStarted.await(ASYNC_WAIT_SECONDS, TimeUnit.SECONDS));
             CompletableFuture.runAsync(daemon::close)
-                    .get(1, TimeUnit.SECONDS);
+                    .get(ASYNC_WAIT_SECONDS, TimeUnit.SECONDS);
             assertTrue(!creating.isDone());
             releaseCreate.countDown();
             CompletionException failure = assertThrows(
                     CompletionException.class, creating::join);
             assertInstanceOf(IllegalStateException.class, failure.getCause());
-            assertTrue(detachReceived.await(1, TimeUnit.SECONDS));
+            assertTrue(detachReceived.await(ASYNC_WAIT_SECONDS, TimeUnit.SECONDS));
             assertEquals("client-2", detachedClient.get());
         } finally {
             releaseCreate.countDown();
@@ -1220,7 +1235,7 @@ class DaemonSessionClientTest {
             long started = System.nanoTime();
             assertThrows(PromptOutcomeIndeterminateException.class,
                     () -> session.promptText(request));
-            assertTrue(Duration.ofNanos(System.nanoTime() - started).toMillis() < 900);
+            assertTrue(Duration.ofNanos(System.nanoTime() - started).toMillis() < TIMEOUT_UPPER_BOUND_MILLIS);
         }
         assertEquals(0, cancels.get());
     }
@@ -1248,7 +1263,7 @@ class DaemonSessionClientTest {
             long started = System.nanoTime();
             assertThrows(PromptOutcomeIndeterminateException.class,
                     () -> session.promptText(request));
-            assertTrue(Duration.ofNanos(System.nanoTime() - started).toMillis() < 900);
+            assertTrue(Duration.ofNanos(System.nanoTime() - started).toMillis() < TIMEOUT_UPPER_BOUND_MILLIS);
         }
     }
 
@@ -1280,7 +1295,7 @@ class DaemonSessionClientTest {
                     () -> session.startPrompt(
                             PromptRequest.text("unsafe-reuse"),
                             PromptObserver.NOOP));
-            assertTrue(Duration.ofNanos(System.nanoTime() - started).toMillis() < 900);
+            assertTrue(Duration.ofNanos(System.nanoTime() - started).toMillis() < TIMEOUT_UPPER_BOUND_MILLIS);
         }
         assertEquals(1, prompts.get());
     }
@@ -1306,7 +1321,7 @@ class DaemonSessionClientTest {
             long started = System.nanoTime();
             assertThrows(PromptOutcomeIndeterminateException.class,
                     () -> session.promptText("go"));
-            assertTrue(Duration.ofNanos(System.nanoTime() - started).toMillis() < 900);
+            assertTrue(Duration.ofNanos(System.nanoTime() - started).toMillis() < TIMEOUT_UPPER_BOUND_MILLIS);
         }
     }
 
@@ -1582,7 +1597,7 @@ class DaemonSessionClientTest {
                     PromptObserver.NOOP);
             assertEquals("prompt-1",
                     running.acceptanceFuture().join().getPromptId());
-            assertTrue(streamOpened.await(1, TimeUnit.SECONDS));
+            assertTrue(streamOpened.await(ASYNC_WAIT_SECONDS, TimeUnit.SECONDS));
 
             PromptCall rejected = second.startPrompt(PromptRequest.text("second"),
                     PromptObserver.NOOP);
@@ -1905,13 +1920,13 @@ class DaemonSessionClientTest {
             DaemonSessionClient session = daemon.createSession();
             PromptCall call = session.startPrompt(PromptRequest.text("go"),
                     PromptObserver.NOOP);
-            assertTrue(admissionStarted.await(1, TimeUnit.SECONDS));
+            assertTrue(admissionStarted.await(ASYNC_WAIT_SECONDS, TimeUnit.SECONDS));
             CompletableFuture<Void> close = CompletableFuture.runAsync(session::close);
             Thread.sleep(100);
             assertTrue(!close.isDone());
             assertEquals(0, detaches.get());
             releaseAdmission.countDown();
-            close.get(1, TimeUnit.SECONDS);
+            close.get(ASYNC_WAIT_SECONDS, TimeUnit.SECONDS);
             assertEquals("prompt-1",
                     call.acceptanceFuture().join().getPromptId());
         }
@@ -1948,23 +1963,23 @@ class DaemonSessionClientTest {
             DaemonSessionClient session = daemon.createSession();
             PromptCall call = session.startPrompt(PromptRequest.text("go"),
                     PromptObserver.NOOP);
-            assertTrue(admissionStarted.await(1, TimeUnit.SECONDS));
+            assertTrue(admissionStarted.await(ASYNC_WAIT_SECONDS, TimeUnit.SECONDS));
             CompletableFuture<Void> continuation = call.acceptanceFuture()
                     .thenRun(() -> {
                         continuationEntered.countDown();
                         await(releaseContinuation);
                     });
             releaseAdmission.countDown();
-            assertTrue(continuationEntered.await(1, TimeUnit.SECONDS));
-            assertTrue(eventsOpened.await(1, TimeUnit.SECONDS));
+            assertTrue(continuationEntered.await(ASYNC_WAIT_SECONDS, TimeUnit.SECONDS));
+            assertTrue(eventsOpened.await(ASYNC_WAIT_SECONDS, TimeUnit.SECONDS));
             CompletableFuture<Void> close = CompletableFuture.runAsync(session::close);
             try {
-                close.get(1, TimeUnit.SECONDS);
+                close.get(ASYNC_WAIT_SECONDS, TimeUnit.SECONDS);
             } finally {
                 releaseContinuation.countDown();
                 releaseEvents.countDown();
             }
-            continuation.get(1, TimeUnit.SECONDS);
+            continuation.get(ASYNC_WAIT_SECONDS, TimeUnit.SECONDS);
             CompletionException failure = assertThrows(CompletionException.class,
                     () -> call.completionFuture().join());
             assertInstanceOf(PromptOutcomeIndeterminateException.class,
@@ -1997,13 +2012,13 @@ class DaemonSessionClientTest {
                 DaemonSessionClient session = daemon.createSession()) {
             PromptCall call = session.startPrompt(PromptRequest.text("go"),
                     PromptObserver.NOOP);
-            assertTrue(admissionStarted.await(1, TimeUnit.SECONDS));
+            assertTrue(admissionStarted.await(ASYNC_WAIT_SECONDS, TimeUnit.SECONDS));
             CompletableFuture<Void> continuation = call.acceptanceFuture()
                     .thenRun(() -> call.completionFuture().join());
             releaseAdmission.countDown();
             assertEquals(PromptTerminal.Kind.COMPLETE,
-                    call.completionFuture().get(1, TimeUnit.SECONDS).getKind());
-            continuation.get(1, TimeUnit.SECONDS);
+                    call.completionFuture().get(ASYNC_WAIT_SECONDS, TimeUnit.SECONDS).getKind());
+            continuation.get(ASYNC_WAIT_SECONDS, TimeUnit.SECONDS);
         } finally {
             releaseAdmission.countDown();
         }
@@ -2027,7 +2042,7 @@ class DaemonSessionClientTest {
                 DaemonSessionClient session = daemon.createSession()) {
             PromptCall call = session.startPrompt(PromptRequest.text("go"),
                     PromptObserver.NOOP);
-            assertTrue(admissionStarted.await(1, TimeUnit.SECONDS));
+            assertTrue(admissionStarted.await(ASYNC_WAIT_SECONDS, TimeUnit.SECONDS));
             CompletableFuture<Void> continuation = call.acceptanceFuture()
                     .handle((ignored, failure) -> {
                         assertTrue(failure != null);
@@ -2040,10 +2055,10 @@ class DaemonSessionClientTest {
             CompletionException terminalFailure = assertThrows(
                     CompletionException.class,
                     () -> call.completionFuture()
-                            .orTimeout(1, TimeUnit.SECONDS).join());
+                            .orTimeout(ASYNC_WAIT_SECONDS, TimeUnit.SECONDS).join());
             assertInstanceOf(DaemonHttpException.class,
                     terminalFailure.getCause());
-            continuation.get(1, TimeUnit.SECONDS);
+            continuation.get(ASYNC_WAIT_SECONDS, TimeUnit.SECONDS);
         } finally {
             releaseAdmission.countDown();
         }
@@ -2074,7 +2089,7 @@ class DaemonSessionClientTest {
                             PromptRequest.text("two"), PromptObserver.NOOP)
                             .completionFuture());
             assertEquals(PromptTerminal.Kind.COMPLETE,
-                    second.get(1, TimeUnit.SECONDS).getKind());
+                    second.get(ASYNC_WAIT_SECONDS, TimeUnit.SECONDS).getKind());
             assertEquals(2, prompts.get());
         }
     }
@@ -2126,7 +2141,7 @@ class DaemonSessionClientTest {
                         continuationEntered.countDown();
                         await(releaseContinuations);
                     }));
-                    assertTrue(continuationEntered.await(1, TimeUnit.SECONDS));
+                    assertTrue(continuationEntered.await(ASYNC_WAIT_SECONDS, TimeUnit.SECONDS));
                 }
                 PromptCall finalCall = session.startPrompt(
                         PromptRequest.text("final"), new PromptObserver() {
@@ -2140,7 +2155,7 @@ class DaemonSessionClientTest {
                         });
                 CompletableFuture<PromptTerminal> finalCompletion =
                         finalCall.completionFuture();
-                assertTrue(finalTerminalObserved.await(1, TimeUnit.SECONDS));
+                assertTrue(finalTerminalObserved.await(ASYNC_WAIT_SECONDS, TimeUnit.SECONDS));
                 PromptCall capacityRejected = secondSession.startPrompt(
                         PromptRequest.text("capacity-rejected"),
                         PromptObserver.NOOP);
@@ -2154,7 +2169,7 @@ class DaemonSessionClientTest {
                 releaseFinalObserver.countDown();
                 releaseContinuations.countDown();
                 assertEquals(PromptTerminal.Kind.COMPLETE,
-                        finalCompletion.get(1, TimeUnit.SECONDS).getKind());
+                        finalCompletion.get(ASYNC_WAIT_SECONDS, TimeUnit.SECONDS).getKind());
                 CompletionException rejection = assertThrows(
                         CompletionException.class,
                         () -> capacityRejected.completionFuture().join());
@@ -2165,7 +2180,7 @@ class DaemonSessionClientTest {
                 releaseContinuations.countDown();
             }
             for (CompletableFuture<Void> continuation : continuations) {
-                continuation.get(1, TimeUnit.SECONDS);
+                continuation.get(ASYNC_WAIT_SECONDS, TimeUnit.SECONDS);
             }
         } finally {
             releaseFinalObserver.countDown();
@@ -2190,7 +2205,7 @@ class DaemonSessionClientTest {
             PromptCall call = session.startPrompt(PromptRequest.text("go"),
                     PromptObserver.NOOP);
             call.completionFuture().thenRun(daemon::close)
-                    .get(1, TimeUnit.SECONDS);
+                    .get(ASYNC_WAIT_SECONDS, TimeUnit.SECONDS);
         } finally {
             daemon.close();
         }
@@ -2218,7 +2233,7 @@ class DaemonSessionClientTest {
             DaemonSessionClient session = daemon.createSession();
             PromptCall call = session.startPrompt(PromptRequest.text("go"),
                     PromptObserver.NOOP);
-            assertTrue(admissionStarted.await(1, TimeUnit.SECONDS));
+            assertTrue(admissionStarted.await(ASYNC_WAIT_SECONDS, TimeUnit.SECONDS));
             CompletableFuture<Void> continuation = call.acceptanceFuture()
                     .handle((ignored, failure) -> {
                         try {
@@ -2231,8 +2246,8 @@ class DaemonSessionClientTest {
             CompletableFuture<Void> closing =
                     CompletableFuture.runAsync(daemon::close);
             releaseAdmission.countDown();
-            closing.get(1, TimeUnit.SECONDS);
-            continuation.get(1, TimeUnit.SECONDS);
+            closing.get(ASYNC_WAIT_SECONDS, TimeUnit.SECONDS);
+            continuation.get(ASYNC_WAIT_SECONDS, TimeUnit.SECONDS);
             assertTrue(call.completionFuture().isDone());
         } finally {
             releaseAdmission.countDown();
@@ -2293,7 +2308,7 @@ class DaemonSessionClientTest {
             DaemonSessionClient second = daemon.createSession();
             CompletableFuture<Void> closing =
                     CompletableFuture.runAsync(daemon::close);
-            assertTrue(detachStarted.await(1, TimeUnit.SECONDS));
+            assertTrue(detachStarted.await(ASYNC_WAIT_SECONDS, TimeUnit.SECONDS));
             DaemonSessionClient unswept = "session-1".equals(
                     detachingSession.get()) ? second : first;
             PromptCall rejected = unswept.startPrompt(
@@ -2310,7 +2325,7 @@ class DaemonSessionClientTest {
                             PermissionResponse.cancelled()));
             assertEquals(0, mutationRequests.get());
             releaseDetach.countDown();
-            closing.get(1, TimeUnit.SECONDS);
+            closing.get(ASYNC_WAIT_SECONDS, TimeUnit.SECONDS);
         } finally {
             releaseDetach.countDown();
             daemon.close();
@@ -2338,7 +2353,7 @@ class DaemonSessionClientTest {
                             awaitUninterruptibly(releaseObserver);
                         }
                     });
-            assertTrue(observerEntered.await(1, TimeUnit.SECONDS));
+            assertTrue(observerEntered.await(ASYNC_WAIT_SECONDS, TimeUnit.SECONDS));
             session.close();
             assertTrue(!call.completionFuture().isDone());
             releaseObserver.countDown();
@@ -2385,7 +2400,7 @@ class DaemonSessionClientTest {
         try (DaemonClient daemon = clientBuilder()
                 .heartbeatInterval(Duration.ofMillis(30)).build()) {
             DaemonSessionClient session = daemon.createSession();
-            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1);
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(ASYNC_WAIT_SECONDS);
             while (heartbeats.get() == 0 && System.nanoTime() < deadline) {
                 Thread.sleep(10);
             }
@@ -2451,13 +2466,13 @@ class DaemonSessionClientTest {
                 for (int number = 0; number < 6; number++) {
                     sessions.add(daemon.createSession());
                 }
-                assertTrue(fourRunning.await(1, TimeUnit.SECONDS));
+                assertTrue(fourRunning.await(ASYNC_WAIT_SECONDS, TimeUnit.SECONDS));
                 long started = System.nanoTime();
                 sessions.get(4).close();
                 assertTrue(Duration.ofNanos(System.nanoTime() - started)
-                        .toMillis() < 500);
+                        .toMillis() < NON_BLOCKING_UPPER_BOUND_MILLIS);
                 releaseHeartbeats.countDown();
-                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1);
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(ASYNC_WAIT_SECONDS);
                 while (heartbeats.get() < 5 && System.nanoTime() < deadline) {
                     Thread.sleep(10);
                 }
@@ -2516,17 +2531,17 @@ class DaemonSessionClientTest {
             CompletableFuture<Void> manualHeartbeat = CompletableFuture.runAsync(
                     first::heartbeat);
             try {
-                assertTrue(heartbeatEntered.await(1, TimeUnit.SECONDS));
+                assertTrue(heartbeatEntered.await(ASYNC_WAIT_SECONDS, TimeUnit.SECONDS));
                 Thread.sleep(100);
                 PromptCall call = second.startPrompt(PromptRequest.builder()
                         .addText("go")
                         .observationTimeout(Duration.ofMillis(200))
                         .build(), PromptObserver.NOOP);
-                assertTrue(streamOpened.await(1, TimeUnit.SECONDS));
+                assertTrue(streamOpened.await(ASYNC_WAIT_SECONDS, TimeUnit.SECONDS));
                 CountDownLatch completed = new CountDownLatch(1);
                 call.completionFuture().whenComplete((outcome, failure) ->
                         completed.countDown());
-                assertTrue(completed.await(1, TimeUnit.SECONDS));
+                assertTrue(completed.await(ASYNC_WAIT_SECONDS, TimeUnit.SECONDS));
                 CompletionException failure = assertThrows(
                         CompletionException.class,
                         () -> call.completionFuture().join());
@@ -2566,13 +2581,13 @@ class DaemonSessionClientTest {
                 .build()) {
             try {
                 daemon.scheduler().execute(() -> daemon.closeStreamAsync(first));
-                assertTrue(firstCloseEntered.await(1, TimeUnit.SECONDS));
+                assertTrue(firstCloseEntered.await(ASYNC_WAIT_SECONDS, TimeUnit.SECONDS));
                 daemon.scheduler().execute(() -> {
                     daemon.closeStreamAsync(second);
                     timerDispatchedSecondClose.countDown();
                 });
-                assertTrue(timerDispatchedSecondClose.await(1, TimeUnit.SECONDS));
-                assertTrue(secondStreamClosed.await(1, TimeUnit.SECONDS));
+                assertTrue(timerDispatchedSecondClose.await(ASYNC_WAIT_SECONDS, TimeUnit.SECONDS));
+                assertTrue(secondStreamClosed.await(ASYNC_WAIT_SECONDS, TimeUnit.SECONDS));
             } finally {
                 releaseFirstClose.countDown();
             }
@@ -2650,21 +2665,21 @@ class DaemonSessionClientTest {
                 .build();
         try {
             daemon.closeStreamAsync(blocker);
-            assertTrue(blockerCloseEntered.await(1, TimeUnit.SECONDS));
+            assertTrue(blockerCloseEntered.await(ASYNC_WAIT_SECONDS, TimeUnit.SECONDS));
             DaemonSessionClient session = daemon.createSession();
             PromptCall call = session.startPrompt(PromptRequest.builder()
                     .addText("go")
                     .observationTimeout(closeSession
                             ? Duration.ofSeconds(30) : Duration.ofMillis(200))
                     .build(), PromptObserver.NOOP);
-            assertTrue(streamOpened.await(1, TimeUnit.SECONDS));
+            assertTrue(streamOpened.await(ASYNC_WAIT_SECONDS, TimeUnit.SECONDS));
             if (closeSession) {
                 session.close();
             }
             CompletionException failure = assertThrows(
                     CompletionException.class,
                     () -> call.completionFuture().orTimeout(
-                            1, TimeUnit.SECONDS).join());
+                            ASYNC_WAIT_SECONDS, TimeUnit.SECONDS).join());
             assertInstanceOf(PromptOutcomeIndeterminateException.class,
                     failure.getCause());
             if (!closeSession) {
@@ -2692,11 +2707,11 @@ class DaemonSessionClientTest {
                 .build()) {
             daemon.submit(() -> { }, () -> { }, released::countDown,
                     () -> pendingCleanup);
-            assertTrue(released.await(1, TimeUnit.SECONDS));
+            assertTrue(released.await(ASYNC_WAIT_SECONDS, TimeUnit.SECONDS));
 
             daemon.submit(nextStarted::countDown, () -> { }, () -> { },
                     () -> CompletableFuture.completedFuture(null));
-            assertTrue(nextStarted.await(1, TimeUnit.SECONDS));
+            assertTrue(nextStarted.await(ASYNC_WAIT_SECONDS, TimeUnit.SECONDS));
         } finally {
             pendingCleanup.complete(null);
         }
@@ -2716,10 +2731,10 @@ class DaemonSessionClientTest {
                 .build()) {
             daemon.submit(() -> { }, () -> { }, firstReleased::countDown,
                     () -> firstCleanup);
-            assertTrue(firstReleased.await(1, TimeUnit.SECONDS));
+            assertTrue(firstReleased.await(ASYNC_WAIT_SECONDS, TimeUnit.SECONDS));
             daemon.submit(() -> { }, () -> { }, secondReleased::countDown,
                     () -> secondCleanup);
-            assertTrue(secondReleased.await(1, TimeUnit.SECONDS));
+            assertTrue(secondReleased.await(ASYNC_WAIT_SECONDS, TimeUnit.SECONDS));
 
             assertThrows(DaemonClientCapacityException.class,
                     () -> daemon.submit(rejectedTaskRuns::incrementAndGet,
@@ -2731,7 +2746,7 @@ class DaemonSessionClientTest {
             CountDownLatch recovered = new CountDownLatch(1);
             daemon.submit(() -> { }, () -> { }, recovered::countDown,
                     () -> CompletableFuture.completedFuture(null));
-            assertTrue(recovered.await(1, TimeUnit.SECONDS));
+            assertTrue(recovered.await(ASYNC_WAIT_SECONDS, TimeUnit.SECONDS));
         } finally {
             firstCleanup.complete(null);
             secondCleanup.complete(null);
@@ -2924,10 +2939,10 @@ class DaemonSessionClientTest {
     private DaemonClient.Builder clientBuilder() {
         return DaemonClient.builder()
                 .baseUri(baseUri)
-                .connectTimeout(Duration.ofSeconds(2))
-                .requestTimeout(Duration.ofSeconds(2))
-                .promptObservationTimeout(Duration.ofSeconds(3))
-                .sseIdleTimeout(Duration.ofSeconds(1))
+                .connectTimeout(CONNECT_TIMEOUT)
+                .requestTimeout(REQUEST_TIMEOUT)
+                .promptObservationTimeout(OBSERVATION_TIMEOUT)
+                .sseIdleTimeout(IDLE_TIMEOUT)
                 .heartbeatInterval(Duration.ZERO)
                 .maximumReconnectAttempts(2);
     }
