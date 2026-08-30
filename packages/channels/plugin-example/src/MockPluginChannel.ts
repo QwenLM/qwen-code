@@ -5,6 +5,7 @@ import type {
   Envelope,
   ChannelAgentBridge,
   ChannelOutputSegmentContext,
+  ChannelOutputSegmentEndReason,
 } from '@qwen-code/channel-base';
 import WebSocket from 'ws';
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -22,6 +23,7 @@ export class MockPluginChannel extends ChannelBase {
   private ws: WebSocket | null = null;
   private serverWsUrl: string;
   private inboundMessage = new AsyncLocalStorage<{ messageId?: string }>();
+  private attributedSegments = new Set<string>();
 
   constructor(
     name: string,
@@ -90,14 +92,36 @@ export class MockPluginChannel extends ChannelBase {
   ): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
 
+    let text = chunk;
+    if (
+      segment?.sourceLabel &&
+      !this.attributedSegments.has(segment.segmentId)
+    ) {
+      const attributed = this.formatAttributedText(chunk, segment.sourceLabel);
+      if (attributed !== chunk) {
+        text = attributed;
+        this.attributedSegments.add(segment.segmentId);
+      }
+    }
+
     const msg: ChunkMessage = {
       type: 'chunk',
       messageId:
         segment?.messageId ?? this.getResponseMessageId(sessionId) ?? 'unknown',
       chatId,
-      text: chunk,
+      text,
     };
     this.ws.send(JSON.stringify(msg));
+  }
+
+  protected override onOutputSegmentEnd(
+    chatId: string,
+    sessionId: string,
+    segment: ChannelOutputSegmentContext,
+    reason: ChannelOutputSegmentEndReason,
+  ): void | Promise<void> {
+    this.attributedSegments.delete(segment.segmentId);
+    return super.onOutputSegmentEnd(chatId, sessionId, segment, reason);
   }
 
   protected override async onResponseComplete(
@@ -106,11 +130,19 @@ export class MockPluginChannel extends ChannelBase {
     sessionId: string,
     segment?: ChannelOutputSegmentContext,
   ): Promise<void> {
-    this.sendOutbound(
-      chatId,
-      fullText,
-      segment?.messageId ?? this.getResponseMessageId(sessionId),
-    );
+    try {
+      this.sendOutbound(
+        chatId,
+        segment?.sourceLabel
+          ? this.formatAttributedText(fullText, segment.sourceLabel)
+          : fullText,
+        segment?.messageId ?? this.getResponseMessageId(sessionId),
+      );
+    } finally {
+      if (segment?.sourceLabel) {
+        this.attributedSegments.delete(segment.segmentId);
+      }
+    }
   }
 
   async sendMessage(chatId: string, text: string): Promise<void> {
