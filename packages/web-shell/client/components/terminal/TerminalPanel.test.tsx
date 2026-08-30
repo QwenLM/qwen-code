@@ -33,7 +33,7 @@ vi.mock('@xterm/addon-fit', () => ({
 }));
 vi.mock('../../themeContext', () => ({ useTheme: () => 'light' }));
 vi.mock('../../config/daemon', () => ({ getDaemonToken: () => '' }));
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useWorkspace: () => workspace,
 }));
 vi.mock('../../i18n', () => ({

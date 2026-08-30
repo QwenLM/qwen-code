@@ -7354,6 +7354,32 @@ describe('SessionService', () => {
       });
     });
 
+    it('rehydrates source metadata appended after the head scan window', async () => {
+      const sessionId = '78777777-7777-4777-8777-777777777777';
+      const lines: Array<Record<string, unknown>> = [
+        userLine(sessionId, 'hello'),
+      ];
+      for (let i = 0; i < 11; i++) {
+        lines.push({
+          ...userLine(sessionId, `filler-${i}`),
+          uuid: `filler-${i}`,
+        });
+      }
+      lines.push(sessionSourceLine(sessionId));
+      writeSession(sessionId, lines);
+
+      const result = await service.listSessions();
+
+      expect(findItem(result.items, sessionId)).toMatchObject({
+        sourceType: 'scheduled_task',
+        sourceId: 'task-123',
+      });
+      expect(await service.readCreationMetadata(sessionId)).toMatchObject({
+        sourceType: 'scheduled_task',
+        sourceId: 'task-123',
+      });
+    });
+
     it('reads one exact persisted summary without paging the catalog', async () => {
       const sessionId = '79777777-7777-4777-8777-777777777777';
       writeSession(sessionId, [
