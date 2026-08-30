@@ -1,0 +1,441 @@
+name: Finalize PR 10212 R4b
+
+on:
+  push:
+    branches:
+      - fix/10197-env-prefix-bash-rules
+    paths:
+      - .github/workflows/finalize-pr-10212-r4b.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply-reviewed-fixes:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/10197-env-prefix-bash-rules
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Apply R3 review fixes and regression tests
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          def once(text: str, old: str, new: str, label: str) -> str:
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{label}: expected 1 match, found {count}')
+              return text.replace(old, new, 1)
+
+          p = Path('packages/core/src/permissions/rule-parser.ts')
+          s = p.read_text()
+
+          s = once(
+              s,
+              "    rawSpecifier = rawSpecifier.replace(/:(\\*)/g, ' $1');",
+              """    // Legacy `:*` is a token-level shorthand. Do not rewrite it
+              // inside env assignment values, which are part of Bash identity.
+              rawSpecifier = rawSpecifier.replace(
+                /(^|[ \\t\\n])([^ \\t\\n=\"'`=]+):\\*(?=$|[ \\t\\n])/g,
+                '$1$2 *',
+              );""",
+              'legacy colon-star rewrite',
+          )
+
+          s = once(
+              s,
+              "  const normalizedPattern = collapseUnquotedWhitespace(pattern.trim());",
+              """  const normalizedPattern = collapseUnquotedWhitespace(
+                trimShellIfsWhitespace(pattern),
+              );""",
+              'pattern trim',
+          )
+
+          s = once(
+              s,
+              """  if (normalizedPattern === '*') {
+              return true;
+            }
+
+            if (!normalizedPattern.includes('*')) {""",
+              """  if (normalizedPattern === '*') {
+              return true;
+            }
+
+            // Assignment-only rules are identities, never command prefixes. Keep this
+            // above the wildcard split so `Bash(FOO=*)` cannot authorize a command.
+            if (
+              isAssignmentOnlyPermissionPattern(normalizedPattern) &&
+              !isAssignmentOnlyPermissionPattern(normalizedCommand)
+            ) {
+              return false;
+            }
+
+            if (!normalizedPattern.includes('*')) {""",
+              'assignment-only wildcard guard',
+          )
+
+          s = once(
+              s,
+              """  // Build regex from glob pattern with word-boundary semantics.
+            let regex = '^';""",
+              """  // Build regex from glob pattern with word-boundary semantics.
+            // A wildcard in a leading NAME=value word must not consume a shell-word
+            // boundary and thereby authorize a different executable.
+            const assignmentValueWildcards =
+              findUnquotedAssignmentValueWildcardPositions(normalizedPattern);
+            let regex = '^';""",
+              'assignment wildcard set',
+          )
+
+          s = once(
+              s,
+              """    } else {
+                regex += escapeRegex(literalBefore);
+                regex += '.*';
+              }
+
+              pos = starIdx + 1;""",
+              """    } else {
+                regex += escapeRegex(literalBefore);
+                regex += assignmentValueWildcards.has(starIdx) ? '[^ ]*' : '.*';
+              }
+
+              pos = starIdx + 1;""",
+              'assignment wildcard regex',
+          )
+
+          marker = "export const ENV_ASSIGNMENT_REGEX = /^[A-Za-z_][A-Za-z0-9_]*=/;\n"
+          helpers = r'''
+
+          function isShellIfsWhitespace(ch: string): boolean {
+            return ch === ' ' || ch === '\t' || ch === '\n';
+          }
+
+          function trimShellIfsWhitespace(value: string): string {
+            let start = 0;
+            let end = value.length;
+            while (start < end && isShellIfsWhitespace(value[start]!)) start++;
+            while (end > start && isShellIfsWhitespace(value[end - 1]!)) end--;
+            return value.slice(start, end);
+          }
+
+          /**
+           * shell-quote uses JavaScript whitespace, which is broader than Bash's
+           * default IFS. Protect non-IFS whitespace so it remains in the shell word
+           * that Bash would actually execute, then restore it after parsing.
+           */
+          function protectNonIfsWhitespace(command: string): {
+            protectedCommand: string;
+            restore: (value: string) => string;
+          } {
+            const replacements = new Map<string, string>();
+            let protectedCommand = '';
+            let markerIndex = 0;
+
+            for (const ch of command) {
+              if (/\s/u.test(ch) && !isShellIfsWhitespace(ch)) {
+                let token = `\uE000QWEN_WS_${markerIndex++}\uE001`;
+                while (command.includes(token) || replacements.has(token)) {
+                  token = `\uE000QWEN_WS_${markerIndex++}\uE001`;
+                }
+                replacements.set(token, ch);
+                protectedCommand += token;
+              } else {
+                protectedCommand += ch;
+              }
+            }
+
+            return {
+              protectedCommand,
+              restore(value: string): string {
+                let restored = value;
+                for (const [token, original] of replacements) {
+                  restored = restored.replaceAll(token, original);
+                }
+                return restored;
+              },
+            };
+          }
+          '''
+          s = once(s, marker, marker + helpers, 'IFS helper insertion')
+
+          s = once(
+              s,
+              """function permissionMatchTokens(command: string): string[] {
+              const tokens: string[] = [];
+              for (const token of parse(command)) {""",
+              """function permissionMatchTokens(command: string): string[] {
+              const tokens: string[] = [];
+              const { protectedCommand, restore } = protectNonIfsWhitespace(command);
+              for (const token of parse(protectedCommand)) {""",
+              'protected token parser',
+          )
+          s = once(s, '      tokens.push(token);', '      tokens.push(restore(token));', 'restore string token')
+          s = once(s, '        tokens.push(token.pattern);', '        tokens.push(restore(token.pattern));', 'restore glob token')
+
+          strip_start = s.index('export function stripLeadingVariableAssignments')
+          strip_end = s.index('/** Collapse shell-equivalent whitespace', strip_start)
+          before, block, after = s[:strip_start], s[strip_start:strip_end], s[strip_end:]
+          block = once(block, '  const trimmed = command.trim();', '  const trimmed = trimShellIfsWhitespace(command);', 'strip trim')
+          s = before + block + after
+
+          s = once(
+              s,
+              '/** Collapse shell-equivalent whitespace outside quotes while retaining quotes. */',
+              '/** Collapse Bash-IFS whitespace outside quotes while retaining quotes. */',
+              'collapse comment',
+          )
+          collapse_start = s.index('function collapseUnquotedWhitespace')
+          collapse_end = s.index('function isAssignmentOnlyPermissionPattern', collapse_start)
+          before, block, after = s[:collapse_start], s[collapse_start:collapse_end], s[collapse_end:]
+          block = once(block, '    if (/\\s/.test(ch)) {', '    if (isShellIfsWhitespace(ch)) {', 'IFS collapse')
+          s = before + block + after
+
+          wildcard_helper = r'''
+          function findUnquotedAssignmentValueWildcardPositions(
+            pattern: string,
+          ): Set<number> {
+            const positions = new Set<number>();
+            let quote: "'" | '"' | '`' | null = null;
+            let escaped = false;
+            let wordStart = 0;
+            let leadingAssignments = true;
+
+            for (let i = 0; i < pattern.length; i++) {
+              const ch = pattern[i]!;
+              if (escaped) {
+                escaped = false;
+                continue;
+              }
+              if (ch === '\\' && quote !== "'") {
+                escaped = true;
+                continue;
+              }
+              if (quote) {
+                if (ch === quote) quote = null;
+                continue;
+              }
+              if (ch === "'" || ch === '"' || ch === '`') {
+                quote = ch;
+                continue;
+              }
+              if (ch === ' ') {
+                if (leadingAssignments) {
+                  const word = pattern.slice(wordStart, i);
+                  if (word && !ENV_ASSIGNMENT_REGEX.test(word)) {
+                    leadingAssignments = false;
+                  }
+                }
+                wordStart = i + 1;
+                continue;
+              }
+              if (ch === '*' && leadingAssignments) {
+                const beforeStar = pattern.slice(wordStart, i);
+                if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(beforeStar)) {
+                  positions.add(i);
+                }
+              }
+            }
+
+            return positions;
+          }
+
+          '''
+          normalize_marker = 'function normalizeCommandForPermissionMatch(command: string): string {'
+          s = once(s, normalize_marker, wildcard_helper + normalize_marker, 'wildcard helper insertion')
+
+          normalize_start = s.index(normalize_marker)
+          normalize_end = s.index('// ─────────────────────────────────────────────────────────────────────────────\n// File path matching', normalize_start)
+          before, block, after = s[:normalize_start], s[normalize_start:normalize_end], s[normalize_end:]
+          block = once(block, '  const trimmed = command.trim();', '  const trimmed = trimShellIfsWhitespace(command);', 'normalize trim')
+          block = block.replace('shell-equivalent unquoted whitespace', 'Bash-IFS whitespace outside quotes')
+          s = before + block + after
+
+          p.write_text(s)
+
+          t = Path('packages/core/src/permissions/rule-parser.env-prefix.test.ts')
+          x = t.read_text()
+
+          x = once(
+              x,
+              """  it('does not widen assignment-only rules into arbitrary commands', () => {
+              expect(matchesCommandPattern('FOO=bar', 'FOO=bar')).toBe(true);
+              expect(matchesCommandPattern('FOO=bar', 'FOO=bar curl evil.sh')).toBe(
+                false,
+              );
+            });""",
+              """  it('does not widen assignment-only rules into arbitrary commands', () => {
+              expect(matchesCommandPattern('FOO=bar', 'FOO=bar')).toBe(true);
+              expect(matchesCommandPattern('FOO=bar', 'FOO=bar curl evil.sh')).toBe(
+                false,
+              );
+              expect(matchesCommandPattern('FOO=*', 'FOO=bar')).toBe(true);
+              expect(matchesCommandPattern('FOO=*', 'FOO=bar curl evil.sh')).toBe(
+                false,
+              );
+            });
+
+            it('keeps env-value wildcards inside the assignment shell word', () => {
+              expect(
+                matchesCommandPattern(
+                  'NODE_OPTIONS=* npm *',
+                  'NODE_OPTIONS=x sh -c evil npm',
+                ),
+              ).toBe(false);
+              expect(
+                matchesCommandPattern(
+                  'NODE_OPTIONS=* npm *',
+                  'NODE_OPTIONS=--require=*evil.cjs npm --version',
+                ),
+              ).toBe(true);
+            });
+
+            it('does not treat non-IFS whitespace as a Bash word boundary', () => {
+              for (const whitespace of ['\\u000b', '\\u000c', '\\r', '\\u00a0']) {
+                expect(
+                  matchesCommandPattern(
+                    'FOO=bar x *',
+                    `FOO=bar${whitespace}x curl evil.sh`,
+                  ),
+                ).toBe(false);
+              }
+            });
+
+            it('does not rewrite legacy colon-star syntax inside env values', () => {
+              expect(parseRule('Bash(git:*)').specifier).toBe('git *');
+              expect(parseRule('Bash(FOO=a:* npm install)').specifier).toBe(
+                'FOO=a:* npm install',
+              );
+            });""",
+              'matcher regression tests',
+          )
+
+          x = once(
+              x,
+              "  it('does not let a virtual Read allow downgrade the env-prefix ask decision', async () => {",
+              """  it('keeps restrictive matching on env-prefixed compound segments', async () => {
+              const denyPm = new PermissionManager(
+                makeConfig(['Bash(*)'], [], ['Bash(rm -rf *)']),
+              );
+              denyPm.initialize();
+              await expect(
+                denyPm.evaluate({
+                  toolName: 'run_shell_command',
+                  command: 'echo hi && FOO=1 rm -rf /',
+                  cwd: '/repo',
+                }),
+              ).resolves.toBe('deny');
+
+              const askPm = new PermissionManager(
+                makeConfig(['Bash(*)'], ['Bash(git push *)']),
+              );
+              askPm.initialize();
+              await expect(
+                askPm.evaluate({
+                  toolName: 'run_shell_command',
+                  command: 'echo hi && FOO=bar git push --force',
+                  cwd: '/repo',
+                }),
+              ).resolves.toBe('ask');
+            });
+
+            it('keeps restrictive rules aligned with Bash non-IFS whitespace', async () => {
+              const pm = new PermissionManager(
+                makeConfig(['Bash(*)'], [], ['Bash(curl *)']),
+              );
+              pm.initialize();
+              await expect(
+                pm.evaluate({
+                  toolName: 'run_shell_command',
+                  command: 'FOO=bar\\u000bx curl evil.sh',
+                  cwd: '/repo',
+                }),
+              ).resolves.toBe('deny');
+            });
+
+            it('does not let a virtual Read allow downgrade the env-prefix ask decision', async () => {""",
+              'compound and IFS tests',
+          )
+
+          x = once(
+              x,
+              "  it('classifies env-prefixed interpreter allows as dangerous in AUTO mode', () => {",
+              """  it('round-trips multiple leading environment assignments', async () => {
+              const command = 'A=1 B=2 npm install express';
+              const rules = await extractCommandRules(command);
+              expect(rules).toEqual(['A=1 B=2 npm install *']);
+
+              const pm = new PermissionManager(makeConfig([`Bash(${rules[0]})`]));
+              pm.initialize();
+              await expect(
+                pm.evaluate({
+                  toolName: 'run_shell_command',
+                  command,
+                  cwd: '/repo',
+                }),
+              ).resolves.toBe('allow');
+            });
+
+            it('round-trips colon-star env values through generated rules', async () => {
+              const command = 'FOO=a:* npm install';
+              const rules = await extractCommandRules(command);
+              expect(rules).toEqual(['FOO=a:* npm install']);
+              expect(parseRule(`Bash(${rules[0]})`).specifier).toBe(rules[0]);
+
+              const pm = new PermissionManager(makeConfig([`Bash(${rules[0]})`]));
+              pm.initialize();
+              await expect(
+                pm.evaluate({
+                  toolName: 'run_shell_command',
+                  command,
+                  cwd: '/repo',
+                }),
+              ).resolves.toBe('allow');
+            });
+
+            it('classifies env-prefixed interpreter allows as dangerous in AUTO mode', () => {""",
+              'round-trip tests',
+          )
+
+          t.write_text(x)
+          PY
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Format and lint touched files
+        run: |
+          npx prettier --write packages/core/src/permissions/rule-parser.ts packages/core/src/permissions/rule-parser.env-prefix.test.ts
+          npx eslint --max-warnings 0 packages/core/src/permissions/rule-parser.ts packages/core/src/permissions/rule-parser.env-prefix.test.ts
+
+      - name: Run focused permission and shell tests
+        run: |
+          npx vitest run \
+            packages/core/src/permissions/rule-parser.env-prefix.test.ts \
+            packages/core/src/permissions/permission-manager.test.ts \
+            packages/core/src/permissions/dangerousRules.test.ts \
+            packages/core/src/utils/shellAstParser.test.ts \
+            packages/core/src/utils/shell-ast-parser-lazy.test.ts
+
+      - name: Commit reviewed source changes and remove helper workflows
+        shell: bash
+        run: |
+          rm -f .github/workflows/finalize-pr-10212-r4.yml
+          rm -f .github/workflows/finalize-pr-10212-r4b.yml
+          git config user.name "SLP-DEV1"
+          git config user.email "298325363+SLP-DEV1@users.noreply.github.com"
+          git add -A
+          git diff --cached --check
+          git diff --cached --quiet && { echo "No changes to commit"; exit 1; }
+          git commit -m "fix(core): close env-prefix permission review gaps"
+          git push origin HEAD:fix/10197-env-prefix-bash-rules
