@@ -248,48 +248,70 @@ export async function activate(context: vscode.ExtensionContext) {
       DIFF_SCHEME,
       diffContentProvider,
     ),
-    (vscode.commands.registerCommand('qwen.diff.accept', (uri?: vscode.Uri) => {
-      const docUri = uri ?? vscode.window.activeTextEditor?.document.uri;
-      if (docUri && docUri.scheme === DIFF_SCHEME) {
-        diffManager.acceptDiff(docUri);
-      }
-      // If any chat surface is requesting permission, actively select allow (prefer once)
-      try {
-        for (const provider of chatProviderRegistry?.getPermissionAwareProviders() ??
-          []) {
-          if (provider?.hasPendingPermission()) {
-            provider.respondToPendingPermission('allow', {
-              fromDiffEditor: !!docUri && docUri.scheme === DIFF_SCHEME,
-              uri: docUri,
-            });
-          }
+    vscode.commands.registerCommand(
+      'qwen.diff.accept',
+      async (uri?: vscode.Uri) => {
+        const docUri = uri ?? vscode.window.activeTextEditor?.document.uri;
+        const isManagedDiff =
+          docUri?.scheme === DIFF_SCHEME && diffManager.hasDiff(docUri);
+        const permissionRequestId = isManagedDiff
+          ? diffManager.getPermissionRequestId(docUri)
+          : undefined;
+        if (docUri && isManagedDiff && !permissionRequestId) {
+          await diffManager.acceptDiff(docUri);
         }
-      } catch (err) {
-        logger.warn('[Extension] Auto-allow on diff.accept failed:', err);
-      }
-      logger.log('[Extension] Diff accepted');
-    }),
-    vscode.commands.registerCommand('qwen.diff.cancel', (uri?: vscode.Uri) => {
-      const docUri = uri ?? vscode.window.activeTextEditor?.document.uri;
-      if (docUri && docUri.scheme === DIFF_SCHEME) {
-        diffManager.cancelDiff(docUri);
-      }
-      // If any chat surface is requesting permission, actively select reject/cancel
-      try {
-        for (const provider of chatProviderRegistry?.getPermissionAwareProviders() ??
-          []) {
-          if (provider?.hasPendingPermission()) {
-            provider.respondToPendingPermission('cancel', {
-              fromDiffEditor: !!docUri && docUri.scheme === DIFF_SCHEME,
-              uri: docUri,
-            });
+        // If any chat surface is requesting permission, actively select allow (prefer once)
+        try {
+          for (const provider of chatProviderRegistry?.getPermissionAwareProviders() ??
+            []) {
+            if (!isManagedDiff) continue;
+            if (permissionRequestId) {
+              provider.respondToPendingPermission('allow', {
+                fromDiffEditor: true,
+                permissionRequestId,
+              });
+            } else if (provider?.hasPendingPermission()) {
+              provider.respondToPendingPermission('allow');
+            }
           }
+        } catch (err) {
+          logger.warn('[Extension] Auto-allow on diff.accept failed:', err);
         }
-      } catch (err) {
-        logger.warn('[Extension] Auto-reject on diff.cancel failed:', err);
-      }
-      logger.log('[Extension] Diff cancelled');
-    })),
+        logger.log('[Extension] Diff accepted');
+      },
+    ),
+    vscode.commands.registerCommand(
+      'qwen.diff.cancel',
+      async (uri?: vscode.Uri) => {
+        const docUri = uri ?? vscode.window.activeTextEditor?.document.uri;
+        const isManagedDiff =
+          docUri?.scheme === DIFF_SCHEME && diffManager.hasDiff(docUri);
+        const permissionRequestId = isManagedDiff
+          ? diffManager.getPermissionRequestId(docUri)
+          : undefined;
+        if (docUri && isManagedDiff && !permissionRequestId) {
+          await diffManager.cancelDiff(docUri);
+        }
+        // If any chat surface is requesting permission, actively select reject/cancel
+        try {
+          for (const provider of chatProviderRegistry?.getPermissionAwareProviders() ??
+            []) {
+            if (!isManagedDiff) continue;
+            if (permissionRequestId) {
+              provider.respondToPendingPermission('cancel', {
+                fromDiffEditor: true,
+                permissionRequestId,
+              });
+            } else if (provider?.hasPendingPermission()) {
+              provider.respondToPendingPermission('cancel');
+            }
+          }
+        } catch (err) {
+          logger.warn('[Extension] Auto-reject on diff.cancel failed:', err);
+        }
+        logger.log('[Extension] Diff cancelled');
+      },
+    ),
     vscode.commands.registerCommand('qwen.diff.closeAll', async () => {
       try {
         await diffManager.closeAll();

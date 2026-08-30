@@ -53,6 +53,8 @@ export interface ShowDiffOptions {
    * diffs opened while IDE mode is off).
    */
   readOnly?: boolean;
+  /** WebShell permission request represented by this native diff. */
+  permissionRequestId?: string;
 }
 
 // Information about a diff view that is currently open.
@@ -62,6 +64,7 @@ interface DiffInfo {
   newContent: string;
   leftDocUri: vscode.Uri;
   rightDocUri: vscode.Uri;
+  permissionRequestId?: string;
 }
 
 /**
@@ -118,12 +121,14 @@ export class DiffManager {
     filePath: string,
     oldContent: string,
     newContent: string,
+    permissionRequestId?: string,
   ): boolean {
     for (const diffInfo of this.diffDocuments.values()) {
       if (
         diffInfo.originalFilePath === filePath &&
         diffInfo.oldContent === oldContent &&
-        diffInfo.newContent === newContent
+        diffInfo.newContent === newContent &&
+        diffInfo.permissionRequestId === permissionRequestId
       ) {
         return true;
       }
@@ -136,10 +141,16 @@ export class DiffManager {
    * @param filePath Path to the file being diffed
    * @returns True if an existing diff view was found and focused, false otherwise
    */
-  private async focusExistingDiff(filePath: string): Promise<boolean> {
+  private async focusExistingDiff(
+    filePath: string,
+    permissionRequestId?: string,
+  ): Promise<boolean> {
     const normalizedPath = path.normalize(filePath);
     for (const [, diffInfo] of this.diffDocuments.entries()) {
-      if (diffInfo.originalFilePath === normalizedPath) {
+      if (
+        diffInfo.originalFilePath === normalizedPath &&
+        diffInfo.permissionRequestId === permissionRequestId
+      ) {
         const rightDocUri = diffInfo.rightDocUri;
         const leftDocUri = diffInfo.leftDocUri;
 
@@ -199,7 +210,14 @@ export class DiffManager {
     const key = this.makeKey(normalizedPath, oldContent, newContent);
 
     // Check if a diff view with the same content already exists
-    if (this.hasExistingDiff(normalizedPath, oldContent, newContent)) {
+    if (
+      this.hasExistingDiff(
+        normalizedPath,
+        oldContent,
+        newContent,
+        resolvedOptions?.permissionRequestId,
+      )
+    ) {
       const last = this.recentlyShown.get(key) || 0;
       const now = Date.now();
       if (now - last < DiffManager.DEDUPE_WINDOW_MS) {
@@ -210,7 +228,10 @@ export class DiffManager {
         return;
       }
       // Outside the dedupe window: softly focus the existing diff
-      await this.focusExistingDiff(normalizedPath);
+      await this.focusExistingDiff(
+        normalizedPath,
+        resolvedOptions?.permissionRequestId,
+      );
       this.recentlyShown.set(key, now);
       return;
     }
@@ -236,6 +257,7 @@ export class DiffManager {
       newContent,
       leftDocUri,
       rightDocUri,
+      permissionRequestId: resolvedOptions?.permissionRequestId,
     });
 
     const diffTitle = `${path.basename(normalizedPath)} (Before ↔ After)`;
@@ -281,11 +303,19 @@ export class DiffManager {
   /**
    * Closes an open diff view for a specific file.
    */
-  async closeDiff(filePath: string, suppressNotification = false) {
+  async closeDiff(
+    filePath: string,
+    suppressNotification = false,
+    permissionRequestId?: string,
+  ) {
     const normalizedPath = path.normalize(filePath);
     let uriToClose: vscode.Uri | undefined;
     for (const [, diffInfo] of this.diffDocuments.entries()) {
-      if (diffInfo.originalFilePath === normalizedPath) {
+      if (
+        diffInfo.originalFilePath === normalizedPath &&
+        (permissionRequestId === undefined ||
+          diffInfo.permissionRequestId === permissionRequestId)
+      ) {
         uriToClose = diffInfo.rightDocUri;
         break;
       }
@@ -336,6 +366,14 @@ export class DiffManager {
         },
       }),
     );
+  }
+
+  getPermissionRequestId(rightDocUri: vscode.Uri): string | undefined {
+    return this.diffDocuments.get(rightDocUri.toString())?.permissionRequestId;
+  }
+
+  hasDiff(rightDocUri: vscode.Uri): boolean {
+    return this.diffDocuments.has(rightDocUri.toString());
   }
 
   /**

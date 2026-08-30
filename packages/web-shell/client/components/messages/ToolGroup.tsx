@@ -1083,17 +1083,27 @@ export const ToolLine = memo(function ToolLine({
   const transcriptRenderMode = useTranscriptRenderMode();
   const subagentDetails = useSubagentDetails();
   const monitorDetails = useMonitorDetails();
+  const { hostOwnsEditDiffPreview } = useWebShellCustomization();
   const monitorDetailsAvailable = monitorDetails !== undefined;
   const mcpApp = getMcpAppDisplay(tool.rawOutput);
   const isForcedExpanded = forceExpanded || Boolean(mcpApp);
   const hasApproval = approval?.toolCallId === tool.callId;
   const isPendingEditApproval = hasApproval && isEditToolName(tool.toolName);
+  const isHostOwnedEditApproval = Boolean(
+    hostOwnsEditDiffPreview &&
+      hasApproval &&
+      approval?.hasDiffPreview &&
+      isEditToolName(approval?.toolName ?? tool.toolName),
+  );
+  const locksPendingEditApproval = hostOwnsEditDiffPreview
+    ? isHostOwnedEditApproval
+    : isPendingEditApproval;
   const [monitorDetailsUnavailable, setMonitorDetailsUnavailable] =
     useState(false);
   const [expanded, setExpanded] = useState(
     () =>
       isForcedExpanded ||
-      (!summaryOnly && shouldAutoExpand(tool) && !isPendingEditApproval),
+      (!summaryOnly && shouldAutoExpand(tool) && !locksPendingEditApproval),
   );
   const monitorDetailsRequestRef = useRef<object | null>(null);
   // Set once the user explicitly toggles this row, so auto-collapse-on-
@@ -1104,7 +1114,7 @@ export const ToolLine = memo(function ToolLine({
     () => {
       setExpanded(
         isForcedExpanded ||
-          (!summaryOnly && shouldAutoExpand(tool) && !isPendingEditApproval),
+          (!summaryOnly && shouldAutoExpand(tool) && !locksPendingEditApproval),
       );
       setMonitorDetailsUnavailable(false);
       monitorDetailsRequestRef.current = null;
@@ -1114,7 +1124,7 @@ export const ToolLine = memo(function ToolLine({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [
       isForcedExpanded,
-      isPendingEditApproval,
+      locksPendingEditApproval,
       monitorDetailsAvailable,
       summaryOnly,
       tool.callId,
@@ -1187,7 +1197,13 @@ export const ToolLine = memo(function ToolLine({
     // is the single source of interaction.
     const approvalPending = !!hasApproval;
     const panel = (
-      <SubAgentPanel tool={tool} hideHeader defaultExpanded inline />
+      <SubAgentPanel
+        tool={tool}
+        approval={hostOwnsEditDiffPreview ? approval : undefined}
+        hideHeader
+        defaultExpanded
+        inline
+      />
     );
     if (subagentDetails && !hideHeader) {
       const rowContent = (
@@ -1313,18 +1329,20 @@ export const ToolLine = memo(function ToolLine({
   const isRead = name === 'read' || name === 'read_file' || name === 'readfile';
   // Every regular tool row expands on demand. Content controls only what the
   // expanded card shows, never whether the user can open or close it —
-  // except while an edit approval is pending: the native diff editor owns
-  // that interaction, so the row stays locked closed until it resolves.
+  // except while an opted-in host owns this pending Edit's diff preview.
   // When a long description is expanded we move it out of the header into a
   // wrapped block below, so the header drops its single-line copy.
   const descExpandable = !isTodo && isDescriptionExpandable(description);
-  const expandable = !isForcedExpanded && !isPendingEditApproval;
+  const expandable = !isForcedExpanded && !locksPendingEditApproval;
   const interactive = opensMonitorDetails || expandable;
+  const toggleExpanded = () => {
+    userToggledRef.current = true;
+    setExpanded((value) => !value);
+  };
   const fallbackToMonitorInline = () => {
     setMonitorDetailsUnavailable(true);
     if (!expandable) return;
-    userToggledRef.current = true;
-    setExpanded((value) => !value);
+    toggleExpanded();
   };
   const tryOpenMonitorDetails = () => {
     if (!monitorDetails) return;
@@ -1387,8 +1405,7 @@ export const ToolLine = memo(function ToolLine({
                     tryOpenMonitorDetails();
                     return;
                   }
-                  userToggledRef.current = true;
-                  setExpanded((value) => !value);
+                  toggleExpanded();
                 }
               : undefined
           }
@@ -1401,8 +1418,7 @@ export const ToolLine = memo(function ToolLine({
                     tryOpenMonitorDetails();
                     return;
                   }
-                  userToggledRef.current = true;
-                  setExpanded((value) => !value);
+                  toggleExpanded();
                 }
               : undefined
           }

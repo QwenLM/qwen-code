@@ -30,7 +30,6 @@ import { createImagePathResolver } from '../utils/imageHandler.js';
 import { isDiscontinuedModel } from '../utils/discontinuedModel.js';
 import { type ApprovalModeValue } from '../../types/approvalModeValueTypes.js';
 import { isAuthenticationRequiredError } from '../../utils/authErrors.js';
-import { shouldResolveAgainstWorkspace } from '../../utils/file-path.js';
 import { getErrorMessage } from '../../utils/errorMessage.js';
 import {
   applyProviderInstallPlanToFile,
@@ -156,10 +155,7 @@ export class WebViewProvider {
   // a diff, auto-allow read/execute, or auto-reject on cancel).
   private pendingPermissionRequest: RequestPermissionRequest | null = null;
   private pendingPermissionResolve: ((optionId: string) => void) | null = null;
-  private webShellPermissionPending = false;
-  // Resolved original paths of the permission diffs the web shell is waiting
-  // on; diff-editor votes only count when they target one of these.
-  private webShellPermissionPendingPaths = new Set<string>();
+  private readonly webShellPermissionOwners = new Map<vscode.Webview, string>();
   // Track a pending ask user question request and its resolver
   private pendingAskUserQuestionRequest: AskUserQuestionRequest | null = null;
   private pendingAskUserQuestionResolve:
@@ -210,8 +206,11 @@ export class WebViewProvider {
     this.agentManager = new QwenAgentManager();
     this.conversationStore = new ConversationStore(context);
     this.panelManager = new PanelManager(extensionUri, () => {
-      this.webShellPermissionPending = false;
-      this.webShellPermissionPendingPaths.clear();
+      for (const webview of this.webShellPermissionOwners.keys()) {
+        if (webview !== this.attachedWebview) {
+          this.webShellPermissionOwners.delete(webview);
+        }
+      }
       // Panel dispose callback — unblock any pending ACP Promises
       if (this.pendingPermissionResolve) {
         this.pendingPermissionResolve('cancel');
@@ -949,6 +948,7 @@ export class WebViewProvider {
 
     // Clean up when the view is disposed
     webviewView.onDidDispose(() => {
+      this.webShellPermissionOwners.delete(webview);
       this.attachedWebview = null;
       // Disconnect the ACP agent process to prevent orphan processes
       this.agentManager.disconnect();
@@ -1940,24 +1940,18 @@ export class WebViewProvider {
     webview: vscode.Webview,
   ): Promise<boolean> {
     if (message.type === 'webShellPermissionState') {
-      const stateData = message.data as
-        | { pending?: unknown; paths?: unknown }
+      const data = message.data as
+        | { pending?: unknown; requestId?: unknown }
         | undefined;
-      this.webShellPermissionPending = stateData?.pending === true;
-      const rawPaths =
-        this.webShellPermissionPending && Array.isArray(stateData?.paths)
-          ? (stateData.paths as unknown[])
-          : [];
-      this.webShellPermissionPendingPaths = new Set(
-        rawPaths
-          .filter((entry): entry is string => typeof entry === 'string')
-          .map((entry) => this.resolveWebShellPermissionPath(entry)),
-      );
+      if (data?.pending === true && typeof data.requestId === 'string') {
+        this.webShellPermissionOwners.set(webview, data.requestId);
+      } else {
+        this.webShellPermissionOwners.delete(webview);
+      }
       return true;
     }
     if (message.type === 'webShellSessionChanged') {
-      this.webShellPermissionPending = false;
-      this.webShellPermissionPendingPaths.clear();
+      this.webShellPermissionOwners.delete(webview);
       const data = message.data as
         | { sessionId?: unknown; workspaceCwd?: unknown }
         | undefined;
@@ -1972,8 +1966,7 @@ export class WebViewProvider {
       return true;
     }
     if (message.type === 'webShellReady') {
-      this.webShellPermissionPending = false;
-      this.webShellPermissionPendingPaths.clear();
+      this.webShellPermissionOwners.delete(webview);
       const workspaceCwd =
         (vscode.window.activeTextEditor
           ? vscode.workspace.getWorkspaceFolder(
@@ -2387,7 +2380,9 @@ export class WebViewProvider {
    * Whether there is a pending permission decision awaiting an option.
    */
   hasPendingPermission(): boolean {
-    return this.webShellPermissionPending || !!this.pendingPermissionResolve;
+    return (
+      this.webShellPermissionOwners.size > 0 || !!this.pendingPermissionResolve
+    );
   }
 
   /** Get current ACP mode id (if known). */
@@ -2409,42 +2404,18 @@ export class WebViewProvider {
    * Simulate selecting a permission option while a request drawer is open.
    * The choice can be a concrete optionId or a shorthand intent.
    */
-  /**
-   * Resolve a path reported by the web shell the same way the showDiff
-   * command resolves it before handing it to the diff manager, so the stored
-   * value matches the qwen-diff document's fsPath.
-   */
-  private resolveWebShellPermissionPath(filePath: string): string {
-    let resolved = filePath;
-    if (shouldResolveAgainstWorkspace(filePath)) {
-      const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-      if (workspaceFolder) {
-        resolved = vscode.Uri.joinPath(workspaceFolder.uri, filePath).fsPath;
-      }
-    }
-    return path.normalize(resolved);
-  }
-
   respondToPendingPermission(
     choice: { optionId: string } | 'accept' | 'allow' | 'reject' | 'cancel',
-    context?: { fromDiffEditor?: boolean; uri?: vscode.Uri },
+    context?: { fromDiffEditor?: boolean; permissionRequestId?: string },
   ): void {
-    // Web-shell approvals may only be voted from the permission diff itself.
-    // `qwen.diff.isVisible` is also true on the user's original file while a
-    // diff is open, and other qwen-diff editors (stacked approvals, diffs
-    // left over from other sessions) may be open at the same time, so the
-    // vote only counts when the triggering document is one of the diffs the
-    // web shell is actually waiting on. Without this guard Ctrl+S (or the
-    // check/cross title buttons) anywhere else would silently approve/reject
-    // an edit the user may never have looked at.
+    // Web-shell approvals are bound to the request id stored on the managed
+    // diff. The target web shell validates that exact id again before voting,
+    // so an original file or a stale/stacked diff cannot resolve another
+    // session's approval.
     if (
-      this.webShellPermissionPending &&
       typeof choice === 'string' &&
       context?.fromDiffEditor &&
-      context.uri !== undefined &&
-      this.webShellPermissionPendingPaths.has(
-        path.normalize(context.uri.fsPath),
-      )
+      context.permissionRequestId
     ) {
       const decision =
         choice === 'accept' || choice === 'allow'
@@ -2452,14 +2423,18 @@ export class WebViewProvider {
           : choice === 'cancel' || choice === 'reject'
             ? 'reject'
             : undefined;
-      const webview = decision ? this.getActiveWebview() : undefined;
+      const webview = decision
+        ? (Array.from(this.webShellPermissionOwners).find(
+            ([, requestId]) => requestId === context.permissionRequestId,
+          )?.[0] ?? this.getActiveWebview())
+        : undefined;
       if (webview && decision) {
         void webview.postMessage({
           type: 'webShellPermissionDecision',
-          data: { decision },
+          data: { decision, requestId: context.permissionRequestId },
         });
-        return;
       }
+      return;
     }
     if (!this.pendingPermissionResolve || !this.pendingPermissionRequest) {
       return; // nothing to do

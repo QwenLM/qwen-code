@@ -479,6 +479,7 @@ describe('EmbeddedApp host wiring', () => {
         oldText: 'header\nconst value = 1;\nfooter',
         newText: 'header\nconst value = 2;\nfooter',
         source: 'web-shell',
+        requestId: 'req-write',
       },
     });
     expect(postMessagesOfType('webShellPermissionState').at(-1)).toEqual({
@@ -645,15 +646,23 @@ describe('EmbeddedApp host wiring', () => {
         await Promise.resolve();
       });
 
-      expect(container.textContent).toContain('Loading conversation…');
+      expect(
+        container.querySelector(
+          '[role="status"][aria-label="Loading conversation…"]',
+        ),
+      ).not.toBeNull();
 
-      // A retriable connection failure that never settles must not lock the
-      // panel behind the overlay forever.
+      // A retriable connection failure that never settles must not leave the
+      // header loading state active forever.
       await act(async () => {
         await vi.advanceTimersByTimeAsync(15_000);
       });
 
-      expect(container.textContent).not.toContain('Loading conversation…');
+      expect(
+        container.querySelector(
+          '[role="status"][aria-label="Loading conversation…"]',
+        ),
+      ).toBeNull();
       expect(container.textContent).toContain(
         'The conversation switch timed out. Try again.',
       );
@@ -677,13 +686,17 @@ describe('web shell permission decision messages', () => {
     return api;
   }
 
-  async function dispatchDecision(decision: string, source: Window | null) {
+  async function dispatchDecision(
+    decision: string,
+    source: Window | null,
+    requestId = 'req-1',
+  ) {
     await act(async () => {
       window.dispatchEvent(
         new MessageEvent('message', {
           data: {
             type: 'webShellPermissionDecision',
-            data: { decision },
+            data: { decision, requestId },
           },
           source,
         }),
@@ -701,7 +714,7 @@ describe('web shell permission decision messages', () => {
     // with this frame's parent as their source.
     await dispatchDecision('allow', window.parent);
 
-    expect(respondToPendingPermission).toHaveBeenCalledWith('allow');
+    expect(respondToPendingPermission).toHaveBeenCalledWith('req-1', 'allow');
   });
 
   it('ignores decisions posted by a nested iframe window', async () => {

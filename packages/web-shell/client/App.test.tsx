@@ -5157,6 +5157,7 @@ function makePendingPermissionBlock(
       label: string;
       raw: Record<string, unknown>;
     }>;
+    content?: unknown[];
   } = {},
 ): unknown {
   const toolName = overrides.toolName ?? 'run_shell_command';
@@ -5174,6 +5175,7 @@ function makePendingPermissionBlock(
         toolName,
         ...(overrides.todoPlan ? { qwenTodoApproval: overrides.todoPlan } : {}),
       },
+      ...(overrides.content ? { content: overrides.content } : {}),
       ...(isAskUser
         ? { input: { questions: [{ question: 'Pick one', options: [] }] } }
         : {}),
@@ -19122,6 +19124,7 @@ describe('App session callbacks', () => {
   it('submits allow_once, not allow_always, for a native edit approval accept', async () => {
     let shellApi: WebShellApi | null = null;
     const { rerender } = renderApp({
+      hostOwnsEditDiffPreview: true,
       shellRef: (api) => {
         shellApi = api;
       },
@@ -19137,6 +19140,14 @@ describe('App session callbacks', () => {
         makePendingPermissionBlock({
           toolName: 'edit',
           kind: 'edit',
+          content: [
+            {
+              type: 'diff',
+              path: 'file.ts',
+              oldText: 'before',
+              newText: 'after',
+            },
+          ],
           options: [
             {
               optionId: 'proceed_always',
@@ -19166,7 +19177,7 @@ describe('App session callbacks', () => {
 
     let resolved: boolean | undefined;
     await act(async () => {
-      resolved = await shellApi?.respondToPendingPermission('allow');
+      resolved = await shellApi?.respondToPendingPermission('req-1', 'allow');
       await Promise.resolve();
     });
     await flush();

@@ -173,7 +173,7 @@ describe('registerNewCommands', () => {
       '/workspace/src/app.ts',
       'old',
       'new',
-      { readOnly: false },
+      { readOnly: false, permissionRequestId: undefined },
     );
   });
 
@@ -197,7 +197,11 @@ describe('registerNewCommands', () => {
       { fsPath: '/workspace' },
       'src/foo.ts',
     );
-    expect(closeDiff).toHaveBeenCalledWith('/workspace/src/foo.ts', true);
+    expect(closeDiff).toHaveBeenCalledWith(
+      '/workspace/src/foo.ts',
+      true,
+      undefined,
+    );
   });
 
   it('closeDiff keeps absolute paths unchanged', async () => {
@@ -217,7 +221,11 @@ describe('registerNewCommands', () => {
     await getRegisteredHandler(closeDiffCommand)('/workspace/src/foo.ts');
 
     expect(joinPath).not.toHaveBeenCalled();
-    expect(closeDiff).toHaveBeenCalledWith('/workspace/src/foo.ts', true);
+    expect(closeDiff).toHaveBeenCalledWith(
+      '/workspace/src/foo.ts',
+      true,
+      undefined,
+    );
   });
 
   it('showDiff keeps UNC paths absolute', async () => {
@@ -244,7 +252,7 @@ describe('registerNewCommands', () => {
       '\\\\server\\share\\app.ts',
       'old',
       'new',
-      { readOnly: false },
+      { readOnly: false, permissionRequestId: undefined },
     );
   });
 
@@ -272,7 +280,7 @@ describe('registerNewCommands', () => {
       '/workspace/src/app.ts',
       'old',
       'new',
-      { readOnly: true },
+      { readOnly: true, permissionRequestId: undefined },
     );
   });
 });

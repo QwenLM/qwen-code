@@ -235,6 +235,7 @@ export class FileMessageHandler extends BaseMessageHandler {
         await vscode.commands.executeCommand(
           closeDiffCommand,
           (data?.path as string) || '',
+          typeof data?.requestId === 'string' ? data.requestId : undefined,
         );
         break;
 
@@ -632,6 +633,8 @@ export class FileMessageHandler extends BaseMessageHandler {
         // daemon: the approving tool applies its own proposed content. Open
         // them read-only so hand edits cannot be silently discarded.
         readOnly: data.source === 'web-shell',
+        permissionRequestId:
+          typeof data.requestId === 'string' ? data.requestId : undefined,
       });
     } catch (error) {
       logger.error('[FileMessageHandler] Failed to open diff:', error);

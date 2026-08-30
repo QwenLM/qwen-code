@@ -2221,14 +2221,21 @@ describe('pending edit approval rows', () => {
       status: 'in_progress',
       args: { file_path: 'package.json' },
     });
-    const container = renderToolLine(tool, {
-      approval: {
-        id: 'perm-edit',
-        toolCallId: tool.callId,
-        content: [],
-        options: [],
+    const container = renderToolLine(
+      tool,
+      {
+        approval: {
+          id: 'perm-edit',
+          toolCallId: tool.callId,
+          toolName: 'WriteFile',
+          hasDiffPreview: true,
+          content: [],
+          options: [],
+        },
       },
-    });
+      {},
+      { hostOwnsEditDiffPreview: true },
+    );
 
     // The native diff editor owns the approval interaction: no auto-expand
     // and no expand affordance while the approval is outstanding.

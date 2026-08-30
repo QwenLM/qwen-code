@@ -469,7 +469,11 @@ describe('FileMessageHandler', () => {
       data: { path: 'src/foo.ts' },
     });
 
-    expect(closeDiff).toHaveBeenCalledWith('/workspace/src/foo.ts', true);
+    expect(closeDiff).toHaveBeenCalledWith(
+      '/workspace/src/foo.ts',
+      true,
+      undefined,
+    );
   });
 
   it('maps the web-shell diff source to the readOnly showDiff option', async () => {
