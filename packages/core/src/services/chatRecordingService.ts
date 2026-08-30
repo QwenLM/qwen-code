@@ -2095,7 +2095,8 @@ export class ChatRecordingService {
    * @param data.model The model name
    * @param data.tokens Token usage statistics
    * @param data.contextWindowSize Context window size of the model
-   * @param data.toolCallsMetadata Enriched tool call info for UI recovery
+   * @param data.goalContext Goal turn attributed to this model call
+   * @param data.goalTokensAlreadyAccumulated Whether Goal billing was recorded per attempt
    */
   recordAssistantTurn(data: {
     model: string;

@@ -14940,7 +14940,7 @@ describe('LlmChat', async () => {
       expect(recordedText(recordAssistantTurn, 1)).toBe('B complete');
     });
 
-    it('rolls back recovery text emitted before a provider error', async () => {
+    it('persists recovery text emitted before a provider error', async () => {
       const recordAssistantTurn = vi.fn();
       const recordingChat = chatWithRecorder(recordAssistantTurn);
       const streams = [
@@ -14964,9 +14964,9 @@ describe('LlmChat', async () => {
         // Consume through the synthetic STOP emitted after the error.
       }
 
-      expect(recordingChat.getLastModelMessageText()).toBe('Hello');
+      expect(recordingChat.getLastModelMessageText()).toBe('Hello visible');
       expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
-      expect(recordedText(recordAssistantTurn)).toBe('Hello');
+      expect(recordedText(recordAssistantTurn)).toBe('Hello visible');
     });
 
     it('bounds an escalated STOP drain when provider EOF never arrives', async () => {
@@ -15066,6 +15066,39 @@ describe('LlmChat', async () => {
       expect(recordAssistantTurn.mock.calls[0]![0].tokens).toEqual(
         visibleUsage,
       );
+    });
+
+    it('persists visible escalated output when the provider fails', async () => {
+      const recordAssistantTurn = vi.fn();
+      const recordingChat = chatWithRecorder(recordAssistantTurn);
+      const streams = [
+        makeStream([makeChunk([{ text: 'discarded' }], 'MAX_TOKENS')]),
+        (async function* () {
+          yield makeChunk([{ text: 'visible escalation' }]);
+          throw new Error('provider disconnected');
+        })(),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await recordingChat.sendMessageStream(
+        'gemini-pro',
+        { message: 'essay' },
+        'escalated-provider-error-visible-output',
+      );
+      await expect(async () => {
+        for await (const _event of stream) {
+          // Consume until the provider error propagates.
+        }
+      }).rejects.toThrow('provider disconnected');
+
+      expect(recordingChat.getLastModelMessageText()).toBe(
+        'visible escalation',
+      );
+      expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+      expect(recordedText(recordAssistantTurn)).toBe('visible escalation');
     });
 
     it('escalates an empty MAX_TOKENS response instead of retrying it as an empty stream', async () => {
@@ -15535,6 +15568,53 @@ describe('LlmChat', async () => {
           { role: 'user', parts: [{ text: 'write a long essay' }] },
           { role: 'model', parts: [{ text: 'Hello world' }] },
         ]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('retries a metadata-only recovery attempt with no visible output', async () => {
+      vi.useFakeTimers();
+      try {
+        const recordAssistantTurn = vi.fn();
+        const recordingChat = chatWithRecorder(recordAssistantTurn);
+        const streams = [
+          makeStream([makeChunk([{ text: 'Hello' }], 'MAX_TOKENS')]),
+          (async function* () {
+            yield {
+              candidates: [],
+              usageMetadata: {
+                promptTokenCount: 10,
+                totalTokenCount: 10,
+              },
+            } as unknown as GenerateContentResponse;
+          })(),
+          makeStream([makeChunk([{ text: ' ending.' }], 'STOP')]),
+        ];
+        let callIndex = 0;
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockImplementation(async () => streams[callIndex++]!);
+
+        const stream = await recordingChat.sendMessageStream(
+          'gemini-3-pro',
+          { message: 'write a long essay' },
+          'prompt-metadata-only-recovery-retry',
+        );
+        const iterator = stream[Symbol.asyncIterator]();
+        for (;;) {
+          const next = iterator.next();
+          await vi.advanceTimersByTimeAsync(5_000);
+          const result = await next;
+          if (result.done) break;
+        }
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(3);
+        expect(recordingChat.getLastModelMessageText()).toBe('Hello ending.');
+        expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+        expect(recordedText(recordAssistantTurn)).toBe('Hello ending.');
       } finally {
         vi.useRealTimers();
       }
@@ -19019,10 +19099,9 @@ describe('LlmChat', async () => {
         'prompt-recovery-fc-throw',
       );
 
-      // Consume; the catch swallows the error and emits a synthetic
-      // STOP chunk so the consumer sees a clean termination.
-      for await (const _ of stream) {
-        /* consume */
+      const events: StreamEvent[] = [];
+      for await (const event of stream) {
+        events.push(event);
       }
 
       const history = chat.getHistory();
@@ -19042,6 +19121,22 @@ describe('LlmChat', async () => {
         ),
       );
       expect(stillHasPartialFc).toBe(false);
+
+      const functionCallIndex = events.findIndex(
+        (event) =>
+          event.type === StreamEventType.CHUNK &&
+          event.value.functionCalls?.some(
+            (call) => call.id === 'call_recovery_throw',
+          ),
+      );
+      const revocationIndex = events.findIndex(
+        (event, index) =>
+          index > functionCallIndex &&
+          event.type === StreamEventType.RETRY &&
+          event.isContinuation,
+      );
+      expect(functionCallIndex).toBeGreaterThanOrEqual(0);
+      expect(revocationIndex).toBeGreaterThan(functionCallIndex);
 
       // Roles must strictly alternate (no consecutive same-role) so
       // providers don't reject the next turn.

@@ -503,6 +503,26 @@ export interface LlmChatSendOptions {
 /** @deprecated Use `LlmChatSendOptions`; retained until a future major release. */
 export type GeminiChatSendOptions = LlmChatSendOptions;
 
+function hasDisplayableStreamOutput(
+  response: GenerateContentResponse,
+): boolean {
+  const candidate = response.candidates?.[0];
+  const hasDisplayablePart = (candidate?.content?.parts ?? []).some(
+    (part) =>
+      (typeof part.text === 'string' && part.text.length > 0) ||
+      part.functionCall !== undefined ||
+      (typeof part.inlineData?.data === 'string' &&
+        part.inlineData.data.length > 0 &&
+        part.inlineData.mimeType?.trim().toLowerCase().startsWith('image/')),
+  );
+  return (
+    hasDisplayablePart ||
+    candidate?.citationMetadata?.citations?.some(
+      (citation) => citation.uri !== undefined,
+    ) === true
+  );
+}
+
 /**
  * Symbol key under which `sendMessageStream` publishes this send's
  * acceptance snapshot on the caller's request-parts array immediately
@@ -2848,11 +2868,9 @@ export class LlmChat {
     // Clear any partial-push marker left over from a prior unretryable
     // break path — the marker is per-send; carrying it across sends
     // would let the next send's retry catch wrongly pop a now-valid
-    // model entry sitting at the stale index. The deferred-record
-    // stash gets the same per-send reset for the same reason: a
-    // leftover from a prior unretryable break would otherwise get
-    // appended to JSONL by THIS send's retry-loop flush, attaching
-    // someone else's failed turn to this conversation.
+    // model entry sitting at the stale index. The previous send's finally
+    // flushes its deferred-record stash before releasing this send's queue
+    // slot, so only the partial-push marker needs an explicit reset here.
     this.clearPendingPartialState();
 
     let compressionInfo: ChatCompressionInfo;
@@ -4159,6 +4177,7 @@ export class LlmChat {
             isCurrent?: () => boolean;
             recordDeferral?: 'on-max-tokens' | 'always';
             onModelTurnCommitted?: (content: Content) => void;
+            preserveVisibleOutputOnFailure?: boolean;
           },
           retryEvent: Extract<StreamEvent, { type: StreamEventType.RETRY }> = {
             type: StreamEventType.RETRY,
@@ -4169,6 +4188,7 @@ export class LlmChat {
           let acceptQuietToolResultCompletionOnNextAttempt = false;
           for (;;) {
             const attemptState = buildAttempt();
+            let yieldedVisibleOutput = false;
             try {
               if (attemptState.isCurrent && !attemptState.isCurrent()) {
                 attemptState.rollback();
@@ -4215,6 +4235,7 @@ export class LlmChat {
                   ) {
                     (terminalChunks ??= []).push(chunk);
                   } else {
+                    yieldedVisibleOutput ||= hasDisplayableStreamOutput(chunk);
                     yield { type: StreamEventType.CHUNK, value: chunk };
                   }
                 }
@@ -4226,6 +4247,12 @@ export class LlmChat {
               }
               return;
             } catch (error) {
+              if (
+                attemptState.preserveVisibleOutputOnFailure &&
+                yieldedVisibleOutput
+              ) {
+                throw error;
+              }
               attemptState.rollback();
               if (!(error instanceof InvalidStreamError)) throw error;
 
@@ -4379,53 +4406,74 @@ export class LlmChat {
             };
             recoveryParams = escalatedParams;
             recoveryFinishReason = undefined;
-            for await (const event of streamWithInvalidStreamRetries(() => {
-              escalatedVisibleParts = [];
-              escalatedVisibleTokens = undefined;
-              escalatedAttemptCommitted = false;
-              return {
-                requestContents,
-                params: escalatedParams,
-                rollback: () => {
-                  self.popPendingPartialAssistantTurn();
-                  escalatedVisibleParts = [];
-                  escalatedVisibleTokens = undefined;
-                },
-                isCurrent: () =>
-                  self.historyMutationVersion ===
-                  escalatedHistoryMutationVersion,
-                // The escalated turn replaces the initial truncated turn, so
-                // its record remains owned until either STOP or MAX_TOKENS is
-                // committed.
-                recordDeferral: 'always',
-              };
-            })) {
-              if (event.type === StreamEventType.RETRY) {
-                yield event;
-                continue;
-              }
-              const fr = firstCandidateFinishReason(event.value);
-              escalatedVisibleTokens =
-                event.value.usageMetadata ?? escalatedVisibleTokens;
-              if (!fr) {
-                escalatedVisibleParts.push(
-                  ...(event.value.candidates?.[0]?.content?.parts ?? []),
-                );
-              }
-              if (fr) {
-                escalatedAttemptCommitted = true;
+            try {
+              for await (const event of streamWithInvalidStreamRetries(() => {
                 escalatedVisibleParts = [];
-                recoveryFinishReason = fr;
-                if (fr === FinishReason.MAX_TOKENS) {
-                  const committedModel = self.history.at(-1);
-                  if (committedModel?.role === 'model') {
-                    escalatedCommittedModelContent = committedModel;
-                    escalatedCommittedHistoryMutationVersion =
-                      self.historyMutationVersion;
+                escalatedVisibleTokens = undefined;
+                escalatedAttemptCommitted = false;
+                return {
+                  requestContents,
+                  params: escalatedParams,
+                  rollback: () => {
+                    self.popPendingPartialAssistantTurn();
+                    escalatedVisibleParts = [];
+                    escalatedVisibleTokens = undefined;
+                  },
+                  isCurrent: () =>
+                    self.historyMutationVersion ===
+                    escalatedHistoryMutationVersion,
+                  // The escalated turn replaces the initial truncated turn, so
+                  // its record remains owned until either STOP or MAX_TOKENS is
+                  // committed.
+                  recordDeferral: 'always',
+                  preserveVisibleOutputOnFailure: true,
+                };
+              })) {
+                if (event.type === StreamEventType.RETRY) {
+                  yield event;
+                  continue;
+                }
+                const fr = firstCandidateFinishReason(event.value);
+                escalatedVisibleTokens =
+                  event.value.usageMetadata ?? escalatedVisibleTokens;
+                if (!fr) {
+                  escalatedVisibleParts.push(
+                    ...(event.value.candidates?.[0]?.content?.parts ?? []),
+                  );
+                }
+                if (fr) {
+                  escalatedAttemptCommitted = true;
+                  escalatedVisibleParts = [];
+                  recoveryFinishReason = fr;
+                  if (fr === FinishReason.MAX_TOKENS) {
+                    const committedModel = self.history.at(-1);
+                    if (committedModel?.role === 'model') {
+                      escalatedCommittedModelContent = committedModel;
+                      escalatedCommittedHistoryMutationVersion =
+                        self.historyMutationVersion;
+                    }
                   }
                 }
+                yield event;
               }
-              yield event;
+            } catch (escalationError) {
+              const exposedFunctionCall = escalatedVisibleParts.some(
+                (part) => part.functionCall !== undefined,
+              );
+              if (exposedFunctionCall) {
+                self.popPendingPartialAssistantTurn();
+                escalatedVisibleParts = escalatedVisibleParts.filter(
+                  (part) => part.functionCall === undefined,
+                );
+              }
+              abandonEscalatedAttempt?.();
+              if (exposedFunctionCall) {
+                yield {
+                  type: StreamEventType.RETRY,
+                  isContinuation: true,
+                };
+              }
+              throw escalationError;
             }
             escalatedAttemptCommitted = true;
             escalatedVisibleParts = [];
@@ -4606,6 +4654,10 @@ export class LlmChat {
                     // coalesced into the single merged record, not written
                     // separately.
                     recordDeferral: 'always',
+                    // Once output is visible, preserve it as the terminal
+                    // partial answer instead of retrying an attempt whose UI
+                    // output can no longer be retracted safely.
+                    preserveVisibleOutputOnFailure: true,
                     onModelTurnCommitted: (content) => {
                       self.activeRecoveryModelContent = content;
                     },
@@ -4641,10 +4693,29 @@ export class LlmChat {
                 completeActiveRecoveryAttempt();
               }
             } catch (recoveryError) {
-              rollbackActiveRecoveryAttempt();
+              const exposedFunctionCall = activeRecoveryVisibleParts.some(
+                (part) => part.functionCall !== undefined,
+              );
+              if (activeRecoveryVisibleParts.length > 0) {
+                activeRecoveryVisibleParts = activeRecoveryVisibleParts.filter(
+                  (part) => part.functionCall === undefined,
+                );
+                abandonActiveRecoveryAttempt?.();
+              } else {
+                rollbackActiveRecoveryAttempt();
+              }
               debugLogger.warn(
                 `Recovery attempt ${recoveryCount} failed: ${recoveryError}`,
               );
+              if (exposedFunctionCall) {
+                // Turn clears pending tool calls on RETRY. This is a
+                // continuation signal so already-visible text remains while
+                // the incomplete tool request is revoked before STOP.
+                yield {
+                  type: StreamEventType.RETRY,
+                  isContinuation: true,
+                };
+              }
               // Emit a synthetic finish-reason chunk so the UI gets a
               // terminal signal (Finished event) instead of a partial
               // response with no end marker. Uses STOP because partial

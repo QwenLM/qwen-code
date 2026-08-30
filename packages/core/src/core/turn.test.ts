@@ -24,6 +24,7 @@ import type {
   Content,
   PartListUnion,
 } from '@google/genai';
+import { FinishReason } from '@google/genai';
 import { reportError } from '../utils/errorReporting.js';
 import type { LlmChat } from './llm-chat.js';
 import { StreamEventType } from './llm-chat.js';
@@ -1594,6 +1595,55 @@ describe('Turn', () => {
         { type: LlmEventType.Retry },
         { type: LlmEventType.Content, value: 'Success' },
       ]);
+    });
+
+    it('revokes a recovery tool call before a synthetic stop', async () => {
+      const mockResponseStream = (async function* () {
+        yield {
+          type: StreamEventType.CHUNK,
+          value: {
+            functionCalls: [
+              {
+                id: 'rolled-back-call',
+                name: 'read_file',
+                args: { path: '/tmp/file' },
+              },
+            ],
+          } as unknown as GenerateContentResponse,
+        };
+        yield {
+          type: StreamEventType.RETRY,
+          isContinuation: true,
+        };
+        yield {
+          type: StreamEventType.CHUNK,
+          value: {
+            candidates: [
+              {
+                content: { role: 'model', parts: [] },
+                finishReason: FinishReason.STOP,
+              },
+            ],
+          } as unknown as GenerateContentResponse,
+        };
+      })();
+      mockSendMessageStream.mockResolvedValue(mockResponseStream);
+
+      const events = [];
+      for await (const event of turn.run(
+        'test-model',
+        [],
+        new AbortController().signal,
+      )) {
+        events.push(event);
+      }
+
+      expect(events.map((event) => event.type)).toEqual([
+        LlmEventType.ToolCallRequest,
+        LlmEventType.Retry,
+        LlmEventType.Finished,
+      ]);
+      expect(turn.pendingToolCalls).toEqual([]);
     });
 
     it('bridges a compressed stream event to a ChatCompressed event', async () => {
