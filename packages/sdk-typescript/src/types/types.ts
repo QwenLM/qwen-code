@@ -414,8 +414,12 @@ export interface QueryOptions {
    * model request. Unlisted non-exempt tools are demoted to deferred and stay
    * reachable through `tool_search` + `tool_call` while both bridge tools are
    * registered; when either is unregistered (`tools.toolSearch.enabled: false`
-   * denies both; a `tool_search` or `tool_call` deny rule removes one) the
-   * demoted tools are out of reach for that session and a warning is logged.
+   * denies both; a `tool_search` or `tool_call` deny rule or a
+   * `tools.disabled` entry removes one) the
+   * demoted tools that remain hidden are out of reach for that session and a
+   * warning is logged — except tools also listed in `tools.visible`, which
+   * are declared upfront, and resumed sessions, which re-declare demoted
+   * tools referenced by direct calls in the transcript.
    * Tools already deferred by default remain
    * on demand even when listed; `tools.visible` surfaces one at startup. The
    * allowlist does not affect MCP tools, the `--json-schema`
@@ -467,8 +471,12 @@ export interface QueryOptions {
    *   are demoted to deferred — still registered and reachable through
    *   `tool_search` + `tool_call` while both bridge tools are registered;
    *   when either is unregistered (`tools.toolSearch.enabled: false` denies
-   *   both; a `tool_search` or `tool_call` deny rule removes one) the demoted
-   *   tools are out of reach for that session and a warning is logged (#9827)
+   *   both; a `tool_search` or `tool_call` deny rule or a `tools.disabled`
+   *   entry removes one) the
+   *   demoted tools that remain hidden are out of reach for that session and
+   *   a warning is logged — except tools also listed in `tools.visible`,
+   *   which are declared upfront, and resumed sessions, which re-declare
+   *   demoted tools referenced by direct calls in the transcript (#9827)
    *
    * **Pattern matching:**
    * - Tool name: `'write_file'`
