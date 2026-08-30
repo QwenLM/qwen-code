@@ -6,7 +6,10 @@
 
 import { useState, useCallback } from 'react';
 import type { Config, ReasoningEffort } from '@qwen-code/qwen-code-core';
-import { applyReasoningEffort } from '@qwen-code/qwen-code-core';
+import {
+  applyReasoningEffort,
+  usesMandatoryReasoningDefaultOnly,
+} from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import { MessageType, type HistoryItemWithoutId } from '../types.js';
@@ -34,6 +37,18 @@ export const useEffortCommand = (
       try {
         if (!effort) {
           // User cancelled the dialog — leave the current effort unchanged.
+          return;
+        }
+        const generation = config.getContentGeneratorConfig?.();
+        if (
+          generation &&
+          usesMandatoryReasoningDefaultOnly({
+            modelId: config.getModel?.(),
+            authType: generation.authType,
+            baseUrl: generation.baseUrl,
+            thinkingMandatory: generation.thinkingMandatory,
+          })
+        ) {
           return;
         }
         // Apply at runtime (next turn) and persist for future sessions; provider

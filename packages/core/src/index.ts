@@ -70,6 +70,7 @@ export * from './core/reasoning-effort.js';
 export {
   normalizeModelReasoningEffort,
   resolveModelReasoningConfiguration,
+  usesMandatoryReasoningDefaultOnly,
   type ModelReasoningConfiguration,
 } from './core/model-reasoning-config.js';
 export * from './core/coreToolScheduler.js';

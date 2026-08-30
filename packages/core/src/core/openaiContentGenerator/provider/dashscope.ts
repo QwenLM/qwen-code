@@ -407,9 +407,10 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       string,
       unknown
     >;
-    const requestParams = isTieredQwenModel
-      ? withoutNullishThinkingKnobs(rawRequestParams)!
-      : rawRequestParams;
+    const requestParams =
+      isTieredQwenModel || modelReasoning
+        ? withoutNullishThinkingKnobs(rawRequestParams)!
+        : rawRequestParams;
     // A request-level reasoning_effort (samplingParams) beats the config
     // tier: dashscopeExtras is spread after requestWithTokenLimits below, so
     // without this copy the tier would clobber the request-level override.

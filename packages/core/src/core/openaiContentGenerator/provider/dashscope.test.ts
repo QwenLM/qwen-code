@@ -1193,6 +1193,29 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       expect(result['reasoning_effort']).toBe('high');
     });
 
+    it('drops a nullish request-level effort for toggle-only Token Plan GLM 5.2', () => {
+      const generator = new DashScopeOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          authType: AuthType.USE_OPENAI,
+          baseUrl:
+            'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+          model: 'glm-5.2',
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+      const result = generator.buildRequest(
+        {
+          ...baseRequest,
+          model: 'glm-5.2',
+          reasoning_effort: null,
+        } as unknown as Parameters<typeof generator.buildRequest>[0],
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result).not.toHaveProperty('reasoning_effort');
+    });
+
     it.each([
       {
         model: 'glm-5.2',

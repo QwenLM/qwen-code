@@ -97,6 +97,7 @@ import {
   refreshMemoryInstruction,
   applyReasoningEffort,
   REASONING_EFFORT_TIERS,
+  usesMandatoryReasoningDefaultOnly,
   addDaemonRequestAttribute,
   extractDaemonTraceContext,
   withDaemonSpan,
@@ -5684,6 +5685,18 @@ class QwenAgent implements Agent {
           const modelReasoning = this.getModelReasoningConfiguration(
             session.getConfig(),
           );
+          const mandatoryDefaultOnly = usesMandatoryReasoningDefaultOnly({
+            modelId: session.getConfig().getModel(),
+            authType: generation.authType,
+            baseUrl: generation.baseUrl,
+            thinkingMandatory,
+          });
+          if (mandatoryDefaultOnly && value !== REASONING_EFFORT_DEFAULT) {
+            throw RequestError.invalidParams(
+              undefined,
+              `Unknown reasoning effort: ${value}. Choose one of: ${REASONING_EFFORT_DEFAULT}`,
+            );
+          }
           if (modelReasoning) {
             const providerCanDisable =
               modelReasoning.toggleOnly || modelReasoning.canDisable !== false;
@@ -13204,6 +13217,12 @@ class QwenAgent implements Agent {
     const reasoningEnabled =
       generation.reasoning !== false &&
       (!reasoningOverride || !overrideDisablesReasoning);
+    const mandatoryDefaultOnly = usesMandatoryReasoningDefaultOnly({
+      modelId: rawCurrentModelId,
+      authType: generation.authType,
+      baseUrl: generation.baseUrl,
+      thinkingMandatory: generation.thinkingMandatory,
+    });
     const reasoningEffortConfigOption: SessionConfigOption = (modelReasoning
       ? buildModelReasoningConfigOption(
           rawCurrentModelId,
@@ -13220,19 +13239,23 @@ class QwenAgent implements Agent {
       description: 'How hard reasoning-capable models should think',
       category: 'thought_level',
       type: 'select' as const,
-      currentValue: currentModelEffort ?? REASONING_EFFORT_DEFAULT,
+      currentValue: mandatoryDefaultOnly
+        ? REASONING_EFFORT_DEFAULT
+        : (currentModelEffort ?? REASONING_EFFORT_DEFAULT),
       options: [
         {
           value: REASONING_EFFORT_DEFAULT,
           name: 'Default',
           description: 'Use the model or provider default',
         },
-        ...REASONING_EFFORT_TIERS.map((effort) => ({
-          value: effort,
-          name: REASONING_EFFORT_NAMES[effort],
-          description:
-            'Providers map or clamp the requested tier for the active model',
-        })),
+        ...(mandatoryDefaultOnly
+          ? []
+          : REASONING_EFFORT_TIERS.map((effort) => ({
+              value: effort,
+              name: REASONING_EFFORT_NAMES[effort],
+              description:
+                'Providers map or clamp the requested tier for the active model',
+            }))),
       ],
     };
 

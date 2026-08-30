@@ -57,6 +57,24 @@ describe('useEffortCommand', () => {
     expect(result.current.isEffortDialogOpen).toBe(false);
   });
 
+  it('does not apply or persist a tier for mandatory Kimi K2.7', () => {
+    config = {
+      ...config,
+      getModel: vi.fn().mockReturnValue('kimi-k2.7-code'),
+      getContentGeneratorConfig: vi.fn().mockReturnValue({
+        authType: 'openai',
+        baseUrl: 'https://api.moonshot.cn/v1',
+        thinkingMandatory: true,
+      }),
+    } as unknown as Config;
+    const { result } = renderHook(() => useEffortCommand(settings, config));
+
+    act(() => result.current.handleEffortSelect('xhigh'));
+
+    expect(setReasoningEffort).not.toHaveBeenCalled();
+    expect(setValue).not.toHaveBeenCalled();
+  });
+
   it('cancels without mutating config or settings on undefined', () => {
     const { result } = renderHook(() => useEffortCommand(settings, config));
     act(() => result.current.openEffortDialog());

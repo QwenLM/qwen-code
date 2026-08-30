@@ -17,6 +17,7 @@ import {
   applyReasoningEffort,
   normalizeReasoningEffort,
   REASONING_EFFORT_TIERS,
+  usesMandatoryReasoningDefaultOnly,
 } from '@qwen-code/qwen-code-core';
 import { formatEffortChangeMessage } from './effort-utils.js';
 
@@ -54,6 +55,25 @@ export const effortCommand: SlashCommand = {
     }
 
     const args = context.invocation?.args?.trim() || actionArgs.trim();
+    const generation = config.getContentGeneratorConfig?.();
+    const mandatoryDefaultOnly =
+      generation !== undefined &&
+      usesMandatoryReasoningDefaultOnly({
+        modelId: config.getModel?.(),
+        authType: generation.authType,
+        baseUrl: generation.baseUrl,
+        thinkingMandatory: generation.thinkingMandatory,
+      });
+
+    if (mandatoryDefaultOnly) {
+      return {
+        type: 'message',
+        messageType: args ? 'error' : 'info',
+        content: t(
+          'The active model always uses the provider reasoning default and does not expose effort tiers.',
+        ),
+      };
+    }
 
     // No argument: open the interactive picker, or (non-interactive/ACP) report
     // the current tier and the available options.

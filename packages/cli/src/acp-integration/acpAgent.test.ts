@@ -316,6 +316,9 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   resolveModelReasoningConfiguration: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).resolveModelReasoningConfiguration,
+  usesMandatoryReasoningDefaultOnly: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).usesMandatoryReasoningDefaultOnly,
   normalizeModelReasoningEffort: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).normalizeModelReasoningEffort,
@@ -9048,6 +9051,48 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       ).rejects.toThrow(
         'Unknown reasoning effort: none. Choose one of: low, high, max',
       );
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
+  it('offers only the provider default for mandatory Kimi K2.7 reasoning', async () => {
+    const sessionId = 'kimi-k2.7-default-reasoning-session';
+    const innerConfig = await setupSessionMocks(sessionId);
+    const generation = {
+      authType: AuthType.USE_OPENAI,
+      baseUrl: 'https://api.moonshot.cn/v1',
+      reasoning: { effort: 'low' },
+      thinkingMandatory: true,
+    };
+    innerConfig.getModel = vi.fn().mockReturnValue('kimi-k2.7-code');
+    innerConfig.getContentGeneratorConfig = vi.fn(() => generation);
+    innerConfig.getReasoningEffort = vi.fn(() => generation.reasoning.effort);
+
+    const { agent, agentPromise } = await bootAcpAgent();
+    try {
+      const session = (await agent.newSession({
+        cwd: '/tmp',
+        mcpServers: [],
+      })) as SetSessionConfigOptionResponse;
+      expect(
+        session.configOptions.find((item) => item.id === 'reasoning_effort'),
+      ).toMatchObject({
+        currentValue: 'default',
+        options: [{ value: 'default' }],
+      });
+
+      await expect(
+        agent.setSessionConfigOption({
+          sessionId,
+          configId: 'reasoning_effort',
+          value: 'low',
+        }),
+      ).rejects.toThrow(
+        'Unknown reasoning effort: low. Choose one of: default',
+      );
+      expect(innerConfig.setReasoningEffort).not.toHaveBeenCalled();
     } finally {
       mockConnectionState.resolve();
       await agentPromise;

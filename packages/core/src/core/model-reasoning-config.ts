@@ -9,6 +9,10 @@ import {
   clampReasoningEffort,
   type ReasoningEffort,
 } from './reasoning-effort.js';
+import {
+  isQwenFamilyWireModel,
+  isTieredEffortWireModel,
+} from './modalityDefaults.js';
 
 export type ModelReasoningConfiguration =
   | {
@@ -37,6 +41,11 @@ export interface ModelReasoningConfigInput {
   readonly modelId: string | undefined;
   readonly authType?: AuthType;
   readonly baseUrl?: string;
+}
+
+export interface MandatoryReasoningDefaultInput
+  extends ModelReasoningConfigInput {
+  readonly thinkingMandatory?: boolean;
 }
 
 export const DASHSCOPE_REGIONAL_HOSTS: readonly string[] = [
@@ -212,6 +221,28 @@ export function resolveModelReasoningConfiguration(
     default:
       return undefined;
   }
+}
+
+export function usesMandatoryReasoningDefaultOnly(
+  input: MandatoryReasoningDefaultInput,
+): boolean {
+  if (
+    input.thinkingMandatory !== true ||
+    !input.modelId ||
+    resolveModelReasoningConfiguration(input)
+  ) {
+    return false;
+  }
+  const modelId = input.modelId.toLowerCase();
+  const endpoint = classifyModelReasoningEndpoint(input);
+  if (endpoint === 'moonshot') {
+    return true;
+  }
+  return (
+    endpoint.startsWith('alibaba-') &&
+    !isTieredEffortWireModel(modelId) &&
+    !isQwenFamilyWireModel(modelId)
+  );
 }
 
 export function normalizeModelReasoningEffort(

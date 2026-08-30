@@ -5881,7 +5881,7 @@ describe('Server Config (config.ts)', () => {
         config.getModelsConfig().getGenerationConfig().reasoning,
       ).toBeUndefined();
       config.setReasoningEffort('high');
-      expect(config.getReasoningEffort()).toBe('high');
+      expect(config.getReasoningEffort()).toBeUndefined();
     });
 
     it('keeps the positive block a rebuild resolved when dropping an inapplicable sticky disable', async () => {

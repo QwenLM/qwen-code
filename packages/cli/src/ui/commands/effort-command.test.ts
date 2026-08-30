@@ -75,6 +75,23 @@ describe('effortCommand', () => {
     expect(res).toMatchObject({ messageType: 'info' });
   });
 
+  it('does not apply or persist a tier for mandatory Kimi K2.7', async () => {
+    Object.assign(context.services.config as object, {
+      getModel: vi.fn().mockReturnValue('kimi-k2.7-code'),
+      getContentGeneratorConfig: vi.fn().mockReturnValue({
+        authType: 'openai',
+        baseUrl: 'https://api.moonshot.cn/v1',
+        thinkingMandatory: true,
+      }),
+    });
+
+    const res = await effortCommand.action!(context, 'high');
+
+    expect(setReasoningEffort).not.toHaveBeenCalled();
+    expect(setValue).not.toHaveBeenCalled();
+    expect(res).toMatchObject({ messageType: 'error' });
+  });
+
   it('keeps a valid tier session-local when persistence is disabled', async () => {
     const res = await effortCommand.action!(
       {

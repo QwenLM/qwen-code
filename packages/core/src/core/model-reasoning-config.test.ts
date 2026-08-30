@@ -10,6 +10,7 @@ import {
   classifyModelReasoningEndpoint,
   normalizeModelReasoningEffort,
   resolveModelReasoningConfiguration,
+  usesMandatoryReasoningDefaultOnly,
 } from './model-reasoning-config.js';
 
 const OPENAI = AuthType.USE_OPENAI;
@@ -19,6 +20,39 @@ const TOKEN_PLAN =
 const CODING_PLAN = 'https://coding.dashscope.aliyuncs.com/v1';
 
 describe('resolveModelReasoningConfiguration', () => {
+  it.each(
+    ['kimi-k2.7-code', 'kimi-k2.7-code-highspeed'].flatMap((modelId) =>
+      [
+        'https://api.moonshot.cn/v1',
+        'https://api.moonshot.ai/v1',
+        TOKEN_PLAN,
+      ].map((baseUrl) => ({ modelId, baseUrl })),
+    ),
+  )(
+    'uses only the mandatory provider default for $modelId on $baseUrl',
+    ({ modelId, baseUrl }) => {
+      expect(
+        usesMandatoryReasoningDefaultOnly({
+          modelId,
+          authType: OPENAI,
+          baseUrl,
+          thinkingMandatory: true,
+        }),
+      ).toBe(true);
+    },
+  );
+
+  it('keeps the tiered wire control for mandatory qwen3.8-max-preview', () => {
+    expect(
+      usesMandatoryReasoningDefaultOnly({
+        modelId: 'qwen3.8-max-preview',
+        authType: OPENAI,
+        baseUrl: TOKEN_PLAN,
+        thinkingMandatory: true,
+      }),
+    ).toBe(false);
+  });
+
   it.each([
     {},
     { authType: OPENAI, baseUrl: 'https://self-hosted.example/v1' },

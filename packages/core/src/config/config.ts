@@ -19,7 +19,10 @@ import type {
 } from '../core/contentGenerator.js';
 import type { ContentGeneratorConfigSources } from '../core/contentGenerator.js';
 import type { ReasoningEffort } from '../core/reasoning-effort.js';
-import { resolveModelReasoningConfiguration } from '../core/model-reasoning-config.js';
+import {
+  resolveModelReasoningConfiguration,
+  usesMandatoryReasoningDefaultOnly,
+} from '../core/model-reasoning-config.js';
 import type { MCPOAuthConfig } from '../mcp/oauth-provider.js';
 import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
 import type { VisionBridgeModelSelection } from '../services/visionBridge/vision-bridge-service.js';
@@ -5092,13 +5095,28 @@ export class Config {
    * deleting `effort`, so sibling keys the wire layer honors (e.g.
    * `budget_tokens`) survive.
    *
-   * No-op when thinking is explicitly disabled (`reasoning: false`) so effort
-   * cannot silently re-enable it.
+   * No-op when thinking is explicitly disabled (`reasoning: false`), or when a
+   * thinking-mandatory route exposes only the provider default, so callers
+   * cannot report a tier that the wire adapter will discard.
    */
   setReasoningEffort(
     effort: ReasoningEffort | undefined,
     recordDefaultOverride?: boolean,
   ): void {
+    const activeConfig =
+      this.contentGeneratorConfig ?? this.modelsConfig?.getGenerationConfig();
+    if (
+      effort &&
+      activeConfig &&
+      usesMandatoryReasoningDefaultOnly({
+        modelId: activeConfig.model,
+        authType: activeConfig.authType,
+        baseUrl: activeConfig.baseUrl,
+        thinkingMandatory: activeConfig.thinkingMandatory,
+      })
+    ) {
+      return;
+    }
     // Under an explicit `reasoning: false` the tier does not land
     // (applyEffort no-ops) and callers report the discard; do not record an
     // override a later rebuild would then force-apply. The live config is
