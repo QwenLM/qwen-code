@@ -12,6 +12,8 @@ Each chat serializes send admission before awaiting the previous send. This keep
 
 Goal usage is accumulated per successful model attempt, independently of durable assistant recording. The final record marks those tokens as already accumulated so persistence does not bill them twice.
 
+Recovery terminal chunks are drained for up to one second so trailing provider usage metadata can be included without allowing a provider that never closes to wedge the chat. Metadata that arrives after that bounded cutoff is unavailable; Goal accounting records the usage observed before the stream is aborted.
+
 ## Invariants
 
 - A recovered live model turn produces exactly one assistant transcript record.

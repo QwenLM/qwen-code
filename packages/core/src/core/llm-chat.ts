@@ -338,25 +338,28 @@ export function redactStructuredOutputArgsForRecording(
   };
 }
 
-/**
- * Join fragments of one thought block and retain the first signature.
- */
-function buildThoughtContentPart(parts: readonly Part[]): Part | undefined {
-  const texts = parts
-    .filter((part) => part.thought)
-    .map((part) => (typeof part.text === 'string' ? part.text : ''));
+/** Join fragments of one thought block without collapsing signed blocks. */
+function buildThoughtContentParts(parts: readonly Part[]): Part[] {
+  const thoughtParts = parts.filter((part) => part.thought);
+  const signedThoughtParts = thoughtParts.filter(
+    (part) => part.thoughtSignature,
+  );
+  if (signedThoughtParts.length > 1) {
+    return thoughtParts.map((part) => ({ ...part }));
+  }
+  const texts = thoughtParts.map((part) =>
+    typeof part.text === 'string' ? part.text : '',
+  );
   const thoughtText = texts.join('').trim();
   if (thoughtText === '') {
-    return undefined;
+    return [];
   }
   const thoughtPart: Part = { text: thoughtText, thought: true };
-  const thoughtSignature = parts.find(
-    (part) => part.thought && part.thoughtSignature,
-  )?.thoughtSignature;
+  const thoughtSignature = signedThoughtParts[0]?.thoughtSignature;
   if (thoughtSignature) {
     thoughtPart.thoughtSignature = thoughtSignature;
   }
-  return thoughtPart;
+  return [thoughtPart];
 }
 
 /**
@@ -6254,6 +6257,7 @@ export class LlmChat {
           }
           const shouldStartTerminalBuffer =
             (isToolResultContinuation &&
+              recordDeferral !== undefined &&
               observedTerminalFinishReason !== undefined &&
               (recordDeferral === 'always' ||
                 observedTerminalFinishReason === FinishReason.MAX_TOKENS)) ||
@@ -6332,7 +6336,7 @@ export class LlmChat {
       }
     }
 
-    const thoughtContentPart = buildThoughtContentPart(allModelParts);
+    const thoughtContentParts = buildThoughtContentParts(allModelParts);
 
     let contentParts = allModelParts.filter((part) => !part.thought);
     const consolidatedHistoryParts: Part[] = [];
@@ -6444,7 +6448,7 @@ export class LlmChat {
     // exhausted the quiet completion is accepted rather than failing the
     // run (#9026): some model families legitimately end turns silently
     // after a tool result.
-    const hasAnyContent = contentText || thoughtContentPart !== undefined;
+    const hasAnyContent = contentText || thoughtContentParts.length > 0;
     const lacksVisibleToolResultProgress =
       isToolResultContinuation &&
       (!contentText || contentText === GEMINI_EMPTY_CONTENT_PLACEHOLDER);
@@ -6521,7 +6525,8 @@ export class LlmChat {
     const willPersistToHistory =
       streamError === null ||
       (hasToolCall &&
-        (thoughtContentPart || consolidatedHistoryParts.length > 0));
+        (thoughtContentParts.length > 0 ||
+          consolidatedHistoryParts.length > 0));
     // Transport-continuation merge (issue #8094). `allModelParts` is
     // per-attempt, so a continuation's parts carry the resumed remainder only.
     // Fold the already-delivered prefix back in HERE — into the parts
@@ -6557,7 +6562,7 @@ export class LlmChat {
       const textIndex = consolidatedHistoryParts.findIndex(isPlainTextPart);
       if (textIndex < 0) {
         // Continuation returned no text of its own (e.g. only a functionCall).
-        // `thoughtContentPart` is prepended separately at the push below, so
+        // `thoughtContentParts` are prepended separately at the push below, so
         // index 0 here is already "after any leading thought part".
         consolidatedHistoryParts.unshift({ text: transportContinuationPrefix });
       } else {
@@ -6585,7 +6590,7 @@ export class LlmChat {
     // assembly and would otherwise desync transcript from history on
     // `--resume`).
     const acceptedTurnParts: Part[] = [
-      ...(thoughtContentPart ? [thoughtContentPart] : []),
+      ...thoughtContentParts,
       ...consolidatedHistoryParts,
     ];
     if (acceptedQuietToolResultCompletion && acceptedTurnParts.length === 0) {
@@ -6595,7 +6600,7 @@ export class LlmChat {
       willPersistToHistory &&
       (acceptedQuietToolResultCompletion ||
         emptyMaxTokensOwnedByRecovery ||
-        thoughtContentPart ||
+        thoughtContentParts.length > 0 ||
         contentText ||
         hasToolCall ||
         usageMetadata)
@@ -6609,7 +6614,7 @@ export class LlmChat {
         message: acceptedQuietToolResultCompletion
           ? acceptedTurnParts
           : [
-              ...(thoughtContentPart ? [thoughtContentPart] : []),
+              ...thoughtContentParts,
               ...(contentText ? [{ text: contentText }] : []),
               ...(hasToolCall
                 ? contentParts
@@ -6701,17 +6706,15 @@ export class LlmChat {
       // Reuse the `willPersistToHistory` gate from the recordAssistantTurn
       // block above instead of re-deriving it. When `streamError !== null`,
       // `willPersistToHistory` reduces to exactly the original expression
-      // `hasToolCall && (thoughtContentPart || consolidatedHistoryParts.length > 0)`;
+      // `hasToolCall && (thoughtContentParts.length > 0 ||
+      // consolidatedHistoryParts.length > 0)`;
       // sharing the single binding eliminates drift risk if one gate is
       // tightened without the other and the JSONL recording silently
       // desyncs from in-memory history.
       if (willPersistToHistory) {
         const modelContent: Content = {
           role: 'model',
-          parts: [
-            ...(thoughtContentPart ? [thoughtContentPart] : []),
-            ...consolidatedHistoryParts,
-          ],
+          parts: [...thoughtContentParts, ...consolidatedHistoryParts],
         };
         this.history.push(modelContent);
         onModelTurnCommitted?.(modelContent);

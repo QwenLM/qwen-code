@@ -3338,6 +3338,79 @@ describe('LlmChat', async () => {
       }
     });
 
+    it('yields a user-capped tool-result terminal chunk without a drain stall', async () => {
+      vi.useFakeTimers();
+      try {
+        vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+          authType: AuthType.USE_GEMINI,
+          model: 'test-model',
+          samplingParams: { max_tokens: 1024 },
+        });
+        chat.setHistory([
+          { role: 'user', parts: [{ text: 'inspect the project' }] },
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_read_file',
+                  name: 'read_file',
+                  args: { path: '/tmp/example' },
+                },
+              },
+            ],
+          },
+        ]);
+        vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+          (async function* () {
+            yield {
+              candidates: [
+                {
+                  content: {
+                    parts: [{ thought: true, text: 'I need more tokens.' }],
+                  },
+                  finishReason: 'MAX_TOKENS',
+                },
+              ],
+            } as GenerateContentResponse;
+            await new Promise<void>(() => undefined);
+          })(),
+        );
+
+        const stream = await chat.sendMessageStream(
+          'gemini-pro',
+          {
+            message: [
+              {
+                functionResponse: {
+                  id: 'call_read_file',
+                  name: 'read_file',
+                  response: { output: 'file contents' },
+                },
+              },
+            ],
+          },
+          'prompt-id-tool-result-user-max-tokens-no-stall',
+        );
+        const iterator = stream[Symbol.asyncIterator]();
+        let firstEventSettled = false;
+        const firstEventPromise = iterator.next().then((result) => {
+          firstEventSettled = true;
+          return result;
+        });
+
+        await vi.advanceTimersByTimeAsync(999);
+
+        expect(firstEventSettled).toBe(true);
+        expect((await firstEventPromise).value?.type).toBe(
+          StreamEventType.CHUNK,
+        );
+        await iterator.return?.(undefined);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('should preserve (empty content) outside tool result continuations', async () => {
       const validStream = (async function* () {
         yield {
@@ -17671,6 +17744,46 @@ describe('LlmChat', async () => {
       });
       expect(resumed.map((entry) => entry.role)).toEqual(['user', 'model']);
       expect(resumed.at(-1)?.parts).toEqual(
+        recordingChat.getHistory().at(-1)?.parts,
+      );
+    });
+
+    it('preserves separately signed thought blocks within one attempt', async () => {
+      const recordAssistantTurn = vi.fn();
+      const recordingChat = chatWithRecorder(recordAssistantTurn);
+      const signedThoughts: Part[] = [
+        {
+          text: 'First block.',
+          thought: true,
+          thoughtSignature: 'sig-1',
+        },
+        {
+          text: 'Second block.',
+          thought: true,
+          thoughtSignature: 'sig-2',
+        },
+      ];
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        makeStream([
+          makeChunk([...signedThoughts, { text: 'Answer.' }], 'STOP'),
+        ]),
+      );
+
+      const stream = await recordingChat.sendMessageStream(
+        'gemini-3-pro',
+        { message: 'think twice' },
+        'prompt-two-signed-thought-blocks',
+      );
+      for await (const _event of stream) {
+        // consume
+      }
+
+      expect(recordingChat.getHistory().at(-1)?.parts).toEqual([
+        ...signedThoughts,
+        { text: 'Answer.' },
+      ]);
+      expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+      expect(recordAssistantTurn.mock.calls[0]![0].message).toEqual(
         recordingChat.getHistory().at(-1)?.parts,
       );
     });
