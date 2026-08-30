@@ -95,6 +95,9 @@ describe('createProjectRuntimeReloader', () => {
 
   beforeEach(async () => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-runtime-reloader-'));
+    const fakeHome = path.join(tempDir, 'os-home');
+    fs.mkdirSync(fakeHome, { recursive: true });
+    vi.spyOn(os, 'homedir').mockReturnValue(fakeHome);
     previousQwenHome = process.env['QWEN_HOME'];
     process.env['QWEN_HOME'] = path.join(tempDir, 'home');
     resetHomeEnvBootstrapForTesting();
@@ -200,12 +203,7 @@ describe('createProjectRuntimeReloader', () => {
     expect(process.env['A_KEY']).toBe('from-boot');
   });
 
-  it('resolves QWEN_DISABLED_SLASH_COMMANDS from the target project environment', async () => {
-    // Startup reads the denylist after `loadEnvironment`; the reloader
-    // resolves config in `prepare()`, BEFORE any `process.env` rewrite —
-    // and in a shared process that rewrite never happens. Reading
-    // `process.env` there kept project A's denylist for the rest of the
-    // session.
+  it('keeps environment-backed config aligned when the host declines the rewrite', async () => {
     writeProject(projectA, {}, 'QWEN_DISABLED_SLASH_COMMANDS=auth\n');
     writeProject(projectB, {}, 'QWEN_DISABLED_SLASH_COMMANDS=deploy\n');
     const loaded = startupSettings();
@@ -215,11 +213,11 @@ describe('createProjectRuntimeReloader', () => {
       hostPolicy: { ownsProcessEnvironment: () => false },
     }).prepare(projectB, true, ApprovalMode.DEFAULT, projectA);
 
-    expect(prepared.config.disabledSlashCommands).toEqual(['deploy']);
+    expect(prepared.config.disabledSlashCommands).toEqual(['auth']);
     expect(process.env['QWEN_DISABLED_SLASH_COMMANDS']).toBe('auth');
   });
 
-  it('resolves web search from the target project environment', async () => {
+  it('keeps web search aligned when the host declines the environment rewrite', async () => {
     writeProject(
       projectA,
       {},
@@ -235,10 +233,73 @@ describe('createProjectRuntimeReloader', () => {
     }).prepare(projectB, true, ApprovalMode.DEFAULT, projectA);
 
     expect(prepared.config.webSearch).toMatchObject({
+      baseUrl: 'https://a.example/search',
+    });
+    expect(prepared.config.webSearch?.apiKeyEnv).toBe('DASHSCOPE_API_KEY');
+    expect(process.env['WEB_SEARCH_BASE_URL']).toBe('https://a.example/search');
+  });
+
+  it('refreshes environment-backed config after commit force-writes values', async () => {
+    process.env['WEB_SEARCH_BASE_URL'] = 'https://operator.example/search';
+    writeProject(projectA, {});
+    writeProject(
+      projectB,
+      {},
+      'WEB_SEARCH_BASE_URL=https://b.example/search\nWEB_SEARCH_API_KEY=key-b\n',
+    );
+    const prepared = await makeReloader(startupSettings()).prepare(
+      projectB,
+      true,
+      ApprovalMode.DEFAULT,
+      projectA,
+    );
+
+    expect(prepared.config.webSearch).toMatchObject({
+      baseUrl: 'https://operator.example/search',
+    });
+    await prepared.commit();
+    expect(prepared.config.webSearch).toMatchObject({
       baseUrl: 'https://b.example/search',
       apiKeyEnv: 'WEB_SEARCH_API_KEY',
     });
-    expect(process.env['WEB_SEARCH_BASE_URL']).toBe('https://a.example/search');
+    expect(process.env['WEB_SEARCH_BASE_URL']).toBe('https://b.example/search');
+    expect(process.env['WEB_SEARCH_API_KEY']).toBe('key-b');
+  });
+
+  it('refreshes environment-backed config after commit deletes stale keys', async () => {
+    writeProject(projectA, {}, 'QWEN_DISABLED_SLASH_COMMANDS=auth\n');
+    writeProject(projectB, {});
+    const loaded = startupSettings();
+    process.env['QWEN_DISABLED_SLASH_COMMANDS'] = 'operator-command';
+    const prepared = await makeReloader(loaded).prepare(
+      projectB,
+      true,
+      ApprovalMode.DEFAULT,
+      projectA,
+    );
+
+    expect(prepared.config.disabledSlashCommands).toEqual(['operator-command']);
+    await prepared.commit();
+    expect(prepared.config.disabledSlashCommands).toEqual([]);
+    expect(process.env['QWEN_DISABLED_SLASH_COMMANDS']).toBeUndefined();
+  });
+
+  it('keeps explicit MCP allow flags authoritative after relocation', async () => {
+    argv.allowedMcpServerNames = ['fs'];
+    writeProject(projectA, {});
+    writeProject(projectB, {
+      mcp: { allowed: ['db'], excluded: ['fs'] },
+    });
+
+    const prepared = await makeReloader(startupSettings()).prepare(
+      projectB,
+      true,
+      ApprovalMode.DEFAULT,
+      projectA,
+    );
+
+    expect(prepared.config.allowedMcpServers).toEqual(['fs']);
+    expect(prepared.config.excludedMcpServers).toBeUndefined();
   });
 
   it('keeps a bare session trusted after relocation', async () => {

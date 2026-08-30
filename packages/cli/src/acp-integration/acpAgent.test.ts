@@ -3455,7 +3455,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       expect(vi.mocked(loadCliConfig)).toHaveBeenCalledTimes(1),
     );
     const sessionAHostPolicy = vi.mocked(loadCliConfig).mock.calls[0]?.[9];
-    expect(sessionAHostPolicy?.ownsProcessEnvironment?.()).toBe(true);
+    expect(sessionAHostPolicy?.ownsProcessEnvironment?.()).toBe(false);
     await agent.newSession({ cwd: '/workspace-b', mcpServers: [] });
     const sessionBHostPolicy = vi.mocked(loadCliConfig).mock.calls[1]?.[9];
     expect(sessionAHostPolicy?.ownsProcessEnvironment?.()).toBe(false);

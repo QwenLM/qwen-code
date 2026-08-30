@@ -40,6 +40,7 @@ import {
   parseBooleanEnvFlag,
   SchemaValidator,
   type ConfigParameters,
+  type PreparedProjectRuntime,
   type ProjectRuntimeReloader,
   type MCPServerConfig,
   type SkillLevel,
@@ -57,11 +58,7 @@ import {
   loadSettings,
   SettingScope,
 } from './settings.js';
-import {
-  buildRuntimeEnvironment,
-  isFileSourcedEnvKey,
-  reloadEnvironment,
-} from './environment.js';
+import { reloadEnvironment } from './environment.js';
 import {
   resolveCliGenerationConfig,
   getAuthTypeFromEnv,
@@ -1492,32 +1489,17 @@ export function createProjectRuntimeReloader(
         (bareMode
           ? (isWorkspaceTrusted(nextSettings.merged)?.isTrusted ?? true)
           : nextSettings.isTrusted);
-      // The target project's environment as `reloadEnvironment` would leave
-      // it: keys the previous project's env files contributed are dropped
-      // before the target's files and `settings.env` overlay the process
-      // environment. Config resolution below reads THIS view, not
-      // `process.env` — prepare() runs before commit() rewrites the process
-      // environment, and in a shared process that rewrite never happens.
-      const targetEnvironment: Readonly<NodeJS.ProcessEnv> = bareMode
-        ? process.env
-        : buildRuntimeEnvironment(
-            nextSettings.merged,
-            targetDir,
-            Object.fromEntries(
-              Object.entries(process.env).filter(
-                ([key]) => !isFileSourcedEnvKey(key),
-              ),
-            ),
-            effectiveTrust,
-          ).effectiveEnv;
       // Never rewrite `process.env` from a bare session (bare startup never
       // loads env) or from a process that hosts other live sessions.
       const reloadProcessEnvironment =
         !bareMode && (hostPolicy?.ownsProcessEnvironment?.() ?? true);
+      // Shared processes keep their existing environment. An owning process
+      // refreshes the environment-backed fields after commit rewrites it.
+      const targetEnvironment: Readonly<NodeJS.ProcessEnv> = process.env;
       const warnings: string[] = [];
       if (!bareMode && !reloadProcessEnvironment) {
         warnings.push(
-          'Process environment left unchanged: this process hosts other ' +
+          'Process environment left unchanged: this process may host other ' +
             "sessions, so the target project's .env and settings.env were " +
             'not applied to spawned tools and MCP servers.',
         );
@@ -1531,7 +1513,7 @@ export function createProjectRuntimeReloader(
               topTierMcpServers,
             );
       const gating =
-        bareMode || safeMode
+        bareMode || safeMode || argv.allowedMcpServerNames !== undefined
           ? {
               allowed: argv.allowedMcpServerNames?.filter(Boolean),
               excluded: undefined,
@@ -1601,7 +1583,7 @@ export function createProjectRuntimeReloader(
       let committed = false;
       let environmentReloaded = false;
 
-      return {
+      const preparedRuntime: PreparedProjectRuntime = {
         warnings,
         config: {
           trustedFolder: effectiveTrust,
@@ -1821,6 +1803,18 @@ export function createProjectRuntimeReloader(
           if (reloadProcessEnvironment) {
             reloadEnvironment(nextSettings.merged, targetDir, effectiveTrust);
             environmentReloaded = true;
+            preparedRuntime.config.webSearch = resolveWebSearchSettings(
+              runtimeSettings,
+              process.env,
+            );
+            preparedRuntime.config.disabledSlashCommands =
+              resolveDisabledSlashCommands(
+                runtimeSettings,
+                argv,
+                bareMode,
+                safeMode,
+                process.env,
+              );
           }
         },
         async rollback() {
@@ -1846,6 +1840,7 @@ export function createProjectRuntimeReloader(
           appEvents.emit(AppEvent.McpPendingApprovalChanged);
         },
       };
+      return preparedRuntime;
     },
   };
 }

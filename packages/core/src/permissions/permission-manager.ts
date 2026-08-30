@@ -293,7 +293,14 @@ export class PermissionManager {
     this.coreToolsAllowList = null;
     // `initialize()` re-derives the `tools.eager` allowlist unconditionally
     // (array → active list, anything else → null), so it needs no reset.
-    this.initialize();
+    try {
+      this.initialize();
+    } catch (error) {
+      if (wasStripped && !this.strippedAllowRules) {
+        this.stripDangerousRulesForAutoMode();
+      }
+      throw error;
+    }
     if (wasStripped && !this.strippedAllowRules) {
       this.stripDangerousRulesForAutoMode();
     }

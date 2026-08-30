@@ -7049,9 +7049,14 @@ describe('Server Config (config.ts)', () => {
         bugCommand: { urlTemplate: 'https://bugs.example.test/{title}' },
         coreTools: ['read_file'],
         allowedTools: ['read_file'],
-        excludeTools: ['run_shell_command'],
+        excludeTools: ['sdk-exclude'],
         disabledSlashCommands: ['auth'],
-        permissions: { deny: ['run_shell_command'] },
+        permissions: {
+          allow: ['target-permission-allow'],
+          ask: ['target-permission-ask'],
+          deny: ['target-permission-deny'],
+        },
+        eagerTools: ['read_file'],
         toolSearchThreshold: 17,
         mcpServerCommand: 'target-mcp-command',
         mcpToolIdleTimeoutMs: 4567,
@@ -7085,6 +7090,18 @@ describe('Server Config (config.ts)', () => {
     config.setArenaManager({ cleanup: cleanupArena } as never);
     await config.initialize({ skipGeminiInitialization: true });
     await config.waitForMcpReady();
+    const permissionReload = vi.spyOn(
+      config.getPermissionManager()!,
+      'reloadForProjectChange',
+    );
+    const skillRefresh = vi.spyOn(
+      config.getSkillManager()!,
+      'refreshForProjectChange',
+    );
+    const subagentRefresh = vi.spyOn(
+      config.getSubagentManager(),
+      'refreshForProjectChange',
+    );
     config
       .getWorkspaceContext()
       .addDirectory('/path/to/runtime-added-directory');
@@ -7120,12 +7137,20 @@ describe('Server Config (config.ts)', () => {
     expect(config.getTeamManager()).toBeNull();
     expect(config.getArenaManager()).toBeNull();
     expect(config.getCoreTools()).toEqual(['read_file']);
-    expect(config.getPermissionsAllow()).toEqual(['read_file']);
+    expect(config.getPermissionsAllow()).toEqual([
+      'target-permission-allow',
+      'read_file',
+    ]);
+    expect(config.getPermissionsAsk()).toEqual(['target-permission-ask']);
+    expect(config.getEagerTools()).toEqual(['read_file']);
     expect(config.getDisabledSlashCommands()).toEqual(['auth']);
     expect(config.getToolSearchThreshold()).toBe(17);
     expect(config.getMcpServerCommand()).toBe('target-mcp-command');
     expect(config.getMcpToolIdleTimeoutMs()).toBe(4567);
-    expect(config.getPermissionsDeny()).toEqual(['run_shell_command']);
+    expect(config.getPermissionsDeny()).toEqual([
+      'target-permission-deny',
+      'sdk-exclude',
+    ]);
     expect(config.getDisabledSkillLevels()).toEqual(new Set(['user']));
     expect(config.getCustomSkillDirs()).toEqual(['/target-skills']);
     expect(config.getImportFormat()).toBe('flat');
@@ -7203,6 +7228,9 @@ describe('Server Config (config.ts)', () => {
     expect(
       ToolRegistry.prototype.rediscoverCommandTools,
     ).toHaveBeenCalledOnce();
+    expect(permissionReload).toHaveBeenCalledOnce();
+    expect(skillRefresh).toHaveBeenCalledOnce();
+    expect(subagentRefresh).toHaveBeenCalledOnce();
 
     chdirSpy.mockRestore();
     cwdSpy.mockRestore();
@@ -7238,7 +7266,7 @@ describe('Server Config (config.ts)', () => {
     // The constructor default is trusted; deleting the re-application
     // keeps a session trusted in a workspace the runtime declared untrusted.
     const prepare = vi.fn().mockResolvedValue({
-      config: { trustedFolder: false } as ProjectRuntimeConfig,
+      config: preparedRuntime({ trustedFolder: false }),
       commit: vi.fn().mockResolvedValue(undefined),
       rollback: vi.fn(),
       complete: vi.fn().mockResolvedValue(undefined),
@@ -7266,10 +7294,11 @@ describe('Server Config (config.ts)', () => {
     // A host that declines to rewrite a process-wide resource (for example
     // the environment, in a process hosting sibling sessions) reports it
     // at prepare time; the switch still commits and the caller sees why.
+    const commit = vi.fn().mockResolvedValue(undefined);
     const prepare = vi.fn().mockResolvedValue({
-      config: {} as ProjectRuntimeConfig,
+      config: preparedRuntime(),
       warnings: ['Process environment left unchanged'],
-      commit: vi.fn().mockResolvedValue(undefined),
+      commit,
       rollback: vi.fn(),
       complete: vi.fn().mockResolvedValue(undefined),
     });
@@ -7287,10 +7316,12 @@ describe('Server Config (config.ts)', () => {
     });
 
     expect(result.projectRuntimeRefreshErrors?.[0]).toBeInstanceOf(Error);
+    expect(result.projectRuntimeRefreshErrors).toHaveLength(1);
     expect((result.projectRuntimeRefreshErrors?.[0] as Error).message).toBe(
       'Process environment left unchanged',
     );
     expect(config.getTargetDir()).toBe(newDir);
+    expect(commit).toHaveBeenCalledOnce();
     chdirSpy.mockRestore();
     cwdSpy.mockRestore();
   });

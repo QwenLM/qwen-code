@@ -12593,14 +12593,9 @@ class QwenAgent implements Agent {
       // channel. newSessionConfig maps the throw to a RequestError.
       true,
       {
-        // This child hosts every session on its channel and spawned tools
-        // inherit `process.env`, so a per-session `/cd` may only rewrite
-        // the process environment while no sibling session is live.
-        ownsProcessEnvironment: () =>
-          this.sessions.size +
-            this.initializingConfigs.size +
-            this.pendingSessionConfigCreations <=
-          1,
+        // This child can accept another session at any time, and spawned
+        // tools inherit one process-wide environment.
+        ownsProcessEnvironment: () => false,
         ...(provisionalWorkspace
           ? { provisionalWorkspace: true as const }
           : {}),
