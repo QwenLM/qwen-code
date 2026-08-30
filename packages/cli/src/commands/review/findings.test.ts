@@ -36,7 +36,7 @@ import {
   type Finding,
   type FindingsReport,
   holdCriticalsFailingOnBase,
-  holdUnwitnessedCriticals,
+  holdUnwitnessedFindings,
   sharedFailingFilesOf,
 } from './findings.js';
 
@@ -205,10 +205,48 @@ describe('validateFindings', () => {
     ).toThrow(/location 0 has an invalid "line"/);
   });
 
-  it('rejects a top-level input that is not an array', () => {
-    expect(() => validateFindings({ findings: [] })).toThrow(
+  it('rejects a top-level input that is neither an array nor a findings wrapper', () => {
+    expect(() => validateFindings({ findings: 'not-an-array' })).toThrow(
       /must be a JSON array/,
     );
+    expect(() => validateFindings({ verdict: 'approve' })).toThrow(
+      /must be a JSON array/,
+    );
+  });
+
+  it('accepts the saved-artifact and report wrappers the recovery path feeds it', () => {
+    // Step 9 cleanup deletes the findings-in.json side file a later-session
+    // outcome path needs; the saved artifact (Step 8) and this command's own
+    // report survive it, and both wrap the array. `--input` must recover
+    // from that surviving state instead of dying on the missing side file.
+    const canonical = validateFindings([
+      { ...base, id: 'R1-1' },
+      { ...base, id: 'R1-2', severity: 'Suggestion' },
+    ]);
+    const report = buildReport(canonical);
+    const fromReport = validateFindings(report);
+    expect(fromReport.map((f) => f.id)).toEqual(['R1-1', 'R1-2']);
+
+    // The ReviewArtifactV1 shape: the same array under review metadata.
+    const artifact = {
+      schemaVersion: 1,
+      reviewId: 'review-1',
+      findings: report.findings,
+      counts: report.counts,
+    };
+    const fromArtifact = validateFindings(artifact);
+    expect(fromArtifact.map((f) => f.id)).toEqual(['R1-1', 'R1-2']);
+
+    // The wrapper round-trips the outcome merge end to end: outcomes apply
+    // to the unwrapped list exactly as they would to the bare array.
+    const withOutcomes = applyOutcomes(
+      validateFindings(report),
+      validateOutcomes([
+        { id: 'R1-1', outcome: 'fixed' },
+        { id: 'R1-2', outcome: 'skipped', note: 'intended behaviour' },
+      ]),
+    );
+    expect(withOutcomes.map((f) => f.outcome)).toEqual(['fixed', 'skipped']);
   });
 });
 
@@ -424,6 +462,24 @@ describe('validateOutcomes', () => {
     expect(() => validateOutcomes([{ outcome: 'fixed' }])).toThrow(
       /index 0 is missing a string "id"/,
     );
+  });
+
+  it('rejects a skipped outcome with no note', () => {
+    // `skipped` keeps the finding on the reader's plate and the note is the
+    // reader's only handle on it — and the report_findings contract refuses
+    // a skipped outcome that carries none, so the ledger feeding it must not
+    // accept one either.
+    expect(() => validateOutcomes([{ id: 'f1', outcome: 'skipped' }])).toThrow(
+      /"skipped" with no note/,
+    );
+    expect(() =>
+      validateOutcomes([{ id: 'f1', outcome: 'skipped', note: '   ' }]),
+    ).toThrow(/"skipped" with no note/);
+    expect(
+      validateOutcomes([
+        { id: 'f1', outcome: 'skipped', note: 'needs a product call' },
+      ]),
+    ).toEqual([{ id: 'f1', outcome: 'skipped', note: 'needs a product call' }]);
   });
 });
 
@@ -690,7 +746,7 @@ describe('findings (command boundary)', () => {
   }
 
   it('demotes an unwitnessed Critical through the whole handler, and says so on stderr', () => {
-    // The unit tests pin holdUnwitnessedCriticals in isolation; this pins the
+    // The unit tests pin holdUnwitnessedFindings in isolation; this pins the
     // WIRING — the call sits in the handler before buildReport, so removing
     // it, or moving it after the report is built, fails here, not silently.
     const input = join(dir, 'in.json');
@@ -711,6 +767,54 @@ describe('findings (command boundary)', () => {
     expect(stderr).toContain('w1 filed at low confidence');
     expect(stderr).not.toContain('w2 filed at low confidence');
     expect(report.counts.byConfidence['low']).toBe(1);
+  });
+
+  it('the artifact compose-review consumes already has an unwitnessed deferrable Critical at low confidence (#10291 × witness rule)', () => {
+    // The two features compose safely only by ORDER: the witness hold runs
+    // here, in Step 6, before compose-review ever reads the artifact — so a
+    // Critical whose axes say fails-closed on new-surface but that no run
+    // confirmed is terminal-only by the time the deferral channel exists,
+    // and the orchestrator has nothing high-confidence to route into
+    // `deferredSuggestions`. Nothing in compose-review can re-check this
+    // (its deferral entries carry no witness field), so the order IS the
+    // contract; moving the hold after the report is built fails here.
+    const input = join(dir, 'in.json');
+    const out = join(dir, 'findings.json');
+    writeFileSync(
+      input,
+      JSON.stringify([
+        {
+          ...base,
+          id: 'd1',
+          direction: 'fails-closed',
+          baseline: 'new-surface',
+        },
+        {
+          ...base,
+          id: 'd2',
+          direction: 'fails-closed',
+          baseline: 'new-surface',
+          witness: 'probe: the sparse clone wedged at step 3',
+        },
+      ]),
+    );
+    runCapturingStderr({ input, out, print: false });
+    const report = JSON.parse(readFileSync(out, 'utf8')) as FindingsReport;
+    const byId = new Map(report.findings.map((f) => [f.id, f]));
+    // Unwitnessed: demoted, axes preserved as facts, never deferrable.
+    expect(byId.get('d1')).toMatchObject({
+      confidence: 'low',
+      direction: 'fails-closed',
+      baseline: 'new-surface',
+    });
+    expect(byId.get('d1')?.failureScenario).toContain('witness rule');
+    // Witnessed: the artifact carries it high with both axes intact — the
+    // only shape the critical floor is ever allowed to defer.
+    expect(byId.get('d2')).toMatchObject({
+      confidence: 'high',
+      direction: 'fails-closed',
+      baseline: 'new-surface',
+    });
   });
 
   it('announces every hold, naming the finding and the measured file', () => {
@@ -813,6 +917,10 @@ describe('findings (command boundary)', () => {
     expect(report.findings[0].severity).toBe('Suggestion');
     expect(report.counts.bySeverity['Critical']).toBe(0);
     expect(report.findings[0].failureScenario).toContain('failed there too');
+    // The measurement hold must run BEFORE the witness hold, or the held
+    // Suggestion (review-source, no witness) would be demoted to low
+    // confidence and silently lose the PR surface the hold promises.
+    expect(report.findings[0].confidence).toBe('high');
   });
 
   it('--to-anchors writes the resolver input beside the artifact, and names it on stderr', () => {
@@ -1526,7 +1634,7 @@ describe('findings (command boundary)', () => {
   });
 });
 
-describe('holdUnwitnessedCriticals — the witness rule has a machine half', () => {
+describe('holdUnwitnessedFindings — the witness rule has a machine half', () => {
   const critical = {
     id: 'w1',
     severity: 'Critical' as const,
@@ -1542,13 +1650,51 @@ describe('holdUnwitnessedCriticals — the witness rule has a machine half', () 
     // The demotion the SKILL promises as mechanical: without this, the sort
     // exists only as Step 4 prose, and an omitted `confidence` even defaults
     // to `high` — the fail-open direction (dogfood review of the witness PR).
-    const { findings, unwitnessed } = holdUnwitnessedCriticals([critical]);
+    const { findings, unwitnessed } = holdUnwitnessedFindings([critical]);
     expect(findings[0].confidence).toBe('low');
     expect(findings[0].severity).toBe('Critical');
     expect(findings[0].failureScenario).toContain('witness rule');
+    expect(findings[0].failureScenario).toContain('this confirmed Critical');
     // The original evidence survives — the rule is appended, not substituted.
     expect(findings[0].failureScenario).toContain('fires twice');
     expect(unwitnessed).toEqual(['w1']);
+  });
+
+  it('the deferrable axes (#10291) do NOT exempt an unwitnessed Critical — witness first, deferral second', () => {
+    // A Critical tagged fails-closed on new-surface is the ONE combination
+    // the critical floor may defer (compose-review's floorDefersCritical).
+    // Deferral is a posting decision about a CONFIRMED blocker; it is not a
+    // second door past the witness rule the way `heldByMeasurement` is (that
+    // one carries a measurement as its witness). Without this pin, an
+    // unverified Critical could ride its axes straight into the deferral
+    // channel — moved out of the posting set as if it were settled, while no
+    // run ever confirmed it. So: no witness → low confidence (terminal-only,
+    // never drafted, never deferrable), axes or not.
+    const deferrable = {
+      ...critical,
+      direction: 'fails-closed' as const,
+      baseline: 'new-surface' as const,
+    };
+    const held = holdUnwitnessedFindings([deferrable]);
+    expect(held.findings[0].confidence).toBe('low');
+    expect(held.unwitnessed).toEqual(['w1']);
+    // The axes are preserved on the demoted finding — they are facts about
+    // the finding, not a licence — so a later witness can restore it whole.
+    expect(held.findings[0].direction).toBe('fails-closed');
+    expect(held.findings[0].baseline).toBe('new-surface');
+
+    // With a witness the same finding stays high-confidence AND keeps its
+    // axes, which is what lets compose-review defer it: the axes reach the
+    // deferral channel only on a finding that passed the witness rule.
+    const witnessed = holdUnwitnessedFindings([
+      { ...deferrable, witness: 'probe: the sparse clone wedged at step 3' },
+    ]);
+    expect(witnessed.unwitnessed).toEqual([]);
+    expect(witnessed.findings[0]).toMatchObject({
+      confidence: 'high',
+      direction: 'fails-closed',
+      baseline: 'new-surface',
+    });
   });
 
   it('leaves a witnessed Critical alone — either form of the field counts', () => {
@@ -1556,7 +1702,7 @@ describe('holdUnwitnessedCriticals — the witness rule has a machine half', () 
       'BASE: 2 calls / PR: 1 call — probe flipped',
       'not run — needs a live OAuth endpoint this harness lacks',
     ]) {
-      const { findings, unwitnessed } = holdUnwitnessedCriticals([
+      const { findings, unwitnessed } = holdUnwitnessedFindings([
         { ...critical, witness },
       ]);
       expect(findings[0].confidence).toBe('high');
@@ -1568,7 +1714,7 @@ describe('holdUnwitnessedCriticals — the witness rule has a machine half', () 
     // A [build]/[test]/[probe] finding IS a run's output; demanding a second
     // witness would demote findings the pipeline treats as pre-confirmed.
     for (const source of ['build', 'test', 'probe', 'lint'] as const) {
-      const { unwitnessed } = holdUnwitnessedCriticals([
+      const { unwitnessed } = holdUnwitnessedFindings([
         { ...critical, source },
       ]);
       expect(unwitnessed).toEqual([]);
@@ -1576,15 +1722,101 @@ describe('holdUnwitnessedCriticals — the witness rule has a machine half', () 
   });
 
   it('is idempotent — a demoted finding re-fed is not touched again', () => {
-    const once = holdUnwitnessedCriticals([critical]).findings[0];
-    const twice = holdUnwitnessedCriticals([once]).findings[0];
+    const once = holdUnwitnessedFindings([critical]).findings[0];
+    const twice = holdUnwitnessedFindings([once]).findings[0];
     expect(twice).toEqual(once);
-    // Suggestions are never judged: the rule targets the severity that posts
-    // as a blocker.
+  });
+
+  it('exempts a measurement-held finding — the two holds must not compose into a silent drop', () => {
+    // test-delta's hold demotes Critical→Suggestion on the promise the
+    // finding STAYS in front of a human as a posted Suggestion whose note
+    // says how to re-raise it. Judging that Suggestion here would drop it to
+    // terminal-only — and it is not the unexecuted claim this rule stops:
+    // the measurement that moved it IS a run's output, riding the finding.
+    const named = {
+      ...critical,
+      failureScenario: 'breaks packages/x/foo.test.ts on main',
+    };
+    const held = holdCriticalsFailingOnBase([named], ['packages/x/foo.test.ts'])
+      .findings[0];
+    expect(held.severity).toBe('Suggestion');
+    expect(held.heldByMeasurement).toEqual({ file: 'packages/x/foo.test.ts' });
+    const { findings, unwitnessed } = holdUnwitnessedFindings([held]);
+    expect(unwitnessed).toEqual([]);
+    expect(findings[0].confidence).toBe('high');
+  });
+
+  it('does NOT exempt a Critical re-raised through the measurement note’s own door', () => {
+    // The note tells the reader to "file it at Critical again"; a finding
+    // that does so still carries `heldByMeasurement`, and it must face the
+    // witness rule like any unexecuted Critical — the exemption is scoped to
+    // Suggestion precisely so this door does not become a witness bypass.
+    const reraised = {
+      ...critical,
+      severity: 'Critical' as const,
+      heldByMeasurement: { file: 'packages/x/foo.test.ts' },
+    };
+    const { findings, unwitnessed } = holdUnwitnessedFindings([reraised]);
+    expect(unwitnessed).toEqual(['w1']);
+    expect(findings[0].confidence).toBe('low');
+  });
+
+  it('judges Suggestions on the same terms — they post to the PR too', () => {
+    // The rule originally targeted Criticals only; an unexecuted claim rides
+    // onto the author's screen through the Suggestion door on exactly the
+    // same terms, so both postable severities are judged. `Nice to have` is
+    // terminal-only by construction and stays exempt.
+    const { findings, unwitnessed } = holdUnwitnessedFindings([
+      { ...critical, severity: 'Suggestion' },
+    ]);
+    expect(findings[0].confidence).toBe('low');
+    expect(findings[0].failureScenario).toContain('witness rule');
+    // The sentence names the severity it demoted — a hardcoded 'Critical'
+    // here would mislabel every demoted Suggestion in the one sentence a
+    // human reads to understand the demotion.
+    expect(findings[0].failureScenario).toContain('this confirmed Suggestion');
+    expect(unwitnessed).toEqual(['w1']);
     expect(
-      holdUnwitnessedCriticals([{ ...critical, severity: 'Suggestion' }])
+      holdUnwitnessedFindings([{ ...critical, severity: 'Nice to have' }])
         .unwitnessed,
     ).toEqual([]);
+  });
+
+  it('treats a reason-less `not run` line as no witness at all', () => {
+    // The escape hatch is the REASON, not the phrase: `not run —` with
+    // nothing after the dash names nothing a human can weigh, so it counts
+    // as absent. Emptiness is "no letter or digit", not a dash-glyph list —
+    // the first draft enumerated three dashes and U+2015/U+2212/U+FF0D
+    // slipped through as "reasons".
+    for (const witness of [
+      'not run',
+      'not run —',
+      'witness: not run - ',
+      'not run \u2015',
+      'not run \u2212',
+      'not run \uFF0D',
+      'not run —— …',
+      // The phrase's own word-continuations carry no reason either.
+      'not runnable',
+      'not running —',
+    ]) {
+      const { unwitnessed } = holdUnwitnessedFindings([
+        { ...critical, witness },
+      ]);
+      expect(unwitnessed).toEqual(['w1']);
+    }
+    // A real reason in ANY script stands — JavaScript's \w is ASCII-only,
+    // so the emptiness test must not read a CJK reason as empty.
+    for (const witness of [
+      'not run — timing window no probe can pin',
+      'not run — 需要生产环境才能触发',
+      'not runnable — needs a prod-only token',
+    ]) {
+      const { unwitnessed } = holdUnwitnessedFindings([
+        { ...critical, witness },
+      ]);
+      expect(unwitnessed).toEqual([]);
+    }
   });
 });
 
@@ -2048,5 +2280,111 @@ describe('validateFindings — the canonical artifact round-trips', () => {
       validateFindings([{ ...base, fix_witness: 'N/A' }])[0].fixWitness,
     ).toBe('N/A');
     expect(validateFindings([{ ...base }])[0].fixWitness).toBeUndefined();
+  });
+
+  it('keeps fixConstraint, and drops the N/A its sibling field allows', () => {
+    // The fact the fix must not violate — the premise half of #10153, beside
+    // the claim half `fixWitness` carries. It round-trips like every sibling
+    // so Step 7's comment body reads it from data rather than re-deriving a
+    // constant or a file:line the finder already quoted.
+    const constraint =
+      'any bound here must be <= MAX_SUBAGENT_DEPTH_LIMIT = 100 ' +
+      '(packages/core/src/config/config.ts:1533)';
+    const [f] = validateFindings([
+      {
+        ...base,
+        fixWitness: 'N/A',
+        fixConstraint: constraint,
+      },
+    ]);
+    expect(f.fixConstraint).toBe(constraint);
+    expect(f.fixWitness).toBe('N/A');
+    expect(
+      validateFindings([{ ...base, fix_constraint: constraint }])[0]
+        .fixConstraint,
+    ).toBe(constraint);
+    // Absence stays absence: the field has no `N/A` form, because an empty
+    // constraint carries no information and would lengthen every posted
+    // comment (#9177). A finder that copies the fixWitness habit and writes
+    // the placeholder anyway must not hand the poster a "constraint" — the
+    // literal is normalised to absence so presence alone is the signal.
+    expect(validateFindings([{ ...base }])[0].fixConstraint).toBeUndefined();
+    for (const placeholder of [
+      'N/A',
+      'n/a',
+      'NA',
+      'none',
+      'None.',
+      ' N/A ',
+      // The omission literals the finding format and the posting rule name
+      // — the finder told to omit the line is the one most likely to write
+      // one, and carried through it would hand Step 7 a "constraint" that
+      // names no constant and no file:line.
+      'none observed',
+      'None observed',
+      'None observed.',
+      'no constraints observed',
+    ]) {
+      expect(
+        validateFindings([{ ...base, fixConstraint: placeholder }])[0]
+          .fixConstraint,
+      ).toBeUndefined();
+    }
+    // And the drop is narrow: a real constraint that merely CONTAINS one of
+    // the words survives — the bar for the field is a quoted constant or a
+    // file:line, and neither collapses to a placeholder.
+    expect(
+      validateFindings([
+        { ...base, fixConstraint: 'none of the callers pass 0 (src/a.ts:12)' },
+      ])[0].fixConstraint,
+    ).toBe('none of the callers pass 0 (src/a.ts:12)');
+  });
+});
+
+describe('the finding axes (#10291)', () => {
+  it('round-trips direction and baseline, and leaves an unclassified finding bare', () => {
+    const [classified, bare] = validateFindings([
+      { ...base, direction: 'fails-closed', baseline: 'new-surface' },
+      { ...base, id: 'f2' },
+    ]);
+    expect(classified.direction).toBe('fails-closed');
+    expect(classified.baseline).toBe('new-surface');
+    expect(bare.direction).toBeUndefined();
+    expect(bare.baseline).toBeUndefined();
+    // Fed back through `--input` (the artifact wrapper), both survive.
+    const again = validateFindings({
+      findings: [classified],
+    } as unknown as Finding[]);
+    expect(again[0]).toMatchObject({
+      direction: 'fails-closed',
+      baseline: 'new-surface',
+    });
+  });
+
+  it('refuses a misspelled axis with the index — a silent drop would post a deferrable blocker', () => {
+    expect(() =>
+      validateFindings([{ ...base, direction: 'fails-open' }]),
+    ).toThrow(
+      /Finding at index 0: has direction "fails-open"; expected one of "certifies-falsely", "fails-closed"/,
+    );
+    expect(() =>
+      validateFindings([{ ...base, baseline: 'old-surface' }]),
+    ).toThrow(
+      /Finding at index 0: has baseline "old-surface"; expected one of "regression", "new-surface"/,
+    );
+  });
+
+  it("renders the axes as the claim line's bracket tags", () => {
+    const report = buildReport(
+      validateFindings([
+        { ...base, direction: 'fails-closed', baseline: 'new-surface' },
+        { ...base, id: 'f2', direction: 'certifies-falsely' },
+        { ...base, id: 'f3' },
+      ]),
+    );
+    const lines = renderFindings(report);
+    expect(lines[0]).toMatch(/^Critical \[fails-closed\] \[new-surface\] — /);
+    expect(lines[1]).toMatch(/^Critical \[certifies-falsely\] — /);
+    expect(lines[2]).toMatch(/^Critical — /);
   });
 });

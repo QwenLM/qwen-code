@@ -284,12 +284,15 @@ export abstract class DeclarativeTool<
    *   - undefined: fall back to raw params (only safe when the tool is
    *     known to have no sensitive params)
    *
-   * Default is the empty-string sentinel — fail-closed: a third-party
-   * MCP tool (or any tool that has not opted in) does not leak its raw
-   * parameters (potentially containing API keys, tokens, file contents)
-   * into the classifier LLM prompt. Tools that want their args inspected
-   * by the classifier for safety judgement should override this and
-   * return an object with only the security-relevant fields.
+   * Default is the empty-string sentinel — fail-closed: a tool that has
+   * not opted in does not leak its raw parameters (potentially containing
+   * API keys, tokens, file contents) into the classifier LLM prompt.
+   * Tools that want their args inspected by the classifier for safety
+   * judgement should override this and return an object with only the
+   * security-relevant fields. Note that `DiscoveredMCPTool` overrides
+   * this and forwards a bounded projection of every MCP call's arguments
+   * by default (see `mcp-classifier-input.ts`; opt out with
+   * `permissions.autoMode.mcp.forwardArguments: false`).
    */
   toAutoClassifierInput(
     _params: TParams,
@@ -634,6 +637,7 @@ export interface AgentResultDisplay {
   subagentColor?: string;
   taskDescription: string;
   taskPrompt: string;
+  executionMode?: 'foreground' | 'background';
   status: 'running' | 'completed' | 'failed' | 'cancelled' | 'background';
   terminateReason?: string;
   result?: string;
@@ -784,6 +788,7 @@ export type ToolResultDisplay =
   | AgentResultDisplay
   | TeamResultDisplay
   | TaskListResultDisplay
+  | FindingsResultDisplay
   | AnsiOutputDisplay
   | McpToolProgressData
   | McpAppResultDisplay
@@ -834,6 +839,56 @@ export interface DiffStat {
   user_removed_chars: number;
 }
 
+/**
+ * One review finding as the `report_findings` tool hands it to clients.
+ *
+ * Field names and enum spellings deliberately match the `qwen review
+ * findings` artifact (`packages/cli/src/commands/review/findings.ts`) so the model
+ * copies values straight out of the artifact instead of translating them —
+ * a translation layer between two spellings of the same list is where
+ * severities have historically drifted.
+ */
+export interface ReportedFinding {
+  /** The findings artifact's id (`R<round>-<n>` / `D<round>-<n>`), when one exists. */
+  id?: string;
+  severity: 'Critical' | 'Suggestion' | 'Nice to have';
+  /** Verification confidence. Absent on an unverified (low-effort) pass. */
+  confidence?: 'high' | 'low';
+  /** Where the finding came from. */
+  source?: 'review' | 'build' | 'test' | 'probe' | 'lint';
+  file: string;
+  line?: number;
+  /** One sentence stating the defect. */
+  summary: string;
+  /** `summary` compressed to <= 60 characters, for a compact list UI. */
+  shortSummary: string;
+  /** The concrete trigger and wrong outcome. */
+  failureScenario: string;
+  /** Free-form kebab-case tag (`correctness`, `security`, …). */
+  category?: string;
+  /** Which way a Critical fails — see `FINDING_DIRECTIONS`. */
+  direction?: 'certifies-falsely' | 'fails-closed';
+  /** What a Critical is measured against — see `FINDING_BASELINES`. */
+  baseline?: 'regression' | 'new-surface';
+  /** Set only on a re-report after fixes were applied. */
+  outcome?: 'fixed' | 'skipped' | 'no_change_needed';
+  /** The fixer's reason — mainly for `skipped`. */
+  outcomeNote?: string;
+}
+
+export interface FindingsResultDisplay {
+  type: 'findings_list';
+  /** The review effort the findings came from. */
+  level?: 'low' | 'medium' | 'high';
+  findings: ReportedFinding[];
+  /**
+   * Set by history/recording compaction when the retained-display budget
+   * evicted the least severe tail of a larger list: how many findings were
+   * removed. The retained prefix keeps the most severe entries.
+   */
+  omittedFindings?: number;
+}
+
 export interface TodoResultDisplay {
   type: 'todo_list';
   planId?: string;
@@ -843,6 +898,7 @@ export interface TodoResultDisplay {
     status: 'pending' | 'in_progress' | 'completed';
     blockedBy?: string[];
   }>;
+  unchanged?: boolean;
 }
 
 export interface PlanResultDisplay {
@@ -973,13 +1029,6 @@ export type ToolCallConfirmationDetails = (
 ) & {
   /** Explains why an AUTO-mode call was routed to manual confirmation. */
   autoModeFallback?: AutoModeFallbackConfirmation;
-  /**
-   * The reason supplied by a PreToolUse hook whose 'ask' decision escalated
-   * this call into an interactive confirmation. Rendered alongside the
-   * tool's own confirmation body (e.g. the edit diff) so the user sees why
-   * the prompt appeared (#9434).
-   */
-  hookAskReason?: string;
 };
 
 export interface ToolPlanConfirmationDetails {

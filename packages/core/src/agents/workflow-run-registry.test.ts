@@ -707,7 +707,6 @@ describe('WorkflowRunRegistry', () => {
           fileDiff: '@@ safe display diff @@',
           originalContent: 'ORIGINAL_CONTENT_SENTINEL',
           newContent: 'NEW_CONTENT_SENTINEL',
-          hookAskReason: 'HOOK_ASK_REASON_SENTINEL',
         },
       }),
     );
@@ -724,78 +723,6 @@ describe('WorkflowRunRegistry', () => {
         hideAlwaysAllow: true,
         hideModify: true,
         skipIdeDiff: true,
-        // The hook reason must survive the restriction so bubbled approvals
-        // keep the reason in the leader UI (#9441 R1-1 follow-up).
-        hookAskReason: 'HOOK_ASK_REASON_SENTINEL',
-      },
-    });
-  });
-
-  it('preserves the hook reason on exec confirmations through restriction', () => {
-    // The hookAskReason passthrough must survive restrictWorkflow-
-    // ConfirmationDetails for the EXEC branch too, not only edit
-    // (#9441 R3-8): a workflow subagent's hook-escalated shell command
-    // must bubble to the leader UI with the hook's reason intact.
-    const r = new WorkflowRunRegistry();
-    r.register(reg('wf_exec_hook_reason'));
-    r.setApprovalChangeCallback(() => {});
-    const emitter = new AgentEventEmitter();
-    r.bridgeApprovalEvents('wf_exec_hook_reason', emitter);
-    emitter.emit(
-      AgentEventType.TOOL_WAITING_APPROVAL,
-      approvalEvent({
-        name: 'Shell',
-        confirmationDetails: {
-          type: 'exec',
-          title: 'Run command?',
-          command: 'git status',
-          rootCommand: 'git',
-          hookAskReason: 'HOOK_ASK_REASON_SENTINEL',
-        },
-      }),
-    );
-
-    expect(r.get('wf_exec_hook_reason')!.pendingApprovals[0]).toMatchObject({
-      confirmationDetails: {
-        type: 'exec',
-        command: 'git status',
-        hideAlwaysAllow: true,
-        hookAskReason: 'HOOK_ASK_REASON_SENTINEL',
-      },
-    });
-  });
-
-  it('preserves the hook reason on info confirmations through restriction', () => {
-    // The ask bounce synthesizes an info view for every tool without a
-    // structured one (any MCP tool, web_fetch, or a structured tool whose
-    // re-entrant preview throws); the hookAskReason passthrough must
-    // survive restrictWorkflowConfirmationDetails for the INFO branch too,
-    // not only edit/exec (#9441 R8-1).
-    const r = new WorkflowRunRegistry();
-    r.register(reg('wf_info_hook_reason'));
-    r.setApprovalChangeCallback(() => {});
-    const emitter = new AgentEventEmitter();
-    r.bridgeApprovalEvents('wf_info_hook_reason', emitter);
-    emitter.emit(
-      AgentEventType.TOOL_WAITING_APPROVAL,
-      approvalEvent({
-        name: 'HookedTool',
-        confirmationDetails: {
-          type: 'info',
-          title: 'Hook confirmation',
-          prompt: 'hook says confirm',
-          hookAskReason: 'HOOK_ASK_REASON_SENTINEL',
-        },
-      }),
-    );
-
-    expect(r.get('wf_info_hook_reason')!.pendingApprovals[0]).toMatchObject({
-      confirmationDetails: {
-        type: 'info',
-        title: 'Hook confirmation',
-        prompt: 'hook says confirm',
-        hideAlwaysAllow: true,
-        hookAskReason: 'HOOK_ASK_REASON_SENTINEL',
       },
     });
   });

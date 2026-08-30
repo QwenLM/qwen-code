@@ -1774,45 +1774,6 @@ export class ShellToolInvocation extends BaseToolInvocation<
     };
   }
 
-  /**
-   * Build the edit confirmation for a prepared sed edit. When the user has
-   * already edited and approved the content (`confirmedSedNewContent`,
-   * retained across a PreToolUse ask bounce for the same target), the view
-   * presents THAT content — the re-confirmation must show exactly the
-   * change approval will write; `executeSedEdit` applies the same
-   * substitution at write time (#9434 review R4-2).
-   */
-  private buildSedEditConfirmationDetails(
-    edit: PreparedSedEdit,
-  ): ToolEditConfirmationDetails {
-    const displayEdit =
-      this.confirmedSedNewContent !== undefined
-        ? { ...edit, newContent: this.confirmedSedNewContent }
-        : edit;
-    const display = this.makeSedEditDisplay(displayEdit);
-    return {
-      type: 'edit',
-      title: `Confirm Sed Edit: ${shortenPath(makeRelative(displayEdit.filePath, this.config.getTargetDir()))}`,
-      fileName: displayEdit.fileName,
-      filePath: displayEdit.filePath,
-      fileDiff: display.fileDiff,
-      originalContent: displayEdit.originalContent,
-      newContent: displayEdit.newContent,
-      hideModify: true,
-      onConfirm: async (
-        outcome: ToolConfirmationOutcome,
-        payload?: ToolConfirmationPayload,
-      ) => {
-        if (payload?.newContent !== undefined) {
-          this.confirmedSedNewContent = payload.newContent;
-        }
-        if (outcome === ToolConfirmationOutcome.ProceedAlways) {
-          this.config.setApprovalMode(ApprovalMode.AUTO_EDIT);
-        }
-      },
-    };
-  }
-
   private sedEditError(
     message: string,
     type = ToolErrorType.FILE_WRITE_FAILURE,
@@ -2119,37 +2080,34 @@ export class ShellToolInvocation extends BaseToolInvocation<
     if (sedInfo) {
       try {
         const edit = await this.prepareSedEdit(sedInfo);
-        const previous = this.preparedSedEdit;
-        // Only clear a prior user-confirmed edit when the freshly prepared
-        // edit differs from the previously prepared one (a genuinely new sed
-        // target). A re-entrant getConfirmationDetails for the SAME sed edit —
-        // the PreToolUse ask bounce — must keep the content the user already
-        // edited and approved, or the bounce would silently discard it and the
-        // post-ask re-execution would write the simulated result instead.
-        if (
-          previous === undefined ||
-          previous.filePath !== edit.filePath ||
-          previous.newContent !== edit.newContent
-        ) {
-          this.confirmedSedNewContent = undefined;
-        }
         this.preparedSedEdit = edit;
+        this.confirmedSedNewContent = undefined;
         this.sedEditPreviewFailed = false;
-        return this.buildSedEditConfirmationDetails(edit);
+        const display = this.makeSedEditDisplay(edit);
+        const confirmationDetails: ToolEditConfirmationDetails = {
+          type: 'edit',
+          title: `Confirm Sed Edit: ${shortenPath(makeRelative(edit.filePath, this.config.getTargetDir()))}`,
+          fileName: edit.fileName,
+          filePath: edit.filePath,
+          fileDiff: display.fileDiff,
+          originalContent: edit.originalContent,
+          newContent: edit.newContent,
+          hideModify: true,
+          onConfirm: async (
+            outcome: ToolConfirmationOutcome,
+            payload?: ToolConfirmationPayload,
+          ) => {
+            if (payload?.newContent !== undefined) {
+              this.confirmedSedNewContent = payload.newContent;
+            }
+            if (outcome === ToolConfirmationOutcome.ProceedAlways) {
+              this.config.setApprovalMode(ApprovalMode.AUTO_EDIT);
+            }
+          },
+        };
+        return confirmationDetails;
       } catch (err) {
         if (err instanceof StructuredToolError) {
-          throw err;
-        }
-        // A FAILED re-entrant preview (the PreToolUse ask bounce) must not
-        // discard an already-prepared/confirmed sed edit: flipping
-        // sedEditPreviewFailed here would make execution skip
-        // executeSedEdit and run the RAW sed command, silently dropping the
-        // user-approved content along with the FILE_CHANGED_SINCE_READ
-        // guard, symlink refusal, and file-history backup. Propagate the
-        // error instead: the caller falls back to a synthetic confirmation
-        // while execution keeps honoring the prepared edit (#9434 review
-        // R4-3).
-        if (this.preparedSedEdit) {
           throw err;
         }
         this.sedEditPreviewFailed = true;

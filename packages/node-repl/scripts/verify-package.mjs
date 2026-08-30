@@ -23,6 +23,20 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const packageRoot = path.resolve(scriptDirectory, '..');
+const computerUseSkillSource = path.resolve(
+  packageRoot,
+  '..',
+  'core',
+  'src',
+  'skills',
+  'bundled',
+  'computer-use',
+  'SKILL.md',
+);
+const expectedComputerUseInstructions = readFileSync(
+  computerUseSkillSource,
+  'utf8',
+);
 const npmRegistry = 'https://registry.npmjs.org';
 
 function valueAfter(flag) {
@@ -80,6 +94,7 @@ for (const required of [
   'dist/index.d.ts',
   'dist/kernel-manager.js',
   'dist/mcp-server.js',
+  'dist/computer-use-skill.md',
   'dist/runtime/kernel.mjs',
   'dist/runtime/module-loader.mjs',
   'dist/runtime/tree-sitter-javascript.wasm',
@@ -104,15 +119,36 @@ if (tarballs.length !== 1 || tarballs[0] !== packed.filename) {
     `expected exactly one Node REPL tarball, found ${tarballs.join(', ')}`,
   );
 }
-run('npm', [
-  'publish',
-  tarball,
-  '--dry-run',
-  '--access',
-  'public',
-  '--json',
-  `--registry=${npmRegistry}`,
-]);
+const remoteIntegrityResult = spawnSync(
+  'npm',
+  [
+    'view',
+    `${packed.name}@${packed.version}`,
+    'dist.integrity',
+    `--registry=${npmRegistry}`,
+  ],
+  { cwd: packageRoot, encoding: 'utf8', stdio: 'pipe' },
+);
+if (remoteIntegrityResult.error) throw remoteIntegrityResult.error;
+const remoteIntegrity =
+  remoteIntegrityResult.status === 0 ? remoteIntegrityResult.stdout.trim() : '';
+if (remoteIntegrity) {
+  if (remoteIntegrity !== packed.integrity) {
+    throw new Error(
+      `${packed.name}@${packed.version} already exists with different integrity`,
+    );
+  }
+} else {
+  run('npm', [
+    'publish',
+    tarball,
+    '--dry-run',
+    '--access',
+    'public',
+    '--json',
+    `--registry=${npmRegistry}`,
+  ]);
+}
 
 const consumer = mkdtempSync(path.join(tmpdir(), 'qwen-node-repl-consumer-'));
 const textOf = (result) =>
@@ -161,6 +197,15 @@ try {
   if (!existsSync(serverEntry)) {
     throw new Error('clean install is missing the Node REPL entry point');
   }
+  const installedComputerUseInstructions = readFileSync(
+    path.join(installedRoot, 'dist', 'computer-use-skill.md'),
+    'utf8',
+  );
+  if (installedComputerUseInstructions !== expectedComputerUseInstructions) {
+    throw new Error(
+      'packed Computer Use instructions differ from the source skill',
+    );
+  }
 
   const transport = new StdioClientTransport({
     command: process.execPath,
@@ -173,6 +218,11 @@ try {
   });
   try {
     await client.connect(transport);
+    if (client.getInstructions() !== expectedComputerUseInstructions) {
+      throw new Error(
+        'MCP initialize instructions differ from the source skill',
+      );
+    }
     const tools = await client.listTools();
     const names = tools.tools.map((tool) => tool.name).sort();
     if (

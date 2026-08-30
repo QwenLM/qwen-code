@@ -20,6 +20,25 @@ import {
 // gap that two-layer SDK re-exports are easy to drift on.
 import type {
   DaemonClient,
+  CreateStandaloneSessionOptions,
+  DaemonArchiveStandaloneSessionsResult,
+  DaemonDeleteStandaloneSessionsResult,
+  DaemonRestoredStandaloneSession,
+  DaemonSessionRestoreStrategy,
+  DaemonStandaloneBatchError,
+  DaemonStandaloneCreationRecovery,
+  DaemonStandaloneDirectoryResult,
+  DaemonStandaloneFields,
+  DaemonStandaloneMetadataResult,
+  DaemonStandaloneSession,
+  DaemonStandaloneSessionCreating,
+  DaemonStandaloneSessionListOptions,
+  DaemonStandaloneSessionListPage,
+  DaemonStandaloneSessionLookup,
+  DaemonStandaloneSessionSummary,
+  DaemonStandaloneWorkingDirectory,
+  DaemonUnarchiveStandaloneSessionsResult,
+  RestoreStandaloneSessionRequest,
   WorkspaceDaemonClient,
   DaemonClientEvictedData,
   DaemonClientEvictedEvent,
@@ -145,6 +164,7 @@ import type {
 import {
   DAEMON_UI_DEBUG_REASONS,
   DAEMON_UI_UNRECOGNIZED_DIAGNOSTIC_REASONS,
+  isTaskExecutionMode,
   selectUnrecognizedDiagnostics,
   UNRECOGNIZED_DIAGNOSTICS_LIMIT,
 } from '../../src/daemon/index.js';
@@ -180,6 +200,37 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     // failure mode caught for PR-21 auth surface).
     expect(typeof Public.isWorkspaceScopedBudgetEvent).toBe('function');
     expect('projectChatRecordsToDaemonTranscript' in Public).toBe(false);
+    expect(Public.STANDALONE_SESSIONS_CAPABILITY).toBe(
+      'standalone_sessions_v1',
+    );
+    expect(typeof Public.isStandaloneSessionNotFoundError).toBe('function');
+    expect(typeof Public.isStandaloneCreationOutcomeUnknown).toBe('function');
+    expect(typeof Public.DaemonStandaloneProtocolError).toBe('function');
+    expect(typeof Public.DaemonStandaloneCreationOutcomeUnknownError).toBe(
+      'function',
+    );
+  });
+
+  it('exports standalone session SDK types from the package entry', () => {
+    expectTypeOf<CreateStandaloneSessionOptions>().not.toBeNever();
+    expectTypeOf<RestoreStandaloneSessionRequest>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneSession>().not.toBeNever();
+    expectTypeOf<DaemonRestoredStandaloneSession>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneSessionSummary>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneSessionLookup>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneSessionListOptions>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneSessionListPage>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneDirectoryResult>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneMetadataResult>().not.toBeNever();
+    expectTypeOf<DaemonArchiveStandaloneSessionsResult>().not.toBeNever();
+    expectTypeOf<DaemonUnarchiveStandaloneSessionsResult>().not.toBeNever();
+    expectTypeOf<DaemonDeleteStandaloneSessionsResult>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneBatchError>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneFields>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneSessionCreating>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneWorkingDirectory>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneCreationRecovery>().not.toBeNever();
+    expectTypeOf<DaemonSessionRestoreStrategy>().not.toBeNever();
   });
 
   it('round-trips a raw DaemonEvent through the public narrow helper', () => {
@@ -703,5 +754,24 @@ describe('unrecognized-diagnostic sidechannel public surface (#8823)', () => {
     expectTypeOf<DaemonEntryUnrecognizedDiagnostic>().toHaveProperty(
       'debugReason',
     );
+  });
+});
+
+describe('task executionMode guard public surface', () => {
+  it('pins the fail-closed literal whitelist at the daemon entry', () => {
+    // webui's projection (`projectSubagentToolUpdate`) and the web-shell
+    // adapter (`daemonToolBlockToToolCall`) both import this guard from
+    // @qwen-code/sdk/daemon; a dropped re-export is a compile error for
+    // them, and a widened or narrowed literal set silently re-routes live
+    // vs recorded classification. Pin the runtime behavior here the way
+    // DAEMON_UI_DEBUG_REASONS pins its closed union.
+    expect(typeof isTaskExecutionMode).toBe('function');
+    expect(isTaskExecutionMode('foreground')).toBe(true);
+    expect(isTaskExecutionMode('background')).toBe(true);
+    expect(isTaskExecutionMode('detached')).toBe(false);
+    expect(isTaskExecutionMode('')).toBe(false);
+    expect(isTaskExecutionMode(undefined)).toBe(false);
+    expect(isTaskExecutionMode(42)).toBe(false);
+    expect(isTaskExecutionMode({})).toBe(false);
   });
 });

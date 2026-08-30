@@ -129,6 +129,35 @@ describe('permissionUtils', () => {
         }),
       ]);
     });
+
+    it('can hide project persistence while keeping user persistence', () => {
+      const options = toPermissionOptions(
+        {
+          type: 'exec',
+          title: 'Confirm Shell Command',
+          command: 'git status',
+          rootCommand: 'git',
+          permissionRules: ['Bash(git status)'],
+          onConfirm: async () => undefined,
+        },
+        false,
+        {
+          allowProjectPersistence: false,
+          allowUserPersistence: true,
+        },
+      );
+
+      expect(options).not.toContainEqual(
+        expect.objectContaining({
+          optionId: ToolConfirmationOutcome.ProceedAlwaysProject,
+        }),
+      );
+      expect(options).toContainEqual(
+        expect.objectContaining({
+          optionId: ToolConfirmationOutcome.ProceedAlwaysUser,
+        }),
+      );
+    });
   });
 
   describe('interactionMetaFields', () => {
@@ -214,64 +243,6 @@ describe('permissionUtils', () => {
     expect(content[0]).toMatchObject({
       content: {
         text: 'Classifier unavailable. Default Mode is recommended.',
-      },
-    });
-  });
-
-  it('renders the hook ask reason on edit, exec, and info permission requests', () => {
-    // A PreToolUse hook escalated these calls (#9434): off-TUI surfaces
-    // must carry the reason so the prompt is distinguishable from an
-    // ordinary permission request. The info class is the ask bounce's
-    // synthetic fallback for tools without a structured view (#9434
-    // review R5-2).
-    const editContent = buildPermissionRequestContent({
-      type: 'edit',
-      title: 'Confirm edit',
-      fileName: 'a.txt',
-      filePath: '/tmp/a.txt',
-      fileDiff: 'diff',
-      originalContent: 'a',
-      newContent: 'b',
-      hookAskReason: 'path requires human review',
-      onConfirm: async () => undefined,
-    });
-    expect(editContent).toContainEqual({
-      type: 'content',
-      content: {
-        type: 'text',
-        text: 'Hook requested confirmation: path requires human review',
-      },
-    });
-
-    const execContent = buildPermissionRequestContent({
-      type: 'exec',
-      title: 'Confirm shell',
-      command: 'git status',
-      rootCommand: 'git',
-      hookAskReason: 'path requires human review',
-      onConfirm: async () => undefined,
-    });
-    expect(execContent).toContainEqual({
-      type: 'content',
-      content: {
-        type: 'text',
-        text: 'Hook requested confirmation: path requires human review',
-      },
-    });
-
-    const infoContent = buildPermissionRequestContent({
-      type: 'info',
-      title: 'Hook requested confirmation to run web_fetch',
-      prompt: 'network egress requires human review',
-      renderPromptAsPlainText: true,
-      hookAskReason: 'network egress requires human review',
-      onConfirm: async () => undefined,
-    });
-    expect(infoContent).toContainEqual({
-      type: 'content',
-      content: {
-        type: 'text',
-        text: 'Hook requested confirmation: network egress requires human review',
       },
     });
   });

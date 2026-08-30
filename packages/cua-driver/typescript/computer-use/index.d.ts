@@ -1,11 +1,30 @@
+import type {
+  ActionResult as NativeActionResult,
+  SessionOutput as NativeSessionOutput,
+  VerifyStateOutput as NativeVerifyStateOutput,
+} from "../dist/index.js";
+
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
 export type JsonObject = { [key: string]: JsonValue };
 
 export interface ComputerUseOptions {
   session?: string;
+  /** Opt into a finite session lifetime. Omit both TTL fields for owner-lifetime persistence. */
   sessionTtlSeconds?: number;
+  /** Opt into a finite idle lifetime. Omit both TTL fields for owner-lifetime persistence. */
   idleTtlSeconds?: number;
+  callTimeoutMs?: number;
+}
+
+export interface CallOptions {
+  signal?: AbortSignal;
+  /** Native-call deadline. Must be from 1 through 29000 milliseconds. */
+  callTimeoutMs?: number;
+}
+
+export interface DeliveryOptions {
+  deliveryMode?: "background" | "foreground";
 }
 
 export interface ComputerUseConnectOptions extends ComputerUseOptions {
@@ -57,7 +76,7 @@ export interface ComputerUseScreenshot {
   images: unknown[];
 }
 
-export interface ObserveWindowOptions extends WindowRef {
+export interface ObserveWindowOptions extends WindowRef, CallOptions {
   baseRevisionId?: string;
   forceFull?: boolean;
   includeScreenshot?: boolean;
@@ -89,60 +108,130 @@ export interface WindowObservation {
   structured?: JsonObject;
 }
 
-export interface VerifyStateOptions extends WindowRef {
+export interface VerifyStateOptions extends WindowRef, CallOptions {
   expect: JsonObject[];
   timeoutMs?: number;
   stableSamples?: number;
   includeScreenshot?: boolean;
 }
 
-export type ClickOptions = PointOrElementRef & {
+export type ClickOptions = PointOrElementRef & CallOptions & DeliveryOptions & {
   button?: "left" | "right" | "middle";
   count?: number;
 };
 
-export type RightClickOptions = PointOrElementRef & {
+export type RightClickOptions = PointOrElementRef & CallOptions & DeliveryOptions & {
   modifier?: string[];
 };
 
-export interface DragOptions extends WindowRef {
+export interface DragOptions extends WindowRef, CallOptions, DeliveryOptions {
   fromX: number;
   fromY: number;
   toX: number;
   toY: number;
   durationMs?: number;
   steps?: number;
-  deliveryMode?: "background" | "foreground";
   button?: "left" | "right" | "middle";
   modifier?: string[];
 }
 
-export type ScrollOptions = PointOrElementRef & {
+export type ScrollOptions = PointOrElementRef & CallOptions & DeliveryOptions & {
   direction: "up" | "down" | "left" | "right";
   by?: "line" | "page";
   amount?: number;
 };
 
-export interface ElementValueOptions extends ElementRef {
+export interface ElementValueOptions extends ElementRef, CallOptions {
   value: string;
 }
 
-export type TextOptions = ExactActionRef & {
+export type TextOptions = ExactActionRef & CallOptions & DeliveryOptions & {
   text: string;
   delayMs?: number;
 };
 
-export type KeyOptions = ExactActionRef & {
+export type KeyOptions = ExactActionRef & CallOptions & DeliveryOptions & {
   key: string;
   modifiers?: string[];
 };
 
-export type HotkeyOptions = ExactActionRef & {
+export type HotkeyOptions = ExactActionRef & CallOptions & DeliveryOptions & {
   keys: string[];
 };
 
-export interface SecondaryActionOptions extends ElementRef {
+export interface SecondaryActionOptions extends ElementRef, CallOptions {
   action: string;
+}
+
+export type ActionEffect =
+  | "confirmed"
+  | "partial"
+  | "unverifiable"
+  | "suspected_noop"
+  | "refused";
+export type ActionRoute =
+  | "accessibility"
+  | "synthetic_events"
+  | "global_input"
+  | "system_api"
+  | "dom"
+  | "trusted_input";
+
+export interface ComputerUseActionResult {
+  effect: ActionEffect;
+  route: ActionRoute;
+  delivery?: {
+    mode: "background" | "foreground" | "not_applicable" | "unknown";
+    delivered_count?: number;
+  };
+  evidence?: Array<{ kind: "value_readback" | "window_change" }>;
+  escalation?: {
+    target: "pixel" | "foreground" | "page" | "session";
+    reason:
+      | "route_unavailable"
+      | "delivery_failed"
+      | "effect_unconfirmed"
+      | "suspected_noop"
+      | "permission_required";
+  };
+  /** The generated UniFFI record returned alongside the JSON projection. */
+  action?: NativeActionResult;
+}
+
+export type VerificationStatus = "satisfied" | "unsatisfied" | "unknown";
+export interface ComputerUseVerificationResult {
+  status: VerificationStatus;
+  stable: boolean;
+  elapsed_ms: number;
+  samples: number;
+  predicates: Array<{
+    index: number;
+    status: VerificationStatus;
+    unknown_reason?:
+      | "invalid_predicate"
+      | "unsupported_predicate"
+      | "untrusted_source"
+      | "multi_match"
+      | "target_missing"
+      | "observation_unavailable"
+      | "stability_unproven"
+      | null;
+    observed_json?: string | null;
+  }>;
+  /** The generated UniFFI record returned alongside the JSON projection. */
+  verification?: NativeVerifyStateOutput;
+}
+
+export interface ActAndVerifyOptions {
+  action: () => Promise<ComputerUseActionResult>;
+  verify: (
+    action: ComputerUseActionResult,
+  ) => Promise<ComputerUseVerificationResult>;
+}
+
+export interface ActAndVerifyResult {
+  action: ComputerUseActionResult;
+  verification: ComputerUseVerificationResult;
 }
 
 export class ComputerUseError extends Error {
@@ -156,24 +245,33 @@ export class ComputerUse {
   static create(options?: ComputerUseOptions): Promise<ComputerUse>;
   static connect(options?: ComputerUseConnectOptions): Promise<ComputerUse>;
 
+  readonly connectionGeneration: number;
+
   supportsObservationRevision(): Promise<boolean>;
-  listApps(): Promise<JsonObject[]>;
-  listWindows(options?: {
+  sessionInfo(options?: CallOptions): Promise<NativeSessionOutput>;
+  reconnect(): Promise<{ connectionGeneration: number }>;
+  listApps(options?: CallOptions): Promise<JsonObject[]>;
+  listWindows(options?: CallOptions & {
     pid?: number;
     onScreenOnly?: boolean;
   }): Promise<JsonObject[]>;
-  getWindow(options: WindowRef): Promise<JsonObject>;
+  getWindow(options: WindowRef & CallOptions): Promise<JsonObject>;
   observeWindow(options: ObserveWindowOptions): Promise<WindowObservation>;
-  verifyState(options: VerifyStateOptions): Promise<JsonObject | undefined>;
-  click(options: ClickOptions): Promise<JsonObject>;
-  doubleClick(options: PointOrElementRef): Promise<JsonObject>;
-  rightClick(options: RightClickOptions): Promise<JsonObject>;
-  drag(options: DragOptions): Promise<JsonObject>;
-  scroll(options: ScrollOptions): Promise<JsonObject>;
-  setValue(options: ElementValueOptions): Promise<JsonObject>;
-  typeText(options: TextOptions): Promise<JsonObject>;
-  pressKey(options: KeyOptions): Promise<JsonObject>;
-  hotkey(options: HotkeyOptions): Promise<JsonObject>;
-  performSecondaryAction(options: SecondaryActionOptions): Promise<JsonObject>;
+  verifyState(options: VerifyStateOptions): Promise<ComputerUseVerificationResult>;
+  click(options: ClickOptions): Promise<ComputerUseActionResult>;
+  doubleClick(
+    options: PointOrElementRef & CallOptions & DeliveryOptions,
+  ): Promise<ComputerUseActionResult>;
+  rightClick(options: RightClickOptions): Promise<ComputerUseActionResult>;
+  drag(options: DragOptions): Promise<ComputerUseActionResult>;
+  scroll(options: ScrollOptions): Promise<ComputerUseActionResult>;
+  setValue(options: ElementValueOptions): Promise<ComputerUseActionResult>;
+  typeText(options: TextOptions): Promise<ComputerUseActionResult>;
+  pressKey(options: KeyOptions): Promise<ComputerUseActionResult>;
+  hotkey(options: HotkeyOptions): Promise<ComputerUseActionResult>;
+  performSecondaryAction(
+    options: SecondaryActionOptions,
+  ): Promise<ComputerUseActionResult>;
+  actAndVerify(options: ActAndVerifyOptions): Promise<ActAndVerifyResult>;
   close(): Promise<void>;
 }

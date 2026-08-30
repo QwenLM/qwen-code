@@ -10,24 +10,13 @@ function withWarnings(
   description: string,
   details: Record<string, unknown>,
 ): string {
-  const prefixes: string[] = [];
-  // A PreToolUse hook escalated this call (#9434): surface the hook's
-  // reason on the non-TUI permission surfaces too, so a hook-forced
-  // prompt is distinguishable from an ordinary one off-TUI.
-  const hookAskReason = details['hookAskReason'];
-  if (typeof hookAskReason === 'string' && hookAskReason.length > 0) {
-    prefixes.push(`Hook requested confirmation: ${hookAskReason}`);
-  }
   const warnings = Array.isArray(details['warnings'])
     ? details['warnings'].filter(
         (warning): warning is string => typeof warning === 'string',
       )
     : [];
-  if (warnings.length > 0) {
-    prefixes.push(warnings.join('\n'));
-  }
-  return prefixes.length > 0
-    ? `${prefixes.join('\n')}\n${description}`
+  return warnings.length > 0
+    ? `${warnings.join('\n')}\n${description}`
     : description;
 }
 
@@ -117,13 +106,7 @@ export function buildPermissionSuggestions(
         {
           type: 'allow',
           label: 'Allow Info Request',
-          // withWarnings surfaces a PreToolUse hook's ask reason on the
-          // synthetic info fallback the ask bounce uses for tools without
-          // a structured view (#9434 review R5-2).
-          description: withWarnings(
-            title || 'Allow information request',
-            details,
-          ),
+          description: title || 'Allow information request',
         },
         {
           type: 'deny',

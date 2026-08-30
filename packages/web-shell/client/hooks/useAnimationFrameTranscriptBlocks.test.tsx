@@ -20,10 +20,12 @@ const testStore = vi.hoisted(() => {
     revision: 0,
     tailAppendBarrierRevision: 0,
   };
+  let blockChangeSummaryEnabled = true;
   const listeners = new Set<() => void>();
   return {
     getSnapshot: () => ({ blocks, blockIndexById }),
-    getBlockChangeSummary: () => blockChangeSummary,
+    getBlockChangeSummary: () =>
+      blockChangeSummaryEnabled ? blockChangeSummary : undefined,
     subscribe: (listener: () => void) => {
       listeners.add(listener);
       return () => listeners.delete(listener);
@@ -60,6 +62,9 @@ const testStore = vi.hoisted(() => {
       };
       listeners.forEach((listener) => listener());
     },
+    disableBlockChangeSummary() {
+      blockChangeSummaryEnabled = false;
+    },
     reset() {
       blocks = [];
       blockIndexById = {};
@@ -68,6 +73,7 @@ const testStore = vi.hoisted(() => {
         revision: 0,
         tailAppendBarrierRevision: 0,
       };
+      blockChangeSummaryEnabled = true;
       listeners.clear();
     },
   };
@@ -77,7 +83,7 @@ const testConnection = vi.hoisted(() => ({
   sessionId: 'session-a' as string | undefined,
 }));
 
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useTranscriptStore: () => testStore,
   useConnection: () => testConnection,
 }));
@@ -93,8 +99,8 @@ let renderLog: Array<{
   revision?: number;
 }> = [];
 
-function Harness() {
-  const snapshot = useAnimationFrameTranscriptSnapshot();
+function Harness({ structuralOnly = false }: { structuralOnly?: boolean }) {
+  const snapshot = useAnimationFrameTranscriptSnapshot({ structuralOnly });
   latestBlocks = snapshot.blocks;
   latestSummary = snapshot.blockChangeSummary;
   renderCount += 1;
@@ -123,6 +129,60 @@ afterEach(() => {
 });
 
 describe('useAnimationFrameTranscriptSnapshot', () => {
+  it('caches structural snapshots when the store has no change summary', () => {
+    let pendingFrame: FrameRequestCallback | null = null;
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+      pendingFrame = callback;
+      return 1;
+    });
+    testStore.disableBlockChangeSummary();
+    container = document.createElement('div');
+    document.body.append(container);
+    root = createRoot(container);
+
+    act(() => root!.render(<Harness structuralOnly />));
+
+    expect(renderCount).toBe(1);
+    expect(latestBlocks).toEqual([]);
+
+    // Without a change summary every notification may be structural, so the
+    // consumer must keep the pre-change update behavior and wake.
+    act(() => testStore.update([{ id: 'a' } as DaemonTranscriptBlock]));
+    act(() => pendingFrame?.(1_000));
+
+    expect(renderCount).toBeGreaterThan(1);
+    expect(latestBlocks).toHaveLength(1);
+  });
+
+  it('keeps structural consumers asleep for pure tail appends', () => {
+    let pendingFrame: FrameRequestCallback | null = null;
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+      pendingFrame = callback;
+      return 1;
+    });
+    vi.spyOn(performance, 'now').mockReturnValue(1_000);
+    const first = { id: 'thought', text: 'a' } as DaemonTranscriptBlock;
+    testStore.update([first]);
+    container = document.createElement('div');
+    document.body.append(container);
+    root = createRoot(container);
+    act(() => root!.render(<Harness structuralOnly />));
+    const initialRenderCount = renderCount;
+
+    act(() => testStore.appendTail([{ ...first, text: 'ab' }], 'thought'));
+
+    expect(pendingFrame).toBeNull();
+    expect(renderCount).toBe(initialRenderCount);
+    expect(latestBlocks).toEqual([first]);
+
+    const tool = { id: 'tool', kind: 'tool' } as DaemonTranscriptBlock;
+    act(() => testStore.update([{ ...first, text: 'ab' }, tool]));
+    act(() => pendingFrame?.(1_000));
+
+    expect(renderCount).toBeGreaterThan(initialRenderCount);
+    expect(latestBlocks).toEqual([{ ...first, text: 'ab' }, tool]);
+  });
+
   it('keeps coalesced tail blocks paired with their change summary', () => {
     let pendingFrame: FrameRequestCallback | null = null;
     vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
