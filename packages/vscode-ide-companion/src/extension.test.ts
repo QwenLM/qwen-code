@@ -6,6 +6,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as vscode from 'vscode';
+import { DiffManager } from './diff-manager.js';
 import { activate } from './extension.js';
 import { ChatProviderRegistry } from './webview/providers/ChatProviderRegistry.js';
 import { IDE_DEFINITIONS, detectIdeFromEnv } from '@qwen-code/qwen-code-core';
@@ -401,41 +402,40 @@ describe('activate', () => {
       const acceptHandler = findHandler('qwen.diff.accept');
       expect(acceptHandler).toBeDefined();
 
-      // Accepting the permission diff itself votes, tagged as coming from
-      // the diff editor.
       const diffUri = {
         scheme: 'qwen-diff',
         fsPath: '/workspace/src/app.ts',
         toString: () => 'qwen-diff:///workspace/src/app.ts',
       };
-      acceptHandler!(diffUri);
+      const hasDiff = vi
+        .spyOn(DiffManager.prototype, 'hasDiff')
+        .mockReturnValue(true);
+      const getPermissionRequestId = vi
+        .spyOn(DiffManager.prototype, 'getPermissionRequestId')
+        .mockReturnValue('req-1');
+
+      await acceptHandler!(diffUri);
       expect(provider.respondToPendingPermission).toHaveBeenCalledWith(
         'allow',
-        { fromDiffEditor: true, uri: diffUri },
+        { fromDiffEditor: true, permissionRequestId: 'req-1' },
       );
 
-      // Ctrl+S on the user's original workspace file also triggers
-      // qwen.diff.accept while a diff is open; that must not be tagged as a
-      // diff-editor vote, or it would approve an edit the user may never
-      // have looked at.
       provider.respondToPendingPermission.mockClear();
       const fileUri = {
         scheme: 'file',
         fsPath: '/workspace/src/app.ts',
         toString: () => 'file:///workspace/src/app.ts',
       };
-      acceptHandler!(fileUri);
-      expect(provider.respondToPendingPermission).toHaveBeenCalledWith(
-        'allow',
-        { fromDiffEditor: false, uri: fileUri },
-      );
-
-      // Gate: with nothing pending the provider is never asked to vote.
-      provider.respondToPendingPermission.mockClear();
-      provider.hasPendingPermission.mockReturnValue(false);
-      acceptHandler!(diffUri);
+      await acceptHandler!(fileUri);
       expect(provider.respondToPendingPermission).not.toHaveBeenCalled();
 
+      getPermissionRequestId.mockReturnValue(undefined);
+      provider.hasPendingPermission.mockReturnValue(false);
+      await acceptHandler!(diffUri);
+      expect(provider.respondToPendingPermission).not.toHaveBeenCalled();
+
+      hasDiff.mockRestore();
+      getPermissionRequestId.mockRestore();
       registrySpy.mockRestore();
     });
   });

@@ -2233,7 +2233,6 @@ describe('pending edit approval rows', () => {
           options: [],
         },
       },
-      {},
       { hostOwnsEditDiffPreview: true },
     );
 

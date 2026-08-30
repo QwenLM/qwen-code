@@ -689,7 +689,7 @@ export function EmbeddedApp() {
         const decision = decisionData?.decision;
         const requestId = decisionData?.requestId;
         const isHostDecision =
-          event.source === window.parent ||
+          event.source === window.parent &&
           requestId === webShellPermissionRequestIdRef.current;
         if (
           (decision === 'allow' || decision === 'reject') &&

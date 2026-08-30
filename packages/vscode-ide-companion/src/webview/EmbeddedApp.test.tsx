@@ -741,6 +741,40 @@ describe('web shell permission decision messages', () => {
     return api;
   }
 
+  async function setPendingPermission(
+    props: CapturedProps,
+    requestId = 'req-1',
+  ) {
+    const onTranscriptChange = callback<(blocks: unknown[]) => void>(
+      props,
+      'onTranscriptChange',
+    );
+    await act(async () => {
+      onTranscriptChange([
+        {
+          id: 'permission-1',
+          kind: 'permission',
+          requestId,
+          title: 'Edit fixture.txt',
+          resolved: false,
+          options: [],
+          preview: { kind: 'key_value', rows: [] },
+          toolCall: {
+            content: [
+              {
+                type: 'diff',
+                path: '/workspace/fixture.txt',
+                oldText: 'before',
+                newText: 'after',
+              },
+            ],
+          },
+        },
+      ]);
+      await Promise.resolve();
+    });
+  }
+
   async function dispatchDecision(
     decision: string,
     source: Window | null,
@@ -761,9 +795,10 @@ describe('web shell permission decision messages', () => {
   }
 
   it('forwards host-relayed decisions to the web shell', async () => {
-    await renderApp();
+    const props = await renderApp();
     const respondToPendingPermission = vi.fn().mockResolvedValue(true);
     installShellApi({ respondToPendingPermission });
+    await setPendingPermission(props);
 
     // Extension-host messages arrive via the webview preload frame, i.e.
     // with this frame's parent as their source.
@@ -773,14 +808,16 @@ describe('web shell permission decision messages', () => {
   });
 
   it('ignores decisions posted by a nested iframe window', async () => {
-    await renderApp();
+    const props = await renderApp();
     const respondToPendingPermission = vi.fn().mockResolvedValue(true);
     installShellApi({ respondToPendingPermission });
+    await setPendingPermission(props);
 
     // MCP apps and artifact previews run in scriptable sandboxed iframes
     // inside this webview; they can postMessage to this window and must
-    // not be able to vote on the pending approval. Their source is their
-    // own child window, not the preload parent frame.
+    // not be able to vote on the pending approval, even when they know the
+    // active request id. Their source is their own child window, not the
+    // preload parent frame.
     const iframe = document.createElement('iframe');
     document.body.appendChild(iframe);
     try {
@@ -796,9 +833,10 @@ describe('web shell permission decision messages', () => {
   });
 
   it('ignores decisions delivered without a source window', async () => {
-    await renderApp();
+    const props = await renderApp();
     const respondToPendingPermission = vi.fn().mockResolvedValue(true);
     installShellApi({ respondToPendingPermission });
+    await setPendingPermission(props);
 
     // Fail closed on synthetic deliveries: real host messages always carry
     // the preload frame as their source.
@@ -808,9 +846,10 @@ describe('web shell permission decision messages', () => {
   });
 
   it('surfaces a notice when the shell resolves the vote to false', async () => {
-    await renderApp();
+    const props = await renderApp();
     const respondToPendingPermission = vi.fn().mockResolvedValue(false);
     installShellApi({ respondToPendingPermission });
+    await setPendingPermission(props);
     const { container } = mounted[mounted.length - 1];
 
     await dispatchDecision('allow', window.parent);
