@@ -155,6 +155,29 @@ describe('useDialogSelect resyncKey', () => {
     rerender({ resyncKey: 'scope-select', initialIndex: 1 });
     expect(result.current.activeIndex).toBe(2);
   });
+
+  it('disarms an armed numeric flush on view swap (R4-3)', () => {
+    vi.useFakeTimers();
+    try {
+      const onSelect = vi.fn();
+      const { rerender } = renderHook(
+        (props: { resyncKey: string }) =>
+          useDialogSelect({ items, numbers: true, onSelect, ...props }),
+        { initialProps: { resyncKey: 'mount' } },
+      );
+      // Arm a digit flush in the first view.
+      press({ name: '1', sequence: '1' });
+      // Tab to another view before the flush timeout fires.
+      rerender({ resyncKey: 'scope-select' });
+      act(() => {
+        vi.advanceTimersByTime(NUMBER_SELECT_TIMEOUT_MS + 10);
+      });
+      // The stale flush must not commit a selection in the new view.
+      expect(onSelect).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe('useDialogSelect items re-sync (ink INITIALIZE parity)', () => {

@@ -429,11 +429,13 @@ describe('startup-window registry self-heal', () => {
     // the re-parse reaches the action race the signal is already aborted,
     // and a late 'abort' listener never fires — the action's side effects
     // must not run on the cancelled submission.
-    const action = vi.fn(() => ({
-      type: 'message',
-      messageType: 'info',
-      content: 'side effects ran',
-    }));
+    const action = vi.fn(
+      (): SlashCommandActionReturn => ({
+        type: 'message',
+        messageType: 'info',
+        content: 'side effects ran',
+      }),
+    );
     let resolveLoad: (commands: SlashCommand[]) => void = () => {};
     loadInteractiveCommandsMock.mockReturnValue(
       new Promise<SlashCommand[]>((resolve) => {
