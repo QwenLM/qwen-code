@@ -2,10 +2,9 @@
 
 ## 文档状态
 
-- 状态：已完成 6 轮 Sub Agent 审计、实现与验证
+- 状态：目标态设计
 - 对应 Issue：[QwenLM/qwen-code#8271](https://github.com/QwenLM/qwen-code/issues/8271) 的 Part 2
 - 依赖：Part 1 已由 [#8817](https://github.com/QwenLM/qwen-code/pull/8817) 合入 `main`（`9f8f65dde0`）
-- 调研基线：`5b125f0b89`（2026-08-15 的 `upstream/main`）
 - 相关设计：
   - [从已完成 Assistant 回复创建会话分支](./assistant-response-session-branching.md)
   - [Web Shell worktree 隔离会话](./2026-07-19-webshell-worktree-sessions.md)
@@ -39,10 +38,10 @@ worktree；会话的 `workspaceCwd`、transcript、列表归属和持久化位�
    `GitWorktreeService.createUserWorktree()` 创建 `worktree-<slug>`，spawn 后通过
    `changeSessionCwd()` 进入 worktree，并写入 `<sessionId>.worktree.json`。
 4. Bridge 的 `workspaceCwd` 是不可变的 runtime ownership root；
-   `effectiveCwd` 可以切到 worktree。会话列表按 `workspaceCwd` 查询。现有 Web
-   Shell 会把 `worktree.path` 传给 Git status、diff 和 commit；但 daemon 当前只
-   接受 `workspaceCwd` 内的 cwd，因此 workspace 是 monorepo 子目录而 worktree
-   位于 repo top 时会拒绝或回退，Part 2 必须补上 session-bound 授权。
+   `effectiveCwd` 可以切到 worktree。会话列表按 `workspaceCwd` 查询。Web Shell
+   把 `worktree.path` 和 owning session id 一起传给 Git read/mutation；daemon 通过
+   session-bound resolver 授权 repo-top managed worktree，而不扩大 runtime 的
+   workspace ownership。
 5. Worktree session 的现有 UI 已能显示 worktree 图标、分支和 Git 状态；Part 2
    不需要再造一套标识组件。
 6. 当前 `POST /session/:id/branch` 是 primary-workspace-only 路由。Part 2 不顺带
@@ -155,6 +154,12 @@ interface BranchSessionRequest {
 }
 ```
 
+所有用户可控的 worktree 创建入口（包括普通 session 创建和 branch session）都
+必须拒绝精确的 ephemeral agent slug 形状 `agent-<7hex>`。这个命名空间只属于
+内部 Agent worktree 生成器和 stale-agent sweep；用户路由不能创建随后会被该
+sweep 当作临时资源删除的 worktree。内部 Agent 路径仍可复用同一个通用 slug
+validator，因此这项保留规则由用户路由显式执行。
+
 `worktree` 缺失时，现有 latest-state 和 historical 分支返回语义保持不变。
 `worktree` 存在时，无论是否提供 `atRecordId`，成功响应都是已 load 的
 `DaemonBranchedSession`，并带：
@@ -184,7 +189,7 @@ interface BranchSessionRequest {
 
 | 场景                                                   | HTTP/code                                                        | 可见 session                             |
 | ------------------------------------------------------ | ---------------------------------------------------------------- | ---------------------------------------- |
-| `worktree` 不是 object / slug 非法                     | `400 invalid_worktree` / `worktree_invalid_slug`                 | 无                                       |
+| `worktree` 不是 object / slug 非法或命中保留命名空间   | `400 invalid_worktree` / `worktree_invalid_slug`                 | 无                                       |
 | source workspace 不可信                                | `403 untrusted_workspace`                                        | 无                                       |
 | 非 Git repo、无 commit 或 cwd 不是允许的 base checkout | `409 worktree_base_checkout_unsupported`                         | 无                                       |
 | worktree 创建失败                                      | `500 worktree_create_failed`                                     | 无                                       |
@@ -232,10 +237,49 @@ top。SDK 的 workspace Git 请求在传 `cwd=worktree.path` 时同时传 target
 5. 任一读取、identity 或 containment 校验失败时，read route 和 mutation route
    都明确拒绝；显式非法 cwd 不能静默 fallback 到 `workspaceCwd`。
 
+所有 containment 判断统一复用 segment-aware 的 shared `isWithinRoot()` 语义：
+只有 relative path 恰为 `..`、以 `..${path.sep}` 开头或仍是 absolute path 才是
+逃逸。`...`、`..cache` 等合法目录段必须继续被视为 root 内路径，不能用
+`relative.startsWith('..')` 粗略拒绝。
+
 这条 helper 应用于所有接收 worktree cwd 的下游消费者：status、diff/file diff、
 log/commit detail、branches、checkout/create branch、push、pull、commit，以及创建
 GitHub PR 时接收 cwd 的 route。它只授权该 session 已持久化并持有 marker 的一个
 managed worktree，不授权 repo top 的其他目录或另一个 session 的 worktree。
+
+SDK/Web Shell 不仅在 checkout、commit 等 mutation 中携带 target `sessionId`；
+branch listing 和后台 Git status refresh 只要发送 `cwd=worktree.path`，也必须同时
+携带 owning session id。缺失或错误 id 的 worktree read 与 mutation 使用同一条
+fail-closed resolver，不能因为请求是只读就放宽。
+
+### 7.2 Sidecar 与 marker 的消费契约
+
+Sidecar 只描述预期 worktree，不能单独证明当前 ownership。所有生产 load/resume
+入口（TUI、headless、ACP）调用共享 restore helper 时必须提供目标 session id；
+helper 只有在 worktree 存活、路径 containment 成立且 regular marker owner 仍等于
+该 id 时才生成恢复提示。marker 缺失、不可读或已被另一个 session 合法接管时，
+不得把 worktree 路径注入下一次模型请求，并应 best-effort 清理旧 session 的 stale
+sidecar。
+
+Daemon session list 的 durable sidecar enrichment 使用同一 owner 交叉检查。owner
+不匹配时仍可列出 session 本身，但不能把 sidecar-derived worktree metadata 放入
+catalog cache。该门禁只影响 durable sidecar enrichment；live bridge 已经验证的
+当前 worktree metadata 仍按既有 merge 规则消费。
+
+### 7.3 Git 子进程环境隔离
+
+Branch base resolver、worktree capability preflight、session-managed cwd resolver
+以及 marker exclude 的 common-dir 探测都必须通过 shared `gitEnv()` 启动 Git。
+必须清除完整的 repository-shifting/config 注入集合，包括 `GIT_DIR`、
+`GIT_WORK_TREE`、`GIT_COMMON_DIR`、`GIT_INDEX_FILE`、`GIT_CONFIG_*` 和 object-dir
+重定向；为 simple-git 显式传入环境时，也要去除其安全插件会拒绝的
+`EDITOR`/`GIT_EDITOR`/`GIT_SEQUENCE_EDITOR` 与 `PAGER`/`GIT_PAGER`，避免 spawn
+在执行前被拒绝。
+
+这些探测的 cwd 由 server 解析，但 cwd 本身不足以抵抗 inherited Git env。身份
+探测失败时继续 fail closed；marker exclude 即使保持 best-effort，也只能向 owning
+repository 的 `info/exclude` 写入 `/.qwen-session`，不能被环境变量重定向到其他
+repository。
 
 ## 8. Daemon 事务
 
@@ -314,7 +358,8 @@ Route 在调用 branch mutation 前完成：
 6. 安全写入 worktree 内 `.qwen-session = targetSessionId`。写入前拒绝 HEAD 已跟踪
    的同名路径；创建时使用 no-follow、exclusive create、`0600`、handle-based
    regular-file 校验和 fsync。已存在文件、目录或 symlink 一律 fail closed。对
-   Part 2，此 marker 是强制成功项。
+   Part 2，此 marker 是强制成功项。随后解析 common dir 并写入 marker exclude
+   规则时遵循第 7.3 节的 Git 环境隔离，确保规则只落在 owning repository。
 7. 在原 workspace chats dir 以 exclusive create 原子写入 target
    `<sessionId>.worktree.json`；不能覆盖任何既有 sidecar。直接使用现有完整
    `WorktreeSession` shape：
@@ -513,7 +558,8 @@ WebUI 不能再只用 `atRecordId === undefined` 判断 restored result；应使
   `branch_worktree_activation_failed` 时刷新 source workspace catalog；activation
   failure 不自动切换，也不把它表述成“未创建”。
 - 成功后不新增专用 worktree banner；复用 `sessionWorktree`、Git chip、session
-  catalog 和 Git dialog 的现有消费链。
+  catalog 和 Git dialog 的现有消费链。BranchPicker 打开后的后台 status refresh
+  与 branch listing 一样，同时传 worktree path 和 target session id。
 
 ## 10. 实现范围
 
@@ -524,14 +570,18 @@ WebUI 不能再只用 `atRecordId === undefined` 判断 restored result；应使
 | `packages/cli/src/serve/branch-worktree-preparation.ts`                                                                                                   | base-checkout resolver、小型事务 marker、严格 rollback 和 startup recovery                         |
 | `packages/cli/src/serve/run-qwen-serve.ts` / runtime materialize 路径                                                                                     | 每个 primary generation 一次的 recovery 调用与 mutex                                               |
 | `packages/cli/src/startup/worktreeStartup.ts`                                                                                                             | adoption 的 expected-owner CAS 必须成功后才能写新 sidecar                                          |
-| `packages/cli/src/serve/workspace-route-runtime.ts`                                                                                                       | 增加 session-bound managed worktree cwd resolver                                                   |
+| `packages/cli/src/serve/workspace-route-runtime.ts`                                                                                                       | 增加 session-bound managed cwd resolver；复用 shared containment 与 Git 环境隔离                   |
+| `packages/cli/src/serve/server/session-list.ts`                                                                                                           | sidecar-derived worktree metadata 仅在 marker owner 匹配时进入 session catalog                     |
 | `packages/cli/src/serve/routes/workspace-git.ts`、`workspace-git-diff.ts`、`workspace-git-log.ts`、`workspace-git-branches.ts`、`workspace-github-prs.ts` | 计算 preflight；所有 cwd 消费者统一授权并拒绝非法显式 cwd                                          |
 | `packages/cli/src/acp-integration/acpAgent.ts`                                                                                                            | 接受 daemon 指定的 target UUID，继续使用现有 fork transaction                                      |
+| `packages/cli/src/nonInteractiveCli.ts` / `packages/cli/src/ui/AppContainer.tsx`                                                                          | load/resume 时把 expected session id 传入共享 worktree restore                                     |
 | `packages/acp-bridge/src/bridgeTypes.ts` / `bridge.ts`                                                                                                    | internal `targetSessionId`、`persistOnly` 和 execution snapshot accessor，不复制 worktree 文件逻辑 |
-| `packages/core/src/services/gitWorktreeService.ts`                                                                                                        | 增加 fresh strict-create marker；加固保留 adoption 语义的 compare-and-replace marker               |
+| `packages/core/src/services/gitWorktreeService.ts`                                                                                                        | strict marker create/CAS；marker exclude common-dir 探测使用隔离 Git 环境                          |
+| `packages/core/src/services/worktreeSessionService.ts`                                                                                                    | restore 时交叉检查 expected session id 与 marker owner，并清理 stale sidecar                       |
+| `packages/core/src/utils/git-branches.ts`                                                                                                                 | 提供 resolver/preflight/simple-git 共用的 Git 子进程环境净化                                       |
 | `packages/sdk-typescript/src/daemon`                                                                                                                      | branch request/response 类型，以及 Git 请求 `sessionId` 的 JSON 序列化                             |
 | `packages/webui/src/daemon/session`                                                                                                                       | options-based branch action，保留切换/attach 语义                                                  |
-| `packages/web-shell/client`                                                                                                                               | dialog、capability gate、错误反馈、请求去重，以及 worktree Git 请求携带 target id                  |
+| `packages/web-shell/client`                                                                                                                               | dialog、capability gate、错误反馈、请求去重，以及所有 worktree Git read/mutation 携带 target id    |
 
 不修改 `packages/core/src/services/sessionService.ts`、branch checkpoint schema、
 transcript replay schema 或 session catalog schema。Core 只拆分两种 marker API：
@@ -553,6 +603,8 @@ transcript replay schema 或 session catalog schema。Core 只拆分两种 marke
 - 不带 `worktree` 的 branch request 与当前 JSON、返回形状和 restore 行为一致。
 - 新 capability 被广告；旧 capability fixture 不会误显示新选项。
 - untrusted、非 Git、无 commit、非法 slug、branch/path 冲突均在 fork 前失败。
+- 普通 session 与 branch session 的用户路由均拒绝 canonical `agent-<7hex>`；内部
+  ephemeral Agent worktree 仍可创建同形 slug。
 - source live cwd 位于原 checkout 子目录或其自有 managed worktree 时，从同一 resolver
   返回的 checkout HEAD 创建；`/cd` 到另一个 repo/linked worktree 时 preflight false，
   直接伪造 branch request 也返回 `worktree_base_checkout_unsupported`。
@@ -570,6 +622,9 @@ transcript replay schema 或 session catalog schema。Core 只拆分两种 marke
   commit：recovery 不得删除 sidecar/worktree，最终 session 可正常 load。
 - commit 后 load/cd/HTTP delivery 失败保留完整 session，并能在下一次 load 时从
   sidecar 恢复 worktree。
+- sidecar 指向仍存活但 marker 已属于另一个 session 的 worktree 时，TUI、headless
+  和 ACP 均不生成恢复提示并清理旧 sidecar；session catalog 仍列出 session，但不
+  富集旧 worktree metadata。same-owner marker 继续恢复。
 - 两个并发相同请求不能共用 target id/slug，也不能互删资源；reservation 期间
   外部 load/restore 被拒绝，释放后才能 attach。
 - 防御性模拟 internal load 返回 `attached: true`，activation 只 detach 本次
@@ -584,6 +639,12 @@ transcript replay schema 或 session catalog schema。Core 只拆分两种 marke
 
 - worktree path 必须 realpath containment 于 server 推导的
   `<repoTop>/.qwen/worktrees`；sidecar symlink escape 被拒绝。
+- containment 接受 `...`、`..cache` 等合法 root 内目录段，同时继续拒绝真正的
+  `..`/absolute escape。
+- 在 daemon 继承 `GIT_DIR`、`GIT_WORK_TREE`、`GIT_COMMON_DIR` 或 `GIT_CONFIG_*`
+  指向 decoy repository 时，branch resolver、preflight 和 session-managed cwd
+  仍只认证 owning repository；marker exclude 只写 owning repository，不触碰
+  decoy 的 `info/exclude`。
 - journal 在第一个副作用前 durable；每个 phase crash 都可幂等恢复。
 - cleanup 只有 owner token、`.qwen-session`、branch tip 和 target transcript
   状态全部匹配才删除；任一读取异常都 fail closed。
@@ -624,6 +685,8 @@ transcript replay schema 或 session catalog schema。Core 只拆分两种 marke
   文案。
 - 成功切换后 session list 和 Git chip 显示 `worktree-<slug>`，所有 worktree Git
   请求同时使用 worktree path 和 target session id。
+- BranchPicker 打开后的 branch listing 与 status refresh 都携带 target session
+  id；缺少该参数的回归会在 daemon 返回 `invalid_cwd` 前被参数断言捕获。
 
 ### 11.4 浏览器 E2E
 
@@ -640,20 +703,7 @@ transcript replay schema 或 session catalog schema。Core 只拆分两种 marke
 7. 注入 worktree create、fork、load 和 cd 失败，核对第 8.5 节的 commit-point
    语义。
 
-## 12. 实施顺序
-
-1. API/capability 与 Agent target-id plumbing；保持所有旧测试不变。
-2. Daemon target reservation、preflight、pre-effect journal、persist-only branch
-   和 activation helper。
-3. marker hardening、runtime startup recovery 与故障注入测试。
-4. WebUI options action 和 Web Shell dialog/capability gate。
-5. focused unit tests、`npm run build && npm run typecheck`、真实浏览器 E2E。
-
-每一步都保持 `worktree` 缺失时的现有路径不变。Part 2 是跨 CLI、Bridge、SDK、
-WebUI 和 Web Shell 的 core-adjacent feature，实施前应由 maintainer 对 ownership、
-commit point 和 cleanup 边界签字。
-
-## 13. 被否决的方案
+## 12. 被否决的方案
 
 ### Client 先创建 worktree session，再调用 branch
 
