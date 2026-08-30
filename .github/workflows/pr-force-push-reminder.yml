@@ -27,12 +27,9 @@ jobs:
     # Checks out nothing and runs no repository code (pull_request_target
     # events use base-repo YAML), so the persistent ECS pool is safe and
     # skips the saturated hosted queue. Kill-switch: MAINTAINER_ECS_RUNNER_DISABLED.
-    # This job finishes in seconds, so it takes the short-job lane
-    # (`ecs-light` — runner 1 on each ECS host) instead of `ecs-qwen`,
-    # where a seconds-long job queues behind 90-minute Test jobs. The
-    # lane exists because head-of-line blocking, not capacity, is what
-    # delays these: they are 71% of the queued jobs but 13% of the
-    # machine time.
+    # Seconds-long job: uses the ecs-light short-job lane (head-of-line
+    # blocking, not capacity); lane convention and fleet split documented
+    # in .github/scripts/ci/runner-lane-labels.test.mjs.
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-light"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     steps:
       - name: 'Detect force-push and post reminder'

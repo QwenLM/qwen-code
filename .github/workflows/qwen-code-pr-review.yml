@@ -133,12 +133,9 @@ jobs:
     concurrency:
       group: 'qwen-pr-ack-${{ github.event.issue.number || github.event.pull_request.number }}'
       cancel-in-progress: false
-    # This job finishes in seconds, so it takes the short-job lane
-    # (`ecs-light` — runner 1 on each ECS host) instead of `ecs-qwen`,
-    # where a seconds-long job queues behind 90-minute Test jobs. The
-    # lane exists because head-of-line blocking, not capacity, is what
-    # delays these: they are 71% of the queued jobs but 13% of the
-    # machine time.
+    # Seconds-long job: uses the ecs-light short-job lane (head-of-line
+    # blocking, not capacity); lane convention and fleet split documented
+    # in .github/scripts/ci/runner-lane-labels.test.mjs.
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-light"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 5
     permissions:
@@ -222,13 +219,13 @@ jobs:
       github.event_name == 'pull_request_target' &&
       github.event.action == 'review_requested' &&
       github.event.requested_reviewer.login == 'qwen-code-ci-bot'
-    # This job finishes in seconds, so it takes the short-job lane
-    # (`ecs-light` — runner 1 on each ECS host) instead of `ecs-qwen`,
-    # where a seconds-long job queues behind 90-minute Test jobs. The
-    # lane exists because head-of-line blocking, not capacity, is what
-    # delays these: they are 71% of the queued jobs but 13% of the
-    # machine time.
+    # Seconds-long job: uses the ecs-light short-job lane (head-of-line
+    # blocking, not capacity); lane convention and fleet split documented
+    # in .github/scripts/ci/runner-lane-labels.test.mjs.
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-light"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    # A single echo, but on a three-slot lane an uncapped job is a third of
+    # the lane's capacity if it ever wedges — so cap it like its siblings.
+    timeout-minutes: 5
     permissions: {}
     outputs:
       bot_login: '${{ steps.values.outputs.bot_login }}'
@@ -322,12 +319,9 @@ jobs:
     # use the persistent ECS runner. The job IS the write-permission check, so
     # it cannot route on its own output; downstream jobs already route on the
     # repository guard alone.
-    # This job finishes in seconds, so it takes the short-job lane
-    # (`ecs-light` — runner 1 on each ECS host) instead of `ecs-qwen`,
-    # where a seconds-long job queues behind 90-minute Test jobs. The
-    # lane exists because head-of-line blocking, not capacity, is what
-    # delays these: they are 71% of the queued jobs but 13% of the
-    # machine time.
+    # Seconds-long job: uses the ecs-light short-job lane (head-of-line
+    # blocking, not capacity); lane convention and fleet split documented
+    # in .github/scripts/ci/runner-lane-labels.test.mjs.
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(''["self-hosted", "linux", "x64", "ecs-light"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 5
     permissions:

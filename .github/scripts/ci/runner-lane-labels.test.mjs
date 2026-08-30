@@ -61,28 +61,57 @@ const workflowFiles = readdirSync(workflowsDir)
   .filter((name) => name.endsWith('.yml') || name.endsWith('.yaml'))
   .sort();
 
-// Reads only `runs-on:` values — every one in this repo is a single line —
-// so a bash `[ "$X" == "self-hosted" ]` inside a run body is not mistaken for
-// a label set. Matches both spellings a `runs-on` can take: the YAML sequence
-// ['self-hosted', 'linux', 'x64', 'ecs-qwen'] and the JSON text inside
-// fromJSON('["self-hosted", "linux", "x64", "ecs-qwen"]'), whose quotes are
-// doubled by the surrounding single-quoted YAML scalar.
+// Reads only `runs-on:` values — so a bash `[ "$X" == "self-hosted" ]` inside
+// a run body is not mistaken for a label set. Two spellings parse: the quoted
+// YAML sequence ['self-hosted', 'linux', 'x64', 'ecs-qwen'] and the JSON text
+// inside fromJSON('["self-hosted", "linux", "x64", "ecs-qwen"]'), whose quotes
+// are doubled by the surrounding single-quoted YAML scalar.
+//
+// Every spelling this parser cannot read is returned in `unreadable` and FAILS
+// the suite rather than being skipped. A skipped spelling is an open door: a
+// block-sequence `runs-on:` (labels on the following lines) captures an empty
+// value, and an unquoted flow sequence ([self-hosted, linux, x64, lane])
+// yields no quoted tokens — either would carry an unregistered lane past a
+// green run, recreating exactly the silent-queueing incident this file exists
+// to prevent. Keeping the repo on single-line quoted `runs-on` values is part
+// of the contract; the failure message says to inline the labels.
 function selfHostedLabelSets(text) {
   const sets = [];
+  const unreadable = [];
   const runsOnValues = [...text.matchAll(/^\s*runs-on:(.*)$/gm)].map(
     (m) => m[1],
   );
-  for (const match of runsOnValues
-    .join('\n')
-    .matchAll(/\[[^[\]]*self-hosted[^[\]]*\]/gi)) {
-    const labels = [...match[0].matchAll(/["']{1,2}([^"']+)["']{1,2}/g)].map(
-      (m) => m[1],
-    );
-    if (labels.some((l) => l.toLowerCase() === 'self-hosted')) {
-      sets.push({ raw: match[0], labels });
+  for (const value of runsOnValues) {
+    const trimmed = value.trim();
+    // Block sequence or block scalar: the labels live on lines this parser
+    // does not read, so it cannot vouch for them.
+    if (['', '|', '|-', '>', '>-'].includes(trimmed)) {
+      unreadable.push(
+        `'runs-on: ${trimmed}' (block form — labels on following lines)`,
+      );
+      continue;
+    }
+    let parsedSelfHosted = false;
+    for (const match of value.matchAll(/\[[^[\]]*self-hosted[^[\]]*\]/gi)) {
+      const labels = [...match[0].matchAll(/["']{1,2}([^"']+)["']{1,2}/g)].map(
+        (m) => m[1],
+      );
+      if (labels.some((l) => l.toLowerCase() === 'self-hosted')) {
+        sets.push({ raw: match[0], labels });
+        parsedSelfHosted = true;
+      } else {
+        // The bracket group names self-hosted but quoted extraction found no
+        // labels: the unquoted flow spelling.
+        unreadable.push(`unquoted label list: ${match[0]}`);
+      }
+    }
+    if (!parsedSelfHosted && /self-hosted/i.test(value) && !/\[/.test(value)) {
+      // e.g. a bare `runs-on: self-hosted` — routable, but laneless and
+      // invisible to the registry check above.
+      unreadable.push(`bare self-hosted value: '${trimmed}'`);
     }
   }
-  return sets;
+  return { sets, unreadable };
 }
 
 describe('self-hosted runs-on labels', () => {
@@ -90,7 +119,19 @@ describe('self-hosted runs-on labels', () => {
 
   for (const file of workflowFiles) {
     const text = readFileSync(join(workflowsDir, file), 'utf8');
-    for (const { raw, labels } of selfHostedLabelSets(text)) {
+    const { sets, unreadable } = selfHostedLabelSets(text);
+
+    for (const spelling of unreadable) {
+      it(`${file}: guard cannot read a runs-on`, () => {
+        assert.fail(
+          `${spelling} — this guard cannot verify the lane, so it fails ` +
+            `closed. Inline the labels as a single-line quoted sequence ` +
+            `(or extend selfHostedLabelSets).`,
+        );
+      });
+    }
+
+    for (const { raw, labels } of sets) {
       const lanes = labels.filter((l) => !PLATFORM_LABELS.has(l.toLowerCase()));
 
       // A matrix- or input-driven label (update-ecs-runner-qwen.yml fans out
@@ -132,4 +173,58 @@ describe('self-hosted runs-on labels', () => {
       );
     }
   });
+});
+
+// The fail-closed contract, pinned on synthetic text so it cannot rot: every
+// runs-on spelling the parser reads must land in `sets`, every spelling it
+// cannot read must land in `unreadable` — never silently in neither. Each
+// unreadable spelling below was verified to slip an invented lane past the
+// original parser unnoticed.
+describe('selfHostedLabelSets fail-closed parsing', () => {
+  const parses = [
+    [
+      `    runs-on: '\${{ x && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'`,
+      ['ecs-qwen'],
+    ],
+    [
+      `    runs-on: ['self-hosted', 'linux', 'x64', 'ecs-agent']`,
+      ['ecs-agent'],
+    ],
+  ];
+  for (const [text, lanes] of parses) {
+    it(`parses: ${text.trim().slice(0, 60)}…`, () => {
+      const { sets, unreadable } = selfHostedLabelSets(text);
+      assert.equal(unreadable.length, 0);
+      assert.deepEqual(
+        sets.flatMap((s) =>
+          s.labels.filter((l) => !PLATFORM_LABELS.has(l.toLowerCase())),
+        ),
+        lanes,
+      );
+    });
+  }
+
+  const refuses = [
+    [
+      'block sequence',
+      `    runs-on:\n      - self-hosted\n      - linux\n      - x64\n      - ecs-invented`,
+    ],
+    [
+      'unquoted flow sequence',
+      `    runs-on: [self-hosted, linux, x64, ecs-invented]`,
+    ],
+    ['bare self-hosted', `    runs-on: self-hosted`],
+    ['block scalar', `    runs-on: >-\n      self-hosted`],
+  ];
+  for (const [name, text] of refuses) {
+    it(`refuses to skip: ${name}`, () => {
+      const { sets, unreadable } = selfHostedLabelSets(text);
+      assert.equal(sets.length, 0);
+      assert.ok(
+        unreadable.length >= 1,
+        `the ${name} spelling parsed as neither a label set nor unreadable — ` +
+          `an invented lane written this way would ship past a green suite`,
+      );
+    });
+  }
 });
