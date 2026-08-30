@@ -1101,6 +1101,12 @@ export const useLlmStream = (
   // are not an identity (ids are re-minted after core-history compaction and
   // providers can reuse wire ids across turns).
   const toolBatchIdByCallIdRef = useRef(new Map<string, string>());
+  // CallIds of batches whose deferred thought resolved as a merge
+  // (mergeDeferredThoughtWithToolGroup folded the batch's summary into the
+  // thought line). The summary-emission gate consults this set so a merged
+  // batch does not ALSO fire generateToolUseSummary and render a second,
+  // redundant summary line for the same batch (R16-1).
+  const mergedBatchCallIdsRef = useRef(new Set<string>());
   const toolBatchCounterRef = useRef(0);
   // Per-mount nonce: checkpoint JSON persists stamped history and /restore
   // loads it into a session whose counter restarts at 0 — without it, a
@@ -1167,6 +1173,14 @@ export const useLlmStream = (
               toolGroupDisplay,
               completedToolCallsFromScheduler[0]?.request.prompt_id,
             );
+            if (groupToCommit.display?.mergedIntoThought) {
+              // Remember the merge so handleCompletedTools' summary gate
+              // skips this batch — its summary already renders as the
+              // folded thought's toolSummary suffix (R16-1).
+              for (const tc of completedToolCallsFromScheduler) {
+                mergedBatchCallIdsRef.current.add(tc.request.callId);
+              }
+            }
             addItem(groupToCommit, Date.now());
 
             // Handle tool response submission immediately when tools complete
@@ -6033,6 +6047,18 @@ export const useLlmStream = (
       // Subagent exclusion is implicit — useLlmStream only drives the
       // main session; subagents run through agents/runtime/ with their own loop.
       if (config.getEmitToolUseSummaries()) {
+        // A batch that resolved as a thought merge already carries its
+        // summary — the folded thought line's toolSummary suffix. Firing the
+        // pipeline for it renders a duplicate `● <label>` line (R16-1). Skip
+        // by the recorded merge-resolution state: merged groups deliberately
+        // stay in history, so the staleness check's group lookup cannot
+        // distinguish them from an ordinary batch.
+        const batchMergedIntoThought = llmTools.some((tc) =>
+          mergedBatchCallIdsRef.current.has(tc.request.callId),
+        );
+        for (const tc of llmTools) {
+          mergedBatchCallIdsRef.current.delete(tc.request.callId);
+        }
         // Only summarize successful tools. Error/cancelled entries push
         // "Cancelled by user" / retry-loop warnings into the summarizer
         // prompt and produce plausibly-worded but misleading labels (the
@@ -6041,12 +6067,14 @@ export const useLlmStream = (
         // prefixes but not prevent this kind of polluted-input hallucination.
         // Goal tools already render authoritative lifecycle copy, which a
         // generated summary can contradict while verification is pending.
-        const successfulTools = llmTools.filter(
-          (tc) =>
-            tc.status === 'success' &&
-            tc.request.name !== ToolNames.GET_GOAL &&
-            tc.request.name !== ToolNames.UPDATE_GOAL,
-        );
+        const successfulTools = batchMergedIntoThought
+          ? []
+          : llmTools.filter(
+              (tc) =>
+                tc.status === 'success' &&
+                tc.request.name !== ToolNames.GET_GOAL &&
+                tc.request.name !== ToolNames.UPDATE_GOAL,
+            );
         if (successfulTools.length > 0) {
           const toolInfoForSummary = successfulTools.map((tc) => ({
             name: tc.request.name,

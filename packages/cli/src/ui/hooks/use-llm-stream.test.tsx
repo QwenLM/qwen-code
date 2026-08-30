@@ -14767,6 +14767,106 @@ describe('useLlmStream', () => {
       });
     });
 
+    it('does not emit a tool_use_summary for a batch that merged into the thought (R16-1)', async () => {
+      const getOnComplete = captureSchedulerOnComplete();
+      const generateText = vi.fn().mockResolvedValue({
+        text: 'Read a file',
+        usage: undefined,
+      });
+      const summaryConfig = {
+        ...mockConfig,
+        getEmitToolUseSummaries: vi.fn(() => true),
+        getFastModel: vi.fn(() => 'qwen-fast'),
+        getModel: vi.fn(() => 'qwen-main'),
+        getLlmClient: vi.fn(() => ({})),
+        getBaseLlmClient: vi.fn(() => ({ generateText })),
+      } as unknown as Config;
+
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerLlmEventType.Thought,
+            value: { subject: '', description: 'planning tool usage' },
+          };
+          yield {
+            type: ServerLlmEventType.ToolCallRequest,
+            value: {
+              callId: 'tc1',
+              name: 'read_file',
+              args: { path: '/foo' },
+              isClientInitiated: false,
+              prompt_id: 'p1',
+            },
+          };
+          yield {
+            type: ServerLlmEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const { result } = renderHook(() =>
+        useLlmStream(
+          new MockedLlmClientClass(summaryConfig),
+          [],
+          mockAddItem,
+          summaryConfig,
+          true,
+          mockLoadedSettings,
+          mockOnDebugMessage,
+          mockHandleSlashCommand,
+          false,
+          () => 'vscode' as EditorType,
+          () => {},
+          () => Promise.resolve(),
+          false,
+          () => {},
+          () => {},
+          () => {},
+          () => {},
+          80,
+          24,
+        ),
+      );
+
+      await act(async () => {
+        void result.current.submitQuery(
+          'think then tool call',
+          SendMessageType.UserQuery,
+          'p1',
+        );
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      await act(async () => {
+        await getOnComplete()?.([successfulReadToolCall()]);
+      });
+
+      // The batch resolves as a merge: the folded thought carries the batch
+      // summary as its toolSummary suffix.
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'gemini_thought',
+          toolSummary: 'Read /foo',
+        }),
+        expect.any(Number),
+      );
+
+      // Give the continuation a beat, then assert the merged batch fired NO
+      // fast-model generation and added NO tool_use_summary item — the
+      // thought suffix is the batch's only summary line. Removing the
+      // merged-batch exclusion from the emission gate must turn this red.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(generateText).not.toHaveBeenCalled();
+      const summaryItems = (mockAddItem.mock.calls as unknown[][]).filter(
+        (call) =>
+          (call[0] as { type?: string } | undefined)?.type ===
+          'tool_use_summary',
+      );
+      expect(summaryItems).toHaveLength(0);
+    });
+
     it('should commit the deferred thought without merging when the batch contains a non-collapsible tool', async () => {
       const getOnComplete = captureSchedulerOnComplete();
 
