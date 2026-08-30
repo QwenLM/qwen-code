@@ -9739,9 +9739,11 @@ describe('Session', () => {
       // still-raw audio riding along.
       const audioBridgeSpy = vi
         .spyOn(audioBridgeService, 'runAudioBridge')
-        .mockImplementation(async ({ parts }: { parts: Part[] }) => ({
+        .mockImplementation(async ({ parts }: { parts: PartListUnion }) => ({
           status: 'skipped',
-          parts,
+          parts: (Array.isArray(parts) ? parts : [parts]).map((part) =>
+            typeof part === 'string' ? { text: part } : part,
+          ),
           audioCount: 0,
           convertedCount: 0,
           egressCount: 0,
@@ -9806,9 +9808,11 @@ describe('Session', () => {
         .mockResolvedValue(createEmptyStream());
       const audioBridgeSpy = vi
         .spyOn(audioBridgeService, 'runAudioBridge')
-        .mockImplementation(async ({ parts }: { parts: Part[] }) => ({
+        .mockImplementation(async ({ parts }: { parts: PartListUnion }) => ({
           status: 'skipped',
-          parts,
+          parts: (Array.isArray(parts) ? parts : [parts]).map((part) =>
+            typeof part === 'string' ? { text: part } : part,
+          ),
           audioCount: 0,
           convertedCount: 0,
           egressCount: 0,
