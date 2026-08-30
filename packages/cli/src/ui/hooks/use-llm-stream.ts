@@ -4453,6 +4453,16 @@ export const useLlmStream = (
          */
         preOverrideParts?: PartListUnion;
         /**
+         * The retry payload with the steer segment already removed, captured
+         * at the composition site where the segment boundaries are known
+         * (immediately before the steer parts are appended). The restore trim
+         * uses it directly instead of suffix arithmetic: teammate envelopes
+         * are appended AFTER the steer parts, so the steer is not a trailing
+         * suffix of the stored payload and slicing by steer length would
+         * strip the wrong segment (R52-3).
+         */
+        steerlessRetryPayload?: PartListUnion;
+        /**
          * True when this continuation's drained steer routed raw media to the
          * active override: stamp the media-routed marker on this prompt (the
          * drain runs before submitQuery, so it cannot stamp it itself).
@@ -5017,15 +5027,26 @@ export const useLlmStream = (
             // and the content cannot reach the model twice.
             const storedPayload = lastPromptRef.current;
             steerUndoStored = storedPayload;
-            const suffixLength =
-              metadata?.preOverrideParts !== undefined && steerInput.retryParts
-                ? steerInput.retryParts.length
-                : steerInput.parts.length;
+            // Prefer the steer-less payload captured at the composition site:
+            // teammate envelopes are appended after the steer parts, so the
+            // steer is not a trailing suffix of the stored payload and suffix
+            // arithmetic would strip the wrong segment (R52-3). Fall back to
+            // the slice only for callers that do not supply the snapshot.
             const storedParts = normalizePartList(storedPayload);
-            const trimmedStored = storedParts.slice(
-              0,
-              Math.max(0, storedParts.length - suffixLength),
-            );
+            const trimmedStored =
+              metadata?.steerlessRetryPayload !== undefined
+                ? normalizePartList(metadata.steerlessRetryPayload)
+                : storedParts.slice(
+                    0,
+                    Math.max(
+                      0,
+                      storedParts.length -
+                        (metadata?.preOverrideParts !== undefined &&
+                        steerInput.retryParts
+                          ? steerInput.retryParts.length
+                          : steerInput.parts.length),
+                    ),
+                  );
             const trimmedPayload =
               trimmedStored.length > 0 ? trimmedStored : null;
             // Settle fires `onAccept` once the steer's push has landed. From
@@ -7022,6 +7043,7 @@ export const useLlmStream = (
       // submitQuery's onRestore hook strips the steer segment back out so the
       // content still recovers exactly once (via the re-drain).
       let steerRetryQuery: PartListUnion | undefined;
+      let steerlessRetryPayload: PartListUnion | undefined;
       if (drained.length > 0) {
         const midTurnAbort =
           abortControllerRef.current ?? new AbortController();
@@ -7041,6 +7063,11 @@ export const useLlmStream = (
                 ...drainedSteer.retryParts,
               ];
             }
+            // Snapshot the steer-less retry payload BEFORE appending the
+            // steer (and, below, the teammate envelopes): the restore trim
+            // must strip exactly the steer segment, and the steer is not a
+            // trailing suffix once teammates follow it (R52-3).
+            steerlessRetryPayload = [...responsesToSend];
             responsesToSend.push(...drainedSteer.parts);
           }
         } finally {
@@ -7236,6 +7263,7 @@ export const useLlmStream = (
       await submitQuery(responsesToSend, SendMessageType.ToolResult, promptId, {
         steerInput: submissionSettlement,
         preOverrideParts: steerRetryQuery,
+        steerlessRetryPayload,
         steerMediaRouted: drainedSteer?.mediaRouted,
         onDelivered: () => submissionSettlement?.accept(),
         onAdmissionFailed: () => {
