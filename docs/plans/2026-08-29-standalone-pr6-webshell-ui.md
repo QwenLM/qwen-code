@@ -143,6 +143,13 @@ cwd: wsCwd })` under the new intent contract.
 - **Git** — `resolveSessionForWorkspace` (`App.tsx:6661`) and the composer
   git chips (gated by `gitModeEligible`, `App.tsx:6763`); stays
   workspace-bound.
+- **Scheduled Tasks and other workspace-maintenance callers** (review P1):
+  `ScheduledTasksDialog.onCreateViaChat` resolves an explicit workspace cwd
+  and passes `{ kind: 'workspace', cwd }` — durable standalone scheduling
+  is out of scope, so an active standalone context must never choose
+  inherit/global here. The same rule audits every remaining
+  workspace-maintenance callsite, with a standalone→Scheduled-Tasks
+  regression test.
 - **Current-session New Chat** (`{ kind: 'inherit' }`) — inherits the
   active `connection.sessionContext`: standalone → pending standalone,
   workspace → pending workspace with the current cwd (today's behavior). A
@@ -311,6 +318,24 @@ connection.sessionContext`) so draft standalone chats hide project
   fallback, and after attach uses only the standalone session's
   session-supported data. Covered by a workspace→standalone transition test
   with stale commands, skills, draft, and history snapshots.
+- **Workspace effects and slash-command handlers gate on context too**
+  (review P1): a sessionless App derives `activeWorkspaceCwd` from
+  locked/selected/primary and starts the Git-status effect, and `/diff`,
+  `/log`, `/prs`, `/settings`, `/schedule`, `/memory add` can open or
+  default to workspace-scoped flows — hidden controls alone leave these
+  live against the primary workspace. A workspace-eligible cwd is derived
+  only when `effectiveContext.kind === 'workspace'` and gates background
+  effects, command discovery, and submit-time handlers; tests assert zero
+  workspace requests or panels from both pending and attached standalone
+  contexts.
+- **The legacy input-history fallback is disabled for standalone
+  identities** (review P1): `useComposerCore`/`useInputHistory` fall back
+  to the unscoped `qwen-web-shell-history` key whenever a scoped history is
+  empty, so a standalone-specific key alone would still surface legacy
+  workspace-era prompts. The fallback policy becomes
+  product-context-aware — no legacy/global fallback for a non-workspace
+  history identity — tested with an empty standalone history while the
+  legacy key is populated.
 - Component list (`origin/main`): composer workspace selector
   (`components/WorkspaceSelector.tsx`, rendered `ChatEditor.tsx:3116`);
   Git chips/popovers (`GitBranchIndicator`, `GitModePopover`,
@@ -510,6 +535,13 @@ Unit/component (vitest, `packages/web-shell`):
 - Split View bare-id classifier: delayed catalogs, standalone/`creating`
   rejection, only `404` continues to workspace ownership resolution, and a
   controlled host cannot re-inject sanitized ids (review P1).
+- Pending and attached standalone contexts issue zero workspace requests or
+  panels (Git-status effect, `/diff`, `/log`, `/prs`, `/settings`,
+  `/schedule`, `/memory`) (review P1).
+- Empty standalone input history stays empty while the legacy global
+  history key is populated (review P1).
+- `ScheduledTasksDialog.onCreateViaChat` forces workspace intent even from
+  an active standalone context (review P1).
 
 E2E (Playwright, `packages/web-shell/client/e2e`):
 
