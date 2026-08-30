@@ -385,6 +385,9 @@ export interface DaemonClientOptions {
 const DEFAULT_SESSION_LIST_PAGE_SIZE = 20;
 
 const DEFAULT_FETCH_TIMEOUT_MS = 30_000;
+// Provider mutations persist before their bounded runtime sync. A default
+// client deadline could report failure while the daemon still completes it.
+const DEFAULT_PROVIDER_MUTATION_TIMEOUT_MS = 0;
 const DEFAULT_SESSION_RESTORE_TIMEOUT_MS = 70_000;
 const SESSION_RESTORE_TIMEOUT_HEADROOM_MS = 10_000;
 const VOICE_TRANSCRIPTION_DEFAULT_TIMEOUT_MS = 65_000;
@@ -622,6 +625,10 @@ export interface RestoreSessionRequest {
   historyPageSize?: number;
   /** Load-only live-turn replay projection. Omit for the complete journal. */
   liveReplayMode?: 'full' | 'summary';
+  /** Restore-time attribution for legacy/unattributed sessions. */
+  sourceType?: string;
+  /** Optional source-specific identifier. Requires `sourceType`. */
+  sourceId?: string;
   /**
    * Client-side deadline for this restore request. `0` disables the client
    * timer and relies on the daemon's own restore deadline.
@@ -2176,10 +2183,11 @@ export class DaemonClient {
 
   /**
    * Append to or replace `QWEN.md` at workspace or global scope.
-   * Strict mutation gate (`token_required` on no-token loopback
-   * defaults). When the daemon advertises `workspace_memory`, expect
-   * 200 with `{ ok, filePath, bytesWritten, mode }`; older daemons
-   * without the capability return 404.
+   * The strict mutation gate accepts trusted-loopback callers without a token;
+   * older daemons and non-trusted embeds can still return `token_required`.
+   * When the daemon advertises `workspace_memory`, expect 200 with
+   * `{ ok, filePath, bytesWritten, mode }`; older daemons without the
+   * capability return 404.
    */
   async writeWorkspaceMemory(
     req: DaemonWriteMemoryRequest,
@@ -3384,6 +3392,19 @@ export class DaemonClient {
     req: RestoreSessionRequest,
     clientId?: string,
   ): Promise<DaemonRestoredSession> {
+    let sourceType = req.sourceType;
+    let sourceId = req.sourceId;
+    if (req.sourceType !== undefined || req.sourceId !== undefined) {
+      try {
+        await this.requireCapability('session_source_metadata');
+      } catch (error) {
+        if (!(error instanceof DaemonCapabilityMissingError)) {
+          throw error;
+        }
+        sourceType = undefined;
+        sourceId = undefined;
+      }
+    }
     const timeoutMs = this.resolveRestoreTimeoutMs(req.timeoutMs);
     return await this.fetchWithTimeout(
       `${this.baseUrl}/session/${urlEncode(sessionId)}/${action}`,
@@ -3401,6 +3422,8 @@ export class DaemonClient {
           ...(action === 'load' && req.liveReplayMode !== undefined
             ? { liveReplayMode: req.liveReplayMode }
             : {}),
+          ...(sourceType !== undefined ? { sourceType } : {}),
+          ...(sourceId !== undefined ? { sourceId } : {}),
         }),
       },
       async (res) => {
@@ -3859,8 +3882,9 @@ export class DaemonClient {
 
   /**
    * Execute a direct daemon-side shell command for a session. The daemon must
-   * be started with direct session shell enabled and bearer auth configured;
-   * callers must also provide a client id already bound to this session.
+   * be started with direct session shell enabled and either bearer auth or
+   * trusted-loopback operator authority; callers must also provide a client id
+   * already bound to this session.
    * Prefer `DaemonSessionClient.shellCommand()` when available because it
    * forwards the session-bound client id automatically.
    */
@@ -3887,9 +3911,9 @@ export class DaemonClient {
 
   /**
    * Toggle a tool name in the workspace's
-   * `tools.disabled` settings list. Strict-gated mutation route — the
-   * daemon must be configured with a bearer token. The daemon writes
-   * the settings file directly and fan-outs a `tool_toggled` event to
+   * `tools.disabled` settings list. The strict mutation gate accepts
+   * trusted-loopback operator authority or listener credentials. The daemon
+   * writes the settings file directly and fan-outs a `tool_toggled` event to
    * every live session SSE bus.
    *
    * Already-registered tools in active sessions are NOT retroactively
@@ -4086,6 +4110,9 @@ export class DaemonClient {
         }
         return (await res.json()) as DaemonModelDeleteResult;
       },
+      this.hasExplicitFetchTimeout
+        ? undefined
+        : DEFAULT_PROVIDER_MUTATION_TIMEOUT_MS,
     );
   }
 
@@ -5518,6 +5545,9 @@ export class DaemonClient {
         }
         return (await res.json()) as DaemonAuthProviderInstallResult;
       },
+      this.hasExplicitFetchTimeout
+        ? undefined
+        : DEFAULT_PROVIDER_MUTATION_TIMEOUT_MS,
     );
   }
 

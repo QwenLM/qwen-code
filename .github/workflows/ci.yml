@@ -79,7 +79,7 @@ env:
   # BOTH the github_ci_only helper step and the full-profile Test step, so a
   # new helper test can't be added to one path and silently dropped from the
   # other.
-  HELPER_TESTS: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/classify-release-notes.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/resolve-sandbox-image.test.mjs .github/scripts/web-shell-visuals-publish.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/qwen-triage-workflow.test.mjs .github/scripts/assign-issue-owner.test.mjs .github/scripts/auto-minimize-spam.test.mjs .github/scripts/ci-runner-routing.test.mjs .github/scripts/autofix-status-heartbeat.test.mjs'
+  HELPER_TESTS: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/classify-release-notes.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/resolve-sandbox-image.test.mjs .github/scripts/web-shell-visuals-publish.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/qwen-triage-workflow.test.mjs .github/scripts/assign-issue-owner.test.mjs .github/scripts/auto-minimize-spam.test.mjs .github/scripts/ci-runner-routing.test.mjs .github/scripts/autofix-status-heartbeat.test.mjs .github/scripts/assign-pr-owner.test.mjs .github/scripts/check-disk-floor.test.mjs'
   # The growth ratchet and its vitest mirror compare each workflow against
   # the PR's base commit to tell "this PR grew the file" apart from "the
   # baseline went stale on main" (#9904). Wired once here so every lane
@@ -460,6 +460,15 @@ jobs:
           npm config set fetch-retries 5
           npm config set fetch-timeout 300000
 
+      # Fail fast on a saturated self-hosted host instead of dying on ENOSPC
+      # mid-install (#10035): the workspace cleaner skips busy runners, so a
+      # busy fleet can hit 100% while jobs keep being admitted. Gating before
+      # `npm ci` turns that into a clear, retryable reschedule onto a host
+      # with headroom, instead of a corrupted half-run.
+      - name: 'Disk floor gate (self-hosted)'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
+        run: 'bash .github/scripts/check-disk-floor.sh "${GITHUB_WORKSPACE}" "${RUNNER_TEMP:-/tmp}"'
+
       - name: 'Install dependencies'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         run: |-
@@ -638,6 +647,12 @@ jobs:
           # failing run captures the spike, and dump full state on failure.
           # Keep Linux temp paths real and short on disk-backed /var/tmp.
           # Symlink aliases break tests that intentionally compare real paths.
+          # The sample-file setup sits BEFORE the TMPDIR routing block (#10035)
+          # because no-ak-integration-ci pins that block byte-identical across
+          # the test/test_macos/test_windows legs; each DFSAMPLE line already
+          # carries the routed tmpdir, so the header only needs job/runner ids.
+          DISK_SAMPLES="${RUNNER_TEMP}/disk-pressure-samples.log"
+          echo "DISKCONTEXT $(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) runner[${RUNNER_NAME:-unknown}] run[${GITHUB_RUN_ID:-local}/${GITHUB_RUN_ATTEMPT:-1}] job[${GITHUB_JOB:-test}]" > "$DISK_SAMPLES" 2>/dev/null || true
           export TMPDIR="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
           if [ "${RUNNER_OS:-}" = "Linux" ]; then
             QWEN_CI_TMPDIR="$(mktemp -d /var/tmp/qwen-ci-XXXXXX 2>/dev/null || true)"
@@ -647,7 +662,7 @@ jobs:
               trap 'rm -rf "$TMPDIR" 2>/dev/null || true' EXIT
             fi
           fi
-          ( while true; do echo "DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) tmpdir[${TMPDIR}] space[$(df -h "${TMPDIR}" 2>/dev/null | tail -1)] inodes[$(df -i "${TMPDIR}" 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]" 2>/dev/null; sleep 10; done ) &
+          ( while true; do sample="DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) tmpdir[${TMPDIR}] space[$(df -h "${TMPDIR}" 2>/dev/null | tail -1)] inodes[$(df -i "${TMPDIR}" 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]"; echo "$sample"; echo "$sample" >> "$DISK_SAMPLES" 2>/dev/null || true; sleep 10; done ) &
           SAMPLER_PID=$!
           set +e
           npm run test:ci
@@ -657,6 +672,18 @@ jobs:
           kill "$SAMPLER_PID" 2>/dev/null || true
           if [ "$RC" -ne 0 ]; then df -hT 2>/dev/null || df -h 2>/dev/null || true; df -i 2>/dev/null || true; grep -E 'MemTotal|MemAvailable|SwapTotal|SwapFree' /proc/meminfo 2>/dev/null || true; fi
           exit "$RC"
+
+      # The host looks healthy after cleanup, so persist the disk-pressure
+      # timeline from a failed run (#10035): the artifact keeps the samples
+      # around long enough to correlate them with this job and runner.
+      - name: 'Upload disk-pressure samples'
+        if: '${{ failure() }}'
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'disk-pressure-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}'
+          path: '${{ runner.temp }}/disk-pressure-samples.log'
+          if-no-files-found: 'ignore'
+          retention-days: 14
 
       # Release guard for the Chrome extension: build, package, and scan real
       # artifacts for forbidden adapter signatures instead of leaving
@@ -860,6 +887,13 @@ jobs:
           npm config set fetch-retry-maxtimeout 120000
           npm config set fetch-retries 5
           npm config set fetch-timeout 300000
+
+      # Same pre-install admission check as the test job (#10035): this job
+      # lands on the same self-hosted pool and installs before the gate would
+      # otherwise have freed space for it.
+      - name: 'Disk floor gate (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: 'bash .github/scripts/check-disk-floor.sh "${GITHUB_WORKSPACE}" "${RUNNER_TEMP:-/tmp}"'
 
       - name: 'Install dependencies'
         run: |-
@@ -1642,6 +1676,12 @@ jobs:
           echo "NPM_CONFIG_CACHE=${cache_dir}" >> "${GITHUB_ENV}"
           echo "Using persistent npm cache at ${cache_dir}"
           du -sh "${cache_dir}" 2>/dev/null || true
+
+      # Same pre-install admission check as the test job (#10035): this job
+      # shares the self-hosted pool in the merge queue.
+      - name: 'Disk floor gate (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: 'bash .github/scripts/check-disk-floor.sh "${GITHUB_WORKSPACE}" "${RUNNER_TEMP:-/tmp}"'
 
       - name: 'Install Dependencies'
         env:
