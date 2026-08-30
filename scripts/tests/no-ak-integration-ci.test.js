@@ -31,7 +31,16 @@ const CONFIGURE_ACTION_PATH =
 const NODE_ACTION_PATH = '.github/actions/self-hosted-node/action.yml';
 const GUARD_STEP = 'Verify checkout includes expected head commit';
 
-function runClassifierTrust(step, { sameRepo, permission, apiFails = false }) {
+function runClassifierTrust(
+  step,
+  {
+    sameRepo,
+    permission,
+    apiFails = false,
+    eventName = 'pull_request',
+    prAuthor = 'contributor',
+  },
+) {
   const body = step.match(/run: \|-\n([\s\S]*)$/)?.[1] ?? '';
   const script = body.replace(/^ {10}/gm, '');
   const dir = mkdtempSync(path.join(tmpdir(), 'classifier-trust-'));
@@ -54,11 +63,11 @@ function runClassifierTrust(step, { sameRepo, permission, apiFails = false }) {
       env: {
         ...process.env,
         PATH: `${dir}:${process.env.PATH ?? ''}`,
-        GITHUB_EVENT_NAME: 'pull_request',
+        GITHUB_EVENT_NAME: eventName,
         GITHUB_OUTPUT: output,
         GITHUB_REPOSITORY: 'QwenLM/qwen-code',
         SAME_REPO: String(sameRepo),
-        PR_AUTHOR: 'contributor',
+        PR_AUTHOR: prAuthor,
         GH_STUB_PERMISSION: permission,
         GH_STUB_FAIL: String(apiFails),
       },
@@ -160,6 +169,30 @@ describe('no-AK integration CI wiring', () => {
       // permission) and a real below-write permission are different
       // remedies, and the verdict line alone cannot tell them apart.
       expect(deniedApi.stdout).not.toBe(deniedRead.stdout);
+
+      // The two remaining reason branches need the same pin. The merge
+      // queue runs this step on every merge_group event, so an edit that
+      // drops or swaps these reason assignments would otherwise ship with
+      // every test green while the log silently reports a stale cause.
+      const nonPrEvent = runClassifierTrust(step, {
+        sameRepo: false,
+        permission: 'write',
+        eventName: 'merge_group',
+      });
+      expect(nonPrEvent.output).toBe('can_trust_pr_classifier=false');
+      expect(nonPrEvent.stdout).toContain('PR classifier trusted: false');
+      expect(nonPrEvent.stdout).toContain('not a pull_request');
+
+      const missingAuthor = runClassifierTrust(step, {
+        sameRepo: false,
+        permission: 'write',
+        prAuthor: '',
+      });
+      expect(missingAuthor.output).toBe('can_trust_pr_classifier=false');
+      expect(missingAuthor.stdout).toContain('PR classifier trusted: false');
+      expect(missingAuthor.stdout).toContain('PR author missing');
+
+      expect(nonPrEvent.stdout).not.toBe(missingAuthor.stdout);
     },
   );
 
