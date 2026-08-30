@@ -22,7 +22,12 @@ function makeRegistry(
   const allTools = new Map<string, AnyDeclarativeTool>([
     [ToolNames.TOOL_CALL, new ToolCallTool()],
     ...(withToolSearch
-      ? ([[ToolNames.TOOL_SEARCH, new MockTool({ name: ToolNames.TOOL_SEARCH })]] as const)
+      ? ([
+          [
+            ToolNames.TOOL_SEARCH,
+            new MockTool({ name: ToolNames.TOOL_SEARCH }),
+          ],
+        ] as const)
       : []),
     ...tools.map((tool) => [tool.name, tool] as const),
   ]);
@@ -88,6 +93,13 @@ describe('ToolCallTool', () => {
       expect(result).toMatchObject({
         errorType: ToolErrorType.INVALID_TOOL_PARAMS,
       });
+      // Pin the dedicated recursive-bridge guard by its message: the
+      // downstream isDeferredAndHidden rejection also returns
+      // INVALID_TOOL_PARAMS, so asserting on errorType alone would stay
+      // green if this guard were deleted (wenshao verification note 2).
+      if ('error' in result) {
+        expect(result.error.message).toContain('cannot invoke bridge tool');
+      }
     },
   );
 

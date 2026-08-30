@@ -323,7 +323,8 @@ class ToolSearchInvocation extends BaseToolInvocation<
     // JSON unicode escapes decode back to their original characters when the
     // model interprets the JSON, but as raw text inside the wrapper they are
     // no longer tag delimiters.
-    const schemaBlocks = reviewed.map(      (tool) =>
+    const schemaBlocks = reviewed.map(
+      (tool) =>
         `<function>${escapeJsonTagCharacters(JSON.stringify(tool.schema))}</function>`,
     );
     let llmContent = '';
