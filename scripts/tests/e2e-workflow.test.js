@@ -111,6 +111,10 @@ describe('e2e workflow', () => {
           steps.find((step) => step.name === 'Install dependencies'),
         ),
       );
+      // An `if:` here would skip the record on one leg, where the gate's
+      // ${E2E_JOB_START_EPOCH:-0} fallback then always takes the ::error::
+      // branch and the retry never fires on the leg it exists for.
+      expect(epochStep.if).toBeUndefined();
     });
 
     it('wraps the sandbox:none shard command in a retryable function', () => {
@@ -147,12 +151,22 @@ describe('e2e workflow', () => {
       expect(group).toMatch(/elapsed[\s\S]*exit 1[\s\S]*run_shard\s*\n\s*\}/);
     });
 
+    it('pins the job timeout the budget-gate arithmetic is built on', () => {
+      // The 2100s threshold is 3600s minus a 25-minute reserve; the 3600s
+      // comes from this timeout. Editing one without the other mis-budgets
+      // the retry in both directions with every other witness green.
+      expect(yml.jobs['e2e-test-linux']['timeout-minutes']).toBe(60);
+    });
+
     it('keeps the run step red when the shard stays red', () => {
       // continue-on-error sits above the script exit code that every other
       // witness observes: with it, two failing attempts still report green.
-      // The sandbox-image build step's deliberate continue-on-error stays
-      // untouched — this pins the run step only.
+      // Pin both levels — a job-level key computes the job conclusion green
+      // whatever the run step exits. The sandbox-image build step's
+      // deliberate step-level key and isolated-nightly's deliberate job-level
+      // key stay untouched — this pins the run step and e2e-test-linux only.
       expect(runStep['continue-on-error']).toBeUndefined();
+      expect(yml.jobs['e2e-test-linux']['continue-on-error']).toBeUndefined();
     });
 
     it('does not retry the docker leg', () => {

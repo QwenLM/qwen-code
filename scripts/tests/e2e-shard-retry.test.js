@@ -17,12 +17,14 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 
-// Executes the e2e workflow's 'Run E2E tests' script under the same
-// `bash -eo pipefail` GitHub Actions uses, with npm stubbed, so the retry's
-// exit-code semantics are witnessed by bash rather than by shape assertions
-// alone. A failure-swallowing mutation (a group-level `|| true`) or a
-// missing budget gate turns these red. Bash-driven, so it is excluded from
-// the Windows lanes in vitest.config.ts.
+// Executes the e2e workflow's 'Run E2E tests' script under GitHub Actions'
+// default Linux step shell — `bash -e {0}`: the step has no `shell:` override
+// and e2e.yml no `defaults:` block, so no pipefail — with npm stubbed and the
+// clock pinned, so the retry's exit-code semantics and the budget gate's
+// exact threshold are witnessed by bash rather than by shape assertions
+// alone. A failure-swallowing mutation (a group-level `|| true`) or a missing
+// budget gate turns these red. Bash-driven, so it is excluded from the
+// Windows lanes in vitest.config.ts.
 describe('e2e workflow sandbox:none shard retry execution', () => {
   const yml = parse(readFileSync('.github/workflows/e2e.yml', 'utf8'));
   const steps = yml.jobs['e2e-test-linux'].steps;
@@ -50,20 +52,28 @@ describe('e2e workflow sandbox:none shard retry execution', () => {
         ].join('\n'),
       );
       chmodSync(npmStub, 0o755);
+      // The clock is pinned so the budget-gate boundary cases are exact:
+      // with the real clock, elapsed only ever grows between this process
+      // and the script's `date +%s`, which would race the 2100s threshold.
+      const now = Math.floor(Date.now() / 1000);
+      const dateStub = join(dir, 'date');
+      writeFileSync(
+        dateStub,
+        ['#!/usr/bin/env bash', `printf '%s' '${now}'`].join('\n'),
+      );
+      chmodSync(dateStub, 0o755);
       const scriptFile = join(dir, 'run-e2e-tests.sh');
       writeFileSync(scriptFile, script);
       let exitCode = 0;
       let output = '';
       try {
-        output = execFileSync('bash', ['-e', '-o', 'pipefail', scriptFile], {
+        output = execFileSync('bash', ['-e', scriptFile], {
           env: {
             ...process.env,
             PATH: `${dir}:${process.env.PATH}`,
             NPM_CALL_COUNT_FILE: callCountFile,
             NPM_FAIL_CALLS: failCalls,
-            E2E_JOB_START_EPOCH: String(
-              Math.floor(Date.now() / 1000) - elapsedSeconds,
-            ),
+            E2E_JOB_START_EPOCH: String(now - elapsedSeconds),
           },
           encoding: 'utf8',
         });
@@ -101,6 +111,28 @@ describe('e2e workflow sandbox:none shard retry execution', () => {
       elapsedSeconds: 1200,
     });
     expect(npmCalls).toBe(2);
+    expect(exitCode).not.toBe(0);
+  });
+
+  it('retries at exactly the 2100s budget-gate threshold', () => {
+    // The gate admits a retry at elapsed <= 2100. Threshold mutations in
+    // either direction must not ship silently between the 1200/3000 probes.
+    const { exitCode, npmCalls, output } = runStepScript({
+      failCalls: '1',
+      elapsedSeconds: 2100,
+    });
+    expect(npmCalls).toBe(2);
+    expect(output).toContain('::warning::');
+    expect(exitCode).toBe(0);
+  });
+
+  it('refuses a retry one second past the 2100s budget-gate threshold', () => {
+    const { exitCode, npmCalls, output } = runStepScript({
+      failCalls: '1',
+      elapsedSeconds: 2101,
+    });
+    expect(npmCalls).toBe(1);
+    expect(output).toContain('::error::');
     expect(exitCode).not.toBe(0);
   });
 
