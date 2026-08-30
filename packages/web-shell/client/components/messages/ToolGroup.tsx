@@ -1312,7 +1312,9 @@ export const ToolLine = memo(function ToolLine({
     name === 'glob';
   const isRead = name === 'read' || name === 'read_file' || name === 'readfile';
   // Every regular tool row expands on demand. Content controls only what the
-  // expanded card shows, never whether the user can open or close it.
+  // expanded card shows, never whether the user can open or close it —
+  // except while an edit approval is pending: the native diff editor owns
+  // that interaction, so the row stays locked closed until it resolves.
   // When a long description is expanded we move it out of the header into a
   // wrapped block below, so the header drops its single-line copy.
   const descExpandable = !isTodo && isDescriptionExpandable(description);
