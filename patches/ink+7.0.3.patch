@@ -314,7 +314,7 @@ index cdb5fc4..3247e02 100644
  const createStandard = (stream, { showCursor = false } = {}) => {
      let previousLineCount = 0;
      let previousOutput = '';
-@@ -12,7 +13,26 @@
+@@ -12,7 +16,26 @@
      let cursorDirty = false;
      let previousCursorPosition;
      let cursorWasShown = false;
@@ -342,7 +342,7 @@ index cdb5fc4..3247e02 100644
      const hasChanges = (str, activeCursor) => {
          const cursorChanged = cursorPositionChanged(activeCursor, previousCursorPosition);
          return str !== previousOutput || cursorChanged;
-@@ -24,7 +44,7 @@
+@@ -24,7 +47,7 @@
          }
          // Only use cursor if setCursorPosition was called since last render.
          // This ensures stale positions don't persist after component unmount.
@@ -351,7 +351,7 @@ index cdb5fc4..3247e02 100644
          cursorDirty = false;
          const cursorChanged = cursorPositionChanged(activeCursor, previousCursorPosition);
          if (!hasChanges(str, activeCursor)) {
-@@ -32,7 +52,8 @@
+@@ -32,7 +55,8 @@
          }
          const lines = str.split('\n');
          const visibleCount = visibleLineCount(lines, str);
@@ -361,7 +361,7 @@ index cdb5fc4..3247e02 100644
          if (str === previousOutput && cursorChanged) {
              stream.write(buildCursorOnlySequence({
                  cursorWasShown,
-@@ -40,6 +61,7 @@
+@@ -40,6 +64,7 @@
                  previousCursorPosition,
                  visibleLineCount: visibleCount,
                  cursorPosition: activeCursor,
@@ -369,7 +369,7 @@ index cdb5fc4..3247e02 100644
              }));
          }
          else {
-@@ -50,6 +72,7 @@
+@@ -50,6 +75,7 @@
                  str +
                  cursorSuffix);
              previousLineCount = lines.length;
@@ -377,7 +377,7 @@ index cdb5fc4..3247e02 100644
          }
          previousCursorPosition = activeCursor ? { ...activeCursor } : undefined;
          cursorWasShown = activeCursor !== undefined;
-@@ -62,12 +85,16 @@
+@@ -62,12 +88,16 @@
          previousLineCount = 0;
          previousCursorPosition = undefined;
          cursorWasShown = false;
@@ -394,7 +394,7 @@ index cdb5fc4..3247e02 100644
          if (!showCursor) {
              cliCursor.show(stream);
              hasHiddenCursor = false;
-@@ -78,18 +105,21 @@
+@@ -78,18 +108,21 @@
          previousLineCount = 0;
          previousCursorPosition = undefined;
          cursorWasShown = false;
@@ -418,7 +418,7 @@ index cdb5fc4..3247e02 100644
          }
          previousCursorPosition = activeCursor ? { ...activeCursor } : undefined;
          cursorWasShown = activeCursor !== undefined;
-@@ -97,9 +127,10 @@
+@@ -97,9 +130,10 @@
      render.setCursorPosition = (position) => {
          cursorPosition = position;
          cursorDirty = true;
@@ -430,7 +430,7 @@ index cdb5fc4..3247e02 100644
      return render;
  };
  const createIncremental = (stream, { showCursor = false } = {}) => {
-@@ -110,7 +141,26 @@
+@@ -110,7 +144,26 @@
      let cursorDirty = false;
      let previousCursorPosition;
      let cursorWasShown = false;
@@ -458,7 +458,7 @@ index cdb5fc4..3247e02 100644
      const hasChanges = (str, activeCursor) => {
          const cursorChanged = cursorPositionChanged(activeCursor, previousCursorPosition);
          return str !== previousOutput || cursorChanged;
-@@ -122,7 +172,7 @@
+@@ -122,7 +175,7 @@
          }
          // Only use cursor if setCursorPosition was called since last render.
          // This ensures stale positions don't persist after component unmount.
@@ -467,7 +467,7 @@ index cdb5fc4..3247e02 100644
          cursorDirty = false;
          const cursorChanged = cursorPositionChanged(activeCursor, previousCursorPosition);
          if (!hasChanges(str, activeCursor)) {
-@@ -138,6 +188,7 @@
+@@ -138,6 +191,7 @@
                  previousCursorPosition,
                  visibleLineCount: visibleCount,
                  cursorPosition: activeCursor,
@@ -475,7 +475,7 @@ index cdb5fc4..3247e02 100644
              }));
              previousCursorPosition = activeCursor ? { ...activeCursor } : undefined;
              cursorWasShown = activeCursor !== undefined;
-@@ -145,7 +196,7 @@
+@@ -145,7 +199,7 @@
          }
          const returnPrefix = buildReturnToBottomPrefix(cursorWasShown, previousLines.length, previousCursorPosition);
          if (str === '\n' || previousOutput.length === 0) {
@@ -484,7 +484,7 @@ index cdb5fc4..3247e02 100644
              stream.write(returnPrefix +
                  ansiEscapes.eraseLines(previousLines.length) +
                  str +
-@@ -154,6 +205,7 @@
+@@ -154,6 +208,7 @@
              previousCursorPosition = activeCursor ? { ...activeCursor } : undefined;
              previousOutput = str;
              previousLines = nextLines;
@@ -492,7 +492,7 @@ index cdb5fc4..3247e02 100644
              return true;
          }
          const hasTrailingNewline = str.endsWith('\n');
-@@ -187,13 +239,14 @@
+@@ -187,13 +242,14 @@
                  // has no trailing newline (fullscreen mode).
                  (isLastLine && !hasTrailingNewline ? '' : '\n'));
          }
@@ -508,7 +508,7 @@ index cdb5fc4..3247e02 100644
          return true;
      };
      render.clear = () => {
-@@ -203,12 +256,16 @@
+@@ -203,12 +259,16 @@
          previousLines = [];
          previousCursorPosition = undefined;
          cursorWasShown = false;
@@ -525,7 +525,7 @@ index cdb5fc4..3247e02 100644
          if (!showCursor) {
              cliCursor.show(stream);
              hasHiddenCursor = false;
-@@ -219,18 +276,21 @@
+@@ -219,18 +279,21 @@
          previousLines = [];
          previousCursorPosition = undefined;
          cursorWasShown = false;
@@ -549,7 +549,7 @@ index cdb5fc4..3247e02 100644
          }
          previousCursorPosition = activeCursor ? { ...activeCursor } : undefined;
          cursorWasShown = activeCursor !== undefined;
-@@ -238,9 +298,10 @@
+@@ -238,9 +301,10 @@
      render.setCursorPosition = (position) => {
          cursorPosition = position;
          cursorDirty = true;

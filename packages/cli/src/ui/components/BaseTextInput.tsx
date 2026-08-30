@@ -145,6 +145,7 @@ export type PhysicalCursorState = {
 export function getAbsolutePosition(
   node: DOMElement | null,
 ): { top: number; left: number } | undefined {
+  // Lazy cursor getters rely on this being the only undefined path.
   if (!node) return undefined;
 
   let top = 0;
