@@ -87,29 +87,11 @@ jobs:
           npm run package:hosted-installation -- --out-dir dist/installation --version "${RELEASE_VERSION}"
 
       - name: 'Install ossutil'
-        env:
-          OSSUTIL_URL: "${{ vars.OSSUTIL_URL || 'https://gosspublic.alicdn.com/ossutil/1.7.19/ossutil-v1.7.19-linux-amd64.zip' }}"
-          OSSUTIL_SHA256: "${{ vars.OSSUTIL_SHA256 || 'dcc512e4a893e16bbee63bc769339d8e56b21744fd83c8212a9d8baf28767343' }}"
-        run: |-
-          set -euo pipefail
-
-          tmp_dir="$(mktemp -d)"
-          curl -fsSL --connect-timeout 15 --max-time 300 "${OSSUTIL_URL}" -o "${tmp_dir}/ossutil.zip"
-          echo "${OSSUTIL_SHA256}  ${tmp_dir}/ossutil.zip" | sha256sum -c -
-          unzip -q "${tmp_dir}/ossutil.zip" -d "${tmp_dir}"
-
-          ossutil_path="$(find "${tmp_dir}" -type f \( -name 'ossutil' -o -name 'ossutil64' \) -print -quit)"
-          if [[ -z "${ossutil_path}" ]]; then
-            echo "::error::ossutil binary not found in downloaded archive"
-            exit 1
-          fi
-
-          chmod +x "${ossutil_path}"
-          mkdir -p "${HOME}/.local/bin"
-          install -m 0755 "${ossutil_path}" "${HOME}/.local/bin/ossutil"
-          echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
-          rm -rf "${tmp_dir}"
-          "${HOME}/.local/bin/ossutil" >/dev/null
+        uses: './.github/actions/install-ossutil'
+        with:
+          install-dir: '${{ runner.temp }}/ossutil-bin'
+          connect-timeout: '15'
+          max-time: '300'
 
       - name: 'Configure Aliyun OSS Credentials'
         env:

@@ -1,0 +1,48 @@
+name: Install ossutil
+description: Download, verify, and install the pinned ossutil binary
+inputs:
+  install-dir:
+    description: Directory where the verified binary is installed
+    required: true
+  retry:
+    description: Retry transient download failures
+    required: false
+    default: 'false'
+  connect-timeout:
+    description: curl connection timeout in seconds
+    required: false
+    default: '15'
+  max-time:
+    description: curl maximum transfer time in seconds
+    required: false
+    default: '300'
+runs:
+  using: composite
+  steps:
+    - name: Download and verify ossutil
+      shell: bash
+      env:
+        OSSUTIL_URL: "${{ vars.OSSUTIL_URL || 'https://gosspublic.alicdn.com/ossutil/1.7.19/ossutil-v1.7.19-linux-amd64.zip' }}"
+        OSSUTIL_SHA256: "${{ vars.OSSUTIL_SHA256 || 'dcc512e4a893e16bbee63bc769339d8e56b21744fd83c8212a9d8baf28767343' }}"
+        INSTALL_DIR: ${{ inputs.install-dir }}
+        RETRY: ${{ inputs.retry }}
+        CONNECT_TIMEOUT: ${{ inputs.connect-timeout }}
+        MAX_TIME: ${{ inputs.max-time }}
+      run: |
+        set -euo pipefail
+        tmp_dir="$(mktemp -d)"
+        trap 'rm -rf "$tmp_dir"' EXIT
+        retry_args=()
+        if [[ "$RETRY" == 'true' ]]; then
+          retry_args=(--retry 2 --retry-delay 2 --retry-all-errors)
+        fi
+        curl -fsSL "${retry_args[@]}" --connect-timeout "$CONNECT_TIMEOUT" --max-time "$MAX_TIME" "$OSSUTIL_URL" -o "$tmp_dir/ossutil.zip"
+        echo "$OSSUTIL_SHA256  $tmp_dir/ossutil.zip" | sha256sum -c -
+        unzip -q "$tmp_dir/ossutil.zip" -d "$tmp_dir"
+        ossutil_path="$(find "$tmp_dir" -type f \( -name 'ossutil' -o -name 'ossutil64' \) -print -quit)"
+        [[ -n "$ossutil_path" ]] || { echo '::error::ossutil binary not found in downloaded archive'; exit 1; }
+        chmod +x "$ossutil_path"
+        install -d "$INSTALL_DIR"
+        install -m 0755 "$ossutil_path" "$INSTALL_DIR/ossutil"
+        echo "$INSTALL_DIR" >> "$GITHUB_PATH"
+        "$INSTALL_DIR/ossutil" >/dev/null
