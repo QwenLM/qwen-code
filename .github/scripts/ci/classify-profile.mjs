@@ -11,6 +11,7 @@ export const GITHUB_CI_ONLY_FILES = new Set([
   '.github/actionlint.yaml',
   '.github/scripts/pr-safety-precheck.mjs',
   '.github/scripts/pr-safety-precheck.test.mjs',
+  '.github/scripts/update-ecs-runner-qwen-workflow.test.mjs',
   '.github/scripts/web-shell-visuals-publish.test.mjs',
   '.github/workflows/qwen-pr-safety-precheck.yml',
   '.github/workflows/update-ecs-runner-qwen.yml',

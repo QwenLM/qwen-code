@@ -6,6 +6,7 @@
 
 import { execFileSync } from 'node:child_process';
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -13,6 +14,7 @@ import {
   realpathSync,
   rmSync,
   symlinkSync,
+  writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -29,7 +31,76 @@ const CONFIGURE_ACTION_PATH =
 const NODE_ACTION_PATH = '.github/actions/self-hosted-node/action.yml';
 const GUARD_STEP = 'Verify checkout includes expected head commit';
 
+function runClassifierTrust(step, { sameRepo, permission, apiFails = false }) {
+  const body = step.match(/run: \|-\n([\s\S]*)$/)?.[1] ?? '';
+  const script = body.replace(/^ {10}/gm, '');
+  const dir = mkdtempSync(path.join(tmpdir(), 'classifier-trust-'));
+  const output = path.join(dir, 'github-output');
+  const gh = path.join(dir, 'gh');
+  try {
+    writeFileSync(
+      gh,
+      [
+        '#!/usr/bin/env bash',
+        '[[ "${GH_STUB_FAIL}" == "true" ]] && exit 1',
+        'printf \'%s\\n\' "${GH_STUB_PERMISSION}"',
+      ].join('\n'),
+      { mode: 0o755 },
+    );
+    chmodSync(gh, 0o755);
+    writeFileSync(output, '');
+    execFileSync('bash', ['-c', script], {
+      env: {
+        ...process.env,
+        PATH: `${dir}:${process.env.PATH ?? ''}`,
+        GITHUB_EVENT_NAME: 'pull_request',
+        GITHUB_OUTPUT: output,
+        GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+        SAME_REPO: String(sameRepo),
+        PR_AUTHOR: 'contributor',
+        GH_STUB_PERMISSION: permission,
+        GH_STUB_FAIL: String(apiFails),
+      },
+    });
+    return readFileSync(output, 'utf8').trim();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 describe('no-AK integration CI wiring', () => {
+  it('executes the classifier trust decision fail-closed', () => {
+    const workflow = readFileSync(
+      path.join(ROOT, '.github/workflows/ci.yml'),
+      'utf8',
+    );
+    const step = getWorkflowStep(
+      getWorkflowJob(workflow, 'classify_pr'),
+      'Determine classifier trust',
+    );
+
+    expect(
+      runClassifierTrust(step, {
+        sameRepo: true,
+        permission: '',
+        apiFails: true,
+      }),
+    ).toBe('can_trust_pr_classifier=true');
+    expect(
+      runClassifierTrust(step, { sameRepo: false, permission: 'write' }),
+    ).toBe('can_trust_pr_classifier=true');
+    expect(
+      runClassifierTrust(step, { sameRepo: false, permission: 'read' }),
+    ).toBe('can_trust_pr_classifier=false');
+    expect(
+      runClassifierTrust(step, {
+        sameRepo: false,
+        permission: '',
+        apiFails: true,
+      }),
+    ).toBe('can_trust_pr_classifier=false');
+  });
+
   it.runIf(process.platform === 'linux')(
     'keeps Linux Unix socket paths short and identity-stable',
     () => {
@@ -176,6 +247,7 @@ describe('no-AK integration CI wiring', () => {
     const macosJob = getWorkflowJob(workflow, 'test_macos');
     const windowsJob = getWorkflowJob(workflow, 'test_windows');
     const gateJob = getWorkflowJob(workflow, 'integration_no_ak');
+    const classifyJob = getWorkflowJob(workflow, 'classify_pr');
     const permissionsIndex = workflow.indexOf('\npermissions:');
     expect(permissionsIndex).toBeGreaterThan(0);
     const workflowTriggers = workflow.slice(0, permissionsIndex);
@@ -212,6 +284,23 @@ describe('no-AK integration CI wiring', () => {
     expect(getWorkflowStep(gateJob, 'Checkout')).toContain(
       "format('refs/pull/{0}/head', github.event.pull_request.number)",
     );
+    const classifierTrust = getWorkflowStep(
+      classifyJob,
+      'Determine classifier trust',
+    );
+    expect(classifyJob).toContain(
+      "can_trust_pr_classifier: '${{ steps.classifier_trust.outputs.can_trust_pr_classifier }}'",
+    );
+    expect(classifierTrust).toContain('collaborators/${PR_AUTHOR}/permission');
+    expect(classifierTrust).toContain('can_trust=false');
+    expect(classifierTrust).toContain('"${SAME_REPO}" == "true"');
+    expect(classifierTrust).toContain('admin|maintain|write');
+    expect(classifierTrust).toContain('2>/dev/null || true');
+    expect(classifierTrust).not.toContain('AUTHOR_ASSOCIATION');
+    expect(workflow).toContain(
+      '.github/scripts/update-ecs-runner-qwen-workflow.test.mjs',
+    );
+
     // The profile gate is classified in this job: depending on `test` for
     // its ci_profile output would queue the check behind the hour-long unit
     // run. Pin the wrapper so the two classifiers cannot drift.
@@ -223,12 +312,8 @@ describe('no-AK integration CI wiring', () => {
         '.github/scripts/ci/classify-pr-profile.sh "${GITHUB_REPOSITORY}" "${PR_NUMBER}"',
       );
       expect(classify).toContain("id: 'ci_profile'");
-      expect(classify).toContain('CAN_TRUST_PR_CLASSIFIER');
       expect(classify).toContain(
-        `contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association)`,
-      );
-      expect(classify).toContain(
-        'Untrusted fork PR detected; running full CI.',
+        "CAN_TRUST_PR_CLASSIFIER: '${{ needs.classify_pr.outputs.can_trust_pr_classifier }}'",
       );
     }
     for (const stepName of [

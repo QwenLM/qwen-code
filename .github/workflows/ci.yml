@@ -79,7 +79,7 @@ env:
   # BOTH the github_ci_only helper step and the full-profile Test step, so a
   # new helper test can't be added to one path and silently dropped from the
   # other.
-  HELPER_TESTS: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/classify-release-notes.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/resolve-sandbox-image.test.mjs .github/scripts/web-shell-visuals-publish.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/qwen-triage-workflow.test.mjs .github/scripts/assign-issue-owner.test.mjs .github/scripts/auto-minimize-spam.test.mjs .github/scripts/ci-runner-routing.test.mjs .github/scripts/autofix-status-heartbeat.test.mjs .github/scripts/assign-pr-owner.test.mjs'
+  HELPER_TESTS: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/classify-release-notes.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/resolve-sandbox-image.test.mjs .github/scripts/update-ecs-runner-qwen-workflow.test.mjs .github/scripts/web-shell-visuals-publish.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/qwen-triage-workflow.test.mjs .github/scripts/assign-issue-owner.test.mjs .github/scripts/auto-minimize-spam.test.mjs .github/scripts/ci-runner-routing.test.mjs .github/scripts/autofix-status-heartbeat.test.mjs .github/scripts/assign-pr-owner.test.mjs'
   # The growth ratchet and its vitest mirror compare each workflow against
   # the PR's base commit to tell "this PR grew the file" apart from "the
   # baseline went stale on main" (#9904). Wired once here so every lane
@@ -115,6 +115,7 @@ jobs:
     outputs:
       skip_ci: '${{ steps.release_sync.outputs.skip_ci }}'
       ubuntu_runner: '${{ steps.pick_runner.outputs.ubuntu_runner }}'
+      can_trust_pr_classifier: '${{ steps.classifier_trust.outputs.can_trust_pr_classifier }}'
     steps:
       - name: 'Detect release version-sync PR'
         id: 'release_sync'
@@ -187,6 +188,27 @@ jobs:
           fi
           echo "ubuntu_runner=${ubuntu_runner}" >> "${GITHUB_OUTPUT}"
           echo "Selected Linux runner: ${ubuntu_runner}"
+
+      - name: 'Determine classifier trust'
+        id: 'classifier_trust'
+        env:
+          GH_TOKEN: '${{ github.token }}'
+          SAME_REPO: '${{ github.event.pull_request.head.repo.full_name == github.repository }}'
+          PR_AUTHOR: '${{ github.event.pull_request.user.login }}'
+        run: |-
+          can_trust=false
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            if [[ "${SAME_REPO}" == "true" ]]; then
+              can_trust=true
+            elif [[ -n "${PR_AUTHOR}" ]]; then
+              permission="$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${PR_AUTHOR}/permission" --jq '.permission' 2>/dev/null || true)"
+              case "${permission}" in
+                admin|maintain|write) can_trust=true ;;
+              esac
+            fi
+          fi
+          echo "can_trust_pr_classifier=${can_trust}" >> "${GITHUB_OUTPUT}"
+          echo "PR classifier trusted: ${can_trust}"
 
   #
   # Test: Node
@@ -378,7 +400,7 @@ jobs:
         env:
           GH_TOKEN: '${{ github.token }}'
           PR_NUMBER: "${{ github.event_name == 'pull_request' && github.event.pull_request.number || '' }}"
-          CAN_TRUST_PR_CLASSIFIER: '${{ github.event_name == ''pull_request'' && (github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association)) }}'
+          CAN_TRUST_PR_CLASSIFIER: '${{ needs.classify_pr.outputs.can_trust_pr_classifier }}'
         run: |-
           profile=full
           if [[ "${GITHUB_EVENT_NAME}" == "pull_request" && -n "${PR_NUMBER}" ]]; then
@@ -1390,7 +1412,7 @@ jobs:
         env:
           GH_TOKEN: '${{ github.token }}'
           PR_NUMBER: "${{ github.event_name == 'pull_request' && github.event.pull_request.number || '' }}"
-          CAN_TRUST_PR_CLASSIFIER: '${{ github.event_name == ''pull_request'' && (github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association)) }}'
+          CAN_TRUST_PR_CLASSIFIER: '${{ needs.classify_pr.outputs.can_trust_pr_classifier }}'
         run: |-
           profile=full
           if [[ "${GITHUB_EVENT_NAME}" == "pull_request" && -n "${PR_NUMBER}" ]]; then

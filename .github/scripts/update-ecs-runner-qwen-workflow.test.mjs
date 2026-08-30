@@ -5,6 +5,7 @@
  */
 
 import { spawnSync } from 'node:child_process';
+import assert from 'node:assert/strict';
 import {
   chmodSync,
   mkdtempSync,
@@ -14,7 +15,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, it } from 'node:test';
 
 const workflow = readFileSync(
   '.github/workflows/update-ecs-runner-qwen.yml',
@@ -92,47 +93,57 @@ function runResolve({ failures = 0, version = '0.22.3', env = {} } = {}) {
 
 describe('ECS runner qwen update workflow', () => {
   it('installs without the selected runner npm prefix', () => {
-    expect(workflow).toContain('cd "${RUNNER_TEMP:?}"');
-    expect(workflow).toContain('sudo env -u NPM_CONFIG_PREFIX npm install -g');
+    assert.ok(workflow.includes('cd "${RUNNER_TEMP:?}"'));
+    assert.ok(
+      workflow.includes('sudo env -u NPM_CONFIG_PREFIX npm install -g'),
+    );
   });
 
   it('runs only when this workflow changes on main', () => {
-    expect(workflow).toContain(
-      "  push:\n    branches: ['main']\n    paths: ['.github/workflows/update-ecs-runner-qwen.yml']",
+    assert.ok(
+      workflow.includes(
+        "  push:\n    branches: ['main']\n    paths: ['.github/workflows/update-ecs-runner-qwen.yml']",
+      ),
     );
   });
 
   it('annotates a retry and a terminal failure distinctly', () => {
     // The final attempt must not log a "retrying" warning that never
     // retries; a sustained failure ends with an explicit exhausted error.
-    expect(workflow).toContain(
-      'echo "::warning::npm install attempt ${attempt} failed; retrying"',
+    assert.ok(
+      workflow.includes(
+        'echo "::warning::npm install attempt ${attempt} failed; retrying"',
+      ),
     );
-    expect(workflow).toContain(
-      'echo "::error::npm install of @qwen-code/qwen-code@${VERSION} failed after 3 attempts"',
+    assert.ok(
+      workflow.includes(
+        'echo "::error::npm install of @qwen-code/qwen-code@${VERSION} failed after 3 attempts"',
+      ),
     );
-    expect(workflow).toContain('for attempt in 1 2 3; do');
-    expect(workflow).toContain('if [[ "${attempt}" -lt 3 ]]; then');
-    expect(workflow).toContain('sudo rm -rf "${PKG_DIR}"/.qwen-code-*');
+    assert.ok(workflow.includes('for attempt in 1 2 3; do'));
+    assert.ok(workflow.includes('if [[ "${attempt}" -lt 3 ]]; then'));
+    assert.ok(workflow.includes('sudo rm -rf "${PKG_DIR}"/.qwen-code-*'));
   });
 
   it('resolves once on a hosted runner and feeds every pool', () => {
     // One resolution shared by the matrix is what keeps pools that start
     // hours apart from installing different versions; it also keeps the
     // registry wait off the ECS runners.
-    expect(workflow).toContain("    runs-on: 'ubuntu-latest'");
-    expect(workflow).toContain(
-      "      version: '${{ steps.version.outputs.version }}'",
+    assert.ok(workflow.includes("    runs-on: 'ubuntu-latest'"));
+    assert.ok(
+      workflow.includes(
+        "      version: '${{ steps.version.outputs.version }}'",
+      ),
     );
-    expect(workflow).toContain("    needs: 'resolve'");
+    assert.ok(workflow.includes("    needs: 'resolve'"));
     // Both consumers read the job output; a leftover step reference would
     // silently expand to an empty version and install `@qwen-code/qwen-code@`.
     const consumers = workflow.match(
       /VERSION: '\$\{\{ needs\.resolve\.outputs\.version \}\}'/g,
     );
-    expect(consumers).toHaveLength(2);
-    expect(workflow).not.toContain(
-      "VERSION: '${{ steps.version.outputs.version }}'",
+    assert.equal(consumers?.length, 2);
+    assert.ok(
+      !workflow.includes("VERSION: '${{ steps.version.outputs.version }}'"),
     );
   });
 
@@ -141,12 +152,12 @@ describe('ECS runner qwen update workflow', () => {
     // (~16 minutes for v0.22.3), and release.yml dispatches this workflow as
     // soon as it returns.
     const resolved = runResolve({ failures: 3 });
-    expect(resolved.status).toBe(0);
-    expect(resolved.attempts).toBe(4);
-    expect(resolved.output.trim()).toBe('version=0.22.3');
-    expect(resolved.stdout).toContain('is not on the registry yet');
+    assert.equal(resolved.status, 0);
+    assert.equal(resolved.attempts, 4);
+    assert.equal(resolved.output.trim(), 'version=0.22.3');
+    assert.ok(resolved.stdout.includes('is not on the registry yet'));
     // The per-attempt 404 noise stays out of the log on the happy path.
-    expect(resolved.stderr).not.toContain('E404');
+    assert.ok(!resolved.stderr.includes('E404'));
   });
 
   it('fails with the registry error once the wait budget is spent', () => {
@@ -154,19 +165,21 @@ describe('ECS runner qwen update workflow', () => {
       failures: 99,
       env: { RESOLVE_TIMEOUT_SECONDS: '0' },
     });
-    expect(resolved.status).toBe(1);
-    expect(resolved.output.trim()).toBe('');
+    assert.equal(resolved.status, 1);
+    assert.equal(resolved.output.trim(), '');
     // The suppressed stderr is replayed, so the log still says *why*.
-    expect(resolved.stderr).toContain('npm error code E404');
+    assert.ok(resolved.stderr.includes('npm error code E404'));
     // The annotation stays on stdout, where Actions parses workflow commands.
-    expect(resolved.stdout).toContain(
-      "::error::No published qwen version matches '0.22.3' after 0s.",
+    assert.ok(
+      resolved.stdout.includes(
+        "::error::No published qwen version matches '0.22.3' after 0s.",
+      ),
     );
   });
 
   it('resolves the latest dist-tag when dispatched without a version', () => {
     const resolved = runResolve({ env: { INPUT_VERSION: '' } });
-    expect(resolved.status).toBe(0);
-    expect(resolved.output.trim()).toBe('version=0.22.3');
+    assert.equal(resolved.status, 0);
+    assert.equal(resolved.output.trim(), 'version=0.22.3');
   });
 });
