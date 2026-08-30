@@ -420,6 +420,23 @@ describe('autofix-status-heartbeat loop', () => {
       'command -v timeout >/dev/null && command -v pkill >/dev/null && command -v pgrep >/dev/null',
     ]).status === 0;
 
+  // `pgrep -s` counts a zombie as a session member, and the killed loop
+  // leader stays one until this process reaps it — a reap that is
+  // scheduling-delayed on an oversubscribed runner, so a pgrep oracle can
+  // burn killLoop's whole 5s budget on a session with nothing left to
+  // write (R9-1: 4/10 saturated rate runs red here). The kill exists to
+  // stop writers (the ENOTEMPTY teardown race) and a zombie writes
+  // nothing: empty means no LIVE member (R/S/D/T states), Z excluded —
+  // while a live mid-tick escapee still matches.
+  function sessionHasLiveMembers(pid) {
+    return (
+      spawnSync('bash', [
+        '-c',
+        `ps -o stat= -s ${pid} 2>/dev/null | grep -q '^[[:space:]]*[^Z[:space:]]'`,
+      ]).status === 0
+    );
+  }
+
   // Kill the loop's whole session, not just its group: each tick's
   // `timeout … gh` subtree runs in its own process group (coreutils
   // timeout default), so a group-only kill landing mid-tick leaves it
@@ -431,16 +448,27 @@ describe('autofix-status-heartbeat loop', () => {
   // The group kill stays as the fallback for hosts without the session
   // tools.
   async function killLoop(child) {
+    const killSession = () => {
+      if (haveSessionKillTools) {
+        spawnSync('bash', [
+          '-c',
+          `pkill -KILL -s ${child.pid} 2>/dev/null || true`,
+        ]);
+      }
+      killGroup(child);
+    };
+    killSession();
     if (haveSessionKillTools) {
-      spawnSync('bash', [
-        '-c',
-        `pkill -KILL -s ${child.pid} 2>/dev/null || true`,
-      ]);
-    }
-    killGroup(child);
-    if (haveSessionKillTools) {
+      // A member born while the sweep ran escapes it: a saturated runner
+      // stalls the shim between the record write and its `sleep` fork,
+      // and the orphan (ppid 1) is still live — so re-kill on each poll
+      // until nothing live remains to escape.
       await waitFor(
-        () => spawnSync('pgrep', ['-s', String(child.pid)]).status !== 0,
+        () => {
+          if (!sessionHasLiveMembers(child.pid)) return true;
+          killSession();
+          return false;
+        },
         5000,
         50,
       );
@@ -1161,7 +1189,7 @@ describe('autofix-status-heartbeat loop', () => {
         await killLoop(child);
       }
       assert.ok(
-        spawnSync('pgrep', ['-s', String(pid)]).status !== 0,
+        !sessionHasLiveMembers(pid),
         'the teardown kill must empty the loop session before cleanup',
       );
       // The incident's failing call, immediately after the kill: with no
@@ -1204,11 +1232,57 @@ describe('autofix-status-heartbeat loop', () => {
           'a budget overrun must resolve the timeout sentinel',
         );
         assert.ok(
-          spawnSync('pgrep', ['-s', String(pid)]).status !== 0,
+          !sessionHasLiveMembers(pid),
           'the budget kill must empty the loop session before cleanup',
         );
       } finally {
         await killLoop(child);
+      }
+    },
+  );
+
+  it(
+    'the session-empty oracle ignores zombies and catches live members',
+    {
+      skip: haveSessionKillTools
+        ? false
+        : 'requires coreutils timeout + procps pkill/pgrep',
+    },
+    async () => {
+      // The deterministic half of R9-1: a faithful kill leaves the session
+      // leader a zombie until THIS process reaps it. Check synchronously —
+      // no event-loop turn between kill and oracle, so nothing can reap —
+      // and pin both halves of the oracle: the zombie-only session reads
+      // empty (pgrep -s still matches it: the loaded-runner flake state),
+      // and a live member still matches, so Z filtering does not blind the
+      // wait to an escapee.
+      const zombie = spawn('sleep', ['30'], {
+        detached: true,
+        stdio: 'ignore',
+      });
+      zombie.unref();
+      process.kill(zombie.pid, 'SIGKILL');
+      const until = Date.now() + 300;
+      while (Date.now() < until) {
+        // busy-spin: any event-loop turn could reap the zombie
+      }
+      assert.ok(
+        spawnSync('pgrep', ['-s', String(zombie.pid)]).status === 0,
+        'the flake state must hold: pgrep -s still matches the zombie',
+      );
+      assert.ok(
+        !sessionHasLiveMembers(zombie.pid),
+        'a zombie-only session must read empty to the live-member oracle',
+      );
+      const live = spawn('sleep', ['30'], { detached: true, stdio: 'ignore' });
+      live.unref();
+      try {
+        assert.ok(
+          sessionHasLiveMembers(live.pid),
+          'a live session member must match the oracle',
+        );
+      } finally {
+        process.kill(live.pid, 'SIGKILL');
       }
     },
   );
@@ -1290,9 +1364,7 @@ describe('autofix-status-heartbeat loop', () => {
           // the group is already gone — nothing left to kill
         }
         await waitFor(
-          () =>
-            !haveSessionKillTools ||
-            spawnSync('pgrep', ['-s', pid]).status !== 0,
+          () => !haveSessionKillTools || !sessionHasLiveMembers(pid),
           5000,
           50,
         );
