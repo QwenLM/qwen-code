@@ -150,6 +150,8 @@ interface DaemonSessionClientStaticLike {
       modelServiceId?: string;
       sessionScope: 'thread';
       approvalMode?: string;
+      sourceType?: string;
+      sourceId?: string;
     },
     clientId?: string,
   ): Promise<DaemonChannelSessionClient>;
@@ -213,6 +215,11 @@ export function createDaemonSessionFactory({
       // sessions remain thread-scoped so different channels never share the
       // daemon's default single session.
       sessionScope: 'thread' as const,
+      sourceType: 'channel',
+      // sourceId = channel instance name (e.g. feishu-main): distinguishes
+      // channel instances on the daemon data plane; the channel kind
+      // (dingtalk/feishu) is derivable from the name via the channel config.
+      ...(req.sourceId ? { sourceId: req.sourceId } : {}),
     };
     if (req.sessionId) {
       return await DaemonSessionClient.resume(
@@ -224,16 +231,7 @@ export function createDaemonSessionFactory({
     }
     return await DaemonSessionClient.createOrAttach(
       client,
-      {
-        ...daemonReq,
-        sourceType: 'channel',
-        // sourceId = channel instance name (e.g. feishu-main): distinguishes
-        // channel instances on the daemon data plane; the channel kind
-        // (dingtalk/feishu) is derivable from the name via the channel config.
-        // The load branch above deliberately omits it: loading never re-stamps
-        // creation attribution.
-        ...(req.sourceId ? { sourceId: req.sourceId } : {}),
-      },
+      daemonReq,
       clientId,
     );
   };
