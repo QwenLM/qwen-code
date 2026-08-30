@@ -2651,6 +2651,7 @@ export function createServeApp(
       service: standaloneSessionService,
       mutate,
       sendBridgeError,
+      isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
     });
     standaloneSessionsAvailable = true;
   }
