@@ -44,7 +44,7 @@ describe('ci.yml disk-pressure evidence', () => {
     const tests = step('Run tests and generate reports').run;
     assert.match(
       tests,
-      /DISK_SAMPLES="\$\{RUNNER_TEMP\}\/disk-pressure-samples\.log"\nif \[ ! -s "\$DISK_SAMPLES" \]; then\n  echo "DISKCONTEXT .*" > "\$DISK_SAMPLES" 2>\/dev\/null \|\| true\nfi/,
+      /DISK_SAMPLES="\$\{RUNNER_TEMP\}\/disk-pressure-samples\.log"\nif \[ ! -s "\$DISK_SAMPLES" \]; then\n {2}echo "DISKCONTEXT .*" > "\$DISK_SAMPLES" 2>\/dev\/null \|\| true\nfi/,
     );
     assert.ok(tests.indexOf('export TMPDIR=') > tests.indexOf('DISK_SAMPLES='));
 

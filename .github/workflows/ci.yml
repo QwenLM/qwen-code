@@ -475,7 +475,7 @@ jobs:
           DISK_SAMPLES="${RUNNER_TEMP}/disk-pressure-samples.log"
           echo "DISKCONTEXT $(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) runner[${RUNNER_NAME:-unknown}] run[${GITHUB_RUN_ID:-local}/${GITHUB_RUN_ATTEMPT:-1}] job[${GITHUB_JOB:-test}]" > "$DISK_SAMPLES" 2>/dev/null || true
           sample_disk() {
-            sample="DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) tmpdir[${RUNNER_TEMP:-/tmp}] space[$(df -h "${RUNNER_TEMP:-/tmp}" 2>/dev/null | tail -1)] inodes[$(df -i "${RUNNER_TEMP:-/tmp}" 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null || true)]"
+            sample="DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) tmpdir[${RUNNER_TEMP:-/tmp}] space[$(df -h "${RUNNER_TEMP:-/tmp}" 2>/dev/null | tail -1)] inodes[$(df -i "${RUNNER_TEMP:-/tmp}" 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]" || true
             echo "$sample"
             echo "$sample" >> "$DISK_SAMPLES" 2>/dev/null || true
           }
