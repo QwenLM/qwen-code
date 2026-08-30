@@ -44,6 +44,10 @@ it('keeps the shared Linux test lane above its observed contention budget', () =
   expect(ci.jobs.test['timeout-minutes']).toBe(90);
 });
 
+it('keeps the no-AK gate above its observed dependency-install budget', () => {
+  expect(ci.jobs.integration_no_ak['timeout-minutes']).toBe(90);
+});
+
 // One helper for both "an <event> run reaches exactly these jobs" invariants.
 //
 // It decides by EVALUATING each gate for the event, not by looking for tokens
