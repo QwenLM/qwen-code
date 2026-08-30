@@ -378,11 +378,11 @@ jobs:
         env:
           GH_TOKEN: '${{ github.token }}'
           PR_NUMBER: "${{ github.event_name == 'pull_request' && github.event.pull_request.number || '' }}"
-          IS_SAME_REPO_PR: "${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}"
+          CAN_TRUST_PR_CLASSIFIER: '${{ github.event_name == ''pull_request'' && (github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association)) }}'
         run: |-
           profile=full
           if [[ "${GITHUB_EVENT_NAME}" == "pull_request" && -n "${PR_NUMBER}" ]]; then
-            if [[ "${IS_SAME_REPO_PR}" == "true" ]]; then
+            if [[ "${CAN_TRUST_PR_CLASSIFIER}" == "true" ]]; then
               # Fetch + classify through the shared wrapper (also used by the
               # review workflow's docs-only gate) so the classifier's input
               # contract lives in one place. Exit 2 = listing failed,
@@ -399,7 +399,7 @@ jobs:
                 profile=full
               fi
             else
-              echo "Fork PR detected; running full CI."
+              echo "Untrusted fork PR detected; running full CI."
             fi
           fi
           echo "ci_profile=${profile}" >> "${GITHUB_OUTPUT}"
@@ -1390,11 +1390,11 @@ jobs:
         env:
           GH_TOKEN: '${{ github.token }}'
           PR_NUMBER: "${{ github.event_name == 'pull_request' && github.event.pull_request.number || '' }}"
-          IS_SAME_REPO_PR: "${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}"
+          CAN_TRUST_PR_CLASSIFIER: '${{ github.event_name == ''pull_request'' && (github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association)) }}'
         run: |-
           profile=full
           if [[ "${GITHUB_EVENT_NAME}" == "pull_request" && -n "${PR_NUMBER}" ]]; then
-            if [[ "${IS_SAME_REPO_PR}" == "true" ]]; then
+            if [[ "${CAN_TRUST_PR_CLASSIFIER}" == "true" ]]; then
               set +e
               profile="$(.github/scripts/ci/classify-pr-profile.sh "${GITHUB_REPOSITORY}" "${PR_NUMBER}")"
               classify_rc=$?
@@ -1407,7 +1407,7 @@ jobs:
                 profile=full
               fi
             else
-              echo "Fork PR detected; running full CI."
+              echo "Untrusted fork PR detected; running full CI."
             fi
           fi
           echo "ci_profile=${profile}" >> "${GITHUB_OUTPUT}"

@@ -215,11 +215,22 @@ describe('no-AK integration CI wiring', () => {
     // The profile gate is classified in this job: depending on `test` for
     // its ci_profile output would queue the check behind the hour-long unit
     // run. Pin the wrapper so the two classifiers cannot drift.
-    const classify = getWorkflowStep(gateJob, 'Classify CI profile');
-    expect(classify).toContain(
-      '.github/scripts/ci/classify-pr-profile.sh "${GITHUB_REPOSITORY}" "${PR_NUMBER}"',
-    );
-    expect(classify).toContain("id: 'ci_profile'");
+    for (const classify of [
+      getWorkflowStep(ubuntuJob, 'Classify CI profile'),
+      getWorkflowStep(gateJob, 'Classify CI profile'),
+    ]) {
+      expect(classify).toContain(
+        '.github/scripts/ci/classify-pr-profile.sh "${GITHUB_REPOSITORY}" "${PR_NUMBER}"',
+      );
+      expect(classify).toContain("id: 'ci_profile'");
+      expect(classify).toContain('CAN_TRUST_PR_CLASSIFIER');
+      expect(classify).toContain(
+        `contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association)`,
+      );
+      expect(classify).toContain(
+        'Untrusted fork PR detected; running full CI.',
+      );
+    }
     for (const stepName of [
       'Setup Node.js (hosted)',
       'Use pre-installed Node.js (self-hosted)',

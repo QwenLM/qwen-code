@@ -51,6 +51,17 @@ test('uses github_ci_only for each allowed GitHub CI helper file', () => {
   }
 });
 
+test('uses github_ci_only for the ECS updater maintenance change', () => {
+  assert.equal(
+    classifyChangedFiles([
+      '.github/actionlint.yaml',
+      '.github/scripts/web-shell-visuals-publish.test.mjs',
+      '.github/workflows/update-ecs-runner-qwen.yml',
+    ]),
+    'github_ci_only',
+  );
+});
+
 test('falls back to full for case-mismatched GitHub CI helper paths', () => {
   assert.equal(
     classifyChangedFiles(['.GITHUB/SCRIPTS/PR-SAFETY-PRECHECK.MJS']),
