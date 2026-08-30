@@ -323,6 +323,8 @@ export const BaseTextInput = ({
   const linesRef = useRef<DOMElement | null>(null);
   const { hasMeasured } = useBoxMetrics(boxRef);
   const { setCursorPosition } = useCursor();
+  const disablePhysicalCursor =
+    process.env['QWEN_CODE_DISABLE_PHYSICAL_CURSOR'] === '1';
   const cursorPosition = getPhysicalCursorPosition(boxRef.current, {
     hasMeasured,
     showCursor,
@@ -334,7 +336,7 @@ export const BaseTextInput = ({
   });
   // Ink snapshots this value in its insertion effect, so it must be set
   // during render rather than from another effect.
-  setCursorPosition(cursorPosition);
+  setCursorPosition(disablePhysicalCursor ? undefined : cursorPosition);
 
   const resolvedBorderColor = borderColor ?? theme.border.focused;
   const resolvedPrefix = prefix ?? (
@@ -394,6 +396,26 @@ export const BaseTextInput = ({
             linesToRender.map((lineText, idx) => {
               const absoluteVisualIndex = scrollVisualRow + idx;
               const isOnCursorLine = absoluteVisualIndex === cursorVisualRow;
+              const cursorWidth =
+                isOnCursorLine &&
+                showCursor &&
+                cursorVisualCol >= cpLen(lineText)
+                  ? 1
+                  : 0;
+              const placeholderCleanupWidth =
+                disablePhysicalCursor &&
+                absoluteVisualIndex === 0 &&
+                placeholder
+                  ? Math.max(
+                      0,
+                      Math.min(
+                        stringWidth(placeholder),
+                        Math.max(0, columns - prefixWidth),
+                      ) -
+                        stringWidth(lineText) -
+                        cursorWidth,
+                    )
+                  : 0;
 
               return (
                 <Box key={idx} height={1}>
@@ -407,6 +429,11 @@ export const BaseTextInput = ({
                     buffer,
                     scrollVisualRow,
                   })}
+                  {placeholderCleanupWidth > 0 && (
+                    <Text>
+                      {' '.repeat(placeholderCleanupWidth) + '\u200B'}
+                    </Text>
+                  )}
                 </Box>
               );
             })
