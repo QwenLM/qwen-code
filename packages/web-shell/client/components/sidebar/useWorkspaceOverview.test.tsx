@@ -390,6 +390,57 @@ describe('useWorkspaceOverview', () => {
     expect(latest?.overview?.skills).toBeUndefined();
   });
 
+  it('expires facets during a hang even though every round is superseded', async () => {
+    // The SDK's request deadline equals the poll cadence: once the daemon
+    // stops answering, each round times out right after the next tick has
+    // replaced it, so no round is ever "current" when it lands.
+    const timeoutMs = WORKSPACE_OVERVIEW_POLL_MS;
+    workspaceMcp.mockImplementation(
+      () =>
+        new Promise((_, reject) => {
+          setTimeout(() => reject(new Error('request timed out')), timeoutMs);
+        }),
+    );
+    workspaceMcp.mockResolvedValueOnce({
+      v: 1,
+      workspaceCwd: '/w',
+      initialized: true,
+      discoveryState: 'completed',
+      servers: [
+        {
+          kind: 'mcp_server',
+          name: 'a',
+          status: 'ok',
+          transport: 'stdio',
+          disabled: false,
+          mcpStatus: 'connected',
+        },
+      ],
+    });
+    await render(makeClient(fullHandle), '/w', {
+      enabled: true,
+      items: ['mcp'],
+    });
+    await flush();
+    expect(latest?.overview?.mcp?.configured).toBe(1);
+    // Each tick starts a round and lets the previous one time out just after
+    // it was superseded; the facet is still carried over until three such
+    // rounds have gone unanswered.
+    for (let tick = 1; tick <= WORKSPACE_OVERVIEW_MAX_MISSES; tick += 1) {
+      await act(async () => {
+        vi.advanceTimersByTime(WORKSPACE_OVERVIEW_POLL_MS);
+      });
+      await flush();
+      expect(latest?.overview?.mcp?.configured).toBe(1);
+    }
+    await act(async () => {
+      vi.advanceTimersByTime(WORKSPACE_OVERVIEW_POLL_MS);
+    });
+    await flush();
+    // The third unanswered round expires the facet: unavailable, not frozen.
+    expect(latest?.overview?.mcp).toBeUndefined();
+  });
+
   it('refetches as soon as it is enabled again', async () => {
     const client = makeClient(fullHandle);
     await render(client, '/w', { enabled: true, items: ['mcp'] });

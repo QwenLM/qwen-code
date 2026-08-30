@@ -279,6 +279,22 @@ export function overviewFacetHasIssue(
   }
 }
 
+/** Remove facets whose carry-over has expired, keeping everything else. */
+export function dropExpiredFacets(
+  snapshot: WorkspaceOverviewSnapshot,
+  expired: ReadonlySet<WorkspaceOverviewItem>,
+): WorkspaceOverviewSnapshot {
+  if (expired.size === 0) return snapshot;
+  const trimmed: WorkspaceOverviewSnapshot = { fetchedAt: snapshot.fetchedAt };
+  for (const item of WORKSPACE_OVERVIEW_ITEMS) {
+    const value = snapshot[item];
+    if (value !== undefined && !expired.has(item)) {
+      Object.assign(trimmed, { [item]: value });
+    }
+  }
+  return trimmed;
+}
+
 /**
  * Merge a fresh snapshot over the previous one, keeping a facet's last known
  * value when the new round did not answer for it — unless the facet is in

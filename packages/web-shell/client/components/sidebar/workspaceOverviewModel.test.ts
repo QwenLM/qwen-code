@@ -12,6 +12,7 @@ import type {
   DaemonWorkspaceMcpStatus,
 } from '@qwen-code/sdk/daemon';
 import {
+  dropExpiredFacets,
   isOverviewFacetKnown,
   isRuntimeDiscoveredFacet,
   mergeOverviewSnapshots,
@@ -389,6 +390,19 @@ describe('mergeOverviewSnapshots', () => {
       new Set(['context']),
     );
     expect(merged).toEqual({ skills: previous.skills, fetchedAt: 2 });
+  });
+
+  it('trims expired facets from a snapshot without touching the rest', () => {
+    const snapshot: WorkspaceOverviewSnapshot = {
+      skills: { initialized: true, total: 3, enabled: 3 },
+      context: { initialized: true, fileCount: 1, ruleCount: 2 },
+      fetchedAt: 5,
+    };
+    expect(dropExpiredFacets(snapshot, new Set(['context']))).toEqual({
+      skills: snapshot.skills,
+      fetchedAt: 5,
+    });
+    expect(dropExpiredFacets(snapshot, new Set())).toBe(snapshot);
   });
 
   it('drops facets that are no longer requested', () => {

@@ -86,7 +86,11 @@ call fails independently — an older daemon without a route, a transient
 error, or a malformed body — leaves that facet `undefined` and keeps the
 others. A facet keeps its last known value across up to three consecutive
 unanswered rounds, then reads as unavailable, so a route that stays gone
-after a rollback cannot freeze a stale count on the chip.
+after a rollback cannot freeze a stale count on the chip. Rounds that time
+out after the next tick has already replaced them still count: the SDK's
+request deadline equals the poll cadence, so during a daemon hang every
+round is superseded before it lands, and only their observed misses can
+expire the facet.
 
 Fetching is gated on the section being expanded, the workspace trusted and the
 default header rendered (a locked sidebar's custom header has no chip or menu

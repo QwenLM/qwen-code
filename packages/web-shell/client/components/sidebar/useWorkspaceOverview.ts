@@ -8,6 +8,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { DaemonClient } from '@qwen-code/sdk/daemon';
 import {
   DEFAULT_WORKSPACE_OVERVIEW_ITEMS,
+  dropExpiredFacets,
   mergeOverviewSnapshots,
   summarizeChannels,
   summarizeContext,
@@ -119,6 +120,10 @@ export function useWorkspaceOverview(
   const requestIdRef = useRef(0);
   // Consecutive rounds each facet went unanswered; bounds the carry-over.
   const missesRef = useRef<Partial<Record<WorkspaceOverviewItem, number>>>({});
+  // The workspace the bookkeeping belongs to; a round from another cwd that
+  // lands late must not touch it.
+  const cwdRef = useRef(workspaceCwd);
+  cwdRef.current = workspaceCwd;
   // Order-insensitive identity so a caller passing a fresh array literal each
   // render does not restart the poll loop.
   const itemsKey = [...new Set(items)].sort().join(',');
@@ -135,13 +140,29 @@ export function useWorkspaceOverview(
   const reload = useCallback(async () => {
     if (!active || !workspaceCwd) return;
     const requestId = ++requestIdRef.current;
-    const next = await fetchWorkspaceOverview(client, workspaceCwd, requested);
-    if (requestId !== requestIdRef.current) return;
+    const cwd = workspaceCwd;
+    const next = await fetchWorkspaceOverview(client, cwd, requested);
+    if (cwd !== cwdRef.current) return;
+    // Bookkeeping runs for every round that lands, superseded or not: the
+    // SDK's request deadline equals the poll cadence, so while the daemon
+    // hangs each round times out just after the next tick has replaced it.
+    // If only current rounds counted, misses would never accumulate and the
+    // chips would freeze on pre-hang counts for the whole hang.
     const expired = new Set<WorkspaceOverviewItem>();
     for (const item of requested) {
       const misses = next[item] ? 0 : (missesRef.current[item] ?? 0) + 1;
       missesRef.current[item] = misses;
       if (misses >= WORKSPACE_OVERVIEW_MAX_MISSES) expired.add(item);
+    }
+    if (requestId !== requestIdRef.current) {
+      // A superseded round's data is stale, but an expiry it observed is
+      // real: drop those facets and leave the rest to the current round.
+      if (expired.size > 0) {
+        setOverview(
+          (previous) => previous && dropExpiredFacets(previous, expired),
+        );
+      }
+      return;
     }
     setOverview((previous) =>
       mergeOverviewSnapshots(previous, next, requested, expired),
