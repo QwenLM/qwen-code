@@ -14015,7 +14015,7 @@ describe('DaemonSessionProvider', () => {
     ]);
   });
 
-  it('marks a live restored-prompt terminal incomplete while an unowned live-journal marker remains', async () => {
+  it('claims a production-shaped id-less live-journal marker only for its owning prompt', async () => {
     const terminalDelivered = createDeferred<void>();
     const nextTerminal = createDeferred<void>();
     const nextTerminalDelivered = createDeferred<void>();
@@ -14045,6 +14045,7 @@ describe('DaemonSessionProvider', () => {
           {
             v: 1,
             type: 'history_truncated',
+            promptId: 'prompt-1',
             data: {
               reason: 'replay_window_exceeded',
               scope: 'live_journal',
@@ -14054,7 +14055,6 @@ describe('DaemonSessionProvider', () => {
               maxEvents: 2,
               fullTranscriptAvailable: true,
             },
-            id: 9,
           },
           {
             id: 10,
@@ -14172,7 +14172,7 @@ describe('DaemonSessionProvider', () => {
     ]);
   });
 
-  it('attributes an unrecoverable live-journal marker to its owning prompt', async () => {
+  it('attributes an unrecoverable live-journal marker after retention evicts its block', async () => {
     const firstTerminalDelivered = createDeferred<void>();
     const secondTerminal = createDeferred<void>();
     const secondTerminalDelivered = createDeferred<void>();
@@ -14197,6 +14197,18 @@ describe('DaemonSessionProvider', () => {
         yield {
           id: 11,
           v: 1,
+          type: 'session_update',
+          promptId: 'prompt-a',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'x'.repeat(5000) },
+            },
+          },
+        } satisfies DaemonEvent;
+        yield {
+          id: 12,
+          v: 1,
           type: 'turn_complete',
           promptId: 'prompt-a',
           data: { promptId: 'prompt-a', stopReason: 'end_turn' },
@@ -14204,7 +14216,7 @@ describe('DaemonSessionProvider', () => {
         firstTerminalDelivered.resolve();
         await secondTerminal.promise;
         yield {
-          id: 12,
+          id: 13,
           v: 1,
           type: 'turn_complete',
           promptId: 'prompt-b',
@@ -14216,12 +14228,17 @@ describe('DaemonSessionProvider', () => {
     sdkMocks.sessions.push(session);
 
     const settlements: DaemonPromptSettledEvent[] = [];
+    let blocks: readonly DaemonTranscriptBlock[] = [];
     function Harness() {
       useDaemonPromptSettled((event) => settlements.push(event));
+      blocks = useDaemonTranscriptBlocks();
       return null;
     }
 
-    await renderWithProvider(<Harness />, { autoConnect: true });
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      maxRetainedBytes: 1000,
+    });
     await act(async () => {
       await firstTerminalDelivered.promise;
       await flushPromises();
@@ -14232,6 +14249,12 @@ describe('DaemonSessionProvider', () => {
         transcriptComplete: true,
       }),
     ]);
+    expect(
+      blocks.some(
+        (block) =>
+          block.kind === 'status' && block.source === 'history_truncated',
+      ),
+    ).toBe(false);
 
     await act(async () => {
       secondTerminal.resolve();
@@ -14250,78 +14273,22 @@ describe('DaemonSessionProvider', () => {
     ]);
   });
 
-  it('does not reclaim an unowned live-journal marker after a same-session rebuild', async () => {
-    const firstTerminalDelivered = createDeferred<void>();
-    const ringEvicted = createDeferred<void>();
-    const reloadedStreamStarted = createDeferred<void>();
-    const nextTerminal = createDeferred<void>();
-    const nextTerminalDelivered = createDeferred<void>();
-    const firstSession = createMockSession({
-      sessionId: 'session-replayed-live-journal-marker',
-      events: async function* firstEvents() {
-        yield {
-          id: 10,
-          v: 1,
-          type: 'history_truncated',
-          data: {
-            reason: 'replay_window_exceeded',
-            scope: 'live_journal',
-            truncatedEvents: 8,
-            retainedEvents: 2,
-            maxBytes: 1024,
-            maxEvents: 2,
-            fullTranscriptAvailable: false,
-          },
-        } satisfies DaemonEvent;
-        yield {
-          id: 11,
-          v: 1,
-          type: 'turn_complete',
-          promptId: 'prompt-a',
-          data: { promptId: 'prompt-a', stopReason: 'end_turn' },
-        } satisfies DaemonEvent;
-        firstTerminalDelivered.resolve();
-        await ringEvicted.promise;
-        yield {
-          id: 12,
-          v: 1,
-          type: 'state_resync_required',
-          data: { reason: 'ring_evicted' },
-        } satisfies DaemonEvent;
-      },
-    });
-    const reloadedSession = createMockSession({
-      sessionId: firstSession.sessionId,
-      replaySnapshot: {
-        compactedReplay: [
-          {
-            id: 7,
-            v: 1,
-            type: 'session_update',
-            promptId: 'prompt-old-a',
-            data: {
-              update: {
-                sessionUpdate: 'agent_message_chunk',
-                content: { type: 'text', text: 'older prefix a' },
-              },
-            },
-          },
-        ],
-        liveJournal: [
-          {
-            id: 8,
-            v: 1,
-            type: 'session_update',
-            promptId: 'prompt-old-b',
-            data: {
-              update: {
-                sessionUpdate: 'agent_message_chunk',
-                content: { type: 'text', text: 'older prefix b' },
-              },
-            },
-          },
-          {
-            id: 10,
+  it.each([
+    { label: 'id-bearing', markerId: 10 as number | undefined },
+    { label: 'id-less', markerId: undefined },
+  ])(
+    'does not reclaim an unowned $label live-journal marker after a same-session rebuild',
+    async ({ markerId }) => {
+      const firstTerminalDelivered = createDeferred<void>();
+      const ringEvicted = createDeferred<void>();
+      const reloadedStreamStarted = createDeferred<void>();
+      const nextTerminal = createDeferred<void>();
+      const nextTerminalDelivered = createDeferred<void>();
+      const firstSession = createMockSession({
+        sessionId: 'session-replayed-live-journal-marker',
+        events: async function* firstEvents() {
+          yield {
+            ...(markerId === undefined ? {} : { id: markerId }),
             v: 1,
             type: 'history_truncated',
             data: {
@@ -14333,67 +14300,129 @@ describe('DaemonSessionProvider', () => {
               maxEvents: 2,
               fullTranscriptAvailable: false,
             },
-          },
-        ],
-      },
-      events: async function* reloadedEvents() {
-        reloadedStreamStarted.resolve();
-        await nextTerminal.promise;
-        yield {
-          id: 13,
-          v: 1,
-          type: 'turn_complete',
+          } satisfies DaemonEvent;
+          yield {
+            id: 11,
+            v: 1,
+            type: 'turn_complete',
+            promptId: 'prompt-a',
+            data: { promptId: 'prompt-a', stopReason: 'end_turn' },
+          } satisfies DaemonEvent;
+          firstTerminalDelivered.resolve();
+          await ringEvicted.promise;
+          yield {
+            id: 12,
+            v: 1,
+            type: 'state_resync_required',
+            data: { reason: 'ring_evicted' },
+          } satisfies DaemonEvent;
+        },
+      });
+      const reloadedSession = createMockSession({
+        sessionId: firstSession.sessionId,
+        replaySnapshot: {
+          compactedReplay: [
+            {
+              id: 7,
+              v: 1,
+              type: 'session_update',
+              promptId: 'prompt-old-a',
+              data: {
+                update: {
+                  sessionUpdate: 'agent_message_chunk',
+                  content: { type: 'text', text: 'older prefix a' },
+                },
+              },
+            },
+          ],
+          liveJournal: [
+            {
+              id: 8,
+              v: 1,
+              type: 'session_update',
+              promptId: 'prompt-old-b',
+              data: {
+                update: {
+                  sessionUpdate: 'agent_message_chunk',
+                  content: { type: 'text', text: 'older prefix b' },
+                },
+              },
+            },
+            {
+              ...(markerId === undefined ? {} : { id: markerId }),
+              v: 1,
+              type: 'history_truncated',
+              data: {
+                reason: 'replay_window_exceeded',
+                scope: 'live_journal',
+                truncatedEvents: 8,
+                retainedEvents: 2,
+                maxBytes: 1024,
+                maxEvents: 2,
+                fullTranscriptAvailable: false,
+              },
+            },
+          ],
+        },
+        events: async function* reloadedEvents() {
+          reloadedStreamStarted.resolve();
+          await nextTerminal.promise;
+          yield {
+            id: 13,
+            v: 1,
+            type: 'turn_complete',
+            promptId: 'prompt-b',
+            data: { promptId: 'prompt-b', stopReason: 'end_turn' },
+          } satisfies DaemonEvent;
+          nextTerminalDelivered.resolve();
+        },
+      });
+      sdkMocks.sessions.push(firstSession, reloadedSession);
+
+      const settlements: DaemonPromptSettledEvent[] = [];
+      function Harness() {
+        useDaemonPromptSettled((event) => settlements.push(event));
+        return null;
+      }
+
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        reconnectDelayMs: 1,
+        maxReconnectDelayMs: 1,
+      });
+      await act(async () => {
+        await firstTerminalDelivered.promise;
+        await flushPromises();
+      });
+      expect(settlements).toEqual([
+        expect.objectContaining({
+          promptId: 'prompt-a',
+          transcriptComplete: false,
+        }),
+      ]);
+
+      await act(async () => {
+        ringEvicted.resolve();
+        await reloadedStreamStarted.promise;
+        await flushPromises();
+      });
+      await act(async () => {
+        nextTerminal.resolve();
+        await nextTerminalDelivered.promise;
+        await flushPromises();
+      });
+      expect(settlements).toEqual([
+        expect.objectContaining({
+          promptId: 'prompt-a',
+          transcriptComplete: false,
+        }),
+        expect.objectContaining({
           promptId: 'prompt-b',
-          data: { promptId: 'prompt-b', stopReason: 'end_turn' },
-        } satisfies DaemonEvent;
-        nextTerminalDelivered.resolve();
-      },
-    });
-    sdkMocks.sessions.push(firstSession, reloadedSession);
-
-    const settlements: DaemonPromptSettledEvent[] = [];
-    function Harness() {
-      useDaemonPromptSettled((event) => settlements.push(event));
-      return null;
-    }
-
-    await renderWithProvider(<Harness />, {
-      autoConnect: true,
-      reconnectDelayMs: 1,
-      maxReconnectDelayMs: 1,
-    });
-    await act(async () => {
-      await firstTerminalDelivered.promise;
-      await flushPromises();
-    });
-    expect(settlements).toEqual([
-      expect.objectContaining({
-        promptId: 'prompt-a',
-        transcriptComplete: false,
-      }),
-    ]);
-
-    await act(async () => {
-      ringEvicted.resolve();
-      await reloadedStreamStarted.promise;
-      await flushPromises();
-    });
-    await act(async () => {
-      nextTerminal.resolve();
-      await nextTerminalDelivered.promise;
-      await flushPromises();
-    });
-    expect(settlements).toEqual([
-      expect.objectContaining({
-        promptId: 'prompt-a',
-        transcriptComplete: false,
-      }),
-      expect.objectContaining({
-        promptId: 'prompt-b',
-        transcriptComplete: true,
-      }),
-    ]);
-  });
+          transcriptComplete: true,
+        }),
+      ]);
+    },
+  );
 
   it('publishes a restored prompt terminal received in a reconnect replay', async () => {
     const ringEvicted = createDeferred<void>();

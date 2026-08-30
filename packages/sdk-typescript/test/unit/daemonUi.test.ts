@@ -4608,6 +4608,7 @@ describe('daemon UI reducer state machine (PR-E)', () => {
     const events = normalizeDaemonEvent({
       v: 1,
       type: 'history_truncated',
+      promptId: 'prompt-live',
       data: {
         reason: 'replay_window_exceeded',
         truncatedEvents: 4,
@@ -4640,6 +4641,7 @@ describe('daemon UI reducer state machine (PR-E)', () => {
     expect(state.blocks).toMatchObject([
       {
         kind: 'status',
+        promptId: 'prompt-live',
         text: expect.stringContaining('History truncated') as string,
       },
     ]);

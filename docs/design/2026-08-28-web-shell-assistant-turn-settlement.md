@@ -33,6 +33,8 @@ The daemon session provider publishes a settlement only after it has:
 2. applied `assistant.done` and the terminal event's own transcript projection;
 3. completed live-journal repair when a truncated active turn can be repaired, or classified the retained transcript as incomplete before discarding an unsuccessful repair.
 
+Live-journal truncation ownership is captured when the marker arrives, before transcript retention can evict its rendered status block. The client keeps a session-scoped marker-claim ledger: daemon event IDs are used when present, while id-less markers use a deterministic client key derived from their prompt ownership and payload. The transcript projection also preserves the envelope `promptId` on `history_truncated` status blocks. A marker is consumed only by its owning terminal (or conservatively by the first observed terminal when ownership is absent), so it can make that turn incomplete without tainting later turns.
+
 Ordinary session load, branch/split transcript replay, and older-history pagination never publish settlements. A terminal received while reconnecting an already active prompt may publish because it is a previously unseen live lifecycle transition, not history playback.
 
 The callback covers live turns from both the primary chat and interactive Split View panes. Every pane observes its own session provider, and a bounded Web Shell-level dispatcher suppresses duplicates when the primary session is also mounted in a pane. Merely opening a pane and replaying its transcript remains silent.
@@ -66,5 +68,6 @@ Web Shell owns projection of the final visible assistant message and the public 
 - `TC-13`: degraded catch-up replay and unrecoverable live-journal markers publish the affected turn with `transcriptComplete: false` without tainting later complete turns in the same session.
 - `TC-14`: a correlated terminal after reconnect consumes the restored-active snapshot and allows live or catch-up repair to finish; a mismatched live terminal neither consumes nor publishes for the restored turn.
 - `TC-15`: a live turn in a Split View pane publishes with that pane's session and final message, while the shared dispatcher suppresses duplicate observation of the primary session.
+- `TC-16`: id-less live-journal markers retain envelope prompt ownership, and marker claims survive transcript-retention eviction and same-session rebuilds without tainting later turns.
 
 No visual UI changes are introduced, so browser screenshot validation is not applicable. Package unit tests, build, typecheck, and repository preflight are the delivery gates.

@@ -1535,7 +1535,9 @@ function appendStatusBlock(
       ? { serverTimestamp: event.serverTimestamp }
       : {}),
     ...(event?.type === 'error' && event.code ? { code: event.code } : {}),
-    ...(event?.type === 'error' && event.promptId
+    ...((event?.type === 'error' ||
+      (event?.type === 'status' && event.source === 'history_truncated')) &&
+    event.promptId
       ? { promptId: event.promptId }
       : {}),
     ...(event?.type === 'error' && event.errorKind

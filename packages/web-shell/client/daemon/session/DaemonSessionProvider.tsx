@@ -187,6 +187,30 @@ interface LiveJournalRepairEpisode {
   controller?: AbortController;
 }
 
+interface LiveJournalMarkerClaim {
+  key: string;
+  eventId?: number;
+  promptId?: string;
+}
+
+function createLiveJournalMarkerClaim(
+  marker: DaemonEvent,
+  promptId = eventPromptId(marker),
+): LiveJournalMarkerClaim {
+  const eventId = marker.id;
+  if (eventId !== undefined) {
+    return {
+      key: `event:${eventId}`,
+      eventId,
+      ...(promptId ? { promptId } : {}),
+    };
+  }
+  return {
+    key: `marker:${promptId ?? ''}:${JSON.stringify(marker.data ?? null)}`,
+    ...(promptId ? { promptId } : {}),
+  };
+}
+
 interface RestoredActivePromptTracking {
   sessionId: string;
   promptId?: string;
@@ -1113,6 +1137,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   );
   const publishedPromptSettlementsRef = useRef<Set<string>>(new Set());
   const settledLiveJournalMarkerEventIdsRef = useRef<Set<number>>(new Set());
+  const settledLiveJournalMarkerClaimKeysRef = useRef<Set<string>>(new Set());
+  const pendingLiveJournalMarkerClaimsRef = useRef<
+    Map<string, LiveJournalMarkerClaim>
+  >(new Map());
   const liveJournalMarkerPromptIdsByEventIdRef = useRef<Map<number, string>>(
     new Map(),
   );
@@ -1164,10 +1192,16 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       const settlement = repair.pendingSettlement;
       if (!settlement) return;
       repair.pendingSettlement = undefined;
-      if (!transcriptComplete && typeof repair.target.marker.id === 'number') {
-        settledLiveJournalMarkerEventIdsRef.current.add(
-          repair.target.marker.id,
+      if (!transcriptComplete) {
+        const claim = createLiveJournalMarkerClaim(
+          repair.target.marker,
+          repair.target.promptId,
         );
+        settledLiveJournalMarkerClaimKeysRef.current.add(claim.key);
+        pendingLiveJournalMarkerClaimsRef.current.delete(claim.key);
+        if (claim.eventId !== undefined) {
+          settledLiveJournalMarkerEventIdsRef.current.add(claim.eventId);
+        }
       }
       publishPromptSettlement({ ...settlement, transcriptComplete });
     },
@@ -1428,46 +1462,66 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       flushTranscriptSync();
       store.dispatch(events);
     };
+    const seedLiveJournalMarkerClaim = (
+      marker: DaemonEvent,
+      promptId = eventPromptId(marker),
+    ) => {
+      const claim = createLiveJournalMarkerClaim(marker, promptId);
+      if (
+        settledLiveJournalMarkerClaimKeysRef.current.has(claim.key) ||
+        (claim.eventId !== undefined &&
+          settledLiveJournalMarkerEventIdsRef.current.has(claim.eventId))
+      ) {
+        return;
+      }
+      pendingLiveJournalMarkerClaimsRef.current.set(claim.key, claim);
+    };
     const claimCommittedLiveJournalMarkers = (promptId: string) => {
-      const markers = store.getSnapshot().blocks.flatMap((block) =>
-        block.kind === 'status' &&
-        block.source === 'history_truncated' &&
-        isRecord(block.data) &&
-        block.data['scope'] === 'live_journal'
-          ? [
-              {
-                eventId: block.eventId,
-                promptId:
-                  typeof block.data['promptId'] === 'string'
-                    ? block.data['promptId']
-                    : block.eventId === undefined
-                      ? undefined
-                      : liveJournalMarkerPromptIdsByEventIdRef.current.get(
-                          block.eventId,
-                        ),
-              },
-            ]
-          : [],
-      );
+      for (const block of store.getSnapshot().blocks) {
+        if (
+          block.kind !== 'status' ||
+          block.source !== 'history_truncated' ||
+          !isRecord(block.data) ||
+          block.data['scope'] !== 'live_journal' ||
+          block.eventId === undefined
+        ) {
+          continue;
+        }
+        const key = `event:${block.eventId}`;
+        if (
+          settledLiveJournalMarkerClaimKeysRef.current.has(key) ||
+          settledLiveJournalMarkerEventIdsRef.current.has(block.eventId)
+        ) {
+          continue;
+        }
+        pendingLiveJournalMarkerClaimsRef.current.set(key, {
+          key,
+          eventId: block.eventId,
+          promptId:
+            block.promptId ??
+            (typeof block.data['promptId'] === 'string'
+              ? block.data['promptId']
+              : liveJournalMarkerPromptIdsByEventIdRef.current.get(
+                  block.eventId,
+                )),
+        });
+      }
       let claimed = false;
       let present = false;
-      for (const marker of markers) {
+      for (const marker of pendingLiveJournalMarkerClaimsRef.current.values()) {
         // An unowned marker is conservatively assigned to the first terminal
-        // that observes it. The daemon event id makes that claim stable across
-        // same-session transcript rebuilds; without an id, fail closed on
-        // every observation rather than certify an incomplete transcript.
+        // that observes it. A client-side claim key keeps that assignment
+        // stable when the daemon omitted an event id or transcript retention
+        // evicts the marker block before the terminal arrives.
         if (marker.promptId !== undefined && marker.promptId !== promptId) {
           continue;
         }
         present = true;
-        if (marker.eventId === undefined) {
-          claimed = true;
-          continue;
+        settledLiveJournalMarkerClaimKeysRef.current.add(marker.key);
+        pendingLiveJournalMarkerClaimsRef.current.delete(marker.key);
+        if (marker.eventId !== undefined) {
+          settledLiveJournalMarkerEventIdsRef.current.add(marker.eventId);
         }
-        if (settledLiveJournalMarkerEventIdsRef.current.has(marker.eventId)) {
-          continue;
-        }
-        settledLiveJournalMarkerEventIdsRef.current.add(marker.eventId);
         claimed = true;
       }
       return { claimed, present };
@@ -2115,6 +2169,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             if (previousSessionId !== nextSession.sessionId) {
               clearNotices();
               settledLiveJournalMarkerEventIdsRef.current.clear();
+              settledLiveJournalMarkerClaimKeysRef.current.clear();
+              pendingLiveJournalMarkerClaimsRef.current.clear();
               liveJournalMarkerPromptIdsByEventIdRef.current.clear();
             }
             // Defer store.reset() until right before replay dispatch
@@ -2265,14 +2321,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           const { compactedReplay, liveJournal } = activeSession.replaySnapshot;
           const replayEvents = [...compactedReplay, ...liveJournal];
           for (const marker of replayEvents) {
-            if (!isLiveJournalMarker(marker) || marker.id === undefined) {
-              continue;
-            }
+            if (!isLiveJournalMarker(marker)) continue;
             const markerPromptId = resolveLiveJournalMarkerPromptId(
               marker,
               liveJournal,
             );
-            if (markerPromptId !== undefined) {
+            seedLiveJournalMarkerClaim(marker, markerPromptId);
+            if (marker.id !== undefined && markerPromptId !== undefined) {
               liveJournalMarkerPromptIdsByEventIdRef.current.set(
                 marker.id,
                 markerPromptId,
@@ -3188,9 +3243,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             if (sessionRef.current !== activeSession) {
               break;
             }
-            if (isLiveJournalMarker(event) && event.id !== undefined) {
+            if (isLiveJournalMarker(event)) {
               const markerPromptId = eventPromptId(event);
-              if (markerPromptId !== undefined) {
+              seedLiveJournalMarkerClaim(event, markerPromptId);
+              if (event.id !== undefined && markerPromptId !== undefined) {
                 liveJournalMarkerPromptIdsByEventIdRef.current.set(
                   event.id,
                   markerPromptId,
