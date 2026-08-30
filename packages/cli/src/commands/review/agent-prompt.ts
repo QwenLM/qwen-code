@@ -381,6 +381,7 @@ const FINDING_FORMAT = `Format each finding using this structure:
 - **Failure scenario:** <the concrete trigger and the concrete wrong outcome: what input, state, timing, or config makes this code misbehave, and what incorrect output / crash / leak / exposure results>
 - **Suggested fix:** <concrete code suggestion when possible, or "N/A">
 - **Fix witness:** <the test that must go RED if that fix is removed — the test file and the behaviour it pins — or "N/A" when the fix adds no guard, branch or behaviour a test can pin>
+- **Fix constraint:** <an existing fact the fix must not violate, with its source — the quoted constant or the file:line — and OMIT THIS LINE when you observed none; never write "N/A">
 - **Severity:** Critical | Suggestion | Nice to have
 - **Confidence:** high | low
 
@@ -395,7 +396,9 @@ const FINDING_FORMAT = `Format each finding using this structure:
 
 **The failure scenario is the finding's evidence, and it gates reporting.** For a quality finding, state the concrete cost instead of a crash — what is duplicated, wasted, or made harder to change — or quote the rule it violates. A **Suggestion** or **Nice to have** whose failure scenario you cannot fill in concretely **is not a finding: do not report it.** A suspected **Critical** whose trigger you cannot pin down IS still reported, at \`Confidence: low\`, with the scenario naming the mechanism and what remains uncertain — a later verification stage rules on it. "This looks risky", with no nameable trigger and no nameable cost, is how a hallucinated finding reaches a pull request.
 
-**A fix that adds a guard owes a test that fails without it — say so in the finding.** The fix round is this loop's largest single source of its own next round: measured across six multi-round pull requests, roughly a third of every post-first-round finding was introduced by the fix immediately before it, and the dominant shape was a guard or branch added with no test of its own. The suite re-runs only the tests that exist, so an unwitnessed guard passes every gate and its hole comes back as next round's finding. So when your **Suggested fix** adds or changes a guard, a branch, or a behaviour, fill **Fix witness** with the test that must go red without it — the file and what it asserts — and, where you can, the mutation that proves it: remove the guard, run that test, watch it fail. Write \`N/A\` when there is genuinely nothing to pin — a rename, a comment, a docs line, a type-only change, a fix whose whole content is deleting code. **This field never gates reporting**: a finding whose fix you cannot pin is still filed, with \`N/A\`. It is an acceptance criterion for the author, not a bar for you.`;
+**A fix that adds a guard owes a test that fails without it — say so in the finding.** The fix round is this loop's largest single source of its own next round: measured across six multi-round pull requests, roughly a third of every post-first-round finding was introduced by the fix immediately before it, and the dominant shape was a guard or branch added with no test of its own. The suite re-runs only the tests that exist, so an unwitnessed guard passes every gate and its hole comes back as next round's finding. So when your **Suggested fix** adds or changes a guard, a branch, or a behaviour, fill **Fix witness** with the test that must go red without it — the file and what it asserts — and, where you can, the mutation that proves it: remove the guard, run that test, watch it fail. Write \`N/A\` when there is genuinely nothing to pin — a rename, a comment, a docs line, a type-only change, a fix whose whole content is deleting code. **This field never gates reporting**: a finding whose fix you cannot pin is still filed, with \`N/A\`. It is an acceptance criterion for the author, not a bar for you.
+
+**A fix that introduces a premise owes the fact it must respect — with its source, or not at all.** Fix witness pins the fix's *claim*: does it do what it says. Nothing pins the fix's *premises* — the assumptions a fix newly introduces — and those pass a witnessed test cleanly. Two Criticals on one merged fix each had the test that reds without the guard, and were still wrong: a hand-picked \`hops < 16\` lineage cap sat below the user-configurable \`MAX_SUBAGENT_DEPTH_LIMIT = 100\`, so deep lineages silently got back the hang the fix was for; and parking several runtimes' approvals on one registry entry broke a \`callId\` uniqueness that dedup and resolve relied on elsewhere, so a user's answer reached the wrong agent. So when your **Suggested fix** introduces a bound, shares a resource, or changes a shape, and you have already seen the existing fact it must not violate — a configured limit any new bound must stay within, a second site that reads the same field, a uniqueness the resource's key currently guarantees — fill **Fix constraint** with that fact and where it lives. The bar is the **Witness** bar, not the Fix witness bar: **quote the constant or give the \`file:line\`, or omit the line.** The costs are asymmetric — a wrong Fix witness is one test not written; a wrong constraint is confidently-stated misdirection the fixer will follow. "Be careful about concurrency", "keep this consistent with the other path" — a caution with no quoted fact and no location — is forbidden in this field exactly as "this looks risky" is forbidden in the failure scenario. And when you observed nothing, **omit the line entirely** — not \`N/A\`, not "none observed": an absent constraint says nothing and would lengthen every finding. Like Fix witness, this field never gates reporting.`;
 
 /**
  * What not to report.
@@ -1348,8 +1351,12 @@ function fetchedShaOf(report: PlanReport): string | undefined {
  * have any. Resolved against the process cwd, like every other use of
  * `worktreePath` here: the report stores it repo-relative and review commands
  * run from the project root.
+ *
+ * Exported for `emit-workflow`, which must probe the tree exactly the way this
+ * command's handler does: both paths build through `buildLaunch`, and a probe
+ * only one of them ran is a divergence in the briefs the two paths bake.
  */
-function worktreeResidueOf(report: PlanReport): WorktreeResidue {
+export function worktreeResidueOf(report: PlanReport): WorktreeResidue {
   const wt = report.worktreePath;
   if (typeof wt !== 'string' || !wt) return { paths: [], total: 0 };
   // Hand over the sha fetch-pr recorded: committing the contamination moves
@@ -2302,12 +2309,15 @@ export function findingsSection(
  * Build one agent's brief and launch prompt, write the brief beside the plan, and
  * return the key and the prompt for the caller to record and print.
  *
- * One body for both callers on purpose: the single-agent path and `--roster` must
- * emit byte-identical prompts for the same agent, because the delivery check
- * compares agents against records — a drift between the two paths would read as a
- * rewritten launch on a run that did everything right.
+ * One body for every caller on purpose: the single-agent path, `--roster` and
+ * `emit-workflow` must emit byte-identical prompts for the same agent, because
+ * the delivery check compares agents against records — a drift between the
+ * paths would read as a rewritten launch on a run that did everything right.
+ * Exported for that reason: a caller that rebuilt this would be a second
+ * implementation of the invariant, and byte-parity would become something a
+ * test asserts rather than something the code cannot break.
  */
-function buildLaunch(
+export function buildLaunch(
   report: PlanReport,
   planPath: string,
   spec: {

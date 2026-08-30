@@ -191,6 +191,8 @@ export const SERVE_CONTROL_EXT_METHODS = {
   sessionTurnStatus: 'qwen/control/session/turn_status',
   workspaceMcpRuntimeAdd: 'qwen/control/workspace/mcp/runtime-add',
   workspaceMcpRuntimeRemove: 'qwen/control/workspace/mcp/runtime-remove',
+  workspaceModelProvidersReload:
+    'qwen/control/workspace/model-providers/reload',
   workspaceReload: 'qwen/control/workspace/reload',
   workspaceSkillsRefresh: 'qwen/control/workspace/skills/refresh',
   workspaceExtensionsRefresh: 'qwen/control/workspace/extensions/refresh',
@@ -480,7 +482,10 @@ export interface ServeWorkspaceSkillStatus extends ServeStatusCell {
   installedPath?: string;
   argumentHint?: string;
   model?: string;
+  /** Canonical name of the extension that provides this skill. */
   extensionName?: string;
+  /** Localized presentation name; never use as an extension identity. */
+  extensionDisplayName?: string;
 }
 
 export interface ServeWorkspaceSkillsRefreshResult {

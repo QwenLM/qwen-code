@@ -1,4 +1,5 @@
-// Runner-routing regression guards for ci.yml and serve-ab.yml.
+// Runner-routing regression guards for ci.yml, serve-ab.yml, e2e.yml, and
+// the qwen-autofix.yml scan lane.
 //
 // classify_pr carries the routing logic TWICE — the `runs-on` expression
 // (which selects the classify job's own runner) and the `pick_runner` shell
@@ -68,10 +69,18 @@ function evalRunsOn(expression, { ecsDisabled, eventName, sameRepo, assoc }) {
       /github\.event_name == 'merge_group'/,
       String(eventName === 'merge_group'),
     ],
+    // Longest term first as a convention; both patterns are quote-anchored
+    // (the closing quote is part of each regex), so neither can match
+    // inside the other and the substitution order is behaviorally inert.
+    [
+      /github\.event_name != 'pull_request_review'/,
+      String(eventName !== 'pull_request_review'),
+    ],
     [
       /github\.event_name != 'pull_request'/,
       String(eventName !== 'pull_request'),
     ],
+    [/github\.repository == 'QwenLM\/qwen-code'/, 'true'],
     [
       /github\.event\.pull_request\.head\.repo\.full_name == github\.repository/,
       String(sameRepo),
@@ -80,6 +89,7 @@ function evalRunsOn(expression, { ecsDisabled, eventName, sameRepo, assoc }) {
       /contains\(fromJSON\('\["OWNER","MEMBER","COLLABORATOR"\]'\), github\.event\.pull_request\.author_association\)/,
       String(TRUSTED.includes(assoc)),
     ],
+    [/github\.repository == 'QwenLM\/qwen-code'/, 'true'],
   ];
   let expr = expression.replace(/^\$\{\{\s*/, '').replace(/\s*\}\}$/, '');
   for (const [term, value] of substitutions) {
@@ -212,6 +222,46 @@ describe('ci.yml classify_pr runner routing', () => {
       HOSTED,
       'kill-switch must revert even trusted runs to hosted',
     );
+  });
+
+  it('a push to main reaches ECS, and the kill-switch still wins', () => {
+    // The post-merge fast signal (Classify PR + Test on `main`) runs the same
+    // ten-plus-minute Test job a pull request does, in the most trusted
+    // context there is: the code is already merged and the YAML is main's
+    // own. Route it to the pool instead of spending a scarce hosted Linux
+    // runner on every merge. A push carries no author association, so this
+    // arm is necessarily event-based.
+    assert.equal(
+      runPickRunner({
+        ecsDisabled: false,
+        sameRepo: false,
+        assoc: '',
+        eventName: 'push',
+      }),
+      ECS,
+    );
+    assert.equal(
+      runPickRunner({
+        ecsDisabled: true,
+        sameRepo: false,
+        assoc: '',
+        eventName: 'push',
+      }),
+      HOSTED,
+      'kill-switch must revert post-merge runs to hosted',
+    );
+  });
+
+  it('keeps the push arm out of the classify runs-on expression', () => {
+    // classify_pr routes twice, and on a push the two halves deliberately
+    // disagree: the shell step sends downstream Linux jobs to ECS while this
+    // expression leaves classify_pr itself hosted. Pin the asymmetry so a
+    // future "drift fix" has to read why first — this expression is the
+    // canonical association-routing text that sdk-java.yml and serve-ab.yml
+    // mirror, a push has no association to route on, and classify_pr is a
+    // seconds-long job whose pool costs nothing either way. The drift guard
+    // above evaluates both halves on pull_request, where they must agree.
+    assert.doesNotMatch(classifyRunsOn, /github\.event_name == 'push'/);
   });
 
   it('the runs-on expression keeps the trusted clause and kill-switch', () => {
@@ -420,4 +470,233 @@ describe('serve-ab.yml runner routing', () => {
       "the kept .git config must be scrubbed to the qwen-triage.yml config-sanitize allowlist, anchored to $WS/.git so a healed symlinked root never scrubs the link's target",
     );
   });
+});
+
+describe('e2e.yml e2e-test-linux runner routing', () => {
+  // Every trigger is a trusted context (push to in-repo branches, schedule,
+  // dispatch — no pull_request), so the lane routes to the persistent pool
+  // whenever routing is enabled, with the kill-switch as the only fallback.
+  const e2eDoc = parse(readFileSync(join(workflowsDir, 'e2e.yml'), 'utf8'));
+  // evalRunsOn unwraps the winning fromJSON label to the array it names.
+  const ECS_LABELS = ['self-hosted', 'linux', 'x64', 'ecs-qwen'];
+  const HOSTED_LABELS = ['ubuntu-latest'];
+  const job = e2eDoc.jobs['e2e-test-linux'];
+  const runsOn = String(job['runs-on']);
+
+  it('pins the repository guard clause the matrix substitutes away', () => {
+    // evalRunsOn substitutes the repo clause with a constant; deleting it
+    // from the workflow would leave every evaluation green while fork runs
+    // queue on a label no fork registers. Pin the real text.
+    assert.match(runsOn, /github\.repository == 'QwenLM\/qwen-code'/);
+  });
+
+  it('reaches the persistent pool on every trusted trigger', () => {
+    for (const eventName of ['push', 'schedule', 'workflow_dispatch']) {
+      assert.deepEqual(
+        evalRunsOn(runsOn, {
+          ecsDisabled: false,
+          eventName,
+          sameRepo: false,
+          assoc: '',
+        }),
+        ECS_LABELS,
+        `e2e-test-linux must run from the pool on ${eventName}`,
+      );
+    }
+  });
+
+  it('obeys the kill-switch', () => {
+    assert.deepEqual(
+      evalRunsOn(runsOn, {
+        ecsDisabled: true,
+        eventName: 'push',
+        sameRepo: true,
+        assoc: 'OWNER',
+      }),
+      HOSTED_LABELS,
+      'kill-switch must force the lane back to hosted',
+    );
+  });
+
+  it('keeps the workflow free of pull_request triggers', () => {
+    // The simple repo+kill-switch expression above is only safe because no
+    // lane of this workflow ever runs PR-authored workflow code. Adding a
+    // pull_request trigger must force a deliberate routing rework.
+    // `on:` is equally valid as a map, a sequence, or a scalar; normalize
+    // before enumerating, or a non-map form enumerates indices, not names.
+    const onMap = e2eDoc.on ?? e2eDoc[true] ?? {};
+    const triggers = Array.isArray(onMap)
+      ? onMap.map(String)
+      : typeof onMap === 'string'
+        ? [onMap]
+        : Object.keys(onMap);
+    assert.ok(triggers.length > 0, 'could not read the trigger map');
+    for (const trigger of triggers) {
+      assert.ok(
+        !trigger.startsWith('pull_request'),
+        `e2e.yml gained a ${trigger} trigger; the pool routing needs the fork-trust clause before this can land`,
+      );
+    }
+  });
+
+  it('carries the pool hygiene and capability steps in order', () => {
+    const names = job.steps.map((s) => s.name);
+    const preflight = names.indexOf('Check container runtime');
+    const heal = names.indexOf('Restore workspace ownership');
+    const checkout = job.steps.findIndex((s) =>
+      String(s.uses || '').startsWith('actions/checkout'),
+    );
+    const prune = names.indexOf('Prune dangling docker images');
+    // GitHub's default is 360 minutes; a wedged shard would hold a pool
+    // runner for all of it. Pin the ci.yml pool precedent.
+    assert.equal(job['timeout-minutes'], 60);
+    // Fail-fast daemon probe (#9556) before any expensive step, only on the
+    // docker leg.
+    assert.ok(preflight !== -1, 'the docker preflight must exist');
+    assert.match(job.steps[preflight].if, /sandbox:docker/);
+    assert.match(job.steps[preflight].run, /docker info/);
+    assert.match(job.steps[preflight].run, /exit 1/);
+    assert.ok(
+      preflight < names.indexOf('Install dependencies'),
+      'the docker preflight must fail fast, before any expensive step',
+    );
+    assert.ok(
+      !('continue-on-error' in job.steps[preflight]) &&
+        !('continue-on-error' in job),
+      'a failed docker probe must fail the job, not downgrade to a warning',
+    );
+    // Ownership heal before checkout, self-hosted only.
+    assert.ok(heal !== -1, 'the ownership heal must exist');
+    assert.equal(
+      job.steps[heal].if,
+      "${{ runner.environment == 'self-hosted' }}",
+    );
+    assert.match(job.steps[heal].run, /chown -R .* "\$GITHUB_WORKSPACE"/);
+    assert.match(job.steps[heal].run, /chmod -R u\+rwX/);
+    assert.ok(heal < checkout, 'the heal must precede the checkout');
+    // Dangling-only prune at the end: always(), docker leg, pool only —
+    // and never a form that could remove tagged images other jobs use.
+    assert.ok(prune !== -1, 'the dangling prune must exist');
+    assert.match(job.steps[prune].if, /always\(\)/);
+    assert.match(job.steps[prune].if, /sandbox:docker/);
+    assert.match(job.steps[prune].if, /runner\.environment == 'self-hosted'/);
+    assert.match(job.steps[prune].run, /docker image prune --force/);
+    assert.match(job.steps[prune].run, /until=24h/);
+    assert.doesNotMatch(job.steps[prune].run, /--all|-a\b/);
+    // A failing prune must stay diagnosable: surface a warning instead of a
+    // silent `|| true`, and keep the daemon's error out of /dev/null.
+    assert.match(job.steps[prune].run, /\|\| echo "::warning::/);
+    assert.doesNotMatch(job.steps[prune].run, /\/dev\/null/);
+    assert.ok(
+      prune === job.steps.length - 1,
+      'the prune must be the final step so nothing dirties the pool after it',
+    );
+  });
+
+  it('keeps setup-node off the pool', () => {
+    // The action's post step uploads the npm cache to GitHub; on the
+    // pool's slow egress that save ran 14+ minutes and timed out
+    // security-checks' first pool run (2026-08-26). Hosted keeps the
+    // action; the pool reuses the machine's Node and its persistent npm
+    // cache, exactly as ci.yml does.
+    const setup = job.steps.find((s) =>
+      String(s.uses || '').startsWith('actions/setup-node'),
+    );
+    assert.ok(setup, 'the hosted setup-node step must exist');
+    assert.equal(setup.if, "${{ runner.environment == 'github-hosted' }}");
+    const preflight = job.steps.find(
+      (s) => s.uses === './.github/actions/self-hosted-node',
+    );
+    assert.ok(preflight, 'the pool lane must use the pre-installed Node');
+    assert.equal(preflight.if, "${{ runner.environment == 'self-hosted' }}");
+  });
+});
+
+describe('qwen-autofix.yml scan-lane runner routing', () => {
+  // route and review-scan gate the WHOLE fan-out: while they sit queued no
+  // review-address leg starts. A hosted-runner backlog queued them past the
+  // cron period, and the cron supersede rule then starved every scan round
+  // (2026-08-25) — so pin the lane on the persistent pool, with the
+  // fork-trust clause and the kill-switch intact.
+  const autofixDoc = parse(
+    readFileSync(join(workflowsDir, 'qwen-autofix.yml'), 'utf8'),
+  );
+  // evalRunsOn unwraps the winning fromJSON label to the array it names, so
+  // compare against arrays, not the ECS/HOSTED string constants above.
+  const ECS_LABELS = ['self-hosted', 'linux', 'x64', 'ecs-qwen'];
+  const HOSTED_LABELS = ['ubuntu-latest'];
+
+  for (const jobName of ['route', 'review-scan']) {
+    const runsOn = String(autofixDoc.jobs[jobName]['runs-on']);
+
+    it(`${jobName} reaches the persistent pool on schedule, dispatch, issue_comment, and issues`, () => {
+      // issue_comment is route's /takeover and /retry lane, issues its
+      // label/assign trigger lane for issue-autofix — pin both beside the
+      // cron and dispatch triggers so a later event-allowlist narrowing of
+      // the pool clause cannot silently demote either back to hosted.
+      for (const eventName of [
+        'schedule',
+        'workflow_dispatch',
+        'issue_comment',
+        'issues',
+      ]) {
+        assert.deepEqual(
+          evalRunsOn(runsOn, {
+            ecsDisabled: false,
+            eventName,
+            sameRepo: false,
+            assoc: '',
+          }),
+          ECS_LABELS,
+          `${jobName} must scan from the pool on ${eventName}`,
+        );
+      }
+    });
+
+    it(`${jobName} keeps untrusted fork PR lanes hosted`, () => {
+      for (const eventName of ['pull_request', 'pull_request_review']) {
+        assert.deepEqual(
+          evalRunsOn(runsOn, {
+            ecsDisabled: false,
+            eventName,
+            sameRepo: false,
+            assoc: 'NONE',
+          }),
+          HOSTED_LABELS,
+          `${jobName} fork lane (${eventName}) must stay hosted`,
+        );
+        assert.deepEqual(
+          evalRunsOn(runsOn, {
+            ecsDisabled: false,
+            eventName,
+            sameRepo: true,
+            assoc: 'NONE',
+          }),
+          ECS_LABELS,
+          `${jobName} same-repo lane (${eventName}) must reach the pool`,
+        );
+      }
+    });
+
+    it(`${jobName} obeys the kill-switch on every event`, () => {
+      for (const eventName of [
+        'schedule',
+        'workflow_dispatch',
+        'issue_comment',
+        'pull_request',
+        'pull_request_review',
+      ]) {
+        assert.deepEqual(
+          evalRunsOn(runsOn, {
+            ecsDisabled: true,
+            eventName,
+            sameRepo: true,
+            assoc: 'OWNER',
+          }),
+          HOSTED_LABELS,
+          `kill-switch must win on ${eventName}`,
+        );
+      }
+    });
+  }
 });

@@ -267,6 +267,10 @@ export const LOAD_REPLAY_MAX_BYTES = 32 * 1024 * 1024;
 export const LOAD_REPLAY_MAX_UPDATES = 10_000;
 
 export const REQUESTED_SESSION_ID_META_KEY = 'qwen-code/sessionId';
+export const SESSION_INITIALIZATION_DEADLINE_META_KEY =
+  'qwen.daemon.sessionInitializationDeadlineMs';
+export const SESSION_INITIALIZATION_TIMEOUT_ERROR_KIND =
+  'session_initialization_timeout';
 
 export const CHANNEL_STARTUP_PROFILE_META_KEY =
   'qwen.daemon.channelStartupProfile';
@@ -596,6 +600,7 @@ export interface ChangeSessionCwdResult {
 }
 
 export type BridgeWorkspaceMemoryRememberContextMode = 'workspace' | 'clean';
+export type BridgeWorkspaceMemoryRememberTargetScope = 'project' | 'user';
 export type BridgeAutoMemoryTopic =
   | 'user'
   | 'feedback'
@@ -605,6 +610,7 @@ export type BridgeAutoMemoryTopic =
 export interface BridgeWorkspaceMemoryRememberRequest {
   content: string;
   contextMode: BridgeWorkspaceMemoryRememberContextMode;
+  scope?: BridgeWorkspaceMemoryRememberTargetScope;
 }
 
 export interface BridgeWorkspaceMemoryRememberResult {
@@ -615,6 +621,7 @@ export interface BridgeWorkspaceMemoryRememberResult {
 
 export interface BridgeWorkspaceMemoryForgetRequest {
   query: string;
+  scope?: BridgeWorkspaceMemoryRememberTargetScope;
 }
 
 export interface BridgeWorkspaceMemoryForgetMatch {
@@ -768,6 +775,8 @@ export interface BridgeSessionGoal {
 export interface SessionPrInfo {
   number: number;
   url: string;
+  /** Snapshot of the PR's state at last bind/refresh; optional. */
+  state?: 'open' | 'merged' | 'closed';
 }
 
 export interface SessionMetadataUpdate {
@@ -1563,6 +1572,17 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
    * storage-agnostic. Optional so lightweight fakes may omit it.
    */
   seedSessionPrs?(sessionId: string, prs: SessionPrInfo[]): void;
+
+  /**
+   * Replace the in-memory PR binding list of a live session with the
+   * persisted sidecar contents after a rewrite that can evict bindings
+   * (the backfill cap trim). Unlike {@link seedSessionPrs}, overwrites an
+   * entry that already holds bindings, so the summary merge cannot
+   * resurrect evicted numbers from a stale entry. No-op when the entry is
+   * unknown (session not live). Callers own sidecar I/O; the bridge stays
+   * storage-agnostic. Optional so lightweight fakes may omit it.
+   */
+  setSessionPrs?(sessionId: string, prs: SessionPrInfo[]): void;
 
   /**
    * List the structured artifacts registered for a live session. Throws

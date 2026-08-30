@@ -91,7 +91,7 @@ const initializationResult = {
   authError: null,
   themeError: null,
   shouldOpenAuthDialog: false,
-  geminiMdFileCount: 0,
+  memoryFileCount: 0,
 } as InitializationResult;
 
 async function start(
@@ -173,6 +173,55 @@ describe('startInteractiveUI cross-session messaging', () => {
     peerMessagingStart.mockResolvedValue({
       close: vi.fn().mockResolvedValue(undefined),
     });
+  });
+
+  it('wires the session-id pin and the misaddressed self-heal', async () => {
+    // The only production wiring of either: the gate reads getSessionId to
+    // judge a frame's pin, and answers a misaddressed one by reasserting
+    // the registry record. Asserting PeerMessaging.start was called says
+    // nothing about the two callbacks, so either could be dropped without
+    // a test noticing.
+    const reassertSessionRegistryRecord = vi.fn().mockResolvedValue(undefined);
+    const config = Object.assign(makeConfig(), {
+      reassertSessionRegistryRecord,
+    });
+
+    await start(config, enabledSettings);
+    await vi.waitFor(() => expect(peerMessagingStart).toHaveBeenCalled());
+
+    const options = peerMessagingStart.mock.calls[0]?.[0] as {
+      getSessionId: () => string;
+      reassertSessionRecord: () => Promise<void>;
+    };
+    expect(options.getSessionId()).toBe('session-123');
+    await options.reassertSessionRecord();
+    expect(reassertSessionRegistryRecord).toHaveBeenCalledTimes(1);
+  });
+
+  it('reads the session id live, so /clear moves the pin with the session', async () => {
+    // `startNewSession` reassigns Config's session id in place, so /clear,
+    // /new and /resume all leave the same Config answering with a new id.
+    // A callback that captured the id at startup would keep judging frames
+    // against the session the user just left: envelopes addressed to the
+    // successor read as misaddressed, and stale ones aimed at the dead id
+    // are admitted. Asserting a single call cannot tell the two wirings
+    // apart — only a second call after the id moves can.
+    let sessionId = 'session-before-clear';
+    const config = Object.assign(makeConfig(), {
+      getSessionId: () => sessionId,
+      reassertSessionRegistryRecord: vi.fn().mockResolvedValue(undefined),
+    });
+
+    await start(config, enabledSettings);
+    await vi.waitFor(() => expect(peerMessagingStart).toHaveBeenCalled());
+
+    const options = peerMessagingStart.mock.calls[0]?.[0] as {
+      getSessionId: () => string;
+    };
+    expect(options.getSessionId()).toBe('session-before-clear');
+
+    sessionId = 'session-after-clear';
+    expect(options.getSessionId()).toBe('session-after-clear');
   });
 
   it('does not bind an inbox unless the setting is on', async () => {
