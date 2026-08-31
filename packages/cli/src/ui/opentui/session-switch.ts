@@ -141,6 +141,13 @@ export async function handleResumeSession(
     if (!sessionData) {
       // Nothing was replayed — close this attempt's unarmed transaction.
       config.getLlmClient()?.commitTelemetrySwap?.();
+      host.addItem(
+        {
+          type: MessageType.ERROR,
+          text: `Session ${sessionId} could not be loaded.`,
+        },
+        Date.now(),
+      );
       return;
     }
     const customTitle = sessionService.getSessionTitle(sessionId);
@@ -187,6 +194,7 @@ export async function handleResumeSession(
     // 2. UI swap. The commit point is the UI-side session re-key: from here
     //    on a failure must not roll core back OR undo the telemetry replay.
     host.startNewSession(sessionId);
+    uiSwapped = true;
     host.setSessionName(customTitle ?? null);
     host.clearPendingState();
     host.clearItems();
@@ -198,7 +206,6 @@ export async function handleResumeSession(
         Date.now(),
       );
     }
-    uiSwapped = true;
     config.getLlmClient()?.commitTelemetrySwap?.();
   } catch (error) {
     if (coreSwapped && !uiSwapped) {
@@ -358,11 +365,11 @@ export async function handleBranchSession(
     // 8. UI swap.
     const uiHistoryItems = buildUiHistoryItems(resumed, host);
     host.startNewSession(newSessionId);
+    uiSwapped = true;
     host.clearPendingState();
     host.clearItems();
     host.loadHistory(uiHistoryItems);
     host.resetTranscript(resumeEventsFromSession(resumed, config));
-    uiSwapped = true;
     resetBackgroundStateForSessionSwitch(config);
     // The UI re-key commits the swap: from here on a failure keeps the
     // replay — it belongs to the session the user is on.

@@ -56,6 +56,7 @@ export function transcribeSession(
   const events: OpenTuiStreamEvent[] = [];
   const prompts: string[] = [];
   let toolSeq = 0;
+  const pendingIdlessIds: string[] = [];
   for (const line of jsonl.split('\n')) {
     const t = line.trim();
     if (!t) continue;
@@ -96,7 +97,7 @@ export function transcribeSession(
     }
     if (o.type === 'tool_result') {
       const r = o.toolCallResult ?? {};
-      const id = r.callId ?? `tool-${++toolSeq}`;
+      const id = r.callId ?? pendingIdlessIds.shift() ?? `tool-${++toolSeq}`;
       if (r.resultDisplay) {
         // FileDiff results ride as structured payloads (colored diff lines in
         // the tool card); everything else flattens to display text. Bare
@@ -135,9 +136,14 @@ export function transcribeSession(
           }
           if (p.functionCall) {
             const name = p.functionCall.name ?? 'tool';
+            let id = p.functionCall.id;
+            if (!id) {
+              id = `tool-${++toolSeq}`;
+              pendingIdlessIds.push(id);
+            }
             events.push({
               type: 'tool-start',
-              id: p.functionCall.id ?? `tool-${++toolSeq}`,
+              id,
               tool: name,
               title: opts.toolTitle?.(name) ?? name,
             });
