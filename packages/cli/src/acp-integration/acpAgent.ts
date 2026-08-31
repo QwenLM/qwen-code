@@ -13280,18 +13280,36 @@ class QwenAgent implements Agent {
     isInitialAuth?: boolean,
   ): Promise<void> {
     await config.refreshAuth(authType, isInitialAuth);
-    if (settings.merged.model?.reasoningEffort !== REASONING_EFFORT_NONE) {
+    const selection = parseReasoningSelection(
+      settings.merged.model?.reasoningEffort,
+    );
+    if (!selection || selection === REASONING_EFFORT_DEFAULT) {
       return;
     }
     const generation = config.getContentGeneratorConfig?.();
     const modelId = generation?.model ?? config.getModel();
     if (
-      isReasoningSelectionSupported(
+      !isReasoningSelectionSupported(
         modelId,
-        REASONING_EFFORT_NONE,
+        selection,
         generation?.thinkingMandatory === true,
       )
     ) {
+      return;
+    }
+    const modelReasoning = this.getModelReasoningConfiguration(config);
+    if (generation && modelReasoning && !modelReasoning.toggleOnly) {
+      for (const source of ['extra_body', 'samplingParams'] as const) {
+        const layer = generation[source];
+        if (!layer) continue;
+        const next = { ...layer };
+        delete next['enable_thinking'];
+        delete next['reasoning_effort'];
+        delete next['thinking_budget'];
+        generation[source] = next;
+      }
+    }
+    if (selection === REASONING_EFFORT_NONE) {
       applyReasoningSelection(config, REASONING_EFFORT_NONE);
     }
   }

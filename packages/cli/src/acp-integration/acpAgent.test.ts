@@ -8476,34 +8476,61 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     }
   });
 
-  it('replays a persisted thinking disable after daemon authentication', async () => {
-    const sessionId = 'persisted-none-auth-session';
-    const innerConfig = await setupSessionMocks(sessionId);
-    const generation: {
-      model: string;
-      reasoning?: false | { effort?: string };
-    } = { model: 'claude-opus-4-6', reasoning: false };
-    const settings = makeSessionSettings({
-      mcpServers: {},
-      model: { reasoningEffort: 'none' },
-    });
-    vi.mocked(loadSettings).mockReturnValue(settings);
-    innerConfig.getModel = vi.fn(() => generation.model);
-    innerConfig.getContentGeneratorConfig = vi.fn(() => generation);
-    innerConfig.refreshAuth = vi.fn(async () => {
-      generation.reasoning = undefined;
-    });
+  it.each([
+    ['claude-opus-4-6', 'none'],
+    ['qwen3.8-max', 'medium'],
+  ] as const)(
+    'restores persisted %s reasoning %s after daemon authentication',
+    async (model, selection) => {
+      const sessionId = 'persisted-none-auth-session';
+      const innerConfig = await setupSessionMocks(sessionId);
+      const extraBody = { enable_thinking: false, seed: 7 };
+      const samplingParams = { thinking_budget: 1024, temperature: 0.2 };
+      const generation: {
+        model: string;
+        reasoning?: false | { effort?: string };
+        extra_body?: Record<string, unknown>;
+        samplingParams?: Record<string, unknown>;
+      } = { model, reasoning: false };
+      const settings = makeSessionSettings({
+        mcpServers: {},
+        model: { reasoningEffort: selection },
+      });
+      vi.mocked(loadSettings).mockReturnValue(settings);
+      innerConfig.getModel = vi.fn(() => generation.model);
+      innerConfig.getContentGeneratorConfig = vi.fn(() => generation);
+      innerConfig.getReasoningEffort = vi.fn(() =>
+        generation.reasoning ? generation.reasoning.effort : undefined,
+      );
+      innerConfig.refreshAuth = vi.fn(async () => {
+        generation.reasoning =
+          selection === 'none' ? undefined : { effort: selection };
+        generation.extra_body = extraBody;
+        generation.samplingParams = samplingParams;
+      });
 
-    const { agent, agentPromise } = await bootAcpAgent();
-    try {
-      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      const { agent, agentPromise } = await bootAcpAgent();
+      try {
+        await agent.newSession({ cwd: '/tmp', mcpServers: [] });
 
-      expect(generation.reasoning).toBe(false);
-    } finally {
-      mockConnectionState.resolve();
-      await agentPromise;
-    }
-  });
+        expect(generation.reasoning).toEqual(
+          selection === 'none' ? false : { effort: selection },
+        );
+        if (model === 'qwen3.8-max') {
+          expect(generation.extra_body).toEqual({ seed: 7 });
+          expect(generation.samplingParams).toEqual({ temperature: 0.2 });
+        }
+        expect(extraBody).toEqual({ enable_thinking: false, seed: 7 });
+        expect(samplingParams).toEqual({
+          thinking_budget: 1024,
+          temperature: 0.2,
+        });
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
 
   it.each([false, { effort: 'medium', budget_tokens: 42000 }] as const)(
     'resets to canonical reasoning defaults %j rather than a previous selection',
