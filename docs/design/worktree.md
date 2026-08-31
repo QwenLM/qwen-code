@@ -8,24 +8,25 @@ qwen-code 目前仅有面向 Arena 多模型对比场景的内部 worktree 实�
 
 ## 现状对比
 
-| 功能                              | qwen-code       | claude-code | 阶段    |
-| --------------------------------- | --------------- | ----------- | ------- |
-| `EnterWorktree` 工具              | ✅（Phase A）   | ✅          | —       |
-| `ExitWorktree` 工具               | ✅（Phase A）   | ✅          | —       |
-| AgentTool `isolation: 'worktree'` | ✅（Phase B）   | ✅          | —       |
-| 过期 worktree 自动清理            | ✅（Phase B）   | ✅          | —       |
-| worktree 会话状态持久化与恢复     | ❌              | ✅          | Phase C |
-| Post-creation setup（hooks 配置） | ❌              | ✅          | Phase C |
-| StatusLine worktree 状态展示      | ❌              | ✅          | Phase C |
-| WorktreeExitDialog（退出提示）    | ❌              | ✅          | Phase C |
-| `--worktree` CLI 启动标志         | ✅（Phase D）   | ✅          | —       |
-| 符号链接目录（node_modules 等）   | ✅（Phase D）   | ✅          | —       |
-| PR 引用（`--worktree=#123`）      | ✅（Phase D）   | ✅          | —       |
-| sparse checkout                   | ❌              | ✅          | Future  |
-| tmux 集成                         | ❌              | ✅          | Future  |
-| Arena 多模型 worktree 隔离        | ✅（qwen 独有） | ❌          | —       |
-| 脏状态覆盖（stash + copy）        | ✅              | ✅          | —       |
-| Baseline commit 追踪              | ✅（qwen 独有） | ❌          | —       |
+| 功能                                      | qwen-code       | claude-code | 阶段    |
+| ----------------------------------------- | --------------- | ----------- | ------- |
+| `EnterWorktree` 工具                      | ✅（Phase A）   | ✅          | —       |
+| `ExitWorktree` 工具                       | ✅（Phase A）   | ✅          | —       |
+| AgentTool `isolation: 'worktree'`         | ✅（Phase B）   | ✅          | —       |
+| 过期 worktree 自动清理                    | ✅（Phase B）   | ✅          | —       |
+| worktree 会话状态持久化与恢复             | ❌              | ✅          | Phase C |
+| Post-creation setup（hooks 配置）         | ❌              | ✅          | Phase C |
+| StatusLine worktree 状态展示              | ❌              | ✅          | Phase C |
+| WorktreeExitDialog（退出提示）            | ❌              | ✅          | Phase C |
+| `--worktree` CLI 启动标志                 | ✅（Phase D）   | ✅          | —       |
+| 符号链接目录（node_modules 等）           | ✅（Phase D）   | ✅          | —       |
+| `.worktreeinclude`（复制 gitignore 文件） | ✅（Phase D）   | ✅          | —       |
+| PR 引用（`--worktree=#123`）              | ✅（Phase D）   | ✅          | —       |
+| sparse checkout                           | ❌              | ✅          | Future  |
+| tmux 集成                                 | ❌              | ✅          | Future  |
+| Arena 多模型 worktree 隔离                | ✅（qwen 独有） | ❌          | —       |
+| 脏状态覆盖（stash + copy）                | ✅              | ✅          | —       |
+| Baseline commit 追踪                      | ✅（qwen 独有） | ❌          | —       |
 
 ## 设计原则
 
@@ -357,19 +358,51 @@ git fetch origin pull/<N>/head
 
 **与 D-2 的关系：** PR worktree **同样**应用 `symlinkDirectories`（用户期望在 PR 上立刻能跑测试，依赖目录需要复用）。
 
+#### D-4：`.worktreeinclude` 文件（复制 gitignore 文件）
+
+**格式：** 仓库根目录的 `.worktreeinclude`，每行一个 **gitignore 风格 pattern**，`#` 开头为注释，空行与首尾空白忽略。语法与 Claude Code 的同名文件一致（二者均使用 npm `ignore` 包编译），无法编译的 pattern 记 warn 后按"不匹配任何东西"处理，不影响其余行。
+
+```text
+# .worktreeinclude
+.env
+appsettings.Development.json
+.local/
+```
+
+**与 D-2 的分工：** 二者互补，差异不只是开销。
+
+| 维度     | `.worktreeinclude`          | `worktree.symlinkDirectories`   |
+| -------- | --------------------------- | ------------------------------- |
+| 机制     | 复制                        | 符号链接                        |
+| 编辑语义 | 隔离，worktree 内改动不回写 | 共享，写入穿透到主工作树        |
+| 配置载体 | 提交进仓库，随 clone 分发   | `settings.json`，每位开发者各自 |
+| 适用     | 本地配置、密钥、证书        | `node_modules` 等大体积只读目录 |
+
+agent 在 worktree 内改 `.env` 不得污染开发者的主 checkout —— 这正是必须用复制而非符号链接的原因。反过来，复制 `node_modules` 每个 worktree 要几 GB，且**当前没有体积上限**，大目录仍应走 D-2。
+
+**实现要点：**
+
+- **候选集是 `git ls-files --others --ignored --exclude-standard`**，即 git 实际忽略的文件。这一点承担双重作用：其一，tracked 文件本就由 `git worktree add` 带入 worktree，本功能要补的正是被忽略的那部分；其二，它给 pattern 划定了边界 —— `.worktreeinclude` 提交在仓库里，但任何 pattern 都只能从 git 已列出的集合里选，`.git` 内部、tracked 文件、仓库外路径根本不在候选集中。`--directory` 会把完全被忽略的目录折叠成单条 `dir/`，故对候选目录再跑一次带路径限定的 `ls-files` 展开（与上游同样的两遍结构）。
+- 符号链接直接跳过，既不复制为链接也不解引用（与上游一致）。
+- 由 `GitWorktreeService` 自行从 `sourceRepoPath` 读取，**不经 `createUserWorktree` 的 options 传参** —— 该文件属于仓库而非用户配置，所有创建路径（`--worktree`、`enter_worktree`、agent `isolation`、`qwen serve`）自动生效，无需改动任何调用点。
+- 校验复用 D-2 的 `resolveWorktreeEntry()`（由 `symlinkConfiguredDirectories` 抽出共享）：绝对路径、`..` 段、逃出 repo root、落入 `.git` / `.qwen` 一律拒绝；stat 后再以 realpath 复跑一遍全部检查，防止提交进仓库的符号链接绕过词法检查。
+- **信任级别低于 D-2。** `.worktreeinclude` 提交在仓库里，内容来自任何能推送者（包括用户不信任的 clone），而 `symlinkDirectories` 出自用户自己的 settings。因此校验门按前者标定，不得为后者放松。
+- 复制**在符号链接之后**执行，且两者都跳过已存在的目标 —— 同一路径两处都配置时符号链接胜出（用户自己的 settings 优先于仓库提交的文件）。目标占位检查用 `lstat` 而非 `access(F_OK)`，否则断链会被误判为不存在而遭覆盖。
+- fail-open：逐条失败只 log，不中断 worktree 创建。
+
 #### 影响文件
 
-| 文件                                                         | 变更类型                                                                                                                                   |
-| ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| `packages/cli/src/config/config.ts`                          | yargs 新增 `--worktree` 选项；`CliArgs` 接口加 `worktree?: string \| boolean`                                                              |
-| `packages/cli/src/gemini.tsx`                                | `loadCliConfig()` 之后、主循环之前调用新的 `setupStartupWorktree()` helper                                                                 |
-| `packages/cli/src/startup/worktreeStartup.ts`                | 新建：`setupStartupWorktree()` 处理 slug 解析、PR fetch、sidecar 写入、cwd 切换                                                            |
-| `packages/cli/src/nonInteractiveCli.ts`                      | 复用同一 helper（已有 `restoreWorktreeContext` 注入逻辑，无须改）                                                                          |
-| `packages/cli/src/acp-integration/acpAgent.ts`               | 复用同一 helper                                                                                                                            |
-| `packages/core/src/services/gitWorktreeService.ts`           | 新增 `parsePRReference()`、`fetchPullRequestRef()`、`symlinkConfiguredDirectories()`；`createUserWorktree()` 接受可选 `baseBranchRef` 参数 |
-| `packages/cli/src/config/settingsSchema.ts`                  | 新增 `worktree.symlinkDirectories: string[]` 顶层项                                                                                        |
-| `packages/vscode-ide-companion/schemas/settings.schema.json` | 重新生成                                                                                                                                   |
-| `docs/users/features/worktree.md`                            | 新增 Quick Start CLI flag 章节、Settings 表新增一行                                                                                        |
+| 文件                                                         | 变更类型                                                                                                                                                                                                                                                                            |
+| ------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/cli/src/config/config.ts`                          | yargs 新增 `--worktree` 选项；`CliArgs` 接口加 `worktree?: string \| boolean`                                                                                                                                                                                                       |
+| `packages/cli/src/gemini.tsx`                                | `loadCliConfig()` 之后、主循环之前调用新的 `setupStartupWorktree()` helper                                                                                                                                                                                                          |
+| `packages/cli/src/startup/worktreeStartup.ts`                | 新建：`setupStartupWorktree()` 处理 slug 解析、PR fetch、sidecar 写入、cwd 切换                                                                                                                                                                                                     |
+| `packages/cli/src/nonInteractiveCli.ts`                      | 复用同一 helper（已有 `restoreWorktreeContext` 注入逻辑，无须改）                                                                                                                                                                                                                   |
+| `packages/cli/src/acp-integration/acpAgent.ts`               | 复用同一 helper                                                                                                                                                                                                                                                                     |
+| `packages/core/src/services/gitWorktreeService.ts`           | 新增 `parsePRReference()`、`fetchPullRequestRef()`、`symlinkConfiguredDirectories()`；D-4 追加 `readWorktreeIncludeEntries()`、`copyIncludedPaths()`，并抽出共享校验 `buildWorktreeEntryContext()` / `resolveWorktreeEntry()`；`createUserWorktree()` 接受可选 `baseBranchRef` 参数 |
+| `packages/cli/src/config/settingsSchema.ts`                  | 新增 `worktree.symlinkDirectories: string[]` 顶层项                                                                                                                                                                                                                                 |
+| `packages/vscode-ide-companion/schemas/settings.schema.json` | 重新生成                                                                                                                                                                                                                                                                            |
+| `docs/users/features/worktree.md`                            | 新增 Quick Start CLI flag 章节、Settings 表新增一行；D-4 新增 `.worktreeinclude` 章节                                                                                                                                                                                               |
 
 #### 安全与回滚
 
@@ -390,8 +423,9 @@ git fetch origin pull/<N>/head
 
 以下功能面向更特定的使用场景，当前阶段不纳入排期，待用户需求明确后再评估实现。
 
-| 功能                    | 说明                                                                                      |
-| ----------------------- | ----------------------------------------------------------------------------------------- |
-| sparse checkout         | `worktree.sparsePaths` 配置项，大型 monorepo 只 checkout 指定路径，缩短创建时间和磁盘占用 |
-| `.worktreeinclude` 文件 | 将 gitignore 的文件（`.env`、`secrets.json` 等）自动复制进 worktree                       |
-| tmux 集成               | `--worktree --tmux` 在新 tmux 窗口启动 worktree 会话                                      |
+| 功能            | 说明                                                                                      |
+| --------------- | ----------------------------------------------------------------------------------------- |
+| sparse checkout | `worktree.sparsePaths` 配置项，大型 monorepo 只 checkout 指定路径，缩短创建时间和磁盘占用 |
+| tmux 集成       | `--worktree --tmux` 在新 tmux 窗口启动 worktree 会话                                      |
+
+（`.worktreeinclude` 原列于此表，已在 Phase D-4 实现，见上。）

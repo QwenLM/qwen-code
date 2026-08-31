@@ -5,7 +5,9 @@
  */
 
 import * as fs from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
 import * as path from 'node:path';
+import ignore from 'ignore';
 import { randomBytes, randomInt } from 'node:crypto';
 import { execFile, execSync } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -21,6 +23,14 @@ import { loadSimpleGit } from '../utils/load-simple-git.js';
 import { initRepositoryWithMainBranch } from './gitInit.js';
 
 const debugLogger = createDebugLogger('GIT_WORKTREE_SERVICE');
+
+/**
+ * Repo-root opt-in file listing gitignored paths to copy into every new
+ * general-purpose worktree. Committed, so it travels with the repository —
+ * unlike the per-user `worktree.symlinkDirectories` setting. See
+ * `copyIncludedPaths` for why both exist.
+ */
+const WORKTREE_INCLUDE_FILE = '.worktreeinclude';
 
 /** Prefix applied to every general-purpose worktree branch. */
 export const WORKTREE_BRANCH_PREFIX = 'worktree-';
@@ -229,6 +239,43 @@ interface SessionConfigFile {
   baseBranch?: string;
   createdAt: number;
   [key: string]: unknown;
+}
+
+/**
+ * Loop-invariant canonical paths shared by every entry resolution for one
+ * worktree-creation cycle. Built once by `buildWorktreeEntryContext`, then
+ * handed to `resolveWorktreeEntry` for each configured entry.
+ *
+ * Every field is canonical (realpath'd) precisely so the containment checks
+ * in `resolveWorktreeEntry` compare canonical-to-canonical — see the long
+ * note in `buildWorktreeEntryContext` for why the lexical form is a trap.
+ */
+interface WorktreeEntryContext {
+  /** Canonical main-repo root. */
+  repoRootAbs: string;
+  /** `<repoRootAbs>/.git` — blocklisted subtree. */
+  gitDirAbs: string;
+  /** `<repoRootAbs>/.qwen` — blocklisted subtree. */
+  qwenDirAbs: string;
+  /** Worktree root as passed in; used lexically to build destinations. */
+  worktreePath: string;
+  /** Canonical worktree root, for containment checks on the dest side. */
+  realWorktreePath: string;
+}
+
+/**
+ * One entry that cleared every gate in `resolveWorktreeEntry`. Holding a
+ * value of this type means: the source is inside the repo (both lexically
+ * and after realpath), is not git- or CLI-internal, exists, and `destAbs`
+ * has an existing parent directory that is inside the worktree.
+ */
+interface ResolvedWorktreeEntry {
+  /** Canonical source path inside the main repo. */
+  realSource: string;
+  /** Destination inside the worktree. Parent exists and is contained. */
+  destAbs: string;
+  /** Source stat, for callers that branch on directory-vs-file. */
+  sourceStat: { isDirectory: () => boolean };
 }
 
 /**
@@ -1709,6 +1756,30 @@ export class GitWorktreeService {
         });
       }
 
+      // Phase D-4: copy the gitignored files selected by the repo's
+      // `.worktreeinclude` patterns
+      // into the new worktree (e.g. `.env`, local certs) so the model
+      // gets an isolated copy of files git deliberately does not track.
+      // Read from disk rather than plumbed through `options` — the file
+      // belongs to the repository, so every creation path picks it up
+      // without touching a single call site. Runs after the symlink pass
+      // so a path present in both keeps the user's symlink. Same
+      // fail-open policy: failures log and continue.
+      const includePatterns = await this.readWorktreeIncludePatterns();
+      if (includePatterns.length > 0) {
+        await this.resolveIncludedFiles(includePatterns)
+          .then((files) =>
+            files.length > 0
+              ? this.copyIncludedPaths(worktreePath, files)
+              : undefined,
+          )
+          .catch((error) => {
+            debugLogger.warn(
+              `createUserWorktree: copyIncludedPaths failed for ${slug}: ${error}`,
+            );
+          });
+      }
+
       const worktree: WorktreeInfo = {
         id: slug,
         name: slug,
@@ -1813,14 +1884,257 @@ export class GitWorktreeService {
   }
 
   /**
+   * Builds the loop-invariant half of the entry-validation context for one
+   * worktree-creation cycle. Returns `null` when the repo root cannot be
+   * canonicalised: every containment gate downstream compares against
+   * `repoRootAbs`, so without it there is nothing safe to validate against
+   * and the caller must skip the whole opt-in step. That is non-destructive
+   * — the worktree itself is already on disk by this point.
+   *
+   * We must `fs.realpath` the repo root (rather than `path.resolve`, which
+   * is purely lexical) so every containment check compares canonical paths
+   * to canonical paths. `resolveWorktreeEntry`'s post-stat
+   * `fs.realpath(sourceAbs)` produces a canonical path, and on any system
+   * where the repo path contains a symlink component (macOS
+   * `/tmp → /private/tmp` is ubiquitous; user-symlinked source trees on
+   * Linux/Windows too) the lexical `path.resolve(sourceRepoPath)` does not
+   * share a prefix with that canonical realpath. Without this hoist
+   * `isWithinRoot(realSource, repoRootAbs)` silently rejects EVERY
+   * configured entry — cf. PR #4381 round 8 regression.
+   */
+  private async buildWorktreeEntryContext(
+    worktreePath: string,
+    logPrefix: string,
+  ): Promise<WorktreeEntryContext | null> {
+    let repoRootAbs: string;
+    try {
+      repoRootAbs = await fs.realpath(this.sourceRepoPath);
+    } catch {
+      debugLogger.warn(
+        `${logPrefix}: cannot realpath sourceRepoPath "${this.sourceRepoPath}", skipping all entries`,
+      );
+      return null;
+    }
+    // Same canonical-vs-canonical requirement on the dest side. The
+    // worktree was just created by `git worktree add`, so the path should
+    // exist; fall back to the input path on realpath error so a
+    // weird-but-extant worktree path doesn't deadlock the whole loop.
+    const realWorktreePath = await fs
+      .realpath(worktreePath)
+      .catch(() => worktreePath);
+    return {
+      repoRootAbs,
+      gitDirAbs: path.join(repoRootAbs, '.git'),
+      qwenDirAbs: path.join(repoRootAbs, '.qwen'),
+      worktreePath,
+      realWorktreePath,
+    };
+  }
+
+  /**
+   * Validates one configured entry and resolves it to a canonical source
+   * plus a destination inside the worktree, or `null` when any gate
+   * rejects it. Every rejection is logged here, so callers just skip.
+   *
+   * Shared by two callers with different trust levels:
+   *
+   * - `symlinkConfiguredDirectories` — entries from the user's own
+   *   `worktree.symlinkDirectories` setting.
+   * - `copyIncludedPaths` — entries from a repo-committed
+   *   `.worktreeinclude`, whose content comes from anyone who can push to
+   *   the repository, including a clone the user does not trust.
+   *
+   * The second is strictly lower-trust, and these gates are calibrated for
+   * it. Never relax one for the benefit of the settings-driven path.
+   *
+   * Gate order matters. The lexical checks run first because they are free
+   * and reject the obvious traversals; the realpath re-checks then re-run
+   * the SAME containment and blocklist tests against the canonical path,
+   * because a committed-or-out-of-band source symlink (`<repo>/node_modules
+   * → /etc`) passes every lexical test.
+   */
+  private async resolveWorktreeEntry(
+    raw: string,
+    ctx: WorktreeEntryContext,
+    logPrefix: string,
+  ): Promise<ResolvedWorktreeEntry | null> {
+    const { repoRootAbs, gitDirAbs, qwenDirAbs } = ctx;
+
+    if (typeof raw !== 'string' || raw.length === 0) {
+      debugLogger.warn(
+        `${logPrefix}: skipping non-string / empty entry: ${JSON.stringify(raw)}`,
+      );
+      return null;
+    }
+
+    // Reject absolute paths and any traversal-prone form. Resolve first
+    // to catch `./foo/../../etc` style escapes that look relative.
+    if (path.isAbsolute(raw)) {
+      debugLogger.warn(`${logPrefix}: refusing absolute path "${raw}"`);
+      return null;
+    }
+    // Reject any literal `..` segment up front. The post-resolve
+    // `isWithinRoot` check below would still accept `foo/../bar`
+    // (resolves to `bar`, which is inside the repo), but the public
+    // contract — settingsSchema description, docs/users/features/
+    // worktree.md, WorktreeSettings JSDoc — promises rejection of
+    // any entry containing `..`. Enforce that promise here.
+    if (raw.split(/[\\/]/).includes('..')) {
+      debugLogger.warn(
+        `${logPrefix}: refusing path "${raw}" — contains '..' segment`,
+      );
+      return null;
+    }
+    const sourceAbs = path.resolve(repoRootAbs, raw);
+    if (sourceAbs === repoRootAbs) {
+      // `""` / `"."` / `"./"` etc. — pointless and would alias the
+      // entire repo into itself. Reject explicitly so the path-prefix
+      // checks below don't have to handle this degenerate case.
+      debugLogger.warn(
+        `${logPrefix}: refusing empty / repo-root path "${raw}"`,
+      );
+      return null;
+    }
+    if (!isWithinRoot(sourceAbs, repoRootAbs)) {
+      debugLogger.warn(
+        `${logPrefix}: refusing path "${raw}" — resolves outside repo root (${sourceAbs} vs ${repoRootAbs})`,
+      );
+      return null;
+    }
+
+    // Refuse to pull git-internal paths into the worktree. `.git`
+    // would silently break commits / status / diff inside the
+    // worktree (the worktree's own gitlink file points at the parent
+    // common-dir, and an entry here would shadow it). The whole
+    // `.qwen` tree is also off-limits: taking `.qwen` (parent) would
+    // recursively pull `.qwen/worktrees` into the new worktree,
+    // recreating the loop; taking `.qwen/worktrees` directly creates
+    // the same loop more obviously; and `.qwen/projects` /
+    // `.qwen/tmp` are CLI metadata users have no legitimate reason to
+    // share across worktrees.
+    // `gitDirAbs` / `qwenDirAbs` are canonical (derived from the
+    // realpath'd `repoRootAbs`), so these comparisons stay consistent
+    // with the post-stat realpath check below.
+    if (isWithinRoot(sourceAbs, gitDirAbs)) {
+      debugLogger.warn(`${logPrefix}: refusing git-internal path "${raw}"`);
+      return null;
+    }
+    if (isWithinRoot(sourceAbs, qwenDirAbs)) {
+      debugLogger.warn(
+        `${logPrefix}: refusing path "${raw}" — ` +
+          `the .qwen tree is CLI-managed; taking any of it could ` +
+          `create a worktrees-inside-worktrees loop or alias CLI metadata.`,
+      );
+      return null;
+    }
+
+    // Confirm the source exists. We don't insist on it being a directory
+    // specifically — `node_modules` is canonically a dir, but a user
+    // who wants a single file (`.env`, `secrets.json`) should still get
+    // it.
+    let sourceStat: { isDirectory: () => boolean } | null = null;
+    try {
+      sourceStat = await fs.stat(sourceAbs);
+    } catch (error) {
+      if (isNodeError(error) && error.code === 'ENOENT') {
+        debugLogger.debug(
+          `${logPrefix}: source missing, skipping: ${sourceAbs}`,
+        );
+      } else {
+        debugLogger.warn(`${logPrefix}: cannot stat ${sourceAbs}: ${error}`);
+      }
+      return null;
+    }
+
+    // Resolve through any symlinks in the source path and RE-RUN the
+    // containment + blocklist checks against the realpath. The lexical
+    // checks above only see `path.resolve(repoRoot, raw)` — they can't
+    // tell that `<repo>/node_modules` is actually a symlink chaining
+    // into `.git`, an outside dir, or `.qwen`. Without this step a
+    // committed-or-out-of-band source symlink bypasses every guard the
+    // lexical checks set up. Callers use the realpath as the operand so
+    // the result is one-hop and doesn't preserve the chain.
+    let realSource: string;
+    try {
+      realSource = await fs.realpath(sourceAbs);
+    } catch (error) {
+      debugLogger.warn(
+        `${logPrefix}: cannot realpath source "${sourceAbs}": ${error}`,
+      );
+      return null;
+    }
+    if (!isWithinRoot(realSource, repoRootAbs)) {
+      debugLogger.warn(
+        `${logPrefix}: refusing path "${raw}" — real source ${realSource} escapes repo root ${repoRootAbs}`,
+      );
+      return null;
+    }
+    if (isWithinRoot(realSource, gitDirAbs)) {
+      debugLogger.warn(
+        `${logPrefix}: refusing path "${raw}" — real source ${realSource} resolves inside .git`,
+      );
+      return null;
+    }
+    if (isWithinRoot(realSource, qwenDirAbs)) {
+      debugLogger.warn(
+        `${logPrefix}: refusing path "${raw}" — real source ${realSource} resolves inside .qwen`,
+      );
+      return null;
+    }
+
+    const destAbs = path.join(ctx.worktreePath, raw);
+
+    // Ensure the parent directory of `destAbs` exists. For top-level
+    // entries (`node_modules`) this is a no-op against the worktree
+    // root, but for nested values (`tools/cache`) we may need to
+    // create the intermediate dirs first — git worktree add does NOT
+    // create them.
+    try {
+      await fs.mkdir(path.dirname(destAbs), { recursive: true });
+    } catch (error) {
+      debugLogger.warn(
+        `${logPrefix}: cannot mkdir parent of ${destAbs}: ${error}`,
+      );
+      return null;
+    }
+
+    // Sibling-drift defense to the source-side realpath check:
+    // `path.join(worktreePath, raw)` is lexical too. If `git worktree
+    // add` materialized a committed symlink under the worktree
+    // (e.g. HEAD ships `tools → /etc`), then the OS-side resolution
+    // of `<worktree>/tools/cache` traverses through the committed
+    // symlink and our `fs.mkdir` / write lands OUTSIDE the worktree.
+    // Realpath the dest parent and refuse if it escapes.
+    let realDestParent: string;
+    try {
+      realDestParent = await fs.realpath(path.dirname(destAbs));
+    } catch (error) {
+      debugLogger.warn(
+        `${logPrefix}: cannot realpath dest parent for "${raw}" (${path.dirname(destAbs)}): ${error}`,
+      );
+      return null;
+    }
+    if (!isWithinRoot(realDestParent, ctx.realWorktreePath)) {
+      debugLogger.warn(
+        `${logPrefix}: refusing path "${raw}" — dest parent ${realDestParent} escapes worktree root ${ctx.realWorktreePath} (committed-symlink chain)`,
+      );
+      return null;
+    }
+
+    return { realSource, destAbs, sourceStat };
+  }
+
+  /**
    * Phase D-2 symlink loop. For each configured directory under the main
    * repository, creates a symbolic link from the new worktree to the
    * main-repo location (`<worktreePath>/<dir>` → `<repoRoot>/<dir>`).
    *
-   * Fail-open semantics — the worktree IS already on disk and usable by
-   * the time this runs, so a symlink failure must NOT abort the parent
-   * `createUserWorktree` call. Per-entry failures are logged at debug or
-   * warn level depending on cause:
+   * Entry validation lives in `resolveWorktreeEntry`; this method owns
+   * only the symlink write. Fail-open semantics — the worktree IS
+   * already on disk and usable by the time this runs, so a symlink
+   * failure must NOT abort the parent `createUserWorktree` call.
+   * Per-entry failures are logged at debug or warn level depending on
+   * cause:
    *
    * - **ENOENT on source** (the main repo does not have the directory):
    *   debug log, skip. Typical for users who configure `node_modules`
@@ -1840,209 +2154,14 @@ export class GitWorktreeService {
     worktreePath: string,
     configured: readonly string[],
   ): Promise<void> {
-    // Loop-invariant canonical paths, hoisted out of the per-entry loop.
-    //
-    // We must `fs.realpath` the repo root (rather than `path.resolve`,
-    // which is purely lexical) so every containment check below compares
-    // canonical paths to canonical paths. The post-stat `realSource =
-    // fs.realpath(sourceAbs)` produces a canonical path, and on any
-    // system where the repo path contains a symlink component (macOS
-    // `/tmp → /private/tmp` is ubiquitous; user-symlinked source trees on
-    // Linux/Windows too) the lexical `path.resolve(sourceRepoPath)` does
-    // not share a prefix with that canonical realpath. Without this hoist
-    // `isWithinRoot(realSource, repoRootAbs)` silently rejects EVERY
-    // configured entry — cf. PR #4381 round 8 regression.
-    let repoRootAbs: string;
-    try {
-      repoRootAbs = await fs.realpath(this.sourceRepoPath);
-    } catch {
-      // realpath of a non-existent / inaccessible repo root is fatal for
-      // the symlink loop's containment checks (we can't validate against
-      // a path we can't canonicalise). Bail out — the worktree itself is
-      // already on disk so this is non-destructive; we just skip the
-      // opt-in symlink step.
-      debugLogger.warn(
-        `symlinkConfiguredDirectories: cannot realpath sourceRepoPath "${this.sourceRepoPath}", skipping all entries`,
-      );
-      return;
-    }
-    const gitDirAbs = path.join(repoRootAbs, '.git');
-    const qwenDirAbs = path.join(repoRootAbs, '.qwen');
-    // Same canonical-vs-canonical requirement for the dest side. The
-    // worktree was just created by `git worktree add`, so the path
-    // should exist; fall back to the input path on realpath error so a
-    // weird-but-extant worktree path doesn't deadlock the whole loop.
-    const realWorktreePath = await fs
-      .realpath(worktreePath)
-      .catch(() => worktreePath);
+    const logPrefix = 'symlinkConfiguredDirectories';
+    const ctx = await this.buildWorktreeEntryContext(worktreePath, logPrefix);
+    if (!ctx) return;
 
     for (const raw of configured) {
-      if (typeof raw !== 'string' || raw.length === 0) {
-        debugLogger.warn(
-          `symlinkConfiguredDirectories: skipping non-string / empty entry: ${JSON.stringify(raw)}`,
-        );
-        continue;
-      }
-
-      // Reject absolute paths and any traversal-prone form. Resolve first
-      // to catch `./foo/../../etc` style escapes that look relative.
-      if (path.isAbsolute(raw)) {
-        debugLogger.warn(
-          `symlinkConfiguredDirectories: refusing absolute path "${raw}"`,
-        );
-        continue;
-      }
-      // Reject any literal `..` segment up front. The post-resolve
-      // `isWithinRoot` check below would still accept `foo/../bar`
-      // (resolves to `bar`, which is inside the repo), but the public
-      // contract — settingsSchema description, docs/users/features/
-      // worktree.md, WorktreeSettings JSDoc — promises rejection of
-      // any entry containing `..`. Enforce that promise here.
-      if (raw.split(/[\\/]/).includes('..')) {
-        debugLogger.warn(
-          `symlinkConfiguredDirectories: refusing path "${raw}" — contains '..' segment`,
-        );
-        continue;
-      }
-      const sourceAbs = path.resolve(repoRootAbs, raw);
-      if (sourceAbs === repoRootAbs) {
-        // `""` / `"."` / `"./"` etc. — pointless and would alias the
-        // entire repo into itself. Reject explicitly so the path-prefix
-        // checks below don't have to handle this degenerate case.
-        debugLogger.warn(
-          `symlinkConfiguredDirectories: refusing empty / repo-root path "${raw}"`,
-        );
-        continue;
-      }
-      if (!isWithinRoot(sourceAbs, repoRootAbs)) {
-        debugLogger.warn(
-          `symlinkConfiguredDirectories: refusing path "${raw}" — resolves outside repo root (${sourceAbs} vs ${repoRootAbs})`,
-        );
-        continue;
-      }
-
-      // Refuse to symlink git-internal paths into the worktree. `.git`
-      // would silently break commits / status / diff inside the
-      // worktree (the worktree's own gitlink file points at the parent
-      // common-dir, and a symlink would shadow it). The whole `.qwen`
-      // tree is also off-limits: linking `.qwen` (parent) would
-      // recursively pull `.qwen/worktrees` into the new worktree,
-      // recreating the loop; linking `.qwen/worktrees` directly
-      // creates the same loop more obviously; and `.qwen/projects`
-      // / `.qwen/tmp` are CLI metadata users have no legitimate
-      // reason to share across worktrees.
-      // `gitDirAbs` / `qwenDirAbs` are canonical (derived from the
-      // realpath'd `repoRootAbs` hoisted above the loop), so these
-      // comparisons stay consistent with the post-stat realpath check.
-      if (isWithinRoot(sourceAbs, gitDirAbs)) {
-        debugLogger.warn(
-          `symlinkConfiguredDirectories: refusing git-internal path "${raw}"`,
-        );
-        continue;
-      }
-      if (isWithinRoot(sourceAbs, qwenDirAbs)) {
-        debugLogger.warn(
-          `symlinkConfiguredDirectories: refusing path "${raw}" — ` +
-            `the .qwen tree is CLI-managed; symlinking any of it could ` +
-            `create a worktrees-inside-worktrees loop or alias CLI metadata.`,
-        );
-        continue;
-      }
-
-      // Confirm the source exists. We don't insist on it being a directory
-      // specifically — `node_modules` is canonically a dir, but a user
-      // who wants to share a single file (`.env`, `secrets.json`) via
-      // `symlinkDirectories` should still get the link.
-      let sourceStat: { isDirectory: () => boolean } | null = null;
-      try {
-        sourceStat = await fs.stat(sourceAbs);
-      } catch (error) {
-        if (isNodeError(error) && error.code === 'ENOENT') {
-          debugLogger.debug(
-            `symlinkConfiguredDirectories: source missing, skipping: ${sourceAbs}`,
-          );
-        } else {
-          debugLogger.warn(
-            `symlinkConfiguredDirectories: cannot stat ${sourceAbs}: ${error}`,
-          );
-        }
-        continue;
-      }
-
-      // Resolve through any symlinks in the source path and RE-RUN the
-      // containment + blocklist checks against the realpath. The lexical
-      // checks above only see `path.resolve(repoRoot, raw)` — they can't
-      // tell that `<repo>/node_modules` is actually a symlink chaining
-      // into `.git`, an outside dir, or `.qwen`. Without this step a
-      // committed-or-out-of-band source symlink bypasses every guard the
-      // lexical loop set up. Use the realpath as the symlink target so
-      // the new link points canonically rather than preserving the chain.
-      let realSource: string;
-      try {
-        realSource = await fs.realpath(sourceAbs);
-      } catch (error) {
-        debugLogger.warn(
-          `symlinkConfiguredDirectories: cannot realpath source "${sourceAbs}": ${error}`,
-        );
-        continue;
-      }
-      if (!isWithinRoot(realSource, repoRootAbs)) {
-        debugLogger.warn(
-          `symlinkConfiguredDirectories: refusing path "${raw}" — real source ${realSource} escapes repo root ${repoRootAbs}`,
-        );
-        continue;
-      }
-      if (isWithinRoot(realSource, gitDirAbs)) {
-        debugLogger.warn(
-          `symlinkConfiguredDirectories: refusing path "${raw}" — real source ${realSource} resolves inside .git`,
-        );
-        continue;
-      }
-      if (isWithinRoot(realSource, qwenDirAbs)) {
-        debugLogger.warn(
-          `symlinkConfiguredDirectories: refusing path "${raw}" — real source ${realSource} resolves inside .qwen`,
-        );
-        continue;
-      }
-
-      const destAbs = path.join(worktreePath, raw);
-
-      // Ensure the parent directory of `destAbs` exists. For top-level
-      // entries (`node_modules`) this is a no-op against the worktree
-      // root, but for nested values (`tools/cache`) we may need to
-      // create the intermediate dirs first — git worktree add does NOT
-      // create them.
-      try {
-        await fs.mkdir(path.dirname(destAbs), { recursive: true });
-      } catch (error) {
-        debugLogger.warn(
-          `symlinkConfiguredDirectories: cannot mkdir parent of ${destAbs}: ${error}`,
-        );
-        continue;
-      }
-
-      // Sibling-drift defense to the round-7 source-side realpath check:
-      // `path.join(worktreePath, raw)` is lexical too. If `git worktree
-      // add` materialized a committed symlink under the worktree
-      // (e.g. HEAD ships `tools → /etc`), then the OS-side resolution
-      // of `<worktree>/tools/cache` traverses through the committed
-      // symlink and our `fs.mkdir` / `fs.symlink` write OUTSIDE the
-      // worktree. Realpath the dest parent and refuse if it escapes.
-      let realDestParent: string;
-      try {
-        realDestParent = await fs.realpath(path.dirname(destAbs));
-      } catch (error) {
-        debugLogger.warn(
-          `symlinkConfiguredDirectories: cannot realpath dest parent for "${raw}" (${path.dirname(destAbs)}): ${error}`,
-        );
-        continue;
-      }
-      if (!isWithinRoot(realDestParent, realWorktreePath)) {
-        debugLogger.warn(
-          `symlinkConfiguredDirectories: refusing path "${raw}" — dest parent ${realDestParent} escapes worktree root ${realWorktreePath} (committed-symlink chain)`,
-        );
-        continue;
-      }
+      const resolved = await this.resolveWorktreeEntry(raw, ctx, logPrefix);
+      if (!resolved) continue;
+      const { realSource, destAbs, sourceStat } = resolved;
 
       // `fs.symlink` rejects with EEXIST when the destination already
       // exists. Treat that as "user already populated this slot, leave
@@ -2067,19 +2186,251 @@ export class GitWorktreeService {
         // the chain we just validated.
         await fs.symlink(realSource, destAbs, symlinkType);
         debugLogger.debug(
-          `symlinkConfiguredDirectories: linked ${destAbs} → ${realSource} (${symlinkType})`,
+          `${logPrefix}: linked ${destAbs} → ${realSource} (${symlinkType})`,
         );
       } catch (error) {
         if (isNodeError(error) && error.code === 'EEXIST') {
           debugLogger.debug(
-            `symlinkConfiguredDirectories: destination exists, skipping: ${destAbs}`,
+            `${logPrefix}: destination exists, skipping: ${destAbs}`,
           );
         } else {
           debugLogger.warn(
-            `symlinkConfiguredDirectories: failed to link ${destAbs} → ${realSource}: ${error}`,
+            `${logPrefix}: failed to link ${destAbs} → ${realSource}: ${error}`,
           );
         }
       }
+    }
+  }
+
+  /**
+   * Reads `<repoRoot>/.worktreeinclude` and returns its raw patterns.
+   *
+   * Format matches the convention the file already has in other agent
+   * CLIs: gitignore-style patterns, one per line, `#` starts a comment,
+   * blank lines and surrounding whitespace ignored. Compilation and
+   * matching happen in `resolveIncludedFiles`; this method only strips
+   * the file down to candidate pattern strings.
+   *
+   * A missing file is the overwhelmingly common case and returns `[]`
+   * silently. Any other read error warns and returns `[]`: the worktree
+   * is already on disk, so an unreadable opt-in file must not abort
+   * creation.
+   */
+  private async readWorktreeIncludePatterns(): Promise<string[]> {
+    const filePath = path.join(this.sourceRepoPath, WORKTREE_INCLUDE_FILE);
+    let content: string;
+    try {
+      content = await fs.readFile(filePath, 'utf8');
+    } catch (error) {
+      if (!isNodeError(error) || error.code !== 'ENOENT') {
+        debugLogger.warn(
+          `readWorktreeIncludePatterns: cannot read ${filePath}: ${error}`,
+        );
+      }
+      return [];
+    }
+    return content
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0 && !line.startsWith('#'));
+  }
+
+  /**
+   * Expands `.worktreeinclude` patterns into the concrete repo-relative
+   * file paths to copy.
+   *
+   * The candidate set is `git ls-files --others --ignored
+   * --exclude-standard`, i.e. exactly the files git deliberately does NOT
+   * track. That choice is load-bearing twice over:
+   *
+   * - **It is the feature's whole point.** Tracked files already arrive in
+   *   the worktree via `git worktree add`; the gap this closes is the
+   *   ignored ones (`.env`, local certs, machine-local config).
+   * - **It bounds what a pattern can name.** `.worktreeinclude` is
+   *   committed, so its content comes from anyone who can push — but a
+   *   pattern can only ever select from what git already listed. `.git`
+   *   internals, tracked files and anything outside the repo are simply
+   *   not in the candidate set, so no pattern can reach them. The
+   *   per-path gates in `resolveWorktreeEntry` still run afterwards as
+   *   defense in depth.
+   *
+   * `--directory` collapses a fully-ignored directory into a single
+   * `dir/` entry, so a pattern naming a path inside one would match
+   * nothing. Candidate directories are therefore re-expanded with a
+   * second, scoped `ls-files` call — the same two-pass shape the
+   * convention uses elsewhere.
+   *
+   * Uncompilable patterns are dropped with a warning rather than failing
+   * the run, so one bad line cannot cost a user their whole file.
+   */
+  private async resolveIncludedFiles(patterns: string[]): Promise<string[]> {
+    const lsIgnored = async (scope: string[]): Promise<string[]> => {
+      const args = [
+        'ls-files',
+        '--others',
+        '--ignored',
+        '--exclude-standard',
+        ...(scope.length > 0 ? ['--', ...scope] : ['--directory']),
+      ];
+      try {
+        const raw = await (await this.getGit()).raw(args);
+        return raw.trim().split('\n').filter(Boolean);
+      } catch (error) {
+        debugLogger.warn(
+          `resolveIncludedFiles: \`git ${args.join(' ')}\` failed: ${error}`,
+        );
+        return [];
+      }
+    };
+
+    const candidates = await lsIgnored([]);
+    if (candidates.length === 0) return [];
+
+    const matcher = ignore();
+    for (const pattern of patterns) {
+      try {
+        matcher.add(pattern);
+      } catch (error) {
+        debugLogger.warn(
+          `resolveIncludedFiles: gitignore-style pattern failed to compile, ` +
+            `treating it as matching nothing: "${pattern}" (${error})`,
+        );
+      }
+    }
+
+    const files = candidates.filter(
+      (entry) => !entry.endsWith('/') && matcher.ignores(entry),
+    );
+
+    // A collapsed `dir/` entry is worth expanding when a pattern could
+    // plausibly select something under it. `ignores()` on the directory
+    // itself answers the common `.local/` and `.local` forms; beyond that
+    // we fall back to a literal prefix test on each pattern, so
+    // `.local/certs/*.pem` still reaches into a collapsed `.local/`.
+    const dirs = candidates.filter((entry) => {
+      if (!entry.endsWith('/')) return false;
+      const withoutSlash = entry.slice(0, -1);
+      if (matcher.ignores(withoutSlash) || matcher.ignores(entry)) return true;
+      return patterns.some((pattern) => {
+        const rooted = pattern.startsWith('/') ? pattern.slice(1) : pattern;
+        // The literal head of the pattern, up to its first wildcard.
+        const wildcardAt = rooted.search(/[*?[]/);
+        const head = wildcardAt === -1 ? rooted : rooted.slice(0, wildcardAt);
+        return head.length > 0 && head.startsWith(entry);
+      });
+    });
+
+    if (dirs.length > 0) {
+      for (const entry of await lsIgnored(dirs)) {
+        if (matcher.ignores(entry)) files.push(entry);
+      }
+    }
+
+    return [...new Set(files)];
+  }
+
+  /**
+   * Phase D-4 copy loop. Copies each file selected by `.worktreeinclude`
+   * from the main working tree into the new worktree.
+   *
+   * Complements `symlinkConfiguredDirectories` rather than duplicating it.
+   * The two differ on both axes:
+   *
+   * - **Semantics.** A symlink is shared mutable state: an agent editing
+   *   `.env` inside the worktree writes through to the main tree. A copy
+   *   is per-worktree and isolated, which is what local config, secrets
+   *   and certificates need. Conversely a copy of `node_modules` costs
+   *   gigabytes, so heavy shared dirs still belong in
+   *   `worktree.symlinkDirectories`.
+   * - **Ownership.** `.worktreeinclude` is committed, so it travels with
+   *   the repository and applies to everyone who clones it; the setting
+   *   is per-user. That is also why entries here are lower-trust — see
+   *   `resolveWorktreeEntry`.
+   *
+   * Runs AFTER the symlink pass, and both skip an occupied destination,
+   * so when a path appears in both the symlink wins. That ordering is
+   * deliberate: the user's own setting outranks a file committed by
+   * whoever wrote the repository.
+   *
+   * Every entry here is a single file — `resolveIncludedFiles` already
+   * expanded directories through git — so this is a flat `copyFile` loop
+   * with no recursive walk. Symbolic links are skipped outright rather
+   * than copied as links or dereferenced: dereferencing would pull
+   * repo-external content into the worktree, and reproducing the link
+   * would hand the worktree a path that resolves who-knows-where.
+   *
+   * Same fail-open policy as the symlink pass: per-entry failures log and
+   * continue; the worktree stays usable.
+   */
+  private async copyIncludedPaths(
+    worktreePath: string,
+    entries: readonly string[],
+  ): Promise<void> {
+    const logPrefix = 'copyIncludedPaths';
+    const ctx = await this.buildWorktreeEntryContext(worktreePath, logPrefix);
+    if (!ctx) return;
+
+    let copied = 0;
+    for (const raw of entries) {
+      // `git ls-files` reports POSIX separators on every platform; the
+      // gates and `path.join` below expect native ones.
+      const native = raw.split('/').join(path.sep);
+
+      // Skip symlinks before anything else. `resolveWorktreeEntry`
+      // realpaths the source, so a link pointing inside the repo would
+      // otherwise be copied as its target's content under the link's
+      // name — silently materialising a file the repo models as a link.
+      const sourceAbs = path.resolve(ctx.repoRootAbs, native);
+      const isLink = await fs
+        .lstat(sourceAbs)
+        .then((st) => st.isSymbolicLink())
+        .catch(() => false);
+      if (isLink) {
+        debugLogger.debug(`${logPrefix}: skipping symlink: ${sourceAbs}`);
+        continue;
+      }
+
+      const resolved = await this.resolveWorktreeEntry(native, ctx, logPrefix);
+      if (!resolved) continue;
+      const { realSource, destAbs } = resolved;
+
+      // `lstat`, not `fileExists`: a broken symlink still occupies the
+      // slot and must not be overwritten, but `fs.access(F_OK)` follows
+      // the link and would report it absent.
+      const destOccupied = await fs
+        .lstat(destAbs)
+        .then(() => true)
+        .catch(() => false);
+      if (destOccupied) {
+        debugLogger.debug(
+          `${logPrefix}: destination exists, skipping: ${destAbs}`,
+        );
+        continue;
+      }
+
+      try {
+        await fs.copyFile(realSource, destAbs, fsConstants.COPYFILE_EXCL);
+        copied++;
+        debugLogger.debug(`${logPrefix}: copied ${realSource} → ${destAbs}`);
+      } catch (error) {
+        if (isNodeError(error) && error.code === 'EEXIST') {
+          // Lost the race with the lstat probe above. Same contract:
+          // leave the existing content alone.
+          debugLogger.debug(
+            `${logPrefix}: destination exists, skipping: ${destAbs}`,
+          );
+        } else {
+          debugLogger.warn(
+            `${logPrefix}: failed to copy ${realSource} → ${destAbs}: ${error}`,
+          );
+        }
+      }
+    }
+
+    if (copied > 0) {
+      debugLogger.debug(
+        `${logPrefix}: copied ${copied} file(s) from ${WORKTREE_INCLUDE_FILE}`,
+      );
     }
   }
 

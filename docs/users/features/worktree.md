@@ -90,6 +90,7 @@ Every Qwen-managed worktree is placed under your project's `.qwen` directory:
 - **Branch** — always `worktree-<slug>`, branched from whichever branch you have checked out when you ask for the worktree (not necessarily the main working tree's `HEAD`). For PR worktrees the branch is `worktree-pr-<N>` and is based on `FETCH_HEAD` (the PR's tip on the GitHub side) rather than your local branch.
 - **Hooks** — the worktree's `core.hooksPath` is automatically pointed at the main repo's `.husky/` (preferred) or `.git/hooks/` so commits inside the worktree still trigger your existing pre-commit / commit-msg hooks.
 - **Optional symlinks** — directories listed in `worktree.symlinkDirectories` (see [Settings](#settings)) are symlinked from the main repo into the new worktree so heavy dirs like `node_modules` can be reused without reinstalling.
+- **Optional copies** — paths listed in the repo's [`.worktreeinclude`](#worktreeinclude) file are copied in, so gitignored local files like `.env` are present without leaking edits back to your main tree.
 
 The general-purpose worktree path is **not configurable** — it must live under `<repoRoot>/.qwen/worktrees/` so the CLI can find it on restart and on stale-cleanup sweeps. (The unrelated `agents.arena.worktreeBaseDir` setting controls only [Agent Arena](./arena.md) worktrees, which use a separate path tree under `~/.qwen/arena/`.)
 
@@ -235,6 +236,50 @@ Settings unrelated to general worktrees but worth knowing about:
 - `agents.arena.worktreeBaseDir` — controls **Agent Arena** worktree placement (default `~/.qwen/arena`). Does not affect general-purpose worktrees, which always live under `<repoRoot>/.qwen/worktrees/`.
 
 There is no schema for `worktree.sparsePaths` yet — that's a roadmap item (see [Limitations](#limitations)).
+
+## `.worktreeinclude`
+
+A worktree contains only **tracked** files, so everything git deliberately ignores — `.env`, local dev configs, certificates — is missing from every worktree you create. Commit a `.worktreeinclude` file at your repository root to list the paths that should be copied in:
+
+```text
+# .worktreeinclude — one repo-relative path per line
+.env
+appsettings.Development.json
+.local/
+```
+
+One pattern per line, in **gitignore syntax** — `#` starts a comment, blank lines and surrounding whitespace are ignored, and globs (`*.pem`, `certs/**`) work the way they do in `.gitignore`. A pattern that fails to compile is dropped with a warning instead of failing the run.
+
+Only files git **actually ignores** are candidates. A pattern that matches a tracked file, or an untracked file that no `.gitignore` rule covers, selects nothing — tracked files already arrive in the worktree through `git worktree add`, and the gap this closes is the ignored ones. Symbolic links are skipped rather than copied.
+
+Because the file is committed, it travels with the repository and applies to everyone who clones it — unlike `worktree.symlinkDirectories`, which each developer sets in their own `settings.json`.
+
+### Copy or symlink?
+
+The two mechanisms are complementary, and the difference is not just cost:
+
+|                | `.worktreeinclude`                        | `worktree.symlinkDirectories`               |
+| -------------- | ----------------------------------------- | ------------------------------------------- |
+| **Mechanism**  | Copy                                      | Symlink                                     |
+| **Edits**      | Isolated — the worktree gets its own copy | Shared — writes go through to the main tree |
+| **Configured** | `.worktreeinclude`, committed to the repo | `settings.json`, per developer              |
+| **Use for**    | Local config, secrets, certificates       | Heavy shared dirs: `node_modules`, caches   |
+
+Reach for a copy when an agent editing the file inside the worktree must not touch your main checkout — which is exactly the case for `.env`. Reach for a symlink when the content is large and read-mostly: copying `node_modules` costs gigabytes per worktree, and there is currently **no size limit** on what `.worktreeinclude` will copy.
+
+### Rules and failure behavior
+
+Entries are validated against the same guards as `worktree.symlinkDirectories`, and rejections never abort worktree creation:
+
+- The candidate set comes from `git ls-files --others --ignored`, so a pattern can only ever select files git already lists. `.git` internals, tracked files and anything outside the repository are unreachable by construction.
+- Selected paths are additionally checked to resolve inside the repo root and outside `.git` / `.qwen`, as defense in depth.
+- **Symbolic links are skipped**, neither reproduced nor dereferenced.
+- **A pattern matching nothing is harmless** — no error, no failed creation.
+- **Existing destinations are never overwritten.** A tracked file that git already placed in the worktree wins over a copy, and so does a symlink from `worktree.symlinkDirectories` — the symlink pass runs first, so a path listed in both stays a symlink.
+
+Rejections and skips are recorded in the debug log (`DEBUG=1`); worktree creation itself still succeeds.
+
+Applies to ALL worktree-creation paths: `--worktree` flag, `enter_worktree` tool, and `agent isolation: "worktree"`.
 
 ## Tool Reference
 
