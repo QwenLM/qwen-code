@@ -4366,6 +4366,7 @@ function ensureMinimalDist({
     recursive: true,
   });
   writeFileSync(path.join(distPath, 'cli.js'), 'console.log("qwen");\n');
+  writeFileSync(path.join(distPath, 'codeModeHost.js'), 'export {};\n');
   if (includeCliEntry) {
     writeFileSync(path.join(distPath, 'cli-entry.js'), 'import "./cli.js";\n');
   }
