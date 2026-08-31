@@ -106,6 +106,20 @@ describe('collectScheduledTaskSession', () => {
     ).toEqual(['run-2', 'run-1']);
   });
 
+  it('treats a rename matching the suffix shape as a generated name', () => {
+    // Pins the known limit documented above SCHEDULED_TASK_RUN_TIME_SUFFIX
+    // in scheduled-task-session-groups.ts:
+    // shape-based classification cannot tell such a rename from a generated
+    // run name, so it outranks other renames and loses its suffix.
+    const sections = new Map();
+    collectScheduledTaskSession(sections, run('run-1', 'Investigate flake'));
+    collectScheduledTaskSession(
+      sections,
+      run('run-2', 'Follow-up · 08-31 09:30'),
+    );
+    expect(sections.get('scheduled-task:task-1')?.label).toBe('Follow-up');
+  });
+
   it('keeps the first rename as the label when no run carries the generated shape', () => {
     const sections = new Map();
     collectScheduledTaskSession(sections, run('run-1', 'First rename'));

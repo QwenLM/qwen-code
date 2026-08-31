@@ -5,6 +5,10 @@ import type { DaemonSessionSummary } from '@qwen-code/sdk/daemon';
 const SCHEDULED_TASK_RUN_SOURCE_ID_PREFIX = 'scheduled_task_run:';
 // Mirrors the time suffix appended by scheduledTaskRunSessionName in
 // cli/src/runtime/scheduled-task-run.ts; change both together.
+// Known limit: a user rename ending in this same shape is indistinguishable
+// from a generated run name here, so it is classified as generated (outranks
+// other renames, suffix stripped). Carrying the task title structurally —
+// persisted alongside the run — would remove the guesswork.
 const SCHEDULED_TASK_RUN_TIME_SUFFIX = / · \d{2}-\d{2} \d{2}:\d{2}$/u;
 
 export interface ScheduledTaskSessionGroupIdentity {
