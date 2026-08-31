@@ -647,8 +647,8 @@ describe('registerModelProvidersHotReload', () => {
     expect(refreshAuth).toHaveBeenCalledOnce();
     // Watcher-triggered refresh must never start an interactive auth flow:
     // the second argument makes QWEN_OAUTH require cached credentials, so
-    // unavailable credentials reject into the notice branch instead of
-    // prompting a device-auth mid-session.
+    // unavailable credentials reject into the listener's catch (debug-logged,
+    // retried on later events) instead of prompting a device-auth mid-session.
     expect(refreshAuth).toHaveBeenCalledWith(AuthType.USE_OPENAI, true);
   });
 
