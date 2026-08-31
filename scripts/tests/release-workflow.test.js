@@ -426,26 +426,10 @@ describe('release workflow', () => {
     );
 
     const rootPackage = JSON.parse(readFileSync('package.json', 'utf8'));
-    const expandWorkspace = (pattern) => {
-      if (pattern.endsWith('/*')) {
-        const parent = pattern.slice(0, -2);
-        return readdirSync(parent, { withFileTypes: true })
-          .filter((entry) => entry.isDirectory())
-          .map((entry) => join(parent, entry.name, 'package.json'))
-          .filter(existsSync);
-      }
-      const manifest = join(pattern, 'package.json');
-      return existsSync(manifest) ? [manifest] : [];
-    };
-    const excluded = new Set(
-      rootPackage.workspaces
-        .filter((pattern) => pattern.startsWith('!'))
-        .flatMap((pattern) => expandWorkspace(pattern.slice(1))),
-    );
-    const workspacePackages = rootPackage.workspaces
-      .filter((pattern) => !pattern.startsWith('!'))
-      .flatMap(expandWorkspace)
-      .filter((path) => !excluded.has(path))
+    const workspacePackages = getWorkspacePackageJsonPaths(
+      process.cwd(),
+      rootPackage.workspaces,
+    )
       .map((path) => [path, JSON.parse(readFileSync(path, 'utf8'))])
       .filter(([, packageJson]) => packageJson.scripts?.['test:ci']);
 
