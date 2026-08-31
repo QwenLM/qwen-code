@@ -1511,9 +1511,10 @@ describe('qwen resolve workflow: recovering requests that used to be lost', () =
     'utf8',
   );
   const resolveJob = job(workflow, 'resolve-pr');
+  const publishJob = job(workflow, 'publish-resolution');
   const authorizeJob = job(workflow, 'authorize');
   const prepareStep = step(resolveJob, 'Prepare pull request branch');
-  const reportStep = step(resolveJob, 'Report result');
+  const reportStep = step(publishJob, 'Report result');
   const authorizeStep = step(authorizeJob, 'Check principal write permission');
 
   // The replay functions, dedented out of the `run: |-` block so a real git
@@ -1829,68 +1830,79 @@ describe('qwen resolve workflow: recovering requests that used to be lost', () =
       'git diff "origin/${BASE_REF}...HEAD" > "${WORKDIR}/pushed/pushed.diff"',
     );
     expect(reportStep).toContain('qwen-resolve-pr-${PR_NUMBER}-pushed');
-    const pushedUpload = step(resolveJob, 'Upload pushed tree');
+    const pushedUpload = step(publishJob, 'Upload pushed tree');
     expect(pushedUpload).toContain(
-      "name: 'qwen-resolve-pr-${{ steps.resolve.outputs.pr_number }}-pushed'",
+      "name: 'qwen-resolve-pr-${{ needs.resolve-pr.outputs.pr_number }}-pushed'",
     );
     expect(pushedUpload).toContain("path: '${{ env.WORKDIR }}/pushed/'");
-    expect(pushedUpload).toContain(
-      'if: "${{ always() && steps.prepare.outputs.decision == \'run\' }}"',
-    );
-    expect(resolveJob.indexOf("- name: 'Upload pushed tree'")).toBeGreaterThan(
-      resolveJob.indexOf("- name: 'Report result'"),
+    // always() (not the resolve-pr prepare gate, which has no meaning here);
+    // quote style is the workflow author's choice, so match either.
+    expect(pushedUpload).toMatch(/if:\s*['"]\$\{\{ always\(\) \}\}['"]/);
+    expect(pushedUpload).not.toContain('steps.prepare.outputs.decision');
+    expect(publishJob.indexOf("- name: 'Upload pushed tree'")).toBeGreaterThan(
+      publishJob.indexOf("- name: 'Report result'"),
     );
   });
 
-  it('defines every uppercase variable the resolve-pr run blocks expand', () => {
+  it('defines every uppercase variable the resolve-pr and publish run blocks expand', () => {
     // The steps run under `set -u`; a ${NAME} the env block does not define
     // aborts the step at first use. The replay was shipped once with BASE_REF
     // missing from 'Report result' — the fixture test injected it, so nothing
     // noticed. Cover every run block of the job, not just that one.
-    const jobEnv = new Set(
-      [...resolveJob.matchAll(/^ {6}([A-Z][A-Z0-9_]*): /gm)].map((m) => m[1]),
-    );
     const builtins = new Set([
       'GITHUB_OUTPUT',
       'GITHUB_REPOSITORY',
       'GITHUB_STEP_SUMMARY',
+      'GITHUB_ENV',
+      'GITHUB_PATH',
       'RUNNER_TEMP',
       'HOME',
       'PATH',
+      'RANDOM',
+      'PIPESTATUS',
+      'BASH_REMATCH',
     ]);
-    const stepBlocks = resolveJob.split(/\n {6}- name: /).slice(1);
-    for (const block of stepBlocks) {
-      if (!/\n {8}run: \|-?\n/.test(block)) {
-        continue;
+    for (const jobText of [resolveJob, publishJob]) {
+      const jobEnv = new Set(
+        [...jobText.matchAll(/^ {6}([A-Z][A-Z0-9_]*): /gm)].map((m) => m[1]),
+      );
+      const stepBlocks = jobText.split(/\n {6}- name: /).slice(1);
+      for (const block of stepBlocks) {
+        if (!/\n {8}run: \|-?\n/.test(block)) {
+          continue;
+        }
+        const name = block.slice(0, block.indexOf('\n'));
+        const stepEnv = new Set(
+          [...block.matchAll(/^ {10}([A-Z][A-Z0-9_]*): /gm)].map((m) => m[1]),
+        );
+        const run = block.slice(block.search(/\n {8}run: \|-?\n/));
+        const assigned = new Set(
+          [...run.matchAll(/(?:^|[\s;{(])([A-Z][A-Z0-9_]*)=/gm)].map(
+            (m) => m[1],
+          ),
+        );
+        const referenced = new Set(
+          [...run.matchAll(/\$\{?([A-Z][A-Z0-9_]+)\b/g)]
+            .map((m) => m[1])
+            .filter((v) => !v.startsWith('GITHUB_')),
+        );
+        const missing = [...referenced].filter(
+          (v) =>
+            !jobEnv.has(v) &&
+            !stepEnv.has(v) &&
+            !assigned.has(v) &&
+            !builtins.has(v),
+        );
+        expect(
+          missing,
+          `step ${name} expands undefined: ${missing.join(', ')}`,
+        ).toEqual([]);
       }
-      const name = block.slice(0, block.indexOf('\n'));
-      const stepEnv = new Set(
-        [...block.matchAll(/^ {10}([A-Z][A-Z0-9_]*): /gm)].map((m) => m[1]),
-      );
-      const run = block.slice(block.search(/\n {8}run: \|-?\n/));
-      const assigned = new Set(
-        [...run.matchAll(/(?:^|[\s;{(])([A-Z][A-Z0-9_]*)=/gm)].map((m) => m[1]),
-      );
-      const referenced = new Set(
-        [...run.matchAll(/\$\{?([A-Z][A-Z0-9_]+)\b/g)]
-          .map((m) => m[1])
-          .filter((v) => !v.startsWith('GITHUB_')),
-      );
-      const missing = [...referenced].filter(
-        (v) =>
-          !jobEnv.has(v) &&
-          !stepEnv.has(v) &&
-          !assigned.has(v) &&
-          !builtins.has(v),
-      );
-      expect(
-        missing,
-        `step ${name} expands undefined: ${missing.join(', ')}`,
-      ).toEqual([]);
     }
-    // And the one that shipped missing is now there.
-    expect(step(resolveJob, 'Report result')).toContain(
-      "BASE_REF: '${{ steps.prepare.outputs.base_ref }}'",
+    // And the one that shipped missing is now there (the replay lives in the
+    // publish job, whose refs come from the agent job's outputs).
+    expect(step(publishJob, 'Report result')).toContain(
+      "BASE_REF: '${{ needs.resolve-pr.outputs.base_ref }}'",
     );
   });
 
