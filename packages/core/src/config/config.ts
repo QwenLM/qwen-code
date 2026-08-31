@@ -86,6 +86,10 @@ import { recordStartupEvent } from '../utils/startupEventSink.js';
 import { ToolRegistry, type ToolFactory } from '../tools/tool-registry.js';
 import type { McpBudgetEvent } from '../tools/mcp-client-manager.js';
 import { ToolNames } from '../tools/tool-names.js';
+import {
+  ToolMode,
+  type ToolMode as ToolModeValue,
+} from '../tools/code-mode.js';
 import type {
   ArtifactHostConfig,
   ArtifactOssConfig,
@@ -933,6 +937,8 @@ export interface ConfigParameters {
    * auto-approval and never affects registration (#10075).
    */
   eagerTools?: string[];
+  /** Replace ordinary model-facing tools with the isolated exec bridge. */
+  codeModeOnly?: boolean;
   /**
    * Percentage of the model's context window used as the session-start
    * budget for preloading deferred tools. When the combined estimated
@@ -2111,6 +2117,7 @@ export class Config {
   private readonly visibleTools: ReadonlySet<string>;
   private readonly eagerTools: readonly string[] | undefined;
   private readonly toolSearchThreshold: number;
+  private readonly toolMode: ToolModeValue;
   private readonly permissionsAllow: string[];
   private readonly permissionsAsk: string[];
   private readonly permissionsDeny: string[];
@@ -2619,6 +2626,10 @@ export class Config {
     this.skipStartupContext = params.skipStartupContext ?? false;
     this.bareMode = params.bareMode ?? false;
     this.safeMode = params.safeMode ?? isSafeModeEnv();
+    this.toolMode =
+      params.codeModeOnly && !this.bareMode && !this.safeMode
+        ? ToolMode.CodeModeOnly
+        : ToolMode.Direct;
     if (this.safeMode) {
       this.debugLogger.info(
         'Safe mode active: hooks, extensions, skills, MCP servers, context files, rules disabled',
@@ -6120,6 +6131,14 @@ export class Config {
     return this.toolSearchThreshold;
   }
 
+  getCodeModeOnly(): boolean {
+    return this.toolMode === ToolMode.CodeModeOnly;
+  }
+
+  getToolMode(): ToolModeValue {
+    return this.toolMode;
+  }
+
   /**
    * Replace the in-process `disabledTools`
    * snapshot with a fresh set sourced from the workspace settings.
@@ -9119,6 +9138,14 @@ export class Config {
       });
     };
 
+    const registerExecIfEnabled = async (): Promise<void> => {
+      if (this.getToolMode() !== ToolMode.CodeModeOnly) return;
+      await registerLazy(ToolNames.EXEC, async () => {
+        const { ExecTool } = await import('../tools/exec.js');
+        return new ExecTool(this);
+      });
+    };
+
     if (this.getBareMode()) {
       await registerLazy(ToolNames.READ_FILE, async () => {
         const { ReadFileTool } = await import('../tools/read-file.js');
@@ -9138,6 +9165,7 @@ export class Config {
       });
       await registerGoalWorkerTools();
       await registerStructuredOutputIfRequested();
+      await registerExecIfEnabled();
       this.debugLogger.debug(
         `ToolRegistry created: ${JSON.stringify(registry.getAllToolNames())} (${registry.getAllToolNames().length} tools)`,
       );
@@ -9145,6 +9173,7 @@ export class Config {
     }
 
     // --- Core tools (always registered) ---
+    await registerExecIfEnabled();
     await registerGoalWorkerTools();
     await registerLazy(ToolNames.TOOL_SEARCH, async () => {
       const { ToolSearchTool } = await import('../tools/tool-search.js');

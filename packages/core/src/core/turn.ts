@@ -148,6 +148,9 @@ export interface ToolCallRequestInfo {
   /** Set to true when the LLM response was truncated due to max_tokens. */
   wasOutputTruncated?: boolean;
   goalContext?: GoalTurnPermit;
+  /** Parent model tool call for a programmatically dispatched child call. */
+  parentCallId?: string;
+  source?: 'model' | 'code_mode';
 }
 
 export type ToolExecutionStatus =

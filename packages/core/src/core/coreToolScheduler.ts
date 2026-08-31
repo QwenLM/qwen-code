@@ -206,6 +206,16 @@ import {
 import { evaluateToolInvocationGuard } from './tool-invocation-guard.js';
 import { goalTurnContext } from '../goals/goal-turn-context.js';
 import { goalToolResultProvenance } from '../goals/goal-tool-result-provenance.js';
+import {
+  runWithoutToolCallRuntime,
+  runWithToolCallRuntime,
+  type CodeModeToolResult,
+} from '../code-mode/tool-call-runtime.js';
+import {
+  getToolExposure,
+  isCodeModeToolCallAllowed,
+  ToolMode,
+} from '../tools/code-mode.js';
 
 const debugLogger = createDebugLogger('TOOL_SCHEDULER');
 
@@ -280,6 +290,22 @@ function extractTextFromPartListUnion(c: PartListUnion): string {
   }
   return '';
 }
+
+function extractCodeModeToolOutput(parts: Part[]): string {
+  return parts
+    .map((part) => {
+      if (typeof part.text === 'string') return part.text;
+      const response = part.functionResponse?.response;
+      if (!response) return '';
+      const value =
+        response['output'] ?? response['error'] ?? response['content'] ?? '';
+      return typeof value === 'string' ? value : JSON.stringify(value);
+    })
+    .filter(Boolean)
+    .join('\n');
+}
+
+const CODE_MODE_BATCH_WINDOW_MS = 5;
 
 const TOOL_SPAN_STATUS_PRE_HOOK_BLOCKED = 'Tool execution blocked by hook';
 const TOOL_SPAN_STATUS_INVOCATION_GUARD_DENIED =
@@ -1404,6 +1430,7 @@ function producerContentEqual(
 }
 
 export class CoreToolScheduler {
+  private readonly schedulerOptions: CoreToolSchedulerOptions;
   private toolRegistry: ToolRegistry;
   private toolCalls: ToolCall[] = [];
   private outputUpdateHandler?: OutputUpdateHandler;
@@ -1474,8 +1501,26 @@ export class CoreToolScheduler {
     resolve: () => void;
     reject: (reason?: Error) => void;
   }> = [];
+  private nestedToolScheduler?: CoreToolScheduler;
+  private nestedToolCalls: ToolCall[] = [];
+  private nestedSequence = 0;
+  private nestedFlushScheduled = false;
+  private nestedQueue: Array<{
+    request: ToolCallRequestInfo;
+    signal: AbortSignal;
+    resolve: (result: CodeModeToolResult) => void;
+    reject: (reason: unknown) => void;
+  }> = [];
+  private nestedResolvers = new Map<
+    string,
+    {
+      resolve: (result: CodeModeToolResult) => void;
+      reject: (reason: unknown) => void;
+    }
+  >();
 
   constructor(options: CoreToolSchedulerOptions) {
+    this.schedulerOptions = options;
     this.config = options.config;
     this.toolRegistry = options.config.getToolRegistry();
     this.outputUpdateHandler = options.outputUpdateHandler;
@@ -1487,6 +1532,114 @@ export class CoreToolScheduler {
     this.onToolResultFullTurnModel = options.onToolResultFullTurnModel;
     this.shouldObserveProducer = options.shouldObserveProducer ?? (() => true);
     this.hasSkillToolOverride = options.hasSkillTool;
+  }
+
+  private getOrCreateNestedToolScheduler(): CoreToolScheduler {
+    if (this.nestedToolScheduler) return this.nestedToolScheduler;
+    this.nestedToolScheduler = new CoreToolScheduler({
+      ...this.schedulerOptions,
+      onAllToolCallsComplete: async (calls) => {
+        for (const call of calls) {
+          const resolver = this.nestedResolvers.get(call.request.callId);
+          if (!resolver) continue;
+          this.nestedResolvers.delete(call.request.callId);
+          if (call.status === 'success') {
+            resolver.resolve({
+              callId: call.request.callId,
+              name: call.request.name,
+              status: 'success',
+              output: extractCodeModeToolOutput(call.response.responseParts),
+              content: call.response.responseParts,
+            });
+          } else {
+            resolver.reject(
+              call.response.error ??
+                new Error(
+                  extractCodeModeToolOutput(call.response.responseParts) ||
+                    `Tool ${call.request.name} failed.`,
+                ),
+            );
+          }
+        }
+      },
+      onToolCallsUpdate: (calls) => {
+        this.nestedToolCalls = calls;
+        this.notifyToolCallsUpdate();
+      },
+    });
+    return this.nestedToolScheduler;
+  }
+
+  private dispatchCodeModeTool(
+    name: string,
+    args: Record<string, unknown>,
+    parent: ToolCallRequestInfo,
+    signal: AbortSignal,
+  ): Promise<CodeModeToolResult> {
+    if (getToolExposure(name) !== 'code-mode-callable') {
+      return Promise.reject(
+        new Error(`Tool "${name}" is not callable from exec.`),
+      );
+    }
+    const callId = `${parent.callId}:code:${++this.nestedSequence}`;
+    const request: ToolCallRequestInfo = {
+      callId,
+      name,
+      args,
+      isClientInitiated: true,
+      prompt_id: parent.prompt_id,
+      response_id: parent.response_id,
+      parentCallId: parent.callId,
+      source: 'code_mode',
+      goalContext: parent.goalContext,
+    };
+    return new Promise<CodeModeToolResult>((resolve, reject) => {
+      this.nestedQueue.push({ request, signal, resolve, reject });
+      if (this.nestedFlushScheduled) return;
+      this.nestedFlushScheduled = true;
+      setTimeout(() => this.flushNestedQueue(), CODE_MODE_BATCH_WINDOW_MS);
+    });
+  }
+
+  private flushNestedQueue(): void {
+    this.nestedFlushScheduled = false;
+    const entries = this.nestedQueue.splice(0);
+    if (entries.length === 0) return;
+    const active = entries.filter((entry) => !entry.signal.aborted);
+    for (const entry of entries) {
+      if (entry.signal.aborted) entry.reject(entry.signal.reason);
+    }
+    if (active.length === 0) return;
+
+    const batchController = new AbortController();
+    const abortBatch = (event: Event) => {
+      const aborted = event.currentTarget as AbortSignal;
+      batchController.abort(aborted.reason);
+    };
+    for (const entry of active) {
+      entry.signal.addEventListener('abort', abortBatch, { once: true });
+      this.nestedResolvers.set(entry.request.callId, {
+        resolve: entry.resolve,
+        reject: entry.reject,
+      });
+    }
+    void runWithoutToolCallRuntime(() =>
+      this.getOrCreateNestedToolScheduler().schedule(
+        active.map((entry) => entry.request),
+        batchController.signal,
+      ),
+    )
+      .catch((error) => {
+        for (const entry of active) {
+          this.nestedResolvers.delete(entry.request.callId);
+          entry.reject(error);
+        }
+      })
+      .finally(() => {
+        for (const entry of active) {
+          entry.signal.removeEventListener('abort', abortBatch);
+        }
+      });
   }
 
   private get memoryMonitor(): MemoryPressureMonitor | undefined {
@@ -2459,6 +2612,25 @@ export class CoreToolScheduler {
           }
 
           const canonicalName = canonicalToolName(reqInfo.name);
+          if (
+            this.config.getToolMode?.() === ToolMode.CodeModeOnly &&
+            !isCodeModeToolCallAllowed(canonicalName, reqInfo.source ?? 'model')
+          ) {
+            newToolCalls.push({
+              status: 'error',
+              request: reqInfo,
+              response: createErrorResponse(
+                reqInfo,
+                new Error(
+                  `Tool "${reqInfo.name}" is unavailable on this CodeModeOnly call surface.`,
+                ),
+                ToolErrorType.EXECUTION_DENIED,
+                'not_started',
+              ),
+              durationMs: 0,
+            });
+            continue;
+          }
 
           // Check if the tool is excluded due to permissions/environment restrictions
           // This check should happen before registry lookup to provide a clear permission error
@@ -2739,6 +2911,10 @@ export class CoreToolScheduler {
             'gen_ai.tool.call.id': reqInfo.providerCallId ?? reqInfo.callId,
             call_id: reqInfo.callId,
             tool_name: canonicalName,
+            ...(reqInfo.parentCallId
+              ? { 'tool.parent_call_id': reqInfo.parentCallId }
+              : {}),
+            ...(reqInfo.source ? { 'tool.source': reqInfo.source } : {}),
           },
           toolCall.tool.description,
           reqInfo.prompt_id,
@@ -3769,7 +3945,22 @@ export class CoreToolScheduler {
     // Guard: if the tool is no longer awaiting approval (already handled by
     // another confirmation path, e.g. IDE vs CLI race), skip to avoid double
     // processing and potential re-execution.
-    if (!toolCall) return;
+    if (!toolCall) {
+      if (
+        this.nestedToolScheduler?.toolCalls.some(
+          (call) => call.request.callId === callId,
+        )
+      ) {
+        return this.nestedToolScheduler.handleConfirmationResponse(
+          callId,
+          originalOnConfirm,
+          outcome,
+          signal,
+          payload,
+        );
+      }
+      return;
+    }
 
     if (goalTurnContext.getStore() !== toolCall.request.goalContext) {
       return runInRequestGoalContext(toolCall.request, () =>
@@ -4307,6 +4498,14 @@ export class CoreToolScheduler {
           'gen_ai.tool.call.id': scheduledCall.request.providerCallId ?? callId,
           call_id: callId, // legacy alias — see _schedule for context
           tool_name: canonical, // legacy alias — see _schedule for context
+          ...(scheduledCall.request.parentCallId
+            ? {
+                'tool.parent_call_id': scheduledCall.request.parentCallId,
+              }
+            : {}),
+          ...(scheduledCall.request.source
+            ? { 'tool.source': scheduledCall.request.source }
+            : {}),
         },
         scheduledCall.tool.description,
         scheduledCall.request.prompt_id,
@@ -4850,14 +5049,30 @@ export class CoreToolScheduler {
               callId,
             });
             executionStatus = 'error';
-            return invocation.execute(
-              execSignal,
-              liveOutputCallback,
-              shellExecutionConfig,
-              setPidCallback,
-              setPromoteAbortControllerCallback,
-              canPromoteForegroundShell,
-            );
+            const execute = () =>
+              invocation.execute(
+                execSignal,
+                liveOutputCallback,
+                shellExecutionConfig,
+                setPidCallback,
+                setPromoteAbortControllerCallback,
+                canPromoteForegroundShell,
+              );
+            return scheduledCall.request.name === ToolNames.EXEC
+              ? runWithToolCallRuntime(
+                  {
+                    parentCallId: callId,
+                    dispatch: (name, args, nestedSignal) =>
+                      this.dispatchCodeModeTool(
+                        name,
+                        args,
+                        scheduledCall.request,
+                        nestedSignal,
+                      ),
+                  },
+                  execute,
+                )
+              : execute();
           }),
         );
       } else {
@@ -4872,11 +5087,27 @@ export class CoreToolScheduler {
               callId,
             });
             executionStatus = 'error';
-            return invocation.execute(
-              execSignal,
-              liveOutputCallback,
-              shellExecutionConfig,
-            );
+            const execute = () =>
+              invocation.execute(
+                execSignal,
+                liveOutputCallback,
+                shellExecutionConfig,
+              );
+            return scheduledCall.request.name === ToolNames.EXEC
+              ? runWithToolCallRuntime(
+                  {
+                    parentCallId: callId,
+                    dispatch: (name, args, nestedSignal) =>
+                      this.dispatchCodeModeTool(
+                        name,
+                        args,
+                        scheduledCall.request,
+                        nestedSignal,
+                      ),
+                  },
+                  execute,
+                )
+              : execute();
           }),
         );
       }
@@ -6277,7 +6508,7 @@ export class CoreToolScheduler {
       return;
     }
     try {
-      this.onToolCallsUpdate([...this.toolCalls]);
+      this.onToolCallsUpdate([...this.toolCalls, ...this.nestedToolCalls]);
     } catch (error) {
       debugLogger.error(
         `Tool call update observer failed: ${

@@ -2849,6 +2849,40 @@ describe('mergeExcludeTools', () => {
     expect(config.getToolSearchThreshold()).toBe(10);
   });
 
+  it('should enable CodeModeOnly only when explicitly configured', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    const direct = await loadCliConfig({}, argv, undefined, []);
+    const codeMode = await loadCliConfig(
+      { tools: { codeModeOnly: true } },
+      argv,
+      undefined,
+      [],
+    );
+
+    expect(direct.getCodeModeOnly()).toBe(false);
+    expect(codeMode.getCodeModeOnly()).toBe(true);
+    expect(direct.getToolMode()).toBe('direct');
+    expect(codeMode.getToolMode()).toBe('code_mode_only');
+  });
+
+  it.each(['--safe-mode', '--bare'])(
+    'should disable CodeModeOnly in %s mode',
+    async (flag) => {
+      process.argv = ['node', 'script.js', flag];
+      const argv = await parseArguments();
+      const config = await loadCliConfig(
+        { tools: { codeModeOnly: true } },
+        argv,
+        undefined,
+        [],
+      );
+
+      expect(config.getCodeModeOnly()).toBe(false);
+    },
+  );
+
   it('should default tools.listDirectory.enabled to false', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();

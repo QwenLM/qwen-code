@@ -2562,6 +2562,16 @@ const SETTINGS_SCHEMA = {
     description: 'Settings for built-in and custom tools.',
     showInDialog: false,
     properties: {
+      codeModeOnly: {
+        type: 'boolean',
+        label: 'Code Mode Only',
+        category: 'Tools',
+        requiresRestart: true,
+        default: false,
+        description:
+          'Expose ordinary tools to the model only through the isolated exec JavaScript tool. Direct control tools remain available.',
+        showInDialog: false,
+      },
       sandbox: {
         type: 'object',
         label: 'Sandbox',

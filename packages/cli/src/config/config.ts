@@ -2008,6 +2008,8 @@ export async function loadCliConfig(
     disabledTools: disabledTools.length > 0 ? disabledTools : undefined,
     visibleTools: visibleTools.length > 0 ? visibleTools : undefined,
     eagerTools,
+    codeModeOnly:
+      !bareMode && !safeMode && settings.tools?.codeModeOnly === true,
     toolSearchThreshold:
       bareMode || safeMode ? 0 : settings.tools?.toolSearch?.threshold,
     // New unified permissions (PermissionManager source of truth).

@@ -29,6 +29,14 @@ import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
 import type { ReadResourceResult } from '@modelcontextprotocol/sdk/types.js';
 import { normalizeMcpToolName } from '../utils/tool-name-utils.js';
 import { CHARS_PER_TOKEN } from '../services/tokenEstimation.js';
+import {
+  buildExecDeclaration,
+  getToolExposure,
+  planCodeModeBindings,
+  ToolMode,
+  type CodeModeBindingPlan,
+} from './code-mode.js';
+import { ToolNames } from './tool-names.js';
 
 type ToolParams = Record<string, unknown>;
 
@@ -208,6 +216,7 @@ export class ToolRegistry {
   // pinDeferredToolReveal): they survive the `/clear` reset that
   // intentionally drops discovered reveals so the new session starts clean.
   private pinnedDeferredReveals: Set<string> = new Set();
+  private codeModeCollisionWarnings = new Set<string>();
   // Built-in tools demoted to deferred by an active `settings.tools.eager`
   // allowlist (#9827, #10075). They are fully registered — listed
   // in `/tools`, discoverable and loadable via ToolSearch, callable through
@@ -252,6 +261,20 @@ export class ToolRegistry {
     const byName = aName.localeCompare(bName);
     if (byName !== 0) return byName;
     return a.displayName.localeCompare(b.displayName);
+  }
+
+  private static compareCodeModeTools(
+    a: AnyDeclarativeTool,
+    b: AnyDeclarativeTool,
+  ): number {
+    const aName = a.schema.name ?? a.name;
+    const bName = b.schema.name ?? b.name;
+    if (aName !== bName) return aName < bName ? -1 : 1;
+    return a.displayName < b.displayName
+      ? -1
+      : a.displayName > b.displayName
+        ? 1
+        : 0;
   }
 
   /**
@@ -818,6 +841,9 @@ export class ToolRegistry {
   getFunctionDeclarations(options?: {
     includeDeferred?: boolean;
   }): FunctionDeclaration[] {
+    if (this.config.getToolMode?.() === ToolMode.CodeModeOnly) {
+      return this.getCodeModeFunctionDeclarations();
+    }
     const includeDeferred = options?.includeDeferred === true;
     return Array.from(this.tools.values())
       .filter(
@@ -829,6 +855,51 @@ export class ToolRegistry {
       )
       .sort(ToolRegistry.compareToolsByDeclarationName)
       .map((tool) => tool.schema);
+  }
+
+  private getCodeModeFunctionDeclarations(
+    allowedNames?: ReadonlySet<string>,
+  ): FunctionDeclaration[] {
+    const plan = this.getCodeModeBindingPlan(allowedNames);
+    return Array.from(this.tools.values())
+      .filter((tool) => {
+        const exposure = getToolExposure(tool.name);
+        if (exposure === 'exec') return true;
+        return (
+          exposure === 'direct-only' &&
+          (!allowedNames || allowedNames.has(tool.name))
+        );
+      })
+      .sort(ToolRegistry.compareCodeModeTools)
+      .map((tool) =>
+        tool.name === ToolNames.EXEC
+          ? buildExecDeclaration(tool, plan)
+          : tool.schema,
+      );
+  }
+
+  getCodeModeBindingPlan(
+    allowedNames?: ReadonlySet<string>,
+  ): CodeModeBindingPlan {
+    const plan = planCodeModeBindings(
+      Array.from(this.tools.values()),
+      (name) => this.isDeferredAndHidden(name),
+      allowedNames,
+    );
+    this.warnCodeModeCollisions(plan);
+    return plan;
+  }
+
+  private warnCodeModeCollisions(plan: CodeModeBindingPlan): void {
+    for (const collision of plan.collisions) {
+      const key = `${collision.jsName}:${collision.kept}:${collision.omitted}`;
+      if (this.codeModeCollisionWarnings.has(key)) continue;
+      this.codeModeCollisionWarnings.add(key);
+      debugLogger.warn(
+        `Code mode tool "${collision.omitted}" is unavailable because its JavaScript name ` +
+          `tools.${collision.jsName} collides with "${collision.kept}".`,
+      );
+    }
   }
 
   /**
@@ -1015,6 +1086,9 @@ export class ToolRegistry {
         `getFunctionDeclarationsFiltered() called with ${this.factories.size} unloaded ` +
           `tool factories. Call warmAll() first to avoid incomplete results.`,
       );
+    }
+    if (this.config.getToolMode?.() === ToolMode.CodeModeOnly) {
+      return this.getCodeModeFunctionDeclarations(new Set(toolNames));
     }
     const declarations: FunctionDeclaration[] = [];
     for (const name of toolNames) {

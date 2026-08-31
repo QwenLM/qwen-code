@@ -28545,6 +28545,106 @@ describe('Session', () => {
       }>;
     };
 
+    it('re-enters the ACP tool chain for a code-mode nested call', async () => {
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      mockConfig.getToolMode = vi
+        .fn()
+        .mockReturnValue(core.ToolMode.CodeModeOnly);
+      const nestedExecute = vi.fn().mockImplementation(async () => {
+        expect(core.getToolCallRuntime()).toBeUndefined();
+        return {
+          llmContent: 'nested ACP output',
+          returnDisplay: 'nested ACP output',
+        };
+      });
+      const nestedTool = {
+        name: 'read_file',
+        kind: core.Kind.Read,
+        displayName: 'Read file',
+        description: 'Read file',
+        build: vi.fn().mockReturnValue({
+          params: { path: '/tmp/example.txt' },
+          execute: nestedExecute,
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue('Read file'),
+          toolLocations: vi.fn().mockReturnValue([]),
+        }),
+        canUpdateOutput: false,
+        isOutputMarkdown: true,
+      };
+      const outerTool = {
+        name: core.ToolNames.EXEC,
+        kind: core.Kind.Other,
+        displayName: 'Exec',
+        description: 'Exec',
+        build: vi.fn().mockReturnValue({
+          params: { source: 'probe' },
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue('Exec'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          execute: vi.fn().mockImplementation(async (signal: AbortSignal) => {
+            const runtime = core.getToolCallRuntime();
+            if (!runtime) throw new Error('missing runtime');
+            const nested = await runtime.dispatch(
+              'read_file',
+              { path: '/tmp/example.txt' },
+              signal,
+            );
+            return {
+              llmContent: nested.output,
+              returnDisplay: nested.output,
+            };
+          }),
+        }),
+        canUpdateOutput: false,
+        isOutputMarkdown: true,
+      };
+      mockToolRegistry.getTool.mockImplementation((name: string) =>
+        name === core.ToolNames.EXEC ? outerTool : nestedTool,
+      );
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'prompt-code-mode-acp', [
+        {
+          id: 'exec-acp-parent',
+          name: core.ToolNames.EXEC,
+          args: { source: 'probe' },
+        },
+      ]);
+
+      expect(nestedExecute).toHaveBeenCalledOnce();
+      expect(mockToolRegistry.getTool).toHaveBeenCalledWith('read_file');
+      expect(result.parts).toHaveLength(1);
+      expect(result.parts[0].functionResponse?.name).toBe(core.ToolNames.EXEC);
+      expect(result.parts[0].functionResponse?.response?.['output']).toBe(
+        'nested ACP output',
+      );
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+        expect.arrayContaining([
+          expect.objectContaining({
+            functionResponse: expect.objectContaining({ name: 'read_file' }),
+          }),
+        ]),
+        expect.anything(),
+      );
+
+      const direct = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'prompt-code-mode-direct', [
+        {
+          id: 'read-acp-direct',
+          name: 'read_file',
+          args: { path: '/tmp/example.txt' },
+        },
+      ]);
+      expect(nestedExecute).toHaveBeenCalledOnce();
+      expect(direct.parts[0].functionResponse?.response?.['error']).toContain(
+        'unavailable on this CodeModeOnly call surface',
+      );
+    });
+
     function emitNestedAskUserQuestion(
       eventEmitter: EventEmitter,
       respond: ReturnType<typeof vi.fn>,
