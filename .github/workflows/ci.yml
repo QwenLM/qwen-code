@@ -1479,6 +1479,10 @@ jobs:
           echo "Using persistent npm cache at ${cache_dir}"
           du -sh "${cache_dir}" 2>/dev/null || true
 
+      - name: 'Disk floor gate (self-hosted)'
+        if: "${{ steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
+        run: 'bash .github/scripts/check-disk-floor.sh "${GITHUB_WORKSPACE}" "${RUNNER_TEMP:-/tmp}"'
+
       - name: 'Install Dependencies'
         if: "${{ steps.ci_profile.outputs.ci_profile == 'full' }}"
         env:
