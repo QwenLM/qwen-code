@@ -19121,7 +19121,7 @@ describe('App session callbacks', () => {
     ).toBe('session-1');
   });
 
-  it('submits allow_once, not allow_always, for a native edit approval accept', async () => {
+  it('submits allow_once for a native structured edit approval accept', async () => {
     let shellApi: WebShellApi | null = null;
     const { rerender } = renderApp({
       hostOwnsEditDiffPreview: true,
@@ -19138,8 +19138,8 @@ describe('App session callbacks', () => {
     await act(async () => {
       testState.blocks = [
         makePendingPermissionBlock({
-          toolName: 'edit',
-          kind: 'edit',
+          toolName: 'run_shell_command',
+          kind: 'execute',
           content: [
             {
               type: 'diff',

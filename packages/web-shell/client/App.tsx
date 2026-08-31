@@ -9108,7 +9108,6 @@ export function App({
         (!requestId ||
           request.id !== requestId ||
           !hostOwnsEditDiffPreview ||
-          !isEditToolPermission(request) ||
           request.hasDiffPreview !== true)
       ) {
         return false;
