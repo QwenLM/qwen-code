@@ -4515,6 +4515,9 @@ describe('runQwenServe telemetry validation', () => {
       expect(createBridge.mock.calls[1]?.[0]).not.toHaveProperty(
         'permissionConsensusQuorum',
       );
+      const firstDynamicEpochSource =
+        createBridge.mock.calls[1]?.[0].runtimeEpochSource;
+      expect(firstDynamicEpochSource?.allocate()).toBe(1);
       const firstDynamicFileSystem = createBridge.mock.calls[1]?.[0].fileSystem;
       const firstDynamicTarget = path.join(
         tmpDir,
@@ -4608,6 +4611,10 @@ describe('runQwenServe telemetry validation', () => {
       });
       expect(readded.status).toBe(201);
       expect(createBridge).toHaveBeenCalledTimes(3);
+      expect(createBridge.mock.calls[2]?.[0].runtimeEpochSource).toBe(
+        firstDynamicEpochSource,
+      );
+      expect(firstDynamicEpochSource?.allocate()).toBe(2);
       const secondDynamicTarget = path.join(
         tmpDir,
         'dynamic-runtime-readded.txt',

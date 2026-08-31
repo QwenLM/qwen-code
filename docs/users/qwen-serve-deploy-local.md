@@ -42,7 +42,8 @@ Runtime isolation covers cwd, environment overlay, filesystem/trust boundary,
 workspace services, bridge, Voice lease state, channel worker, and the ACP/MCP
 resource boundary. Production attempts to preheat the trusted primary ACP child
 for compatibility; trusted secondaries start on their first runtime-backed
-command or Session, and untrusted workspaces do not start ACP.
+command or Session, and untrusted secondaries do not start ACP. Legacy primary
+routes retain their existing compatibility behavior.
 Authentication, HTTP rate limits, listener and Voice admission caps,
 total-session admission, metrics, shutdown, and the process fault radius remain
 daemon-global. Run separate daemons when those process-level boundaries must be

@@ -1582,48 +1582,52 @@ describe('DaemonClient', () => {
       });
     });
 
-    it('gives runtime ensure the server deadline plus client headroom', async () => {
-      vi.useFakeTimers();
-      try {
-        let resolveResponse: ((value: Response) => void) | undefined;
-        let requestSignal: AbortSignal | null | undefined;
-        const slowFetch = vi.fn(
-          (_input: RequestInfo | URL, init?: { signal?: AbortSignal | null }) =>
-            new Promise<Response>((resolve, reject) => {
-              resolveResponse = resolve;
-              requestSignal = init?.signal;
-              init?.signal?.addEventListener('abort', () => {
-                reject(
-                  init.signal!.reason ??
-                    new DOMException('aborted', 'AbortError'),
-                );
-              });
-            }),
-        );
-        const client = new DaemonClient({
-          baseUrl: 'http://daemon',
-          fetch: slowFetch as unknown as typeof globalThis.fetch,
-          fetchTimeoutMs: 1,
-        });
+    it.each([
+      ['primary', (client: DaemonClient) => client.ensureWorkspaceRuntime()],
+      [
+        'qualified',
+        (client: DaemonClient) =>
+          client.workspaceByCwd('/work/secondary').ensureRuntime(),
+      ],
+    ] as const)(
+      'gives %s runtime ensure the server deadline plus client headroom',
+      async (_label, ensureRuntime) => {
+        vi.useFakeTimers();
+        try {
+          let requestSignal: AbortSignal | null | undefined;
+          const slowFetch = vi.fn(
+            (
+              _input: RequestInfo | URL,
+              init?: { signal?: AbortSignal | null },
+            ) =>
+              new Promise<Response>((_resolve, reject) => {
+                requestSignal = init?.signal;
+                init?.signal?.addEventListener('abort', () => {
+                  reject(
+                    init.signal!.reason ??
+                      new DOMException('aborted', 'AbortError'),
+                  );
+                });
+              }),
+          );
+          const client = new DaemonClient({
+            baseUrl: 'http://daemon',
+            fetch: slowFetch as unknown as typeof globalThis.fetch,
+            fetchTimeoutMs: 1,
+          });
 
-        const inflight = client.ensureWorkspaceRuntime();
-        await vi.advanceTimersByTimeAsync(61_999);
-        expect(requestSignal?.aborted).toBe(false);
-        resolveResponse?.(
-          jsonResponse(200, {
-            v: 1,
-            workspaceCwd: '/work/a',
-            state: 'idle',
-            runtimeLive: true,
-            runtimeEpoch: 1,
-          }),
-        );
-
-        await expect(inflight).resolves.toMatchObject({ runtimeLive: true });
-      } finally {
-        vi.useRealTimers();
-      }
-    });
+          const outcome = ensureRuntime(client).catch(
+            (error: unknown) => error,
+          );
+          await vi.advanceTimersByTimeAsync(61_999);
+          expect(requestSignal?.aborted).toBe(false);
+          await vi.advanceTimersByTimeAsync(1);
+          expect(await outcome).toMatchObject({ name: 'TimeoutError' });
+        } finally {
+          vi.useRealTimers();
+        }
+      },
+    );
 
     it('GETs /workspace/preflight and returns the preflight envelope unchanged', async () => {
       const preflight: DaemonWorkspacePreflightStatus = {

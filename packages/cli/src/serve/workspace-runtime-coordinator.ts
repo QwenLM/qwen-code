@@ -106,7 +106,7 @@ export class WorkspaceRuntimeCoordinator {
         timeoutMs,
       );
     } catch (error) {
-      this.assertAcceptingWork();
+      this.assertAcceptingWork(error);
       if (error instanceof WorkspaceRuntimeStillStartingError) throw error;
       throw new WorkspaceRuntimeInitializationError(error);
     }
@@ -120,10 +120,10 @@ export class WorkspaceRuntimeCoordinator {
     return status;
   }
 
-  private assertAcceptingWork(): void {
+  private assertAcceptingWork(cause?: unknown): void {
     this.runtime.generationGuard?.assertOpen();
     if (this.disposed || this.draining) {
-      throw new WorkspaceDrainingError(this.runtime.workspaceCwd);
+      throw new WorkspaceDrainingError(this.runtime.workspaceCwd, cause);
     }
   }
 }

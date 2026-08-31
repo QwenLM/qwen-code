@@ -5229,6 +5229,53 @@ describe('createServeApp', () => {
       }
     });
 
+    it('mounts primary workspace runtime status and ensure routes', async () => {
+      let snapshot = {
+        state: 'cold' as const,
+        runtimeLive: false,
+        runtimeEpoch: 0,
+        activeWork: false,
+      };
+      const bridge = Object.assign(fakeBridge(), {
+        getWorkspaceRuntimeLifecycleSnapshot: () => snapshot,
+        preheat: vi.fn(async () => {
+          snapshot = {
+            state: 'idle' as const,
+            runtimeLive: true,
+            runtimeEpoch: 1,
+            activeWork: false,
+          };
+        }),
+      });
+      const workspaceRegistry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'primary-id',
+          workspaceCwd: WS_BOUND,
+          primary: true,
+          bridge,
+        }),
+      ]);
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, workspaceRegistry },
+      );
+
+      const before = await request(app)
+        .get('/workspace/runtime/status')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(before.status).toBe(200);
+      expect(before.body).toMatchObject({ state: 'cold', runtimeEpoch: 0 });
+
+      const ensured = await request(app)
+        .post('/workspace/runtime/ensure')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({});
+      expect(ensured.status).toBe(200);
+      expect(ensured.body).toMatchObject({ state: 'idle', runtimeEpoch: 1 });
+      expect(bridge.preheat).toHaveBeenCalledWith({ keepAliveMs: 600_000 });
+    });
+
     it('rejects workspace ACP preheat timeouts above the route cap', async () => {
       const bridge = fakeBridge();
       const opts = { ...baseOpts, workspace: WS_BOUND, token: 'secret' };

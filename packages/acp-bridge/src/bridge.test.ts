@@ -4208,18 +4208,18 @@ describe('createAcpSessionBridge', () => {
       channelFactory,
     });
     try {
-      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
       const refresh = bridge.refreshExtensionsForAllSessions();
+      const overlappingRefresh = bridge.refreshExtensionsForAllSessions();
 
       await vi.advanceTimersByTimeAsync(30_000);
 
       await expect(refresh).resolves.toEqual({ refreshed: 0, failed: 1 });
-      expect(stalledHandle.killed).toBe(true);
-
-      await expect(bridge.refreshExtensionsForAllSessions()).resolves.toEqual({
+      await expect(overlappingRefresh).resolves.toEqual({
         refreshed: 0,
-        failed: 0,
+        failed: 1,
       });
+      expect(stalledHandle.killed).toBe(false);
       expect(
         stalledHandle.agent.extMethodCalls.filter(
           (call) =>
@@ -4228,6 +4228,8 @@ describe('createAcpSessionBridge', () => {
         ),
       ).toHaveLength(1);
 
+      await bridge.closeSession(session.sessionId);
+      expect(stalledHandle.killed).toBe(true);
       await bridge.spawnOrAttach({ workspaceCwd: WS_A });
       await expect(bridge.refreshExtensionsForAllSessions()).resolves.toEqual({
         refreshed: 1,
@@ -31654,13 +31656,11 @@ describe('preheat', () => {
 
     statusResult.resolve({ ready: true });
     await expect(status).resolves.toEqual({ ready: true });
-    expect(handle.killed).toBe(true);
-    await vi.waitFor(() => {
-      expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toMatchObject({
-        state: 'cold',
-        runtimeLive: false,
-        activeWork: false,
-      });
+    expect(handle.killed).toBe(false);
+    expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toMatchObject({
+      state: 'idle',
+      runtimeLive: true,
+      activeWork: false,
     });
 
     await bridge.shutdown();
@@ -31935,6 +31935,105 @@ describe('preheat', () => {
     }
   });
 
+  it('defers MCP detail timeout retirement until active sessions drain', async () => {
+    vi.useFakeTimers();
+    const detailResult = deferred<Record<string, unknown>>();
+    const handle = makeChannel({
+      extMethodImpl: async (method) => {
+        if (method === SERVE_STATUS_EXT_METHODS.workspaceMcp) {
+          return {
+            v: 1,
+            workspaceCwd: WS_A,
+            initialized: true,
+            discoveryState: 'completed',
+            servers: [{ name: 'aone', mcpStatus: 'connected' }],
+          };
+        }
+        if (
+          method === SERVE_STATUS_EXT_METHODS.workspaceMcpTools ||
+          method === SERVE_STATUS_EXT_METHODS.workspaceMcpResources
+        ) {
+          return await detailResult.promise;
+        }
+        return {};
+      },
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      initializeTimeoutMs: 50,
+    });
+
+    try {
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const status = bridge.queryWorkspaceStatus(
+        SERVE_STATUS_EXT_METHODS.workspaceMcp,
+        () => ({ discoveryState: 'not_started', servers: [] }),
+      );
+      await vi.advanceTimersByTimeAsync(50);
+
+      await expect(status).resolves.toMatchObject({
+        discoveryState: 'completed',
+      });
+      expect(handle.killed).toBe(false);
+      await expect(
+        bridge.sendPrompt(session.sessionId, {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'still alive' }],
+        }),
+      ).resolves.toMatchObject({ stopReason: 'end_turn' });
+
+      await bridge.closeSession(session.sessionId);
+      expect(handle.killed).toBe(true);
+    } finally {
+      detailResult.resolve({});
+      await bridge.shutdown();
+      vi.useRealTimers();
+    }
+  });
+
+  it('defers a workspace status timeout until active sessions drain', async () => {
+    vi.useFakeTimers();
+    const stalledStatus = deferred<Record<string, unknown>>();
+    const handle = makeChannel({
+      extMethodImpl: async (method) =>
+        method === SERVE_STATUS_EXT_METHODS.workspaceMcp
+          ? await stalledStatus.promise
+          : {},
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      initializeTimeoutMs: 50,
+      channelIdleTimeoutMs: 600_000,
+    });
+
+    try {
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const status = bridge.queryWorkspaceStatus(
+        SERVE_STATUS_EXT_METHODS.workspaceMcp,
+        () => ({ discoveryState: 'not_started', servers: [] }),
+      );
+      void status.catch(() => undefined);
+
+      await vi.advanceTimersByTimeAsync(50);
+      await expect(status).rejects.toBeInstanceOf(BridgeTimeoutError);
+      expect(handle.killed).toBe(false);
+      expect(bridge.sessionCount).toBe(1);
+      await expect(
+        bridge.sendPrompt(session.sessionId, {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'still alive' }],
+        }),
+      ).resolves.toMatchObject({ stopReason: 'end_turn' });
+
+      await bridge.closeSession(session.sessionId);
+      expect(handle.killed).toBe(true);
+    } finally {
+      stalledStatus.resolve({});
+      await bridge.shutdown();
+      vi.useRealTimers();
+    }
+  });
+
   it('keeps a shared channel while a timed-out new session RPC settles', async () => {
     vi.useFakeTimers();
     const stalledStarted = deferred<void>();
@@ -32085,7 +32184,36 @@ describe('preheat', () => {
     }
   });
 
-  it('drains missing MCP auth through its owning channel with an active session', async () => {
+  it('defers an MCP discovery timeout until active sessions drain', async () => {
+    vi.useFakeTimers();
+    try {
+      const handle = makeChannel({
+        extMethodImpl: async (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.workspaceMcpInitialize
+            ? { accepted: true }
+            : {},
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        channelIdleTimeoutMs: 600_000,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await bridge.initializeWorkspaceMcp();
+      await vi.advanceTimersByTimeAsync(300_000);
+
+      expect(handle.killed).toBe(false);
+      expect(bridge.sessionCount).toBe(1);
+
+      await bridge.closeSession(session.sessionId);
+      expect(handle.killed).toBe(true);
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('defers missing MCP auth retirement until active sessions drain', async () => {
     vi.useFakeTimers();
     try {
       const handle = makeChannel({
@@ -32112,8 +32240,9 @@ describe('preheat', () => {
       });
       const bridge = makeBridge({
         channelFactory: async () => handle.channel,
+        channelIdleTimeoutMs: 600_000,
       });
-      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
 
       await expect(
         bridge.manageMcpServer('aone', 'authenticate', undefined),
@@ -32129,14 +32258,11 @@ describe('preheat', () => {
       });
 
       await vi.advanceTimersByTimeAsync(600_000);
+      expect(handle.killed).toBe(false);
+      expect(bridge.sessionCount).toBe(1);
+
+      await bridge.closeSession(session.sessionId);
       expect(handle.killed).toBe(true);
-      await vi.waitFor(() =>
-        expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toMatchObject({
-          state: 'cold',
-          runtimeLive: false,
-          activeWork: false,
-        }),
-      );
       expect(bridge.sessionCount).toBe(0);
 
       await bridge.shutdown();
@@ -32359,6 +32485,45 @@ describe('preheat', () => {
     }
   });
 
+  it('keeps the longer explicit keep-alive over a configured idle timeout', async () => {
+    vi.useFakeTimers();
+    try {
+      const handle = makeChannel();
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        channelIdleTimeoutMs: 30_000,
+      });
+
+      await bridge.preheat({ keepAliveMs: 600_000 });
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(handle.killed).toBe(false);
+      await vi.advanceTimersByTimeAsync(570_000);
+      expect(handle.killed).toBe(true);
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('clamps explicit keep-alive to the setTimeout maximum', async () => {
+    vi.useFakeTimers();
+    try {
+      const handle = makeChannel();
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+
+      await bridge.preheat({ keepAliveMs: 2_147_483_648 });
+      await vi.advanceTimersByTimeAsync(2_147_483_646);
+      expect(handle.killed).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(handle.killed).toBe(true);
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it.each([
     ['an omitted timeout', undefined],
     ['an explicit zero timeout', 0],
@@ -32478,6 +32643,7 @@ describe('session idle reaper', () => {
       // reaper can catch this.
       await vi.advanceTimersByTimeAsync(6_000);
       expect(bridge.sessionCount).toBe(0);
+      expect(handle.killed).toBe(true);
 
       await bridge.shutdown();
     } finally {

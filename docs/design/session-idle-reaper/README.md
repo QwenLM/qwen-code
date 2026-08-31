@@ -92,7 +92,7 @@ Bridge closure (createHttpAcpBridge)
 
 | Mechanism                                 | Scope                     | What it manages                                                                  |
 | ----------------------------------------- | ------------------------- | -------------------------------------------------------------------------------- |
-| `channelIdleTimeoutMs` + `startIdleTimer` | Channel (child process)   | Unset or `0` reaps immediately; a positive value delays reap                     |
+| `channelIdleTimeoutMs` + `startIdleTimer` | Channel (child process)   | Reaps after work drains; configured and keepalive delays use the longer window   |
 | **Session reaper** (this design)          | Session (in-memory entry) | Closes individual sessions when idle                                             |
 | `ConnectionRegistry` sweep                | ACP-over-HTTP connection  | Reaps `/acp` transport-layer connections (different layer)                       |
 | `writerIdleTimeoutMs`                     | SSE subscriber            | Evicts a single stuck SSE subscriber                                             |
@@ -309,8 +309,9 @@ function.
 
 - `startSessionReaper()` is called at bridge construction time (after
   option validation, alongside the existing `channelIdleTimeoutMs` setup).
-  Omitting that channel option or setting it to `0` reaps an idle Workspace
-  Runtime immediately; configured values must be non-negative.
+  Omitting that channel option or setting it to `0` reaps after runtime work
+  drains; plain preheat is preserved for first use, and an active keepalive may
+  extend the delay. Configured values must be non-negative.
 - `stopSessionReaper()` is called in both `shutdown()` and `killAllSync()`.
 
 ### 4.6 Interaction with existing `closeSession` callers
@@ -382,7 +383,7 @@ generic terminal-frame handler (`isTerminalLifecycleEvent`) already handles
 | 9   | closeSession with explicit reason                       | Call `closeSession` with `reason: 'idle_timeout'`, verify published event                                                                                                              |
 | 10  | Multiple idle sessions reaped in one tick               | Create 3 idle sessions, advance time, trigger tick, verify all 3 reaped                                                                                                                |
 | 11  | Session with heartbeat within TTL survives              | Create a session, record heartbeat, advance time to just under TTL, verify session survives                                                                                            |
-| 12  | Channel idle policy evaluated after last session reaped | Create 1 session (last on channel), reap it, verify an unset timeout reaps the channel and an explicit positive timeout arms the compatibility timer                                   |
+| 12  | Channel idle policy evaluated after last session reaped | Create 1 session (last on channel), reap it, and verify an unset timeout reaps the channel                                                                                             |
 
 ### 5.2 Integration tests (`server.test.ts`)
 
@@ -433,4 +434,4 @@ generic terminal-frame handler (`isTerminalLifecycleEvent`) already handles
 | `closeSession` inside reaper throws, poisoning the scan loop                    | Each close is in its own `.catch()` — one failure doesn't block others                                                                                                            |
 | Reaper iteration over `byId` during concurrent `closeSession` from another path | ES2015 Map iteration tolerates deletion of current/previous keys. Double-close is idempotent (`byId.get` returns undefined → `SessionNotFoundError` caught by reaper's `.catch`). |
 | Performance of scanning 20 sessions every 60s                                   | Trivial — 20 Map reads + 4 field checks each. No I/O.                                                                                                                             |
-| Channel idle timer interaction                                                  | When the last session is reaped, `closeSession` calls `startIdleTimer`; an unset or zero timeout reaps immediately, while an explicit positive timeout arms the timer.            |
+| Channel idle timer interaction                                                  | When the last session is reaped, `closeSession` calls `startIdleTimer`; the effective delay is the longer configured or active keepalive window.                                  |

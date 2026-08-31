@@ -200,7 +200,7 @@ Bridge 是 WorkspaceRuntime 内由 Coordinator 和兼容 adapter 调用的通信
 - 建立、复用和关闭 Channel；
 - 分配单调递增的 runtime epoch；
 - 记录 session、handshake、workspace control、discovery 和 auth 的物理 lease；
-- 在物理 lease 全部释放后按 idle 策略回收：未配置或 `0` 立即回收，正值延迟回收；
+- 在物理 lease 全部释放后按 idle 策略回收；显式 keepalive 与配置值取剩余时长最大值；
 - ACP 请求/响应关联，以及协议支持时的取消；
 - 将当前 epoch 的事件和原始 Catalog 快照提供给 Coordinator；
 - Session multiplex 的协议适配。
@@ -319,8 +319,9 @@ preheat/initialize，并在成功后登记 keepalive；它尚不串联 capabilit
 Foundation 在 OAuth 返回 pending 后保留 owning Channel 的 auth lease。明确观察到
 同一 Channel 上的 server 已变为 non-pending 时释放；Catalog 中缺少 server 不是完成
 证据。pending 状态的固定安全期限到达时，Bridge 先对 owning Channel 做最后一次状态确认；
-仍无法证明完成时终止该 Channel，以进程退出完成 safe drain。该策略可能结束该
-Channel 上的 Session，因此 deadline 是故障恢复上限，不是普通 idle 回收。
+仍无法证明完成时将 owning Channel 标记为待退役。无 Session 时立即终止；有 Session
+时允许现有会话继续使用，并在最后一个 Session 排空后终止 Channel，以进程退出完成
+safe drain。deadline 是故障恢复上限，不是普通 idle 回收。
 
 Target Coordinator 将通过 Bridge 的外层 runtime-control lease 包住一次完整
 capability runtime command。其中的 Catalog、Extension refresh、Skills refresh 和
@@ -328,9 +329,9 @@ capability runtime command。其中的 Catalog、Extension refresh、Skills refr
 lease。Coordinator 不建立第二套用于物理生命周期的可写“逻辑 lease”。这些计数和
 Map 不对调用方开放。
 
-Coordinator 另有仅用于 workspace removal admission 的 daemon-local management
-operation 计数。它覆盖尚未进入 Bridge 的配置持久化和后台提交，但不参与顶层
-`active/idle` 投影或 ACP idle 回收判断。
+Target Coordinator 还需要仅用于 workspace removal admission 的 daemon-local
+management operation 计数。它覆盖尚未进入 Bridge 的配置持久化和后台提交，但不参与
+顶层 `active/idle` 投影或 ACP idle 回收判断。
 
 约束：
 
@@ -358,8 +359,9 @@ lease 决定，而不是只看 Session 数量：
 2. `lastActivityAt` 保持既有 Session 观测语义，只由 Session spawn/restore 和
    prompt 活动更新；workspace runtime 请求通过 lease/keepalive 控制回收，不伪装成
    Session activity；
-3. 未配置或显式设为 `0` 时保持既有默认行为：所有物理 work lease 排空后立即回收；
-4. 显式正值启用 idle timer；到期时 Bridge 再次确认 session、spawn/restore、
+3. 未配置或显式设为 `0` 时，普通 runtime work lease 排空后立即回收；裸 preheat
+   自身结算不启动立即回收器，而是保留到首次使用；
+4. 显式正值或 active keepalive 启用 idle timer，并取两者剩余时长最大值；到期时 Bridge 再次确认 session、spawn/restore、
    workspace-control、MCP discovery 和 auth work 均为空后停止 runtime；
 5. daemon shutdown 和 workspace removal 可以统一结束对应子进程。
 
@@ -384,9 +386,9 @@ startup preheat 是迁移期策略，不是目标架构的启动入口。完成�
 
 ### 8.4 Draining 与移除
 
-Foundation 的 workspace removal activity 已包含 Session 之外的 Bridge 物理 work、
-在途 ensure 和已接纳的 workspace-scoped management operation。非 `force` 移除遇到
-这些活动项返回 `workspace_busy`。进入 `draining` 后，Registry 阻止新的路由解析，
+Foundation 的 workspace removal activity 已包含 Session 之外的 Bridge 物理 work 和
+在途 ensure。非 `force` 移除遇到这些活动项返回 `workspace_busy`。进入 `draining`
+后，Registry 阻止新的路由解析，
 Coordinator 关闭新的 ensure admission；已经解析但尚未开始物理工作的请求以
 `workspace_draining` 失败。移除回滚时一并恢复 admission，提交后的强制清理才终止
 现有 work。
@@ -925,8 +927,8 @@ Catalog GET 始终保持只读，不以“页面加载”为理由启动 ACP。
   但 runtime command 和敏感 Workspace scope mutation 明确失败，global config owner
   不受 primary workspace trust 影响；
 - 最后一个 Session 关闭不影响页面正在进行的 operation；
-- 最后一个物理 lease 释放后，默认或 `0` 立即回收 ACP child；配置正值时，在 timeout
-  窗口内再次打开管理页面会复用同一 runtime/epoch；
+- 最后一个普通 runtime lease 释放后，默认或 `0` 立即回收 ACP child；裸 preheat
+  保留到首次使用；配置正值或 active keepalive 时，在较长窗口内复用同一 runtime/epoch；
 - 显式 `ensure` 成功后至少保活十分钟，使紧随其后的状态与 Catalog 读取能够观察到
   已初始化的 runtime；再次 `ensure` 会续期该窗口；
 - 外层 runtime-control lease 连续覆盖一次 ensure；回收只能在同一 epoch 完成所请求的
@@ -992,8 +994,8 @@ Foundation 的自动化验证覆盖：
    以及禁止 primary fallback；
 3. 并发 ensure、10 分钟续期、不同 keepalive 取最长窗口和启动失败后的重试；
 4. Channel factory/initialize 绝对启动 deadline、AbortSignal、迟到 child 清理；
-5. OAuth pending lease、期限到达前的最终状态确认，以及无法证明完成时通过 owning
-   Channel 退出安全排空；
+5. OAuth pending lease、期限到达前的最终状态确认，以及无法证明完成时在现有 Session
+   排空后通过 owning Channel 退出安全排空；
 6. production 默认预热受信任 primary、不预热 untrusted primary，以及显式
    `preheatBridge: false` 的 opt-out；
 7. SDK REST 路由与 timeout。
@@ -1023,8 +1025,8 @@ Foundation 的自动化验证覆盖：
    config GET 仍可读，global config owner 不受 primary trust 影响。
 8. **SDK transport**：REST、ACP HTTP/WS 模式下 Workspace client 都不会把 daemon
    runtime 路由误发为 ACP method。
-9. **连续 lease**：未配置 idle timeout 或显式配置 `0` 时，runtime work 排空后立即回收；
-   显式正值时按空闲窗口回收。兼容 preheat 保留旧资源语义；显式 `ensure` 额外登记
+9. **连续 lease**：未配置 idle timeout 或显式配置 `0` 时，普通 runtime work 排空后立即回收；
+   裸 preheat 自身保留到首次使用；显式正值或 active keepalive 取较长窗口。兼容 preheat 保留旧资源语义；显式 `ensure` 额外登记
    可续期的 10 分钟 workspace 保活窗口。Capability RPC 与最终状态投影不跨 epoch，
    物理回收只发生在外层 runtime-control lease 释放后。
 10. **OAuth 排空**：认证 pending 时删除配置或 reload，Catalog 缺失不释放 auth

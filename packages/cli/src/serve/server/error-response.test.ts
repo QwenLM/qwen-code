@@ -21,7 +21,10 @@ import {
 } from '../workspace-runtime-coordinator.js';
 import { sendBridgeError } from './error-response.js';
 import { DaemonDrainingError } from './session-archive.js';
-import { BridgeTimeoutError } from '../acp-session-bridge.js';
+import {
+  BridgeTimeoutError,
+  WorkspaceDrainingError,
+} from '../acp-session-bridge.js';
 import { StandaloneSessionServiceError } from '../conversations/standalone-session-service.js';
 import { ConversationRuntimeOwnershipError } from '../conversations/conversation-runtime-errors.js';
 
@@ -311,6 +314,32 @@ describe('sendBridgeError session writer errors', () => {
     expect(json).toHaveBeenCalledWith({
       error: 'Workspace runtime failed to initialize',
       code: 'runtime_initialization_failed',
+    });
+  });
+
+  it('logs the cause of a runtime failure hidden by workspace draining', () => {
+    const { response, set, status, json } = responseMock();
+    const cause = new Error('preheat failed');
+    const daemonLog = {
+      error: vi.fn(),
+    } as unknown as DaemonLogger;
+
+    sendBridgeError(
+      response,
+      new WorkspaceDrainingError('/workspace', cause),
+      { route: 'POST /workspace/runtime/ensure' },
+      daemonLog,
+    );
+
+    expect(daemonLog.error).toHaveBeenCalledWith('preheat failed', cause, {
+      route: 'POST /workspace/runtime/ensure',
+    });
+    expect(set).toHaveBeenCalledWith('Retry-After', '5');
+    expect(status).toHaveBeenCalledWith(503);
+    expect(json).toHaveBeenCalledWith({
+      error: 'Workspace "/workspace" is being removed',
+      code: 'workspace_draining',
+      workspaceCwd: '/workspace',
     });
   });
 
