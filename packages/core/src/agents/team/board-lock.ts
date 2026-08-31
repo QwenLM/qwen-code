@@ -12,12 +12,9 @@
  * `proper-lockfile` cross-process lock that guards writers in other agent
  * processes, over `atomicWriteJSON`.
  *
- * The same discipline already exists twice — `tasks.ts` (`withTaskFileLock`)
- * and `mailbox.ts` (`withInboxLock`) — with the second documented as mirroring
- * the first. This module is the extracted form, used by the newer board items;
- * folding those two onto it is a follow-up, deliberately not bundled here so
- * adding `ask` and `decision` does not also rewrite the task and mailbox
- * paths.
+ * The same discipline already exists in `tasks.ts` and `mailbox.ts`. This
+ * implementation stays local to Agent Board so this feature does not also
+ * rewrite those established paths.
  */
 
 import { randomUUID } from 'node:crypto';
@@ -73,12 +70,12 @@ export function assertSafeName(kind: string, name: string): void {
 }
 
 const ITEM_ID =
-  /^[adt]-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+  /^[at]-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 export function assertItemId(
   kind: string,
   id: string,
-  prefix?: 'a' | 'd' | 't',
+  prefix?: 'a' | 't',
 ): void {
   if (!ITEM_ID.test(id) || (prefix && !id.startsWith(`${prefix}-`))) {
     throw new Error(`Invalid ${kind} "${id}".`);
@@ -93,7 +90,7 @@ async function ensurePrivateDir(dir: string): Promise<void> {
 export async function createBoardRecord<T>(
   board: string,
   collection: string,
-  prefix: 'a' | 'd' | 't',
+  prefix: 'a' | 't',
   build: (id: string) => T,
 ): Promise<T> {
   assertSafeName('board name', board);
@@ -123,103 +120,63 @@ export async function createBoardRecord<T>(
   throw new Error(`Could not allocate a ${collection} id.`);
 }
 
-/**
- * Build a two-tier lock over a family of files.
- *
- * The discipline is the same everywhere it is used — an in-process `Mutex` per
- * path so local writers do not stampede the OS lock (the cause of Windows
- * `ELOCKED` flakiness), wrapping a `proper-lockfile` cross-process lock — but
- * the tuning is not. `mailbox.ts` deliberately retries 10 times where the task
- * board retries 30, and logs a compromised lock at a quieter level. A factory
- * keeps one implementation without flattening those choices into it.
- *
- * `retries` is the cross-process retry budget; `onCompromised` receives a lock
- * that went stale under us.
- */
-export function createItemLock(options: {
-  retries: number;
-  onCompromised: (err: Error) => void;
-}) {
-  const lockOptions: lockfile.LockOptions = {
-    retries: {
-      retries: options.retries,
-      minTimeout: 5,
-      maxTimeout: 100,
-      factor: 2,
-      // Jitter the backoff so in-process and cross-process contenders don't
-      // retry in lockstep (thundering herd) and starve each other out of the
-      // retry budget.
-      randomize: true,
-    },
-    stale: 5000,
-    onCompromised: options.onCompromised,
-  };
-
-  const fileLocks = new Map<string, Mutex>();
-
-  /**
-   * Run `fn` holding both the in-process mutex and the cross-process file lock
-   * for `filePath`. Release of both is automatic.
-   *
-   * A file that vanishes — before the lock is taken, or between taking it and
-   * reading — surfaces as `onMissing()` when one is given, and otherwise
-   * rethrows. Callers that treat a vanished record as "not found" pass one;
-   * callers that consider it a real error do not.
-   */
-  const withLock = async function <T>(
-    filePath: string,
-    fn: () => Promise<T>,
-    onMissing?: () => T,
-  ): Promise<T> {
-    let lock = fileLocks.get(filePath);
-    if (!lock) {
-      lock = new Mutex();
-      fileLocks.set(filePath, lock);
-    }
-    return lock
-      .runExclusive(async () => {
-        let release: (() => Promise<void>) | undefined;
-        try {
-          release = await lockfile.lock(filePath, lockOptions);
-        } catch (err) {
-          if (isNodeError(err) && err.code === 'ENOENT' && onMissing) {
-            return onMissing();
-          }
-          throw err;
-        }
-        try {
-          return await fn();
-        } catch (err) {
-          if (isNodeError(err) && err.code === 'ENOENT' && onMissing) {
-            return onMissing();
-          }
-          throw err;
-        } finally {
-          try {
-            await release?.();
-          } catch (err) {
-            debug.warn('failed to release lock:', err);
-          }
-        }
-      })
-      .finally(() => {
-        // Drop the mutex once nobody is queued on it. This must run AFTER
-        // runExclusive releases the mutex — inside the callback isLocked() is
-        // always true because this caller itself holds it, so the delete was
-        // unreachable and the map grew without bound for a long-lived reader.
-        const held = fileLocks.get(filePath);
-        if (held && !held.isLocked()) fileLocks.delete(filePath);
-      });
-  };
-
-  return withLock;
-}
-
-/** The board's own lock: the same budget the task board uses. */
-export const withItemLock = createItemLock({
-  retries: 30,
+const lockOptions: lockfile.LockOptions = {
+  retries: {
+    retries: 30,
+    minTimeout: 5,
+    maxTimeout: 100,
+    factor: 2,
+    randomize: true,
+  },
+  stale: 5000,
   onCompromised: (err) => debug.warn('board item lock compromised:', err),
-});
+};
+
+const fileLocks = new Map<string, Mutex>();
+
+export function withItemLock<T>(
+  filePath: string,
+  fn: () => Promise<T>,
+  onMissing?: () => T,
+): Promise<T> {
+  let lock = fileLocks.get(filePath);
+  if (!lock) {
+    lock = new Mutex();
+    fileLocks.set(filePath, lock);
+  }
+  return lock
+    .runExclusive(async () => {
+      let release: (() => Promise<void>) | undefined;
+      try {
+        release = await lockfile.lock(filePath, lockOptions);
+      } catch (err) {
+        if (isNodeError(err) && err.code === 'ENOENT' && onMissing) {
+          return onMissing();
+        }
+        throw err;
+      }
+      try {
+        return await fn();
+      } catch (err) {
+        if (isNodeError(err) && err.code === 'ENOENT' && onMissing) {
+          return onMissing();
+        }
+        throw err;
+      } finally {
+        try {
+          await release?.();
+        } catch (err) {
+          debug.warn('failed to release lock:', err);
+        }
+      }
+    })
+    .finally(() => {
+      // runExclusive releases before this callback; keep the mutex while a
+      // queued caller has already acquired it.
+      const held = fileLocks.get(filePath);
+      if (held && !held.isLocked()) fileLocks.delete(filePath);
+    });
+}
 
 export async function pruneCollection(
   board: string,
@@ -267,7 +224,9 @@ export async function pruneCollection(
           return;
         }
         await fsp.unlink(full);
-        removed.push(file);
+        // Report the item id, so callers can reconcile against the ids the
+        // rest of the board surface reports.
+        removed.push(path.basename(file, '.json'));
       },
       () => {},
     );

@@ -7,7 +7,6 @@
 import type {
   AskRecord,
   BoardTaskRecord,
-  DecisionRecord,
 } from '@qwen-code/qwen-code-core/board';
 import { sanitizeTerminalText } from '../../ui/utils/textUtils.js';
 
@@ -15,7 +14,6 @@ export interface BoardSnapshot {
   board: string;
   tasks: BoardTaskRecord[];
   asks: AskRecord[];
-  decisions: DecisionRecord[];
 }
 
 export function oneLine(value: string): string {
@@ -24,12 +22,6 @@ export function oneLine(value: string): string {
 
 export function renderBoard(snapshot: BoardSnapshot): string {
   const lines = [`board: ${oneLine(snapshot.board)}`];
-
-  for (const decision of snapshot.decisions) {
-    lines.push(
-      `! ${decision.id} [${decision.state}] ${oneLine(decision.question)}`,
-    );
-  }
   for (const ask of snapshot.asks) {
     lines.push(
       `? ${ask.id} [${ask.state}] ${oneLine(ask.from)} -> ${oneLine(ask.to)}: ${oneLine(ask.question)}`,

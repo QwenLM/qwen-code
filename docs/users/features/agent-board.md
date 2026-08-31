@@ -3,6 +3,10 @@
 Agent Board lets independently started agents share work through files on the
 same machine. It does not start, join, monitor, or send input to agent processes.
 
+It is a low-level interoperability surface, not the Qwen Agent Team scheduler or
+the cross-session messaging transport. A task owner is only a recorded label;
+it does not start or wake a Qwen Code, Codex, or other agent process.
+
 > Experimental. The on-disk format may change between releases.
 
 ## Use a board
@@ -43,18 +47,6 @@ With `--wait`, exit code `0` means answered, `2` declined, `3` the ask's TTL
 expired, and `4` the local wait ended while the ask was still open. `--timeout`
 sets the local wait in seconds; `--ttl` sets the ask lifetime in seconds.
 
-## Request a decision
-
-Use a decision for authority that should remain visible until a person acts:
-
-```bash
-qwen board raise "ship this result?" --board orders --as worker
-qwen board resolve <decision-id> --approve --board orders --as human
-```
-
-The CLI records the declared resolver. It cannot prove that the caller is a
-person, so this is a workflow convention rather than a security boundary.
-
 ## Machine-readable output
 
 Add `--json` to receive JSON without ANSI formatting:
@@ -64,7 +56,7 @@ qwen board show --board orders --as web --json
 ```
 
 Passing `--as` to `show` filters tasks to that owner and asks to or from that
-actor. Open decisions remain visible because they require human attention.
+actor.
 
 ## Housekeeping
 

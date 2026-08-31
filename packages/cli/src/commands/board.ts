@@ -15,13 +15,10 @@ import {
   getAsk,
   listAsks,
   listBoardTasks,
-  listDecisions,
   pruneAsks,
   pruneBoardTasks,
-  pruneDecisions,
-  raiseDecision,
-  resolveDecision,
 } from '@qwen-code/qwen-code-core/board';
+import { sanitizeTerminalText } from '../ui/utils/textUtils.js';
 import { requireActorName, requireBoardName } from './board/context.js';
 import { oneLine, renderBoard, type BoardSnapshot } from './board/render.js';
 
@@ -31,10 +28,33 @@ interface CommonArgs {
   json?: boolean;
 }
 
-function emit(argv: CommonArgs, value: unknown, human: string): void {
-  process.stdout.write(
-    `${argv.json ? JSON.stringify(value) : oneLine(human)}\n`,
-  );
+async function emit(
+  argv: CommonArgs,
+  value: unknown,
+  human: string,
+): Promise<void> {
+  // Sanitize without flattening: the `show` panel and `ask --wait` answers
+  // are genuinely multi-line, and `sanitizeTerminalText` keeps LF/TAB while
+  // neutralizing dangerous control sequences.
+  const text = `${argv.json ? JSON.stringify(value) : sanitizeTerminalText(human)}\n`;
+  // `parseArguments` calls `process.exit` as soon as this handler resolves. A
+  // write to a pipe is asynchronous, so resolving before stdout has drained
+  // truncates output larger than the pipe buffer while still exiting 0.
+  //
+  // A reader that closes early (`... | head`) reports that twice: once to the
+  // write callback and once as a stream `error` event. The listener keeps the
+  // second one from surfacing as an uncaught exception, and the callback
+  // decides the outcome — a closed reader ends the pipeline normally, while
+  // any other write failure still has to reach the caller.
+  if (process.stdout.listenerCount('error') === 0) {
+    process.stdout.on('error', () => {});
+  }
+  await new Promise<void>((resolve, reject) => {
+    process.stdout.write(text, (err) => {
+      if (err && (err as NodeJS.ErrnoException).code !== 'EPIPE') reject(err);
+      else resolve();
+    });
+  });
 }
 
 async function run(fn: () => Promise<void>): Promise<void> {
@@ -56,10 +76,9 @@ function finiteNumber(value: unknown, flag: string, minimum: number): number {
 }
 
 async function snapshot(board: string, actor?: string): Promise<BoardSnapshot> {
-  const [tasks, asks, decisions] = await Promise.all([
+  const [tasks, asks] = await Promise.all([
     listBoardTasks(board),
     listAsks(board),
-    listDecisions(board),
   ]);
   return {
     board,
@@ -67,7 +86,6 @@ async function snapshot(board: string, actor?: string): Promise<BoardSnapshot> {
     asks: actor
       ? asks.filter((ask) => ask.from === actor || ask.to === actor)
       : asks,
-    decisions,
   };
 }
 
@@ -96,7 +114,7 @@ export const boardCommand: CommandModule = {
             const actor =
               a.as === undefined ? undefined : requireActorName(a.as);
             const state = await snapshot(board, actor);
-            emit(a, state, renderBoard(state));
+            await emit(a, state, renderBoard(state));
           }),
       })
 
@@ -116,7 +134,7 @@ export const boardCommand: CommandModule = {
               subject: a.subject,
               owner: a.owner,
             });
-            emit(a, task, `${task.id} ${task.subject}`);
+            await emit(a, task, `${task.id} ${task.subject}`);
           }),
       })
 
@@ -133,7 +151,7 @@ export const boardCommand: CommandModule = {
               a.id,
               requireActorName(a.as),
             );
-            emit(a, task, `${task.id} claimed by ${task.owner}`);
+            await emit(a, task, `${task.id} claimed by ${task.owner}`);
           }),
       })
 
@@ -153,7 +171,7 @@ export const boardCommand: CommandModule = {
               requireActorName(a.as),
               a.note,
             );
-            emit(a, task, `${task.id} completed`);
+            await emit(a, task, `${task.id} completed`);
           }),
       })
 
@@ -179,6 +197,11 @@ export const boardCommand: CommandModule = {
               ttl: number;
             };
             const board = requireBoardName(a.board);
+            // Validate the local wait before creating the ask: a rejected
+            // `--timeout` must not leave an orphaned open ask on the board.
+            const waitMs = a.wait
+              ? finiteNumber(a.timeout * 1000, '--timeout', 0)
+              : 0;
             const ask = await createAsk({
               board,
               from: requireActorName(a.as),
@@ -188,21 +211,16 @@ export const boardCommand: CommandModule = {
               ttlMs: finiteNumber(a.ttl, '--ttl', 0.001) * 1000,
             });
             if (!a.wait) {
-              emit(a, ask, `${ask.id} -> ${ask.to}`);
+              await emit(a, ask, `${ask.id} -> ${ask.to}`);
               return;
             }
 
-            const waitMs = finiteNumber(
-              finiteNumber(a.timeout, '--timeout', 0) * 1000,
-              '--timeout',
-              0,
-            );
             const deadline = Date.now() + waitMs;
             for (;;) {
               const current = await getAsk(board, ask.id);
               if (!current) throw new Error(`Ask "${ask.id}" not found.`);
               if (current.state !== 'open') {
-                emit(
+                await emit(
                   a,
                   current,
                   current.state === 'answered'
@@ -239,7 +257,7 @@ export const boardCommand: CommandModule = {
               requireActorName(a.as),
               a.answer,
             );
-            emit(a, ask, `${ask.id} answered`);
+            await emit(a, ask, `${ask.id} answered`);
           }),
       })
 
@@ -259,60 +277,7 @@ export const boardCommand: CommandModule = {
               requireActorName(a.as),
               a.reason,
             );
-            emit(a, ask, `${ask.id} declined`);
-          }),
-      })
-
-      .command({
-        command: 'raise <question>',
-        describe: 'Raise a decision for a human',
-        builder: (y: Argv) =>
-          y
-            .positional('question', { type: 'string', demandOption: true })
-            .option('about', { type: 'string' }),
-        handler: (argv) =>
-          run(async () => {
-            const a = argv as CommonArgs & { question: string; about?: string };
-            const decision = await raiseDecision({
-              board: requireBoardName(a.board),
-              raisedBy: requireActorName(a.as),
-              question: a.question,
-              about: a.about,
-            });
-            emit(a, decision, `${decision.id} awaiting a decision`);
-          }),
-      })
-
-      .command({
-        command: 'resolve <id>',
-        describe: 'Resolve a decision',
-        builder: (y: Argv) =>
-          y
-            .positional('id', { type: 'string', demandOption: true })
-            .option('approve', { type: 'boolean' })
-            .option('reject', { type: 'boolean' })
-            .option('note', { type: 'string' })
-            .check((a) => {
-              if (Boolean(a['approve']) === Boolean(a['reject'])) {
-                throw new Error('Pass exactly one of --approve or --reject.');
-              }
-              return true;
-            }),
-        handler: (argv) =>
-          run(async () => {
-            const a = argv as CommonArgs & {
-              id: string;
-              approve?: boolean;
-              note?: string;
-            };
-            const decision = await resolveDecision(
-              requireBoardName(a.board),
-              a.id,
-              requireActorName(a.as),
-              a.approve ? 'approved' : 'rejected',
-              a.note,
-            );
-            emit(a, decision, `${decision.id} ${decision.state}`);
+            await emit(a, ask, `${ask.id} declined`);
           }),
       })
 
@@ -328,14 +293,13 @@ export const boardCommand: CommandModule = {
             const board = requireBoardName(a.board);
             const cutoff =
               finiteNumber(a.olderThan, '--older-than', 0) * 86_400_000;
-            const [asks, decisions, tasks] = await Promise.all([
+            const [asks, tasks] = await Promise.all([
               pruneAsks(board, cutoff),
-              pruneDecisions(board, cutoff),
               pruneBoardTasks(board, cutoff),
             ]);
-            const removed = { asks, decisions, tasks };
-            const total = asks.length + decisions.length + tasks.length;
-            emit(a, removed, `Removed ${total} settled items.`);
+            const removed = { asks, tasks };
+            const total = asks.length + tasks.length;
+            await emit(a, removed, `Removed ${total} settled items.`);
           }),
       })
 

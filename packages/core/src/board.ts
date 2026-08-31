@@ -25,11 +25,3 @@ export {
   type AskRecord,
   type AskState,
 } from './agents/team/asks.js';
-export {
-  listDecisions,
-  pruneDecisions,
-  raiseDecision,
-  resolveDecision,
-  type DecisionRecord,
-  type DecisionState,
-} from './agents/team/decisions.js';

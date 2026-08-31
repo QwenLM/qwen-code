@@ -8,13 +8,13 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { answerAsk, createAsk, declineAsk, listAsks } from './asks.js';
 import {
-  listDecisions,
-  pruneDecisions,
-  raiseDecision,
-  resolveDecision,
-} from './decisions.js';
+  answerAsk,
+  createAsk,
+  declineAsk,
+  listAsks,
+  pruneAsks,
+} from './asks.js';
 import { getCollectionDir, withItemLock } from './board-lock.js';
 
 vi.mock('../../config/storage.js', async (importOriginal) => {
@@ -41,7 +41,7 @@ function setGlobalDir(dir: string): void {
   ).__setMockGlobalDir(dir);
 }
 
-describe('board asks and decisions', () => {
+describe('board asks', () => {
   let tmpDir: string;
 
   beforeEach(async () => {
@@ -78,22 +78,6 @@ describe('board asks and decisions', () => {
     ).resolves.toMatchObject({ state: 'declined', reason: 'not now' });
   });
 
-  it('records who raised and resolved a decision', async () => {
-    const decision = await raiseDecision({
-      board: 'demo',
-      raisedBy: 'worker',
-      question: 'ship it?',
-    });
-    await expect(
-      resolveDecision('demo', decision.id, 'human', 'approved', 'looks good'),
-    ).resolves.toMatchObject({
-      state: 'approved',
-      raisedBy: 'worker',
-      resolvedBy: 'human',
-      note: 'looks good',
-    });
-  });
-
   it('skips malformed records in list operations', async () => {
     await createAsk({
       board: 'demo',
@@ -106,20 +90,15 @@ describe('board asks and decisions', () => {
       path.join(asksDir, 'a-00000000-0000-4000-8000-000000000000.json'),
       JSON.stringify({ schemaVersion: 99 }),
     );
+    // Valid UUIDv4 filenames so these records reach content validation
+    // (all-zero names are rejected by the filename filter before parsing).
     await fs.writeFile(
-      path.join(asksDir, 'a-00000000-0000-0000-0000-000000000000.json'),
-      '{}',
-    );
-    const decisionsDir = getCollectionDir('demo', 'decisions');
-    await fs.mkdir(decisionsDir, { recursive: true });
-    await fs.writeFile(
-      path.join(decisionsDir, 'd-00000000-0000-0000-0000-000000000000.json'),
+      path.join(asksDir, 'a-00000000-0000-4000-8000-000000000001.json'),
       '{}',
     );
     await expect(listAsks('demo')).resolves.toMatchObject([
       { question: 'healthy' },
     ]);
-    await expect(listDecisions('demo')).resolves.toEqual([]);
   });
 
   it('rejects records whose id does not match the filename', async () => {
@@ -149,67 +128,49 @@ describe('board asks and decisions', () => {
     await expect(answerAsk('demo', firstAsk.id, 'web', 'yes')).rejects.toThrow(
       'does not match its filename',
     );
-
-    const firstDecision = await raiseDecision({
-      board: 'demo',
-      raisedBy: 'worker',
-      question: 'first?',
-    });
-    const secondDecision = await raiseDecision({
-      board: 'demo',
-      raisedBy: 'worker',
-      question: 'second?',
-    });
-    await fs.writeFile(
-      path.join(
-        getCollectionDir('demo', 'decisions'),
-        `${firstDecision.id}.json`,
-      ),
-      JSON.stringify({ ...firstDecision, id: secondDecision.id }),
-    );
-    await expect(listDecisions('demo')).resolves.toMatchObject([
-      { question: 'second?' },
-    ]);
-    await expect(
-      resolveDecision('demo', firstDecision.id, 'human', 'approved'),
-    ).rejects.toThrow('does not match its filename');
   });
 
   it('re-checks prune eligibility while holding the item lock', async () => {
-    const decision = await raiseDecision({
+    const ask = await createAsk({
       board: 'demo',
-      raisedBy: 'worker',
-      question: 'ship it?',
+      from: 'api',
+      to: 'web',
+      question: 'still needed?',
+      ttlMs: 1000,
     });
-    const resolved = await resolveDecision(
-      'demo',
-      decision.id,
-      'human',
-      'approved',
-    );
     const target = path.join(
-      getCollectionDir('demo', 'decisions'),
-      `${decision.id}.json`,
+      getCollectionDir('demo', 'asks'),
+      `${ask.id}.json`,
     );
+    const pruneNow = ask.expiresAt + 1;
 
     let pruning: Promise<string[]> | undefined;
     await withItemLock(target, async () => {
-      pruning = pruneDecisions('demo', 0, Date.now() + 1);
+      pruning = pruneAsks('demo', 0, pruneNow);
       await new Promise((resolve) => setImmediate(resolve));
       await fs.writeFile(
         target,
         JSON.stringify({
-          ...resolved,
-          state: 'open',
-          resolvedAt: null,
-          resolvedBy: null,
+          ...ask,
+          expiresAt: pruneNow + 1000,
         }),
       );
     });
 
     await expect(pruning).resolves.toEqual([]);
-    await expect(listDecisions('demo')).resolves.toMatchObject([
-      { state: 'open' },
-    ]);
+    await expect(listAsks('demo')).resolves.toMatchObject([{ state: 'open' }]);
+  });
+
+  it('reports pruned items by id, not by filename', async () => {
+    const ask = await createAsk({
+      board: 'demo',
+      from: 'api',
+      to: 'web',
+      question: 'settled',
+      ttlMs: 1000,
+    });
+    await declineAsk('demo', ask.id, 'web', 'not my area');
+    await expect(pruneAsks('demo', 0)).resolves.toEqual([ask.id]);
+    await expect(listAsks('demo')).resolves.toEqual([]);
   });
 });

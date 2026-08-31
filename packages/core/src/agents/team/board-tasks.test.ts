@@ -98,10 +98,12 @@ describe('board tasks', () => {
       `${malformedId}.json`,
     );
     await fs.writeFile(malformedPath, '{broken');
+    // A valid UUIDv4 filename so this record reaches content validation
+    // (all-zero names are rejected by the filename filter before parsing).
     await fs.writeFile(
       path.join(
         getCollectionDir('demo', 'tasks'),
-        't-00000000-0000-0000-0000-000000000000.json',
+        't-00000000-0000-4000-8000-000000000001.json',
       ),
       '{}',
     );
