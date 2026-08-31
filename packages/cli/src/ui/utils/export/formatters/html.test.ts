@@ -17,7 +17,17 @@ const sessionData: ExportSessionData = {
     startTime: '2026-08-16T00:00:00.000Z',
     exportTime: '2026-08-16T01:00:00.000Z',
     cwd: '/home/alice/project',
+    gitRepo: 'qwen-code',
+    gitBranch: 'feature/export',
+    model: 'qwen-test',
+    channel: 'cli',
     promptCount: 1,
+    contextUsagePercent: 25,
+    contextWindowSize: 128_000,
+    totalTokens: 32_000,
+    filesWritten: 1,
+    linesAdded: 2,
+    linesRemoved: 1,
     uniqueFiles: ['/home/alice/project/secret.ts'],
   },
 };
@@ -58,6 +68,11 @@ describe('HTML export formatter', () => {
     expect(html).not.toContain('session-secret');
     expect(html).not.toContain('/home/alice');
     expect(html).not.toContain('__EXPORT_NONCE__');
+    expect(html).toContain('data-document-metadata');
+    expect(html).toContain('Context Usage');
+    expect(html).toContain('data-document-expand-all');
+    expect(html).toContain('data-document-collapse-all');
+    expect(html).toContain('data-document-theme-toggle');
     expect(nonce).toBeTruthy();
     expect(secondNonce).toBeTruthy();
     expect(secondNonce).not.toBe(nonce);

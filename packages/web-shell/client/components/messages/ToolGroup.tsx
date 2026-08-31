@@ -65,6 +65,7 @@ import {
 } from './toolFormatting';
 import { useI18n } from '../../i18n';
 import {
+  useTranscriptDocumentExpanded,
   useTranscriptRenderMode,
   type TranscriptRenderMode,
 } from '../../transcriptRenderMode';
@@ -1615,8 +1616,9 @@ const ThoughtLine = memo(function ThoughtLine({
 }) {
   const transcriptRenderMode = useTranscriptRenderMode();
   const documentMode = transcriptRenderMode === 'document';
+  const documentExpanded = useTranscriptDocumentExpanded();
   const [expanded, setExpanded] = useState(false);
-  const showContent = documentMode || expanded;
+  const showContent = documentMode ? documentExpanded : expanded;
   const handleToggle = useCallback(() => {
     if (!documentMode) setExpanded((value) => !value);
   }, [documentMode]);
@@ -1651,13 +1653,14 @@ export const ToolGroup = memo(function ToolGroup({
   const { t } = useI18n();
   const transcriptRenderMode = useTranscriptRenderMode();
   const documentMode = transcriptRenderMode === 'document';
+  const documentExpanded = useTranscriptDocumentExpanded();
   const subagentDetails = useSubagentDetails();
   const monitorDetails = useMonitorDetails();
   const monitorDetailsAvailable = monitorDetails !== undefined;
   const [monitorDetailsUnavailable, setMonitorDetailsUnavailable] =
     useState(false);
   const [chatExpanded, setChatExpanded] = useState(false);
-  const showGroupContent = documentMode || chatExpanded;
+  const showGroupContent = documentMode ? documentExpanded : chatExpanded;
   const monitorDetailsRequestRef = useRef<object | null>(null);
   const hasRunningTool = hasActiveAgents(tools);
   const activeTool =

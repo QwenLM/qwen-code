@@ -38,7 +38,10 @@ import {
   WebShellThemeId,
   type WebShellTheme,
 } from '../themeContext';
-import { TranscriptRenderModeProvider } from '../transcriptRenderMode';
+import {
+  TranscriptDocumentExpandedProvider,
+  TranscriptRenderModeProvider,
+} from '../transcriptRenderMode';
 import styles from '../App.module.css';
 import { McpAppHostContext } from '../mcpAppHostContext';
 
@@ -55,6 +58,7 @@ export interface WebShellTranscriptProps {
   chatMaxWidth?: number;
   workspaceCwd?: string;
   compactThinking?: boolean;
+  documentExpanded?: boolean;
   collapseCompletedTurns?: boolean;
   markdownTableMode?: MarkdownTableMode;
   virtualScrollThreshold?: number;
@@ -107,6 +111,7 @@ function WebShellTranscriptContent({
   chatMaxWidth,
   workspaceCwd = '',
   compactThinking = false,
+  documentExpanded = true,
   collapseCompletedTurns,
   markdownTableMode = 'basic',
   virtualScrollThreshold,
@@ -242,44 +247,49 @@ function WebShellTranscriptContent({
         <McpAppHostContext.Provider value={mcpAppBaseUrl}>
           <WebShellPortalRootContext.Provider value={portalRoot}>
             <TranscriptRenderModeProvider value={renderMode}>
-              <WebShellCustomizationProvider value={customization}>
-                <TodoContextsProvider
-                  timeline={todoTimeline}
-                  details={todoDetails}
-                >
-                  {/* Embedded read-only transcript API (not the main chat):
+              <TranscriptDocumentExpandedProvider value={documentExpanded}>
+                <WebShellCustomizationProvider value={customization}>
+                  <TodoContextsProvider
+                    timeline={todoTimeline}
+                    details={todoDetails}
+                  >
+                    {/* Embedded read-only transcript API (not the main chat):
                       keep tool groups unmerged so hosts see the full record,
                       independent of the main app's always-on compact view. */}
-                  <CompactModeContext.Provider value={false}>
-                    <div
-                      ref={rootRef}
-                      className={rootClassName}
-                      style={rootStyle}
-                      data-web-shell-root
-                      data-web-shell-shadcn
-                      data-transcript-render-mode={renderMode}
-                      lang={resolvedLanguage}
-                    >
+                    <CompactModeContext.Provider value={false}>
                       <div
-                        className={`${styles.content} ${styles.contentHasMessages}`}
+                        ref={rootRef}
+                        className={rootClassName}
+                        style={rootStyle}
+                        data-web-shell-root
+                        data-web-shell-shadcn
+                        data-transcript-render-mode={renderMode}
+                        data-document-expanded={
+                          documentMode ? String(documentExpanded) : undefined
+                        }
+                        lang={resolvedLanguage}
                       >
-                        <MessageList
-                          messages={messages}
-                          pendingApproval={null}
-                          isResponding={false}
-                          workspaceCwd={workspaceCwd}
-                          virtualScrollThreshold={
-                            documentMode
-                              ? Number.MAX_SAFE_INTEGER
-                              : virtualScrollThreshold
-                          }
-                          hideSessionTimeline={documentMode}
-                        />
+                        <div
+                          className={`${styles.content} ${styles.contentHasMessages}`}
+                        >
+                          <MessageList
+                            messages={messages}
+                            pendingApproval={null}
+                            isResponding={false}
+                            workspaceCwd={workspaceCwd}
+                            virtualScrollThreshold={
+                              documentMode
+                                ? Number.MAX_SAFE_INTEGER
+                                : virtualScrollThreshold
+                            }
+                            hideSessionTimeline={documentMode}
+                          />
+                        </div>
                       </div>
-                    </div>
-                  </CompactModeContext.Provider>
-                </TodoContextsProvider>
-              </WebShellCustomizationProvider>
+                    </CompactModeContext.Provider>
+                  </TodoContextsProvider>
+                </WebShellCustomizationProvider>
+              </TranscriptDocumentExpandedProvider>
             </TranscriptRenderModeProvider>
           </WebShellPortalRootContext.Provider>
         </McpAppHostContext.Provider>

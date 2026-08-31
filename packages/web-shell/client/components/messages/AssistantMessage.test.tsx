@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { WebShellCustomizationProvider } from '../../customization';
 import { I18nProvider } from '../../i18n';
 import {
+  TranscriptDocumentExpandedProvider,
   TranscriptRenderModeProvider,
   type TranscriptRenderMode,
 } from '../../transcriptRenderMode';
@@ -40,6 +41,7 @@ function render(
   node: ReactNode,
   language: 'en' | 'zh-CN' = 'en',
   renderMode: TranscriptRenderMode = 'interactive',
+  documentExpanded = true,
 ): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
@@ -48,7 +50,9 @@ function render(
     root.render(
       <I18nProvider language={language}>
         <TranscriptRenderModeProvider value={renderMode}>
-          {node}
+          <TranscriptDocumentExpandedProvider value={documentExpanded}>
+            {node}
+          </TranscriptDocumentExpandedProvider>
         </TranscriptRenderModeProvider>
       </I18nProvider>,
     );
@@ -124,6 +128,20 @@ describe('AssistantMessage thinking logic', () => {
 
     expect(container.textContent).toContain('document thinking detail');
     expect(container.querySelector('[aria-expanded]')).toBeNull();
+  });
+
+  it('honors the document-wide collapsed state without enabling controls', () => {
+    const container = render(
+      <ThinkingMessage content="document thinking detail" timestamp={0} />,
+      'en',
+      'document',
+      false,
+    );
+
+    expect(container.textContent).not.toContain('document thinking detail');
+    expect(container.querySelector('button')?.hasAttribute('disabled')).toBe(
+      true,
+    );
   });
 
   it.each([

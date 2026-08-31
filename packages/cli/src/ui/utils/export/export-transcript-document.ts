@@ -1910,7 +1910,11 @@ function redactHomePathStructures(value: string): string {
   let cursor = 0;
   for (const match of value.matchAll(urlPattern)) {
     result += redactNonHttpHomePathStructures(value.slice(cursor, match.index));
-    result += match[0];
+    result +=
+      match[0].toLowerCase().startsWith('data:image/') &&
+      containsNonHttpHomePath(match[0], true)
+        ? redactNonHttpHomePathStructures(match[0])
+        : match[0];
     cursor = match.index + match[0].length;
   }
   return result + redactNonHttpHomePathStructures(value.slice(cursor));
@@ -1918,16 +1922,14 @@ function redactHomePathStructures(value: string): string {
 
 function redactNonHttpHomePathStructures(value: string): string {
   const rawRedacted = redactRawHomePathStructures(value);
-  const encodedRedacted = rawRedacted.replace(
-    PERCENT_ENCODED_TOKEN_PATTERN,
-    (token: string, offset: number, source: string) => {
-      const tokenStart = offset;
-      if (source.slice(0, tokenStart).endsWith('[home]')) return token;
-      const decoded = decodePercentToken(token);
-      const redacted = redactRawHomePathStructures(decoded);
-      return redacted === decoded ? token : redacted;
-    },
-  );
+  const decoded = decodePercentText(rawRedacted);
+  if (decoded === undefined) return '[encoded content omitted]';
+  const encodedRedacted = containsRawHomePath(decoded)
+    ? redactRawHomePathStructures(decoded).replace(
+        /(?:\[home\]){2,}/g,
+        '[home]',
+      )
+    : rawRedacted;
   return encodedRedacted.replace(
     /file:\/+(?:[^/\s]+\/)?(?:[A-Za-z]:\/)?\[home\]/gi,
     'file://[home]',
@@ -1955,6 +1957,12 @@ function containsUnredactedHomePath(
   let cursor = 0;
   for (const match of value.matchAll(urlPattern)) {
     if (
+      match[0].toLowerCase().startsWith('data:image/') &&
+      containsNonHttpHomePath(match[0], checkPercentEncoding)
+    ) {
+      return true;
+    }
+    if (
       containsNonHttpHomePath(
         value.slice(cursor, match.index),
         checkPercentEncoding,
@@ -1973,25 +1981,27 @@ function containsNonHttpHomePath(
 ): boolean {
   if (containsRawHomePath(value)) return true;
   if (!checkPercentEncoding) return false;
-  for (const match of value.matchAll(PERCENT_ENCODED_TOKEN_PATTERN)) {
-    if (containsRawHomePath(decodePercentToken(match[0]))) return true;
-  }
-  return false;
+  const decoded = decodePercentText(value);
+  return decoded === undefined || containsRawHomePath(decoded);
 }
 
-const PERCENT_ENCODED_TOKEN_PATTERN = /%[0-9A-Fa-f]{2}[^\s<>"'\x60]*/g;
-
-function decodePercentToken(value: string): string {
+function decodePercentText(value: string): string | undefined {
   let decoded = value;
   for (let pass = 0; pass < 3; pass += 1) {
-    const next = decoded.replace(/%([0-9A-Fa-f]{2})/g, (escape, hex) => {
-      const code = Number.parseInt(hex, 16);
-      return code >= 0x20 && code <= 0x7e ? String.fromCharCode(code) : escape;
-    });
-    if (next === decoded) break;
+    const next = decodePrintablePercentEscapes(decoded);
+    if (next === decoded) return decoded;
     decoded = next;
   }
-  return decoded;
+  return decodePrintablePercentEscapes(decoded) === decoded
+    ? decoded
+    : undefined;
+}
+
+function decodePrintablePercentEscapes(value: string): string {
+  return value.replace(/%([0-9A-Fa-f]{2})/g, (escape, hex) => {
+    const code = Number.parseInt(hex, 16);
+    return code >= 0x20 && code <= 0x7e ? String.fromCharCode(code) : escape;
+  });
 }
 
 function containsRawHomePath(value: string): boolean {

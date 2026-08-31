@@ -156,11 +156,26 @@ function detectTodoList(
     return undefined;
   }
 
+  const retainedEntries = entries.slice(0, MAX_TODO_PREVIEW_ENTRIES);
+  const authoredIds = new Set<string>();
+  for (const entry of retainedEntries) {
+    if (!isRecord(entry)) continue;
+    const meta = isRecord(entry['_meta']) ? entry['_meta'] : undefined;
+    const qwenTodo =
+      meta && isRecord(meta['qwenTodo']) ? meta['qwenTodo'] : undefined;
+    const authoredId =
+      getFirstString(qwenTodo, ['id']) ?? getFirstString(entry, ['id']);
+    if (authoredId && authoredId.length <= MAX_TODO_ID_LENGTH) {
+      authoredIds.add(authoredId);
+    }
+  }
+
   const normalized: DaemonTranscriptTodoItem[] = [];
+  const usedIds = new Set<string>();
   let truncated = entries.length > MAX_TODO_PREVIEW_ENTRIES;
   let remainingText = MAX_TOOL_RESULT_PREVIEW_LENGTH;
   let remainingDependencyInputs = MAX_TODO_PREVIEW_ENTRIES;
-  entries.slice(0, MAX_TODO_PREVIEW_ENTRIES).forEach((entry, index) => {
+  retainedEntries.forEach((entry, index) => {
     if (!isRecord(entry)) {
       truncated = true;
       return;
@@ -182,15 +197,21 @@ function detectTodoList(
       meta && isRecord(meta['qwenTodo']) ? meta['qwenTodo'] : undefined;
     const qwenTodoId = getFirstString(qwenTodo, ['id']);
     const entryId = getFirstString(entry, ['id']);
-    const rawId = qwenTodoId ?? entryId ?? `plan-${index}`;
+    const authoredId = qwenTodoId ?? entryId;
+    const rawId = authoredId ?? `plan-${index}`;
     if (
       (qwenTodo?.['id'] !== undefined) !== !!qwenTodoId ||
       (entry['id'] !== undefined) !== !!entryId
     ) {
       truncated = true;
     }
-    const id = rawId.length <= MAX_TODO_ID_LENGTH ? rawId : `plan-${index}`;
+    let id = rawId.length <= MAX_TODO_ID_LENGTH ? rawId : `plan-${index}`;
     if (id !== rawId) truncated = true;
+    const idWasSynthesized = authoredId === undefined || id !== rawId;
+    if (usedIds.has(id) || (idWasSynthesized && authoredIds.has(id))) {
+      id = allocateUniqueTodoId(id, authoredIds, usedIds);
+    }
+    usedIds.add(id);
     const rawStatus = getFirstString(entry, ['status']);
     if (entry['status'] !== undefined && rawStatus === undefined) {
       truncated = true;
@@ -283,6 +304,20 @@ function detectTodoList(
     ...(planId ? { planId } : {}),
     ...(revision !== undefined ? { revision } : {}),
   };
+}
+
+function allocateUniqueTodoId(
+  base: string,
+  authoredIds: ReadonlySet<string>,
+  usedIds: ReadonlySet<string>,
+): string {
+  for (let attempt = 1; ; attempt += 1) {
+    const suffix = attempt === 1 ? '-s' : `-s${attempt}`;
+    const candidate = `${base.slice(0, MAX_TODO_ID_LENGTH - suffix.length)}${suffix}`;
+    if (!authoredIds.has(candidate) && !usedIds.has(candidate)) {
+      return candidate;
+    }
+  }
 }
 
 function extractDisplayContentText(content: unknown): string | undefined {

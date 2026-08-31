@@ -3,7 +3,10 @@ import type { TodoItem } from '../../adapters/types';
 import { TodoTimelineContext } from '../../WebShellContexts';
 import { TodoEventSummary, TodoFullList } from './TodoView';
 import { useI18n } from '../../i18n';
-import { useTranscriptRenderMode } from '../../transcriptRenderMode';
+import {
+  useTranscriptDocumentExpanded,
+  useTranscriptRenderMode,
+} from '../../transcriptRenderMode';
 import flashStyles from '../MessageLocateFlash.module.css';
 import styles from './PlanMessage.module.css';
 
@@ -29,8 +32,10 @@ export const PlanMessage = memo(function PlanMessage({
 }: PlanMessageProps) {
   const { t } = useI18n();
   const documentMode = useTranscriptRenderMode() === 'document';
+  const documentExpanded = useTranscriptDocumentExpanded();
   const [expanded, setExpanded] = useState(false);
   if (todos.length === 0) return null;
+  const showFullList = documentMode ? documentExpanded : expanded;
 
   const total = todos.length;
   const completed = todos.filter((td) => td.status === 'completed').length;
@@ -65,7 +70,7 @@ export const PlanMessage = memo(function PlanMessage({
           </span>
         </button>
       )}
-      {documentMode || expanded ? (
+      {showFullList ? (
         <TodoFullList todos={todos} numbered />
       ) : (
         <PlanEventSummary id={id} todos={todos} />

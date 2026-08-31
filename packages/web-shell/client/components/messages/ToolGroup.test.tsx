@@ -9,7 +9,10 @@ import { hasActiveAgents } from '../../adapters/toolClassification';
 import { transcriptBlocksToDaemonMessages } from '../../adapters/transcriptToMessages';
 import { getTranslator, I18nProvider } from '../../i18n';
 import { WebShellCustomizationProvider } from '../../customization';
-import { TranscriptRenderModeProvider } from '../../transcriptRenderMode';
+import {
+  TranscriptDocumentExpandedProvider,
+  TranscriptRenderModeProvider,
+} from '../../transcriptRenderMode';
 import { SubagentDetailsProvider } from '../../subagentDetailsContext';
 import { MonitorDetailsProvider } from '../../monitorDetailsContext';
 import { McpAppHostContext } from '../../mcpAppHostContext';
@@ -99,6 +102,7 @@ function renderToolGroup(
   language: 'en' | 'zh-CN' = 'en',
   generateContent?: SessionContentGenerator,
   mcpAppHostUrl?: string,
+  documentExpanded = true,
 ): HTMLElement {
   const renderMode =
     typeof renderModeOrCompactSummary === 'string'
@@ -130,19 +134,21 @@ function renderToolGroup(
     root.render(
       <I18nProvider language={language}>
         <TranscriptRenderModeProvider value={renderMode}>
-          <WebShellCustomizationProvider value={customization}>
-            {onOpenMonitor ? (
-              <MonitorDetailsProvider onOpen={onOpenMonitor}>
-                {group}
-              </MonitorDetailsProvider>
-            ) : onOpenSubagent ? (
-              <SubagentDetailsProvider onOpen={onOpenSubagent}>
-                {group}
-              </SubagentDetailsProvider>
-            ) : (
-              group
-            )}
-          </WebShellCustomizationProvider>
+          <TranscriptDocumentExpandedProvider value={documentExpanded}>
+            <WebShellCustomizationProvider value={customization}>
+              {onOpenMonitor ? (
+                <MonitorDetailsProvider onOpen={onOpenMonitor}>
+                  {group}
+                </MonitorDetailsProvider>
+              ) : onOpenSubagent ? (
+                <SubagentDetailsProvider onOpen={onOpenSubagent}>
+                  {group}
+                </SubagentDetailsProvider>
+              ) : (
+                group
+              )}
+            </WebShellCustomizationProvider>
+          </TranscriptDocumentExpandedProvider>
         </TranscriptRenderModeProvider>
       </I18nProvider>,
     );
@@ -746,6 +752,25 @@ describe('tool row rendering', () => {
         ) as HTMLElement | null
       )?.style.display,
     ).not.toBe('none');
+    expect(container.querySelector('button:not([disabled])')).toBeNull();
+  });
+
+  it('honors the document-wide collapsed state for tools and thoughts', () => {
+    const container = renderToolGroup(
+      [makeTool({ rawOutput: 'document tool output' })],
+      {},
+      [{ content: 'document thought' }],
+      'document',
+      undefined,
+      undefined,
+      'en',
+      undefined,
+      undefined,
+      false,
+    );
+
+    expect(container.textContent).not.toContain('document tool output');
+    expect(container.textContent).not.toContain('document thought');
     expect(container.querySelector('button:not([disabled])')).toBeNull();
   });
 

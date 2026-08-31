@@ -5,7 +5,10 @@ import {
   type WebShellAssistantTurnFooterRenderInfo,
 } from '../../customization';
 import { useI18n } from '../../i18n';
-import { useTranscriptRenderMode } from '../../transcriptRenderMode';
+import {
+  useTranscriptDocumentExpanded,
+  useTranscriptRenderMode,
+} from '../../transcriptRenderMode';
 import { formatTimestamp } from '../MessageTimestamp';
 import {
   warnClipboardWriteFailure,
@@ -331,8 +334,9 @@ export const ThinkingMessage = memo(function ThinkingMessage({
   const { language, t } = useI18n();
   const transcriptRenderMode = useTranscriptRenderMode();
   const documentMode = transcriptRenderMode === 'document';
+  const documentExpanded = useTranscriptDocumentExpanded();
   const [thinkingExpanded, setThinkingExpanded] = useState(false);
-  const showThinking = documentMode || thinkingExpanded;
+  const showThinking = documentMode ? documentExpanded : thinkingExpanded;
   const thinkingActive = isStreaming === true;
   const startTimeRef = useRef(timestamp ?? Date.now());
   const sawActiveRef = useRef(thinkingActive);

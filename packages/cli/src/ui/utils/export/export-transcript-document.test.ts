@@ -195,7 +195,8 @@ describe('ExportTranscriptDocumentV1', () => {
       'Case variants [home]/private.txt [home]/private.txt',
     );
     expect(text).toContain('Normalized [home]/private.txt [home]/private.txt');
-    expect(text).toContain('data:image/png;base64,/home/AA');
+    expect(text).toContain('[image omitted: safe]');
+    expect(text).not.toContain('data:image/png;base64,/home/AA');
     expect(text).not.toContain('/Users/alice');
     expect(text).not.toContain('C:\\Users\\alice');
     expect(text).not.toContain('/home/alice');
@@ -384,6 +385,65 @@ describe('ExportTranscriptDocumentV1', () => {
     expect(text).not.toContain(encodedHomePath);
     expect(text).not.toContain('%2FUsers%2Fbob');
     expect(document.metadata.repository).toBe(encodedHomePath);
+  });
+
+  it('fails closed when encoded home paths exceed the decode-pass limit', () => {
+    const encodeLayers = (value: string, count: number) => {
+      let encoded = value;
+      for (let index = 0; index < count; index += 1) {
+        encoded = encodeURIComponent(encoded);
+      }
+      return encoded;
+    };
+    const unix = encodeLayers('/home/alice/private.txt', 4);
+    const windows = encodeLayers('C:\\Users\\bob\\private.txt', 4);
+    const document = createExportTranscriptDocumentV1(
+      [
+        record('deeply-encoded-home-paths', null, {
+          message: {
+            role: 'user',
+            parts: [{ text: `Unix ${unix}\nWindows ${windows}` }],
+          },
+        }),
+      ],
+      sessionData,
+      EXPORT_OPTIONS,
+    );
+    const text =
+      document.blocks[0]?.kind === 'user' ? document.blocks[0].text : '';
+
+    expect(text).not.toContain(unix);
+    expect(text).not.toContain(windows);
+    expect(text).not.toContain('alice');
+    expect(text).not.toContain('bob');
+  });
+
+  it('redacts home paths split across literal and encoded text boundaries', () => {
+    const payloads = [
+      '/home%2Falice/private.txt',
+      '/Users%2Falice/private.txt',
+      '/home%5Calice/private.txt',
+      '/hom%65/alice/private.txt',
+      'data:image/png;base64,QUJD/home/alice/private.txt',
+      '![x](data:image/png;base64,iVBORw0KGgo=)/home/alice/private.txt',
+    ];
+    const document = createExportTranscriptDocumentV1(
+      [
+        record('split-encoded-home-paths', null, {
+          message: {
+            role: 'user',
+            parts: [{ text: payloads.join('\n') }],
+          },
+        }),
+      ],
+      sessionData,
+      EXPORT_OPTIONS,
+    );
+    const text =
+      document.blocks[0]?.kind === 'user' ? document.blocks[0].text : '';
+
+    for (const payload of payloads) expect(text).not.toContain(payload);
+    expect(text).not.toContain('alice');
   });
 
   it('exports qwen-native edit args as a complete file diff', () => {

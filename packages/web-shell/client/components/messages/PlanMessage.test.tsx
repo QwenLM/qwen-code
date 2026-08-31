@@ -3,7 +3,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../../i18n';
-import { TranscriptRenderModeProvider } from '../../transcriptRenderMode';
+import {
+  TranscriptDocumentExpandedProvider,
+  TranscriptRenderModeProvider,
+} from '../../transcriptRenderMode';
 import type { TodoItem } from '../../adapters/types';
 import { todoStateKey, type TodoDetail } from '../../utils/todos';
 
@@ -48,6 +51,7 @@ function renderPlan(
   timeline?: Map<string, unknown>,
   documentMode = false,
   details = new Map<string, TodoDetail>(),
+  documentExpanded = true,
 ): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
@@ -58,11 +62,13 @@ function renderPlan(
         <TranscriptRenderModeProvider
           value={documentMode ? 'document' : 'interactive'}
         >
-          <TodoTimelineContext.Provider value={timeline ?? new Map()}>
-            <TodoDetailContext.Provider value={details}>
-              <PlanMessage id={id} todos={todos} />
-            </TodoDetailContext.Provider>
-          </TodoTimelineContext.Provider>
+          <TranscriptDocumentExpandedProvider value={documentExpanded}>
+            <TodoTimelineContext.Provider value={timeline ?? new Map()}>
+              <TodoDetailContext.Provider value={details}>
+                <PlanMessage id={id} todos={todos} />
+              </TodoDetailContext.Provider>
+            </TodoTimelineContext.Provider>
+          </TranscriptDocumentExpandedProvider>
         </TranscriptRenderModeProvider>
       </I18nProvider>,
     );
@@ -121,6 +127,21 @@ describe('PlanMessage', () => {
     );
     expect(container.textContent).toContain('Input');
     expect(container.textContent).toContain('12');
+  });
+
+  it('honors the document-wide collapsed state for plans', () => {
+    const container = renderPlan(
+      'p1',
+      TODOS,
+      undefined,
+      true,
+      new Map(),
+      false,
+    );
+
+    expect(container.textContent).toContain('Second task');
+    expect(container.textContent).not.toContain('Third task');
+    expect(container.querySelector('button')).toBeNull();
   });
 
   it('shows the plan-keyed diff when a timeline is present', () => {

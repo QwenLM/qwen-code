@@ -11,6 +11,7 @@ interface Observation {
   theme: string;
   language: string;
   renderMode: string;
+  documentExpanded: boolean;
   compactMode: boolean;
   customization: Record<string, unknown>;
 }
@@ -52,6 +53,9 @@ vi.mock('./MessageList', async () => {
   const { useI18n } = await import('../i18n');
   const { useTheme } = await import('../themeContext');
   const { useTranscriptRenderMode } = await import('../transcriptRenderMode');
+  const { useTranscriptDocumentExpanded } = await import(
+    '../transcriptRenderMode'
+  );
   return {
     MessageList: (props: Record<string, unknown> & { messages: Message[] }) => {
       if (observed.shouldThrow) throw new Error('message-list boom');
@@ -61,6 +65,7 @@ vi.mock('./MessageList', async () => {
         theme: useTheme(),
         language: useI18n().language,
         renderMode: useTranscriptRenderMode(),
+        documentExpanded: useTranscriptDocumentExpanded(),
         compactMode: React.useContext(CompactModeContext),
         customization: customization as Record<string, unknown>,
       });
@@ -217,6 +222,7 @@ describe('WebShellTranscript contract', () => {
 
     const observation = latestObservation();
     expect(observation.renderMode).toBe('document');
+    expect(observation.documentExpanded).toBe(true);
     expect(observation.props.virtualScrollThreshold).toBe(
       Number.MAX_SAFE_INTEGER,
     );
@@ -228,6 +234,25 @@ describe('WebShellTranscript contract', () => {
         .querySelector('[data-web-shell-root]')
         ?.getAttribute('data-transcript-render-mode'),
     ).toBe('document');
+  });
+
+  it('projects the document-wide expansion state without changing render mode', () => {
+    mount(
+      <WebShellTranscript
+        blocks={[]}
+        renderMode="document"
+        documentExpanded={false}
+      />,
+    );
+
+    const observation = latestObservation();
+    expect(observation.renderMode).toBe('document');
+    expect(observation.documentExpanded).toBe(false);
+    expect(
+      document
+        .querySelector('[data-web-shell-root]')
+        ?.getAttribute('data-document-expanded'),
+    ).toBe('false');
   });
 
   it('uses safe tool projections only in document mode', () => {

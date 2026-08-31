@@ -5444,6 +5444,44 @@ describe('daemon UI tool preview taxonomy (PR-C)', () => {
     });
   });
 
+  it('keeps synthesized todo ids unique from authored ids', () => {
+    const preview = createDaemonToolPreview(
+      {
+        entries: [
+          { id: 'plan-1', content: 'Authored', status: 'pending' },
+          { content: 'Synthesized', status: 'pending' },
+        ],
+      },
+      { toolName: 'todo_write' },
+    );
+    const ids =
+      preview.kind === 'todo_list' ? preview.entries.map((e) => e.id) : [];
+
+    expect(ids).toEqual(['plan-1', 'plan-1-s']);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it('keeps truncated todo id fallbacks unique from authored ids', () => {
+    const preview = createDaemonToolPreview(
+      {
+        entries: [
+          {
+            id: 'x'.repeat(513),
+            content: 'Truncated',
+            status: 'pending',
+          },
+          { id: 'plan-0', content: 'Authored', status: 'pending' },
+        ],
+      },
+      { toolName: 'todo_write' },
+    );
+    const ids =
+      preview.kind === 'todo_list' ? preview.entries.map((e) => e.id) : [];
+
+    expect(ids).toEqual(['plan-0-s', 'plan-0']);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
   it.each([{ revision: 1 }, ' '])(
     'marks an invalid todo plan id %j as truncated',
     (planId) => {
