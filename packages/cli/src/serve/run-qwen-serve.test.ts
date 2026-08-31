@@ -802,8 +802,9 @@ describe('workspace skill settings persistence', () => {
     await expect(
       persistDisabledSkills!(workspace, 'inherited-opt-in', true),
     ).resolves.toEqual({
-      changed: false,
+      changed: true,
       disabled: ['orphan', ' ReViEw ', 'review'],
+      settingsChanges: [{ key: 'skills.enabled', value: ['inherited-opt-in'] }],
     });
 
     await expect(
@@ -834,14 +835,23 @@ describe('workspace skill settings persistence', () => {
     ).resolves.toEqual({
       changed: true,
       disabled: ['orphan', 'alpha', 'beta'],
-      settingsChanges: [{ key: 'skills.enabled', value: ['opt-in-skill'] }],
+      settingsChanges: [
+        {
+          key: 'skills.enabled',
+          value: ['inherited-opt-in', 'review', 'opt-in-skill'],
+        },
+      ],
     });
 
     const saved = JSON.parse(
       fs.readFileSync(path.join(workspace, '.qwen', 'settings.json'), 'utf8'),
     ) as { skills: { disabled: string[]; enabled: string[] } };
     expect(saved.skills.disabled).toEqual(['orphan', 'alpha', 'beta']);
-    expect(saved.skills.enabled).toEqual(['opt-in-skill']);
+    expect(saved.skills.enabled).toEqual([
+      'inherited-opt-in',
+      'review',
+      'opt-in-skill',
+    ]);
     await expect(
       persistDisabledSkills!(workspace, 'locked-skill', false),
     ).resolves.toEqual({
@@ -863,6 +873,10 @@ describe('workspace skill settings persistence', () => {
         {
           key: 'skills.disabled',
           value: ['orphan', 'alpha', 'beta'],
+        },
+        {
+          key: 'skills.enabled',
+          value: ['inherited-opt-in', 'review', 'opt-in-skill', 'locked-skill'],
         },
       ],
     });
@@ -1069,16 +1083,18 @@ describe('workspace skill settings persistence', () => {
     expect(savedUser.skills.disabled).toEqual(['locked-skill']);
     expect(savedUser.skills.enabled).toBeUndefined();
 
-    const preinstallNoop = await persistDisabledSkillsBatch!(
+    const preinstallOptIn = await persistDisabledSkillsBatch!(
       workspace,
       ['future-skill'],
       true,
     );
-    expect(preinstallNoop.outcomes).toEqual([
-      { skillName: 'future-skill', changed: false },
+    expect(preinstallOptIn.outcomes).toEqual([
+      { skillName: 'future-skill', changed: true },
     ]);
-    expect(preinstallNoop.settingsChanges).toEqual([]);
-    expect(setValues).toHaveBeenCalledOnce();
+    expect(preinstallOptIn.settingsChanges).toEqual([
+      { key: 'skills.enabled', value: ['future-skill'] },
+    ]);
+    expect(setValues).toHaveBeenCalledTimes(2);
 
     const preinstallEnable = await persistDisabledSkillsBatch!(
       workspace,
@@ -1093,8 +1109,9 @@ describe('workspace skill settings persistence', () => {
         key: 'skills.disabled',
         value: ['review', 'alpha', 'locked-skill'],
       },
+      { key: 'skills.enabled', value: ['future-skill', 'orphan'] },
     ]);
-    expect(setValues).toHaveBeenCalledTimes(2);
+    expect(setValues).toHaveBeenCalledTimes(3);
 
     const enableResult = await persistDisabledSkillsBatch!(
       workspace,
@@ -1108,10 +1125,10 @@ describe('workspace skill settings persistence', () => {
     expect(enableResult.settingsChanges).toEqual([
       {
         key: 'skills.enabled',
-        value: ['opt-in'],
+        value: ['future-skill', 'orphan', 'opt-in'],
       },
     ]);
-    expect(setValues).toHaveBeenCalledTimes(3);
+    expect(setValues).toHaveBeenCalledTimes(4);
 
     const savedAfterEnable = JSON.parse(
       fs.readFileSync(path.join(workspace, '.qwen', 'settings.json'), 'utf8'),
@@ -1121,7 +1138,11 @@ describe('workspace skill settings persistence', () => {
       'alpha',
       'locked-skill',
     ]);
-    expect(savedAfterEnable.skills.enabled).toEqual(['opt-in']);
+    expect(savedAfterEnable.skills.enabled).toEqual([
+      'future-skill',
+      'orphan',
+      'opt-in',
+    ]);
 
     const guard = vi.fn();
     await persistDisabledSkillsBatch!(workspace, ['guarded'], false, guard);

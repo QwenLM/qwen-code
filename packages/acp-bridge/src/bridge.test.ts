@@ -4196,6 +4196,57 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('separates concurrent skill-only and full refreshes for every session', async () => {
+    const skillsGate = deferred<Record<string, unknown>>();
+    const fullGate = deferred<Record<string, unknown>>();
+    const handle = makeChannel({
+      extMethodImpl: async (method, params) =>
+        method === SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh
+          ? await (params['skillsOnly'] ? skillsGate.promise : fullGate.promise)
+          : {},
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    try {
+      const first = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      const second = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      const skills = bridge.refreshExtensionsForAllSessions(undefined, {
+        skillsOnly: true,
+      });
+      const duplicate = bridge.refreshExtensionsForAllSessions(undefined, {
+        skillsOnly: true,
+      });
+      const full = bridge.refreshExtensionsForAllSessions();
+      await vi.waitFor(() =>
+        expect(handle.agent.extMethodCalls).toHaveLength(4),
+      );
+      expect(handle.agent.extMethodCalls.map(({ params }) => params)).toEqual([
+        { sessionId: first.sessionId, skillsOnly: true },
+        {
+          sessionId: second.sessionId,
+          refreshBootstrap: false,
+          skillsOnly: true,
+        },
+        { sessionId: first.sessionId },
+        { sessionId: second.sessionId, refreshBootstrap: false },
+      ]);
+      skillsGate.resolve({});
+      await expect(skills).resolves.toEqual({ refreshed: 2, failed: 0 });
+      await expect(duplicate).resolves.toEqual({ refreshed: 2, failed: 0 });
+      fullGate.reject(new Error('full refresh failed'));
+      await expect(full).resolves.toEqual({ refreshed: 0, failed: 2 });
+    } finally {
+      skillsGate.resolve({});
+      fullGate.resolve({});
+      await bridge.shutdown();
+    }
+  });
+
   it('bounds a hung session extension refresh', async () => {
     vi.useFakeTimers();
     const refreshGate = deferred<Record<string, unknown>>();
