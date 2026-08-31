@@ -51,7 +51,7 @@ const inlineDecodeCache = new Map<
   string,
   { png: Buffer; size: { width: number; height: number } }
 >();
-export const INLINE_DECODE_NEGATIVE_CACHE_LIMIT = 64;
+export const INLINE_DECODE_NEGATIVE_CACHE_LIMIT = 8;
 const invalidInlineImageCache = new Set<string>();
 
 // A Kitty terminal keeps a transmitted image and redraws it from the placeholder
@@ -346,10 +346,6 @@ function getImageFormat(mimeType: string): string | null {
 }
 
 function decodeInlineImage(data: string): Buffer | null {
-  if (data.length === 0 || data.length > MAX_INLINE_IMAGE_ENCODED_LENGTH) {
-    return null;
-  }
-
   const normalized = data.replace(/\s/g, '');
   if (
     normalized.length === 0 ||
@@ -374,6 +370,10 @@ function decodeInlineImage(data: string): Buffer | null {
 function getDecodedInlinePng(
   data: string,
 ): { png: Buffer; size: { width: number; height: number } } | null {
+  if (data.length === 0 || data.length > MAX_INLINE_IMAGE_ENCODED_LENGTH) {
+    return null;
+  }
+
   const cached = inlineDecodeCache.get(data);
   if (cached) {
     inlineDecodeCache.delete(data);
@@ -381,21 +381,21 @@ function getDecodedInlinePng(
     return cached;
   }
 
-  const negativeKey = crypto.createHash('sha256').update(data).digest('hex');
-  if (invalidInlineImageCache.has(negativeKey)) {
-    invalidInlineImageCache.delete(negativeKey);
-    invalidInlineImageCache.add(negativeKey);
+  if (invalidInlineImageCache.has(data)) {
+    invalidInlineImageCache.delete(data);
+    invalidInlineImageCache.add(data);
     return null;
   }
 
   const png = decodeInlineImage(data);
-  if (!png) {
-    cacheInvalidInlineImage(negativeKey);
-    return null;
-  }
-  const size = readValidatedInlinePngSize(png);
-  if (!size) {
-    cacheInvalidInlineImage(negativeKey);
+  const size = png ? readValidatedInlinePngSize(png) : null;
+  if (!png || !size) {
+    invalidInlineImageCache.add(data);
+    while (invalidInlineImageCache.size > INLINE_DECODE_NEGATIVE_CACHE_LIMIT) {
+      const oldest = invalidInlineImageCache.values().next().value;
+      if (oldest === undefined) break;
+      invalidInlineImageCache.delete(oldest);
+    }
     return null;
   }
 
@@ -407,15 +407,6 @@ function getDecodedInlinePng(
     inlineDecodeCache.delete(oldest);
   }
   return decoded;
-}
-
-function cacheInvalidInlineImage(key: string): void {
-  invalidInlineImageCache.add(key);
-  while (invalidInlineImageCache.size > INLINE_DECODE_NEGATIVE_CACHE_LIMIT) {
-    const oldest = invalidInlineImageCache.values().next().value;
-    if (oldest === undefined) break;
-    invalidInlineImageCache.delete(oldest);
-  }
 }
 
 function readValidatedInlinePngSize(

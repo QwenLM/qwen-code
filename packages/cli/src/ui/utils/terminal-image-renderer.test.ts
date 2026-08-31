@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -133,52 +134,78 @@ describe('terminalImageRenderer', () => {
     }
   });
 
-  it('caches repeated invalid inline payloads and evicts old entries', () => {
+  it('caches invalid inline payloads with bounded LRU eviction', () => {
     const invalidPayloads = Array.from(
       { length: INLINE_DECODE_NEGATIVE_CACHE_LIMIT + 1 },
-      (_, index) => Buffer.from(`not a png ${index}`).toString('base64'),
+      (_, index) =>
+        Buffer.from(`invalid LRU payload ${index}`).toString('base64'),
     );
     const bufferFrom = vi.spyOn(Buffer, 'from');
-
-    try {
-      for (const data of invalidPayloads) {
-        prepareInlineTerminalImage({
-          data,
-          mimeType: 'image/png',
-          contentWidth: 24,
-          env: { TERM: 'xterm-kitty' },
-          stdoutIsTTY: true,
-        });
-      }
-
+    const createHash = vi.spyOn(crypto, 'createHash');
+    const prepare = (data: string) =>
       prepareInlineTerminalImage({
-        data: invalidPayloads[0],
+        data,
         mimeType: 'image/png',
         contentWidth: 24,
         env: { TERM: 'xterm-kitty' },
         stdoutIsTTY: true,
       });
 
+    try {
+      for (const data of invalidPayloads.slice(
+        0,
+        INLINE_DECODE_NEGATIVE_CACHE_LIMIT,
+      )) {
+        prepare(data);
+      }
+      expect(bufferFrom).toHaveBeenCalledTimes(
+        INLINE_DECODE_NEGATIVE_CACHE_LIMIT,
+      );
+
+      prepare(invalidPayloads[0]);
+      expect(bufferFrom).toHaveBeenCalledTimes(
+        INLINE_DECODE_NEGATIVE_CACHE_LIMIT,
+      );
+
+      prepare(invalidPayloads[INLINE_DECODE_NEGATIVE_CACHE_LIMIT]);
+      expect(bufferFrom).toHaveBeenCalledTimes(
+        INLINE_DECODE_NEGATIVE_CACHE_LIMIT + 1,
+      );
+
+      prepare(invalidPayloads[0]);
+      expect(bufferFrom).toHaveBeenCalledTimes(
+        INLINE_DECODE_NEGATIVE_CACHE_LIMIT + 1,
+      );
+
+      prepare(invalidPayloads[1]);
       expect(bufferFrom).toHaveBeenCalledTimes(
         INLINE_DECODE_NEGATIVE_CACHE_LIMIT + 2,
       );
+      expect(createHash).not.toHaveBeenCalled();
     } finally {
       bufferFrom.mockRestore();
+      createHash.mockRestore();
     }
   });
 
   it('rejects inline payloads above the shared image limit before decoding', () => {
     const oversizedBase64 = 'A'.repeat(MAX_INLINE_IMAGE_ENCODED_LENGTH + 1);
+    const bufferFrom = vi.spyOn(Buffer, 'from');
 
-    expect(
-      prepareInlineTerminalImage({
-        data: oversizedBase64,
-        mimeType: 'image/png',
-        contentWidth: 24,
-        env: { TERM: 'xterm-kitty' },
-        stdoutIsTTY: true,
-      }),
-    ).toEqual({ fallbackText: '[image: png]', result: null });
+    try {
+      expect(
+        prepareInlineTerminalImage({
+          data: oversizedBase64,
+          mimeType: 'image/png',
+          contentWidth: 24,
+          env: { TERM: 'xterm-kitty' },
+          stdoutIsTTY: true,
+        }),
+      ).toEqual({ fallbackText: '[image: png]', result: null });
+      expect(bufferFrom).not.toHaveBeenCalled();
+    } finally {
+      bufferFrom.mockRestore();
+    }
   });
 
   it('rejects inline PNG dimensions above the shared image limit', () => {
