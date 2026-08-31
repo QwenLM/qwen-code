@@ -1457,14 +1457,28 @@ export function normalizeGoalTokenBudget(value: unknown): number {
 }
 
 /**
+ * Largest accepted `model.goalTokenBudget`: 10x the built-in default.
+ *
+ * The bound is a typo guard, not a policy on long runs. The population for
+ * this setting is exactly "people typing zeros into a safety bound", and a
+ * silent extra zero disarms the runaway-spend guard the setting exists for;
+ * an operator who genuinely wants more autonomy than 300M tokens per window
+ * has the explicit opt-out (`0`/`-1`) instead. Values above the cap fall
+ * back to the default and land in the debug log like every other invalid
+ * value.
+ */
+export const GOAL_TOKEN_BUDGET_CAP = 10 * GOAL_DEFAULT_TOKEN_BUDGET;
+
+/**
  * True for the values `normalizeGoalTokenBudget` honours (`-1` as the
- * opt-out alias for `0`); false for the values that fall back to the default.
+ * opt-out alias for `0`, positives up to `GOAL_TOKEN_BUDGET_CAP`); false for
+ * the values that fall back to the default.
  */
 export function isValidGoalTokenBudget(value: unknown): value is number {
   return (
     typeof value === 'number' &&
     Number.isInteger(value) &&
-    (value >= 0 || value === -1)
+    (value === -1 || (value >= 0 && value <= GOAL_TOKEN_BUDGET_CAP))
   );
 }
 

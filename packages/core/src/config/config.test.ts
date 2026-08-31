@@ -21,6 +21,7 @@ import {
   TrustGateError,
   matchesServerPattern,
   matchesAnyServerPattern,
+  GOAL_TOKEN_BUDGET_CAP,
   normalizeGoalTokenBudget,
   isValidGoalTokenBudget,
 } from './config.js';
@@ -3161,6 +3162,19 @@ describe('Server Config (config.ts)', () => {
         expect(runtime.getSnapshot().goal).not.toHaveProperty('tokenBudget');
       },
     );
+
+    it('accepts the cap itself and rejects one token more', () => {
+      // The cap is a typo guard: an extra zero on the default must not
+      // silently widen the runaway-spend window tenfold.
+      expect(isValidGoalTokenBudget(GOAL_TOKEN_BUDGET_CAP)).toBe(true);
+      expect(normalizeGoalTokenBudget(GOAL_TOKEN_BUDGET_CAP)).toBe(
+        GOAL_TOKEN_BUDGET_CAP,
+      );
+      expect(isValidGoalTokenBudget(GOAL_TOKEN_BUDGET_CAP + 1)).toBe(false);
+      expect(normalizeGoalTokenBudget(GOAL_TOKEN_BUDGET_CAP + 1)).toBe(
+        GOAL_DEFAULT_TOKEN_BUDGET,
+      );
+    });
 
     it.each([
       ['absent', undefined],
