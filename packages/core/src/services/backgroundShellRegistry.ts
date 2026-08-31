@@ -23,6 +23,7 @@ import * as fs from 'node:fs';
 import type { TaskBase, TaskRegistration } from '../agents/tasks/types.js';
 import { atomicWriteFileSync } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { openSyncNoFollow } from '../utils/no-follow-open.js';
 import { todoWorkChainContext } from '../utils/promptIdContext.js';
 import {
   isBidiControlChar,
@@ -61,7 +62,10 @@ type OutputTailResult =
 function readOutputTail(outputFile: string): OutputTailResult {
   let fd: number | undefined;
   try {
-    fd = fs.openSync(outputFile, getReadOutputOpenFlags());
+    // O_NOFOLLOW (or the compensating identity check where the flag does
+    // not exist, e.g. Windows) refuses a symlink planted over the output
+    // file, so the tail can never be read through it (#8227).
+    fd = openSyncNoFollow(outputFile);
     const stat = fs.fstatSync(fd);
     if (!stat.isFile() || stat.size <= 0) return undefined;
 
@@ -105,11 +109,6 @@ function readOutputTail(outputFile: string): OutputTailResult {
       }
     }
   }
-}
-
-function getReadOutputOpenFlags(): number {
-  const constants = fs.constants;
-  return (constants?.O_RDONLY ?? 0) | (constants?.O_NOFOLLOW ?? 0);
 }
 
 function truncateCommandForModel(command: string): {
