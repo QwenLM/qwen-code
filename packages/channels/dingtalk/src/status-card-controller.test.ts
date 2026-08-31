@@ -1162,7 +1162,7 @@ describe('StatusCardController', () => {
     }
   });
 
-  it('falls back when the boundary drain write fails and keeps retrying', async () => {
+  it('stops retrying after a failed boundary drain is abandoned', async () => {
     vi.useFakeTimers();
     const { client, controller } = createHarness();
     controller.replace(segment(), target, 'first');
@@ -1174,12 +1174,10 @@ describe('StatusCardController', () => {
 
     await expect(controller.flushPending('segment-1')).resolves.toBe(false);
     expect(client.openOrUpdateStream).toHaveBeenCalledTimes(2);
+    controller.abandon('segment-1');
 
     await vi.advanceTimersByTimeAsync(1_000);
-    expect(client.openOrUpdateStream).toHaveBeenCalledTimes(3);
-    expect(client.openOrUpdateStream).toHaveBeenLastCalledWith(
-      expect.objectContaining({ content: 'first more', finalize: false }),
-    );
+    expect(client.openOrUpdateStream).toHaveBeenCalledTimes(2);
   });
 
   it('re-arms flushes promptly after a boundary drain recovers a failed write', async () => {

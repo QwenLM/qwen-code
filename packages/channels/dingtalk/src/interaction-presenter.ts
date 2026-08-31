@@ -209,6 +209,7 @@ export class DingtalkInteractionPresenter {
           text || presentation.content,
         );
         if (!fallbackText || !this.options.sendFallback) return false;
+        statusCards?.abandon(statusContext.segmentId);
         await this.sendFallback(
           run,
           presentation.context.target.chatId,
@@ -230,6 +231,7 @@ export class DingtalkInteractionPresenter {
           text || presentation.content,
         );
         if (!fallbackText || !this.options.sendFallback) return false;
+        statusCards?.abandon(statusContext.segmentId);
         await this.sendFallback(
           run,
           presentation.context.target.chatId,
@@ -250,6 +252,7 @@ export class DingtalkInteractionPresenter {
         text || presentation.content,
       );
       if (!fallbackText || !this.options.sendFallback) return false;
+      statusCards?.abandon(statusContext.segmentId);
       await this.sendFallback(
         run,
         presentation.context.target.chatId,

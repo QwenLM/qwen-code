@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type {
   ChannelOutputSegmentContext,
   ChannelUserInputRequestContext,
@@ -154,6 +154,10 @@ function createHarness() {
     sendFallback,
   };
 }
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 describe('DingtalkInteractionPresenter', () => {
   it('creates the running card as soon as the run starts', async () => {
@@ -982,6 +986,60 @@ describe('DingtalkInteractionPresenter', () => {
       'session-1',
     );
     statusCards.dispose();
+  });
+
+  it('abandons a creation retry after a response-boundary fallback', async () => {
+    vi.useFakeTimers();
+    const { client, presenter, sendFallback } = createHarness();
+    vi.mocked(client.createAndDeliver).mockRejectedValueOnce(
+      new Error('status template unavailable'),
+    );
+    presenter.appendOutput(segment('segment-1'), 'segment one');
+
+    const closed = presenter.closeOutput('segment-1', '', 'response_boundary');
+    await vi.advanceTimersByTimeAsync(0);
+    await expect(closed).resolves.toBe(true);
+
+    expect(sendFallback).toHaveBeenCalledWith(
+      'cid-1',
+      'segment one',
+      'session-1',
+    );
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(client.createAndDeliver).toHaveBeenCalledOnce();
+    expect(client.openOrUpdateStream).not.toHaveBeenCalled();
+  });
+
+  it('abandons stream recovery after a response-boundary fallback', async () => {
+    vi.useFakeTimers();
+    const { client, presenter, sendFallback } = createHarness();
+    let contentWrites = 0;
+    vi.mocked(client.openOrUpdateStream).mockImplementation(async (request) => {
+      if (request.finalize) return;
+      contentWrites++;
+      if (contentWrites === 2) throw new Error('stream blip');
+    });
+    presenter.startStatusCard('run-1');
+    await vi.advanceTimersByTimeAsync(0);
+    presenter.appendOutput(segment('segment-1'), 'answer more');
+
+    const closed = presenter.closeOutput('segment-1', '', 'response_boundary');
+    await vi.advanceTimersByTimeAsync(0);
+    await expect(closed).resolves.toBe(true);
+
+    expect(sendFallback).toHaveBeenCalledWith(
+      'cid-1',
+      'answer more',
+      'session-1',
+    );
+    expect(contentWrites).toBe(2);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(contentWrites).toBe(2);
+    expect(client.updateInstance).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        cardParamMap: expect.objectContaining({ content: 'answer more' }),
+      }),
+    );
   });
 
   it.each([

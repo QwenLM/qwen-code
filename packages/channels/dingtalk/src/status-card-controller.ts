@@ -167,6 +167,13 @@ export class StatusCardController {
     return !record.terminal && !record.streamFailed;
   }
 
+  abandon(segmentId: string): void {
+    const record = this.recordsBySegment.get(segmentId);
+    if (!record) return;
+    record.hasPendingWrite = false;
+    this.removeRecord(record);
+  }
+
   /**
    * Resolves once the card is known to be delivered (or not) without waiting
    * through a creation backoff: `creationAttempt` is the failed attempt until
