@@ -40,6 +40,7 @@ import { workspaceLabel } from '../../utils/workspace';
 import { SessionGroupSection } from './SessionGroupSection';
 import { SessionDetailsTooltip } from './SessionDetailsTooltip';
 import { sessionMatchesGitQuery } from './sessionSearch';
+import { useSessionContentSearch } from './useSessionContentSearch';
 import { measureSessionTitleScroll } from './sessionTitleScroll';
 import { groupSessionsByChannelType } from './channelSessionGroups';
 import { useWorkspaceOverview } from './useWorkspaceOverview';
@@ -119,9 +120,13 @@ interface WorkspaceSectionProps {
    * Render one session row. The sidebar passes its shared `renderSessionRow`
    * so per-workspace sessions match the single-workspace list exactly — same
    * type scale, hover actions (pin, archive, export, more…), and states —
-   * instead of a bespoke, feature-poor row.
+   * instead of a bespoke, feature-poor row. `options.searchSnippet` carries
+   * the content-search excerpt for sessions matched on message text.
    */
-  renderSession: (session: DaemonSessionSummary) => ReactNode;
+  renderSession: (
+    session: DaemonSessionSummary,
+    options?: { searchSnippet?: string | undefined },
+  ) => ReactNode;
   mapSession?: (session: DaemonSessionSummary) => DaemonSessionSummary;
   showSessionDetails?: boolean;
   /**
@@ -554,20 +559,42 @@ export function WorkspaceSection({
       ? (liveStats ?? (sessionsActive ? undefined : retainedStats))
       : undefined;
 
+  const contentSearchHits = useSessionContentSearch(
+    sessionsEnabled ? client : undefined,
+    workspace.cwd,
+    searchQuery,
+  );
   const searchedSessions = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
-    return sessions
-      .map((session) => mapSession?.(session) ?? session)
-      .filter((session) => {
-        if (!query) return true;
-        const label = (session.displayName || '').toLowerCase();
-        return (
-          label.includes(query) ||
-          session.sessionId.toLowerCase().includes(query) ||
-          sessionMatchesGitQuery(session, query)
-        );
-      });
-  }, [mapSession, searchQuery, sessions]);
+    const scoped = sessions.map((session) => mapSession?.(session) ?? session);
+    if (!query) return scoped;
+    const localMatches = scoped.filter((session) => {
+      const label = (session.displayName || '').toLowerCase();
+      return (
+        label.includes(query) ||
+        session.sessionId.toLowerCase().includes(query) ||
+        sessionMatchesGitQuery(session, query)
+      );
+    });
+    // Merge transcript-content hits the local fast path didn't match
+    // (server order is recency); hits the loaded catalog carries keep
+    // their catalog entry — see WebShellSidebar's searchedSessions.
+    if (contentSearchHits.size === 0) return localMatches;
+    const catalogById = new Map(
+      scoped.map((session) => [session.sessionId, session]),
+    );
+    const seen = new Set(localMatches.map((session) => session.sessionId));
+    const merged = [...localMatches];
+    for (const [sessionId, hit] of contentSearchHits) {
+      if (seen.has(sessionId)) continue;
+      merged.push(catalogById.get(sessionId) ?? hit.session);
+    }
+    return merged;
+  }, [contentSearchHits, mapSession, searchQuery, sessions]);
+  const renderSessionWithSnippet = (session: DaemonSessionSummary) =>
+    renderSession(session, {
+      searchSnippet: contentSearchHits.get(session.sessionId)?.snippet,
+    });
   const visibleSessions = useMemo(
     () =>
       excludePinned
@@ -823,7 +850,9 @@ export function WorkspaceSection({
                       });
                     }}
                   >
-                    {group.sessions.map((session) => renderSession(session))}
+                    {group.sessions.map((session) =>
+                      renderSessionWithSnippet(session),
+                    )}
                   </SessionGroupSection>
                 ))}
               </>
@@ -860,7 +889,9 @@ export function WorkspaceSection({
                     deleteLabel={deleteGroupLabel}
                     actionsDisabled={groupActionsDisabled}
                   >
-                    {sessions.map((session) => renderSession(session))}
+                    {sessions.map((session) =>
+                      renderSessionWithSnippet(session),
+                    )}
                   </SessionGroupSection>
                 ))}
                 {groupedSessions.ungrouped.length > 0 && (
@@ -881,7 +912,7 @@ export function WorkspaceSection({
                     }}
                   >
                     {groupedSessions.ungrouped.map((session) =>
-                      renderSession(session),
+                      renderSessionWithSnippet(session),
                     )}
                   </SessionGroupSection>
                 )}
@@ -889,7 +920,7 @@ export function WorkspaceSection({
             ) : (
               <>
                 {directSessions.map((session) => {
-                  if (!readOnly) return renderSession(session);
+                  if (!readOnly) return renderSessionWithSnippet(session);
                   const label = getSessionLabel(session);
                   const stamp = session.updatedAt || session.createdAt;
                   const row = (

@@ -6,6 +6,7 @@ import type { ReactNode } from 'react';
 import type {
   DaemonClient,
   DaemonSessionGroupCatalog,
+  DaemonSessionSearchResult,
   DaemonSessionSummary,
   DaemonWorkspaceCapability,
   DaemonWorkspaceGitStatus,
@@ -148,6 +149,10 @@ function renderSection(
     searchQuery: string;
     gitBranchWanted: boolean;
     compact: boolean;
+    renderSession: (
+      session: DaemonSessionSummary,
+      options?: { searchSnippet?: string | undefined },
+    ) => ReactNode;
   }> = {},
 ): void {
   act(() => {
@@ -174,9 +179,12 @@ function renderSection(
           sourceType={overrides.sourceType}
           channelGroupingEnabled={overrides.channelGroupingEnabled}
           ungroupedLabel="Ungrouped"
-          renderSession={(session: DaemonSessionSummary): ReactNode => (
-            <div key={session.sessionId}>{session.displayName}</div>
-          )}
+          renderSession={
+            overrides.renderSession ??
+            ((session: DaemonSessionSummary): ReactNode => (
+              <div key={session.sessionId}>{session.displayName}</div>
+            ))
+          }
           onOpenGitDiff={overrides.onOpenGitDiff}
           overviewEnabled={overrides.overviewEnabled}
           renderHeader={overrides.renderHeader}
@@ -1727,6 +1735,119 @@ describe('WorkspaceSection pinned group members (issue #10391)', () => {
     expect(ungrouped?.textContent).toContain('\u00b7 1');
     expect(ungrouped?.textContent).toContain('Plain session');
     expect(ungrouped?.textContent ?? '').not.toContain('Pinned free');
+  });
+});
+
+describe('WorkspaceSection content search', () => {
+  function makeSearchClient(input: {
+    sessions: Array<Partial<DaemonSessionSummary>>;
+    searchResults: DaemonSessionSearchResult;
+  }): DaemonClient & {
+    searchWorkspaceSessions: ReturnType<typeof vi.fn>;
+  } {
+    const searchWorkspaceSessions = vi
+      .fn()
+      .mockResolvedValue(input.searchResults);
+    const client = {
+      searchWorkspaceSessions,
+      workspaceByCwd: vi.fn(() => ({
+        workspaceGit,
+        listWorkspaceSessionsPage: vi
+          .fn()
+          .mockResolvedValue({ sessions: input.sessions }),
+        listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+      })),
+    };
+    return client as unknown as DaemonClient & {
+      searchWorkspaceSessions: ReturnType<typeof vi.fn>;
+    };
+  }
+
+  // The content search debounces 300ms before hitting the daemon.
+  async function advanceSearchDebounce(): Promise<void> {
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 350));
+    });
+  }
+
+  const renderRow = (
+    session: DaemonSessionSummary,
+    options?: { searchSnippet?: string | undefined },
+  ): ReactNode => (
+    <div key={session.sessionId}>
+      {session.displayName}
+      {options?.searchSnippet ? `|${options.searchSnippet}` : ''}
+    </div>
+  );
+
+  it('merges content hits not in the loaded catalog and forwards the snippet', async () => {
+    const client = makeSearchClient({
+      sessions: [{ sessionId: 'loaded', displayName: 'Loaded session' }],
+      searchResults: {
+        results: [
+          {
+            session: {
+              sessionId: 'ghost-hit',
+              workspaceCwd: '/tmp/project',
+              displayName: 'Ghost hit',
+            },
+            snippet: 'qdrant excerpt',
+          },
+        ],
+      },
+    });
+    renderSection({
+      client,
+      expanded: true,
+      searchQuery: 'qdrant',
+      renderSession: renderRow,
+    });
+    await flush();
+    await advanceSearchDebounce();
+    await flush();
+
+    expect(client.searchWorkspaceSessions).toHaveBeenCalledWith(
+      '/tmp/project',
+      'qdrant',
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    // The content hit renders with its snippet even though the loaded
+    // catalog page doesn't carry the session; the non-matching loaded
+    // session is filtered out.
+    expect(container.textContent).toContain('Ghost hit');
+    expect(container.textContent).toContain('qdrant excerpt');
+    expect(container.textContent ?? '').not.toContain('Loaded session');
+  });
+
+  it('keeps the catalog entry for a content hit already listed locally', async () => {
+    const client = makeSearchClient({
+      sessions: [{ sessionId: 'loaded-hit', displayName: 'Loaded hit' }],
+      searchResults: {
+        results: [
+          {
+            session: {
+              sessionId: 'loaded-hit',
+              workspaceCwd: '/tmp/project',
+              displayName: 'Stale search name',
+            },
+            snippet: 'qdrant excerpt',
+          },
+        ],
+      },
+    });
+    renderSection({
+      client,
+      expanded: true,
+      searchQuery: 'qdrant',
+      renderSession: renderRow,
+    });
+    await flush();
+    await advanceSearchDebounce();
+    await flush();
+
+    expect(container.textContent).toContain('Loaded hit');
+    expect(container.textContent).toContain('qdrant excerpt');
+    expect(container.textContent ?? '').not.toContain('Stale search name');
   });
 });
 

@@ -404,6 +404,42 @@ const SESSION_FILE_PATTERN = /^[0-9a-fA-F-]{32,36}\.jsonl$/;
 const PR_SIDECAR_FILE_PATTERN = /^[0-9a-fA-F-]{32,36}\.pr\.json$/;
 /** Maximum number of lines to scan when looking for the first prompt text. */
 const MAX_PROMPT_SCAN_LINES = 10;
+
+export interface SessionContentSearchOptions {
+  /** Most recent session files to scan, default 200. */
+  maxFiles?: number;
+  /** Maximum matching sessions to return, default 20. */
+  maxResults?: number;
+  signal?: AbortSignal;
+}
+
+export interface SessionContentSearchHit {
+  sessionId: string;
+  /** Short excerpt of the first matching message, ellipsized around the match. */
+  snippet: string;
+}
+
+/** Characters of context kept before/after the match in a search snippet. */
+const SEARCH_SNIPPET_CONTEXT = 40;
+
+/**
+ * Builds a single-line excerpt of `text` around the first occurrence of
+ * `lowerQuery` (must already be lowercased).
+ */
+function buildSearchSnippet(text: string, lowerQuery: string): string {
+  const collapsed = text.replace(/\s+/g, ' ').trim();
+  const index = collapsed.toLowerCase().indexOf(lowerQuery);
+  if (index === -1) return collapsed;
+  const start = Math.max(0, index - SEARCH_SNIPPET_CONTEXT);
+  const end = Math.min(
+    collapsed.length,
+    index + lowerQuery.length + SEARCH_SNIPPET_CONTEXT * 2,
+  );
+  let snippet = collapsed.slice(start, end);
+  if (start > 0) snippet = `...${snippet}`;
+  if (end < collapsed.length) snippet = `${snippet}...`;
+  return snippet;
+}
 /**
  * Maximum bytes to read from head/tail of a session file.
  * Used by readLastRecordUuid which still does its own tail read.
@@ -2120,6 +2156,140 @@ export class SessionService {
     }
 
     return this.countSessionMessagesFromPath(filePath);
+  }
+
+  /**
+   * Searches the text of user/assistant messages across the project's active
+   * sessions, most recently modified first. Streams each transcript
+   * line-by-line and stops reading a file at its first match, returning one
+   * snippet per matching session. Bounded by `maxFiles`/`maxResults` so a
+   * debounced UI search stays responsive without a full-text index.
+   */
+  async searchSessionContent(
+    query: string,
+    options: SessionContentSearchOptions = {},
+  ): Promise<SessionContentSearchHit[]> {
+    const { maxFiles = 200, maxResults = 20, signal } = options;
+    const lowerQuery = query.trim().toLowerCase();
+    if (!lowerQuery) return [];
+    signal?.throwIfAborted();
+
+    const chatsDir = this.getChatsDirForState('active');
+    let files: Array<{ name: string; mtime: number }> = [];
+    try {
+      for (const name of fs.readdirSync(chatsDir)) {
+        if (!SESSION_FILE_PATTERN.test(name)) continue;
+        try {
+          files.push({
+            name,
+            mtime: fs.statSync(path.join(chatsDir, name)).mtimeMs,
+          });
+        } catch {
+          // Skip files we can't stat
+        }
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+      throw error;
+    }
+    files.sort((a, b) => b.mtime - a.mtime);
+    files = files.slice(0, Math.max(1, maxFiles));
+    signal?.throwIfAborted();
+
+    const hits: SessionContentSearchHit[] = [];
+    for (const [index, file] of files.entries()) {
+      signal?.throwIfAborted();
+      if (hits.length >= maxResults) break;
+      if ((index + 1) % SESSION_LIST_CANCEL_YIELD_INTERVAL === 0) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        signal?.throwIfAborted();
+      }
+      const hit = await this.searchSessionFileForQuery(
+        path.join(chatsDir, file.name),
+        lowerQuery,
+        signal,
+      );
+      if (hit) hits.push(hit);
+    }
+    return hits;
+  }
+
+  private async searchSessionFileForQuery(
+    filePath: string,
+    lowerQuery: string,
+    signal?: AbortSignal,
+  ): Promise<SessionContentSearchHit | undefined> {
+    let fileStream: fs.ReadStream | undefined;
+    let rl: readline.Interface | undefined;
+    try {
+      fileStream = fs.createReadStream(filePath);
+      rl = readline.createInterface({
+        input: fileStream,
+        crlfDelay: Infinity,
+      });
+      let checkedProject = false;
+      let lineCount = 0;
+      for await (const line of rl) {
+        if ((++lineCount & 1023) === 0) signal?.throwIfAborted();
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        for (const record of jsonl.parseLineTolerant<ChatRecord>(
+          trimmed,
+          filePath,
+        )) {
+          if (!checkedProject) {
+            checkedProject = true;
+            if (
+              !(await this.sessionBelongsToCurrentProject(
+                record.sessionId,
+                record.cwd,
+                signal,
+              ))
+            ) {
+              return undefined;
+            }
+          }
+          const text = this.extractRecordSearchText(record);
+          if (!text.toLowerCase().includes(lowerQuery)) continue;
+          return {
+            sessionId: record.sessionId,
+            snippet: buildSearchSnippet(text, lowerQuery),
+          };
+        }
+      }
+      return undefined;
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      return undefined;
+    } finally {
+      rl?.close();
+      fileStream?.destroy();
+    }
+  }
+
+  /**
+   * Text a session-content search matches against for one record: the
+   * prompt display text for user records, otherwise the concatenated text
+   * parts. Subtype records (slash commands, telemetry, ...) are skipped
+   * like they are for first-prompt extraction.
+   */
+  private extractRecordSearchText(record: ChatRecord): string {
+    if (record.type !== 'user' && record.type !== 'assistant') return '';
+    if (record.subtype !== undefined) return '';
+    if (record.type === 'user') {
+      const payload = record.systemPayload as
+        | UserPromptRecordPayload
+        | undefined;
+      if (payload?.displayText) return payload.displayText;
+    }
+    if (!record.message?.parts) return '';
+    const texts: string[] = [];
+    for (const part of record.message.parts as Part[]) {
+      if ('text' in part && typeof part.text === 'string') {
+        texts.push(part.text);
+      }
+    }
+    return texts.join('\n');
   }
 
   private async countSessionMessagesFromPath(

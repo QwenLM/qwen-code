@@ -214,6 +214,7 @@ async function writeStoredSession(input: {
   parentSessionId?: string;
   sourceType?: string;
   sourceId?: string;
+  assistantText?: string;
 }): Promise<void> {
   const chatsDir = path.join(new Storage(input.cwd).getProjectDir(), 'chats');
   await fsp.mkdir(chatsDir, { recursive: true });
@@ -229,6 +230,17 @@ async function writeStoredSession(input: {
       cwd: input.cwd,
     },
   ];
+  if (input.assistantText !== undefined) {
+    records.push({
+      uuid: `${input.sessionId}-assistant-1`,
+      parentUuid: `${input.sessionId}-user-1`,
+      sessionId: input.sessionId,
+      timestamp: input.timestamp,
+      type: 'assistant',
+      message: { role: 'model', parts: [{ text: input.assistantText }] },
+      cwd: input.cwd,
+    });
+  }
   if (input.parentSessionId !== undefined) {
     records.push({
       uuid: `${input.sessionId}-parent-1`,
@@ -3959,6 +3971,116 @@ describe('multi-workspace session dispatch', () => {
       .set('Host', host());
     expect(group.status).toBe(400);
     expect(group.body.code).toBe('invalid_session_group_filter');
+  });
+
+  it('searches non-primary workspace session content and returns snippets', async () => {
+    await withRuntimeDir(async () => {
+      const contentHitId = '550e8400-e29b-41d4-a716-446655440111';
+      const promptHitId = '550e8400-e29b-41d4-a716-446655440112';
+      const missId = '550e8400-e29b-41d4-a716-446655440113';
+      await writeStoredSession({
+        sessionId: contentHitId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'generic title-like prompt',
+        assistantText: 'The qdrant indexing pipeline batches upserts.',
+        mtime: new Date('2026-07-08T00:04:00.000Z'),
+      });
+      await writeStoredSession({
+        sessionId: promptHitId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:01:00.000Z',
+        prompt: 'how does qdrant handle sharding?',
+        mtime: new Date('2026-07-08T00:05:00.000Z'),
+      });
+      await writeStoredSession({
+        sessionId: missId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:02:00.000Z',
+        prompt: 'unrelated topic',
+        mtime: new Date('2026-07-08T00:06:00.000Z'),
+      });
+      const { app } = makeHarness();
+
+      const res = await request(app)
+        .get('/workspace/secondary-id/sessions/search?q=qdrant')
+        .set('Host', host());
+
+      expect(res.status).toBe(200);
+      expect(res.body.results).toHaveLength(2);
+      // Most recently modified first.
+      expect(
+        res.body.results.map(
+          (result: { session: { sessionId: string } }) =>
+            result.session.sessionId,
+        ),
+      ).toEqual([promptHitId, contentHitId]);
+      expect(res.body.results[0].snippet).toContain('qdrant');
+      expect(res.body.results[1].snippet).toContain('qdrant');
+      expect(res.body.results[1].session).toEqual(
+        expect.objectContaining({
+          workspaceCwd: SECONDARY_CWD,
+          displayName: 'generic title-like prompt',
+        }),
+      );
+    });
+  });
+
+  it('validates the workspace session search query parameters', async () => {
+    const { app } = makeHarness();
+
+    const missing = await request(app)
+      .get('/workspace/secondary-id/sessions/search')
+      .set('Host', host());
+    expect(missing.status).toBe(400);
+    expect(missing.body.code).toBe('invalid_search_query');
+
+    const empty = await request(app)
+      .get('/workspace/secondary-id/sessions/search?q=%20%20')
+      .set('Host', host());
+    expect(empty.status).toBe(400);
+    expect(empty.body.code).toBe('invalid_search_query');
+
+    const tooLong = await request(app)
+      .get(`/workspace/secondary-id/sessions/search?q=${'a'.repeat(201)}`)
+      .set('Host', host());
+    expect(tooLong.status).toBe(400);
+    expect(tooLong.body.code).toBe('invalid_search_query');
+
+    for (const raw of ['0', '51', 'abc']) {
+      const invalid = await request(app)
+        .get(
+          `/workspace/secondary-id/sessions/search?q=qdrant&maxResults=${raw}`,
+        )
+        .set('Host', host());
+      expect(invalid.status).toBe(400);
+      expect(invalid.body.code).toBe('invalid_search_max_results');
+    }
+  });
+
+  it('honors maxResults for workspace session content search', async () => {
+    await withRuntimeDir(async () => {
+      for (const [index, sessionId] of [
+        '550e8400-e29b-41d4-a716-446655440121',
+        '550e8400-e29b-41d4-a716-446655440122',
+      ].entries()) {
+        await writeStoredSession({
+          sessionId,
+          cwd: SECONDARY_CWD,
+          timestamp: '2026-07-08T00:00:00.000Z',
+          prompt: `qdrant prompt ${index}`,
+          mtime: new Date(`2026-07-08T00:0${index}:00.000Z`),
+        });
+      }
+      const { app } = makeHarness();
+
+      const res = await request(app)
+        .get('/workspace/secondary-id/sessions/search?q=qdrant&maxResults=1')
+        .set('Host', host());
+
+      expect(res.status).toBe(200);
+      expect(res.body.results).toHaveLength(1);
+    });
   });
 
   it('lists archived non-primary workspace sessions for trusted workspaces', async () => {

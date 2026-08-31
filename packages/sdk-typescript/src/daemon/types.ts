@@ -1427,6 +1427,23 @@ export interface DaemonSessionListPage {
   truncated?: boolean;
 }
 
+/** One content-search hit: the matching session plus an excerpt of the match. */
+export interface DaemonSessionSearchMatch {
+  session: DaemonSessionSummary;
+  /** Short single-line excerpt of the first matching message. */
+  snippet: string;
+}
+
+export interface DaemonSessionSearchResult {
+  results: DaemonSessionSearchMatch[];
+}
+
+export interface DaemonSessionSearchOptions {
+  /** Maximum matching sessions to return (server clamps to 1–50). */
+  maxResults?: number;
+  signal?: AbortSignal;
+}
+
 export interface DaemonSessionCatalogVersion {
   generation: string;
   revision: number;
