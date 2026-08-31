@@ -3202,7 +3202,9 @@ describe('createAcpSessionBridge', () => {
       availableSkills: [],
     });
     await expect(
-      bridge.getSessionTasksStatus(session.sessionId),
+      bridge.getSessionTasksStatus(session.sessionId, {
+        includeWorkflows: true,
+      }),
     ).resolves.toMatchObject({
       sessionId: session.sessionId,
       tasks: [],
@@ -3226,6 +3228,10 @@ describe('createAcpSessionBridge', () => {
       'qwen/status/session/tasks',
       'qwen/status/session/lsp',
     ]);
+    expect(handles[0]?.agent.extMethodCalls[2]?.params).toMatchObject({
+      sessionId: session.sessionId,
+      includeWorkflows: true,
+    });
 
     await bridge.shutdown();
   });
@@ -24072,6 +24078,19 @@ describe('createAcpSessionBridge', () => {
             sessionId: session.sessionId,
             modelId: 'qwen3-coder',
           },
+          { clientId: 'client-not-issued' },
+        ),
+      ).rejects.toBeInstanceOf(InvalidClientIdError);
+      await expect(
+        bridge.cancelSessionTask(session.sessionId, 'task-1', 'workflow', {
+          clientId: 'client-not-issued',
+        }),
+      ).rejects.toBeInstanceOf(InvalidClientIdError);
+      await expect(
+        bridge.controlSessionWorkflowTask(
+          session.sessionId,
+          'task-1',
+          'rerun',
           { clientId: 'client-not-issued' },
         ),
       ).rejects.toBeInstanceOf(InvalidClientIdError);

@@ -73,8 +73,10 @@ import type {
   DaemonUsageRange,
   DaemonStatusReport,
   DaemonStatusReportDetail,
-  DaemonSessionTaskStatus,
+  DaemonSessionTaskWithWorkflowStatus,
   DaemonSessionTasksStatus,
+  DaemonSessionWorkflowTaskStatus,
+  DaemonSessionWorkflowTasksStatus,
   DaemonUpdateAgentRequest,
   DaemonWorkspaceFile,
   DaemonWorkspaceFileBytes,
@@ -3288,6 +3290,22 @@ export class DaemonClient {
     );
   }
 
+  async sessionWorkflowTasks(
+    sessionId: string,
+    clientId?: string,
+  ): Promise<DaemonSessionWorkflowTasksStatus> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/tasks?includeWorkflows=true`,
+      { headers: this.headers({}, clientId) },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /session/:id/tasks');
+        }
+        return (await res.json()) as DaemonSessionWorkflowTasksStatus;
+      },
+    );
+  }
+
   async sessionLspStatus(
     sessionId: string,
     clientId?: string,
@@ -3307,24 +3325,63 @@ export class DaemonClient {
   async sessionTaskCancel(
     sessionId: string,
     taskId: string,
-    kind: DaemonSessionTaskStatus['kind'],
+    kind: DaemonSessionTaskWithWorkflowStatus['kind'],
     clientId?: string,
   ): Promise<{ cancelled: boolean }> {
+    return await this.sessionTaskMutation<{ cancelled: boolean }>(
+      sessionId,
+      taskId,
+      'cancel',
+      { kind },
+      clientId,
+    );
+  }
+
+  async sessionWorkflowTaskAction(
+    sessionId: string,
+    taskId: string,
+    action:
+      | 'pause'
+      | 'resume'
+      | 'retry'
+      | 'rerun'
+      | 'delete-history'
+      | 'run-saved',
+    clientId?: string,
+  ): Promise<{
+    changed: boolean;
+    status?: DaemonSessionWorkflowTaskStatus['status'];
+    taskId?: string;
+  }> {
+    return await this.sessionTaskMutation<{
+      changed: boolean;
+      status?: DaemonSessionWorkflowTaskStatus['status'];
+      taskId?: string;
+    }>(sessionId, taskId, 'workflow-action', { action }, clientId);
+  }
+
+  private async sessionTaskMutation<T>(
+    sessionId: string,
+    taskId: string,
+    route: 'cancel' | 'workflow-action',
+    body: object,
+    clientId?: string,
+  ): Promise<T> {
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/session/${urlEncode(sessionId)}/tasks/${urlEncode(taskId)}/cancel`,
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/tasks/${urlEncode(taskId)}/${route}`,
       {
         method: 'POST',
         headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
-        body: JSON.stringify({ kind }),
+        body: JSON.stringify(body),
       },
       async (res) => {
         if (!res.ok) {
           throw await this.failOnError(
             res,
-            'POST /session/:id/tasks/:taskId/cancel',
+            `POST /session/:id/tasks/:taskId/${route}`,
           );
         }
-        return (await res.json()) as { cancelled: boolean };
+        return (await res.json()) as T;
       },
     );
   }
