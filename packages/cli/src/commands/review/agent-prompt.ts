@@ -2506,8 +2506,8 @@ export function renderFixAuditInput(artifact: unknown, hunks: string): string {
     throw new Error(
       `agent-prompt: --hunks carries no edit for any of the ${fixed.length} ` +
         `finding(s) the ledger marks fixed (${ids(fixed)}): no hunk touches ` +
-        'any location they name. A fix that left no hunk where the finding ' +
-        'is is a claim, not an edit — either the snapshot was taken after ' +
+        'any location they name. A fix that left no hunk where its finding ' +
+        'sits is a claim, not an edit — either the snapshot was taken after ' +
         'the edits, or those outcomes are wrong and the ledger, not the ' +
         'audit, is what to correct.',
     );
