@@ -1263,7 +1263,15 @@ export class PermissionManager {
       // dangerous-stash branch above. Reload cycles (e.g. /unskill +
       // re-invoke) re-run applySkillAllowedTools; without this guard the
       // skill's allowedTools list would accumulate on every cycle.
-      if (this.sessionRules.allow.some((r) => r.raw === rule.raw)) {
+      // The kept entry's trust gating takes the WIDER of the two grants: a
+      // user grant of the same raw outranks a repo grant, so an ungated
+      // arrival clears the flag on the kept entry — otherwise the user's
+      // grant would inherit the repo grant's suspension when folder trust
+      // is revoked. A gated re-arrival (a skill reload) stays an
+      // idempotent skip and never re-gates a rule the user holds.
+      const existing = this.sessionRules.allow.find((r) => r.raw === rule.raw);
+      if (existing) {
+        if (!options?.trustGated) existing.trustGated = false;
         return;
       }
       this.sessionRules.allow.push(rule);

@@ -296,10 +296,21 @@ describe('SkillCommandLoader', () => {
       expect(mockAddSessionAllowRule).not.toHaveBeenCalled();
     });
 
-    it('grants them in a trusted folder', async () => {
+    it('grants them in a trusted folder — marked trust-gated for the live revocation check', async () => {
       vi.mocked(mockConfig.isTrustedFolder).mockReturnValue(true);
       await runProjectSkill();
       expect(mockAddSessionAllowRule).toHaveBeenCalledTimes(2);
+      // Exactly `{ trustGated: true }`: suspension keys solely off the
+      // flag, so a `/my-skill`-invoked project skill whose grants shipped
+      // ungated would silently escape the mid-session revocation.
+      expect(mockAddSessionAllowRule).toHaveBeenNthCalledWith(
+        1,
+        'Bash(curl *)',
+        { trustGated: true },
+      );
+      expect(mockAddSessionAllowRule).toHaveBeenNthCalledWith(2, 'Write', {
+        trustGated: true,
+      });
     });
   });
 
