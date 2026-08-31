@@ -372,6 +372,8 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // with a display). Headless hosts omit the tag so clients hide the
   // Browse affordance instead of surfacing a guaranteed picker failure.
   native_directory_picker: { since: 'v1' },
+  // Workspace-owned runtime lifecycle status and explicit on-demand startup.
+  workspace_runtime: { since: 'v1' },
   // The daemon host can open a workspace directory in the host's OS file
   // manager (Finder via `open` on macOS, Explorer via `explorer.exe` on
   // Windows, xdg-open on a Linux host with a display). Headless hosts omit
@@ -407,6 +409,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // projections. This is additive to the legacy primary-workspace
   // `workspace_extensions` contract.
   extension_management_v2: { since: 'v1' },
+  extension_state: { since: 'v1' },
   extension_git_credentials: { since: 'v1' },
   extension_local_path_install: { since: 'v1' },
   // Workspace-qualified, daemon-local persisted transcript paging. The tag is
@@ -530,6 +533,7 @@ export interface AdvertiseFeatureToggles {
   scratchWorkspaceRegistrationAvailable?: boolean;
   workspaceRuntimeRemovalAvailable?: boolean;
   nativeDirectoryPickerAvailable?: boolean;
+  workspaceRuntimeAvailable?: boolean;
   localPathOpenAvailable?: boolean;
   localTerminalOpenAvailable?: boolean;
   /**
@@ -673,6 +677,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   [
     'native_directory_picker',
     (toggles) => toggles.nativeDirectoryPickerAvailable === true,
+  ],
+  [
+    'workspace_runtime',
+    (toggles) => toggles.workspaceRuntimeAvailable === true,
   ],
   [
     'workspace_local_open',

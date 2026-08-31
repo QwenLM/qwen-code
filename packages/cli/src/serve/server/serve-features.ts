@@ -60,6 +60,7 @@ interface CreateServeFeaturesDeps {
   acpHttpEnabled?: boolean;
   workspaceRuntimeRemovalAvailable?: boolean;
   nativeDirectoryPickerAvailable?: boolean;
+  workspaceRuntimeAvailable: () => boolean;
   localPathOpenAvailable?: boolean;
   localTerminalOpenAvailable?: boolean;
   workspaceTrustHotReloadAvailable?: boolean;
@@ -99,6 +100,7 @@ export function createServeFeatures(
     acpHttpEnabled,
     workspaceRuntimeRemovalAvailable,
     nativeDirectoryPickerAvailable,
+    workspaceRuntimeAvailable,
     localPathOpenAvailable,
     localTerminalOpenAvailable,
     workspaceTrustHotReloadAvailable,
@@ -155,6 +157,7 @@ export function createServeFeatures(
           scratchWorkspaceRegistrationAvailable(),
         workspaceRuntimeRemovalAvailable,
         nativeDirectoryPickerAvailable,
+        workspaceRuntimeAvailable: workspaceRuntimeAvailable(),
         localPathOpenAvailable,
         localTerminalOpenAvailable,
         workspaceTrustHotReloadAvailable,
