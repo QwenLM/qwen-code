@@ -118,6 +118,10 @@ describe('useWorkspaceRemoval', () => {
     // or hung refresh settles, leaving a ghost row with nothing to retry.
     expect(options.onRemoved).toHaveBeenCalledWith(workspace);
     expect(latest?.candidate).toEqual(workspace);
+    // ... and the dialog gates must stay locked for the whole window: a
+    // confirm that stops awaiting the reconcile would drop submitting here
+    // and reopen Confirm/Cancel mid round-trip.
+    expect(latest?.submitting).toBe(true);
     await act(async () => {
       resolveReconcile();
       await confirmDone!;
@@ -580,6 +584,33 @@ describe('useWorkspaceRemoval', () => {
     expect(removeWorkspace).toHaveBeenLastCalledWith('ws-two', {
       force: false,
     });
+  });
+
+  it('reads the latest options at confirm time, not first-render captures', async () => {
+    const removeWorkspace = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new DaemonHttpError(409, { code: 'workspace_busy', activity }, 'busy'),
+      )
+      .mockResolvedValue({ removed: true });
+    const base = baseOptions({ removeWorkspace, blockForce: () => false });
+    await render(base);
+    act(() => latest!.request(workspace));
+    await act(async () => {
+      await latest!.confirm();
+    });
+    expect(latest?.activity).toEqual(activity);
+    // The connection state moved between renders: the active session now
+    // lives in the candidate workspace. blockForce must be read fresh at
+    // confirm time — a stale first-render capture would let the forced
+    // removal fire against the workspace hosting the live session.
+    await render({ ...base, blockForce: () => true });
+    await act(async () => {
+      await latest!.confirm();
+    });
+    expect(removeWorkspace).toHaveBeenCalledTimes(1);
+    expect(base.onRemoved).not.toHaveBeenCalled();
+    expect(latest?.candidate).toEqual(workspace);
   });
 
   it('resets submitting after success so a second removal can run', async () => {
