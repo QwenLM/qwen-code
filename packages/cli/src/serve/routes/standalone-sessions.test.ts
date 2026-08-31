@@ -20,7 +20,11 @@ import { registerStandaloneSessionRoutes } from './standalone-sessions.js';
 
 const sessionId = '11111111-1111-4111-8111-111111111111';
 
-function createHarness() {
+function createHarness({
+  isWorkspaceTrusted = () => true,
+}: {
+  isWorkspaceTrusted?: () => boolean;
+} = {}) {
   const service = {
     create: vi.fn(async () => ({
       session: {
@@ -90,6 +94,7 @@ function createHarness() {
     service: service as unknown as StandaloneSessionService,
     mutate,
     sendBridgeError,
+    isWorkspaceTrusted,
   });
   return { app, service, mutate };
 }
@@ -423,6 +428,48 @@ describe('standalone session routes', () => {
     });
     expect(JSON.stringify(response.body)).not.toContain('full skill body');
   });
+
+  it.each(['load', 'resume'] as const)(
+    'redacts workflows from untrusted standalone %s replay arrays',
+    async (action) => {
+      const { app, service } = createHarness({
+        isWorkspaceTrusted: () => false,
+      });
+      const commandsEvent = {
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId,
+          update: {
+            sessionUpdate: 'available_commands_update',
+            availableCommands: [
+              { name: 'help', description: 'Help' },
+              { name: 'workflows', description: 'Manage workflows' },
+            ],
+          },
+        },
+      };
+      service[action].mockResolvedValueOnce({
+        sessionId,
+        compactedReplay: [commandsEvent],
+        liveJournal: [commandsEvent],
+      } as never);
+
+      const response = await request(app)
+        .post(`/standalone/sessions/${sessionId}/${action}`)
+        .send({});
+
+      expect(response.status).toBe(200);
+      for (const replayKey of ['compactedReplay', 'liveJournal'] as const) {
+        expect(
+          response.body[replayKey][0].data.update.availableCommands.map(
+            (command: { name: string }) => command.name,
+          ),
+        ).toEqual(['help']);
+      }
+    },
+  );
 
   it('repairs an exact directory only with an empty object body', async () => {
     const { app, service } = createHarness();

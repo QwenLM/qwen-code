@@ -1595,6 +1595,16 @@ const SETTINGS_SCHEMA = {
           'Run-level wall-clock budget for headless / unattended runs, in seconds. -1 means unlimited; otherwise must be in [1, ~2,147,483] (sub-second values and values above ~24 days are rejected as typos). Overridable per-invocation via --max-wall-time (which also accepts duration suffixes like 5m, 1.5h).',
         showInDialog: false,
       },
+      goalTokenBudget: {
+        type: 'integer',
+        label: 'Goal Token Budget',
+        category: 'Model',
+        requiresRestart: false,
+        default: undefined as number | undefined,
+        description:
+          'Autonomous spend window armed on each new Goal, in tokens as counted by the Goal meter (totalTokenCount summed over every model call the Goal makes in its own turns; side queries and checkpoint verification are not metered). When a Goal spends its window it gets one wind-down turn to hand off, then stops until you resume it, which arms another window. Unset uses the built-in default of 30,000,000; -1 means unlimited. Zero, values above 300,000,000 (10x the default, a typo guard), other negative, fractional, or non-number values are rejected at startup.',
+        showInDialog: false,
+      },
       maxToolCalls: {
         type: 'number',
         label: 'Max Tool Calls',
@@ -2813,7 +2823,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: undefined as string[] | undefined,
         description:
-          'Allowlist of eager-by-default built-in tool names whose schemas remain eligible for the initial model request. Unlisted non-exempt tools are deferred but stay registered, listed in /tools, and reachable through the tool_search + tool_call bridge. Tools already deferred by default stay on demand even when listed; use tools.visible to surface one at startup. tool_search, tool_call, structured_output, plan-mode lifecycle tools, task_stop, MCP tools, and computer_use__* tools are unaffected. An explicitly empty list ([]) defers every non-exempt eager-by-default tool; omit the setting for no restriction. Pairs with the ToolSearch + ToolCall bridge: when either half is not registered — tools.toolSearch.enabled false (which denies both), a tool_search or tool_call deny rule, or a tools.disabled entry — the allowlist still withholds the schemas, but nothing can load them back, so the demoted tools that remain hidden are out of reach for that session and a warning is logged — except tools also listed in tools.visible, which are declared upfront, and resumed sessions, which re-declare demoted tools referenced by direct calls in the transcript. Differs from tools.disabled, which removes tools entirely, and from permissions.allow, which only auto-approves calls.',
+          'Allowlist of eager-by-default built-in tool names whose schemas remain eligible for the initial model request. Unlisted non-exempt tools are deferred but stay registered, listed in /tools, and reachable through the tool_search + tool_call bridge. Tools already deferred by default stay on demand even when listed; use tools.visible to surface one at startup. tool_search, tool_call, structured_output, plan-mode lifecycle tools, task_stop, MCP tools, and computer_use__* tools are unaffected. An explicitly empty list ([]) defers every non-exempt eager-by-default tool; omit the setting for no restriction. Pairs with the ToolSearch + ToolCall bridge: when either half is not registered — tools.toolSearch.enabled false (which denies both), a tool_search or tool_call deny rule, the automatic opt-out for DeepSeek models, or a tools.disabled entry — the allowlist still withholds the schemas, but nothing can load them back, so the demoted tools that remain hidden are out of reach for that session and a warning is logged — except tools also listed in tools.visible, which are declared upfront, and resumed sessions, which re-declare demoted tools referenced by direct calls in the transcript. Differs from tools.disabled, which removes tools entirely, and from permissions.allow, which only auto-approves calls.',
         showInDialog: false,
       },
       approvalMode: {

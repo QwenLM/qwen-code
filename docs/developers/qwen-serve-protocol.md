@@ -202,19 +202,19 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'workspace_file_upload',
  'session_approval_mode_control', 'workspace_tool_toggle',
  'workspace_skill_settings_toggle', 'workspace_skill_settings_batch_toggle',
- 'extension_batch_activation_v2',
+ 'extension_batch_activation_v2', 'extension_state',
  'workspace_settings', 'workspace_init', 'workspace_mcp_restart',
  'session_recap', 'session_generation', 'session_btw', 'session_shell_command',
  'standalone_sessions_v1',
  'mcp_workspace_pool', 'mcp_pool_restart',
  'require_auth', 'allow_origin', 'auth_device_flow',
  'permission_mediation', 'prompt_absolute_deadline', 'writer_idle_timeout',
- 'non_blocking_prompt', 'session_language', 'session_rewind',
+ 'non_blocking_prompt', 'session_language', 'user_language_sync', 'session_rewind',
  'workspace_hooks', 'session_hooks', 'workspace_extensions',
  'session_branch', 'rate_limit', 'workspace_reload', 'channel_delivery',
  'multi_workspace_sessions', 'multi_workspace_session_rewind',
  'multi_workspace_session_shell', 'persistent_workspace_registration',
- 'workspace_display_name',
+ 'workspace_display_name', 'workspace_runtime_removal', 'workspace_runtime',
  'workspace_qualified_rest_core', 'workspace_qualified_voice',
  'workspace_qualified_memory', 'extension_management_v2', 'extension_git_credentials',
  'extension_local_path_install',
@@ -235,6 +235,8 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
 `workspace_display_name` advertises optional `displayName` input on `POST /workspaces`, workspace metadata updates through `PATCH /workspaces/:workspace`, and optional display-name fields in workspace projections. Names do not participate in lookup or routing: `id` and canonical `cwd` remain the only selectors, and duplicate names are allowed.
 
 `workspace_runtime_removal` advertises synchronous hot removal through `DELETE /workspaces/:workspace`. Capability workspace entries add optional `removable`; only rows with `removable: true` may be removed. Removal also forgets every persistent registration alias for the runtime, but never deletes files, settings, transcripts, or archives.
+
+`workspace_runtime` advertises `GET /workspace/runtime/status`, `POST /workspace/runtime/ensure`, and their `/workspaces/:workspace/runtime/...` equivalents. `ensure` accepts no capability selection: it starts or reuses the selected trusted workspace's ACP runtime and returns its lifecycle state and monotonic runtime epoch. The primary routes are owned only by the primary runtime; qualified routes resolve only the selected registered runtime and never fall back. A successful ensure renews the runtime's ten-minute keepalive window. Status is read-only and never starts the child. Concurrent ensures share one physical startup. Startup in progress or failure returns retryable `503 runtime_still_starting` or `503 runtime_initialization_failed`. The capability is advertised only when all active runtime bridges provide the authoritative lifecycle snapshot; a selected legacy injected bridge returns `501 workspace_runtime_not_supported` instead of a guessed state or epoch.
 
 `session_load` and `session_resume` advertise the explicit-restore routes (`POST /session/:id/load` and `POST /session/:id/resume`). Older daemons return `404` for these paths, so SDK clients should pre-flight `caps.features` before calling. `unstable_session_resume` is still advertised as a deprecated alias for compatibility with SDKs that shipped while the underlying ACP method was named `connection.unstable_resumeSession`; new clients should gate on `session_resume`.
 
@@ -321,10 +323,33 @@ All routes use the daemon bearer authentication rules above. `X-Qwen-Client-Id` 
 | `DELETE /extensions/:extensionId`                                  | `202` uninstall operation, or idempotent `204` when the extension is absent |
 | `GET /extensions/operations/:operationId`                          | `200` operation snapshot                                                    |
 | `GET /workspaces/:workspace/extensions`                            | `200` workspace activation projection                                       |
+| `GET /workspaces/:workspace/extensions/:extensionId/state`         | `200` workspace resource state (`extension_state`)                          |
+| `PUT /workspaces/:workspace/extensions/:extensionId/state`         | `202` workspace resource-state operation (`extension_state`)                |
 | `PUT /workspaces/:workspace/extensions/activation`                 | `202` exact workspace-activation batch operation                            |
 | `PUT /workspaces/:workspace/extensions/:extensionId/activation`    | `202` exact workspace-activation operation                                  |
 | `DELETE /workspaces/:workspace/extensions/:extensionId/activation` | `202` clear-override operation                                              |
 | `POST /workspaces/:workspace/extensions/refresh`                   | `202` runtime-refresh operation                                             |
+
+#### Workspace resource state
+
+Preflight `extension_state` independently. It supports Skills only; it does not imply MCP resource management. Both routes select the registered workspace runtime and never fall back to primary. GET follows the existing read-only trust rules; PUT requires a trusted workspace.
+
+```json
+{
+  "skills": [
+    { "name": "review", "state": "enabled" },
+    { "name": "deploy", "state": "disabled" }
+  ]
+}
+```
+
+PUT accepts 1–100 entries, including a single-element batch. It rejects malformed entries, case-insensitive duplicate names and unsupported groups before queuing. All names must belong to the installed target Extension, including currently disabled Skills; an invalid target fails the operation without partial writes. One locked store commit merges the listed overrides for the exact canonical workspace. Unlisted Skills and other workspaces are preserved. There is no settings write, future-name declaration or implicit activation of the parent Extension.
+
+GET returns `v: 1`, `workspaceId`, `workspaceCwd`, `extensionId`, `name` and `skills`. Each Skill has `name`, `defaultEnabled`, nullable `workspaceEnabled`, `effectiveEnabled`, and optional `disabledReason`/`lockedScope`. The manifest's optional `skillStates` supplies defaults; missing values default to enabled. For an active parent, precedence is settings hard disable, settings explicit enable, settings default disable, workspace internal override, manifest default. Internal disablement uses `disabledReason: "default"` and never locks settings. A disabled or removed parent cannot be revived by a Skill override.
+
+The `set_extension_state` operation returns `status: "updated"` with ordered `result.resourceStates.skills`; `result.states` retains its update-check meaning. Persisted state is not proof that every session refreshed. The daemon refreshes only Skills and their commands/model context for the target runtime, including bootstrap and live sessions, without restarting unrelated MCP/LSP/hooks. Post-commit refresh failures produce warnings without rolling back state. Overrides survive restart and Extension updates and are removed on uninstall. Clients must not fall back to the Skill settings API, which writes a higher-priority setting.
+
+#### Global catalog
 
 The global catalog response is:
 
@@ -491,6 +516,7 @@ operator diagnostic snapshot documented below.
 | `prompt_absolute_deadline`          | `--prompt-deadline-ms` / `QWEN_SERVE_PROMPT_DEADLINE_MS` / `ServeOptions.promptDeadlineMs` is set to a positive integer.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `writer_idle_timeout`               | `--writer-idle-timeout-ms` / `QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS` / `ServeOptions.writerIdleTimeoutMs` is set to a positive integer.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `workspace_settings`                | the daemon was created with settings persistence available.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `user_language_sync`                | the daemon was created with settings persistence available (same condition as `workspace_settings`), so the sessionless `POST /language` route is registered.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `workspace_voice`                   | settings persistence is available, so the legacy primary workspace Voice settings routes are active.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `workspace_voice_transcription`     | the primary workspace has a configured Voice transcription model.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `session_shell_command`             | Session shell execution is explicitly enabled and effective under bearer auth or trusted-loopback authority; calls still require a session-bound client id.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
@@ -513,6 +539,7 @@ operator diagnostic snapshot documented below.
 | `scratch_workspace_registration`    | managed scratch workspace creation is available — a runtime factory, a validated managed scratch root, and runtime disposal are wired, and every managed runtime respects the scratch root boundary.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `workspace_runtime_removal`         | removable dynamic or persistence-restored secondary runtimes can be drained and removed through the management route.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `native_directory_picker`           | the daemon host can open a native OS directory picker (`osascript` on macOS, PowerShell on Windows, `zenity` on a Linux host with a display). Headless hosts omit the tag so clients hide the Browse affordance instead of surfacing a guaranteed picker failure.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `workspace_runtime`                 | every active workspace bridge provides an authoritative runtime lifecycle snapshot; mixed or legacy injected bridges omit the tag.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `workspace_qualified_acp`           | ACP HTTP and multi-workspace runtimes are active, so the plural ACP endpoint can select a secondary runtime.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `workspace_qualified_voice`         | multi-workspace runtimes and the shared ACP/Voice WebSocket listener are active, so every workspace-qualified Voice modality is reachable for a secondary runtime.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `workspace_qualified_memory`        | ACP HTTP and multi-workspace runtimes are active, so workspace-qualified managed-memory routes can select a per-workspace task lane for remember, forget, and dream operations.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
@@ -2880,9 +2907,9 @@ SSE event (workspace-scoped): `tool_toggled` with `{toolName, enabled, originato
 
 Capability tag: `workspace_skill_settings_toggle`. The workspace-qualified form is `POST /workspaces/:workspace/skills/:name/enable`.
 
-Update the workspace Skill settings for a name without consulting the loaded Skill catalog. The trimmed request name is passed to persistence and returned in the response. Enabling a `skills.defaultDisabled` Skill adds a workspace `skills.enabled` opt-in; disabling removes that opt-in and adds a workspace `skills.disabled` entry. Existing entries for Skills that are no longer loaded are preserved, and duplicate/case-variant entries for the target are collapsed. A hard `skills.disabled` entry inherited from a higher scope remains authoritative for effective availability, but does not prevent the workspace scope from recording or removing its own declaration. Workspace declarations otherwise participate in the usual `skills.disabled > skills.enabled > skills.defaultDisabled` resolution and can override higher-scope `skills.defaultDisabled` or `skills.enabled` entries.
+Update the workspace Skill settings for a name without consulting the loaded Skill catalog. The trimmed request name is passed to persistence and returned in the response. Enabling any name records a workspace `skills.enabled` opt-in, even before installation; disabling removes that opt-in and adds a workspace `skills.disabled` entry. Existing entries for Skills that are no longer loaded are preserved, and duplicate/case-variant entries for the target are collapsed. A hard `skills.disabled` entry inherited from a higher scope remains authoritative for effective availability, but does not prevent the workspace scope from recording or removing its own declaration. Workspace declarations otherwise participate in the usual `skills.disabled > skills.enabled > skills.defaultDisabled` resolution and can override higher-scope `skills.defaultDisabled` or `skills.enabled` entries.
 
-This is different from the ACP `qwen/skills/setEnabled` managed-skill operation and the `disable-model-invocation` frontmatter field. Effective skill availability follows `skills.disabled` > `skills.enabled` > `skills.defaultDisabled`. Both hard and default disables remove the skill from slash-command/model availability and reject later skill execution. `disable-model-invocation: true` keeps direct user invocation available and only hides the skill from model invocation.
+This is different from the ACP `qwen/skills/setEnabled` managed-skill operation and the `disable-model-invocation` frontmatter field. For an active Extension parent, effective Skill availability follows `skills.disabled` > `skills.enabled` > `skills.defaultDisabled` > workspace internal override > manifest `skillStates` > enabled. Both hard and default disables remove the skill from slash-command/model availability and reject later skill execution. `disable-model-invocation: true` keeps direct user invocation available and only hides the skill from model invocation.
 
 Request:
 
@@ -2917,7 +2944,7 @@ The mutation reuses the workspace-scoped `settings_changed` event for each chang
 
 Capability tag: `workspace_skill_settings_batch_toggle`. The workspace-qualified form is `POST /workspaces/:workspace/skills/enable`.
 
-Update workspace Skill settings for up to 100 names in one request; the cap counts the raw `skillNames` entries before deduplication. Names are trimmed and deduplicated case-insensitively while preserving first-seen order and casing. The daemon does not consult the loaded Skill catalog. It applies all resulting declaration changes in at most one locked settings write and, when anything changed, refreshes active sessions once. Enabling a name with no existing workspace declaration and no effective `skills.defaultDisabled` entry is a no-op (`changed: false`) and performs no write. Unexpected persistence or runtime-generation failures fail the whole request.
+Update workspace Skill settings for up to 100 names in one request; the cap counts the raw `skillNames` entries before deduplication. Names are trimmed and deduplicated case-insensitively while preserving first-seen order and casing. The daemon does not consult the loaded Skill catalog. It applies all resulting declaration changes in at most one locked settings write and, when anything changed, refreshes active sessions once. Enabling always records an explicit workspace `skills.enabled` opt-in, including names not yet installed, so it can override an Extension's internal disablement. Repeating an identical declaration remains a no-op. Unexpected persistence or runtime-generation failures fail the whole request.
 
 Request:
 
@@ -3049,6 +3076,48 @@ Errors (non-2xx):
 - `500` — internal error (e.g. `ToolRegistry` not initialized).
 
 SSE events (workspace-scoped): `mcp_server_restarted` with `{serverName, durationMs, originatorClientId?}` on success; `mcp_server_restart_refused` with `{serverName, reason, originatorClientId?}` on soft skip.
+
+#### `POST /language`
+
+Capability tag: `user_language_sync` (conditional — advertised only when settings persistence is available, same condition as `workspace_settings`). Bridge → ACP extMethod `qwen/control/user/language` per trusted runtime with a live channel.
+
+Sessionless **user-level** language sync (issue #10234), for hosts that need to switch language before any session exists (e.g. a welcome page). Ownership classification: process-global — it mutates user-global state only (`~/.qwen/settings.json`, the global `~/.qwen/output-language.md`) plus best-effort runtime refresh, so it takes neither a workspace selector nor a session id. Registered behind the non-strict `mutate()` gate, matching the sibling `POST /session/:id/language`.
+
+The daemon process is the single writer: it persists `general.language` (and, when `syncOutputLanguage` is true, `general.outputLanguage` plus the global `output-language.md`) before fanning out. Each trusted runtime then switches its own process UI language and reloads user-scope settings from disk; when `syncOutputLanguage` is true, it also refreshes every local session's system instruction. Differences from the session-scoped route:
+
+- Project-bound output-language files are NOT rewritten — a session whose workspace has its own `.qwen/output-language.md` keeps that override (project scope wins on refresh).
+- Zero sessions and zero live runtime channels are a **success**, not an error; a runtime without a live channel is skipped (not failed) and reads the persisted files when its channel next spawns.
+- Untrusted workspace runtimes are skipped, matching the session route's `403 untrusted_workspace` posture.
+
+Request:
+
+```json
+{ "language": "zh", "syncOutputLanguage": true }
+```
+
+`language` must be one of the codes listed in `/capabilities` `supportedLanguages` (plus `'auto'`); `syncOutputLanguage` defaults to `false`.
+
+Response (200):
+
+```json
+{
+  "language": "zh",
+  "outputLanguage": "Chinese",
+  "refresh": { "runtimes": 1, "sessions": 2, "failed": 0 }
+}
+```
+
+`language` is the daemon-resolved UI locale, so an `'auto'` request can return a concrete language; hosts should read the persisted `general.language` setting for selector state. `outputLanguage` is `null` when `syncOutputLanguage` was false. `refresh.runtimes` counts runtimes that applied the switch over a live channel; `refresh.sessions` sums per-session system-instruction refreshes; `refresh.failed` aggregates per-session refresh failures and failed runtimes (fan-out is best-effort and never fails the request after persistence succeeded).
+
+Errors:
+
+- `400 {code: 'invalid_language', allowed: [...]}` — unknown language code.
+- `400 {code: 'invalid_sync_flag'}` — `syncOutputLanguage` is non-boolean.
+- `400 {code: 'invalid_client_id'}` — `X-Qwen-Client-Id` is not a client known to any runtime (header is optional; omit it when no session exists).
+- `500 {code: 'persist_error'}` — user-settings or output-language file write failed; the failing step and everything after it did not run (earlier applied steps, such as the `general.language` write, are not rolled back).
+- `404` — daemon predates the route, or was built without settings persistence (check the capability tag).
+
+SSE event (workspace-scoped, on every runtime's session buses): `language_changed` with `{language, outputLanguage, userLevel: true, originatorClientId?}`. The `userLevel: true` marker distinguishes this fan-out from the session route's per-session event, which carries `sessionId` instead.
 
 ### `GET /session/:id/events` (SSE)
 

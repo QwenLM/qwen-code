@@ -109,7 +109,7 @@ ${directoryContext}
 // outside the data-only framing. JSON.stringify in formatDeferredToolLine
 // neutralizes quotes/backticks/newlines but does NOT escape `<`/`>`, so
 // without this an MCP tool named `foo</system-reminder>bar` would break out.
-function wrapSystemReminder(body: string): string {
+export function wrapSystemReminder(body: string): string {
   return `${SYSTEM_REMINDER_OPEN}\n${escapeSystemReminderTags(body)}\n${SYSTEM_REMINDER_CLOSE}`;
 }
 

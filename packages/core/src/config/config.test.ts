@@ -21,7 +21,11 @@ import {
   TrustGateError,
   matchesServerPattern,
   matchesAnyServerPattern,
+  GOAL_TOKEN_BUDGET_CAP,
+  normalizeGoalTokenBudget,
+  isValidGoalTokenBudget,
 } from './config.js';
+import { GOAL_DEFAULT_TOKEN_BUDGET } from '../goals/goal-protocol.js';
 import { Storage } from './storage.js';
 import { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from '../services/loopDetectionService.js';
 import * as fs from 'node:fs';
@@ -96,8 +100,12 @@ import { syncTeamMemory } from '../memory/team-memory-sync.js';
 import { getTeamMemoryShareabilityWarning } from '../memory/team-memory-git-status.js';
 import * as runtimeStatus from '../utils/runtimeStatus.js';
 import * as sessionRegistry from '../services/session-registry.js';
-import { ExtensionManager } from '../extension/extensionManager.js';
+import {
+  ExtensionManager,
+  type Extension,
+} from '../extension/extensionManager.js';
 import { SkillManager } from '../skills/skill-manager.js';
+import type { SkillConfig } from '../skills/types.js';
 import { createSkillScopedAgentConfig } from '../memory/skillReviewAgentPlanner.js';
 import { maybeRunAutoSkillCurator } from '../skills/skill-curator.js';
 import { HookSystem } from '../hooks/index.js';
@@ -581,6 +589,75 @@ describe('Server Config (config.ts)', () => {
         sources: {},
       }),
     );
+  });
+
+  it('resolves live skill settings without reviving an inactive or removed owner', () => {
+    const disabled = new Set<string>();
+    const enabled = new Set<string>();
+    const config = new Config({
+      ...baseParams,
+      disabledSkillNamesProvider: () => disabled,
+      enabledSkillNamesProvider: () => enabled,
+      overrideExtensions: undefined,
+    });
+    const skill: SkillConfig = {
+      name: 'Review',
+      description: 'Review changes',
+      level: 'extension',
+      filePath: '/extensions/suite/skills/review/SKILL.md',
+      body: 'Review instructions',
+      extensionName: 'suite',
+    };
+    const extension: Extension = {
+      id: 'a'.repeat(64),
+      name: 'suite',
+      version: '1.0.0',
+      isActive: true,
+      path: '/extensions/suite',
+      config: { name: 'suite', version: '1.0.0' },
+      contextFiles: [],
+      skills: [skill],
+    };
+    const manager = config.getExtensionManager();
+    vi.spyOn(manager, 'getLoadedExtensions').mockReturnValue([extension]);
+    const state = {
+      defaultEnabled: true,
+      workspaceEnabled: null as boolean | null,
+    };
+    vi.spyOn(manager, 'getExtensionSkillState').mockReturnValue(state);
+
+    for (const [declared, workspace, blocked, optedIn, expected] of [
+      [true, null, false, false, true],
+      [false, null, false, false, false],
+      [true, false, false, false, false],
+      [false, true, false, false, true],
+      [true, true, true, false, false],
+      [false, false, false, true, true],
+      [true, true, true, true, false],
+    ] as const) {
+      state.defaultEnabled = declared;
+      state.workspaceEnabled = workspace;
+      blocked ? disabled.add('review') : disabled.clear();
+      optedIn ? enabled.add('review') : enabled.clear();
+      expect(config.isSkillEnabled(skill)).toBe(expected);
+    }
+
+    disabled.clear();
+    enabled.add('review');
+    extension.isActive = false;
+    expect(config.isSkillEnabled(skill)).toBe(false);
+    extension.isActive = true;
+    extension.skills = [];
+    expect(config.isSkillEnabled(skill)).toBe(false);
+    extension.skills = [skill];
+    expect(config.isSkillEnabled({ ...skill, extensionName: 'other' })).toBe(
+      false,
+    );
+    expect(
+      config.isSkillEnabled({ ...skill, filePath: '/unowned/SKILL.md' }),
+    ).toBe(false);
+    expect(config.isSkillEnabled({ ...skill, level: 'project' })).toBe(true);
+    expect(config.getDisabledSkillNames()).toEqual(new Set());
   });
 
   describe('project-dir registry lifecycle', () => {
@@ -3118,6 +3195,197 @@ describe('Server Config (config.ts)', () => {
       await expect(
         first.dispatch({ action: 'create', objective: 'stale' }),
       ).rejects.toThrow('Goal runtime has been disposed');
+    });
+
+    it('arms each new Goal with the configured token budget', async () => {
+      // The only production constructor never passed a grant before, so
+      // every session ran on the built-in default with no operator control.
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        goalTokenBudget: 1_234,
+      });
+      expect(config.getGoalTokenBudgetGrant()).toBe(1_234);
+
+      const runtime = config.getGoalRuntime();
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+      expect(runtime.getSnapshot().goal).toMatchObject({ tokenBudget: 1_234 });
+    });
+
+    it.each([
+      ['0', 0],
+      ['-1', -1],
+    ] as const)(
+      'runs Goals with no budget when goalTokenBudget is %s',
+      async (_label, goalTokenBudget) => {
+        // 0 and its -1 alias map to the runtime's non-finite opt-out: the
+        // created Goal carries no `tokenBudget` field at all, so nothing
+        // non-finite is persisted.
+        const config = new Config({
+          ...baseParams,
+          chatRecording: true,
+          goalTokenBudget,
+        });
+        expect(config.getGoalTokenBudgetGrant()).toBe(Number.POSITIVE_INFINITY);
+
+        const runtime = config.getGoalRuntime();
+        await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+        expect(runtime.getSnapshot().goal).not.toHaveProperty('tokenBudget');
+      },
+    );
+
+    it('accepts the cap itself and rejects one token more', () => {
+      // The cap is a typo guard: an extra zero on the default must not
+      // silently widen the runaway-spend window tenfold.
+      expect(isValidGoalTokenBudget(GOAL_TOKEN_BUDGET_CAP)).toBe(true);
+      expect(normalizeGoalTokenBudget(GOAL_TOKEN_BUDGET_CAP)).toBe(
+        GOAL_TOKEN_BUDGET_CAP,
+      );
+      expect(isValidGoalTokenBudget(GOAL_TOKEN_BUDGET_CAP + 1)).toBe(false);
+      expect(normalizeGoalTokenBudget(GOAL_TOKEN_BUDGET_CAP + 1)).toBe(
+        GOAL_DEFAULT_TOKEN_BUDGET,
+      );
+    });
+
+    it.each([
+      ['absent', undefined],
+      ['negative', -5],
+      ['fractional', 1.5],
+      ['NaN', Number.NaN],
+    ] as const)(
+      'arms the built-in default when goalTokenBudget is %s',
+      async (_label, goalTokenBudget) => {
+        const config = new Config({
+          ...baseParams,
+          chatRecording: true,
+          goalTokenBudget,
+        });
+        expect(config.getGoalTokenBudgetGrant()).toBe(
+          GOAL_DEFAULT_TOKEN_BUDGET,
+        );
+
+        const runtime = config.getGoalRuntime();
+        await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+        expect(runtime.getSnapshot().goal).toMatchObject({
+          tokenBudget: GOAL_DEFAULT_TOKEN_BUDGET,
+        });
+      },
+    );
+
+    it('normalizes the goalTokenBudget setting', () => {
+      expect(normalizeGoalTokenBudget(400_000)).toBe(400_000);
+      expect(normalizeGoalTokenBudget(0)).toBe(Number.POSITIVE_INFINITY);
+      // -1 is the opt-out alias for 0, matching the sibling budget
+      // settings where -1 means unlimited.
+      expect(normalizeGoalTokenBudget(-1)).toBe(Number.POSITIVE_INFINITY);
+      expect(isValidGoalTokenBudget(-1)).toBe(true);
+      for (const invalid of [
+        undefined,
+        null,
+        -2,
+        1.5,
+        Number.NaN,
+        '12',
+        Number.POSITIVE_INFINITY,
+      ]) {
+        expect(normalizeGoalTokenBudget(invalid)).toBe(
+          GOAL_DEFAULT_TOKEN_BUDGET,
+        );
+        expect(isValidGoalTokenBudget(invalid)).toBe(false);
+      }
+      expect(isValidGoalTokenBudget(0)).toBe(true);
+      expect(isValidGoalTokenBudget(30_000_000)).toBe(true);
+    });
+
+    it('records the invalid-goalTokenBudget fallback in the debug log', async () => {
+      // The fallback notice lives in the debug log file (enabled via
+      // QWEN_DEBUG_LOG_FILE / --debug), not on a user-visible channel.
+      const previousDebugLogFileEnv = process.env['QWEN_DEBUG_LOG_FILE'];
+      const sessionId = 'goal-budget-warning-session';
+      const mkdirSpy = vi
+        .spyOn(fs.promises, 'mkdir')
+        .mockResolvedValue(undefined);
+      const appendFileSpy = vi
+        .spyOn(fs.promises, 'appendFile')
+        .mockResolvedValue(undefined);
+
+      try {
+        process.env['QWEN_DEBUG_LOG_FILE'] = '1';
+        resetDebugLoggingState();
+
+        new Config({ ...baseParams, sessionId, goalTokenBudget: -5 });
+
+        await vi.waitFor(() =>
+          expect(appendFileSpy).toHaveBeenCalledWith(
+            Storage.getDebugLogPath(sessionId),
+            expect.stringMatching(
+              /Ignoring invalid goalTokenBudget -5:.*using the default of 30000000/,
+            ),
+            'utf8',
+          ),
+        );
+      } finally {
+        mkdirSpy.mockRestore();
+        appendFileSpy.mockRestore();
+        resetDebugLoggingState();
+        setDebugLogSession(null);
+        if (previousDebugLogFileEnv === undefined) {
+          delete process.env['QWEN_DEBUG_LOG_FILE'];
+        } else {
+          process.env['QWEN_DEBUG_LOG_FILE'] = previousDebugLogFileEnv;
+        }
+      }
+    });
+
+    it('keeps the goalTokenBudget debug warning silent for absent, valid, and opt-out values', async () => {
+      const previousDebugLogFileEnv = process.env['QWEN_DEBUG_LOG_FILE'];
+      const sessionId = 'goal-budget-warning-session';
+      const mkdirSpy = vi
+        .spyOn(fs.promises, 'mkdir')
+        .mockResolvedValue(undefined);
+      const appendFileSpy = vi
+        .spyOn(fs.promises, 'appendFile')
+        .mockResolvedValue(undefined);
+
+      try {
+        process.env['QWEN_DEBUG_LOG_FILE'] = '1';
+        resetDebugLoggingState();
+
+        for (const goalTokenBudget of [undefined, 0, 1_234, -1]) {
+          new Config({ ...baseParams, sessionId, goalTokenBudget });
+          // Let any fire-and-forget debug write settle before the next case.
+          await new Promise((resolve) => setImmediate(resolve));
+        }
+        expect(
+          appendFileSpy.mock.calls.filter((call) =>
+            String(call[1]).includes('Ignoring invalid goalTokenBudget'),
+          ),
+        ).toHaveLength(0);
+
+        // Control case: the channel is live in this test, so the silence
+        // above is meaningful.
+        new Config({ ...baseParams, sessionId, goalTokenBudget: -5 });
+        await vi.waitFor(() =>
+          expect(appendFileSpy).toHaveBeenCalledWith(
+            Storage.getDebugLogPath(sessionId),
+            expect.stringContaining('Ignoring invalid goalTokenBudget -5'),
+            'utf8',
+          ),
+        );
+      } finally {
+        mkdirSpy.mockRestore();
+        appendFileSpy.mockRestore();
+        resetDebugLoggingState();
+        setDebugLogSession(null);
+        if (previousDebugLogFileEnv === undefined) {
+          delete process.env['QWEN_DEBUG_LOG_FILE'];
+        } else {
+          process.env['QWEN_DEBUG_LOG_FILE'] = previousDebugLogFileEnv;
+        }
+      }
     });
 
     it('bills Goal turns through the canonical chat recorder', async () => {
@@ -9312,6 +9580,44 @@ describe('Server Config (config.ts)', () => {
 
       expect(registered).not.toContain(ToolNames.LS);
       expect(deferred).toContain(ToolNames.LS);
+    });
+
+    it('registers an enabled LS eagerly when tools.eager covers it (#10400)', async () => {
+      // Third cell of the LS x tools.eager matrix: enabled AND covered by
+      // the allowlist (via the ListFiles alias) -> registered eagerly via
+      // registerFactory, not demoted to deferred. Guards against a
+      // registerLazy mutant that demotes LS whenever an eager list is
+      // active, ignoring entry coverage (#10400).
+      const params: ConfigParameters = {
+        ...baseParams,
+        useRipgrep: false,
+        coreTools: undefined,
+        lsToolEnabled: true,
+        eagerTools: ['Shell', 'ListFiles'],
+      };
+      const config = new Config(params);
+      await config.initialize();
+
+      const { registerFactory, registerPermissionDeferredFactory } = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: {
+            prototype: {
+              registerFactory: Mock;
+              registerPermissionDeferredFactory: Mock;
+            };
+          };
+        }
+      ).ToolRegistry.prototype;
+
+      const registered = (registerFactory as Mock).mock.calls.map(
+        (call) => call[0],
+      ) as string[];
+      const deferred = (
+        registerPermissionDeferredFactory as Mock
+      ).mock.calls.map((call) => call[0]) as string[];
+
+      expect(registered).toContain(ToolNames.LS);
+      expect(deferred).not.toContain(ToolNames.LS);
     });
 
     it('registers the full built-in set when no permissionsAllow is set (#9827 regression guard)', async () => {

@@ -10,6 +10,10 @@ import path from 'node:path';
 export default defineConfig({
   resolve: {
     alias: {
+      '@qwen-code/qwen-code-core/noFollowOpen': path.resolve(
+        __dirname,
+        '../core/src/utils/no-follow-open.ts',
+      ),
       '@qwen-code/qwen-code-core/subSessionConstants': path.resolve(
         __dirname,
         '../core/src/tools/sub-session-constants.ts',
@@ -29,8 +33,18 @@ export default defineConfig({
     },
   },
   test: {
+    // Shared ECS hosts can pause an otherwise healthy test past Vitest's 5s
+    // default when several CI runners on the same machine are busy.
+    testTimeout: process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
+      ? 60_000
+      : undefined,
+    hookTimeout: process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
+      ? 60_000
+      : undefined,
     reporters: ['default'],
     silent: true,
+    // RPC-timeout exemption; see scripts/tests/unit-vitest-configs.test.ts.
+    dangerouslyIgnoreUnhandledErrors: process.platform !== 'linux',
     coverage: {
       enabled: false,
       provider: 'v8',

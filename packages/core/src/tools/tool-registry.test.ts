@@ -931,6 +931,28 @@ describe('ToolRegistry', () => {
       );
     });
 
+    it('keeps the tool visible when listed in visibleTools', async () => {
+      const registry = new ToolRegistry(
+        new Config({
+          ...baseConfigParams,
+          visibleTools: ['hidden_by_allowlist'],
+        }),
+      );
+      registry.registerPermissionDeferredFactory(
+        'hidden_by_allowlist',
+        async () => new MockTool({ name: 'hidden_by_allowlist' }),
+      );
+      await registry.warmAll();
+
+      expect(registry.getFunctionDeclarations().map((d) => d.name)).toContain(
+        'hidden_by_allowlist',
+      );
+      expect(registry.isDeferredAndHidden('hidden_by_allowlist')).toBe(false);
+      expect(registry.getDeferredToolSummary().map((t) => t.name)).not.toContain(
+        'hidden_by_allowlist',
+      );
+    });
+
     it('includes a permission-deferred schema after an explicit reveal', async () => {
       toolRegistry.registerPermissionDeferredFactory(
         'hidden_by_allowlist',
