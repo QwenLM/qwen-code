@@ -5,7 +5,7 @@
  */
 
 import type { ChannelPlugin } from '@qwen-code/channel-base';
-import { DwsChannel } from './dws-channel.js';
+import { DEFAULT_START_REACTION, DwsChannel } from './dws-channel.js';
 
 export { DwsChannel };
 export { DwsClient, DwsCommandError, parseDwsImEvent } from './dws-client.js';
@@ -90,9 +90,8 @@ export const plugin: ChannelPlugin = {
         key: 'startReaction',
         label: 'Start Reaction',
         kind: 'string',
-        default: '🤔',
-        description:
-          'DingTalk reaction emoji or name added while a task is running. Leave empty to use 🤔',
+        default: DEFAULT_START_REACTION,
+        description: `DingTalk reaction emoji or name added while a task is running. Leave empty to use ${DEFAULT_START_REACTION}`,
       },
       {
         key: 'endReaction',
