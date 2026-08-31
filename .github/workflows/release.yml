@@ -409,7 +409,7 @@ jobs:
 
       - name: 'Pack Build Outputs'
         run: |-
-          build_paths=('dist')
+          build_paths=('dist' 'packages/web-templates/src/generated')
           while IFS= read -r -d '' path; do
             build_paths+=("${path}")
           done < <(find packages integrations -type d -name dist -prune -print0)

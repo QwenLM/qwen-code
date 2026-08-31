@@ -399,6 +399,13 @@ describe('release workflow', () => {
     expect(upload.with.overwrite).toBe(true);
   });
 
+  it('shares generated web templates with build consumers', () => {
+    const pack = releaseYaml.jobs.quality_build.steps.find(
+      (step) => step.name === 'Pack Build Outputs',
+    );
+    expect(pack.run).toContain('packages/web-templates/src/generated');
+  });
+
   it('fans workspace tests into three complete Vitest shards', () => {
     const job = releaseYaml.jobs.workspace_tests;
     expect(job.strategy).toEqual({
