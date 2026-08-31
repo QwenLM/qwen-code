@@ -5759,7 +5759,14 @@ export function App({
     prevActivePanelRef.current = activePanel;
     prevApprovalOverlayRef.current = approvalOverlayActive;
     if (activePanel) {
-      if (activePanel === 'extensions' || activePanel === 'channels') {
+      if (
+        activePanel === 'extensions' ||
+        activePanel === 'channels' ||
+        // The Workspaces panel renders its own header; the generic Back
+        // button (panelBackRef) is excluded for it, so the fallback below
+        // would focus nothing.
+        activePanel === 'workspaces'
+      ) {
         panelHeadingRef.current?.focus();
         return;
       }
@@ -12929,6 +12936,8 @@ export function App({
                               ? t('plugins.title')
                             : activePanel === 'channels'
                               ? t('channels.title')
+                            : activePanel === 'workspaces'
+                              ? t('workspacesOverview.title')
                               : t('sessionsOverview.title')
                   }
                 >

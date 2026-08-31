@@ -417,6 +417,7 @@ function renderSidebar(
     onNewWorktreeSession?: (cwd?: string) => void;
     onOpenAddWorkspace?: () => void;
     onOpenWorkspacesOverview?: () => void;
+    footer?: Parameters<typeof WebShellSidebar>[0]['footer'];
     onNewSession?: (workspaceCwd?: string) => boolean;
     onLoadSession?: (sessionId: string, workspaceCwd?: string) => void;
     workspaces?: DaemonWorkspaceCapability[];
@@ -458,6 +459,7 @@ function renderSidebar(
           onSelectWorkspace={overrides.onSelectWorkspace}
           onOpenAddWorkspace={overrides.onOpenAddWorkspace}
           onOpenWorkspacesOverview={overrides.onOpenWorkspacesOverview}
+          footer={overrides.footer}
           onOpenWorkspaceManagement={overrides.onOpenWorkspaceManagement}
           workspaceOverview={overrides.workspaceOverview}
           onOpenGitDiff={overrides.onOpenGitDiff}
@@ -5807,6 +5809,45 @@ describe('WebShellSidebar manage workspaces entry', () => {
       entry!.click();
     });
     expect(onOpenWorkspacesOverview).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders the opt-in footer entry outside the default set and honours the locked gate', async () => {
+    const onOpenWorkspacesOverview = vi.fn();
+    // Not part of the default footer items.
+    renderSidebar({ onOpenWorkspacesOverview });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="footer-workspaces-overview"]'),
+    ).toBeNull();
+    renderSidebar({
+      onOpenWorkspacesOverview,
+      footer: { items: ['settings', 'workspacesOverview', 'collapse'] },
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const button = container.querySelector<HTMLButtonElement>(
+      '[data-testid="footer-workspaces-overview"]',
+    );
+    expect(button).not.toBeNull();
+    await act(async () => {
+      button!.click();
+    });
+    expect(onOpenWorkspacesOverview).toHaveBeenCalledTimes(1);
+    // A locked sidebar shows no workspaces-overview surface at all.
+    renderSidebar({
+      onOpenWorkspacesOverview,
+      footer: { items: ['settings', 'workspacesOverview', 'collapse'] },
+      lockedWorkspaceCwd: '/tmp/other',
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="footer-workspaces-overview"]'),
+    ).toBeNull();
   });
 
   it('hides the entry when unwired or when the sidebar is locked to one workspace', async () => {

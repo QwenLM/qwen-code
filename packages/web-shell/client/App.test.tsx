@@ -11485,6 +11485,16 @@ describe('App session callbacks', () => {
   });
 
   it('opens the Workspaces overview panel from the sidebar entry', async () => {
+    mockConnection.sessionId = undefined;
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    };
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
     const { container } = renderApp();
     await flush();
     expect(
@@ -11499,9 +11509,25 @@ describe('App session callbacks', () => {
       await Promise.resolve();
     });
     await flush();
+    const panel = container.querySelector(
+      '[data-testid="workspaces-overview-panel"]',
+    );
+    expect(panel).not.toBeNull();
+
+    // New task on a row starts a draft there and returns to the chat view.
+    const newTask = Array.from(panel!.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('New task'),
+    );
+    expect(newTask).toBeDefined();
+    await act(async () => {
+      newTask!.click();
+      await Promise.resolve();
+    });
+    await flush();
+    expect(mockSessionActions.clearSession).toHaveBeenCalled();
     expect(
       container.querySelector('[data-testid="workspaces-overview-panel"]'),
-    ).not.toBeNull();
+    ).toBeNull();
   });
 
   it('reloads skills from the target workspace when starting a new session', async () => {

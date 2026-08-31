@@ -177,6 +177,220 @@ describe('useWorkspaceRemoval', () => {
     expect(latest?.submitting).toBe(false);
   });
 
+  it('retries an in-progress removal until the daemon converges', async () => {
+    vi.useFakeTimers();
+    try {
+      const removeWorkspace = vi
+        .fn()
+        .mockRejectedValueOnce(
+          new DaemonHttpError(
+            409,
+            { code: 'workspace_removal_in_progress' },
+            'in progress',
+          ),
+        )
+        .mockRejectedValueOnce(
+          new DaemonHttpError(
+            409,
+            { code: 'workspace_registration_in_progress' },
+            'in progress',
+          ),
+        )
+        .mockResolvedValueOnce({ removed: true });
+      const options = baseOptions({ removeWorkspace });
+      await render(options);
+      act(() => latest!.request(workspace));
+      let confirmDone: Promise<void>;
+      act(() => {
+        confirmDone = latest!.confirm();
+      });
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(latest?.remoteInProgress).toBe(true);
+      for (let tick = 0; tick < 2; tick += 1) {
+        await act(async () => {
+          vi.advanceTimersByTime(250);
+          await Promise.resolve();
+          await Promise.resolve();
+          await Promise.resolve();
+        });
+      }
+      await act(async () => {
+        await confirmDone!;
+      });
+      expect(removeWorkspace).toHaveBeenCalledTimes(3);
+      expect(options.onRemoved).toHaveBeenCalledWith(workspace);
+      expect(options.onError).not.toHaveBeenCalled();
+      expect(latest?.candidate).toBeNull();
+      expect(latest?.remoteInProgress).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('surfaces workspace_busy discovered mid-retry and stops retrying', async () => {
+    vi.useFakeTimers();
+    try {
+      const removeWorkspace = vi
+        .fn()
+        .mockRejectedValueOnce(
+          new DaemonHttpError(
+            409,
+            { code: 'workspace_removal_in_progress' },
+            'in progress',
+          ),
+        )
+        .mockRejectedValueOnce(
+          new DaemonHttpError(
+            409,
+            { code: 'workspace_busy', activity },
+            'busy',
+          ),
+        );
+      const options = baseOptions({ removeWorkspace });
+      await render(options);
+      act(() => latest!.request(workspace));
+      let confirmDone: Promise<void>;
+      act(() => {
+        confirmDone = latest!.confirm();
+      });
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(250);
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await act(async () => {
+        await confirmDone!;
+      });
+      expect(removeWorkspace).toHaveBeenCalledTimes(2);
+      expect(latest?.remoteInProgress).toBe(false);
+      expect(latest?.activity).toEqual(activity);
+      expect(latest?.candidate).toEqual(workspace);
+      expect(options.onError).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('stops the in-progress retry loop when the dialog is dismissed', async () => {
+    vi.useFakeTimers();
+    try {
+      const removeWorkspace = vi
+        .fn()
+        .mockRejectedValue(
+          new DaemonHttpError(
+            409,
+            { code: 'workspace_removal_in_progress' },
+            'in progress',
+          ),
+        );
+      const options = baseOptions({ removeWorkspace });
+      await render(options);
+      act(() => latest!.request(workspace));
+      let confirmDone: Promise<void>;
+      act(() => {
+        confirmDone = latest!.confirm();
+      });
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(latest?.remoteInProgress).toBe(true);
+      act(() => latest!.dismiss());
+      await act(async () => {
+        vi.advanceTimersByTime(250);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await act(async () => {
+        await confirmDone!;
+      });
+      // The dismissed loop never retried and reported nothing.
+      expect(removeWorkspace).toHaveBeenCalledTimes(1);
+      expect(options.onError).not.toHaveBeenCalled();
+      expect(options.onRemoved).not.toHaveBeenCalled();
+      expect(latest?.candidate).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('reports exhausted in-progress retries through onError', async () => {
+    vi.useFakeTimers();
+    try {
+      const removeWorkspace = vi
+        .fn()
+        .mockRejectedValue(
+          new DaemonHttpError(
+            409,
+            { code: 'workspace_removal_in_progress' },
+            'in progress',
+          ),
+        );
+      const options = baseOptions({ removeWorkspace });
+      await render(options);
+      act(() => latest!.request(workspace));
+      let confirmDone: Promise<void>;
+      act(() => {
+        confirmDone = latest!.confirm();
+      });
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      for (let tick = 0; tick < 20; tick += 1) {
+        await act(async () => {
+          vi.advanceTimersByTime(250);
+          await Promise.resolve();
+          await Promise.resolve();
+          await Promise.resolve();
+        });
+      }
+      await act(async () => {
+        await confirmDone!;
+      });
+      expect(removeWorkspace).toHaveBeenCalledTimes(21);
+      expect(options.onError).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: 'Workspace removal remained in progress after retries.',
+        }),
+        'removal failed',
+      );
+      expect(latest?.remoteInProgress).toBe(false);
+      expect(latest?.candidate).toEqual(workspace);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('resets submitting after success so a second removal can run', async () => {
+    const options = baseOptions();
+    await render(options);
+    act(() => latest!.request(workspace));
+    await act(async () => {
+      await latest!.confirm();
+    });
+    expect(latest?.submitting).toBe(false);
+    const second = { ...workspace, id: 'ws-two', cwd: '/tmp/two' };
+    act(() => latest!.request(second));
+    await act(async () => {
+      await latest!.confirm();
+    });
+    expect(options.removeWorkspace).toHaveBeenNthCalledWith(2, 'ws-two', {
+      force: false,
+    });
+    expect(options.onRemoved).toHaveBeenLastCalledWith(second);
+    expect(latest?.candidate).toBeNull();
+  });
+
   it('ignores request() while a removal is submitting', async () => {
     let resolveRemove: (value: unknown) => void = () => {};
     const removeWorkspace = vi.fn(

@@ -12,7 +12,12 @@ import type {
   DaemonCapabilities,
   DaemonSessionSummary,
 } from '@qwen-code/sdk/daemon';
+import { DaemonHttpError } from '@qwen-code/sdk/daemon';
 import { I18nProvider } from '../../i18n';
+import {
+  SESSION_LIST_PAGE_SIZE,
+  WEB_SHELL_SESSION_SOURCE_TYPE,
+} from '../../constants/sessions';
 import { WorkspacesOverviewPanel } from './WorkspacesOverviewPanel';
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
@@ -34,11 +39,24 @@ let connectionState: {
 let workspaceCapabilities: DaemonCapabilities | undefined;
 let sessionPages: Record<
   string,
-  { sessions: DaemonSessionSummary[]; truncated?: boolean } | undefined
+  | {
+      sessions: DaemonSessionSummary[];
+      truncated?: boolean;
+      nextCursor?: string;
+    }
+  | undefined
 >;
-let sessionQueryOptions: Array<{ cwd: string; enabled: boolean }>;
+let sessionQueryOptions: Array<{
+  cwd: string;
+  enabled: boolean;
+  query: unknown;
+}>;
 let overviews: Record<string, { mcp?: Record<string, unknown> } | undefined>;
-let overviewCalls: Array<{ cwd: string; enabled: boolean }>;
+let overviewCalls: Array<{
+  cwd: string;
+  enabled: boolean;
+  items: unknown;
+}>;
 const refreshCapabilities = vi.fn();
 const invalidateWorkspace = vi.fn();
 const workspaceGit = vi.fn();
@@ -68,6 +86,7 @@ vi.mock('../../session-catalog/session-catalog-hooks', () => ({
     sessionQueryOptions.push({
       cwd: query.workspaceCwd,
       enabled: options.enabled !== false,
+      query,
     });
     const page =
       options.enabled === false ? undefined : sessionPages[query.workspaceCwd];
@@ -77,6 +96,7 @@ vi.mock('../../session-catalog/session-catalog-hooks', () => ({
         : undefined,
       sessions: page?.sessions ?? [],
       truncated: page?.truncated === true,
+      nextCursor: page?.nextCursor,
       loading: false,
       stale: false,
       reload: vi.fn(),
@@ -88,9 +108,9 @@ vi.mock('../sidebar/useWorkspaceOverview', () => ({
   useWorkspaceOverview: (
     _client: unknown,
     cwd: string,
-    options: { enabled: boolean },
+    options: { enabled: boolean; items?: unknown },
   ) => {
-    overviewCalls.push({ cwd, enabled: options.enabled });
+    overviewCalls.push({ cwd, enabled: options.enabled, items: options.items });
     return { overview: options.enabled ? overviews[cwd] : undefined };
   },
 }));
@@ -256,8 +276,25 @@ describe('WorkspacesOverviewPanel', () => {
     };
     await render();
     const other = rowByLabel('API');
+    // Column order: name, path, sessions, mcp, git, lastActivity, actions.
+    const mcpCell = other.querySelectorAll('td')[3];
+    expect(mcpCell?.textContent).toBe('—');
     expect(other.textContent).not.toContain('0/0');
-    expect(other.textContent).toContain('—');
+  });
+
+  it('excludes disabled servers from the MCP denominator', async () => {
+    overviews['/w'] = {
+      mcp: {
+        initialized: true,
+        configured: 4,
+        connected: 1,
+        failed: 0,
+        disabled: 2,
+      },
+    };
+    await render();
+    const mcpCell = rowByLabel('/w').querySelectorAll('td')[3];
+    expect(mcpCell?.textContent).toContain('1/2');
   });
 
   it('never fetches for an untrusted workspace and renders placeholders', async () => {
@@ -322,6 +359,35 @@ describe('WorkspacesOverviewPanel', () => {
     expect(refreshCapabilities).toHaveBeenCalled();
   });
 
+  it('treats a capabilities-refresh failure after removal as success', async () => {
+    const onError = vi.fn();
+    refreshCapabilities.mockRejectedValueOnce(new Error('refresh blip'));
+    await render({ onError });
+    const removeButton = Array.from(
+      rowByLabel('API').querySelectorAll('button'),
+    ).find(
+      (button) => button.getAttribute('aria-label') === 'Remove workspace',
+    )!;
+    await act(async () => {
+      removeButton.click();
+    });
+    const confirm = Array.from(document.body.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Remove workspace',
+    )!;
+    await act(async () => {
+      confirm.click();
+    });
+    // The daemon confirmed the removal; the refresh failure must not be
+    // reported as a removal failure, and the dialog must close.
+    expect(removeWorkspace).toHaveBeenCalledTimes(1);
+    expect(onError).not.toHaveBeenCalled();
+    expect(
+      Array.from(document.body.querySelectorAll('button')).some(
+        (button) => button.textContent === 'Remove workspace',
+      ),
+    ).toBe(false);
+  });
+
   it('hides Remove entirely without the daemon feature', async () => {
     connectionState.capabilities = {
       qwenCodeVersion: '1.2.3',
@@ -333,6 +399,117 @@ describe('WorkspacesOverviewPanel', () => {
         (button) => button.getAttribute('aria-label') === 'Remove workspace',
       ),
     ).toHaveLength(0);
+  });
+
+  it('pins the per-row catalog query and overview facet shape', async () => {
+    await render();
+    const call = sessionQueryOptions.find((entry) => entry.cwd === '/other');
+    expect(call?.query).toEqual({
+      routeKind: 'legacy',
+      workspaceCwd: '/other',
+      options: {
+        pageSize: SESSION_LIST_PAGE_SIZE,
+        archiveState: 'active',
+        sourceType: WEB_SHELL_SESSION_SOURCE_TYPE,
+      },
+    });
+    for (const entry of overviewCalls) {
+      expect(entry.items).toEqual(['mcp']);
+    }
+  });
+
+  it('falls back to createdAt for sessions without an updatedAt', async () => {
+    sessionPages['/other'] = {
+      sessions: [session({ createdAt: new Date().toISOString() })],
+    };
+    await render();
+    const cell = rowByLabel('API').querySelectorAll('td')[5];
+    expect(cell?.textContent).toBe('just now');
+  });
+
+  it('treats a nextCursor page as a lower bound', async () => {
+    sessionPages['/other'] = {
+      sessions: [session({})],
+      nextCursor: 'page-2',
+    };
+    await render();
+    const cell = rowByLabel('API').querySelectorAll('td')[2];
+    expect(cell?.textContent).toContain('1+');
+  });
+
+  it('ignores a second New task click while one is creating', async () => {
+    let resolveCreate: (value: boolean) => void = () => {};
+    const onNewSession = vi.fn(
+      () =>
+        new Promise<boolean>((resolve) => {
+          resolveCreate = resolve;
+        }),
+    );
+    await render({ onNewSession });
+    // The columns rebuild on state changes and remount the cell, so the
+    // button node must be re-queried after every click.
+    const newTaskButton = () =>
+      Array.from(rowByLabel('API').querySelectorAll('button')).find(
+        (candidate) => candidate.textContent?.includes('New task'),
+      )!;
+    await act(async () => {
+      newTaskButton().click();
+    });
+    expect(newTaskButton().disabled).toBe(true);
+    await act(async () => {
+      newTaskButton().click();
+    });
+    expect(onNewSession).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      resolveCreate(true);
+      await Promise.resolve();
+    });
+    expect(newTaskButton().disabled).toBe(false);
+  });
+
+  it('blocks the forced removal of the active session workspace', async () => {
+    connectionState.sessionId = 's-live';
+    connectionState.workspaceCwd = '/other';
+    removeWorkspace.mockRejectedValueOnce(
+      new DaemonHttpError(
+        409,
+        {
+          code: 'workspace_busy',
+          activity: {
+            sessions: 1,
+            activePrompts: 1,
+            pendingSessionStarts: 0,
+            acpConnections: 1,
+            memoryTasks: 0,
+            channelWorkers: 0,
+          },
+        },
+        'busy',
+      ),
+    );
+    await render();
+    const removeButton = Array.from(
+      rowByLabel('API').querySelectorAll('button'),
+    ).find(
+      (button) => button.getAttribute('aria-label') === 'Remove workspace',
+    )!;
+    await act(async () => {
+      removeButton.click();
+    });
+    const confirm = Array.from(document.body.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Remove workspace',
+    )!;
+    await act(async () => {
+      confirm.click();
+    });
+    expect(removeWorkspace).toHaveBeenCalledTimes(1);
+    // The dialog stays open in the busy state with the force action
+    // disabled for the workspace the active session lives in.
+    expect(confirm.disabled).toBe(true);
+    await act(async () => {
+      confirm.click();
+    });
+    expect(removeWorkspace).toHaveBeenCalledTimes(1);
   });
 
   it('shows the Add workspace action only when wired', async () => {

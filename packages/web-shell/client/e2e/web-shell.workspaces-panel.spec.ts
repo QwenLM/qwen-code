@@ -50,6 +50,24 @@ function createScenario(): WebShellDaemonScenario {
       untracked: 0,
       conflicted: 0,
     },
+    // The secondary workspace answers its own facet so a row showing the
+    // primary's data would be caught (cross-wiring witness).
+    workspaceOverviews: {
+      [SECONDARY_CWD]: {
+        mcp: {
+          servers: [
+            {
+              kind: 'mcp_server',
+              name: 'solo',
+              status: 'ok',
+              transport: 'stdio',
+              disabled: false,
+              mcpStatus: 'connected',
+            },
+          ],
+        },
+      },
+    },
     mcp: {
       servers: [
         {
@@ -125,6 +143,8 @@ test('lists every workspace with its health from the Projects entry', async ({
 
   const secondaryRow = panel.locator('tbody tr', { hasText: SECONDARY_CWD });
   await expect(secondaryRow).toBeVisible();
+  // The secondary row shows its own MCP facet, not the primary's.
+  await expect(secondaryRow.getByText('1/1')).toBeVisible();
   await expect(
     secondaryRow.getByRole('button', { name: 'New task' }),
   ).toBeEnabled();

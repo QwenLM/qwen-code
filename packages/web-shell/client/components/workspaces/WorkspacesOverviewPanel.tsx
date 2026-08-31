@@ -50,9 +50,10 @@ import { TooltipProvider } from '../ui/tooltip';
 import styles from './WorkspacesOverviewPanel.module.css';
 
 /**
- * Counts change on the order of prompts, not keystrokes; the sidebar's
- * overview facets poll at the same cadence, so an open panel and an expanded
- * sidebar row share their catalog fetches instead of doubling them.
+ * Counts change on the order of prompts, not keystrokes. The query is
+ * byte-identical to useOtherWorkspaceSessions', so for secondary workspaces
+ * the catalog store dedupes the panel with the sidebar's own subscription;
+ * an expanded row's qualified 10s query is a separate entry.
  */
 const SESSIONS_POLL_MS = 30_000;
 const GIT_POLL_MS = 60_000;
@@ -148,7 +149,12 @@ function SessionsCell({ workspace }: { workspace: DaemonWorkspaceCapability }) {
   if (!workspace.trusted || page.page === undefined) {
     return <span className={styles.muted}>—</span>;
   }
-  const stats = summarizeSessions(page.sessions, page.truncated);
+  // Either more pages follow, or the daemon capped its scan; the same
+  // union the sidebar's section applies.
+  const stats = summarizeSessions(
+    page.sessions,
+    page.truncated || Boolean(page.nextCursor),
+  );
   return (
     <span
       className={styles.statCell}
@@ -180,6 +186,9 @@ function McpCell({ workspace }: { workspace: DaemonWorkspaceCapability }) {
     items: ['mcp'],
   });
   const mcp = overview?.mcp;
+  // Disabled servers are excluded from the denominator, matching the
+  // sidebar chip's connected/enabled convention (formatOverviewValue).
+  const enabled = mcp ? mcp.configured - mcp.disabled : 0;
   if (!workspace.trusted || !mcp || !mcp.initialized) {
     // The runtime discovers MCP servers; before an ACP child is live the
     // daemon answers a placeholder that must read as unknown, never zero.
@@ -191,9 +200,7 @@ function McpCell({ workspace }: { workspace: DaemonWorkspaceCapability }) {
   }
   return (
     <span className={styles.statCell}>
-      <span>
-        {mcp.connected}/{mcp.configured}
-      </span>
+      <span>{enabled === 0 ? '0' : `${mcp.connected}/${enabled}`}</span>
       {mcp.failed > 0 && (
         <Badge variant="destructive">
           {t('workspacesOverview.mcpFailed', { count: mcp.failed })}
@@ -246,8 +253,11 @@ function LastActivityCell({
   }
   let latest: string | undefined;
   for (const session of page.sessions) {
-    if (session.updatedAt && (!latest || session.updatedAt > latest)) {
-      latest = session.updatedAt;
+    // Mirrors the daemon's getSummaryActivityTime: a live session has no
+    // updatedAt until its first terminal publishes; createdAt stands in.
+    const activity = session.updatedAt ?? session.createdAt;
+    if (activity && (!latest || activity > latest)) {
+      latest = activity;
     }
   }
   if (!latest) return <span className={styles.muted}>—</span>;
@@ -307,7 +317,12 @@ export function WorkspacesOverviewPanel({
       workspaceActions.removeWorkspace(workspaceId, options),
     onRemoved: async (removed) => {
       catalogController.invalidateWorkspace(removed.cwd);
-      await workspace.refreshCapabilities?.();
+      try {
+        await workspace.refreshCapabilities?.();
+      } catch {
+        // The mutation already converged; a later refresh will reconcile,
+        // same contract as the sidebar's reconcileRemovedWorkspace.
+      }
     },
     onError: reportError,
     errorMessage: t('sidebar.removeWorkspaceError'),

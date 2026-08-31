@@ -5737,10 +5737,12 @@ export function WebShellSidebar({
                   </button>
                 )}
               {onOpenWorkspacesOverview &&
+                !lockedWorkspaceCwd &&
                 footerItems.has('workspacesOverview') && (
                   <button
                     className={styles.collapseButton}
                     type="button"
+                    data-testid="footer-workspaces-overview"
                     title={t('sidebar.manageWorkspaces')}
                     aria-label={t('sidebar.manageWorkspaces')}
                     onClick={onOpenWorkspacesOverview}
