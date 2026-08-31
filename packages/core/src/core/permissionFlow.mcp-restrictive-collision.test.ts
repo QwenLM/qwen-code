@@ -136,6 +136,38 @@ describe('evaluatePermissionFlow MCP restrictive collision handling', () => {
     expect(pm.findMatchingDenyRule).not.toHaveBeenCalled();
   });
 
+  it('keeps a unique legacy alias returned by the registry for grant evaluation', async () => {
+    const legacyAlias = 'mcp__srv__foo_bar';
+    const rawName = 'mcp__srv__foo/bar';
+    const registeredName = 'mcp__srv__foo_bar_0cnn7di';
+    const resolver = vi.fn().mockReturnValue([legacyAlias]);
+
+    const pm = {
+      hasRelevantRules: vi.fn().mockReturnValue(true),
+      evaluate: vi.fn().mockImplementation(async (ctx: { toolAliases?: readonly string[] }) =>
+        ctx.toolAliases?.[0] === legacyAlias ? 'allow' : 'default',
+      ),
+      hasMatchingAskRule: vi.fn().mockReturnValue(false),
+    };
+    const config = {
+      getPermissionManager: vi.fn().mockReturnValue(pm),
+      getToolRegistry: vi.fn().mockReturnValue({
+        getUnambiguousMcpPermissionAliases: resolver,
+      }),
+      getTargetDir: vi.fn().mockReturnValue('/repo'),
+    } as unknown as Config;
+    const inv = invocation(legacyAlias) as AnyToolInvocation & {
+      getDefaultPermission: ReturnType<typeof vi.fn>;
+    };
+    inv.getDefaultPermission = vi.fn().mockResolvedValue('ask');
+
+    const result = await evaluatePermissionFlow(config, inv, registeredName, {});
+
+    expect(resolver).toHaveBeenCalledWith(registeredName, [legacyAlias]);
+    expect(result.pmCtx.toolAliases).toEqual([legacyAlias, rawName]);
+    expect(result.finalPermission).toBe('allow');
+  });
+
   it('fails closed for allow grants if the registry resolver is unavailable', async () => {
     const legacyAlias = 'mcp__srv__foo_bar';
     const rawName = 'mcp__srv__foo/bar';
