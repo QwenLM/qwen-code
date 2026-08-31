@@ -19,6 +19,7 @@ import type {
   StandaloneSessionService,
 } from '../conversations/standalone-session-service.js';
 import { omitSkillDetailsFromReplayArrays } from '../skill-details-redaction.js';
+import { redactWorkflowsFromReplayArrays } from '../workflow-session-gate.js';
 import type { SendBridgeError } from '../server/error-response.js';
 import { InvalidCursorError } from '../server/session-list.js';
 import {
@@ -33,6 +34,7 @@ export interface RegisterStandaloneSessionRoutesDeps {
   service: StandaloneSessionService;
   mutate: (options?: { strict?: boolean }) => RequestHandler;
   sendBridgeError: SendBridgeError;
+  isWorkspaceTrusted: () => boolean;
 }
 
 function sendInvalidRequest(res: Response, message: string): void {
@@ -426,7 +428,14 @@ export function registerStandaloneSessionRoutes(
               await cleanupRestore()?.catch(() => undefined);
               return;
             }
-            res.status(200).json(omitSkillDetailsFromReplayArrays(restored));
+            const shaped = omitSkillDetailsFromReplayArrays(restored);
+            res
+              .status(200)
+              .json(
+                deps.isWorkspaceTrusted()
+                  ? shaped
+                  : redactWorkflowsFromReplayArrays(shaped),
+              );
           },
         ),
     );
