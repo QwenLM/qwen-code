@@ -950,14 +950,19 @@ describe('ChatCompressionService', () => {
     // 413 recoveries fire BELOW the token threshold; reporting
     // 'token_limit' makes the CLI notice claim a token overflow that
     // never happened and pollutes the recorded payload (#10380).
+    // A real 413 payload carries a large visible history; the
+    // estimate-based accounting only reports a reduction when that
+    // history out-sizes the post-compact visible content.
     const history: Content[] = [
-      { role: 'user', parts: [{ text: 'context msg' }] },
+      {
+        role: 'user',
+        parts: [{ text: `context msg ${'X'.repeat(60_000)}` }],
+      },
       { role: 'model', parts: [{ text: 'ack' }] },
       { role: 'user', parts: [{ text: 'final fresh user message' }] },
       { role: 'model', parts: [{ text: 'final model reply' }] },
     ];
     vi.mocked(mockChat.getHistory).mockReturnValue(history);
-    // Large enough that the 250-token summary is not an inflation.
     vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
       90_000,
     );
@@ -965,8 +970,8 @@ describe('ChatCompressionService', () => {
 
     const mockGenerateText = vi.fn().mockResolvedValue({
       text: 'Summary',
-      // Input above the 1000-token system overhead so the accounting
-      // credits a real reduction; output small enough not to inflate.
+      // Small output keeps the summary well below the visible-history
+      // estimate so the compression reports a reduction.
       usage: {
         promptTokenCount: 90_000,
         candidatesTokenCount: 50,
@@ -3254,7 +3259,16 @@ describe('ChatCompressionService.compress cache sharing', () => {
     // Re-uploading it would 413 again (and log a misleading cache-sharing
     // failure) before the slimmed cold path recovers anyway. Removing the
     // requestPayloadTooLarge conjunct makes generateText reappear (red).
-    const { chat, config, generateText } = makeFixture();
+    // The history must be visibly large so the estimate-based accounting
+    // reports a reduction (a real 413 payload dwarfs the summary).
+    const { chat, config, generateText } = makeFixture({
+      history: [
+        { role: 'user', parts: [{ text: `message-0 ${'X'.repeat(60_000)}` }] },
+        { role: 'model', parts: [{ text: 'message-1' }] },
+        { role: 'user', parts: [{ text: 'message-2' }] },
+        { role: 'model', parts: [{ text: 'message-3' }] },
+      ],
+    });
     const coldSpy = vi
       .spyOn(sideQueryModule, 'runSideQuery')
       .mockResolvedValue({
