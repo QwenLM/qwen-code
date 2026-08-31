@@ -42,6 +42,17 @@ describe('MCP permission identity collisions (#10199)', () => {
     );
   });
 
+  it('fails closed for unsafe server spellings when raw identity is unavailable', () => {
+    const providerSafeName = 'mcp__foo_bar__evil';
+
+    expect(matchesRule(parseRule('mcp__foo.bar'), providerSafeName)).toBe(
+      false,
+    );
+    expect(matchesRule(parseRule('mcp__foo.bar__*'), providerSafeName)).toBe(
+      false,
+    );
+  });
+
   it('keeps raw server rules working when the tool segment is provider-unsafe', () => {
     const rawToolName = 'mcp__foo.bar__do.it';
 
