@@ -1243,6 +1243,12 @@ export function buildDisabledSkillNamesProvider(
   return () => resolveSkillSettings(loadedSettings).disabledNames;
 }
 
+export function buildEnabledSkillNamesProvider(
+  loadedSettings: LoadedSettings,
+): () => ReadonlySet<string> {
+  return () => resolveSkillSettings(loadedSettings).enabledNames;
+}
+
 /**
  * Thrown (instead of `process.exit(1)`) when a caller-supplied session id
  * already exists and `throwOnSessionIdConflict` is set. The interactive CLI
@@ -1325,6 +1331,7 @@ export async function loadCliConfig(
       ) => Promise<SessionRestoreProjection | undefined>;
     };
   },
+  enabledSkillNamesProvider?: () => ReadonlySet<string>,
 ): Promise<Config> {
   const provisionalWorkspace = hostPolicy?.provisionalWorkspace === true;
   const debugMode = isDebugMode(argv);
@@ -1982,6 +1989,8 @@ export async function loadCliConfig(
       disabledSlashCommands.length > 0 ? disabledSlashCommands : undefined,
     disabledSkillNamesProvider:
       bareMode || safeMode ? undefined : disabledSkillNamesProvider,
+    enabledSkillNamesProvider:
+      bareMode || safeMode ? undefined : enabledSkillNamesProvider,
     terminalImageRenderSupportProvider: interactive
       ? async () => {
           const { getTerminalImageRenderSupport } = await import(
