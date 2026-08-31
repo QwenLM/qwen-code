@@ -139,7 +139,7 @@ const WRITE_GIT_SUBCOMMAND =
 const WRITE_GIT_REMOTE_ACTION =
   /^(add|remove|rm|rename|set-branches|set-head|set-url|update)$/;
 const GIT_EXTERNAL_HELPER_OPTION =
-  /^--(?:ext-diff|filters|show-signature|textconv|open-files-in-pager)(?:=|$)/;
+  /^--(?:ext-diff|filters|show-signature|textconv|open-files-in-pager|remerge-diff)(?:=|$)|^--diff-merges=remerge$/;
 const GIT_COMMIT_VALUE_OPTION =
   /^(?:-[CcFmt]|--(?:author|cleanup|date|file|fixup|message|pathspec-from-file|reedit-message|reuse-message|squash|template|trailer))$/;
 /** git branch flags that mutate state. */
@@ -828,13 +828,14 @@ function evaluateGitSafety(args: string[]): ShellCommandSafety {
   if (subcommand === 'remote') {
     const action = rest.find((arg) => !arg.startsWith('-'))?.toLowerCase();
     if (!action) return invokesHelper ? 'unknown' : 'read-only';
-    const hasBlockedAction = rest.some((arg) =>
+    const remoteOptions = beforeTerminator(rest);
+    const hasBlockedAction = remoteOptions.some((arg) =>
       /^(?:add|remove|rm|rename|set-branches|set-head|set-url|update|prune)$/i.test(
         arg,
       ),
     );
     if (action === 'show') {
-      const noQuery = rest.some((arg) =>
+      const noQuery = remoteOptions.some((arg) =>
         ['-n', '--no-query'].includes(arg.toLowerCase()),
       );
       return noQuery && !hasBlockedAction && !invokesHelper
@@ -845,7 +846,7 @@ function evaluateGitSafety(args: string[]): ShellCommandSafety {
       return hasBlockedAction || invokesHelper ? 'unknown' : 'read-only';
     if (WRITE_GIT_REMOTE_ACTION.test(action)) return 'write';
     if (action === 'prune')
-      return rest.some((arg) => ['-n', '--dry-run'].includes(arg))
+      return remoteOptions.some((arg) => ['-n', '--dry-run'].includes(arg))
         ? 'unknown'
         : 'write';
     return 'unknown';
@@ -1118,18 +1119,24 @@ function evaluateStatementSafety(node: SyntaxNode): ShellCommandSafety {
   return childrenSafety(node, 'unknown');
 }
 
+function isKnownSafePromisorCommand(
+  subcommand: string,
+  rest: string[],
+): boolean {
+  if (subcommand !== 'log') return false;
+  const options = beforeTerminator(rest);
+  return (
+    options.length === 1 &&
+    (options[0] === '-1' || options[0] === '--max-count=1')
+  );
+}
+
 function localGitConfigMakesCommandUnsafe(
   root: SyntaxNode,
   cwd: string,
 ): boolean {
   let changedDirectory = false;
-  let usesGit = false;
-  let usesDiff = false;
-  let usesTextconvConsumer = false;
-  let usesFsmonitorConsumer = false;
-  let usesWorktreeFilterConsumer = false;
-  let usesSignatureConsumer = false;
-  let usesPromisorMaterializer = false;
+  const gitReads: Array<{ subcommand: string; rest: string[] }> = [];
 
   for (const command of collectDescendants(root, new Set(['command']))) {
     const name = getCommandName(command);
@@ -1145,48 +1152,52 @@ function localGitConfigMakesCommandUnsafe(
     const subcommand = (args[0] ?? '').toLowerCase();
     if (!READ_ONLY_GIT_SUBCOMMANDS.has(subcommand)) continue;
     if (changedDirectory) return true;
-
-    const rest = args.slice(1);
-    usesGit = true;
-    usesDiff ||= subcommand === 'diff';
-    usesTextconvConsumer ||= ['blame', 'diff', 'log', 'show'].includes(
-      subcommand,
-    );
-    usesFsmonitorConsumer ||= [
-      'blame',
-      'diff',
-      'grep',
-      'ls-files',
-      'status',
-    ].includes(subcommand);
-    usesWorktreeFilterConsumer ||=
-      ['blame', 'diff', 'status'].includes(subcommand) ||
-      (subcommand === 'ls-files' &&
-        beforeTerminator(rest).some(
-          (arg) => arg === '--modified' || /^-[^-]*m/.test(arg),
-        ));
-    usesSignatureConsumer ||= ['log', 'show'].includes(subcommand);
-    usesPromisorMaterializer ||=
-      ['blame', 'cat-file', 'diff', 'grep', 'show'].includes(subcommand) ||
-      (subcommand === 'log' &&
-        beforeTerminator(rest).some((arg) =>
-          /^(?:-p|--patch(?:=|$)|--stat(?:=|$)|--numstat$|--shortstat$|--dirstat(?:=|$)|--raw$|--name-only$|--name-status$)/.test(
-            arg,
-          ),
-        ));
+    gitReads.push({ subcommand, rest: args.slice(1) });
   }
 
-  if (!usesGit) return false;
+  if (gitReads.length === 0) return false;
   const risk = getLocalGitConfigRisk(cwd);
-  return (
-    (usesDiff && (risk.diffExternal || risk.diffDriverCommand)) ||
-    (usesTextconvConsumer && risk.diffDriverTextconv) ||
-    (usesFsmonitorConsumer && risk.fsmonitor) ||
-    (usesWorktreeFilterConsumer && risk.worktreeFilter) ||
-    risk.pager ||
-    (usesSignatureConsumer && risk.signatureVerifier) ||
-    (usesPromisorMaterializer && risk.promisorRemote)
-  );
+
+  // Invert the old consumer blocklist model. For broad execution mechanisms
+  // we default to unsafe and only keep narrowly-proven non-consumers as safe.
+  // This prevents each newly-discovered Git flag from becoming a new bypass.
+  if (risk.pager) return true;
+
+  return gitReads.some(({ subcommand, rest }) => {
+    if (
+      (risk.diffExternal || risk.diffDriverCommand) &&
+      subcommand === 'diff'
+    )
+      return true;
+    if (
+      risk.diffDriverTextconv &&
+      ['blame', 'diff', 'log', 'show'].includes(subcommand)
+    )
+      return true;
+    if (
+      risk.fsmonitor &&
+      !['branch', 'cat-file', 'log', 'remote', 'rev-parse', 'show'].includes(
+        subcommand,
+      )
+    )
+      return true;
+    if (
+      risk.worktreeFilter &&
+      !['branch', 'cat-file', 'log', 'remote', 'rev-parse', 'show'].includes(
+        subcommand,
+      )
+    )
+      return true;
+    if (
+      risk.signatureVerifier &&
+      ['log', 'show'].includes(subcommand)
+    )
+      return true;
+    if (risk.promisorRemote && !isKnownSafePromisorCommand(subcommand, rest))
+      return true;
+    if (risk.mergeDriver && ['log', 'show'].includes(subcommand)) return true;
+    return false;
+  });
 }
 
 // GIT_CONFIG_COUNT/GIT_CONFIG_KEY_* are rejected at the raw shell permission
@@ -1197,17 +1208,7 @@ function fallbackGitConfigMakesCommandUnsafe(
 ): boolean {
   if (/\b(?:cd|pushd)\b[\s\S]*\bgit\b/i.test(command)) return true;
   if (!/\bgit\b/i.test(command)) return false;
-  const risk = getLocalGitConfigRisk(cwd);
-  return (
-    risk.diffExternal ||
-    risk.diffDriverCommand ||
-    risk.diffDriverTextconv ||
-    risk.fsmonitor ||
-    risk.worktreeFilter ||
-    risk.pager ||
-    risk.signatureVerifier ||
-    risk.promisorRemote
-  );
+  return Object.values(getLocalGitConfigRisk(cwd)).some(Boolean);
 }
 
 async function classifyInternal(
