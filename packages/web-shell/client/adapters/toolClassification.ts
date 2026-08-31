@@ -15,6 +15,23 @@ export function isActiveToolStatus(
   );
 }
 
+export type TerminalBackgroundAgentStatus =
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+  | 'canceled';
+
+export function isTerminalBackgroundAgentStatus(
+  status: unknown,
+): status is TerminalBackgroundAgentStatus {
+  return (
+    status === 'completed' ||
+    status === 'failed' ||
+    status === 'cancelled' ||
+    status === 'canceled'
+  );
+}
+
 export function hasActiveAgents(agents: readonly ACPToolCall[]): boolean {
   return agents.some((agent) => isActiveToolStatus(agent.status));
 }
@@ -70,6 +87,28 @@ export function isBackgroundSubAgentToolCall(tool: ACPToolCall): boolean {
     explicitlyBackground ||
     defaultsToBackground
   );
+}
+
+export function projectTerminalBackgroundAgentTool(
+  tool: ACPToolCall,
+  status: unknown,
+  endTime?: number,
+): ACPToolCall {
+  if (!isTerminalBackgroundAgentStatus(status)) return tool;
+  const cancelled = status === 'cancelled' || status === 'canceled';
+  return {
+    ...tool,
+    status: status === 'failed' ? 'failed' : 'completed',
+    ...(endTime !== undefined ? { endTime } : {}),
+    ...(cancelled
+      ? {
+          rawOutput: {
+            ...(getRecord(tool.rawOutput) ?? {}),
+            status: 'cancelled',
+          },
+        }
+      : {}),
+  };
 }
 
 const BACKGROUND_SHELL_NAMES = new Set([
