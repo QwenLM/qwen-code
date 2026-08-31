@@ -255,6 +255,7 @@ export function EnvironmentPanel({
                   workspaceCwd={gitWorkspaceCwd}
                   gitCwd={gitCwd}
                   side="left"
+                  status={gitStatus}
                   onOpenDiff={onOpenGitDiff}
                   onOpenCommit={onOpenGitCommit}
                 >

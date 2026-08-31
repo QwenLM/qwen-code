@@ -1542,6 +1542,18 @@ export class WorkflowRunRegistry {
     for (const e of toEvict) {
       this.entries.delete(e.runId);
     }
+    // Eviction is a row-removing mutation like every other one, and the
+    // consumers that render these rows (tasks dialog, `/workflows`
+    // roster) re-read the registry only when a status change is
+    // emitted. Two paths reach here without a usable emission:
+    // `releaseHandle` emits nothing of its own, and complete / fail /
+    // cancel / abortAll emit BEFORE sweeping, so a synchronous consumer
+    // reads the pre-eviction list. Either way the roster kept showing
+    // an evicted row until some unrelated status change fired. Emit
+    // once here, after the sweep, so every eviction converges on its
+    // own — and so a future eviction site inherits the guarantee
+    // instead of having to remember it.
+    this.emitStatusChange();
   }
 
   private emitStatusChange(entry?: WorkflowTask): void {

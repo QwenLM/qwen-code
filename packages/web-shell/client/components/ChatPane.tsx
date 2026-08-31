@@ -23,7 +23,7 @@ import {
   useTranscriptStore,
   useWorkspace,
   type DaemonSessionActions,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import {
   type DaemonSessionArtifact,
   type DaemonSessionMonitorTaskStatus,
@@ -255,7 +255,7 @@ export function ChatPane({
   sessionWorkflowEnabled = false,
 }: ChatPaneProps) {
   const { t } = useI18n();
-  const { renderComposerFooter: CustomComposerFooter } =
+  const { renderComposerFooter: CustomComposerFooter, askUserFreeTextLabel } =
     useWebShellCustomization();
   const connection = useConnection();
   const actions = useActions();
@@ -1399,6 +1399,7 @@ export function ChatPane({
               onError={reportError}
               variant="floating"
               keyboardActive={false}
+              customInputLabel={askUserFreeTextLabel}
             />
           </div>
         )}

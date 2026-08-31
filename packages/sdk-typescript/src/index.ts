@@ -288,6 +288,7 @@ export {
   type DaemonWorkspaceMemoryForgetResult,
   type DaemonWorkspaceMemoryForgetTask,
   type DaemonWorkspaceMemoryRememberContextMode,
+  type DaemonWorkspaceMemoryRememberTargetScope,
   type DaemonWorkspaceMemoryRememberOptions,
   type DaemonWorkspaceMemoryRememberResult,
   type DaemonWorkspaceMemoryRememberTask,

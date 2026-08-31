@@ -1817,10 +1817,54 @@ describe('WorkflowRunRegistry', () => {
     expect(r.get(held.runId)).toBe(held);
     expect(r.list()).toHaveLength(MAX_RETAINED_TERMINAL_WORKFLOWS + 1);
 
+    const statusChange = vi.fn();
+    r.setStatusChangeCallback(statusChange);
     r.releaseHandle(held.runId, handle);
 
     expect(r.get(held.runId)).toBeUndefined();
     expect(r.list()).toHaveLength(MAX_RETAINED_TERMINAL_WORKFLOWS);
+    expect(statusChange.mock.calls).toEqual([[undefined]]);
+  });
+
+  it('does not emit on a handle release that evicts nothing', () => {
+    const r = new WorkflowRunRegistry();
+    const held = r.register(reg('wf_held'));
+    const handle = {
+      runId: held.runId,
+      abort: vi.fn(),
+    } as unknown as WorkflowRunHandle;
+    r.attachHandle(handle);
+    r.complete(held.runId, null, 1_000);
+
+    const statusChange = vi.fn();
+    r.setStatusChangeCallback(statusChange);
+    r.releaseHandle(held.runId, handle);
+
+    // Under the retention cap nothing is swept, so the release is not a
+    // row-removing mutation and must stay silent.
+    expect(statusChange).not.toHaveBeenCalled();
+    expect(r.get(held.runId)).toBe(held);
+  });
+
+  it('emits after the sweep, so a consumer reads the post-eviction list', () => {
+    const r = new WorkflowRunRegistry();
+    for (let i = 0; i < MAX_RETAINED_TERMINAL_WORKFLOWS; i++) {
+      r.register(reg(`wf_${i}`));
+      r.complete(`wf_${i}`, null, 1_000 + i);
+    }
+
+    const seen: number[] = [];
+    r.setStatusChangeCallback(() => {
+      seen.push(r.list().length);
+    });
+    // complete() emits BEFORE it sweeps, so without the trailing
+    // eviction emission a consumer only ever observes the over-cap list
+    // and keeps rendering the row that was just dropped.
+    r.register(reg('wf_overflow'));
+    r.complete('wf_overflow', null, 9_000);
+
+    expect(r.list()).toHaveLength(MAX_RETAINED_TERMINAL_WORKFLOWS);
+    expect(seen.at(-1)).toBe(MAX_RETAINED_TERMINAL_WORKFLOWS);
   });
 
   it('active entries are never evicted', () => {
