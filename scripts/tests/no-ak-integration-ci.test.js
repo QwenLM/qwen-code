@@ -247,6 +247,13 @@ describe('no-AK integration CI wiring', () => {
     );
     expect(trustedClassifier).toContain('docs_only|github_ci_only|full) ;;');
     expect(trustedClassifier).toContain('profile=full');
+    // The classify_pr job output resolves against the step ID: renaming it
+    // empties the output and every consumer silently falls back to `full` —
+    // fail-safe direction, but a silent perf regression nothing would notice.
+    expect(trustedClassifier).toContain("id: 'ci_profile'");
+    expect(trustedClassifier).toContain(
+      'echo "ci_profile=${profile}" >> "${GITHUB_OUTPUT}"',
+    );
     expect(classifyJob).not.toContain('collaborators/${PR_AUTHOR}/permission');
     expect(classifyJob).not.toContain('CI_BOT_PAT');
     expect(workflow).toContain(
@@ -264,6 +271,14 @@ describe('no-AK integration CI wiring', () => {
         "TRUSTED_CI_PROFILE: '${{ needs.classify_pr.outputs.ci_profile }}'",
       );
       expect(profileStep).toContain('profile="${TRUSTED_CI_PROFILE:-full}"');
+      // Degraded path (classify_pr failed or was skipped, so the output is
+      // empty) must not log a byte-identical line to a legitimate `full`
+      // classification: the breadcrumb is the only signal that distinguishes a
+      // producer failure from a PR that really is full-profile.
+      expect(profileStep).toContain('if [ -z "${TRUSTED_CI_PROFILE}" ]; then');
+      expect(profileStep).toContain(
+        'echo "::warning::classify_pr produced no ci_profile output (classifier job failed or was skipped); running full CI."',
+      );
       expect(profileStep).not.toContain('classify-pr-profile.sh');
       expect(profileStep).not.toContain('GH_TOKEN');
     }

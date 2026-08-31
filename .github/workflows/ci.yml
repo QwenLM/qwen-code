@@ -533,6 +533,9 @@ jobs:
         env:
           TRUSTED_CI_PROFILE: '${{ needs.classify_pr.outputs.ci_profile }}'
         run: |-
+          if [ -z "${TRUSTED_CI_PROFILE}" ]; then
+            echo "::warning::classify_pr produced no ci_profile output (classifier job failed or was skipped); running full CI."
+          fi
           profile="${TRUSTED_CI_PROFILE:-full}"
           case "${profile}" in
             docs_only|github_ci_only|full) ;;
@@ -1576,6 +1579,9 @@ jobs:
         env:
           TRUSTED_CI_PROFILE: '${{ needs.classify_pr.outputs.ci_profile }}'
         run: |-
+          if [ -z "${TRUSTED_CI_PROFILE}" ]; then
+            echo "::warning::classify_pr produced no ci_profile output (classifier job failed or was skipped); running full CI."
+          fi
           profile="${TRUSTED_CI_PROFILE:-full}"
           case "${profile}" in
             docs_only|github_ci_only|full) ;;
