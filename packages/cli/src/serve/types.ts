@@ -321,7 +321,7 @@ export interface ServeOptions {
    * Per-SSE-connection idle deadline.
    */
   writerIdleTimeoutMs?: number;
-  /** Non-negative ms to keep ACP child alive after last session closes. 0 = immediate kill (default). */
+  /** ACP child auto-reap delay. Keepalive windows may extend it. */
   channelIdleTimeoutMs?: number;
   /** Session reaper scan interval in ms. 0 = disabled. Default: 60000. */
   sessionReapIntervalMs?: number;
