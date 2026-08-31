@@ -4,8 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type React from 'react';
 import { render } from 'ink-testing-library';
-import { OverflowProvider } from '../../contexts/OverflowContext.js';
+import {
+  OverflowProvider,
+  useOverflowState,
+} from '../../contexts/OverflowContext.js';
 import { MaxSizedBox, setMaxSizedBoxDebugging } from './MaxSizedBox.js';
 import { Box, Text } from 'ink';
 import { describe, it, expect } from 'vitest';
@@ -552,5 +556,103 @@ Line 3 direct child`);
     expect(gutters).toEqual(
       Array.from({ length: gutters.length }, (_, i) => i + 1),
     );
+  });
+});
+
+const OverflowProbe: React.FC = () => {
+  const state = useOverflowState();
+  return <Text>{`overflowing:${state ? state.overflowingIds.size : -1}`}</Text>;
+};
+
+// ink flushes the post-effect re-render on its own throttle, so let one tick
+// settle before reading the frame (the registration happens in useEffect).
+const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
+
+describe('<MaxSizedBox /> overflow registration (#10640)', () => {
+  it('registers overflow so the ctrl+s hint shows when lines are hidden', async () => {
+    const { lastFrame } = render(
+      <OverflowProvider>
+        <MaxSizedBox maxWidth={80} maxHeight={2}>
+          <Box>
+            <Text>Line 1</Text>
+          </Box>
+          <Box>
+            <Text>Line 2</Text>
+          </Box>
+          <Box>
+            <Text>Line 3</Text>
+          </Box>
+        </MaxSizedBox>
+        <OverflowProbe />
+      </OverflowProvider>,
+    );
+    await settle();
+    expect(lastFrame()).toContain('... first 2 lines hidden ...');
+    expect(lastFrame()).toContain('overflowing:1');
+  });
+
+  it('keeps the hidden-lines marker but skips registration when registerOverflow is false', async () => {
+    const { lastFrame } = render(
+      <OverflowProvider>
+        <MaxSizedBox maxWidth={80} maxHeight={2} registerOverflow={false}>
+          <Box>
+            <Text>Line 1</Text>
+          </Box>
+          <Box>
+            <Text>Line 2</Text>
+          </Box>
+          <Box>
+            <Text>Line 3</Text>
+          </Box>
+        </MaxSizedBox>
+        <OverflowProbe />
+      </OverflowProvider>,
+    );
+    await settle();
+    // Truncation and its marker are unchanged ...
+    expect(lastFrame()).toContain('... first 2 lines hidden ...');
+    expect(lastFrame()).toContain('Line 3');
+    // ... but the box no longer advertises lines to the ctrl+s hint.
+    expect(lastFrame()).toContain('overflowing:0');
+  });
+
+  it('drops a stale registration when registerOverflow flips to false', async () => {
+    const { lastFrame, rerender } = render(
+      <OverflowProvider>
+        <MaxSizedBox maxWidth={80} maxHeight={2}>
+          <Box>
+            <Text>Line 1</Text>
+          </Box>
+          <Box>
+            <Text>Line 2</Text>
+          </Box>
+          <Box>
+            <Text>Line 3</Text>
+          </Box>
+        </MaxSizedBox>
+        <OverflowProbe />
+      </OverflowProvider>,
+    );
+    await settle();
+    expect(lastFrame()).toContain('overflowing:1');
+
+    rerender(
+      <OverflowProvider>
+        <MaxSizedBox maxWidth={80} maxHeight={2} registerOverflow={false}>
+          <Box>
+            <Text>Line 1</Text>
+          </Box>
+          <Box>
+            <Text>Line 2</Text>
+          </Box>
+          <Box>
+            <Text>Line 3</Text>
+          </Box>
+        </MaxSizedBox>
+        <OverflowProbe />
+      </OverflowProvider>,
+    );
+    await settle();
+    expect(lastFrame()).toContain('overflowing:0');
   });
 });

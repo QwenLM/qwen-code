@@ -607,7 +607,14 @@ const StringResultRenderer: React.FC<{
   renderAsMarkdown: boolean;
   availableHeight?: number;
   childWidth: number;
-}> = ({ data, renderAsMarkdown, availableHeight, childWidth }) => {
+  registerOverflow?: boolean;
+}> = ({
+  data,
+  renderAsMarkdown,
+  availableHeight,
+  childWidth,
+  registerOverflow,
+}) => {
   let displayData = data;
 
   // Truncate if too long
@@ -640,6 +647,7 @@ const StringResultRenderer: React.FC<{
       maxWidth={childWidth}
       additionalHiddenLinesCount={sliced.hiddenLinesCount}
       sourceBoundaries={sliced.sourceBoundaries}
+      registerOverflow={registerOverflow}
     >
       <Box>
         <Text wrap="wrap" color={theme.text.primary}>
@@ -845,6 +853,12 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
     isCappingShell && shellCapHeight !== undefined
       ? shellCapHeight + 1
       : availableHeight;
+  // Ctrl+s ("show more lines") lifts height clamps but not the
+  // ui.shellOutputMaxLines cap (#10640): when the shell cap is what hides
+  // lines, keep them out of the overflow state so the ctrl+s hint does not
+  // advertise lines that pressing ctrl+s cannot reveal.
+  const shellCapIgnoresShowMore =
+    isCappingShell && shellCapHeight === shellOutputMaxLines;
   const innerWidth = contentWidth - STATUS_INDICATOR_WIDTH;
 
   // Long tool call response in MarkdownDisplay doesn't respect availableTerminalHeight properly,
@@ -1023,6 +1037,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
                 renderAsMarkdown={renderOutputAsMarkdown}
                 availableHeight={shellStringCapHeight}
                 childWidth={innerWidth}
+                registerOverflow={!shellCapIgnoresShowMore}
               />
             )}
           </Box>
