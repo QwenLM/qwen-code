@@ -2820,6 +2820,15 @@ export function WebShellSidebar({
     }
   }, [cancelRename, collapsed, collapsedSessionsOpen]);
 
+  useEffect(() => {
+    if (projectFeaturesEnabled) return;
+    setCollapsedSessionsOpen(false);
+    setSearchOpen(false);
+    setSearchQuery('');
+    cancelRename();
+    setGroupMenu(null);
+  }, [cancelRename, projectFeaturesEnabled]);
+
   const saveRename = useCallback(() => {
     const nextName = editingName.trim();
     if (

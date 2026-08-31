@@ -228,7 +228,8 @@ export function StandaloneRecents({
         ]);
         if (
           result.archived.includes(session.sessionId) ||
-          result.alreadyArchived.includes(session.sessionId)
+          result.alreadyArchived.includes(session.sessionId) ||
+          result.notFound?.includes(session.sessionId)
         ) {
           return;
         }
@@ -251,7 +252,8 @@ export function StandaloneRecents({
         ]);
         if (
           result.unarchived.includes(session.sessionId) ||
-          result.alreadyActive.includes(session.sessionId)
+          result.alreadyActive.includes(session.sessionId) ||
+          result.notFound?.includes(session.sessionId)
         ) {
           return;
         }

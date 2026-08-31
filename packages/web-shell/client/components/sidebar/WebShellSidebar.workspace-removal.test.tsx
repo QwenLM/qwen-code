@@ -1647,6 +1647,31 @@ describe('WebShellSidebar workspace removal', () => {
     });
   });
 
+  it('clears project search state while project features are hidden', async () => {
+    active.sessions = [
+      {
+        sessionId: 'visible-session',
+        displayName: 'Visible session',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'default',
+      },
+    ];
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+    const searchInput = await openSessionSearch();
+    await act(async () => {
+      setInputValue(searchInput, 'missing');
+      await Promise.resolve();
+    });
+
+    renderSidebar({ projectFeaturesEnabled: false });
+    renderSidebar({ projectFeaturesEnabled: true });
+    await act(async () => Promise.resolve());
+
+    expect(container.querySelector('input')).toBeNull();
+    expect(container.textContent).toContain('Visible session');
+  });
+
   it('shows a native tooltip for the workspace create-group action', async () => {
     connection.capabilities = {
       ...capabilities,

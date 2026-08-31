@@ -8,6 +8,7 @@ import { STANDALONE_SESSIONS_CAPABILITY } from '@qwen-code/sdk/daemon';
 const mocks = vi.hoisted(() => ({
   list: vi.fn(),
   archive: vi.fn(),
+  unarchive: vi.fn(),
   rename: vi.fn(),
   t: vi.fn((key: string) => key),
   workspace: {} as Record<string, unknown>,
@@ -62,6 +63,7 @@ describe('StandaloneRecents', () => {
   beforeEach(() => {
     mocks.list.mockReset();
     mocks.archive.mockReset();
+    mocks.unarchive.mockReset();
     mocks.rename.mockReset();
     mocks.rename.mockResolvedValue(undefined);
     mocks.list.mockImplementation(
@@ -80,6 +82,7 @@ describe('StandaloneRecents', () => {
       client: {
         listStandaloneSessionsPage: mocks.list,
         archiveStandaloneSessions: mocks.archive,
+        unarchiveStandaloneSessions: mocks.unarchive,
         renameStandaloneSession: mocks.rename,
       },
     };
@@ -179,6 +182,50 @@ describe('StandaloneRecents', () => {
       'sidebar.standaloneActionFailed',
     );
     expect(container.textContent).toContain('Active chat');
+  });
+
+  it('treats an already-missing archive target as terminal success', async () => {
+    mocks.archive.mockResolvedValue({
+      archived: [],
+      alreadyArchived: [],
+      notFound: ['active'],
+      errors: [],
+    });
+    const { onError } = await render();
+    const archiveButton = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('sidebar.archive'),
+    );
+
+    await act(async () => archiveButton?.click());
+
+    expect(onError).not.toHaveBeenCalled();
+    expect(mocks.list).toHaveBeenCalledTimes(2);
+  });
+
+  it('treats an already-missing unarchive target as terminal success', async () => {
+    mocks.unarchive.mockResolvedValue({
+      unarchived: [],
+      alreadyActive: [],
+      notFound: ['archived'],
+      errors: [],
+    });
+    const { onError } = await render();
+    const archivedToggle = Array.from(
+      container.querySelectorAll('button'),
+    ).find((button) => button.textContent?.includes('sidebar.archivedTitle'));
+    await act(async () => archivedToggle?.click());
+    const unarchiveButton = Array.from(
+      container.querySelectorAll('button'),
+    ).find((button) => button.textContent?.includes('sidebar.unarchive'));
+
+    await act(async () => unarchiveButton?.click());
+
+    expect(onError).not.toHaveBeenCalled();
+    expect(mocks.list).toHaveBeenCalledWith({
+      archiveState: 'archived',
+      pageSize: 50,
+    });
+    expect(mocks.list.mock.calls.length).toBeGreaterThan(2);
   });
 
   it('dispatches a lifecycle action only once before React commits busy state', async () => {

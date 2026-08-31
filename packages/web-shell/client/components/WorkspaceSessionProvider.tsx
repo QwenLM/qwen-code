@@ -45,6 +45,30 @@ export function WorkspaceSessionProvider(props: WorkspaceSessionProviderProps) {
     historyPageSize = WEB_SHELL_HISTORY_PAGE_SIZE,
     webShellProps,
   } = props;
+  const onSessionIdChange = webShellProps.onSessionIdChange;
+  const attachedStandaloneSessionIdRef = useRef<string | undefined>(undefined);
+  const handleSessionIdChange = useCallback<
+    NonNullable<WebShellProps['onSessionIdChange']>
+  >(
+    (nextSessionId, nextWorkspaceId, nextWorkspaceCwd, nextSessionContext) => {
+      attachedStandaloneSessionIdRef.current =
+        nextSessionContext?.kind === 'standalone' ? nextSessionId : undefined;
+      onSessionIdChange?.(
+        nextSessionId,
+        nextWorkspaceId,
+        nextWorkspaceCwd,
+        nextSessionContext,
+      );
+    },
+    [onSessionIdChange],
+  );
+  if (
+    sessionContext?.kind !== 'standalone' ||
+    (attachedStandaloneSessionIdRef.current !== undefined &&
+      attachedStandaloneSessionIdRef.current !== sessionId)
+  ) {
+    attachedStandaloneSessionIdRef.current = undefined;
+  }
   const t = getTranslator(normalizeLanguage(webShellProps.language));
   const contextConflictsWithWorkspace =
     sessionContext?.kind !== undefined &&
@@ -65,12 +89,17 @@ export function WorkspaceSessionProvider(props: WorkspaceSessionProviderProps) {
   if (sessionContext?.kind === 'standalone') {
     return (
       <StandaloneSessionGate
-        key={sessionId ?? 'standalone-draft'}
         sessionId={sessionId}
+        attachedSessionId={attachedStandaloneSessionIdRef.current}
         clientId={clientId}
         restartSseOnPrompt={restartSseOnPrompt}
         historyPageSize={historyPageSize}
-        webShellProps={webShellProps}
+        webShellProps={{
+          ...webShellProps,
+          onSessionIdChange: onSessionIdChange
+            ? handleSessionIdChange
+            : undefined,
+        }}
       />
     );
   }
@@ -327,16 +356,19 @@ type StandaloneResolution =
   | { status: 'ready' }
   | { status: 'archived'; lookup: DaemonStandaloneSessionSummary }
   | { status: 'not-found' }
+  | { status: 'still-creating' }
   | { status: 'error'; error: Error };
 
 function StandaloneSessionGate({
   sessionId,
+  attachedSessionId,
   clientId,
   restartSseOnPrompt,
   historyPageSize,
   webShellProps,
 }: {
   sessionId?: string;
+  attachedSessionId?: string;
   clientId?: string;
   restartSseOnPrompt?: boolean;
   historyPageSize: number;
@@ -347,15 +379,32 @@ function StandaloneSessionGate({
   const [resolution, setResolution] = useState<StandaloneResolution>(() =>
     sessionId ? { status: 'loading' } : { status: 'ready' },
   );
+  const [resolutionSessionId, setResolutionSessionId] = useState(sessionId);
   const resolutionGenerationRef = useRef(0);
   const t = useMemo(
     () => getTranslator(normalizeLanguage(webShellProps.language)),
     [webShellProps.language],
   );
 
-  const resolveSession = useCallback(
-    async (generation: number) => {
+  const standaloneSupported =
+    workspace.capabilities?.features?.includes(
+      STANDALONE_SESSIONS_CAPABILITY,
+    ) === true;
+
+  useEffect(() => {
+    if (!standaloneSupported) return;
+    const generation = resolutionGenerationRef.current + 1;
+    resolutionGenerationRef.current = generation;
+    setResolutionSessionId(sessionId);
+    const resolveSession = async () => {
       if (!sessionId) {
+        if (resolutionGenerationRef.current === generation) {
+          setResolution({ status: 'ready' });
+        }
+        return;
+      }
+
+      if (attachedSessionId === sessionId) {
         if (resolutionGenerationRef.current === generation) {
           setResolution({ status: 'ready' });
         }
@@ -394,36 +443,26 @@ function StandaloneSessionGate({
         }
         const delay = STANDALONE_LOOKUP_DELAYS_MS[index];
         if (delay === undefined) {
-          setResolution({
-            status: 'error',
-            error: new Error(t('session.stillCreating')),
-          });
+          setResolution({ status: 'still-creating' });
           return;
         }
         await new Promise<void>((resolve) => window.setTimeout(resolve, delay));
         if (resolutionGenerationRef.current !== generation) return;
       }
-    },
-    [sessionId, t, workspace.client],
-  );
-
-  useEffect(() => {
-    if (
-      !workspace.capabilities?.features?.includes(
-        STANDALONE_SESSIONS_CAPABILITY,
-      )
-    ) {
-      return;
-    }
-    const generation = resolutionGenerationRef.current + 1;
-    resolutionGenerationRef.current = generation;
-    void resolveSession(generation);
+    };
+    void resolveSession();
     return () => {
       if (resolutionGenerationRef.current === generation) {
         resolutionGenerationRef.current += 1;
       }
     };
-  }, [attempt, resolveSession, workspace.capabilities?.features]);
+  }, [
+    attempt,
+    attachedSessionId,
+    sessionId,
+    standaloneSupported,
+    workspace.client,
+  ]);
 
   const capabilities = workspace.capabilities;
   if (workspace.status === 'error') {
@@ -454,7 +493,7 @@ function StandaloneSessionGate({
       </div>
     );
   }
-  if (!capabilities.features?.includes(STANDALONE_SESSIONS_CAPABILITY)) {
+  if (!standaloneSupported) {
     return (
       <WorkspaceUnavailableState
         title={t('session.standaloneUnavailable')}
@@ -464,7 +503,10 @@ function StandaloneSessionGate({
       />
     );
   }
-  if (resolution.status === 'loading') {
+  if (
+    (resolutionSessionId !== sessionId && attachedSessionId !== sessionId) ||
+    resolution.status === 'loading'
+  ) {
     return (
       <div
         data-web-shell-root
@@ -503,11 +545,15 @@ function StandaloneSessionGate({
       />
     );
   }
-  if (resolution.status === 'error') {
+  if (resolution.status === 'error' || resolution.status === 'still-creating') {
     return (
       <WorkspaceUnavailableState
         title={t('session.loadFailed')}
-        description={resolution.error.message}
+        description={
+          resolution.status === 'still-creating'
+            ? t('session.stillCreating')
+            : resolution.error.message
+        }
         actionLabel={t('common.retry')}
         theme={webShellProps.theme}
         icon={<WifiOffIcon />}
@@ -531,6 +577,10 @@ function StandaloneSessionGate({
                 result.alreadyActive.includes(sessionId!)
               ) {
                 setResolution({ status: 'ready' });
+                return;
+              }
+              if (result.notFound?.includes(sessionId!)) {
+                setResolution({ status: 'not-found' });
                 return;
               }
               const failure = result.errors.find(

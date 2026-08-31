@@ -82,6 +82,7 @@ type MockConnection = {
       state: 'creating';
       sessionId: string;
     };
+    errorCode?: 'working_directory_missing';
   };
 };
 
@@ -298,6 +299,7 @@ const {
       notFound: [],
       errors: [],
     }),
+    repairStandaloneSessionDirectory: vi.fn().mockResolvedValue(undefined),
     resolveSubagentSession: vi
       .fn()
       .mockRejectedValue(new Error('Subagent details unavailable')),
@@ -5412,6 +5414,10 @@ beforeEach(() => {
     notFound: [],
     errors: [],
   });
+  mockWorkspace.client.repairStandaloneSessionDirectory.mockReset();
+  mockWorkspace.client.repairStandaloneSessionDirectory.mockResolvedValue(
+    undefined,
+  );
   for (const method of Object.values(sessionCatalogController)) {
     method.mockReset();
   }
@@ -9947,6 +9953,58 @@ describe('App session callbacks', () => {
       undefined,
       undefined,
       { kind: 'standalone' },
+    );
+  });
+
+  it('keeps a newer standalone draft when an older session load fails', async () => {
+    const load = deferred<void>();
+    mockConnection.sessionContext = { kind: 'workspace', cwd: '/tmp/project' };
+    mockWorkspace.capabilities = {
+      features: ['standalone_sessions_v1'],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    mockSessionActions.loadSession.mockReturnValueOnce(load.promise);
+    const shellRef = createRef<WebShellApi>();
+    const { rerender } = renderApp({ shellRef });
+    await flush();
+
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent('qwen:open-session', {
+          detail: { sessionId: 'stale-session', workspaceCwd: '/tmp/project' },
+        }),
+      );
+    });
+    await vi.waitFor(() =>
+      expect(mockSessionActions.loadSession).toHaveBeenCalled(),
+    );
+    await act(async () => {
+      expect(await shellRef.current?.createNewSession()).toBe(true);
+    });
+    act(() => {
+      mockConnection.sessionId = undefined;
+      rerender({ shellRef });
+    });
+    await act(async () => {
+      load.reject(new Error('stale load failed'));
+      await Promise.resolve();
+    });
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('standalone prompt');
+      await vi.waitFor(() =>
+        expect(mockSessionActions.createSession).toHaveBeenCalled(),
+      );
+    });
+
+    expect(mockSessionActions.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionContext: { kind: 'standalone' } }),
     );
   });
 
@@ -21552,6 +21610,29 @@ describe('App session callbacks', () => {
     }
   });
 
+  it('does not restore over a consumed split deep link after capabilities refresh', async () => {
+    window.history.pushState({}, '', '/?split=s1,s2');
+    try {
+      const { container, rerender } = renderApp();
+      await flush();
+      saveSplitSessions(['stale-split']);
+      act(() => {
+        mockWorkspace.capabilities = {
+          ...mockWorkspace.capabilities,
+          features: [...(mockWorkspace.capabilities?.features ?? [])],
+        } as typeof mockWorkspace.capabilities;
+        rerender();
+      });
+      await flush();
+
+      expect(
+        container.querySelector('[data-testid="split-initial"]')?.textContent,
+      ).toBe('s1,s2');
+    } finally {
+      window.history.pushState({}, '', '/');
+    }
+  });
+
   it('lets controlled split session ids take precedence over a ?split= URL', async () => {
     window.history.pushState({}, '', '/?split=s1,s2');
     try {
@@ -23622,6 +23703,7 @@ describe('App session callbacks', () => {
       '/tools',
       '/agents',
       '/extensions manage',
+      '/goal',
       '/model --vision qwen-vl',
       '/resume',
       '/delete',
@@ -23649,7 +23731,7 @@ describe('App session callbacks', () => {
     expect(mockWorkspaceActions.loadEnv).not.toHaveBeenCalled();
     expect(settingsSetValue).not.toHaveBeenCalled();
     expect(mockSessionActions.loadSession).not.toHaveBeenCalled();
-    expect(onToast).toHaveBeenCalledTimes(9);
+    expect(onToast).toHaveBeenCalledTimes(10);
   });
 
   it('allows ordinary shell commands in a standalone chat', async () => {
@@ -23814,6 +23896,83 @@ describe('App session callbacks', () => {
     expect(container.textContent).toContain('Creation may have succeeded');
     expect(container.textContent).not.toContain(
       'No conversation exists for the reserved ID',
+    );
+  });
+
+  it('reports a recovered standalone load failure without reverting to archived', async () => {
+    const sessionId = 'standalone-recovery-source';
+    mockConnection.sessionId = sessionId;
+    mockConnection.sessionContext = { kind: 'standalone' };
+    mockConnection.workspaceCwd = '';
+    mockConnection.standaloneSession = {
+      creationRecovery: { state: 'creating', sessionId },
+    };
+    mockWorkspace.capabilities = {
+      features: ['standalone_sessions_v1'],
+      workspaces: [{ id: 'primary', cwd: '/workspace', primary: true }],
+    } as typeof mockWorkspace.capabilities;
+    mockWorkspace.client.getStandaloneSession.mockResolvedValue({
+      sessionId,
+      sourceType: 'standalone',
+      context: { kind: 'standalone' },
+      isArchived: true,
+    });
+    mockWorkspace.client.unarchiveStandaloneSessions.mockResolvedValue({
+      unarchived: [sessionId],
+      alreadyActive: [],
+      notFound: [],
+      errors: [],
+    });
+    mockSessionActions.loadSession.mockRejectedValue(new Error('load failed'));
+    const onToast = vi.fn();
+    const { container } = renderApp({ onToast });
+    await flush();
+    const buttonNamed = (label: string) =>
+      Array.from(container.querySelectorAll<HTMLButtonElement>('button')).find(
+        (button) => button.textContent?.trim() === label,
+      );
+    await act(async () => buttonNamed('Check status')?.click());
+    await vi.waitFor(() => expect(buttonNamed('Unarchive')).toBeDefined());
+
+    await act(async () => buttonNamed('Unarchive')?.click());
+
+    expect(container.textContent).not.toContain(
+      'The recovered conversation is archived',
+    );
+    expect(onToast).toHaveBeenCalledWith('error', 'load failed');
+    expect(onToast).not.toHaveBeenCalledWith(
+      'error',
+      expect.stringContaining('Failed to unarchive'),
+    );
+  });
+
+  it('re-enables standalone directory repair after reload replaces the owner', async () => {
+    mockConnection.sessionContext = { kind: 'standalone' };
+    mockConnection.workspaceCwd = '';
+    mockConnection.standaloneSession = {
+      errorCode: 'working_directory_missing',
+    };
+    mockSessionActions.reloadSession.mockImplementationOnce(async () => {
+      testState.ownerVersion += 1;
+    });
+    const onToast = vi.fn();
+    const { container } = renderApp({ onToast });
+    await flush();
+    const repairButton = () =>
+      Array.from(container.querySelectorAll<HTMLButtonElement>('button')).find(
+        (button) => button.textContent?.trim() === 'Repair directory',
+      );
+
+    await act(async () => repairButton()?.click());
+
+    expect(
+      mockWorkspace.client.repairStandaloneSessionDirectory,
+    ).toHaveBeenCalledWith('session-1');
+    expect(repairButton()).toBeDefined();
+    expect(repairButton()?.disabled).toBe(false);
+    expect(onToast).toHaveBeenCalledWith(
+      'info',
+      'The private working directory was repaired.',
     );
   });
 

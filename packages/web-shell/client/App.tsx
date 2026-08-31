@@ -1343,6 +1343,7 @@ const NON_WORKSPACE_BLOCKED_COMMANDS = new Set([
   'delete',
   'diff',
   'extensions',
+  'goal',
   'log',
   'memory',
   'mcp',
@@ -2668,8 +2669,12 @@ export function App({
   const standaloneDirectoryErrorCode = effectiveStandaloneSession?.errorCode;
   const [standaloneRecoveryResolution, setStandaloneRecoveryResolution] =
     useState<StandaloneRecoveryResolution>('idle');
+  const standaloneRecoveryRequestRef = useRef(0);
   const [standaloneRepairBusy, setStandaloneRepairBusy] = useState(false);
+  const standaloneRepairRequestRef = useRef(0);
   useEffect(() => {
+    standaloneRecoveryRequestRef.current += 1;
+    standaloneRepairRequestRef.current += 1;
     setStandaloneRecoveryResolution('idle');
     setStandaloneRepairBusy(false);
   }, [connection.sessionId]);
@@ -6012,11 +6017,13 @@ export function App({
   );
   const resolvedPaneHeaderActions =
     renderPaneHeaderActions ?? defaultPaneHeaderActions;
+  const splitBootstrapHandledRef = useRef(false);
   // A `?split=a,b` URL (opened in a new tab from the overview) enters the split
   // view with those sessions on load. Consume the param once so a later reload
   // or exit doesn't force the split back on.
   useEffect(() => {
-    if (!workspace.capabilities) return;
+    if (!workspace.capabilities || splitBootstrapHandledRef.current) return;
+    splitBootstrapHandledRef.current = true;
     const ids = parseSplitSessionIds(window.location.search);
     if (ids.length > 0) {
       const url = new URL(window.location.href);
@@ -9158,6 +9165,7 @@ export function App({
   );
 
   const composerFocusRequestRef = useRef(0);
+  const sessionOpenInvocationRef = useRef(0);
   const scheduleComposerFocus = useCallback((sessionId?: string) => {
     const request = ++composerFocusRequestRef.current;
     window.setTimeout(() => {
@@ -9196,6 +9204,7 @@ export function App({
         pushToast('warning', t('session.recoveryBlocksAction'));
         return false;
       }
+      const invocation = ++sessionOpenInvocationRef.current;
       let nextContext: DaemonProductSessionContext | undefined;
       let availableWorkspaces = workspacesRef.current;
       if (intent.kind === 'workspace') {
@@ -9261,10 +9270,12 @@ export function App({
             : undefined;
         }
       }
+      if (sessionOpenInvocationRef.current !== invocation) return false;
       const targetWorkspaceCwd =
         nextContext?.kind === 'workspace' ? nextContext.cwd : undefined;
       const previousPendingContext = pendingSessionContextRef.current;
       setPendingSessionContext(nextContext);
+      setSidebarSwitchingSessionId(null);
       composerSourceVersionRef.current += 1;
       selectedWorkspaceCwdRef.current = targetWorkspaceCwd;
       setSelectedWorkspaceCwd(targetWorkspaceCwd);
@@ -9308,7 +9319,12 @@ export function App({
         setSessionBranch(undefined);
         return true;
       } catch (error) {
-        setPendingSessionContext(previousPendingContext);
+        if (
+          sessionOpenInvocationRef.current === invocation &&
+          pendingSessionContextRef.current === nextContext
+        ) {
+          setPendingSessionContext(previousPendingContext);
+        }
         if (composerFocusRequestRef.current === focusRequest) {
           composerFocusRequestRef.current += 1;
         }
@@ -9852,7 +9868,6 @@ export function App({
     }
   }, [createNewSession, onSessionIdChange]);
 
-  const sessionOpenInvocationRef = useRef(0);
   const loadSidebarSession = useCallback(
     async (
       sessionId: string,
@@ -9887,12 +9902,18 @@ export function App({
                 : workspaceCwd,
           sessionContext: targetContext,
         });
-        if (sessionOpenInvocationRef.current === invocation) {
+        if (
+          sessionOpenInvocationRef.current === invocation &&
+          pendingSessionContextRef.current === targetContext
+        ) {
           composerSourceVersionRef.current += 1;
           setPendingSessionContext(undefined);
         }
       } catch (error) {
-        if (sessionOpenInvocationRef.current === invocation) {
+        if (
+          sessionOpenInvocationRef.current === invocation &&
+          pendingSessionContextRef.current === targetContext
+        ) {
           setSidebarSwitchingSessionId(null);
           setPendingSessionContext(previousPendingContext);
         }
@@ -9973,15 +9994,16 @@ export function App({
       connectionRef.current.standaloneSession?.creationRecovery,
     );
     if (!sessionId || standaloneRecoveryResolution === 'checking') return;
-    const owner = sessionOwnerGuard.capture();
+    const request = ++standaloneRecoveryRequestRef.current;
+    const isCurrent = () =>
+      standaloneRecoveryRequestRef.current === request &&
+      connectionRef.current.sessionId === sessionId;
     setStandaloneRecoveryResolution('checking');
     try {
       const result = await workspace.client.unarchiveStandaloneSessions([
         sessionId,
       ]);
-      if (!owner.isCurrent() || connectionRef.current.sessionId !== sessionId) {
-        return;
-      }
+      if (!isCurrent()) return;
       if (
         !result.unarchived.includes(sessionId) &&
         !result.alreadyActive.includes(sessionId)
@@ -9995,16 +10017,22 @@ export function App({
         );
         throw new Error(failure?.message ?? t('session.unarchiveFailed'));
       }
-      await loadSidebarSession(sessionId, undefined, { kind: 'standalone' });
     } catch (error) {
-      if (!owner.isCurrent()) return;
+      if (!isCurrent()) return;
       setStandaloneRecoveryResolution('archived');
       reportError(error, t('session.unarchiveFailed'));
+      return;
+    }
+    try {
+      await loadSidebarSession(sessionId, undefined, { kind: 'standalone' });
+    } catch (error) {
+      if (!isCurrent()) return;
+      setStandaloneRecoveryResolution('unknown');
+      reportError(error, t('session.recoveryCheckFailed'));
     }
   }, [
     loadSidebarSession,
     reportError,
-    sessionOwnerGuard,
     standaloneRecoveryResolution,
     t,
     workspace.client,
@@ -10026,6 +10054,7 @@ export function App({
       return;
     }
     const owner = sessionOwnerGuard.capture();
+    const request = ++standaloneRepairRequestRef.current;
     setStandaloneRepairBusy(true);
     try {
       await workspace.client.repairStandaloneSessionDirectory(sessionId);
@@ -10033,15 +10062,23 @@ export function App({
         return;
       }
       await sessionActions.reloadSession(new AbortController().signal);
-      if (owner.isCurrent() && connectionRef.current.sessionId === sessionId) {
+      if (
+        standaloneRepairRequestRef.current === request &&
+        connectionRef.current.sessionId === sessionId
+      ) {
         pushToast('info', t('session.repairSucceeded'));
       }
     } catch (error) {
-      if (owner.isCurrent()) {
+      if (
+        standaloneRepairRequestRef.current === request &&
+        connectionRef.current.sessionId === sessionId
+      ) {
         reportError(error, t('session.repairFailed'));
       }
     } finally {
-      if (owner.isCurrent()) setStandaloneRepairBusy(false);
+      if (standaloneRepairRequestRef.current === request) {
+        setStandaloneRepairBusy(false);
+      }
     }
   }, [
     pushToast,
@@ -13981,11 +14018,12 @@ export function App({
                           closePanel();
                           return;
                         }
-                        const openInvocation = sessionOpenInvocationRef.current;
-                        void createNewSession({
+                        const creation = createNewSession({
                           kind: 'workspace',
                           cwd: currentWorkspaceCwd,
-                        }).then(
+                        });
+                        const openInvocation = sessionOpenInvocationRef.current;
+                        void creation.then(
                           (created) => {
                             const latest = connectionRef.current;
                             const latestWorkspaceCwd =
