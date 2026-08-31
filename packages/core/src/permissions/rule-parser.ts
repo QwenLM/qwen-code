@@ -415,8 +415,11 @@ export function parseRule(raw: string): PermissionRule {
   if (specifierKind === 'command') {
     // Legacy `:*` is token syntax; never rewrite env assignment values.
     rawSpecifier = rawSpecifier.replace(
-      /(^|[ \t\n])([^ \t\n="'`=]+):\*(?=$|[ \t\n])/g,
-      '$1$2 *',
+      /(^|[ \t\n])([^ \t\n]+):\*(?=$|[ \t\n])/g,
+      (match, leadingWhitespace: string, token: string) =>
+        ENV_ASSIGNMENT_REGEX.test(token)
+          ? match
+          : `${leadingWhitespace}${token} *`,
     );
   }
 
@@ -465,7 +468,7 @@ export function parseRule(raw: string): PermissionRule {
     }
   } else if (
     specifierKind !== 'literal' &&
-    rawSpecifier.includes(':') &&
+    stripLeadingVariableAssignments(rawSpecifier).includes(':') &&
     !rawSpecifier.startsWith('domain:')
   ) {
     debugLogger.warn(
@@ -1013,7 +1016,7 @@ export function matchesCommandPattern(
   // Build regex from glob pattern with word-boundary semantics.
   // Wildcards in leading NAME=value words cannot cross shell-word boundaries.
   const assignmentValueWildcards =
-    findUnquotedAssignmentValueWildcardPositions(normalizedPattern);
+    findAssignmentValueWildcardPositions(normalizedPattern);
   let regex = '^';
   let pos = 0;
 
@@ -1026,13 +1029,25 @@ export function matchesCommandPattern(
 
     const literalBefore = normalizedPattern.substring(pos, starIdx);
 
-    if (starIdx > 0 && normalizedPattern[starIdx - 1] === ' ') {
+    if (assignmentValueWildcards.literal.has(starIdx)) {
+      // A wildcard written inside quotes or shell substitution in a leading
+      // assignment is shell syntax, not a permission wildcard. Matching it
+      // literally prevents the rule from authorizing different executable
+      // substitution text.
+      regex += escapeRegex(literalBefore);
+      regex += '\\*';
+    } else if (assignmentValueWildcards.bounded.has(starIdx)) {
+      // Unquoted assignment-value wildcards may vary, but never consume the
+      // next shell word and thereby change the command identity.
+      regex += escapeRegex(literalBefore);
+      regex += '[^ ]*';
+    } else if (starIdx > 0 && normalizedPattern[starIdx - 1] === ' ') {
       const literalWithoutTrailingSpace = literalBefore.slice(0, -1);
       regex += escapeRegex(literalWithoutTrailingSpace);
       regex += '( .*)?';
     } else {
       regex += escapeRegex(literalBefore);
-      regex += assignmentValueWildcards.has(starIdx) ? '[^ ]*' : '.*';
+      regex += '.*';
     }
 
     pos = starIdx + 1;
@@ -1302,14 +1317,21 @@ function isAssignmentOnlyPermissionPattern(pattern: string): boolean {
   }
 }
 
-function findUnquotedAssignmentValueWildcardPositions(
-  pattern: string,
-): Set<number> {
-  const positions = new Set<number>();
+function findAssignmentValueWildcardPositions(pattern: string): {
+  bounded: Set<number>;
+  literal: Set<number>;
+} {
+  const bounded = new Set<number>();
+  const literal = new Set<number>();
   let quote: "'" | '"' | '`' | null = null;
   let escaped = false;
   let wordStart = 0;
   let leadingAssignments = true;
+  let substitutionDepth = 0;
+
+  const isLeadingAssignmentWildcard = (index: number): boolean =>
+    leadingAssignments &&
+    ENV_ASSIGNMENT_REGEX.test(pattern.slice(wordStart, index));
 
   for (let i = 0; i < pattern.length; i++) {
     const ch = pattern[i]!;
@@ -1322,11 +1344,32 @@ function findUnquotedAssignmentValueWildcardPositions(
       continue;
     }
     if (quote) {
+      if (ch === '*' && isLeadingAssignmentWildcard(i)) {
+        literal.add(i);
+      }
       if (ch === quote) quote = null;
       continue;
     }
     if (ch === "'" || ch === '"' || ch === '`') {
       quote = ch;
+      continue;
+    }
+    if (
+      (ch === '$' || ch === '<' || ch === '>') &&
+      pattern[i + 1] === '('
+    ) {
+      substitutionDepth++;
+      i++;
+      continue;
+    }
+    if (substitutionDepth > 0) {
+      if (ch === '(') {
+        substitutionDepth++;
+      } else if (ch === ')') {
+        substitutionDepth--;
+      } else if (ch === '*' && isLeadingAssignmentWildcard(i)) {
+        literal.add(i);
+      }
       continue;
     }
     if (ch === ' ') {
@@ -1339,14 +1382,12 @@ function findUnquotedAssignmentValueWildcardPositions(
       wordStart = i + 1;
       continue;
     }
-    if (ch === '*' && leadingAssignments) {
-      const beforeStar = pattern.slice(wordStart, i);
-      if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(beforeStar)) {
-        positions.add(i);
-      }
+    if (ch === '*' && isLeadingAssignmentWildcard(i)) {
+      bounded.add(i);
     }
   }
-  return positions;
+
+  return { bounded, literal };
 }
 
 function normalizeCommandForPermissionMatch(command: string): string {

