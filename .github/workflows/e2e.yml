@@ -46,8 +46,12 @@ jobs:
     # Kill-switch: MAINTAINER_ECS_RUNNER_DISABLED.
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     # A wedged shard must free the pool runner well before GitHub's
-    # 360-minute default; 60 matches ci.yml's pool jobs.
-    timeout-minutes: 60
+    # 360-minute default. The ceiling is extended on the ECS pool only,
+    # mirroring ci.yml's pool lanes: run 33345905817 (issue #10591) expired
+    # at the old flat 60 on a contended shared host before its log reported
+    # any test result. Hosted fallbacks keep the pre-contention ceiling so
+    # a genuine hang there does not burn the extra 30 minutes.
+    timeout-minutes: "${{ fromJSON((github.repository == 'QwenLM/qwen-code' && vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true') && '90' || '60') }}"
     # Skip on fork PRs: forks have no access to repository secrets
     # (OPENAI_*, DOCKERHUB_*), so the matrix would fail unconditionally
     # and show misleading red status. Same-repo PRs run normally.

@@ -94,4 +94,56 @@ describe('e2e workflow', () => {
     expect(runStep.run).toContain('mktemp -d /var/tmp/qwen-ci-XXXXXX');
     expect(runStep.run).toContain('trap \'rm -rf "$TMPDIR"');
   });
+
+  describe('job timeout lane contract', () => {
+    // Run 33345905817 (issue #10591) expired at the old flat 60-minute
+    // ceiling on a contended shared ECS host before its log reported any
+    // test result. The extended ceiling is
+    // scoped to the pool routing — the same condition `runs-on` uses:
+    // hosted fallbacks (forks and MAINTAINER_ECS_RUNNER_DISABLED=true)
+    // keep the pre-contention bound, so a genuine hang there does not
+    // burn the extra 30 minutes. Evaluate the real timeout expression for
+    // both routings instead of pinning a bare number — the same
+    // substitute-then-evaluate technique ci-platform-lanes.test.js uses —
+    // so a regression to an unconditional ceiling fails here instead of
+    // reading as a passing constant.
+    const timeoutMinutesOn = ({ repository, ecsDisabled }) => {
+      const expr = String(yml.jobs['e2e-test-linux']['timeout-minutes'])
+        .replace(/^\$\{\{\s*/, '')
+        .replace(/\s*\}\}$/, '')
+        .replace(/github\.repository/g, JSON.stringify(repository))
+        .replace(
+          /vars\.MAINTAINER_ECS_RUNNER_DISABLED/g,
+          JSON.stringify(ecsDisabled),
+        )
+        .replace(/fromJSON\(/g, '(');
+      if (/github\.|vars\.|needs\.|steps\.|fromJSON\(/.test(expr)) {
+        throw new Error(
+          `e2e-test-linux timeout carries a term this guard does not model: ${expr}`,
+        );
+      }
+      return Number(new Function(`return (${expr});`)());
+    };
+
+    it('keeps a contended ECS shard above the install/build/test budget', () => {
+      expect(
+        timeoutMinutesOn({ repository: 'QwenLM/qwen-code', ecsDisabled: '' }),
+      ).toBe(90);
+    });
+
+    it('keeps the hosted fallback on the pre-contention ceiling', () => {
+      expect(
+        timeoutMinutesOn({
+          repository: 'some-fork/qwen-code',
+          ecsDisabled: '',
+        }),
+      ).toBe(60);
+      expect(
+        timeoutMinutesOn({
+          repository: 'QwenLM/qwen-code',
+          ecsDisabled: 'true',
+        }),
+      ).toBe(60);
+    });
+  });
 });
