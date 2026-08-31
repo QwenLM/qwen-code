@@ -446,10 +446,14 @@ jobs:
           npm run bundle
 
       - name: 'Run CLI Integration Tests'
+        env:
+          RUNNER_ENVIRONMENT: '${{ runner.environment }}'
         run: |-
           npm run test:integration:cli:sandbox:none
 
       - name: 'Run Interactive Integration Tests'
+        env:
+          RUNNER_ENVIRONMENT: '${{ runner.environment }}'
         run: |-
           npm run test:integration:interactive:sandbox:none
 
@@ -528,12 +532,16 @@ jobs:
           npm run build:sandbox -- -s
 
       - name: 'Run CLI Docker Integration Tests'
+        env:
+          RUNNER_ENVIRONMENT: '${{ runner.environment }}'
         run: |-
           # The package.json docker test scripts each rebuild the sandbox image.
           # Run vitest directly here so this job reuses the image built above.
           QWEN_SANDBOX=docker npx vitest run --root ./integration-tests cli
 
       - name: 'Run Interactive Docker Integration Tests'
+        env:
+          RUNNER_ENVIRONMENT: '${{ runner.environment }}'
         run: |-
           QWEN_SANDBOX=docker npx vitest run --root ./integration-tests interactive
 
