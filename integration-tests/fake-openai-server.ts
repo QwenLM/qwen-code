@@ -29,6 +29,7 @@ export type FakeOpenAIResponse = {
   model?: string;
   content?: string;
   contentChunks?: string[];
+  errorContent?: string;
   disconnectAfterContentChunks?: number;
   toolCalls?: FakeOpenAIToolCall[];
   finishReason?: 'stop' | 'tool_calls' | 'length';
@@ -47,6 +48,13 @@ export type FakeOpenAIChoice = {
   index: number;
   content?: string;
   contentChunks?: string[];
+  /**
+   * Streaming-only mid-stream provider error: emits one chunk carrying this
+   * string as `delta.content` together with `finish_reason: 'error_finish'`,
+   * then ends the stream. Mirrors gateways that report upstream failures as
+   * stream content instead of an HTTP error status.
+   */
+  errorContent?: string;
   toolCalls?: FakeOpenAIToolCall[];
   finishReason?: 'stop' | 'tool_calls' | 'length';
 };
@@ -298,6 +306,12 @@ function writeStreamed(
   const choices = responseChoices(message);
   for (const [choicePosition, choice] of choices.entries()) {
     send(chunk(choice.index, { role: 'assistant' }));
+    if (choice.errorContent !== undefined) {
+      send(
+        chunk(choice.index, { content: choice.errorContent }, 'error_finish'),
+      );
+      continue;
+    }
     for (const [contentIndex, content] of (
       choice.contentChunks ?? []
     ).entries()) {
@@ -373,6 +387,7 @@ function responseChoices(message: FakeOpenAIResponse): FakeOpenAIChoice[] {
         index: 0,
         content: message.content,
         contentChunks: message.contentChunks,
+        errorContent: message.errorContent,
         toolCalls: message.toolCalls,
         finishReason: message.finishReason,
       },
