@@ -23,6 +23,16 @@ import type {
 const DEFAULT_RULE_TTL_MS = 30 * 60_000;
 const MAX_RULES = 64;
 
+/**
+ * Scope a backend's raw requestId. Request ids are adaptor-local strings
+ * (qwen serve mints UUIDs; an ACP adaptor counts perm-1, perm-2), so the
+ * owning adaptor must scope the key or two live backends collide and one
+ * backend's resolution retracts another backend's pending ask.
+ */
+function scopedRequestId(backend: BackendHandle, requestId: string): string {
+  return `${backend.adaptor}:${requestId}`;
+}
+
 export interface PendingPermission {
   requestHandle: string;
   requestId: string;
@@ -34,7 +44,8 @@ export interface PendingPermission {
 }
 
 export interface PermissionBrokerOptions {
-  adaptor: BackendAdaptor;
+  /** Resolves the adaptor that owns a pending request's backend handle. */
+  adaptorFor: (handle: BackendHandle) => BackendAdaptor;
   now?: () => number;
   ruleTtlMs?: number;
   log?: (
@@ -110,7 +121,10 @@ export class PermissionBroker {
       createdAt: this.now(),
     };
     this.pending.set(pending.requestHandle, pending);
-    this.pendingByRequestId.set(pending.requestId, pending.requestHandle);
+    this.pendingByRequestId.set(
+      scopedRequestId(fields.backend, pending.requestId),
+      pending.requestHandle,
+    );
     this.options.log?.('permission.request', {
       requestHandle: pending.requestHandle,
       requestId: pending.requestId,
@@ -176,10 +190,14 @@ export class PermissionBroker {
   }
 
   /** A resolution arrived from the event stream (possibly our own vote). */
-  onResolved(requestId: string): PendingPermission | undefined {
-    const handle = this.pendingByRequestId.get(requestId);
+  onResolved(
+    backend: BackendHandle,
+    requestId: string,
+  ): PendingPermission | undefined {
+    const scoped = scopedRequestId(backend, requestId);
+    const handle = this.pendingByRequestId.get(scoped);
     if (handle === undefined) return undefined;
-    this.pendingByRequestId.delete(requestId);
+    this.pendingByRequestId.delete(scoped);
     const pending = this.pending.get(handle);
     this.pending.delete(handle);
     return pending;
@@ -218,11 +236,9 @@ export class PermissionBroker {
     auto: boolean,
     note?: string,
   ): Promise<'delivered' | 'already_resolved'> {
-    const outcome = await this.options.adaptor.respondPermission(
-      pending.backend,
-      pending.requestId,
-      decision,
-    );
+    const outcome = await this.options
+      .adaptorFor(pending.backend)
+      .respondPermission(pending.backend, pending.requestId, decision);
     this.options.log?.('permission.decision', {
       requestHandle: pending.requestHandle,
       requestId: pending.requestId,
@@ -233,7 +249,9 @@ export class PermissionBroker {
     });
     if (outcome === 'delivered' || outcome === 'already_resolved') {
       this.pending.delete(pending.requestHandle);
-      this.pendingByRequestId.delete(pending.requestId);
+      this.pendingByRequestId.delete(
+        scopedRequestId(pending.backend, pending.requestId),
+      );
     }
     return outcome;
   }

@@ -201,6 +201,19 @@ export class LiveSession {
       options.gracefulStopDrainMs ?? DEFAULT_GRACEFUL_STOP_DRAIN_MS;
   }
 
+  /**
+   * The adaptor that owns a backend handle. Single-adaptor today; becomes
+   * registry routing when multiple backends coexist (M4).
+   */
+  private adaptorFor(handle: BackendHandle): BackendAdaptor {
+    if (handle.adaptor !== this.adaptor.name) {
+      throw new Error(
+        `unknown backend '${handle.adaptor}' (this session runs '${this.adaptor.name}')`,
+      );
+    }
+    return this.adaptor;
+  }
+
   /** LiveCallHandlers.onStart */
   async start(call: {
     epoch: number;
@@ -230,7 +243,7 @@ export class LiveSession {
         },
       }),
       broker: new PermissionBroker({
-        adaptor: this.adaptor,
+        adaptorFor: (backend) => this.adaptorFor(backend),
         log: (type, payload) => this.log.write(type, payload),
       }),
     };
@@ -673,7 +686,7 @@ export class LiveSession {
       // would ever transition it out).
       const existing =
         receipt.jobRef !== undefined
-          ? this.handles.jobByRef(receipt.jobRef)
+          ? this.handles.jobByRef(backend, receipt.jobRef)
           : undefined;
       const job =
         existing ??
@@ -954,13 +967,13 @@ export class LiveSession {
     switch (event.type) {
       case 'turn_started': {
         const job = event.jobRef
-          ? this.handles.jobByRef(event.jobRef)
+          ? this.handles.jobByRef(backend, event.jobRef)
           : undefined;
         if (job) job.state = 'running';
         return;
       }
       case 'progress': {
-        const job = this.jobFor(sessionHandle, event.jobRef);
+        const job = this.jobFor(sessionHandle, backend, event.jobRef);
         context.injector.enqueue({
           kind: 'progress',
           context: `[PROGRESS ${job?.jobHandle ?? sessionHandle}] ${event.summary}`,
@@ -977,7 +990,7 @@ export class LiveSession {
         return;
       }
       case 'turn_complete': {
-        const job = this.jobFor(sessionHandle, event.jobRef);
+        const job = this.jobFor(sessionHandle, backend, event.jobRef);
         if (job) job.state = 'done';
         const label = job?.jobHandle ?? sessionHandle;
         const spokenSummary = lastSentence(
@@ -995,7 +1008,7 @@ export class LiveSession {
         return;
       }
       case 'turn_error': {
-        const job = this.jobFor(sessionHandle, event.jobRef);
+        const job = this.jobFor(sessionHandle, backend, event.jobRef);
         if (job)
           job.state = event.error === 'cancelled' ? 'cancelled' : 'failed';
         const label = job?.jobHandle ?? sessionHandle;
@@ -1051,7 +1064,7 @@ export class LiveSession {
         return;
       }
       case 'permission_resolved': {
-        const pending = context.broker.onResolved(event.requestId);
+        const pending = context.broker.onResolved(backend, event.requestId);
         if (!event.byUs) {
           const retracted = context.injector.retractPermission(event.requestId);
           if (!retracted && pending) {
@@ -1082,10 +1095,11 @@ export class LiveSession {
 
   private jobFor(
     sessionHandle: string,
+    backend: BackendHandle,
     jobRef: string | undefined,
   ): JobRecord | undefined {
     if (jobRef) {
-      const byRef = this.handles.jobByRef(jobRef);
+      const byRef = this.handles.jobByRef(backend, jobRef);
       if (byRef) return byRef;
     }
     return this.handles.activeJobForSession(sessionHandle);

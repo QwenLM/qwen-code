@@ -41,7 +41,7 @@ function createBroker(options?: { ruleTtlMs?: number }): Rig {
   const clock = { now: 1_000_000 };
   const logEvents: Rig['logEvents'] = [];
   const broker = new PermissionBroker({
-    adaptor: adaptor as unknown as BackendAdaptor,
+    adaptorFor: () => adaptor as unknown as BackendAdaptor,
     now: () => clock.now,
     ...(options?.ruleTtlMs !== undefined
       ? { ruleTtlMs: options.ruleTtlMs }
@@ -218,11 +218,39 @@ describe('PermissionBroker', () => {
     const { broker } = createBroker();
     await request(broker, { requestId: 'r1' });
 
-    const pending = broker.onResolved('r1');
+    const pending = broker.onResolved(BACKEND, 'r1');
     expect(pending?.requestHandle).toBe('req_1');
     expect(broker.pendingCount).toBe(0);
 
-    expect(broker.onResolved('r1')).toBeUndefined();
+    expect(broker.onResolved(BACKEND, 'r1')).toBeUndefined();
+  });
+
+  it('scopes requestIds by owning adaptor — one backend never retracts another', async () => {
+    // Request ids are adaptor-local (serve UUIDs vs an ACP counter), so two
+    // backends can mint the same id; a resolution from one must leave the
+    // other's pending ask intact.
+    const { broker } = createBroker();
+    const otherBackend: BackendHandle = { id: 's1', adaptor: 'acp' };
+    await request(broker, { requestId: 'perm-1' });
+    await broker.onRequest({
+      requestId: 'perm-1',
+      backend: otherBackend,
+      sessionHandle: 'session_2',
+      title: 'write_file: other.txt',
+      options: OPTIONS,
+    });
+    expect(broker.pendingCount).toBe(2);
+
+    const resolved = broker.onResolved(BACKEND, 'perm-1');
+    expect(resolved?.requestHandle).toBe('req_1');
+
+    // The acp backend's identical id is untouched…
+    expect(broker.pendingCount).toBe(1);
+    // …and resolves only against its own backend.
+    expect(broker.onResolved(otherBackend, 'perm-1')?.requestHandle).toBe(
+      'req_2',
+    );
+    expect(broker.pendingCount).toBe(0);
   });
 
   it('logs requests and decisions with the auto flag', async () => {

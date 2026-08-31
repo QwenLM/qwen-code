@@ -39,6 +39,11 @@ export class HandleRegistry {
   /** Sessions whose backend reported closure — handles no longer resolve. */
   private readonly closedSessions = new Set<string>();
   private readonly jobs = new Map<string, JobRecord>();
+  /**
+   * Keyed by `${backend.adaptor}:${jobRef}` — jobRefs are adaptor-local
+   * (qwen serve mints prompt UUIDs, an ACP adaptor counts turn-1, turn-2),
+   * so the owning adaptor scopes the key or two backends collide.
+   */
   private readonly jobsByRef = new Map<string, string>();
   private readonly assets = new Map<string, AssetRecord>();
   private sessionSeq = 0;
@@ -68,10 +73,11 @@ export class HandleRegistry {
   }
 
   /**
-   * Register a new job. Idempotent by jobRef: a jobRef already registered
-   * means the backend attributed the prompt to that existing turn (e.g. a
-   * steer that joined it), so the existing record is returned instead of
-   * minting a second job that would orphan the first in 'running'.
+   * Register a new job. Idempotent by (backend, jobRef): a jobRef already
+   * registered for that backend means the backend attributed the prompt to
+   * that existing turn (e.g. a steer that joined it), so the existing record
+   * is returned instead of minting a second job that would orphan the first
+   * in 'running'.
    */
   createJob(fields: {
     sessionHandle: string;
@@ -80,7 +86,7 @@ export class HandleRegistry {
     task: string;
   }): JobRecord {
     if (fields.jobRef !== undefined) {
-      const existing = this.jobByRef(fields.jobRef);
+      const existing = this.jobByRef(fields.backend, fields.jobRef);
       if (existing) return existing;
     }
     const record: JobRecord = {
@@ -94,7 +100,10 @@ export class HandleRegistry {
     };
     this.jobs.set(record.jobHandle, record);
     if (record.jobRef !== undefined) {
-      this.jobsByRef.set(record.jobRef, record.jobHandle);
+      this.jobsByRef.set(
+        `${fields.backend.adaptor}:${record.jobRef}`,
+        record.jobHandle,
+      );
     }
     return record;
   }
@@ -103,9 +112,9 @@ export class HandleRegistry {
     return this.jobs.get(handle.trim());
   }
 
-  /** Find the job a backend event's jobRef belongs to. */
-  jobByRef(jobRef: string): JobRecord | undefined {
-    const handle = this.jobsByRef.get(jobRef);
+  /** Find the job a backend event's jobRef (on its backend) belongs to. */
+  jobByRef(backend: BackendHandle, jobRef: string): JobRecord | undefined {
+    const handle = this.jobsByRef.get(`${backend.adaptor}:${jobRef}`);
     return handle ? this.jobs.get(handle) : undefined;
   }
 
