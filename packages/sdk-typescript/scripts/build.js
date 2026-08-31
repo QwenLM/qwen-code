@@ -117,9 +117,9 @@ const rootDir = join(__dirname, '..');
 // avoid complete Web Shell projection on every streamed text update.
 // Bumped from 208KB to 215KB for the complete standalone-session lifecycle,
 // response validation, and outcome-unknown recovery surface.
-// Workflow task status and control APIs merge within this budget; keep the
-// measured combined bundle bounded here.
-const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 215 * 1024;
+// Bumped from 215KB to 216KB after workflow task status and control APIs merged
+// with daemon JSON-RPC error detail surfacing.
+const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 216 * 1024;
 // The opt-in `daemon/transports` browser bundle legitimately ships the concrete
 // ACP transports (AcpHttpTransport/AcpWsTransport/AutoReconnect + negotiate), so
 // it's larger than the default barrel — but still budgeted so a future PR can't
