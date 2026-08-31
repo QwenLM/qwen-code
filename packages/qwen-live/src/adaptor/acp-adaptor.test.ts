@@ -106,11 +106,15 @@ class FakeConnection implements AcpConnectionLike {
     params: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
     this.extCalls.push({ method, params });
-    if (method === 'qwen/control/session/live-conversation') {
-      return Promise.resolve({});
-    }
     return Promise.resolve({});
   }
+
+  setSessionMode(params: Record<string, unknown>): Promise<unknown> {
+    this.setModeCalls.push(params);
+    return Promise.resolve({});
+  }
+
+  setModeCalls: Array<Record<string, unknown>> = [];
 
   settle(stopReason = 'end_turn', error?: unknown): void {
     const waiter = this.promptWaiter;

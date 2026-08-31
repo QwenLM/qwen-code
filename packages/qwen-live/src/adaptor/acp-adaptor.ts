@@ -96,6 +96,7 @@ export interface AcpConnectionLike {
     method: string,
     params: Record<string, unknown>,
   ): Promise<Record<string, unknown>>;
+  setSessionMode(params: Record<string, unknown>): Promise<unknown>;
 }
 
 export interface AcpAdaptorOptions {
@@ -209,6 +210,15 @@ export class AcpAdaptor implements BackendAdaptor {
     const state = this.trackSession(sessionId, this.generation);
     state.label = opts?.label;
     state.cwd = cwd;
+    // qwen-code's ACP sessions default to AUTO approval (silent allows);
+    // the voice product exists to surface permission asks aloud, so pin
+    // the session to the asking mode. Non-qwen agents answer -32601 and
+    // keep their own default.
+    try {
+      await conn.setSessionMode({ sessionId, modeId: 'default' });
+    } catch {
+      /* agent has no set_mode; its default stands */
+    }
     // Best effort: qwen-code swaps in live voice instructions when this
     // succeeds; other agents answer -32601 and we simply stay off.
     void this.activateLiveConversation(conn, sessionId);
