@@ -154,6 +154,10 @@ import {
   registerWorkspaceStatusRoutes,
 } from './routes/workspace-status.js';
 import {
+  registerWorkspaceQualifiedRuntimeRoutes,
+  registerWorkspaceRuntimeRoutes,
+} from './routes/workspace-runtime.js';
+import {
   createDaemonWorkspaceService,
   type DaemonWorkspaceService,
   type DaemonWorkspaceServiceDeps,
@@ -167,6 +171,7 @@ import {
   registerWorkspaceQualifiedSettingsRoutes,
   registerWorkspaceSettingsRoutes,
 } from './routes/workspace-settings.js';
+import { registerUserLanguageRoutes } from './routes/user-language.js';
 import {
   getActiveSseCount,
   registerSseEventsRoutes,
@@ -223,6 +228,7 @@ import {
   type WorkspaceRuntime,
   type WorkspaceRuntimeEnvMetadata,
 } from './workspace-registry.js';
+import { supportsWorkspaceRuntimeLifecycle } from './workspace-runtime-coordinator.js';
 import { isInternalWorkspaceRuntime } from './workspace-runtime-visibility.js';
 import {
   createWorkspaceRuntimeSessionService,
@@ -1042,6 +1048,15 @@ export function createServeApp(
       nativeDirectoryPickerAvailable:
         deps.nativeDirectoryPickerAvailable ??
         isNativeDirectoryPickerAvailable(),
+      workspaceRuntimeAvailable: () => {
+        const runtimes = workspaceRegistry.list();
+        return (
+          runtimes.length > 0 &&
+          runtimes.every((runtime) =>
+            supportsWorkspaceRuntimeLifecycle(runtime.bridge),
+          )
+        );
+      },
       workspaceTrustHotReloadAvailable:
         deps.workspaceTrustHotReloadAvailable === true,
       isPrimaryWorkspaceTrusted: () => isPrimaryWorkspaceTrusted(),
@@ -2172,6 +2187,7 @@ export function createServeApp(
     maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession,
     sessionRestoreTimeoutMs,
     languageCodes,
+    daemonEnv: daemonEnvAtBoot,
   });
 
   if (liveVoiceSurfaceAvailable) {
@@ -2253,6 +2269,18 @@ export function createServeApp(
   });
   registerWorkspaceQualifiedStatusRoutes(app, {
     workspaceRegistry,
+    sendBridgeError,
+  });
+  registerWorkspaceRuntimeRoutes(app, {
+    workspaceRegistry,
+    mutate,
+    safeBody,
+    sendBridgeError,
+  });
+  registerWorkspaceQualifiedRuntimeRoutes(app, {
+    workspaceRegistry,
+    mutate,
+    safeBody,
     sendBridgeError,
   });
   registerWorkspaceGitRoutes(app, {
@@ -2592,6 +2620,25 @@ export function createServeApp(
       },
       invalidateServeFeaturesCache,
     });
+    // Process-global user-level language sync (issue #10234). Registered
+    // under the same `persistSetting` availability gate as the workspace
+    // settings routes and advertised as the conditional
+    // `user_language_sync` capability.
+    registerUserLanguageRoutes(app, {
+      boundWorkspace: primaryBoundWorkspace,
+      mutate,
+      safeBody,
+      languageCodes,
+      persistSetting: async (...args) => {
+        await persistSetting(...args);
+      },
+      workspaceRegistry,
+      parseAndValidateClientId: (req, res) =>
+        parseAndValidateWorkspaceClientId(req, res, [
+          primaryBridge,
+          ...workspaceRegistry.list().map((runtime) => runtime.bridge),
+        ]),
+    });
   }
   registerWorkspacePermissionsRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
@@ -2727,6 +2774,7 @@ export function createServeApp(
       service: standaloneSessionService,
       mutate,
       sendBridgeError,
+      isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
     });
     standaloneSessionsAvailable = true;
   }

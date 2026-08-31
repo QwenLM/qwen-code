@@ -73,8 +73,10 @@ import type {
   DaemonUsageRange,
   DaemonStatusReport,
   DaemonStatusReportDetail,
-  DaemonSessionTaskStatus,
+  DaemonSessionTaskWithWorkflowStatus,
   DaemonSessionTasksStatus,
+  DaemonSessionWorkflowTaskStatus,
+  DaemonSessionWorkflowTasksStatus,
   DaemonUpdateAgentRequest,
   DaemonWorkspaceFile,
   DaemonWorkspaceFileBytes,
@@ -109,6 +111,7 @@ import type {
   DaemonWorkspaceProvidersStatus,
   DaemonWorkspaceAcpStatusResult,
   DaemonWorkspaceAcpPreheatResult,
+  DaemonWorkspaceRuntimeStatus,
   DaemonWorkspaceSkillsStatus,
   DaemonWorkspaceToolsStatus,
   DaemonWriteMemoryRequest,
@@ -130,6 +133,7 @@ import type {
   PromptResult,
   SetModelResult,
   SetSessionLanguageResult,
+  SetUserLanguageResult,
   SessionMetadataResult,
   DaemonApprovalMode,
   DaemonApprovalModeResult,
@@ -205,6 +209,8 @@ import type {
   ExtensionRefreshResponse,
   ExtensionUpdateCheckResponse,
   WorkspaceExtensionProjection,
+  WorkspaceExtensionState,
+  ExtensionStateUpdate,
   DaemonWorkspaceHooksStatus,
   DaemonPermissionRuleType,
   DaemonPermissionScope,
@@ -393,6 +399,13 @@ const SESSION_RESTORE_TIMEOUT_HEADROOM_MS = 10_000;
 const VOICE_TRANSCRIPTION_DEFAULT_TIMEOUT_MS = 65_000;
 const GITHUB_SETUP_DEFAULT_TIMEOUT_MS = 90_000;
 const CHANNEL_NOTIFY_DEFAULT_TIMEOUT_MS = 35_000;
+// Keep in sync with DEFAULT_ENSURE_TIMEOUT_MS in
+// packages/cli/src/serve/workspace-runtime-coordinator.ts.
+const WORKSPACE_RUNTIME_ENSURE_SERVER_DEADLINE_MS = 60_000;
+const WORKSPACE_RUNTIME_ENSURE_CLIENT_HEADROOM_MS = 2_000;
+const WORKSPACE_RUNTIME_ENSURE_TIMEOUT_MS =
+  WORKSPACE_RUNTIME_ENSURE_SERVER_DEADLINE_MS +
+  WORKSPACE_RUNTIME_ENSURE_CLIENT_HEADROOM_MS;
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 // Keep in sync with acp-bridge bridge.ts and CLI serve/server.ts.
 const DEFAULT_MAX_PENDING_PROMPTS_PER_SESSION = 5;
@@ -936,10 +949,35 @@ export class DaemonClient {
     } catch {
       /* body unreadable */
     }
-    const detail =
-      body && typeof body === 'object' && 'error' in body
-        ? String((body as { error: unknown }).error)
+    const errorBody =
+      body && typeof body === 'object' && !Array.isArray(body)
+        ? (body as Record<string, unknown>)
+        : undefined;
+    let detail =
+      errorBody && 'error' in errorBody
+        ? String(errorBody['error'])
         : `HTTP ${res.status}`;
+    // Only unwrap opaque JSON-RPC 5xx responses. Specific top-level errors may
+    // intentionally hide diagnostic data that should not become display text.
+    if (
+      res.status >= 500 &&
+      errorBody?.['error'] === 'Internal error' &&
+      typeof errorBody['code'] === 'number'
+    ) {
+      const data = errorBody['data'];
+      if (typeof data === 'string' && data.length > 0) {
+        detail = data;
+      } else if (data && typeof data === 'object' && !Array.isArray(data)) {
+        const record = data as Record<string, unknown>;
+        const details = record['details'];
+        const message = record['message'];
+        if (typeof details === 'string' && details.length > 0) {
+          detail = details;
+        } else if (typeof message === 'string' && message.length > 0) {
+          detail = message;
+        }
+      }
+    }
     if (sessionId && res.status === 503 && body && typeof body === 'object') {
       const data = body as {
         code?: unknown;
@@ -1431,6 +1469,26 @@ export class DaemonClient {
     return await this.jsonRequest<DaemonWorkspaceAcpStatusResult>(
       '/workspace/acp/status',
       'GET /workspace/acp/status',
+      { mode: 'rest' },
+    );
+  }
+
+  async ensureWorkspaceRuntime(): Promise<DaemonWorkspaceRuntimeStatus> {
+    return await this.jsonRequest<DaemonWorkspaceRuntimeStatus>(
+      '/workspace/runtime/ensure',
+      'POST /workspace/runtime/ensure',
+      {
+        method: 'POST',
+        timeoutMs: WORKSPACE_RUNTIME_ENSURE_TIMEOUT_MS,
+        mode: 'rest',
+      },
+    );
+  }
+
+  async workspaceRuntimeStatus(): Promise<DaemonWorkspaceRuntimeStatus> {
+    return await this.jsonRequest<DaemonWorkspaceRuntimeStatus>(
+      '/workspace/runtime/status',
+      'GET /workspace/runtime/status',
       { mode: 'rest' },
     );
   }
@@ -3288,6 +3346,22 @@ export class DaemonClient {
     );
   }
 
+  async sessionWorkflowTasks(
+    sessionId: string,
+    clientId?: string,
+  ): Promise<DaemonSessionWorkflowTasksStatus> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/tasks?includeWorkflows=true`,
+      { headers: this.headers({}, clientId) },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /session/:id/tasks');
+        }
+        return (await res.json()) as DaemonSessionWorkflowTasksStatus;
+      },
+    );
+  }
+
   async sessionLspStatus(
     sessionId: string,
     clientId?: string,
@@ -3307,24 +3381,63 @@ export class DaemonClient {
   async sessionTaskCancel(
     sessionId: string,
     taskId: string,
-    kind: DaemonSessionTaskStatus['kind'],
+    kind: DaemonSessionTaskWithWorkflowStatus['kind'],
     clientId?: string,
   ): Promise<{ cancelled: boolean }> {
+    return await this.sessionTaskMutation<{ cancelled: boolean }>(
+      sessionId,
+      taskId,
+      'cancel',
+      { kind },
+      clientId,
+    );
+  }
+
+  async sessionWorkflowTaskAction(
+    sessionId: string,
+    taskId: string,
+    action:
+      | 'pause'
+      | 'resume'
+      | 'retry'
+      | 'rerun'
+      | 'delete-history'
+      | 'run-saved',
+    clientId?: string,
+  ): Promise<{
+    changed: boolean;
+    status?: DaemonSessionWorkflowTaskStatus['status'];
+    taskId?: string;
+  }> {
+    return await this.sessionTaskMutation<{
+      changed: boolean;
+      status?: DaemonSessionWorkflowTaskStatus['status'];
+      taskId?: string;
+    }>(sessionId, taskId, 'workflow-action', { action }, clientId);
+  }
+
+  private async sessionTaskMutation<T>(
+    sessionId: string,
+    taskId: string,
+    route: 'cancel' | 'workflow-action',
+    body: object,
+    clientId?: string,
+  ): Promise<T> {
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/session/${urlEncode(sessionId)}/tasks/${urlEncode(taskId)}/cancel`,
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/tasks/${urlEncode(taskId)}/${route}`,
       {
         method: 'POST',
         headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
-        body: JSON.stringify({ kind }),
+        body: JSON.stringify(body),
       },
       async (res) => {
         if (!res.ok) {
           throw await this.failOnError(
             res,
-            'POST /session/:id/tasks/:taskId/cancel',
+            `POST /session/:id/tasks/:taskId/${route}`,
           );
         }
-        return (await res.json()) as { cancelled: boolean };
+        return (await res.json()) as T;
       },
     );
   }
@@ -4954,6 +5067,30 @@ export class DaemonClient {
   }
 
   /**
+   * Sessionless user-level language sync (`POST /language`). Succeeds with
+   * zero sessions, so hosts can switch language before creating one.
+   * Pre-flight `caps.features.includes('user_language_sync')` — daemons that
+   * predate the route or were built without settings persistence 404.
+   */
+  async setUserLanguage(
+    language: string,
+    opts?: { syncOutputLanguage?: boolean; clientId?: string },
+  ): Promise<SetUserLanguageResult> {
+    return await this.jsonRequest<SetUserLanguageResult>(
+      '/language',
+      'POST /language',
+      {
+        method: 'POST',
+        body: {
+          language,
+          syncOutputLanguage: opts?.syncOutputLanguage ?? false,
+        },
+        clientId: opts?.clientId,
+      },
+    );
+  }
+
+  /**
    * Send a prompt to the agent. Supports both blocking (legacy 200)
    * and non-blocking (202 + SSE `turn_complete`) daemon responses.
    *
@@ -5742,6 +5879,28 @@ export class WorkspaceDaemonClient {
 
   workspaceMcp(): Promise<DaemonWorkspaceMcpStatus> {
     return this.get('/mcp', 'GET /workspaces/:workspace/mcp');
+  }
+
+  ensureRuntime(): Promise<DaemonWorkspaceRuntimeStatus> {
+    return this.client.workspaceJsonRequest<DaemonWorkspaceRuntimeStatus>(
+      this.workspaceSelector,
+      '/runtime/ensure',
+      'POST /workspaces/:workspace/runtime/ensure',
+      {
+        method: 'POST',
+        timeoutMs: WORKSPACE_RUNTIME_ENSURE_TIMEOUT_MS,
+        mode: 'rest',
+      },
+    );
+  }
+
+  runtimeStatus(): Promise<DaemonWorkspaceRuntimeStatus> {
+    return this.client.workspaceJsonRequest<DaemonWorkspaceRuntimeStatus>(
+      this.workspaceSelector,
+      '/runtime/status',
+      'GET /workspaces/:workspace/runtime/status',
+      { mode: 'rest' },
+    );
   }
 
   /**
@@ -6893,6 +7052,28 @@ export class WorkspaceDaemonClient {
       '/extensions',
       'GET /workspaces/:workspace/extensions',
       { mode: 'rest' },
+    );
+  }
+
+  extensionState(extensionId: string): Promise<WorkspaceExtensionState> {
+    return this.client.workspaceJsonRequest<WorkspaceExtensionState>(
+      this.workspaceSelector,
+      `/extensions/${urlEncode(extensionId)}/state`,
+      'GET /workspaces/:workspace/extensions/:extensionId/state',
+      { mode: 'rest' },
+    );
+  }
+
+  setExtensionState(
+    extensionId: string,
+    update: ExtensionStateUpdate,
+    clientId?: string,
+  ): Promise<ExtensionMutationResponse> {
+    return this.client.workspaceJsonRequest<ExtensionMutationResponse>(
+      this.workspaceSelector,
+      `/extensions/${urlEncode(extensionId)}/state`,
+      'PUT /workspaces/:workspace/extensions/:extensionId/state',
+      { method: 'PUT', body: update, clientId, mode: 'rest' },
     );
   }
 

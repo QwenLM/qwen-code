@@ -45,6 +45,7 @@ import {
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   type BridgeBranchedSession,
 } from '@qwen-code/acp-bridge/bridgeTypes';
+import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import { parseSessionSource } from '@qwen-code/acp-bridge';
 import {
   isReservedLiveSessionSource,
@@ -164,6 +165,11 @@ import {
   sendUntrustedWorkspaceResponse,
   sendWorkspaceRuntimeUnavailable,
 } from '../workspace-route-runtime.js';
+import {
+  redactWorkflowsFromAvailableCommandsEvent,
+  redactWorkflowsFromReplayArrays,
+  redactWorkflowsFromSupportedCommands,
+} from '../workflow-session-gate.js';
 import type {
   WorkspaceEntry,
   WorkspaceRegistry,
@@ -192,6 +198,26 @@ import {
 // `..`, `.lock` suffixes, etc.). Compared case-insensitively because ref
 // storage is case-folding on macOS/Windows.
 const GIT_RESERVED_BRANCH = 'HEAD';
+
+function redactSdkSurfaceEvent<T extends { type: string; data: unknown }>(
+  event: T,
+  workspaceTrusted: boolean,
+): T {
+  const shaped = omitSkillDetailsForSdkSurface(event);
+  return workspaceTrusted
+    ? shaped
+    : redactWorkflowsFromAvailableCommandsEvent(shaped);
+}
+
+function redactSdkSurfaceReplay<
+  T extends {
+    compactedReplay?: BridgeEvent[];
+    liveJournal?: BridgeEvent[];
+  },
+>(session: T, workspaceTrusted: boolean): T {
+  const shaped = omitSkillDetailsFromReplayArrays(session);
+  return workspaceTrusted ? shaped : redactWorkflowsFromReplayArrays(shaped);
+}
 
 // Byte-length caps for branch names. git creates loose refs as files under
 // `.git/refs/heads/`, so each `/`-separated component is bounded by the
@@ -3405,7 +3431,9 @@ export function registerSessionRoutes(
           }
           // Same replay-array shape as the load response; redact skill
           // bodies for the browser surface (#9234).
-          res.status(200).json(omitSkillDetailsFromReplayArrays(session));
+          res
+            .status(200)
+            .json(redactSdkSurfaceReplay(session, runtime.trusted));
         } catch (err) {
           sendBridgeError(res, err, { route, sessionId });
         }
@@ -3523,7 +3551,9 @@ export function registerSessionRoutes(
               }
               return;
             }
-            res.status(200).json(omitSkillDetailsFromReplayArrays(session));
+            res
+              .status(200)
+              .json(redactSdkSurfaceReplay(session, runtime.trusted));
             return;
           }
         } catch (error) {
@@ -3913,7 +3943,7 @@ export function registerSessionRoutes(
         }
         // The load response embeds the replay snapshot inline; redact the
         // skill bodies there just like the SSE egress does (#9234).
-        res.status(200).json(omitSkillDetailsFromReplayArrays(session));
+        res.status(200).json(redactSdkSurfaceReplay(session, runtime.trusted));
       } catch (err) {
         if (err instanceof RequestedSessionIdAdmissionError) {
           sendRequestedSessionIdAdmissionError(res, err, route);
@@ -4112,7 +4142,10 @@ export function registerSessionRoutes(
         res
           .status(201)
           .json(
-            omitSkillDetailsFromReplayArrays(result as BridgeBranchedSession),
+            redactSdkSurfaceReplay(
+              result as BridgeBranchedSession,
+              runtime.trusted,
+            ),
           );
       },
       { rejectStandalone: true },
@@ -4182,7 +4215,7 @@ export function registerSessionRoutes(
           }
           return;
         }
-        res.status(201).json(omitSkillDetailsFromReplayArrays(result));
+        res.status(201).json(redactSdkSurfaceReplay(result, runtime.trusted));
       },
       { rejectStandalone: true },
     ),
@@ -4335,6 +4368,7 @@ export function registerSessionRoutes(
       return;
     }
 
+    let workspaceTrusted = false;
     try {
       const result = await archiveCoordinator.runSharedMany(
         [sessionId],
@@ -4346,6 +4380,7 @@ export function registerSessionRoutes(
             cursor !== undefined,
           );
           if (!runtime) return undefined;
+          workspaceTrusted = runtime.trusted;
           captureRuntimeGenerationAssertion(runtime)?.();
           return runtime.bridge.getSessionTranscriptPage({
             sessionId,
@@ -4361,7 +4396,9 @@ export function registerSessionRoutes(
         .set('Cache-Control', 'no-store')
         .json({
           ...result,
-          events: (result.events ?? []).map(omitSkillDetailsForSdkSurface),
+          events: (result.events ?? []).map((event) =>
+            redactSdkSurfaceEvent(event, workspaceTrusted),
+          ),
         });
     } catch (err) {
       sendBridgeError(res, err, {
@@ -4490,11 +4527,14 @@ export function registerSessionRoutes(
               v: 1 as const,
               sessionId,
               events: replay.updates.map((update) =>
-                omitSkillDetailsForSdkSurface({
-                  v: 1 as const,
-                  type: 'session_update' as const,
-                  data: update,
-                }),
+                redactSdkSurfaceEvent(
+                  {
+                    v: 1 as const,
+                    type: 'session_update' as const,
+                    data: update,
+                  },
+                  runtime.trusted,
+                ),
               ),
               ...(replay.nextCursor && !cursorTooLarge
                 ? { nextCursor: replay.nextCursor }
@@ -4639,10 +4679,14 @@ export function registerSessionRoutes(
     withOwnerReadSession(
       'GET /session/:id/supported-commands',
       async (_req, res, sessionId, runtime) => {
+        const status =
+          await runtime.bridge.getSessionSupportedCommandsStatus(sessionId);
         res
           .status(200)
           .json(
-            await runtime.bridge.getSessionSupportedCommandsStatus(sessionId),
+            runtime.trusted
+              ? status
+              : redactWorkflowsFromSupportedCommands(status),
           );
       },
     ),
@@ -4652,10 +4696,16 @@ export function registerSessionRoutes(
     '/session/:id/tasks',
     withOwnerReadSession(
       'GET /session/:id/tasks',
-      async (_req, res, sessionId, runtime) => {
-        res
-          .status(200)
-          .json(await runtime.bridge.getSessionTasksStatus(sessionId));
+      async (req, res, sessionId, runtime) => {
+        res.status(200).json(
+          await runtime.bridge.getSessionTasksStatus(sessionId, {
+            // Same fail-closed shape as the workflow control surfaces:
+            // opting in here leaks strictly more than the redacted
+            // supported-commands surface on an untrusted workspace.
+            includeWorkflows:
+              runtime.trusted && req.query['includeWorkflows'] === 'true',
+          }),
+        );
       },
     ),
   );
@@ -4808,16 +4858,80 @@ export function registerSessionRoutes(
         }
         const body = safeBody(req);
         const kind = body['kind'];
-        if (kind !== 'agent' && kind !== 'shell' && kind !== 'monitor') {
-          res
-            .status(400)
-            .json({ error: '`kind` must be "agent", "shell", or "monitor"' });
+        if (
+          kind !== 'agent' &&
+          kind !== 'shell' &&
+          kind !== 'monitor' &&
+          kind !== 'workflow'
+        ) {
+          res.status(400).json({
+            error: '`kind` must be "agent", "shell", "monitor", or "workflow"',
+          });
           return;
         }
+        if (kind === 'workflow' && !runtime.trusted) {
+          res.status(200).json({ cancelled: false, reason: 'disabled' });
+          return;
+        }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
         res
           .status(200)
           .json(
-            await runtime.bridge.cancelSessionTask(sessionId, taskId, kind),
+            await runtime.bridge.cancelSessionTask(
+              sessionId,
+              taskId,
+              kind,
+              clientId !== undefined ? { clientId } : undefined,
+            ),
+          );
+      },
+    ),
+  );
+
+  app.post(
+    '/session/:id/tasks/:taskId/workflow-action',
+    mutate({ strict: true }),
+    withOwnerMutableSession(
+      'POST /session/:id/tasks/:taskId/workflow-action',
+      async (req, res, sessionId, runtime) => {
+        const taskId = req.params['taskId'];
+        if (!taskId) {
+          res.status(400).json({
+            error: '`taskId` route parameter is required',
+          });
+          return;
+        }
+        const action = safeBody(req)['action'];
+        if (
+          action !== 'pause' &&
+          action !== 'resume' &&
+          action !== 'retry' &&
+          action !== 'rerun' &&
+          action !== 'delete-history' &&
+          action !== 'run-saved'
+        ) {
+          res.status(400).json({
+            error:
+              '`action` must be "pause", "resume", "retry", "rerun", "delete-history", or "run-saved"',
+          });
+          return;
+        }
+        if (!runtime.trusted) {
+          res.status(200).json({ changed: false });
+          return;
+        }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        res
+          .status(200)
+          .json(
+            await runtime.bridge.controlSessionWorkflowTask(
+              sessionId,
+              taskId,
+              action,
+              clientId !== undefined ? { clientId } : undefined,
+            ),
           );
       },
     ),

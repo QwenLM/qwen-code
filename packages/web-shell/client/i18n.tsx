@@ -1383,6 +1383,51 @@ const EN: Messages = {
   'sidebar.addWorkspaceAdding': 'Adding…',
   'sidebar.removeWorkspace': 'Remove workspace',
   'sidebar.workspaceActions': 'Workspace actions',
+  'sidebar.renameWorkspace': 'Rename…',
+  'sidebar.renameWorkspaceTitle': 'Rename Workspace',
+  'sidebar.workspaceNamePrompt': 'Display name',
+  'sidebar.workspaceNameHint': 'Leave empty to show the folder name.',
+  'sidebar.workspaceNameInvalid': 'Names cannot contain control characters.',
+  'sidebar.renameWorkspaceFailed': 'Failed to rename workspace',
+  'sidebar.copyWorkspacePath': 'Copy path',
+  'sidebar.copyWorkspacePathFailed': 'Failed to copy workspace path',
+  'sidebar.manageWorkspace': 'Manage',
+  'sidebar.reloadWorkspace': 'Reload runtime',
+  'sidebar.reloadWorkspaceFailed': 'Failed to reload workspace runtime',
+  'sidebar.workspaceCount': (v) => `${v?.count ?? 0} workspaces`,
+  'sidebar.sessionsRunning': (v) =>
+    `${v?.count ?? 0} running session${v?.count === 1 ? '' : 's'}`,
+  'sidebar.sessionsAttention': (v) =>
+    `${v?.count ?? 0} session${v?.count === 1 ? '' : 's'} waiting for you`,
+  'sidebar.sessionsTotal': (v) =>
+    `${v?.count ?? 0}${v?.truncated ? '+' : ''} session${v?.count === 1 && !v?.truncated ? '' : 's'}`,
+  'sidebar.overview.label': 'Workspace overview',
+  'sidebar.overview.unknown': 'not initialized yet',
+  'sidebar.overview.unavailable': 'unavailable on this daemon',
+  'sidebar.overview.mcp': 'MCP',
+  'sidebar.overview.skills': 'Skills',
+  'sidebar.overview.extensions': 'Extensions',
+  'sidebar.overview.channels': 'Channels',
+  'sidebar.overview.context': 'Context',
+  'sidebar.overview.hooks': 'Hooks',
+  'sidebar.overview.settings': 'Settings',
+  'sidebar.overview.mcpDetail': (v) =>
+    `${v?.connected ?? 0} of ${v?.configured ?? 0} connected` +
+    (Number(v?.failed) > 0 ? `, ${v?.failed} failed` : '') +
+    (Number(v?.disabled) > 0 ? `, ${v?.disabled} disabled` : ''),
+  'sidebar.overview.skillsDetail': (v) =>
+    `${v?.enabled ?? 0} of ${v?.total ?? 0} enabled`,
+  'sidebar.overview.extensionsDetail': (v) =>
+    `${v?.active ?? 0} of ${v?.total ?? 0} active`,
+  'sidebar.overview.channelsDetail': (v) =>
+    `${v?.connected ?? 0} of ${v?.configured ?? 0} connected` +
+    (Number(v?.failed) > 0 ? `, ${v?.failed} failed` : ''),
+  'sidebar.overview.contextDetail': (v) =>
+    `${v?.files ?? 0} context file${v?.files === 1 ? '' : 's'}, ${v?.rules ?? 0} rule${v?.rules === 1 ? '' : 's'}`,
+  'sidebar.overview.hooksDetail': (v) =>
+    `${v?.count ?? 0} hook${v?.count === 1 ? '' : 's'}`,
+  'sidebar.overview.hooksDisabled': (v) =>
+    `${v?.count ?? 0} hook${v?.count === 1 ? '' : 's'} (disabled)`,
   'sidebar.forceRemoveWorkspace': 'Force remove',
   'sidebar.removeWorkspaceTitle': 'Remove Workspace',
   'sidebar.removeWorkspaceConfirm': (v) =>
@@ -4543,6 +4588,47 @@ const ZH: Messages = {
   'sidebar.addWorkspaceAdding': '添加中…',
   'sidebar.removeWorkspace': '移除工作区',
   'sidebar.workspaceActions': '工作区操作',
+  'sidebar.renameWorkspace': '重命名…',
+  'sidebar.renameWorkspaceTitle': '重命名工作区',
+  'sidebar.workspaceNamePrompt': '显示名称',
+  'sidebar.workspaceNameHint': '留空则显示文件夹名。',
+  'sidebar.workspaceNameInvalid': '名称不能包含控制字符。',
+  'sidebar.renameWorkspaceFailed': '重命名工作区失败',
+  'sidebar.copyWorkspacePath': '复制路径',
+  'sidebar.copyWorkspacePathFailed': '复制工作区路径失败',
+  'sidebar.manageWorkspace': '管理',
+  'sidebar.reloadWorkspace': '重新加载运行时',
+  'sidebar.reloadWorkspaceFailed': '重新加载工作区运行时失败',
+  'sidebar.workspaceCount': (v) => `${v?.count ?? 0} 个工作区`,
+  'sidebar.sessionsRunning': (v) => `${v?.count ?? 0} 个会话运行中`,
+  'sidebar.sessionsAttention': (v) => `${v?.count ?? 0} 个会话等待处理`,
+  'sidebar.sessionsTotal': (v) =>
+    `${v?.count ?? 0}${v?.truncated ? '+' : ''} 个会话`,
+  'sidebar.overview.label': '工作区概览',
+  'sidebar.overview.unknown': '尚未初始化',
+  'sidebar.overview.unavailable': '当前 daemon 不支持',
+  'sidebar.overview.mcp': 'MCP',
+  'sidebar.overview.skills': '技能',
+  'sidebar.overview.extensions': '扩展',
+  'sidebar.overview.channels': '频道',
+  'sidebar.overview.context': '上下文',
+  'sidebar.overview.hooks': 'Hooks',
+  'sidebar.overview.settings': '设置',
+  'sidebar.overview.mcpDetail': (v) =>
+    `${v?.configured ?? 0} 个已配置，${v?.connected ?? 0} 个已连接` +
+    (Number(v?.failed) > 0 ? `，${v?.failed} 个失败` : '') +
+    (Number(v?.disabled) > 0 ? `，${v?.disabled} 个已禁用` : ''),
+  'sidebar.overview.skillsDetail': (v) =>
+    `共 ${v?.total ?? 0} 个，${v?.enabled ?? 0} 个已启用`,
+  'sidebar.overview.extensionsDetail': (v) =>
+    `共 ${v?.total ?? 0} 个，${v?.active ?? 0} 个已启用`,
+  'sidebar.overview.channelsDetail': (v) =>
+    `${v?.configured ?? 0} 个已配置，${v?.connected ?? 0} 个已连接` +
+    (Number(v?.failed) > 0 ? `，${v?.failed} 个失败` : ''),
+  'sidebar.overview.contextDetail': (v) =>
+    `${v?.files ?? 0} 个上下文文件，${v?.rules ?? 0} 条规则`,
+  'sidebar.overview.hooksDetail': (v) => `${v?.count ?? 0} 个 hook`,
+  'sidebar.overview.hooksDisabled': (v) => `${v?.count ?? 0} 个 hook（已禁用）`,
   'sidebar.forceRemoveWorkspace': '强制移除',
   'sidebar.removeWorkspaceTitle': '移除工作区',
   'sidebar.removeWorkspaceConfirm': (v) =>

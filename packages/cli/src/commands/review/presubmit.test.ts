@@ -405,7 +405,12 @@ describe('presubmitCommand', () => {
   // `id?` entry type covers the carried-id (#9208) tests unchanged.
   async function presubmitWithComments(
     comments: Array<Record<string, unknown>>,
-    newFindings: Array<{ path: string; line: number; id?: string }>,
+    newFindings: Array<{
+      path: string;
+      line: number;
+      start_line?: number;
+      id?: string;
+    }>,
   ) {
     ghApiAllMock.mockReturnValue(comments);
     ghApiMock.mockReturnValue(null);
@@ -828,6 +833,62 @@ describe('presubmitCommand', () => {
       expect(result.existingComments.total).toBe(1);
       expect(result.existingComments.byBucket.overlap).toBe(1);
       expect(result.blockOnExistingComments).toBe(true);
+    });
+
+    it('classifies a comment inside a new finding range as overlap', async () => {
+      const result = await presubmitWithComments(
+        [
+          {
+            id: 3,
+            body: '**[Critical]** existing finding',
+            path: 'a.ts',
+            line: 15,
+            commit_id: 'abc123',
+            user: { login: 'qwen-code-ci-bot' },
+          },
+        ],
+        [{ path: 'a.ts', start_line: 12, line: 18 }],
+      );
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.existingComments.byBucket.noConflict).toBe(0);
+    });
+
+    it('classifies intersecting existing and new finding ranges as overlap', async () => {
+      const result = await presubmitWithComments(
+        [
+          {
+            id: 4,
+            body: '**[Critical]** existing finding',
+            path: 'a.ts',
+            start_line: 8,
+            line: 14,
+            commit_id: 'abc123',
+            user: { login: 'qwen-code-ci-bot' },
+          },
+        ],
+        [{ path: 'a.ts', start_line: 12, line: 18 }],
+      );
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.existingComments.byBucket.noConflict).toBe(0);
+    });
+
+    it('keeps disjoint ranges in noConflict', async () => {
+      const result = await presubmitWithComments(
+        [
+          {
+            id: 5,
+            body: '**[Critical]** existing finding',
+            path: 'a.ts',
+            start_line: 4,
+            line: 8,
+            commit_id: 'abc123',
+            user: { login: 'qwen-code-ci-bot' },
+          },
+        ],
+        [{ path: 'a.ts', start_line: 12, line: 18 }],
+      );
+      expect(result.existingComments.byBucket.overlap).toBe(0);
+      expect(result.existingComments.byBucket.noConflict).toBe(1);
     });
 
     it('classifies the shape attribution-off actually posts — markerless body, trailing marker, reviewing account', async () => {
@@ -1744,6 +1805,10 @@ describe('parseFindingsFile (via mocked fs)', () => {
     ['{"path":"a.ts"}', null], // object, not array
     ['[{"line":5}]', null], // entry without a string path → reject WHOLE file
     ['[{"path":"a.ts","line":5}]', [{ path: 'a.ts', line: 5 }]],
+    [
+      '[{"path":"a.ts","start_line":3,"line":5}]',
+      [{ path: 'a.ts', startLine: 3, line: 5 }],
+    ],
     ['[{"path":"a.ts"}]', [{ path: 'a.ts', line: 0 }]], // missing line → 0
     // Carried ledger id for the re-post exemption (#9208); a present-but-
     // non-string id rejects the WHOLE file, same fail-safe as `path`.
