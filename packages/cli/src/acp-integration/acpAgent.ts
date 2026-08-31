@@ -13442,7 +13442,6 @@ class QwenAgent implements Agent {
         { errorKind: 'session_id_conflict', sessionId },
       );
     }
-    options.beforeSessionCreate?.();
     const workflowHistory = await listWorkflowSnapshots(config);
     const session = new Session(
       sessionId,

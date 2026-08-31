@@ -5,7 +5,10 @@ import type {
   DaemonSessionTaskWithWorkflowStatus,
   DaemonSessionWorkflowTasksStatus,
 } from '@qwen-code/sdk/daemon';
-import { useActions, useConnection } from '@qwen-code/webui/daemon-react-sdk';
+import {
+  useActions,
+  useConnection,
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import {
   ChevronRightIcon,
   CirclePlayIcon,
