@@ -440,25 +440,44 @@ describe('review run (handler)', () => {
     });
   }
 
-  /** Child that "completes", writing (or not) a composed verdict first. */
+  /**
+   * The run id the handler under test published to its (mock) child — for
+   * fixture writes that happen OUTSIDE the spawn mock, after spawn ran.
+   * `readComposed` fences on it exactly as `readStopSidecar` always has.
+   */
+  function spawnedRunId(): string {
+    const opts = spawnMock.mock.calls.at(-1)?.[2] as
+      | { env: NodeJS.ProcessEnv }
+      | undefined;
+    return String(opts?.env['QWEN_REVIEW_RUN_ID']);
+  }
+
+  /**
+   * Child that "completes", writing (or not) a composed verdict first —
+   * stamped with the run id the parent published into its env, exactly as
+   * compose-review stamps the artifact (readComposed fences on it).
+   */
   function armChild(exit: number, composed?: Record<string, unknown>): void {
-    spawnMock.mockImplementation(() => {
-      const child = new FakeChild();
-      setImmediate(() => {
-        if (composed) {
-          mkdirSync(REVIEW_TMP_DIR, { recursive: true });
-          mkdirSync(REVIEWS_DIR, { recursive: true });
-          writeFileSync(
-            join(REVIEW_TMP_DIR, 'qwen-review-local-composed.json'),
-            JSON.stringify(composed),
-            'utf8',
-          );
-          writeFileSync(join(REVIEWS_DIR, 'review.md'), '# report', 'utf8');
-        }
-        child.emit('close', exit);
-      });
-      return child;
-    });
+    spawnMock.mockImplementation(
+      (...args: [unknown, unknown, { env: NodeJS.ProcessEnv }]) => {
+        const runId = args[2].env['QWEN_REVIEW_RUN_ID'];
+        const child = new FakeChild();
+        setImmediate(() => {
+          if (composed) {
+            mkdirSync(REVIEW_TMP_DIR, { recursive: true });
+            mkdirSync(REVIEWS_DIR, { recursive: true });
+            writeFileSync(
+              join(REVIEW_TMP_DIR, 'qwen-review-local-composed.json'),
+              JSON.stringify({ runId, ...composed }),
+              'utf8',
+            );
+            writeFileSync(join(REVIEWS_DIR, 'review.md'), '# report', 'utf8');
+          }
+          child.emit('close', exit);
+        });
+        return child;
+      },
+    );
   }
 
   it('republishes the composed verdict and exits 0', async () => {
@@ -518,17 +537,23 @@ describe('review run (handler)', () => {
     // the verdict while the child still runs.
     vi.useFakeTimers();
     let child!: FakeChild;
-    spawnMock.mockImplementation(() => {
-      // Step 6: compose-review writes the composed verdict.
-      mkdirSync(REVIEW_TMP_DIR, { recursive: true });
-      writeFileSync(
-        join(REVIEW_TMP_DIR, 'qwen-review-local-composed.json'),
-        JSON.stringify({ event: 'APPROVE', verdictLine: 'Verdict: Approve' }),
-        'utf8',
-      );
-      child = new FakeChild();
-      return child;
-    });
+    spawnMock.mockImplementation(
+      (...args: [unknown, unknown, { env: NodeJS.ProcessEnv }]) => {
+        // Step 6: compose-review writes the composed verdict.
+        mkdirSync(REVIEW_TMP_DIR, { recursive: true });
+        writeFileSync(
+          join(REVIEW_TMP_DIR, 'qwen-review-local-composed.json'),
+          JSON.stringify({
+            runId: args[2].env['QWEN_REVIEW_RUN_ID'],
+            event: 'APPROVE',
+            verdictLine: 'Verdict: Approve',
+          }),
+          'utf8',
+        );
+        child = new FakeChild();
+        return child;
+      },
+    );
 
     const done = runHandler();
     // The capture poll snapshots the verdict while the child still runs...
@@ -597,6 +622,7 @@ describe('review run (handler)', () => {
     writeFileSync(
       join(REVIEW_TMP_DIR, 'qwen-review-pr-9014-composed.json'),
       JSON.stringify({
+        runId: spawnedRunId(),
         event: 'COMMENT',
         verdictLine: 'Verdict: Comment',
       }),
@@ -621,18 +647,24 @@ describe('review run (handler)', () => {
     // verdict.
     vi.useFakeTimers();
     let child!: FakeChild;
-    spawnMock.mockImplementation(() => {
-      mkdirSync(REVIEW_TMP_DIR, { recursive: true });
-      const path = join(REVIEW_TMP_DIR, 'qwen-review-pr-7-composed.json');
-      writeFileSync(
-        path,
-        JSON.stringify({ event: 'APPROVE', verdictLine: 'Verdict: Approve' }),
-        'utf8',
-      );
-      utimesSync(path, Date.now() / 1000, Date.now() / 1000);
-      child = new FakeChild();
-      return child;
-    });
+    spawnMock.mockImplementation(
+      (...args: [unknown, unknown, { env: NodeJS.ProcessEnv }]) => {
+        mkdirSync(REVIEW_TMP_DIR, { recursive: true });
+        const path = join(REVIEW_TMP_DIR, 'qwen-review-pr-7-composed.json');
+        writeFileSync(
+          path,
+          JSON.stringify({
+            runId: args[2].env['QWEN_REVIEW_RUN_ID'],
+            event: 'APPROVE',
+            verdictLine: 'Verdict: Approve',
+          }),
+          'utf8',
+        );
+        utimesSync(path, Date.now() / 1000, Date.now() / 1000);
+        child = new FakeChild();
+        return child;
+      },
+    );
 
     const done = runHandler({ target: '7' });
     await vi.advanceTimersByTimeAsync(1_000);
@@ -640,6 +672,7 @@ describe('review run (handler)', () => {
     writeFileSync(
       path,
       JSON.stringify({
+        runId: spawnedRunId(),
         event: 'REQUEST_CHANGES',
         verdictLine: 'Verdict: Request changes',
       }),
@@ -1010,16 +1043,22 @@ describe('review run (handler)', () => {
     // records that the timer fired.
     vi.useFakeTimers();
     let child!: FakeChild;
-    spawnMock.mockImplementation(() => {
-      mkdirSync(REVIEW_TMP_DIR, { recursive: true });
-      writeFileSync(
-        join(REVIEW_TMP_DIR, 'qwen-review-local-composed.json'),
-        JSON.stringify({ event: 'APPROVE', verdictLine: 'Verdict: Approve' }),
-        'utf8',
-      );
-      child = new FakeChild();
-      return child;
-    });
+    spawnMock.mockImplementation(
+      (...args: [unknown, unknown, { env: NodeJS.ProcessEnv }]) => {
+        mkdirSync(REVIEW_TMP_DIR, { recursive: true });
+        writeFileSync(
+          join(REVIEW_TMP_DIR, 'qwen-review-local-composed.json'),
+          JSON.stringify({
+            runId: args[2].env['QWEN_REVIEW_RUN_ID'],
+            event: 'APPROVE',
+            verdictLine: 'Verdict: Approve',
+          }),
+          'utf8',
+        );
+        child = new FakeChild();
+        return child;
+      },
+    );
 
     const done = runHandler({ 'timeout-minutes': 1 });
     // The capture poll snapshots the verdict while the child still runs...
@@ -1203,7 +1242,11 @@ describe('review run (handler)', () => {
         );
         writeFileSync(
           join(REVIEW_TMP_DIR, 'qwen-review-local-composed.json'),
-          JSON.stringify({ event: 'COMMENT', verdictLine: 'Verdict: Comment' }),
+          JSON.stringify({
+            runId: opts.env['QWEN_REVIEW_RUN_ID'],
+            event: 'COMMENT',
+            verdictLine: 'Verdict: Comment',
+          }),
           'utf8',
         );
         child = new FakeChild();
@@ -1257,7 +1300,11 @@ describe('review run (handler)', () => {
         );
         writeFileSync(
           join(REVIEW_TMP_DIR, 'qwen-review-local-composed.json'),
-          JSON.stringify({ event: 'COMMENT', verdictLine: 'Verdict: Comment' }),
+          JSON.stringify({
+            runId: opts.env['QWEN_REVIEW_RUN_ID'],
+            event: 'COMMENT',
+            verdictLine: 'Verdict: Comment',
+          }),
           'utf8',
         );
         child = new FakeChild();
@@ -1303,7 +1350,11 @@ describe('review run (handler)', () => {
         );
         writeFileSync(
           join(REVIEW_TMP_DIR, 'qwen-review-local-composed.json'),
-          JSON.stringify({ event: 'COMMENT', verdictLine: 'Verdict: Comment' }),
+          JSON.stringify({
+            runId: opts.env['QWEN_REVIEW_RUN_ID'],
+            event: 'COMMENT',
+            verdictLine: 'Verdict: Comment',
+          }),
           'utf8',
         );
         // Close synchronously on the next microtask — before ANY timer.
@@ -1345,6 +1396,7 @@ describe('review run (handler)', () => {
           writeFileSync(
             join(REVIEW_TMP_DIR, 'qwen-review-local-composed.json'),
             JSON.stringify({
+              runId: opts.env['QWEN_REVIEW_RUN_ID'],
               event: 'REQUEST_CHANGES',
               verdictLine: 'Verdict: Request changes — R1-1 still stands',
             }),
@@ -1389,6 +1441,7 @@ describe('review run (handler)', () => {
           writeFileSync(
             join(REVIEW_TMP_DIR, 'qwen-review-local-composed.json'),
             JSON.stringify({
+              runId: opts.env['QWEN_REVIEW_RUN_ID'],
               event: 'COMMENT',
               verdictLine: 'Verdict: Comment',
             }),
@@ -1480,6 +1533,88 @@ describe('review run (handler)', () => {
     expect(result.completed).toBe(true);
     expect(result.event).toBeNull();
     expect(process.exitCode).toBe(0);
+  });
+
+  it('refuses the sidecar-alone completion on a LOCAL target wearing a PR reason', async () => {
+    // The exemption above is keyed on the TARGET CLASS beside the reason
+    // string: capture-local stamps only the three decided reasons, so a
+    // local sidecar wearing `up-to-date` is a forged or drifted stamp —
+    // completing on it would let the local cache's open Criticals slip an
+    // exit 0 with no composed artifact at all.
+    spawnMock.mockImplementation(
+      (
+        _cmd: unknown,
+        _argv: unknown,
+        opts: { env: Record<string, string> },
+      ) => {
+        const child = new FakeChild();
+        setImmediate(() => {
+          mkdirSync(REVIEW_TMP_DIR, { recursive: true });
+          writeFileSync(
+            join(REVIEW_TMP_DIR, 'qwen-review-local-stop.json'),
+            JSON.stringify({
+              reason: 'up-to-date',
+              runId: opts.env['QWEN_REVIEW_RUN_ID'],
+            }),
+            'utf8',
+          );
+          child.emit('close', 0);
+        });
+        return child;
+      },
+    );
+
+    await runHandler({ 'fail-on': 'request-changes' });
+
+    const result = JSON.parse(outs.join(''));
+    expect(result.completed).toBe(false);
+    expect(result.event).toBeNull();
+    expect(process.exitCode).toBe(1);
+  });
+
+  it('reads an unstamped composed artifact as no verdict — the fence the sidecar has', async () => {
+    // A file at the composed name without this run's stamp is not this
+    // run's verdict: a child that skipped compose-review and wrote the
+    // artifact by hand — or a concurrent same-stem run's leftover inside
+    // the mtime window — must not decide this run's exit code.
+    spawnMock.mockImplementation(
+      (
+        _cmd: unknown,
+        _argv: unknown,
+        opts: { env: Record<string, string> },
+      ) => {
+        const child = new FakeChild();
+        setImmediate(() => {
+          mkdirSync(REVIEW_TMP_DIR, { recursive: true });
+          writeFileSync(
+            join(REVIEW_TMP_DIR, 'qwen-review-local-stop.json'),
+            JSON.stringify({
+              reason: 'unchanged-since-last-round',
+              runId: opts.env['QWEN_REVIEW_RUN_ID'],
+            }),
+            'utf8',
+          );
+          // No runId stamp: the hand-written shape the fence exists for.
+          writeFileSync(
+            join(REVIEW_TMP_DIR, 'qwen-review-local-composed.json'),
+            JSON.stringify({
+              event: 'COMMENT',
+              verdictLine: 'Verdict: Comment',
+            }),
+            'utf8',
+          );
+          child.emit('close', 0);
+        });
+        return child;
+      },
+    );
+
+    await runHandler({ 'fail-on': 'request-changes' });
+
+    const result = JSON.parse(outs.join(''));
+    expect(result.completed).toBe(false);
+    expect(result.event).toBeNull();
+    expect(process.exitCode).toBe(1);
   });
 });
 

@@ -451,9 +451,20 @@ export function exitCodeFor(
   return 0;
 }
 
-function readComposed(path: string): ComposedVerdict | null {
+function readComposed(path: string, runId: string): ComposedVerdict | null {
   try {
-    const parsed = JSON.parse(readFileSync(path, 'utf8')) as ComposedVerdict;
+    const parsed = JSON.parse(readFileSync(path, 'utf8')) as ComposedVerdict & {
+      runId?: unknown;
+    };
+    // Stamped by THIS run, or it is not this run's verdict — the same fence
+    // the stop sidecar carries (`readStopSidecar`), because this artifact is
+    // MORE verdict-bearing than the sidecar, not less: it alone decides the
+    // event a `--fail-on` gate acts on, its name is the same non-injective
+    // flattened target token, and the mtime window alone admitted any file a
+    // concurrent same-stem run — or something that skipped `compose-review`
+    // entirely — wrote into it. compose-review stamps the id it inherited
+    // from this parent's `childEnv`.
+    if (parsed.runId !== runId) return null;
     // The one field everything downstream keys on. A file without it is not a
     // composed verdict, whatever its name says.
     return typeof parsed.event === 'string' ? parsed : null;
@@ -658,7 +669,7 @@ async function runReview(args: RunReviewArgs): Promise<void> {
     const best = newestArtifactSince(REVIEW_TMP_DIR, composedPattern, cutoffMs);
     if (best === null || best.mtime <= capturedMtime) return;
     // A half-written file fails to parse; the next tick retries it.
-    const verdict = readComposed(best.path);
+    const verdict = readComposed(best.path, runId);
     if (verdict !== null) {
       capturedPath = best.path;
       capturedVerdict = verdict;
@@ -736,7 +747,7 @@ async function runReview(args: RunReviewArgs): Promise<void> {
   if (composed === null) {
     const best = newestArtifactSince(REVIEW_TMP_DIR, composedPattern, cutoffMs);
     composedPath = best?.path ?? null;
-    composed = composedPath ? readComposed(composedPath) : null;
+    composed = composedPath ? readComposed(composedPath, runId) : null;
   }
   const reportPath =
     newestArtifactSince(REVIEWS_DIR, reportPatternFor(targetClass), cutoffMs)
@@ -763,10 +774,16 @@ async function runReview(args: RunReviewArgs): Promise<void> {
   // no-event Comment when nothing is open (SKILL Step 1's stop branches).
   // A decided stop with no composed artifact is therefore a re-rule the
   // compose gate REFUSED — no verdict was produced, and the round must not
-  // exit 0 over the ledger's still-open Criticals like a clean stop.
+  // exit 0 over the ledger's still-open Criticals like a clean stop. The
+  // exemption is keyed on the TARGET CLASS beside the reason string: only
+  // the PR path ever writes these two reasons (capture-local stamps only
+  // the three decided ones), so a local/file sidecar wearing `up-to-date`
+  // is a forged or drifted stamp, not a PR stop, and completing on it
+  // would let the local cache's open Criticals slip an exit 0.
   const completed =
     composed !== null ||
     (stop !== null &&
+      targetClass.kind === 'pr' &&
       (stop.reason === 'up-to-date' || stop.reason === 'empty-diff'));
   // A stop carries no synthesised event, deliberately: the stop's rendered
   // blocker list comes from the cache ledger, which only a cache-writing
