@@ -1210,6 +1210,7 @@ describe('ChannelBase', () => {
             kind: 'shell',
             title: `Run ${requestId}`,
             rawInput: { command: 'echo secret-token' },
+            _meta: { toolName: 'run_shell_command' },
           },
           options,
         },
@@ -1828,6 +1829,11 @@ describe('ChannelBase', () => {
       await vi.waitFor(() => expect(ch.sent).toHaveLength(1));
       expect(ch.userInputPresentations).toHaveLength(1);
       expect(ch.sent[0]!.text).toContain('Permission required to run a tool');
+      expect(ch.sent[0]!.text).toContain('Tool: ask_user_question');
+      expect(ch.sent[0]!.text).toContain(
+        'Action: AskUserQuestion: Ask user 1 question',
+      );
+      expect(ch.sent[0]!.text).toContain('Parameters: questions (1 item)');
       expect(respondToPermissionMock()).not.toHaveBeenCalled();
 
       await active.finish();
@@ -2126,11 +2132,14 @@ describe('ChannelBase', () => {
       expect(ch.sent.at(-1)?.text).toContain(
         'Permission required to run a tool',
       );
-      expect(ch.sent.at(-1)?.text).toContain('Command:');
-      expect(ch.sent.at(-1)?.text).toContain('Run req-1');
-      expect(ch.sent.at(-1)?.text).toContain('/approve        allow once');
-      expect(ch.sent.at(-1)?.text).toContain('/approve-always always allow');
-      expect(ch.sent.at(-1)?.text).toContain('/deny           deny');
+      expect(ch.sent.at(-1)?.text).toContain('Tool: run_shell_command');
+      expect(ch.sent.at(-1)?.text).toContain('Action: Run req-1');
+      expect(ch.sent.at(-1)?.text).toContain('Parameters: command');
+      expect(ch.sent.at(-1)?.text).toContain('/approve        Allow once');
+      expect(ch.sent.at(-1)?.text).toContain(
+        '/approve-always Always Allow in project',
+      );
+      expect(ch.sent.at(-1)?.text).toContain('/deny           Deny');
       expect(ch.sent.at(-1)?.text).not.toContain('Request: req-1');
       expect(ch.sent.at(-1)?.text).not.toContain('proceed_once');
       expect(ch.sent.at(-1)?.text).not.toContain('secret-token');
@@ -2565,7 +2574,7 @@ describe('ChannelBase', () => {
       ]);
 
       expect(ch.sent.at(-1)?.text).toContain(
-        '/approve-always always allow for this project',
+        '/approve-always Always Allow in project',
       );
 
       await ch.handleInbound(envelope({ text: '/approve-always req-1' }));
@@ -2589,7 +2598,7 @@ describe('ChannelBase', () => {
       ]);
 
       expect(ch.sent.at(-1)?.text).toContain(
-        '/approve-always always allow for this user',
+        '/approve-always Always Allow for user',
       );
 
       await ch.handleInbound(envelope({ text: '/approve-always req-1' }));
@@ -2617,7 +2626,7 @@ describe('ChannelBase', () => {
       ]);
 
       expect(ch.sent.at(-1)?.text).toContain(
-        '/approve-always always allow for this user',
+        '/approve-always Always Allow for user',
       );
 
       await ch.handleInbound(envelope({ text: '/approve-always req-1' }));
@@ -3748,7 +3757,7 @@ describe('ChannelBase', () => {
           },
         });
         expect(ch.sent[0]!.text).toBe(
-          '[review] Permission required to run a tool\nRequest: req-123\n\nCommand:\nRun tests\n\nReply with:\n/approve req-123          allow once\n/approve-always req-123   always allow for this project\n/deny req-123             deny',
+          '[review] Permission required to run a tool\nRequest: req-123\n\nTool: unknown\nAction: Run tests\n\nReply with:\n/approve req-123          Allow once\n/approve-always req-123   Always\n/deny req-123             Deny',
         );
 
         ch.sent = [];

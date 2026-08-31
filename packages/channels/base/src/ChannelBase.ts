@@ -2851,36 +2851,42 @@ export abstract class ChannelBase {
   private formatPermissionRequest(pending: PendingPermission): string {
     const { toolCall } = pending.request;
     const title = sanitizeQuotedText(toolCall.title || 'Tool use', 160);
+    const toolName = this.permissionToolName(toolCall);
+    const parameters = this.permissionParameterSummary(toolCall);
+    const approveOption = this.approvalOption(pending);
     const alwaysOption = this.approvalAlwaysOption(pending);
+    const denyOption = this.denialOption(pending);
     if (pending.taskName) {
       const replies = [
-        `/approve ${pending.requestId}          allow once`,
+        `/approve ${pending.requestId}          ${this.permissionOptionLabel(approveOption, 'allow once')}`,
         ...(alwaysOption
           ? [`/approve-always ${pending.requestId}   ${alwaysOption.label}`]
           : []),
-        `/deny ${pending.requestId}             deny`,
+        `/deny ${pending.requestId}             ${this.permissionOptionLabel(denyOption, 'deny')}`,
       ];
       return [
         'Permission required to run a tool',
         `Request: ${pending.requestId}`,
         '',
-        'Command:',
-        title,
+        `Tool: ${toolName}`,
+        `Action: ${title}`,
+        ...(parameters ? [`Parameters: ${parameters}`] : []),
         '',
         'Reply with:',
         ...replies,
       ].join('\n');
     }
     const replies = [
-      '/approve        allow once',
+      `/approve        ${this.permissionOptionLabel(approveOption, 'allow once')}`,
       ...(alwaysOption ? [`/approve-always ${alwaysOption.label}`] : []),
-      '/deny           deny',
+      `/deny           ${this.permissionOptionLabel(denyOption, 'deny')}`,
     ];
     const lines = [
       'Permission required to run a tool',
       '',
-      'Command:',
-      title,
+      `Tool: ${toolName}`,
+      `Action: ${title}`,
+      ...(parameters ? [`Parameters: ${parameters}`] : []),
       '',
       'Reply with:',
       ...replies,
@@ -2888,16 +2894,72 @@ export abstract class ChannelBase {
     return lines.join('\n');
   }
 
-  private approvalOptionId(pending: PendingPermission): string | undefined {
+  private permissionToolName(
+    toolCall: PermissionRequestEvent['request']['toolCall'],
+  ): string {
+    const rawToolCall = toolCall as unknown as Record<string, unknown>;
+    const meta = isRecord(rawToolCall['_meta'])
+      ? rawToolCall['_meta']
+      : undefined;
+    const name =
+      typeof meta?.['toolName'] === 'string'
+        ? meta['toolName']
+        : typeof rawToolCall['kind'] === 'string'
+          ? rawToolCall['kind']
+          : 'unknown';
+    return sanitizeQuotedText(name, 120);
+  }
+
+  private permissionParameterSummary(
+    toolCall: PermissionRequestEvent['request']['toolCall'],
+  ): string | undefined {
+    const rawToolCall = toolCall as unknown as Record<string, unknown>;
+    const rawInput = isRecord(rawToolCall['rawInput'])
+      ? rawToolCall['rawInput']
+      : undefined;
+    if (!rawInput) return undefined;
+
+    const entries = Object.entries(rawInput);
+    if (entries.length === 0) return undefined;
+    const visible = entries.slice(0, 4).map(([key, value]) => {
+      const safeKey = sanitizeQuotedText(key, 48);
+      if (Array.isArray(value)) {
+        return `${safeKey} (${value.length} ${value.length === 1 ? 'item' : 'items'})`;
+      }
+      if (isRecord(value)) {
+        return `${safeKey} (object)`;
+      }
+      return safeKey;
+    });
+    if (entries.length > visible.length) {
+      visible.push(`+${entries.length - visible.length} more`);
+    }
+    return visible.join(', ');
+  }
+
+  private permissionOptionLabel(
+    option: PermissionOption | undefined,
+    fallback: string,
+  ): string {
+    return sanitizeQuotedText(option?.name?.trim() || fallback, 160);
+  }
+
+  private approvalOption(
+    pending: PendingPermission,
+  ): PermissionOption | undefined {
     const options = pending.request.options;
     return (
-      options.find((option) => option.kind === 'allow_once')?.optionId ??
+      options.find((option) => option.kind === 'allow_once') ??
       options.find(
         (option) =>
           option.optionId === 'proceed_once' &&
           (option as { kind?: string }).kind === undefined,
-      )?.optionId
+      )
     );
+  }
+
+  private approvalOptionId(pending: PendingPermission): string | undefined {
+    return this.approvalOption(pending)?.optionId;
   }
 
   private approvalAlwaysOption(
@@ -2915,7 +2977,10 @@ export abstract class ChannelBase {
     }
     return {
       optionId: option.optionId,
-      label: this.approvalAlwaysLabel(option),
+      label: this.permissionOptionLabel(
+        option,
+        this.approvalAlwaysLabel(option),
+      ),
     };
   }
 
@@ -2943,7 +3008,17 @@ export abstract class ChannelBase {
       | { outcome: 'selected'; optionId: string }
       | { outcome: 'cancelled' };
   } {
-    const option =
+    const option = this.denialOption(pending);
+    if (option) {
+      return { outcome: { outcome: 'selected', optionId: option.optionId } };
+    }
+    return { outcome: { outcome: 'cancelled' } };
+  }
+
+  private denialOption(
+    pending: PendingPermission,
+  ): PermissionOption | undefined {
+    return (
       pending.request.options.find(
         (candidate) => candidate.kind === 'reject_once',
       ) ??
@@ -2951,11 +3026,8 @@ export abstract class ChannelBase {
         (candidate) =>
           candidate.optionId === 'cancel' &&
           (candidate as { kind?: string }).kind === undefined,
-      );
-    if (option) {
-      return { outcome: { outcome: 'selected', optionId: option.optionId } };
-    }
-    return { outcome: { outcome: 'cancelled' } };
+      )
+    );
   }
 
   private async handlePermissionResponseCommand(
