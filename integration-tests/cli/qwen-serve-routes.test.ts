@@ -426,6 +426,7 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_display_name',
       'workspace_runtime_removal',
       ...(nativeDirectoryPickerAtBoot ? ['native_directory_picker'] : []),
+      'workspace_runtime',
       'workspace_qualified_rest_core',
       'extension_management_v2',
       'extension_git_credentials',

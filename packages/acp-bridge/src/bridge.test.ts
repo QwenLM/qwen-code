@@ -71,6 +71,7 @@ import type { ChannelFactory } from './channel.js';
 import type {
   BridgeOptions,
   BridgeFreshSessionAdmissionContext,
+  BridgeRuntimeEpochSource,
   BridgeTelemetry,
 } from './bridgeOptions.js';
 import { createInMemoryChannel } from './inMemoryChannel.js';
@@ -4192,14 +4193,19 @@ describe('createAcpSessionBridge', () => {
   it('bounds a hung session extension refresh', async () => {
     vi.useFakeTimers();
     const refreshGate = deferred<Record<string, unknown>>();
-    const handle = makeChannel({
+    const stalledHandle = makeChannel({
       extMethodImpl: async (method) =>
         method === SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh
           ? await refreshGate.promise
           : {},
     });
+    const replacementHandle = makeChannel();
+    const channelFactory = vi
+      .fn()
+      .mockResolvedValueOnce(stalledHandle.channel)
+      .mockResolvedValueOnce(replacementHandle.channel);
     const bridge = makeBridge({
-      channelFactory: async () => handle.channel,
+      channelFactory,
     });
     try {
       await bridge.spawnOrAttach({ workspaceCwd: WS_A });
@@ -4208,31 +4214,33 @@ describe('createAcpSessionBridge', () => {
       await vi.advanceTimersByTimeAsync(30_000);
 
       await expect(refresh).resolves.toEqual({ refreshed: 0, failed: 1 });
+      expect(stalledHandle.killed).toBe(true);
 
-      const retry = bridge.refreshExtensionsForAllSessions();
+      await expect(bridge.refreshExtensionsForAllSessions()).resolves.toEqual({
+        refreshed: 0,
+        failed: 0,
+      });
       expect(
-        handle.agent.extMethodCalls.filter(
+        stalledHandle.agent.extMethodCalls.filter(
           (call) =>
             call.method ===
             SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh,
         ),
       ).toHaveLength(1);
-      await vi.advanceTimersByTimeAsync(30_000);
-      await expect(retry).resolves.toEqual({ refreshed: 0, failed: 1 });
 
-      refreshGate.resolve({});
-      await vi.advanceTimersByTimeAsync(0);
+      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
       await expect(bridge.refreshExtensionsForAllSessions()).resolves.toEqual({
         refreshed: 1,
         failed: 0,
       });
+      expect(channelFactory).toHaveBeenCalledTimes(2);
       expect(
-        handle.agent.extMethodCalls.filter(
+        replacementHandle.agent.extMethodCalls.filter(
           (call) =>
             call.method ===
             SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh,
         ),
-      ).toHaveLength(2);
+      ).toHaveLength(1);
     } finally {
       refreshGate.resolve({});
       vi.useRealTimers();
@@ -9808,6 +9816,28 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('reaps a sole failed restore even with a positive idle timeout', async () => {
+    const handle = makeChannel({
+      loadSessionImpl: () => {
+        throw new Error('restore failed on an empty channel');
+      },
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      channelIdleTimeoutMs: 60_000,
+    });
+
+    await expect(
+      bridge.loadSession({
+        sessionId: 'failed-restore',
+        workspaceCwd: WS_A,
+      }),
+    ).rejects.toThrow();
+    expect(handle.killed).toBe(true);
+
+    await bridge.shutdown();
+  });
+
   it('keeps a shared channel usable when restore fails beside a live session', async () => {
     const handles: ChannelHandle[] = [];
     const factory: ChannelFactory = async () => {
@@ -9887,7 +9917,8 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
-  it('maps an ACP missing persisted session to SessionNotFoundError', async () => {
+  it('maps a missing persisted session and arms idle channel reaping', async () => {
+    vi.useFakeTimers();
     const handles: ChannelHandle[] = [];
     const factory: ChannelFactory = async () => {
       const h = makeChannel({
@@ -9898,21 +9929,31 @@ describe('createAcpSessionBridge', () => {
       handles.push(h);
       return h.channel;
     };
-    const bridge = makeBridge({ channelFactory: factory });
-
-    await expect(
-      bridge.loadSession({
-        sessionId: 'missing-persisted',
-        workspaceCwd: WS_A,
-      }),
-    ).rejects.toMatchObject({
-      name: 'SessionNotFoundError',
-      sessionId: 'missing-persisted',
+    const bridge = makeBridge({
+      channelFactory: factory,
+      channelIdleTimeoutMs: 5_000,
     });
-    expect(bridge.sessionCount).toBe(0);
-    expect(handles[0]?.killed).toBe(false);
 
-    await bridge.shutdown();
+    try {
+      await expect(
+        bridge.loadSession({
+          sessionId: 'missing-persisted',
+          workspaceCwd: WS_A,
+        }),
+      ).rejects.toMatchObject({
+        name: 'SessionNotFoundError',
+        sessionId: 'missing-persisted',
+      });
+      expect(bridge.sessionCount).toBe(0);
+      expect(handles[0]?.killed).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(5_001);
+
+      expect(handles[0]?.killed).toBe(true);
+    } finally {
+      await bridge.shutdown();
+      vi.useRealTimers();
+    }
   });
 
   // The `isAcpSessionResourceNotFound` `message`-fallback path can't
@@ -12125,14 +12166,17 @@ describe('createAcpSessionBridge', () => {
     // `channel.exited` fires (OS-level reap), not be eagerly cleared
     // by `shutdown()`.
     const killSyncInvoked: string[] = [];
+    const teardown = deferred<void>();
     const factory: ChannelFactory = async () => {
       const h = makeChannel({ sessionIdPrefix: 's' });
+      const realKill = h.channel.kill;
       const realKillSync = h.channel.killSync;
       h.channel = {
         ...h.channel,
-        kill: () =>
-          // Never resolve — simulates a stuck SIGTERM grace window.
-          new Promise(() => {}),
+        kill: async () => {
+          await teardown.promise;
+          await realKill();
+        },
         killSync: () => {
           killSyncInvoked.push('called');
           realKillSync();
@@ -12143,8 +12187,7 @@ describe('createAcpSessionBridge', () => {
     const bridge = makeBridge({ channelFactory: factory });
     await bridge.spawnOrAttach({ workspaceCwd: WS_A });
 
-    // Kick off shutdown — its `channel.kill()` will hang on the
-    // never-resolving Promise above, so the entry maps clear but
+    // Kick off shutdown — its `channel.kill()` is held below, so the entry maps clear but
     // the channel-kill await never finishes. This is the mid-drain
     // state.
     const shutdownPromise = bridge.shutdown();
@@ -12161,10 +12204,8 @@ describe('createAcpSessionBridge', () => {
     // sync prefix.
     expect(killSyncInvoked).toHaveLength(1);
 
-    // Cleanup: the never-resolving kill keeps shutdownPromise
-    // pending forever. Don't await it (would hang the test). The
-    // test runner GCs it when this `it` returns.
-    void shutdownPromise;
+    teardown.resolve();
+    await shutdownPromise;
   });
 
   it('killAllSync force-kills the channel during the initialize handshake (tanzhenxin cold-spawn-window)', async () => {
@@ -28251,6 +28292,63 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('tracks a stuck final cancel and retires its channel at the deadline', async () => {
+      const stalledWriteStarted = deferred<void>();
+      const stalledWrite = deferred<void>();
+      const handle = makeChannel();
+      const originalWritable = handle.channel.stream.writable;
+      let writesBeforeStall = Number.POSITIVE_INFINITY;
+      handle.channel.stream = {
+        ...handle.channel.stream,
+        writable: new WritableStream({
+          async write(message) {
+            if (writesBeforeStall === 0) {
+              stalledWriteStarted.resolve();
+              await stalledWrite.promise;
+              return;
+            }
+            writesBeforeStall--;
+            const writer = originalWritable.getWriter();
+            try {
+              await writer.write(message);
+            } finally {
+              writer.releaseLock();
+            }
+          },
+        }),
+      };
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        initializeTimeoutMs: 20,
+        channelIdleTimeoutMs: 60_000,
+      });
+
+      try {
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        writesBeforeStall = 1;
+        const close = bridge.closeSession(session.sessionId);
+        await stalledWriteStarted.promise;
+
+        expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toMatchObject({
+          state: 'active',
+          runtimeLive: true,
+          activeWork: true,
+        });
+        await expect(close).resolves.toBeUndefined();
+        expect(handle.killed).toBe(true);
+        await vi.waitFor(() =>
+          expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toMatchObject({
+            state: 'cold',
+            runtimeLive: false,
+            activeWork: false,
+          }),
+        );
+      } finally {
+        stalledWrite.resolve();
+        await bridge.shutdown();
+      }
+    });
+
     it('resolves pending permissions before waiting for agent close during kill', async () => {
       let capturedConn: AgentSideConnection | undefined;
       const permissionResponse: { current?: Promise<unknown> } = {};
@@ -31299,6 +31397,985 @@ describe('channelIdleTimeoutMs', () => {
 });
 
 describe('preheat', () => {
+  it('reports cold, starting, and idle from one atomic lifecycle snapshot', async () => {
+    const handle = makeChannel();
+    const factoryResult = deferred<typeof handle.channel>();
+    const factory: ChannelFactory = async () => await factoryResult.promise;
+    const bridge = makeBridge({ channelFactory: factory });
+
+    expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toEqual({
+      state: 'cold',
+      runtimeLive: false,
+      runtimeEpoch: 0,
+      activeWork: false,
+    });
+
+    const preheat = bridge.preheat();
+    await vi.waitFor(() => {
+      expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toMatchObject({
+        state: 'starting',
+        runtimeLive: false,
+        runtimeEpoch: 0,
+        activeWork: true,
+      });
+    });
+
+    factoryResult.resolve(handle.channel);
+    await preheat;
+    expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toEqual({
+      state: 'idle',
+      runtimeLive: true,
+      runtimeEpoch: 1,
+      activeWork: false,
+    });
+
+    await bridge.shutdown();
+  });
+
+  it('keeps an outer runtime reservation after channel startup completes', async () => {
+    const handle = makeChannel();
+    const preheatInnerCompleted = deferred<void>();
+    const releasePreheat = deferred<void>();
+    const telemetry: BridgeTelemetry = {
+      captureContext: () => undefined,
+      runWithContext: (_captured, fn) => fn(),
+      async withSpan(operation, _attributes, fn) {
+        const result = await fn();
+        if (operation === 'channel.preheat') {
+          preheatInnerCompleted.resolve();
+          await releasePreheat.promise;
+        }
+        return result;
+      },
+      event() {},
+      injectPromptContext: (request) => request,
+    };
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      telemetry,
+    });
+
+    const preheat = bridge.preheat();
+    await preheatInnerCompleted.promise;
+    expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toMatchObject({
+      state: 'active',
+      runtimeLive: true,
+      activeWork: true,
+    });
+
+    releasePreheat.resolve();
+    await preheat;
+    expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toMatchObject({
+      state: 'idle',
+      runtimeLive: true,
+      activeWork: false,
+    });
+
+    await bridge.shutdown();
+  });
+
+  it('rejects a channel that exits before initialization can publish it', async () => {
+    const handle = makeChannel({
+      initializeImpl: async () => {
+        handle.crash({ exitCode: 1, signalCode: null });
+        await Promise.resolve();
+        return {
+          protocolVersion: PROTOCOL_VERSION,
+          agentInfo: { name: 'fake-agent', version: '0' },
+          authMethods: [],
+          agentCapabilities: {},
+        };
+      },
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+    });
+
+    await expect(bridge.preheat()).rejects.toBeInstanceOf(
+      BridgeChannelClosedError,
+    );
+    expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toEqual({
+      state: 'cold',
+      runtimeLive: false,
+      runtimeEpoch: 0,
+      activeWork: false,
+    });
+
+    await bridge.shutdown();
+  });
+
+  it('clears a timed-out physical spawn so a later preheat can retry', async () => {
+    vi.useFakeTimers();
+    try {
+      const handle = makeChannel();
+      const stuckFactory = new Promise<never>(() => {});
+      let factoryCalls = 0;
+      const factory: ChannelFactory = async () => {
+        factoryCalls++;
+        if (factoryCalls === 1) return await stuckFactory;
+        return handle.channel;
+      };
+      const bridge = makeBridge({
+        channelFactory: factory,
+        initializeTimeoutMs: 50,
+      });
+
+      const firstPreheat = bridge.preheat();
+      void firstPreheat.catch(() => undefined);
+      await vi.waitFor(() => expect(factoryCalls).toBe(1));
+      expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!().state).toBe(
+        'starting',
+      );
+
+      await vi.advanceTimersByTimeAsync(50);
+      await expect(firstPreheat).rejects.toThrow(/channel factory timed out/);
+      expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toEqual({
+        state: 'cold',
+        runtimeLive: false,
+        runtimeEpoch: 0,
+        activeWork: false,
+      });
+
+      await bridge.preheat();
+      expect(factoryCalls).toBe(2);
+      expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toMatchObject({
+        state: 'idle',
+        runtimeLive: true,
+        runtimeEpoch: 1,
+      });
+
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('kills a channel returned after its factory deadline without publishing it', async () => {
+    vi.useFakeTimers();
+    try {
+      const handle = makeChannel();
+      const factoryResult = deferred<typeof handle.channel>();
+      const bridge = makeBridge({
+        channelFactory: async () => await factoryResult.promise,
+        initializeTimeoutMs: 50,
+      });
+
+      const preheat = bridge.preheat();
+      void preheat.catch(() => undefined);
+      await vi.waitFor(() => {
+        expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!().state).toBe(
+          'starting',
+        );
+      });
+      await vi.advanceTimersByTimeAsync(50);
+      await expect(preheat).rejects.toThrow(/channel factory timed out/);
+
+      factoryResult.resolve(handle.channel);
+      await vi.waitFor(() => expect(handle.killed).toBe(true));
+      expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toEqual({
+        state: 'cold',
+        runtimeLive: false,
+        runtimeEpoch: 0,
+        activeWork: false,
+      });
+
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps runtime epochs monotonic across bridge replacement', async () => {
+    let runtimeEpoch = 0;
+    const runtimeEpochSource: BridgeRuntimeEpochSource = {
+      current: () => runtimeEpoch,
+      allocate: () => ++runtimeEpoch,
+    };
+    const firstHandle = makeChannel();
+    const firstBridge = makeBridge({
+      channelFactory: async () => firstHandle.channel,
+      runtimeEpochSource,
+    });
+
+    await firstBridge.preheat();
+    expect(
+      firstBridge.getWorkspaceRuntimeLifecycleSnapshot!().runtimeEpoch,
+    ).toBe(1);
+    await firstBridge.shutdown();
+
+    const secondHandle = makeChannel();
+    const secondBridge = makeBridge({
+      channelFactory: async () => secondHandle.channel,
+      runtimeEpochSource,
+    });
+    expect(secondBridge.getWorkspaceRuntimeLifecycleSnapshot!()).toMatchObject({
+      state: 'cold',
+      runtimeLive: false,
+      runtimeEpoch: 1,
+    });
+
+    await secondBridge.preheat();
+    expect(
+      secondBridge.getWorkspaceRuntimeLifecycleSnapshot!().runtimeEpoch,
+    ).toBe(2);
+    await secondBridge.shutdown();
+  });
+
+  it('keeps an idle-timeout-zero channel alive while workspace status is pending', async () => {
+    const statusResult = deferred<Record<string, unknown>>();
+    const statusMethod = 'qwen/status/workspace/test';
+    const handle = makeChannel({
+      extMethodImpl: async (method) => {
+        if (method === statusMethod) return await statusResult.promise;
+        return {};
+      },
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      channelIdleTimeoutMs: 0,
+    });
+    await bridge.preheat();
+
+    const status = bridge.queryWorkspaceStatus(statusMethod, () => ({
+      idle: true,
+    }));
+    await vi.waitFor(() =>
+      expect(handle.agent.extMethodCalls).toContainEqual({
+        method: statusMethod,
+        params: { cwd: WS_A },
+      }),
+    );
+    expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toMatchObject({
+      state: 'active',
+      runtimeLive: true,
+      activeWork: true,
+    });
+    expect(handle.killed).toBe(false);
+
+    statusResult.resolve({ ready: true });
+    await expect(status).resolves.toEqual({ ready: true });
+    expect(handle.killed).toBe(true);
+    await vi.waitFor(() => {
+      expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toMatchObject({
+        state: 'cold',
+        runtimeLive: false,
+        activeWork: false,
+      });
+    });
+
+    await bridge.shutdown();
+  });
+
+  it('reaps an idle-timeout-zero channel whose session is removed mid-initialization', async () => {
+    const handle = makeChannel({
+      extMethodImpl: (method) => {
+        if (method === SERVE_CONTROL_EXT_METHODS.sessionApprovalMode) {
+          throw new Error('approval mode rejected');
+        }
+        return {};
+      },
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      channelIdleTimeoutMs: 0,
+    });
+
+    const err = await bridge
+      .spawnOrAttach({
+        workspaceCwd: WS_A,
+        approvalMode: ApprovalMode.YOLO,
+      })
+      .then(
+        () => null,
+        (e: unknown) => e,
+      );
+
+    expect(err).not.toBeNull();
+    await vi.waitFor(() => expect(handle.killed).toBe(true));
+    await vi.waitFor(() =>
+      expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toMatchObject({
+        state: 'cold',
+        runtimeLive: false,
+        activeWork: false,
+      }),
+    );
+
+    await bridge.shutdown();
+  });
+
+  it('aborts the startup signal when channel initialization fails', async () => {
+    let capturedSignal: AbortSignal | undefined;
+    const handle = makeChannel({
+      initializeThrows: new Error('handshake refused'),
+    });
+    const bridge = makeBridge({
+      channelFactory: async (_workspaceCwd, _childEnvOverrides, signal) => {
+        capturedSignal = signal;
+        return handle.channel;
+      },
+    });
+
+    const err = await bridge.preheat().then(
+      () => null,
+      (e: unknown) => e,
+    );
+
+    expect(err).not.toBeNull();
+    expect(capturedSignal?.aborted).toBe(true);
+    expect(handle.killed).toBe(true);
+    await bridge.shutdown();
+  });
+
+  it('aborts the startup signal when the runtime epoch regresses', async () => {
+    let capturedSignal: AbortSignal | undefined;
+    const handle = makeChannel();
+    const bridge = makeBridge({
+      channelFactory: async (_workspaceCwd, _childEnvOverrides, signal) => {
+        capturedSignal = signal;
+        return handle.channel;
+      },
+      runtimeEpochSource: {
+        current: () => 5,
+        allocate: () => 5,
+      },
+    });
+
+    await expect(bridge.preheat()).rejects.toThrow(/monotonically/);
+    expect(capturedSignal?.aborted).toBe(true);
+    expect(handle.killed).toBe(true);
+    await bridge.shutdown();
+  });
+
+  it('aborts the startup signal when the channel factory times out', async () => {
+    vi.useFakeTimers();
+    try {
+      let capturedSignal: AbortSignal | undefined;
+      const handle = makeChannel();
+      const factoryResult = deferred<typeof handle.channel>();
+      const bridge = makeBridge({
+        channelFactory: async (_workspaceCwd, _childEnvOverrides, signal) => {
+          capturedSignal = signal;
+          return await factoryResult.promise;
+        },
+        initializeTimeoutMs: 50,
+      });
+
+      const preheat = bridge.preheat();
+      void preheat.catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(50);
+      await expect(preheat).rejects.toThrow(/channel factory timed out/);
+      expect(capturedSignal?.aborted).toBe(true);
+
+      factoryResult.resolve(handle.channel);
+      await vi.waitFor(() => expect(handle.killed).toBe(true));
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    {
+      label: 'MCP initialization',
+      method: SERVE_CONTROL_EXT_METHODS.workspaceMcpInitialize,
+      timeoutMs: 50,
+      invoke: (bridge: ReturnType<typeof makeBridge>) =>
+        bridge.initializeWorkspaceMcp(),
+    },
+    {
+      label: 'MCP authentication',
+      method: SERVE_CONTROL_EXT_METHODS.workspaceMcpManage,
+      timeoutMs: 600_000,
+      invoke: (bridge: ReturnType<typeof makeBridge>) =>
+        bridge.manageMcpServer('aone', 'authenticate', undefined),
+    },
+  ])(
+    'retires a kept-alive channel when $label exceeds its physical lease',
+    async ({ method, timeoutMs, invoke }) => {
+      vi.useFakeTimers();
+      try {
+        const stalledResult = deferred<Record<string, unknown>>();
+        const firstHandle = makeChannel({
+          extMethodImpl: async (candidate) =>
+            candidate === method ? await stalledResult.promise : {},
+        });
+        const secondHandle = makeChannel();
+        const channelFactory = vi
+          .fn()
+          .mockResolvedValueOnce(firstHandle.channel)
+          .mockResolvedValueOnce(secondHandle.channel);
+        const bridge = makeBridge({
+          channelFactory,
+          initializeTimeoutMs: 50,
+        });
+
+        await bridge.preheat({ keepAliveMs: 600_000 });
+        expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toMatchObject({
+          state: 'idle',
+          runtimeLive: true,
+          runtimeEpoch: 1,
+        });
+
+        const request = invoke(bridge);
+        void request.catch(() => undefined);
+        await vi.waitFor(() =>
+          expect(firstHandle.agent.extMethodCalls).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                method,
+              }),
+            ]),
+          ),
+        );
+
+        await vi.advanceTimersByTimeAsync(timeoutMs);
+        await expect(request).rejects.toBeInstanceOf(BridgeTimeoutError);
+        expect(firstHandle.killed).toBe(true);
+        await vi.waitFor(() =>
+          expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toMatchObject({
+            state: 'cold',
+            runtimeLive: false,
+            runtimeEpoch: 1,
+            activeWork: false,
+          }),
+        );
+
+        await bridge.preheat({ keepAliveMs: 600_000 });
+        expect(channelFactory).toHaveBeenCalledTimes(2);
+        expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toMatchObject({
+          state: 'idle',
+          runtimeLive: true,
+          runtimeEpoch: 2,
+        });
+
+        await bridge.shutdown();
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it('retires a kept-alive channel when MCP detail discovery times out', async () => {
+    vi.useFakeTimers();
+    const detailResult = deferred<Record<string, unknown>>();
+    const firstHandle = makeChannel({
+      extMethodImpl: async (method) => {
+        if (method === SERVE_STATUS_EXT_METHODS.workspaceMcp) {
+          return {
+            v: 1,
+            workspaceCwd: WS_A,
+            initialized: true,
+            discoveryState: 'completed',
+            servers: [{ name: 'aone', mcpStatus: 'connected' }],
+          };
+        }
+        if (
+          method === SERVE_STATUS_EXT_METHODS.workspaceMcpTools ||
+          method === SERVE_STATUS_EXT_METHODS.workspaceMcpResources
+        ) {
+          return await detailResult.promise;
+        }
+        return {};
+      },
+    });
+    const secondHandle = makeChannel();
+    const channelFactory = vi
+      .fn()
+      .mockResolvedValueOnce(firstHandle.channel)
+      .mockResolvedValueOnce(secondHandle.channel);
+    const bridge = makeBridge({
+      channelFactory,
+      initializeTimeoutMs: 50,
+    });
+
+    try {
+      await bridge.preheat({ keepAliveMs: 600_000 });
+      const status = bridge.queryWorkspaceStatus(
+        SERVE_STATUS_EXT_METHODS.workspaceMcp,
+        () => ({ discoveryState: 'not_started', servers: [] }),
+      );
+      void status.catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(firstHandle.agent.extMethodCalls).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            method: SERVE_STATUS_EXT_METHODS.workspaceMcpTools,
+          }),
+          expect.objectContaining({
+            method: SERVE_STATUS_EXT_METHODS.workspaceMcpResources,
+          }),
+        ]),
+      );
+
+      await vi.advanceTimersByTimeAsync(50);
+      await expect(status).resolves.toMatchObject({
+        discoveryState: 'completed',
+      });
+      expect(firstHandle.killed).toBe(true);
+      await vi.waitFor(() =>
+        expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toMatchObject({
+          state: 'cold',
+          runtimeLive: false,
+          runtimeEpoch: 1,
+          activeWork: false,
+        }),
+      );
+
+      await bridge.preheat({ keepAliveMs: 600_000 });
+      expect(channelFactory).toHaveBeenCalledTimes(2);
+      expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toMatchObject({
+        state: 'idle',
+        runtimeLive: true,
+        runtimeEpoch: 2,
+      });
+    } finally {
+      detailResult.resolve({});
+      await bridge.shutdown();
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps a shared channel while a timed-out new session RPC settles', async () => {
+    vi.useFakeTimers();
+    const stalledStarted = deferred<void>();
+    const stalled = deferred<Record<string, unknown>>();
+    let newSessionCalls = 0;
+    const firstHandle = makeChannel({
+      extMethodImpl: activeWorkCloseImpl,
+      newSessionImpl: async () => {
+        newSessionCalls++;
+        if (newSessionCalls === 1) {
+          return { sessionId: 'live-session' };
+        }
+        stalledStarted.resolve();
+        return (await stalled.promise) as NewSessionResponse;
+      },
+    });
+    const secondHandle = makeChannel();
+    const channelFactory = vi
+      .fn()
+      .mockResolvedValueOnce(firstHandle.channel)
+      .mockResolvedValueOnce(secondHandle.channel);
+    const bridge = makeBridge({
+      channelFactory,
+      initializeTimeoutMs: 50,
+      sessionScope: 'thread',
+    });
+
+    try {
+      await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      const request = bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      void request.catch(() => undefined);
+      await stalledStarted.promise;
+
+      await vi.advanceTimersByTimeAsync(50);
+      await expect(request).rejects.toBeInstanceOf(BridgeTimeoutError);
+      expect(firstHandle.killed).toBe(false);
+      expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toMatchObject({
+        state: 'active',
+        runtimeLive: true,
+        runtimeEpoch: 1,
+        activeWork: true,
+      });
+
+      stalled.resolve({ sessionId: 'late-session' });
+      await vi.advanceTimersByTimeAsync(0);
+      await bridge.preheat({ keepAliveMs: 600_000 });
+      expect(channelFactory).toHaveBeenCalledTimes(1);
+      expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toMatchObject({
+        state: 'active',
+        runtimeLive: true,
+        runtimeEpoch: 1,
+      });
+    } finally {
+      stalled.resolve({ sessionId: 'late-session' });
+      await bridge.shutdown();
+      vi.useRealTimers();
+    }
+  });
+
+  it('transfers an outer reservation before an idle workspace call drains', async () => {
+    const statusResult = deferred<Record<string, unknown>>();
+    const initializeResult = deferred<Record<string, unknown>>();
+    const statusMethod = 'qwen/status/workspace/reservation-race';
+    const handle = makeChannel({
+      extMethodImpl: async (method) => {
+        if (method === statusMethod) return await statusResult.promise;
+        if (method === SERVE_CONTROL_EXT_METHODS.workspaceMcpInitialize) {
+          return await initializeResult.promise;
+        }
+        return {};
+      },
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      channelIdleTimeoutMs: 0,
+    });
+    await bridge.preheat();
+
+    const status = bridge.queryWorkspaceStatus(statusMethod, () => ({
+      idle: true,
+    }));
+    await vi.waitFor(() =>
+      expect(handle.agent.extMethodCalls).toContainEqual({
+        method: statusMethod,
+        params: { cwd: WS_A },
+      }),
+    );
+
+    statusResult.resolve({ ready: true });
+    const initialize = bridge.initializeWorkspaceMcp();
+    await vi.waitFor(() =>
+      expect(handle.agent.extMethodCalls).toContainEqual({
+        method: SERVE_CONTROL_EXT_METHODS.workspaceMcpInitialize,
+        params: { cwd: WS_A },
+      }),
+    );
+    expect(handle.killed).toBe(false);
+
+    initializeResult.resolve({ accepted: false });
+    await expect(status).resolves.toEqual({ ready: true });
+    await expect(initialize).resolves.toEqual({ accepted: false });
+    expect(handle.killed).toBe(true);
+
+    await bridge.shutdown();
+  });
+
+  it('terminates the owning channel when MCP discovery exceeds its lease', async () => {
+    vi.useFakeTimers();
+    try {
+      const handle = makeChannel({
+        extMethodImpl: async (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.workspaceMcpInitialize
+            ? { accepted: true }
+            : {},
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+
+      await expect(bridge.initializeWorkspaceMcp()).resolves.toEqual({
+        accepted: true,
+      });
+      expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toMatchObject({
+        state: 'active',
+        runtimeLive: true,
+        activeWork: true,
+      });
+
+      await vi.advanceTimersByTimeAsync(300_000);
+      expect(handle.killed).toBe(true);
+      await vi.waitFor(() =>
+        expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toMatchObject({
+          state: 'cold',
+          runtimeLive: false,
+          activeWork: false,
+        }),
+      );
+
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('drains missing MCP auth through its owning channel with an active session', async () => {
+    vi.useFakeTimers();
+    try {
+      const handle = makeChannel({
+        extMethodImpl: async (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.workspaceMcpManage) {
+            return {
+              serverName: 'aone',
+              action: 'authenticate',
+              ok: true,
+              pending: true,
+            };
+          }
+          if (method === SERVE_STATUS_EXT_METHODS.workspaceMcp) {
+            return {
+              v: 1,
+              workspaceCwd: WS_A,
+              initialized: true,
+              discoveryState: 'completed',
+              servers: [],
+            };
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await expect(
+        bridge.manageMcpServer('aone', 'authenticate', undefined),
+      ).resolves.toMatchObject({
+        serverName: 'aone',
+        action: 'authenticate',
+        pending: true,
+      });
+      expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toMatchObject({
+        state: 'active',
+        runtimeLive: true,
+        activeWork: true,
+      });
+
+      await vi.advanceTimersByTimeAsync(600_000);
+      expect(handle.killed).toBe(true);
+      await vi.waitFor(() =>
+        expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toMatchObject({
+          state: 'cold',
+          runtimeLive: false,
+          activeWork: false,
+        }),
+      );
+      expect(bridge.sessionCount).toBe(0);
+
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('rechecks MCP auth before its deadline can terminate active sessions', async () => {
+    vi.useFakeTimers();
+    try {
+      let statusRequests = 0;
+      const handle = makeChannel({
+        extMethodImpl: async (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.workspaceMcpManage) {
+            return {
+              serverName: 'aone',
+              action: 'authenticate',
+              ok: true,
+              pending: true,
+            };
+          }
+          if (method === SERVE_STATUS_EXT_METHODS.workspaceMcp) {
+            statusRequests += 1;
+            return {
+              v: 1,
+              workspaceCwd: WS_A,
+              initialized: true,
+              discoveryState: 'completed',
+              servers: [
+                {
+                  name: 'aone',
+                  authenticationState:
+                    statusRequests === 1 ? 'pending' : 'succeeded',
+                },
+              ],
+            };
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await bridge.manageMcpServer('aone', 'authenticate', undefined);
+      expect(statusRequests).toBe(1);
+
+      await vi.advanceTimersByTimeAsync(600_000);
+      await vi.waitFor(() => expect(statusRequests).toBe(2));
+      expect(handle.killed).toBe(false);
+      expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toMatchObject({
+        state: 'active',
+        runtimeLive: true,
+        activeWork: true,
+      });
+
+      await bridge.closeSession(session.sessionId);
+      expect(handle.killed).toBe(true);
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not let a superseded MCP auth timer terminate the renewed channel', async () => {
+    vi.useFakeTimers();
+    try {
+      let authenticationRequests = 0;
+      let statusRequests = 0;
+      const expiryStatusStarted = deferred<void>();
+      const expiryStatus = deferred<Record<string, unknown>>();
+      const handle = makeChannel({
+        extMethodImpl: async (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.workspaceMcpManage) {
+            authenticationRequests++;
+            return {
+              serverName: 'aone',
+              action: 'authenticate',
+              ok: true,
+              pending: true,
+            };
+          }
+          if (method === SERVE_STATUS_EXT_METHODS.workspaceMcp) {
+            statusRequests++;
+            if (statusRequests === 2) {
+              expiryStatusStarted.resolve();
+              return await expiryStatus.promise;
+            }
+            return {
+              v: 1,
+              workspaceCwd: WS_A,
+              initialized: true,
+              discoveryState: 'completed',
+              servers: [{ name: 'aone', authenticationState: 'pending' }],
+            };
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await bridge.manageMcpServer('aone', 'authenticate', undefined);
+
+      const expiry = vi.advanceTimersByTimeAsync(600_000);
+      await expiryStatusStarted.promise;
+      const renewal = bridge.manageMcpServer('aone', 'authenticate', undefined);
+      await vi.waitFor(() => expect(authenticationRequests).toBe(2));
+      expiryStatus.resolve({
+        v: 1,
+        workspaceCwd: WS_A,
+        initialized: true,
+        discoveryState: 'completed',
+        servers: [{ name: 'aone', authenticationState: 'pending' }],
+      });
+      await Promise.all([expiry, renewal]);
+
+      expect(handle.killed).toBe(false);
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('honors the longest keep-alive from concurrent preheats', async () => {
+    vi.useFakeTimers();
+    try {
+      const handle = makeChannel();
+      const factoryResult = deferred<typeof handle.channel>();
+      let factoryCalls = 0;
+      const bridge = makeBridge({
+        channelFactory: async () => {
+          factoryCalls++;
+          return await factoryResult.promise;
+        },
+      });
+
+      const shortPreheat = bridge.preheat({ keepAliveMs: 1_000 });
+      const longPreheat = bridge.preheat({ keepAliveMs: 10_000 });
+      await vi.waitFor(() => expect(factoryCalls).toBe(1));
+      factoryResult.resolve(handle.channel);
+      await Promise.all([shortPreheat, longPreheat]);
+
+      await vi.advanceTimersByTimeAsync(9_999);
+      expect(handle.killed).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(handle.killed).toBe(true);
+
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('arms a keep-alive when a concurrent plain preheat finishes last', async () => {
+    vi.useFakeTimers();
+    try {
+      const handle = makeChannel();
+      const releasePlainPreheat = deferred<void>();
+      let preheatSpanCount = 0;
+      const telemetry: BridgeTelemetry = {
+        captureContext: () => undefined,
+        runWithContext: (_captured, fn) => fn(),
+        async withSpan(operation, _attributes, fn) {
+          const preheatIndex =
+            operation === 'channel.preheat' ? ++preheatSpanCount : 0;
+          const result = await fn();
+          if (preheatIndex === 2) await releasePlainPreheat.promise;
+          return result;
+        },
+        event() {},
+        injectPromptContext: (request) => request,
+      };
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        telemetry,
+      });
+
+      const keptAlive = bridge.preheat({ keepAliveMs: 600_000 });
+      const plain = bridge.preheat();
+      await keptAlive;
+      expect(handle.killed).toBe(false);
+
+      releasePlainPreheat.resolve();
+      await plain;
+      await vi.advanceTimersByTimeAsync(599_999);
+      expect(handle.killed).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(handle.killed).toBe(true);
+
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('renews an explicitly ensured runtime warm window', async () => {
+    vi.useFakeTimers();
+    try {
+      const handle = makeChannel();
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+
+      await bridge.preheat({ keepAliveMs: 600_000 });
+      expect(bridge.getDaemonStatusSnapshot().limits.channelIdleTimeoutMs).toBe(
+        0,
+      );
+      await vi.advanceTimersByTimeAsync(300_000);
+      await bridge.preheat({ keepAliveMs: 600_000 });
+      await vi.advanceTimersByTimeAsync(599_999);
+      expect(handle.killed).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(handle.killed).toBe(true);
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    ['an omitted timeout', undefined],
+    ['an explicit zero timeout', 0],
+  ] as const)('preserves the preheated channel with %s', async (_, timeout) => {
+    const handle = makeChannel();
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      ...(timeout === undefined ? {} : { channelIdleTimeoutMs: timeout }),
+    });
+
+    await bridge.preheat();
+
+    expect(handle.killed).toBe(false);
+    expect(bridge.isChannelLive()).toBe(true);
+    await bridge.shutdown();
+  });
+
   it('spawns channel that is reused by first session', async () => {
     let factoryCalls = 0;
     const factory: ChannelFactory = async () => {
@@ -31321,7 +32398,7 @@ describe('preheat', () => {
     await bridge.shutdown();
   });
 
-  it('is a no-op after shutdown', async () => {
+  it('rejects after shutdown without spawning a channel', async () => {
     let factoryCalls = 0;
     const factory: ChannelFactory = async () => {
       factoryCalls++;
@@ -31329,7 +32406,9 @@ describe('preheat', () => {
     };
     const bridge = makeBridge({ channelFactory: factory });
     await bridge.shutdown();
-    await bridge.preheat();
+    await expect(bridge.preheat()).rejects.toThrow(
+      'AcpSessionBridge is shutting down',
+    );
     expect(factoryCalls).toBe(0);
   });
 

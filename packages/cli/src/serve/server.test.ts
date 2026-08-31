@@ -789,6 +789,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'scratch_workspace_registration',
   'workspace_runtime_removal',
   'native_directory_picker',
+  'workspace_runtime',
   'workspace_qualified_rest_core',
   'workspace_qualified_voice',
   'workspace_qualified_memory',
@@ -3277,6 +3278,20 @@ describe('createServeApp', () => {
           );
           continue;
         }
+        if (feature === 'workspace_runtime') {
+          expect(predicate({ workspaceRuntimeAvailable: true })).toBe(true);
+          expect(predicate({ workspaceRuntimeAvailable: false })).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              workspaceRuntimeAvailable: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
         if (feature === 'workspace_trust_hot_reload') {
           expect(predicate({ workspaceTrustHotReloadAvailable: true })).toBe(
             true,
@@ -4215,6 +4230,7 @@ describe('createServeApp', () => {
             sessionArtifactsPersistenceAvailable: true,
             sessionGenerationAvailable: true,
             workspaceGenerationAvailable: true,
+            workspaceRuntimeAvailable: true,
             acpHttpEnabled: true,
             // Mirror the server.ts probe so the expectation matches on both
             // GUI and headless hosts.

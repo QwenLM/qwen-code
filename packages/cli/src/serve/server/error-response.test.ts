@@ -14,27 +14,31 @@ import {
   SessionWriterLostError,
   SessionWriterUnavailableError,
 } from '@qwen-code/qwen-code-core';
+import type { DaemonLogger } from '../daemon-logger.js';
+import {
+  WorkspaceRuntimeInitializationError,
+  WorkspaceRuntimeStillStartingError,
+} from '../workspace-runtime-coordinator.js';
 import { sendBridgeError } from './error-response.js';
 import { DaemonDrainingError } from './session-archive.js';
 import { BridgeTimeoutError } from '../acp-session-bridge.js';
 import { StandaloneSessionServiceError } from '../conversations/standalone-session-service.js';
 import { ConversationRuntimeOwnershipError } from '../conversations/conversation-runtime-errors.js';
-import type { DaemonLogger } from '../daemon-logger.js';
 
 function responseMock(): {
   response: Response;
+  set: ReturnType<typeof vi.fn>;
   status: ReturnType<typeof vi.fn>;
   json: ReturnType<typeof vi.fn>;
-  set: ReturnType<typeof vi.fn>;
 } {
+  const set = vi.fn();
   const status = vi.fn();
   const json = vi.fn();
-  const set = vi.fn();
-  const response = { status, json, set };
+  const response = { set, status, json };
+  set.mockReturnValue(response);
   status.mockReturnValue(response);
   json.mockReturnValue(response);
-  set.mockReturnValue(response);
-  return { response: response as unknown as Response, status, json, set };
+  return { response: response as unknown as Response, set, status, json };
 }
 
 describe('sendBridgeError session writer errors', () => {
@@ -254,6 +258,59 @@ describe('sendBridgeError session writer errors', () => {
       error: 'Session write ownership could not be verified.',
       code: 'session_writer_unavailable',
       errorKind: 'session_writer_unavailable',
+    });
+  });
+
+  it('maps runtime still starting to 503 with Retry-After', () => {
+    const { response, set, status, json } = responseMock();
+    const daemonLog = {
+      error: vi.fn(),
+    } as unknown as DaemonLogger;
+
+    sendBridgeError(
+      response,
+      new WorkspaceRuntimeStillStartingError(),
+      { route: 'POST /workspace/runtime/ensure' },
+      daemonLog,
+    );
+
+    expect(set).toHaveBeenCalledWith('Retry-After', '5');
+    expect(status).toHaveBeenCalledWith(503);
+    expect(json).toHaveBeenCalledWith({
+      error: 'Workspace runtime is still starting',
+      code: 'runtime_still_starting',
+    });
+    expect(daemonLog.error).toHaveBeenCalledWith(
+      'Workspace runtime is still starting',
+      expect.any(WorkspaceRuntimeStillStartingError),
+      { route: 'POST /workspace/runtime/ensure' },
+    );
+  });
+
+  it('logs the cause of runtime initialization failures', () => {
+    const { response, set, status, json } = responseMock();
+    const cause = new Error('child initialize failed');
+    const daemonLog = {
+      error: vi.fn(),
+    } as unknown as DaemonLogger;
+
+    sendBridgeError(
+      response,
+      new WorkspaceRuntimeInitializationError(cause),
+      { route: 'POST /workspace/runtime/ensure' },
+      daemonLog,
+    );
+
+    expect(daemonLog.error).toHaveBeenCalledWith(
+      'child initialize failed',
+      cause,
+      { route: 'POST /workspace/runtime/ensure' },
+    );
+    expect(set).toHaveBeenCalledWith('Retry-After', '5');
+    expect(status).toHaveBeenCalledWith(503);
+    expect(json).toHaveBeenCalledWith({
+      error: 'Workspace runtime failed to initialize',
+      code: 'runtime_initialization_failed',
     });
   });
 

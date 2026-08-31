@@ -483,8 +483,8 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         type: 'boolean',
         default: true,
         description:
-          'HTTP bridge mode: attempt to preheat one primary `qwen --acp` child; trusted ' +
-          'secondaries start one on demand. Stage 2 native in-process mode is ' +
+          'HTTP bridge mode: attempt to preheat the primary `qwen --acp` child; ' +
+          'trusted secondaries start one on demand. Stage 2 native in-process mode is ' +
           'not yet implemented; this flag will become opt-in then.',
       })
       .option('memory-budget-mb', {
@@ -582,7 +582,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       .option('channel-idle-timeout-ms', {
         type: 'number',
         description:
-          'Milliseconds to keep ACP child alive after last session closes. ' +
+          'Compatibility auto-reap delay for an idle workspace ACP child. ' +
           '0 or unset = immediate kill (default).',
       })
       .option('initialize-timeout-ms', {

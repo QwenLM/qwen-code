@@ -3087,7 +3087,7 @@ describe('createDaemonWorkspaceService', () => {
       });
     });
 
-    it('returns ready without preheating when the channel is already live', async () => {
+    it('renews the idle window when the channel is already live', async () => {
       const preheatAcpChild = vi.fn().mockResolvedValue(undefined);
       const svc = createDaemonWorkspaceService(
         makeDeps({ isChannelLive: () => true, preheatAcpChild }),
@@ -3096,7 +3096,7 @@ describe('createDaemonWorkspaceService', () => {
       const result = await svc.preheatAcpChild(makeCtx());
 
       expect(result).toMatchObject({ ready: true, channelLive: true });
-      expect(preheatAcpChild).not.toHaveBeenCalled();
+      expect(preheatAcpChild).toHaveBeenCalledOnce();
     });
 
     it('returns an error when ACP preheat is unavailable', async () => {
@@ -3146,13 +3146,13 @@ describe('createDaemonWorkspaceService', () => {
         channelLive: false,
         reason: 'timeout',
       });
-      expect(preheatAcpChild).toHaveBeenCalledOnce();
+      expect(preheatAcpChild).toHaveBeenCalledTimes(2);
       expect(mockWriteStderrLine).toHaveBeenCalledWith(
         'qwen serve: ACP preheat timed out after 1ms',
       );
     });
 
-    it('lets concurrent waiters share one preheat attempt', async () => {
+    it('forwards every concurrent observer to the bridge', async () => {
       const pending = deferred<void>();
       let live = false;
       const preheatAcpChild = vi.fn(() => pending.promise);
@@ -3160,8 +3160,12 @@ describe('createDaemonWorkspaceService', () => {
         makeDeps({ isChannelLive: () => live, preheatAcpChild }),
       );
 
-      const first = svc.preheatAcpChild(makeCtx(), { timeoutMs: 1000 });
-      const second = svc.preheatAcpChild(makeCtx(), { timeoutMs: 1000 });
+      const first = svc.preheatAcpChild(makeCtx(), {
+        timeoutMs: 1000,
+      });
+      const second = svc.preheatAcpChild(makeCtx(), {
+        timeoutMs: 1000,
+      });
       live = true;
       pending.resolve();
 
@@ -3169,10 +3173,12 @@ describe('createDaemonWorkspaceService', () => {
         expect.objectContaining({ ready: true, channelLive: true }),
         expect.objectContaining({ ready: true, channelLive: true }),
       ]);
-      expect(preheatAcpChild).toHaveBeenCalledOnce();
+      expect(preheatAcpChild).toHaveBeenCalledTimes(2);
+      expect(preheatAcpChild).toHaveBeenNthCalledWith(1);
+      expect(preheatAcpChild).toHaveBeenNthCalledWith(2);
     });
 
-    it('allows a new attempt after the shared preheat settles', async () => {
+    it('allows a new attempt after a timed-out observer', async () => {
       const firstAttempt = deferred<void>();
       let live = false;
       const preheatAcpChild = vi

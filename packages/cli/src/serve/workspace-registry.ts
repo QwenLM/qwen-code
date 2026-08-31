@@ -12,6 +12,7 @@ import type { ClientMcpSenderRegistry } from './acp-http/client-mcp-sender-regis
 import type { WorkspaceFileSystemFactory } from './fs/index.js';
 import type { WorkspaceRuntimeProvenance } from './managed-scratch-workspace.js';
 import type { DaemonWorkspaceService } from './workspace-service/types.js';
+import type { WorkspaceRuntimeCoordinator } from './workspace-runtime-coordinator.js';
 import { isInternalWorkspaceRuntime } from './workspace-runtime-visibility.js';
 
 export interface WorkspaceRuntimeEnvMetadata {
@@ -48,6 +49,7 @@ export interface WorkspaceRuntime {
   readonly clientMcpSenderRegistry: ClientMcpSenderRegistry;
   readonly generationGuard?: WorkspaceGenerationGuard;
   readonly trustMaterialization?: string;
+  runtimeCoordinator?: WorkspaceRuntimeCoordinator;
 }
 
 export type WorkspaceEntryState =
