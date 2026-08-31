@@ -6939,6 +6939,11 @@ describe('scriptLintGate — the deterministic gate reads the report', () => {
           path: '.github/workflows/ci.yml',
           tool: 'actionlint',
           reason: 'mapping unsupported <!-- qwen-review-deferred --> here',
+          // The zh half renders THIS leg when present — without a marker
+          // here, the loop below sanitised zh via the already-stripped
+          // English fallback and the `stripCommentGrammar(d.reasonZh)` call
+          // was never exercised: deleting it survived the whole suite.
+          reasonZh: '映射不支持 <!-- qwen-review-deferred --> 这里',
         },
       ],
       skipped: [
@@ -6954,6 +6959,9 @@ describe('scriptLintGate — the deterministic gate reads the report', () => {
     }
     expect(g.disclosed[0].en).toContain('qwen-review-deferred');
     expect(g.disclosed[0].en).toContain('mapping unsupported');
+    // Same invariant on the zh half: the text survives, the grammar is inert.
+    expect(g.disclosed[0].zh).toContain('qwen-review-deferred');
+    expect(g.disclosed[0].zh).toContain('映射不支持');
   });
 
   it.each([
@@ -7284,6 +7292,46 @@ describe('composeReview — the script-lint gate wired to the verdict', () => {
     );
     // the clean-approve copy is still there — the disclosure augments, it doesn't replace
     expect(r.body).toContain('No issues found. LGTM! ✅');
+  });
+
+  it('two deferred entries join per language, the reasonZh branch rendered whole', () => {
+    // Every other deferred fixture holds ONE entry, and a one-element join
+    // emits no separator — so the en '; ' join, the zh full-width '；' join
+    // and the reasonZh-carrying branch (the primary case: every report the
+    // current CLI writes carries `reasonZh`) were pinned by nothing; the
+    // single-entry test above reaches only the English-fallback branch. Two
+    // entries, one translated and one not, pin both composed sentences
+    // whole, separators included.
+    const p = gateReadyPlan(['verify', 'reverse-audit'], { han: true });
+    writeGateReport({
+      deferred: [
+        {
+          path: '.github/workflows/ci.yml',
+          tool: 'actionlint',
+          reason: 'source mapping not yet supported',
+          reasonZh: '尚未支持源映射',
+        },
+        {
+          path: '.github/workflows/release.yml',
+          tool: 'actionlint',
+          reason: 'source mapping not yet supported',
+        },
+      ],
+    });
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('APPROVE');
+    expect(r.body).toContain(
+      'Not linted (tool limitation, not a blocker): `.github/workflows/ci.yml` — source mapping not yet supported; `.github/workflows/release.yml` — source mapping not yet supported.',
+    );
+    expect(r.body).toContain(
+      '未检查（工具限制，非阻断）：`.github/workflows/ci.yml`——尚未支持源映射；`.github/workflows/release.yml`——source mapping not yet supported。',
+    );
   });
 });
 
