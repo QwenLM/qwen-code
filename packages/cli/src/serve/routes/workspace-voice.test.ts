@@ -65,7 +65,12 @@ async function writeJson(file: string, value: unknown): Promise<void> {
 }
 
 async function makeHarness(
-  opts: { persistSetting?: boolean; token?: string; trusted?: boolean } = {},
+  opts: {
+    persistSetting?: boolean;
+    token?: string;
+    trusted?: boolean;
+    hostname?: string;
+  } = {},
 ): Promise<Harness> {
   const scratch = await fsp.mkdtemp(
     path.join(
@@ -106,6 +111,7 @@ async function makeHarness(
     transport: 'qwen-asr-chat',
   }));
   const serveOpts: ServeOptions = { ...baseOpts };
+  serveOpts.hostname = opts.hostname ?? baseOpts.hostname;
   if ('token' in opts) {
     serveOpts.token = opts.token;
   }
@@ -954,7 +960,7 @@ describe('workspace voice routes', () => {
     expect(h.transcribe).not.toHaveBeenCalled();
   });
 
-  it('POST /workspace/voice/transcribe requires a configured token on loopback defaults', async () => {
+  it('POST /workspace/voice/transcribe runs on trusted loopback without a token', async () => {
     await teardown(h);
     h = await makeHarness({ token: '' });
     await writeVoiceModelSettings(h);
@@ -962,6 +968,20 @@ describe('workspace voice routes', () => {
     const res = await request(h.app)
       .post('/workspace/voice/transcribe?voiceModel=qwen3-asr-flash')
       .set('Host', hostHeader)
+      .set('Content-Type', 'audio/wav')
+      .send(Buffer.from([1, 2, 3, 4]));
+
+    expect(res.status).toBe(200);
+    expect(res.body.text).toBe('hello from audio');
+    expect(h.transcribe).toHaveBeenCalledOnce();
+  });
+
+  it('POST /workspace/voice/transcribe denies a non-trusted tokenless embed', async () => {
+    await teardown(h);
+    h = await makeHarness({ token: '', hostname: '192.0.2.1' });
+
+    const res = await request(h.app)
+      .post('/workspace/voice/transcribe')
       .set('Content-Type', 'audio/wav')
       .send(Buffer.from([1, 2, 3, 4]));
 
