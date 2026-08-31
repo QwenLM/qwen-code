@@ -7,6 +7,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Mock } from 'vitest';
 import type * as fs from 'node:fs/promises';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { GitWorktreeService } from './gitWorktreeService.js';
 import { isCommandAvailable } from '../utils/shell-utils.js';
@@ -99,6 +100,12 @@ describe('GitWorktreeService', () => {
     hoistedMockFsStat.mockResolvedValue({ birthtimeMs: 123 });
     hoistedMockFsRm.mockResolvedValue(undefined);
     hoistedMockFsReadFile.mockResolvedValue('{}');
+  });
+
+  it('expands a home-relative custom base directory', () => {
+    expect(GitWorktreeService.getBaseDir('~/.qwen/arena')).toBe(
+      path.join(os.homedir(), '.qwen', 'arena'),
+    );
   });
 
   it('checkGitAvailable should return an error when git is unavailable', async () => {

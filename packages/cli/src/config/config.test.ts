@@ -1337,6 +1337,36 @@ describe('loadCliConfig', () => {
     });
   });
 
+  it('passes arena run limits from settings to core config unchanged', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const configured = await loadCliConfig(
+      {
+        agents: {
+          arena: {
+            maxRoundsPerAgent: 50,
+            timeoutSeconds: 600,
+          },
+        },
+      },
+      argv,
+    );
+    const unset = await loadCliConfig({ agents: { arena: {} } }, argv);
+
+    expect(configured.getAgentsSettings().arena).toEqual({
+      worktreeBaseDir: undefined,
+      preserveArtifacts: false,
+      maxRoundsPerAgent: 50,
+      timeoutSeconds: 600,
+    });
+    expect(unset.getAgentsSettings().arena).toEqual({
+      worktreeBaseDir: undefined,
+      preserveArtifacts: false,
+      maxRoundsPerAgent: undefined,
+      timeoutSeconds: undefined,
+    });
+  });
+
   it('passes tools.shell.defaultTimeoutMs from settings to core config', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();

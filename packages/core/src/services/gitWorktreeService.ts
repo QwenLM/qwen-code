@@ -18,6 +18,7 @@ import { isNodeError } from '../utils/errors.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { fileExists, isWithinRoot } from '../utils/fileUtils.js';
 import { loadSimpleGit } from '../utils/load-simple-git.js';
+import { expandHomeDir } from '../utils/paths.js';
 import { initRepositoryWithMainBranch } from './gitInit.js';
 
 const debugLogger = createDebugLogger('GIT_WORKTREE_SERVICE');
@@ -260,7 +261,7 @@ export class GitWorktreeService {
    */
   static getBaseDir(customDir?: string): string {
     if (customDir) {
-      return path.resolve(customDir);
+      return path.resolve(expandHomeDir(customDir));
     }
     return path.join(Storage.getGlobalQwenDir(), WORKTREES_DIR);
   }
