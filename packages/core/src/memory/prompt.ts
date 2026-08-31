@@ -35,7 +35,7 @@ export const MEMORY_FRONTMATTER_EXAMPLE: readonly string[] = [
   '```',
 ];
 
-const CATEGORY_SECTION: readonly string[] = [
+export const MEMORY_CATEGORY_SECTION: readonly string[] = [
   '## Memory categories',
   '',
   '`type` controls storage and maintenance. `category` controls the two-level memory overview tree. Choose exactly one category from this fixed list; do not invent nested categories:',
@@ -480,7 +480,7 @@ export function buildManagedAutoMemoryPrompt(
       '',
       ...CONDENSED_WHEN_TO_ACCESS_SECTION,
       '',
-      ...CATEGORY_SECTION,
+      ...MEMORY_CATEGORY_SECTION,
       '',
       ...keywordVocabularySection,
       '',
@@ -573,7 +573,7 @@ export function buildManagedAutoMemoryPrompt(
     '',
     ...TYPES_SECTION_INDIVIDUAL,
     '',
-    ...CATEGORY_SECTION,
+    ...MEMORY_CATEGORY_SECTION,
     '',
     ...(teamSection !== undefined ? buildTeamScopeSection() : []),
     ...WHAT_NOT_TO_SAVE_SECTION,

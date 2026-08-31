@@ -21,6 +21,7 @@ import {
   buildUserConsolidationTaskPrompt,
   planUserAutoMemoryDreamByAgent,
 } from './user-dream-agent-planner.js';
+import { AUTO_MEMORY_TREE_CATEGORIES } from './types.js';
 
 vi.mock('../agents/forkedAgent.js', () => ({ runForkedAgent: vi.fn() }));
 
@@ -66,6 +67,9 @@ describe('User Dream agent planner', () => {
     expect(prompt).toContain('2-6 discriminative retrieval terms');
     expect(prompt).toContain('discriminative retrieval terms or short phrases');
     expect(prompt).toContain('domain-qualified phrases');
+    for (const category of AUTO_MEMORY_TREE_CATEGORIES) {
+      expect(prompt).toContain(category);
+    }
     expect(prompt).not.toContain('Session transcripts:');
   });
 

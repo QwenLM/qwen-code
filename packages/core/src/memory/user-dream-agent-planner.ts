@@ -19,6 +19,7 @@ import { createMemoryScopedAgentConfig } from './memory-scoped-agent-config.js';
 import { DREAM_OPERATIONS_FILENAME } from './dream-operations.js';
 import { scanUserAutoMemoryTopicDocuments } from './scan.js';
 import { renderWriterKeywordVocabularySnapshot } from './writer-keyword-vocabulary.js';
+import { MEMORY_CATEGORY_SECTION } from './prompt.js';
 
 const MAX_TURNS = 8;
 const MAX_TIME_MINUTES = 5;
@@ -53,6 +54,9 @@ export function buildUserConsolidationTaskPrompt(
     '',
     '- List the directory and read relevant topic files.',
     '- Backfill missing `description`, `category`, `usage_scenarios`, and `keywords` from the complete body.',
+    '',
+    ...MEMORY_CATEGORY_SECTION,
+    '',
     '- Keep 2-6 discriminative retrieval terms or short phrases; prefer domain-qualified phrases over generic single words, with at most 2 exact identifiers last.',
     '- Remove duplicate, generic, or corpus-wide hub keywords.',
     '- Refresh `description`, `category`, `usage_scenarios`, and `keywords` whenever body meaning changes.',

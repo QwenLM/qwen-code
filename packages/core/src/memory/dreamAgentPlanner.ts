@@ -22,6 +22,7 @@ import { createMemoryScopedAgentConfig } from './memory-scoped-agent-config.js';
 import { DREAM_OPERATIONS_FILENAME } from './dream-operations.js';
 import { scanAutoMemoryTopicDocuments } from './scan.js';
 import { renderWriterKeywordVocabularySnapshot } from './writer-keyword-vocabulary.js';
+import { MEMORY_CATEGORY_SECTION } from './prompt.js';
 
 const MAX_TURNS = 8;
 const MAX_TIME_MINUTES = 5;
@@ -118,6 +119,9 @@ export function buildConsolidationTaskPrompt(
     '- Fix stale or contradicted facts when clear from the existing content',
     '- Convert relative dates (for example: "yesterday", "last week") to absolute dates when preserving them',
     '- Backfill missing `description`, `category`, `usage_scenarios`, and `keywords` from the complete body.',
+    '',
+    ...MEMORY_CATEGORY_SECTION,
+    '',
     '- Remove duplicate, generic, or corpus-wide hub keywords.',
     '- Keep 2-6 discriminative retrieval terms or short phrases; prefer domain-qualified phrases over generic single words, with at most 2 exact identifiers last.',
     '- Refresh `description`, `category`, `usage_scenarios`, and `keywords` whenever the body meaning changes',

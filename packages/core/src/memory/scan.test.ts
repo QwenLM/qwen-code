@@ -15,6 +15,7 @@ import {
 } from './paths.js';
 import {
   parseAutoMemoryTopicDocument,
+  rereadAutoMemoryDocument,
   scanAllAutoMemoryTopicDocuments,
   scanAutoMemorySnapshot,
   scanAutoMemoryTopicDocuments,
@@ -388,6 +389,29 @@ describe('auto-memory topic scanning', () => {
       false,
     );
     await expect(fs.readFile(outsideFile, 'utf-8')).resolves.toContain('body');
+  });
+
+  it('rejects a memory replaced by an outside symlink after scanning', async () => {
+    const filePath = getAutoMemoryFilePath(
+      projectRoot,
+      path.join('project', 'context.md'),
+    );
+    const outsideFile = path.join(tempDir, 'outside.md');
+    const content =
+      '---\ntype: project\nname: Context\ndescription: Project context\n---\nbody';
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    await fs.writeFile(filePath, content, 'utf-8');
+    await fs.writeFile(
+      outsideFile,
+      content.replace('body', 'outside'),
+      'utf-8',
+    );
+    const [doc] = await scanAutoMemoryTopicDocuments(projectRoot);
+
+    await fs.rm(filePath);
+    await fs.symlink(outsideFile, filePath, 'file');
+
+    await expect(rereadAutoMemoryDocument(doc!)).resolves.toBeNull();
   });
 
   it('also scans project-local memory files when project memory uses runtime storage', async () => {

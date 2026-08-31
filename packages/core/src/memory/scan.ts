@@ -25,7 +25,10 @@ import {
   getTeamAutoMemoryRoot,
   getUserAutoMemoryRoot,
 } from './paths.js';
-import { listTrustedMemoryMarkdownFiles } from './trusted-memory-filesystem.js';
+import {
+  listTrustedMemoryMarkdownFiles,
+  resolveTrustedMemoryFile,
+} from './trusted-memory-filesystem.js';
 
 const debugLogger = createDebugLogger('AUTO_MEMORY_SCAN');
 
@@ -660,9 +663,18 @@ export async function rereadAutoMemoryDocument(
   doc: ScannedAutoMemoryDocument,
 ): Promise<ScannedAutoMemoryDocument | null> {
   try {
+    const root = doc.relativePath
+      .split('/')
+      .reduce((current) => path.dirname(current), doc.filePath);
+    const trustedFile = await resolveTrustedMemoryFile(
+      root,
+      getMemoryRootTrustedAnchor(root),
+      doc.relativePath,
+    );
+    if (!trustedFile) return null;
     const [content, stats] = await Promise.all([
-      fs.readFile(doc.filePath, 'utf-8'),
-      fs.stat(doc.filePath),
+      fs.readFile(trustedFile, 'utf-8'),
+      fs.stat(trustedFile),
     ]);
     return parseAutoMemoryTopicDocument(
       doc.filePath,

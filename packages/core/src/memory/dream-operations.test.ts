@@ -7,11 +7,24 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   applyDreamOperations,
   DREAM_OPERATIONS_FILENAME,
 } from './dream-operations.js';
+
+const pathAliases = vi.hoisted(() => new Map<string, string>());
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...actual,
+    lstat: (filePath: Parameters<typeof actual.lstat>[0]) =>
+      actual.lstat(pathAliases.get(String(filePath)) ?? filePath),
+    realpath: (filePath: Parameters<typeof actual.realpath>[0]) =>
+      actual.realpath(pathAliases.get(String(filePath)) ?? filePath),
+  };
+});
 
 function memory(type: string, name: string): string {
   return `---\ntype: ${type}\nname: ${name}\ndescription: ${name}\nkeywords:\n  - ${name}\n---\n\n${name}\n`;
@@ -28,6 +41,7 @@ describe('Dream operations', () => {
   });
 
   afterEach(async () => {
+    pathAliases.clear();
     await fs.rm(tempDir, { recursive: true, force: true });
   });
 
@@ -175,4 +189,35 @@ describe('Dream operations', () => {
       );
     },
   );
+
+  it('compares delete and target identities after filesystem resolution', async () => {
+    const target = path.join(memoryRoot, 'feedback', 'prefs.md');
+    const source = path.join(memoryRoot, 'feedback', 'other.md');
+    const targetAlias = path.join(memoryRoot, 'feedback', 'PREFS.md');
+    await fs.writeFile(target, memory('feedback', 'Preferences'));
+    await fs.writeFile(source, memory('feedback', 'Other'));
+    pathAliases.set(targetAlias, target);
+    await fs.writeFile(
+      path.join(memoryRoot, DREAM_OPERATIONS_FILENAME),
+      JSON.stringify({
+        version: 1,
+        delete: ['feedback/prefs.md', 'feedback/other.md'],
+        operations: [
+          {
+            type: 'dedupe',
+            sources: ['feedback/other.md'],
+            target: 'feedback/PREFS.md',
+          },
+        ],
+      }),
+    );
+
+    await expect(applyDreamOperations(memoryRoot)).rejects.toThrow(
+      'target cannot also be deleted',
+    );
+    await expect(fs.readFile(target, 'utf-8')).resolves.toContain(
+      'Preferences',
+    );
+    await expect(fs.readFile(source, 'utf-8')).resolves.toContain('Other');
+  });
 });

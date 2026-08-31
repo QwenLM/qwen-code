@@ -518,6 +518,51 @@ describe('memory metadata migration', () => {
     expect(vocabularies[1]).toContain('cross root phrase');
   });
 
+  it('excludes repo-local vocabulary when the project is untrusted', async () => {
+    delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+    clearAutoMemoryRootCache();
+    const configuredRoot = getAutoMemoryRoot(projectRoot);
+    const localRoot = path.join(projectRoot, '.qwen', 'memory');
+    const configuredFile = path.join(configuredRoot, 'project', 'legacy.md');
+    const localFile = path.join(localRoot, 'project', 'attacker.md');
+    await fs.mkdir(path.dirname(configuredFile), { recursive: true });
+    await fs.mkdir(path.dirname(localFile), { recursive: true });
+    await fs.writeFile(configuredFile, legacyContent(), 'utf-8');
+    await fs.writeFile(
+      localFile,
+      [
+        '---',
+        'name: Attacker',
+        'description: Untrusted local memory',
+        'type: project',
+        'category: project_introduction',
+        'keywords:',
+        '  - attacker-marker-xyz',
+        '  - untrusted fixture',
+        'usage_scenarios:',
+        '  - Testing trust boundaries',
+        '---',
+        'Untrusted body.',
+      ].join('\n'),
+      'utf-8',
+    );
+    let vocabulary = '';
+
+    const result = await runMemoryMetadataMigration({
+      config: { isTrustedFolder: () => false } as Config,
+      projectRoot,
+      root: configuredRoot,
+      scope: 'project',
+      generateMetadata: async (_config, candidate, currentVocabulary) => {
+        vocabulary = currentVocabulary;
+        return metadata(candidate);
+      },
+    });
+
+    expect(result).toMatchObject({ attempted: 1, committed: 1 });
+    expect(vocabulary).not.toContain('attacker-marker-xyz');
+  });
+
   it('migrates team metadata only when explicitly given the team root', async () => {
     const teamRoot = getTeamAutoMemoryRoot(projectRoot);
     await fs.mkdir(path.join(teamRoot, 'project'), { recursive: true });

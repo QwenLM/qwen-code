@@ -446,6 +446,7 @@ export async function runMemoryMetadataMigration(params: {
       ? (
           await scanAutoMemorySnapshot(params.projectRoot, {
             scopes: ['project'],
+            trustedProject: params.config.isTrustedFolder?.() ?? false,
             uncapped: true,
           })
         ).docs

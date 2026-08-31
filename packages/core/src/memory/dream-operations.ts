@@ -148,10 +148,9 @@ async function resolveExistingFile(
 }
 
 async function validateTarget(
-  memoryRoot: string,
+  filePath: string,
   relativePath: string,
 ): Promise<void> {
-  const filePath = await resolveExistingFile(memoryRoot, relativePath);
   const content = await fs.readFile(filePath, 'utf-8');
   if (
     !parseAutoMemoryTopicDocument(filePath, content, 0, relativePath, 'project')
@@ -178,10 +177,16 @@ export async function applyDreamOperations(
   try {
     const manifest = parseManifest(JSON.parse(raw) as unknown);
     const deletePaths = manifest.delete.map(normalizeRelativeMarkdownPath);
-    if (new Set(deletePaths).size !== deletePaths.length) {
+    const resolvedDeletes = await Promise.all(
+      deletePaths.map(async (relativePath) => ({
+        relativePath,
+        filePath: await resolveExistingFile(memoryRoot, relativePath),
+      })),
+    );
+    const deleteSet = new Set(resolvedDeletes.map(({ filePath }) => filePath));
+    if (deleteSet.size !== resolvedDeletes.length) {
       throw new Error('Dream operations manifest contains duplicate deletes.');
     }
-    const deleteSet = new Set(deletePaths);
     const dedupedSources = new Set<string>();
     const claimedSources = new Set<string>();
     let splitEntries = 0;
@@ -189,52 +194,58 @@ export async function applyDreamOperations(
     for (const operation of manifest.operations) {
       if (operation.type === 'dedupe') {
         const target = normalizeRelativeMarkdownPath(operation.target);
-        if (deleteSet.has(target)) {
+        const targetFile = await resolveExistingFile(memoryRoot, target);
+        if (deleteSet.has(targetFile)) {
           throw new Error('Dream dedupe target cannot also be deleted.');
         }
-        await validateTarget(memoryRoot, target);
+        await validateTarget(targetFile, target);
         for (const sourceValue of operation.sources) {
           const source = normalizeRelativeMarkdownPath(sourceValue);
-          if (!deleteSet.has(source) || source === target) {
+          const sourceFile = await resolveExistingFile(memoryRoot, source);
+          if (!deleteSet.has(sourceFile) || sourceFile === targetFile) {
             throw new Error('Dream dedupe sources must be deleted files.');
           }
-          if (claimedSources.has(source)) {
+          if (claimedSources.has(sourceFile)) {
             throw new Error('Dream source cannot belong to two operations.');
           }
-          claimedSources.add(source);
-          dedupedSources.add(source);
+          claimedSources.add(sourceFile);
+          dedupedSources.add(sourceFile);
         }
       } else {
         const source = normalizeRelativeMarkdownPath(operation.source);
-        if (!deleteSet.has(source)) {
+        const sourceFile = await resolveExistingFile(memoryRoot, source);
+        if (!deleteSet.has(sourceFile)) {
           throw new Error('Dream split source must be deleted.');
         }
-        if (claimedSources.has(source)) {
+        if (claimedSources.has(sourceFile)) {
           throw new Error('Dream source cannot belong to two operations.');
         }
-        claimedSources.add(source);
+        claimedSources.add(sourceFile);
         const targets = operation.targets.map(normalizeRelativeMarkdownPath);
+        const resolvedTargets = await Promise.all(
+          targets.map(async (relativePath) => ({
+            relativePath,
+            filePath: await resolveExistingFile(memoryRoot, relativePath),
+          })),
+        );
+        const targetFiles = resolvedTargets.map(({ filePath }) => filePath);
         if (
-          new Set(targets).size !== targets.length ||
-          targets.some((target) => deleteSet.has(target))
+          new Set(targetFiles).size !== targetFiles.length ||
+          targetFiles.some((target) => deleteSet.has(target))
         ) {
           throw new Error(
             'Dream split targets must be unique surviving files.',
           );
         }
         await Promise.all(
-          targets.map((target) => validateTarget(memoryRoot, target)),
+          resolvedTargets.map(({ relativePath, filePath }) =>
+            validateTarget(filePath, relativePath),
+          ),
         );
         splitEntries += 1;
       }
     }
 
-    const resolvedDeletes = await Promise.all(
-      deletePaths.map(async (relativePath) => ({
-        relativePath,
-        filePath: await resolveExistingFile(memoryRoot, relativePath),
-      })),
-    );
     for (const { filePath } of resolvedDeletes) {
       abortSignal?.throwIfAborted();
       await fs.unlink(filePath);

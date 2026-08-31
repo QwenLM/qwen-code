@@ -10,6 +10,7 @@ import { runForkedAgent, getCacheSafeParams } from '../agents/forkedAgent.js';
 import { buildFunctionResponseParts } from '../tools/agent/fork-subagent.js';
 import type { Content } from '@google/genai';
 import {
+  MEMORY_CATEGORY_SECTION,
   MEMORY_FRONTMATTER_EXAMPLE,
   TYPES_SECTION_INDIVIDUAL,
   WHAT_NOT_TO_SAVE_SECTION,
@@ -60,6 +61,7 @@ const EXTRACTION_AGENT_SYSTEM_PROMPT = [
   '',
   ...TYPES_SECTION_INDIVIDUAL,
   ...WHAT_NOT_TO_SAVE_SECTION,
+  ...MEMORY_CATEGORY_SECTION,
   '',
   'Memory file format reference:',
   ...MEMORY_FRONTMATTER_EXAMPLE,

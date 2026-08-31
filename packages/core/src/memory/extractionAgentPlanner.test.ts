@@ -15,6 +15,7 @@ import {
 } from './paths.js';
 import { runForkedAgent, getCacheSafeParams } from '../agents/forkedAgent.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { AUTO_MEMORY_TREE_CATEGORIES } from './types.js';
 
 vi.mock('./scan.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./scan.js')>();
@@ -116,6 +117,11 @@ describe('runAutoMemoryExtractionByAgent', () => {
         maxTimeMinutes: 2,
       }),
     );
+    const systemPrompt =
+      vi.mocked(runForkedAgent).mock.calls[0]?.[0].systemPrompt;
+    for (const category of AUTO_MEMORY_TREE_CATEGORIES) {
+      expect(systemPrompt).toContain(category);
+    }
   });
 
   it('threads the configured memory agent timeout into the forked agent', async () => {
