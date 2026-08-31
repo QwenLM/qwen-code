@@ -124,10 +124,8 @@ export function registerUserLanguageRoutes(
 
     // The daemon's own i18n drives server-generated strings; runtimes
     // switch theirs during the fan-out. Best-effort either way.
-    let resolvedLanguage = language;
     try {
       await setLanguageAsync(language);
-      resolvedLanguage = getCurrentLanguage();
     } catch (err) {
       writeStderrLine(
         `qwen serve: POST /language daemon i18n switch failed: ${
@@ -135,6 +133,7 @@ export function registerUserLanguageRoutes(
         }`,
       );
     }
+    const resolvedLanguage = getCurrentLanguage();
 
     // Refresh trusted runtimes. A runtime without a live ACP channel is
     // skipped rather than failed: it has no sessions to refresh and reads

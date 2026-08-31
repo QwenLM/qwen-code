@@ -305,12 +305,12 @@ describe('POST /language', () => {
     const runtime = makeRuntime({ trusted: true, cwd: '/a' });
 
     const { app } = makeApp({ runtimes: [runtime] });
-    const res = await request(app).post('/language').send({ language: 'zh' });
+    const res = await request(app).post('/language').send({ language: 'auto' });
 
     expect(res.status).toBe(200);
     expect(res.body.language).toBe('zh');
     expect(runtime.bridge.setUserLanguage).toHaveBeenCalledWith({
-      language: 'zh',
+      language: 'auto',
       syncOutputLanguage: false,
     });
     expect(runtime.bridge.publishWorkspaceEvent).toHaveBeenCalledWith(
