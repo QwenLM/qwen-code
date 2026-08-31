@@ -203,10 +203,15 @@ jobs:
           fi
           chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
 
+      # actions/checkout reuses a leftover directory whose origin URL
+      # matches and runs git (hooks included) inside it, so the trusted
+      # classifier checkout below must not inherit a residue from an
+      # earlier run on the shared pool; the sweep removes it like the
+      # .qwen names (see the test job's sweep comment for the rule).
       - name: 'Clean stale .qwen before checkout'
         run: |-
           set -uo pipefail
-          for stale_qwen in "$GITHUB_WORKSPACE/.qwen" "$GITHUB_WORKSPACE/.qwen.root-orig"; do
+          for stale_qwen in "$GITHUB_WORKSPACE/.qwen" "$GITHUB_WORKSPACE/.qwen.root-orig" "$GITHUB_WORKSPACE/trusted-ci-classifier"; do
             if [ ! -e "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
               continue
             fi
@@ -392,11 +397,15 @@ jobs:
       # that producer's naming changes or a third residue name appears,
       # update the for-loop list in every sweep copy or the checkout
       # poisoning this sweep exists for silently recurs.
+      # `trusted-ci-classifier` is the third residue name: classify_pr's
+      # base-SHA checkout path. actions/checkout reuses a leftover copy
+      # whose origin URL matches and runs git (hooks included) inside it,
+      # so it is swept rather than warmed.
       - name: 'Clean stale .qwen before checkout'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         run: |-
           set -uo pipefail
-          for stale_qwen in "$GITHUB_WORKSPACE/.qwen" "$GITHUB_WORKSPACE/.qwen.root-orig"; do
+          for stale_qwen in "$GITHUB_WORKSPACE/.qwen" "$GITHUB_WORKSPACE/.qwen.root-orig" "$GITHUB_WORKSPACE/trusted-ci-classifier"; do
             if [ ! -e "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
               continue
             fi
@@ -906,7 +915,7 @@ jobs:
       - name: 'Clean stale .qwen before checkout'
         run: |-
           set -uo pipefail
-          for stale_qwen in "$GITHUB_WORKSPACE/.qwen" "$GITHUB_WORKSPACE/.qwen.root-orig"; do
+          for stale_qwen in "$GITHUB_WORKSPACE/.qwen" "$GITHUB_WORKSPACE/.qwen.root-orig" "$GITHUB_WORKSPACE/trusted-ci-classifier"; do
             if [ ! -e "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
               continue
             fi
@@ -1469,7 +1478,7 @@ jobs:
       - name: 'Clean stale .qwen before checkout'
         run: |-
           set -uo pipefail
-          for stale_qwen in "$GITHUB_WORKSPACE/.qwen" "$GITHUB_WORKSPACE/.qwen.root-orig"; do
+          for stale_qwen in "$GITHUB_WORKSPACE/.qwen" "$GITHUB_WORKSPACE/.qwen.root-orig" "$GITHUB_WORKSPACE/trusted-ci-classifier"; do
             if [ ! -e "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
               continue
             fi
@@ -1690,7 +1699,7 @@ jobs:
       - name: 'Clean stale .qwen before checkout'
         run: |-
           set -uo pipefail
-          for stale_qwen in "$GITHUB_WORKSPACE/.qwen" "$GITHUB_WORKSPACE/.qwen.root-orig"; do
+          for stale_qwen in "$GITHUB_WORKSPACE/.qwen" "$GITHUB_WORKSPACE/.qwen.root-orig" "$GITHUB_WORKSPACE/trusted-ci-classifier"; do
             if [ ! -e "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
               continue
             fi

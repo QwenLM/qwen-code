@@ -586,7 +586,7 @@ jobs:
       - name: 'Clean stale .qwen before checkout'
         run: |-
           set -uo pipefail
-          for stale_qwen in "$GITHUB_WORKSPACE/.qwen" "$GITHUB_WORKSPACE/.qwen.root-orig"; do
+          for stale_qwen in "$GITHUB_WORKSPACE/.qwen" "$GITHUB_WORKSPACE/.qwen.root-orig" "$GITHUB_WORKSPACE/trusted-ci-classifier"; do
             if [ ! -e "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
               continue
             fi
