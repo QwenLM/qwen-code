@@ -696,14 +696,18 @@ await agent('scan package.json')
     const result = await new WorkflowTool(config, {
       dispatch: async () => 'unused',
     })
-      .buildSessionOwnedBackground({
-        script: `phase('Inspect'); return { status: 'ready' };`,
-      })
+      .buildSessionOwnedBackground(
+        {
+          script: `phase('Inspect'); return { status: 'ready' };`,
+        },
+        'review-and-fix',
+      )
       .execute(new AbortController().signal);
 
     expect(result.workflowRunId).toMatch(/^wf_[0-9a-f]+$/);
     const run = registry.get(result.workflowRunId!);
     expect(run?.isBackgrounded).toBe(true);
+    expect(run?.workflowName).toBe('review-and-fix');
     await vi.waitFor(() =>
       expect(registry.get(result.workflowRunId!)?.status).toBe('completed'),
     );

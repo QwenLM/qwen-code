@@ -258,6 +258,7 @@ describe('buildSessionTasksStatus workflow graph', () => {
       tokenBudgetTotal: 8_000,
       perPhaseTokens: new Map(),
       script: '',
+      workflowName: 'review-and-fix',
       sourceRunId: 'wf_source',
       startMode: 'rerun',
       pendingApprovals: [
@@ -292,6 +293,7 @@ describe('buildSessionTasksStatus workflow graph', () => {
       kind: 'workflow',
       id: 'wf_graph',
       toolUseId: 'workflow-call-1',
+      workflowName: 'review-and-fix',
       label: 'review-and-fix',
       currentPhase: 'Review',
       agentsDispatched: 2,

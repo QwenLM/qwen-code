@@ -633,6 +633,11 @@
   stroke-width: 2.4;
 }
 
+.nodeState > svg,
+.nodeState::after {
+  grid-area: 1 / 1;
+}
+
 .node[data-status='running'] .nodeState::after {
   width: 9px;
   height: 9px;

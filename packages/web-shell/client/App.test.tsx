@@ -530,6 +530,7 @@ const {
       } | null,
       latestWorkflowRunsProps: null as {
         onCreateViaChat?: () => void;
+        onWorkflowRunStarted?: () => void;
       } | null,
     },
     rawEnqueuePrompt: vi.fn(() => true),
@@ -1783,7 +1784,10 @@ vi.doMock('./components/dialogs/GoalsDialog', async () => {
 vi.doMock('./components/workflows/WorkflowRunsPage', async () => {
   const React = await import('react');
   return {
-    WorkflowRunsPage: (props: { onCreateViaChat?: () => void }) => {
+    WorkflowRunsPage: (props: {
+      onCreateViaChat?: () => void;
+      onWorkflowRunStarted?: () => void;
+    }) => {
       testState.latestWorkflowRunsProps = props;
       return React.createElement('div', {
         'data-testid': 'workflow-runs-content',
@@ -25526,6 +25530,20 @@ describe('App /goal command', () => {
 });
 
 describe('App workflow history entry', () => {
+  it('refreshes background-task polling when a saved workflow starts', async () => {
+    mockConnection.supportedCommands = { workflowsEnabled: true };
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/workflows';
+    await clickSubmit(container);
+    await flush();
+
+    expect(testState.latestBackgroundTasksRefreshTrigger).toBe(0);
+    act(() => testState.latestWorkflowRunsProps?.onWorkflowRunStarted?.());
+    expect(testState.latestBackgroundTasksRefreshTrigger).toBe(1);
+  });
+
   it('starts a fresh workflow-creation chat from the runs page', async () => {
     mockConnection.supportedCommands = { workflowsEnabled: true };
     const { container } = renderApp();

@@ -359,6 +359,7 @@ export function WorkflowExecutionView({
   }, [selectedId, task]);
 
   useEffect(() => {
+    setSelectedId(initialDispatchId(task));
     setShowComparison(false);
     setShowHistory(false);
     setHistoryFilter('all');
@@ -366,6 +367,9 @@ export function WorkflowExecutionView({
     setComparisonRunId(task.sourceRunId ?? '');
     setHoveredDispatchId('');
     setFocusedDispatchId('');
+    // Polling replaces the task object; reset selection only when the run
+    // changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [task.id, task.sourceRunId]);
 
   useEffect(() => {

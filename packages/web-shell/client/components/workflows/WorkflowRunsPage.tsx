@@ -35,6 +35,7 @@ type SavedWorkflow = NonNullable<
 
 interface WorkflowRunsPageProps {
   onCreateViaChat: () => void;
+  onWorkflowRunStarted?: () => void;
 }
 
 const RECENT_RUNS_LIMIT = 3;
@@ -51,7 +52,10 @@ function isActiveStatus(
   return status === 'running' || status === 'pausing' || status === 'paused';
 }
 
-export function WorkflowRunsPage({ onCreateViaChat }: WorkflowRunsPageProps) {
+export function WorkflowRunsPage({
+  onCreateViaChat,
+  onWorkflowRunStarted,
+}: WorkflowRunsPageProps) {
   const { t } = useI18n();
   const actions = useActions();
   const connection = useConnection();
@@ -62,7 +66,8 @@ export function WorkflowRunsPage({ onCreateViaChat }: WorkflowRunsPageProps) {
   const [loadError, setLoadError] = useState(false);
   const [startingName, setStartingName] = useState<string | null>(null);
   const [startError, setStartError] = useState(false);
-  const [selectedName, setSelectedName] = useState<string | null>(null);
+  const [selectedWorkflow, setSelectedWorkflow] =
+    useState<SavedWorkflow | null>(null);
   const [detailState, setDetailState] =
     useState<SavedWorkflowDetailState | null>(null);
   const [showSource, setShowSource] = useState(false);
@@ -124,7 +129,7 @@ export function WorkflowRunsPage({ onCreateViaChat }: WorkflowRunsPageProps) {
   useEffect(() => {
     setStartingName(null);
     setStartError(false);
-    setSelectedName(null);
+    setSelectedWorkflow(null);
     setDetailState(null);
     setShowSource(false);
   }, [connection.sessionId]);
@@ -149,13 +154,19 @@ export function WorkflowRunsPage({ onCreateViaChat }: WorkflowRunsPageProps) {
   // takes its expanded detail with it rather than showing stale content.
   useEffect(() => {
     if (
-      selectedName !== null &&
-      !savedWorkflows.some((workflow) => workflow.name === selectedName)
+      selectedWorkflow !== null &&
+      !savedWorkflows.some(
+        (workflow) =>
+          workflow.name === selectedWorkflow.name &&
+          workflow.source === selectedWorkflow.source,
+      )
     ) {
-      setSelectedName(null);
+      detailGenerationRef.current += 1;
+      setSelectedWorkflow(null);
       setDetailState(null);
+      setShowSource(false);
     }
-  }, [savedWorkflows, selectedName]);
+  }, [savedWorkflows, selectedWorkflow]);
 
   const loadDetail = useCallback(
     async (name: string) => {
@@ -188,28 +199,32 @@ export function WorkflowRunsPage({ onCreateViaChat }: WorkflowRunsPageProps) {
   );
 
   const toggleDetail = useCallback(
-    (name: string) => {
-      if (selectedName === name) {
+    (workflow: SavedWorkflow) => {
+      if (
+        selectedWorkflow?.name === workflow.name &&
+        selectedWorkflow.source === workflow.source
+      ) {
         detailGenerationRef.current += 1;
-        setSelectedName(null);
+        setSelectedWorkflow(null);
         setDetailState(null);
         setShowSource(false);
         return;
       }
-      setSelectedName(name);
+      setSelectedWorkflow(workflow);
       setShowSource(false);
-      void loadDetail(name);
+      void loadDetail(workflow.name);
     },
-    [loadDetail, selectedName],
+    [loadDetail, selectedWorkflow],
   );
 
   const recentRunsByName = useMemo(() => {
     const byName = new Map<string, DaemonSessionTaskWithWorkflowStatus[]>();
     for (const task of snapshot?.tasks ?? []) {
       if (task.kind !== 'workflow') continue;
-      const runs = byName.get(task.label) ?? [];
+      if (!task.workflowName) continue;
+      const runs = byName.get(task.workflowName) ?? [];
       runs.push(task);
-      byName.set(task.label, runs);
+      byName.set(task.workflowName, runs);
     }
     for (const runs of byName.values()) {
       runs.sort((a, b) => b.startTime - a.startTime);
@@ -225,6 +240,11 @@ export function WorkflowRunsPage({ onCreateViaChat }: WorkflowRunsPageProps) {
     [],
   );
 
+  const handleWorkflowRunStarted = useCallback(() => {
+    setTab('active');
+    onWorkflowRunStarted?.();
+  }, [onWorkflowRunStarted]);
+
   const runSavedWorkflow = useCallback(
     async (workflow: SavedWorkflow) => {
       const sessionId = activeSessionIdRef.current;
@@ -237,7 +257,7 @@ export function WorkflowRunsPage({ onCreateViaChat }: WorkflowRunsPageProps) {
           setStartError(true);
           return;
         }
-        setTab('active');
+        handleWorkflowRunStarted();
         await reload();
       } catch {
         if (activeSessionIdRef.current === sessionId) setStartError(true);
@@ -245,7 +265,7 @@ export function WorkflowRunsPage({ onCreateViaChat }: WorkflowRunsPageProps) {
         if (activeSessionIdRef.current === sessionId) setStartingName(null);
       }
     },
-    [actions, reload],
+    [actions, handleWorkflowRunStarted, reload],
   );
 
   return (
@@ -326,7 +346,9 @@ export function WorkflowRunsPage({ onCreateViaChat }: WorkflowRunsPageProps) {
                 ) : (
                   <div className={styles.savedList}>
                     {savedWorkflows.map((workflow) => {
-                      const expanded = selectedName === workflow.name;
+                      const expanded =
+                        selectedWorkflow?.name === workflow.name &&
+                        selectedWorkflow.source === workflow.source;
                       const detailId = `workflow-saved-detail-${workflow.source}-${workflow.name}`;
                       return (
                         <div
@@ -344,7 +366,7 @@ export function WorkflowRunsPage({ onCreateViaChat }: WorkflowRunsPageProps) {
                               aria-label={t('workflowRuns.detail.toggle', {
                                 name: workflow.name,
                               })}
-                              onClick={() => toggleDetail(workflow.name)}
+                              onClick={() => toggleDetail(workflow)}
                             >
                               <ChevronRightIcon
                                 className={styles.savedChevron}
@@ -420,7 +442,7 @@ export function WorkflowRunsPage({ onCreateViaChat }: WorkflowRunsPageProps) {
                   taskView="workflow-active"
                   emptyLabel={t('workflowRuns.emptyActive')}
                   onTasksChange={handleTasksChange}
-                  onWorkflowRunStarted={() => setTab('active')}
+                  onWorkflowRunStarted={handleWorkflowRunStarted}
                 />
               </TabsContent>
               <TabsContent value="history" className={styles.content}>
@@ -433,7 +455,7 @@ export function WorkflowRunsPage({ onCreateViaChat }: WorkflowRunsPageProps) {
                   taskView="workflow-history"
                   emptyLabel={t('workflowRuns.emptyHistory')}
                   onTasksChange={handleTasksChange}
-                  onWorkflowRunStarted={() => setTab('active')}
+                  onWorkflowRunStarted={handleWorkflowRunStarted}
                 />
               </TabsContent>
             </>

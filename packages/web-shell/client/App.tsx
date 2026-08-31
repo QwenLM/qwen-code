@@ -13315,6 +13315,9 @@ export function App({
                   </div>
                   <div className={styles.fullPageBody}>
                     <WorkflowRunsPage
+                      onWorkflowRunStarted={() =>
+                        setBackgroundTasksRefreshTrigger((value) => value + 1)
+                      }
                       onCreateViaChat={() => {
                         void createNewSession(
                           connection.workspaceCwd ??

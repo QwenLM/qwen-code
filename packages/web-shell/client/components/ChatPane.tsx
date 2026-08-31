@@ -285,7 +285,7 @@ export function ChatPane({
     taskActivityKey,
     connection.status === 'connected',
     0,
-    sessionWorkflowEnabled,
+    connection.supportedCommands?.workflowsEnabled === true,
   );
   const transcriptHistory = useTranscriptHistory();
   const store = useTranscriptStore();

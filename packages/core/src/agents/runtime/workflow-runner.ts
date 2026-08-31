@@ -42,6 +42,7 @@ export interface WorkflowRunnerOptions {
   config: Config;
   signal: AbortSignal;
   toolUseId?: string;
+  workflowName?: string;
   script?: string;
   scriptPath?: string;
   args: unknown;
@@ -231,6 +232,9 @@ export class WorkflowRunner {
         {
           runId,
           toolUseId: options.toolUseId,
+          ...(options.workflowName
+            ? { workflowName: options.workflowName }
+            : {}),
           meta: null,
           status: 'running',
           startTime: Date.now(),

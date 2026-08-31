@@ -227,6 +227,52 @@ describe('useBackgroundTasks', () => {
     expect(latestTasks).toEqual([runningWorkflow]);
   });
 
+  it('keeps polling past a terminal snapshot while workflow activity is live', async () => {
+    taskActivityKey = 'workflow-call:in_progress';
+    workflowsEnabled = true;
+    const terminalWorkflow = {
+      kind: 'workflow' as const,
+      id: 'wf-old',
+      label: 'Old workflow',
+      description: 'Old workflow',
+      status: 'completed' as const,
+      startTime: Date.now() - 100,
+      endTime: Date.now(),
+      runtimeMs: 100,
+      isBackgrounded: false,
+      currentPhase: null,
+      phaseVisits: [],
+      dispatches: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      recentLogs: [],
+      pendingApprovalCount: 0,
+    };
+    const runningWorkflow = {
+      ...terminalWorkflow,
+      id: 'wf-new',
+      status: 'running' as const,
+      endTime: undefined,
+      runtimeMs: 1,
+    };
+    sdkMock.actions.getWorkflowTasks
+      .mockResolvedValueOnce(workflowSnapshot('session-a', [terminalWorkflow]))
+      .mockResolvedValueOnce(workflowSnapshot('session-a', [terminalWorkflow]))
+      .mockResolvedValue(
+        workflowSnapshot('session-a', [terminalWorkflow, runningWorkflow]),
+      );
+
+    await renderHarness();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(6000);
+    });
+
+    expect(sdkMock.actions.getWorkflowTasks).toHaveBeenCalledTimes(3);
+    expect(latestTasks).toContainEqual(runningWorkflow);
+  });
+
   it('only pauses polling for a task panel in the same session', async () => {
     const runningMonitor = monitor('monitor-a', 'running');
     sdkMock.actions.getTasks.mockResolvedValue(

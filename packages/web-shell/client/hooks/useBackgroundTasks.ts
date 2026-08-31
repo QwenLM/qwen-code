@@ -87,7 +87,10 @@ export function useBackgroundTasks(
             return;
           }
           emptyPollsRef.current = 0;
-          if (!hasActiveTask(snapshot.tasks)) {
+          if (
+            !hasActiveTask(snapshot.tasks) &&
+            !hasActiveTaskActivity(taskActivityKey)
+          ) {
             setPollingActive(false);
           }
         })

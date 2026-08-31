@@ -60,6 +60,7 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
 
 const { WorkflowRunsPage } = await import('./WorkflowRunsPage');
 const createViaChatMock = vi.fn();
+const workflowRunStartedMock = vi.fn();
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -80,6 +81,7 @@ afterEach(() => {
   runSavedWorkflowMock.mockReset();
   readSavedWorkflowMock.mockReset();
   createViaChatMock.mockReset();
+  workflowRunStartedMock.mockReset();
   refreshCommandsMock.mockResolvedValue(undefined);
   runSavedWorkflowMock.mockResolvedValue({ started: true });
 });
@@ -92,6 +94,7 @@ function workflowTask(
   return {
     kind: 'workflow',
     id,
+    workflowName: label,
     label,
     description: label,
     status: 'running',
@@ -142,7 +145,10 @@ async function mountPage() {
   await act(async () => {
     root.render(
       <I18nProvider language="en">
-        <WorkflowRunsPage onCreateViaChat={createViaChatMock} />
+        <WorkflowRunsPage
+          onCreateViaChat={createViaChatMock}
+          onWorkflowRunStarted={workflowRunStartedMock}
+        />
       </I18nProvider>,
     );
   });
@@ -261,6 +267,7 @@ describe('WorkflowRunsPage', () => {
     await act(async () => runButton!.click());
 
     expect(runSavedWorkflowMock).toHaveBeenCalledWith('deep-review');
+    expect(workflowRunStartedMock).toHaveBeenCalledOnce();
     const runningTab = Array.from(
       container.querySelectorAll<HTMLButtonElement>('button'),
     ).find((button) => button.textContent?.includes('Running'));
@@ -303,12 +310,15 @@ describe('WorkflowRunsPage', () => {
       sessionId: 'session-1',
       now: 10_000,
       tasks: [
-        workflowTask('workflow-done', 'deep-review', {
+        workflowTask('workflow-done', 'Release readiness', {
+          workflowName: 'deep-review',
           status: 'completed',
           endTime: 8_000,
           isHistorical: true,
         }),
-        workflowTask('workflow-other', 'release-check'),
+        workflowTask('workflow-other', 'Release readiness', {
+          workflowName: 'release-check',
+        }),
       ],
     });
 
@@ -379,6 +389,46 @@ describe('WorkflowRunsPage', () => {
     expect(detail?.querySelector('[data-workflow-source]')).toBeNull();
   });
 
+  it('closes detail when the same name switches saved-workflow scope', async () => {
+    connectionMock.supportedCommands.savedWorkflows = [
+      { name: 'deploy', source: 'project' },
+    ];
+    readSavedWorkflowMock.mockResolvedValue(null);
+    const container = await renderPage({
+      v: 1,
+      sessionId: 'session-1',
+      now: 10_000,
+      tasks: [],
+    });
+    const toggle = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Show details for deploy"]',
+    );
+    await act(async () => toggle!.click());
+    expect(
+      container.querySelector('[data-workflow-detail="deploy"]'),
+    ).not.toBeNull();
+
+    connectionMock.supportedCommands.savedWorkflows = [
+      { name: 'deploy', source: 'user' },
+    ];
+    const root = mounted.at(-1)!.root;
+    await act(async () => {
+      root.render(
+        <I18nProvider language="en">
+          <WorkflowRunsPage
+            onCreateViaChat={createViaChatMock}
+            onWorkflowRunStarted={workflowRunStartedMock}
+          />
+        </I18nProvider>,
+      );
+      await Promise.resolve();
+    });
+
+    expect(
+      container.querySelector('[data-workflow-detail="deploy"]'),
+    ).toBeNull();
+  });
+
   it('ignores a saved-workflow completion from the previous session', async () => {
     connectionMock.supportedCommands.savedWorkflows = [
       { name: 'deep-review', source: 'project' },
@@ -412,7 +462,10 @@ describe('WorkflowRunsPage', () => {
     await act(async () => {
       root.render(
         <I18nProvider language="en">
-          <WorkflowRunsPage onCreateViaChat={createViaChatMock} />
+          <WorkflowRunsPage
+            onCreateViaChat={createViaChatMock}
+            onWorkflowRunStarted={workflowRunStartedMock}
+          />
         </I18nProvider>,
       );
       await Promise.resolve();
@@ -503,7 +556,10 @@ describe('WorkflowRunsPage', () => {
     await act(async () => {
       root.render(
         <I18nProvider language="en">
-          <WorkflowRunsPage onCreateViaChat={createViaChatMock} />
+          <WorkflowRunsPage
+            onCreateViaChat={createViaChatMock}
+            onWorkflowRunStarted={workflowRunStartedMock}
+          />
         </I18nProvider>,
       );
       await Promise.resolve();

@@ -232,6 +232,7 @@ class WorkflowToolInvocation extends BaseToolInvocation<
     private readonly config: Config,
     private readonly toolOptions: WorkflowToolOptions,
     params: WorkflowParams,
+    private readonly workflowName?: string,
   ) {
     super(params);
   }
@@ -370,6 +371,7 @@ class WorkflowToolInvocation extends BaseToolInvocation<
         config: this.config,
         signal,
         toolUseId: this.callId,
+        ...(this.workflowName ? { workflowName: this.workflowName } : {}),
         script: this.params.script,
         scriptPath: this.params.scriptPath,
         args: this.params.args,
@@ -985,6 +987,7 @@ export class WorkflowTool extends BaseDeclarativeTool<
 
   buildSessionOwnedBackground(
     params: Omit<WorkflowParams, 'run_in_background'>,
+    workflowName?: string,
   ): ToolInvocation<WorkflowParams, WorkflowToolResult> {
     const validationError = this.validateToolParams(params);
     if (validationError) {
@@ -995,7 +998,12 @@ export class WorkflowTool extends BaseDeclarativeTool<
         'WorkflowTool: session-owned background runs require an active workflow completion channel.',
       );
     }
-    return this.createInvocation({ ...params, run_in_background: true });
+    return new WorkflowToolInvocation(
+      this.config,
+      this.toolOptions,
+      { ...params, run_in_background: true },
+      workflowName,
+    );
   }
 
   protected override validateToolParamValues(

@@ -453,6 +453,7 @@ import {
 type SessionOwnedWorkflowTool = {
   buildSessionOwnedBackground(
     params: Omit<WorkflowParams, 'run_in_background'>,
+    workflowName?: string,
   ): {
     execute(signal: AbortSignal): Promise<WorkflowToolResult>;
   };
@@ -11240,9 +11241,12 @@ class QwenAgent implements Agent {
                 );
               }
               const result = (await workflowTool
-                .buildSessionOwnedBackground({
-                  scriptPath: savedWorkflow.scriptPath,
-                })
+                .buildSessionOwnedBackground(
+                  {
+                    scriptPath: savedWorkflow.scriptPath,
+                  },
+                  savedWorkflow.name,
+                )
                 .execute(new AbortController().signal)) as WorkflowToolResult;
               const startedTask = result.workflowRunId
                 ? registry.get(result.workflowRunId)
@@ -11306,7 +11310,7 @@ class QwenAgent implements Agent {
                 ...(action === 'retry' ? { resumeFromRunId: task.runId } : {}),
               };
               const result = (await workflowTool
-                .buildSessionOwnedBackground(startParams)
+                .buildSessionOwnedBackground(startParams, task.workflowName)
                 .execute(new AbortController().signal)) as WorkflowToolResult;
               if (action === 'rerun') {
                 const rerunTask = result.workflowRunId

@@ -85,6 +85,7 @@ describe('toSnapshot', () => {
     const s = toSnapshot(
       task({
         description: 'Review and fix',
+        workflowName: 'review-and-fix',
         sourceRunId: 'wf_source',
         startMode: 'rerun',
       }),
@@ -98,6 +99,7 @@ describe('toSnapshot', () => {
     expect(s.result).toEqual({ answer: 42 });
     expect(s).toMatchObject({
       description: 'Review and fix',
+      workflowName: 'review-and-fix',
       sourceRunId: 'wf_source',
       startMode: 'rerun',
     });

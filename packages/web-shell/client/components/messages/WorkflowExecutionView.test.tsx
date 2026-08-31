@@ -244,6 +244,61 @@ describe('WorkflowExecutionView', () => {
     expect(container.querySelector('[data-workflow-prompt]')).not.toBeNull();
   });
 
+  it('resets dispatch selection when a new run reuses dispatch ids', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const firstRun = workflowTask({ id: 'wf-first' });
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <WorkflowExecutionView task={firstRun} />
+        </I18nProvider>,
+      );
+    });
+    const architecture = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent?.includes('Architecture'));
+    act(() => architecture!.click());
+    expect(
+      container.querySelector('[data-selected-dispatch="dispatch-3"]'),
+    ).not.toBeNull();
+
+    const secondRun = workflowTask({
+      id: 'wf-second',
+      dispatches: [
+        ...workflowTask().dispatches,
+        {
+          id: 'dispatch-4',
+          phaseVisitId: 'phase-2',
+          label: 'New failure',
+          prompt: 'Inspect the new failure',
+          status: 'failed',
+          dependsOn: ['dispatch-3'],
+          queuedAt: 1_300,
+          startedAt: 1_310,
+          endedAt: 1_320,
+          error: 'new failure',
+        },
+      ],
+      agentsDispatched: 4,
+      agentsCompleted: 2,
+    });
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <WorkflowExecutionView task={secondRun} />
+        </I18nProvider>,
+      );
+    });
+
+    expect(
+      container.querySelector('[data-selected-dispatch="dispatch-4"]'),
+    ).not.toBeNull();
+    expect(container.textContent).toContain('Inspect the new failure');
+  });
+
   it('focuses direct graph connections on hover and keyboard focus', () => {
     const container = document.createElement('div');
     document.body.appendChild(container);

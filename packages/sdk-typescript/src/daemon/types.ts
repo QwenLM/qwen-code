@@ -2745,6 +2745,8 @@ export interface DaemonSessionWorkflowTaskStatus {
   id: string;
   /** Tool call in the parent session that launched this workflow. */
   toolUseId?: string;
+  /** Saved workflow definition name, when this run came from one. */
+  workflowName?: string;
   /** Restored from the project snapshot store; controls are read-only. */
   isHistorical?: boolean;
   sourceRunId?: string;

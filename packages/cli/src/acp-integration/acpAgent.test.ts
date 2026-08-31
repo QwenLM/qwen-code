@@ -12428,9 +12428,12 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       status: 'running',
       taskId: 'wf_5678efab',
     });
-    expect(buildSessionOwnedBackground).toHaveBeenCalledWith({
-      scriptPath: '/tmp/.qwen/workflows/deep-review.js',
-    });
+    expect(buildSessionOwnedBackground).toHaveBeenCalledWith(
+      {
+        scriptPath: '/tmp/.qwen/workflows/deep-review.js',
+      },
+      'deep-review',
+    );
     expect(execute).toHaveBeenCalledOnce();
 
     mockConnectionState.resolve();
@@ -12446,6 +12449,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       runId: 'wf_1234abcd',
       kind: 'workflow' as const,
       status: 'failed' as 'failed' | 'running',
+      workflowName: 'deep-review',
       script: 'return await agent(args.prompt)',
       args: { prompt: 'retry this path' },
     };
@@ -12488,11 +12492,14 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         action: 'retry',
       }),
     ).resolves.toEqual({ changed: true, status: 'running' });
-    expect(buildSessionOwnedBackground).toHaveBeenCalledWith({
-      script: task.script,
-      args: task.args,
-      resumeFromRunId: task.runId,
-    });
+    expect(buildSessionOwnedBackground).toHaveBeenCalledWith(
+      {
+        script: task.script,
+        args: task.args,
+        resumeFromRunId: task.runId,
+      },
+      task.workflowName,
+    );
     expect(execute).toHaveBeenCalledOnce();
 
     mockConnectionState.resolve();
@@ -12736,6 +12743,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       runId: 'wf_1234abcd',
       kind: 'workflow' as const,
       status: 'failed' as 'failed' | 'running',
+      workflowName: 'deep-review',
       script: 'return await agent(args.prompt)',
       args: { prompt: 'rerun everything' },
     };
@@ -12806,10 +12814,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       status: 'running',
       taskId: rerun.runId,
     });
-    expect(buildSessionOwnedBackground).toHaveBeenCalledWith({
-      script: task.script,
-      args: task.args,
-    });
+    expect(buildSessionOwnedBackground).toHaveBeenCalledWith(
+      {
+        script: task.script,
+        args: task.args,
+      },
+      task.workflowName,
+    );
     expect(execute).toHaveBeenCalledOnce();
     expect(rerun).toMatchObject({
       sourceRunId: task.runId,

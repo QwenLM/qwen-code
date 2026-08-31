@@ -150,7 +150,7 @@ function findWorkflowHistoryTasks(
   task: DaemonSessionTaskStatus,
   tasks: DaemonSessionTaskStatus[],
 ): Array<Extract<DaemonSessionTaskStatus, { kind: 'workflow' }>> {
-  if (task.kind !== 'workflow') return [];
+  if (task.kind !== 'workflow' || !task.workflowName) return [];
   return tasks
     .filter(
       (
@@ -158,7 +158,7 @@ function findWorkflowHistoryTasks(
       ): candidate is Extract<DaemonSessionTaskStatus, { kind: 'workflow' }> =>
         candidate.kind === 'workflow' &&
         candidate.id !== task.id &&
-        candidate.label === task.label,
+        candidate.workflowName === task.workflowName,
     )
     .sort((a, b) => b.startTime - a.startTime);
 }
@@ -574,6 +574,9 @@ export function TasksStatusMessage({
           setActionError(t('workflow.action.unavailable'));
           return;
         }
+        if (action === 'retry' || action === 'rerun') {
+          onWorkflowRunStarted?.();
+        }
         const snapshot = await loadTasks();
         if (
           expectedSessionIdRef.current !== sessionId ||
@@ -585,7 +588,6 @@ export function TasksStatusMessage({
         setAllTasks(snapshot.tasks);
         onTasksChange?.(snapshot);
         if (result.taskId) {
-          onWorkflowRunStarted?.();
           if (nextTasks.some((candidate) => candidate.id === result.taskId)) {
             setSelectedTaskId(result.taskId);
           }
@@ -931,7 +933,9 @@ export function TasksStatusMessage({
                     event.preventDefault();
                     activateTask();
                   }}
-                  onFocus={() => setSelectedTaskId(task.id)}
+                  onFocus={() => {
+                    if (!embedded) setSelectedTaskId(task.id);
+                  }}
                   onMouseEnter={() => {
                     if (!embedded) setSelectedTaskId(task.id);
                   }}
