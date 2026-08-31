@@ -193,22 +193,45 @@ describe('POST /language', () => {
   });
 
   it('accepts auto and preserves it when output language is synced', async () => {
-    const { app, persistSetting } = makeApp();
+    const runtime = makeRuntime({ trusted: true, cwd: '/auto' });
+    const { app, persistSetting } = makeApp({ runtimes: [runtime] });
 
     const res = await request(app)
       .post('/language')
       .send({ language: 'auto', syncOutputLanguage: true });
 
     expect(res.status).toBe(200);
+    expect(res.body.language).toBe('zh');
     expect(res.body.outputLanguage).toBe('auto');
     expect(vi.mocked(updateOutputLanguageFile)).toHaveBeenCalledWith('auto');
+    expect(persistSetting).toHaveBeenCalledTimes(2);
     expect(persistSetting).toHaveBeenCalledWith(
       '/workspace',
       SettingScope.User,
       'general.language',
       'auto',
     );
+    expect(persistSetting).toHaveBeenCalledWith(
+      '/workspace',
+      SettingScope.User,
+      'general.outputLanguage',
+      'auto',
+    );
     expect(vi.mocked(setLanguageAsync)).toHaveBeenCalledWith('auto');
+    expect(runtime.bridge.setUserLanguage).toHaveBeenCalledWith({
+      language: 'auto',
+      syncOutputLanguage: true,
+    });
+    expect(runtime.bridge.publishWorkspaceEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'language_changed',
+        data: expect.objectContaining({
+          language: 'zh',
+          outputLanguage: 'auto',
+          userLevel: true,
+        }),
+      }),
+    );
   });
 
   it('returns 500 persist_error without side effects when persistence fails', async () => {
@@ -224,6 +247,54 @@ describe('POST /language', () => {
 
     expect(res.status).toBe(500);
     expect(res.body.code).toBe('persist_error');
+    expect(runtime.bridge.setUserLanguage).not.toHaveBeenCalled();
+    expect(runtime.bridge.publishWorkspaceEvent).not.toHaveBeenCalled();
+    expect(vi.mocked(setLanguageAsync)).not.toHaveBeenCalled();
+  });
+
+  it('returns 500 persist_error when the output-language file write fails', async () => {
+    vi.mocked(updateOutputLanguageFile).mockImplementationOnce(() => {
+      throw new Error('read-only file system');
+    });
+    const runtime = makeRuntime({ trusted: true, cwd: '/a' });
+    const { app, persistSetting } = makeApp({ runtimes: [runtime] });
+
+    const res = await request(app)
+      .post('/language')
+      .send({ language: 'zh', syncOutputLanguage: true });
+
+    expect(res.status).toBe(500);
+    expect(res.body.code).toBe('persist_error');
+    expect(persistSetting).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(updateOutputLanguageFile)).toHaveBeenCalledWith('Chinese');
+    expect(runtime.bridge.setUserLanguage).not.toHaveBeenCalled();
+    expect(runtime.bridge.publishWorkspaceEvent).not.toHaveBeenCalled();
+    expect(vi.mocked(setLanguageAsync)).not.toHaveBeenCalled();
+  });
+
+  it('returns 500 persist_error when the output-language setting write fails', async () => {
+    const persistSetting = vi.fn(
+      async (
+        _workspace: string,
+        _scope: SettingScope,
+        key: string,
+      ): Promise<void> => {
+        if (key === 'general.outputLanguage') {
+          throw new Error('disk full');
+        }
+      },
+    );
+    const runtime = makeRuntime({ trusted: true, cwd: '/a' });
+    const { app } = makeApp({ runtimes: [runtime], persistSetting });
+
+    const res = await request(app)
+      .post('/language')
+      .send({ language: 'zh', syncOutputLanguage: true });
+
+    expect(res.status).toBe(500);
+    expect(res.body.code).toBe('persist_error');
+    expect(persistSetting).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(updateOutputLanguageFile)).toHaveBeenCalledWith('Chinese');
     expect(runtime.bridge.setUserLanguage).not.toHaveBeenCalled();
     expect(runtime.bridge.publishWorkspaceEvent).not.toHaveBeenCalled();
     expect(vi.mocked(setLanguageAsync)).not.toHaveBeenCalled();
@@ -314,8 +385,19 @@ describe('POST /language', () => {
     expect(refreshed.bridge.publishWorkspaceEvent).toHaveBeenCalledWith(
       expect.objectContaining({
         type: 'language_changed',
+        data: expect.objectContaining({
+          language: 'zh',
+          outputLanguage: 'Chinese',
+          userLevel: true,
+        }),
         originatorClientId: 'client-1',
       }),
+    );
+    expect(noChannel.bridge.publishWorkspaceEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'language_changed' }),
+    );
+    expect(broken.bridge.publishWorkspaceEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'language_changed' }),
     );
   });
 

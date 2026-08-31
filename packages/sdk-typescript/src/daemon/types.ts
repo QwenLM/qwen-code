@@ -2970,7 +2970,7 @@ export interface SetUserLanguageResult {
   refresh: {
     /** Runtimes that applied the switch over a live channel. */
     runtimes: number;
-    /** Sessions refreshed across those runtimes. */
+    /** Sessions attempted (per-session failures are counted in `failed`). */
     sessions: number;
     /** Session-level refresh failures plus failed runtimes. */
     failed: number;

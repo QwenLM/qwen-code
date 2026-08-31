@@ -10,6 +10,7 @@ import { describe, expect, it } from 'vitest';
 import {
   CONDITIONAL_SERVE_FEATURES,
   SERVE_CAPABILITY_REGISTRY,
+  SERVE_PROTOCOL_VERSION,
 } from './capabilities.js';
 
 const START = '<!-- conditional-serve-features:start -->';
@@ -44,7 +45,9 @@ describe('conditional serve capability documentation', () => {
       'utf8',
     );
     const match = index.match(
-      /SERVE_PROTOCOL_VERSION = 'v1'`; (\d+) registered tags; (\d+) conditional tags/,
+      new RegExp(
+        `SERVE_PROTOCOL_VERSION = '${SERVE_PROTOCOL_VERSION}'\`; (\\d+) registered tags; (\\d+) conditional tags`,
+      ),
     );
 
     expect(match).not.toBeNull();

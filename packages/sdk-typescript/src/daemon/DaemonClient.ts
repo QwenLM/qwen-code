@@ -5069,8 +5069,8 @@ export class DaemonClient {
   /**
    * Sessionless user-level language sync (`POST /language`). Succeeds with
    * zero sessions, so hosts can switch language before creating one.
-   * Pre-flight `caps.features.includes('user_language_sync')` — older
-   * daemons 404 the route.
+   * Pre-flight `caps.features.includes('user_language_sync')` — daemons that
+   * predate the route or were built without settings persistence 404.
    */
   async setUserLanguage(
     language: string,
