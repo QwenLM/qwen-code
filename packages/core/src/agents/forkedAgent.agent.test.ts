@@ -36,6 +36,18 @@ vi.mock('../models/content-generator-config.js', async (importOriginal) => {
   };
 });
 
+/**
+ * `runForkedAgent` defers its early-completion abort to a macrotask so the
+ * batch that triggered it finishes emitting first. A probe that reads
+ * `signal.aborted` in the statement after an emit therefore reports `false`
+ * for every run, aborting or not — it has to yield to the same queue first.
+ */
+function flushDeferredAbort(): Promise<void> {
+  return new Promise<void>((resolve) => {
+    setImmediate(resolve);
+  });
+}
+
 function makeRuntimeView(model: string): RuntimeContentGeneratorView {
   return {
     contentGenerator: {} as RuntimeContentGeneratorView['contentGenerator'],
@@ -364,6 +376,712 @@ describe('runForkedAgent (AgentHeadless path) bound-tool isolation', () => {
     }
   });
 
+  it('counts a successful edit as a write and completes early on it', async () => {
+    const parent = new ConfigImpl(baseParams);
+    const parentRegistry = await parent.createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (parent as any).toolRegistry = parentRegistry;
+
+    let executeSignal: AbortSignal | undefined;
+    let abortedAfterEdit: boolean | undefined;
+    const spy = vi.spyOn(AgentHeadless, 'create').mockImplementation(
+      async (
+        _name,
+        _config,
+        _promptConfig,
+        _modelConfig,
+        _runConfig,
+        _toolConfig,
+        eventEmitter,
+      ) =>
+        ({
+          execute: vi.fn().mockImplementation(async (_context, signal) => {
+            executeSignal = signal;
+            const emitter = eventEmitter as AgentEventEmitter;
+            emitter.emit(AgentEventType.TOOL_CALL, {
+              subagentId: 'fork',
+              round: 1,
+              callId: 'edit-1',
+              name: ToolNames.EDIT,
+              args: { file_path: '/repo/.qwen/memories/project.md' },
+              description: 'edit',
+              timestamp: Date.now(),
+            });
+            emitter.emit(AgentEventType.TOOL_RESULT, {
+              subagentId: 'fork',
+              round: 1,
+              callId: 'edit-1',
+              name: ToolNames.EDIT,
+              success: true,
+              timestamp: Date.now(),
+            });
+            await flushDeferredAbort();
+            abortedAfterEdit = signal.aborted;
+          }),
+          getTerminateMode: vi
+            .fn()
+            .mockReturnValue(AgentTerminateMode.CANCELLED),
+          getFinalText: vi.fn().mockReturnValue(''),
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        }) as any,
+    );
+
+    try {
+      const result = await runForkedAgent({
+        name: 'test-fork',
+        systemPrompt: 'You are a test fork.',
+        taskPrompt: 'amend one file',
+        config: parent,
+        completeAfterFirstSuccessfulWrite: true,
+      });
+
+      // Every other test in this file drives the write path with
+      // `write_file`, and the one edit it emits fails — so `edit` counting as
+      // a mutating tool was asserted nowhere on its success side. A remember
+      // agent amending an existing entry takes exactly this path.
+      expect(abortedAfterEdit).toBe(true);
+      expect(executeSignal?.aborted).toBe(true);
+      expect(result.status).toBe('completed');
+      expect(result.terminateReason).toBe(AgentTerminateMode.GOAL);
+      expect(result.filesWritten).toEqual(['/repo/.qwen/memories/project.md']);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('completes after the first successful write without waiting for another model turn', async () => {
+    const parent = new ConfigImpl(baseParams);
+    const parentRegistry = await parent.createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (parent as any).toolRegistry = parentRegistry;
+
+    let executeSignal: AbortSignal | undefined;
+    const spy = vi.spyOn(AgentHeadless, 'create').mockImplementation(
+      async (
+        _name,
+        _config,
+        _promptConfig,
+        _modelConfig,
+        _runConfig,
+        _toolConfig,
+        eventEmitter,
+      ) =>
+        ({
+          execute: vi.fn().mockImplementation(async (_context, signal) => {
+            executeSignal = signal;
+            const emitter = eventEmitter as AgentEventEmitter;
+            emitter.emit(AgentEventType.TOOL_CALL, {
+              subagentId: 'fork',
+              round: 1,
+              callId: 'write-1',
+              name: ToolNames.WRITE_FILE,
+              args: { file_path: '/repo/.qwen/memories/project.md' },
+              description: 'write',
+              timestamp: Date.now(),
+            });
+            emitter.emit(AgentEventType.TOOL_RESULT, {
+              subagentId: 'fork',
+              round: 1,
+              callId: 'write-1',
+              name: ToolNames.WRITE_FILE,
+              success: true,
+              timestamp: Date.now(),
+            });
+          }),
+          getTerminateMode: vi
+            .fn()
+            .mockReturnValue(AgentTerminateMode.CANCELLED),
+          getFinalText: vi.fn().mockReturnValue(''),
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        }) as any,
+    );
+
+    try {
+      const result = await runForkedAgent({
+        name: 'test-fork',
+        systemPrompt: 'You are a test fork.',
+        taskPrompt: 'write one file',
+        config: parent,
+        completeAfterFirstSuccessfulWrite: true,
+      });
+
+      expect(executeSignal?.aborted).toBe(true);
+      expect(result.status).toBe('completed');
+      expect(result.terminateReason).toBe(AgentTerminateMode.GOAL);
+      expect(result.finalText).toBeUndefined();
+      expect(result.filesWritten).toEqual(['/repo/.qwen/memories/project.md']);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('defers the early-completion abort until the current batch finishes emitting', async () => {
+    // agent-core emits a parallel batch's TOOL_RESULT events one by one,
+    // synchronously. Aborting synchronously from inside the first result's
+    // handler re-enters agent-core's onAbort mid-emission, which replaces
+    // the still-unemitted real successes of the same batch with synthetic
+    // cancellation failures — so filesWritten under-reports writes that
+    // actually landed on disk. The abort must be deferred out of the
+    // emitter handler; the rest of the batch still has to emit real
+    // results.
+    const parent = new ConfigImpl(baseParams);
+    const parentRegistry = await parent.createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (parent as any).toolRegistry = parentRegistry;
+
+    let executeSignal: AbortSignal | undefined;
+    let abortedMidBatch: boolean | undefined;
+    const spy = vi.spyOn(AgentHeadless, 'create').mockImplementation(
+      async (
+        _name,
+        _config,
+        _promptConfig,
+        _modelConfig,
+        _runConfig,
+        _toolConfig,
+        eventEmitter,
+      ) =>
+        ({
+          execute: vi.fn().mockImplementation(async (_context, signal) => {
+            executeSignal = signal;
+            const emitter = eventEmitter as AgentEventEmitter;
+            emitter.emit(AgentEventType.TOOL_CALL, {
+              subagentId: 'fork',
+              round: 1,
+              callId: 'write-a',
+              name: ToolNames.WRITE_FILE,
+              args: { file_path: '/repo/.qwen/memories/a.md' },
+              description: 'write',
+              timestamp: Date.now(),
+            });
+            emitter.emit(AgentEventType.TOOL_CALL, {
+              subagentId: 'fork',
+              round: 1,
+              callId: 'write-b',
+              name: ToolNames.WRITE_FILE,
+              args: { file_path: '/repo/.qwen/memories/b.md' },
+              description: 'write',
+              timestamp: Date.now(),
+            });
+            emitter.emit(AgentEventType.TOOL_RESULT, {
+              subagentId: 'fork',
+              round: 1,
+              callId: 'write-a',
+              name: ToolNames.WRITE_FILE,
+              success: true,
+              timestamp: Date.now(),
+            });
+            abortedMidBatch = signal.aborted;
+            emitter.emit(AgentEventType.TOOL_RESULT, {
+              subagentId: 'fork',
+              round: 1,
+              callId: 'write-b',
+              name: ToolNames.WRITE_FILE,
+              success: true,
+              timestamp: Date.now(),
+            });
+            await new Promise((resolve) => setImmediate(resolve));
+          }),
+          getTerminateMode: vi
+            .fn()
+            .mockReturnValue(AgentTerminateMode.CANCELLED),
+          getFinalText: vi.fn().mockReturnValue(''),
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        }) as any,
+    );
+
+    try {
+      const result = await runForkedAgent({
+        name: 'test-fork',
+        systemPrompt: 'You are a test fork.',
+        taskPrompt: 'write two files',
+        config: parent,
+        completeAfterFirstSuccessfulWrite: true,
+      });
+
+      // Mid-batch the run must not be aborted synchronously, and the
+      // deferred abort must land once the batch emission is over.
+      expect(abortedMidBatch).toBe(false);
+      expect(executeSignal?.aborted).toBe(true);
+      expect(result.status).toBe('completed');
+      expect(result.terminateReason).toBe(AgentTerminateMode.GOAL);
+      expect(result.filesWritten).toEqual([
+        '/repo/.qwen/memories/a.md',
+        '/repo/.qwen/memories/b.md',
+      ]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('resolves completed when the deferred self-abort lands inside the next model round', async () => {
+    // The deferred early-completion abort lands after the reasoning loop's
+    // post-batch abort check, inside the next model round, so the in-flight
+    // stream rejects with an AbortError. The goal write is already on disk
+    // at that point — the run must report the completion instead of
+    // surfacing the self-triggered abort as a failure.
+    const parent = new ConfigImpl(baseParams);
+    const parentRegistry = await parent.createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (parent as any).toolRegistry = parentRegistry;
+
+    let executeSignal: AbortSignal | undefined;
+    const spy = vi.spyOn(AgentHeadless, 'create').mockImplementation(
+      async (
+        _name,
+        _config,
+        _promptConfig,
+        _modelConfig,
+        _runConfig,
+        _toolConfig,
+        eventEmitter,
+      ) =>
+        ({
+          execute: vi.fn().mockImplementation(async (_context, signal) => {
+            executeSignal = signal;
+            const emitter = eventEmitter as AgentEventEmitter;
+            emitter.emit(AgentEventType.TOOL_CALL, {
+              subagentId: 'fork',
+              round: 1,
+              callId: 'write-1',
+              name: ToolNames.WRITE_FILE,
+              args: { file_path: '/repo/.qwen/memories/project.md' },
+              description: 'write',
+              timestamp: Date.now(),
+            });
+            emitter.emit(AgentEventType.TOOL_RESULT, {
+              subagentId: 'fork',
+              round: 1,
+              callId: 'write-1',
+              name: ToolNames.WRITE_FILE,
+              success: true,
+              timestamp: Date.now(),
+            });
+            // Yield a macrotask so the queued self-abort fires first,
+            // then fail the way a model stream aborted mid-flight does.
+            await new Promise((resolve) => setImmediate(resolve));
+            throw new DOMException('This operation was aborted', 'AbortError');
+          }),
+          getTerminateMode: vi
+            .fn()
+            .mockReturnValue(AgentTerminateMode.CANCELLED),
+          getFinalText: vi.fn().mockReturnValue(''),
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        }) as any,
+    );
+
+    try {
+      const result = await runForkedAgent({
+        name: 'test-fork',
+        systemPrompt: 'You are a test fork.',
+        taskPrompt: 'write one file',
+        config: parent,
+        completeAfterFirstSuccessfulWrite: true,
+      });
+
+      expect(executeSignal?.aborted).toBe(true);
+      expect(result.status).toBe('completed');
+      expect(result.terminateReason).toBe(AgentTerminateMode.GOAL);
+      expect(result.finalText).toBeUndefined();
+      expect(result.filesWritten).toEqual(['/repo/.qwen/memories/project.md']);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('still rejects when an external abort beats the deferred self-abort', async () => {
+    // An external cancel that fires while the self-abort is queued must
+    // keep rejecting the run: only the run's own early-completion abort
+    // is converted into a completion.
+    const parent = new ConfigImpl(baseParams);
+    const parentRegistry = await parent.createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (parent as any).toolRegistry = parentRegistry;
+
+    const external = new AbortController();
+    const spy = vi.spyOn(AgentHeadless, 'create').mockImplementation(
+      async (
+        _name,
+        _config,
+        _promptConfig,
+        _modelConfig,
+        _runConfig,
+        _toolConfig,
+        eventEmitter,
+      ) =>
+        ({
+          execute: vi.fn().mockImplementation(async (_context, _signal) => {
+            const emitter = eventEmitter as AgentEventEmitter;
+            emitter.emit(AgentEventType.TOOL_CALL, {
+              subagentId: 'fork',
+              round: 1,
+              callId: 'write-1',
+              name: ToolNames.WRITE_FILE,
+              args: { file_path: '/repo/.qwen/memories/project.md' },
+              description: 'write',
+              timestamp: Date.now(),
+            });
+            emitter.emit(AgentEventType.TOOL_RESULT, {
+              subagentId: 'fork',
+              round: 1,
+              callId: 'write-1',
+              name: ToolNames.WRITE_FILE,
+              success: true,
+              timestamp: Date.now(),
+            });
+            // The external cancel wins the race against the queued
+            // self-abort.
+            external.abort();
+            await new Promise((resolve) => setImmediate(resolve));
+            throw new DOMException('This operation was aborted', 'AbortError');
+          }),
+          getTerminateMode: vi
+            .fn()
+            .mockReturnValue(AgentTerminateMode.CANCELLED),
+          getFinalText: vi.fn().mockReturnValue(''),
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        }) as any,
+    );
+
+    try {
+      await expect(
+        runForkedAgent({
+          name: 'test-fork',
+          systemPrompt: 'You are a test fork.',
+          taskPrompt: 'write one file',
+          config: parent,
+          completeAfterFirstSuccessfulWrite: true,
+          abortSignal: external.signal,
+        }),
+      ).rejects.toMatchObject({ name: 'AbortError' });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('reports an external abort that resolves after the write as cancelled', async () => {
+    // Twin of the reject case above. When the external cancel lands on a
+    // batch boundary, agent-core RESOLVES cancelled instead of throwing, so
+    // the catch never runs — the latched early completion then reported the
+    // cancelled run as a successful GOAL. Same user action, opposite outcome
+    // depending only on which event-loop boundary the cancel hit.
+    const parent = new ConfigImpl(baseParams);
+    const parentRegistry = await parent.createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (parent as any).toolRegistry = parentRegistry;
+
+    const external = new AbortController();
+    const spy = vi.spyOn(AgentHeadless, 'create').mockImplementation(
+      async (
+        _name,
+        _config,
+        _promptConfig,
+        _modelConfig,
+        _runConfig,
+        _toolConfig,
+        eventEmitter,
+      ) =>
+        ({
+          execute: vi.fn().mockImplementation(async (_context, _signal) => {
+            const emitter = eventEmitter as AgentEventEmitter;
+            emitter.emit(AgentEventType.TOOL_CALL, {
+              subagentId: 'fork',
+              round: 1,
+              callId: 'write-1',
+              name: ToolNames.WRITE_FILE,
+              args: { file_path: '/repo/.qwen/memories/project.md' },
+              description: 'write',
+              timestamp: Date.now(),
+            });
+            emitter.emit(AgentEventType.TOOL_RESULT, {
+              subagentId: 'fork',
+              round: 1,
+              callId: 'write-1',
+              name: ToolNames.WRITE_FILE,
+              success: true,
+              timestamp: Date.now(),
+            });
+            // The external cancel wins the race, and the run then settles
+            // by RESOLVING on the batch boundary rather than throwing.
+            external.abort();
+            await new Promise((resolve) => setImmediate(resolve));
+          }),
+          getTerminateMode: vi
+            .fn()
+            .mockReturnValue(AgentTerminateMode.CANCELLED),
+          getFinalText: vi.fn().mockReturnValue(''),
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        }) as any,
+    );
+
+    try {
+      const result = await runForkedAgent({
+        name: 'test-fork',
+        systemPrompt: 'You are a test fork.',
+        taskPrompt: 'write one file',
+        config: parent,
+        completeAfterFirstSuccessfulWrite: true,
+        abortSignal: external.signal,
+      });
+
+      expect(result.status).not.toBe('completed');
+      expect(result).toMatchObject({
+        status: 'cancelled',
+        terminateReason: AgentTerminateMode.CANCELLED,
+      });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('keeps running past successful writes the early-completion predicate excludes', async () => {
+    const parent = new ConfigImpl(baseParams);
+    const parentRegistry = await parent.createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (parent as any).toolRegistry = parentRegistry;
+
+    let executeSignal: AbortSignal | undefined;
+    let abortedAfterIndexWrite: boolean | undefined;
+    let abortedAfterEntryWrite: boolean | undefined;
+    const spy = vi.spyOn(AgentHeadless, 'create').mockImplementation(
+      async (
+        _name,
+        _config,
+        _promptConfig,
+        _modelConfig,
+        _runConfig,
+        _toolConfig,
+        eventEmitter,
+      ) =>
+        ({
+          execute: vi.fn().mockImplementation(async (_context, signal) => {
+            executeSignal = signal;
+            const emitter = eventEmitter as AgentEventEmitter;
+            emitter.emit(AgentEventType.TOOL_CALL, {
+              subagentId: 'fork',
+              round: 1,
+              callId: 'write-index',
+              name: ToolNames.WRITE_FILE,
+              args: { file_path: '/repo/.qwen/memories/MEMORY.md' },
+              description: 'write',
+              timestamp: Date.now(),
+            });
+            emitter.emit(AgentEventType.TOOL_RESULT, {
+              subagentId: 'fork',
+              round: 1,
+              callId: 'write-index',
+              name: ToolNames.WRITE_FILE,
+              success: true,
+              timestamp: Date.now(),
+            });
+            // The early-completion abort is deferred to a macrotask
+            // (`setImmediate` in forkedAgent.ts), so a synchronous read here
+            // is `false` no matter what the predicate decided. Flush first,
+            // and the reading becomes a statement about the predicate.
+            await flushDeferredAbort();
+            abortedAfterIndexWrite = signal.aborted;
+            emitter.emit(AgentEventType.TOOL_CALL, {
+              subagentId: 'fork',
+              round: 1,
+              callId: 'write-entry',
+              name: ToolNames.WRITE_FILE,
+              args: { file_path: '/repo/.qwen/memories/project.md' },
+              description: 'write',
+              timestamp: Date.now(),
+            });
+            emitter.emit(AgentEventType.TOOL_RESULT, {
+              subagentId: 'fork',
+              round: 1,
+              callId: 'write-entry',
+              name: ToolNames.WRITE_FILE,
+              success: true,
+              timestamp: Date.now(),
+            });
+            await flushDeferredAbort();
+            abortedAfterEntryWrite = signal.aborted;
+          }),
+          getTerminateMode: vi
+            .fn()
+            .mockReturnValue(AgentTerminateMode.CANCELLED),
+          getFinalText: vi.fn().mockReturnValue(''),
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        }) as any,
+    );
+
+    try {
+      const result = await runForkedAgent({
+        name: 'test-fork',
+        systemPrompt: 'You are a test fork.',
+        taskPrompt: 'write one file',
+        config: parent,
+        completeAfterFirstSuccessfulWrite: (filePath) =>
+          !filePath.endsWith('MEMORY.md'),
+      });
+
+      // The excluded MEMORY.md write must not abort the run; the entry
+      // write that follows must.
+      //
+      // Both probes are read after the deferred abort has had a macrotask
+      // to land. The `true` reading is what makes the `false` one mean
+      // anything: it proves the flush is long enough to observe an abort
+      // that did fire, so `false` after the excluded write is the predicate
+      // holding the run open rather than the probe reading too early.
+      expect(abortedAfterEntryWrite).toBe(true);
+      expect(abortedAfterIndexWrite).toBe(false);
+      expect(executeSignal?.aborted).toBe(true);
+      expect(result.status).toBe('completed');
+      expect(result.terminateReason).toBe(AgentTerminateMode.GOAL);
+      expect(result.filesWritten).toEqual([
+        '/repo/.qwen/memories/MEMORY.md',
+        '/repo/.qwen/memories/project.md',
+      ]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('keeps running past a failed write when completing after the first successful write', async () => {
+    const parent = new ConfigImpl(baseParams);
+    const parentRegistry = await parent.createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (parent as any).toolRegistry = parentRegistry;
+
+    let executeSignal: AbortSignal | undefined;
+    let abortedAfterFailedWrite: boolean | undefined;
+    let abortedAfterRetryWrite: boolean | undefined;
+    const spy = vi.spyOn(AgentHeadless, 'create').mockImplementation(
+      async (
+        _name,
+        _config,
+        _promptConfig,
+        _modelConfig,
+        _runConfig,
+        _toolConfig,
+        eventEmitter,
+      ) =>
+        ({
+          execute: vi.fn().mockImplementation(async (_context, signal) => {
+            executeSignal = signal;
+            const emitter = eventEmitter as AgentEventEmitter;
+            emitter.emit(AgentEventType.TOOL_CALL, {
+              subagentId: 'fork',
+              round: 1,
+              callId: 'write-failed',
+              name: ToolNames.WRITE_FILE,
+              args: { file_path: '/repo/.qwen/memories/project.md' },
+              description: 'write',
+              timestamp: Date.now(),
+            });
+            emitter.emit(AgentEventType.TOOL_RESULT, {
+              subagentId: 'fork',
+              round: 1,
+              callId: 'write-failed',
+              name: ToolNames.WRITE_FILE,
+              success: false,
+              timestamp: Date.now(),
+            });
+            // Same deferral as the twin above — read after the flush, or
+            // the probe reports `false` for a run that did abort.
+            await flushDeferredAbort();
+            abortedAfterFailedWrite = signal.aborted;
+            emitter.emit(AgentEventType.TOOL_CALL, {
+              subagentId: 'fork',
+              round: 2,
+              callId: 'write-retry',
+              name: ToolNames.WRITE_FILE,
+              args: { file_path: '/repo/.qwen/memories/project.md' },
+              description: 'write',
+              timestamp: Date.now(),
+            });
+            emitter.emit(AgentEventType.TOOL_RESULT, {
+              subagentId: 'fork',
+              round: 2,
+              callId: 'write-retry',
+              name: ToolNames.WRITE_FILE,
+              success: true,
+              timestamp: Date.now(),
+            });
+            await flushDeferredAbort();
+            abortedAfterRetryWrite = signal.aborted;
+          }),
+          getTerminateMode: vi
+            .fn()
+            .mockReturnValue(AgentTerminateMode.CANCELLED),
+          getFinalText: vi.fn().mockReturnValue(''),
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        }) as any,
+    );
+
+    try {
+      const result = await runForkedAgent({
+        name: 'test-fork',
+        systemPrompt: 'You are a test fork.',
+        taskPrompt: 'write one file',
+        config: parent,
+        completeAfterFirstSuccessfulWrite: true,
+      });
+
+      // The failed write must not trigger early completion; the retry's
+      // successful write must. Same pairing as the twin above: without the
+      // `true` reading taken after the same flush, `false` here is satisfied
+      // by a probe that simply ran before the deferred abort landed.
+      expect(abortedAfterRetryWrite).toBe(true);
+      expect(abortedAfterFailedWrite).toBe(false);
+      expect(executeSignal?.aborted).toBe(true);
+      expect(result.status).toBe('completed');
+      expect(result.terminateReason).toBe(AgentTerminateMode.GOAL);
+      expect(result.filesWritten).toEqual(['/repo/.qwen/memories/project.md']);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('keeps cancellation as cancellation when no write succeeded', async () => {
+    const parent = new ConfigImpl(baseParams);
+    const parentRegistry = await parent.createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (parent as any).toolRegistry = parentRegistry;
+    const spy = vi.spyOn(AgentHeadless, 'create').mockResolvedValue({
+      execute: vi.fn().mockResolvedValue(undefined),
+      getTerminateMode: vi.fn().mockReturnValue(AgentTerminateMode.CANCELLED),
+      getFinalText: vi.fn().mockReturnValue(''),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+
+    try {
+      const result = await runForkedAgent({
+        name: 'test-fork',
+        systemPrompt: 'You are a test fork.',
+        taskPrompt: 'write one file',
+        config: parent,
+        completeAfterFirstSuccessfulWrite: true,
+      });
+
+      expect(result.status).toBe('cancelled');
+      expect(result.filesWritten).toEqual([]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('binds EditTool from the wrapper registry to the wrapper Config (not the parent)', async () => {
     const parent = new ConfigImpl(baseParams);
     const parentRegistry = await parent.createToolRegistry(undefined, {
@@ -414,7 +1132,16 @@ describe('runForkedAgent (AgentHeadless path) bound-tool isolation', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (parent as any).toolRegistry = parentRegistry;
 
-    const scopedPm = { id: 'scoped-pm-marker' } as never;
+    // Production memory-scoped overrides implement the full registration
+    // surface (MemoryScopedPermissionManager in memory-scoped-agent-config.ts
+    // picks getToolRegistrationStatus): createToolRegistry's registerLazy
+    // resolves the PM through getPermissionManager() and consults it at
+    // registration time (#10075), so the stub must answer that call or the
+    // bare-mode factories are skipped and ensureTool resolves undefined.
+    const scopedPm = {
+      id: 'scoped-pm-marker',
+      getToolRegistrationStatus: async () => 'registered' as const,
+    } as never;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const scopedConfig = Object.create(parent) as any;
     scopedConfig.getPermissionManager = () => scopedPm;

@@ -7,7 +7,7 @@ import {
   useWorkspaceActions,
   type DaemonFileStat,
   type DaemonWorkspaceActions,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import { useEffect, useMemo, useRef } from 'react';
 
 export type ArtifactWorkspaceActions = Pick<
