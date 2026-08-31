@@ -1096,6 +1096,10 @@ vi.mock('./components/sidebar/WebShellSidebar', async () => {
       onOpenSplitView?: () => void;
       onMobileClose?: () => void;
       onNewSession?: () => Promise<boolean> | boolean;
+      onNewWorktreeSession?: (
+        workspaceCwd?: string,
+      ) => Promise<boolean> | boolean | void;
+      onSelectWorkspace?: (workspaceCwd: string | undefined) => void;
       onLoadSession?: (sessionId: string) => Promise<void> | void;
       onSelectCurrentSession?: () => void;
       onSessionsDeleted?: (sessionIds: string[]) => void;
@@ -1130,6 +1134,33 @@ vi.mock('./components/sidebar/WebShellSidebar', async () => {
             onClick: props.onNewSession,
           },
           'new session',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'new-worktree-session',
+            type: 'button',
+            onClick: () => void props.onNewWorktreeSession?.(),
+          },
+          'new worktree session',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'new-worktree-session-other',
+            type: 'button',
+            onClick: () => void props.onNewWorktreeSession?.('/other'),
+          },
+          'new worktree session in other',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'select-other-workspace',
+            type: 'button',
+            onClick: () => props.onSelectWorkspace?.('/other'),
+          },
+          'select other workspace',
         ),
         React.createElement(
           'button',
@@ -11074,6 +11105,368 @@ describe('App session callbacks', () => {
 
     expect(mockSessionActions.createSession).toHaveBeenCalledWith(
       expect.objectContaining({ worktree: { slug: 'feat-a' } }),
+    );
+  });
+
+  it('keeps an armed worktree intent across a transient git-status failure', async () => {
+    mockConnection.sessionId = undefined;
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    };
+    const workspaceGit = vi.fn().mockResolvedValue({ branch: 'main' });
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit,
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    renderApp();
+    await flush();
+    await flush();
+
+    const intentChange = testState.latestChatEditorProps?.onGitModeIntentChange;
+    act(() => {
+      intentChange?.({ mode: 'worktree', slug: 'feat-a' });
+    });
+    await flush();
+    expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+      mode: 'worktree',
+      slug: 'feat-a',
+    });
+
+    // One refetch round fails (daemon busy, network blip): the status is
+    // transiently unknown, but the requested worktree must not silently
+    // degrade to a plain session once the status recovers.
+    workspaceGit.mockRejectedValueOnce(new Error('daemon busy'));
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await flush();
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await flush();
+    await flush();
+    expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+      mode: 'worktree',
+      slug: 'feat-a',
+    });
+  });
+
+  it('arms the worktree intent from the sidebar entry, unless another session start intervened', async () => {
+    mockConnection.sessionId = undefined;
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    };
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    const { container } = renderApp();
+    await flush();
+    await flush();
+    const worktreeButton = container.querySelector<HTMLButtonElement>(
+      '[data-testid="new-worktree-session"]',
+    )!;
+    const newSessionButton = container.querySelector<HTMLButtonElement>(
+      '[data-testid="new-session"]',
+    )!;
+
+    // Alone: the draft is armed for a worktree.
+    await act(async () => {
+      worktreeButton.click();
+      await Promise.resolve();
+    });
+    await flush();
+    await flush();
+    expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+      mode: 'worktree',
+    });
+
+    // A plain new task started while the worktree creation is still in
+    // flight owns the draft; the late arm must not land on it.
+    await act(async () => {
+      worktreeButton.click();
+      newSessionButton.click();
+      await Promise.resolve();
+    });
+    await flush();
+    await flush();
+    expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+      mode: 'current',
+    });
+  });
+
+  it('gives a prompt submitted while the worktree draft is still clearing the worktree', async () => {
+    mockConnection.sessionId = undefined;
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    };
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    let resolveClear: () => void = () => {};
+    mockSessionActions.clearSession.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveClear = resolve;
+        }),
+    );
+    const { container } = renderApp();
+    await flush();
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="new-worktree-session"]',
+        )!
+        .click();
+      await Promise.resolve();
+    });
+    // The clear is still in flight; the intent is already the draft's.
+    expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+      mode: 'worktree',
+    });
+    await act(async () => {
+      resolveClear();
+      await Promise.resolve();
+    });
+    await flush();
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('first prompt');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.createSession).toHaveBeenCalled();
+      });
+    });
+    expect(mockSessionActions.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ worktree: { slug: undefined } }),
+    );
+  });
+
+  it('drops the worktree intent when the draft is re-targeted before it settles', async () => {
+    mockConnection.sessionId = undefined;
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+        { id: 'other', cwd: '/other', primary: false, trusted: true },
+      ],
+    };
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    let resolveClear: () => void = () => {};
+    mockSessionActions.clearSession.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveClear = resolve;
+        }),
+    );
+    const { container } = renderApp();
+    await flush();
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="new-worktree-session"]',
+        )!
+        .click();
+      await Promise.resolve();
+    });
+    // The sidebar re-targets the draft while the clear is still in flight.
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="select-other-workspace"]',
+        )!
+        .click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      resolveClear();
+      await Promise.resolve();
+    });
+    await flush();
+    await flush();
+    expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+      mode: 'current',
+    });
+  });
+
+  it('keeps the worktree intent when the composer re-selects the draft workspace', async () => {
+    mockConnection.sessionId = undefined;
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+        { id: 'other', cwd: '/other', primary: false, trusted: true },
+      ],
+    };
+    mockWorkspace.client.workspaceByCwd.mockImplementation((cwd: string) => ({
+      workspaceGit: vi
+        .fn()
+        .mockResolvedValue({ v: 2, workspaceCwd: cwd, branch: 'main' }),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    renderApp();
+    await flush();
+    await flush();
+    act(() => {
+      testState.latestChatEditorProps?.onSelectWorkspace?.('/other');
+    });
+    await flush();
+    await flush();
+    act(() => {
+      testState.latestChatEditorProps?.onGitModeIntentChange?.({
+        mode: 'worktree',
+        slug: 'feat-a',
+      });
+    });
+    await flush();
+    expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+      mode: 'worktree',
+      slug: 'feat-a',
+    });
+
+    // Radix fires onValueChange for the already-checked radio row too; a
+    // re-select of the draft's own workspace changes nothing.
+    act(() => {
+      testState.latestChatEditorProps?.onSelectWorkspace?.('/other');
+    });
+    await flush();
+    await flush();
+    expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+      mode: 'worktree',
+      slug: 'feat-a',
+    });
+
+    // A real switch still drops it.
+    act(() => {
+      testState.latestChatEditorProps?.onSelectWorkspace?.(undefined);
+    });
+    await flush();
+    await flush();
+    expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+      mode: 'current',
+    });
+  });
+
+  it("keeps a worktree intent armed for another workspace across the draft's stale no-branch status", async () => {
+    mockConnection.sessionId = undefined;
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+        { id: 'other', cwd: '/other', primary: false, trusted: true },
+      ],
+    };
+    // The primary is not a repository; the daemon answers a definitive
+    // no-branch status for it. The secondary is a repo on main.
+    mockWorkspace.client.workspaceByCwd.mockImplementation((cwd: string) => ({
+      workspaceGit: vi
+        .fn()
+        .mockResolvedValue(
+          cwd === '/other'
+            ? { v: 2, workspaceCwd: '/other', branch: 'main' }
+            : { v: 2, workspaceCwd: '/workspace', branch: null },
+        ),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    const { container } = renderApp();
+    await flush();
+    await flush();
+    expect(testState.latestChatEditorProps?.gitModeIntent).toBeUndefined();
+
+    // "New worktree task" on the secondary's row while the draft still
+    // holds the primary's no-branch answer.
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="new-worktree-session-other"]',
+        )!
+        .click();
+      await Promise.resolve();
+    });
+    await flush();
+    await flush();
+    expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+      mode: 'worktree',
+    });
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit('first prompt');
+    });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.createSession).toHaveBeenCalled();
+    });
+    expect(mockSessionActions.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workspaceCwd: '/other',
+        worktree: { slug: undefined },
+      }),
+    );
+  });
+
+  it("clears the worktree intent once the draft workspace's own status turns definitively no-branch", async () => {
+    mockConnection.sessionId = undefined;
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    };
+    const workspaceGit = vi
+      .fn()
+      .mockResolvedValue({ v: 2, workspaceCwd: '/workspace', branch: 'main' });
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit,
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    renderApp();
+    await flush();
+    await flush();
+    act(() => {
+      testState.latestChatEditorProps?.onGitModeIntentChange?.({
+        mode: 'worktree',
+        slug: 'feat-a',
+      });
+    });
+    await flush();
+    expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+      mode: 'worktree',
+      slug: 'feat-a',
+    });
+
+    // The repository is gone (.git removed): the daemon now answers a
+    // definitive no-branch status for this very workspace.
+    workspaceGit.mockResolvedValue({
+      v: 2,
+      workspaceCwd: '/workspace',
+      branch: null,
+    });
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await flush();
+    await flush();
+    // The chip is gone with the branch; the reset is observable on the
+    // session the next prompt creates.
+    expect(testState.latestChatEditorProps?.gitModeIntent).toBeUndefined();
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit('first prompt');
+    });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.createSession).toHaveBeenCalled();
+    });
+    expect(mockSessionActions.createSession).toHaveBeenCalledWith(
+      expect.not.objectContaining({ worktree: expect.anything() }),
     );
   });
 
@@ -21716,8 +22109,11 @@ describe('App session callbacks', () => {
     expect(testState.latestModelManagement?.busy).toBe(false);
   });
 
-  it('does not let an A-to-B-to-A deletion clear a newer selection', async () => {
-    const deletion = deferred<undefined>();
+  it('does not let an A-to-B-to-A deletion affect the newer owner', async () => {
+    const deletion = deferred<{
+      removed: true;
+      runtimeSync: { status: 'failed' };
+    }>();
     const selection = deferred<void>();
     mockWorkspaceActions.deleteModel.mockReturnValueOnce(deletion.promise);
     mockSessionActions.setModel.mockReturnValueOnce(selection.promise);
@@ -21753,16 +22149,137 @@ describe('App session callbacks', () => {
     expect(testState.latestModelManagement?.busy).toBe(true);
 
     await act(async () => {
-      deletion.resolve(undefined);
+      deletion.resolve({
+        removed: true,
+        runtimeSync: { status: 'failed' },
+      });
       await deletion.promise;
     });
     expect(testState.latestModelManagement?.busy).toBe(true);
+    expect(mockStore.dispatch).not.toHaveBeenCalledWith([
+      {
+        type: 'status',
+        text: 'The change was saved, but running sessions could not be refreshed. Restart qwen serve before using the updated model list.',
+      },
+    ]);
 
     await act(async () => {
       selection.resolve();
       await selection.promise;
     });
     expect(testState.latestModelManagement?.busy).toBe(false);
+  });
+
+  it('warns when a deleted model was saved but runtime sync failed', async () => {
+    mockWorkspaceActions.deleteModel.mockResolvedValueOnce({
+      removed: true,
+      runtimeSync: { status: 'failed' },
+    });
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+
+    await act(async () => {
+      testState.latestModelManagement?.onDeleteModel?.({
+        authType: 'api-key',
+        modelId: 'old-model',
+      });
+      await Promise.resolve();
+    });
+
+    expect(mockStore.dispatch).toHaveBeenCalledWith([
+      {
+        type: 'status',
+        text: 'The change was saved, but running sessions could not be refreshed. Restart qwen serve before using the updated model list.',
+      },
+    ]);
+  });
+
+  it('does not publish stale deletion warnings into a replacement session', async () => {
+    const deletion = deferred<{
+      removed: true;
+      requiresRestart: true;
+      runtimeSync: { status: 'failed' };
+    }>();
+    mockWorkspaceActions.deleteModel.mockReturnValueOnce(deletion.promise);
+    const { container, rerender } = renderApp();
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+    act(() =>
+      testState.latestModelManagement?.onDeleteModel?.({
+        authType: 'api-key',
+        modelId: 'old-model',
+      }),
+    );
+
+    act(() => {
+      testState.ownerVersion += 1;
+      mockConnection.sessionId = 'session-2';
+      rerender();
+    });
+    await flush();
+    await act(async () => {
+      deletion.resolve({
+        removed: true,
+        requiresRestart: true,
+        runtimeSync: { status: 'failed' },
+      });
+      await deletion.promise;
+    });
+
+    expect(mockStore.dispatch).not.toHaveBeenCalledWith([
+      {
+        type: 'status',
+        text: 'The change was saved, but running sessions could not be refreshed. Restart qwen serve before using the updated model list.',
+      },
+    ]);
+    expect(mockStore.dispatch).not.toHaveBeenCalledWith([
+      {
+        type: 'status',
+        text: 'This change requires a restart to take effect.',
+      },
+    ]);
+  });
+
+  it('does not report a stale deletion error in a replacement session', async () => {
+    const deletion = deferred<never>();
+    mockWorkspaceActions.deleteModel.mockReturnValueOnce(deletion.promise);
+    const consoleError = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
+    const { container, rerender } = renderApp();
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+    act(() =>
+      testState.latestModelManagement?.onDeleteModel?.({
+        authType: 'api-key',
+        modelId: 'old-model',
+      }),
+    );
+
+    act(() => {
+      testState.ownerVersion += 1;
+      mockConnection.sessionId = 'session-2';
+      rerender();
+    });
+    await flush();
+    await act(async () => {
+      deletion.reject(new Error('delete failed'));
+      await deletion.promise.catch(() => undefined);
+    });
+
+    expect(consoleError).not.toHaveBeenCalledWith(
+      '[web-shell]',
+      expect.stringContaining('delete failed'),
+      expect.anything(),
+    );
+    consoleError.mockRestore();
   });
 
   it('sends /model --fast with --global when the fast-model picker is opened from the User tab', async () => {
