@@ -16,7 +16,7 @@ import {
   execFileSync,
   type ExecFileOptions,
 } from 'node:child_process';
-import { accessSync, constants as fsConstants, existsSync } from 'node:fs';
+import { accessSync, constants as fsConstants } from 'node:fs';
 
 const SHELL_TOOL_NAMES = ['run_shell_command', 'ShellTool'];
 
@@ -105,18 +105,33 @@ export interface ShellConfiguration {
   shell: ShellType;
 }
 
-let cachedBashPath: string | null | undefined;
+let cachedBashPath: string | undefined;
 const ENV_ASSIGNMENT_REGEX = /^[A-Za-z_][A-Za-z0-9_]*=/;
 
 /**
  * Attempts to find the Git Bash executable path on Windows.
  * Checks common installation locations and PATH.
- * @returns The path to bash.exe if found, or null when Git Bash is absent.
+ * @returns The path to bash.exe if found, or 'bash' as fallback.
  */
-export function findGitBashPath(): string | null {
+function findGitBashPath(): string {
   // Return cached result if available
-  if (cachedBashPath !== undefined) {
+  if (cachedBashPath) {
     return cachedBashPath;
+  }
+
+  // Search in PATH directories
+  const pathEnv = process.env['PATH'] || '';
+  const pathDirs = pathEnv.split(path.delimiter).filter(Boolean);
+
+  for (const dir of pathDirs) {
+    const bashPath = path.join(dir, 'bash.exe');
+    try {
+      accessSync(bashPath, fsConstants.X_OK);
+      cachedBashPath = bashPath;
+      return bashPath;
+    } catch {
+      // Continue searching
+    }
   }
 
   // Check common Git Bash installation locations
@@ -150,35 +165,9 @@ export function findGitBashPath(): string | null {
     }
   }
 
-  // A bare bash.exe on PATH may be the WSL launcher. Require a neighboring
-  // Git installation before treating a custom PATH entry as Git Bash/MSYS.
-  const pathEnv = process.env['PATH'] || '';
-  const pathDirs = pathEnv.split(path.delimiter).filter(Boolean);
-  for (const dir of pathDirs) {
-    const bashPath = path.join(dir, 'bash.exe');
-    const gitPaths = [
-      path.join(dir, 'git.exe'),
-      path.join(dir, '..', 'cmd', 'git.exe'),
-      path.join(dir, '..', '..', 'cmd', 'git.exe'),
-    ];
-    try {
-      accessSync(bashPath, fsConstants.X_OK);
-      if (!gitPaths.some((gitPath) => existsSync(gitPath))) {
-        continue;
-      }
-      cachedBashPath = bashPath;
-      return bashPath;
-    } catch {
-      // Continue searching
-    }
-  }
-
-  cachedBashPath = null;
-  return null;
-}
-
-export function _resetShellUtilsCachesForTest(): void {
-  cachedBashPath = undefined;
+  // Fallback to 'bash' and let the system handle it
+  cachedBashPath = 'bash';
+  return 'bash';
 }
 
 /**
@@ -191,21 +180,19 @@ export function _resetShellUtilsCachesForTest(): void {
  */
 export function getShellConfiguration(): ShellConfiguration {
   if (isWindows()) {
-    // Prefer Git Bash whenever Git for Windows is installed. This gives the
-    // model one predictable Bash surface even when Qwen Code was launched
-    // from cmd.exe or PowerShell.
+    // Detect Git Bash / MSYS2 / MinTTY environments
+    // These environments should use bash instead of cmd/PowerShell
     const msystem = process.env['MSYSTEM'];
     const term = process.env['TERM'] || '';
-    const isGitBashEnvironment =
+    const isGitBash =
       msystem?.startsWith('MINGW') ||
       msystem?.startsWith('MSYS') ||
       term.includes('msys') ||
       term.includes('cygwin');
-    const gitBashPath = findGitBashPath();
 
-    if (gitBashPath || isGitBashEnvironment) {
+    if (isGitBash) {
       return {
-        executable: gitBashPath ?? 'bash',
+        executable: findGitBashPath(),
         argsPrefix: ['-c'],
         shell: 'bash',
       };

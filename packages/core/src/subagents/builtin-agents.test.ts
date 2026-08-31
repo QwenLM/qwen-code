@@ -99,9 +99,13 @@ describe('BuiltinAgentRegistry', () => {
       expect(exploreAgent?.tools).not.toContain(ToolNames.GREP);
       expect(exploreAgent?.tools).not.toContain(ToolNames.GLOB);
       expect(exploreAgent?.systemPrompt).toContain('`rg --files`');
+      // review-agent keeps the dedicated search tools either way: the review
+      // skill document enumerates its exact tool set for the orchestrator to
+      // judge against, and a static document cannot track a list that varies
+      // with whether Bash hosts the search tools.
       expect(reviewAgent?.tools).toContain(ToolNames.SHELL);
-      expect(reviewAgent?.tools).not.toContain(ToolNames.GREP);
-      expect(reviewAgent?.tools).not.toContain(ToolNames.GLOB);
+      expect(reviewAgent?.tools).toContain(ToolNames.GREP);
+      expect(reviewAgent?.tools).toContain(ToolNames.GLOB);
     });
 
     // Regression for #7126: Explore is a read-only search worker that

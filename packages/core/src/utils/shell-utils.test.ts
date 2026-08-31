@@ -5,11 +5,7 @@
  */
 
 import { expect, describe, it, beforeEach, vi, afterEach } from 'vitest';
-import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import os from 'node:os';
-import path from 'node:path';
 import {
-  _resetShellUtilsCachesForTest,
   buildShellExecWarnings,
   checkArgumentSafety,
   checkCommandPermissions,
@@ -35,19 +31,14 @@ import type { AnyToolInvocation } from '../tools/tools.js';
 
 const mockPlatform = vi.hoisted(() => vi.fn());
 const mockHomedir = vi.hoisted(() => vi.fn());
-vi.mock('os', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('os')>();
-  return {
-    ...actual,
-    default: {
-      ...actual,
-      platform: mockPlatform,
-      homedir: mockHomedir,
-    },
+vi.mock('os', () => ({
+  default: {
     platform: mockPlatform,
     homedir: mockHomedir,
-  };
-});
+  },
+  platform: mockPlatform,
+  homedir: mockHomedir,
+}));
 
 const mockQuote = vi.hoisted(() => vi.fn());
 vi.mock('shell-quote', async () => {
@@ -63,7 +54,6 @@ vi.mock('shell-quote', async () => {
 let config: Config;
 
 beforeEach(() => {
-  _resetShellUtilsCachesForTest();
   mockPlatform.mockReturnValue('linux');
   mockQuote.mockImplementation((args: string[]) =>
     args.map((arg) => `'${arg}'`).join(' '),
@@ -76,7 +66,6 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  _resetShellUtilsCachesForTest();
   vi.clearAllMocks();
 });
 
@@ -1203,51 +1192,6 @@ describe('getShellConfiguration', () => {
       expect(config.executable).toBe('C:\\Path\\To\\POWERSHELL.EXE');
       expect(config.argsPrefix).toEqual(['-NoProfile', '-Command']);
       expect(config.shell).toBe('powershell');
-    });
-
-    it('prefers an installed Git Bash when launched from cmd.exe', async () => {
-      const directory = await mkdtemp(path.join(os.tmpdir(), 'qwen-git-bash-'));
-      const bashPath = path.join(directory, 'bash.exe');
-      await Promise.all([
-        writeFile(bashPath, ''),
-        writeFile(path.join(directory, 'git.exe'), ''),
-      ]);
-      await chmod(bashPath, 0o755);
-      process.env['PATH'] = directory;
-      process.env['ComSpec'] = 'cmd.exe';
-      delete process.env['MSYSTEM'];
-      delete process.env['TERM'];
-      _resetShellUtilsCachesForTest();
-
-      try {
-        expect(getShellConfiguration()).toEqual({
-          executable: bashPath,
-          argsPrefix: ['-c'],
-          shell: 'bash',
-        });
-      } finally {
-        await rm(directory, { recursive: true, force: true });
-      }
-    });
-
-    it('does not mistake a bare WSL-style bash.exe for Git Bash', async () => {
-      const directory = await mkdtemp(path.join(os.tmpdir(), 'qwen-wsl-bash-'));
-      await writeFile(path.join(directory, 'bash.exe'), '');
-      process.env['PATH'] = directory;
-      process.env['ComSpec'] = 'cmd.exe';
-      delete process.env['MSYSTEM'];
-      delete process.env['TERM'];
-      _resetShellUtilsCachesForTest();
-
-      try {
-        expect(getShellConfiguration()).toEqual({
-          executable: 'cmd.exe',
-          argsPrefix: ['/d', '/s', '/c'],
-          shell: 'cmd',
-        });
-      } finally {
-        await rm(directory, { recursive: true, force: true });
-      }
     });
 
     describe('Git Bash / MSYS2 / MinTTY detection', () => {

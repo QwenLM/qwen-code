@@ -82,7 +82,7 @@ import {
 } from '../tools/mcp-client.js';
 import { setMemoryFilename } from '../utils/memory-constants.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
-import { isBashSearchAvailable } from '../utils/bash-search-tools.js';
+import { resolveBashSearchAvailability } from '../utils/bash-search-tools.js';
 import { recordStartupEvent } from '../utils/startupEventSink.js';
 import { ToolRegistry, type ToolFactory } from '../tools/tool-registry.js';
 import type { McpBudgetEvent } from '../tools/mcp-client-manager.js';
@@ -9146,12 +9146,9 @@ export class Config {
       sendSdkMcpMessage,
     );
 
-    // Helper: check permission then register a lazy factory (no module import
-    // happens here — the dynamic import() only runs when the tool is first used).
-    const registerLazy = async (
+    const getRegistrationStatus = async (
       toolName: ToolName,
-      factory: ToolFactory,
-    ): Promise<void> => {
+    ): Promise<ToolRegistrationStatus | null> => {
       // PermissionManager handles the coreTools allowlist, deny rules, and
       // the `tools.eager` allowlist in a single check. A tool the active
       // eager allowlist omits comes back `deferred`, not `disabled`: it is
@@ -9177,8 +9174,19 @@ export class Config {
           `Failed to check permissions for tool "${toolName}", skipping registration:`,
           error,
         );
-        return;
+        return null;
       }
+
+      return status;
+    };
+
+    // Helper: check permission then register a lazy factory (no module import
+    // happens here — the dynamic import() only runs when the tool is first used).
+    const registerLazy = async (
+      toolName: ToolName,
+      factory: ToolFactory,
+    ): Promise<void> => {
+      const status = await getRegistrationStatus(toolName);
 
       if (status === 'deferred') {
         registry.registerPermissionDeferredFactory(toolName, factory);
@@ -9303,7 +9311,49 @@ export class Config {
       return new ZoomImageTool(this);
     });
 
-    if (!isBashSearchAvailable()) {
+    // A subagent registry keeps the dedicated search tools even when Bash hosts
+    // them. A restricted teammate is launched with an explicit tool list built
+    // from READ_ONLY_INSPECTION_TOOLS, which grants no shell on purpose, and
+    // `getFunctionDeclarationsFiltered` silently drops names the registry never
+    // registered — gating them here would leave that agent unable to search at
+    // all.
+    const shellRegistrationStatus = await getRegistrationStatus(
+      ToolNames.SHELL,
+    );
+    let dedicatedSearchIsEager = false;
+    if (this.getEagerTools() !== undefined) {
+      const [grepStatus, globStatus] = await Promise.all([
+        getRegistrationStatus(ToolNames.GREP),
+        getRegistrationStatus(ToolNames.GLOB),
+      ]);
+      dedicatedSearchIsEager =
+        grepStatus === 'registered' || globStatus === 'registered';
+    }
+    const bashHostsSearch =
+      !options?.forSubAgent &&
+      shellRegistrationStatus === 'registered' &&
+      !dedicatedSearchIsEager &&
+      (await resolveBashSearchAvailability(this));
+
+    if (bashHostsSearch) {
+      const registerDeferredSearch = async (
+        toolName: ToolName,
+        factory: ToolFactory,
+      ): Promise<void> => {
+        const status = await getRegistrationStatus(toolName);
+        if (status === 'registered' || status === 'deferred') {
+          registry.registerPermissionDeferredFactory(toolName, factory);
+        }
+      };
+      await registerDeferredSearch(ToolNames.GREP, async () => {
+        const { RipGrepTool } = await import('../tools/ripGrep.js');
+        return new RipGrepTool(this);
+      });
+      await registerDeferredSearch(ToolNames.GLOB, async () => {
+        const { GlobTool } = await import('../tools/glob.js');
+        return new GlobTool(this);
+      });
+    } else {
       // --- Grep / RipGrep (conditional) ---
       if (this.getUseRipgrep()) {
         let useRipgrep = false;

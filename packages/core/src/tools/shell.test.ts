@@ -44,10 +44,7 @@ vi.mock('fs');
 vi.mock('os');
 vi.mock('crypto');
 
-import {
-  _resetShellUtilsCachesForTest,
-  isCommandAllowed,
-} from '../utils/shell-utils.js';
+import { isCommandAllowed } from '../utils/shell-utils.js';
 import {
   ShellTool,
   type ShellToolInvocation,
@@ -107,7 +104,6 @@ describe('ShellTool', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    _resetShellUtilsCachesForTest();
     mockIsBashSearchAvailable.mockReturnValue(false);
     mockWrapWithBashSearchTools.mockImplementation(
       (command: string) => command,
@@ -180,9 +176,6 @@ describe('ShellTool', () => {
 
     // executeBackground writes to disk; stub mkdirSync + createWriteStream.
     vi.mocked(fs.mkdirSync).mockReturnValue(undefined);
-    vi.mocked(fs.accessSync).mockImplementation(() => {
-      throw new Error('not found');
-    });
     vi.mocked(fs.lstatSync).mockReturnValue({
       isSymbolicLink: () => false,
     } as fs.Stats);

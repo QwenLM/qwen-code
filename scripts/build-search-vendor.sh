@@ -16,7 +16,6 @@ bfs_version=4.1.4
 bfs_sha256=0cac6849efb8a9447268fb273de3fab38f8460adb26a1770934e3f325fab8f5d
 ugrep_version=7.8.4
 ugrep_sha256=b16b3503e80890c78a5c845f8c141f239f3904359f1e41900ca566c86e120172
-ugrep_windows_sha256=e1d982675554faf8bc7f17654e79922e454505f078b722d0fd46bbc353aecf4f
 zig_version=0.14.1
 case "$(uname -m)" in
   arm64 | aarch64)
@@ -53,15 +52,10 @@ download \
   "https://ziglang.org/download/$zig_version/zig-$zig_host_arch-macos-$zig_version.tar.xz" \
   "$work_dir/zig.tar.xz" \
   "$zig_sha256"
-download \
-  "https://github.com/Genivia/ugrep/releases/download/v$ugrep_version/ugrep-windows-x64.zip" \
-  "$work_dir/ugrep-windows.zip" \
-  "$ugrep_windows_sha256"
 
 tar -xzf "$work_dir/bfs.tar.gz" -C "$work_dir"
 tar -xzf "$work_dir/ugrep.tar.gz" -C "$work_dir"
 tar -xJf "$work_dir/zig.tar.xz" -C "$work_dir"
-unzip -q "$work_dir/ugrep-windows.zip" -d "$work_dir/ugrep-windows"
 
 build_bfs_macos() {
   local arch=$1
@@ -75,8 +69,8 @@ build_bfs_macos() {
     cd "$build_dir"
     env \
       CC=clang \
-      CFLAGS="-arch $clang_arch -mmacosx-version-min=12.0" \
-      LDFLAGS="-arch $clang_arch -mmacosx-version-min=12.0" \
+      CFLAGS="-arch $clang_arch -mmacosx-version-min=11.0" \
+      LDFLAGS="-arch $clang_arch -mmacosx-version-min=11.0" \
       ./configure \
         --enable-release \
         --without-libacl \
@@ -84,7 +78,7 @@ build_bfs_macos() {
         --without-libselinux \
         --without-liburing \
         --without-oniguruma
-    # New SDK headers expose APIs unavailable at the macOS 12 deployment target.
+    # New SDK headers expose APIs unavailable at the macOS 11 deployment target.
     perl -pi -e \
       's/#define BFS_HAS_PIPE2 true/#define BFS_HAS_PIPE2 false/; s/#define BFS_HAS_POSIX_SPAWN_ADDFCHDIR true/#define BFS_HAS_POSIX_SPAWN_ADDFCHDIR false/' \
       gen/config.h
@@ -109,9 +103,9 @@ build_ugrep_macos() {
     env \
       CC=clang \
       CXX=clang++ \
-      CFLAGS="-O3 -arch $clang_arch -mmacosx-version-min=12.0" \
-      CXXFLAGS="-O3 -arch $clang_arch -mmacosx-version-min=12.0" \
-      LDFLAGS="-arch $clang_arch -mmacosx-version-min=12.0" \
+      CFLAGS="-O3 -arch $clang_arch -mmacosx-version-min=11.0" \
+      CXXFLAGS="-O3 -arch $clang_arch -mmacosx-version-min=11.0" \
+      LDFLAGS="-arch $clang_arch -mmacosx-version-min=11.0" \
       ./configure \
         --host="$configure_arch-apple-darwin" \
         --without-pcre2 \
@@ -194,8 +188,7 @@ mkdir -p \
   "$vendor_dir/ugrep/arm64-darwin" \
   "$vendor_dir/ugrep/arm64-linux" \
   "$vendor_dir/ugrep/x64-darwin" \
-  "$vendor_dir/ugrep/x64-linux" \
-  "$vendor_dir/ugrep/x64-win32"
+  "$vendor_dir/ugrep/x64-linux"
 
 build_bfs_macos arm64
 build_bfs_macos x64
@@ -206,6 +199,5 @@ build_linux x64 x86_64-linux-musl
 
 install -m 644 "$work_dir/bfs-$bfs_version/LICENSE" "$vendor_dir/bfs/LICENSE"
 install -m 644 "$work_dir/ugrep-$ugrep_version/LICENSE.txt" "$vendor_dir/ugrep/LICENSE.txt"
-find "$work_dir/ugrep-windows" -name ugrep.exe -exec install -m 755 {} "$vendor_dir/ugrep/x64-win32/ugrep.exe" \;
 
 file "$vendor_dir"/bfs/*/bfs "$vendor_dir"/ugrep/*/ugrep*

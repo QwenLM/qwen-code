@@ -7,7 +7,6 @@
 import path from 'node:path';
 import { deriveConfig, type Config } from '../config/config.js';
 import { ToolNames } from '../tools/tool-names.js';
-import { isBashSearchAvailable } from '../utils/bash-search-tools.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   runForkedAgent,
@@ -192,7 +191,6 @@ export async function runManagedRememberByAgent(params: {
   scope?: WorkspaceRememberTargetScope;
   abortSignal?: AbortSignal;
 }): Promise<ManagedRememberResult> {
-  const hasBashSearch = isBashSearchAvailable();
   if (!params.config.isManagedMemoryAvailable()) {
     throw Object.assign(new Error('Managed memory is unavailable'), {
       code: 'managed_memory_unavailable',
@@ -253,9 +251,14 @@ export async function runManagedRememberByAgent(params: {
       maxTimeMinutes: params.config.getMemoryAgentTimeoutMinutes() ?? 5,
       extraHistory: params.contextMode === 'clean' ? [] : undefined,
       preserveEmptyExtraHistory: params.contextMode === 'clean',
+      // GREP stays unconditional: unlike the dream and extraction planners,
+      // this agent is deliberately built without `allowShell`, so the Bash
+      // search surface is unreachable from here and dropping GREP would leave
+      // it unable to find the conflicting record its own rules tell it to
+      // update.
       tools: [
         ToolNames.READ_FILE,
-        ...(hasBashSearch ? [] : [ToolNames.GREP]),
+        ToolNames.GREP,
         ToolNames.WRITE_FILE,
         ToolNames.EDIT,
       ],

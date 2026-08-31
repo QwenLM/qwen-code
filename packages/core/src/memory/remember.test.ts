@@ -31,10 +31,6 @@ import {
 vi.mock('../agents/forkedAgent.js', () => ({
   runForkedAgent: vi.fn(),
 }));
-const mockIsBashSearchAvailable = vi.hoisted(() => vi.fn());
-vi.mock('../utils/bash-search-tools.js', () => ({
-  isBashSearchAvailable: mockIsBashSearchAvailable,
-}));
 
 vi.mock('./indexer.js', () => ({
   rebuildManagedAutoMemoryIndex: vi.fn(),
@@ -72,7 +68,6 @@ describe('remember memory helper', () => {
     vi.mocked(rebuildUserAutoMemoryIndex).mockReset();
     vi.mocked(rebuildManagedAutoMemoryIndex).mockResolvedValue('');
     vi.mocked(rebuildUserAutoMemoryIndex).mockResolvedValue('');
-    mockIsBashSearchAvailable.mockReturnValue(false);
   });
 
   afterEach(async () => {
@@ -210,8 +205,7 @@ describe('remember memory helper', () => {
     expect(rebuildManagedAutoMemoryIndex).toHaveBeenCalledWith(projectRoot);
   });
 
-  it('omits unavailable search tools without granting Shell', async () => {
-    mockIsBashSearchAvailable.mockReturnValue(true);
+  it('keeps the search tool without granting Shell', async () => {
     const memoryFile = path.join(
       getAutoMemoryRoot(projectRoot),
       'feedback',
@@ -232,7 +226,7 @@ describe('remember memory helper', () => {
 
     expect(runForkedAgent).toHaveBeenCalledWith(
       expect.objectContaining({
-        tools: ['read_file', 'write_file', 'edit'],
+        tools: ['read_file', 'grep_search', 'write_file', 'edit'],
       }),
     );
   });

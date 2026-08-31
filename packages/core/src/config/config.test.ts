@@ -61,7 +61,7 @@ import { DEFAULT_TOKEN_LIMIT } from '../core/tokenLimits.js';
 import { LlmClient } from '../core/client.js';
 import { ShellTool } from '../tools/shell.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
-import { isBashSearchAvailable } from '../utils/bash-search-tools.js';
+import { resolveBashSearchAvailability } from '../utils/bash-search-tools.js';
 import {
   getSessionProjectDir,
   sessionIdContext,
@@ -297,7 +297,7 @@ vi.mock('../utils/ripgrepUtils.js', () => ({
   canUseRipgrep: vi.fn(),
 }));
 vi.mock('../utils/bash-search-tools.js', () => ({
-  isBashSearchAvailable: vi.fn(),
+  resolveBashSearchAvailability: vi.fn(),
 }));
 vi.mock('../tools/glob', () => ({
   GlobTool: createToolMock('glob'),
@@ -531,7 +531,7 @@ describe('Server Config (config.ts)', () => {
   // Default mock for canUseRipgrep to return true (tests that care about ripgrep will override this)
   beforeEach(() => {
     vi.mocked(canUseRipgrep).mockResolvedValue(true);
-    vi.mocked(isBashSearchAvailable).mockReturnValue(false);
+    vi.mocked(resolveBashSearchAvailability).mockResolvedValue(false);
   });
   const SANDBOX: SandboxConfig = {
     command: 'docker',
@@ -11212,14 +11212,80 @@ describe('setApprovalMode with folder trust', () => {
     });
 
     it('uses Bash search instead of registering grep and glob', async () => {
-      vi.mocked(isBashSearchAvailable).mockReturnValue(true);
+      vi.mocked(resolveBashSearchAvailability).mockResolvedValue(true);
       const config = new Config(baseParams);
       await config.initialize();
 
       const calls = (ToolRegistry.prototype.registerFactory as Mock).mock.calls;
       expect(calls.some((call) => call[0] === ToolNames.GREP)).toBe(false);
       expect(calls.some((call) => call[0] === ToolNames.GLOB)).toBe(false);
+      const deferred = (
+        ToolRegistry.prototype.registerPermissionDeferredFactory as Mock
+      ).mock.calls;
+      expect(deferred.some((call) => call[0] === ToolNames.GREP)).toBe(true);
+      expect(deferred.some((call) => call[0] === ToolNames.GLOB)).toBe(true);
       expect(canUseRipgrep).not.toHaveBeenCalled();
+    });
+
+    it('honors explicitly eager dedicated search tools', async () => {
+      vi.mocked(resolveBashSearchAvailability).mockResolvedValue(true);
+      const config = new Config({
+        ...baseParams,
+        eagerTools: [ToolNames.SHELL, ToolNames.GREP, ToolNames.GLOB],
+      });
+      await config.initialize();
+
+      const registered = (ToolRegistry.prototype.registerFactory as Mock).mock
+        .calls;
+      expect(registered.some((call) => call[0] === ToolNames.GREP)).toBe(true);
+      expect(registered.some((call) => call[0] === ToolNames.GLOB)).toBe(true);
+      expect(resolveBashSearchAvailability).not.toHaveBeenCalled();
+    });
+
+    it('keeps dedicated search tools when Shell is not registered', async () => {
+      vi.mocked(resolveBashSearchAvailability).mockResolvedValue(true);
+      const config = new Config({
+        ...baseParams,
+        coreTools: [ToolNames.GREP, ToolNames.GLOB],
+      });
+      await config.initialize();
+
+      const calls = (ToolRegistry.prototype.registerFactory as Mock).mock.calls;
+      expect(calls.some((call) => call[0] === ToolNames.GREP)).toBe(true);
+      expect(calls.some((call) => call[0] === ToolNames.GLOB)).toBe(true);
+      expect(calls.some((call) => call[0] === ToolNames.SHELL)).toBe(false);
+      expect(resolveBashSearchAvailability).not.toHaveBeenCalled();
+    });
+
+    it('keeps eager search tools when Shell is deferred', async () => {
+      vi.mocked(resolveBashSearchAvailability).mockResolvedValue(true);
+      const config = new Config({
+        ...baseParams,
+        eagerTools: [ToolNames.GREP, ToolNames.GLOB],
+      });
+      await config.initialize();
+
+      const registered = (ToolRegistry.prototype.registerFactory as Mock).mock
+        .calls;
+      expect(registered.some((call) => call[0] === ToolNames.GREP)).toBe(true);
+      expect(registered.some((call) => call[0] === ToolNames.GLOB)).toBe(true);
+      expect(resolveBashSearchAvailability).not.toHaveBeenCalled();
+    });
+
+    it('keeps grep and glob in a subagent registry when Bash hosts search', async () => {
+      vi.mocked(resolveBashSearchAvailability).mockResolvedValue(true);
+      const config = new Config(baseParams);
+      await config.initialize();
+      (ToolRegistry.prototype.registerFactory as Mock).mockClear();
+
+      await config.createToolRegistry(undefined, {
+        skipDiscovery: true,
+        forSubAgent: true,
+      });
+
+      const calls = (ToolRegistry.prototype.registerFactory as Mock).mock.calls;
+      expect(calls.some((call) => call[0] === ToolNames.GREP)).toBe(true);
+      expect(calls.some((call) => call[0] === ToolNames.GLOB)).toBe(true);
     });
   });
 });

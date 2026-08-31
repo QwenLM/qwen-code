@@ -9,10 +9,12 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import type { Config } from '../config/config.js';
-import { getBuiltinRipgrep } from './ripgrepUtils.js';
+import { resolveHealthyBuiltinRipgrep } from './ripgrepUtils.js';
 import { getShellConfiguration } from './shell-utils.js';
 import {
+  _resetBashSearchToolsForTest,
   isBashSearchAvailable,
+  resolveBashSearchAvailability,
   wrapWithBashSearchTools,
 } from './bash-search-tools.js';
 
@@ -24,19 +26,24 @@ vi.mock('node:os', async (importOriginal) => ({
   },
 }));
 vi.mock('./ripgrepUtils.js', () => ({
-  getBuiltinRipgrep: vi.fn(),
+  resolveHealthyBuiltinRipgrep: vi.fn(),
 }));
 vi.mock('./shell-utils.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./shell-utils.js')>()),
   getShellConfiguration: vi.fn(),
 }));
 
+const PLATFORM_DIRECTORY = 'arm64-linux';
+
 describe('Bash search tools', () => {
   let projectRoot: string;
+  let secondRoot: string;
   let vendorRoot: string;
 
   beforeEach(async () => {
+    _resetBashSearchToolsForTest();
     projectRoot = await mkdtemp(path.join(os.tmpdir(), 'qwen-search-project-'));
+    secondRoot = await mkdtemp(path.join(os.tmpdir(), 'qwen-search-second-'));
     vendorRoot = await mkdtemp(path.join(os.tmpdir(), 'qwen-search-vendor-'));
     vi.mocked(os.platform).mockReturnValue('linux');
     vi.mocked(getShellConfiguration).mockReturnValue({
@@ -44,63 +51,51 @@ describe('Bash search tools', () => {
       argsPrefix: ['-c'],
       shell: 'bash',
     });
-    await installFakeVendor('arm64-linux');
+    await installFakeVendor();
   });
 
   afterEach(async () => {
+    _resetBashSearchToolsForTest();
     vi.restoreAllMocks();
     await Promise.all([
       rm(projectRoot, { recursive: true, force: true }),
+      rm(secondRoot, { recursive: true, force: true }),
       rm(vendorRoot, { recursive: true, force: true }),
     ]);
   });
 
-  async function installFakeVendor(platformDirectory: string) {
-    const rg = path.join(
-      vendorRoot,
-      'ripgrep',
-      platformDirectory,
-      platformDirectory.endsWith('win32') ? 'rg.exe' : 'rg',
-    );
-    const executableSuffix = platformDirectory.endsWith('win32') ? '.exe' : '';
+  async function installFakeVendor() {
+    const rg = path.join(vendorRoot, 'ripgrep', PLATFORM_DIRECTORY, 'rg');
     await Promise.all(
       ['ripgrep', 'bfs', 'ugrep'].map((vendor) =>
-        mkdir(path.join(vendorRoot, vendor, platformDirectory), {
+        mkdir(path.join(vendorRoot, vendor, PLATFORM_DIRECTORY), {
           recursive: true,
         }),
       ),
     );
     await Promise.all([
       writeFile(rg, ''),
+      writeFile(path.join(vendorRoot, 'bfs', PLATFORM_DIRECTORY, 'bfs'), ''),
       writeFile(
-        path.join(
-          vendorRoot,
-          'bfs',
-          platformDirectory,
-          `bfs${executableSuffix}`,
-        ),
-        '',
-      ),
-      writeFile(
-        path.join(
-          vendorRoot,
-          'ugrep',
-          platformDirectory,
-          `ugrep${executableSuffix}`,
-        ),
+        path.join(vendorRoot, 'ugrep', PLATFORM_DIRECTORY, 'ugrep'),
         '',
       ),
     ]);
-    vi.mocked(getBuiltinRipgrep).mockReturnValue(rg);
+    vi.mocked(resolveHealthyBuiltinRipgrep).mockResolvedValue(rg);
   }
 
   function createConfig(options?: {
     respectGitIgnore?: boolean;
     respectQwenIgnore?: boolean;
+    useRipgrep?: boolean;
+    useBuiltinRipgrep?: boolean;
+    directories?: string[];
   }): Config {
     return {
+      getUseRipgrep: () => options?.useRipgrep ?? true,
+      getUseBuiltinRipgrep: () => options?.useBuiltinRipgrep ?? true,
       getWorkspaceContext: () => ({
-        getDirectories: () => [projectRoot],
+        getDirectories: () => options?.directories ?? [projectRoot],
       }),
       getTargetDir: () => projectRoot,
       getFileFilteringOptions: () => ({
@@ -116,70 +111,100 @@ describe('Bash search tools', () => {
       writeFile(path.join(projectRoot, '.agentignore'), 'agent-only.txt\n'),
       writeFile(path.join(projectRoot, '.qwenignore'), 'private.txt\n'),
     ]);
+    const config = createConfig();
 
+    expect(await resolveBashSearchAvailability(config)).toBe(true);
     expect(isBashSearchAvailable()).toBe(true);
-    const command = wrapWithBashSearchTools(
-      'rg needle .',
-      createConfig(),
-      projectRoot,
-    );
+    const command = wrapWithBashSearchTools('rg needle .', config, projectRoot);
 
     expect(command).toContain('rg()');
     expect(command).toContain('grep()');
     expect(command).toContain('find()');
-    expect(command).toContain('/ripgrep/arm64-linux/rg');
-    expect(command).toContain('/ugrep/arm64-linux/ugrep');
-    expect(command).toContain('/bfs/arm64-linux/bfs');
+    expect(command).toContain(`/ripgrep/${PLATFORM_DIRECTORY}/rg`);
+    expect(command).toContain(`/ugrep/${PLATFORM_DIRECTORY}/ugrep`);
+    expect(command).toContain(`/bfs/${PLATFORM_DIRECTORY}/bfs`);
+    expect(command).toContain('--hidden');
+    expect(command).toContain('--glob \\!.git');
     expect(command).toContain('--no-require-git');
+    expect(command).toContain('--exclude-dir=.git');
     expect(command).toContain('--ignore-files');
+    expect(command).toContain('this option is disabled by Qwen Code');
     expect(command.indexOf('.agentignore')).toBeLessThan(
       command.indexOf('.qwenignore'),
     );
     expect(command.endsWith('rg needle .')).toBe(true);
   });
 
-  it('maps Windows Git Bash to bundled rg and ugrep plus system find', async () => {
+  it('stays inert on Windows', async () => {
     vi.mocked(os.platform).mockReturnValue('win32');
-    await installFakeVendor('x64-win32');
+    const config = createConfig();
 
-    const command = wrapWithBashSearchTools(
-      'grep needle .',
-      createConfig(),
-      projectRoot,
+    expect(await resolveBashSearchAvailability(config)).toBe(false);
+    expect(isBashSearchAvailable()).toBe(false);
+    expect(wrapWithBashSearchTools('rg needle .', config, projectRoot)).toBe(
+      'rg needle .',
     );
-
-    expect(command).toContain('/ripgrep/x64-win32/rg.exe');
-    expect(command).toContain('/ugrep/x64-win32/ugrep.exe');
-    expect(command).toContain('find() { command find');
-    expect(command).not.toContain('/bfs/');
   });
 
-  it('keeps the command unchanged when Bash search is unavailable', () => {
+  it('keeps the command unchanged when the shell is not Bash', async () => {
     vi.mocked(getShellConfiguration).mockReturnValue({
       executable: 'cmd.exe',
       argsPrefix: ['/d', '/s', '/c'],
       shell: 'cmd',
     });
+    const config = createConfig();
 
-    expect(wrapWithBashSearchTools('dir', createConfig(), projectRoot)).toBe(
-      'dir',
+    expect(await resolveBashSearchAvailability(config)).toBe(false);
+    expect(wrapWithBashSearchTools('dir', config, projectRoot)).toBe('dir');
+  });
+
+  it('declines when the user opted out of the bundled ripgrep', async () => {
+    expect(
+      await resolveBashSearchAvailability(createConfig({ useRipgrep: false })),
+    ).toBe(false);
+
+    _resetBashSearchToolsForTest();
+    expect(
+      await resolveBashSearchAvailability(
+        createConfig({ useBuiltinRipgrep: false }),
+      ),
+    ).toBe(false);
+  });
+
+  it('does not cache a per-config opt-out as missing binaries', async () => {
+    expect(
+      await resolveBashSearchAvailability(createConfig({ useRipgrep: false })),
+    ).toBe(false);
+    expect(await resolveBashSearchAvailability(createConfig())).toBe(true);
+  });
+
+  it('declines when the bundled ripgrep does not run', async () => {
+    vi.mocked(resolveHealthyBuiltinRipgrep).mockResolvedValue(null);
+
+    expect(await resolveBashSearchAvailability(createConfig())).toBe(false);
+  });
+
+  it('keeps dedicated search tools for a multi-root workspace', async () => {
+    expect(await resolveBashSearchAvailability(createConfig())).toBe(true);
+    const config = createConfig({ directories: [projectRoot, secondRoot] });
+
+    expect(await resolveBashSearchAvailability(config)).toBe(false);
+    expect(wrapWithBashSearchTools('rg needle .', config, secondRoot)).toBe(
+      'rg needle .',
     );
   });
 
   it('honors disabled Git and Qwen ignore settings', async () => {
     await writeFile(path.join(projectRoot, '.qwenignore'), 'private.txt\n');
+    const config = createConfig({
+      respectGitIgnore: false,
+      respectQwenIgnore: false,
+    });
 
-    const command = wrapWithBashSearchTools(
-      'rg needle .',
-      createConfig({
-        respectGitIgnore: false,
-        respectQwenIgnore: false,
-      }),
-      projectRoot,
-    );
+    expect(await resolveBashSearchAvailability(config)).toBe(true);
+    const command = wrapWithBashSearchTools('rg needle .', config, projectRoot);
 
     expect(command).toContain('--no-ignore-vcs');
-    expect(command).not.toContain('--no-require-git');
     expect(command).not.toContain('--ignore-file ');
     expect(command).not.toContain('--ignore-files');
   });

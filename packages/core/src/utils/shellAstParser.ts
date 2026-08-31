@@ -788,6 +788,21 @@ function evaluateOutputOption(args: string[], long = true, short = true) {
   return null;
 }
 
+function evaluateGrepSafety(args: string[]): ShellCommandSafety {
+  const options = beforeTerminator(args);
+  if (options.some((arg) => /^--save-config(?:=|$)/.test(arg))) {
+    return 'write';
+  }
+  if (
+    options.some((arg) =>
+      /^(?:---|--(?:config|filter|pager|query|view)(?:=|$)|-[^-]*Q)/.test(arg),
+    )
+  ) {
+    return 'unknown';
+  }
+  return 'read-only';
+}
+
 function evaluateGitSafety(args: string[]): ShellCommandSafety {
   const first = args[0];
   if (!first || first === '--version') return 'read-only';
@@ -1002,6 +1017,7 @@ function evaluateCommandSafety(commandNode: SyntaxNode): ShellCommandSafety {
   else if (root === 'find') result = evaluateFindSafety(args);
   else if (root === 'sed') result = evaluateSedSafety(args);
   else if (root === 'awk') result = evaluateAwkSafety(args);
+  else if (root === 'grep') result = evaluateGrepSafety(args);
   else if (root === 'sort' || root === 'tree') {
     result = evaluateOutputOption(args, root === 'sort') ?? 'read-only';
     if (hasHelp(args, ['-o', '--output'])) result = 'unknown';

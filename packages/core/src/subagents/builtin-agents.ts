@@ -8,17 +8,6 @@ import { ToolDisplayNames, ToolNames } from '../tools/tool-names.js';
 import { isBashSearchAvailable } from '../utils/bash-search-tools.js';
 import type { SubagentConfig } from './types.js';
 
-const hasBashSearch = isBashSearchAvailable();
-const exploreSearchGuidance = hasBashSearch
-  ? `- Use ${ToolDisplayNames.SHELL} with \`rg --files\`, then pipe the list to another \`rg\` to filter filenames without overriding ignore rules
-- Use ${ToolDisplayNames.SHELL} with \`rg\` for content search; configured ignore files are applied automatically
-- Use \`find\` only for metadata predicates where ignore behavior is not required`
-  : `- Use ${ToolDisplayNames.GLOB} for broad file pattern matching
-- Use ${ToolDisplayNames.GREP} for searching file contents with regex`;
-const exploreTools = hasBashSearch
-  ? [ToolNames.READ_FILE, ToolNames.SHELL]
-  : [ToolNames.READ_FILE, ToolNames.GREP, ToolNames.GLOB, ToolNames.SHELL];
-
 /**
  * Canonical name of the default builtin subagent. Exported so UI
  * surfaces (e.g. `LiveAgentPanel`'s default-type elision) can compare
@@ -51,14 +40,20 @@ export const DEFAULT_BUILTIN_SUBAGENT_TYPE = 'general-purpose';
  */
 export const REVIEW_BUILTIN_SUBAGENT_TYPE = 'review-agent';
 
-/**
- * Registry of built-in subagents that are always available to all users.
- * These agents are embedded in the codebase and cannot be modified or deleted.
- */
-export class BuiltinAgentRegistry {
-  private static readonly BUILTIN_AGENTS: Array<
-    Omit<SubagentConfig, 'level' | 'filePath'>
-  > = [
+function buildBuiltinAgents(
+  hasBashSearch: boolean,
+): Array<Omit<SubagentConfig, 'level' | 'filePath'>> {
+  const exploreSearchGuidance = hasBashSearch
+    ? `- Use ${ToolDisplayNames.SHELL} with \`rg --files\`, then pipe the list to another \`rg\` to filter filenames without overriding ignore rules
+- Use ${ToolDisplayNames.SHELL} with \`rg\` for content search; configured ignore files are applied automatically
+- Use \`find\` only for metadata predicates where ignore behavior is not required`
+    : `- Use ${ToolDisplayNames.GLOB} for broad file pattern matching
+- Use ${ToolDisplayNames.GREP} for searching file contents with regex`;
+  const exploreTools = hasBashSearch
+    ? [ToolNames.READ_FILE, ToolNames.SHELL]
+    : [ToolNames.READ_FILE, ToolNames.GREP, ToolNames.GLOB, ToolNames.SHELL];
+
+  return [
     {
       name: DEFAULT_BUILTIN_SUBAGENT_TYPE,
       description:
@@ -343,7 +338,18 @@ Guidelines:
       //     verifier brief's "corroborate via the vendor's own tracker" and a
       //     project rule naming an MCP server both lose their direct route and
       //     fall back to what SHELL can reach.
-      tools: [...exploreTools, ToolNames.WRITE_FILE, ToolNames.EDIT],
+      // Unconditional, unlike Explore's list: SKILL.md enumerates this exact
+      // set for the orchestrator to judge "needs a tool outside that set"
+      // against, and a static document cannot track a list that changes with
+      // whether Bash hosts the search tools.
+      tools: [
+        ToolNames.READ_FILE,
+        ToolNames.GREP,
+        ToolNames.GLOB,
+        ToolNames.SHELL,
+        ToolNames.WRITE_FILE,
+        ToolNames.EDIT,
+      ],
       // Deliberately role-NEUTRAL, and this is load-bearing. The same type now
       // serves every role the review launches, and they do not share a shape:
       // Agent 7 (`readsDiff: false`) is handed no diff at all and reports what
@@ -385,6 +391,22 @@ Notes:
 - Report in the format your assignment specifies. If you found nothing, say so AND say what you examined — a report that names nothing you read is indistinguishable from never having read anything.`,
     },
   ];
+}
+
+/**
+ * Registry of built-in subagents that are always available to all users.
+ * These agents are embedded in the codebase and cannot be modified or deleted.
+ */
+export class BuiltinAgentRegistry {
+  // Built per access rather than once at module load: whether Bash hosts the
+  // search tools is only known after tool registration probes the bundled
+  // binaries, so reading it at import time permanently captures the
+  // pre-registration fallback.
+  private static get BUILTIN_AGENTS(): Array<
+    Omit<SubagentConfig, 'level' | 'filePath'>
+  > {
+    return buildBuiltinAgents(isBashSearchAvailable());
+  }
 
   /**
    * Gets all built-in agent configurations.

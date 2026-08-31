@@ -871,6 +871,25 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
   // ── Grep / search commands ────────────────────────────────────────────────
 
   grep: (args, cwd) => {
+    const terminatorIndex = args.indexOf('--');
+    const options = args.slice(
+      0,
+      terminatorIndex < 0 ? args.length : terminatorIndex,
+    );
+    const saveConfig = options.find((arg) => /^--save-config(?:=|$)/.test(arg));
+    if (saveConfig) {
+      const equalsIndex = saveConfig.indexOf('=');
+      const target =
+        equalsIndex < 0 ? '.ugrep' : saveConfig.slice(equalsIndex + 1);
+      if (target && target !== '-') {
+        return [
+          {
+            virtualTool: 'write_file',
+            filePath: resolvePath(target, cwd),
+          },
+        ];
+      }
+    }
     const hasPatternFlag = args.some(
       (a) =>
         a === '-e' || a === '-f' || a.startsWith('-e') || a.startsWith('-f'),

@@ -148,6 +148,18 @@ describe('extractShellOperations', () => {
     ]);
   });
 
+  it('grep: --save-config becomes a write', () => {
+    expect(
+      extractShellOperations(
+        'grep --save-config=/tmp/ugrep.conf needle file.txt',
+        CWD,
+      ),
+    ).toEqual([{ virtualTool: 'write_file', filePath: '/tmp/ugrep.conf' }]);
+    expect(
+      extractShellOperations('grep --save-config needle file.txt', CWD),
+    ).toEqual([{ virtualTool: 'write_file', filePath: `${CWD}/.ugrep` }]);
+  });
+
   // ── ls / find ──────────────────────────────────────────────────────────────
 
   it('ls: no args defaults to cwd', () => {
