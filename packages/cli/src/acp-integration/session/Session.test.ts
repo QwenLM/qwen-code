@@ -975,6 +975,10 @@ describe('Session', () => {
       getWorkflowRunRegistry: vi.fn().mockReturnValue(mockWorkflowRunRegistry),
       getFileHistoryService: vi.fn().mockReturnValue(mockFileHistoryService),
       getDisabledSkillNames: vi.fn().mockReturnValue(new Set<string>()),
+      isSkillEnabled: vi.fn(
+        (skill: { name: string }) =>
+          !mockConfig.getDisabledSkillNames().has(skill.name.toLowerCase()),
+      ),
       setSubSessionSpawner: vi.fn(),
       getSubSessionSpawner: vi.fn(),
       setCurrentSessionScheduledTaskCreator: vi.fn(),

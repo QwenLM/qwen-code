@@ -6938,7 +6938,7 @@ describe('DaemonClient', () => {
       ).resolves.toBeUndefined();
     });
 
-    it('routes only projection and activation methods through a workspace', async () => {
+    it('routes workspace extension state and activation over REST', async () => {
       const status = {
         v: 1,
         workspaceId: 'ws-a',
@@ -6948,8 +6948,19 @@ describe('DaemonClient', () => {
         appliedGeneration: 1,
         extensions: [],
       };
+      const resourceState = {
+        v: 1,
+        workspaceId: 'ws-a',
+        workspaceCwd: '/work/a',
+        extensionId: 'a'.repeat(64),
+        name: 'demo-a',
+        skills: [],
+      };
       const { fetch, calls } = recordingFetch((req) => {
         if (req.url.endsWith('/extensions')) return jsonResponse(200, status);
+        if (req.method === 'GET' && req.url.endsWith('/state')) {
+          return jsonResponse(200, resourceState);
+        }
         return jsonResponse(202, { accepted: true, operationId: 'op-2' });
       });
       const transportFetch = vi.fn(async () =>
@@ -6979,6 +6990,21 @@ describe('DaemonClient', () => {
       );
       await ws.clearExtensionActivation('a'.repeat(64), 'client-1');
       await ws.refreshExtensionRuntime('client-1');
+      await expect(ws.extensionState('a'.repeat(64))).resolves.toEqual(
+        resourceState,
+      );
+      const update = {
+        skills: [
+          { name: 'review', state: 'disabled' as const },
+          { name: 'plan', state: 'enabled' as const },
+        ],
+      };
+      await expect(
+        ws.setExtensionState('a'.repeat(64), update, 'client-1'),
+      ).resolves.toEqual({
+        accepted: true,
+        operationId: 'op-2',
+      });
 
       expect(calls.map((c) => [c.method, c.url])).toEqual([
         ['GET', 'http://daemon/workspaces/%2Fwork%2Fa/extensions'],
@@ -6992,6 +7018,14 @@ describe('DaemonClient', () => {
           `http://daemon/workspaces/%2Fwork%2Fa/extensions/${'a'.repeat(64)}/activation`,
         ],
         ['POST', 'http://daemon/workspaces/%2Fwork%2Fa/extensions/refresh'],
+        [
+          'GET',
+          `http://daemon/workspaces/%2Fwork%2Fa/extensions/${'a'.repeat(64)}/state`,
+        ],
+        [
+          'PUT',
+          `http://daemon/workspaces/%2Fwork%2Fa/extensions/${'a'.repeat(64)}/state`,
+        ],
       ]);
       expect(calls[2]?.body).toBe(
         JSON.stringify({
@@ -7000,6 +7034,7 @@ describe('DaemonClient', () => {
         }),
       );
       expect(transportFetch).not.toHaveBeenCalled();
+      expect(calls[6]?.body).toBe(JSON.stringify(update));
     });
   });
 

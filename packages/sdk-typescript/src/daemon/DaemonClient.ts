@@ -207,6 +207,8 @@ import type {
   ExtensionRefreshResponse,
   ExtensionUpdateCheckResponse,
   WorkspaceExtensionProjection,
+  WorkspaceExtensionState,
+  ExtensionStateUpdate,
   DaemonWorkspaceHooksStatus,
   DaemonPermissionRuleType,
   DaemonPermissionScope,
@@ -6969,6 +6971,28 @@ export class WorkspaceDaemonClient {
       '/extensions',
       'GET /workspaces/:workspace/extensions',
       { mode: 'rest' },
+    );
+  }
+
+  extensionState(extensionId: string): Promise<WorkspaceExtensionState> {
+    return this.client.workspaceJsonRequest<WorkspaceExtensionState>(
+      this.workspaceSelector,
+      `/extensions/${urlEncode(extensionId)}/state`,
+      'GET /workspaces/:workspace/extensions/:extensionId/state',
+      { mode: 'rest' },
+    );
+  }
+
+  setExtensionState(
+    extensionId: string,
+    update: ExtensionStateUpdate,
+    clientId?: string,
+  ): Promise<ExtensionMutationResponse> {
+    return this.client.workspaceJsonRequest<ExtensionMutationResponse>(
+      this.workspaceSelector,
+      `/extensions/${urlEncode(extensionId)}/state`,
+      'PUT /workspaces/:workspace/extensions/:extensionId/state',
+      { method: 'PUT', body: update, clientId, mode: 'rest' },
     );
   }
 

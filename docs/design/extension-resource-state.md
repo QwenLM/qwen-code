@@ -1,6 +1,6 @@
 # Extension 内部资源状态管理
 
-状态：设计草案。当前 PR 仅提交设计文档，不包含功能实现；下文的新增字段、接口和验收项均为拟议行为，不代表已经上线或完成运行验证。
+状态：按本设计实施中。PR 包含 Skill 状态管理的运行时与 SDK 实现；验证结果以实际构建、定向测试和 E2E 报告为准，不代表已经上线。
 
 ## 目标与边界
 
@@ -104,6 +104,8 @@ Content-Type: application/json
 
 路由复用现有 workspace 选择器、认证、信任、运行时生命周期及 generation 检查。它属于选中 runtime 的 workspace 操作，不能使用 primary workspace 的管理服务，也不能在未知、不可信或已关闭的 workspace 上回退到 primary。
 
+GET 沿用现有 V2 只读接口的信任规则：允许读取已登记的不可信 workspace，但忽略其 workspace settings；PUT 必须针对可信 workspace。两者均不回退到 primary。
+
 ### 查询与操作结果
 
 ```http
@@ -169,11 +171,11 @@ CLI Skill 管理保持原有交互，只写 workspace settings，不写 Extensio
 
 这有一项明确的持久化行为调整：以前部分开启请求被视为默认已开而不写文件，实施后会记录显式 `skills.enabled`，包括未安装名称。重复同值请求保持最终状态不变。此调整用于确保原管理入口可以覆盖 Extension 的内部关闭，不能继续让 enable 请求无写入却声称已经开启。
 
-## 后续实施与验收
+## 实施与验收
 
 实现涉及原生 Extension 声明解析、Extension Store/Manager、core 的来源感知开关判断、CLI settings 与执行入口、workspace 状态映射、daemon 路由、ACP 刷新和 TypeScript SDK。只在这些链路补齐所需行为，不实现未来资源的注册框架，也不修改现有 MCP preferences。
 
-后续实现前由 test-engineer 建立可执行的基线和 E2E 用例，覆盖：
+实现前由 test-engineer 建立全局 CLI 基线；定向测试与隔离 E2E 按风险覆盖以下行为，不为矩阵数量重复测试：
 
 1. 声明缺字段、空对象、缺项、显式真假、非法值及特殊合法名称；无字段 Extension 也能保存内部覆盖。
 2. 完整 settings 优先级矩阵、父 Extension 关闭、同名其他来源不串状态；保留已有模型及用户调用限制。
@@ -184,4 +186,4 @@ CLI Skill 管理保持原有交互，只写 workspace settings，不写 Extensio
 7. 旧 action/invocation 在 runtime 应用关闭状态后不可执行正文或产生权限等副作用；独立命令回退仍正常。
 8. CLI 保存、原单个/批量 Skill API、通用 SDK、GET 状态、slash commands 和模型实际执行一致；现有 MCP 行为不变。
 
-实现交付需要相关包的定向单元测试、build、typecheck、bundle、E2E 和完整 diff 自审。当前文档 PR 只校验文档格式、示例和契约一致性；上述功能测试尚未执行，也不作为本 PR 的验证证据。
+实现交付需要相关包的定向单元测试、build、typecheck、bundle、E2E 和完整 diff 自审。全局基线已确认声明关闭未生效且缺少新接口；该全局版本早于多 workspace API，其路由缺失不作为当前源码回归。最终验证报告单独附在 PR，不将验收清单当作已完成的测试证据。

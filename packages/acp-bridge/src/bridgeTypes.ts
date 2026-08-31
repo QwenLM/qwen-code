@@ -1901,6 +1901,7 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
    */
   refreshExtensionsForAllSessions(
     data?: Omit<BridgeExtensionsChangedData, 'refreshed' | 'failed'>,
+    options?: { skillsOnly?: boolean },
   ): Promise<{
     refreshed: number;
     failed: number;

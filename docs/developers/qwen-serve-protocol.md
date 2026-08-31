@@ -202,7 +202,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'workspace_file_upload',
  'session_approval_mode_control', 'workspace_tool_toggle',
  'workspace_skill_settings_toggle', 'workspace_skill_settings_batch_toggle',
- 'extension_batch_activation_v2',
+ 'extension_batch_activation_v2', 'extension_state',
  'workspace_settings', 'workspace_init', 'workspace_mcp_restart',
  'session_recap', 'session_generation', 'session_btw', 'session_shell_command',
  'standalone_sessions_v1',
@@ -321,10 +321,33 @@ All routes use the daemon bearer authentication rules above. `X-Qwen-Client-Id` 
 | `DELETE /extensions/:extensionId`                                  | `202` uninstall operation, or idempotent `204` when the extension is absent |
 | `GET /extensions/operations/:operationId`                          | `200` operation snapshot                                                    |
 | `GET /workspaces/:workspace/extensions`                            | `200` workspace activation projection                                       |
+| `GET /workspaces/:workspace/extensions/:extensionId/state`         | `200` workspace resource state (`extension_state`)                          |
+| `PUT /workspaces/:workspace/extensions/:extensionId/state`         | `202` workspace resource-state operation (`extension_state`)                |
 | `PUT /workspaces/:workspace/extensions/activation`                 | `202` exact workspace-activation batch operation                            |
 | `PUT /workspaces/:workspace/extensions/:extensionId/activation`    | `202` exact workspace-activation operation                                  |
 | `DELETE /workspaces/:workspace/extensions/:extensionId/activation` | `202` clear-override operation                                              |
 | `POST /workspaces/:workspace/extensions/refresh`                   | `202` runtime-refresh operation                                             |
+
+#### Workspace resource state
+
+Preflight `extension_state` independently. It supports Skills only; it does not imply MCP resource management. Both routes select the registered workspace runtime and never fall back to primary. GET follows the existing read-only trust rules; PUT requires a trusted workspace.
+
+```json
+{
+  "skills": [
+    { "name": "review", "state": "enabled" },
+    { "name": "deploy", "state": "disabled" }
+  ]
+}
+```
+
+PUT accepts 1–100 entries, including a single-element batch. It rejects malformed entries, case-insensitive duplicate names and unsupported groups before queuing. All names must belong to the installed target Extension, including currently disabled Skills; an invalid target fails the operation without partial writes. One locked store commit merges the listed overrides for the exact canonical workspace. Unlisted Skills and other workspaces are preserved. There is no settings write, future-name declaration or implicit activation of the parent Extension.
+
+GET returns `v: 1`, `workspaceId`, `workspaceCwd`, `extensionId`, `name` and `skills`. Each Skill has `name`, `defaultEnabled`, nullable `workspaceEnabled`, `effectiveEnabled`, and optional `disabledReason`/`lockedScope`. The manifest's optional `skillStates` supplies defaults; missing values default to enabled. For an active parent, precedence is settings hard disable, settings explicit enable, settings default disable, workspace internal override, manifest default. Internal disablement uses `disabledReason: "default"` and never locks settings. A disabled or removed parent cannot be revived by a Skill override.
+
+The `set_extension_state` operation returns `status: "updated"` with ordered `result.resourceStates.skills`; `result.states` retains its update-check meaning. Persisted state is not proof that every session refreshed. The daemon refreshes only Skills and their commands/model context for the target runtime, including bootstrap and live sessions, without restarting unrelated MCP/LSP/hooks. Post-commit refresh failures produce warnings without rolling back state. Overrides survive restart and Extension updates and are removed on uninstall. Clients must not fall back to the Skill settings API, which writes a higher-priority setting.
+
+#### Global catalog
 
 The global catalog response is:
 
@@ -2880,9 +2903,9 @@ SSE event (workspace-scoped): `tool_toggled` with `{toolName, enabled, originato
 
 Capability tag: `workspace_skill_settings_toggle`. The workspace-qualified form is `POST /workspaces/:workspace/skills/:name/enable`.
 
-Update the workspace Skill settings for a name without consulting the loaded Skill catalog. The trimmed request name is passed to persistence and returned in the response. Enabling a `skills.defaultDisabled` Skill adds a workspace `skills.enabled` opt-in; disabling removes that opt-in and adds a workspace `skills.disabled` entry. Existing entries for Skills that are no longer loaded are preserved, and duplicate/case-variant entries for the target are collapsed. A hard `skills.disabled` entry inherited from a higher scope remains authoritative for effective availability, but does not prevent the workspace scope from recording or removing its own declaration. Workspace declarations otherwise participate in the usual `skills.disabled > skills.enabled > skills.defaultDisabled` resolution and can override higher-scope `skills.defaultDisabled` or `skills.enabled` entries.
+Update the workspace Skill settings for a name without consulting the loaded Skill catalog. The trimmed request name is passed to persistence and returned in the response. Enabling any name records a workspace `skills.enabled` opt-in, even before installation; disabling removes that opt-in and adds a workspace `skills.disabled` entry. Existing entries for Skills that are no longer loaded are preserved, and duplicate/case-variant entries for the target are collapsed. A hard `skills.disabled` entry inherited from a higher scope remains authoritative for effective availability, but does not prevent the workspace scope from recording or removing its own declaration. Workspace declarations otherwise participate in the usual `skills.disabled > skills.enabled > skills.defaultDisabled` resolution and can override higher-scope `skills.defaultDisabled` or `skills.enabled` entries.
 
-This is different from the ACP `qwen/skills/setEnabled` managed-skill operation and the `disable-model-invocation` frontmatter field. Effective skill availability follows `skills.disabled` > `skills.enabled` > `skills.defaultDisabled`. Both hard and default disables remove the skill from slash-command/model availability and reject later skill execution. `disable-model-invocation: true` keeps direct user invocation available and only hides the skill from model invocation.
+This is different from the ACP `qwen/skills/setEnabled` managed-skill operation and the `disable-model-invocation` frontmatter field. For an active Extension parent, effective Skill availability follows `skills.disabled` > `skills.enabled` > `skills.defaultDisabled` > workspace internal override > manifest `skillStates` > enabled. Both hard and default disables remove the skill from slash-command/model availability and reject later skill execution. `disable-model-invocation: true` keeps direct user invocation available and only hides the skill from model invocation.
 
 Request:
 
@@ -2917,7 +2940,7 @@ The mutation reuses the workspace-scoped `settings_changed` event for each chang
 
 Capability tag: `workspace_skill_settings_batch_toggle`. The workspace-qualified form is `POST /workspaces/:workspace/skills/enable`.
 
-Update workspace Skill settings for up to 100 names in one request; the cap counts the raw `skillNames` entries before deduplication. Names are trimmed and deduplicated case-insensitively while preserving first-seen order and casing. The daemon does not consult the loaded Skill catalog. It applies all resulting declaration changes in at most one locked settings write and, when anything changed, refreshes active sessions once. Enabling a name with no existing workspace declaration and no effective `skills.defaultDisabled` entry is a no-op (`changed: false`) and performs no write. Unexpected persistence or runtime-generation failures fail the whole request.
+Update workspace Skill settings for up to 100 names in one request; the cap counts the raw `skillNames` entries before deduplication. Names are trimmed and deduplicated case-insensitively while preserving first-seen order and casing. The daemon does not consult the loaded Skill catalog. It applies all resulting declaration changes in at most one locked settings write and, when anything changed, refreshes active sessions once. Enabling always records an explicit workspace `skills.enabled` opt-in, including names not yet installed, so it can override an Extension's internal disablement. Repeating an identical declaration remains a no-op. Unexpected persistence or runtime-generation failures fail the whole request.
 
 Request:
 

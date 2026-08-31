@@ -4551,6 +4551,28 @@ export interface WorkspaceExtensionProjection {
   extensions: WorkspaceExtensionProjectionEntry[];
 }
 
+export interface WorkspaceExtensionSkillState {
+  name: string;
+  defaultEnabled: boolean;
+  workspaceEnabled: boolean | null;
+  effectiveEnabled: boolean;
+  disabledReason?: 'hard' | 'default' | 'inactive_extension';
+  lockedScope?: 'system' | 'user' | 'systemDefaults';
+}
+
+export interface WorkspaceExtensionState {
+  v: 1;
+  workspaceId: string;
+  workspaceCwd: string;
+  extensionId: string;
+  name: string;
+  skills: WorkspaceExtensionSkillState[];
+}
+
+export interface ExtensionStateUpdate {
+  skills: Array<{ name: string; state: ExtensionActivationState }>;
+}
+
 export interface ExtensionInstallResponse {
   accepted: true;
   operationId: string;
@@ -4587,6 +4609,7 @@ export interface ExtensionOperationResult {
   updated?: boolean;
   reason?: string;
   states?: Record<string, DaemonExtensionUpdateState>;
+  resourceStates?: { skills: WorkspaceExtensionSkillState[] };
   results?: Array<
     ExtensionDefaultActivationBatchItem | ExtensionWorkspaceActivationBatchItem
   >;
