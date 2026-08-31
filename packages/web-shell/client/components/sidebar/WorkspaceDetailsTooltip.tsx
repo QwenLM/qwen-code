@@ -134,6 +134,7 @@ export function WorkspaceDetailsTooltip({
   const openTimerRef = useRef<number | undefined>(undefined);
   const closeTimerRef = useRef<number | undefined>(undefined);
   const anchorRef = useRef<HTMLDivElement | null>(null);
+  const contentRef = useRef<HTMLDivElement | null>(null);
   const collisionBoundary = open
     ? resolveSessionDetailsCollisionBoundary(
         anchorRef.current?.closest<HTMLElement>('aside') ?? null,
@@ -164,6 +165,12 @@ export function WorkspaceDetailsTooltip({
     cancelClose();
     closeTimerRef.current = window.setTimeout(close, 100);
   };
+  // The content is portaled, so "focus stayed inside" spans two trees: the
+  // anchor (header row) and the popover content.
+  const containsFocusTarget = (node: EventTarget | null): boolean =>
+    node instanceof Node &&
+    (anchorRef.current?.contains(node) === true ||
+      contentRef.current?.contains(node) === true);
 
   const sessionsBreakdown =
     sessions && sessions.total > 0
@@ -197,12 +204,25 @@ export function WorkspaceDetailsTooltip({
           }
         }}
         onPointerLeave={closeAfterDelay}
+        // Keyboard parity with hover: focusing the header button opens the
+        // details after the same delay; moving focus out closes them.
+        onFocus={(event) => {
+          if (event.currentTarget.contains(event.target as Node)) {
+            openAfterDelay();
+          }
+        }}
+        onBlur={(event) => {
+          if (!containsFocusTarget(event.relatedTarget)) {
+            closeAfterDelay();
+          }
+        }}
         onPointerDownCapture={close}
         onClick={() => close()}
       >
         {children}
       </PopoverAnchor>
       <PopoverContent
+        ref={contentRef}
         side="right"
         align="start"
         sideOffset={0}
@@ -215,6 +235,12 @@ export function WorkspaceDetailsTooltip({
         onOpenAutoFocus={(event) => event.preventDefault()}
         onPointerEnter={cancelClose}
         onPointerLeave={closeAfterDelay}
+        onFocus={cancelClose}
+        onBlur={(event) => {
+          if (!containsFocusTarget(event.relatedTarget)) {
+            closeAfterDelay();
+          }
+        }}
         className={sidebarStyles.sessionDetailsTooltip}
       >
         <div className={sidebarStyles.sessionDetailsHeader}>

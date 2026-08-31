@@ -1405,7 +1405,6 @@ const EN: Messages = {
     `${v?.count ?? 0} session${v?.count === 1 ? '' : 's'} waiting for you`,
   'sidebar.sessionsTotal': (v) =>
     `${v?.count ?? 0}${v?.truncated ? '+' : ''} session${v?.count === 1 && !v?.truncated ? '' : 's'}`,
-  'sidebar.overview.label': 'Workspace overview',
   'sidebar.overview.sessions': 'Sessions',
   'sidebar.overview.unknown': 'not initialized yet',
   'sidebar.overview.unavailable': 'unavailable on this daemon',
@@ -4610,7 +4609,6 @@ const ZH: Messages = {
   'sidebar.sessionsAttention': (v) => `${v?.count ?? 0} 个会话等待处理`,
   'sidebar.sessionsTotal': (v) =>
     `${v?.count ?? 0}${v?.truncated ? '+' : ''} 个会话`,
-  'sidebar.overview.label': '工作区概览',
   'sidebar.overview.sessions': '会话',
   'sidebar.overview.unknown': '尚未初始化',
   'sidebar.overview.unavailable': '当前 daemon 不支持',

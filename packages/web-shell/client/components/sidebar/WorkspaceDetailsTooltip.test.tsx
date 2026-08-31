@@ -187,8 +187,9 @@ describe('WorkspaceDetailsTooltip', () => {
       await Promise.resolve();
     });
     expect(onOpenPathLocally).toHaveBeenCalledTimes(1);
-    // Success swaps the folder icon for the check (non-interactive state).
-    expect(openButton!.querySelector('svg')).not.toBeNull();
+    // Success swaps the folder icon for the check.
+    expect(openButton!.querySelector('svg.lucide-check')).not.toBeNull();
+    expect(openButton!.querySelector('svg.lucide-folder-open')).toBeNull();
   });
 
   it('keeps the idle icon when opening fails', async () => {
@@ -214,8 +215,10 @@ describe('WorkspaceDetailsTooltip', () => {
       await Promise.resolve();
     });
     expect(onOpenPathLocally).toHaveBeenCalledTimes(1);
-    // A rejection is swallowed (the sidebar toasts) without a false check.
-    expect(openButton!.disabled).toBe(false);
+    // A rejection is swallowed (the sidebar toasts): no false check appears
+    // and the folder icon stays.
+    expect(openButton!.querySelector('svg.lucide-check')).toBeNull();
+    expect(openButton!.querySelector('svg.lucide-folder-open')).not.toBeNull();
   });
 
   it('shows session counts with a breakdown tooltip', async () => {
@@ -288,5 +291,32 @@ describe('WorkspaceDetailsTooltip', () => {
       await Promise.resolve();
     });
     expect(onOpenTerminalLocally).toHaveBeenCalledTimes(1);
+  });
+
+  it('opens on keyboard focus with the same delay as hover', async () => {
+    vi.useFakeTimers();
+    await act(async () => {
+      root.render(
+        <I18nProvider language="en">
+          <WorkspaceDetailsTooltip
+            label="qwen-code"
+            cwd="/work/qwen-code"
+            overview={undefined}
+            items={[]}
+          >
+            <button type="button">qwen-code</button>
+          </WorkspaceDetailsTooltip>
+        </I18nProvider>,
+      );
+    });
+    const trigger = container.querySelector('button');
+    await act(async () => {
+      trigger!.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+      vi.advanceTimersByTime(300);
+      await Promise.resolve();
+    });
+    const details = document.querySelector<HTMLElement>('[role="dialog"]');
+    expect(details).not.toBeNull();
+    expect(details?.textContent).toContain('/work/qwen-code');
   });
 });

@@ -50,6 +50,10 @@ chmodSync(join(konsoleDir, 'konsole'), 0o755);
 const xtermDir = mkdtempSync(join(tmpdir(), 'open-xterm-'));
 writeFileSync(join(xtermDir, 'xterm'), '#!/bin/sh\nexit 0\n');
 chmodSync(join(xtermDir, 'xterm'), 0o755);
+// win32 launchers refuse a missing directory before spawning, so their tests
+// must open a real one.
+const win32ExistingDir = mkdtempSync(join(tmpdir(), 'open-win32-'));
+const win32MissingDir = join(tmpdir(), 'open-win32-missing');
 
 function setPlatform(platform: NodeJS.Platform) {
   vi.spyOn(process, 'platform', 'get').mockReturnValue(platform);
@@ -108,9 +112,9 @@ describe('openPathLocally', () => {
     setPlatform('win32');
     spawnMock.mockReturnValue(fakeChild('close'));
 
-    await openPathLocally('C:\\code');
+    await openPathLocally(win32ExistingDir);
 
-    expect(spawnMock).toHaveBeenCalledWith('explorer.exe', ['C:\\code'], {
+    expect(spawnMock).toHaveBeenCalledWith('explorer.exe', [win32ExistingDir], {
       stdio: 'ignore',
     });
   });
@@ -119,9 +123,21 @@ describe('openPathLocally', () => {
     setPlatform('win32');
     spawnMock.mockReturnValue(fakeChild('error'));
 
-    await expect(openPathLocally('C:\\code')).rejects.toBeInstanceOf(
+    await expect(openPathLocally(win32ExistingDir)).rejects.toBeInstanceOf(
       LocalPathOpenUnavailableError,
     );
+  });
+
+  it('rejects a deleted directory on Windows without spawning', async () => {
+    setPlatform('win32');
+
+    await expect(openPathLocally(win32MissingDir)).rejects.toBeInstanceOf(
+      LocalPathOpenUnavailableError,
+    );
+    await expect(openTerminalLocally(win32MissingDir)).rejects.toBeInstanceOf(
+      LocalPathOpenUnavailableError,
+    );
+    expect(spawnMock).not.toHaveBeenCalled();
   });
 
   it('opens the path with xdg-open on Linux', async () => {
@@ -249,39 +265,54 @@ describe('openTerminalLocally', () => {
     setPlatform('win32');
     spawnMock.mockReturnValue(fakeChild('close'));
 
-    await openTerminalLocally('C:\\code');
+    await openTerminalLocally(win32ExistingDir);
 
     expect(spawnMock).toHaveBeenCalledTimes(1);
-    expect(spawnMock).toHaveBeenCalledWith('wt.exe', ['-d', 'C:\\code'], {
+    expect(spawnMock).toHaveBeenCalledWith('wt.exe', ['-d', win32ExistingDir], {
       stdio: 'ignore',
     });
   });
 
-  it('falls back to cmd.exe when wt.exe fails to spawn on Windows', async () => {
+  it('falls back to a PowerShell-launched cmd window when wt.exe fails to spawn on Windows', async () => {
     setPlatform('win32');
     spawnMock
       .mockReturnValueOnce(fakeChild('error'))
       .mockReturnValueOnce(fakeChild('close'));
 
-    await openTerminalLocally('C:\\code');
+    await openTerminalLocally(win32ExistingDir);
 
     expect(spawnMock).toHaveBeenCalledTimes(2);
-    expect(spawnMock).toHaveBeenNthCalledWith(1, 'wt.exe', ['-d', 'C:\\code'], {
-      stdio: 'ignore',
-    });
+    expect(spawnMock).toHaveBeenNthCalledWith(
+      1,
+      'wt.exe',
+      ['-d', win32ExistingDir],
+      { stdio: 'ignore' },
+    );
+    // The directory travels through the environment, never through a
+    // re-parsed cmd.exe command line.
     expect(spawnMock).toHaveBeenNthCalledWith(
       2,
-      'cmd.exe',
-      ['/c', 'start', '""', 'cmd', '/k', 'cd', '/d', '"C:\\code"'],
-      { stdio: 'ignore' },
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-STA',
+        '-Command',
+        expect.stringContaining('$env:QWEN_LOCAL_OPEN_DIR'),
+      ],
+      expect.objectContaining({
+        stdio: 'ignore',
+        env: expect.objectContaining({
+          QWEN_LOCAL_OPEN_DIR: win32ExistingDir,
+        }),
+      }),
     );
   });
 
-  it('wraps the failure when both wt.exe and cmd.exe fail on Windows', async () => {
+  it('wraps the failure when both wt.exe and the fallback fail on Windows', async () => {
     setPlatform('win32');
     spawnMock.mockReturnValue(fakeChild('error'));
 
-    await expect(openTerminalLocally('C:\\code')).rejects.toBeInstanceOf(
+    await expect(openTerminalLocally(win32ExistingDir)).rejects.toBeInstanceOf(
       LocalPathOpenUnavailableError,
     );
   });

@@ -157,8 +157,10 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'Local-open availability probes process-scoped host session state ' +
         '(SSH markers, display server, Windows session name, terminal ' +
         'emulators on PATH), so embedded callers may omit the environment ' +
-        'argument.',
-      accesses: { whole: 3 },
+        'argument; the win32 terminal fallback inherits the daemon ' +
+        'environment to hand the target directory to PowerShell via one ' +
+        'added variable.',
+      accesses: { whole: 4 },
     },
   ],
   [

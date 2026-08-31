@@ -126,6 +126,11 @@ export async function openPathLocally(path: string): Promise<void> {
     }
 
     if (process.platform === 'win32') {
+      // explorer.exe opens Quick Access for a deleted directory and still
+      // exits 0, which would report a successful open for a workspace that
+      // no longer exists — darwin/linux fail that case in the launcher, so
+      // probe first here.
+      assertPathExists(path);
       await spawnAndIgnoreExitCode('explorer.exe', [path]);
       return;
     }
@@ -145,6 +150,14 @@ export async function openPathLocally(path: string): Promise<void> {
   );
 }
 
+function assertPathExists(path: string): void {
+  try {
+    statSync(path);
+  } catch {
+    throw new LocalPathOpenUnavailableError(`Path does not exist: ${path}`);
+  }
+}
+
 export async function openTerminalLocally(path: string): Promise<void> {
   try {
     if (process.platform === 'darwin') {
@@ -155,6 +168,9 @@ export async function openTerminalLocally(path: string): Promise<void> {
     }
 
     if (process.platform === 'win32') {
+      // Same deleted-directory honesty as the folder open: wt.exe ignores a
+      // missing -d target and opens its default profile directory.
+      assertPathExists(path);
       await spawnWindowsTerminal(path);
       return;
     }
@@ -175,22 +191,26 @@ export async function openTerminalLocally(path: string): Promise<void> {
   );
 }
 
-// wt.exe (Windows Terminal) is absent on older installs; fall back to
-// cmd.exe's `start`, which is always present.
+// wt.exe (Windows Terminal) is absent on older installs; fall back to a
+// PowerShell-launched cmd window.
 async function spawnWindowsTerminal(path: string): Promise<void> {
   try {
     await spawnAndIgnoreExitCode('wt.exe', ['-d', path]);
   } catch {
-    await spawnAndIgnoreExitCode('cmd.exe', [
-      '/c',
-      'start',
-      '""',
-      'cmd',
-      '/k',
-      'cd',
-      '/d',
-      `"${path}"`,
-    ]);
+    // cmd.exe `start` re-parses its command line and disagrees with Node's
+    // CreateProcess quoting — even space-containing paths mis-parse there.
+    // PowerShell expands the directory from the environment instead, so the
+    // path never travels through a re-parsed command line.
+    await spawnAndIgnoreExitCode(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-STA',
+        '-Command',
+        'Start-Process cmd.exe -ArgumentList "/k cd /d `"$env:QWEN_LOCAL_OPEN_DIR`""',
+      ],
+      { QWEN_LOCAL_OPEN_DIR: path },
+    );
   }
 }
 
@@ -226,9 +246,13 @@ async function spawnLinuxTerminal(path: string): Promise<void> {
 function spawnAndIgnoreExitCode(
   command: string,
   args: readonly string[],
+  extraEnv?: Record<string, string>,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, [...args], { stdio: 'ignore' });
+    const child = spawn(command, [...args], {
+      stdio: 'ignore',
+      ...(extraEnv ? { env: { ...process.env, ...extraEnv } } : {}),
+    });
     const timer = setTimeout(() => {
       child.kill();
       reject(new Error(`${command} did not exit within 10s`));
