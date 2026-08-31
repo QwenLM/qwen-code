@@ -10,7 +10,8 @@ import {
 import type { DingtalkCardCallbackResult } from './interactive-card-types.js';
 import { sanitizeStreamingImageMarkers } from './outbound-image.js';
 import {
-  DINGTALK_PRESENTATION_PHASE_LABELS,
+  isChinesePresentationLanguage,
+  presentationPhaseLabel,
   type DingtalkPresentationPhase,
 } from './presentation-phase.js';
 
@@ -52,6 +53,7 @@ export interface StatusCardControllerOptions {
   client: DingtalkInteractiveCardClient;
   cancelRun(sessionId: string, runId: string): Promise<boolean>;
   model?: string;
+  language?: string;
   onError?(operation: string, error: unknown): void;
 }
 
@@ -65,8 +67,9 @@ function boundContent(content: string): string {
 function activeContent(
   phase: DingtalkPresentationPhase,
   content: string,
+  language?: string,
 ): string {
-  const label = DINGTALK_PRESENTATION_PHASE_LABELS[phase];
+  const label = presentationPhaseLabel(phase, language);
   const sanitized = sanitizeStreamingImageMarkers(content);
   if (!sanitized) return label;
 
@@ -110,7 +113,11 @@ export class StatusCardController {
     if (record.terminal) return;
     record.content = boundContent(content);
     if (record.streamFailed) return;
-    record.pendingSnapshot = activeContent(record.phase, record.content);
+    record.pendingSnapshot = activeContent(
+      record.phase,
+      record.content,
+      this.options.language,
+    );
     this.scheduleFlush(record);
   }
 
@@ -217,23 +224,7 @@ export class StatusCardController {
         continue;
       }
       record.phase = phase;
-      const update = record.writeChain
-        .then(async () => {
-          if (!(await record.ready) || record.terminal || record.streamFailed) {
-            return;
-          }
-          await this.options.client.openOrUpdateStream({
-            outTrackId: record.outTrackId,
-            key: 'content',
-            content: activeContent(phase, record.content),
-            finalize: false,
-          });
-        })
-        .catch((error) => {
-          this.latchStreamFailure(record, error);
-        });
-      record.writeChain = update;
-      updates.push(update);
+      updates.push(this.updateActiveContent(record));
     }
     await Promise.all(updates);
   }
@@ -295,7 +286,11 @@ export class StatusCardController {
     target: { chatId: string; isGroup: boolean },
   ): Promise<boolean> {
     try {
-      const initialContent = activeContent(record.phase, record.content);
+      const initialContent = activeContent(
+        record.phase,
+        record.content,
+        this.options.language,
+      );
       await this.options.client.createAndDeliver({
         templateId: STATUS_CARD_TEMPLATE_ID,
         outTrackId: record.outTrackId,
@@ -322,7 +317,7 @@ export class StatusCardController {
           outTrackId: record.outTrackId,
           cardParamMap: {
             flowStatus: 3,
-            statusLine: 'Unavailable',
+            statusLine: this.statusStateLabel('Unavailable'),
             hasAction: 'false',
             stop_action: 'false',
           },
@@ -461,9 +456,54 @@ export class StatusCardController {
     );
     const model = this.options.model?.trim();
     return {
-      text: [state, model, `${second}s`].filter(Boolean).join(' · '),
+      text: [
+        state ? this.statusStateLabel(state) : undefined,
+        model,
+        `${second}s`,
+      ]
+        .filter(Boolean)
+        .join(' · '),
       second,
     };
+  }
+
+  private statusStateLabel(state: string): string {
+    if (!isChinesePresentationLanguage(this.options.language)) {
+      return state;
+    }
+    return (
+      {
+        Completed: '已完成',
+        Failed: '已失败',
+        Stopped: '已终止',
+        Cancelled: '已取消',
+        Unavailable: '不可用',
+      }[state] ?? state
+    );
+  }
+
+  private updateActiveContent(record: StatusRecord): Promise<void> {
+    const update = record.writeChain
+      .then(async () => {
+        if (!(await record.ready) || record.terminal || record.streamFailed) {
+          return;
+        }
+        await this.options.client.openOrUpdateStream({
+          outTrackId: record.outTrackId,
+          key: 'content',
+          content: activeContent(
+            record.phase,
+            record.content,
+            this.options.language,
+          ),
+          finalize: false,
+        });
+      })
+      .catch((error) => {
+        this.latchStreamFailure(record, error);
+      });
+    record.writeChain = update;
+    return update;
   }
 
   private async updateActiveStatus(record: StatusRecord): Promise<void> {

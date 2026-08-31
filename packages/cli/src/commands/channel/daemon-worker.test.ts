@@ -887,8 +887,14 @@ describe('runChannelDaemonWorker', () => {
   it('starts selected channels through a daemon-backed bridge facade', async () => {
     const sdk = createSdk();
     const ready = vi.fn();
-    const settings = { merged: { proxy: 'http://settings-proxy:8080' } };
+    const settings = {
+      merged: {
+        proxy: 'http://settings-proxy:8080',
+        general: { language: 'en' },
+      },
+    };
     mockLoadSettings.mockReturnValueOnce(settings);
+    vi.stubEnv('QWEN_CODE_LANG', 'zh');
 
     const handle = await runChannelDaemonWorker({
       daemonUrl: 'http://127.0.0.1:4170',
@@ -947,6 +953,7 @@ describe('runChannelDaemonWorker', () => {
         },
         stateDir:
           '/tmp/qwen/channels/daemon/workspace-hash/instances/telegram-hash',
+        displayLanguage: 'zh',
       }),
     );
     expect(mockDaemonChannelStateDir).toHaveBeenCalledWith(

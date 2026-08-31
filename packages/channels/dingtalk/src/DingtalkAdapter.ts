@@ -47,8 +47,10 @@ import {
 } from './interactive-card-types.js';
 import { StatusCardController } from './status-card-controller.js';
 import {
-  DINGTALK_PRESENTATION_PHASE_LABELS,
+  isChinesePresentationLanguage,
   lifecyclePresentationPhase,
+  presentationPhaseLabel,
+  type DingtalkPresentationPhase,
 } from './presentation-phase.js';
 import { QuestionCardController } from './question-card-controller.js';
 import { DingtalkInteractionPresenter } from './interaction-presenter.js';
@@ -621,7 +623,6 @@ const IMAGE_INSTRUCTIONS = [
   '',
   'Only use a real image file inside the workspace or system temporary directory.',
 ].join('\n');
-
 type MentionTargetEnvelope = Envelope & {
   [mentionTarget]?: string;
 };
@@ -643,7 +644,12 @@ interface DingtalkReactionState {
   messageId: string;
   chatId: string;
   sessionId?: string;
+  desiredStatusTag?: DingtalkEmotionTag;
   statusTag?: DingtalkEmotionTag;
+  terminalTag?: DingtalkEmotionTag;
+  finishing: boolean;
+  drainScheduled: boolean;
+  eyeAttached: boolean;
   tail: Promise<void>;
 }
 
@@ -660,9 +666,6 @@ const EYE_TAG: DingtalkEmotionTag = {
   emotionId: ACK_EMOTION_ID,
   backgroundId: ACK_EMOTION_BG_ID,
 };
-const THINKING_TAG = statusEmotionTag(
-  DINGTALK_PRESENTATION_PHASE_LABELS.thinking,
-);
 const DONE_TAG: DingtalkEmotionTag = {
   name: '✅ Done',
   emotionId: DONE_EMOTION_ID,
@@ -720,6 +723,7 @@ type DingtalkChannelConfig = ChannelConfig & {
 export class DingtalkChannel extends ChannelBase {
   private client: DWClient;
   private readonly atSender: boolean;
+  private readonly displayLanguage: string | undefined;
   private connectionManager?: DingtalkConnectionManager<DWClient>;
   private seenMessages: Map<string, number> = new Map();
   private mentionTargets = new Map<string, string>();
@@ -784,6 +788,7 @@ export class DingtalkChannel extends ChannelBase {
 
     this.atSender =
       (config as unknown as Record<string, unknown>)['atSender'] === true;
+    this.displayLanguage = options?.displayLanguage;
     if (!this.config.instructions) {
       this.config.instructions = [
         '## DingTalk Channel',
@@ -831,6 +836,9 @@ export class DingtalkChannel extends ChannelBase {
           cancelRun: (sessionId, runId) =>
             this.requestPromptRunCancellation(sessionId, runId),
           ...(config.model ? { model: config.model } : {}),
+          ...(options?.displayLanguage
+            ? { language: options.displayLanguage }
+            : {}),
           onError: (operation, error) => {
             process.stderr.write(
               `[DingTalk:${this.name}] ${operation} failed: ${sanitizeLogText(String(error), 300)}\n`,
@@ -1617,6 +1625,88 @@ export class DingtalkChannel extends ChannelBase {
     });
   }
 
+  private scheduleReactionDrain(state: DingtalkReactionState): void {
+    if (state.drainScheduled) return;
+    state.drainScheduled = true;
+    this.enqueueReaction(state, async () => {
+      try {
+        await this.drainReactionState(state);
+      } finally {
+        state.drainScheduled = false;
+      }
+    });
+  }
+
+  private async drainReactionState(
+    state: DingtalkReactionState,
+  ): Promise<void> {
+    while (true) {
+      if (state.finishing) {
+        await this.finishReactionState(state);
+        return;
+      }
+      if (
+        this.reactionStates.get(state.key) !== state ||
+        !this.activeReactionKeys.has(state.key)
+      ) {
+        return;
+      }
+
+      const desired = state.desiredStatusTag;
+      if (!desired || desired.name === state.statusTag?.name) return;
+      if (state.statusTag) {
+        if (
+          (await this.recallReaction(
+            state.messageId,
+            state.chatId,
+            state.statusTag,
+          )) === false
+        ) {
+          state.desiredStatusTag = state.statusTag;
+          return;
+        }
+        state.statusTag = undefined;
+        continue;
+      }
+
+      if (
+        (await this.attachReaction(state.messageId, state.chatId, desired)) ===
+        false
+      ) {
+        state.desiredStatusTag = undefined;
+        return;
+      }
+      state.statusTag = desired;
+    }
+  }
+
+  private async finishReactionState(
+    state: DingtalkReactionState,
+  ): Promise<void> {
+    let statusCleared = true;
+    if (state.statusTag) {
+      statusCleared =
+        (await this.recallReaction(
+          state.messageId,
+          state.chatId,
+          state.statusTag,
+        )) !== false;
+      if (statusCleared) state.statusTag = undefined;
+    }
+    const eyeCleared =
+      !state.eyeAttached ||
+      (await this.recallReaction(state.messageId, state.chatId, EYE_TAG)) !==
+        false;
+    if (state.terminalTag && statusCleared && eyeCleared) {
+      await this.attachReaction(
+        state.messageId,
+        state.chatId,
+        state.terminalTag,
+      );
+    }
+    this.forgetReactionState(state);
+  }
+
   private rememberInboundMessageId(msgId: string): void {
     this.inboundMessageIds.delete(msgId);
     this.inboundMessageIds.add(msgId);
@@ -1650,6 +1740,10 @@ export class DingtalkChannel extends ChannelBase {
       messageId,
       chatId,
       ...(sessionId ? { sessionId } : {}),
+      desiredStatusTag: this.phaseReactionTag('thinking'),
+      finishing: false,
+      drainScheduled: false,
+      eyeAttached: false,
       tail: Promise.resolve(),
     };
     this.reactionStates.set(key, state);
@@ -1667,11 +1761,8 @@ export class DingtalkChannel extends ChannelBase {
           this.forgetReactionState(state);
           return;
         }
-        if (
-          (await this.attachReaction(messageId, chatId, THINKING_TAG)) !== false
-        ) {
-          state.statusTag = THINKING_TAG;
-        }
+        state.eyeAttached = true;
+        this.scheduleReactionDrain(state);
       } catch (err) {
         this.forgetReactionState(state);
         this.logReactionFailure('reaction attach', err);
@@ -1687,29 +1778,32 @@ export class DingtalkChannel extends ChannelBase {
     if (!messageId) return;
     const state = this.reactionStates.get(this.reactionKey(messageId, chatId));
     if (!state || !this.activeReactionKeys.has(state.key)) return;
-    this.enqueueReaction(state, async () => {
-      if (this.reactionStates.get(state.key) !== state) {
-        return;
-      }
-      if (state.statusTag?.name === tag.name) return;
-      if (
-        state.statusTag &&
-        (await this.recallReaction(
-          state.messageId,
-          state.chatId,
-          state.statusTag,
-        )) === false
-      ) {
-        return;
-      }
-      state.statusTag = undefined;
-      if (
-        (await this.attachReaction(state.messageId, state.chatId, tag)) !==
-        false
-      ) {
-        state.statusTag = tag;
-      }
-    });
+    state.desiredStatusTag = tag;
+    this.scheduleReactionDrain(state);
+  }
+
+  private phaseReactionTag(
+    phase: DingtalkPresentationPhase,
+  ): DingtalkEmotionTag {
+    return statusEmotionTag(
+      presentationPhaseLabel(phase, this.displayLanguage),
+    );
+  }
+
+  private terminalReactionTag(
+    type: 'completed' | 'failed' | 'cancelled',
+  ): DingtalkEmotionTag {
+    if (!isChinesePresentationLanguage(this.displayLanguage)) {
+      return type === 'completed'
+        ? DONE_TAG
+        : type === 'failed'
+          ? FAILED_TAG
+          : STOPPED_TAG;
+    }
+    if (type === 'completed') {
+      return { ...DONE_TAG, name: '✅ 已完成' };
+    }
+    return statusEmotionTag(type === 'failed' ? '❌ 失败' : '⏹️ 已停止');
   }
 
   private finishReaction(
@@ -1727,27 +1821,10 @@ export class DingtalkChannel extends ChannelBase {
       keys?.delete(key);
       if (keys?.size === 0) this.sessionReactionKeys.delete(sessionId);
     }
-    this.enqueueReaction(state, async () => {
-      let cleared = true;
-      if (state.statusTag) {
-        cleared =
-          (await this.recallReaction(
-            state.messageId,
-            state.chatId,
-            state.statusTag,
-          )) !== false;
-        if (cleared) state.statusTag = undefined;
-      }
-      const eyeCleared =
-        (await this.recallReaction(state.messageId, state.chatId, EYE_TAG)) !==
-        false;
-      if (terminalTag && cleared && eyeCleared) {
-        await this.attachReaction(state.messageId, state.chatId, terminalTag);
-      }
-      if (this.reactionStates.get(key) === state) {
-        this.reactionStates.delete(key);
-      }
-    });
+    state.finishing = true;
+    state.desiredStatusTag = undefined;
+    state.terminalTag = terminalTag;
+    this.scheduleReactionDrain(state);
   }
 
   private stopReaction(
@@ -1826,7 +1903,7 @@ export class DingtalkChannel extends ChannelBase {
       this.replaceStatusReaction(
         event.chatId,
         event.messageId,
-        statusEmotionTag(DINGTALK_PRESENTATION_PHASE_LABELS[presentationPhase]),
+        this.phaseReactionTag(presentationPhase),
       );
       return;
     }
@@ -1836,11 +1913,7 @@ export class DingtalkChannel extends ChannelBase {
         event.chatId,
         event.messageId,
         event.sessionId,
-        event.type === 'completed'
-          ? DONE_TAG
-          : event.type === 'failed'
-            ? FAILED_TAG
-            : STOPPED_TAG,
+        this.terminalReactionTag(event.type),
       );
       if (event.runId) {
         this.deleteFileProjectorsForRun(event.runId);

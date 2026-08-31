@@ -53,6 +53,7 @@ function deferred<T>() {
 function createHarness(
   options: {
     model?: string;
+    language?: string;
     onError?(operation: string, error: unknown): void;
   } = {},
 ) {
@@ -302,6 +303,50 @@ describe('StatusCardController', () => {
         cardParamMap: {
           statusLine: 'qwen3.7-max · 2s',
         },
+      }),
+    );
+  });
+
+  it('uses the configured Qwen display language for status card labels', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const { client, controller } = createHarness({ language: 'zh' });
+
+    controller.replace(segment(), target, 'answer');
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(client.createAndDeliver).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cardParamMap: expect.objectContaining({
+          content: '🤔 思考中\n\nanswer',
+        }),
+      }),
+    );
+
+    await controller.complete('segment-1', 'answer');
+    expect(client.updateInstance).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        cardParamMap: expect.objectContaining({
+          statusLine: '已完成 · 0s',
+        }),
+      }),
+    );
+  });
+
+  it('renders only the lifecycle phase before response text exists', async () => {
+    vi.useFakeTimers();
+    const { client, controller } = createHarness({ language: 'zh' });
+
+    controller.ensure(segment(), target);
+    await vi.advanceTimersByTimeAsync(0);
+    vi.mocked(client.openOrUpdateStream).mockClear();
+
+    await controller.updateRunPhase('run-1', 'running');
+
+    expect(client.openOrUpdateStream).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        content: '🖥️ 执行中',
+        finalize: false,
       }),
     );
   });
