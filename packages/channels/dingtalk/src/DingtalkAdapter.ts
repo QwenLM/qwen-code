@@ -605,25 +605,33 @@ function presentInboundError(error: unknown): InboundErrorPresentation {
   const parts: string[] = [];
   let status: number | undefined;
 
-  if (error instanceof Error) {
-    parts.push(error.name, error.message);
-  } else if (typeof error === 'string') {
-    parts.push(error);
-  }
+  try {
+    if (error instanceof Error) {
+      parts.push(error.name, error.message);
+    } else if (typeof error === 'string') {
+      parts.push(error);
+    }
 
-  if (typeof error === 'object' && error !== null) {
-    const record = error as Record<string, unknown>;
-    if (typeof record['code'] === 'string') parts.push(record['code']);
-    if (typeof record['status'] === 'number') status = record['status'];
-    const body = record['body'];
-    if (typeof body === 'string') {
-      parts.push(body);
-    } else if (typeof body === 'object' && body !== null) {
-      const bodyRecord = body as Record<string, unknown>;
-      for (const key of ['code', 'errorKind', 'message']) {
-        if (typeof bodyRecord[key] === 'string') parts.push(bodyRecord[key]);
+    if (typeof error === 'object' && error !== null) {
+      const record = error as Record<string, unknown>;
+      if (typeof record['code'] === 'string') parts.push(record['code']);
+      if (typeof record['status'] === 'number') status = record['status'];
+      const body = record['body'];
+      if (typeof body === 'string') {
+        parts.push(body);
+      } else if (typeof body === 'object' && body !== null) {
+        const bodyRecord = body as Record<string, unknown>;
+        for (const key of ['code', 'errorKind', 'message']) {
+          if (typeof bodyRecord[key] === 'string') parts.push(bodyRecord[key]);
+        }
       }
     }
+  } catch {
+    return {
+      status: 'Processing failed',
+      nextStep:
+        'Try again. If it keeps failing, contact the bot administrator.',
+    };
   }
 
   const diagnostic = parts.join(' ').slice(0, 2000).toLowerCase();
@@ -662,7 +670,7 @@ function presentInboundError(error: unknown): InboundErrorPresentation {
     )
   ) {
     return {
-      status: 'Agent is busy',
+      status: 'Service is busy',
       nextStep: 'Try again in a moment.',
     };
   }
@@ -674,7 +682,7 @@ function presentInboundError(error: unknown): InboundErrorPresentation {
     )
   ) {
     return {
-      status: 'Agent is temporarily unavailable',
+      status: 'Service is temporarily unavailable',
       nextStep:
         'Try again in a moment. If it keeps failing, contact the bot administrator.',
     };
@@ -2699,9 +2707,16 @@ export class DingtalkChannel extends ChannelBase {
       processMessage.catch((err) => {
         // Don't await — stream callback should return quickly
         const reference = randomUUID().slice(0, 8);
+        let errorSummary = 'Unknown error';
+        try {
+          errorSummary =
+            err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+        } catch {
+          // The user-facing fallback below must survive arbitrary rejections.
+        }
         process.stderr.write(
           `[DingTalk:${this.name}] Error handling message ref=${reference}: ${sanitizeLogText(
-            err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+            errorSummary,
             300,
           )}\n`,
         );

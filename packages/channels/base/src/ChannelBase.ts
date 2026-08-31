@@ -2850,7 +2850,7 @@ export abstract class ChannelBase {
 
   private formatPermissionRequest(pending: PendingPermission): string {
     const { toolCall } = pending.request;
-    const title = sanitizeQuotedText(toolCall.title || 'Tool use', 160);
+    const title = this.permissionTitle(toolCall);
     const toolName = this.permissionToolName(toolCall);
     const parameters = this.permissionParameterSummary(toolCall);
     const approveOption = this.approvalOption(pending);
@@ -2894,6 +2894,14 @@ export abstract class ChannelBase {
     return lines.join('\n');
   }
 
+  private permissionTitle(
+    toolCall: PermissionRequestEvent['request']['toolCall'],
+  ): string {
+    const rawTitle =
+      typeof toolCall.title === 'string' ? toolCall.title : undefined;
+    return sanitizeQuotedText(rawTitle || '', 160).trim() || 'Tool use';
+  }
+
   private permissionToolName(
     toolCall: PermissionRequestEvent['request']['toolCall'],
   ): string {
@@ -2901,13 +2909,12 @@ export abstract class ChannelBase {
     const meta = isRecord(rawToolCall['_meta'])
       ? rawToolCall['_meta']
       : undefined;
-    const name =
-      typeof meta?.['toolName'] === 'string'
-        ? meta['toolName']
-        : typeof rawToolCall['kind'] === 'string'
-          ? rawToolCall['kind']
-          : 'unknown';
-    return sanitizeQuotedText(name, 120);
+    for (const candidate of [meta?.['toolName'], rawToolCall['kind']]) {
+      if (typeof candidate !== 'string') continue;
+      const name = sanitizeQuotedText(candidate, 120).trim();
+      if (name) return name;
+    }
+    return 'unknown';
   }
 
   private permissionParameterSummary(
@@ -2922,7 +2929,7 @@ export abstract class ChannelBase {
     const entries = Object.entries(rawInput);
     if (entries.length === 0) return undefined;
     const visible = entries.slice(0, 4).map(([key, value]) => {
-      const safeKey = sanitizeQuotedText(key, 48);
+      const safeKey = sanitizeQuotedText(key, 48).trim() || 'unknown';
       if (Array.isArray(value)) {
         return `${safeKey} (${value.length} ${value.length === 1 ? 'item' : 'items'})`;
       }
@@ -2941,7 +2948,9 @@ export abstract class ChannelBase {
     option: PermissionOption | undefined,
     fallback: string,
   ): string {
-    return sanitizeQuotedText(option?.name?.trim() || fallback, 160);
+    const rawLabel = typeof option?.name === 'string' ? option.name : '';
+    const label = sanitizeQuotedText(rawLabel, 160).trim();
+    return label || fallback;
   }
 
   private approvalOption(
@@ -3050,7 +3059,7 @@ export abstract class ChannelBase {
         .map((id) => {
           const pending = this.pendingPermissions.get(id);
           const title = pending
-            ? `: ${sanitizeQuotedText(pending.request.toolCall.title || 'Tool use', 160)}`
+            ? `: ${this.permissionTitle(pending.request.toolCall)}`
             : '';
           const task = pending?.taskName ? `Task ${pending.taskName} — ` : '';
           return `- ${task}${sanitizeQuotedText(id, 128)}${title}`;

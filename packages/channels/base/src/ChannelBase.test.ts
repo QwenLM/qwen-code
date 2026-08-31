@@ -1197,8 +1197,8 @@ describe('ChannelBase', () => {
           kind: 'allow_always',
           name: 'Always Allow in project',
         },
-        { optionId: 'proceed_once', kind: 'allow_once', name: 'Allow once' },
-        { optionId: 'cancel', kind: 'reject_once', name: 'Deny' },
+        { optionId: 'proceed_once', kind: 'allow_once', name: 'Allow' },
+        { optionId: 'cancel', kind: 'reject_once', name: 'Reject' },
       ],
     ): void {
       (bridge as unknown as EventEmitter).emit('permissionRequest', {
@@ -1225,7 +1225,7 @@ describe('ChannelBase', () => {
           toolCall: {
             toolCallId: `tool-${requestId}`,
             kind: 'other',
-            title: 'AskUserQuestion: Ask user 1 question',
+            title: 'Ask user 1 question',
             rawInput: {
               questions: [
                 {
@@ -1457,7 +1457,7 @@ describe('ChannelBase', () => {
           toolCall: {
             toolCallId: 'tool-question',
             kind: 'other',
-            title: 'AskUserQuestion: Ask user 2 questions',
+            title: 'Ask user 2 questions',
             rawInput: { questions: [{ question: 'stale legacy question' }] },
             _meta: {
               toolName: 'ask_user_question',
@@ -1830,9 +1830,7 @@ describe('ChannelBase', () => {
       expect(ch.userInputPresentations).toHaveLength(1);
       expect(ch.sent[0]!.text).toContain('Permission required to run a tool');
       expect(ch.sent[0]!.text).toContain('Tool: ask_user_question');
-      expect(ch.sent[0]!.text).toContain(
-        'Action: AskUserQuestion: Ask user 1 question',
-      );
+      expect(ch.sent[0]!.text).toContain('Action: Ask user 1 question');
       expect(ch.sent[0]!.text).toContain('Parameters: questions (1 item)');
       expect(respondToPermissionMock()).not.toHaveBeenCalled();
 
@@ -2135,11 +2133,11 @@ describe('ChannelBase', () => {
       expect(ch.sent.at(-1)?.text).toContain('Tool: run_shell_command');
       expect(ch.sent.at(-1)?.text).toContain('Action: Run req-1');
       expect(ch.sent.at(-1)?.text).toContain('Parameters: command');
-      expect(ch.sent.at(-1)?.text).toContain('/approve        Allow once');
+      expect(ch.sent.at(-1)?.text).toContain('/approve        Allow');
       expect(ch.sent.at(-1)?.text).toContain(
         '/approve-always Always Allow in project',
       );
-      expect(ch.sent.at(-1)?.text).toContain('/deny           Deny');
+      expect(ch.sent.at(-1)?.text).toContain('/deny           Reject');
       expect(ch.sent.at(-1)?.text).not.toContain('Request: req-1');
       expect(ch.sent.at(-1)?.text).not.toContain('proceed_once');
       expect(ch.sent.at(-1)?.text).not.toContain('secret-token');
@@ -2150,6 +2148,46 @@ describe('ChannelBase', () => {
         outcome: { outcome: 'selected', optionId: 'proceed_once' },
       });
       expect(ch.sent.at(-1)?.text).toBe('Permission approved.');
+    });
+
+    it('uses stable fallbacks when permission labels sanitize to empty', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      (bridge as unknown as EventEmitter).emit('permissionRequest', {
+        requestId: 'req-empty-labels',
+        sessionId,
+        request: {
+          toolCall: {
+            toolCallId: 'tool-empty-labels',
+            kind: 'shell',
+            title: 42,
+            rawInput: { '\u0000\n[]': true },
+            _meta: { toolName: '\u0000\n' },
+          },
+          options: [
+            {
+              optionId: 'proceed_once',
+              kind: 'allow_once',
+              name: { trim: true },
+            },
+            {
+              optionId: 'cancel',
+              kind: 'reject_once',
+              name: '\u0000\n',
+            },
+          ],
+        },
+      });
+
+      expect(ch.sent.at(-1)?.text).toContain('Tool: shell');
+      expect(ch.sent.at(-1)?.text).toContain('Action: Tool use');
+      expect(ch.sent.at(-1)?.text).toContain('Parameters: unknown');
+      expect(ch.sent.at(-1)?.text).toContain('/approve        allow once');
+      expect(ch.sent.at(-1)?.text).toContain('/deny           deny');
+
+      emitPermission(sessionId, 'req-other');
+      await ch.handleInbound(envelope({ text: '/approve' }));
+      expect(ch.sent.at(-1)?.text).toContain('- req-empty-labels: Tool use');
     });
 
     it('cancels bridge permissions when the target no longer belongs to the channel', async () => {

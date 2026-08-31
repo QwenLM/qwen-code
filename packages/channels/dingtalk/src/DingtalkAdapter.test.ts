@@ -2473,7 +2473,7 @@ describe('DingtalkChannel parsed-message logging', () => {
       expect(reference).toBeDefined();
       expect(body.markdown.text).toBe(
         '\\[review\\]\n\n**Unable to process this message**\n\n' +
-          '**Status:** Agent is temporarily unavailable\n' +
+          '**Status:** Service is temporarily unavailable\n' +
           '**Next step:** Try again in a moment. If it keeps failing, contact the bot administrator.\n' +
           `**Reference:** \`${reference}\``,
       );
@@ -2491,12 +2491,14 @@ describe('DingtalkChannel parsed-message logging', () => {
     {
       name: 'configuration failures',
       error: Object.assign(new Error('request rejected'), { status: 401 }),
+      rawDetail: 'request rejected',
       status: 'Bot configuration error',
       nextStep: 'Contact the bot administrator.',
     },
     {
       name: 'cancelled requests',
       error: new Error('request aborted'),
+      rawDetail: 'request aborted',
       status: 'Request was cancelled',
       nextStep: 'Send the request again if you still need it.',
     },
@@ -2505,6 +2507,7 @@ describe('DingtalkChannel parsed-message logging', () => {
       error: Object.assign(new Error('request aborted after timeout'), {
         status: 504,
       }),
+      rawDetail: 'request aborted after timeout',
       status: 'Request timed out',
       nextStep: 'Try again. For a large request, split it into smaller parts.',
     },
@@ -2513,12 +2516,29 @@ describe('DingtalkChannel parsed-message logging', () => {
       error: Object.assign(new Error('request failed'), {
         body: 'overloaded',
       }),
-      status: 'Agent is busy',
+      rawDetail: 'overloaded',
+      status: 'Service is busy',
       nextStep: 'Try again in a moment.',
     },
     {
       name: 'unexpected failures',
       error: new Error('provider failed with secret-marker'),
+      rawDetail: 'secret-marker',
+      status: 'Processing failed',
+      nextStep:
+        'Try again. If it keeps failing, contact the bot administrator.',
+    },
+    {
+      name: 'opaque rejections',
+      error: new Proxy(
+        {},
+        {
+          get() {
+            throw new Error('getter secret-marker');
+          },
+        },
+      ),
+      rawDetail: 'secret-marker',
       status: 'Processing failed',
       nextStep:
         'Try again. If it keeps failing, contact the bot administrator.',
@@ -2560,7 +2580,7 @@ describe('DingtalkChannel parsed-message logging', () => {
       expect(body.markdown.text).toContain(
         `**Status:** ${testCase.status}\n**Next step:** ${testCase.nextStep}`,
       );
-      expect(body.markdown.text).not.toContain(testCase.error.message);
+      expect(body.markdown.text).not.toContain(testCase.rawDetail);
       expect(body.markdown.text).toMatch(/\*\*Reference:\*\* `[0-9a-f]{8}`$/);
     } finally {
       stderrSpy.mockRestore();
