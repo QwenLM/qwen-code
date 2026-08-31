@@ -87,7 +87,7 @@ const BLOCKED_GIT_REMOTE_ACTIONS = new Set([
   'update',
 ]);
 const GIT_EXTERNAL_HELPER_OPTION =
-  /(?:^--(?:ext-diff|filters|show-signature|textconv|open-files-in-pager)(?:=|$)|%G[?GKFPST])/;
+  /(?:^--(?:ext-diff|filters|show-signature|textconv|open-files-in-pager|remerge-diff)(?:=|$)|^--diff-merges=remerge$|%G[?GKFPST])/;
 
 const SAFE_SED_OPTION = /^(?:-[nErsuz]|--(?:quiet|silent))$/;
 
@@ -204,13 +204,15 @@ function evaluateAwkCommand(tokens: string[]): boolean {
 function evaluateGitRemoteArgs(args: string[]): boolean {
   const action = args.find((arg) => !arg.startsWith('-'))?.toLowerCase();
   if (action && !['show', 'get-url'].includes(action)) return false;
+  const terminator = args.indexOf('--');
+  const options = args.slice(0, terminator < 0 ? args.length : terminator);
   if (
     action === 'show' &&
-    !args.some((arg) => ['-n', '--no-query'].includes(arg.toLowerCase()))
+    !options.some((arg) => ['-n', '--no-query'].includes(arg.toLowerCase()))
   ) {
     return false;
   }
-  for (const arg of args) {
+  for (const arg of options) {
     if (BLOCKED_GIT_REMOTE_ACTIONS.has(arg.toLowerCase())) return false;
   }
   return true;
