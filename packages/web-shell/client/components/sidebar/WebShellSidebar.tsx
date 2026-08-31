@@ -83,7 +83,7 @@ import {
   DropdownMenuTrigger,
 } from '../ui/dropdown-menu';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
-import { formatDate } from '../../utils/formatDate';
+import { formatDateTime } from '../../utils/formatDateTime';
 import { DialogShell } from '../dialogs/DialogShell';
 import { WorkspaceSection, isAbsolutePath } from './WorkspaceSection';
 import { WorkspaceMenu, type WorkspaceMenuActions } from './WorkspaceMenu';
@@ -4078,7 +4078,7 @@ export function WebShellSidebar({
       const label = getSessionLabel(session);
       const stamp = session.updatedAt || session.createdAt;
       // Rows stay text-only; the precise date lives in the hover popover.
-      const time = stamp ? formatDate(stamp) : '';
+      const time = stamp ? formatDateTime(stamp) : '';
       const busy = busySessionIds.has(sessionIdentity);
       const exporting = exportingSessionIds.has(sessionIdentity);
       const completedUnread =
