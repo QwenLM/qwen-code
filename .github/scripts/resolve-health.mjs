@@ -86,6 +86,9 @@ export function classifyResult(body) {
   if (line.includes('could not run conflict resolution')) {
     return 'infra_failed';
   }
+  if (line.includes('run artifact never reached the publish job')) {
+    return 'infra_failed';
+  }
   if (line.includes('did not complete successfully')) {
     return 'agent_failed';
   }

@@ -71,7 +71,9 @@ import {
   getCustomSystemPrompt,
   getPlanModeSystemReminder,
   resolveInteractionMode,
+  resolveMainSessionOutputStyle,
 } from './prompts.js';
+import { getOutputStyleTurnReminder } from './output-styles.js';
 import {
   CompressionStatus,
   LlmEventType,
@@ -129,6 +131,7 @@ import {
   getDirectoryContextString,
   getInitialChatHistory,
   getStartupContextLength,
+  wrapSystemReminder,
   type AgentAvailabilityEntry,
 } from './environmentContext.js';
 import {
@@ -371,7 +374,11 @@ export function getMainSessionBaseSystemPrompt(
         config.getModel(),
         undefined,
         resolveInteractionMode(config),
-        config.getOutputStyle(),
+        // The prompt and the per-turn reminder must agree on which style is
+        // in force, so both read it from the same resolver rather than from
+        // `getOutputStyle()` directly — a prompt override carries no style
+        // section, and a session must not be reminded of one it lacks.
+        resolveMainSessionOutputStyle(config),
       );
 }
 
@@ -3644,6 +3651,16 @@ export class LlmClient {
           } catch {
             // Arena config not yet initialized — skip
           }
+        }
+
+        // Remind the model of the style its system prompt carries: the
+        // section sits in the cached prompt and fades over a long
+        // conversation without a nudge next to the newest user text.
+        const outputStyle = resolveMainSessionOutputStyle(this.config);
+        if (outputStyle) {
+          systemReminders.push(
+            wrapSystemReminder(getOutputStyleTurnReminder(outputStyle)),
+          );
         }
 
         const userQueryMemory =

@@ -36,6 +36,14 @@ const producer = readFileSync(
   join(here, '..', 'workflows', 'qwen-code-pr-review.yml'),
   'utf8',
 );
+// One job of the producer workflow, from its name to the next job.
+function producerJob(name) {
+  const start = producer.indexOf(`\n  ${name}:`);
+  assert.ok(start > 0, `${name} job not found in the producer`);
+  const rest = producer.slice(start + 1);
+  const next = rest.search(/\n {2}[A-Za-z]/);
+  return next === -1 ? rest : rest.slice(0, next);
+}
 
 const BOT = 'qwen-code-dev-bot';
 let nextId = 1000;
@@ -78,6 +86,8 @@ const AGENT_FAILED =
 const INFRA_FAILED =
   'Qwen Code could not run conflict resolution on this PR: the agent step ended with `outcome=cancelled` before producing a result.';
 const SKIPPED = 'Qwen Code did not run conflict resolution for this request.';
+const ARTIFACT_MISSING =
+  "Qwen Code's conflict-resolution agent finished successfully, but its run artifact never reached the publish job — the upload failed or the artifact expired — so the result could not be verified or published.";
 const MOVED =
   'Qwen Code resolved the merge conflicts, but the head branch changed while resolving, so the update was not pushed.';
 const PERMISSION =
@@ -96,6 +106,7 @@ describe('resolve-health: classification', () => {
     assert.equal(kind(PUSHED), 'pushed');
     assert.equal(kind(AGENT_FAILED), 'agent_failed');
     assert.equal(kind(INFRA_FAILED), 'infra_failed');
+    assert.equal(kind(ARTIFACT_MISSING), 'infra_failed');
     assert.equal(kind(SKIPPED), 'skipped');
     assert.equal(kind(NOOP), 'noop');
     assert.equal(kind(DRY_RUN), 'dry_run');
@@ -144,20 +155,19 @@ describe('resolve-health: classification', () => {
     // backticks (\`) inside double quotes; unescape them so each sentence
     // is seen whole, not cut at the first backslash (which would collapse
     // the four "resolved, but" sentences into one prefix).
-    const start = producer.indexOf('\n  resolve-pr:');
-    const rest = producer.slice(start + 1);
-    const next = rest.search(/\n {2}[A-Za-z]/);
-    const job = next === -1 ? rest : rest.slice(0, next);
-    const sentences = [...job.matchAll(/echo "((?:[^"\\]|\\.)*)"/g)]
+    // The lane reports from two jobs: `resolve-pr` posts the skip report,
+    // `publish-resolution` every outcome of a run it publishes.
+    const lane = producerJob('resolve-pr') + producerJob('publish-resolution');
+    const sentences = [...lane.matchAll(/echo "((?:[^"\\]|\\.)*)"/g)]
       .map((m) => m[1].replace(/\\(.)/g, '$1'))
-      .filter((s) => s.startsWith('Qwen Code '));
-    // Exact, not a floor: the producer emits nine report sentences today, and
-    // a floor one below that let the dry-run sentence be dropped or reworded
-    // into a "resolved, but" shape without any test noticing.
+      .filter((s) => s.startsWith('Qwen Code'));
+    // Exact, not a floor: the producer emits twelve report sentences today,
+    // and a floor one below that let the dry-run sentence be dropped or
+    // reworded into a "resolved, but" shape without any test noticing.
     assert.equal(
       sentences.length,
-      9,
-      `expected exactly the nine report sentences, found ${sentences.length}: ${sentences.join(' | ')}`,
+      12,
+      `expected exactly the twelve report sentences, found ${sentences.length}: ${sentences.join(' | ')}`,
     );
     const kinds = new Map();
     for (const sentence of sentences) {
@@ -168,7 +178,9 @@ describe('resolve-health: classification', () => {
       );
       kinds.set(sentence, kind);
     }
-    // The four "resolved, but" producers land on the two sides they belong to.
+    // The four "resolved, but" producers land on the two sides they belong
+    // to; the replayed push is a success and the lost artifact an infra
+    // failure.
     for (const [sentence, kind] of kinds) {
       if (sentence.includes('head branch changed while resolving')) {
         assert.equal(kind, 'resolved_moved', sentence);
@@ -177,6 +189,12 @@ describe('resolve-health: classification', () => {
         sentence.includes('but pushing to')
       ) {
         assert.equal(kind, 'push_failed', sentence);
+      } else if (sentence.includes('replayed on top of it')) {
+        assert.equal(kind, 'pushed', sentence);
+      } else if (
+        sentence.includes('run artifact never reached the publish job')
+      ) {
+        assert.equal(kind, 'infra_failed', sentence);
       }
     }
     assert.ok([...kinds.values()].includes('resolved_moved'));
@@ -186,7 +204,13 @@ describe('resolve-health: classification', () => {
       3,
     );
     // And the constants this file uses are real producer sentences.
-    for (const sentence of [PUSHED, AGENT_FAILED, SKIPPED, NOOP]) {
+    for (const sentence of [
+      PUSHED,
+      AGENT_FAILED,
+      SKIPPED,
+      NOOP,
+      ARTIFACT_MISSING,
+    ]) {
       assert.ok(
         producer.includes(sentence),
         `stale test constant: ${sentence}`,
@@ -206,19 +230,21 @@ describe('resolve-health: classification', () => {
 
   it('pins the producer gate that makes a refused request unanswerable', () => {
     // ANSWERABLE_ASSOCIATIONS exists because a refused request is silent:
-    // `resolve-pr` runs only when `authorize` says yes, and every step that
-    // could report — `Report result`, `Report skipped request` — lives inside
-    // that job. Should the producer ever answer a refusal, this test fails
-    // and the association gate can be dropped instead of quietly hiding
-    // requests the lane now does report on.
-    const start = producer.indexOf('\n  resolve-pr:');
-    assert.ok(start > 0, 'resolve-pr job not found in the producer');
-    const rest = producer.slice(start + 1);
-    const next = rest.search(/\n {2}[A-Za-z]/);
-    const job = next === -1 ? rest : rest.slice(0, next);
-    assert.match(job, /needs\.authorize\.outputs\.should_review == 'true'/);
-    assert.ok(job.includes("- name: 'Report skipped request'"));
-    assert.ok(job.includes("- name: 'Report result'"));
+    // `resolve-pr` runs only when `authorize` says yes, and
+    // `publish-resolution` only publishes a run `resolve-pr` decided to
+    // make — so both report steps (`Report skipped request`, `Report
+    // result`) sit behind that gate. Should the producer ever answer a
+    // refusal, this test fails and the association gate can be dropped
+    // instead of quietly hiding requests the lane now does report on.
+    const resolvePr = producerJob('resolve-pr');
+    assert.match(
+      resolvePr,
+      /needs\.authorize\.outputs\.should_review == 'true'/,
+    );
+    assert.ok(resolvePr.includes("- name: 'Report skipped request'"));
+    const publish = producerJob('publish-resolution');
+    assert.match(publish, /needs\.resolve-pr\.outputs\.decision == 'run'/);
+    assert.ok(publish.includes("- name: 'Report result'"));
     // ...and the permission set that gate applies. The watch's set is wider
     // on purpose (a read-only collaborator still counts), never narrower.
     const authorize = producer.slice(

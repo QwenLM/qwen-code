@@ -58,6 +58,10 @@ import {
 import type { DaemonLogger } from '../daemon-logger.js';
 import { mapWorkspaceSkillToggleError } from '../workspace-service/types.js';
 import { sendGenerationClosedError } from '../workspace-route-runtime.js';
+import {
+  WorkspaceRuntimeInitializationError,
+  WorkspaceRuntimeStillStartingError,
+} from '../workspace-runtime-coordinator.js';
 import { DaemonDrainingError } from './session-archive.js';
 import { StandaloneSessionServiceError } from '../conversations/standalone-session-service.js';
 import { ConversationRuntimeOwnershipError } from '../conversations/conversation-runtime-errors.js';
@@ -73,6 +77,50 @@ export type SendBridgeError = (
   err: unknown,
   ctx?: BridgeErrorContext,
 ) => void;
+
+function reportBridgeError(
+  err: unknown,
+  ctx: BridgeErrorContext | undefined,
+  daemonLog: DaemonLogger | undefined,
+): void {
+  recordDaemonBridgeError(err);
+  const extraContext = bridgeErrorExtraContext(ctx);
+  recordDaemonError(undefined, err, {
+    ...(ctx?.route ? { 'http.route': ctx.route } : {}),
+    ...(ctx?.sessionId ? { 'session.id': ctx.sessionId } : {}),
+  });
+  emitDaemonLog('Daemon bridge error.', {
+    ...(ctx?.route ? { 'http.route': ctx.route } : {}),
+    ...(ctx?.sessionId ? { 'session.id': ctx.sessionId } : {}),
+    ...extraContext,
+    'error.type': err instanceof Error ? err.name : typeof err,
+    'error.message': (err instanceof Error ? err.message : String(err)).slice(
+      0,
+      1024,
+    ),
+  });
+  if (daemonLog) {
+    daemonLog.error(
+      err instanceof Error ? err.message : String(err),
+      err instanceof Error ? err : undefined,
+      {
+        ...(ctx?.route ? { route: ctx.route } : {}),
+        ...(ctx?.sessionId ? { sessionId: ctx.sessionId } : {}),
+        ...extraContext,
+      },
+    );
+    return;
+  }
+  const ctxParts = [
+    ctx?.route,
+    ctx?.sessionId ? `session=${ctx.sessionId}` : undefined,
+    ...Object.entries(extraContext).map(([key, value]) => `${key}=${value}`),
+  ].filter(Boolean);
+  const ctxStr = ctxParts.length > 0 ? ` (${ctxParts.join(' ')})` : '';
+  writeStderrLine(
+    `qwen serve: bridge error${ctxStr}: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
+  );
+}
 
 const SESSION_WRITER_ERROR_MESSAGES = {
   session_writer_conflict:
@@ -284,6 +332,24 @@ export function sendBridgeError(
     return;
   }
   if (sendGenerationClosedError(res, err)) return;
+  if (err instanceof WorkspaceRuntimeStillStartingError) {
+    reportBridgeError(err, ctx, daemonLog);
+    res.set('Retry-After', '5');
+    res.status(503).json({
+      error: err.message,
+      code: 'runtime_still_starting',
+    });
+    return;
+  }
+  if (err instanceof WorkspaceRuntimeInitializationError) {
+    reportBridgeError(err.cause ?? err, ctx, daemonLog);
+    res.set('Retry-After', '5');
+    res.status(503).json({
+      error: err.message,
+      code: 'runtime_initialization_failed',
+    });
+    return;
+  }
   if (
     err instanceof Error &&
     'code' in err &&
@@ -345,6 +411,7 @@ export function sendBridgeError(
     return;
   }
   if (err instanceof WorkspaceDrainingError) {
+    if (err.cause !== undefined) reportBridgeError(err.cause, ctx, daemonLog);
     res.set('Retry-After', '5');
     res.status(503).json({
       error: err.message,
@@ -902,43 +969,7 @@ export function sendBridgeError(
   // structured daemon logger (which tees to stderr + log file). When
   // absent (tests, direct embeds), fall back to the legacy stderr-only
   // `writeStderrLine` path.
-  recordDaemonBridgeError(err);
-  const extraContext = bridgeErrorExtraContext(ctx);
-  recordDaemonError(undefined, err, {
-    ...(ctx?.route ? { 'http.route': ctx.route } : {}),
-    ...(ctx?.sessionId ? { 'session.id': ctx.sessionId } : {}),
-  });
-  emitDaemonLog('Daemon bridge error.', {
-    ...(ctx?.route ? { 'http.route': ctx.route } : {}),
-    ...(ctx?.sessionId ? { 'session.id': ctx.sessionId } : {}),
-    ...extraContext,
-    'error.type': err instanceof Error ? err.name : typeof err,
-    'error.message': (err instanceof Error ? err.message : String(err)).slice(
-      0,
-      1024,
-    ),
-  });
-  if (daemonLog) {
-    daemonLog.error(
-      err instanceof Error ? err.message : String(err),
-      err instanceof Error ? err : undefined,
-      {
-        ...(ctx?.route ? { route: ctx.route } : {}),
-        ...(ctx?.sessionId ? { sessionId: ctx.sessionId } : {}),
-        ...extraContext,
-      },
-    );
-  } else {
-    const ctxParts = [
-      ctx?.route,
-      ctx?.sessionId ? `session=${ctx.sessionId}` : undefined,
-      ...Object.entries(extraContext).map(([key, value]) => `${key}=${value}`),
-    ].filter(Boolean);
-    const ctxStr = ctxParts.length > 0 ? ` (${ctxParts.join(' ')})` : '';
-    writeStderrLine(
-      `qwen serve: bridge error${ctxStr}: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
-    );
-  }
+  reportBridgeError(err, ctx, daemonLog);
   res.status(500).json(errorPayload(err));
 }
 
