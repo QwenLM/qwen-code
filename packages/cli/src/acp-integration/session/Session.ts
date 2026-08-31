@@ -110,6 +110,9 @@ import {
   MessageDisplayDispatcher,
   getPlanModeSystemReminder,
   getArenaSystemReminder,
+  getOutputStyleTurnReminder,
+  resolveMainSessionOutputStyle,
+  wrapSystemReminder,
   getStartupContextLength,
   isSystemReminderContent,
   buildSessionRecoveryPlanFromApiHistory,
@@ -1783,12 +1786,10 @@ export async function buildAvailableCommandsSnapshot(
     settings,
     executionPolicy,
   );
-  const disabledSkillNames = config.getDisabledSkillNames();
   const inactiveSkillRefs = inactiveExtensionSkillRefs(config);
 
   const visibleSlashCommands = slashCommands.filter((cmd) => {
     if (cmd.kind !== CommandKind.SKILL || !cmd.skillDetail) return true;
-    const skillName = cmd.skillDetail.name.toLowerCase();
     const isInactiveExtensionCommand =
       cmd.skillDetail.level === 'extension' &&
       isInactiveExtensionSkill(
@@ -1803,7 +1804,9 @@ export async function buildAvailableCommandsSnapshot(
         },
         inactiveSkillRefs,
       );
-    return !disabledSkillNames.has(skillName) && !isInactiveExtensionCommand;
+    return (
+      config.isSkillEnabled(cmd.skillDetail) && !isInactiveExtensionCommand
+    );
   });
 
   const availableCommands: AvailableCommand[] = visibleSlashCommands.map(
@@ -1847,7 +1850,7 @@ export async function buildAvailableCommandsSnapshot(
     if (skillManager) {
       const skills = (await skillManager.listSkills()).filter(
         (skill) =>
-          !disabledSkillNames.has(skill.name.toLowerCase()) &&
+          config.isSkillEnabled(skill) &&
           !isInactiveExtensionSkill(skill, inactiveSkillRefs),
       );
       availableSkills = skills.map((skill) => skill.name);
@@ -10979,6 +10982,18 @@ export class Session implements SessionContext {
         reminders.push({ text: getArenaSystemReminder(configPath) });
       } catch {
         // Arena config not yet initialized — skip (matches client.ts).
+      }
+    }
+
+    // The output-style reminder, exactly as `LlmClient.sendMessageStream`
+    // sends it: the ACP prompt carries the style section, so it needs the
+    // same per-turn nudge or the style fades over a long session.
+    if (this.config.getOutputStyle?.()) {
+      const outputStyle = resolveMainSessionOutputStyle(this.config);
+      if (outputStyle) {
+        reminders.push({
+          text: wrapSystemReminder(getOutputStyleTurnReminder(outputStyle)),
+        });
       }
     }
 
