@@ -6500,26 +6500,66 @@ describe('Session', () => {
       });
     });
 
-    it('reloads the persisted selection before reconciling a workspace model rebuild', () => {
-      const state = installReasoningPreference('low');
-      currentModel = 'qwen3.7-plus';
-      state.live.reasoning = undefined;
-      state.rebuildable.reasoning = undefined;
-      vi.mocked(mockSettings.reloadScopeFromDisk).mockImplementation(() => {
-        state.user.settings.model.reasoningEffort = 'none';
-        mockSettings.recomputeMerged();
-        return true;
-      });
-      session.reloadReasoningSelection();
-      expect(mockSettings.reloadScopeFromDisk).toHaveBeenCalledWith(
-        SettingScope.User,
-      );
-      expect(mockSettings.reloadScopeFromDisk).toHaveBeenCalledWith(
-        SettingScope.Workspace,
-      );
-      expect(state.live.reasoning).toBe(false);
-      expect(state.rebuildable.reasoning).toBe(false);
-    });
+    it.each([
+      ['qwen3.7-plus', 'none', false],
+      ['qwen3.8-max', 'low', true],
+      ['qwen3.8-max', 'max', false],
+    ] as const)(
+      'reloads persisted reasoning for %s with %s after a workspace model rebuild',
+      (modelId, selection, clearsOverrides) => {
+        const state = installReasoningPreference('low');
+        const extraBody = {
+          enable_thinking: false,
+          reasoning_effort: 'xhigh',
+          seed: 7,
+        };
+        const samplingParams = { thinking_budget: 1024, temperature: 0.2 };
+        currentModel = modelId;
+        for (const generation of [state.live, state.rebuildable]) {
+          Object.assign(generation, {
+            model: modelId,
+            reasoning: undefined,
+            extra_body: extraBody,
+            samplingParams,
+          });
+        }
+        vi.mocked(mockSettings.reloadScopeFromDisk).mockImplementation(() => {
+          state.user.settings.model.reasoningEffort = selection;
+          mockSettings.recomputeMerged();
+          return true;
+        });
+        session.reloadReasoningSelection();
+        expect(mockSettings.reloadScopeFromDisk).toHaveBeenCalledWith(
+          SettingScope.User,
+        );
+        expect(mockSettings.reloadScopeFromDisk).toHaveBeenCalledWith(
+          SettingScope.Workspace,
+        );
+        const expected =
+          selection === 'none'
+            ? false
+            : selection === 'low'
+              ? { effort: 'low' }
+              : undefined;
+        expect(state.live.reasoning).toEqual(expected);
+        expect(state.rebuildable.reasoning).toEqual(expected);
+        expect(state.live.extra_body).toEqual(
+          clearsOverrides ? { seed: 7 } : extraBody,
+        );
+        expect(state.live.samplingParams).toEqual(
+          clearsOverrides ? { temperature: 0.2 } : samplingParams,
+        );
+        expect(state.rebuildable.extra_body).toEqual({
+          enable_thinking: false,
+          reasoning_effort: 'xhigh',
+          seed: 7,
+        });
+        expect(state.rebuildable.samplingParams).toEqual({
+          thinking_budget: 1024,
+          temperature: 0.2,
+        });
+      },
+    );
 
     it('keeps a model switch live when incompatible preference cleanup fails', async () => {
       const state = installReasoningPreference('max');

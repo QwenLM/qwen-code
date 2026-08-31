@@ -132,6 +132,20 @@ export function isReasoningSelectionSupported(
     : REASONING_EFFORT_TIERS.includes(selection);
 }
 
+export function clearReasoningRequestOverrides(
+  generation: ContentGeneratorConfig,
+): void {
+  for (const source of ['extra_body', 'samplingParams'] as const) {
+    const layer = generation[source];
+    if (!layer) continue;
+    const next = { ...layer };
+    delete next['enable_thinking'];
+    delete next['reasoning_effort'];
+    delete next['thinking_budget'];
+    generation[source] = next;
+  }
+}
+
 export function applyReasoningSelection(
   config: Config,
   selection: ReasoningSelection,

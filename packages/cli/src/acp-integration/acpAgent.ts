@@ -274,6 +274,7 @@ import {
   applyReasoningSelection,
   buildModelReasoningConfigOption,
   buildModelReasoningConfigPreview,
+  clearReasoningRequestOverrides,
   getModelConfiguration,
   isReasoningSelectionSupported,
   PERSIST_REASONING_SELECTION_META_KEY,
@@ -5833,15 +5834,7 @@ class QwenAgent implements Agent {
           const previousRebuildableReasoning = rebuildable?.reasoning;
           try {
             if (modelReasoning && !modelReasoning.toggleOnly) {
-              for (const source of ['extra_body', 'samplingParams'] as const) {
-                const layer = generation[source];
-                if (!layer) continue;
-                const next = { ...layer };
-                delete next['enable_thinking'];
-                delete next['reasoning_effort'];
-                delete next['thinking_budget'];
-                generation[source] = next;
-              }
+              clearReasoningRequestOverrides(generation);
             }
             applyReasoningSelection(config, selected, defaultReasoning);
             if (!modelReasoning && selected !== REASONING_EFFORT_NONE) {
@@ -13299,15 +13292,7 @@ class QwenAgent implements Agent {
     }
     const modelReasoning = this.getModelReasoningConfiguration(config);
     if (generation && modelReasoning && !modelReasoning.toggleOnly) {
-      for (const source of ['extra_body', 'samplingParams'] as const) {
-        const layer = generation[source];
-        if (!layer) continue;
-        const next = { ...layer };
-        delete next['enable_thinking'];
-        delete next['reasoning_effort'];
-        delete next['thinking_budget'];
-        generation[source] = next;
-      }
+      clearReasoningRequestOverrides(generation);
     }
     if (selection === REASONING_EFFORT_NONE) {
       applyReasoningSelection(config, REASONING_EFFORT_NONE);

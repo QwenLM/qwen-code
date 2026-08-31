@@ -335,6 +335,8 @@ import {
 import { recordDaemonSessionModel } from '../session-model-persistence.js';
 import {
   applyReasoningSelection,
+  clearReasoningRequestOverrides,
+  getModelConfiguration,
   isReasoningSelectionSupported,
   parseReasoningSelection,
   REASONING_EFFORT_DEFAULT,
@@ -10337,8 +10339,8 @@ export class Session implements SessionContext {
     if (rawSelection === undefined) return;
 
     const selection = parseReasoningSelection(rawSelection);
-    const thinkingMandatory =
-      this.config.getContentGeneratorConfig?.()?.thinkingMandatory === true;
+    const generation = this.config.getContentGeneratorConfig?.();
+    const thinkingMandatory = generation?.thinkingMandatory === true;
     const supported =
       selection !== undefined &&
       selection !== REASONING_EFFORT_DEFAULT &&
@@ -10354,6 +10356,15 @@ export class Session implements SessionContext {
           }`,
         );
       }
+    }
+    const modelReasoning = getModelConfiguration(modelId)?.reasoning;
+    if (
+      supported &&
+      generation &&
+      modelReasoning &&
+      !modelReasoning.toggleOnly
+    ) {
+      clearReasoningRequestOverrides(generation);
     }
     applyReasoningSelection(
       this.config,
