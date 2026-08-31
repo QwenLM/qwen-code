@@ -92,6 +92,39 @@ describe('useWorkspaceRemoval', () => {
     expect(latest?.candidate).toBeNull();
   });
 
+  it('keeps the dialog open until the caller finishes reconciling', async () => {
+    let resolveReconcile: () => void = () => {};
+    const options = baseOptions({
+      onRemoved: vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            resolveReconcile = resolve;
+          }),
+      ),
+    });
+    await render(options);
+    act(() => latest!.request(workspace));
+    let confirmDone: Promise<void>;
+    act(() => {
+      confirmDone = latest!.confirm();
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    // The daemon confirmed, but the caller is still reconciling (in the
+    // panel this is a capabilities round-trip): the dialog state must not
+    // clear yet — clearing first would close the dialog before a failed
+    // or hung refresh settles, leaving a ghost row with nothing to retry.
+    expect(options.onRemoved).toHaveBeenCalledWith(workspace);
+    expect(latest?.candidate).toEqual(workspace);
+    await act(async () => {
+      resolveReconcile();
+      await confirmDone!;
+    });
+    expect(latest?.candidate).toBeNull();
+  });
+
   it('surfaces workspace_busy activity and retries with force', async () => {
     const removeWorkspace = vi
       .fn()
@@ -369,6 +402,184 @@ describe('useWorkspaceRemoval', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('treats a mid-retry workspace_mismatch as already removed', async () => {
+    vi.useFakeTimers();
+    try {
+      const removeWorkspace = vi
+        .fn()
+        .mockRejectedValueOnce(
+          new DaemonHttpError(
+            409,
+            { code: 'workspace_removal_in_progress' },
+            'in progress',
+          ),
+        )
+        .mockRejectedValueOnce(
+          new DaemonHttpError(400, { code: 'workspace_mismatch' }, 'gone'),
+        );
+      const options = baseOptions({ removeWorkspace });
+      await render(options);
+      act(() => latest!.request(workspace));
+      let confirmDone: Promise<void>;
+      act(() => {
+        confirmDone = latest!.confirm();
+      });
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(250);
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await act(async () => {
+        await confirmDone!;
+      });
+      expect(options.onRemoved).toHaveBeenCalledWith(workspace);
+      expect(options.onError).not.toHaveBeenCalled();
+      expect(latest?.candidate).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('forwards a mid-retry non-transient error instead of the synthetic message', async () => {
+    vi.useFakeTimers();
+    try {
+      const boom = new DaemonHttpError(500, { code: 'internal' }, 'daemon 500');
+      const removeWorkspace = vi
+        .fn()
+        .mockRejectedValueOnce(
+          new DaemonHttpError(
+            409,
+            { code: 'workspace_removal_in_progress' },
+            'in progress',
+          ),
+        )
+        .mockRejectedValueOnce(boom);
+      const options = baseOptions({ removeWorkspace });
+      await render(options);
+      act(() => latest!.request(workspace));
+      let confirmDone: Promise<void>;
+      act(() => {
+        confirmDone = latest!.confirm();
+      });
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(250);
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await act(async () => {
+        await confirmDone!;
+      });
+      // The real daemon error surfaces, not the exhausted-retries text.
+      expect(options.onError).toHaveBeenCalledWith(boom, 'removal failed');
+      expect(options.onRemoved).not.toHaveBeenCalled();
+      expect(latest?.remoteInProgress).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('lets a second removal retry after a dismissed in-progress loop', async () => {
+    vi.useFakeTimers();
+    try {
+      const removeWorkspace = vi
+        .fn()
+        .mockRejectedValueOnce(
+          new DaemonHttpError(
+            409,
+            { code: 'workspace_removal_in_progress' },
+            'in progress',
+          ),
+        )
+        .mockRejectedValueOnce(
+          new DaemonHttpError(
+            409,
+            { code: 'workspace_removal_in_progress' },
+            'in progress',
+          ),
+        )
+        .mockResolvedValueOnce({ removed: true });
+      const options = baseOptions({ removeWorkspace });
+      await render(options);
+      act(() => latest!.request(workspace));
+      let firstConfirm: Promise<void>;
+      act(() => {
+        firstConfirm = latest!.confirm();
+      });
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(latest?.remoteInProgress).toBe(true);
+      act(() => latest!.dismiss());
+      await act(async () => {
+        vi.advanceTimersByTime(250);
+        await firstConfirm!;
+      });
+      // request() must clear the stale dismiss so the next loop can run.
+      const second = { ...workspace, id: 'ws-two', cwd: '/tmp/two' };
+      act(() => latest!.request(second));
+      let secondConfirm: Promise<void>;
+      act(() => {
+        secondConfirm = latest!.confirm();
+      });
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(250);
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await act(async () => {
+        await secondConfirm!;
+      });
+      expect(options.onRemoved).toHaveBeenCalledWith(second);
+      expect(options.onError).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('clears stale busy state when a new removal is requested', async () => {
+    const removeWorkspace = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new DaemonHttpError(409, { code: 'workspace_busy', activity }, 'busy'),
+      )
+      .mockResolvedValueOnce({ removed: true });
+    const options = baseOptions({ removeWorkspace });
+    await render(options);
+    act(() => latest!.request(workspace));
+    await act(async () => {
+      await latest!.confirm();
+    });
+    expect(latest?.activity).toEqual(activity);
+    const second = { ...workspace, id: 'ws-two', cwd: '/tmp/two' };
+    act(() => latest!.request(second));
+    // The previous workspace's busy report must not leak into the new
+    // dialog, and the first attempt must not inherit force.
+    expect(latest?.activity).toBeNull();
+    expect(latest?.remoteInProgress).toBe(false);
+    await act(async () => {
+      await latest!.confirm();
+    });
+    expect(removeWorkspace).toHaveBeenLastCalledWith('ws-two', {
+      force: false,
+    });
   });
 
   it('resets submitting after success so a second removal can run', async () => {

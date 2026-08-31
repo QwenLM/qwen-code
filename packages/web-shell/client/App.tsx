@@ -13215,9 +13215,10 @@ export function App({
                         onClose={closePanel}
                         // A new draft replaces the panel with the chat view;
                         // createNewSession's default (no keepPanel) does that.
-                        onNewSession={(workspaceCwd) =>
-                          createNewSession(workspaceCwd)
-                        }
+                        // Passed directly (stable identity): the panel keys
+                        // its column definitions on it, and a fresh arrow per
+                        // render would remount every table cell.
+                        onNewSession={createNewSession}
                         onAddWorkspace={
                           dynamicWorkspaceRegistrationSupported
                             ? () => setShowAddWorkspaceDialog(true)

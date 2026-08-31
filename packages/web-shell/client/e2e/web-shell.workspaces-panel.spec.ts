@@ -50,8 +50,11 @@ function createScenario(): WebShellDaemonScenario {
       untracked: 0,
       conflicted: 0,
     },
-    // The secondary workspace answers its own facet so a row showing the
-    // primary's data would be caught (cross-wiring witness).
+    // The secondary workspace answers its own MCP facet so a row showing
+    // the primary's data would be caught. This witness covers the MCP
+    // column only: the mock daemon serves one session list and one git
+    // status for every cwd, so those columns are pinned per-row by the
+    // unit suite instead.
     workspaceOverviews: {
       [SECONDARY_CWD]: {
         mcp: {

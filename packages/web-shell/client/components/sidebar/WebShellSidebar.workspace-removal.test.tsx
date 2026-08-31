@@ -3607,6 +3607,21 @@ describe('WebShellSidebar workspace removal', () => {
       'Switch to another workspace or close the current session',
     );
     expect(dialogButton('Force remove').disabled).toBe(true);
+    // The hook's blockForce wiring refuses a stale or programmatic
+    // invocation even past the disabled attribute: call the button's
+    // handler directly, as a stale reference would.
+    const force = dialogButton('Force remove');
+    const propsKey = Object.keys(force).find((key) =>
+      key.startsWith('__reactProps'),
+    )!;
+    const forceProps = (force as unknown as Record<string, unknown>)[
+      propsKey
+    ] as { onClick: () => void };
+    await act(async () => {
+      forceProps.onClick();
+      await Promise.resolve();
+    });
+    expect(workspaceActions.removeWorkspace).toHaveBeenCalledTimes(1);
   });
 
   it('shows Voice-only activity before offering force removal', async () => {
@@ -5836,6 +5851,17 @@ describe('WebShellSidebar manage workspaces entry', () => {
       button!.click();
     });
     expect(onOpenWorkspacesOverview).toHaveBeenCalledTimes(1);
+    // Opting into the footer item without wiring the handler must not
+    // render a dead control.
+    renderSidebar({
+      footer: { items: ['settings', 'workspacesOverview', 'collapse'] },
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="footer-workspaces-overview"]'),
+    ).toBeNull();
     // A locked sidebar shows no workspaces-overview surface at all.
     renderSidebar({
       onOpenWorkspacesOverview,

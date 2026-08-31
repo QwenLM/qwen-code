@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { DaemonHttpError } from '@qwen-code/sdk/daemon';
 import type {
   DaemonWorkspaceCapability,
@@ -54,13 +54,15 @@ export interface WorkspaceRemovalController {
  * `workspace_removal_in_progress` / `workspace_registration_in_progress`
  * retry briefly while another writer converges.
  */
-export function useWorkspaceRemoval({
-  removeWorkspace,
-  onRemoved,
-  onError,
-  errorMessage,
-  blockForce,
-}: UseWorkspaceRemovalOptions): WorkspaceRemovalController {
+export function useWorkspaceRemoval(
+  options: UseWorkspaceRemovalOptions,
+): WorkspaceRemovalController {
+  // Callers pass fresh option closures every render; reading them through a
+  // ref keeps the controller's identity stable across renders that change
+  // nothing, so consumers can key memos (the panel's column definitions)
+  // on it without rebuilding per render.
+  const optionsRef = useRef(options);
+  optionsRef.current = options;
   const [candidate, setCandidate] = useState<DaemonWorkspaceCapability | null>(
     null,
   );
@@ -81,13 +83,13 @@ export function useWorkspaceRemoval({
 
   const handleRemoved = useCallback(
     async (removed: DaemonWorkspaceCapability) => {
-      await onRemoved(removed);
+      await optionsRef.current.onRemoved(removed);
       if (!mountedRef.current) return;
       setCandidate(null);
       setActivity(null);
       setRemoteInProgress(false);
     },
-    [onRemoved],
+    [],
   );
 
   const request = useCallback(
@@ -109,6 +111,8 @@ export function useWorkspaceRemoval({
   }, []);
 
   const confirm = useCallback(async () => {
+    const { removeWorkspace, onError, errorMessage, blockForce } =
+      optionsRef.current;
     if (!candidate || submitting) return;
     const force = activity !== null;
     if (force && blockForce?.(candidate)) return;
@@ -216,24 +220,30 @@ export function useWorkspaceRemoval({
         setSubmitting(false);
       }
     }
-  }, [
-    activity,
-    blockForce,
-    candidate,
-    errorMessage,
-    handleRemoved,
-    onError,
-    removeWorkspace,
-    submitting,
-  ]);
+  }, [activity, candidate, handleRemoved, submitting]);
 
-  return {
-    candidate,
-    activity,
-    submitting,
-    remoteInProgress,
-    request,
-    confirm,
-    dismiss,
-  };
+  // A stable controller identity: consumers put it in memo dependencies
+  // (the panel's column definitions), and a fresh object per render would
+  // rebuild those on every render — remounting every table cell and
+  // re-firing their fetches.
+  return useMemo(
+    () => ({
+      candidate,
+      activity,
+      submitting,
+      remoteInProgress,
+      request,
+      confirm,
+      dismiss,
+    }),
+    [
+      candidate,
+      activity,
+      submitting,
+      remoteInProgress,
+      request,
+      confirm,
+      dismiss,
+    ],
+  );
 }

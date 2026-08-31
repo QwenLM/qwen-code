@@ -11520,6 +11520,9 @@ describe('App session callbacks', () => {
       '[data-testid="workspaces-overview-panel"]',
     );
     expect(panel).not.toBeNull();
+    // The panel renders its own header (no generic Back button), so the
+    // focus effect must land on the panel heading.
+    expect(document.activeElement).toBe(panel!.querySelector('h1'));
 
     // New task on a row starts a draft there and returns to the chat view.
     const newTask = Array.from(panel!.querySelectorAll('button')).find(

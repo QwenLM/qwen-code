@@ -416,6 +416,8 @@ describe('WorkspacesOverviewPanel', () => {
     for (const entry of overviewCalls) {
       expect(entry.items).toEqual(['mcp']);
     }
+    // The branch cell keeps the sidebar chip's enriched-status contract.
+    expect(workspaceGit).toHaveBeenCalledWith('/other', { wait: true });
   });
 
   it('falls back to createdAt for sessions without an updatedAt', async () => {
@@ -431,6 +433,16 @@ describe('WorkspacesOverviewPanel', () => {
     sessionPages['/other'] = {
       sessions: [session({})],
       nextCursor: 'page-2',
+    };
+    await render();
+    const cell = rowByLabel('API').querySelectorAll('td')[2];
+    expect(cell?.textContent).toContain('1+');
+  });
+
+  it('treats a capped scan without a cursor as a lower bound too', async () => {
+    sessionPages['/other'] = {
+      sessions: [session({})],
+      truncated: true,
     };
     await render();
     const cell = rowByLabel('API').querySelectorAll('td')[2];
@@ -458,6 +470,16 @@ describe('WorkspacesOverviewPanel', () => {
     expect(newTaskButton().disabled).toBe(true);
     await act(async () => {
       newTaskButton().click();
+    });
+    expect(onNewSession).toHaveBeenCalledTimes(1);
+    // The guard is global, not per-row: a second draft must not start from
+    // another workspace while this one is still creating.
+    const otherRowButton = Array.from(
+      rowByLabel('/w').querySelectorAll('button'),
+    ).find((candidate) => candidate.textContent?.includes('New task'))!;
+    expect(otherRowButton.disabled).toBe(true);
+    await act(async () => {
+      otherRowButton.click();
     });
     expect(onNewSession).toHaveBeenCalledTimes(1);
     await act(async () => {
@@ -506,10 +528,77 @@ describe('WorkspacesOverviewPanel', () => {
     // The dialog stays open in the busy state with the force action
     // disabled for the workspace the active session lives in.
     expect(confirm.disabled).toBe(true);
+    // A stale or programmatic invocation must be refused by the hook's
+    // blockForce wiring too, not only by the disabled attribute: invoke
+    // the button's handler directly, as a stale reference would.
+    const propsKey = Object.keys(confirm).find((key) =>
+      key.startsWith('__reactProps'),
+    )!;
+    const props = (confirm as unknown as Record<string, unknown>)[propsKey] as {
+      onClick: () => void;
+    };
+    await act(async () => {
+      props.onClick();
+      await Promise.resolve();
+    });
+    expect(removeWorkspace).toHaveBeenCalledTimes(1);
+  });
+
+  it('allows the forced removal when the active session lives elsewhere', async () => {
+    connectionState.sessionId = 's-live';
+    connectionState.workspaceCwd = '/w';
+    removeWorkspace
+      .mockRejectedValueOnce(
+        new DaemonHttpError(
+          409,
+          {
+            code: 'workspace_busy',
+            activity: {
+              sessions: 1,
+              activePrompts: 0,
+              pendingSessionStarts: 0,
+              acpConnections: 1,
+              memoryTasks: 0,
+              channelWorkers: 0,
+            },
+          },
+          'busy',
+        ),
+      )
+      .mockResolvedValueOnce({ removed: true });
+    await render();
+    const removeButton = Array.from(
+      rowByLabel('API').querySelectorAll('button'),
+    ).find(
+      (button) => button.getAttribute('aria-label') === 'Remove workspace',
+    )!;
+    await act(async () => {
+      removeButton.click();
+    });
+    const confirm = Array.from(document.body.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Remove workspace',
+    )!;
     await act(async () => {
       confirm.click();
     });
-    expect(removeWorkspace).toHaveBeenCalledTimes(1);
+    // Busy, but the active session is in another workspace: force stays
+    // available and goes out with force: true.
+    expect(confirm.disabled).toBe(false);
+    await act(async () => {
+      confirm.click();
+    });
+    expect(removeWorkspace).toHaveBeenLastCalledWith('other', { force: true });
+  });
+
+  it('keeps row cells mounted across re-renders', async () => {
+    const onNewSession = vi.fn().mockResolvedValue(true);
+    const onError = vi.fn();
+    await render({ onNewSession, onError });
+    workspaceGit.mockClear();
+    // Same prop identities: only internal hook objects change. A columns
+    // rebuild would remount every cell and re-fire the git fetches.
+    await render({ onNewSession, onError });
+    expect(workspaceGit).not.toHaveBeenCalled();
   });
 
   it('shows the Add workspace action only when wired', async () => {
