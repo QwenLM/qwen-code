@@ -26,6 +26,11 @@ const modelProvidersDebugLogger = createDebugLogger(
   'MODEL_PROVIDERS_HOT_RELOAD',
 );
 
+function emitHotReloadNotice(message: string): void {
+  appEvents.emit(AppEvent.OpenDebugConsole);
+  appEvents.emit(AppEvent.LogError, message);
+}
+
 /**
  * The three connection-admission lists discovery consults to decide whether a
  * given MCP server may connect. Distinct from the `mcpServers` config map:
@@ -241,12 +246,10 @@ export function registerMcpHotReload(
           err instanceof Error ? (err.stack ?? err.message) : String(err)
         }`,
       );
-      // …but also surface a concise, user-visible notice. `debugLogger.error`
-      // only shows under `--debug`, so a failed settings edit would otherwise
-      // silently do nothing with no indication anything went wrong. `LogError`
-      // is the same channel the CLI already renders to the user.
-      appEvents.emit(
-        AppEvent.LogError,
+      // …but also open the debug console and preserve the LogError event for
+      // any future renderer. `debugLogger.error` only shows after the console
+      // opens, so a failed settings edit would otherwise be silent.
+      emitHotReloadNotice(
         'Failed to reload MCP server settings; existing MCP state may be unchanged. Run with --debug for details.',
       );
     }
@@ -299,7 +302,7 @@ export function registerModelProvidersHotReload(
   // Edge-triggered drift notice: notify on the false→true transition only, so
   // a second independent drift (drift → revert → drift) notifies again.
   let protocolDriftActive = false;
-  const reconcile = () => {
+  const reconcile = async () => {
     // Drift check runs on EVERY event (before the modelProviders gate): a
     // protocol revert/edit that leaves providers unchanged must still update
     // the edge state. Diff against the APPLIED protocol map, not a boot-time
@@ -311,10 +314,10 @@ export function registerModelProvidersHotReload(
       settings.merged.providerProtocol ?? {},
     );
     if (drifted && !protocolDriftActive) {
-      appEvents.emit(
-        AppEvent.LogError,
-        'providerProtocol changed; protocol mappings for custom providers require a restart to take effect.',
-      );
+      const message =
+        'providerProtocol changed; protocol mappings for custom providers require a restart to take effect.';
+      modelProvidersDebugLogger.warn(message);
+      emitHotReloadNotice(message);
     }
     protocolDriftActive = drifted;
 
@@ -336,9 +339,26 @@ export function registerModelProvidersHotReload(
           err instanceof Error ? (err.stack ?? err.message) : String(err)
         }`,
       );
-      appEvents.emit(
-        AppEvent.LogError,
+      emitHotReloadNotice(
         'Failed to reload model provider settings; the model list may be unchanged. Run with --debug for details.',
+      );
+      return;
+    }
+
+    const authType = config.getAuthType();
+    if (!authType) {
+      return;
+    }
+    try {
+      await config.refreshAuth(authType);
+    } catch (err) {
+      modelProvidersDebugLogger.error(
+        `refreshAuth after modelProviders reload threw: ${
+          err instanceof Error ? (err.stack ?? err.message) : String(err)
+        }`,
+      );
+      emitHotReloadNotice(
+        'Failed to refresh the active model provider; the model list was updated but the active client may still use the previous settings. Run with --debug for details.',
       );
     }
   };
@@ -346,6 +366,6 @@ export function registerModelProvidersHotReload(
   // loadCliConfig resolves, so an edit that lands in that window has
   // already refreshed settings.merged with no listener attached — without
   // this the registry would silently keep the pre-edit boot value.
-  reconcile();
+  void reconcile();
   return watcher.addChangeListener(reconcile);
 }

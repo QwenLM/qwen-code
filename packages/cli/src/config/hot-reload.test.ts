@@ -18,6 +18,7 @@ import * as path from 'node:path';
 import * as fs from 'node:fs';
 import {
   ApprovalMode,
+  AuthType,
   type Config,
   type MCPServerConfig,
   type ModelProvidersConfig,
@@ -590,6 +591,7 @@ describe('registerModelProvidersHotReload', () => {
   let settings: LoadedSettings;
   let merged: Settings;
   let reloadModelProvidersConfig: Mock;
+  let refreshAuth: Mock;
   let config: Config;
   /** The registry's APPLIED providers config (what the gate diffs against). */
   let applied: ModelProvidersConfig | undefined;
@@ -602,8 +604,11 @@ describe('registerModelProvidersHotReload', () => {
     reloadModelProvidersConfig = vi.fn((next?: ModelProvidersConfig) => {
       applied = next;
     });
+    refreshAuth = vi.fn(async () => {});
     config = {
       reloadModelProvidersConfig,
+      refreshAuth,
+      getAuthType: () => AuthType.USE_OPENAI,
       getModelProvidersConfig: () => applied,
       getProviderProtocolConfig: () => appliedProtocol,
     } as unknown as Config;
@@ -644,6 +649,8 @@ describe('registerModelProvidersHotReload', () => {
     expect(reloadModelProvidersConfig).toHaveBeenCalledWith(
       merged.modelProviders,
     );
+    expect(refreshAuth).toHaveBeenCalledOnce();
+    expect(refreshAuth).toHaveBeenCalledWith(AuthType.USE_OPENAI);
   });
 
   it('skips the reload when an unrelated settings key changed', async () => {
@@ -658,6 +665,7 @@ describe('registerModelProvidersHotReload', () => {
     await listener([]);
 
     expect(reloadModelProvidersConfig).not.toHaveBeenCalled();
+    expect(refreshAuth).not.toHaveBeenCalled();
   });
 
   it('treats absent and {} modelProviders as unchanged', async () => {
@@ -667,6 +675,7 @@ describe('registerModelProvidersHotReload', () => {
     await listener([]);
 
     expect(reloadModelProvidersConfig).not.toHaveBeenCalled();
+    expect(refreshAuth).not.toHaveBeenCalled();
   });
 
   it('does not re-reload the same snapshot on repeat events', async () => {
@@ -679,16 +688,19 @@ describe('registerModelProvidersHotReload', () => {
     await listener([]);
 
     expect(reloadModelProvidersConfig).toHaveBeenCalledOnce();
+    expect(refreshAuth).toHaveBeenCalledOnce();
   });
 
-  it('surfaces a throwing reload as LogError and retries on the next event', async () => {
+  it('surfaces a throwing reload as a visible notice and retries on the next event', async () => {
     registerModelProvidersHotReload(watcher, settings, config);
     reloadModelProvidersConfig.mockImplementationOnce(() => {
       throw new Error('rebuild failed');
     });
 
-    const spy = vi.fn();
-    appEvents.on(AppEvent.LogError, spy);
+    const logErrorSpy = vi.fn();
+    const openDebugConsoleSpy = vi.fn();
+    appEvents.on(AppEvent.LogError, logErrorSpy);
+    appEvents.on(AppEvent.OpenDebugConsole, openDebugConsoleSpy);
     try {
       merged.modelProviders = {
         openai: [{ id: 'gpt-x', baseUrl: 'https://x' }],
@@ -697,8 +709,9 @@ describe('registerModelProvidersHotReload', () => {
 
       // Failure is user-visible, and applied state did NOT advance — the
       // same edit retries and lands on the next event.
-      expect(spy).toHaveBeenCalledOnce();
-      expect(String(spy.mock.calls[0][0])).toContain(
+      expect(openDebugConsoleSpy).toHaveBeenCalledOnce();
+      expect(logErrorSpy).toHaveBeenCalledOnce();
+      expect(String(logErrorSpy.mock.calls[0][0])).toContain(
         'Failed to reload model provider settings',
       );
       await listener([]);
@@ -706,9 +719,11 @@ describe('registerModelProvidersHotReload', () => {
       expect(reloadModelProvidersConfig).toHaveBeenLastCalledWith(
         merged.modelProviders,
       );
-      expect(spy).toHaveBeenCalledOnce();
+      expect(refreshAuth).toHaveBeenCalledOnce();
+      expect(logErrorSpy).toHaveBeenCalledOnce();
     } finally {
-      appEvents.off(AppEvent.LogError, spy);
+      appEvents.off(AppEvent.LogError, logErrorSpy);
+      appEvents.off(AppEvent.OpenDebugConsole, openDebugConsoleSpy);
     }
   });
 
@@ -736,9 +751,10 @@ describe('registerModelProvidersHotReload', () => {
     // though it equals an earlier value.
     expect(reloadModelProvidersConfig).toHaveBeenCalledOnce();
     expect(reloadModelProvidersConfig).toHaveBeenCalledWith(bootProviders);
+    expect(refreshAuth).toHaveBeenCalledOnce();
   });
 
-  it('reconciles once at registration for edits that landed before the listener attached', () => {
+  it('reconciles once at registration for edits that landed before the listener attached', async () => {
     const bootProviders = {
       openai: [{ id: 'gpt-a', baseUrl: 'https://a' }],
     } as ModelProvidersConfig;
@@ -750,18 +766,22 @@ describe('registerModelProvidersHotReload', () => {
     } as ModelProvidersConfig;
 
     registerModelProvidersHotReload(watcher, settings, config);
+    await Promise.resolve();
 
     expect(reloadModelProvidersConfig).toHaveBeenCalledOnce();
     expect(reloadModelProvidersConfig).toHaveBeenCalledWith(
       merged.modelProviders,
     );
+    expect(refreshAuth).toHaveBeenCalledOnce();
   });
 
-  it('notifies on each providerProtocol drift against the APPLIED map (edge-triggered)', async () => {
+  it('opens the debug console for each providerProtocol drift notice', async () => {
     registerModelProvidersHotReload(watcher, settings, config);
 
-    const spy = vi.fn();
-    appEvents.on(AppEvent.LogError, spy);
+    const logErrorSpy = vi.fn();
+    const openDebugConsoleSpy = vi.fn();
+    appEvents.on(AppEvent.LogError, logErrorSpy);
+    appEvents.on(AppEvent.OpenDebugConsole, openDebugConsoleSpy);
     try {
       // Combined edit: modelProviders (hot) + providerProtocol (restart-only).
       merged.providerProtocol = {
@@ -772,29 +792,34 @@ describe('registerModelProvidersHotReload', () => {
       } as ModelProvidersConfig;
       await listener([]);
 
-      expect(spy).toHaveBeenCalledOnce();
-      expect(String(spy.mock.calls[0][0])).toContain('providerProtocol');
+      expect(openDebugConsoleSpy).toHaveBeenCalledOnce();
+      expect(logErrorSpy).toHaveBeenCalledOnce();
+      expect(String(logErrorSpy.mock.calls[0][0])).toContain(
+        'providerProtocol',
+      );
 
       // While the drift persists, further hot-reloads do not re-emit.
       merged.modelProviders = {
         idealab: [{ id: 'm-2', baseUrl: 'https://x' }],
       } as ModelProvidersConfig;
       await listener([]);
-      expect(spy).toHaveBeenCalledOnce();
+      expect(logErrorSpy).toHaveBeenCalledOnce();
 
       // Reverting the protocol clears the drift…
       merged.providerProtocol = {} as Settings['providerProtocol'];
       await listener([]);
-      expect(spy).toHaveBeenCalledOnce();
+      expect(logErrorSpy).toHaveBeenCalledOnce();
 
       // …so a second independent drift notifies again.
       merged.providerProtocol = {
         idealab: 'anthropic',
       } as Settings['providerProtocol'];
       await listener([]);
-      expect(spy).toHaveBeenCalledTimes(2);
+      expect(openDebugConsoleSpy).toHaveBeenCalledTimes(2);
+      expect(logErrorSpy).toHaveBeenCalledTimes(2);
     } finally {
-      appEvents.off(AppEvent.LogError, spy);
+      appEvents.off(AppEvent.LogError, logErrorSpy);
+      appEvents.off(AppEvent.OpenDebugConsole, openDebugConsoleSpy);
     }
   });
 
