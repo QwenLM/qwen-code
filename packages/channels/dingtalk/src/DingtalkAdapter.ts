@@ -46,6 +46,10 @@ import {
   type DingtalkInteractiveCardConfig,
 } from './interactive-card-types.js';
 import { StatusCardController } from './status-card-controller.js';
+import {
+  DINGTALK_PRESENTATION_PHASE_LABELS,
+  lifecyclePresentationPhase,
+} from './presentation-phase.js';
 import { QuestionCardController } from './question-card-controller.js';
 import { DingtalkInteractionPresenter } from './interaction-presenter.js';
 import type {
@@ -656,14 +660,9 @@ const EYE_TAG: DingtalkEmotionTag = {
   emotionId: ACK_EMOTION_ID,
   backgroundId: ACK_EMOTION_BG_ID,
 };
-const THINKING_TAG = statusEmotionTag('🤔 Thinking');
-const READING_TAG = statusEmotionTag('📖 Reading');
-const SEARCHING_TAG = statusEmotionTag('🔎 Searching');
-const RUNNING_TAG = statusEmotionTag('🖥️ Running');
-const EDITING_TAG = statusEmotionTag('🛠️ Editing');
-const WORKING_TAG = statusEmotionTag('🛠️ Working');
-const RETRYING_TAG = statusEmotionTag('⚠️ Retrying');
-const REPLYING_TAG = statusEmotionTag('✍️ Replying');
+const THINKING_TAG = statusEmotionTag(
+  DINGTALK_PRESENTATION_PHASE_LABELS.thinking,
+);
 const DONE_TAG: DingtalkEmotionTag = {
   name: '✅ Done',
   emotionId: DONE_EMOTION_ID,
@@ -671,20 +670,6 @@ const DONE_TAG: DingtalkEmotionTag = {
 };
 const FAILED_TAG = statusEmotionTag('❌ Failed');
 const STOPPED_TAG = statusEmotionTag('⏹️ Stopped');
-
-function lifecycleStatusTag(
-  event: ChannelTaskLifecycleEvent,
-): DingtalkEmotionTag | undefined {
-  if (event.type === 'text_chunk') return REPLYING_TAG;
-  if (event.type !== 'tool_call') return undefined;
-  if (/fail|error/i.test(event.toolCall.status)) return RETRYING_TAG;
-  if (/complete|success/i.test(event.toolCall.status)) return THINKING_TAG;
-  if (/read/i.test(event.toolCall.kind)) return READING_TAG;
-  if (/search|browser|web/i.test(event.toolCall.kind)) return SEARCHING_TAG;
-  if (/shell|exec|command|run/i.test(event.toolCall.kind)) return RUNNING_TAG;
-  if (/edit|write|patch/i.test(event.toolCall.kind)) return EDITING_TAG;
-  return WORKING_TAG;
-}
 
 function collectNonBotMentionIds(data: DingTalkMessageData): string[] {
   if (!Array.isArray(data.atUsers) || typeof data.chatbotUserId !== 'string') {
@@ -1830,9 +1815,19 @@ export class DingtalkChannel extends ChannelBase {
       }
       return;
     }
-    const statusTag = lifecycleStatusTag(event);
-    if (statusTag) {
-      this.replaceStatusReaction(event.chatId, event.messageId, statusTag);
+    const presentationPhase = lifecyclePresentationPhase(event);
+    if (event.runId && presentationPhase) {
+      this.interactionPresenter?.updateStatusCardPhase(
+        event.runId,
+        presentationPhase,
+      );
+    }
+    if (presentationPhase) {
+      this.replaceStatusReaction(
+        event.chatId,
+        event.messageId,
+        statusEmotionTag(DINGTALK_PRESENTATION_PHASE_LABELS[presentationPhase]),
+      );
       return;
     }
     if (isTerminalTaskLifecycleType(event.type)) {

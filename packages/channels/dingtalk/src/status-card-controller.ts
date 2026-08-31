@@ -9,6 +9,10 @@ import {
 } from './interactive-card-client.js';
 import type { DingtalkCardCallbackResult } from './interactive-card-types.js';
 import { sanitizeStreamingImageMarkers } from './outbound-image.js';
+import {
+  DINGTALK_PRESENTATION_PHASE_LABELS,
+  type DingtalkPresentationPhase,
+} from './presentation-phase.js';
 
 const FLUSH_INTERVAL_MS = 500;
 const STATUS_REFRESH_INTERVAL_MS = 1_000;
@@ -27,8 +31,10 @@ interface StatusRecord {
   target: { chatId: string; isGroup: boolean };
   outTrackId: string;
   content: string;
+  phase: DingtalkPresentationPhase;
   startedAt: number;
   lastStatusSecond: number;
+  lastStatusPhase?: DingtalkPresentationPhase;
   ready: Promise<boolean>;
   terminal: boolean;
   streamFailed: boolean;
@@ -141,6 +147,7 @@ export class StatusCardController {
       target,
       outTrackId,
       content: boundContent(initialContent),
+      phase: 'thinking',
       startedAt: Date.now(),
       lastStatusSecond: 0,
       ready: Promise.resolve(false),
@@ -177,6 +184,34 @@ export class StatusCardController {
       false,
       retainedContent,
     );
+  }
+
+  async updateRunPhase(
+    runId: string,
+    phase: DingtalkPresentationPhase,
+  ): Promise<void> {
+    const updates: Array<Promise<void>> = [];
+    for (const segmentId of this.segmentIdsByRun.get(runId) ?? []) {
+      const record = this.recordsBySegment.get(segmentId);
+      if (
+        !record ||
+        record.terminal ||
+        record.streamFailed ||
+        record.phase === phase
+      ) {
+        continue;
+      }
+      record.phase = phase;
+      const update = record.writeChain.then(async () => {
+        if (!(await record.ready) || record.terminal || record.streamFailed) {
+          return;
+        }
+        await this.updateActiveStatus(record, phase);
+      });
+      record.writeChain = update;
+      updates.push(update);
+    }
+    await Promise.all(updates);
   }
 
   fail(segmentId: string, error: string): void {
@@ -244,7 +279,10 @@ export class StatusCardController {
         cardParamMap: {
           content: initialContent,
           flowStatus: 2,
-          statusLine: this.statusLine(record, 'Running').text,
+          statusLine: this.statusLine(
+            record,
+            DINGTALK_PRESENTATION_PHASE_LABELS[record.phase],
+          ).text,
           hasAction: 'true',
           stop_action: 'true',
         },
@@ -255,6 +293,7 @@ export class StatusCardController {
         content: initialContent,
         finalize: false,
       });
+      record.lastStatusPhase = 'thinking';
       return true;
     } catch (error) {
       this.options.onError?.('status card creation', error);
@@ -304,7 +343,7 @@ export class StatusCardController {
           content,
           finalize: false,
         });
-        await this.updateRunningStatus(record);
+        await this.updateActiveStatus(record);
       })
       .catch((error) => {
         record.streamFailed = true;
@@ -402,7 +441,7 @@ export class StatusCardController {
 
   private statusLine(
     record: StatusRecord,
-    state: StatusState,
+    state: string,
   ): { text: string; second: number } {
     const second = Math.max(
       0,
@@ -415,16 +454,28 @@ export class StatusCardController {
     };
   }
 
-  private async updateRunningStatus(record: StatusRecord): Promise<void> {
+  private async updateActiveStatus(
+    record: StatusRecord,
+    phase = record.phase,
+  ): Promise<void> {
     if (record.terminal || record.streamFailed) return;
-    const status = this.statusLine(record, 'Running');
-    if (status.second === record.lastStatusSecond) return;
+    const status = this.statusLine(
+      record,
+      DINGTALK_PRESENTATION_PHASE_LABELS[phase],
+    );
+    if (
+      status.second === record.lastStatusSecond &&
+      phase === record.lastStatusPhase
+    ) {
+      return;
+    }
     try {
       await this.options.client.updateInstance({
         outTrackId: record.outTrackId,
         cardParamMap: { statusLine: status.text },
       });
       record.lastStatusSecond = status.second;
+      record.lastStatusPhase = phase;
       record.consecutiveStatusFailures = 0;
       // A success revives the per-second chain even when only a low-frequency
       // breaker probe is scheduled.
@@ -450,7 +501,7 @@ export class StatusCardController {
       record.statusTimer = undefined;
       if (record.terminal || record.streamFailed) return;
       const refresh = record.writeChain.then(() =>
-        this.updateRunningStatus(record),
+        this.updateActiveStatus(record),
       );
       record.writeChain = refresh;
       void refresh.finally(() => {

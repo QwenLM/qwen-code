@@ -173,6 +173,24 @@ describe('DingtalkInteractionPresenter', () => {
     });
   });
 
+  it('serializes lifecycle phases into the status card before output', async () => {
+    const { client, presenter } = createHarness();
+
+    presenter.startStatusCard('run-1');
+    presenter.updateStatusCardPhase('run-1', 'searching');
+
+    await vi.waitFor(() => {
+      expect(client.updateInstance).toHaveBeenCalledWith(
+        expect.objectContaining({
+          cardParamMap: {
+            statusLine: expect.stringMatching(/^🔎 Searching · \d+s$/u),
+          },
+        }),
+      );
+    });
+    expect(client.openOrUpdateStream).toHaveBeenCalledTimes(1);
+  });
+
   it('adds the group sender only to the final model output', async () => {
     const { client, presenter } = createHarness();
     presenter.registerRun('run-1', 'owner-1', target, 'session-1', {

@@ -9,6 +9,7 @@ import type {
 } from '@qwen-code/channel-base';
 import { stripPartialImageMarker } from './outbound-image.js';
 import type { QuestionCardController } from './question-card-controller.js';
+import type { DingtalkPresentationPhase } from './presentation-phase.js';
 import {
   CONTENT_LIMIT,
   TRUNCATION_MARKER,
@@ -106,6 +107,14 @@ export class DingtalkInteractionPresenter {
       const target = this.cardTarget(statusContext.target);
       statusCards?.ensure(statusContext, target);
     });
+  }
+
+  updateStatusCardPhase(runId: string, phase: DingtalkPresentationPhase): void {
+    const run = this.runs.get(runId);
+    if (!run || run.terminal) return;
+    void this.enqueue(run, () =>
+      this.options.statusCards?.updateRunPhase(runId, phase),
+    );
   }
 
   appendOutput(segment: ChannelOutputSegmentContext, chunk: string): void {

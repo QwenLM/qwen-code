@@ -211,7 +211,7 @@ describe('StatusCardController', () => {
     expect(client.createAndDeliver).toHaveBeenCalledWith(
       expect.objectContaining({
         cardParamMap: expect.objectContaining({
-          statusLine: 'Running · qwen3.7-max · 0s',
+          statusLine: '🤔 Thinking · qwen3.7-max · 0s',
         }),
       }),
     );
@@ -223,7 +223,7 @@ describe('StatusCardController', () => {
     expect(client.updateInstance).toHaveBeenCalledWith(
       expect.objectContaining({
         cardParamMap: {
-          statusLine: 'Running · qwen3.7-max · 2s',
+          statusLine: '🤔 Thinking · qwen3.7-max · 2s',
         },
       }),
     );
@@ -233,13 +233,13 @@ describe('StatusCardController', () => {
     expect(client.updateInstance).toHaveBeenCalledWith(
       expect.objectContaining({
         cardParamMap: {
-          statusLine: 'Running · qwen3.7-max · 3s',
+          statusLine: '🤔 Thinking · qwen3.7-max · 3s',
         },
       }),
     );
   });
 
-  it('omits an unconfigured model from running status', async () => {
+  it('omits an unconfigured model from the active status', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
     const { client, controller } = createHarness();
@@ -250,7 +250,7 @@ describe('StatusCardController', () => {
     expect(client.createAndDeliver).toHaveBeenCalledWith(
       expect.objectContaining({
         cardParamMap: expect.objectContaining({
-          statusLine: 'Running · 0s',
+          statusLine: '🤔 Thinking · 0s',
         }),
       }),
     );
@@ -260,7 +260,44 @@ describe('StatusCardController', () => {
     expect(client.updateInstance).toHaveBeenCalledWith(
       expect.objectContaining({
         cardParamMap: {
-          statusLine: 'Running · 2s',
+          statusLine: '🤔 Thinking · 2s',
+        },
+      }),
+    );
+  });
+
+  it('shows the current lifecycle phase before response text arrives', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const { client, controller } = createHarness({
+      model: 'qwen3.7-max',
+    });
+
+    controller.ensure(segment(), target);
+    await vi.advanceTimersByTimeAsync(0);
+    vi.mocked(client.updateInstance).mockClear();
+
+    void controller.updateRunPhase('run-1', 'searching');
+    void controller.updateRunPhase('run-1', 'searching');
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(client.updateInstance).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cardParamMap: {
+          statusLine: '🔎 Searching · qwen3.7-max · 0s',
+        },
+      }),
+    );
+    expect(client.updateInstance).toHaveBeenCalledTimes(1);
+    expect(client.openOrUpdateStream).toHaveBeenCalledTimes(1);
+
+    vi.mocked(client.updateInstance).mockClear();
+    vi.setSystemTime(1_200);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(client.updateInstance).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cardParamMap: {
+          statusLine: '🔎 Searching · qwen3.7-max · 2s',
         },
       }),
     );

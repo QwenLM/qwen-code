@@ -2048,6 +2048,61 @@ describe('DingtalkChannel status cards', () => {
     expect(appendOutput).not.toHaveBeenCalled();
   });
 
+  it('projects lifecycle phases into the matching status card', () => {
+    const channel = createChannel();
+    const registerRun = vi.fn();
+    const startStatusCard = vi.fn();
+    const updateStatusCardPhase = vi.fn();
+    (
+      channel as unknown as {
+        interactionPresenter: {
+          registerRun: typeof registerRun;
+          startStatusCard: typeof startStatusCard;
+          updateStatusCardPhase: typeof updateStatusCardPhase;
+        };
+        inboundCardOwners: Map<string, unknown>;
+      }
+    ).interactionPresenter = {
+      registerRun,
+      startStatusCard,
+      updateStatusCardPhase,
+    };
+    (
+      channel as unknown as { inboundCardOwners: Map<string, unknown> }
+    ).inboundCardOwners.set('message-1', {
+      ownerId: 'owner-1',
+      target: { chatId: 'cid-1', isGroup: true },
+    });
+    const base = {
+      channelName: 'dingtalk',
+      chatId: 'cid-1',
+      sessionId: 'session-1',
+      messageId: 'message-1',
+      runId: 'run-1',
+      owner: { kind: 'channel_user', id: 'owner-1' },
+    } satisfies LifecycleBase;
+    const lifecycle = getLifecycleHook(channel);
+
+    lifecycle({ ...base, type: 'started' });
+    lifecycle({
+      ...base,
+      type: 'tool_call',
+      toolCall: {
+        sessionId: 'session-1',
+        toolCallId: 'tool-1',
+        kind: 'search',
+        title: 'Search docs',
+        status: 'in_progress',
+      },
+    });
+    lifecycle({ ...base, type: 'text_chunk', chunk: 'Answer' });
+
+    expect(updateStatusCardPhase.mock.calls).toEqual([
+      ['run-1', 'searching'],
+      ['run-1', 'replying'],
+    ]);
+  });
+
   it('captures direct-card correlation by conversation instead of delivery user', async () => {
     const channel = createChannel();
     const envelope: Envelope = {
