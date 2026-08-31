@@ -10,6 +10,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import {
   readWorktreeSession,
+  readWorktreeSessionStrict,
   writeWorktreeSession,
   clearWorktreeSession,
   restoreWorktreeContext,
@@ -109,6 +110,104 @@ describe('readWorktreeSession', () => {
       'utf-8',
     );
     expect(await readWorktreeSession(filePath)).toBeNull();
+  });
+});
+
+describe('readWorktreeSessionStrict', () => {
+  it('distinguishes missing, valid, and malformed sidecars', async () => {
+    await expect(readWorktreeSessionStrict(filePath)).resolves.toEqual({
+      state: 'missing',
+    });
+
+    await fs.writeFile(filePath, JSON.stringify(sample), 'utf8');
+    await expect(readWorktreeSessionStrict(filePath)).resolves.toEqual({
+      state: 'valid',
+      session: sample,
+    });
+
+    await fs.writeFile(filePath, '{broken', 'utf8');
+    await expect(readWorktreeSessionStrict(filePath)).resolves.toMatchObject({
+      state: 'invalid',
+    });
+  });
+
+  it('rejects symlinked, hard-linked, and oversized sidecars', async () => {
+    const target = path.join(tmpDir, 'target');
+    await fs.writeFile(target, JSON.stringify(sample), 'utf8');
+    await fs.symlink(target, filePath);
+    await expect(readWorktreeSessionStrict(filePath)).resolves.toMatchObject({
+      state: 'invalid',
+    });
+
+    await fs.unlink(filePath);
+    await fs.link(target, filePath);
+    await expect(readWorktreeSessionStrict(filePath)).resolves.toMatchObject({
+      state: 'invalid',
+    });
+
+    await fs.unlink(filePath);
+    await fs.writeFile(filePath, 'x'.repeat(64 * 1024 + 1));
+    await expect(readWorktreeSessionStrict(filePath)).resolves.toMatchObject({
+      state: 'invalid',
+    });
+  });
+
+  it('uses a bounded read for sidecar contents', async () => {
+    await fs.writeFile(filePath, JSON.stringify(sample), 'utf8');
+    const probe = await fs.open(filePath, 'r');
+    const prototype = Object.getPrototypeOf(probe) as Pick<
+      typeof probe,
+      'read' | 'readFile'
+    >;
+    const readSpy = vi.spyOn(prototype, 'read');
+    const readFileSpy = vi.spyOn(prototype, 'readFile');
+    await probe.close();
+
+    await expect(readWorktreeSessionStrict(filePath)).resolves.toMatchObject({
+      state: 'valid',
+    });
+    expect(readFileSpy).not.toHaveBeenCalled();
+    expect(readSpy).toHaveBeenCalledWith(
+      expect.any(Buffer),
+      0,
+      64 * 1024 + 1,
+      0,
+    );
+  });
+
+  it('continues reading a stable sidecar after a short read', async () => {
+    await fs.writeFile(filePath, JSON.stringify(sample), 'utf8');
+    const probe = await fs.open(filePath, 'r');
+    const prototype = Object.getPrototypeOf(probe) as typeof probe;
+    const originalRead = prototype.read;
+    await probe.close();
+    const shortRead = function (
+      this: typeof probe,
+      buffer: Buffer,
+      offset: number,
+      length: number,
+      position: number,
+    ) {
+      return originalRead.call(this, {
+        buffer,
+        offset,
+        length: Math.min(length, 5),
+        position,
+      });
+    };
+    const readSpy = vi
+      .spyOn(prototype, 'read')
+      .mockImplementation(shortRead as typeof prototype.read);
+
+    try {
+      await expect(readWorktreeSessionStrict(filePath)).resolves.toEqual({
+        state: 'valid',
+        session: sample,
+      });
+      expect(readSpy.mock.calls.length).toBeGreaterThan(1);
+    } finally {
+      readSpy.mockRestore();
+    }
   });
 });
 

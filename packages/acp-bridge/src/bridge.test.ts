@@ -100,6 +100,7 @@ import {
   gradeActiveWorkCoverage,
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
+  DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY,
   DAEMON_MODEL_PROMPT_META_KEY,
   WORKTREE_MCP_DEFER_META_KEY,
   LOAD_REPLAY_HIDE_INHERITED_META_KEY,
@@ -4865,6 +4866,7 @@ describe('createAcpSessionBridge', () => {
     const loaded = await bridge.loadSession({
       sessionId: 'persisted-1',
       workspaceCwd: WS_A,
+      suppressWorktreeContextRestore: true,
     });
 
     expect(loaded).toEqual({
@@ -4882,7 +4884,9 @@ describe('createAcpSessionBridge', () => {
     });
     expect(handles[0]?.agent.loadSessionCalls).toEqual([
       {
-        _meta: {},
+        _meta: {
+          [DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY]: true,
+        },
         sessionId: 'persisted-1',
         cwd: WS_A,
         mcpServers: [],
@@ -9166,6 +9170,7 @@ describe('createAcpSessionBridge', () => {
     const resumed = await bridge.resumeSession({
       sessionId: 'persisted-2',
       workspaceCwd: WS_A,
+      suppressWorktreeContextRestore: true,
     });
 
     expect(resumed).toEqual({
@@ -9181,7 +9186,14 @@ describe('createAcpSessionBridge', () => {
     });
     expect(handles[0]?.agent.loadSessionCalls).toHaveLength(0);
     expect(handles[0]?.agent.resumeSessionCalls).toEqual([
-      { _meta: {}, sessionId: 'persisted-2', cwd: WS_A, mcpServers: [] },
+      {
+        _meta: {
+          [DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY]: true,
+        },
+        sessionId: 'persisted-2',
+        cwd: WS_A,
+        mcpServers: [],
+      },
     ]);
 
     await bridge.shutdown();

@@ -16,18 +16,41 @@ import { SessionRouter } from './SessionRouter.js';
 
 function createBridge(): ChannelAgentBridge {
   let nextId = 0;
-  const live = new Set<string>();
+  const live = new Map<
+    string,
+    {
+      workspaceCwd: string;
+      worktree?: { slug: string; path: string; branch: string };
+      worktreeState?: 'persisted-v1';
+    }
+  >();
+  const known = new Map(live);
   return {
     availableCommands: [],
     on: vi.fn(),
     off: vi.fn(),
-    newSession: vi.fn(async () => {
+    newSession: vi.fn(async (workspaceCwd: string, options) => {
       const sessionId = `session-${++nextId}`;
-      live.add(sessionId);
+      const info = options?.worktree
+        ? {
+            workspaceCwd,
+            worktree: {
+              slug: sessionId,
+              path: `/worktrees/${sessionId}`,
+              branch: sessionId,
+            },
+            worktreeState: 'persisted-v1',
+          }
+        : { workspaceCwd };
+      live.set(sessionId, info);
+      known.set(sessionId, info);
       return sessionId;
     }),
-    loadSession: vi.fn(async (sessionId: string) => {
-      live.add(sessionId);
+    loadSession: vi.fn(async (sessionId: string, workspaceCwd: string) => {
+      live.set(
+        sessionId,
+        live.get(sessionId) ?? known.get(sessionId) ?? { workspaceCwd },
+      );
       return sessionId;
     }),
     prompt: vi.fn().mockResolvedValue(''),
@@ -36,9 +59,9 @@ function createBridge(): ChannelAgentBridge {
       live.delete(sessionId);
     }),
     listSessions: vi.fn(() =>
-      [...live].map((sessionId) => ({
+      [...live].map(([sessionId, info]) => ({
         sessionId,
-        workspaceCwd: '/workspace',
+        ...info,
         hasActivePrompt: false,
       })),
     ),
@@ -677,6 +700,76 @@ describe('NamedSessionManager', () => {
       readFileSync(join(dir, 'named-sessions.json'), 'utf8'),
     ) as { version: number };
     expect(persisted.version).toBe(1);
+  });
+
+  it('creates, persists, closes, and reopens an exact worktree task', async () => {
+    const named = manager();
+    const created = await named.create(alice, 'feature', 'worktree');
+
+    expect(created).toMatchObject({
+      name: 'feature',
+      isolation: 'worktree',
+      active: true,
+    });
+    expect(router.getSessionCwd(created.sessionId)).toBe(
+      `/worktrees/${created.sessionId}`,
+    );
+    await named.close(alice, 'feature');
+    await expect(named.use(alice, 'feature')).resolves.toMatchObject({
+      sessionId: created.sessionId,
+      isolation: 'worktree',
+    });
+    expect(bridge.loadSession).toHaveBeenCalledWith(
+      created.sessionId,
+      '/workspace',
+      { sourceId: 'channel-a' },
+      expect.anything(),
+    );
+
+    const persisted = JSON.parse(
+      readFileSync(join(dir, 'named-sessions.json'), 'utf8'),
+    ) as {
+      workspaceCwd: string;
+      owners: Array<{ tasks: Array<{ cwd: string; isolation: string }> }>;
+    };
+    expect(persisted.workspaceCwd).toBe('/workspace');
+    expect(persisted.owners[0]?.tasks[0]).toMatchObject({
+      cwd: `/worktrees/${created.sessionId}`,
+      isolation: 'worktree',
+    });
+  });
+
+  it('rejects resetting a worktree task before creating a replacement', async () => {
+    const named = manager();
+    await named.create(alice, 'feature', 'worktree');
+    vi.mocked(bridge.newSession).mockClear();
+
+    await expect(named.reset(alice)).rejects.toThrow('cannot be reset');
+    expect(bridge.newSession).not.toHaveBeenCalled();
+  });
+
+  it('loads a legacy shared-only v1 registry and writes its workspace root next', async () => {
+    const first = manager();
+    await first.create(alice, 'review');
+    const filePath = join(dir, 'named-sessions.json');
+    const legacy = JSON.parse(readFileSync(filePath, 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    delete legacy['workspaceCwd'];
+    writeFileSync(filePath, JSON.stringify(legacy));
+
+    const restarted = manager();
+    await expect(restarted.current(alice)).resolves.toMatchObject({
+      name: 'review',
+      isolation: 'shared',
+    });
+    await restarted.create(alice, 'feature');
+
+    const normalized = JSON.parse(readFileSync(filePath, 'utf8')) as {
+      workspaceCwd?: string;
+    };
+    expect(normalized.workspaceCwd).toBe('/workspace');
   });
 
   it('restores the open presentation when close detachment rolls back', async () => {

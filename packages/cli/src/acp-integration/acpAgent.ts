@@ -412,6 +412,7 @@ import {
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY,
   DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY,
+  DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY,
   LOAD_REPLAY_BULK_MODE,
   LOAD_REPLAY_HIDE_INHERITED_META_KEY,
   LOAD_REPLAY_MAX_BYTES,
@@ -5081,6 +5082,10 @@ class QwenAgent implements Agent {
       (params._meta as Record<string, unknown> | null | undefined)?.[
         DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY
       ] === true;
+    const suppressWorktreeContextRestore =
+      (params._meta as Record<string, unknown> | null | undefined)?.[
+        DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY
+      ] === true;
     const withRestoreHint = <
       T extends { _meta?: Record<string, unknown> | null },
     >(
@@ -5470,7 +5475,7 @@ class QwenAgent implements Agent {
                 }
               }
               await profiler.time('post_replay_services', async () => {
-                if (!provisionalStandalone) {
+                if (!provisionalStandalone && !suppressWorktreeContextRestore) {
                   await this.#restoreWorktreeOnResume(config, createdSession);
                 }
                 await this.#restoreBackgroundAgentsOnResume(
@@ -5552,6 +5557,10 @@ class QwenAgent implements Agent {
     const suppressRestoreAskUserQuestion =
       (params._meta as Record<string, unknown> | null | undefined)?.[
         DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY
+      ] === true;
+    const suppressWorktreeContextRestore =
+      (params._meta as Record<string, unknown> | null | undefined)?.[
+        DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY
       ] === true;
     const withRestoreHint = <
       T extends { _meta?: Record<string, unknown> | null },
@@ -5689,7 +5698,7 @@ class QwenAgent implements Agent {
             },
             beforeStartPostReplayServices: async (createdSession) => {
               await profiler.time('post_replay_services', async () => {
-                if (!provisionalStandalone) {
+                if (!provisionalStandalone && !suppressWorktreeContextRestore) {
                   await this.#restoreWorktreeOnResume(config, createdSession);
                 }
                 await this.#restoreBackgroundAgentsOnResume(

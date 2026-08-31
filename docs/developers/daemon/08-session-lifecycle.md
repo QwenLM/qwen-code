@@ -110,6 +110,8 @@ Both:
 1. Use a per-session `pendingRestoreIds` set on the channel so concurrent restore calls coalesce (`RestoreInProgressError`).
 2. Cache `restoreState` on the entry so a late attacher gets the same payload the original restorer did.
 
+For a persisted worktree session, restore is an integrity-gated extension of this lifecycle. New daemon-created sidecars identify the requested workspace root explicitly; compatible legacy sidecars must identify either that workspace root or its Git repository top-level as the worktree service root. The checkout must be canonically contained below the corresponding `.qwen/worktrees/` directory, and its marker must be a single-link regular file containing the exact restored session ID. The daemon relocates an idle restored child only after those checks, returns the canonical worktree metadata with `worktreeState: "persisted-v1"`, and otherwise detaches an existing attachment or kills a cold restore with `requireZeroAttaches`. It never downgrades an invalid worktree restore to the shared workspace and never deletes persisted worktree state merely because validation failed.
+
 ### Heartbeat
 
 `POST /session/:id/heartbeat` updates `sessionLastSeenAt` regardless of `clientId`. If the request carries a registered `X-Qwen-Client-Id`, `clientLastSeenAt.set(clientId, Date.now())` also updates. Per-client eviction is **not** implemented in v1; revocation is planned for F-series Wave 5. Today, heartbeats provide observability for dashboards and for the upcoming revocation policy in PR 24.
