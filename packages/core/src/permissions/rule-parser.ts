@@ -406,21 +406,16 @@ export function parseRule(raw: string): PermissionRule {
   let rawSpecifier = trimmed.substring(openParen + 1, trimmed.length - 1);
   const canonicalName = resolveToolName(toolPart);
 
-  // Handle legacy `:*` suffix for command specifiers (deprecated, equivalent to ` *`)
-  // e.g. "Bash(git:*)" → specifier becomes "git *"
-  // Only applies to command-type specifiers to avoid interfering with key:value syntax
+  // Handle legacy `:*` syntax for command specifiers (deprecated, equivalent
+  // to inserting a space before `*`). Leading environment assignments are
+  // intentionally opaque: `FOO=a:*` is an assignment value, not legacy rule
+  // syntax. The command portion is rewritten even when `:*` appears mid-token
+  // (`curl:*.evil.com`, `git:**`).
   const specifierKind = rawSpecifier
     ? getSpecifierKind(canonicalName)
     : undefined;
   if (specifierKind === 'command') {
-    // Legacy `:*` is token syntax; never rewrite env assignment values.
-    rawSpecifier = rawSpecifier.replace(
-      /(^|[ \t\n])([^ \t\n]+):\*(?=$|[ \t\n])/g,
-      (match, leadingWhitespace: string, token: string) =>
-        ENV_ASSIGNMENT_REGEX.test(token)
-          ? match
-          : `${leadingWhitespace}${token} *`,
-    );
+    rawSpecifier = rewriteLegacyCommandColonStar(rawSpecifier);
   }
 
   // For literal specifier kind, extract `key:value` param matchers.
@@ -954,6 +949,53 @@ export function splitCompoundCommand(command: string): string[] {
   return commands.length > 0 ? commands : [command];
 }
 
+/** Match the command portion after any leading environment assignments. */
+function matchesCommandPatternCore(pattern: string, command: string): boolean {
+  const normalizedCommand = normalizeCommandForPermissionMatch(command);
+  const normalizedPattern = collapseUnquotedWhitespace(
+    trimShellIfsWhitespace(pattern),
+  );
+
+  if (normalizedPattern === '*') {
+    return true;
+  }
+
+  if (!normalizedPattern.includes('*')) {
+    return (
+      normalizedCommand === normalizedPattern ||
+      normalizedCommand.startsWith(normalizedPattern + ' ')
+    );
+  }
+
+  let regex = '^';
+  let pos = 0;
+  while (pos < normalizedPattern.length) {
+    const starIdx = normalizedPattern.indexOf('*', pos);
+    if (starIdx === -1) {
+      regex += escapeRegex(normalizedPattern.substring(pos));
+      break;
+    }
+
+    const literalBefore = normalizedPattern.substring(pos, starIdx);
+    if (starIdx > 0 && normalizedPattern[starIdx - 1] === ' ') {
+      const literalWithoutTrailingSpace = literalBefore.slice(0, -1);
+      regex += escapeRegex(literalWithoutTrailingSpace);
+      regex += '( .*)?';
+    } else {
+      regex += escapeRegex(literalBefore);
+      regex += '.*';
+    }
+    pos = starIdx + 1;
+  }
+  regex += '$';
+
+  try {
+    return new RegExp(regex, 's').test(normalizedCommand);
+  } catch {
+    return normalizedCommand === normalizedPattern;
+  }
+}
+
 /**
  * Match a shell command against a glob pattern.
  *
@@ -972,94 +1014,54 @@ export function splitCompoundCommand(command: string): string[] {
  *    `Bash(git commit)` matches `git commit -m "test"`.
  *
  * 5. `Bash(*)` is equivalent to `Bash` and matches any command.
+ *
+ * Leading Bash assignment words are handled before the legacy glob matcher.
+ * They are exact execution identity, not permission globs. This prevents a
+ * persisted literal `NAME=*` value or substitution text from widening into a
+ * rule that can consume a different executable command.
  */
 export function matchesCommandPattern(
   pattern: string,
   command: string,
 ): boolean {
-  // This function matches a single pattern against a single simple command.
-  // Compound command splitting is handled by the caller (PermissionManager).
-  const normalizedCommand = normalizeCommandForPermissionMatch(command);
   const normalizedPattern = collapseUnquotedWhitespace(
     trimShellIfsWhitespace(pattern),
   );
 
-  // Special case: lone `*` matches any single command.
+  // Deliberate global catch-all; unlike assignment-local stars this is a
+  // permission wildcard by definition.
   if (normalizedPattern === '*') {
     return true;
   }
 
-  // Assignment-only rules are identities, never command prefixes.
+  const patternSplit = splitLeadingShellAssignments(pattern);
+  const commandSplit = splitLeadingShellAssignments(command);
   if (
-    isAssignmentOnlyPermissionPattern(normalizedPattern) &&
-    !isAssignmentOnlyPermissionPattern(normalizedCommand)
+    patternSplit.assignments.length > 0 ||
+    commandSplit.assignments.length > 0
   ) {
-    return false;
-  }
-
-  if (!normalizedPattern.includes('*')) {
-    // An assignment-only rule is an identity, not a command prefix. Without
-    // this guard `Bash(FOO=bar)` would authorize `FOO=bar <anything>`.
-    if (isAssignmentOnlyPermissionPattern(normalizedPattern)) {
-      return normalizedCommand === normalizedPattern;
+    if (patternSplit.assignments.length !== commandSplit.assignments.length) {
+      return false;
+    }
+    for (let i = 0; i < patternSplit.assignments.length; i++) {
+      if (patternSplit.assignments[i] !== commandSplit.assignments[i]) {
+        return false;
+      }
     }
 
-    // No wildcards: prefix matching (backward compat).
-    // "git commit" matches "git commit" and "git commit -m test"
-    // but NOT "gitcommit".
-    return (
-      normalizedCommand === normalizedPattern ||
-      normalizedCommand.startsWith(normalizedPattern + ' ')
+    const patternRemainder = normalizeCommandForPermissionMatch(
+      patternSplit.remainder,
     );
-  }
-
-  // Build regex from glob pattern with word-boundary semantics.
-  // Wildcards in leading NAME=value words cannot cross shell-word boundaries.
-  const assignmentValueWildcards =
-    findAssignmentValueWildcardPositions(normalizedPattern);
-  let regex = '^';
-  let pos = 0;
-
-  while (pos < normalizedPattern.length) {
-    const starIdx = normalizedPattern.indexOf('*', pos);
-    if (starIdx === -1) {
-      regex += escapeRegex(normalizedPattern.substring(pos));
-      break;
+    const commandRemainder = normalizeCommandForPermissionMatch(
+      commandSplit.remainder,
+    );
+    if (!patternRemainder || !commandRemainder) {
+      return patternRemainder === commandRemainder;
     }
-
-    const literalBefore = normalizedPattern.substring(pos, starIdx);
-
-    if (assignmentValueWildcards.literal.has(starIdx)) {
-      // A wildcard written inside quotes or shell substitution in a leading
-      // assignment is shell syntax, not a permission wildcard. Matching it
-      // literally prevents the rule from authorizing different executable
-      // substitution text.
-      regex += escapeRegex(literalBefore);
-      regex += '\\*';
-    } else if (assignmentValueWildcards.bounded.has(starIdx)) {
-      // Unquoted assignment-value wildcards may vary, but never consume the
-      // next shell word and thereby change the command identity.
-      regex += escapeRegex(literalBefore);
-      regex += '[^ ]*';
-    } else if (starIdx > 0 && normalizedPattern[starIdx - 1] === ' ') {
-      const literalWithoutTrailingSpace = literalBefore.slice(0, -1);
-      regex += escapeRegex(literalWithoutTrailingSpace);
-      regex += '( .*)?';
-    } else {
-      regex += escapeRegex(literalBefore);
-      regex += '.*';
-    }
-
-    pos = starIdx + 1;
+    return matchesCommandPatternCore(patternSplit.remainder, commandSplit.remainder);
   }
 
-  regex += '$';
-
-  try {
-    return new RegExp(regex, 's').test(normalizedCommand);
-  } catch {
-    return normalizedCommand === normalizedPattern;
-  }
+  return matchesCommandPatternCore(pattern, command);
 }
 
 /**
@@ -1165,7 +1167,9 @@ function escapeRegex(s: string): string {
   return s.replace(/[.+?^${}()|[\]\\]/g, '\\$&');
 }
 
-export const ENV_ASSIGNMENT_REGEX = /^[A-Za-z_][A-Za-z0-9_]*=/;
+/** Bash assignment words, including append and indexed assignment forms. */
+export const ENV_ASSIGNMENT_REGEX =
+  /^[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]\r\n]*\])?\+?=/;
 
 function isShellIfsWhitespace(ch: string): boolean {
   return ch === ' ' || ch === '\t' || ch === '\n';
@@ -1225,8 +1229,6 @@ function permissionMatchTokens(command: string): string[] {
         'pattern' in token &&
         typeof token.pattern === 'string'
       ) {
-        // shell-quote represents unquoted * / ? words as glob tokens. Keep
-        // the original word so env assignments remain recognizable.
         tokens.push(restore(token.pattern));
       } else if (typeof token.op === 'string') {
         tokens.push(token.op);
@@ -1236,29 +1238,263 @@ function permissionMatchTokens(command: string): string[] {
   return tokens;
 }
 
+interface LeadingAssignmentSplit {
+  assignments: string[];
+  remainder: string;
+  remainderStart: number;
+}
+
+function skipSingleQuotedShellText(value: string, start: number): number {
+  for (let i = start; i < value.length; i++) {
+    if (value[i] === "'") return i + 1;
+  }
+  return value.length;
+}
+
+function skipBacktickShellText(value: string, start: number): number {
+  for (let i = start; i < value.length; i++) {
+    const ch = value[i]!;
+    if (ch === '\\') {
+      i++;
+      continue;
+    }
+    if (ch === '`') return i + 1;
+    if (ch === '$' && value[i + 1] === '(') {
+      i = skipParenthesizedShellText(value, i + 2) - 1;
+      continue;
+    }
+    if (ch === '$' && value[i + 1] === '{') {
+      i = skipBracedShellText(value, i + 2) - 1;
+    }
+  }
+  return value.length;
+}
+
+function skipDoubleQuotedShellText(value: string, start: number): number {
+  for (let i = start; i < value.length; i++) {
+    const ch = value[i]!;
+    if (ch === '\\') {
+      i++;
+      continue;
+    }
+    if (ch === '"') return i + 1;
+    if (ch === '`') {
+      i = skipBacktickShellText(value, i + 1) - 1;
+      continue;
+    }
+    if (ch === '$' && value[i + 1] === '(') {
+      i = skipParenthesizedShellText(value, i + 2) - 1;
+      continue;
+    }
+    if (ch === '$' && value[i + 1] === '{') {
+      i = skipBracedShellText(value, i + 2) - 1;
+    }
+  }
+  return value.length;
+}
+
+function skipBracedShellText(value: string, start: number): number {
+  let depth = 1;
+  for (let i = start; i < value.length; i++) {
+    const ch = value[i]!;
+    if (ch === '\\') {
+      i++;
+      continue;
+    }
+    if (ch === "'") {
+      i = skipSingleQuotedShellText(value, i + 1) - 1;
+      continue;
+    }
+    if (ch === '"') {
+      i = skipDoubleQuotedShellText(value, i + 1) - 1;
+      continue;
+    }
+    if (ch === '`') {
+      i = skipBacktickShellText(value, i + 1) - 1;
+      continue;
+    }
+    if (ch === '$' && value[i + 1] === '(') {
+      i = skipParenthesizedShellText(value, i + 2) - 1;
+      continue;
+    }
+    if (ch === '$' && value[i + 1] === '{') {
+      depth++;
+      i++;
+      continue;
+    }
+    if (ch === '}' && --depth === 0) return i + 1;
+  }
+  return value.length;
+}
+
+function skipParenthesizedShellText(value: string, start: number): number {
+  let depth = 1;
+  for (let i = start; i < value.length; i++) {
+    const ch = value[i]!;
+    if (ch === '\\') {
+      i++;
+      continue;
+    }
+    if (ch === "'") {
+      i = skipSingleQuotedShellText(value, i + 1) - 1;
+      continue;
+    }
+    if (ch === '"') {
+      i = skipDoubleQuotedShellText(value, i + 1) - 1;
+      continue;
+    }
+    if (ch === '`') {
+      i = skipBacktickShellText(value, i + 1) - 1;
+      continue;
+    }
+    if (
+      (ch === '$' || ch === '<' || ch === '>') &&
+      value[i + 1] === '('
+    ) {
+      depth++;
+      i++;
+      continue;
+    }
+    if (ch === '$' && value[i + 1] === '{') {
+      i = skipBracedShellText(value, i + 2) - 1;
+      continue;
+    }
+    if (ch === '(') {
+      depth++;
+    } else if (ch === ')' && --depth === 0) {
+      return i + 1;
+    }
+  }
+  return value.length;
+}
+
+function findShellWordEnd(value: string, start: number): number {
+  for (let i = start; i < value.length; i++) {
+    const ch = value[i]!;
+    if (ch === '\\') {
+      i++;
+      continue;
+    }
+    if (ch === "'") {
+      i = skipSingleQuotedShellText(value, i + 1) - 1;
+      continue;
+    }
+    if (ch === '"') {
+      i = skipDoubleQuotedShellText(value, i + 1) - 1;
+      continue;
+    }
+    if (ch === '`') {
+      i = skipBacktickShellText(value, i + 1) - 1;
+      continue;
+    }
+    if (
+      (ch === '$' || ch === '<' || ch === '>') &&
+      value[i + 1] === '('
+    ) {
+      i = skipParenthesizedShellText(value, i + 2) - 1;
+      continue;
+    }
+    if (ch === '$' && value[i + 1] === '{') {
+      i = skipBracedShellText(value, i + 2) - 1;
+      continue;
+    }
+    if (isShellIfsWhitespace(ch)) return i;
+  }
+  return value.length;
+}
+
 /**
- * Return a shell command with only leading NAME=value assignments removed.
+ * Split only the leading Bash assignment words from a simple command.
+ * Nested substitutions and quoted/escaped IFS whitespace stay inside the
+ * assignment word, so executable text cannot be mistaken for assignment data.
+ */
+function splitLeadingShellAssignments(value: string): LeadingAssignmentSplit {
+  const assignments: string[] = [];
+  let i = 0;
+  while (i < value.length && isShellIfsWhitespace(value[i]!)) i++;
+
+  while (i < value.length) {
+    const wordStart = i;
+    const wordEnd = findShellWordEnd(value, wordStart);
+    const word = value.slice(wordStart, wordEnd);
+    if (!ENV_ASSIGNMENT_REGEX.test(word)) {
+      return {
+        assignments,
+        remainder: trimShellIfsWhitespace(value.slice(wordStart)),
+        remainderStart: wordStart,
+      };
+    }
+    assignments.push(word);
+    i = wordEnd;
+    while (i < value.length && isShellIfsWhitespace(value[i]!)) i++;
+  }
+
+  return { assignments, remainder: '', remainderStart: value.length };
+}
+
+function rewriteUnquotedColonStars(value: string): string {
+  let result = '';
+  for (let i = 0; i < value.length; i++) {
+    const ch = value[i]!;
+    if (ch === '\\') {
+      result += value.slice(i, Math.min(i + 2, value.length));
+      i++;
+      continue;
+    }
+
+    let end: number | undefined;
+    if (ch === "'") {
+      end = skipSingleQuotedShellText(value, i + 1);
+    } else if (ch === '"') {
+      end = skipDoubleQuotedShellText(value, i + 1);
+    } else if (ch === '`') {
+      end = skipBacktickShellText(value, i + 1);
+    } else if (
+      (ch === '$' || ch === '<' || ch === '>') &&
+      value[i + 1] === '('
+    ) {
+      end = skipParenthesizedShellText(value, i + 2);
+    } else if (ch === '$' && value[i + 1] === '{') {
+      end = skipBracedShellText(value, i + 2);
+    }
+
+    if (end !== undefined) {
+      result += value.slice(i, end);
+      i = end - 1;
+      continue;
+    }
+
+    if (ch === ':' && value[i + 1] === '*') {
+      result += ' *';
+      i++;
+      continue;
+    }
+    result += ch;
+  }
+  return result;
+}
+
+function rewriteLegacyCommandColonStar(specifier: string): string {
+  const { remainderStart } = splitLeadingShellAssignments(specifier);
+  if (remainderStart >= specifier.length) return specifier;
+  return (
+    specifier.slice(0, remainderStart) +
+    rewriteUnquotedColonStars(specifier.slice(remainderStart))
+  );
+}
+
+/**
+ * Return a shell command with only leading assignment words removed.
  * Restrictive deny/ask matching uses this legacy identity in addition to the
- * full identity so the new allow hardening can never narrow a restriction.
+ * full identity so allow hardening can never narrow a restriction.
  */
 export function stripLeadingVariableAssignments(command: string): string {
   const trimmed = trimShellIfsWhitespace(command);
   if (!trimmed) return trimmed;
 
-  try {
-    const tokens = permissionMatchTokens(trimmed);
-    let firstCommandToken = 0;
-    while (
-      firstCommandToken < tokens.length &&
-      ENV_ASSIGNMENT_REGEX.test(tokens[firstCommandToken]!)
-    ) {
-      firstCommandToken++;
-    }
-    if (firstCommandToken === 0) return trimmed;
-    return tokens.slice(firstCommandToken).join(' ');
-  } catch {
-    return trimmed;
-  }
+  const split = splitLeadingShellAssignments(trimmed);
+  if (split.assignments.length === 0) return trimmed;
+  return normalizeCommandForPermissionMatch(split.remainder);
 }
 
 /** Collapse Bash-IFS whitespace outside quotes while retaining quotes. */
@@ -1305,112 +1541,12 @@ function collapseUnquotedWhitespace(command: string): string {
   return result;
 }
 
-function isAssignmentOnlyPermissionPattern(pattern: string): boolean {
-  try {
-    const tokens = permissionMatchTokens(pattern);
-    return (
-      tokens.length > 0 &&
-      tokens.every((token) => ENV_ASSIGNMENT_REGEX.test(token))
-    );
-  } catch {
-    return false;
-  }
-}
-
-function findAssignmentValueWildcardPositions(pattern: string): {
-  bounded: Set<number>;
-  literal: Set<number>;
-} {
-  const bounded = new Set<number>();
-  const literal = new Set<number>();
-  let quote: "'" | '"' | '`' | null = null;
-  let escaped = false;
-  let wordStart = 0;
-  let leadingAssignments = true;
-  let substitutionDepth = 0;
-
-  const isLeadingAssignmentWildcard = (index: number): boolean =>
-    leadingAssignments &&
-    ENV_ASSIGNMENT_REGEX.test(pattern.slice(wordStart, index));
-
-  for (let i = 0; i < pattern.length; i++) {
-    const ch = pattern[i]!;
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
-    if (ch === '\\' && quote !== "'") {
-      escaped = true;
-      continue;
-    }
-    if (quote) {
-      if (ch === '*' && isLeadingAssignmentWildcard(i)) {
-        literal.add(i);
-      }
-      if (ch === quote) quote = null;
-      continue;
-    }
-    if (ch === "'" || ch === '"' || ch === '`') {
-      quote = ch;
-      continue;
-    }
-    if (
-      (ch === '$' || ch === '<' || ch === '>') &&
-      pattern[i + 1] === '('
-    ) {
-      substitutionDepth++;
-      i++;
-      continue;
-    }
-    if (substitutionDepth > 0) {
-      if (ch === '(') {
-        substitutionDepth++;
-      } else if (ch === ')') {
-        substitutionDepth--;
-      } else if (ch === '*' && isLeadingAssignmentWildcard(i)) {
-        literal.add(i);
-      }
-      continue;
-    }
-    if (ch === ' ') {
-      if (leadingAssignments) {
-        const word = pattern.slice(wordStart, i);
-        if (word && !ENV_ASSIGNMENT_REGEX.test(word)) {
-          leadingAssignments = false;
-        }
-      }
-      wordStart = i + 1;
-      continue;
-    }
-    if (ch === '*' && isLeadingAssignmentWildcard(i)) {
-      bounded.add(i);
-    }
-  }
-
-  return { bounded, literal };
-}
-
 function normalizeCommandForPermissionMatch(command: string): string {
   const trimmed = trimShellIfsWhitespace(command);
   if (!trimmed) return trimmed;
 
   try {
-    const tokens = permissionMatchTokens(trimmed);
-    let firstCommandToken = 0;
-    while (
-      firstCommandToken < tokens.length &&
-      ENV_ASSIGNMENT_REGEX.test(tokens[firstCommandToken]!)
-    ) {
-      firstCommandToken++;
-    }
-
-    // Allow rules bind to the complete env-prefixed execution identity, but
-    // Bash-IFS whitespace outside quotes is canonicalized on both sides.
-    if (firstCommandToken > 0) {
-      return collapseUnquotedWhitespace(trimmed);
-    }
-
-    return tokens.join(' ');
+    return permissionMatchTokens(trimmed).join(' ');
   } catch {
     return collapseUnquotedWhitespace(trimmed);
   }
