@@ -629,6 +629,46 @@ describe('startCommand.handler', () => {
     );
   });
 
+  it('waits for asynchronous channel cleanup before standalone exit', async () => {
+    const channels = { telegram: { type: 'telegram' } };
+    let finishDisconnect!: () => void;
+    mockLoadSettings.mockReturnValue({ merged: { channels } });
+    mockChannelConnect.mockResolvedValue(undefined);
+    mockChannelDisconnect.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finishDisconnect = resolve;
+        }),
+    );
+    const processOnSpy = vi
+      .spyOn(process, 'on')
+      .mockImplementation(() => process);
+    const exitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation(() => undefined as never);
+
+    try {
+      void invokeStartHandler({ name: 'telegram' });
+      await vi.waitFor(() => expect(mockWriteServiceInfo).toHaveBeenCalled());
+      const shutdown = processOnSpy.mock.calls.find(
+        ([eventName]) => eventName === 'SIGTERM',
+      )?.[1] as (() => void | Promise<void>) | undefined;
+      expect(shutdown).toBeDefined();
+
+      const shuttingDown = Promise.resolve(shutdown!());
+      await vi.waitFor(() => expect(mockChannelDisconnect).toHaveBeenCalled());
+      expect(exitSpy).not.toHaveBeenCalled();
+
+      finishDisconnect();
+      await shuttingDown;
+
+      expect(exitSpy).toHaveBeenCalledWith(0);
+    } finally {
+      processOnSpy.mockRestore();
+      exitSpy.mockRestore();
+    }
+  });
+
   it('cleans up all connected channels when pidfile creation races', async () => {
     const channels = {
       telegram: { type: 'telegram' },

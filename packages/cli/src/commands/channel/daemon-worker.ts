@@ -566,14 +566,16 @@ export async function runChannelDaemonWorker(
     ...(opts.daemonToken ? { daemonToken: opts.daemonToken } : {}),
     workerEnv: process.env,
   };
-  const disconnectAll = () => {
+  const disconnectAll = async (): Promise<void> => {
+    const disconnections: Array<Promise<void>> = [];
     for (const channel of channels.values()) {
       try {
-        channel.disconnect();
+        disconnections.push(Promise.resolve(channel.disconnect()));
       } catch {
         // best-effort
       }
     }
+    await Promise.allSettled(disconnections);
   };
 
   let router: SessionRouter | undefined;
@@ -672,7 +674,7 @@ export async function runChannelDaemonWorker(
           `[Channel] Failed to connect "${safeName}": ${safeMessage}`,
         );
         try {
-          channel.disconnect();
+          await channel.disconnect();
         } catch {
           // best-effort
         }
@@ -800,23 +802,25 @@ export async function runChannelDaemonWorker(
       },
       async close() {
         scheduler?.stop();
-        disconnectAll();
+        const disconnecting = disconnectAll();
         try {
           bridge.stop();
         } finally {
           createdRouter.dispose();
+          await disconnecting;
         }
       },
     };
   } catch (err) {
     scheduler?.stop();
-    disconnectAll();
+    const disconnecting = disconnectAll();
     try {
       bridge.stop();
     } catch {
       // best-effort during startup rollback
     } finally {
       router?.dispose();
+      await disconnecting;
     }
     throw err;
   }

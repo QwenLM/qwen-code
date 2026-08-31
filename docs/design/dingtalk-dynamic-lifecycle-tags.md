@@ -20,7 +20,7 @@ The running card's `statusLine` contains only the configured model and elapsed t
 
 Phase and terminal labels use the effective Qwen display language after environment override, configured-language selection, and `auto` system-language detection. Presentation language never changes the agent prompt or tool-call schema.
 
-When named-task attribution supplies a source label, the escaped source label stays above the phase and response content throughout running, streaming, fallback, and terminal card states.
+When named-task attribution supplies a source label, the phase remains the first running-state line and the escaped source label stays above the response content throughout running, streaming, fallback, and terminal card states.
 
 ## Delivery modes
 

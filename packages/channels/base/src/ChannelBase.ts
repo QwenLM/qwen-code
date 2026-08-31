@@ -1038,7 +1038,7 @@ export abstract class ChannelBase {
 
   abstract connect(): Promise<void>;
   abstract sendMessage(chatId: string, text: string): Promise<void>;
-  abstract disconnect(): void;
+  abstract disconnect(): void | Promise<void>;
 
   /**
    * Thread-targeted delivery. Polling adapters override this to post comments

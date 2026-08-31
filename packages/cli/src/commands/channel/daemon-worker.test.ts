@@ -2292,6 +2292,41 @@ describe('runChannelDaemonWorker', () => {
     expect(mockRouterClearAll).not.toHaveBeenCalled();
   });
 
+  it('waits for asynchronous channel cleanup before closing', async () => {
+    const sdk = createSdk();
+    let finishDisconnect!: () => void;
+    const disconnect = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finishDisconnect = resolve;
+        }),
+    );
+    mockCreateChannel.mockResolvedValueOnce({
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect,
+      name: 'telegram',
+    });
+
+    const handle = await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      loadDaemonSdk: async () => sdk,
+    });
+    let closed = false;
+    const closing = handle.close().then(() => {
+      closed = true;
+    });
+
+    await vi.waitFor(() => expect(disconnect).toHaveBeenCalledOnce());
+    expect(closed).toBe(false);
+
+    finishDisconnect();
+    await closing;
+
+    expect(closed).toBe(true);
+  });
+
   it('runs webhook tasks on the matching channel handle', async () => {
     const sdk = createSdk();
     const runWebhookTask = vi.fn().mockResolvedValue(undefined);

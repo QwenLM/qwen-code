@@ -17,7 +17,7 @@
 - Phase updates are latest-wins; `completed`, `failed`, and `cancelled` preempt pending phases.
 - A failed recall prevents a contradictory replacement from being attached.
 - Status cards are created on `started`, stream response text below the phase, and remove the phase at terminal completion.
-- Preserve current-main named-task source labels in running, streaming, fallback, and terminal card content.
+- Preserve current-main named-task source labels above response content in running, streaming, fallback, and terminal cards while keeping the lifecycle phase first during active runs.
 - Do not change the DingTalk card template or add dependencies.
 
 ---

@@ -598,6 +598,7 @@ const DONE_EMOTION_BG_ID = 'im_bg_5';
 const EMOTION_API = 'https://api.dingtalk.com/v1.0/robot/emotion';
 const EMOTION_MAX_ATTEMPTS = 3;
 const EMOTION_RETRY_BASE_DELAY_MS = 250;
+const EMOTION_FETCH_TIMEOUT_MS = 15_000;
 const GROUP_MSG_API = 'https://api.dingtalk.com/v1.0/robot/groupMessages/send';
 const DIRECT_MSG_API =
   'https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend';
@@ -655,6 +656,7 @@ interface DingtalkReactionState {
   finishing: boolean;
   drainScheduled: boolean;
   eyeAttached: boolean;
+  revision: number;
   tail: Promise<void>;
 }
 
@@ -1578,6 +1580,7 @@ export class DingtalkChannel extends ChannelBase {
               backgroundId: tag.backgroundId,
             },
           }),
+          signal: AbortSignal.timeout(EMOTION_FETCH_TIMEOUT_MS),
         });
         if (resp.ok) return true;
 
@@ -1618,11 +1621,12 @@ export class DingtalkChannel extends ChannelBase {
     return this.emotionApi('recall', msgId, conversationId, tag);
   }
 
-  disconnect(): void {
+  async disconnect(): Promise<void> {
     if (this.dedupTimer) {
       clearInterval(this.dedupTimer);
     }
-    for (const state of this.reactionStates.values()) {
+    const reactionStates = [...this.reactionStates.values()];
+    for (const state of reactionStates) {
       this.finishReaction(state.chatId, state.messageId, state.sessionId);
     }
     this.activeReactionKeys.clear();
@@ -1634,6 +1638,7 @@ export class DingtalkChannel extends ChannelBase {
       this.client.disconnect();
     }
     process.stderr.write(`[DingTalk:${this.name}] Disconnected.\n`);
+    await Promise.allSettled(reactionStates.map((state) => state.tail));
   }
 
   /** Stable API targets are conversation or user IDs, never webhook URLs. */
@@ -1695,6 +1700,7 @@ export class DingtalkChannel extends ChannelBase {
       const desired = state.desiredStatusTag;
       if (!desired || desired.name === state.statusTag?.name) return;
       if (state.statusTag) {
+        const revision = state.revision;
         if (
           (await this.recallReaction(
             state.messageId,
@@ -1702,6 +1708,7 @@ export class DingtalkChannel extends ChannelBase {
             state.statusTag,
           )) === false
         ) {
+          if (state.revision !== revision) continue;
           state.desiredStatusTag = state.statusTag;
           return;
         }
@@ -1709,10 +1716,12 @@ export class DingtalkChannel extends ChannelBase {
         continue;
       }
 
+      const revision = state.revision;
       if (
         (await this.attachReaction(state.messageId, state.chatId, desired)) ===
         false
       ) {
+        if (state.revision !== revision) continue;
         state.desiredStatusTag = undefined;
         return;
       }
@@ -1784,6 +1793,7 @@ export class DingtalkChannel extends ChannelBase {
       finishing: false,
       drainScheduled: false,
       eyeAttached: false,
+      revision: 0,
       tail: Promise.resolve(),
     };
     this.reactionStates.set(key, state);
@@ -1819,6 +1829,7 @@ export class DingtalkChannel extends ChannelBase {
     const state = this.reactionStates.get(this.reactionKey(messageId, chatId));
     if (!state || !this.activeReactionKeys.has(state.key)) return;
     state.desiredStatusTag = tag;
+    state.revision++;
     this.scheduleReactionDrain(state);
   }
 
@@ -1864,6 +1875,7 @@ export class DingtalkChannel extends ChannelBase {
     state.finishing = true;
     state.desiredStatusTag = undefined;
     state.terminalTag = terminalTag;
+    state.revision++;
     this.scheduleReactionDrain(state);
   }
 

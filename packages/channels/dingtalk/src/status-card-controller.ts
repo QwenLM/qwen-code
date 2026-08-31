@@ -8,6 +8,7 @@ import {
   type DingtalkInteractiveCardClient,
 } from './interactive-card-client.js';
 import type { DingtalkCardCallbackResult } from './interactive-card-types.js';
+import { escapeDingTalkMarkdown } from './markdown.js';
 import { sanitizeStreamingImageMarkers } from './outbound-image.js';
 import {
   isChinesePresentationLanguage,
@@ -32,6 +33,7 @@ interface StatusRecord {
   target: { chatId: string; isGroup: boolean };
   outTrackId: string;
   content: string;
+  sourcePrefix?: string;
   phase: DingtalkPresentationPhase;
   startedAt: number;
   lastStatusSecond: number;
@@ -68,16 +70,29 @@ function activeContent(
   phase: DingtalkPresentationPhase,
   content: string,
   language?: string,
+  sourcePrefix?: string,
 ): string {
   const label = presentationPhaseLabel(phase, language);
   const sanitized = sanitizeStreamingImageMarkers(content);
-  if (!sanitized) return label;
+  const renderedSourcePrefix =
+    sourcePrefix &&
+    (sanitized === sourcePrefix || sanitized.startsWith(`${sourcePrefix}\n\n`))
+      ? sourcePrefix
+      : undefined;
+  const body = renderedSourcePrefix
+    ? sanitized.slice(
+        renderedSourcePrefix.length +
+          (sanitized.length === renderedSourcePrefix.length ? 0 : 2),
+      )
+    : sanitized;
+  const prefix = [label, renderedSourcePrefix].filter(Boolean).join('\n\n');
+  if (!body) return prefix;
 
-  const prefix = `${label}\n\n`;
-  const available = CONTENT_LIMIT - prefix.length;
-  if (sanitized.length <= available) return `${prefix}${sanitized}`;
-  return `${prefix}${TRUNCATION_MARKER}${sanitized.slice(
-    sanitized.length - (available - TRUNCATION_MARKER.length),
+  const separator = '\n\n';
+  const available = CONTENT_LIMIT - prefix.length - separator.length;
+  if (body.length <= available) return `${prefix}${separator}${body}`;
+  return `${prefix}${separator}${TRUNCATION_MARKER}${body.slice(
+    body.length - (available - TRUNCATION_MARKER.length),
   )}`;
 }
 
@@ -117,6 +132,7 @@ export class StatusCardController {
       record.phase,
       record.content,
       this.options.language,
+      record.sourcePrefix,
     );
     this.scheduleFlush(record);
   }
@@ -169,6 +185,9 @@ export class StatusCardController {
       target,
       outTrackId,
       content: boundContent(initialContent),
+      ...(segment.sourceLabel
+        ? { sourcePrefix: escapeDingTalkMarkdown(segment.sourceLabel) }
+        : {}),
       phase: 'thinking',
       startedAt: Date.now(),
       lastStatusSecond: 0,
@@ -224,6 +243,14 @@ export class StatusCardController {
         continue;
       }
       record.phase = phase;
+      if (record.pendingSnapshot !== undefined) {
+        record.pendingSnapshot = activeContent(
+          record.phase,
+          record.content,
+          this.options.language,
+          record.sourcePrefix,
+        );
+      }
       updates.push(this.updateActiveContent(record));
     }
     await Promise.all(updates);
@@ -290,6 +317,7 @@ export class StatusCardController {
         record.phase,
         record.content,
         this.options.language,
+        record.sourcePrefix,
       );
       await this.options.client.createAndDeliver({
         templateId: STATUS_CARD_TEMPLATE_ID,
@@ -495,6 +523,7 @@ export class StatusCardController {
             record.phase,
             record.content,
             this.options.language,
+            record.sourcePrefix,
           ),
           finalize: false,
         });

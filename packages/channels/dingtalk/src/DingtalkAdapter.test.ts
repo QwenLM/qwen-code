@@ -1576,6 +1576,63 @@ describe('DingtalkChannel prompt reactions', () => {
     ]);
   });
 
+  it('does not lose terminal cleanup when a pending status recall is rejected', async () => {
+    const channel = createChannel();
+    const pendingRecall = deferredPromise<boolean>();
+    const attachReaction = vi.fn().mockResolvedValue(true);
+    const recallReaction = vi
+      .fn()
+      .mockReturnValueOnce(pendingRecall.promise)
+      .mockResolvedValue(true);
+    (
+      channel as unknown as {
+        attachReaction: typeof attachReaction;
+        recallReaction: typeof recallReaction;
+      }
+    ).attachReaction = attachReaction;
+    (
+      channel as unknown as {
+        attachReaction: typeof attachReaction;
+        recallReaction: typeof recallReaction;
+      }
+    ).recallReaction = recallReaction;
+    const base = {
+      channelName: 'dingtalk',
+      chatId: 'cid-rejected-recall',
+      sessionId: 'session-rejected-recall',
+      messageId: 'message-rejected-recall',
+      identity: { id: 'channel:dingtalk', displayName: 'dingtalk' },
+      memoryScope: { namespace: 'channel:dingtalk', mode: 'metadata-only' },
+    } satisfies LifecycleBase;
+
+    seedSeenMessage(channel, base.messageId);
+    const lifecycle = getLifecycleHook(channel);
+    lifecycle({ ...base, type: 'started' });
+    await vi.waitFor(() => expect(attachReaction).toHaveBeenCalledTimes(2));
+    lifecycle({
+      ...base,
+      type: 'tool_call',
+      toolCall: {
+        sessionId: base.sessionId,
+        toolCallId: 'tool-read',
+        kind: 'read_file',
+        title: 'Read',
+        status: 'in_progress',
+      },
+    });
+    await vi.waitFor(() => expect(recallReaction).toHaveBeenCalledOnce());
+    lifecycle({ ...base, type: 'cancelled', reason: 'cancel_command' });
+
+    pendingRecall.resolve(false);
+
+    await vi.waitFor(() => expect(attachReaction).toHaveBeenCalledTimes(3));
+    expect(attachReaction.mock.calls.at(-1)?.[2].name).toBe('⏹️ Stopped');
+    expect(
+      (channel as unknown as { reactionStates: Map<string, unknown> })
+        .reactionStates.size,
+    ).toBe(0);
+  });
+
   it('does not attach lifecycle reactions without a conversation id', () => {
     const channel = createChannel();
     const attachReaction = vi.fn().mockResolvedValue(undefined);
@@ -1599,7 +1656,11 @@ describe('DingtalkChannel prompt reactions', () => {
   it('clears active lifecycle reactions on disconnect', async () => {
     const channel = createChannel();
     const attachReaction = vi.fn().mockResolvedValue(undefined);
-    const recallReaction = vi.fn().mockResolvedValue(undefined);
+    const pendingRecall = deferredPromise<boolean>();
+    const recallReaction = vi
+      .fn()
+      .mockReturnValueOnce(pendingRecall.promise)
+      .mockResolvedValue(true);
     (
       channel as unknown as {
         attachReaction: typeof attachReaction;
@@ -1632,15 +1693,73 @@ describe('DingtalkChannel prompt reactions', () => {
     expect(activeReactionKeys.size).toBe(1);
     await vi.waitFor(() => expect(attachReaction).toHaveBeenCalledTimes(2));
 
-    channel.disconnect();
+    let disconnected = false;
+    const disconnecting = Promise.resolve(channel.disconnect()).then(() => {
+      disconnected = true;
+    });
 
     expect(activeReactionKeys.size).toBe(0);
     expect(reactionStates.size).toBe(0);
-    await vi.waitFor(() => expect(recallReaction).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(recallReaction).toHaveBeenCalledOnce());
+    expect(disconnected).toBe(false);
+
+    pendingRecall.resolve(true);
+    await disconnecting;
+
+    expect(recallReaction).toHaveBeenCalledTimes(2);
     expect(recallReaction.mock.calls.map(([, , tag]) => tag.name)).toEqual([
       '🤔 Thinking',
       '👀',
     ]);
+  });
+
+  it('aborts a stuck emotion request so disconnect settles', async () => {
+    const channel = createChannel();
+    (
+      channel as unknown as { config: { clientSecret?: string } }
+    ).config.clientSecret = undefined;
+    const timeoutController = new AbortController();
+    const timeoutSpy = vi
+      .spyOn(AbortSignal, 'timeout')
+      .mockReturnValue(timeoutController.signal);
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation((_input, init) => {
+        const signal = init?.signal;
+        if (!signal) return Promise.reject(new Error('missing timeout signal'));
+        return new Promise<Response>((_resolve, reject) => {
+          signal.addEventListener(
+            'abort',
+            () => reject(signal.reason ?? new Error('request aborted')),
+            { once: true },
+          );
+        });
+      });
+
+    seedSeenMessage(channel, 'message-timeout');
+    getLifecycleHook(channel)({
+      type: 'started',
+      channelName: 'dingtalk',
+      chatId: 'cid-timeout',
+      sessionId: 'session-timeout',
+      messageId: 'message-timeout',
+      identity: { id: 'channel:dingtalk', displayName: 'dingtalk' },
+      memoryScope: { namespace: 'channel:dingtalk', mode: 'metadata-only' },
+    });
+    await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledOnce());
+
+    let disconnected = false;
+    const disconnecting = channel.disconnect().then(() => {
+      disconnected = true;
+    });
+    await Promise.resolve();
+    expect(disconnected).toBe(false);
+
+    timeoutController.abort(new DOMException('Timed out', 'TimeoutError'));
+    await disconnecting;
+
+    expect(timeoutSpy).toHaveBeenCalledWith(15_000);
+    expect(disconnected).toBe(true);
   });
 
   it('skips uppercase webhook URLs when starting a prompt', () => {

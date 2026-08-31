@@ -1,7 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ChannelOutputSegmentContext } from '@qwen-code/channel-base';
 import type { DingtalkInteractiveCardClient } from './interactive-card-client.js';
-import { StatusCardController } from './status-card-controller.js';
+import {
+  CONTENT_LIMIT,
+  StatusCardController,
+} from './status-card-controller.js';
 
 type ExpectedCallbackResult =
   | { kind: 'accepted'; execute: () => Promise<void> }
@@ -150,6 +153,48 @@ describe('StatusCardController', () => {
     expect(content.startsWith('🤔 Thinking\n\n')).toBe(true);
     expect(content).toContain('[Earlier output truncated]');
     expect(content.endsWith('b'.repeat(2_000))).toBe(true);
+  });
+
+  it('preserves the source label when the active snapshot is truncated', async () => {
+    vi.useFakeTimers();
+    const { client, controller } = createHarness();
+    const sourcePrefix = '\\[review\\]';
+    const content = `${sourcePrefix}\n\n${'x'.repeat(
+      CONTENT_LIMIT - sourcePrefix.length - 2,
+    )}`;
+
+    controller.replace(
+      segment('segment-1', { sourceLabel: '[review]' }),
+      target,
+      content,
+    );
+    await vi.advanceTimersByTimeAsync(0);
+
+    const rendered = vi.mocked(client.openOrUpdateStream).mock.calls[0]![0]
+      .content;
+    expect(rendered.length).toBeLessThanOrEqual(CONTENT_LIMIT);
+    expect(rendered.startsWith(`🤔 Thinking\n\n${sourcePrefix}\n\n`)).toBe(
+      true,
+    );
+    expect(rendered.endsWith('x'.repeat(1_000))).toBe(true);
+  });
+
+  it('does not flush an obsolete phase after a newer phase update', async () => {
+    vi.useFakeTimers();
+    const { client, controller } = createHarness();
+    controller.replace(segment(), target, 'first');
+    await vi.advanceTimersByTimeAsync(0);
+    vi.mocked(client.openOrUpdateStream).mockClear();
+
+    controller.replace(segment(), target, 'second');
+    await controller.updateRunPhase('run-1', 'searching');
+    await vi.advanceTimersByTimeAsync(500);
+
+    const contents = vi
+      .mocked(client.openOrUpdateStream)
+      .mock.calls.map(([request]) => request.content);
+    expect(contents).not.toContain('🤔 Thinking\n\nsecond');
+    expect(contents.at(-1)).toBe('🔎 Searching\n\nsecond');
   });
 
   it('hides streamed image paths in status snapshots', async () => {
