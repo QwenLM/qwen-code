@@ -17,7 +17,7 @@ import {
   useConnection,
   useWorkspace,
   useWorkspaceActions,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import { DaemonHttpError } from '@qwen-code/sdk/daemon';
 import type {
   DaemonSessionGroup,
@@ -86,6 +86,15 @@ import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { formatRelativeTime } from '../../utils/formatRelativeTime';
 import { DialogShell } from '../dialogs/DialogShell';
 import { WorkspaceSection, isAbsolutePath } from './WorkspaceSection';
+import { WorkspaceMenu, type WorkspaceMenuActions } from './WorkspaceMenu';
+import { WorkspaceRenameDialog } from './WorkspaceRenameDialog';
+import {
+  DEFAULT_WORKSPACE_OVERVIEW_ITEMS,
+  summarizeSessions,
+  type WorkspaceManagementTarget,
+  type WorkspaceOverviewItem,
+} from './workspaceOverviewModel';
+import { writeClipboardText } from '../../utils/clipboard';
 import { sessionMatchesGitQuery } from './sessionSearch';
 import { SessionPrBadge } from '../SessionPrBadge';
 import {
@@ -352,6 +361,16 @@ type SessionWorkspaceScope =
   | { kind: 'untrusted'; cwd: string; workspace: DaemonWorkspaceCapability }
   | { kind: 'unknown'; cwd: string };
 
+export interface WebShellSidebarWorkspaceOverviewOptions {
+  /**
+   * Facet chips under an expanded workspace row. Defaults to every facet
+   * except hooks.
+   */
+  items?: readonly WorkspaceOverviewItem[];
+}
+
+export type { WorkspaceManagementTarget, WorkspaceOverviewItem };
+
 interface WebShellSidebarProps {
   collapsed: boolean;
   onCollapsedChange: (collapsed: boolean) => void;
@@ -416,6 +435,25 @@ interface WebShellSidebarProps {
   /** Customize which action buttons appear on session rows. */
   sessionActions?: WebShellSidebarSessionActionsOptions;
   footer?: false | WebShellSidebarFooterOptions;
+  /**
+   * Session counts, full path and facet chips on workspace rows. Pass `false`
+   * to keep the plain folder headers.
+   */
+  workspaceOverview?: false | WebShellSidebarWorkspaceOverviewOptions;
+  /**
+   * Open a management page (MCP, skills, …) for a workspace. Offered on the
+   * daemon's primary workspace only: the management pages read the
+   * connection's bound workspace, so another workspace's row cannot open its
+   * own view yet (#10399, layer B1).
+   */
+  onOpenWorkspaceManagement?: (
+    target: WorkspaceManagementTarget,
+    workspaceCwd: string,
+  ) => void;
+  /** Start a new session that works in an isolated git worktree. */
+  onNewWorktreeSession?: (
+    workspaceCwd?: string,
+  ) => Promise<boolean> | boolean | void;
 }
 
 function cx(...classes: Array<string | false | undefined>): string {
@@ -867,6 +905,9 @@ export function WebShellSidebar({
   hideProjectHeader,
   sessionActions: sessionActionsOptions,
   footer,
+  workspaceOverview,
+  onOpenWorkspaceManagement,
+  onNewWorktreeSession,
 }: WebShellSidebarProps) {
   const { t } = useI18n();
   const connection = useConnection();
@@ -1046,6 +1087,8 @@ export function WebShellSidebar({
     loading,
     error,
     data: sessionsPage,
+    nextCursor: sessionsNextCursor,
+    truncated: sessionsTruncated,
     reload,
     deleteSession,
     exportSession,
@@ -1062,6 +1105,26 @@ export function WebShellSidebar({
       ? { view: 'organized' as const, group: 'all' }
       : {}),
   });
+  // Header counts for the primary workspace, whose sessions this component
+  // lists itself (the section only renders the folder header for it).
+  const primarySessionStats = useMemo(
+    () =>
+      includePrimaryWorkspaceSessions && sessionsPage !== undefined
+        ? summarizeSessions(
+            sessions,
+            // Either more pages follow, or the daemon capped its scan and
+            // marked the page a lower bound.
+            Boolean(sessionsNextCursor) || sessionsTruncated === true,
+          )
+        : undefined,
+    [
+      includePrimaryWorkspaceSessions,
+      sessions,
+      sessionsNextCursor,
+      sessionsPage,
+      sessionsTruncated,
+    ],
+  );
   // The catalog starts with loading=false before its subscription requests
   // data, so !loading is not “settled”. Treat the first data as the ready signal (empty
   // lists are still defined data) so the initial-catalog latch waits. Errors
@@ -1158,6 +1221,12 @@ export function WebShellSidebar({
   const exportingSessionIdsRef = useRef<Set<string>>(new Set());
   const [creatingSession, setCreatingSession] = useState(false);
   const creatingSessionRef = useRef(false);
+  // The workspace whose header menu is open: its action wrapper must stay
+  // visible while the (portalled) menu holds hover and focus, or Escape
+  // would return focus to a hidden trigger and strand it on the body.
+  const [openWorkspaceMenuId, setOpenWorkspaceMenuId] = useState<string | null>(
+    null,
+  );
   const [deleteCandidate, setDeleteCandidate] =
     useState<DaemonSessionSummary | null>(null);
   const [groupMenu, setGroupMenu] = useState<GroupMenuState | null>(null);
@@ -1223,6 +1292,10 @@ export function WebShellSidebar({
   const [workspaceRemovalActivity, setWorkspaceRemovalActivity] =
     useState<DaemonWorkspaceRemovalActivity | null>(null);
   const [workspaceRemovalSubmitting, setWorkspaceRemovalSubmitting] =
+    useState(false);
+  const [workspaceRenameCandidate, setWorkspaceRenameCandidate] =
+    useState<DaemonWorkspaceCapability | null>(null);
+  const [workspaceRenameSubmitting, setWorkspaceRenameSubmitting] =
     useState(false);
   const workspaceRemovalMountedRef = useRef(false);
   const workspaceRemovalDismissedRef = useRef(false);
@@ -1317,6 +1390,16 @@ export function WebShellSidebar({
   const workspaceRemovalEnabled = Boolean(
     connection.capabilities?.features?.includes('workspace_runtime_removal'),
   );
+  const workspaceRenameEnabled = Boolean(
+    connection.capabilities?.features?.includes(
+      'dynamic_workspace_registration',
+    ),
+  );
+  const workspaceOverviewEnabled = workspaceOverview !== false;
+  const workspaceOverviewItems =
+    workspaceOverview === false
+      ? DEFAULT_WORKSPACE_OVERVIEW_ITEMS
+      : (workspaceOverview?.items ?? DEFAULT_WORKSPACE_OVERVIEW_ITEMS);
   const canExportSessions =
     connection.capabilities?.features?.includes('session_export') ?? false;
   const canExportWorkspaceSessions =
@@ -2349,6 +2432,75 @@ export function WebShellSidebar({
     [workspaceRemovalSubmitting],
   );
 
+  const requestWorkspaceRename = useCallback(
+    (candidate: DaemonWorkspaceCapability) => {
+      if (workspaceRenameSubmitting) return;
+      setWorkspaceRenameCandidate(candidate);
+    },
+    [workspaceRenameSubmitting],
+  );
+
+  const confirmWorkspaceRename = useCallback(
+    async (displayName: string | null) => {
+      const candidate = workspaceRenameCandidate;
+      if (!candidate || workspaceRenameSubmitting) return;
+      setWorkspaceRenameSubmitting(true);
+      try {
+        await workspaceActions.updateWorkspace(candidate.id, { displayName });
+        setWorkspaceRenameCandidate(null);
+      } catch (error) {
+        onError(error, t('sidebar.renameWorkspaceFailed'));
+        return;
+      } finally {
+        setWorkspaceRenameSubmitting(false);
+      }
+      // The row label reads the capabilities list; refresh so the new name
+      // shows without waiting for the next connection tick. The rename has
+      // already converged, so a failed refresh is not a rename failure — a
+      // later poll tick reconciles the label.
+      try {
+        await workspace.refreshCapabilities?.();
+      } catch {
+        // Reconciled by the next capabilities refresh.
+      }
+    },
+    [
+      onError,
+      t,
+      workspace,
+      workspaceActions,
+      workspaceRenameCandidate,
+      workspaceRenameSubmitting,
+    ],
+  );
+
+  const copyWorkspacePath = useCallback(
+    (candidate: DaemonWorkspaceCapability) => {
+      void writeClipboardText(candidate.cwd).catch((error: unknown) => {
+        onError(error, t('sidebar.copyWorkspacePathFailed'));
+      });
+    },
+    [onError, t],
+  );
+
+  const reloadWorkspaceRuntime = useCallback(
+    (candidate: DaemonWorkspaceCapability) => {
+      // Deferred so a client without the reload method (older SDK) reports
+      // through onError instead of throwing out of the menu handler.
+      void Promise.resolve()
+        .then(() => workspace.client.workspaceByCwd(candidate.cwd).reload())
+        .then(() => {
+          // A reload re-reads settings and may restart the child; refetch the
+          // per-workspace lists and chips instead of waiting a poll interval.
+          setWorkspaceSessionsReloadToken((token) => token + 1);
+        })
+        .catch((error: unknown) => {
+          onError(error, t('sidebar.reloadWorkspaceFailed'));
+        });
+    },
+    [onError, t, workspace.client],
+  );
+
   const confirmWorkspaceRemoval = useCallback(async () => {
     const candidate = workspaceRemovalCandidate;
     if (!candidate || workspaceRemovalSubmitting) return;
@@ -2515,6 +2667,44 @@ export function WebShellSidebar({
       bumpWorkspaceReload,
       onError,
       onNewSession,
+      primaryWorkspaceCwd,
+      sessionCatalogController,
+      t,
+    ],
+  );
+
+  // Same re-entrancy guard, busy state and catalog invalidation as a plain
+  // new task; only the creation callback differs.
+  const handleNewWorktreeSession = useCallback(
+    (workspaceCwd?: string) => {
+      if (!onNewWorktreeSession || creatingSessionRef.current) return;
+
+      creatingSessionRef.current = true;
+      setCreatingSession(true);
+      void (async () => {
+        try {
+          const created = await onNewWorktreeSession(workspaceCwd);
+          if (created) {
+            bumpWorkspaceReload();
+            const ownerCwd = workspaceCwd ?? primaryWorkspaceCwd;
+            if (ownerCwd) {
+              sessionCatalogController.refreshWorkspace(ownerCwd);
+            }
+          }
+        } catch (err) {
+          if (!isAbortError(err)) {
+            onError(err, t('sidebar.newSessionFailed'));
+          }
+        } finally {
+          creatingSessionRef.current = false;
+          setCreatingSession(false);
+        }
+      })();
+    },
+    [
+      bumpWorkspaceReload,
+      onError,
+      onNewWorktreeSession,
       primaryWorkspaceCwd,
       sessionCatalogController,
       t,
@@ -3503,19 +3693,15 @@ export function WebShellSidebar({
     ],
   );
 
-  const filteredSessions = useMemo(() => {
+  const searchedSessions = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
     const sourceScopedSessions = sessions
       .map(applyOptimisticPin)
       .filter((session) =>
         matchesSessionSource(session, selectedSessionSource),
       );
-    const unpinnedSessions =
-      selectedSessionSource === 'channel'
-        ? sourceScopedSessions
-        : sourceScopedSessions.filter((session) => !session.isPinned);
-    const nextSessions = query
-      ? unpinnedSessions.filter((session) => {
+    return query
+      ? sourceScopedSessions.filter((session) => {
           const label = getSessionLabel(session).toLowerCase();
           return (
             label.includes(query) ||
@@ -3523,7 +3709,14 @@ export function WebShellSidebar({
             sessionMatchesGitQuery(session, query)
           );
         })
-      : unpinnedSessions.slice();
+      : sourceScopedSessions;
+  }, [applyOptimisticPin, searchQuery, selectedSessionSource, sessions]);
+  const filteredSessions = useMemo(() => {
+    const unpinnedSessions =
+      selectedSessionSource === 'channel'
+        ? searchedSessions
+        : searchedSessions.filter((session) => !session.isPinned);
+    const nextSessions = unpinnedSessions.slice();
     if (organizationEnabled) {
       return nextSessions;
     }
@@ -3538,13 +3731,7 @@ export function WebShellSidebar({
         (createdTimeById.get(b.sessionId) ?? 0) -
         (createdTimeById.get(a.sessionId) ?? 0),
     );
-  }, [
-    applyOptimisticPin,
-    organizationEnabled,
-    searchQuery,
-    selectedSessionSource,
-    sessions,
-  ]);
+  }, [organizationEnabled, searchedSessions, selectedSessionSource]);
 
   const channelCatalogLoaded = channelCatalogData !== undefined;
   const channelSessionSections = useMemo(
@@ -3580,7 +3767,15 @@ export function WebShellSidebar({
       sessionsByGroupId.set(group.id, []);
     }
     const recentSessions: DaemonSessionSummary[] = [];
-    for (const session of filteredSessions) {
+    // Bucket the search-filtered catalog in one pass, pinned rows included:
+    // they are lifted into the Pinned section, but their group/color section
+    // must keep them, otherwise a section whose members are all pinned
+    // rendered `· 0`, indistinguishable from lost memberships (#10391).
+    // One pass (instead of bucketing the unpinned rows first and appending
+    // the pinned ones) preserves the daemon catalog order — pinned rows sort
+    // first there — so a pinned member is never pushed behind its section's
+    // preview limit by rows it sorts ahead of.
+    for (const session of searchedSessions) {
       // Color takes precedence: the picker keeps color and group mutually
       // exclusive, but stay defensive if a store somehow carries both.
       if (session.color && SESSION_GROUP_COLORS.includes(session.color)) {
@@ -3595,9 +3790,14 @@ export function WebShellSidebar({
           : undefined;
       if (groupSessions) {
         groupSessions.push(session);
-      } else {
-        recentSessions.push(session);
+        continue;
       }
+      // On sources with a Pinned section, a pinned session without a
+      // (renderable) group stays Pinned-section-only; it never spills into
+      // Ungrouped. The channel source has no Pinned section, so its pinned
+      // rows keep the normal Ungrouped bucket.
+      if (session.isPinned && selectedSessionSource !== 'channel') continue;
+      recentSessions.push(session);
     }
     const sections: SessionSection[] = [];
     // Color buckets first, in palette order; only render non-empty ones so the
@@ -3638,7 +3838,14 @@ export function WebShellSidebar({
       });
     }
     return sections;
-  }, [filteredSessions, groups, organizationEnabled, searchQuery, t]);
+  }, [
+    groups,
+    organizationEnabled,
+    searchedSessions,
+    searchQuery,
+    selectedSessionSource,
+    t,
+  ]);
 
   useEffect(() => {
     const activeSections = channelSessionSections ?? sessionSections;
@@ -3826,9 +4033,10 @@ export function WebShellSidebar({
       session: DaemonSessionSummary,
       options: {
         isArchived?: boolean;
+        renameFormDisabled?: boolean;
       } = {},
     ) => {
-      const { isArchived = false } = options;
+      const { isArchived = false, renameFormDisabled = false } = options;
       const sessionIdentity = getIdentityForSession(session);
       const label = getSessionLabel(session);
       const stamp = session.updatedAt || session.createdAt;
@@ -3837,7 +4045,12 @@ export function WebShellSidebar({
       const exporting = exportingSessionIds.has(sessionIdentity);
       const completedUnread =
         !isCurrentSession(session) && completedUnreadIds.has(sessionIdentity);
-      const isEditing = editingSessionIdentity === sessionIdentity;
+      // Pinned group members also render in the Pinned section; callers
+      // suppress the rename form on the duplicate row so only one input can
+      // mount — a rival input's autofocus would blur this one and its blur
+      // handler would cancel the rename.
+      const isEditing =
+        !renameFormDisabled && editingSessionIdentity === sessionIdentity;
       const gitIcon = session.worktree ? (
         <GitForkIcon aria-label={t('sidebar.newWorktreeTask')} />
       ) : session.branch ? (
@@ -4450,7 +4663,6 @@ export function WebShellSidebar({
       filteredSessions.length === 0 &&
       (selectedSessionSource === 'channel' ||
         channelSessionSections !== null ||
-        searchQuery.trim() ||
         !organizationEnabled ||
         sessionSections.length === 0)
     ) {
@@ -4508,7 +4720,14 @@ export function WebShellSidebar({
           deleteLabel={t('sidebar.groupDelete')}
           actionsDisabled={groupBusy}
         >
-          {section.sessions.map((session) => renderSessionRow(session))}
+          {section.sessions.map((session) =>
+            renderSessionRow(session, {
+              // Pinned members also render in the Pinned section; while that
+              // section is expanded its row hosts the rename form, so this
+              // duplicate row must not mount a second autofocused input.
+              renameFormDisabled: Boolean(session.isPinned) && pinnedExpanded,
+            }),
+          )}
         </SessionGroupSection>
       );
     });
@@ -4524,6 +4743,7 @@ export function WebShellSidebar({
     handleRenameGroup,
     loading,
     organizationEnabled,
+    pinnedExpanded,
     reload,
     renderSessionRow,
     searchQuery,
@@ -4762,6 +4982,17 @@ export function WebShellSidebar({
               </div>
             </div>
           </DialogShell>
+        )}
+        {workspaceRenameCandidate && (
+          <WorkspaceRenameDialog
+            key={workspaceRenameCandidate.id}
+            workspace={workspaceRenameCandidate}
+            busy={workspaceRenameSubmitting}
+            onSubmit={(displayName) => void confirmWorkspaceRename(displayName)}
+            onClose={() => {
+              if (!workspaceRenameSubmitting) setWorkspaceRenameCandidate(null);
+            }}
+          />
         )}
         {workspaceRemovalCandidate && (
           <DialogShell
@@ -5268,6 +5499,19 @@ export function WebShellSidebar({
                   }}
                 >
                   <span>{t('sidebar.project')}</span>
+                  {workspaceOverviewEnabled && projectWorkspaces.length > 1 && (
+                    <span
+                      className={styles.projectsHeaderCount}
+                      aria-label={t('sidebar.workspaceCount', {
+                        count: projectWorkspaces.length,
+                      })}
+                      title={t('sidebar.workspaceCount', {
+                        count: projectWorkspaces.length,
+                      })}
+                    >
+                      {projectWorkspaces.length}
+                    </span>
+                  )}
                   <IconChevron expanded={projectsExpanded} />
                 </button>
                 <div className={styles.projectsHeaderActions}>
@@ -5396,124 +5640,242 @@ export function WebShellSidebar({
                           }
                           renderSessions={!ws.primary}
                           renderSession={(session) =>
-                            renderSessionRow({
-                              ...session,
-                              workspaceCwd: ws.cwd,
-                            })
+                            renderSessionRow(
+                              {
+                                ...session,
+                                workspaceCwd: ws.cwd,
+                              },
+                              {
+                                // Pinned members also render in the
+                                // sidebar-level Pinned section; while that
+                                // section is expanded its row hosts the
+                                // rename form, so this duplicate row must
+                                // not mount a second autofocused input.
+                                // Channel mode has no Pinned section, so
+                                // the workspace row is the only copy and
+                                // must stay editable. The suppression also
+                                // requires the Pinned section to actually
+                                // carry the member: `pinnedSessions` merges
+                                // only the pinned catalog pages and the
+                                // primary sessions page, never this
+                                // workspace's own page, so before the
+                                // pinned page settles (or while it errors)
+                                // this row is the only copy and must host
+                                // the form itself.
+                                renameFormDisabled:
+                                  selectedSessionSource !== 'channel' &&
+                                  Boolean(session.isPinned) &&
+                                  pinnedExpanded &&
+                                  pinnedSessions.some(
+                                    (candidate) =>
+                                      getIdentityForSession(candidate) ===
+                                      getIdentityForSession(session),
+                                  ),
+                              },
+                            )
                           }
                           showSessionDetails={sessionActionItems.has('details')}
-                          headerActions={(visible) => {
-                            if (
-                              lockedWorkspaceCwd &&
-                              lockedWorkspaceOptions?.render
-                            ) {
-                              return null;
-                            }
-                            const canRemove =
-                              !lockedWorkspaceCwd &&
-                              workspaceRemovalEnabled &&
-                              !ws.primary &&
-                              ws.removable === true;
-                            if (!ws.trusted && !canRemove) return null;
-                            const wsCwd = ws.primary ? undefined : ws.cwd;
-                            return (
-                              <div
-                                className={styles.workspaceHeaderActions}
-                                style={{
-                                  visibility: visible ? 'visible' : 'hidden',
-                                }}
-                              >
-                                {ws.trusted && (
-                                  <>
-                                    {canOrganizeWorkspace(ws.cwd) && (
-                                      <button
-                                        className={styles.workspaceHeaderAction}
-                                        type="button"
-                                        title={t('sidebar.groupCreate')}
-                                        aria-label={t('sidebar.groupCreate')}
-                                        onClick={(event) => {
-                                          event.preventDefault();
-                                          event.stopPropagation();
-                                          if (ws.primary) {
-                                            handleCreateGroup();
-                                          } else {
-                                            handleCreateWorkspaceGroup(ws.cwd);
-                                          }
-                                        }}
-                                      >
-                                        <PlusIcon size={16} strokeWidth={1.2} />
-                                      </button>
-                                    )}
-                                    <button
-                                      className={styles.workspaceHeaderAction}
-                                      type="button"
-                                      title={t('sidebar.newTask')}
-                                      aria-label={t('sidebar.newTask')}
-                                      onClick={(event) => {
-                                        event.preventDefault();
-                                        event.stopPropagation();
-                                        handleNewSession(wsCwd);
+                          overviewEnabled={workspaceOverviewEnabled}
+                          overviewItems={workspaceOverviewItems}
+                          compact={footerTight}
+                          gitBranchWanted={
+                            Boolean(onNewWorktreeSession) && !lockedWorkspaceCwd
+                          }
+                          sessionStats={
+                            ws.primary
+                              ? (primarySessionStats ?? null)
+                              : undefined
+                          }
+                          // A locked sidebar with a custom header renders no
+                          // action area, so wire nothing: the section then
+                          // skips the git poll that only feeds these actions.
+                          headerActions={
+                            lockedWorkspaceCwd && lockedWorkspaceOptions?.render
+                              ? undefined
+                              : (visible, { overview, gitBranch }) => {
+                                  const canRemove =
+                                    !lockedWorkspaceCwd &&
+                                    workspaceRemovalEnabled &&
+                                    !ws.primary &&
+                                    ws.removable === true;
+                                  if (!ws.trusted && !canRemove) return null;
+                                  const wsCwd = ws.primary ? undefined : ws.cwd;
+                                  const realPath = isAbsolutePath(ws.cwd);
+                                  // A display name persists only for registration-backed
+                                  // rows; the daemon's bound (primary) workspace has no
+                                  // registration id, so a rename there would live in
+                                  // memory until the next restart. Trust is not required:
+                                  // the name is registry metadata, not runtime access.
+                                  const canRename =
+                                    !lockedWorkspaceCwd &&
+                                    workspaceRenameEnabled &&
+                                    realPath &&
+                                    !ws.primary;
+                                  // Management pages read the connection's bound
+                                  // workspace, so only the primary row can open
+                                  // its own view today (#10399, layer B1).
+                                  const canManage =
+                                    ws.primary &&
+                                    ws.trusted &&
+                                    Boolean(onOpenWorkspaceManagement);
+                                  const menuActions: WorkspaceMenuActions = {
+                                    ...(canRename
+                                      ? {
+                                          rename: () =>
+                                            requestWorkspaceRename(ws),
+                                        }
+                                      : {}),
+                                    ...(realPath
+                                      ? {
+                                          copyPath: () => copyWorkspacePath(ws),
+                                        }
+                                      : {}),
+                                    ...(ws.trusted
+                                      ? {
+                                          newSession: () =>
+                                            handleNewSession(wsCwd),
+                                        }
+                                      : {}),
+                                    // A worktree needs a git repository; without a
+                                    // branch the composer never shows the armed
+                                    // intent and the daemon rejects the session.
+                                    ...(ws.trusted &&
+                                    onNewWorktreeSession &&
+                                    gitBranch
+                                      ? {
+                                          newWorktreeSession: () =>
+                                            handleNewWorktreeSession(wsCwd),
+                                        }
+                                      : {}),
+                                    ...(canManage
+                                      ? {
+                                          openManagement: (
+                                            target: WorkspaceManagementTarget,
+                                          ) =>
+                                            onOpenWorkspaceManagement?.(
+                                              target,
+                                              ws.cwd,
+                                            ),
+                                        }
+                                      : {}),
+                                    ...(ws.trusted && realPath
+                                      ? {
+                                          reload: () =>
+                                            reloadWorkspaceRuntime(ws),
+                                        }
+                                      : {}),
+                                    ...(canRemove
+                                      ? {
+                                          remove: () =>
+                                            requestWorkspaceRemoval(ws),
+                                        }
+                                      : {}),
+                                  };
+                                  return (
+                                    <div
+                                      className={styles.workspaceHeaderActions}
+                                      style={{
+                                        visibility:
+                                          visible ||
+                                          openWorkspaceMenuId === ws.id
+                                            ? 'visible'
+                                            : 'hidden',
                                       }}
                                     >
-                                      <SquarePenIcon
-                                        size={16}
-                                        strokeWidth={1.2}
-                                      />
-                                    </button>
-                                  </>
-                                )}
-                                {canRemove && (
-                                  <SessionMenu
-                                    onOpenChange={handleSessionMenuOpenChange}
-                                  >
-                                    <DropdownMenuTrigger asChild>
-                                      <button
-                                        className={styles.workspaceHeaderAction}
-                                        type="button"
-                                        aria-label={t(
-                                          'sidebar.workspaceActions',
-                                        )}
-                                        disabled={
-                                          workspaceRemovalSubmitting &&
-                                          workspaceRemovalCandidate?.id ===
-                                            ws.id
-                                        }
-                                      >
-                                        <EllipsisVerticalIcon
-                                          size={16}
-                                          strokeWidth={1.2}
+                                      {ws.trusted && (
+                                        <>
+                                          {canOrganizeWorkspace(ws.cwd) && (
+                                            <button
+                                              className={
+                                                styles.workspaceHeaderAction
+                                              }
+                                              type="button"
+                                              title={t('sidebar.groupCreate')}
+                                              aria-label={t(
+                                                'sidebar.groupCreate',
+                                              )}
+                                              onClick={(event) => {
+                                                event.preventDefault();
+                                                event.stopPropagation();
+                                                if (ws.primary) {
+                                                  handleCreateGroup();
+                                                } else {
+                                                  handleCreateWorkspaceGroup(
+                                                    ws.cwd,
+                                                  );
+                                                }
+                                              }}
+                                            >
+                                              <PlusIcon
+                                                size={16}
+                                                strokeWidth={1.2}
+                                              />
+                                            </button>
+                                          )}
+                                          <button
+                                            className={
+                                              styles.workspaceHeaderAction
+                                            }
+                                            type="button"
+                                            title={t('sidebar.newTask')}
+                                            aria-label={t('sidebar.newTask')}
+                                            onClick={(event) => {
+                                              event.preventDefault();
+                                              event.stopPropagation();
+                                              handleNewSession(wsCwd);
+                                            }}
+                                          >
+                                            <SquarePenIcon
+                                              size={16}
+                                              strokeWidth={1.2}
+                                            />
+                                          </button>
+                                        </>
+                                      )}
+                                      {/* A locked (embedded) sidebar keeps its
+                                    action area to the session controls the
+                                    host already expects. */}
+                                      {!lockedWorkspaceCwd && (
+                                        <WorkspaceMenu
+                                          workspace={ws}
+                                          actions={menuActions}
+                                          overview={overview}
+                                          disabled={
+                                            (workspaceRemovalSubmitting &&
+                                              workspaceRemovalCandidate?.id ===
+                                                ws.id) ||
+                                            (workspaceRenameSubmitting &&
+                                              workspaceRenameCandidate?.id ===
+                                                ws.id)
+                                          }
+                                          triggerClassName={
+                                            styles.workspaceHeaderAction
+                                          }
+                                          contentStyle={
+                                            SESSION_MENU_PORTAL_STYLE
+                                          }
+                                          onOpenChange={(open) => {
+                                            handleSessionMenuOpenChange(open);
+                                            setOpenWorkspaceMenuId((current) =>
+                                              open
+                                                ? ws.id
+                                                : current === ws.id
+                                                  ? null
+                                                  : current,
+                                            );
+                                          }}
+                                          onPointerDownOutside={
+                                            handleSessionMenuPointerDownOutside
+                                          }
+                                          onCloseAutoFocus={
+                                            handleSessionMenuCloseAutoFocus
+                                          }
                                         />
-                                      </button>
-                                    </DropdownMenuTrigger>
-                                    <DropdownMenuContent
-                                      align="end"
-                                      className="w-auto min-w-40"
-                                      style={SESSION_MENU_PORTAL_STYLE}
-                                      onPointerDownOutside={
-                                        handleSessionMenuPointerDownOutside
-                                      }
-                                      onCloseAutoFocus={
-                                        handleSessionMenuCloseAutoFocus
-                                      }
-                                    >
-                                      <DropdownMenuItem
-                                        variant="destructive"
-                                        aria-label={`${t(
-                                          'sidebar.removeWorkspace',
-                                        )}: ${ws.cwd}`}
-                                        onSelect={() =>
-                                          requestWorkspaceRemoval(ws)
-                                        }
-                                      >
-                                        <Trash2Icon />
-                                        {t('sidebar.removeWorkspace')}
-                                      </DropdownMenuItem>
-                                    </DropdownMenuContent>
-                                  </SessionMenu>
-                                )}
-                              </div>
-                            );
-                          }}
+                                      )}
+                                    </div>
+                                  );
+                                }
+                          }
                         />
                         {ws.primary &&
                         (projectExpanded || searchQuery.trim()) ? (
