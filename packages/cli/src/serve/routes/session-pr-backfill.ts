@@ -122,8 +122,15 @@ interface BackfillCandidate {
   transcriptPath: string;
   /** PR number named by the worktree slug/branch convention, if any. */
   conventionNumber: number | undefined;
-  /** `/review <N|#N>` numbers the session was asked to review. */
-  reviewed: readonly number[];
+  /**
+   * `/review <N|#N|url>` numbers in TRANSCRIPT ORDER (first mention wins,
+   * bare and url forms interleaved as typed): the cap trim tie-breaks
+   * same-rank plan members by plan position as an age proxy, so appending
+   * one form after the other would evict the wrong (younger) review.
+   * `bare` is true when ANY mention was bare or `#N` — those name THIS
+   * repo's PR N.
+   */
+  mentions: ReadonlyArray<{ number: number; bare: boolean }>;
   /** `/review <url>` forms, repo-gated once the page key is known. */
   reviewedUrlForms: ReadonlyArray<{ number: number; url: string }>;
 }
@@ -158,10 +165,23 @@ const REVIEW_COMMAND_PATTERN =
 // The URL form names the repo it reviewed; it is repo-gated once gh's page
 // key is known (see backfillWorkspaceSessionPrs) rather than here.
 function collectReviewedPrNumbers(raw: string): {
-  reviewed: readonly number[];
+  mentions: ReadonlyArray<{ number: number; bare: boolean }>;
   reviewedUrlForms: ReadonlyArray<{ number: number; url: string }>;
 } {
-  const numbers = new Set<number>();
+  const mentions: Array<{ number: number; bare: boolean }> = [];
+  const mentionByNumber = new Map<number, { number: number; bare: boolean }>();
+  const noteMention = (number: number, bare: boolean): void => {
+    const known = mentionByNumber.get(number);
+    if (known) {
+      // A later bare mention still marks the number as naming THIS repo's
+      // PR; the position stays with the first mention.
+      if (bare) known.bare = true;
+      return;
+    }
+    const mention = { number, bare };
+    mentionByNumber.set(number, mention);
+    mentions.push(mention);
+  };
   const urlForms: Array<{ number: number; url: string }> = [];
   for (const line of raw.split('\n')) {
     if (!line.includes('/review')) continue;
@@ -199,17 +219,18 @@ function collectReviewedPrNumbers(raw: string): {
     if (bareNumber !== undefined) {
       // `\d{1,9}` admits 0; PR 0 does not exist and the sidecar write
       // declines it, so it must never count as a binding.
-      if (Number(bareNumber) > 0) numbers.add(Number(bareNumber));
+      if (Number(bareNumber) > 0) noteMention(Number(bareNumber), true);
       continue;
     }
     const url = match[2];
     const urlNumber = match[3];
     if (url === undefined || urlNumber === undefined) continue;
     if (Number(urlNumber) > 0) {
+      noteMention(Number(urlNumber), false);
       urlForms.push({ number: Number(urlNumber), url });
     }
   }
-  return { reviewed: [...numbers], reviewedUrlForms: urlForms };
+  return { mentions, reviewedUrlForms: urlForms };
 }
 
 /**
@@ -317,8 +338,7 @@ export async function backfillWorkspaceSessionPrs(
         );
       if (
         conventionNumber === undefined &&
-        reviewed.reviewed.length === 0 &&
-        reviewed.reviewedUrlForms.length === 0 &&
+        reviewed.mentions.length === 0 &&
         !hasSidecar
       ) {
         continue;
@@ -328,7 +348,7 @@ export async function backfillWorkspaceSessionPrs(
         archiveState,
         transcriptPath: path.join(dir, `${sessionId}.jsonl`),
         conventionNumber,
-        reviewed: reviewed.reviewed,
+        mentions: reviewed.mentions,
         reviewedUrlForms: reviewed.reviewedUrlForms,
       });
     }
@@ -471,11 +491,10 @@ export async function backfillWorkspaceSessionPrs(
     // Insert in ASCENDING authority so the strongest bindings survive the
     // sidecar's tail cap: reviewed first (the session merely looked at that
     // PR), and the worktree convention last (the session exists FOR that
-    // PR, so it must never be evicted by weaker numbers).
-    const numbers: number[] = [];
-    for (const reviewedNumber of candidate.reviewed) {
-      if (!numbers.includes(reviewedNumber)) numbers.push(reviewedNumber);
-    }
+    // PR, so it must never be evicted by weaker numbers). Reviewed numbers
+    // keep TRANSCRIPT order across bare and url forms: the trim tie-breaks
+    // same-rank plan members by plan position as the age proxy, mirroring
+    // the sidecar cap's list-order tie-break.
     // `/review <url>` forms name their PR's URL explicitly — bind the named
     // URL itself instead of re-resolving the bare number, which could land
     // another repo's same-numbered PR. Only forms that PASS the repo gate
@@ -503,14 +522,22 @@ export async function backfillWorkspaceSessionPrs(
         })
         .map((form) => [form.number, form.url]),
     );
-    for (const form of candidate.reviewedUrlForms) {
-      if (formUrlByNumber.has(form.number) && !numbers.includes(form.number)) {
-        numbers.push(form.number);
+    const numbers: number[] = [];
+    for (const mention of candidate.mentions) {
+      // A number mentioned ONLY through url forms is planned only when a
+      // form passed the gate; a bare mention names this repo's PR N and
+      // plans regardless.
+      if (mention.bare || formUrlByNumber.has(mention.number)) {
+        numbers.push(mention.number);
       }
     }
     // Numbers named as THIS repo's PR N (bare or convention): a form may
     // lend such a number its URL only when it names the same PR.
-    const namedAsOwn = new Set<number>(candidate.reviewed);
+    const namedAsOwn = new Set<number>(
+      candidate.mentions
+        .filter((mention) => mention.bare)
+        .map((mention) => mention.number),
+    );
     if (candidate.conventionNumber !== undefined) {
       namedAsOwn.add(candidate.conventionNumber);
     }

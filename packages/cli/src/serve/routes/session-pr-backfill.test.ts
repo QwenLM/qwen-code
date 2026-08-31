@@ -3078,6 +3078,30 @@ describe('backfillWorkspaceSessionPrs', () => {
     ]);
   });
 
+  it('evicts the oldest review by transcript age across bare and url forms', async () => {
+    // The url-form review was typed FIRST — it is the oldest review, and
+    // the trim tie-breaks same-rank plan members by plan position as the
+    // age proxy (mirroring the sidecar cap's list-order tie-break). If
+    // url forms were appended after every bare number, the second-oldest
+    // review would be evicted while the genuinely oldest one persisted at
+    // the newest position, permanently, on every run.
+    await seedSession(SESSION_A);
+    await appendUserText(SESSION_A, '/review https://github.com/o/r/pull/99');
+    await seedReviewedNumbers(SESSION_A, 1, 10);
+    fetchGitHubPullRequestsMock.mockResolvedValue({ kind: 'cli_unavailable' });
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 10, overLimit: 1, unresolved: 0 });
+    expect((await readSessionPrs(prPath))?.map((p) => p.number)).toEqual([
+      1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+    ]);
+  });
+
   it('keeps re-offered pre-provenance occupants ahead of fresh reviews', async () => {
     // Every binding persisted before `source` was recorded is source-less —
     // GitDialog creates included, since the metadata routes only stamp
