@@ -365,18 +365,18 @@ jobs:
           set -euo pipefail
           # Sign all native macOS executables in the bundled runtime so
           # notarization does not reject them. Tauri only signs the main
-          # app binary; resources like ripgrep and the Node.js runtime are
+          # app binary; resources like search tools and the Node.js runtime are
           # embedded verbatim and must be signed beforehand.
           runtime_dir="runtime/qwen-code"
-          # ripgrep vendor binaries
-          rg_dir="$runtime_dir/lib/vendor/ripgrep"
-          if [ -d "$rg_dir" ]; then
-            find "$rg_dir" -type f -name 'rg' -path '*-darwin/*' -exec \
+          # search vendor binaries
+          vendor_dir="$runtime_dir/lib/vendor"
+          if [ -d "$vendor_dir" ]; then
+            find "$vendor_dir" -type f \( -name 'rg' -o -name 'bfs' -o -name 'ugrep' \) -path '*-darwin/*' -exec \
               codesign --force --sign "$APPLE_SIGNING_IDENTITY" \
               --options runtime --timestamp \
               {} +
           else
-            echo "::warning::Ripgrep vendor directory not found at $rg_dir; no ripgrep binaries signed."
+            echo "::warning::Vendor directory not found at $vendor_dir; no search binaries signed."
           fi
           # Node.js runtime binary
           node_bin="$runtime_dir/node/bin/node"

@@ -26,6 +26,7 @@ import {
   scanUserAutoMemoryTopicDocuments,
 } from './scan.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { isBashSearchAvailable } from '../utils/bash-search-tools.js';
 import { createMemoryScopedAgentConfig } from './memory-scoped-agent-config.js';
 
 const MAX_TOPIC_SUMMARY_CHARS = 280;
@@ -148,7 +149,11 @@ function buildTaskPrompt(
   projectMemoryRoot: string,
   userMemoryRoot: string,
   topicSummaries: string,
+  hasBashSearch: boolean,
 ): string {
+  const availableSearchTools = hasBashSearch
+    ? '`run_shell_command` with `rg` / `rg --files`'
+    : '`grep_search`, `glob`, read-only `run_shell_command`';
   return [
     'Managed memory has TWO directories. Choose which one to write each memory into using the per-type `<scope>` guidance in your system instructions:',
     `- USER memory (cross-project, durable knowledge about who the user is): \`${userMemoryRoot}\``,
@@ -156,7 +161,7 @@ function buildTaskPrompt(
     '',
     'Scan the recent conversation history in your context and update durable managed memory in whichever directory each memory belongs.',
     '',
-    'Available tools in this run: `read_file`, `grep_search`, `glob`, read-only `run_shell_command`, and `write_file`/`edit` for paths inside EITHER managed memory directory above.',
+    `Available tools in this run: \`read_file\`, ${availableSearchTools}, and \`write_file\`/\`edit\` for paths inside EITHER managed memory directory above.`,
     '- Do not use any other tools.',
     '- You have a limited turn budget. `edit` requires a prior `read_file` of the same file, so the efficient strategy is: first issue all reads in parallel for every file you might update; then issue all `write_file`/`edit` calls in parallel. Do not interleave reads and writes across multiple turns.',
     '- You MUST only use content from the recent conversation history in your context plus the current managed memory files.',
@@ -251,6 +256,7 @@ export async function runAutoMemoryExtractionByAgent(
   config: Config,
   projectRoot: string,
 ): Promise<AutoMemoryExtractionExecutionResult> {
+  const hasBashSearch = isBashSearchAvailable();
   const cacheSafe = getCacheSafeParams(config.getSessionId());
   if (!cacheSafe) {
     throw new Error(
@@ -275,14 +281,14 @@ export async function runAutoMemoryExtractionByAgent(
       projectMemoryRoot,
       userMemoryRoot,
       topicSummaries,
+      hasBashSearch,
     ),
     systemPrompt: EXTRACTION_AGENT_SYSTEM_PROMPT,
     maxTurns: config.getMemoryAgentMaxTurns() ?? 5,
     maxTimeMinutes: config.getMemoryAgentTimeoutMinutes() ?? 2,
     tools: [
       ToolNames.READ_FILE,
-      ToolNames.GREP,
-      ToolNames.GLOB,
+      ...(hasBashSearch ? [] : [ToolNames.GREP, ToolNames.GLOB]),
       ToolNames.SHELL,
       ToolNames.WRITE_FILE,
       ToolNames.EDIT,

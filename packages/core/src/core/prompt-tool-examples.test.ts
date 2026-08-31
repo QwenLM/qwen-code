@@ -16,6 +16,10 @@ import {
 import { makeFakeConfig } from '../test-utils/config.js';
 import { getCoreSystemPrompt } from './prompts.js';
 
+vi.mock('../utils/bash-search-tools.js', () => ({
+  isBashSearchAvailable: () => false,
+}));
+
 interface ExampleToolCall {
   name: string;
   arguments: Record<string, unknown>;

@@ -11,6 +11,8 @@ allowedTools:
 
 # /goal-draft — write a Goal the verifier can judge
 
+Search compatibility: when `glob` and `grep_search` are not exposed, use read-only `run_shell_command` calls with `rg --files` and `rg` instead.
+
 You are already inside the loaded `goal-draft` skill — do not call the `skill` tool to invoke it again; start with Step 0.
 
 You are drafting the text for `/goal set`. You are NOT doing the work the goal describes. Do not edit files, do not run the checks, do not start on the task. The only deliverable is the objective text and the `/goal set` line the user can run.

@@ -75,6 +75,10 @@ function escapeRegExp(value: string): string {
 // Mock dependencies
 vi.mock('../../subagents/subagent-manager.js');
 vi.mock('../../agents/runtime/agent-headless.js');
+const mockIsBashSearchAvailable = vi.hoisted(() => vi.fn(() => false));
+vi.mock('../../utils/bash-search-tools.js', () => ({
+  isBashSearchAvailable: mockIsBashSearchAvailable,
+}));
 
 // Spies for the subagent-span layer so tests can assert what status taxonomy
 // was published. The real runInSubagentSpanContext sets up OTel context-with,
@@ -128,6 +132,7 @@ describe('AgentTool', () => {
   ];
 
   beforeEach(async () => {
+    mockIsBashSearchAvailable.mockReturnValue(false);
     // Setup fake timers
     vi.useFakeTimers();
 
@@ -301,6 +306,18 @@ describe('AgentTool', () => {
       expect(agentTool.description).toContain('code-review');
       expect(agentTool.description).toContain(
         'Agent for reviewing code quality and best practices',
+      );
+    });
+
+    it('uses Shell for direct search when Bash search is available', async () => {
+      mockIsBashSearchAvailable.mockReturnValue(true);
+
+      const bashAgentTool = new AgentTool(config);
+      await vi.runAllTimersAsync();
+
+      expect(bashAgentTool.description).toContain('`rg --files`');
+      expect(bashAgentTool.description).not.toContain(
+        'use the glob tool instead',
       );
     });
 

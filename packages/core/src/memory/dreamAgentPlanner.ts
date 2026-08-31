@@ -17,6 +17,7 @@ import {
   getAutoMemoryRoot,
 } from './paths.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { isBashSearchAvailable } from '../utils/bash-search-tools.js';
 import { escapeShellArg, getShellConfiguration } from '../utils/shell-utils.js';
 import { createMemoryScopedAgentConfig } from './memory-scoped-agent-config.js';
 
@@ -105,6 +106,7 @@ export async function planManagedAutoMemoryDreamByAgent(
   abortSignal?: AbortSignal,
   options: { suppressChatRecording?: boolean } = {},
 ): Promise<ForkedAgentResult> {
+  const hasBashSearch = isBashSearchAvailable();
   const memoryRoot = getAutoMemoryRoot(projectRoot);
   const transcriptDir = getTranscriptDir(projectRoot);
   const scopedConfig = createMemoryScopedAgentConfig(config, projectRoot, {
@@ -121,8 +123,7 @@ export async function planManagedAutoMemoryDreamByAgent(
     maxTimeMinutes: config.getMemoryAgentTimeoutMinutes() ?? MAX_TIME_MINUTES,
     tools: [
       ToolNames.READ_FILE,
-      ToolNames.GREP,
-      ToolNames.GLOB,
+      ...(hasBashSearch ? [] : [ToolNames.GREP, ToolNames.GLOB]),
       ToolNames.SHELL,
       ToolNames.WRITE_FILE,
       ToolNames.EDIT,

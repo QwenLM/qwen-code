@@ -307,7 +307,7 @@ export function copyBundleAssets({ root = defaultRoot } = {}) {
 
   console.log('Copied sandbox profiles to dist/');
 
-  // Copy vendor directory (contains ripgrep binaries)
+  // Copy vendor directory (contains bundled search binaries)
   console.log('Copying vendor directory...');
   if (existsSync(coreVendorDir)) {
     const destVendorDir = join(distDir, 'vendor');

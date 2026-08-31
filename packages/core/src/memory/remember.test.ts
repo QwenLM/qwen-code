@@ -31,6 +31,10 @@ import {
 vi.mock('../agents/forkedAgent.js', () => ({
   runForkedAgent: vi.fn(),
 }));
+const mockIsBashSearchAvailable = vi.hoisted(() => vi.fn());
+vi.mock('../utils/bash-search-tools.js', () => ({
+  isBashSearchAvailable: mockIsBashSearchAvailable,
+}));
 
 vi.mock('./indexer.js', () => ({
   rebuildManagedAutoMemoryIndex: vi.fn(),
@@ -68,6 +72,7 @@ describe('remember memory helper', () => {
     vi.mocked(rebuildUserAutoMemoryIndex).mockReset();
     vi.mocked(rebuildManagedAutoMemoryIndex).mockResolvedValue('');
     vi.mocked(rebuildUserAutoMemoryIndex).mockResolvedValue('');
+    mockIsBashSearchAvailable.mockReturnValue(false);
   });
 
   afterEach(async () => {
@@ -203,6 +208,33 @@ describe('remember memory helper', () => {
     expect(params.taskPrompt).toContain('Remember the project uses vitest.');
     expect(params.taskPrompt).toContain('<user-content>');
     expect(rebuildManagedAutoMemoryIndex).toHaveBeenCalledWith(projectRoot);
+  });
+
+  it('omits unavailable search tools without granting Shell', async () => {
+    mockIsBashSearchAvailable.mockReturnValue(true);
+    const memoryFile = path.join(
+      getAutoMemoryRoot(projectRoot),
+      'feedback',
+      'saved.md',
+    );
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      filesTouched: [memoryFile],
+      filesWritten: [memoryFile],
+    } satisfies ForkedAgentResult);
+
+    await runManagedRememberByAgent({
+      config: createConfig(projectRoot),
+      projectRoot,
+      content: 'Remember the project uses vitest.',
+      contextMode: 'clean',
+    });
+
+    expect(runForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tools: ['read_file', 'write_file', 'edit'],
+      }),
+    );
   });
 
   it('enforces an explicit project target at the permission boundary', async () => {

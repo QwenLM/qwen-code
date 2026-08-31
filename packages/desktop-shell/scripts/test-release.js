@@ -313,22 +313,30 @@ function testDesktopReleaseSigningWorkflow() {
     ),
     'Unsigned Windows installers are only allowed when no signing config exists',
   );
-  const ripgrepStart = workflow.indexOf('# ripgrep vendor binaries');
-  const ripgrepEnd = workflow.indexOf('# Node.js runtime binary');
+  const searchToolsStart = workflow.indexOf('# search vendor binaries');
+  const searchToolsEnd = workflow.indexOf('# Node.js runtime binary');
   assert.ok(
-    ripgrepStart !== -1 && ripgrepEnd > ripgrepStart,
-    'the vendor signing step must keep its ripgrep/Node section markers',
+    searchToolsStart !== -1 && searchToolsEnd > searchToolsStart,
+    'the vendor signing step must keep its search-tools/Node section markers',
   );
-  const ripgrepSigningBlock = workflow.slice(ripgrepStart, ripgrepEnd);
+  const searchToolsSigningBlock = workflow.slice(
+    searchToolsStart,
+    searchToolsEnd,
+  );
   assert.doesNotMatch(
-    ripgrepSigningBlock,
+    searchToolsSigningBlock,
     /--entitlements/,
-    'ripgrep must not inherit the app entitlements',
+    'search tools must not inherit the app entitlements',
   );
   assert.match(
     workflow,
     /--options runtime --timestamp \\\n\s+\{\} \+/,
-    'ripgrep codesign failures must fail the signing step',
+    'search-tool codesign failures must fail the signing step',
+  );
+  assert.match(
+    searchToolsSigningBlock,
+    /-name 'rg'.*-name 'bfs'.*-name 'ugrep'/,
+    'all bundled search tools must be signed',
   );
   assert.ok(
     workflow.includes(
@@ -370,8 +378,8 @@ function testDesktopReleaseSigningWorkflow() {
   );
   assert.match(
     workflow,
-    /Ripgrep vendor directory not found at \$rg_dir/,
-    'missing ripgrep binaries must be visible in release logs',
+    /Vendor directory not found at \$vendor_dir/,
+    'missing search binaries must be visible in release logs',
   );
   assert.match(
     workflow,

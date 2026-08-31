@@ -4,10 +4,19 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildTeammatePromptAddendum } from './promptAddendum.js';
 
+const mockIsBashSearchAvailable = vi.hoisted(() => vi.fn());
+vi.mock('../../utils/bash-search-tools.js', () => ({
+  isBashSearchAvailable: mockIsBashSearchAvailable,
+}));
+
 describe('buildTeammatePromptAddendum', () => {
+  beforeEach(() => {
+    mockIsBashSearchAvailable.mockReturnValue(false);
+  });
+
   it('uses ordinary teammate reporting instructions by default', () => {
     const prompt = buildTeammatePromptAddendum('worker', 'team', 'leader');
 
@@ -23,6 +32,15 @@ describe('buildTeammatePromptAddendum', () => {
     expect(prompt).toContain('start in plan mode');
     expect(prompt).toContain('call exit_plan_mode');
     expect(prompt).toContain('Do not use send_message for plan approval');
+  });
+
+  it('uses Bash search guidance when available', () => {
+    mockIsBashSearchAvailable.mockReturnValue(true);
+
+    const prompt = buildTeammatePromptAddendum('worker', 'team', 'leader');
+
+    expect(prompt).toContain('run_shell_command with `rg` / `rg --files`');
+    expect(prompt).not.toContain('grep_search, glob');
   });
 
   it('marks read-only tasks complete before the turn-ending report', () => {

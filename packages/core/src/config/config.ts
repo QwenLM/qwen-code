@@ -82,6 +82,7 @@ import {
 } from '../tools/mcp-client.js';
 import { setMemoryFilename } from '../utils/memory-constants.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
+import { isBashSearchAvailable } from '../utils/bash-search-tools.js';
 import { recordStartupEvent } from '../utils/startupEventSink.js';
 import { ToolRegistry, type ToolFactory } from '../tools/tool-registry.js';
 import type { McpBudgetEvent } from '../tools/mcp-client-manager.js';
@@ -9302,49 +9303,51 @@ export class Config {
       return new ZoomImageTool(this);
     });
 
-    // --- Grep / RipGrep (conditional) ---
-    if (this.getUseRipgrep()) {
-      let useRipgrep = false;
-      let errorString: undefined | string = undefined;
-      recordStartupEvent('config_initialize_ripgrep_probe_start');
-      try {
-        useRipgrep = await canUseRipgrep(this.getUseBuiltinRipgrep());
-      } catch (error: unknown) {
-        errorString = getErrorMessage(error);
-      }
-      recordStartupEvent('config_initialize_ripgrep_probe_end');
-      if (useRipgrep) {
-        await registerLazy(ToolNames.GREP, async () => {
-          const { RipGrepTool } = await import('../tools/ripGrep.js');
-          return new RipGrepTool(this);
-        });
+    if (!isBashSearchAvailable()) {
+      // --- Grep / RipGrep (conditional) ---
+      if (this.getUseRipgrep()) {
+        let useRipgrep = false;
+        let errorString: undefined | string = undefined;
+        recordStartupEvent('config_initialize_ripgrep_probe_start');
+        try {
+          useRipgrep = await canUseRipgrep(this.getUseBuiltinRipgrep());
+        } catch (error: unknown) {
+          errorString = getErrorMessage(error);
+        }
+        recordStartupEvent('config_initialize_ripgrep_probe_end');
+        if (useRipgrep) {
+          await registerLazy(ToolNames.GREP, async () => {
+            const { RipGrepTool } = await import('../tools/ripGrep.js');
+            return new RipGrepTool(this);
+          });
+        } else {
+          logRipgrepFallback(
+            this,
+            new RipgrepFallbackEvent(
+              this.getUseRipgrep(),
+              this.getUseBuiltinRipgrep(),
+              errorString || 'ripgrep is not available',
+            ),
+          );
+          await registerLazy(ToolNames.GREP, async () => {
+            const { GrepTool } = await import('../tools/grep.js');
+            return new GrepTool(this);
+          });
+        }
       } else {
-        logRipgrepFallback(
-          this,
-          new RipgrepFallbackEvent(
-            this.getUseRipgrep(),
-            this.getUseBuiltinRipgrep(),
-            errorString || 'ripgrep is not available',
-          ),
-        );
+        recordStartupEvent('config_initialize_ripgrep_probe_start');
+        recordStartupEvent('config_initialize_ripgrep_probe_end');
         await registerLazy(ToolNames.GREP, async () => {
           const { GrepTool } = await import('../tools/grep.js');
           return new GrepTool(this);
         });
       }
-    } else {
-      recordStartupEvent('config_initialize_ripgrep_probe_start');
-      recordStartupEvent('config_initialize_ripgrep_probe_end');
-      await registerLazy(ToolNames.GREP, async () => {
-        const { GrepTool } = await import('../tools/grep.js');
-        return new GrepTool(this);
+
+      await registerLazy(ToolNames.GLOB, async () => {
+        const { GlobTool } = await import('../tools/glob.js');
+        return new GlobTool(this);
       });
     }
-
-    await registerLazy(ToolNames.GLOB, async () => {
-      const { GlobTool } = await import('../tools/glob.js');
-      return new GlobTool(this);
-    });
     await registerLazy(ToolNames.EDIT, async () => {
       const { EditTool } = await import('../tools/edit.js');
       return new EditTool(this);

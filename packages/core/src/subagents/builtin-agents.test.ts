@@ -4,13 +4,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { ToolNames } from '../tools/tool-names.js';
 import {
   BuiltinAgentRegistry,
   DEFAULT_BUILTIN_SUBAGENT_TYPE,
   REVIEW_BUILTIN_SUBAGENT_TYPE,
 } from './builtin-agents.js';
+
+const mockIsBashSearchAvailable = vi.hoisted(() => vi.fn(() => false));
+vi.mock('../utils/bash-search-tools.js', () => ({
+  isBashSearchAvailable: mockIsBashSearchAvailable,
+}));
 
 describe('BuiltinAgentRegistry', () => {
   describe('getBuiltinAgents', () => {
@@ -74,6 +79,29 @@ describe('BuiltinAgentRegistry', () => {
         'pipelines are allowed when every command is read-only',
       );
       expect(exploreAgent?.systemPrompt).not.toContain('(>, >>, |)');
+      expect(exploreAgent?.tools).toContain(ToolNames.SHELL);
+      expect(exploreAgent?.tools).toContain(ToolNames.GREP);
+      expect(exploreAgent?.tools).toContain(ToolNames.GLOB);
+    });
+
+    it('uses Shell search when Bash search is available', async () => {
+      mockIsBashSearchAvailable.mockReturnValue(true);
+      vi.resetModules();
+      const { BuiltinAgentRegistry: BashBuiltinAgentRegistry } = await import(
+        './builtin-agents.js'
+      );
+
+      const exploreAgent = BashBuiltinAgentRegistry.getBuiltinAgent('Explore');
+      const reviewAgent =
+        BashBuiltinAgentRegistry.getBuiltinAgent('review-agent');
+
+      expect(exploreAgent?.tools).toContain(ToolNames.SHELL);
+      expect(exploreAgent?.tools).not.toContain(ToolNames.GREP);
+      expect(exploreAgent?.tools).not.toContain(ToolNames.GLOB);
+      expect(exploreAgent?.systemPrompt).toContain('`rg --files`');
+      expect(reviewAgent?.tools).toContain(ToolNames.SHELL);
+      expect(reviewAgent?.tools).not.toContain(ToolNames.GREP);
+      expect(reviewAgent?.tools).not.toContain(ToolNames.GLOB);
     });
 
     // Regression for #7126: Explore is a read-only search worker that

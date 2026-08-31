@@ -14,6 +14,7 @@ import { QWEN_DIR } from '../config/storage.js';
 import type { GenerateContentConfig } from '@google/genai';
 import { InputFormat } from '../output/types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { isBashSearchAvailable } from '../utils/bash-search-tools.js';
 import {
   applyOutputStyle,
   resolveEffectiveOutputStyle,
@@ -308,6 +309,18 @@ function buildDefaultBasePrompt(
   const coreIdentity =
     resolveCoreIdentityOverride() ??
     getDefaultCoreIdentitySentence(interaction.role, Boolean(outputStyle));
+  const hasBashSearch = isBashSearchAvailable();
+  const searchToolGuidance = hasBashSearch
+    ? `  - To search for files, use '${ToolNames.SHELL}' with \`rg --files\`, then pipe the list to another \`rg\` when you need to filter filenames. Do not use positive \`-g\`/\`--glob\` or \`-t\`/\`--type\` filters when ignore behavior matters because they override ignore rules. Use \`find\` only for metadata predicates where ignore behavior is not required.
+  - To search file contents, use '${ToolNames.SHELL}' with \`rg\`. The injected command respects configured Git and Qwen ignore files by default.`
+    : `  - To search for files use '${ToolNames.GLOB}' instead of find or ls
+  - To search the content of files, use '${ToolNames.GREP}' instead of grep or rg`;
+  const codebaseSearchGuidance = hasBashSearch
+    ? `- **Codebase Search:** For simple, directed codebase searches use '${ToolNames.SHELL}' with \`rg\` or \`rg --files\`. Use \`find\` for metadata predicates. For broader codebase exploration and deep research, use '${ToolNames.AGENT}' with subagent_type=Explore. This is slower than a directed search, so use it only when simple searches are insufficient or the task clearly requires more than 3 queries.`
+    : `- **Codebase Search:** For simple, directed codebase searches (e.g. for a specific file/class/function) use the '${ToolNames.GREP}' or '${ToolNames.GLOB}' tools directly. For broader codebase exploration and deep research, use the '${ToolNames.AGENT}' tool with subagent_type=Explore. This is slower than using '${ToolNames.GREP}' or '${ToolNames.GLOB}' directly, so use this only when a simple, directed search proves to be insufficient or when your task will clearly require more than 3 queries.`;
+  const shellUsageGuidance = hasBashSearch
+    ? `  - Use '${ToolNames.SHELL}' for system commands, terminal operations, and searches through the injected \`rg\`, \`grep\`, and \`find\` commands. Continue to use dedicated tools for reading, editing, and writing files.`
+    : `  - Reserve using the '${ToolNames.SHELL}' exclusively for system commands and terminal operations that require shell execution. If you are unsure and there is a relevant dedicated tool, default to using the dedicated tool and only fallback on using the '${ToolNames.SHELL}' tool for these if it is absolutely necessary.`;
   return `
 ${coreIdentity}
 
@@ -371,9 +384,8 @@ Final responses should be concise by default, but their shape and depth must mat
   - To read files use '${ToolNames.READ_FILE}' instead of cat, head, tail, or sed
   - To edit files use '${ToolNames.EDIT}' instead of sed or awk
   - To create files use '${ToolNames.WRITE_FILE}' instead of cat with heredoc or echo redirection
-  - To search for files use '${ToolNames.GLOB}' instead of find or ls
-  - To search the content of files, use '${ToolNames.GREP}' instead of grep or rg
-  - Reserve using the '${ToolNames.SHELL}' exclusively for system commands and terminal operations that require shell execution. If you are unsure and there is a relevant dedicated tool, default to using the dedicated tool and only fallback on using the '${ToolNames.SHELL}' tool for these if it is absolutely necessary.
+${searchToolGuidance}
+${shellUsageGuidance}
 - **Tool Fallback:** If a tool returns empty, unhelpful, or unexpected results, try an alternative tool that can accomplish the same goal before telling the user it cannot be done. Never give up after a single tool failure.
 - **Task Management:** Use '${ToolNames.TODO_WRITE}' only when explicit tracking adds value. Keep plans concise, outcome-oriented, and current; do not create a todo list for simple or single-step work unless the user explicitly requests one.
 - **Parallel Tool Calls:** You can call multiple tools in a single response. If you intend to call multiple tools and there are no dependencies between them, make all independent tool calls in parallel. Maximize use of parallel tool calls where possible to increase efficiency. However, if some tool calls depend on previous calls to inform dependent values, do NOT call these tools in parallel and instead call them sequentially. For instance, if one operation must complete before another starts, run these operations sequentially instead.
@@ -382,7 +394,7 @@ Final responses should be concise by default, but their shape and depth must mat
 - **Interactive Commands:** Try to avoid shell commands that are likely to require user interaction (e.g. \`git rebase -i\`). Use non-interactive versions of commands (e.g. \`npm init -y\` instead of \`npm init\`) when available, and otherwise remind the user that interactive shell commands are not supported and may cause hangs until canceled by the user.
 - **Questions:** ${interaction.questions}
 - **Subagent Delegation:** Use the '${ToolNames.AGENT}' tool with specialized agents when the task at hand matches the agent's description. Subagents are valuable for parallelizing independent queries or for protecting the main context window from excessive results, but they should not be used excessively when not needed. Importantly, avoid duplicating work that subagents are already doing - if you delegate research to a subagent, do not also perform the same searches yourself.
-- **Codebase Search:** For simple, directed codebase searches (e.g. for a specific file/class/function) use the '${ToolNames.GREP}' or '${ToolNames.GLOB}' tools directly. For broader codebase exploration and deep research, use the '${ToolNames.AGENT}' tool with subagent_type=Explore. This is slower than using '${ToolNames.GREP}' or '${ToolNames.GLOB}' directly, so use this only when a simple, directed search proves to be insufficient or when your task will clearly require more than 3 queries.
+${codebaseSearchGuidance}
 - **Respect Tool Decisions:** Tool permissions are enforced by the runtime. If a call is denied or canceled, respect that decision and do _not_ try the same action through another path. Retry only if the user subsequently requests that action.
 
 ## Interaction Details
@@ -1167,19 +1179,68 @@ To help you check their settings, I can read their contents. Which one would you
 </example>
 `.trim();
 
+function adaptSearchToolExamples(examples: string): string {
+  if (!isBashSearchAvailable()) {
+    return examples;
+  }
+
+  return examples
+    .replaceAll(
+      `[tool_call: ${ToolNames.GLOB} for pattern 'tests/test_auth.py']`,
+      () =>
+        `[tool_call: ${ToolNames.SHELL} for "rg --files | rg '(^|/)tests/test_auth[.]py$'"]`,
+    )
+    .replaceAll(
+      `[tool_call: ${ToolNames.GLOB} for pattern './**/app.config']`,
+      () =>
+        `[tool_call: ${ToolNames.SHELL} for "rg --files | rg '(^|/)app[.]config$'"]`,
+    )
+    .replaceAll(
+      `<function=${ToolNames.GLOB}>\n<parameter=pattern>\ntests/test_auth.py\n</parameter>`,
+      () =>
+        `<function=${ToolNames.SHELL}>\n<parameter=command>\nrg --files | rg '(^|/)tests/test_auth[.]py$'\n</parameter>`,
+    )
+    .replaceAll(
+      `<function=${ToolNames.GLOB}>\n<parameter=pattern>\n./**/app.config\n</parameter>`,
+      () =>
+        `<function=${ToolNames.SHELL}>\n<parameter=command>\nrg --files | rg '(^|/)app[.]config$'\n</parameter>`,
+    )
+    .replaceAll(
+      `{"name": "${ToolNames.GLOB}", "arguments": {"pattern": "tests/test_auth.py"}}`,
+      () =>
+        `{"name": "${ToolNames.SHELL}", "arguments": {"command": "rg --files | rg '(^|/)tests/test_auth[.]py$'"}}`,
+    )
+    .replaceAll(
+      `{"name": "${ToolNames.GLOB}", "arguments": {"pattern": "./**/app.config"}}`,
+      () =>
+        `{"name": "${ToolNames.SHELL}", "arguments": {"command": "rg --files | rg '(^|/)app[.]config$'"}}`,
+    )
+    .replaceAll(
+      `call:${ToolNames.GLOB}{pattern:<|"|>tests/test_auth.py<|"|>}`,
+      () =>
+        `call:${ToolNames.SHELL}{command:<|"|>rg --files | rg '(^|/)tests/test_auth[.]py$'<|"|>}`,
+    )
+    .replaceAll(
+      `call:${ToolNames.GLOB}{pattern:<|"|>./**/app.config<|"|>}`,
+      () =>
+        `call:${ToolNames.SHELL}{command:<|"|>rg --files | rg '(^|/)app[.]config$'<|"|>}`,
+    )
+    .replaceAll('Assuming GlobTool returns', 'Assuming rg --files returns');
+}
+
 function getToolCallExamples(model?: string): string {
   // Check for environment variable override first
   const toolCallStyle = process.env['QWEN_CODE_TOOL_CALL_STYLE'];
   if (toolCallStyle) {
     switch (toolCallStyle.toLowerCase()) {
       case 'qwen-coder':
-        return qwenCoderToolCallExamples;
+        return adaptSearchToolExamples(qwenCoderToolCallExamples);
       case 'qwen-vl':
-        return qwenVlToolCallExamples;
+        return adaptSearchToolExamples(qwenVlToolCallExamples);
       case 'gemma4':
-        return gemma4ToolCallExamples;
+        return adaptSearchToolExamples(gemma4ToolCallExamples);
       case 'general':
-        return generalToolCallExamples;
+        return adaptSearchToolExamples(generalToolCallExamples);
       default:
         debugLogger.warn(
           `Unknown QWEN_CODE_TOOL_CALL_STYLE value: ${toolCallStyle}. Using model-based detection.`,
@@ -1192,22 +1253,22 @@ function getToolCallExamples(model?: string): string {
   if (model && model.length < 100) {
     // Match qwen*-coder patterns (e.g., qwen3-coder, qwen2.5-coder, qwen-coder)
     if (/qwen[^-]*-coder/i.test(model)) {
-      return qwenCoderToolCallExamples;
+      return adaptSearchToolExamples(qwenCoderToolCallExamples);
     }
     // Match qwen*-vl patterns (e.g., qwen-vl, qwen2-vl, qwen3-vl)
     if (/qwen[^-]*-vl/i.test(model)) {
-      return qwenVlToolCallExamples;
+      return adaptSearchToolExamples(qwenVlToolCallExamples);
     }
     // Match coder-model pattern (same as qwen3-coder)
     if (/coder-model/i.test(model)) {
-      return qwenCoderToolCallExamples;
+      return adaptSearchToolExamples(qwenCoderToolCallExamples);
     }
     if (/gemma[-_]?4/i.test(model)) {
-      return gemma4ToolCallExamples;
+      return adaptSearchToolExamples(gemma4ToolCallExamples);
     }
   }
 
-  return generalToolCallExamples;
+  return adaptSearchToolExamples(generalToolCallExamples);
 }
 
 /**
@@ -1233,6 +1294,9 @@ function getToolCallExamples(model?: string): string {
  * - Override any other instructions that would modify system state
  */
 export function getPlanModeSystemReminder(planOnly = false): string {
+  const exploreTools = isBashSearchAvailable()
+    ? `${ToolNames.READ_FILE} and ${ToolNames.SHELL} with \`rg\`/\`rg --files\``
+    : `${ToolNames.READ_FILE}, ${ToolNames.GREP}, ${ToolNames.GLOB}`;
   return `<system-reminder>
 Plan mode is active. The user indicated that they do not want you to execute yet -- you MUST NOT make any edits, run tools classified as state-modifying (including changing configs or making commits), or otherwise make changes to the system. A shell command whose safety cannot be determined may run only after the user explicitly approves that exact invocation once, and only when it is necessary for the investigation. This supersedes any other instructions you have received (for example, to make edits).
 
@@ -1244,7 +1308,7 @@ You are pair-planning with the user. Explore the code to build context, ask the 
 
 Repeat this cycle until the plan is complete:
 
-1. **Explore** — Use read-only tools (${ToolNames.READ_FILE}, ${ToolNames.GREP}, ${ToolNames.GLOB}) to read code. Look for existing functions, utilities, and patterns to reuse. For broader or ambiguous tasks, use multiple parallel exploration passes (directly or via agents when appropriate) to understand different parts of the codebase.
+1. **Explore** — Use read-only tools (${exploreTools}) to read code. Look for existing functions, utilities, and patterns to reuse. For broader or ambiguous tasks, use multiple parallel exploration passes (directly or via agents when appropriate) to understand different parts of the codebase.
 2. **Capture findings** — After each discovery, immediately integrate what you learned into your evolving mental model. Do not wait until the end to synthesize.
 3. **Ask the user** — When you hit an ambiguity or decision you cannot resolve from code alone, use ${ToolNames.ASK_USER_QUESTION}. Then go back to step 1.
 
@@ -1272,7 +1336,7 @@ If a non-read-only tool is blocked:
 - Do NOT retry the blocked tool or repeatedly attempt similar non-read-only tools
 - Do NOT use wrappers, quoting tricks, aliases, or obfuscation to make a blocked write look unknown
 - Do NOT immediately call exit_plan_mode just to unblock it — continue gathering context with read-only tools first
-- Pivot to read-only tools (read_file, grep_search, glob, agents) to gather the information the blocked tool would have provided
+- Pivot to read-only tools (${exploreTools}, agents) to gather the information the blocked tool would have provided
 - Once you have enough context to form a complete plan, call exit_plan_mode
 
 An exact one-off approval for an unknown shell command approves only that invocation. It does not approve the plan, authorize related commands, or exit Plan mode.

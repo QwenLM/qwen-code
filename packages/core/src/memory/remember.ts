@@ -7,6 +7,7 @@
 import path from 'node:path';
 import { deriveConfig, type Config } from '../config/config.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { isBashSearchAvailable } from '../utils/bash-search-tools.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   runForkedAgent,
@@ -191,6 +192,7 @@ export async function runManagedRememberByAgent(params: {
   scope?: WorkspaceRememberTargetScope;
   abortSignal?: AbortSignal;
 }): Promise<ManagedRememberResult> {
+  const hasBashSearch = isBashSearchAvailable();
   if (!params.config.isManagedMemoryAvailable()) {
     throw Object.assign(new Error('Managed memory is unavailable'), {
       code: 'managed_memory_unavailable',
@@ -253,7 +255,7 @@ export async function runManagedRememberByAgent(params: {
       preserveEmptyExtraHistory: params.contextMode === 'clean',
       tools: [
         ToolNames.READ_FILE,
-        ToolNames.GREP,
+        ...(hasBashSearch ? [] : [ToolNames.GREP]),
         ToolNames.WRITE_FILE,
         ToolNames.EDIT,
       ],

@@ -5,7 +5,19 @@
  */
 
 import { ToolDisplayNames, ToolNames } from '../tools/tool-names.js';
+import { isBashSearchAvailable } from '../utils/bash-search-tools.js';
 import type { SubagentConfig } from './types.js';
+
+const hasBashSearch = isBashSearchAvailable();
+const exploreSearchGuidance = hasBashSearch
+  ? `- Use ${ToolDisplayNames.SHELL} with \`rg --files\`, then pipe the list to another \`rg\` to filter filenames without overriding ignore rules
+- Use ${ToolDisplayNames.SHELL} with \`rg\` for content search; configured ignore files are applied automatically
+- Use \`find\` only for metadata predicates where ignore behavior is not required`
+  : `- Use ${ToolDisplayNames.GLOB} for broad file pattern matching
+- Use ${ToolDisplayNames.GREP} for searching file contents with regex`;
+const exploreTools = hasBashSearch
+  ? [ToolNames.READ_FILE, ToolNames.SHELL]
+  : [ToolNames.READ_FILE, ToolNames.GREP, ToolNames.GLOB, ToolNames.SHELL];
 
 /**
  * Canonical name of the default builtin subagent. Exported so UI
@@ -91,10 +103,9 @@ Your strengths:
 - Reading and analyzing file contents
 
 Guidelines:
-- Use ${ToolDisplayNames.GLOB} for broad file pattern matching
-- Use ${ToolDisplayNames.GREP} for searching file contents with regex
+${exploreSearchGuidance}
 - Use ${ToolDisplayNames.READ_FILE} when you know the specific file path you need to read
-- Use ${ToolDisplayNames.SHELL} ONLY for read-only operations (ls, git status, git log, git diff, find, cat, head, tail)
+- Use ${ToolDisplayNames.SHELL} ONLY for read-only operations (rg, grep, find, ls, git status, git log, git diff, cat, head, tail)
 - NEVER use ${ToolDisplayNames.SHELL} for: mkdir, touch, rm, cp, mv, git add, git commit, npm install, pip install, or any file creation/modification
 - Adapt your search approach based on the thoroughness level specified by the caller
 - Return file paths as absolute paths in your final response
@@ -112,10 +123,7 @@ Notes:
 - In your final response, share file paths (always absolute, never relative) that are relevant to the task. Include code snippets only when the exact text is load-bearing (e.g., a bug you found, a function signature the caller asked for) — do not recap code you merely read.
 - For clear communication with the user the assistant MUST avoid using emojis.`,
       tools: [
-        ToolNames.READ_FILE,
-        ToolNames.GREP,
-        ToolNames.GLOB,
-        ToolNames.SHELL,
+        ...exploreTools,
         ToolNames.WEB_FETCH,
         ToolNames.SKILL,
         ToolNames.LSP,
@@ -335,14 +343,7 @@ Guidelines:
       //     verifier brief's "corroborate via the vendor's own tracker" and a
       //     project rule naming an MCP server both lose their direct route and
       //     fall back to what SHELL can reach.
-      tools: [
-        ToolNames.READ_FILE,
-        ToolNames.GREP,
-        ToolNames.GLOB,
-        ToolNames.SHELL,
-        ToolNames.WRITE_FILE,
-        ToolNames.EDIT,
-      ],
+      tools: [...exploreTools, ToolNames.WRITE_FILE, ToolNames.EDIT],
       // Deliberately role-NEUTRAL, and this is load-bearing. The same type now
       // serves every role the review launches, and they do not share a shape:
       // Agent 7 (`readsDiff: false`) is handed no diff at all and reports what

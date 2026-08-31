@@ -31,6 +31,10 @@ import { ensureAutoMemoryScaffold } from './store.js';
 vi.mock('../agents/forkedAgent.js', () => ({
   runForkedAgent: vi.fn(),
 }));
+const mockIsBashSearchAvailable = vi.hoisted(() => vi.fn());
+vi.mock('../utils/bash-search-tools.js', () => ({
+  isBashSearchAvailable: mockIsBashSearchAvailable,
+}));
 
 describe('dreamAgentPlanner', () => {
   const originalMemoryBase = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
@@ -55,6 +59,7 @@ describe('dreamAgentPlanner', () => {
       getMemoryAgentMaxTurns: vi.fn().mockReturnValue(undefined),
     } as unknown as Config;
     vi.mocked(runForkedAgent).mockReset();
+    mockIsBashSearchAvailable.mockReturnValue(false);
   });
 
   afterEach(async () => {
@@ -153,6 +158,22 @@ describe('dreamAgentPlanner', () => {
           'write_file',
           'edit',
         ],
+      }),
+    );
+  });
+
+  it('uses only Shell for search when Bash search is available', async () => {
+    mockIsBashSearchAvailable.mockReturnValue(true);
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      filesTouched: [],
+    } satisfies ForkedAgentResult);
+
+    await planManagedAutoMemoryDreamByAgent(config, projectRoot);
+
+    expect(runForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tools: ['read_file', 'run_shell_command', 'write_file', 'edit'],
       }),
     );
   });

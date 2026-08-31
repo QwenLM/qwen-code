@@ -12,6 +12,8 @@
  * instructions — they infer from tool availability.
  */
 
+import { isBashSearchAvailable } from '../../utils/bash-search-tools.js';
+
 const FINAL_ANSWER_FORWARDING_NOTE = [
   '   When your turn ends, the runtime forwards the last text you emitted to',
   '   the leader automatically, so end your turn with your report. Calling',
@@ -31,6 +33,13 @@ export function buildTeammatePromptAddendum(
   leaderName: string,
   options: { planModeRequired?: boolean; readOnly?: boolean } = {},
 ): string {
+  const hasBashSearch = isBashSearchAvailable();
+  const planSearchTools = hasBashSearch
+    ? 'read_file, task_list, and other available read-only investigation tools'
+    : 'read_file, grep_search, glob, task_list, and other read-only investigation tools';
+  const workSearchTools = hasBashSearch
+    ? 'Use read_file and run_shell_command with `rg` / `rg --files` for search.'
+    : 'Use read_file, grep_search, glob, etc.';
   if (options.readOnly) {
     return [
       `You are read-only agent "${teammateName}" in team "${teamName}".`,
@@ -66,8 +75,7 @@ export function buildTeammatePromptAddendum(
       '1. CHECK TASKS FIRST: Call task_list to find pending tasks.',
       '   Claim a task by calling task_update(taskId, status: "in_progress").',
       '',
-      '2. PLAN FIRST: You start in plan mode. Use read_file, grep_search,',
-      '   glob, task_list, and other read-only investigation tools to understand',
+      `2. PLAN FIRST: You start in plan mode. Use ${planSearchTools} to understand`,
       '   the work before making any changes.',
       '',
       '3. REQUEST LEADER APPROVAL: When your plan is ready, call exit_plan_mode',
@@ -100,7 +108,7 @@ export function buildTeammatePromptAddendum(
     '1. CHECK TASKS FIRST: Call task_list to find pending tasks.',
     '   Claim a task by calling task_update(taskId, status: "in_progress").',
     '',
-    '2. DO THE WORK: Use read_file, grep_search, glob, etc.',
+    `2. DO THE WORK: ${workSearchTools}`,
     '',
     '3. REPORT RESULTS: When done, call send_message(to: "leader",',
     '   message: "<your findings>").',

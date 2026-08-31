@@ -7,6 +7,7 @@
 import { randomUUID } from 'node:crypto';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from '../tools.js';
 import { ToolNames, ToolDisplayNames } from '../tool-names.js';
+import { isBashSearchAvailable } from '../../utils/bash-search-tools.js';
 import {
   EXCLUDED_TOOLS_FOR_SUBAGENTS,
   extractParentToolNames,
@@ -802,6 +803,10 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
    * Updates the tool's description and schema based on available subagents.
    */
   private updateDescriptionAndSchema(): void {
+    const directSearchGuidance = isBashSearchAvailable()
+      ? `- If you want to locate a file or a specific class definition, use ${ToolNames.SHELL} with \`rg --files\` or \`rg\` instead of ${ToolNames.AGENT}; use ${ToolNames.READ_FILE} when you already know the path`
+      : `- If you want to read a specific file path, use the ${ToolNames.READ_FILE} tool or the ${ToolNames.GLOB} tool instead of the ${ToolNames.AGENT} tool, to find the match more quickly
+- If you are searching for a specific class definition like "class Foo", use the ${ToolNames.GREP} tool instead, to find the match more quickly`;
     let subagentDescriptions = '';
     if (this.availableSubagents.length === 0) {
       subagentDescriptions =
@@ -827,8 +832,7 @@ ${subagentDescriptions}
 When using the Agent tool, specify a subagent_type to select which agent type to use. If omitted, the general-purpose agent is used. Top-level regular subagents run in the background by default and report their results through a completion notification; set \`run_in_background: false\` when you need a regular subagent's result inline before continuing. A fork (\`subagent_type: "fork"\`) inherits the parent conversation context. A background fork's result arrives through a completion notification. Forks inherit the full parent conversation by default; set \`fork_turns\` to a positive integer string to limit inheritance to that many recent real user turns. Set \`fork_tools\` to restrict which of the still-visible parent tools the fork may execute, or \`fork_profile\` to load the same restriction from a project profile.
 
 When NOT to use the Agent tool:
-- If you want to read a specific file path, use the ${ToolNames.READ_FILE} tool or the ${ToolNames.GLOB} tool instead of the ${ToolNames.AGENT} tool, to find the match more quickly
-- If you are searching for a specific class definition like "class Foo", use the ${ToolNames.GREP} tool instead, to find the match more quickly
+${directSearchGuidance}
 - If you are searching for code within a specific file or set of 2-3 files, use the ${ToolNames.READ_FILE} tool instead of the ${ToolNames.AGENT} tool, to find the match more quickly
 - Other tasks that are not related to the agent descriptions above
 

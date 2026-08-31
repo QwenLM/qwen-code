@@ -61,6 +61,7 @@ import { DEFAULT_TOKEN_LIMIT } from '../core/tokenLimits.js';
 import { LlmClient } from '../core/client.js';
 import { ShellTool } from '../tools/shell.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
+import { isBashSearchAvailable } from '../utils/bash-search-tools.js';
 import {
   getSessionProjectDir,
   sessionIdContext,
@@ -295,6 +296,9 @@ vi.mock('../tools/ripGrep.js', () => ({
 vi.mock('../utils/ripgrepUtils.js', () => ({
   canUseRipgrep: vi.fn(),
 }));
+vi.mock('../utils/bash-search-tools.js', () => ({
+  isBashSearchAvailable: vi.fn(),
+}));
 vi.mock('../tools/glob', () => ({
   GlobTool: createToolMock('glob'),
 }));
@@ -527,6 +531,7 @@ describe('Server Config (config.ts)', () => {
   // Default mock for canUseRipgrep to return true (tests that care about ripgrep will override this)
   beforeEach(() => {
     vi.mocked(canUseRipgrep).mockResolvedValue(true);
+    vi.mocked(isBashSearchAvailable).mockReturnValue(false);
   });
   const SANDBOX: SandboxConfig = {
     command: 'docker',
@@ -11203,6 +11208,17 @@ describe('setApprovalMode with folder trust', () => {
       );
 
       expect(grepRegistrations.length).toBe(1);
+      expect(canUseRipgrep).not.toHaveBeenCalled();
+    });
+
+    it('uses Bash search instead of registering grep and glob', async () => {
+      vi.mocked(isBashSearchAvailable).mockReturnValue(true);
+      const config = new Config(baseParams);
+      await config.initialize();
+
+      const calls = (ToolRegistry.prototype.registerFactory as Mock).mock.calls;
+      expect(calls.some((call) => call[0] === ToolNames.GREP)).toBe(false);
+      expect(calls.some((call) => call[0] === ToolNames.GLOB)).toBe(false);
       expect(canUseRipgrep).not.toHaveBeenCalled();
     });
   });

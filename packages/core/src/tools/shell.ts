@@ -71,6 +71,10 @@ import {
 } from '../utils/shell-utils.js';
 import { parse, type ControlOperator } from 'shell-quote';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  isBashSearchAvailable,
+  wrapWithBashSearchTools,
+} from '../utils/bash-search-tools.js';
 import { checkPriorRead, StructuredToolError } from './priorReadEnforcement.js';
 import {
   isShellCommandReadOnlyASTInDirectory,
@@ -2299,6 +2303,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
     );
     const commandToExecute = processedCommand;
     const cwd = this.params.directory || this.config.getTargetDir();
+    const executionCommand = wrapWithBashSearchTools(
+      commandToExecute,
+      this.config,
+      cwd,
+    );
 
     // Snapshot HEAD before running so attachCommitAttribution can detect
     // commit creation by HEAD movement instead of trusting the shell
@@ -2570,7 +2579,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     let executionHandle;
     try {
       executionHandle = await ShellExecutionService.execute(
-        commandToExecute,
+        executionCommand,
         cwd,
         onShellOutputEvent,
         combinedSignal,
@@ -2761,7 +2770,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       // Create a formatted error string for display, replacing the wrapper command
       // with the user-facing command.
       const finalError = result.error
-        ? result.error.message.replace(commandToExecute, this.params.command)
+        ? result.error.message.replace(executionCommand, this.params.command)
         : '(none)';
 
       llmContent = [
@@ -3619,6 +3628,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
       this.addCoAuthorToGitCommit(noTrailingAmp),
     );
     const cwd = this.params.directory || this.config.getTargetDir();
+    const executionCommand = wrapWithBashSearchTools(
+      processedCommand,
+      this.config,
+      cwd,
+    );
 
     // Output goes under the project temp dir (which `ReadFileTool`
     // auto-allows by default), so the LLM can `Read` the captured output
@@ -3667,7 +3681,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     };
 
     const { result: resultPromise, pid } = await ShellExecutionService.execute(
-      processedCommand,
+      executionCommand,
       cwd,
       (event: ShellOutputEvent) => {
         if (event.type === 'data' && typeof event.chunk === 'string') {
@@ -3749,7 +3763,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
             // model-facing notification) misreport a failed `npm test` or
             // `false` command as a success.
             const reason = result.error
-              ? result.error.message
+              ? result.error.message.replace(executionCommand, processedCommand)
               : isSignalTermination(result.signal)
                 ? `terminated by signal ${result.signal}`
                 : `exited with code ${result.exitCode}`;
@@ -4970,28 +4984,48 @@ function getShellToolDescription(): string {
   const shellConfiguration = getShellConfiguration();
   const executionWrapper = getShellExecutionWrapper(shellConfiguration);
   const isWindows = os.platform() === 'win32';
+  const hasBashSearch = isBashSearchAvailable();
   const processGroupNote = isWindows
     ? ''
     : '\n  - Command is executed as a subprocess that leads its own process group. Command process group can be terminated as `kill -- -PGID` or signaled as `kill -s SIGNAL -- -PGID`.';
   const processStopNote =
     '\n  - To stop a background command started by this tool, use `task_stop` when a task id is available. Do not use broad process-name kills such as `kill $(pgrep node)`, `pkill node`, or `killall node`; use a specific PID or process group id where supported.';
 
+  const fileOperationGuidance = hasBashSearch
+    ? `- File search commands are provided by Qwen Code for this Bash invocation:
+  - Use \`rg --files\` for ignore-aware filename searches, then pipe that list to another \`rg\` when you need to filter it by pattern.
+  - Use \`rg\` for content search. It respects the configured .gitignore, .qwenignore, and custom ignore files by default.
+  - Do not use positive \`-g\`/\`--glob\` or \`-t\`/\`--type\` filters when ignore behavior matters; ripgrep treats them as explicit overrides of ignore rules.
+  - Use \`grep\` when POSIX grep syntax is specifically useful.
+  - Use \`find\` for metadata predicates such as type, size, permissions, and timestamps; use \`rg --files\` when ignore behavior matters.
+  - Continue to use ${ToolNames.READ_FILE}, ${ToolNames.EDIT}, and ${ToolNames.WRITE_FILE} for reading, editing, and creating files.
+- Avoid using run_shell_command with \`cat\`, \`head\`, \`tail\`, \`sed\`, \`awk\`, or \`echo\` when a dedicated file tool applies:
+  - Read files: Use ${ToolNames.READ_FILE} (NOT cat/head/tail)
+  - Edit files: Use ${ToolNames.EDIT} (NOT sed/awk)
+  - Write files: Use ${ToolNames.WRITE_FILE} (NOT echo >/cat <<EOF)
+  - Communication: Output text directly (NOT echo/printf)`
+    : `- Avoid using run_shell_command with the \`find\`, \`grep\`, \`cat\`, \`head\`, \`tail\`, \`sed\`, \`awk\`, or \`echo\` commands, unless explicitly instructed or when these commands are truly necessary for the task. Instead, always prefer using the dedicated tools for these commands:
+  - File search: Use ${ToolNames.GLOB} (NOT find or ls)
+  - Content search: Use ${ToolNames.GREP} (NOT grep or rg)
+  - Read files: Use ${ToolNames.READ_FILE} (NOT cat/head/tail)
+  - Edit files: Use ${ToolNames.EDIT} (NOT sed/awk)
+  - Write files: Use ${ToolNames.WRITE_FILE} (NOT echo >/cat <<EOF)
+  - Communication: Output text directly (NOT echo/printf)`;
+
   return `Executes a given shell command (as \`${executionWrapper}\`) in a subprocess with optional timeout, ensuring proper handling and security measures.
 
-IMPORTANT: This tool is for terminal operations like git, npm, docker, etc. DO NOT use it for file operations (reading, writing, editing, searching, finding files) - use the specialized tools for this instead.
+${
+  hasBashSearch
+    ? 'IMPORTANT: This tool is for terminal operations like git, npm, and docker, and for file search through the injected rg, grep, and find commands. Use specialized tools for reading, writing, and editing files.'
+    : 'IMPORTANT: This tool is for terminal operations like git, npm, docker, etc. DO NOT use it for file operations (reading, writing, editing, searching, finding files) - use the specialized tools for this instead.'
+}
 
 **Usage notes**:
 - The command argument is required.
 - You can specify an optional timeout in milliseconds (up to 600000ms / 10 minutes). If not specified, commands will timeout after 120000ms (2 minutes).
 - It is very helpful if you write a clear, concise description of what this command does in 5-10 words.
 
-- Avoid using run_shell_command with the \`find\`, \`grep\`, \`cat\`, \`head\`, \`tail\`, \`sed\`, \`awk\`, or \`echo\` commands, unless explicitly instructed or when these commands are truly necessary for the task. Instead, always prefer using the dedicated tools for these commands:
-  - File search: Use ${ToolNames.GLOB} (NOT find or ls)
-  - Content search: Use ${ToolNames.GREP} (NOT grep or rg)
-  - Read files: Use ${ToolNames.READ_FILE} (NOT cat/head/tail)
-  - Edit files: Use ${ToolNames.EDIT} (NOT sed/awk)
-  - Write files: Use ${ToolNames.WRITE_FILE} (NOT echo >/cat <<EOF)
-  - Communication: Output text directly (NOT echo/printf)
+${fileOperationGuidance}
 ${getShellQuotingGuidance(shellConfiguration.shell)}
 ${getShellCommandSequencingGuidance(shellConfiguration)}
 - Try to maintain your current working directory throughout the session by using absolute paths and avoiding usage of \`cd\`. You may use \`cd\` if the User explicitly requests it.
