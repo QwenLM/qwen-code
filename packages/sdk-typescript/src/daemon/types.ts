@@ -131,6 +131,7 @@ export interface DaemonWorkspaceRemovalActivity {
   memoryTasks: number;
   channelWorkers: number;
   voiceSessions?: number;
+  workspaceRuntime?: number;
 }
 
 export interface DaemonWorkspaceRemovalResult {
@@ -708,6 +709,12 @@ export interface DaemonStatusReport {
     writerIdleTimeoutMs: number | null;
     channelIdleTimeoutMs: number;
     sessionIdleTimeoutMs: number;
+    /**
+     * Grace period after a prompt settles before an otherwise-idle session may
+     * be auto-closed, in ms. `0` means the feature is disabled and the session
+     * closes immediately. Additive — older daemons omit this field.
+     */
+    sessionPromptSettledCloseGraceMs?: number;
     acpConnectionCap: number | null;
     acpPreAttachMaxFramesPerStream?: number | null;
     acpPreAttachMaxFramesPerConnection?: number | null;
@@ -1911,6 +1918,14 @@ export interface DaemonWorkspaceAcpPreheatResult {
   durationMs: number;
   reason?: 'timeout' | 'error';
   error?: string;
+}
+
+export interface DaemonWorkspaceRuntimeStatus {
+  v: 1;
+  workspaceCwd: string;
+  state: 'cold' | 'starting' | 'active' | 'idle' | 'stopping';
+  runtimeLive: boolean;
+  runtimeEpoch: number;
 }
 
 export interface DaemonWorkspaceProviderCurrent {
@@ -4551,6 +4566,28 @@ export interface WorkspaceExtensionProjection {
   extensions: WorkspaceExtensionProjectionEntry[];
 }
 
+export interface WorkspaceExtensionSkillState {
+  name: string;
+  defaultEnabled: boolean;
+  workspaceEnabled: boolean | null;
+  effectiveEnabled: boolean;
+  disabledReason?: 'hard' | 'default' | 'inactive_extension';
+  lockedScope?: 'system' | 'user' | 'systemDefaults';
+}
+
+export interface WorkspaceExtensionState {
+  v: 1;
+  workspaceId: string;
+  workspaceCwd: string;
+  extensionId: string;
+  name: string;
+  skills: WorkspaceExtensionSkillState[];
+}
+
+export interface ExtensionStateUpdate {
+  skills: Array<{ name: string; state: ExtensionActivationState }>;
+}
+
 export interface ExtensionInstallResponse {
   accepted: true;
   operationId: string;
@@ -4587,6 +4624,7 @@ export interface ExtensionOperationResult {
   updated?: boolean;
   reason?: string;
   states?: Record<string, DaemonExtensionUpdateState>;
+  resourceStates?: { skills: WorkspaceExtensionSkillState[] };
   results?: Array<
     ExtensionDefaultActivationBatchItem | ExtensionWorkspaceActivationBatchItem
   >;
