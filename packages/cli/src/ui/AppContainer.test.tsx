@@ -50,6 +50,7 @@ import { useContext, useState, useReducer, useEffect, act } from 'react';
 import {
   AppContainer,
   dedupeNewestFirst,
+  buildSpeculativeToolDisplays,
   getSpeculativeToolResult,
   getNextRenderMode,
   isInputActiveForState,
@@ -593,6 +594,33 @@ describe('AppContainer State Management', () => {
         text: 'done',
         status: ToolCallStatus.Success,
       });
+    });
+
+    it('carries the functionCall args onto the display object', () => {
+      // The fourth builder of IndividualToolCallDisplay. Without the args the
+      // setting half-applies: an accepted speculation falls back to the
+      // compact summary while live and resumed turns of the same shape show
+      // their arguments.
+      const args = { file_path: 'src/a.ts', old_string: 'x', new_string: 'y' };
+      const tools = buildSpeculativeToolDisplays(
+        [{ functionCall: { name: 'replace', args } }],
+        [{ functionResponse: { response: { output: 'done' } } }],
+      );
+
+      expect(tools).toHaveLength(1);
+      expect(tools[0]!.args).toEqual(args);
+      expect(tools[0]!.name).toBe('replace');
+      expect(tools[0]!.status).toBe(ToolCallStatus.Success);
+    });
+
+    it('falls back to an empty args object when the call carries none', () => {
+      const tools = buildSpeculativeToolDisplays(
+        [{ functionCall: { name: 'ls' } }],
+        [],
+      );
+      // formatInlineToolArgs skips empty objects, so this renders no args row.
+      expect(tools[0]!.args).toEqual({});
+      expect(tools[0]!.description).toBe('ls');
     });
   });
 
