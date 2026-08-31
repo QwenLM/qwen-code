@@ -8642,13 +8642,24 @@ export class Session implements SessionContext {
       },
     };
     const goalPermit = goalTurnContext.getStore();
-    const responseStream = await chat.sendMessageStream(
-      model,
-      request,
-      promptId,
-      goalPermit,
-      options.promptIdentity ? { promptId: options.promptIdentity } : undefined,
-    );
+    const sendOptions = options.promptIdentity
+      ? { promptId: options.promptIdentity }
+      : undefined;
+    const responseStream = goalPermit
+      ? await chat.sendMessageStream(
+          model,
+          request,
+          promptId,
+          goalPermit,
+          sendOptions,
+        )
+      : await chat.sendMessageStream(
+          model,
+          request,
+          promptId,
+          undefined,
+          sendOptions,
+        );
     return { responseStream, requestRouteKey };
   }
 
