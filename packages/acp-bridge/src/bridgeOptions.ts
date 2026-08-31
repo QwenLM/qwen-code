@@ -90,6 +90,16 @@ export type BridgeSessionLifecycle = (
 ) => void;
 
 /**
+ * Allocates monotonically increasing Channel epochs for one canonical
+ * workspace. Daemon hosts reuse the same source across runtime replacement;
+ * standalone Bridge users may omit it and receive a Bridge-local source.
+ */
+export interface BridgeRuntimeEpochSource {
+  current(): number;
+  allocate(): number;
+}
+
+/**
  * Trusted child-to-daemon request made immediately before a tool executor.
  * `sessionId` and `promptId` are revalidated by BridgeClient against its
  * runtime-owned active entry before this reaches the host handler.
@@ -236,6 +246,8 @@ export interface BridgeOptions {
   sessionScope?: 'single' | 'thread';
   /** Channel factory; defaults to spawning `qwen --acp` as a child process. */
   channelFactory?: ChannelFactory;
+  /** Workspace-scoped epoch source shared across Bridge replacement. */
+  runtimeEpochSource?: BridgeRuntimeEpochSource;
   /** How long to wait for the child's `initialize` reply before giving up. */
   initializeTimeoutMs?: number;
   /**
@@ -358,8 +370,9 @@ export interface BridgeOptions {
   restoreAskUserQuestion?: boolean;
   /**
    * Enables direct daemon shell execution through session shell APIs.
-   * Defaults to false. Callers should turn this on only after the daemon has
-   * bearer auth configured and route layers require a session-bound client id.
+   * Defaults to false. Callers should turn this on only when the daemon has
+   * bearer auth or trusted-loopback operator authority and route layers require
+   * a session-bound client id.
    */
   sessionShellCommandEnabled?: boolean;
   /**
@@ -552,11 +565,9 @@ export interface BridgeOptions {
    */
   onDiagnosticLine?: DiagnosticLineSink;
   /**
-   * Milliseconds to keep the ACP child alive after the last session
-   * closes. When a new session arrives during the idle window, the
-   * warm channel is reused without a cold start. `0` (default) kills
-   * the channel immediately (current behavior). The timer is `.unref()`'d
-   * so it does not prevent daemon exit.
+   * Keeps the ACP child alive after the last session and workspace operation
+   * drain. `0` or unset kills it immediately. Timers are `.unref()`'d so they
+   * do not prevent daemon exit.
    */
   channelIdleTimeoutMs?: number;
   /**

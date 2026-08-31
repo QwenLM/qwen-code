@@ -268,8 +268,8 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_btw: { since: 'v1' },
   // Direct daemon-side shell execution for an existing session.
   // Advertised CONDITIONALLY: operators must explicitly enable it and
-  // configure bearer auth. Clients must still send a session-bound
-  // X-Qwen-Client-Id when calling the route.
+  // either configure bearer auth or use trusted-loopback mode. Clients must
+  // still send a session-bound X-Qwen-Client-Id when calling the route.
   session_shell_command: { since: 'v1' },
   // Daemon hosts a workspace-shared MCP transport
   // pool (`QwenAgent.mcpPool`); `GET /workspace/mcp` reflects pool-level
@@ -372,6 +372,8 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // with a display). Headless hosts omit the tag so clients hide the
   // Browse affordance instead of surfacing a guaranteed picker failure.
   native_directory_picker: { since: 'v1' },
+  // Workspace-owned runtime lifecycle status and explicit on-demand startup.
+  workspace_runtime: { since: 'v1' },
   // Workspace-qualified core REST routes under `/workspaces/:workspace/...`.
   // Covers core file read/write/upload, status/permissions/trust/lifecycle/MCP/tool,
   // memory, workspace agent CRUD, and persisted session organization surfaces.
@@ -395,6 +397,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // projections. This is additive to the legacy primary-workspace
   // `workspace_extensions` contract.
   extension_management_v2: { since: 'v1' },
+  extension_state: { since: 'v1' },
   extension_git_credentials: { since: 'v1' },
   extension_local_path_install: { since: 'v1' },
   // Workspace-qualified, daemon-local persisted transcript paging. The tag is
@@ -518,6 +521,7 @@ export interface AdvertiseFeatureToggles {
   scratchWorkspaceRegistrationAvailable?: boolean;
   workspaceRuntimeRemovalAvailable?: boolean;
   nativeDirectoryPickerAvailable?: boolean;
+  workspaceRuntimeAvailable?: boolean;
   /**
    * Whether the HTTP ACP surface is enabled (default on; opts out via
    * QWEN_SERVE_ACP_HTTP=0). Workspace-qualified ACP is only advertised when on.
@@ -659,6 +663,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   [
     'native_directory_picker',
     (toggles) => toggles.nativeDirectoryPickerAvailable === true,
+  ],
+  [
+    'workspace_runtime',
+    (toggles) => toggles.workspaceRuntimeAvailable === true,
   ],
   [
     'workspace_qualified_acp',
