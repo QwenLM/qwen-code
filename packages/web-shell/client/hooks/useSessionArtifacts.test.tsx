@@ -228,6 +228,39 @@ describe('useSessionArtifacts', () => {
     });
   });
 
+  it('keeps the first active turn id when a follow-up is queued before settling', async () => {
+    const initialLoad = deferred<{ artifacts: DaemonSessionArtifact[] }>();
+    const postPromptLoad = deferred<{ artifacts: DaemonSessionArtifact[] }>();
+    sdkMock.actions.loadArtifacts
+      .mockReturnValueOnce(initialLoad.promise)
+      .mockReturnValueOnce(postPromptLoad.promise);
+
+    await renderHookHost();
+    await act(async () => {
+      initialLoad.resolve({ artifacts: [] });
+      await initialLoad.promise;
+    });
+
+    sdkMock.promptStatus = 'responding';
+    await rerenderHookHost();
+    sdkMock.activeTurnId = 'turn-1';
+    await rerenderHookHost();
+    sdkMock.activeTurnId = 'queued-turn-2';
+    await rerenderHookHost();
+    sdkMock.promptStatus = 'idle';
+    await rerenderHookHost();
+
+    await act(async () => {
+      postPromptLoad.resolve({ artifacts: [] });
+      await postPromptLoad.promise;
+    });
+    expect(latestState?.ready).toEqual({
+      reason: 'turn_complete',
+      sequence: 2,
+      turnId: 'turn-1',
+    });
+  });
+
   it('clears stale artifacts while loading a different session', async () => {
     const sessionA = deferred<{ artifacts: DaemonSessionArtifact[] }>();
     const sessionB = deferred<{ artifacts: DaemonSessionArtifact[] }>();

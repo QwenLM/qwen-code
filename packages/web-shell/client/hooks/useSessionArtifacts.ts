@@ -123,11 +123,12 @@ export function useSessionArtifacts(
   useEffect(() => {
     const previous = previousPromptStatusRef.current;
     previousPromptStatusRef.current = { owner, promptStatus };
+    const capturedTurn = activeTurnRef.current;
     if (
       promptStatus !== 'idle' &&
       (previous.owner !== owner ||
         previous.promptStatus === 'idle' ||
-        activeTurnId !== undefined)
+        (capturedTurn.owner === owner && capturedTurn.turnId === undefined))
     ) {
       activeTurnRef.current = { owner, turnId: activeTurnId };
     }
