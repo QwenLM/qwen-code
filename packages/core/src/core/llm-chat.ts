@@ -3748,6 +3748,13 @@ export class LlmChat {
                   if (
                     isCompressionFailureStatus(reactiveInfo.compressionStatus)
                   ) {
+                    if (
+                      requestPayloadOverflow.isTooLarge &&
+                      reactiveInfo.compressionStatus ===
+                        CompressionStatus.COMPRESSION_FAILED_API_ERROR
+                    ) {
+                      payloadRecoveryThrew = true;
+                    }
                     // Reactive compression is force=true so tryCompress's
                     // failure branch did not increment the counter. Count it
                     // explicitly as one strike — a single transient error

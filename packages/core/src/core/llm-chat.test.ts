@@ -18701,6 +18701,36 @@ describe('LlmChat', async () => {
         expect((caught as { status?: number }).status).toBe(413);
       });
 
+      it('propagates the original 413 when compaction returns an API failure status', async () => {
+        noopThen({
+          newHistory: null,
+          info: {
+            originalTokenCount: 90_000,
+            newTokenCount: 90_000,
+            compressionStatus: CompressionStatus.COMPRESSION_FAILED_API_ERROR,
+          },
+        });
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockRejectedValueOnce(sdkStyle413());
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'next prompt' },
+          'prompt-id-413-compaction-api-failure',
+        );
+        let caught: unknown;
+        try {
+          await consumeStream(stream);
+        } catch (error) {
+          caught = error;
+        }
+        expect(caught).toBeInstanceOf(Error);
+        expect((caught as Error).message).not.toMatch(/start a new session/i);
+        expect((caught as Error).message).toMatch(/413/);
+        expect((caught as { status?: number }).status).toBe(413);
+      });
+
       it('advises reducing the current request when compaction NOOPs on a 413', async () => {
         // NOOP means there was no earlier history to compress — the
         // oversize sits in the current request itself, so /clear + retry

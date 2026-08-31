@@ -900,6 +900,52 @@ describe('ChatCompressionService', () => {
     expect(serialized).toContain('[...truncated for compaction]');
   });
 
+  it('does not account payload-overflow compaction from slimmed side-query usage (#10380)', async () => {
+    const hugeOutput = 'O'.repeat(50_000);
+    vi.mocked(mockChat.getHistory).mockReturnValue([
+      { role: 'user', parts: [{ text: 'context msg' }] },
+      {
+        role: 'model',
+        parts: [
+          {
+            functionResponse: {
+              id: 'tool-1',
+              name: 'run_shell_command',
+              response: { output: hugeOutput },
+            },
+          },
+        ],
+      },
+      { role: 'user', parts: [{ text: 'final fresh user message' }] },
+      { role: 'model', parts: [{ text: 'final model reply' }] },
+    ]);
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(100);
+    vi.mocked(tokenLimit).mockReturnValue(1000);
+
+    vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+      generateText: vi.fn().mockResolvedValue({
+        text: 'Summary',
+        usage: {
+          promptTokenCount: 2_000,
+          candidatesTokenCount: 50,
+          totalTokenCount: 2_050,
+        },
+      }),
+    } as unknown as BaseLlmClient);
+
+    const result = await service.compress(mockChat, {
+      promptId: mockPromptId,
+      force: true,
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
+      requestPayloadTooLarge: true,
+    });
+
+    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+    expect(result.info.newTokenCount).toBeGreaterThan(0);
+  });
+
   it('reports payload_overflow as the trigger reason for 413-driven compactions (#10380)', async () => {
     // 413 recoveries fire BELOW the token threshold; reporting
     // 'token_limit' makes the CLI notice claim a token overflow that

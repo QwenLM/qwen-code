@@ -1196,6 +1196,7 @@ export class ChatCompressionService {
       // token estimation.
       if (
         !usedCacheSharing &&
+        !opts.requestPayloadTooLarge &&
         typeof compressionInputTokenCount === 'number' &&
         compressionInputTokenCount > 0 &&
         typeof compressionOutputTokenCount === 'number' &&

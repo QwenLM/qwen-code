@@ -774,5 +774,45 @@ describe('compactionInputSlimming', () => {
         content: bigText,
       });
     });
+
+    it('does not split surrogate pairs when truncating text', () => {
+      const value = 'a'.repeat(499) + '🙂tail';
+      const { slimmedHistory } = slimCompactionInput(
+        [
+          {
+            role: 'user',
+            parts: [
+              { text: value },
+              {
+                functionCall: {
+                  name: 'write_file',
+                  args: { content: value },
+                },
+              },
+              {
+                functionResponse: {
+                  name: 'run_shell_command',
+                  response: { output: value },
+                },
+              },
+            ],
+          },
+        ],
+        undefined,
+        { maxTextChars: 500 },
+      );
+
+      const parts = slimmedHistory[0]!.parts!;
+      const outputs = [
+        parts[0]!.text!,
+        parts[1]!.functionCall!.args!['content'] as string,
+        parts[2]!.functionResponse!.response!['output'] as string,
+      ];
+      for (const output of outputs) {
+        expect(output.charCodeAt(498)).toBe('a'.charCodeAt(0));
+        expect(output.charCodeAt(499)).not.toBeGreaterThanOrEqual(0xd800);
+        expect(output.endsWith(SLIM_TEXT_TRUNCATION_MARKER)).toBe(true);
+      }
+    });
   });
 });

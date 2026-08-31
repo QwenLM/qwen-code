@@ -408,8 +408,7 @@ function transformPart(
     for (const key of ['output', 'error'] as const) {
       const value = response[key];
       if (typeof value === 'string' && value.length > maxTextChars) {
-        newResponse[key] =
-          value.slice(0, maxTextChars) + SLIM_TEXT_TRUNCATION_MARKER;
+        newResponse[key] = truncateTextForSlimming(value, maxTextChars);
         stats.textPartsTruncated++;
         touched = true;
       }
@@ -437,8 +436,7 @@ function transformPart(
     const newArgs: Record<string, unknown> = { ...args };
     for (const [key, value] of Object.entries(args)) {
       if (typeof value === 'string' && value.length > maxTextChars) {
-        newArgs[key] =
-          value.slice(0, maxTextChars) + SLIM_TEXT_TRUNCATION_MARKER;
+        newArgs[key] = truncateTextForSlimming(value, maxTextChars);
         stats.textPartsTruncated++;
         argsTouched = true;
       }
@@ -461,10 +459,19 @@ function transformPart(
     // pipeline keys reasoning parts off those flags (#10380).
     return {
       ...nextPart,
-      text: nextPart.text.slice(0, maxTextChars) + SLIM_TEXT_TRUNCATION_MARKER,
+      text: truncateTextForSlimming(nextPart.text, maxTextChars),
     };
   }
   return nextPart;
+}
+
+function truncateTextForSlimming(value: string, maxTextChars: number): string {
+  let end = maxTextChars;
+  const last = value.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) {
+    end--;
+  }
+  return value.slice(0, end) + SLIM_TEXT_TRUNCATION_MARKER;
 }
 
 function supportsMimeType(
