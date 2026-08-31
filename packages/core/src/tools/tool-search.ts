@@ -33,10 +33,13 @@ import { DiscoveredMCPTool } from './mcp-tool.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { escapeJsonTagCharacters } from '../utils/formatters.js';
 import {
+  getExcludedToolUnavailableMessage,
   getLeaderOnlyToolUnavailableMessage,
   getSubagentPlanToolUnavailableMessage,
   isLeaderOnlyToolUnavailableInSubagent,
   isPlanLifecycleToolUnavailableInSubagent,
+  isSubagentLikeExecutionContext,
+  isToolExcludedForCurrentContext,
 } from '../agents/runtime/subagent-plan-tool-policy.js';
 
 const debugLogger = createDebugLogger('TOOL_SEARCH');
@@ -245,9 +248,26 @@ class ToolSearchInvocation extends BaseToolInvocation<
    */
   private collectCandidates(): AnyDeclarativeTool[] {
     const registry = this.config.getToolRegistry();
-    return registry
-      .getAllTools()
-      .filter((t) => registry.isDeferredAndHidden(t.name));
+    // Mirror the invocation side (resolveDeferredToolCall): a subagent or
+    // teammate must not even be SHOWN the schema of a tool the exclusion set
+    // forbids it to invoke. Without this filter `select:`/keyword search
+    // advertises the full schema of control-plane tools (team_delete,
+    // workflow, send_message, ...) into exactly the context the set exists to
+    // keep clean, and the follow-up tool_call is denied anyway — a wasted
+    // round plus a schema leak (round-5 review, R5-1). The predicate is
+    // context-gated: it returns false for the leader, whose re-inspection of
+    // visible/hidden tools stays unrestricted.
+    const maxSubagentDepth = this.config.getMaxSubagentDepth();
+    return registry.getAllTools().filter(
+      (t) =>
+        registry.isDeferredAndHidden(t.name) &&
+        // Context-gated: the leader's discovery stays unrestricted (the
+        // predicate itself is ungated so prepareTools can fail closed).
+        !(
+          isSubagentLikeExecutionContext() &&
+          isToolExcludedForCurrentContext(t.name, maxSubagentDepth)
+        ),
+    );
   }
 
   private async returnSchemas(
@@ -283,7 +303,18 @@ class ToolSearchInvocation extends BaseToolInvocation<
       }
       if (
         isPlanLifecycleToolUnavailableInSubagent(canonical) ||
-        isLeaderOnlyToolUnavailableInSubagent(canonical)
+        isLeaderOnlyToolUnavailableInSubagent(canonical) ||
+        // Same mirror as collectCandidates: `select:` must not hand a
+        // subagent/teammate the schema of an exclusion-set tool. Order
+        // matters — plan-lifecycle/leader-only keep their specific messages.
+        // Context-gated here (the predicate itself is ungated so
+        // prepareTools can fail closed); the plan/leader-only checks above
+        // gate internally.
+        (isSubagentLikeExecutionContext() &&
+          isToolExcludedForCurrentContext(
+            canonical,
+            this.config.getMaxSubagentDepth(),
+          ))
       ) {
         blocked.push(canonical);
         continue;
@@ -337,11 +368,15 @@ class ToolSearchInvocation extends BaseToolInvocation<
     }
     let blockedErrorMessage: string | undefined;
     if (blocked.length > 0) {
-      const blockedMessages = blocked.map((name) =>
-        isLeaderOnlyToolUnavailableInSubagent(name)
-          ? getLeaderOnlyToolUnavailableMessage(name)
-          : getSubagentPlanToolUnavailableMessage(name),
-      );
+      const blockedMessages = blocked.map((name) => {
+        if (isLeaderOnlyToolUnavailableInSubagent(name)) {
+          return getLeaderOnlyToolUnavailableMessage(name);
+        }
+        if (isPlanLifecycleToolUnavailableInSubagent(name)) {
+          return getSubagentPlanToolUnavailableMessage(name);
+        }
+        return getExcludedToolUnavailableMessage(name);
+      });
       blockedErrorMessage = blockedMessages.join('\n');
       const header = llmContent ? '\n\n' : '';
       llmContent += `${header}Unavailable: ${blockedErrorMessage}`;

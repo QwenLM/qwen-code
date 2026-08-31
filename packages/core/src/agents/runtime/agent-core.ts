@@ -29,10 +29,8 @@ import {
   getCurrentAgentDepth,
   getCurrentAgentId,
   getRuntimeContentGenerator,
-  isTopLevelSession,
   runWithAgentContext,
   runWithRuntimeContentGenerator,
-  spawnBlockReason,
   type RuntimeContentGeneratorView,
 } from './agent-context.js';
 import {
@@ -128,6 +126,7 @@ import {
   getSubagentPlanToolUnavailableMessage,
   isLeaderOnlyToolUnavailableInSubagent,
   isPlanLifecycleToolUnavailableInSubagent,
+  isToolExcludedForCurrentContext,
 } from './subagent-plan-tool-policy.js';
 
 // The tool-exclusion sets and the context-aware selector now live in
@@ -556,32 +555,25 @@ export class AgentCore {
     await toolRegistry.warmAll();
     const toolsList: FunctionDeclaration[] = [];
 
-    const excludedFromSubagents = getExcludedToolsForCurrentContext();
-
-    // Nested sub-agents: the AgentTool is normally excluded to prevent
-    // recursive spawning, but when maxSubagentDepth permits another level we
-    // let it back in. prepareTools() runs inside this sub-agent's own
-    // AsyncLocalStorage frame (see AgentHeadless.run / AgentInteractive), so
+    // Effective exclusion test — the SHARED predicate
+    // (isToolExcludedForCurrentContext, subagent-plan-tool-policy.ts) also
+    // consumed by the tool_call bridge (resolveDeferredToolCall), so
+    // declaration level and invocation level cannot drift. Nested
+    // sub-agents: AgentTool is depth-gated rather than flatly excluded —
+    // while maxSubagentDepth permits another level it is re-admitted.
+    // prepareTools() runs inside this sub-agent's own AsyncLocalStorage
+    // frame (see AgentHeadless.run / AgentInteractive), so the predicate's
     // spawnBlockReason() reads this agent's own depth and context — the same
-    // shared predicate AgentTool.execute() backstops at runtime.
-    //
-    // !isTopLevelSession() fails closed: prepareTools() only ever serves
-    // agents — never the top-level user session — so a missing agent frame
-    // means the launch path forgot runWithAgentContext. Without this check
-    // such an agent would be depth-gated as the top-level session and receive
-    // the AgentTool even at maxSubagentDepth=1 (codex review: frame-less
+    // shared predicate AgentTool.execute() backstops at runtime. A missing
+    // agent frame fails closed (prepareTools() only ever serves agents,
+    // never the top-level user session; codex review: frame-less
     // AgentInteractive.start(), since fixed to establish its frame).
-    const nestingAllowed =
-      !isTopLevelSession() &&
-      spawnBlockReason(this.runtimeContext.getMaxSubagentDepth()) === null;
-
-    // Effective exclusion test. AgentTool is depth-gated (allowed only when
-    // this sub-agent is shallow enough to spawn another level); every other
-    // control-plane tool follows the static exclusion set unchanged.
     const isExcluded = (name: string | undefined): boolean => {
       if (!name) return false;
-      if (name === ToolNames.AGENT) return !nestingAllowed;
-      return excludedFromSubagents.has(name);
+      return isToolExcludedForCurrentContext(
+        name,
+        this.runtimeContext.getMaxSubagentDepth(),
+      );
     };
     const isHiddenByEagerAllowList = (name: string | undefined): boolean =>
       !!name &&

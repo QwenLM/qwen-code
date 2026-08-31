@@ -2332,7 +2332,12 @@ export class CoreToolScheduler {
     }
 
     const resolution = await runInRequestGoalContext(request, () =>
-      resolveDeferredToolCall(this.toolRegistry, request.args),
+      resolveDeferredToolCall(this.toolRegistry, request.args, {
+        // Thread the real configured depth so the bridge's exclusion check
+        // mirrors prepareTools()'s depth-gated AgentTool re-admission
+        // instead of failing closed on it (round-5 review, R4-1 follow-up).
+        maxSubagentDepth: this.config.getMaxSubagentDepth(),
+      }),
     );
     if ('error' in resolution) {
       return {

@@ -700,6 +700,114 @@ describe('ToolSearchTool', () => {
     expect(result.returnDisplay).toBe('Reviewed 1 tool(s), 1 unavailable');
   });
 
+  it.each([
+    {
+      toolName: ToolNames.TEAM_DELETE,
+      run: (callback: () => Promise<ToolResult>) =>
+        runWithAgentContext('agent-1', callback),
+    },
+    {
+      toolName: ToolNames.SEND_MESSAGE,
+      run: (callback: () => Promise<ToolResult>) =>
+        runWithAgentContext('agent-1', callback),
+    },
+    {
+      toolName: ToolNames.TEAM_DELETE,
+      run: (callback: () => Promise<ToolResult>) =>
+        runWithTeammateIdentity(
+          {
+            agentId: 'agent@test',
+            agentName: 'agent',
+            teamName: 'test',
+            isTeamLead: false,
+          },
+          callback,
+        ),
+    },
+  ])(
+    'select: blocks exclusion-set tool $toolName inside a subagent-like context',
+    async ({ toolName, run }) => {
+      // R5-1: the discovery side must mirror the invocation side — a
+      // subagent/teammate must not be shown the schema of a tool the
+      // exclusion set forbids it to invoke. Mutation check: removing the
+      // isToolExcludedForCurrentContext predicate from returnSchemas' blocked
+      // check turns this red (the schema would be reviewed instead).
+      registry.registerTool(
+        new MockTool({
+          name: toolName,
+          shouldDefer: false,
+        }),
+      );
+      const tool = new ToolSearchTool(config);
+      const result = await run(() =>
+        tool
+          .build({ query: `select:${toolName}` })
+          .execute(new AbortController().signal),
+      );
+
+      expect(String(result.llmContent)).not.toContain(`"name":"${toolName}"`);
+      expect(String(result.llmContent)).toContain(
+        `Tool "${toolName}" is not available to this agent.`,
+      );
+      expect(result.error?.message).toContain(
+        `Tool "${toolName}" is not available to this agent.`,
+      );
+      expect(String(result.returnDisplay)).toContain('1 unavailable');
+    },
+  );
+
+  it('select: still re-inspects an exclusion-set tool for the leader', async () => {
+    // The context-gated filter must not fire outside subagent-like contexts:
+    // a leader whose tools.eager allowlist demoted team_delete keeps its
+    // schema re-inspectable (and bridgeable — see tool-call.test.ts).
+    registry.registerTool(
+      new MockTool({
+        name: ToolNames.TEAM_DELETE,
+        shouldDefer: false,
+      }),
+    );
+    const tool = new ToolSearchTool(config);
+    const result = await tool
+      .build({ query: `select:${ToolNames.TEAM_DELETE}` })
+      .execute(new AbortController().signal);
+
+    expect(String(result.llmContent)).toContain(
+      `"name":"${ToolNames.TEAM_DELETE}"`,
+    );
+    expect(result.error).toBeUndefined();
+    expect(String(result.returnDisplay)).toContain('Reviewed 1 tool(s)');
+  });
+
+  it('keyword search hides exclusion-set tools from subagent candidates', async () => {
+    // R5-1 keyword side: collectCandidates must drop exclusion-set members
+    // in subagent-like contexts while the leader still finds them. Mutation
+    // check: removing the filter from collectCandidates turns the subagent
+    // assertion red.
+    registry.registerTool(
+      new MockTool({
+        name: ToolNames.TEAM_DELETE,
+        description: 'delete the team',
+        searchHint: 'delete team',
+        shouldDefer: true, // deferred+hidden in the real registry
+      }),
+    );
+    const tool = new ToolSearchTool(config);
+
+    const asSubagent = await runWithAgentContext('agent-1', () =>
+      tool.build({ query: 'delete' }).execute(new AbortController().signal),
+    );
+    expect(String(asSubagent.llmContent)).not.toContain(
+      `"name":"${ToolNames.TEAM_DELETE}"`,
+    );
+
+    const asLeader = await tool
+      .build({ query: 'delete' })
+      .execute(new AbortController().signal);
+    expect(String(asLeader.llmContent)).toContain(
+      `"name":"${ToolNames.TEAM_DELETE}"`,
+    );
+  });
+
   it('select: lets plan-required teammates inspect exit_plan_mode but not enter_plan_mode', async () => {
     registry.registerTool(
       new MockTool({

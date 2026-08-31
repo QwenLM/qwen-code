@@ -18,12 +18,13 @@ import {
 } from './tool-names.js';
 import type { ToolRegistry } from './tool-registry.js';
 import {
-  getExcludedToolsForCurrentContext,
+  getExcludedToolUnavailableMessage,
   getLeaderOnlyToolUnavailableMessage,
   getSubagentPlanToolUnavailableMessage,
   isLeaderOnlyToolUnavailableInSubagent,
   isPlanLifecycleToolUnavailableInSubagent,
   isSubagentLikeExecutionContext,
+  isToolExcludedForCurrentContext,
 } from '../agents/runtime/subagent-plan-tool-policy.js';
 
 export interface ToolCallParams {
@@ -41,9 +42,21 @@ export type DeferredToolCallResolution =
       errorType: ToolErrorType;
     };
 
+export interface DeferredToolCallOptions {
+  /**
+   * The session's configured maximum subagent nesting depth. Threaded from
+   * the scheduler's Config so the exclusion check can mirror
+   * `prepareTools()`'s depth-gated re-admission of AgentTool. When absent,
+   * AgentTool stays excluded (the documented fail-closed floor of the raw
+   * exclusion sets).
+   */
+  maxSubagentDepth?: number;
+}
+
 export async function resolveDeferredToolCall(
   registry: ToolRegistry,
   envelope: Record<string, unknown>,
+  options?: DeferredToolCallOptions,
 ): Promise<DeferredToolCallResolution> {
   let bridge: AnyDeclarativeTool | undefined;
   try {
@@ -112,6 +125,51 @@ export async function resolveDeferredToolCall(
       errorType: ToolErrorType.TOOL_NOT_REGISTERED,
     };
   }
+  // Policy denials (plan-lifecycle, leader-only, exclusion set) run before
+  // the deferred/hidden gate, keeping their relative order so each keeps its
+  // specific message. Excluded tools are frequently NOT deferred — the real
+  // workflow/team_delete/todo_write default shouldDefer to false, and
+  // enter_plan_mode is constructed shouldDefer=false — so letting the
+  // isDeferredAndHidden gate run first would misroute them into the
+  // factually-wrong "already visible — call it directly" INVALID_TOOL_PARAMS
+  // denial (and the scheduler would miscount that as a malformed-envelope
+  // retry). All three checks are context-gated internally (no-ops outside
+  // subagent-like contexts), so leader resolution order is unchanged.
+  if (isPlanLifecycleToolUnavailableInSubagent(target.name)) {
+    return {
+      error: new Error(getSubagentPlanToolUnavailableMessage(target.name)),
+      errorType: ToolErrorType.EXECUTION_DENIED,
+    };
+  }
+  if (isLeaderOnlyToolUnavailableInSubagent(target.name)) {
+    return {
+      error: new Error(getLeaderOnlyToolUnavailableMessage(target.name)),
+      errorType: ToolErrorType.EXECUTION_DENIED,
+    };
+  }
+  // R4-1 (+ round-5 review): the bridge must not bypass the
+  // subagent/teammate tool-exclusion set. prepareTools enforces it at
+  // declaration level, but the bridge makes invocation independent of
+  // declaration — without carrying the exclusion set over, a
+  // wildcard/general-purpose subagent (or teammate) could discover
+  // (tool_search) and execute (tool_call) control-plane tools it is supposed
+  // to be unable to reach (team_delete, cron_*, workflow, send_message,
+  // ...). isToolExcludedForCurrentContext is the SAME predicate prepareTools
+  // applies — including AgentTool's depth-gated re-admission while
+  // maxSubagentDepth permits another nesting level — so the two layers
+  // cannot drift. The predicate itself is deliberately ungated (prepareTools
+  // fails closed on a missing frame), so the bridge applies its own context
+  // gate: the top-level leader session is unaffected.
+  if (
+    isSubagentLikeExecutionContext() &&
+    isToolExcludedForCurrentContext(target.name, options?.maxSubagentDepth)
+  ) {
+    return {
+      error: new Error(getExcludedToolUnavailableMessage(target.name)),
+      errorType: ToolErrorType.EXECUTION_DENIED,
+    };
+  }
+
   if (!registry.isDeferredAndHidden(target.name)) {
     return {
       error: new Error(
@@ -131,39 +189,6 @@ export async function resolveDeferredToolCall(
       ),
       errorType: ToolErrorType.EXECUTION_DENIED,
     };
-  }
-  if (isPlanLifecycleToolUnavailableInSubagent(target.name)) {
-    return {
-      error: new Error(getSubagentPlanToolUnavailableMessage(target.name)),
-      errorType: ToolErrorType.EXECUTION_DENIED,
-    };
-  }
-  if (isLeaderOnlyToolUnavailableInSubagent(target.name)) {
-    return {
-      error: new Error(getLeaderOnlyToolUnavailableMessage(target.name)),
-      errorType: ToolErrorType.EXECUTION_DENIED,
-    };
-  }
-  // R4-1: the bridge must not bypass the subagent/teammate tool-exclusion
-  // set. prepareTools enforces it at declaration level (isExcluded), but the
-  // bridge makes invocation independent of declaration — without carrying the
-  // exclusion set over, a wildcard/general-purpose subagent (or teammate)
-  // could discover (tool_search) and execute (tool_call) control-plane tools
-  // it is supposed to be unable to reach (team_delete, cron_*, workflow,
-  // send_message, ...). Enforce the same context-aware exclusion set here,
-  // after the plan-lifecycle / leader-only checks so those keep their
-  // specific messages. The leader context is not gated
-  // (isSubagentLikeExecutionContext is false for the top-level session).
-  if (isSubagentLikeExecutionContext()) {
-    const excludedTools = getExcludedToolsForCurrentContext();
-    if (excludedTools.has(target.name)) {
-      return {
-        error: new Error(
-          `Tool "${target.name}" is not available to this agent.`,
-        ),
-        errorType: ToolErrorType.EXECUTION_DENIED,
-      };
-    }
   }
 
   return {

@@ -9,7 +9,11 @@ import type { ToolResult } from '../../tools/tools.js';
 import { ApprovalMode } from '../../config/approval-mode.js';
 import type { Config } from '../../config/config.js';
 import { getTeammateContext, isTeammate } from '../team/identity.js';
-import { getCurrentAgentId } from './agent-context.js';
+import {
+  getCurrentAgentId,
+  isTopLevelSession,
+  spawnBlockReason,
+} from './agent-context.js';
 
 export const SUBAGENT_PLAN_LIFECYCLE_TOOLS: ReadonlySet<string> = new Set([
   ToolNames.ENTER_PLAN_MODE,
@@ -148,6 +152,48 @@ const PRE_APPROVAL_TASK_CLAIM_KEYS: ReadonlySet<string> = new Set([
 
 export function isSubagentLikeExecutionContext(): boolean {
   return getCurrentAgentId() !== null || isTeammate();
+}
+
+/**
+ * The effective exclusion test, shared by `prepareTools()` (declaration
+ * level) and the tool_call bridge (`resolveDeferredToolCall`, invocation
+ * level) so the two layers cannot drift.
+ *
+ * Deliberately NOT gated on isSubagentLikeExecutionContext(): prepareTools()
+ * only ever serves agents and must fail closed on a missing agent frame
+ * (isTopLevelSession() below), while the bridge wraps this predicate in its
+ * own context gate so the top-level leader session stays unaffected.
+ *
+ * AgentTool is depth-gated rather than unconditionally excluded — mirroring
+ * `prepareTools()`: while `spawnBlockReason()` permits another nesting level
+ * inside a genuine agent frame, AgentTool is re-admitted even though it is a
+ * member of the raw exclusion sets. The raw-set entry remains the fail-closed
+ * floor: when `maxSubagentDepth` is unknown (undefined) AgentTool stays
+ * excluded, as do teammate and fork contexts (spawnBlockReason reports
+ * 'teammate'/'fork' for them).
+ */
+export function isToolExcludedForCurrentContext(
+  toolName: string,
+  maxSubagentDepth?: number,
+): boolean {
+  if (toolName === ToolNames.AGENT) {
+    if (maxSubagentDepth === undefined) {
+      return true;
+    }
+    const nestingAllowed =
+      !isTopLevelSession() && spawnBlockReason(maxSubagentDepth) === null;
+    return !nestingAllowed;
+  }
+  return getExcludedToolsForCurrentContext().has(toolName);
+}
+
+/**
+ * The model-facing denial message for a tool refused by the exclusion set.
+ * Shared by the tool_call bridge and tool_search's discovery-side filter so
+ * both halves of the bridge report the same wording.
+ */
+export function getExcludedToolUnavailableMessage(toolName: string): string {
+  return `Tool "${toolName}" is not available to this agent.`;
 }
 
 export function isPlanRequiredTeammateContext(): boolean {

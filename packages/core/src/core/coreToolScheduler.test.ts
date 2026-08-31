@@ -23,6 +23,7 @@ import type {
   ToolRegistry,
 } from '../index.js';
 import type { PermissionDecision } from '../permissions/types.js';
+import { DEFAULT_MAX_SUBAGENT_DEPTH } from '../config/config.js';
 import {
   ApprovalMode,
   BaseDeclarativeTool,
@@ -952,6 +953,10 @@ describe('CoreToolScheduler', () => {
         getInputFormat: () => undefined,
         getExperimentalZedIntegration: () => false,
         getActiveTodoWorkChainOwner: options.getActiveTodoWorkChainOwner,
+        // Threaded into resolveDeferredToolCall so the bridge's exclusion
+        // check mirrors prepareTools()'s depth-gated AgentTool re-admission
+        // (round-5 review, R4-1 follow-up).
+        getMaxSubagentDepth: () => DEFAULT_MAX_SUBAGENT_DEPTH,
       } as unknown as Config,
       onAllToolCallsComplete: options.disableCompletionCallback
         ? undefined
