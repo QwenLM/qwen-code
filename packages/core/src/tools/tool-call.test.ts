@@ -169,6 +169,33 @@ describe('ToolCallTool', () => {
     });
   });
 
+  it.each([ToolNames.TEAM_DELETE, ToolNames.WORKFLOW])(
+    'rejects an exclusion-set target (%s) bridged from a subagent context',
+    async (toolName) => {
+      // R4-1: the bridge must not bypass the subagent tool-exclusion set.
+      // prepareTools enforces it at declaration level, but the bridge makes
+      // invocation independent of declaration — without carrying the exclusion
+      // set over, a wildcard/general-purpose subagent could discover and
+      // execute control-plane tools it must not reach (team_delete, workflow).
+      // Mutation check: removing the exclusion check in resolveDeferredToolCall
+      // must turn this test red.
+      const target = new MockTool({ name: toolName, shouldDefer: true });
+      const result = await runWithAgentContext('worker', () =>
+        resolveDeferredToolCall(
+          makeRegistry([target], new Set([target.name])),
+          { name: target.name, arguments: {} },
+        ),
+      );
+
+      expect(result).toMatchObject({
+        errorType: ToolErrorType.EXECUTION_DENIED,
+        error: expect.objectContaining({
+          message: expect.stringContaining('not available to this agent'),
+        }),
+      });
+    },
+  );
+
   it('resolves a hidden deferred target while both bridge tools are registered', async () => {
     const target = new MockTool({ name: 'deferred_target', shouldDefer: true });
     const result = await resolveDeferredToolCall(
