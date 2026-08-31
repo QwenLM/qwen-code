@@ -2083,12 +2083,12 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
 
   private enqueueReactionOperation(
     key: string,
-    operation: () => Promise<void>,
+    operation: (isLatest: () => boolean) => Promise<void>,
   ): void {
     const previous = this.reactionOperations.get(key) ?? Promise.resolve();
-    const next = previous
+    const next: Promise<void> = previous
       .catch(() => undefined)
-      .then(operation)
+      .then(() => operation(() => this.reactionOperations.get(key) === next))
       .catch((error) => this.logReactionFailure('reaction transition', error))
       .finally(() => {
         if (this.reactionOperations.get(key) === next) {
@@ -2203,7 +2203,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     const reaction = this.releaseActiveReaction(key);
     if (!reaction) return;
     const generation = this.lifecycleGeneration;
-    this.enqueueReactionOperation(key, async () => {
+    this.enqueueReactionOperation(key, async (isLatest) => {
       const replacement = this.activeReactions.get(key);
       if (replacement) {
         if (reaction.added) replacement.added = true;
@@ -2211,8 +2211,10 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       }
       await this.removeStartedReaction(reaction, 'start reaction removal');
       if (
+        !isLatest() ||
         this.activeReactions.has(key) ||
         !this.endReactionName ||
+        this.endReactionKeys.has(key) ||
         !this.connected ||
         generation !== this.lifecycleGeneration
       ) {

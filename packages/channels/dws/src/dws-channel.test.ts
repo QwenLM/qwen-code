@@ -3407,6 +3407,51 @@ describe('DwsChannel', () => {
     });
   });
 
+  it('adds one end reaction when a retry finishes during prior removal', async () => {
+    const client = new FakeDwsClient();
+    let finishRemoval!: () => void;
+    client.removeImReaction.mockImplementationOnce(
+      async () =>
+        new Promise<void>((resolve) => {
+          finishRemoval = resolve;
+        }),
+    );
+    const { bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({ startReaction: '暗中观察', endReaction: '赞' }),
+    );
+    const prompt = bridge.prompt as ReturnType<typeof vi.fn>;
+    prompt
+      .mockRejectedValueOnce(new Error('first turn failed'))
+      .mockRejectedValueOnce(new Error('retry failed'));
+    const inbound = message(
+      'user_im_message_receive_o2o_all',
+      'retry-message',
+      'do the task',
+    );
+
+    await expect(client.emit(1, inbound)).rejects.toThrow('first turn failed');
+    await vi.waitFor(() => {
+      expect(client.removeImReaction).toHaveBeenCalledWith(
+        'cid-1',
+        'retry-message',
+        '暗中观察',
+      );
+    });
+
+    await expect(client.emit(1, inbound)).rejects.toThrow('retry failed');
+    finishRemoval();
+
+    await vi.waitFor(() => {
+      expect(client.addImReaction).toHaveBeenCalledTimes(2);
+      expect(
+        client.addImReaction.mock.calls.filter(
+          ([, , reaction]) => reaction === '赞',
+        ),
+      ).toHaveLength(1);
+    });
+  });
+
   it('reuses an in-flight start reaction when the same message is retried', async () => {
     const client = new FakeDwsClient();
     let finishStartReaction!: () => void;
