@@ -47,8 +47,10 @@ import type {
   DaemonSession,
   DaemonSessionStatsStatus,
   DaemonSessionSupportedCommandsStatus,
-  DaemonSessionTaskStatus,
+  DaemonSessionTaskWithWorkflowStatus,
   DaemonSessionTasksStatus,
+  DaemonSessionWorkflowTaskStatus,
+  DaemonSessionWorkflowTasksStatus,
   HeartbeatResult,
   GoalControlRequest,
   GoalStateResponse,
@@ -57,7 +59,13 @@ import type {
   PromptResult,
   SetModelResult,
   SessionMetadataResult,
+  DaemonSessionPrInfo,
 } from './types.js';
+import type {
+  CreateStandaloneSessionOptions,
+  DaemonRestoredStandaloneSession,
+  RestoreStandaloneSessionRequest,
+} from './standalone-sessions.js';
 
 /** Compacted replay snapshot returned by the daemon on session load. */
 export interface DaemonReplaySnapshot {
@@ -123,6 +131,10 @@ export interface DaemonSessionClientOptions {
   maxPendingPromptsPerSession?: number | null;
 }
 
+export type DaemonSessionRestoreStrategy =
+  | { kind: 'workspace'; workspaceCwd: string }
+  | { kind: 'standalone' };
+
 export interface DaemonSessionSubscribeOptions
   extends Omit<
     SubscribeOptions,
@@ -158,6 +170,50 @@ function isSessionAttachmentReference(
 const MAX_ATTACHMENT_CACHE_BYTES = 32 * 1024 * 1024;
 const MAX_ATTACHMENT_CACHE_ENTRIES = 128;
 
+function createStandaloneRestoredClient(
+  client: DaemonClient,
+  restored: DaemonRestoredStandaloneSession,
+  includeReplay: boolean,
+): DaemonSessionClient {
+  const {
+    state,
+    hasActivePrompt,
+    compactedReplay,
+    liveJournal,
+    historyHasMore,
+    historyAnchorRecordId,
+    replayDegraded,
+    partial,
+    replayError,
+    lastEventId,
+    eventEpoch,
+    ...session
+  } = restored;
+  return new DaemonSessionClient({
+    client,
+    session,
+    hasActivePrompt,
+    state,
+    lastEventId: lastEventId ?? 0,
+    eventEpoch,
+    ...(includeReplay
+      ? {
+          replaySnapshot: {
+            compactedReplay: compactedReplay ?? [],
+            liveJournal: liveJournal ?? [],
+          },
+          replaySnapshotComplete:
+            Array.isArray(compactedReplay) && Array.isArray(liveJournal),
+          replayPartial: partial === true,
+          replayError,
+          historyHasMore,
+          historyAnchorRecordId,
+          replayDegraded,
+        }
+      : {}),
+  });
+}
+
 /**
  * Session-scoped wrapper around `DaemonClient`.
  *
@@ -172,8 +228,15 @@ const MAX_ATTACHMENT_CACHE_ENTRIES = 128;
 export class DaemonSessionClient {
   readonly client: DaemonClient;
   readonly session: DaemonSession;
+  readonly restoreStrategy: DaemonSessionRestoreStrategy;
   readonly state: DaemonSessionState;
-  readonly replaySnapshot: DaemonReplaySnapshot;
+  /**
+   * Not `readonly`: {@link consumeReplaySnapshot} swaps it for an empty
+   * snapshot once the provider has injected it into the transcript store,
+   * releasing the raw wire events (tens of MiB on busy sessions) instead of
+   * retaining them for the session client's lifetime.
+   */
+  replaySnapshot: DaemonReplaySnapshot;
   readonly replaySnapshotComplete: boolean;
   readonly replayPartial: boolean;
   readonly replayError: string | undefined;
@@ -223,6 +286,11 @@ export class DaemonSessionClient {
   constructor(opts: DaemonSessionClientOptions) {
     this.client = opts.client;
     this.session = { ...opts.session };
+    const context = (opts.session as { context?: { kind?: unknown } }).context;
+    this.restoreStrategy =
+      opts.session.sourceType === 'standalone' && context?.kind === 'standalone'
+        ? { kind: 'standalone' }
+        : { kind: 'workspace', workspaceCwd: opts.session.workspaceCwd };
     this.state = { ...(opts.state ?? {}) };
     this.hasActivePrompt = opts.hasActivePrompt ?? false;
     this.historyHasMore = opts.historyHasMore ?? false;
@@ -375,6 +443,50 @@ export class DaemonSessionClient {
     });
   }
 
+  static async createStandalone(
+    client: DaemonClient,
+    options: CreateStandaloneSessionOptions = {},
+  ): Promise<DaemonSessionClient> {
+    const session = await client.createStandaloneSession(options);
+    return new DaemonSessionClient({
+      client,
+      session,
+      hasActivePrompt: session.hasActivePrompt,
+      lastEventId: 0,
+      eventEpoch: session.eventEpoch,
+    });
+  }
+
+  static async loadStandalone(
+    client: DaemonClient,
+    sessionId: string,
+    request: RestoreStandaloneSessionRequest = {},
+    clientId?: string,
+  ): Promise<DaemonSessionClient> {
+    const restored = await client.loadStandaloneSession(
+      sessionId,
+      request,
+      clientId,
+    );
+    const result = createStandaloneRestoredClient(client, restored, true);
+    await result.hydrateReplaySnapshot();
+    return result;
+  }
+
+  static async resumeStandalone(
+    client: DaemonClient,
+    sessionId: string,
+    request: RestoreStandaloneSessionRequest = {},
+    clientId?: string,
+  ): Promise<DaemonSessionClient> {
+    const restored = await client.resumeStandaloneSession(
+      sessionId,
+      request,
+      clientId,
+    );
+    return createStandaloneRestoredClient(client, restored, false);
+  }
+
   get sessionId(): string {
     return this.session.sessionId;
   }
@@ -405,6 +517,19 @@ export class DaemonSessionClient {
 
   get eventEpoch(): string | undefined {
     return this.lastSeenEpoch;
+  }
+
+  /**
+   * Returns the retained replay snapshot and drops the client's reference
+   * to it. Call once the snapshot has been injected into a transcript
+   * store; the raw wire events are no longer needed (SSE continues from
+   * `lastEventId`, and older history is served by pagination) and can
+   * otherwise pin tens of MiB per session client.
+   */
+  consumeReplaySnapshot(): DaemonReplaySnapshot {
+    const snapshot = this.replaySnapshot;
+    this.replaySnapshot = { compactedReplay: [], liveJournal: [] };
+    return snapshot;
   }
 
   setLastEventId(lastEventId: number | undefined): void {
@@ -580,15 +705,19 @@ export class DaemonSessionClient {
   private async reattach(): Promise<void> {
     if (this.reattaching) return this.reattaching;
     // Send no clientId so the bridge issues a fresh registration rather than
-    // validating the stale one. Pass workspaceCwd explicitly: the daemon's
-    // restore path resolves the workspace key before its existing-session fast
-    // path, and that resolution rejects a missing/relative path.
-    this.reattaching = this.client
-      .resumeSession(this.sessionId, { workspaceCwd: this.workspaceCwd })
-      .then((session) => {
-        // Refresh only the clientId; leave the SSE cursor and ACP state intact.
-        this.session.clientId = session.clientId;
-      });
+    // validating the stale one. Keep the original context explicit: workspace
+    // restore resolves by cwd, while standalone restore must use its dedicated
+    // route and never fall back to the primary runtime.
+    const resume =
+      this.restoreStrategy.kind === 'standalone'
+        ? this.client.resumeStandaloneSession(this.sessionId)
+        : this.client.resumeSession(this.sessionId, {
+            workspaceCwd: this.restoreStrategy.workspaceCwd,
+          });
+    this.reattaching = resume.then((session) => {
+      // Refresh only the clientId; leave the SSE cursor and ACP state intact.
+      this.session.clientId = session.clientId;
+    });
     try {
       await this.reattaching;
     } finally {
@@ -821,9 +950,9 @@ export class DaemonSessionClient {
 
   /**
    * Execute a direct daemon-side shell command for this session. Requires the
-   * daemon to opt in to direct session shell and bearer auth; this wrapper
-   * automatically forwards the client id bound when the session was created
-   * or attached.
+   * daemon to opt in to direct session shell with bearer auth or
+   * trusted-loopback authority; this wrapper automatically forwards the client
+   * id bound when the session was created or attached.
    */
   shellCommand(
     command: string,
@@ -857,18 +986,38 @@ export class DaemonSessionClient {
     return this.client.sessionTasks(this.sessionId, this.clientId);
   }
 
+  workflowTasks(): Promise<DaemonSessionWorkflowTasksStatus> {
+    return this.client.sessionWorkflowTasks(this.sessionId, this.clientId);
+  }
+
   lspStatus(): Promise<DaemonSessionLspStatus> {
     return this.client.sessionLspStatus(this.sessionId, this.clientId);
   }
 
   cancelTask(
     taskId: string,
-    kind: DaemonSessionTaskStatus['kind'],
+    kind: DaemonSessionTaskWithWorkflowStatus['kind'],
   ): Promise<{ cancelled: boolean }> {
     return this.client.sessionTaskCancel(
       this.sessionId,
       taskId,
       kind,
+      this.clientId,
+    );
+  }
+
+  controlWorkflowTask(
+    taskId: string,
+    action: 'pause' | 'resume' | 'retry' | 'rerun' | 'delete-history',
+  ): Promise<{
+    changed: boolean;
+    status?: DaemonSessionWorkflowTaskStatus['status'];
+    taskId?: string;
+  }> {
+    return this.client.sessionWorkflowTaskAction(
+      this.sessionId,
+      taskId,
+      action,
       this.clientId,
     );
   }
@@ -926,6 +1075,7 @@ export class DaemonSessionClient {
 
   async updateMetadata(metadata: {
     displayName?: string;
+    pr?: DaemonSessionPrInfo;
   }): Promise<SessionMetadataResult> {
     return await this.client.updateSessionMetadata(
       this.sessionId,

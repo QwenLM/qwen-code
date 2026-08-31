@@ -42,10 +42,11 @@ import type { LiveProviderCredential } from './provider-credentials.js';
 import {
   isCompatibleLiveSessionSource,
   LIVE_SESSION_SOURCE_PREFIX,
-} from '../conversations/session-source.js';
+} from '../../runtime/live-session-source.js';
+import { normalizeSessionIdForLookup } from '../../config/session-id.js';
 import type { LiveProviderReadiness, LiveSessionLocator } from './types.js';
 
-export { LIVE_SESSION_SOURCE_PREFIX } from '../conversations/session-source.js';
+export { LIVE_SESSION_SOURCE_PREFIX } from '../../runtime/live-session-source.js';
 
 const MAX_COORDINATOR_REQUEST_CHARS = 32_000;
 const MAX_COORDINATOR_RESULT_CHARS = 48_000;
@@ -1407,7 +1408,7 @@ export class LiveSessionCoordinator {
     if (candidate) {
       try {
         const resumed = await runtime.bridge.resumeSession({
-          sessionId: candidate.sessionId,
+          sessionId: normalizeSessionIdForLookup(candidate.sessionId),
           workspaceCwd: runtime.workspaceCwd,
           ...(candidate.parentSessionId
             ? { parentSessionId: candidate.parentSessionId }

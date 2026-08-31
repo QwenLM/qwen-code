@@ -2,6 +2,7 @@ export { query } from './query/createQuery.js';
 export { AbortError, isAbortError } from './types/errors.js';
 export { Query } from './query/Query.js';
 export { SdkLogger } from './utils/logger.js';
+export { PERMISSION_MODES } from './types/permission-mode.js';
 
 // Daemon HTTP client (talks to `qwen serve`)
 export {
@@ -213,6 +214,12 @@ export {
   type DaemonSessionLspStatus,
   type DaemonSessionAgentTaskStatus,
   type DaemonSessionMonitorTaskStatus,
+  type DaemonSessionWorkflowTaskStatus,
+  type DaemonWorkflowApprovalStatusEntry,
+  type DaemonWorkflowDispatchStatus,
+  type DaemonWorkflowDispatchStatusEntry,
+  type DaemonWorkflowEvent,
+  type DaemonWorkflowPhaseVisit,
   type DaemonSessionProcessTaskLifecycleStatus,
   type DaemonSessionDiedData,
   type DaemonSessionDiedEvent,
@@ -242,7 +249,9 @@ export {
   type DaemonSessionSupportedCommandsStatus,
   type DaemonSessionTaskLifecycleStatus,
   type DaemonSessionTaskStatus,
+  type DaemonSessionTaskWithWorkflowStatus,
   type DaemonSessionTasksStatus,
+  type DaemonSessionWorkflowTasksStatus,
   type DaemonSkillLevel,
   type DaemonPreflightCell,
   type DaemonPreflightKind,
@@ -276,6 +285,7 @@ export {
   type DaemonWorkspaceMemoryForgetResult,
   type DaemonWorkspaceMemoryForgetTask,
   type DaemonWorkspaceMemoryRememberContextMode,
+  type DaemonWorkspaceMemoryRememberTargetScope,
   type DaemonWorkspaceMemoryRememberOptions,
   type DaemonWorkspaceMemoryRememberResult,
   type DaemonWorkspaceMemoryRememberTask,
@@ -302,6 +312,7 @@ export {
   type DaemonWorkspaceMcpInitializeResult,
   type DaemonWorkspaceAcpStatusResult,
   type DaemonWorkspaceAcpPreheatResult,
+  type DaemonWorkspaceRuntimeStatus,
   type DaemonWorkspaceProviderCurrent,
   type DaemonWorkspaceProviderModel,
   type DaemonWorkspaceProviderStatus,
@@ -360,8 +371,36 @@ export {
   type RestoreSessionRequest,
   type SetModelResult,
   type SetSessionLanguageResult,
+  type SetUserLanguageResult,
   type SessionMetadataResult,
   type SubscribeOptions,
+} from './daemon/index.js';
+
+export {
+  DaemonStandaloneCreationOutcomeUnknownError,
+  DaemonStandaloneProtocolError,
+  STANDALONE_SESSIONS_CAPABILITY,
+  isStandaloneCreationOutcomeUnknown,
+  isStandaloneSessionNotFoundError,
+  type CreateStandaloneSessionOptions,
+  type DaemonArchiveStandaloneSessionsResult,
+  type DaemonDeleteStandaloneSessionsResult,
+  type DaemonRestoredStandaloneSession,
+  type DaemonSessionRestoreStrategy,
+  type DaemonStandaloneBatchError,
+  type DaemonStandaloneCreationRecovery,
+  type DaemonStandaloneDirectoryResult,
+  type DaemonStandaloneFields,
+  type DaemonStandaloneMetadataResult,
+  type DaemonStandaloneSession,
+  type DaemonStandaloneSessionCreating,
+  type DaemonStandaloneSessionListOptions,
+  type DaemonStandaloneSessionListPage,
+  type DaemonStandaloneSessionLookup,
+  type DaemonStandaloneSessionSummary,
+  type DaemonStandaloneWorkingDirectory,
+  type DaemonUnarchiveStandaloneSessionsResult,
+  type RestoreStandaloneSessionRequest,
 } from './daemon/index.js';
 
 // Auth

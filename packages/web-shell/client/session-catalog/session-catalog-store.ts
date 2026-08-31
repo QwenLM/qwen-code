@@ -160,6 +160,27 @@ function ownsActivityReorder(entry: CatalogEntry): boolean {
   );
 }
 
+function liveSessionSnapshotsEqual(
+  previous: ReadonlyMap<string, DaemonSessionLiveState>,
+  next: ReadonlyMap<string, DaemonSessionLiveState>,
+): boolean {
+  if (previous.size !== next.size) return false;
+  for (const [sessionId, session] of next) {
+    const prior = previous.get(sessionId);
+    if (
+      !prior ||
+      prior.clientCount !== session.clientCount ||
+      prior.hasActivePrompt !== session.hasActivePrompt ||
+      prior.isWaitingForPermission !== session.isWaitingForPermission ||
+      prior.isWaitingForUserQuestion !== session.isWaitingForUserQuestion ||
+      prior.updatedAt !== session.updatedAt
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function getPollInterval(entry: CatalogEntry): number | undefined {
   let interval: number | undefined;
   for (const subscriber of entry.subscribers) {
@@ -191,6 +212,11 @@ export class SessionCatalogStore {
     string,
     Map<string, number>
   >();
+  private readonly liveSessionsByWorkspace = new Map<
+    string,
+    ReadonlyMap<string, DaemonSessionLiveState>
+  >();
+  private readonly liveSessionListeners = new Map<string, Set<() => void>>();
   private activeRequests = 0;
   private activeBackgroundRequests = 0;
   private queueSequence = 0;
@@ -220,6 +246,7 @@ export class SessionCatalogStore {
         this.liveStateWorkspaceUsers.delete(workspaceCwd);
         this.liveStateWorkspaceRefreshRequests.delete(workspaceCwd);
         this.liveStatePendingActivity.delete(workspaceCwd);
+        this.clearLiveSessions(workspaceCwd);
         for (const entry of this.entries.values()) {
           if (entry.query.workspaceCwd !== workspaceCwd) continue;
           this.resetPollSchedule(entry);
@@ -510,10 +537,120 @@ export class SessionCatalogStore {
     }
   }
 
+  /**
+   * Apply a pin toggle optimistically to every loaded page of the workspace,
+   * so the store owns the optimistic state's lifetime (the R5-1 fix
+   * direction). Pinned-view pages gain or lose the row; every other page
+   * patches it in place. Because the toggle lands in the page data itself,
+   * later local writes (`patchSession`, `applyLiveState`) churn around it
+   * without dropping it, and only an authoritative refetch replaces it.
+   * Rolling back is the same operation with the opposite target.
+   */
+  applySessionPinToggle(
+    workspaceCwd: string,
+    session: DaemonSessionSummary,
+    toggle: { pinned: boolean; pinnedAt?: string },
+  ): void {
+    for (const entry of this.entries.values()) {
+      if (entry.query.workspaceCwd !== workspaceCwd || !entry.snapshot.page) {
+        continue;
+      }
+      const page = entry.snapshot.page;
+      const carriesRow = (candidate: DaemonSessionSummary): boolean =>
+        candidate.workspaceCwd === workspaceCwd &&
+        candidate.sessionId === session.sessionId;
+      if (entry.query.options.group === 'pinned') {
+        if (toggle.pinned) {
+          const pinnedSession: DaemonSessionSummary = {
+            ...session,
+            workspaceCwd,
+            isPinned: true,
+            ...(toggle.pinnedAt !== undefined
+              ? { pinnedAt: toggle.pinnedAt }
+              : {}),
+          };
+          const exists = page.sessions.some(carriesRow);
+          this.setSnapshot(entry, {
+            ...entry.snapshot,
+            page: {
+              ...page,
+              sessions: exists
+                ? page.sessions.map((candidate) =>
+                    carriesRow(candidate) ? pinnedSession : candidate,
+                  )
+                : [...page.sessions, pinnedSession],
+            },
+          });
+        } else if (page.sessions.some(carriesRow)) {
+          this.setSnapshot(entry, {
+            ...entry.snapshot,
+            page: {
+              ...page,
+              sessions: page.sessions.filter(
+                (candidate) => !carriesRow(candidate),
+              ),
+            },
+          });
+        }
+        continue;
+      }
+      if (!page.sessions.some(carriesRow)) continue;
+      this.setSnapshot(entry, {
+        ...entry.snapshot,
+        page: {
+          ...page,
+          sessions: page.sessions.map((candidate) => {
+            if (!carriesRow(candidate)) return candidate;
+            const next: DaemonSessionSummary = {
+              ...candidate,
+              isPinned: toggle.pinned,
+            };
+            if (toggle.pinned) {
+              if (toggle.pinnedAt !== undefined) {
+                next.pinnedAt = toggle.pinnedAt;
+              }
+            } else {
+              delete next.pinnedAt;
+            }
+            return next;
+          }),
+        },
+      });
+    }
+  }
+
+  getLiveSession(
+    workspaceCwd: string,
+    sessionId: string,
+  ): DaemonSessionLiveState | undefined {
+    return this.liveSessionsByWorkspace.get(workspaceCwd)?.get(sessionId);
+  }
+
+  hasLiveSessions(workspaceCwd: string): boolean {
+    return this.liveSessionsByWorkspace.has(workspaceCwd);
+  }
+
+  subscribeLiveSessions(
+    workspaceCwd: string,
+    listener: () => void,
+  ): () => void {
+    const existing = this.liveSessionListeners.get(workspaceCwd);
+    const listeners = existing ?? new Set<() => void>();
+    if (!existing) this.liveSessionListeners.set(workspaceCwd, listeners);
+    listeners.add(listener);
+    return () => {
+      listeners.delete(listener);
+      if (listeners.size === 0) {
+        this.liveSessionListeners.delete(workspaceCwd);
+      }
+    };
+  }
+
   applyLiveState(
     workspaceCwd: string,
     liveSessions: readonly DaemonSessionLiveState[],
   ): ReadonlySet<string> {
+    this.recordLiveSessions(workspaceCwd, liveSessions);
     const liveById = new Map(
       liveSessions.map((session) => [session.sessionId, session]),
     );
@@ -594,6 +731,34 @@ export class SessionCatalogStore {
       });
     }
     return absorbed;
+  }
+
+  // The live-state response lists every live session regardless of catalog
+  // paging; keep it so a per-session lookup never depends on the connected
+  // session happening to sit inside a loaded page (#9487).
+  private recordLiveSessions(
+    workspaceCwd: string,
+    liveSessions: readonly DaemonSessionLiveState[],
+  ): void {
+    const next = new Map<string, DaemonSessionLiveState>();
+    for (const session of liveSessions) {
+      next.set(session.sessionId, session);
+    }
+    const previous = this.liveSessionsByWorkspace.get(workspaceCwd);
+    if (previous && liveSessionSnapshotsEqual(previous, next)) return;
+    this.liveSessionsByWorkspace.set(workspaceCwd, next);
+    const listeners = this.liveSessionListeners.get(workspaceCwd);
+    if (listeners) {
+      for (const listener of [...listeners]) listener();
+    }
+  }
+
+  private clearLiveSessions(workspaceCwd: string): void {
+    if (!this.liveSessionsByWorkspace.delete(workspaceCwd)) return;
+    const listeners = this.liveSessionListeners.get(workspaceCwd);
+    if (listeners) {
+      for (const listener of [...listeners]) listener();
+    }
   }
 
   async stageWorkspaceRefresh(
@@ -770,6 +935,8 @@ export class SessionCatalogStore {
     this.liveStateWorkspaceUsers.clear();
     this.liveStateWorkspaceRefreshRequests.clear();
     this.liveStatePendingActivity.clear();
+    this.liveSessionsByWorkspace.clear();
+    this.liveSessionListeners.clear();
     this.entries.clear();
     this.queue.length = 0;
     this.removeVisibilityListener();

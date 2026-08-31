@@ -150,6 +150,7 @@ describe('ModelRegistry', () => {
             name: 'GPT-4 Turbo',
             baseUrl: 'https://api.openai.com/v1',
             generationConfig: {
+              streamIdleTimeoutMs: 600000,
               samplingParams: {
                 temperature: 0.8,
                 max_tokens: 4096,
@@ -176,6 +177,7 @@ describe('ModelRegistry', () => {
 
       expect(model?.generationConfig.samplingParams?.temperature).toBe(0.8);
       expect(model?.generationConfig.samplingParams?.max_tokens).toBe(4096);
+      expect(model?.generationConfig.streamIdleTimeoutMs).toBe(600000);
       // No defaults are applied - only the configured values are present
       expect(model?.generationConfig.samplingParams?.top_p).toBeUndefined();
       expect(model?.generationConfig.timeout).toBeUndefined();
@@ -798,6 +800,27 @@ describe('ModelRegistry', () => {
       expect(registry.getModel(AuthType.USE_OPENAI, 'gpt-3.5')).toBeDefined();
     });
 
+    it('keeps the previous registry when a replacement model is invalid', () => {
+      const registry = new ModelRegistry(
+        { idealab: [{ id: 'old-model' }] } as ModelProvidersConfig,
+        { idealab: 'openai' },
+      );
+
+      expect(() =>
+        registry.reloadModels(
+          {
+            idealab: [{ id: 'new-model' }, { id: '' }],
+          } as ModelProvidersConfig,
+          { idealab: 'gemini' },
+        ),
+      ).toThrow('missing required field: id');
+
+      expect(registry.getModel(AuthType.USE_OPENAI, 'old-model')).toBeDefined();
+      expect(
+        registry.getModel(AuthType.USE_GEMINI, 'new-model'),
+      ).toBeUndefined();
+    });
+
     it('should correctly reload same-id different-baseUrl models', () => {
       const registry = new ModelRegistry({
         openai: [
@@ -1029,6 +1052,23 @@ describe('fastOnly and voiceOnly flags', () => {
     expect(
       registry.getModelsForAuthType(AuthType.USE_OPENAI)[0]?.imageOnly,
     ).toBe(true);
+  });
+
+  it('should propagate image generation capability without excluding the default model', () => {
+    const registry = new ModelRegistry({
+      openai: [
+        {
+          id: 'dual-role-model',
+          supportsImageGeneration: true,
+        },
+      ],
+    });
+
+    const available = registry.getModelsForAuthType(AuthType.USE_OPENAI)[0];
+    expect(available?.supportsImageGeneration).toBe(true);
+    expect(registry.getDefaultModelForAuthType(AuthType.USE_OPENAI)?.id).toBe(
+      'dual-role-model',
+    );
   });
 
   it('should warn when both fastOnly and voiceOnly are set', () => {

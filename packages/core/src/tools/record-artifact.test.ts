@@ -437,7 +437,7 @@ describe('RecordArtifactTool', () => {
     expect(String(result.llmContent)).not.toContain('Recorded artifact');
   });
 
-  it('rejects a directory workspacePath', async () => {
+  it('rejects an empty directory workspacePath', async () => {
     const ws = await workspace();
     await mkdir(path.join(ws.cwd, 'reports'));
 
@@ -449,7 +449,199 @@ describe('RecordArtifactTool', () => {
       .execute(signal);
 
     expect(result.error?.type).toBe(ToolErrorType.TARGET_IS_DIRECTORY);
+    expect(result.artifacts).toBeUndefined();
     expect(String(result.llmContent)).not.toContain('Recorded artifact');
+    expect(String(result.llmContent)).toContain('no recordable files');
+  });
+
+  it('expands a directory workspacePath into per-file artifacts', async () => {
+    const ws = await workspace();
+    await ws.write('reports/a.xlsx', 'xlsx');
+    await ws.write('reports/b.docx', 'docx');
+    await ws.write('reports/.hidden.xlsx', 'hidden');
+    await ws.write('reports/~$lock.xlsx', 'lock');
+    await ws.write('reports/nested/c.pptx', 'pptx');
+
+    const result = await ws.tool
+      .build({
+        title: 'Daily reports',
+        workspacePath: 'reports',
+      })
+      .execute(signal);
+
+    expect(result.error).toBeUndefined();
+    expect(String(result.llmContent)).toContain('Expanded directory');
+    expect(String(result.llmContent)).not.toContain('Recorded artifact');
+    expect(String(result.llmContent)).toContain('reports/a.xlsx');
+    expect(result.artifacts).toMatchObject([
+      {
+        title: 'a.xlsx',
+        storage: 'workspace',
+        workspacePath: 'reports/a.xlsx',
+        description: 'Daily reports',
+      },
+      {
+        title: 'b.docx',
+        storage: 'workspace',
+        workspacePath: 'reports/b.docx',
+        description: 'Daily reports',
+      },
+      {
+        title: 'c.pptx',
+        storage: 'workspace',
+        workspacePath: 'reports/nested/c.pptx',
+        description: 'Daily reports',
+        metadata: { expandedFromDirectory: true },
+      },
+    ]);
+  });
+
+  it('discloses the 100-file cap when expanding a large directory', async () => {
+    const ws = await workspace();
+    for (let index = 0; index < 101; index++) {
+      await ws.write(`reports/f${String(index).padStart(3, '0')}.txt`, 'x');
+    }
+
+    const result = await ws.tool
+      .build({
+        title: 'Many',
+        workspacePath: 'reports',
+      })
+      .execute(signal);
+
+    expect(result.error).toBeUndefined();
+    expect(result.artifacts).toHaveLength(100);
+    expect(String(result.llmContent)).toMatch(/first 100 files/i);
+  });
+
+  it('rejects expanding a junk directory root', async () => {
+    const ws = await workspace();
+    await ws.write('node_modules/pkg/index.js', 'js');
+
+    const result = await ws.tool
+      .build({
+        title: 'Deps',
+        workspacePath: 'node_modules',
+      })
+      .execute(signal);
+
+    expect(result.error?.type).toBe(ToolErrorType.TARGET_IS_DIRECTORY);
+    expect(result.artifacts).toBeUndefined();
+  });
+
+  it('rejects expanding a path nested under a junk directory', async () => {
+    const ws = await workspace();
+    await ws.write('node_modules/react/index.js', 'js');
+
+    const result = await ws.tool
+      .build({
+        title: 'React',
+        workspacePath: 'node_modules/react',
+      })
+      .execute(signal);
+
+    expect(result.error?.type).toBe(ToolErrorType.TARGET_IS_DIRECTORY);
+    expect(result.artifacts).toBeUndefined();
+    expect(String(result.llmContent)).toContain('skipped directory');
+  });
+
+  it('skips expansion children whose names are not trim-stable', async () => {
+    const ws = await workspace();
+    await ws.write('notes/keep.txt', 'ok');
+    await writeFile(path.join(ws.cwd, 'notes', ' report.txt'), 'space');
+
+    const result = await ws.tool
+      .build({
+        title: 'Notes',
+        workspacePath: 'notes',
+      })
+      .execute(signal);
+
+    expect(result.error).toBeUndefined();
+    expect(result.artifacts).toMatchObject([
+      { workspacePath: 'notes/keep.txt' },
+    ]);
+    expect(String(result.llmContent)).toMatch(/Skipped 1 files/i);
+  });
+
+  it('rejects recording the worktree cwd as a directory', async () => {
+    const ws = await workspace(path.join('.qwen', 'worktrees', 'my-feature'));
+    await ws.write('keep.xlsx', 'xlsx');
+
+    const result = await ws.tool
+      .build({
+        title: 'Worktree root',
+        workspacePath: '.',
+      })
+      .execute(signal);
+
+    expect(result.error?.type).toBe(ToolErrorType.TARGET_IS_DIRECTORY);
+    expect(result.artifacts).toBeUndefined();
+    expect(String(result.llmContent)).toContain('workspace root');
+  });
+
+  it('expands a subdirectory inside a worktree session', async () => {
+    const ws = await workspace(path.join('.qwen', 'worktrees', 'my-feature'));
+    await ws.write('reports/a.xlsx', 'xlsx');
+    await ws.write('reports/b.docx', 'docx');
+
+    const result = await ws.tool
+      .build({
+        title: 'Worktree reports',
+        workspacePath: 'reports',
+      })
+      .execute(signal);
+
+    expect(result.error).toBeUndefined();
+    expect(result.artifacts).toMatchObject([
+      {
+        workspacePath: '.qwen/worktrees/my-feature/reports/a.xlsx',
+      },
+      {
+        workspacePath: '.qwen/worktrees/my-feature/reports/b.docx',
+      },
+    ]);
+  });
+
+  it('skips junk directories and lock files when expanding a directory', async () => {
+    const ws = await workspace();
+    await ws.write('reports/keep.xlsx', 'xlsx');
+    await ws.write('reports/node_modules/skip.txt', 'skip');
+    await ws.write('reports/~$lock.xlsx', 'lock');
+
+    const result = await ws.tool
+      .build({
+        title: 'Reports',
+        workspacePath: 'reports',
+      })
+      .execute(signal);
+
+    expect(result.error).toBeUndefined();
+    expect(result.artifacts).toMatchObject([
+      { workspacePath: 'reports/keep.xlsx' },
+    ]);
+    expect(String(result.llmContent)).not.toContain('node_modules');
+  });
+
+  it('warns when directory expansion hits the depth limit', async () => {
+    const ws = await workspace();
+    await ws.write('reports/a/b/c/d/e/too-deep.xlsx', 'deep');
+    await ws.write('reports/shallow.xlsx', 'xlsx');
+
+    const result = await ws.tool
+      .build({
+        title: 'Reports',
+        workspacePath: 'reports',
+      })
+      .execute(signal);
+
+    expect(result.error).toBeUndefined();
+    expect(result.artifacts).toMatchObject([
+      { workspacePath: 'reports/shallow.xlsx' },
+    ]);
+    expect(String(result.llmContent)).toMatch(
+      /deeper than 4 directory levels/i,
+    );
   });
 
   it('rejects a workspace-relative path that escapes the execution directory', () => {

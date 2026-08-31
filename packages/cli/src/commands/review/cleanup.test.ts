@@ -44,7 +44,23 @@ const mocks = vi.hoisted(() => ({
   currentUser: vi.fn(() => 'reviewer'),
   setGhHost: vi.fn(),
   getGhHost: vi.fn((): string | undefined => undefined),
+  // Default 'github' keeps every pre-Aone test on the gh audit path — the
+  // dispatch is only visible to tests that steer it.
+  detectPlatformKind: vi.fn((): 'github' | 'aone' => 'github'),
+  a1Json: vi.fn((..._args: string[]): unknown => []),
+  aoneWhoamiAccount: vi.fn(() => 'reviewer'),
 }));
+
+// The fixtures below key on POSIX path literals (`/repo/.qwen/tmp/…`), but
+// cleanup.ts and the helpers it calls (redirectedAncestor, promptRecordDir,
+// the deadline readers) run those strings through node:path. On Windows that
+// would spell them with a drive letter and backslashes, so no literal-keyed
+// mock or assertion could ever match. Pin POSIX semantics for this module
+// graph; on POSIX hosts this is the identity.
+vi.mock('node:path', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:path')>();
+  return { ...actual, ...actual.posix, default: actual.posix };
+});
 
 vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>();
@@ -104,23 +120,42 @@ vi.mock('./lib/gh.js', () => ({
   getGhHost: mocks.getGhHost,
 }));
 
-vi.mock('./lib/paths.js', () => ({
-  worktreePath: (prNumber: string) => `/repo/.qwen/tmp/review-pr-${prNumber}`,
-  probeWorktreePath: (path: string) => `${path}-probe`,
-  baseWorktreePath: (path: string) => `${path}-base`,
-  scratchWorktreePrefix: (path: string) => `${path}-scratch-`,
-  reviewBranch: (prNumber: string) => `qwen-review/pr-${prNumber}`,
-  LEASE_PREFIX: 'qwen-review-lease-',
-  REVIEW_TMP_DIR: '/repo/.qwen/tmp',
-  tmpFile: (target: string, suffix: string) =>
-    `/repo/.qwen/tmp/qwen-review-${target}-${suffix}`,
-  tmpPrefix: (target: string) => `qwen-review-${target}-`,
+// The audit's platform dispatch — steered per test; the registry's real
+// detection probes git remotes, which do not exist under vitest.
+vi.mock('./lib/platform/registry.js', () => ({
+  detectPlatformKind: mocks.detectPlatformKind,
 }));
 
+// The a1 seams — mocked so no test reaches a real `a1` (a platform query is
+// never a test fixture).
+vi.mock('./lib/platform/aone-client.js', () => ({
+  a1Json: mocks.a1Json,
+  aoneWhoamiAccount: mocks.aoneWhoamiAccount,
+}));
+
+vi.mock('./lib/paths.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./lib/paths.js')>();
+  return {
+    ...actual,
+    worktreePath: (prNumber: string) => `/repo/.qwen/tmp/review-pr-${prNumber}`,
+    probeWorktreePath: (path: string) => `${path}-probe`,
+    baseWorktreePath: (path: string) => `${path}-base`,
+    scratchWorktreePrefix: (path: string) => `${path}-scratch-`,
+    reviewBranch: (prNumber: string) => `qwen-review/pr-${prNumber}`,
+    LEASE_PREFIX: 'qwen-review-lease-',
+    REVIEW_TMP_DIR: '/repo/.qwen/tmp',
+    tmpFile: (target: string, suffix: string) =>
+      `/repo/.qwen/tmp/qwen-review-${target}-${suffix}`,
+    tmpPrefix: (target: string) => `qwen-review-${target}-`,
+  };
+});
+
 import {
+  findUnsanctionedAoneComments,
   findUnsanctionedIssueComments,
   findUnsanctionedReviews,
   runCleanup,
+  type RawAoneComment,
   type RawIssueComment,
   type RawReview,
 } from './cleanup.js';
@@ -162,6 +197,61 @@ describe('runCleanup', () => {
     // clearAllMocks keeps implementations a prior test set — drop them so a
     // throwing rmSync cannot leak into tests that expect deletion to work.
     mocks.rmSync.mockReset();
+  });
+
+  it('spares THIS run\u2019s stop sidecar, sweeps a foreign one', () => {
+    // The PR stop path writes the sidecar and runs cleanup in the same
+    // breath, and the parent's first poll is up to 250 ms away — swept
+    // here, no reader could ever observe the decision and a decided round
+    // exited 1 (human review on #9659). Kept only under a matching runId;
+    // foreign or unstamped residue sweeps as before.
+    const prev = process.env['QWEN_REVIEW_RUN_ID'];
+    process.env['QWEN_REVIEW_RUN_ID'] = 'run-A';
+    try {
+      mocks.existsSync.mockReturnValue(true);
+      mocks.readdirSync.mockImplementation((p: string): string[] =>
+        String(p).endsWith('tmp') ? ['qwen-review-pr-9-stop.json'] : [],
+      );
+      mocks.readFileSync.mockImplementation((p: string) => {
+        if (String(p).endsWith('qwen-review-pr-9-stop.json')) {
+          return JSON.stringify({ reason: 'up-to-date', runId: 'run-A' });
+        }
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      });
+      runCleanup('pr-9');
+      expect(mocks.rmSync).not.toHaveBeenCalledWith(
+        expect.stringContaining('qwen-review-pr-9-stop.json'),
+        expect.anything(),
+      );
+
+      mocks.rmSync.mockClear();
+      process.env['QWEN_REVIEW_RUN_ID'] = 'run-B';
+      runCleanup('pr-9');
+      expect(mocks.rmSync).toHaveBeenCalledWith(
+        expect.stringContaining('qwen-review-pr-9-stop.json'),
+        expect.anything(),
+      );
+    } finally {
+      if (prev === undefined) delete process.env['QWEN_REVIEW_RUN_ID'];
+      else process.env['QWEN_REVIEW_RUN_ID'] = prev;
+    }
+  });
+
+  it('refuses the bare `pr` target — its prefix engulfs every PR family', () => {
+    // R20-4 follow-up: `tmpPrefix('pr')` is `qwen-review-pr-`, a strict
+    // prefix of EVERY PR round's family, and the lease guard lives inside
+    // the `pr-<n>` branch a bare `pr` never enters — one `cleanup pr` swept
+    // every PR's artifacts at once, unguarded. A repo-root file literally
+    // named `pr` derives exactly this token.
+    runCleanup('pr');
+    expect(process.exitCode).toBe(1);
+    process.exitCode = 0;
+    expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('Refusing to clean target "pr"'),
+    );
+    expect(mocks.rmSync).not.toHaveBeenCalled();
+    // The numbered form is untouched.
+    expect(() => runCleanup('pr-123')).not.toThrow();
   });
 
   it('keeps the lease when branch deletion fails', () => {
@@ -926,6 +1016,9 @@ describe('runCleanup — bypass-write audit', () => {
     });
     mocks.currentUser.mockReturnValue('reviewer');
     mocks.ghApiAll.mockReturnValue([]);
+    // Same leak class: the Aone audit describe steers the dispatch, and a
+    // leaked 'aone' would reroute every gh-path test here through a1.
+    mocks.detectPlatformKind.mockReturnValue('github');
   });
 
   it('flags reviewer issue comments posted inside the window', () => {
@@ -1209,6 +1302,8 @@ describe('runCleanup — bypass-write audit', () => {
     // The relay instruction is the sentence that actually moves the warning to
     // a human — the rest of the audit is inert without it, so pin it here.
     expect(warnings.join('\n')).toContain('Relay this warning verbatim');
+    // The footer's platform noun is contract text relayed verbatim.
+    expect(warnings.join('\n')).toContain('writes to the PR');
   });
 
   it('spares every review in a multi-id receipt (two sanctioned submits in one window)', () => {
@@ -1315,5 +1410,636 @@ describe('runCleanup — bypass-write audit', () => {
 
     expect(() => runCleanup('pr-123')).not.toThrow();
     expect(mocks.clearReviewWorktreeLease).toHaveBeenCalled();
+  });
+});
+
+describe('findUnsanctionedAoneComments', () => {
+  // Window boundary as epoch milliseconds; Aone stamps a NUMERIC utc offset
+  // (+08:00), so the fixtures carry it — the lexicographic comparison the
+  // gh twin uses would misorder every one of them.
+  const sinceMs = Date.parse('2026-07-24T00:30:00.000Z');
+  const comment = (over: Partial<RawAoneComment> & { id: number }) =>
+    ({
+      author: { username: 'reviewer' },
+      // 2026-07-24T09:00:00+08:00 = 01:00Z — inside the window.
+      createdAt: '2026-07-24T09:00:00+08:00',
+      ...over,
+    }) as RawAoneComment;
+
+  it('keeps only the authenticated account inside the window, case-insensitively', () => {
+    const got = findUnsanctionedAoneComments(
+      [
+        comment({ id: 1 }),
+        comment({ id: 2, author: { username: 'Reviewer' } }),
+        comment({ id: 3, author: { username: 'someone-else' } }),
+        // 2026-07-24T08:15:00+08:00 = 00:15Z — BEFORE the 00:30Z boundary.
+        comment({ id: 4, createdAt: '2026-07-24T08:15:00+08:00' }),
+      ],
+      'reviewer',
+      sinceMs,
+      new Set(),
+    );
+    expect(got.posted.map((c) => c.id)).toEqual([1, 2]);
+    expect(got.edited).toEqual([]);
+  });
+
+  it('compares instants, not wall-clock strings, in both directions', () => {
+    const got = findUnsanctionedAoneComments(
+      [
+        // 00:15Z — OUTSIDE the window, yet its wall-clock string
+        // ('…T08:15…') sorts AFTER the boundary's ('…T00:30…'): a
+        // lexicographic comparison would flag it.
+        comment({ id: 1, createdAt: '2026-07-24T08:15:00+08:00' }),
+        // The previous day's 16:45-08:00 = 00:45Z — INSIDE the window,
+        // yet its string sorts BEFORE the boundary's date: a lexicographic
+        // comparison would drop it.
+        comment({ id: 2, createdAt: '2026-07-23T16:45:00-08:00' }),
+      ],
+      'reviewer',
+      sinceMs,
+      new Set(),
+    );
+    expect(got.posted.map((c) => c.id)).toEqual([2]);
+  });
+
+  it('excludes every receipt-vouched comment id, not just the last', () => {
+    // Two sanctioned submits in one window (drift restart) — both ids are on
+    // the receipt, and NEITHER may be flagged.
+    const got = findUnsanctionedAoneComments(
+      [comment({ id: 1 }), comment({ id: 2 }), comment({ id: 3 })],
+      'reviewer',
+      sinceMs,
+      new Set([2, 3]),
+    );
+    expect(got.posted.map((c) => c.id)).toEqual([1]);
+  });
+
+  it('excludes a vouched comment from the EDITED arm too, not only the posted one', () => {
+    // The vouch sits in the shared `relevant` filter: a submit-posted
+    // comment whose updatedAt bumps inside the window (a hand-edit of
+    // submit's own summary, or a backend state flip) must not be flagged
+    // as an edited bypass.
+    const got = findUnsanctionedAoneComments(
+      [
+        comment({
+          id: 9,
+          // 2026-07-23T23:00Z — before the window …
+          createdAt: '2026-07-24T07:00:00+08:00',
+          // … bumped at 2026-07-24T01:10Z — inside it.
+          updatedAt: '2026-07-24T09:10:00+08:00',
+        }),
+      ],
+      'reviewer',
+      sinceMs,
+      new Set([9]),
+    );
+    expect(got.posted).toEqual([]);
+    expect(got.edited).toEqual([]);
+  });
+
+  it('classifies a pre-window comment edited inside the window as an edit', () => {
+    const got = findUnsanctionedAoneComments(
+      [
+        comment({
+          id: 5,
+          // 2026-07-23T23:00Z — before the window …
+          createdAt: '2026-07-24T07:00:00+08:00',
+          // … edited at 2026-07-24T01:10Z — inside it.
+          updatedAt: '2026-07-24T09:10:00+08:00',
+        }),
+        comment({
+          id: 6,
+          createdAt: '2026-07-24T07:00:00+08:00',
+          updatedAt: '2026-07-24T07:00:00+08:00',
+        }),
+      ],
+      'reviewer',
+      sinceMs,
+      new Set(),
+    );
+    expect(got.edited.map((c) => c.id)).toEqual([5]);
+    expect(got.posted).toEqual([]);
+  });
+
+  it('drops comments carrying the repo automation marker, but not ones merely quoting it', () => {
+    const got = findUnsanctionedAoneComments(
+      [
+        comment({
+          id: 7,
+          note: '<!-- qwen-pr-precheck:manual-required -->\nchecks…',
+        }),
+        comment({
+          id: 8,
+          note: 'summary quoting:\n<!-- qwen-triage stage=1 -->',
+        }),
+      ],
+      'reviewer',
+      sinceMs,
+      new Set(),
+    );
+    expect(got.posted.map((c) => c.id)).toEqual([8]);
+  });
+
+  it('drops comments with no author, no timestamp, or an unparseable one instead of guessing', () => {
+    const got = findUnsanctionedAoneComments(
+      [
+        comment({ id: 1, author: null }),
+        comment({ id: 2, createdAt: undefined }),
+        comment({ id: 3, createdAt: 'not a timestamp' }),
+      ],
+      'reviewer',
+      sinceMs,
+      new Set(),
+    );
+    expect(got.posted).toEqual([]);
+    expect(got.edited).toEqual([]);
+  });
+});
+
+describe('runCleanup — Aone bypass-write audit', () => {
+  const aoneFetchReport = JSON.stringify({
+    prNumber: '123',
+    ownerRepo: 'maxcompute/odps_src',
+    fetchedAt: '2026-07-24T08:00:00Z',
+    host: 'gitlab.alibaba-inc.com',
+  });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.readdirSync.mockReturnValue([]);
+    mocks.lstatSync.mockReturnValue({
+      isSymbolicLink: () => false,
+      isDirectory: () => true,
+    });
+    mocks.existsSync.mockReturnValue(false);
+    mocks.execFileSync.mockReturnValue(Buffer.from(''));
+    mocks.readFileSync.mockImplementation(() => {
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    mocks.detectPlatformKind.mockReturnValue('aone');
+    mocks.aoneWhoamiAccount.mockReturnValue('reviewer');
+    mocks.a1Json.mockReturnValue([]);
+  });
+
+  const warnings = () =>
+    mocks.writeStdoutLine.mock.calls
+      .map((c) => String(c[0]))
+      .filter((l) => l.startsWith('warning:'));
+
+  it('routes the audit through a1, never gh, and flags an in-window same-account comment', () => {
+    mocks.readFileSync.mockReturnValue(aoneFetchReport);
+    mocks.a1Json.mockReturnValue([
+      {
+        id: 777,
+        note: 'hand-posted summary',
+        author: { username: 'reviewer' },
+        createdAt: '2026-07-24T17:02:32+08:00', // 09:02Z — inside the window
+        path: 'src/foo.ts',
+        line: 12,
+      },
+      {
+        id: 778,
+        note: 'author reply',
+        author: { username: 'pr-author' },
+        createdAt: '2026-07-24T17:03:00+08:00',
+      },
+    ]);
+
+    runCleanup('pr-123');
+
+    // The dispatch saw the recorded host; BOTH comment-list queries rode a1
+    // with the report's coordinates (the default list plus the --resolved
+    // union half) — and nothing touched the gh seam.
+    expect(mocks.detectPlatformKind).toHaveBeenCalledWith({
+      host: 'gitlab.alibaba-inc.com',
+    });
+    expect(mocks.a1Json).toHaveBeenCalledWith(
+      'repo',
+      'mr',
+      'comment',
+      'list',
+      '--mr',
+      '123',
+      '--repo',
+      'maxcompute/odps_src',
+    );
+    expect(mocks.a1Json).toHaveBeenCalledWith(
+      'repo',
+      'mr',
+      'comment',
+      'list',
+      '--mr',
+      '123',
+      '--repo',
+      'maxcompute/odps_src',
+      '--resolved',
+    );
+    expect(mocks.ghApiAll).not.toHaveBeenCalled();
+    expect(mocks.setGhHost).not.toHaveBeenCalled();
+    expect(warnings().join('\n')).toContain(
+      'posted comment 777 at 2026-07-24T17:02:32+08:00 on src/foo.ts:12',
+    );
+    expect(warnings().join('\n')).not.toContain('778');
+    expect(warnings().join('\n')).toContain('qwen review submit');
+    // The union dedupes by id: BOTH queries returned comment 777, and the
+    // relayed lines flag it once, under a header counting it once.
+    expect(
+      warnings().filter((l) => l.includes('posted comment 777')),
+    ).toHaveLength(1);
+    expect(warnings().join('\n')).toContain(
+      'warning: 1 comment(s) by the reviewing account on maxcompute/odps_src MR 123',
+    );
+    // The footer names the account and the relay instruction, as on GitHub.
+    expect(warnings().join('\n')).toContain('(reviewer)');
+    expect(warnings().join('\n')).toContain('Relay this warning verbatim');
+    // The footer's platform noun is contract text relayed verbatim.
+    expect(warnings().join('\n')).toContain('writes to the MR');
+  });
+
+  it('flags a posted-then-RESOLVED bypass through the --resolved union half', () => {
+    // The default list hides resolved comments (measured a1 behaviour); the
+    // union half must bring a bypass that was resolved inside the window
+    // back into the posted arm.
+    mocks.readFileSync.mockReturnValue(aoneFetchReport);
+    mocks.a1Json.mockImplementation((...args: string[]) =>
+      args.includes('--resolved')
+        ? [
+            {
+              id: 88,
+              note: 'hand-posted, then resolved to hide',
+              author: { username: 'reviewer' },
+              createdAt: '2026-07-24T17:05:00+08:00',
+              closed: 1,
+              path: 'src/bar.ts',
+              line: 4,
+            },
+          ]
+        : [],
+    );
+
+    runCleanup('pr-123');
+
+    expect(warnings().join('\n')).toContain(
+      'posted comment 88 at 2026-07-24T17:05:00+08:00 on src/bar.ts:4',
+    );
+  });
+
+  it('does not read a resolution bump on a resolved comment as an edit', () => {
+    // Resolving a comment bumps updatedAt exactly like an edit; the edited
+    // arm skips closed comments so an author resolving an old discussion
+    // inside the window draws no flag.
+    mocks.readFileSync.mockReturnValue(aoneFetchReport);
+    mocks.a1Json.mockImplementation((...args: string[]) =>
+      args.includes('--resolved')
+        ? [
+            {
+              id: 89,
+              note: 'pre-window comment, resolved inside the window',
+              author: { username: 'reviewer' },
+              createdAt: '2026-07-24T07:00:00+08:00', // 23:00Z — pre-window
+              updatedAt: '2026-07-24T17:10:00+08:00', // resolution bump
+              closed: 1,
+            },
+          ]
+        : [],
+    );
+
+    runCleanup('pr-123');
+
+    expect(warnings()).toEqual([]);
+  });
+
+  it('spares receipt-vouched comment ids, and reads ONLY the comment-id axis', () => {
+    mocks.readFileSync.mockImplementation((path: string) => {
+      if (String(path).endsWith('submit-receipt.json')) {
+        // reviewIds on the same receipt must not vouch for a comment.
+        return JSON.stringify({ commentIds: [777, 779], reviewIds: [778] });
+      }
+      return aoneFetchReport;
+    });
+    mocks.a1Json.mockReturnValue([
+      {
+        id: 777,
+        note: 'sanctioned inline',
+        author: { username: 'reviewer' },
+        createdAt: '2026-07-24T17:02:32+08:00',
+      },
+      {
+        id: 778,
+        note: 'hand-posted',
+        author: { username: 'reviewer' },
+        createdAt: '2026-07-24T17:03:00+08:00',
+      },
+      {
+        id: 779,
+        note: 'sanctioned summary, bumped inside the window',
+        author: { username: 'reviewer' },
+        createdAt: '2026-07-24T07:00:00+08:00', // pre-window
+        updatedAt: '2026-07-24T17:10:00+08:00', // in-window bump
+      },
+    ]);
+
+    runCleanup('pr-123');
+
+    expect(warnings().join('\n')).not.toContain('777');
+    expect(warnings().join('\n')).toContain('posted comment 778');
+    // The vouch also covers the EDITED arm: a vouched comment whose
+    // updatedAt moves inside the window is no edited bypass.
+    expect(warnings().join('\n')).not.toContain('779');
+  });
+
+  it('stays silent when the window is clean', () => {
+    mocks.readFileSync.mockReturnValue(aoneFetchReport);
+    mocks.a1Json.mockReturnValue([
+      {
+        id: 7,
+        note: 'bot pipeline note',
+        author: { username: 'odps-cm' },
+        createdAt: '2026-07-24T17:00:00+08:00',
+      },
+    ]);
+
+    runCleanup('pr-123');
+
+    expect(warnings()).toEqual([]);
+  });
+
+  it('does not resolve the account when the MR has no comments at all', () => {
+    mocks.readFileSync.mockReturnValue(aoneFetchReport);
+    mocks.a1Json.mockReturnValue([]);
+
+    runCleanup('pr-123');
+
+    expect(mocks.aoneWhoamiAccount).not.toHaveBeenCalled();
+    expect(warnings()).toEqual([]);
+  });
+
+  it('flattens control sequences out of an MR-author-controlled path before the terminal', () => {
+    mocks.readFileSync.mockReturnValue(aoneFetchReport);
+    mocks.a1Json.mockReturnValue([
+      {
+        id: 31,
+        note: 'inline on a hostile filename',
+        author: { username: 'reviewer' },
+        createdAt: '2026-07-24T17:02:32+08:00',
+        path: 'src/evil\u001b[31m.ts',
+        line: 3,
+      },
+    ]);
+
+    runCleanup('pr-123');
+
+    const joined = warnings().join('\n');
+    expect(joined).toContain('posted comment 31');
+    // inertPath swaps the control run for a space — the escape never
+    // reaches the terminal as an escape.
+    expect(joined).toContain('on src/evil [31m.ts:3');
+    expect(joined).not.toContain('\u001b');
+  });
+
+  it('renders an edited-comment warning with id and updatedAt', () => {
+    mocks.readFileSync.mockReturnValue(aoneFetchReport);
+    mocks.a1Json.mockReturnValue([
+      {
+        id: 21,
+        note: 'pre-window comment, edited inside the window',
+        author: { username: 'reviewer' },
+        createdAt: '2026-07-24T07:00:00+08:00', // 23:00Z the day before
+        updatedAt: '2026-07-24T17:10:00+08:00', // 09:10Z — inside
+      },
+    ]);
+
+    runCleanup('pr-123');
+
+    const joined = warnings().join('\n');
+    expect(joined).toContain('edited comment 21 at 2026-07-24T17:10:00+08:00');
+    // Comment 21 carries no path — the absent-path branch of the location
+    // suffix must render nothing, not `undefined` (the lines are relayed
+    // verbatim into the user-facing summary).
+    const editedLine = warnings().find((l) => l.includes('edited comment 21'));
+    expect(editedLine).not.toContain('undefined');
+    expect(editedLine).toBe(
+      'warning:   edited comment 21 at 2026-07-24T17:10:00+08:00',
+    );
+  });
+
+  it('reaches back past the recorded opening by the clock-skew allowance', () => {
+    // auditSince 08:00:00Z → boundary 07:58:00Z; a comment at 15:58:30+08:00
+    // (07:58:30Z) predates the recorded opening by less than the allowance,
+    // so a fast local clock cannot hide it.
+    mocks.readFileSync.mockReturnValue(aoneFetchReport);
+    mocks.a1Json.mockReturnValue([
+      {
+        id: 11,
+        note: 'just inside the skew allowance',
+        author: { username: 'reviewer' },
+        createdAt: '2026-07-24T15:58:30+08:00',
+      },
+    ]);
+
+    runCleanup('pr-123');
+
+    expect(warnings().join('\n')).toContain('posted comment 11');
+  });
+
+  it('audits from auditSince when drift restarts pushed fetchedAt forward', () => {
+    // The Aone twin of the gh drift test: fetchedAt 10:00Z but auditSince
+    // 08:00Z → boundary 07:58Z; a comment at 08:30Z sits inside the
+    // auditSince window yet outside any fetchedAt-based one.
+    mocks.readFileSync.mockReturnValue(
+      JSON.stringify({
+        prNumber: '123',
+        ownerRepo: 'maxcompute/odps_src',
+        fetchedAt: '2026-07-24T10:00:00Z',
+        auditSince: '2026-07-24T08:00:00Z',
+        host: 'gitlab.alibaba-inc.com',
+      }),
+    );
+    mocks.a1Json.mockReturnValue([
+      {
+        id: 12,
+        note: 'posted during the abandoned attempt',
+        author: { username: 'reviewer' },
+        createdAt: '2026-07-24T16:30:00+08:00', // 08:30Z
+      },
+    ]);
+
+    runCleanup('pr-123');
+
+    expect(warnings().join('\n')).toContain('posted comment 12');
+  });
+
+  it('passes host undefined to the dispatch for a hostless report (the cwd-origin fall-through)', () => {
+    // A bare-number Aone run that omitted --host records no host; the
+    // dispatch then falls back to the cwd clone's origin (the registry's
+    // own fall-through, steered to 'aone' here). The pin is the call shape:
+    // host null must arrive as undefined, not as a string gh could route.
+    mocks.readFileSync.mockReturnValue(
+      JSON.stringify({
+        prNumber: '123',
+        ownerRepo: 'maxcompute/odps_src',
+        fetchedAt: '2026-07-24T08:00:00Z',
+        host: null,
+      }),
+    );
+    mocks.a1Json.mockReturnValue([]);
+
+    runCleanup('pr-123');
+
+    expect(mocks.detectPlatformKind).toHaveBeenCalledWith({ host: undefined });
+    expect(mocks.a1Json).toHaveBeenCalled();
+    expect(mocks.ghApiAll).not.toHaveBeenCalled();
+  });
+
+  it('treats a non-array comment list as a failure, not a clean window', () => {
+    // a1 can answer a well-formed error OBJECT with exit 0; reading it as
+    // "no comments" would make the tripwire's off state indistinguishable
+    // from its all-clear state.
+    mocks.readFileSync.mockReturnValue(aoneFetchReport);
+    mocks.a1Json.mockReturnValue({
+      schemaVersion: 'a1.error/v1',
+      code: 'COMMAND_FAILED',
+    });
+
+    runCleanup('pr-123');
+
+    const notes = mocks.writeStderrLine.mock.calls
+      .map((c) => String(c[0]))
+      .filter((l) => l.startsWith('note: bypass audit skipped'));
+    expect(notes.join('\n')).toContain('unexpected shape');
+    expect(warnings()).toEqual([]);
+  });
+
+  it('surfaces the message of an exit-0 error OBJECT, not just the shape complaint', () => {
+    // Measured a1 behaviour: a backend auth failure or a client timeout
+    // answers the error object with exit 0. The operator paging at 3 AM
+    // needs the cause (auth outage vs schema drift), not only "unexpected
+    // shape".
+    mocks.readFileSync.mockReturnValue(aoneFetchReport);
+    mocks.a1Json.mockReturnValue({
+      schemaVersion: 'a1.error/v1',
+      code: 'COMMAND_FAILED',
+      message:
+        'listing MR comments: failed to initialize NCS CLI executor: ncs below minimum version',
+      retryable: false,
+      exitCode: 1,
+    });
+
+    runCleanup('pr-123');
+
+    const notes = mocks.writeStderrLine.mock.calls
+      .map((c) => String(c[0]))
+      .filter((l) => l.startsWith('note: bypass audit skipped'));
+    expect(notes.join('\n')).toContain('unexpected shape');
+    expect(notes.join('\n')).toContain('failed to initialize NCS CLI executor');
+    expect(warnings()).toEqual([]);
+  });
+
+  it('names the skip when whoami fails, and still finishes cleanup', () => {
+    // The author arm cannot run without the account; matching nothing would
+    // read like a clean window, so the failure must surface as a skip.
+    mocks.readFileSync.mockReturnValue(aoneFetchReport);
+    mocks.a1Json.mockReturnValue([
+      {
+        id: 41,
+        note: 'some comment',
+        author: { username: 'reviewer' },
+        createdAt: '2026-07-24T17:02:32+08:00',
+      },
+    ]);
+    mocks.aoneWhoamiAccount.mockImplementation(() => {
+      throw new Error('a1 auth whoami returned no account');
+    });
+
+    expect(() => runCleanup('pr-123')).not.toThrow();
+    const notes = mocks.writeStderrLine.mock.calls
+      .map((c) => String(c[0]))
+      .filter((l) => l.startsWith('note: bypass audit skipped'));
+    expect(notes.join('\n')).toContain('whoami returned no account');
+    expect(warnings()).toEqual([]);
+    expect(mocks.clearReviewWorktreeLease).toHaveBeenCalled();
+  });
+
+  it('surfaces the first non-empty stderr line when a1 fails, and still finishes cleanup', () => {
+    mocks.readFileSync.mockReturnValue(aoneFetchReport);
+    mocks.a1Json.mockImplementation(() => {
+      throw Object.assign(
+        new Error('Command failed: a1 repo mr comment list …'),
+        {
+          stderr: '\nno repo context: run this command in a git repository\n',
+        },
+      );
+    });
+
+    expect(() => runCleanup('pr-123')).not.toThrow();
+    const notes = mocks.writeStderrLine.mock.calls
+      .map((c) => String(c[0]))
+      .filter((l) => l.startsWith('note: bypass audit skipped'));
+    expect(notes.join('\n')).toContain('no repo context');
+    expect(mocks.clearReviewWorktreeLease).toHaveBeenCalled();
+  });
+
+  it("reads the message field of a1's JSON error object, not its opening brace", () => {
+    // a1 fails with a PRETTY-PRINTED JSON error object on stderr; the first
+    // non-empty line is `{`, which says nothing. The cause rides `message`.
+    mocks.readFileSync.mockReturnValue(aoneFetchReport);
+    mocks.a1Json.mockImplementation(() => {
+      throw Object.assign(
+        new Error('Command failed: a1 repo mr comment list …'),
+        {
+          stderr: JSON.stringify(
+            {
+              schemaVersion: 'a1.error/v1',
+              code: 'COMMAND_FAILED',
+              message: 'merge request not found: 999999999',
+              retryable: false,
+              exitCode: 1,
+            },
+            null,
+            2,
+          ),
+        },
+      );
+    });
+
+    runCleanup('pr-123');
+
+    const notes = mocks.writeStderrLine.mock.calls
+      .map((c) => String(c[0]))
+      .filter((l) => l.startsWith('note: bypass audit skipped'));
+    expect(notes.join('\n')).toContain('merge request not found: 999999999');
+    expect(notes.join('\n')).not.toContain('skipped ({)');
+  });
+
+  it('flattens a message-less JSON error object instead of paging its opening brace', () => {
+    // The `message` field is the cause when present; an error object
+    // without one must still reach the operator as more than the
+    // pretty-print's opening brace.
+    mocks.readFileSync.mockReturnValue(aoneFetchReport);
+    mocks.a1Json.mockImplementation(() => {
+      throw Object.assign(
+        new Error('Command failed: a1 repo mr comment list …'),
+        {
+          stderr: JSON.stringify(
+            {
+              schemaVersion: 'a1.error/v1',
+              code: 'COMMAND_FAILED',
+              retryable: false,
+              exitCode: 1,
+            },
+            null,
+            2,
+          ),
+        },
+      );
+    });
+
+    runCleanup('pr-123');
+
+    const notes = mocks.writeStderrLine.mock.calls
+      .map((c) => String(c[0]))
+      .filter((l) => l.startsWith('note: bypass audit skipped'));
+    expect(notes.join('\n')).toContain('"code":"COMMAND_FAILED"');
+    expect(notes.join('\n')).not.toContain('skipped ({)');
   });
 });

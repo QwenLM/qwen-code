@@ -39,8 +39,18 @@ import {
 import { workspaceLabel } from '../../utils/workspace';
 import { SessionGroupSection } from './SessionGroupSection';
 import { SessionDetailsTooltip } from './SessionDetailsTooltip';
+import { sessionMatchesGitQuery } from './sessionSearch';
 import { measureSessionTitleScroll } from './sessionTitleScroll';
 import { groupSessionsByChannelType } from './channelSessionGroups';
+import { useWorkspaceOverview } from './useWorkspaceOverview';
+import { WorkspaceOverview } from './WorkspaceOverview';
+import {
+  DEFAULT_WORKSPACE_OVERVIEW_ITEMS,
+  summarizeSessions,
+  type WorkspaceOverviewItem,
+  type WorkspaceOverviewSnapshot,
+  type WorkspaceSessionStats,
+} from './workspaceOverviewModel';
 import styles from './WorkspaceSection.module.css';
 import sidebarStyles from './WebShellSidebar.module.css';
 import { useSessionCatalogQuery } from '../../session-catalog/session-catalog-hooks';
@@ -77,6 +87,12 @@ function WorkspaceFolderIcon({ open }: { open: boolean }) {
   );
 }
 
+export interface WorkspaceHeaderActionsContext {
+  overview: WorkspaceOverviewSnapshot | undefined;
+  /** Current branch from the git poll; null/undefined when not a git repo or not polled. */
+  gitBranch: string | null | undefined;
+}
+
 interface WorkspaceSectionProps {
   workspace: DaemonWorkspaceCapability;
   renderHeader?: (expanded: boolean) => ReactNode;
@@ -106,8 +122,43 @@ interface WorkspaceSectionProps {
    * instead of a bespoke, feature-poor row.
    */
   renderSession: (session: DaemonSessionSummary) => ReactNode;
+  mapSession?: (session: DaemonSessionSummary) => DaemonSessionSummary;
   showSessionDetails?: boolean;
-  headerActions?: (visible: boolean) => ReactNode;
+  /**
+   * Hover-revealed actions at the right edge of the folder header. Receives
+   * the workspace's overview snapshot — undefined until the first fetch or
+   * when the overview is disabled; the last fetched one while the row is
+   * collapsed — so a menu can show live counts, and the polled git branch
+   * so git-only actions can be withheld from non-git workspaces.
+   */
+  headerActions?: (
+    visible: boolean,
+    context: WorkspaceHeaderActionsContext,
+  ) => ReactNode;
+  /**
+   * Show session counts in the header and, while expanded, the full path and
+   * facet chips (MCP, skills, …). Off by default so embedders that render
+   * their own header keep today's layout. Facets are fetched only while the
+   * section is expanded and the workspace is trusted.
+   */
+  overviewEnabled?: boolean;
+  overviewItems?: readonly WorkspaceOverviewItem[];
+  /** Narrow sidebar: chips drop their text labels. */
+  compact?: boolean;
+  /**
+   * A header action reads the polled git branch (the worktree entry), so the
+   * poll must run even without the diff-chip handler. Off when no consumer
+   * of `gitBranch` is wired.
+   */
+  gitBranchWanted?: boolean;
+  /**
+   * Session counts for the header. The primary workspace's sessions are
+   * listed by the sidebar itself, so it passes them in; other workspaces
+   * count their own catalog page. `null` means the parent owns the counts
+   * but has no page yet (a source switch in flight): show none rather than
+   * the previous source's numbers.
+   */
+  sessionStats?: WorkspaceSessionStats | null;
   onRenameGroup?: (group: DaemonSessionGroup, workspaceCwd: string) => void;
   onDeleteGroup?: (group: DaemonSessionGroup, workspaceCwd: string) => void;
   renameGroupLabel?: string;
@@ -147,8 +198,14 @@ export function WorkspaceSection({
   onExpandedChange,
   renderSessions = true,
   renderSession,
+  mapSession,
   showSessionDetails = true,
   headerActions,
+  overviewEnabled = false,
+  overviewItems = DEFAULT_WORKSPACE_OVERVIEW_ITEMS,
+  compact = false,
+  gitBranchWanted = false,
+  sessionStats,
   onRenameGroup,
   onDeleteGroup,
   renameGroupLabel,
@@ -371,7 +428,11 @@ export function WorkspaceSection({
   // Undefined when `cwd` is not a real path (synthetic fallback workspace), so
   // the poll — which qualifies the route with the cwd — is skipped entirely.
   const gitPollCwd = isAbsolutePath(workspace.cwd) ? workspace.cwd : undefined;
-  const gitStatusEnabled = Boolean(onOpenGitDiff);
+  // The poll feeds the header chip (needs the diff handler) and the header
+  // actions' git-gated entries (a worktree task needs a branch), so it runs
+  // when either consumer is wired — the caller says so explicitly, since a
+  // header-actions closure is also passed for rows that render no git entry.
+  const gitStatusEnabled = Boolean(onOpenGitDiff) || gitBranchWanted;
 
   // Log a poll failure only on the success→failure transition, not on every
   // 60s/focus tick, so an unreachable workspace doesn't spam a long-lived tab.
@@ -401,8 +462,8 @@ export function WorkspaceSection({
   // The git chip lives in the always-visible folder header, so it polls
   // independently of session expansion: on mount/trust, on window focus, and on
   // a visibility-gated 60s tick (the daemon recomputes the working-tree summary
-  // per call, so the cadence stays gentle). Skipped entirely when no diff
-  // handler is wired, since the chip — its only consumer — would not render.
+  // per call, so the cadence stays gentle). Skipped entirely when neither
+  // consumer — the chip nor the header actions — is wired.
   useEffect(() => {
     if (!gitStatusEnabled || !workspace.trusted || !gitPollCwd) {
       setGitStatus(undefined);
@@ -426,17 +487,94 @@ export function WorkspaceSection({
     workspace.trusted,
   ]);
 
-  const visibleSessions = useMemo(() => {
+  // The path and chips block below renders only under the default header;
+  // the header actions (the menu's live counts) are the snapshot's other
+  // consumer and can be wired under a custom header too.
+  const overviewVisible =
+    overviewEnabled && expanded && !disabled && !renderHeader;
+  const overviewConsumed =
+    overviewEnabled &&
+    expanded &&
+    !disabled &&
+    (!renderHeader || Boolean(headerActions));
+  // Facet chips ride the expanded state like the session list: a collapsed
+  // row costs nothing, and an untrusted workspace has no runtime to ask. A
+  // synthetic fallback workspace has no real cwd, so nothing is fetched.
+  const { overview } = useWorkspaceOverview(client, gitPollCwd, {
+    enabled: overviewConsumed && workspace.trusted,
+    items: overviewItems,
+    reloadToken,
+  });
+  // The header menu stays reachable on a collapsed row, so it keeps the last
+  // snapshot the row fetched (the same retention the session counts get)
+  // instead of dropping its counts the moment the row collapses.
+  const [retainedOverview, setRetainedOverview] =
+    useState<WorkspaceOverviewSnapshot>();
+  useEffect(() => {
+    if (overview) setRetainedOverview(overview);
+  }, [overview]);
+  const liveStats = useMemo<WorkspaceSessionStats | undefined>(() => {
+    if (!overviewEnabled) return undefined;
+    if (sessionStats) return sessionStats;
+    if (!sessionsEnabled || sessionsPage === undefined) return undefined;
+    return summarizeSessions(
+      sessions,
+      // Either more pages follow, or the daemon capped its scan and marked
+      // the page a lower bound.
+      Boolean(sessionsResult.nextCursor) || sessionsResult.truncated === true,
+    );
+  }, [
+    overviewEnabled,
+    sessionStats,
+    sessions,
+    sessionsEnabled,
+    sessionsPage,
+    sessionsResult.nextCursor,
+    sessionsResult.truncated,
+  ]);
+  // Collapsing a row disables its catalog query, so keep the last counts the
+  // row computed: the header keeps telling how busy the workspace is without
+  // paying for a subscription it no longer lists. While the query is active
+  // a missing page is a fetch in progress (a source switch swapped the query
+  // key), and stale counts above an empty list would mislead — show none.
+  // The retained value is tagged with the source it was computed for: a
+  // global source switch while the row is collapsed must not keep showing
+  // the previous source's numbers.
+  const [retained, setRetained] = useState<{
+    stats: WorkspaceSessionStats;
+    sourceType: string | undefined;
+  }>();
+  useEffect(() => {
+    if (liveStats) setRetained({ stats: liveStats, sourceType });
+  }, [liveStats, sourceType]);
+  const retainedStats =
+    retained && retained.sourceType === sourceType ? retained.stats : undefined;
+  const stats =
+    overviewEnabled && sessionStats !== null
+      ? (liveStats ?? (sessionsActive ? undefined : retainedStats))
+      : undefined;
+
+  const searchedSessions = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
-    return sessions.filter((session) => {
-      if (excludePinned && session.isPinned) return false;
-      if (!query) return true;
-      const label = (session.displayName || '').toLowerCase();
-      return (
-        label.includes(query) || session.sessionId.toLowerCase().includes(query)
-      );
-    });
-  }, [excludePinned, searchQuery, sessions]);
+    return sessions
+      .map((session) => mapSession?.(session) ?? session)
+      .filter((session) => {
+        if (!query) return true;
+        const label = (session.displayName || '').toLowerCase();
+        return (
+          label.includes(query) ||
+          session.sessionId.toLowerCase().includes(query) ||
+          sessionMatchesGitQuery(session, query)
+        );
+      });
+  }, [mapSession, searchQuery, sessions]);
+  const visibleSessions = useMemo(
+    () =>
+      excludePinned
+        ? searchedSessions.filter((session) => !session.isPinned)
+        : searchedSessions,
+    [excludePinned, searchedSessions],
+  );
   const directSessions =
     searchActive || showAllSessions || !limitSessions
       ? visibleSessions
@@ -447,7 +585,12 @@ export function WorkspaceSection({
       return null;
     const assigned = new Set<string>();
     const sections = groups.map((group) => {
-      const items = visibleSessions.filter(
+      // Group sections derive from the search-filtered list, not the
+      // pinned-filtered one: pinned members are lifted into the Pinned
+      // section, but dropping them here rendered a group whose members are
+      // all pinned as `· 0`, indistinguishable from lost memberships
+      // (#10391).
+      const items = searchedSessions.filter(
         (session) => session.groupId === group.id,
       );
       items.forEach((session) => assigned.add(session.sessionId));
@@ -455,11 +598,19 @@ export function WorkspaceSection({
     });
     return {
       sections,
+      // Pinned sessions without a group stay Pinned-section-only; they never
+      // spill into Ungrouped.
       ungrouped: visibleSessions.filter(
         (session) => !assigned.has(session.sessionId),
       ),
     };
-  }, [channelGroupingEnabled, groups, organizationEnabled, visibleSessions]);
+  }, [
+    channelGroupingEnabled,
+    groups,
+    organizationEnabled,
+    searchedSessions,
+    visibleSessions,
+  ]);
 
   const channelSessionGroups = useMemo(
     () =>
@@ -517,13 +668,65 @@ export function WorkspaceSection({
                 <WorkspaceFolderIcon open={expanded} />
               </span>
               <span className={styles.headerContent}>
-                <span className={styles.name}>{workspaceLabel(workspace)}</span>
+                <span className={styles.name} title={workspace.cwd}>
+                  {workspaceLabel(workspace)}
+                </span>
               </span>
               {!workspace.trusted && (
                 <span className={styles.badge}>{untrustedLabel}</span>
               )}
               {readOnly && (
                 <span className={styles.badge}>{readOnlyLabel}</span>
+              )}
+              {stats && stats.total > 0 && (
+                <span className={styles.headerCounts}>
+                  {stats.attention > 0 && (
+                    <span
+                      className={cx(
+                        styles.headerCount,
+                        styles.headerCountAttention,
+                      )}
+                      title={t('sidebar.sessionsAttention', {
+                        count: stats.attention,
+                      })}
+                      aria-label={t('sidebar.sessionsAttention', {
+                        count: stats.attention,
+                      })}
+                    >
+                      {stats.attention}
+                    </span>
+                  )}
+                  {stats.running > 0 && (
+                    <span
+                      className={cx(
+                        styles.headerCount,
+                        styles.headerCountRunning,
+                      )}
+                      title={t('sidebar.sessionsRunning', {
+                        count: stats.running,
+                      })}
+                      aria-label={t('sidebar.sessionsRunning', {
+                        count: stats.running,
+                      })}
+                    >
+                      {stats.running}
+                    </span>
+                  )}
+                  <span
+                    className={cx(styles.headerCount, styles.headerCountTotal)}
+                    title={t('sidebar.sessionsTotal', {
+                      count: stats.total,
+                      truncated: stats.truncated ? 1 : 0,
+                    })}
+                    aria-label={t('sidebar.sessionsTotal', {
+                      count: stats.total,
+                      truncated: stats.truncated ? 1 : 0,
+                    })}
+                  >
+                    {stats.total}
+                    {stats.truncated ? '+' : ''}
+                  </span>
+                </span>
               )}
             </>
           )}
@@ -534,6 +737,8 @@ export function WorkspaceSection({
             onOpenChange={setBranchPickerOpen}
             workspaceCwd={workspace.cwd}
             onBranchChanged={() => void loadGitStatus()}
+            status={gitStatus}
+            onStatusRefreshed={setGitStatus}
             onOpenDiff={() => onOpenGitDiff(workspace.cwd)}
             onOpenCommit={
               onOpenCommit ? () => onOpenCommit(workspace.cwd) : undefined
@@ -552,8 +757,29 @@ export function WorkspaceSection({
             </button>
           </BranchPickerPopover>
         )}
-        {headerActions?.(actionsVisible)}
+        {headerActions?.(actionsVisible, {
+          overview: overview ?? retainedOverview,
+          gitBranch: gitStatus?.branch,
+        })}
       </div>
+      {overviewVisible && gitPollCwd !== undefined && (
+        <>
+          <div
+            className={cx(styles.path, compact && styles.pathCompact)}
+            title={workspace.cwd}
+            data-web-shell-workspace-path
+          >
+            {workspace.cwd}
+          </div>
+          {workspace.trusted && (
+            <WorkspaceOverview
+              overview={overview}
+              items={overviewItems}
+              compact={compact}
+            />
+          )}
+        </>
+      )}
       {renderSessions &&
         (expanded || Boolean(searchQuery.trim())) &&
         !disabled && (
@@ -562,7 +788,16 @@ export function WorkspaceSection({
               <div className={styles.error} role="status">
                 {loadErrorLabel}
               </div>
-            ) : visibleSessions.length === 0 ? (
+            ) : visibleSessions.length === 0 &&
+              // Group sections keep pinned members even when the
+              // pinned-filtered list is empty, so only show the empty label
+              // when the grouped view has nothing to render either.
+              !(
+                groupedSessions &&
+                groupedSessions.sections.some(
+                  (section) => section.sessions.length > 0,
+                )
+              ) ? (
               // A source switch swaps the query key; until the new source's
               // page settles there is no data yet, so the "no sessions" notice
               // would flash for a whole fetch round-trip.

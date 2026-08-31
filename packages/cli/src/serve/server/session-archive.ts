@@ -5,7 +5,10 @@
  */
 
 import {
+  SessionIdCaseConflictError,
   SessionService,
+  SessionTranscriptChangedError,
+  SessionWriterUnavailableError,
   type SessionLocation,
 } from '@qwen-code/qwen-code-core';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
@@ -28,6 +31,7 @@ import {
 export interface DaemonArchiveSessionsResult {
   archived: string[];
   alreadyArchived: string[];
+  resolvedConflicts: string[];
   notFound: string[];
   errors: Array<{ sessionId: string; error: unknown }>;
 }
@@ -35,6 +39,7 @@ export interface DaemonArchiveSessionsResult {
 export interface DaemonUnarchiveSessionsResult {
   unarchived: string[];
   alreadyActive: string[];
+  resolvedConflicts: string[];
   notFound: string[];
   errors: Array<{ sessionId: string; error: unknown }>;
 }
@@ -42,7 +47,7 @@ export interface DaemonUnarchiveSessionsResult {
 export interface DaemonDeleteSessionsResult {
   removed: string[];
   notFound: string[];
-  errors: Array<{ sessionId: string; error: unknown }>;
+  errors: Array<{ sessionId: string; error: string }>;
 }
 
 export type DaemonDeleteErrorPhase = 'close' | 'remove' | 'delete';
@@ -59,6 +64,10 @@ export class DaemonDrainingError extends Error {
 export class SessionArchiveCoordinator {
   private readonly exclusive = new Set<string>();
   private readonly shared = new Map<string, number>();
+  private readonly sharedDrains = new Map<
+    string,
+    { promise: Promise<void>; resolve: () => void }
+  >();
   private maintenanceSealed = false;
   private activeMaintenance = 0;
   private maintenanceDrain:
@@ -110,6 +119,43 @@ export class SessionArchiveCoordinator {
     }
   }
 
+  async runExclusiveAfterShared<T>(
+    rawSessionId: string,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    if (this.maintenanceSealed) {
+      throw new DaemonDrainingError();
+    }
+    const sessionId = normalizeSessionIdForLookup(rawSessionId);
+    this.assertNotTransitioning(sessionId);
+    this.exclusive.add(sessionId);
+    this.activeMaintenance++;
+    try {
+      const sharedCount = this.shared.get(sessionId) ?? 0;
+      if (sharedCount > 0) {
+        let drain = this.sharedDrains.get(sessionId);
+        if (!drain) {
+          let resolve!: () => void;
+          const promise = new Promise<void>((done) => {
+            resolve = done;
+          });
+          drain = { promise, resolve };
+          this.sharedDrains.set(sessionId, drain);
+        }
+        await drain.promise;
+      }
+      return await fn();
+    } finally {
+      this.sharedDrains.delete(sessionId);
+      this.exclusive.delete(sessionId);
+      this.activeMaintenance--;
+      if (this.activeMaintenance === 0) {
+        this.maintenanceDrain?.resolve();
+        this.maintenanceDrain = undefined;
+      }
+    }
+  }
+
   sealMaintenanceAndWait(): Promise<void> {
     this.maintenanceSealed = true;
     if (this.activeMaintenance === 0) {
@@ -149,6 +195,8 @@ export class SessionArchiveCoordinator {
         const count = (this.shared.get(sessionId) ?? 1) - 1;
         if (count <= 0) {
           this.shared.delete(sessionId);
+          this.sharedDrains.get(sessionId)?.resolve();
+          this.sharedDrains.delete(sessionId);
         } else {
           this.shared.set(sessionId, count);
         }
@@ -177,6 +225,7 @@ async function runWithDaemonWriterLease<T>(params: {
   service: SessionService;
   mutate: (
     assertOwnedAndUnchanged: () => Promise<void>,
+    assertCleanupOwned: () => void,
   ) => Promise<{ value: T; mutationApplied: boolean }>;
   mutationAppliedAfterError: () => Promise<boolean>;
   afterMutationApplied: () => Promise<void>;
@@ -191,10 +240,25 @@ async function runWithDaemonWriterLease<T>(params: {
   } = params;
   let lease;
   try {
-    lease = await service.acquireSessionWriterLease(sessionId, {
-      processKind: 'daemon',
-      reclaimPolicy: 'never',
-    });
+    const leaseOptions = {
+      processKind: 'daemon' as const,
+      reclaimPolicy: 'never' as const,
+      takeoverPolicy: 'certified' as const,
+    };
+    try {
+      lease = await service.acquireSessionWriterLease(sessionId, leaseOptions);
+    } catch (error) {
+      if (
+        !(error instanceof SessionWriterUnavailableError) &&
+        !(error instanceof SessionTranscriptChangedError)
+      ) {
+        throw error;
+      }
+      lease = await service.acquireSessionMaintenanceLease(
+        sessionId,
+        leaseOptions,
+      );
+    }
   } catch (error) {
     return { mutationApplied: false, error };
   }
@@ -203,7 +267,10 @@ async function runWithDaemonWriterLease<T>(params: {
   let mutationApplied = false;
   let mutationError: unknown;
   try {
-    const mutation = await mutate(() => lease.assertOwnedAndUnchanged());
+    const mutation = await mutate(
+      () => lease.assertOwnedAndUnchanged(),
+      () => lease.assertCleanupOwned(),
+    );
     value = mutation.value;
     mutationApplied = mutation.mutationApplied;
   } catch (error) {
@@ -289,28 +356,40 @@ async function classifySessionLocation(
   service: SessionService,
   sessionId: string,
 ): Promise<SessionLocation> {
-  return service.getSessionLocation(sessionId);
+  return service.getMaintainableSessionLocation(sessionId);
 }
 
-function sessionLocationError(sessionId: string): Error {
-  return new Error(`Session archive conflict: ${sessionId}`);
+function sessionLocationError(sessionId: string): SessionConflictError {
+  const error = new SessionConflictError(sessionId);
+  error.message = `Session "${sessionId}" exists in both active and archived directories. Retry with resolveConflicts: true to keep one copy.`;
+  return error;
 }
 
 function updateScheduledTaskForMaintenance(
   service: SessionService,
   sessionId: string,
   action: DaemonMaintenanceAction,
+  assertCanMutate?: () => void,
 ): Promise<void> {
   if (action === 'archive') {
-    return disableTasksForSessions(service.getProjectRoot(), [sessionId]);
+    return disableTasksForSessions(service.getProjectRoot(), [sessionId], {
+      assertCanCommit: assertCanMutate,
+    });
   }
   if (action === 'unarchive') {
-    return enableTasksForSessions(service.getProjectRoot(), [sessionId]);
+    return enableTasksForSessions(
+      service.getProjectRoot(),
+      [sessionId],
+      Date.now(),
+      { assertCanCommit: assertCanMutate },
+    );
   }
-  return removeTasksForSessions(service.getProjectRoot(), [sessionId]);
+  return removeTasksForSessions(service.getProjectRoot(), [sessionId], {
+    assertCanCommit: assertCanMutate,
+  });
 }
 
-type DeleteOneResult =
+type DeleteOneResult = (
   | {
       kind: 'removed';
       mutationApplied: boolean;
@@ -323,21 +402,39 @@ type DeleteOneResult =
       kind: 'error';
       error: unknown;
       mutationApplied: boolean;
-    };
+    }
+) & { maintenanceError?: unknown };
 
 async function deletePersistedSessionWithLease(
   service: SessionService,
   sessionId: string,
+  assertCanMutate?: () => void,
 ): Promise<DeleteOneResult> {
   const initialLocation = await classifySessionLocation(service, sessionId);
   if (initialLocation === undefined) {
-    return { kind: 'notFound', mutationApplied: false };
-  }
-  if (initialLocation === 'conflict') {
+    let maintenanceError: unknown;
+    try {
+      assertCanMutate?.();
+      await updateScheduledTaskForMaintenance(
+        service,
+        sessionId,
+        'delete',
+        assertCanMutate,
+      );
+    } catch (error) {
+      maintenanceError = error;
+      logSessionArchiveWarning(
+        `scheduled task lifecycle update failed action=delete workspace=${safeLogValue(
+          service.getProjectRoot(),
+        )} session=${safeLogValue(sessionId)} error=${safeLogValue(
+          errorMessage(error),
+        )}`,
+      );
+    }
     return {
-      kind: 'error',
-      error: sessionLocationError(sessionId),
+      kind: 'notFound',
       mutationApplied: false,
+      maintenanceError,
     };
   }
 
@@ -345,7 +442,7 @@ async function deletePersistedSessionWithLease(
     action: 'delete',
     sessionId,
     service,
-    mutate: async (assertOwnedAndUnchanged) => {
+    mutate: async (assertOwnedAndUnchanged, assertCleanupOwned) => {
       const lockedLocation = await classifySessionLocation(service, sessionId);
       if (lockedLocation === undefined) {
         return {
@@ -353,11 +450,11 @@ async function deletePersistedSessionWithLease(
           mutationApplied: false,
         };
       }
-      if (lockedLocation === 'conflict') {
-        throw sessionLocationError(sessionId);
-      }
-      await assertOwnedAndUnchanged();
-      const removed = await service.removeSession(sessionId);
+      const removed = await service.removeSession(sessionId, {
+        assertStorageUnchanged: assertOwnedAndUnchanged,
+        assertCanMutate,
+        assertCleanupOwned,
+      });
       return {
         value: removed ? ('removed' as const) : ('notFound' as const),
         mutationApplied: removed,
@@ -365,19 +462,28 @@ async function deletePersistedSessionWithLease(
     },
     mutationAppliedAfterError: async () =>
       (await classifySessionLocation(service, sessionId)) === undefined,
-    afterMutationApplied: () =>
-      updateScheduledTaskForMaintenance(service, sessionId, 'delete'),
+    afterMutationApplied: async () => {
+      assertCanMutate?.();
+      await updateScheduledTaskForMaintenance(
+        service,
+        sessionId,
+        'delete',
+        assertCanMutate,
+      );
+    },
   });
   if (mutation.error !== undefined) {
     return {
       kind: 'error',
       error: mutation.error,
       mutationApplied: mutation.mutationApplied,
+      maintenanceError: mutation.maintenanceError,
     };
   }
   return {
     kind: mutation.value ?? 'notFound',
     mutationApplied: mutation.mutationApplied,
+    maintenanceError: mutation.maintenanceError,
   };
 }
 
@@ -387,6 +493,7 @@ export async function deleteDaemonSessions(params: {
   bridge: Pick<AcpSessionBridge, 'closeSession' | 'deleteSessionAttachments'>;
   coordinator: SessionArchiveCoordinator;
   coordinatorLockHeld?: boolean;
+  assertCanMutate?: () => void;
   onError?: (entry: {
     phase: DaemonDeleteErrorPhase;
     sessionId: string;
@@ -399,6 +506,7 @@ export async function deleteDaemonSessions(params: {
     bridge,
     coordinator,
     coordinatorLockHeld = false,
+    assertCanMutate,
     onError,
   } = params;
   const uniqueSessionIds = [
@@ -413,10 +521,12 @@ export async function deleteDaemonSessions(params: {
     uniqueSessionIds.map(async (sessionId) => {
       try {
         const mutateSession = async () => {
+          assertCanMutate?.();
           const removePersistedSession = async () => {
             const result = await deletePersistedSessionWithLease(
               service,
               sessionId,
+              assertCanMutate,
             );
             if (result.kind === 'error') {
               onError?.({
@@ -427,7 +537,13 @@ export async function deleteDaemonSessions(params: {
               return result;
             }
             try {
-              await bridge.deleteSessionAttachments(sessionId);
+              if (assertCanMutate) {
+                await bridge.deleteSessionAttachments(sessionId, {
+                  assertCanCommit: assertCanMutate,
+                });
+              } else {
+                await bridge.deleteSessionAttachments(sessionId);
+              }
               return result;
             } catch (error) {
               onError?.({
@@ -439,6 +555,7 @@ export async function deleteDaemonSessions(params: {
                 kind: 'error' as const,
                 error,
                 mutationApplied: result.mutationApplied,
+                maintenanceError: result.maintenanceError,
               };
             }
           };
@@ -485,7 +602,7 @@ export async function deleteDaemonSessions(params: {
 
   const removed: string[] = [];
   const notFound: string[] = [];
-  const errors: Array<{ sessionId: string; error: unknown }> = [];
+  const errors: Array<{ sessionId: string; error: string }> = [];
   for (let i = 0; i < results.length; i++) {
     const sessionId = uniqueSessionIds[i]!;
     const result = results[i]!;
@@ -495,6 +612,12 @@ export async function deleteDaemonSessions(params: {
       notFound.push(sessionId);
     } else {
       errors.push({ sessionId, error: errorMessage(result.error) });
+    }
+    if (result.maintenanceError !== undefined) {
+      errors.push({
+        sessionId,
+        error: 'Scheduled task lifecycle update failed.',
+      });
     }
   }
 
@@ -541,6 +664,55 @@ export async function assertSessionLoadable(
   workspaceCwd: string,
   sessionId: string,
   runtimeBaseDir?: string,
+  options: { allowActiveConflict?: boolean } = {},
+): Promise<SessionLocation> {
+  const service = new SessionService(workspaceCwd, {
+    runtimeBaseDir,
+  });
+  const location = await service.getSessionLocation(sessionId);
+  if (location === 'archived') {
+    throw new SessionArchivedError(sessionId);
+  }
+  if (location === 'conflict') {
+    if (options.allowActiveConflict) {
+      try {
+        await service.findSessionIdIgnoringCase(sessionId);
+      } catch (error) {
+        if (
+          error instanceof SessionIdCaseConflictError &&
+          error.reason === 'case_conflict' &&
+          error.candidateSessionId === sessionId
+        ) {
+          return 'active';
+        }
+        if (!(error instanceof SessionIdCaseConflictError)) throw error;
+      }
+    }
+    throw new SessionConflictError(sessionId);
+  }
+  return location;
+}
+
+export async function resolveSessionIdForRestore(
+  service: SessionService,
+  sessionId: string,
+): Promise<string | undefined> {
+  try {
+    return await service.findSessionIdIgnoringCase(sessionId);
+  } catch (error) {
+    if (error instanceof SessionIdCaseConflictError) {
+      if (error.candidateSessionId === sessionId) return sessionId;
+      throw new SessionConflictError(sessionId);
+    }
+    throw error;
+  }
+}
+
+export async function assertSessionRestorable(
+  workspaceCwd: string,
+  sessionId: string,
+  requestedSessionId: string,
+  runtimeBaseDir?: string,
 ): Promise<SessionLocation> {
   const location = await new SessionService(workspaceCwd, {
     runtimeBaseDir,
@@ -549,7 +721,10 @@ export async function assertSessionLoadable(
     throw new SessionArchivedError(sessionId);
   }
   if (location === 'conflict') {
-    throw new SessionConflictError(sessionId);
+    if (sessionId !== requestedSessionId) {
+      throw new SessionConflictError(requestedSessionId);
+    }
+    return 'active';
   }
   return location;
 }
@@ -642,6 +817,8 @@ export async function archiveDaemonSessions(params: {
   bridge: Pick<AcpSessionBridge, 'closeSession'>;
   coordinator: SessionArchiveCoordinator;
   coordinatorLockHeld?: boolean;
+  resolveConflicts?: boolean;
+  assertCanMutate?: () => void;
 }): Promise<DaemonArchiveSessionsResult> {
   const {
     sessionIds,
@@ -649,6 +826,8 @@ export async function archiveDaemonSessions(params: {
     bridge,
     coordinator,
     coordinatorLockHeld = false,
+    resolveConflicts = false,
+    assertCanMutate,
   } = params;
   const uniqueSessionIds = [
     ...new Set(sessionIds.map(normalizeSessionIdForLookup)),
@@ -662,6 +841,7 @@ export async function archiveDaemonSessions(params: {
     uniqueSessionIds.map(async (sessionId) => {
       try {
         const mutateSession = async () => {
+          assertCanMutate?.();
           try {
             await bridge.closeSession(sessionId, undefined, {
               requireAgentClose: true,
@@ -683,13 +863,7 @@ export async function archiveDaemonSessions(params: {
           if (initialLocation === undefined) {
             return { kind: 'notFound' as const, mutationApplied: false };
           }
-          if (initialLocation === 'archived') {
-            return {
-              kind: 'alreadyArchived' as const,
-              mutationApplied: false,
-            };
-          }
-          if (initialLocation === 'conflict') {
+          if (initialLocation === 'conflict' && !resolveConflicts) {
             return {
               kind: 'error' as const,
               error: sessionLocationError(sessionId),
@@ -701,7 +875,7 @@ export async function archiveDaemonSessions(params: {
             action: 'archive',
             sessionId,
             service,
-            mutate: async (assertOwnedAndUnchanged) => {
+            mutate: async (assertOwnedAndUnchanged, assertCleanupOwned) => {
               const lockedLocation = await classifySessionLocation(
                 service,
                 sessionId,
@@ -712,23 +886,21 @@ export async function archiveDaemonSessions(params: {
                   mutationApplied: false,
                 };
               }
-              if (lockedLocation === 'archived') {
-                return {
-                  value: 'alreadyArchived' as const,
-                  mutationApplied: false,
-                };
-              }
-              if (lockedLocation === 'conflict') {
+              if (lockedLocation === 'conflict' && !resolveConflicts) {
                 throw sessionLocationError(sessionId);
               }
-              await assertOwnedAndUnchanged();
               const result = await service.archiveSessions([sessionId], {
-                knownLocation: 'active',
+                resolveConflicts,
+                assertStorageUnchanged: assertOwnedAndUnchanged,
+                assertCanMutate,
+                assertCleanupOwned,
               });
               if (result.errors[0]) throw result.errors[0].error;
               if (result.archived.length > 0) {
                 return {
-                  value: 'archived' as const,
+                  value: result.resolvedConflicts.length
+                    ? ('resolvedConflict' as const)
+                    : ('archived' as const),
                   mutationApplied: true,
                 };
               }
@@ -743,19 +915,48 @@ export async function archiveDaemonSessions(params: {
             mutationAppliedAfterError: async () =>
               (await classifySessionLocation(service, sessionId)) ===
               'archived',
-            afterMutationApplied: () =>
-              updateScheduledTaskForMaintenance(service, sessionId, 'archive'),
+            afterMutationApplied: async () => {
+              assertCanMutate?.();
+              await updateScheduledTaskForMaintenance(
+                service,
+                sessionId,
+                'archive',
+                assertCanMutate,
+              );
+            },
           });
           if (mutation.error !== undefined) {
             return {
               kind: 'error' as const,
               error: mutation.error,
               mutationApplied: mutation.mutationApplied,
+              maintenanceError: mutation.maintenanceError,
             };
+          }
+          let maintenanceError = mutation.maintenanceError;
+          if (mutation.value === 'alreadyArchived') {
+            try {
+              await updateScheduledTaskForMaintenance(
+                service,
+                sessionId,
+                'archive',
+                assertCanMutate,
+              );
+            } catch (error) {
+              maintenanceError = error;
+              logSessionArchiveWarning(
+                `scheduled task lifecycle update failed action=archive workspace=${safeLogValue(
+                  service.getProjectRoot(),
+                )} session=${safeLogValue(sessionId)} error=${safeLogValue(
+                  errorMessage(error),
+                )}`,
+              );
+            }
           }
           return {
             kind: mutation.value ?? 'notFound',
             mutationApplied: mutation.mutationApplied,
+            maintenanceError,
           };
         };
         return await (coordinatorLockHeld
@@ -777,16 +978,23 @@ export async function archiveDaemonSessions(params: {
 
   const archived: string[] = [];
   const alreadyArchived: string[] = [];
+  const resolvedConflicts: string[] = [];
   const notFound: string[] = [];
   const errors: Array<{ sessionId: string; error: unknown }> = [];
   for (let i = 0; i < results.length; i++) {
     const sessionId = uniqueSessionIds[i]!;
     const result = results[i]!;
     if (result.kind === 'archived') archived.push(sessionId);
-    else if (result.kind === 'alreadyArchived') {
+    else if (result.kind === 'resolvedConflict') {
+      archived.push(sessionId);
+      resolvedConflicts.push(sessionId);
+    } else if (result.kind === 'alreadyArchived') {
       alreadyArchived.push(sessionId);
     } else if (result.kind === 'notFound') notFound.push(sessionId);
     else errors.push({ sessionId, error: result.error });
+    if ('maintenanceError' in result && result.maintenanceError !== undefined) {
+      errors.push({ sessionId, error: result.maintenanceError });
+    }
   }
 
   logSessionArchiveResult('archive', {
@@ -797,7 +1005,13 @@ export async function archiveDaemonSessions(params: {
     errors,
   });
 
-  return { archived, alreadyArchived, notFound, errors };
+  return {
+    archived,
+    alreadyArchived,
+    resolvedConflicts,
+    notFound,
+    errors,
+  };
 }
 
 export async function unarchiveDaemonSessions(params: {
@@ -805,12 +1019,16 @@ export async function unarchiveDaemonSessions(params: {
   service: SessionService;
   coordinator: SessionArchiveCoordinator;
   coordinatorLockHeld?: boolean;
+  resolveConflicts?: boolean;
+  assertCanMutate?: () => void;
 }): Promise<DaemonUnarchiveSessionsResult> {
   const {
     sessionIds,
     service,
     coordinator,
     coordinatorLockHeld = false,
+    resolveConflicts = false,
+    assertCanMutate,
   } = params;
   const uniqueSessionIds = [
     ...new Set(sessionIds.map(normalizeSessionIdForLookup)),
@@ -824,6 +1042,7 @@ export async function unarchiveDaemonSessions(params: {
     uniqueSessionIds.map(async (sessionId) => {
       try {
         const mutateSession = async () => {
+          assertCanMutate?.();
           const initialLocation = await classifySessionLocation(
             service,
             sessionId,
@@ -831,31 +1050,7 @@ export async function unarchiveDaemonSessions(params: {
           if (initialLocation === undefined) {
             return { kind: 'notFound' as const, mutationApplied: false };
           }
-          if (initialLocation === 'active') {
-            let maintenanceError: unknown;
-            try {
-              await updateScheduledTaskForMaintenance(
-                service,
-                sessionId,
-                'unarchive',
-              );
-            } catch (error) {
-              maintenanceError = error;
-              logSessionArchiveWarning(
-                `scheduled task lifecycle update failed action=unarchive workspace=${safeLogValue(
-                  service.getProjectRoot(),
-                )} session=${safeLogValue(sessionId)} error=${safeLogValue(
-                  errorMessage(error),
-                )}`,
-              );
-            }
-            return {
-              kind: 'alreadyActive' as const,
-              mutationApplied: false,
-              maintenanceError,
-            };
-          }
-          if (initialLocation === 'conflict') {
+          if (initialLocation === 'conflict' && !resolveConflicts) {
             return {
               kind: 'error' as const,
               error: sessionLocationError(sessionId),
@@ -867,7 +1062,7 @@ export async function unarchiveDaemonSessions(params: {
             action: 'unarchive',
             sessionId,
             service,
-            mutate: async (assertOwnedAndUnchanged) => {
+            mutate: async (assertOwnedAndUnchanged, assertCleanupOwned) => {
               const lockedLocation = await classifySessionLocation(
                 service,
                 sessionId,
@@ -878,23 +1073,21 @@ export async function unarchiveDaemonSessions(params: {
                   mutationApplied: false,
                 };
               }
-              if (lockedLocation === 'active') {
-                return {
-                  value: 'alreadyActive' as const,
-                  mutationApplied: false,
-                };
-              }
-              if (lockedLocation === 'conflict') {
+              if (lockedLocation === 'conflict' && !resolveConflicts) {
                 throw sessionLocationError(sessionId);
               }
-              await assertOwnedAndUnchanged();
               const result = await service.unarchiveSessions([sessionId], {
-                knownLocation: 'archived',
+                resolveConflicts,
+                assertStorageUnchanged: assertOwnedAndUnchanged,
+                assertCanMutate,
+                assertCleanupOwned,
               });
               if (result.errors[0]) throw result.errors[0].error;
               if (result.unarchived.length > 0) {
                 return {
-                  value: 'unarchived' as const,
+                  value: result.resolvedConflicts.length
+                    ? ('resolvedConflict' as const)
+                    : ('unarchived' as const),
                   mutationApplied: true,
                 };
               }
@@ -908,24 +1101,48 @@ export async function unarchiveDaemonSessions(params: {
             },
             mutationAppliedAfterError: async () =>
               (await classifySessionLocation(service, sessionId)) === 'active',
-            afterMutationApplied: () =>
-              updateScheduledTaskForMaintenance(
+            afterMutationApplied: async () => {
+              assertCanMutate?.();
+              await updateScheduledTaskForMaintenance(
                 service,
                 sessionId,
                 'unarchive',
-              ),
+                assertCanMutate,
+              );
+            },
           });
           if (mutation.error !== undefined) {
             return {
               kind: 'error' as const,
               error: mutation.error,
               mutationApplied: mutation.mutationApplied,
+              maintenanceError: mutation.maintenanceError,
             };
+          }
+          let maintenanceError = mutation.maintenanceError;
+          if (mutation.value === 'alreadyActive') {
+            try {
+              await updateScheduledTaskForMaintenance(
+                service,
+                sessionId,
+                'unarchive',
+                assertCanMutate,
+              );
+            } catch (error) {
+              maintenanceError = error;
+              logSessionArchiveWarning(
+                `scheduled task lifecycle update failed action=unarchive workspace=${safeLogValue(
+                  service.getProjectRoot(),
+                )} session=${safeLogValue(sessionId)} error=${safeLogValue(
+                  errorMessage(error),
+                )}`,
+              );
+            }
           }
           return {
             kind: mutation.value ?? 'notFound',
             mutationApplied: mutation.mutationApplied,
-            maintenanceError: mutation.maintenanceError,
+            maintenanceError,
           };
         };
         return await (coordinatorLockHeld
@@ -947,13 +1164,17 @@ export async function unarchiveDaemonSessions(params: {
 
   const unarchived: string[] = [];
   const alreadyActive: string[] = [];
+  const resolvedConflicts: string[] = [];
   const notFound: string[] = [];
   const errors: Array<{ sessionId: string; error: unknown }> = [];
   for (let i = 0; i < results.length; i++) {
     const sessionId = uniqueSessionIds[i]!;
     const result = results[i]!;
     if (result.kind === 'unarchived') unarchived.push(sessionId);
-    else if (result.kind === 'alreadyActive') alreadyActive.push(sessionId);
+    else if (result.kind === 'resolvedConflict') {
+      unarchived.push(sessionId);
+      resolvedConflicts.push(sessionId);
+    } else if (result.kind === 'alreadyActive') alreadyActive.push(sessionId);
     else if (result.kind === 'notFound') notFound.push(sessionId);
     else errors.push({ sessionId, error: result.error });
     if (result.maintenanceError !== undefined) {
@@ -969,5 +1190,11 @@ export async function unarchiveDaemonSessions(params: {
     errors,
   });
 
-  return { unarchived, alreadyActive, notFound, errors };
+  return {
+    unarchived,
+    alreadyActive,
+    resolvedConflicts,
+    notFound,
+    errors,
+  };
 }

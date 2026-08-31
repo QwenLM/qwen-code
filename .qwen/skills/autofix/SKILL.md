@@ -375,24 +375,45 @@ silently overriding or silently complying.
   root-cause, subtractive fixes over additive guards, and read a rising
   trajectory as a signal — if closing a finding would grow the diff materially
   AND the same class of gap keeps reappearing on code an earlier round added,
-  the right response is to escalate for a split, not to add another guard.
-- Not converging (the diff keeps growing past budget): when `feedback.md`
-  contains a `Needs a maintainer's decision — this PR is not converging`
-  section, the growth brake has been over budget across rounds and the diff is
-  still not shrinking — the findings themselves are driving the growth, so
-  Critical-only cannot help (the Criticals ARE the growth). Do NOT apply more
-  code fixes this round. This is a `defer-to-human` item: STOP `BLOCKED` with a
-  handoff that names the decision and lays out the options — split the PR (land
-  the core, track the remaining findings as follow-up issues), redesign, or
-  accept the current state with the tail deferred — plus your recommendation.
-  Write that handoff to `<workdir>/handoff.md` — English-only, no details
-  block — naming the decision, the options, your recommendation, and what was
-  tried; then stop without writing anything else: no commit, no
-  `address-summary.md`, no `no-action.md`, no `failure.md`. The harness
-  recognizes a handoff with no fix verdict as a deliberate deferral: the round
-  ends cleanly, the note is posted to the PR, and the item waits for the
-  maintainer instead of being re-run. Continuing to patch, or deciding the
-  split yourself, is exactly the wrong move; the call is the maintainer's.
+  consolidate or subtract instead of adding another guard.
+- Growth audit required (the window is over its growth budget): when
+  `feedback.md` contains a `Growth audit required` section, this is a
+  growth-audit round. Solving the problem is primary, growth control
+  secondary — a size signal triggers a JUDGMENT, never a stop: the takeover
+  exists to land fixes, not to police line counts. BEFORE any other work or
+  edit this round, audit the approach on the two axes below, then record
+  `growth-audit.json` in the workdir — a single JSON document, verdict
+  `sound|drift|conflict` plus `kiss.result` and `minimal_change.result`
+  each `pass|fail`, the drift alternative or untraceable hunks, and a
+  rationale — and route on the verdict. The verification gate rejects the
+  round without a valid verdict (the taxonomy is enforced — `sound`
+  requires both axes `pass`, `drift` at least one `fail` — and a conflict
+  verdict must stop the round with the handoff), and a repeated verdict
+  after a prior audit this window must bring new evidence (the feedback
+  section lists the prior audits).
+  - KISS (structure): assume the PR IS over-engineered and try to prove it.
+    Either NAME a structurally simpler approach that achieves the same goal
+    (shape, not prose) or justify each accumulated piece as load-bearing for
+    a specific finding or failure mode.
+  - Minimal change (footprint): every changed file/hunk must trace to (a) the
+    PR's original problem, (b) an accepted review finding, or (c) fixing a
+    failing check. Hunks with no trace are deletion candidates.
+  - `sound` — the approach is justified; continue addressing feedback
+    normally. The workflow re-arms the counting window at the current size
+    and the loop continues.
+  - `drift` — implement the named simpler alternative and/or the deletion
+    list FIRST (typically net-negative), then continue addressing feedback.
+  - `conflict` — two defensible directions and the choice is not yours: STOP
+    `BLOCKED` with a handoff carrying the audit's reasoning — the narrowed
+    contested choice with evidence, not "the diff is too big".
+    Write that handoff to `<workdir>/handoff.md` — English-only, no details
+    block — naming the decision, the options, your recommendation, and what
+    was tried; then stop without writing anything else: no commit, no
+    `address-summary.md`, no `no-action.md`, no `failure.md`. The harness
+    recognizes a handoff with no fix verdict as a deliberate deferral: the
+    round ends cleanly, the note is posted to the PR, and the item waits for
+    the maintainer instead of being re-run. This is the ONLY growth-related
+    path to a human.
 - Needs a maintainer's decision: a finding that turns on a judgment that is
   NOT yours to make — a product or scope tradeoff (is this acceptable for v1?
   should the PR be split?), two reviewers asking for opposite things, or whether

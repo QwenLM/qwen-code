@@ -22,6 +22,8 @@
  * consumer replacing the other.
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
+import type { Config } from '../config/config.js';
 import type { TaskBase, TaskRegistration } from './tasks/types.js';
 import type { WorkflowMeta } from './runtime/workflow-sandbox.js';
 import type { WorkflowRunHandle } from './runtime/workflow-runner.js';
@@ -43,6 +45,69 @@ import { runOutsideAgentContext } from './runtime/agent-context.js';
 import type { WorkflowDispatchState } from './runtime/workflow-dispatch-scheduler.js';
 
 const debugLogger = createDebugLogger('WORKFLOW_REGISTRY');
+
+const mutatingWorkflowTasks = new Map<string, symbol>();
+const workflowTaskMutationContext = new AsyncLocalStorage<
+  ReadonlyMap<string, symbol>
+>();
+const inMemoryMutationScopeIds = new WeakMap<object, number>();
+let nextInMemoryMutationScopeId = 1;
+
+export function getWorkflowTaskMutationKey(
+  config: Config,
+  taskId: string,
+  namespace = 'run',
+): string {
+  const storage = config.storage as
+    | { getWorkflowRunsDir?: () => string }
+    | undefined;
+  const workflowRunsDir = storage?.getWorkflowRunsDir?.();
+  if (workflowRunsDir) {
+    return `${workflowRunsDir}\0${namespace}\0${taskId}`;
+  }
+
+  const owner = storage ?? config.getWorkflowRunRegistry?.() ?? config;
+  let scopeId = inMemoryMutationScopeIds.get(owner);
+  if (scopeId === undefined) {
+    scopeId = nextInMemoryMutationScopeId++;
+    inMemoryMutationScopeIds.set(owner, scopeId);
+  }
+  return `memory:${scopeId}\0${namespace}\0${taskId}`;
+}
+
+export type WorkflowTaskMutationAttempt<T> =
+  | { acquired: true; value: T }
+  | { acquired: false };
+
+export async function tryWithWorkflowTaskMutation<T>(
+  mutationKey: string,
+  operation: () => Promise<T>,
+): Promise<WorkflowTaskMutationAttempt<T>> {
+  const inherited = workflowTaskMutationContext.getStore();
+  const inheritedOwner = inherited?.get(mutationKey);
+  if (
+    inheritedOwner !== undefined &&
+    mutatingWorkflowTasks.get(mutationKey) === inheritedOwner
+  ) {
+    return { acquired: true, value: await operation() };
+  }
+  if (mutatingWorkflowTasks.has(mutationKey)) return { acquired: false };
+
+  const owner = Symbol(mutationKey);
+  mutatingWorkflowTasks.set(mutationKey, owner);
+  const context = new Map(inherited);
+  context.set(mutationKey, owner);
+  try {
+    return {
+      acquired: true,
+      value: await workflowTaskMutationContext.run(context, operation),
+    };
+  } finally {
+    if (mutatingWorkflowTasks.get(mutationKey) === owner) {
+      mutatingWorkflowTasks.delete(mutationKey);
+    }
+  }
+}
 
 /**
  * Cap on terminal entries retained for dialog history. Picked smaller
@@ -363,14 +428,24 @@ export type WorkflowApprovalRequestCallback = (
   signal: AbortSignal,
 ) => void | Promise<void>;
 
+/**
+ * Fires when the runner has safely persisted a terminal run's snapshot to
+ * the shared store. The owning session uses this to retire its
+ * unpersisted history cache: once the run exists on disk, absence from
+ * the store means a deletion happened, not "not written yet".
+ */
+export type WorkflowSnapshotPersistedCallback = (runId: string) => void;
+
 interface WorkflowApprovalRuntime {
   respond: AgentApprovalRequestEvent['respond'];
   requestController?: AbortController;
+  releaseSource: () => void;
 }
 
 export class WorkflowRunRegistry {
   private readonly entries = new Map<string, WorkflowTask>();
   private readonly handles = new Map<string, WorkflowRunHandle>();
+  private readonly starting = new Map<string, AbortController>();
 
   private registerCallback: WorkflowRunRegisterCallback | undefined;
   private statusChangeCallback: WorkflowRunStatusChangeCallback | undefined;
@@ -378,6 +453,9 @@ export class WorkflowRunRegistry {
   private completionCallback: WorkflowRunCompletionCallback | undefined;
   private approvalChangeCallback: WorkflowApprovalChangeCallback | undefined;
   private approvalRequestCallback: WorkflowApprovalRequestCallback | undefined;
+  private snapshotPersistedCallback:
+    | WorkflowSnapshotPersistedCallback
+    | undefined;
   private readonly approvalRuntimes = new Map<
     string,
     WorkflowApprovalRuntime
@@ -447,6 +525,22 @@ export class WorkflowRunRegistry {
     this.approvalRequestCallback = cb;
   }
 
+  setSnapshotPersistedCallback(
+    cb: WorkflowSnapshotPersistedCallback | undefined,
+  ): void {
+    this.snapshotPersistedCallback = cb;
+  }
+
+  /** Called by the runner once a terminal run's snapshot is persisted. */
+  notifySnapshotPersisted(runId: string): void {
+    if (!this.snapshotPersistedCallback) return;
+    try {
+      this.snapshotPersistedCallback(runId);
+    } catch (error) {
+      debugLogger.error('Failed to notify snapshot persistence:', error);
+    }
+  }
+
   /** Fire the terminal-completion notification (best-effort). */
   private emitNotification(entry: WorkflowTask): void {
     if (!this.notificationCallback) return;
@@ -498,18 +592,88 @@ export class WorkflowRunRegistry {
   }
 
   /**
+   * Hold a run id for a workflow whose start is still in flight — the
+   * runner reserves before it loads the script and replays the journal,
+   * and only `register`s once both succeeded. The reservation is what
+   * makes the id visible to liveness and cancel checks during that
+   * window; the returned controller is the run's own.
+   */
+  reserveStart(
+    runId: string,
+    createController: () => AbortController,
+  ): AbortController {
+    const existing = this.entries.get(runId);
+    if (
+      (existing && isActiveWorkflowStatus(existing.status)) ||
+      this.handles.has(runId) ||
+      this.starting.has(runId)
+    ) {
+      throw new Error(`Workflow run ${runId} is already active.`);
+    }
+    const controller = createController();
+    this.starting.set(runId, controller);
+    return controller;
+  }
+
+  releaseStart(runId: string, controller: AbortController): void {
+    if (this.starting.get(runId) === controller) this.starting.delete(runId);
+  }
+
+  isStarting(runId: string): boolean {
+    return this.starting.has(runId);
+  }
+
+  /**
+   * Run ids reserved by `reserveStart` and not yet registered. A session
+   * reports these as active-work holds: `list()` has no entry for the
+   * starting window, and a daemon that judged the session idle from
+   * `list()` alone would close it and abort the start under the client
+   * that just asked for it.
+   */
+  listStartingRunIds(): string[] {
+    return [...this.starting.keys()];
+  }
+
+  /**
+   * Cancel a run that has been reserved but not yet registered. Aborts
+   * the reserved controller only — the reservation itself is the
+   * runner's to release, in its start-failure path, exactly as after
+   * `abortAll`. Returns `false` when nothing is starting under `runId`,
+   * so a caller can fall through to the registered-entry route.
+   */
+  cancelStarting(runId: string): boolean {
+    const controller = this.starting.get(runId);
+    if (!controller) return false;
+    try {
+      controller.abort();
+    } catch (error) {
+      debugLogger.error('Failed to abort a starting workflow:', error);
+    }
+    return true;
+  }
+
+  /**
    * Register a new run. Mutates the registration in place to graduate
    * it to a `WorkflowTask` (sets `id`, `kind`, derived counters), so
    * callers can keep using their local reference post-register and
    * observers see updates without an extra `get()`.
    */
-  register(registration: WorkflowTaskRegistration): WorkflowTask {
+  register(
+    registration: WorkflowTaskRegistration,
+    startController?: AbortController,
+  ): WorkflowTask {
     const existing = this.entries.get(registration.runId);
+    const reservedController = this.starting.get(registration.runId);
     if (
       (existing && isActiveWorkflowStatus(existing.status)) ||
-      this.handles.has(registration.runId)
+      this.handles.has(registration.runId) ||
+      (reservedController !== undefined &&
+        reservedController !== startController)
     ) {
       throw new Error(`Workflow run ${registration.runId} is already active.`);
+    }
+    if (reservedController === startController) {
+      this.starting.delete(registration.runId);
     }
     const entry = registration as WorkflowTask;
     entry.id = registration.runId;
@@ -595,7 +759,9 @@ export class WorkflowRunRegistry {
   }
 
   releaseHandle(runId: string, handle: WorkflowRunHandle): void {
-    if (this.handles.get(runId) === handle) this.handles.delete(runId);
+    if (this.handles.get(runId) !== handle) return;
+    this.handles.delete(runId);
+    this.evictTerminal();
   }
 
   bridgeApprovalEvents(
@@ -617,13 +783,22 @@ export class WorkflowRunRegistry {
         if (dispatch) dispatch.subagentId = event.subagentId;
       }
       const sourceKey = JSON.stringify([event.subagentId, event.callId]);
-      // Re-emission of an already-settled call: respond is idempotent via
-      // the runtime's responded set, so silently dropping it is safe.
-      if (seenSources.has(sourceKey)) return;
+      if (seenSources.has(sourceKey)) {
+        debugLogger.warn(
+          `Workflow approval re-emission dropped (source still latched): ${runId}/${sourceKey}`,
+        );
+        return;
+      }
       seenSources.add(sourceKey);
-      const parked = this.parkPendingApproval(runId, event, dispatchId);
-      if (parked === 'duplicate') return;
+      const parked = this.parkPendingApproval(runId, event, dispatchId, () =>
+        seenSources.delete(sourceKey),
+      );
+      if (parked === 'duplicate') {
+        seenSources.delete(sourceKey);
+        return;
+      }
       if (parked === 'rejected') {
+        seenSources.delete(sourceKey);
         this.rejectResponder(event.respond);
         return;
       }
@@ -662,13 +837,11 @@ export class WorkflowRunRegistry {
       (candidate) => candidate.approvalId === approvalId,
     );
     if (!approval) return false;
-    const runtime = this.approvalRuntimes.get(approvalId);
     this.appendApprovalEvent(entry, approval, 'approval-settled', Date.now());
     entry.pendingApprovals = entry.pendingApprovals.filter(
       (candidate) => candidate !== approval,
     );
-    this.approvalRuntimes.delete(approvalId);
-    runtime?.requestController?.abort();
+    const runtime = this.releaseApprovalRuntime(approvalId);
     this.emitApprovalChange(entry);
     if (!runtime) return false;
     const normalized = normalizeWorkflowApprovalOutcome(outcome);
@@ -716,9 +889,7 @@ export class WorkflowRunRegistry {
     entry.pendingApprovals = entry.pendingApprovals.filter(
       (candidate) => candidate !== approval,
     );
-    const runtime = this.approvalRuntimes.get(approval.approvalId);
-    this.approvalRuntimes.delete(approval.approvalId);
-    runtime?.requestController?.abort();
+    this.releaseApprovalRuntime(approval.approvalId);
     this.emitApprovalChange(entry);
     return true;
   }
@@ -726,7 +897,8 @@ export class WorkflowRunRegistry {
   private parkPendingApproval(
     runId: string,
     event: AgentApprovalRequestEvent,
-    dispatchId?: string,
+    dispatchId: string | undefined,
+    releaseSource: () => void,
   ): string | 'duplicate' | 'rejected' {
     const entry = this.entries.get(runId);
     if (
@@ -786,6 +958,7 @@ export class WorkflowRunRegistry {
     this.approvalRuntimes.set(approvalId, {
       respond: event.respond,
       requestController,
+      releaseSource,
     });
     entry.pendingApprovals = [...entry.pendingApprovals, approval];
     this.appendEvent(entry, {
@@ -826,8 +999,7 @@ export class WorkflowRunRegistry {
         entry.pendingApprovals = entry.pendingApprovals.filter(
           (candidate) => candidate.approvalId !== approvalId,
         );
-        this.approvalRuntimes.delete(approvalId);
-        requestController.abort();
+        this.releaseApprovalRuntime(approvalId);
         this.emitApprovalChange(entry);
         return 'rejected';
       }
@@ -1164,6 +1336,21 @@ export class WorkflowRunRegistry {
     return this.entries.get(runId);
   }
 
+  removeTerminal(runId: string): boolean {
+    const entry = this.entries.get(runId);
+    if (
+      !entry ||
+      !isTerminalWorkflowStatus(entry.status) ||
+      this.handles.has(runId)
+    ) {
+      return false;
+    }
+    this.rejectPendingApprovals(runId);
+    this.entries.delete(runId);
+    this.emitStatusChange();
+    return true;
+  }
+
   setLineage(
     runId: string,
     sourceRunId: string,
@@ -1201,6 +1388,7 @@ export class WorkflowRunRegistry {
    * `reset()` so they settle terminal instead of leaking.
    */
   hasRunningEntries(): boolean {
+    if (this.starting.size > 0) return true;
     for (const entry of this.entries.values()) {
       if (entry.status === 'running' || entry.status === 'pausing') {
         return true;
@@ -1229,11 +1417,10 @@ export class WorkflowRunRegistry {
     for (const entry of this.entries.values()) {
       this.rejectPendingApprovals(entry.runId);
     }
-    for (const runtime of this.approvalRuntimes.values()) {
-      runtime.requestController?.abort();
-      this.rejectResponder(runtime.respond);
+    for (const approvalId of Array.from(this.approvalRuntimes.keys())) {
+      const runtime = this.releaseApprovalRuntime(approvalId);
+      if (runtime) this.rejectResponder(runtime.respond);
     }
-    this.approvalRuntimes.clear();
     this.entries.clear();
     this.handles.clear();
     if (sample) this.emitStatusChange(sample);
@@ -1253,6 +1440,9 @@ export class WorkflowRunRegistry {
   abortAll(): void {
     const endTime = Date.now();
     let lastCancelled: WorkflowTask | undefined;
+    for (const controller of this.starting.values()) {
+      controller.abort();
+    }
     for (const entry of Array.from(this.entries.values())) {
       if (!isActiveWorkflowStatus(entry.status)) continue;
       this.rejectPendingApprovals(entry.runId, undefined, endTime);
@@ -1338,8 +1528,10 @@ export class WorkflowRunRegistry {
    * (by `endTime`) are evicted first.
    */
   private evictTerminal(): void {
-    const terminal = this.list().filter((e) =>
-      isTerminalWorkflowStatus(e.status),
+    const terminal = this.list().filter(
+      (entry) =>
+        isTerminalWorkflowStatus(entry.status) &&
+        !this.handles.has(entry.runId),
     );
     if (terminal.length <= MAX_RETAINED_TERMINAL_WORKFLOWS) return;
     terminal.sort((a, b) => (a.endTime ?? 0) - (b.endTime ?? 0));
@@ -1350,9 +1542,21 @@ export class WorkflowRunRegistry {
     for (const e of toEvict) {
       this.entries.delete(e.runId);
     }
+    // Eviction is a row-removing mutation like every other one, and the
+    // consumers that render these rows (tasks dialog, `/workflows`
+    // roster) re-read the registry only when a status change is
+    // emitted. Two paths reach here without a usable emission:
+    // `releaseHandle` emits nothing of its own, and complete / fail /
+    // cancel / abortAll emit BEFORE sweeping, so a synchronous consumer
+    // reads the pre-eviction list. Either way the roster kept showing
+    // an evicted row until some unrelated status change fired. Emit
+    // once here, after the sweep, so every eviction converges on its
+    // own — and so a future eviction site inherits the guarantee
+    // instead of having to remember it.
+    this.emitStatusChange();
   }
 
-  private emitStatusChange(entry: WorkflowTask): void {
+  private emitStatusChange(entry?: WorkflowTask): void {
     if (!this.statusChangeCallback) return;
     try {
       this.statusChangeCallback(entry);
@@ -1381,14 +1585,23 @@ export class WorkflowRunRegistry {
     );
     const runtimes: WorkflowApprovalRuntime[] = [];
     for (const approvalId of rejectedIds) {
-      const runtime = this.approvalRuntimes.get(approvalId);
-      this.approvalRuntimes.delete(approvalId);
+      const runtime = this.releaseApprovalRuntime(approvalId);
       if (!runtime) continue;
-      runtime.requestController?.abort();
       runtimes.push(runtime);
     }
     this.emitApprovalChange(entry);
     for (const runtime of runtimes) this.rejectResponder(runtime.respond);
+  }
+
+  private releaseApprovalRuntime(
+    approvalId: string,
+  ): WorkflowApprovalRuntime | undefined {
+    const runtime = this.approvalRuntimes.get(approvalId);
+    if (!runtime) return undefined;
+    this.approvalRuntimes.delete(approvalId);
+    runtime.releaseSource();
+    runtime.requestController?.abort();
+    return runtime;
   }
 
   private rejectResponder(respond: AgentApprovalRequestEvent['respond']): void {

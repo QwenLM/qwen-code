@@ -15,7 +15,7 @@ import type {
   DaemonInputAnnotation,
   GoalSnapshotV2,
 } from '@qwen-code/sdk/daemon';
-import type { DaemonStreamingState } from '@qwen-code/webui/daemon-react-sdk';
+import type { DaemonStreamingState } from '@qwen-code/web-shell/daemon-react-sdk';
 import type { ACPToolCall } from './adapters/types';
 import type { WelcomeHeaderProps } from './components/WelcomeHeader';
 import type { WebShellTheme } from './themeContext';
@@ -118,14 +118,18 @@ export type ToolHeaderExtraRenderer = (
 export type WelcomeHeaderRenderer = (props: WelcomeHeaderProps) => ReactNode;
 export type WelcomeFooterRenderer = (props: WelcomeHeaderProps) => ReactNode;
 
-export type WebShellChatHeaderItem = 'title' | 'environment' | 'rightPanel';
+export type WebShellChatHeaderItem =
+  | 'title'
+  | 'environment'
+  | 'rightPanel'
+  | 'tokenUsage';
 
 export interface WebShellChatHeaderOptions {
-  /** Built-in header actions to show. Defaults to all actions. */
+  /** Built-in header actions to show. Token usage is opt-in. */
   items?: readonly WebShellChatHeaderItem[];
 }
 
-export type WebShellRightPanelItem = 'review' | 'sideTask';
+export type WebShellRightPanelItem = 'review' | 'sideTask' | 'terminal';
 
 export interface WebShellRightPanelOptions {
   /** Empty-state actions to show. Defaults to all actions. */
@@ -160,6 +164,10 @@ export interface ChatHeaderRenderInfo {
   onEnvironmentPanelOpenChange: (open: boolean) => void;
   /** Opens or closes the right extension panel. */
   onRightPanelOpenChange: (open: boolean) => void;
+  /** Opens token usage for the current session, when available. */
+  onOpenTokenUsage?: () => void;
+  /** Opens Settings deep-linked to Local Control (Daemon category). */
+  onOpenLocalControlSettings?: () => void;
 }
 
 /**
@@ -179,6 +187,17 @@ export interface UserMessageContentRenderInfo {
     attachmentId?: string;
   }[];
   inputAnnotations?: readonly DaemonInputAnnotation[];
+}
+
+export interface WebShellPreparedSubmit {
+  prompt: string;
+  inputAnnotations?: readonly DaemonInputAnnotation[];
+}
+
+export interface WebShellSubmitSnapshot {
+  sessionId?: string;
+  prompt: string;
+  inputAnnotations: readonly DaemonInputAnnotation[];
 }
 
 export type UserMessageContentRenderer = (
@@ -289,6 +308,7 @@ export interface WebShellComposerInput {
   text?: string;
   tags?: readonly WebShellComposerTag[];
   tagPlacement?: WebShellComposerTagPlacement;
+  clearAttachments?: boolean;
   submit?: boolean;
 }
 
@@ -354,6 +374,7 @@ export interface WebShellAtProvider {
 }
 
 export interface WebShellComposerApi {
+  focus?(): void;
   insertText(text: string, options?: WebShellComposerTextOptions): void;
   setText(text: string): void;
   addTags(
@@ -488,6 +509,8 @@ export type LoadingPhrasesResolver = (
 ) => readonly string[] | undefined | null;
 
 export interface WebShellCustomization {
+  /** Host-specific label for the Ask User Question free-text choice. */
+  askUserFreeTextLabel?: string;
   renderToolHeaderExtra?: ToolHeaderExtraRenderer;
   renderWelcomeHeader?: WelcomeHeaderRenderer;
   renderWelcomeFooter?: WelcomeFooterRenderer;
@@ -511,6 +534,7 @@ export interface WebShellCustomization {
   renderComposerFooter?: ComposerFooterRenderer;
   renderFooter?: FooterRenderer;
   compactThinking?: boolean;
+  hostOwnsEditDiffPreview?: boolean;
   /**
    * Auto-collapse each completed turn's intermediate steps (thinking, tool
    * calls, mid-turn assistant text) behind a toggle on the prompt row, leaving

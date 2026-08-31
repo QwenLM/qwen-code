@@ -9,7 +9,10 @@ import {
   applySkillAllowedTools,
   collectAvailableSkillEntries,
   clearCollectedSkillEntriesCache,
+  clearLoadedSkillTracking,
 } from './skill-utils.js';
+import { ToolNames } from './tool-names.js';
+import type { ToolRegistry } from './tool-registry.js';
 import type { PermissionManager } from '../permissions/permission-manager.js';
 import type { SkillManager } from '../skills/skill-manager.js';
 import type { Config } from '../config/config.js';
@@ -79,6 +82,7 @@ describe('collectAvailableSkillEntries memoize cache', () => {
   function mockConfig(): Config {
     return {
       getDisabledSkillNames: vi.fn().mockReturnValue(new Set<string>()),
+      isSkillEnabled: vi.fn().mockReturnValue(true),
       getModelInvocableCommandsProvider: vi.fn().mockReturnValue(null),
     } as unknown as Config;
   }
@@ -145,5 +149,32 @@ describe('collectAvailableSkillEntries memoize cache', () => {
     await collectAvailableSkillEntries(sm, cfg);
 
     expect(sm.listSkills).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('clearLoadedSkillTracking', () => {
+  it('clears the SkillTool tracker when one is registered', () => {
+    const clearLoadedSkills = vi.fn();
+    const registry = {
+      getTool: vi.fn().mockReturnValue({ clearLoadedSkills }),
+    } as unknown as ToolRegistry;
+
+    clearLoadedSkillTracking(registry, 'test-boundary');
+
+    expect(registry.getTool).toHaveBeenCalledWith(ToolNames.SKILL);
+    expect(clearLoadedSkills).toHaveBeenCalledTimes(1);
+  });
+
+  it('no-ops when the registry or tracker is missing', () => {
+    expect(() =>
+      clearLoadedSkillTracking(undefined, 'test-boundary'),
+    ).not.toThrow();
+
+    const registry = {
+      getTool: vi.fn().mockReturnValue(undefined),
+    } as unknown as ToolRegistry;
+    expect(() =>
+      clearLoadedSkillTracking(registry, 'test-boundary'),
+    ).not.toThrow();
   });
 });

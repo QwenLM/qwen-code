@@ -1,0 +1,76 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Mem0 External Context instance configuration v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "dialectPath",
+    "endpoint",
+    "credentialEnv",
+    "scope",
+    "timeoutMs"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 2
+    },
+    "dialectPath": {
+      "type": "string",
+      "minLength": 1
+    },
+    "endpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["origin"],
+      "properties": {
+        "origin": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "basePath": {
+          "type": "string",
+          "maxLength": 512,
+          "default": ""
+        },
+        "allowInsecureHttp": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "credentialEnv": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Z_][A-Z0-9_]*$"
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "agentId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "appId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        }
+      }
+    },
+    "timeoutMs": {
+      "type": "integer",
+      "minimum": 100,
+      "maximum": 30000
+    }
+  }
+}

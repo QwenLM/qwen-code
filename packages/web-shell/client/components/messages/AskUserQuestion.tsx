@@ -31,6 +31,7 @@ interface AskUserQuestionProps {
   ) => Promise<boolean>;
   onError: (error: unknown, fallback: string) => void;
   variant?: 'inline' | 'floating';
+  customInputLabel?: string;
   /**
    * Whether this question should pull keyboard focus to its first option when it
    * becomes the topmost one. Defaults to true. Split-view panes pass false so an
@@ -51,6 +52,7 @@ export function AskUserQuestion({
   onError,
   variant = 'inline',
   keyboardActive = true,
+  customInputLabel,
 }: AskUserQuestionProps) {
   const submitShortcutLabel =
     typeof navigator !== 'undefined' &&
@@ -859,9 +861,13 @@ export function AskUserQuestion({
                         <input
                           type="text"
                           className={styles.customInput}
-                          placeholder={t('askUser.typePlaceholder')}
+                          placeholder={
+                            customInputLabel ?? t('askUser.typePlaceholder')
+                          }
                           value={customInputs[currentIdx] || ''}
-                          aria-label={t('askUser.typePlaceholder')}
+                          aria-label={
+                            customInputLabel ?? t('askUser.typePlaceholder')
+                          }
                           disabled={submitting}
                           onChange={(e) =>
                             setCustomInputs({
@@ -904,7 +910,8 @@ export function AskUserQuestion({
                         >
                           {hasCustomValue
                             ? customInputs[currentIdx]
-                            : t('askUser.typePlaceholder')}
+                            : (customInputLabel ??
+                              t('askUser.typePlaceholder'))}
                         </button>
                       )}
                     </div>

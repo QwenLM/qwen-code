@@ -15,12 +15,14 @@ import {
   warnClipboardWriteFailure,
   writeClipboardText,
 } from '../../utils/clipboard';
+import { useCopiedFlash } from '../../hooks/useCopiedFlash';
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
 import type { Components, Options } from 'react-markdown';
 import { isMarkdownFenceClosed } from '@datafe-open/markdown-chart';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
+import remarkCjkFriendly from 'remark-cjk-friendly/parseOnly';
 import {
   getCachedHtml,
   getCodeHighlighter,
@@ -191,7 +193,7 @@ function MermaidBlock({ code }: { code: string }) {
   const [svg, setSvg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<'diagram' | 'code'>('diagram');
-  const [copied, setCopied] = useState(false);
+  const [copied, flashCopied] = useCopiedFlash();
   const [zoom, setZoom] = useState(1);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
   const [isDragging, setIsDragging] = useState(false);
@@ -320,8 +322,7 @@ function MermaidBlock({ code }: { code: string }) {
   const handleCopy = () => {
     void writeClipboardText(code)
       .then(() => {
-        setCopied(true);
-        setTimeout(() => setCopied(false), 2000);
+        flashCopied();
       })
       .catch(warnClipboardWriteFailure);
   };
@@ -431,7 +432,7 @@ function CodeBlock({
   const { t } = useI18n();
   const appTheme = useTheme();
   const [html, setHtml] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
+  const [copied, flashCopied] = useCopiedFlash();
 
   const { label, lang, resolvedLang } = resolveFenceLanguage(
     extractRawFenceLanguage(className),
@@ -500,8 +501,7 @@ function CodeBlock({
   const handleCopy = () => {
     void writeClipboardText(code)
       .then(() => {
-        setCopied(true);
-        setTimeout(() => setCopied(false), 2000);
+        flashCopied();
       })
       .catch(warnClipboardWriteFailure);
   };
@@ -963,8 +963,13 @@ export const Markdown = memo(function Markdown({
   // Memoize plugins so their array references remain stable.
   const remarkPlugins = useMemo(() => {
     return sourceMarkdown?.remarkPlugins
-      ? [remarkGfm, remarkMath, ...sourceMarkdown.remarkPlugins]
-      : [remarkGfm, remarkMath];
+      ? [
+          remarkGfm,
+          remarkMath,
+          remarkCjkFriendly,
+          ...sourceMarkdown.remarkPlugins,
+        ]
+      : [remarkGfm, remarkMath, remarkCjkFriendly];
   }, [sourceMarkdown?.remarkPlugins]);
 
   const rehypePlugins = useMemo(() => {

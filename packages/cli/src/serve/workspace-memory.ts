@@ -11,12 +11,12 @@ import {
   Storage,
   WorkspaceMemoryFileTooLargeError,
   WorkspaceMemoryWriteTimeoutError,
-  getAllGeminiMdFilenames,
+  getAllMemoryFilenames,
   writeWorkspaceContextFile,
 } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { isServeDebugMode } from './debug-mode.js';
-import type { AcpSessionBridge } from './acp-session-bridge.js';
+import type { WorkspaceEventBridge } from './acp-session-bridge.js';
 import {
   createIdleWorkspaceMemoryStatus,
   STATUS_SCHEMA_VERSION,
@@ -54,8 +54,8 @@ import type { WorkspaceRegistry } from './workspace-registry.js';
  * bound workspace root and can compute relative paths if they
  * prefer; the global scope (`~/.qwen/QWEN.md`) is NOT under the
  * workspace root, so rewriting to a workspace-relative form would
- * lose information. The bearer-token gate + the daemon's loopback-
- * default binding already restrict who can see these paths. If a
+ * lose information. Configured bearer auth or the daemon's trusted-loopback
+ * binding already defines who can see these paths. If a
  * future deployment shape needs path redaction (e.g. multi-tenant
  * over a shared host), it should land as a `--redact-paths`
  * deployment toggle rather than a per-route default flip — tracked
@@ -63,7 +63,7 @@ import type { WorkspaceRegistry } from './workspace-registry.js';
  */
 
 export interface WorkspaceMemoryRouteDeps {
-  bridge: AcpSessionBridge;
+  bridge: WorkspaceEventBridge;
   boundWorkspace: string;
   collectStatus?: typeof collectWorkspaceMemoryStatus;
   /**
@@ -502,7 +502,7 @@ interface DiscoveredFile {
 export async function collectWorkspaceMemoryStatus(
   boundWorkspace: string,
 ): Promise<ServeWorkspaceMemoryStatus> {
-  const filenames = new Set(getAllGeminiMdFilenames());
+  const filenames = new Set(getAllMemoryFilenames());
   const files: DiscoveredFile[] = [];
   const errors: ServeWorkspaceMemoryStatus['errors'] = [];
 

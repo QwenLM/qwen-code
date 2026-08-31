@@ -181,7 +181,11 @@ export interface DaemonTurnUsage {
 export interface DaemonUiAssistantUsageEvent extends DaemonUiEventBase {
   type: 'assistant.usage';
   usage: DaemonTurnUsage;
-  /** Set when the usage belongs to a sub-agent round; folded into the parent turn total. */
+  /**
+   * Set for sub-agent usage; folded into its parent tool in compact mode. In
+   * retain mode it is folded into the active top-level assistant block, or
+   * dropped after a tool update has finalized that block.
+   */
   parentToolCallId?: string;
 }
 
@@ -1136,23 +1140,71 @@ export interface DaemonTranscriptState
   now: number;
   maxBlocks: number;
   retainSubagentBlocks: boolean;
+  /**
+   * Running estimate (bytes) of what `blocks` retains. Blocks carry raw tool
+   * payloads, so a block-count cap alone is not a memory ceiling; trimming
+   * also evicts until the estimate is back under `maxRetainedBytes`.
+   */
+  retainedBytes: number;
+  maxRetainedBytes: number;
 }
 
 export interface DaemonTranscriptReducerOptions {
   maxBlocks?: number;
+  maxRetainedBytes?: number;
   now?: number;
   retainSubagentBlocks?: boolean;
   onTruncation?: (detail: DaemonTranscriptTruncationDetail) => void;
+}
+
+export interface DaemonTranscriptBlockChangeSummary {
+  /** Opaque identity of the transcript store that produced this summary. */
+  source: object;
+  /** Monotonic version of the store's block projection state. */
+  revision: number;
+  /**
+   * The latest revision that was not a pure append to one streaming tail
+   * block. For summaries from the same source, equal values therefore prove
+   * that every intervening revision was such an append.
+   */
+  tailAppendBarrierRevision: number;
+  /** The streaming tail block changed at this revision, when eligible. */
+  tailBlockId?: string;
 }
 
 export interface DaemonTranscriptTruncationDetail {
   kind: 'blocks' | 'text';
   blockId?: string;
   sourceRecordIds?: readonly string[];
+  /**
+   * Set for `kind: 'blocks'`: the oldest recordId still retained after the
+   * eviction, from the oldest retained block that carries one. Undefined when
+   * no retained block carries a recordId. Lets consumers reconcile exclusive
+   * pagination anchors with retention trimming.
+   */
+  oldestRetainedRecordId?: string;
+  /**
+   * Set for `kind: 'blocks'`: whether the eviction removed blocks from the
+   * OLDEST end. True for retention trimming (oldest-first), which can evict
+   * the record an exclusive pagination anchor points at; false for a rewind
+   * (which drops the newest blocks and leaves the oldest anchor intact).
+   * Consumers should only re-anchor pagination when this is true.
+   */
+  evictedOldest?: boolean;
+  /**
+   * Set for `kind: 'blocks'`: the post-trim window occupancy. Lets consumers
+   * decide whether a previously rejected history page would now be admitted,
+   * without reading a snapshot that may lag the in-flight dispatch.
+   */
+  blockCount?: number;
+  retainedBytes?: number;
+  maxBlocks?: number;
+  maxRetainedBytes?: number;
 }
 
 export interface DaemonTranscriptStore {
   getSnapshot(): DaemonTranscriptState;
+  getBlockChangeSummary?(): DaemonTranscriptBlockChangeSummary;
   subscribe(listener: () => void): () => void;
   dispatch(event: DaemonUiEvent | DaemonUiEvent[]): void;
   appendLocalUserMessage(

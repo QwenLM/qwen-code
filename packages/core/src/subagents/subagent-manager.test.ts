@@ -1859,7 +1859,7 @@ System prompt 3`);
     it('should list subagents from both levels', async () => {
       const subagents = await manager.listSubagents();
 
-      expect(subagents).toHaveLength(6); // agent1 (project takes precedence), agent2, agent3, general-purpose, Explore, statusline-setup (built-in)
+      expect(subagents).toHaveLength(7); // agent1 (project takes precedence), agent2, agent3, general-purpose, Explore, statusline-setup, review-agent (built-in)
       expect(subagents.map((s) => s.name)).toEqual([
         'agent1',
         'agent2',
@@ -1867,6 +1867,7 @@ System prompt 3`);
         'general-purpose',
         'Explore',
         'statusline-setup',
+        'review-agent',
       ]);
     });
 
@@ -1899,6 +1900,7 @@ System prompt 3`);
         'agent3',
         'Explore',
         'general-purpose',
+        'review-agent',
         'statusline-setup',
       ]);
     });
@@ -1911,11 +1913,12 @@ System prompt 3`);
 
       const subagents = await manager.listSubagents();
 
-      expect(subagents).toHaveLength(3); // Only built-in agents remain
+      expect(subagents).toHaveLength(4); // Only built-in agents remain
       expect(subagents.map((s) => s.name)).toEqual([
         'general-purpose',
         'Explore',
         'statusline-setup',
+        'review-agent',
       ]);
       expect(subagents.every((s) => s.level === 'builtin')).toBe(true);
     });
@@ -1927,11 +1930,12 @@ System prompt 3`);
 
       const subagents = await manager.listSubagents();
 
-      expect(subagents).toHaveLength(3); // Only built-in agents remain
+      expect(subagents).toHaveLength(4); // Only built-in agents remain
       expect(subagents.map((s) => s.name)).toEqual([
         'general-purpose',
         'Explore',
         'statusline-setup',
+        'review-agent',
       ]);
       expect(subagents.every((s) => s.level === 'builtin')).toBe(true);
     });
@@ -2403,8 +2407,8 @@ bad`);
         const { runtimeContext, runtimeView } = destructureAgentHeadlessCall(
           mockAgentHeadlessCreate.mock.calls[0],
         );
-        // Subagents always get an `Object.create(parent)` wrapper for
-        // FileReadCache isolation — distinct instance, prototype === parent.
+        // Subagents always get a derived wrapper for child-local state.
+        // It remains a distinct instance whose prototype is the parent.
         expect(runtimeContext).not.toBe(mockConfig);
         expect(Object.getPrototypeOf(runtimeContext)).toBe(mockConfig);
         expect(runtimeView).toBeDefined();

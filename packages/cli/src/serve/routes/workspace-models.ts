@@ -11,7 +11,7 @@ import {
   getOwnKeyScope,
   getWritableScopes,
 } from '../../config/modelProvidersScope.js';
-import { getSettingDefinition } from '../../utils/settingsUtils.js';
+import { getSettingDefinition } from '../../config/settingsUtils.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   isActiveModelSelection,
@@ -22,6 +22,7 @@ import {
   WorkspaceSettingsPartialPersistError,
   type WorkspaceSettingsWrite,
 } from '../workspace-service/types.js';
+import type { ServeModelProviderRuntimeSyncResult } from '../types.js';
 import { sendGenerationClosedError } from '../workspace-route-runtime.js';
 
 type PersistSettings = (
@@ -57,6 +58,7 @@ export interface WorkspaceModelsRouteDeps {
     req: Request,
     res: Response,
   ) => string | undefined | null;
+  syncModelProvidersRuntime?: () => Promise<ServeModelProviderRuntimeSyncResult>;
 }
 
 function parseTarget(
@@ -275,6 +277,27 @@ export function registerWorkspaceModelsRoutes(
         // On a partial persist, tell the caller which keys committed so it can
         // reconcile (e.g. modelProviders removed but model.name not cleared).
         if (err instanceof WorkspaceSettingsPartialPersistError) {
+          if (
+            err.committedWrites.some(
+              (write) => write.key === 'modelProviders',
+            ) &&
+            deps.syncModelProvidersRuntime
+          ) {
+            try {
+              await deps.syncModelProvidersRuntime();
+            } catch (syncError) {
+              if (sendGenerationClosedError(res, syncError)) return;
+              writeStderrLine(
+                'qwen serve: DELETE /workspace/models runtime sync failed after partial persistence',
+              );
+            }
+            try {
+              assertGenerationOpen();
+            } catch (generationError) {
+              if (sendGenerationClosedError(res, generationError)) return;
+              throw generationError;
+            }
+          }
           res.status(500).json({
             error: 'Model removal only partially persisted',
             code: 'partial_persist_error',
@@ -296,15 +319,36 @@ export function registerWorkspaceModelsRoutes(
         throw err;
       }
       for (const write of writes) broadcastWrite(write);
+      let runtimeSync: ServeModelProviderRuntimeSyncResult | undefined;
+      if (deps.syncModelProvidersRuntime) {
+        try {
+          runtimeSync = await deps.syncModelProvidersRuntime();
+        } catch (err) {
+          if (sendGenerationClosedError(res, err)) return;
+          writeStderrLine(
+            'qwen serve: DELETE /workspace/models runtime sync failed after persistence',
+          );
+          runtimeSync = { status: 'failed' };
+        }
+        try {
+          assertGenerationOpen();
+        } catch (err) {
+          if (sendGenerationClosedError(res, err)) return;
+          throw err;
+        }
+      }
 
       const clearedActiveModel = writes.some((w) => w.key === 'model.name');
       // Surface restart-required so the UI can prompt (e.g. modelFallbacks).
       const requiresRestart = writes.some(
         (w) => getSettingDefinition(w.key)?.requiresRestart === true,
       );
-      res
-        .status(200)
-        .json({ removed: true, clearedActiveModel, requiresRestart });
+      res.status(200).json({
+        removed: true,
+        clearedActiveModel,
+        requiresRestart,
+        ...(runtimeSync ? { runtimeSync } : {}),
+      });
     },
   );
 }
