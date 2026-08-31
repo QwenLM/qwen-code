@@ -7,7 +7,10 @@
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { CONDITIONAL_SERVE_FEATURES } from './capabilities.js';
+import {
+  CONDITIONAL_SERVE_FEATURES,
+  SERVE_CAPABILITY_REGISTRY,
+} from './capabilities.js';
 
 const START = '<!-- conditional-serve-features:start -->';
 const END = '<!-- conditional-serve-features:end -->';
@@ -33,5 +36,21 @@ describe('conditional serve capability documentation', () => {
     expect([...documented].sort()).toEqual(
       [...CONDITIONAL_SERVE_FEATURES.keys()].sort(),
     );
+  });
+
+  it('keeps the daemon index capability counts in sync', async () => {
+    const index = await readFile(
+      resolve(process.cwd(), '../../docs/developers/daemon/00-index.md'),
+      'utf8',
+    );
+    const match = index.match(
+      /SERVE_PROTOCOL_VERSION = 'v1'`; (\d+) registered tags; (\d+) conditional tags/,
+    );
+
+    expect(match).not.toBeNull();
+    expect(Number(match?.[1])).toBe(
+      Object.keys(SERVE_CAPABILITY_REGISTRY).length,
+    );
+    expect(Number(match?.[2])).toBe(CONDITIONAL_SERVE_FEATURES.size);
   });
 });

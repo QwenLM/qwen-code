@@ -5164,6 +5164,17 @@ describe('DaemonClient', () => {
       });
       expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
     });
+
+    it('throws DaemonHttpError when an older daemon returns 404', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(404, { error: 'Not Found' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(client.setUserLanguage('zh')).rejects.toMatchObject({
+        status: 404,
+      });
+    });
   });
 
   describe('recapSession (#4175 follow-up)', () => {

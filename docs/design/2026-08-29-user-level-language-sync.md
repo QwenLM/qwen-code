@@ -20,7 +20,8 @@ user-level or process-global (see `sessionLanguage` in
 - `general.language` / `general.outputLanguage` persist at `SettingScope.User`;
 - the global `~/.qwen/output-language.md` is written when no project-bound file
   is involved;
-- **all** active sessions are refreshed, not only the one named in the URL.
+- when output-language sync is requested, **all** active sessions are
+  refreshed, not only the one named in the URL.
 
 Two adjacent facts close the remaining escape hatches:
 
@@ -34,7 +35,8 @@ Two adjacent facts close the remaining escape hatches:
 
 - A daemon-level mutation that performs user-level language synchronization and
   succeeds with **zero sessions and zero workspaces**.
-- Best-effort refresh of all active sessions across all trusted runtimes.
+- Best-effort refresh of all active sessions across all trusted runtimes when
+  `syncOutputLanguage` is true.
 - Capability advertisement so hosts can feature-detect and degrade gracefully
   on older daemons.
 
@@ -92,7 +94,8 @@ Response (mirrors `SetSessionLanguageResult`, with a refresh summary):
 Zero sessions / zero runtimes is a **200** with a zeroed `refresh` summary —
 this is the core acceptance criterion.
 
-Capability: `/capabilities.features.user_language_sync: true`.
+Capability: `/capabilities` returns a `features` string array; hosts detect the
+route with `features.includes('user_language_sync')`.
 
 ## Execution flow
 
@@ -110,8 +113,9 @@ Capability: `/capabilities.features.user_language_sync: true`.
 3. Fan out (`Promise.allSettled`) to every trusted runtime with a live ACP
    channel: new ext-method `qwen/control/user/language` (sessionless). The
    runtime switches its own process i18n, reloads user-scope settings from
-   disk (`reloadScopeFromDisk`), and refreshes each of its sessions
-   (`refreshHierarchicalMemory` + `refreshSystemInstruction`).
+   disk (`reloadScopeFromDisk`), and, when `syncOutputLanguage` is true,
+   refreshes each of its sessions (`refreshHierarchicalMemory` +
+   `refreshSystemInstruction`).
 
 ### Key decisions
 

@@ -185,7 +185,8 @@ export const SERVE_CONTROL_EXT_METHODS = {
   /**
    * Sessionless user-level language sync: the runtime switches its process
    * UI language, reloads the user-scope settings the daemon already
-   * persisted, and refreshes every local session's system instruction.
+   * persisted, and, when `syncOutputLanguage` is true, refreshes every local
+   * session's system instruction.
    * Params: `{ language, syncOutputLanguage }`; result:
    * `{ language, sessions, failed }`.
    */

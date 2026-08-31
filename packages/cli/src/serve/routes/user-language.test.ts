@@ -95,6 +95,8 @@ function makeApp(
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(setLanguageAsync).mockReset().mockResolvedValue(undefined);
+  vi.mocked(getCurrentLanguage).mockReturnValue('zh');
 });
 
 describe('POST /language', () => {
@@ -161,6 +163,7 @@ describe('POST /language', () => {
       'general.language',
       'zh',
     );
+    expect(vi.mocked(setLanguageAsync)).toHaveBeenCalledWith('zh');
     expect(vi.mocked(updateOutputLanguageFile)).not.toHaveBeenCalled();
   });
 
@@ -174,12 +177,38 @@ describe('POST /language', () => {
     expect(res.status).toBe(200);
     expect(res.body.outputLanguage).toBe('Chinese');
     expect(vi.mocked(updateOutputLanguageFile)).toHaveBeenCalledWith('Chinese');
+    expect(persistSetting).toHaveBeenCalledTimes(2);
+    expect(persistSetting).toHaveBeenCalledWith(
+      '/workspace',
+      SettingScope.User,
+      'general.language',
+      'zh',
+    );
     expect(persistSetting).toHaveBeenCalledWith(
       '/workspace',
       SettingScope.User,
       'general.outputLanguage',
       'Chinese',
     );
+  });
+
+  it('accepts auto and preserves it when output language is synced', async () => {
+    const { app, persistSetting } = makeApp();
+
+    const res = await request(app)
+      .post('/language')
+      .send({ language: 'auto', syncOutputLanguage: true });
+
+    expect(res.status).toBe(200);
+    expect(res.body.outputLanguage).toBe('auto');
+    expect(vi.mocked(updateOutputLanguageFile)).toHaveBeenCalledWith('auto');
+    expect(persistSetting).toHaveBeenCalledWith(
+      '/workspace',
+      SettingScope.User,
+      'general.language',
+      'auto',
+    );
+    expect(vi.mocked(setLanguageAsync)).toHaveBeenCalledWith('auto');
   });
 
   it('returns 500 persist_error without side effects when persistence fails', async () => {
@@ -200,15 +229,25 @@ describe('POST /language', () => {
     expect(vi.mocked(setLanguageAsync)).not.toHaveBeenCalled();
   });
 
-  it('still returns 200 when the daemon i18n switch itself fails', async () => {
+  it('still fans out and publishes without output sync when daemon i18n fails', async () => {
     vi.mocked(setLanguageAsync).mockRejectedValueOnce(new Error('boom'));
-    vi.mocked(getCurrentLanguage).mockReturnValue('en');
+    const runtime = makeRuntime({ trusted: true, cwd: '/a' });
 
-    const { app } = makeApp();
+    const { app } = makeApp({ runtimes: [runtime] });
     const res = await request(app).post('/language').send({ language: 'zh' });
 
     expect(res.status).toBe(200);
     expect(res.body.language).toBe('zh');
+    expect(runtime.bridge.setUserLanguage).toHaveBeenCalledWith({
+      language: 'zh',
+      syncOutputLanguage: false,
+    });
+    expect(runtime.bridge.publishWorkspaceEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'language_changed',
+        data: { language: 'zh', outputLanguage: null, userLevel: true },
+      }),
+    );
   });
 
   it('fans out to trusted runtimes, skipping untrusted and channel-less ones', async () => {
@@ -219,6 +258,15 @@ describe('POST /language', () => {
         language: params.language,
         sessions: 2,
         failed: 1,
+      }),
+    });
+    const refreshedSecond = makeRuntime({
+      trusted: true,
+      cwd: '/refreshed-second',
+      setUserLanguage: async (params) => ({
+        language: params.language,
+        sessions: 3,
+        failed: 2,
       }),
     });
     const noChannel = makeRuntime({
@@ -237,7 +285,7 @@ describe('POST /language', () => {
     });
     const untrusted = makeRuntime({ trusted: false, cwd: '/untrusted' });
     const { app } = makeApp({
-      runtimes: [refreshed, noChannel, broken, untrusted],
+      runtimes: [refreshed, refreshedSecond, noChannel, broken, untrusted],
       parseAndValidateClientId: () => 'client-1',
     });
 
@@ -247,7 +295,15 @@ describe('POST /language', () => {
       .send({ language: 'zh', syncOutputLanguage: true });
 
     expect(res.status).toBe(200);
-    expect(res.body.refresh).toEqual({ runtimes: 1, sessions: 2, failed: 2 });
+    expect(res.body.refresh).toEqual({ runtimes: 2, sessions: 5, failed: 4 });
+    expect(refreshed.bridge.setUserLanguage).toHaveBeenCalledWith({
+      language: 'zh',
+      syncOutputLanguage: true,
+    });
+    expect(refreshedSecond.bridge.setUserLanguage).toHaveBeenCalledWith({
+      language: 'zh',
+      syncOutputLanguage: true,
+    });
     expect(untrusted.bridge.setUserLanguage).not.toHaveBeenCalled();
     expect(untrusted.bridge.publishWorkspaceEvent).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -260,6 +316,25 @@ describe('POST /language', () => {
         type: 'language_changed',
         originatorClientId: 'client-1',
       }),
+    );
+  });
+
+  it('isolates workspace event publication failures', async () => {
+    const brokenPublisher = makeRuntime({ trusted: true, cwd: '/broken' });
+    brokenPublisher.bridge.publishWorkspaceEvent.mockImplementationOnce(() => {
+      throw new Error('event bus closed');
+    });
+    const laterRuntime = makeRuntime({ trusted: true, cwd: '/later' });
+    const { app } = makeApp({
+      runtimes: [brokenPublisher, laterRuntime],
+    });
+
+    const res = await request(app).post('/language').send({ language: 'zh' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.refresh).toEqual({ runtimes: 2, sessions: 0, failed: 0 });
+    expect(laterRuntime.bridge.publishWorkspaceEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'language_changed' }),
     );
   });
 });

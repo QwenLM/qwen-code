@@ -5076,24 +5076,16 @@ export class DaemonClient {
     language: string,
     opts?: { syncOutputLanguage?: boolean; clientId?: string },
   ): Promise<SetUserLanguageResult> {
-    return await this.fetchWithTimeout(
-      `${this.baseUrl}/language`,
+    return await this.jsonRequest<SetUserLanguageResult>(
+      '/language',
+      'POST /language',
       {
         method: 'POST',
-        headers: this.headers(
-          { 'Content-Type': 'application/json' },
-          opts?.clientId,
-        ),
-        body: JSON.stringify({
+        body: {
           language,
           syncOutputLanguage: opts?.syncOutputLanguage ?? false,
-        }),
-      },
-      async (res) => {
-        if (!res.ok) {
-          throw await this.failOnError(res, 'POST /language');
-        }
-        return (await res.json()) as SetUserLanguageResult;
+        },
+        clientId: opts?.clientId,
       },
     );
   }

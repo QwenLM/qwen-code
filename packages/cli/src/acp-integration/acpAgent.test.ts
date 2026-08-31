@@ -1068,6 +1068,7 @@ import {
   updateOutputLanguageFile,
   writeOutputLanguageAndRegisterPath,
 } from '../i18n/languageUtils.js';
+import { getCurrentLanguage, setLanguageAsync } from '../i18n/index.js';
 import { buildAuthMethods } from './authMethods.js';
 import {
   ACTIVE_WORK_HEARTBEAT_META_KEY,
@@ -25056,6 +25057,8 @@ describe('sessionLanguage multi-session propagation', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(setLanguageAsync).mockReset().mockResolvedValue(undefined);
+    vi.mocked(getCurrentLanguage).mockReturnValue('zh');
     mockConnectionState.reset();
     capturedAgentFactory = undefined;
 
@@ -26403,7 +26406,7 @@ describe('sessionLanguage multi-session propagation', () => {
     await agentPromise;
   });
 
-  it('userLanguage: syncs without any session and performs no writes', async () => {
+  it('userLanguage: accepts auto without any session and performs no writes', async () => {
     const settings = {
       merged: { mcpServers: {} },
       reloadScopeFromDisk: vi.fn(),
@@ -26427,13 +26430,14 @@ describe('sessionLanguage multi-session propagation', () => {
     vi.mocked(writeOutputLanguageAndRegisterPath).mockClear();
 
     const result = await agent.extMethod('qwen/control/user/language', {
-      language: 'zh',
+      language: 'auto',
       syncOutputLanguage: true,
     });
 
     // Zero sessions is a success, and the daemon process owns persistence:
     // the runtime must not write settings or output-language files itself.
     expect(result).toEqual({ language: 'zh', sessions: 0, failed: 0 });
+    expect(vi.mocked(setLanguageAsync)).toHaveBeenCalledWith('auto');
     expect(settings.reloadScopeFromDisk).toHaveBeenCalledWith(
       SettingScope.User,
     );
@@ -26441,6 +26445,36 @@ describe('sessionLanguage multi-session propagation', () => {
     expect(
       vi.mocked(writeOutputLanguageAndRegisterPath),
     ).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('userLanguage: wraps UI-language switch failures', async () => {
+    const settings = {
+      merged: { mcpServers: {} },
+      reloadScopeFromDisk: vi.fn(),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+    vi.mocked(setLanguageAsync).mockRejectedValueOnce(new Error('i18n down'));
+
+    const agentPromise = runAcpAgent(
+      makeConfig() as unknown as Config,
+      settings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+
+    await expect(
+      agent.extMethod('qwen/control/user/language', { language: 'zh' }),
+    ).rejects.toMatchObject({ code: -32603 });
+    expect(settings.reloadScopeFromDisk).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -26456,6 +26490,9 @@ describe('sessionLanguage multi-session propagation', () => {
     const cfgB = makeConfig({
       getSessionId: vi.fn().mockReturnValue('s-b'),
       getOutputLanguageFilePath: vi.fn().mockReturnValue(undefined),
+      refreshHierarchicalMemory: vi
+        .fn()
+        .mockRejectedValue(new Error('refresh failed')),
     });
 
     const sessionConfigs = [cfgA, cfgB];
@@ -26514,11 +26551,11 @@ describe('sessionLanguage multi-session propagation', () => {
       syncOutputLanguage: true,
     });
 
-    expect(result).toEqual({ language: 'zh', sessions: 2, failed: 0 });
+    expect(result).toEqual({ language: 'zh', sessions: 2, failed: 1 });
     expect(cfgA.refreshHierarchicalMemory).toHaveBeenCalled();
     expect(cfgB.refreshHierarchicalMemory).toHaveBeenCalled();
     expect(cfgA.getLlmClient().refreshSystemInstruction).toHaveBeenCalled();
-    expect(cfgB.getLlmClient().refreshSystemInstruction).toHaveBeenCalled();
+    expect(cfgB.getLlmClient().refreshSystemInstruction).not.toHaveBeenCalled();
     // Unlike the session-scoped route, project-bound output-language files
     // stay untouched: cfgA keeps its project override.
     expect(vi.mocked(updateOutputLanguageFile)).not.toHaveBeenCalled();
@@ -26581,6 +26618,7 @@ describe('sessionLanguage multi-session propagation', () => {
     });
 
     expect(result).toEqual({ language: 'zh', sessions: 0, failed: 0 });
+    expect(vi.mocked(setLanguageAsync)).toHaveBeenCalledWith('en');
     expect(cfgA.refreshHierarchicalMemory).not.toHaveBeenCalled();
     expect(settings.reloadScopeFromDisk).toHaveBeenCalledWith(
       SettingScope.User,
