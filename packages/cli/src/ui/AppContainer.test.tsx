@@ -893,6 +893,57 @@ describe('AppContainer State Management', () => {
       });
     });
 
+    it('reports a pending user question as soft input', async () => {
+      agentViewHandoffMocks.readWorkerSideband.mockReturnValue({
+        sessionId: 'session-1',
+        sidebandEndpoint: '/tmp/agent-view.sock',
+        token: 'token',
+        activeCwd: '/test/workspace',
+      });
+      mockedUseLlmStream.mockReturnValue({
+        pendingToolCalls: [
+          {
+            status: 'awaiting_approval',
+            request: {
+              callId: 'call-1',
+              name: 'ask_user_question',
+              args: {},
+              isClientInitiated: false,
+              prompt_id: 'prompt-1',
+            },
+            confirmationDetails: { type: 'ask_user_question' },
+          },
+        ],
+        streamingState: StreamingState.WaitingForConfirmation,
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
+        clearPendingState: mockClearPendingState,
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await vi.waitFor(() => {
+        expect(agentViewHandoffMocks.reportWorkerState).toHaveBeenCalledWith({
+          sessionState: 'needs_input',
+          inputKind: 'soft',
+          waitingFor: 'response',
+        });
+      });
+    });
+
     it('continues quitting when cancelling the active request fails', () => {
       vi.useFakeTimers();
       const cancelOngoingRequest = vi.fn(() => {

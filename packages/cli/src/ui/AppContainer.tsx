@@ -2381,9 +2381,20 @@ export const AppContainer = (props: AppContainerProps) => {
           ? 'needs_input'
           : 'idle';
 
-    void reportAgentViewWorkerState({ sessionState });
+    void reportAgentViewWorkerState({
+      sessionState,
+      ...(sessionState === 'needs_input'
+        ? pendingToolCalls.some(
+            (call) =>
+              call.status === 'awaiting_approval' &&
+              call.confirmationDetails?.type === 'ask_user_question',
+          )
+          ? { inputKind: 'soft', waitingFor: 'response' }
+          : { inputKind: 'blocking' }
+        : {}),
+    });
     return undefined;
-  }, [streamingState]);
+  }, [streamingState, pendingToolCalls]);
 
   // Auto-open the skill-review dialog when idle and there are pending skills.
   // Gated on the live auto-skill flag: after the dialog's turn-off option
