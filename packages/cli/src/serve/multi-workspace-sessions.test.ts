@@ -142,7 +142,7 @@ interface FakeBridge extends AcpSessionBridge {
   readonly taskCancelCalls: Array<{
     sessionId: string;
     taskId: string;
-    taskKind: 'agent' | 'shell' | 'monitor';
+    taskKind: 'agent' | 'shell' | 'monitor' | 'workflow';
   }>;
   readonly goalClearCalls: string[];
   readonly continueCalls: Array<{
@@ -758,10 +758,26 @@ function makeBridge(
     async cancelSessionTask(
       sessionId: string,
       taskId: string,
-      taskKind: 'agent' | 'shell' | 'monitor',
+      taskKind: 'agent' | 'shell' | 'monitor' | 'workflow',
     ) {
       taskCancelCalls.push({ sessionId, taskId, taskKind });
       return { cancelled: workspaceCwd === SECONDARY_CWD };
+    },
+    async controlSessionWorkflowTask(
+      _sessionId: string,
+      _taskId: string,
+      action:
+        | 'pause'
+        | 'resume'
+        | 'retry'
+        | 'rerun'
+        | 'delete-history'
+        | 'run-saved',
+    ) {
+      return {
+        changed: workspaceCwd === SECONDARY_CWD,
+        status: action === 'pause' ? 'pausing' : 'running',
+      };
     },
     async clearSessionGoal(sessionId: string) {
       goalClearCalls.push(sessionId);
@@ -1132,6 +1148,7 @@ function makeHarness(opts?: {
     undefined,
     {
       workspaceRegistry: registry,
+      daemonEnv: {},
       ...(opts?.daemonLog ? { daemonLog: opts.daemonLog } : {}),
       ...(opts?.liveConversationWorkspace
         ? { liveConversationWorkspace: opts.liveConversationWorkspace }
@@ -1180,13 +1197,20 @@ describe('multi-workspace session dispatch', () => {
     expect(res.body.features).toContain('workspace_archived_session_export');
     expect(res.body.features).toContain('workspace_display_name');
     expect(res.body.workspaces).toEqual([
-      { id: 'primary-id', cwd: PRIMARY_CWD, primary: true, trusted: true },
+      {
+        id: 'primary-id',
+        cwd: PRIMARY_CWD,
+        primary: true,
+        trusted: true,
+        workflowsEnabled: false,
+      },
       {
         id: 'secondary-id',
         cwd: SECONDARY_CWD,
         displayName: 'Secondary workspace',
         primary: false,
         trusted: true,
+        workflowsEnabled: false,
       },
     ]);
     expect(res.body.limits.maxSessionsPerWorkspace).toBe(32);
