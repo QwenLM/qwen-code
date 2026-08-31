@@ -484,12 +484,27 @@ describe('qwen-code-pr-review.yml resolve-pr: agent settings', () => {
     );
     assert.equal(publish['runs-on'], 'ubuntu-latest');
     assert.deepEqual(publish.permissions, { contents: 'read' });
-    // The push lock is held here too: the push is what it serialises.
-    assert.equal(
-      publish.concurrency.group,
-      resolvePrJob.concurrency.group,
-    );
+    // The publisher uses a PER-RUN concurrency group, NOT the shared
+    // head-write one: it is reached only after resolve-pr uploaded a
+    // completed resolution, and GitHub replaces the single pending job in a
+    // group when another is queued, so sharing the head-write group would let
+    // a second /resolve or an autofix writer silently cancel this pending
+    // publisher and drop a resolution that already succeeded. A per-run group
+    // can never be replaced; competing publishers are made safe by the
+    // force-with-lease push, not by the group.
+    assert.match(publish.concurrency.group, /\$\{\{\s*github\.run_id\s*\}\}/);
+    assert.notEqual(publish.concurrency.group, resolvePrJob.concurrency.group);
+    assert.match(resolvePrJob.concurrency.group, /^qwen-pr-head-write-/);
     assert.equal(publish.concurrency['cancel-in-progress'], false);
+    // The atomic guard for two concurrent publishers is the lease, pinned to
+    // the head the agent resolved from.
+    const reportRun = publish.steps.find((s) => s.name === 'Report result').run;
+    assert.ok(
+      reportRun.includes(
+        '--force-with-lease="refs/heads/${HEAD_REF}:${HEAD_SHA}"',
+      ),
+      'the publisher push must be force-with-lease pinned to HEAD_SHA',
+    );
     // No agent here, and the token-bearing step is here and nowhere else.
     assert.ok(publish.steps.every((s) => s.id !== 'resolve_conflicts'));
     assert.ok(publish.steps.every((s) => !(s.run ?? '').includes('qwen ')));

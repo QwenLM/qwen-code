@@ -820,6 +820,37 @@ describe('qwen resolve workflow', () => {
     expect(publishJob).toContain('cancel-in-progress: false');
   });
 
+  it('cannot drop a completed resolution while it waits to publish', () => {
+    // GitHub keeps only one PENDING job per concurrency group and replaces it
+    // when another same-group job is queued; cancel-in-progress:false guards
+    // only a RUNNING job. If the publisher shared the head-write group it
+    // would sit pending after resolve-pr finished, where a second /resolve or
+    // an autofix writer could silently cancel it — dropping a resolution that
+    // already succeeded, before it is pushed or reported. So:
+    const groupOf = (jobText) =>
+      jobText.match(/\n {4}concurrency:\n {6}group: '([^']*)'/)?.[1];
+    const resolveGroup = groupOf(resolveJob);
+    const publishGroup = groupOf(publishJob);
+    // The agent phase keeps the shared head-write group (serialised with
+    // autofix — the expensive work that must not race).
+    expect(resolveGroup).toMatch(/^qwen-pr-head-write-/);
+    // The publisher uses a PER-RUN group: one member for its whole life, so
+    // it can never be the replaced pending job.
+    expect(publishGroup).toContain('${{ github.run_id }}');
+    expect(publishGroup).not.toContain('qwen-pr-head-write-');
+    expect(publishGroup).not.toBe(resolveGroup);
+    // Correctness for two publishers that DO run at once rests on the push,
+    // not the group: force-with-lease pinned to the head the agent resolved
+    // from means exactly one wins and the other reports "moved" — never a
+    // clobber, never a silent drop.
+    const reportStep = step(publishJob, 'Report result');
+    expect(reportStep).toContain(
+      '--force-with-lease="refs/heads/${HEAD_REF}:${HEAD_SHA}"',
+    );
+    // And the publisher is not itself cancel-on-supersede.
+    expect(publishJob).toContain('cancel-in-progress: false');
+  });
+
   it('runs the agent without any GitHub credentials, and nothing credentialed after it', () => {
     const agentStart = resolveJob.indexOf("- name: 'Resolve conflicts'");
     const agentStep = resolveJob.slice(
@@ -948,12 +979,18 @@ describe('qwen resolve workflow', () => {
     expect(verifyStep).toContain(
       "RESOLVE_OUTCOME: '${{ needs.resolve-pr.outputs.agent_outcome }}'",
     );
-    // Both jobs hold the head-write lock: the push is what it serialises.
-    for (const text of [resolveJob, publishJob]) {
-      expect(text).toContain(
-        "group: 'qwen-pr-head-write-${{ github.event.issue.number || github.event.inputs.pr_number }}'",
-      );
-    }
+    // The agent phase holds the shared head-write lock (serialised with
+    // autofix); the publisher does NOT — it uses a per-run group so a
+    // completed resolution waiting to publish can never be replaced. See
+    // 'cannot drop a completed resolution while it waits to publish'.
+    expect(resolveJob).toContain(
+      "group: 'qwen-pr-head-write-${{ github.event.issue.number || github.event.inputs.pr_number }}'",
+    );
+    expect(publishJob).toContain(
+      "group: 'qwen-pr-publish-${{ github.run_id }}'",
+    );
+    const publishGroupLine = publishJob.match(/\n {6}group: '([^']*)'/)[1];
+    expect(publishGroupLine).not.toContain('qwen-pr-head-write-');
     // The push itself is verify-less, so a hook could never receive the URL,
     // and it never answers a credential prompt against a rewritten one.
     const reportStep = step(publishJob, 'Report result');

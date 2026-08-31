@@ -2455,11 +2455,14 @@ jobs:
     timeout-minutes: 120
     # Shared with qwen-autofix.yml's review-address job — see the rationale
     # there. GitHub concurrency groups are repository-scoped, so the identical
-    # prefix is what serialises the two workflows against each other; both
-    # merge the base branch and push to this PR's head, and racing them costs a
-    # whole agent run on the loser (observed on #7355). The prefix must stay
-    # byte-identical in both files; a test pins that, because renaming one side
-    # alone re-opens the race with nothing failing.
+    # prefix is what serialises the two workflows against each other; both run
+    # an expensive conflict-resolution agent against this PR's head, and
+    # racing them costs a whole agent run on the loser (observed on #7355).
+    # The prefix must stay byte-identical in both files; a test pins that,
+    # because renaming one side alone re-opens the race with nothing failing.
+    # Only the AGENT phase lives here; the credentialed push runs in
+    # publish-resolution under a per-run group (see the note there), so a
+    # completed resolution waiting to publish can never be replaced.
     concurrency:
       group: 'qwen-pr-head-write-${{ github.event.issue.number || github.event.inputs.pr_number }}'
       cancel-in-progress: false
@@ -2966,10 +2969,23 @@ jobs:
     if: "${{ always() && needs.resolve-pr.outputs.decision == 'run' }}"
     runs-on: 'ubuntu-latest'
     timeout-minutes: 20
-    # Same group as resolve-pr and qwen-autofix.yml's review-address: the push
-    # is what the group serialises (see the note on resolve-pr).
+    # A PER-RUN group, deliberately NOT the shared qwen-pr-head-write-<pr> one.
+    # This job is only reached after resolve-pr finished and uploaded a
+    # completed resolution; between that and this job starting it sits pending.
+    # GitHub keeps only one pending job per group and replaces it when another
+    # same-group job is queued (cancel-in-progress:false protects only a
+    # RUNNING job), so sharing the head-write group would let a second
+    # /resolve, a later publisher, or an autofix writer silently cancel this
+    # pending publisher — dropping a resolution that already succeeded, before
+    # it is ever pushed or reported. A per-run group has one member for life,
+    # so this job can never be replaced. Competing publishers stay safe not
+    # through the group but through the push itself: it is force-with-lease
+    # pinned to the head the agent resolved from, so of two concurrent pushes
+    # exactly one wins and the other reports "moved" cleanly (never a clobber,
+    # never a silent drop). The expensive, wasteful-to-race work — the agent —
+    # is what stays in the shared head-write group, on resolve-pr.
     concurrency:
-      group: 'qwen-pr-head-write-${{ github.event.issue.number || github.event.inputs.pr_number }}'
+      group: 'qwen-pr-publish-${{ github.run_id }}'
       cancel-in-progress: false
     permissions:
       contents: 'read'
