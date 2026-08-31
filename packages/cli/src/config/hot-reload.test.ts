@@ -805,18 +805,31 @@ describe('registerModelProvidersHotReload', () => {
       await listener([]);
       expect(logErrorSpy).toHaveBeenCalledOnce();
 
+      // A protocol-only edit is suppressed by SettingsWatcher in production.
+      // The next hot-reloadable event must still notice the new drift rather
+      // than staying latched on the previous one.
+      merged.providerProtocol = {
+        idealab: 'anthropic',
+      } as Settings['providerProtocol'];
+      merged.modelProviders = {
+        idealab: [{ id: 'm-3', baseUrl: 'https://x' }],
+      } as ModelProvidersConfig;
+      await listener([]);
+      expect(openDebugConsoleSpy).toHaveBeenCalledTimes(2);
+      expect(logErrorSpy).toHaveBeenCalledTimes(2);
+
       // Reverting the protocol clears the drift…
       merged.providerProtocol = {} as Settings['providerProtocol'];
       await listener([]);
-      expect(logErrorSpy).toHaveBeenCalledOnce();
+      expect(logErrorSpy).toHaveBeenCalledTimes(2);
 
       // …so a second independent drift notifies again.
       merged.providerProtocol = {
         idealab: 'anthropic',
       } as Settings['providerProtocol'];
       await listener([]);
-      expect(openDebugConsoleSpy).toHaveBeenCalledTimes(2);
-      expect(logErrorSpy).toHaveBeenCalledTimes(2);
+      expect(openDebugConsoleSpy).toHaveBeenCalledTimes(3);
+      expect(logErrorSpy).toHaveBeenCalledTimes(3);
     } finally {
       appEvents.off(AppEvent.LogError, logErrorSpy);
       appEvents.off(AppEvent.OpenDebugConsole, openDebugConsoleSpy);

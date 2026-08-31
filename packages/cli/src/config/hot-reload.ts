@@ -12,7 +12,7 @@ import {
   getMCPServerStatus,
   type MCPServerConfig,
 } from '@qwen-code/qwen-code-core';
-import type { LoadedSettings } from './settings.js';
+import type { LoadedSettings, Settings } from './settings.js';
 import type { SettingsWatcher } from './settingsWatcher.js';
 import { assembleMcpServers } from './mcpServers.js';
 import {
@@ -302,6 +302,7 @@ export function registerModelProvidersHotReload(
   // Edge-triggered drift notice: notify on the false→true transition only, so
   // a second independent drift (drift → revert → drift) notifies again.
   let protocolDriftActive = false;
+  let lastNotifiedProtocol: Settings['providerProtocol'] | undefined;
   const reconcile = async () => {
     // Drift check runs on EVERY event (before the modelProviders gate): a
     // protocol revert/edit that leaves providers unchanged must still update
@@ -309,15 +310,21 @@ export function registerModelProvidersHotReload(
     // snapshot: an edit that lands before this listener attaches (or an
     // out-of-band protocol reload, e.g. ACP) would otherwise misfire the
     // notice in both directions (silently never, or spuriously).
+    const currentProtocol = settings.merged.providerProtocol ?? {};
     const drifted = !equal(
       config.getProviderProtocolConfig() ?? {},
-      settings.merged.providerProtocol ?? {},
+      currentProtocol,
     );
-    if (drifted && !protocolDriftActive) {
+    if (
+      drifted &&
+      (!protocolDriftActive ||
+        !equal(currentProtocol, lastNotifiedProtocol ?? {}))
+    ) {
       const message =
         'providerProtocol changed; protocol mappings for custom providers require a restart to take effect.';
       modelProvidersDebugLogger.warn(message);
       emitHotReloadNotice(message);
+      lastNotifiedProtocol = { ...currentProtocol };
     }
     protocolDriftActive = drifted;
 
