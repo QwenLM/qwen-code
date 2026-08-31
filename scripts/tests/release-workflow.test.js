@@ -1205,9 +1205,17 @@ describe('release lane runner routing', () => {
 
   it('passes the runner environment to integration test configuration', () => {
     for (const name of ['integration_none', 'integration_docker']) {
-      expect(releaseYaml.jobs[name].env.RUNNER_ENVIRONMENT, name).toBe(
-        '${{ runner.environment }}',
+      const job = releaseYaml.jobs[name];
+      expect(job.env.RUNNER_ENVIRONMENT, name).toBeUndefined();
+      const testSteps = job.steps.filter((step) =>
+        /(?:vitest|test:integration)/.test(String(step.run ?? '')),
       );
+      expect(testSteps, name).toHaveLength(2);
+      for (const step of testSteps) {
+        expect(step.env.RUNNER_ENVIRONMENT, `${name}: ${step.name}`).toBe(
+          '${{ runner.environment }}',
+        );
+      }
     }
   });
 
