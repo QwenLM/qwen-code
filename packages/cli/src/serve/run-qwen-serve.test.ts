@@ -86,6 +86,7 @@ import {
 import { getDeferredRuntimeRequestTiming } from './server/request-helpers.js';
 import type { WorkspaceFileSystemFactory } from './fs/workspace-file-system.js';
 import { ConversationWorkspace } from './conversations/conversation-workspace.js';
+import type { WorkspaceRuntimeProvenance } from './managed-scratch-workspace.js';
 import * as scheduledTaskKeepalive from './scheduled-task-keepalive.js';
 
 const originalTestRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
@@ -7347,6 +7348,7 @@ describe('runQwenServe runtime startup failures', () => {
       () =>
         ({
           merged: {
+            tools: { workflowsEnabled: !runtimeMounted },
             advanced: {
               runtimeOutputDir: runtimeMounted
                 ? '.runtime-reloaded'
@@ -7433,6 +7435,7 @@ describe('runQwenServe runtime startup failures', () => {
       const pinnedRuntimeBaseDir = path.join(tmpDir, '.runtime-boot');
       expect(primaryRuntime?.sessionRuntimeBaseDir).toBe(pinnedRuntimeBaseDir);
       expect(capturedRuntimeEnv['QWEN_RUNTIME_DIR']).toBe(pinnedRuntimeBaseDir);
+      expect(primaryRuntime?.env.workflowsEnabledBySettings).toBe(true);
 
       await workspace!.reload({
         route: 'POST /workspace/reload',
@@ -7449,6 +7452,7 @@ describe('runQwenServe runtime startup failures', () => {
       expect(capturedRuntimeEnv['QWEN_TEST_RELOAD_LEAK']).toBeUndefined();
       expect(primaryRuntime?.sessionRuntimeBaseDir).toBe(pinnedRuntimeBaseDir);
       expect(capturedRuntimeEnv['QWEN_RUNTIME_DIR']).toBe(pinnedRuntimeBaseDir);
+      expect(primaryRuntime?.env.workflowsEnabledBySettings).toBe(false);
 
       reloadedRuntimeValue = 'hot-synced';
       await expect(
@@ -7708,15 +7712,18 @@ describe('runQwenServe runtime startup failures', () => {
     );
     const primary = path.join(tmpDir, 'primary');
     const secondary = path.join(tmpDir, 'secondary');
+    const dynamic = path.join(tmpDir, 'dynamic');
     const originalRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
     delete process.env['QWEN_RUNTIME_DIR'];
     fs.mkdirSync(primary);
     fs.mkdirSync(secondary);
+    fs.mkdirSync(dynamic);
     vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
       enabled: false,
       sensitiveSpanAttributeMaxLength: 1024 * 1024,
     });
     let runtimeMounted = false;
+    let dynamicReloaded = false;
     let providerRuntimeMutation = false;
     let failEnvFileRead = false;
     vi.spyOn(settingsRuntime, 'loadSettings').mockImplementation(
@@ -7725,6 +7732,10 @@ describe('runQwenServe runtime startup failures', () => {
         const isSecondary = workspace === secondary;
         return {
           merged: {
+            tools: {
+              workflowsEnabled:
+                workspace === dynamic ? !dynamicReloaded : !runtimeMounted,
+            },
             advanced: {
               runtimeOutputDir: isSecondary
                 ? runtimeMounted
@@ -7788,10 +7799,17 @@ describe('runQwenServe runtime startup failures', () => {
     let workspaceRegistry:
       | import('./workspace-registry.js').WorkspaceRegistry
       | undefined;
+    let createWorkspaceRuntime:
+      | ((
+          cwd: string,
+          options: { provenance: WorkspaceRuntimeProvenance },
+        ) => Promise<import('./workspace-registry.js').WorkspaceRuntime>)
+      | undefined;
     vi.spyOn(serverModule, 'createServeApp').mockImplementation(
       (_opts, _getPort, deps) => {
         runtimeMounted = true;
         workspaceRegistry = deps?.workspaceRegistry;
+        createWorkspaceRuntime = deps?.createWorkspaceRuntime;
         return express();
       },
     );
@@ -7827,6 +7845,7 @@ describe('runQwenServe runtime startup failures', () => {
         pinnedRuntimeBaseDir,
       );
       expect(env.effectiveEnv?.['QWEN_RUNTIME_DIR']).toBe(pinnedRuntimeBaseDir);
+      expect(env.workflowsEnabledBySettings).toBe(true);
 
       await expect(
         secondaryRuntime!.workspaceService.reload({
@@ -7844,6 +7863,18 @@ describe('runQwenServe runtime startup failures', () => {
         pinnedRuntimeBaseDir,
       );
       expect(env.effectiveEnv?.['QWEN_RUNTIME_DIR']).toBe(pinnedRuntimeBaseDir);
+      expect(env.workflowsEnabledBySettings).toBe(false);
+
+      const dynamicRuntime = await createWorkspaceRuntime!(dynamic, {
+        provenance: 'existing',
+      });
+      expect(dynamicRuntime.env.workflowsEnabledBySettings).toBe(true);
+      dynamicReloaded = true;
+      await dynamicRuntime.workspaceService.reload({
+        route: 'POST /workspace/reload',
+        workspaceCwd: dynamic,
+      });
+      expect(dynamicRuntime.env.workflowsEnabledBySettings).toBe(false);
 
       providerRuntimeMutation = true;
       await expect(
@@ -7852,7 +7883,7 @@ describe('runQwenServe runtime startup failures', () => {
           workspaceCwd: secondary,
         }),
       ).resolves.toEqual({ status: 'applied' });
-      expect(reloadEnvironment).toHaveBeenCalledOnce();
+      expect(reloadEnvironment).toHaveBeenCalledTimes(2);
       expect(env.effectiveEnv?.['QWEN_TEST_SECONDARY_ENV']).toBe(
         'provider-reloaded',
       );
@@ -7864,7 +7895,7 @@ describe('runQwenServe runtime startup failures', () => {
           workspaceCwd: secondary,
         }),
       ).resolves.toMatchObject({ runtimeEnvironmentApplied: false });
-      expect(reloadEnvironment).toHaveBeenCalledOnce();
+      expect(reloadEnvironment).toHaveBeenCalledTimes(2);
       expect(env.effectiveEnv?.['QWEN_TEST_SECONDARY_ENV']).toBe(
         'provider-reloaded',
       );
