@@ -905,6 +905,9 @@ importers:
       '@opentelemetry/semantic-conventions':
         specifier: ^1.36.0
         version: 1.36.0
+      '@qwen-code/channel-base':
+        specifier: workspace:*
+        version: link:../channels/base
       '@xterm/headless':
         specifier: 5.5.0
         version: 5.5.0
