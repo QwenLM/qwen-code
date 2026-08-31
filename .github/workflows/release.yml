@@ -401,7 +401,6 @@ jobs:
       OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
       OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
       OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
-      RUNNER_ENVIRONMENT: '${{ runner.environment }}'
 
     steps:
       # Shared ECS runners can retain root-owned files from an earlier
@@ -447,10 +446,20 @@ jobs:
           npm run bundle
 
       - name: 'Run CLI Integration Tests'
+        env:
+          # Mapped for integration-tests/vitest.config.ts, which caps each
+          # shared-pool shard at one fork and exempts pressure-flake
+          # unhandled errors.
+          RUNNER_ENVIRONMENT: '${{ runner.environment }}'
         run: |-
           npm run test:integration:cli:sandbox:none
 
       - name: 'Run Interactive Integration Tests'
+        env:
+          # Mapped for integration-tests/vitest.config.ts, which caps each
+          # shared-pool shard at one fork and exempts pressure-flake
+          # unhandled errors.
+          RUNNER_ENVIRONMENT: '${{ runner.environment }}'
         run: |-
           npm run test:integration:interactive:sandbox:none
 
@@ -467,7 +476,6 @@ jobs:
       OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
       OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
       OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
-      RUNNER_ENVIRONMENT: '${{ runner.environment }}'
 
     steps:
       # Shared ECS runners can retain root-owned files from an earlier
@@ -530,12 +538,22 @@ jobs:
           npm run build:sandbox -- -s
 
       - name: 'Run CLI Docker Integration Tests'
+        env:
+          # Mapped for integration-tests/vitest.config.ts, which caps each
+          # shared-pool shard at one fork and exempts pressure-flake
+          # unhandled errors.
+          RUNNER_ENVIRONMENT: '${{ runner.environment }}'
         run: |-
           # The package.json docker test scripts each rebuild the sandbox image.
           # Run vitest directly here so this job reuses the image built above.
           QWEN_SANDBOX=docker npx vitest run --root ./integration-tests cli
 
       - name: 'Run Interactive Docker Integration Tests'
+        env:
+          # Mapped for integration-tests/vitest.config.ts, which caps each
+          # shared-pool shard at one fork and exempts pressure-flake
+          # unhandled errors.
+          RUNNER_ENVIRONMENT: '${{ runner.environment }}'
         run: |-
           QWEN_SANDBOX=docker npx vitest run --root ./integration-tests interactive
 

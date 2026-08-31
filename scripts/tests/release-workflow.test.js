@@ -1204,10 +1204,30 @@ describe('release lane runner routing', () => {
   });
 
   it('passes the runner environment to integration test configuration', () => {
-    for (const name of ['integration_none', 'integration_docker']) {
-      expect(releaseYaml.jobs[name].env.RUNNER_ENVIRONMENT, name).toBe(
-        '${{ runner.environment }}',
-      );
+    // The `runner` context is not available in job-level `env:` — it expands
+    // to an empty string there (and fails actionlint), silently disabling the
+    // ECS limits. The mapping must sit on each step that starts a vitest run
+    // reading it in integration-tests/vitest.config.ts.
+    const integrationSteps = {
+      integration_none: [
+        'Run CLI Integration Tests',
+        'Run Interactive Integration Tests',
+      ],
+      integration_docker: [
+        'Run CLI Docker Integration Tests',
+        'Run Interactive Docker Integration Tests',
+      ],
+    };
+    for (const [name, stepNames] of Object.entries(integrationSteps)) {
+      const job = releaseYaml.jobs[name];
+      expect(job.env.RUNNER_ENVIRONMENT, name).toBeUndefined();
+      for (const stepName of stepNames) {
+        const step = job.steps.find((s) => s.name === stepName);
+        expect(step, `step missing from ${name}: ${stepName}`).toBeTruthy();
+        expect(step.env.RUNNER_ENVIRONMENT, `${name}/${stepName}`).toBe(
+          '${{ runner.environment }}',
+        );
+      }
     }
   });
 
