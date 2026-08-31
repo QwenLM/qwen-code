@@ -5,7 +5,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
@@ -119,24 +119,57 @@ describe.sequential('repository-local Git execution hooks', () => {
     );
   });
 
-  it('gates clean/process filters only for worktree-content consumers', async () => {
-    const cwd = createRepo();
-    config(cwd, 'filter.demo.process', '/tmp/filter-helper');
-    expect(getLocalGitConfigRisk(cwd).worktreeFilter).toBe(true);
+  it('gates clean and process filters for worktree-content consumers', async () => {
+    for (const key of ['filter.demo.clean', 'filter.demo.process']) {
+      const cwd = createRepo();
+      config(cwd, key, '/tmp/filter-helper');
+      expect(getLocalGitConfigRisk(cwd).worktreeFilter).toBe(true);
 
-    for (const command of [
-      'git blame file.txt',
-      'git diff',
-      'git status',
-      'git ls-files -m',
-    ]) {
-      expect(await isShellCommandReadOnlyASTInDirectory(command, cwd)).toBe(
-        false,
-      );
+      for (const command of [
+        'git blame file.txt',
+        'git diff',
+        'git status',
+        'git ls-files -m',
+      ]) {
+        expect(await isShellCommandReadOnlyASTInDirectory(command, cwd)).toBe(
+          false,
+        );
+      }
+      expect(
+        await isShellCommandReadOnlyASTInDirectory('git ls-files', cwd),
+      ).toBe(true);
     }
-    expect(
-      await isShellCommandReadOnlyASTInDirectory('git ls-files', cwd),
-    ).toBe(true);
+  });
+
+  it('ignores executable diff-driver helpers from global scope', async () => {
+    const cwd = createRepo();
+    const globalConfig = path.join(cwd, 'global.gitconfig');
+    writeFileSync(
+      globalConfig,
+      '[diff "pwn"]\n\tcommand = /tmp/global-command\n\ttextconv = /tmp/global-textconv\n',
+    );
+
+    const previousGlobal = process.env['GIT_CONFIG_GLOBAL'];
+    const previousNoSystem = process.env['GIT_CONFIG_NOSYSTEM'];
+    process.env['GIT_CONFIG_GLOBAL'] = globalConfig;
+    process.env['GIT_CONFIG_NOSYSTEM'] = '1';
+    try {
+      const risk = getLocalGitConfigRisk(cwd);
+      expect(risk.diffDriverCommand).toBe(false);
+      expect(risk.diffDriverTextconv).toBe(false);
+      expect(await isShellCommandReadOnlyASTInDirectory('git diff', cwd)).toBe(
+        true,
+      );
+      expect(
+        await isShellCommandReadOnlyASTInDirectory('git blame file.txt', cwd),
+      ).toBe(true);
+    } finally {
+      if (previousGlobal === undefined) delete process.env['GIT_CONFIG_GLOBAL'];
+      else process.env['GIT_CONFIG_GLOBAL'] = previousGlobal;
+      if (previousNoSystem === undefined)
+        delete process.env['GIT_CONFIG_NOSYSTEM'];
+      else process.env['GIT_CONFIG_NOSYSTEM'] = previousNoSystem;
+    }
   });
 
   it('gates partial-clone lazy-fetch consumers without over-gating commit-only log', async () => {
