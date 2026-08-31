@@ -975,6 +975,10 @@ describe('Session', () => {
       getWorkflowRunRegistry: vi.fn().mockReturnValue(mockWorkflowRunRegistry),
       getFileHistoryService: vi.fn().mockReturnValue(mockFileHistoryService),
       getDisabledSkillNames: vi.fn().mockReturnValue(new Set<string>()),
+      isSkillEnabled: vi.fn(
+        (skill: { name: string }) =>
+          !mockConfig.getDisabledSkillNames().has(skill.name.toLowerCase()),
+      ),
       setSubSessionSpawner: vi.fn(),
       getSubSessionSpawner: vi.fn(),
       setCurrentSessionScheduledTaskCreator: vi.fn(),
@@ -5508,6 +5512,75 @@ describe('Session', () => {
           qwenTodoApproval: { planId: 'plan-1', sourceCallId: 'todo-call-1' },
         }),
       );
+    });
+  });
+
+  describe('output style turn reminder', () => {
+    function armStyle(styleName: string | undefined) {
+      mockConfig.getOutputStyle = vi
+        .fn()
+        .mockReturnValue(
+          styleName ? core.getBuiltInOutputStyle(styleName) : undefined,
+        );
+      mockConfig.getSystemPrompt = vi.fn().mockReturnValue(undefined);
+      mockConfig.getExperimentalZedIntegration = vi.fn().mockReturnValue(true);
+      mockConfig.isInteractive = vi.fn().mockReturnValue(false);
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              candidates: [{ content: { parts: [{ text: 'ok' }] } }],
+            },
+          },
+        ]),
+      );
+    }
+
+    it('sends the active style reminder with every ACP prompt', async () => {
+      armStyle('Concise');
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hi' }],
+      });
+
+      expect(textParts(firstSentMessage())).toContainEqual(
+        expect.stringMatching(
+          /^<system-reminder>\nConcise output style is active\. Be concise:.*\n<\/system-reminder>$/s,
+        ),
+      );
+    });
+
+    it('sends nothing when no style is active', async () => {
+      armStyle(undefined);
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hi' }],
+      });
+
+      expect(
+        textParts(firstSentMessage()).some((text) =>
+          text.includes('output style is active'),
+        ),
+      ).toBe(false);
+    });
+
+    it('stays silent when a custom system prompt carries no style section', async () => {
+      armStyle('Concise');
+      mockConfig.getSystemPrompt = vi.fn().mockReturnValue('You are terse.');
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hi' }],
+      });
+
+      expect(
+        textParts(firstSentMessage()).some((text) =>
+          text.includes('output style is active'),
+        ),
+      ).toBe(false);
     });
   });
 

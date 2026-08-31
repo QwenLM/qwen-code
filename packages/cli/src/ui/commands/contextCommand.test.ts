@@ -63,6 +63,9 @@ function makeMockConfig(contextWindowSize = 32_000): Config {
       listSkills: vi.fn().mockResolvedValue([]),
     }),
     getDisabledSkillNames: vi.fn().mockReturnValue(new Set()),
+    isSkillEnabled(this: Config, skill: { name: string }) {
+      return !this.getDisabledSkillNames().has(skill.name.toLowerCase());
+    },
     getChatCompression: vi.fn().mockReturnValue(undefined),
     getAutoCompactThreshold: vi.fn(),
     getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
@@ -99,6 +102,9 @@ describe('collectContextData (contextCommand)', () => {
         listSkills: vi.fn().mockResolvedValue([]),
       }),
       getDisabledSkillNames: vi.fn().mockReturnValue(new Set()),
+      isSkillEnabled(this: Config, skill: { name: string }) {
+        return !this.getDisabledSkillNames().has(skill.name.toLowerCase());
+      },
       getChatCompression: vi.fn().mockReturnValue(undefined),
       getAutoCompactThreshold: vi.fn(),
       getExperimentalZedIntegration: vi.fn().mockReturnValue(false),

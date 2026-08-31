@@ -184,6 +184,7 @@ import {
   type GoalTurnHost,
 } from '../goals/goal-runtime.js';
 import type { GoalRecoveryRecord } from '../goals/goal-persistence.js';
+import { GOAL_DEFAULT_TOKEN_BUDGET } from '../goals/goal-protocol.js';
 import { createGoalCheckpointVerifier } from '../goals/goal-checkpoint-verifier.js';
 import { createGoalVerifier } from '../goals/goal-verifier.js';
 import type { ToolInvocationGuard } from '../core/tool-invocation-guard.js';
@@ -892,6 +893,7 @@ export interface ConfigParameters {
    * Names returned must be lower-cased; consumers compare case-insensitively.
    */
   disabledSkillNamesProvider?: () => ReadonlySet<string>;
+  enabledSkillNamesProvider?: () => ReadonlySet<string>;
   terminalImageRenderSupportProvider?: () => Promise<TerminalImageRenderSupport>;
   /**
    * Skill discovery levels that should not be loaded. Sourced from
@@ -1019,6 +1021,14 @@ export interface ConfigParameters {
   model?: string;
   outputLanguageFilePath?: string;
   maxSessionTurns?: number;
+  /**
+   * Autonomous spend window armed on each new Goal, in `tokensUsed` tokens
+   * (`totalTokenCount` summed per Goal-turn model call). `0` runs Goals with
+   * no budget, and `-1` is accepted as an alias for `0`, matching the sibling
+   * settings where `-1` means unlimited; absent or invalid falls back to
+   * `GOAL_DEFAULT_TOKEN_BUDGET`. See `normalizeGoalTokenBudget`.
+   */
+  goalTokenBudget?: number;
   /**
    * Maximum number of nested sub-agent levels (1-based). `1` reproduces the
    * pre-nesting behavior — level-1 sub-agents exist but cannot themselves
@@ -1434,6 +1444,49 @@ export function validateMaxSessionTurns(value: number | undefined): number {
     );
   }
   return resolved;
+}
+
+/**
+ * Resolves the operator's Goal token budget setting to the grant the Goal
+ * runtime arms on each new Goal.
+ *
+ * A positive integer is the grant. `0` opts out -- the runtime treats a
+ * non-finite grant as "arm nothing", and a Goal with no `tokenBudget` field
+ * runs unbounded, so the opt-out never has to persist `Infinity`. `-1` is an
+ * alias for `0`, matching the sibling budget settings where `-1` means
+ * unlimited. Anything else (absent, other negative, fractional, NaN,
+ * non-number) is the default; the caller decides whether that deserves a
+ * warning via `isValidGoalTokenBudget`.
+ */
+export function normalizeGoalTokenBudget(value: unknown): number {
+  if (value === 0 || value === -1) return Number.POSITIVE_INFINITY;
+  return isValidGoalTokenBudget(value) ? value : GOAL_DEFAULT_TOKEN_BUDGET;
+}
+
+/**
+ * Largest accepted `model.goalTokenBudget`: 10x the built-in default.
+ *
+ * The bound is a typo guard, not a policy on long runs. The population for
+ * this setting is exactly "people typing zeros into a safety bound", and a
+ * silent extra zero disarms the runaway-spend guard the setting exists for;
+ * an operator who genuinely wants more autonomy than 300M tokens per window
+ * has the explicit opt-out (`0`/`-1`) instead. Values above the cap fall
+ * back to the default and land in the debug log like every other invalid
+ * value.
+ */
+export const GOAL_TOKEN_BUDGET_CAP = 10 * GOAL_DEFAULT_TOKEN_BUDGET;
+
+/**
+ * True for the values `normalizeGoalTokenBudget` honours (`-1` as the
+ * opt-out alias for `0`, positives up to `GOAL_TOKEN_BUDGET_CAP`); false for
+ * the values that fall back to the default.
+ */
+export function isValidGoalTokenBudget(value: unknown): value is number {
+  return (
+    typeof value === 'number' &&
+    Number.isInteger(value) &&
+    (value === -1 || (value >= 0 && value <= GOAL_TOKEN_BUDGET_CAP))
+  );
 }
 
 function validateMaxToolCallsPerTurn(value: number | undefined): number {
@@ -2100,6 +2153,9 @@ export class Config {
   private readonly disabledSkillNamesProvider:
     | (() => ReadonlySet<string>)
     | null;
+  private readonly enabledSkillNamesProvider:
+    | (() => ReadonlySet<string>)
+    | null;
   private readonly terminalImageRenderSupportProvider:
     | (() => Promise<TerminalImageRenderSupport>)
     | null;
@@ -2259,6 +2315,7 @@ export class Config {
   private ideMode: boolean;
 
   private readonly maxSessionTurns: number;
+  private readonly goalTokenBudgetGrant: number;
   private readonly maxSubagentDepth: number;
   private readonly maxWallTimeSeconds: number;
   private readonly maxToolCalls: number;
@@ -2453,6 +2510,7 @@ export class Config {
       ...(params.disabledSlashCommands ?? []),
     ]);
     this.disabledSkillNamesProvider = params.disabledSkillNamesProvider ?? null;
+    this.enabledSkillNamesProvider = params.enabledSkillNamesProvider ?? null;
     this.terminalImageRenderSupportProvider =
       params.terminalImageRenderSupportProvider ?? null;
     this.disabledSkillLevels = new Set(params.disabledSkillLevels ?? []);
@@ -2560,6 +2618,17 @@ export class Config {
     this.fileDiscoveryService = params.fileDiscoveryService ?? null;
     this.bugCommand = params.bugCommand;
     this.maxSessionTurns = validateMaxSessionTurns(params.maxSessionTurns);
+    this.goalTokenBudgetGrant = normalizeGoalTokenBudget(
+      params.goalTokenBudget,
+    );
+    if (
+      params.goalTokenBudget !== undefined &&
+      !isValidGoalTokenBudget(params.goalTokenBudget)
+    ) {
+      this.debugLogger.warn(
+        `Ignoring invalid goalTokenBudget ${String(params.goalTokenBudget)}: expected a non-negative integer or -1 (no budget); using the default of ${GOAL_DEFAULT_TOKEN_BUDGET}.`,
+      );
+    }
     this.maxSubagentDepth = normalizeMaxSubagentDepth(params.maxSubagentDepth);
     this.maxWallTimeSeconds = params.maxWallTimeSeconds ?? -1;
     this.maxToolCalls = params.maxToolCalls ?? -1;
@@ -5473,6 +5542,15 @@ export class Config {
     return this.maxSessionTurns;
   }
 
+  /**
+   * The autonomous spend window armed on each new Goal, as the runtime's
+   * `tokenBudgetGrant`: a positive integer, or `Infinity` when the operator
+   * set `goalTokenBudget` to `0` or `-1` (Goals then run unbounded).
+   */
+  getGoalTokenBudgetGrant(): number {
+    return this.goalTokenBudgetGrant;
+  }
+
   getMaxSubagentDepth(): number {
     return this.maxSubagentDepth;
   }
@@ -6065,6 +6143,35 @@ export class Config {
    */
   getDisabledSkillNames(): ReadonlySet<string> {
     return this.disabledSkillNamesProvider?.() ?? EMPTY_DISABLED_SKILL_NAMES;
+  }
+
+  isSkillEnabled(skill: {
+    name: string;
+    level?: string;
+    filePath?: string;
+    extensionName?: string;
+  }): boolean {
+    const name = skill.name.trim().toLowerCase();
+    const extension =
+      skill.level === 'extension'
+        ? this.getExtensions().find(
+            (candidate) =>
+              candidate.name === skill.extensionName &&
+              candidate.skills?.some(
+                (owned) =>
+                  owned.name.trim().toLowerCase() === name &&
+                  owned.filePath === skill.filePath,
+              ),
+          )
+        : undefined;
+    if (skill.level === 'extension' && !extension?.isActive) return false;
+    if (this.getDisabledSkillNames().has(name)) return false;
+    if (!extension || this.enabledSkillNamesProvider?.().has(name)) return true;
+    const state = this.extensionManager.getExtensionSkillState(
+      extension.id,
+      skill.name,
+    );
+    return state.workspaceEnabled ?? state.defaultEnabled;
   }
 
   /**
@@ -8485,6 +8592,7 @@ export class Config {
       tokenLedger: recorder,
       verifier: createGoalVerifier(this),
       checkpointVerifier: createGoalCheckpointVerifier(this),
+      tokenBudgetGrant: this.goalTokenBudgetGrant,
     });
     this.goalRuntime = runtime;
     if (this.goalTurnHost) {

@@ -1595,6 +1595,16 @@ const SETTINGS_SCHEMA = {
           'Run-level wall-clock budget for headless / unattended runs, in seconds. -1 means unlimited; otherwise must be in [1, ~2,147,483] (sub-second values and values above ~24 days are rejected as typos). Overridable per-invocation via --max-wall-time (which also accepts duration suffixes like 5m, 1.5h).',
         showInDialog: false,
       },
+      goalTokenBudget: {
+        type: 'integer',
+        label: 'Goal Token Budget',
+        category: 'Model',
+        requiresRestart: false,
+        default: undefined as number | undefined,
+        description:
+          'Autonomous spend window armed on each new Goal, in tokens as counted by the Goal meter (totalTokenCount summed over every model call the Goal makes in its own turns; side queries and checkpoint verification are not metered). When a Goal spends its window it gets one wind-down turn to hand off, then stops until you resume it, which arms another window. Unset uses the built-in default of 30,000,000; -1 means unlimited. Zero, values above 300,000,000 (10x the default, a typo guard), other negative, fractional, or non-number values are rejected at startup.',
+        showInDialog: false,
+      },
       maxToolCalls: {
         type: 'number',
         label: 'Max Tool Calls',
