@@ -27438,6 +27438,8 @@ describe('sessionLanguage multi-session propagation', () => {
           getConfig: vi.fn().mockReturnValue(cfg),
           isIdle: vi.fn().mockReturnValue(true),
           sendAvailableCommandsUpdate,
+          clearActiveTodoPlanRevision: vi.fn(),
+          clearTodoStopGuardTrust: vi.fn(),
           installRewriter: vi.fn(),
           installGoalTerminalObserver: vi.fn(),
           startCronScheduler: vi.fn(),
