@@ -46,6 +46,10 @@ const MEDIA_TOOL_CAPABILITIES: ReadonlyArray<[string, string]> = [
     'cut a specific time range out of a video (startSec/durationSec) — the primary way to inspect parts of a long video that were not delivered',
   ],
   [
+    ToolNames.OMNI_UNDERSTAND_VIDEO_SEGMENTS,
+    'understand a long video end to end: fixed-length segments described in parallel by an omni model, assembled into a time-labeled text summary',
+  ],
+  [
     ToolNames.OMNI_EXTRACT_KEYFRAMES,
     'extract still frames from a video (clip a range first to sample frames from a specific segment)',
   ],
@@ -62,12 +66,54 @@ const MEDIA_TOOL_CAPABILITIES: ReadonlyArray<[string, string]> = [
     'transcribe speech in an audio file to text',
   ],
   [
+    ToolNames.OMNI_CAPTION_AUDIO,
+    'describe an audio file semantically (speech gist, timbre, sound events, mood) — understanding, not verbatim transcription',
+  ],
+  [
+    ToolNames.OMNI_CLIP_AUDIO,
+    'cut a specific time range out of an audio file (startMs/durationMs)',
+  ],
+  [
     ToolNames.OMNI_DOWNSAMPLE_AUDIO,
     're-encode audio at a lower bitrate/sample rate',
   ],
   [ToolNames.OMNI_DOWNSAMPLE_IMAGE, 'shrink an image to a smaller resolution'],
   [ToolNames.OMNI_CONVERT_IMAGE, 'convert an image to another format'],
+  [
+    ToolNames.OMNI_CLIP_IMAGE,
+    'crop a pixel rectangle (x/y/width/height) out of an image',
+  ],
+  [
+    ToolNames.OMNI_CAPTION_IMAGE,
+    'describe an image with a VL model under a custom prompt, turning visual content into text',
+  ],
+  [
+    ToolNames.OMNI_OCR_IMAGE,
+    'extract the text visible in an image (OCR), with automatic language detection',
+  ],
 ];
+
+/**
+ * Model-facing descriptions of the configured fixed policies, in the order
+ * they run (priority desc, id asc — the orchestrator's own ordering), each
+ * a single bullet. A policy contributes only when its config carries a
+ * `description`; policies without one stay silent. Empty when no policy is
+ * described, so the guidance section omits the block entirely.
+ *
+ * This lets the active preprocessing contract (e.g. the token threshold
+ * below which a video is delivered un-degraded, and how to stay under it)
+ * be authored right next to the policy in settings — like a tool
+ * description — and flow into the prompt automatically, rather than being
+ * restated in this module.
+ */
+function collectPolicyDescriptions(config: Config): string[] {
+  const policies = config.getOmniProcessingConfig?.()?.fixedPolicies;
+  if (!policies) return [];
+  return [...policies]
+    .sort((a, b) => b.priority - a.priority || a.id.localeCompare(b.id))
+    .map((p) => p.description)
+    .filter((d): d is string => typeof d === 'string' && d.length > 0);
+}
 
 /**
  * Build the progressive media understanding section for the system
@@ -103,6 +149,20 @@ export function buildOmniMediaGuidanceSection(config: Config): string | null {
 - Handles also work as the \`resourceId\` argument of the media tools below, in place of a path.`
       : '';
 
+  // Active preprocessing contract, authored per policy in settings and
+  // collected here (like tool descriptions): each configured policy that
+  // carries a `description` explains what it does / when it triggers, so
+  // the model can work with the pipeline (e.g. shrink a clip under the
+  // native-delivery token threshold) instead of guessing at it.
+  const policyDescriptions = collectPolicyDescriptions(config);
+  const policyGuidance =
+    policyDescriptions.length > 0
+      ? `
+
+The media reaching you is shaped by these automatic preprocessing policies (they run in this order):
+${policyDescriptions.map((d) => `- ${d}`).join('\n')}`
+      : '';
+
   const toolGuidance =
     enabledTools.length > 0
       ? `- When the task needs evidence beyond what was delivered — later time ranges, finer visual detail, more frames, a fuller transcript — do not stop at the delivered subset: fetch the evidence yourself with the media tools below, then read the produced file(s) to bring them into context. Work in targeted excerpts (a specific time range or region at a time) so each request stays within limits, and iterate until you have seen enough to complete the task.
@@ -123,6 +183,6 @@ ${recallGuidance}
 Interpret delivered media under this contract:
 
 - A degraded delivery is an OVERVIEW or entry point, not the complete content. The original file on disk is untouched and remains fully available for further processing.
-- Never conclude that content outside the delivered portion does not exist, and never present conclusions drawn from a partial delivery as covering the whole file. Read each disclosure quantitatively: a clip marker covering [0s–600s] of a 4882s video means 4282s exist that you have NOT seen; a keyframe marker tells you which timestamps you actually saw.
+- Never conclude that content outside the delivered portion does not exist, and never present conclusions drawn from a partial delivery as covering the whole file. Read each disclosure quantitatively: a clip marker covering [0s–600s] of a 4882s video means 4282s exist that you have NOT seen; a keyframe marker tells you which timestamps you actually saw.${policyGuidance}
 ${toolGuidance}`;
 }

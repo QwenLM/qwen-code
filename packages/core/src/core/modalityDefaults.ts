@@ -40,6 +40,11 @@ const MODALITY_PATTERNS: Array<[RegExp, InputModalities]> = [
   // -------------------
   // Alibaba / Qwen
   // -------------------
+  // Qwen Omni models: full multimodal (image + audio + video) — the omni
+  // harness targets these. Must precede the qwen3.x-plus/qwen fallbacks:
+  // "qwen3.5-omni-plus" would otherwise match /^qwen/ and be text-only.
+  [/^qwen\d*\.?\d*-omni/, FULL_MULTIMODAL],
+  [/^qwen-omni/, FULL_MULTIMODAL],
   // Qwen Plus models: image + video support
   [/^qwen3\.5-plus/, { image: true, video: true }],
   [/^qwen3\.6-plus/, { image: true, video: true }],

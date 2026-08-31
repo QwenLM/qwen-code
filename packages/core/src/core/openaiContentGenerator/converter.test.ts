@@ -1571,6 +1571,60 @@ describe('OpenAIContentConverter', () => {
       );
     });
 
+    it('moves a bare keyframe timestamp marker together with its frame', () => {
+      // Per-frame markers (`<MM:SS>`) carry no 【媒体降质】 prefix — the
+      // degradation notice rode once on the first frame's header — but they
+      // must still migrate WITH their image so each frame keeps its label.
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [{ functionCall: { id: 'call_1', name: 'Read', args: {} } }],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_1',
+                  name: 'Read',
+                  response: { output: 'frames' },
+                  parts: [
+                    { text: '<00:34>' },
+                    {
+                      inlineData: {
+                        mimeType: 'image/jpeg',
+                        data: 'framebytes',
+                      },
+                    },
+                  ] as unknown as Part[],
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const messages = converter.convertGeminiRequestToOpenAI(request, {
+        ...requestContext,
+        splitToolMedia: true,
+      });
+
+      // The marker did NOT stay stranded in the tool message text.
+      const toolMessage = messages.find((m) => m.role === 'tool');
+      expect(toolMessage?.content).toBe('frames');
+
+      const userContent = messages.find((m) => m.role === 'user')
+        ?.content as Array<{ type: string; text?: string }>;
+      expect(userContent.map((p) => p.type)).toEqual([
+        'text',
+        'text',
+        'image_url',
+      ]);
+      expect(userContent[1].text).toBe('<00:34>');
+    });
+
     it('gives a disclosure only to the media part directly following it', () => {
       // Two media parts after one disclosure: only the adjacent one owns
       // it — the second media part must not pull the disclosure past the

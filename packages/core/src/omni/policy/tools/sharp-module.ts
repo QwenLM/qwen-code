@@ -16,16 +16,29 @@ export interface SharpPipeline {
   resize(options: {
     width: number;
     height: number;
-    fit: 'inside';
-    withoutEnlargement: boolean;
+    fit: 'inside' | 'fill';
+    withoutEnlargement?: boolean;
+  }): SharpPipeline;
+  /** Crop a pixel rectangle out of the (post-rotation) image. */
+  extract(options: {
+    left: number;
+    top: number;
+    width: number;
+    height: number;
   }): SharpPipeline;
   jpeg(options: { quality: number }): SharpPipeline;
   png(): SharpPipeline;
   webp(options: { quality: number }): SharpPipeline;
   /** Header-derived metadata; `pages` is the frame/page count of
    * multi-frame containers (animated GIF/WebP/APNG) — the tools' second,
-   * ffprobe-independent animated-input gate. */
-  metadata(): Promise<{ pages?: number }>;
+   * ffprobe-independent animated-input gate. `orientation` is the EXIF
+   * orientation tag (≥ 5 swaps the displayed axes). */
+  metadata(): Promise<{
+    pages?: number;
+    width?: number;
+    height?: number;
+    orientation?: number;
+  }>;
   toFile(
     outputPath: string,
   ): Promise<{ width: number; height: number; size: number }>;

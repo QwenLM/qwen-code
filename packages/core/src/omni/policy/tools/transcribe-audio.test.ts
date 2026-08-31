@@ -233,6 +233,7 @@ describe('OmniTranscribeAudioTool', () => {
       model: 'qwen3.5-omni-plus',
       modalities: ['text'],
       stream: true,
+      stream_options: { include_usage: true },
       messages: [
         {
           role: 'user',

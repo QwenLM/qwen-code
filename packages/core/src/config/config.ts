@@ -8308,6 +8308,48 @@ export class Config {
               await import('../omni/policy/tools/transcribe-audio.js')
             ).OmniTranscribeAudioTool(this),
         ],
+        [
+          ToolNames.OMNI_CLIP_IMAGE,
+          async () =>
+            new (
+              await import('../omni/policy/tools/clip-image.js')
+            ).OmniClipImageTool(this),
+        ],
+        [
+          ToolNames.OMNI_CLIP_AUDIO,
+          async () =>
+            new (
+              await import('../omni/policy/tools/clip-audio.js')
+            ).OmniClipAudioTool(this),
+        ],
+        [
+          ToolNames.OMNI_CAPTION_IMAGE,
+          async () =>
+            new (
+              await import('../omni/policy/tools/caption-image.js')
+            ).OmniCaptionImageTool(this),
+        ],
+        [
+          ToolNames.OMNI_CAPTION_AUDIO,
+          async () =>
+            new (
+              await import('../omni/policy/tools/caption-audio.js')
+            ).OmniCaptionAudioTool(this),
+        ],
+        [
+          ToolNames.OMNI_OCR_IMAGE,
+          async () =>
+            new (
+              await import('../omni/policy/tools/ocr-image.js')
+            ).OmniOcrImageTool(this),
+        ],
+        [
+          ToolNames.OMNI_UNDERSTAND_VIDEO_SEGMENTS,
+          async () =>
+            new (
+              await import('../omni/policy/tools/understand-video-segments.js')
+            ).OmniUnderstandVideoSegmentsTool(this),
+        ],
       ];
       for (const [name, factory] of omniPolicyToolFactories) {
         await registerLazy(name, factory);

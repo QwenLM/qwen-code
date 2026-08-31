@@ -111,6 +111,12 @@ describe('ReadFileTool', () => {
       getContentGeneratorConfig: () => ({
         modalities: { image: true, pdf: true, audio: true, video: true },
       }),
+      getEffectiveInputModalities: () => ({
+        image: true,
+        pdf: true,
+        audio: true,
+        video: true,
+      }),
       getFileReadCache: () => fileReadCache,
       getFileReadCacheDisabled: () => false,
     } as unknown as Config;
@@ -130,6 +136,28 @@ describe('ReadFileTool', () => {
       expect(tool.description).toContain(
         'selected model to support the corresponding modality',
       );
+    });
+
+    it('recomputes the schema description from live modalities', () => {
+      // The declaration the model actually receives comes from `schema`, which
+      // is recomputed on read — so it reflects the current model's modalities.
+      expect(tool.schema.description).toContain('audio, video');
+      expect(tool.schema.description).toContain('watch a video');
+    });
+
+    it('omits audio/video for a text-only model (no false clip-read promise)', () => {
+      const textOnlyConfig = {
+        getEffectiveInputModalities: () => ({ image: true, pdf: true }),
+      } as unknown as Config;
+      const textTool = new ReadFileTool(textOnlyConfig);
+      for (const desc of [textTool.description, textTool.schema.description]) {
+        expect(desc).toContain(
+          'text, images (PNG, JPG, GIF, WEBP, SVG, BMP), PDF files',
+        );
+        expect(desc).not.toContain('audio, video');
+        expect(desc).not.toContain('watch a video');
+        expect(desc).not.toContain('read_file on the resulting clip');
+      }
     });
 
     it('should return an invocation for valid params (absolute path within root)', () => {

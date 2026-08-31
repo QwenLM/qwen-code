@@ -30,6 +30,7 @@ import {
   type MediaPolicyIoParams,
   type MediaPolicyToolConfigView,
 } from './media-policy-tool.js';
+import { appendOmniUsageLog, type OpenAiUsage } from './usage-log.js';
 
 export const OMNI_TRANSCRIBE_AUDIO_TOOL_NAME = ToolNames.OMNI_TRANSCRIBE_AUDIO;
 
@@ -187,15 +188,25 @@ const readNumber = (
     : undefined;
 };
 
-/** One SSE `data:` chunk of an OpenAI-compatible streaming response. */
+/** One SSE `data:` chunk of an OpenAI-compatible streaming response. The
+ * final chunk (when stream_options.include_usage is set) carries `usage`
+ * and an empty `choices` array. */
 interface StreamChunk {
   choices?: Array<{ delta?: { content?: string | null } }>;
+  usage?: OpenAiUsage | null;
 }
 
-/** Concatenate `choices[0].delta.content` across SSE lines. Exported for
- * tests. */
-export function parseSseTranscript(body: string): string {
+/**
+ * Assemble `choices[0].delta.content` across SSE lines and capture the
+ * final `usage` block (present only when the request set
+ * stream_options.include_usage). Exported for tests.
+ */
+export function parseSseCompletion(body: string): {
+  text: string;
+  usage?: OpenAiUsage;
+} {
   let transcript = '';
+  let usage: OpenAiUsage | undefined;
   for (const rawLine of body.split(/\r?\n/)) {
     const line = rawLine.trim();
     if (!line.startsWith('data:')) continue;
@@ -209,8 +220,15 @@ export function parseSseTranscript(body: string): string {
     }
     const content = chunk.choices?.[0]?.delta?.content;
     if (typeof content === 'string') transcript += content;
+    if (chunk.usage) usage = chunk.usage;
   }
-  return transcript;
+  return { text: transcript, usage };
+}
+
+/** Concatenate `choices[0].delta.content` across SSE lines. Exported for
+ * tests. */
+export function parseSseTranscript(body: string): string {
+  return parseSseCompletion(body).text;
 }
 
 /** Repetition-degeneration thresholds: a transcript tail counts as
@@ -643,6 +661,7 @@ class TranscribeAudioInvocation extends BaseMediaPolicyToolInvocation<Transcribe
           model: options.model,
           modalities: ['text'],
           stream: true,
+          stream_options: { include_usage: true },
           messages: [
             {
               role: 'user',
@@ -665,7 +684,9 @@ class TranscribeAudioInvocation extends BaseMediaPolicyToolInvocation<Transcribe
     if (!response.ok) {
       return { ok: false, error: `HTTP ${response.status}` };
     }
-    return { ok: true, text: parseSseTranscript(await response.text()).trim() };
+    const { text, usage } = parseSseCompletion(await response.text());
+    appendOmniUsageLog(options.model, usage, 'omni_transcribe_audio');
+    return { ok: true, text: text.trim() };
   }
 }
 

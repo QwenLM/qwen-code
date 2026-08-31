@@ -55,6 +55,11 @@ export interface NormalizedFixedPolicy {
   mediaTypes: OmniModality[];
   /** Resource provenances the policy applies to. */
   origins: FixedPolicyOrigin[];
+  /** Optional model-facing description (like a tool description): free text
+   * explaining what the policy does / when it triggers. Collected into the
+   * media-guidance system-prompt section so the model learns the active
+   * preprocessing contract from configuration. Absent when unconfigured. */
+  description?: string;
   /** Optional condition; absent means "always applies". */
   when?: FixedPolicyCondition;
   /** What to do when `when` cannot be decided (default: skip). */

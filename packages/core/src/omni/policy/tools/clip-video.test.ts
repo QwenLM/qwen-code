@@ -96,7 +96,6 @@ describe('OmniClipVideoTool', () => {
     expect(CLIP_VIDEO_DEFAULTS).toEqual({
       crf: 23,
       preset: 'veryfast',
-      audioBitrateKbps: 128,
     });
   });
 
@@ -127,10 +126,7 @@ describe('OmniClipVideoTool', () => {
         '23',
         '-preset',
         'veryfast',
-        '-c:a',
-        'aac',
-        '-b:a',
-        '128k',
+        '-an',
         '-movflags',
         '+faststart',
         outputPath,
@@ -150,7 +146,8 @@ describe('OmniClipVideoTool', () => {
         mimeType: 'video/mp4',
         sizeBytes: OUTPUT_SIZE,
         metadata: {
-          omniDisclosure: '原 63s → 片段 [10s–25s] 15s，片段外内容全部丢弃',
+          omniDisclosure:
+            '原 63s → 片段 [10s–25s] 15s，仅画面（无音轨，对白见完整转写），片段外内容全部丢弃',
           omniRole: 'clip',
         },
       },
@@ -163,7 +160,7 @@ describe('OmniClipVideoTool', () => {
     const args = mocks.runFfmpeg.mock.calls[0][0] as string[];
     expect(args).not.toContain('-t');
     expect(result.artifacts?.[0]?.metadata?.['omniDisclosure']).toBe(
-      '原 63s → 片段 [10s–63s] 53s，片段外内容全部丢弃',
+      '原 63s → 片段 [10s–63s] 53s，仅画面（无音轨，对白见完整转写），片段外内容全部丢弃',
     );
   });
 
@@ -171,7 +168,7 @@ describe('OmniClipVideoTool', () => {
     probe({ durationMs: 63_000 });
     const { result } = await run({ startSec: 50, durationSec: 100 });
     expect(result.artifacts?.[0]?.metadata?.['omniDisclosure']).toBe(
-      '原 63s → 片段 [50s–63s] 13s，片段外内容全部丢弃',
+      '原 63s → 片段 [50s–63s] 13s，仅画面（无音轨，对白见完整转写），片段外内容全部丢弃',
     );
   });
 
@@ -179,7 +176,7 @@ describe('OmniClipVideoTool', () => {
     probe({});
     const { result } = await run({ startSec: 10, durationSec: 15 });
     expect(result.artifacts?.[0]?.metadata?.['omniDisclosure']).toBe(
-      '原 未知时长 → 片段 [10s–25s] 15s，片段外内容全部丢弃',
+      '原 未知时长 → 片段 [10s–25s] 15s，仅画面（无音轨，对白见完整转写），片段外内容全部丢弃',
     );
   });
 
@@ -233,6 +230,31 @@ describe('OmniClipVideoTool', () => {
     );
   });
 
+  it('defaults a missing outputDir to the source video directory', async () => {
+    probe({ durationMs: 63_000 });
+    // No outputDir supplied — the model should not have to invent one.
+    const invocation = tool.build({
+      inputPath,
+      startSec: 10,
+      durationSec: 15,
+    } as never);
+    const result = await invocation.execute(new AbortController().signal);
+    expect(result.error).toBeUndefined();
+    // Written next to the source (root), NOT the staging dir the run() helper
+    // would otherwise inject.
+    const expectedPath = path.join(
+      path.dirname(inputPath),
+      'clip-clip-10s+15s.mp4',
+    );
+    expect(mocks.runFfmpeg).toHaveBeenCalledWith(
+      expect.arrayContaining([expectedPath]),
+      expect.anything(),
+    );
+    expect(result.artifacts?.[0]).toMatchObject({
+      workspacePath: 'clip-clip-10s+15s.mp4',
+    });
+  });
+
   it.each([
     ['both startSec and durationSec absent', {}],
     ['explicit startSec 0 without durationSec (no-op clip)', { startSec: 0 }],
@@ -244,6 +266,25 @@ describe('OmniClipVideoTool', () => {
     expect(() =>
       tool.build({ inputPath, outputDir, ...overrides } as never),
     ).toThrow();
+  });
+
+  it('appends a clip-budget brake once the source hits the soft budget', async () => {
+    probe({ durationMs: 630_000 });
+    // Two clips of this source already on disk (same `<stem>-clip-` prefix);
+    // the run below is the third, hitting the default budget of 3.
+    await fs.writeFile(path.join(outputDir, 'clip-clip-1s+2s.mp4'), '');
+    await fs.writeFile(path.join(outputDir, 'clip-clip-3s+4s.mp4'), '');
+    const { result } = await run({ startSec: 300, durationSec: 15 });
+    expect(result.error).toBeUndefined();
+    expect(String(result.llmContent)).toContain('已对该视频切了 3 段');
+    // The brake steers toward densify-locate, not more trial clips.
+    expect(String(result.llmContent)).toContain('omni_extract_keyframes');
+  });
+
+  it('does not brake below the soft budget', async () => {
+    probe({ durationMs: 630_000 });
+    const { result } = await run({ startSec: 300, durationSec: 15 });
+    expect(String(result.llmContent)).not.toContain('已对该视频切了');
   });
 
   it('rejects a probed full-span request without transcoding', async () => {
