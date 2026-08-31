@@ -2165,11 +2165,15 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
             this.endReactionName,
           );
           this.endReactionKeys.delete(key);
+          if (this.endReactionName === this.startReactionName) {
+            reaction.added = false;
+          }
         } catch (error) {
           this.logReactionFailure('previous end reaction removal', error);
         }
       }
       if (this.activeReactions.get(key) !== reaction) return;
+      if (reaction.added) return;
       try {
         await this.client.addImReaction(
           target.conversationId,
@@ -2200,7 +2204,11 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     if (!reaction) return;
     const generation = this.lifecycleGeneration;
     this.enqueueReactionOperation(key, async () => {
-      if (this.activeReactions.has(key)) return;
+      const replacement = this.activeReactions.get(key);
+      if (replacement) {
+        if (reaction.added) replacement.added = true;
+        return;
+      }
       await this.removeStartedReaction(reaction, 'start reaction removal');
       if (
         this.activeReactions.has(key) ||
