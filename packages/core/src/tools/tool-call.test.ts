@@ -36,6 +36,7 @@ function makeRegistry(
   return {
     ensureTool: async (name: string) => allTools.get(name),
     getTool: (name: string) => allTools.get(name),
+    getAllToolNames: () => [...allTools.keys()],
     isDeferredAndHidden: (name: string) => hidden.has(name),
   } as unknown as ToolRegistry;
 }
@@ -113,6 +114,47 @@ describe('ToolCallTool', () => {
 
     expect(result).toMatchObject({
       errorType: ToolErrorType.TOOL_NOT_REGISTERED,
+      // Pin the present-side remedy: with tool_search registered the denial
+      // must point back at discovery. Mutation check: dropping the remedy
+      // suffix turns this red (the absent-side twin is pinned by the
+      // 'does not suggest tool_search...' case below) — round-5 deferred item.
+      error: expect.objectContaining({
+        message: expect.stringContaining('Run tool_search again'),
+      }),
+    });
+  });
+
+  it('resolves a target case-insensitively like the discovery half', async () => {
+    // tool_search's select: resolves requested names case-insensitively;
+    // the invocation half must agree, otherwise a schema reviewed as e.g.
+    // `Read_File` is not callable through the bridge (round-5 deferred
+    // item). Mutation check: removing the case-insensitive fallback in
+    // resolveDeferredToolCall turns this red.
+    const target = new MockTool({ name: 'deferred_target', shouldDefer: true });
+    const result = await resolveDeferredToolCall(
+      makeRegistry([target], new Set([target.name])),
+      { name: 'Deferred_Target', arguments: { foo: 'baz' } },
+    );
+
+    expect(result).toMatchObject({
+      tool: expect.objectContaining({ name: 'deferred_target' }),
+      arguments: { foo: 'baz' },
+    });
+  });
+
+  it('rejects case-variant spellings of the bridge tools themselves', async () => {
+    // Companion pin: the case-insensitive fallback must feed the recursive
+    // guard, so `Tool_Call` cannot dodge it via casing.
+    const result = await resolveDeferredToolCall(makeRegistry(), {
+      name: 'Tool_Call',
+      arguments: {},
+    });
+
+    expect(result).toMatchObject({
+      errorType: ToolErrorType.INVALID_TOOL_PARAMS,
+      error: expect.objectContaining({
+        message: expect.stringContaining('cannot invoke bridge tool'),
+      }),
     });
   });
 

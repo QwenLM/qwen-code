@@ -89,7 +89,21 @@ export async function resolveDeferredToolCall(
     };
   }
 
-  const targetName = canonicalToolName(invocation.params.name);
+  let targetName = canonicalToolName(invocation.params.name);
+  // The discovery half (tool_search's select:) resolves requested names
+  // case-insensitively against the registered names; the invocation half
+  // must agree, otherwise a schema reviewed as e.g. `Read_File` would not be
+  // callable through the bridge (round-5 deferred item). Exact-case names
+  // take the fast path; the fallback only fires when the exact name is not
+  // registered.
+  if (!registry.getTool(targetName)) {
+    const lower = targetName.toLowerCase();
+    const registered = registry.getAllToolNames?.() ?? [];
+    const match = registered.find((name) => name.toLowerCase() === lower);
+    if (match !== undefined) {
+      targetName = match;
+    }
+  }
   if (
     targetName === ToolNames.TOOL_CALL ||
     targetName === ToolNames.TOOL_SEARCH
