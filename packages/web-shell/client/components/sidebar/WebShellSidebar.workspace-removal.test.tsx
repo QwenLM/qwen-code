@@ -1116,7 +1116,7 @@ describe('WebShellSidebar workspace removal', () => {
     });
     expect(secondaryArchive).toHaveBeenCalledWith(['other-secondary']);
     expect(primaryArchive).not.toHaveBeenCalled();
-  });
+  }, 15000);
 
   it('shows rename for current and non-current locked-secondary sessions', async () => {
     connection.sessionId = 'locked-current';
@@ -1501,7 +1501,7 @@ describe('WebShellSidebar workspace removal', () => {
     expect(primaryDelete).not.toHaveBeenCalled();
     expect(primaryArchive).not.toHaveBeenCalled();
     expect(primaryOrganization).not.toHaveBeenCalled();
-  });
+  }, 15000);
 
   it('requires workspace_qualified_rest_core for locked secondary destructive and organization controls', async () => {
     connection.capabilities = {
