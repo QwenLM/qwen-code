@@ -308,17 +308,36 @@ describe('<ToolGroupMessage />', () => {
           resultDisplay: agent('planner'),
         }),
       ];
-      const { lastFrame } = renderWithToolCallArgs(
-        <ToolGroupMessage
-          {...baseProps}
-          contentWidth={120}
-          toolCalls={agents}
-          isPending={false}
-        />,
+      // InlineParallelAgentsDisplay reads the registry off config; the bare
+      // `{}` mockConfig would make `getBackgroundTaskRegistry` throw, ink
+      // would swallow it, and the frame would be empty — which a negative
+      // assertion alone would pass vacuously. Mirrors `registryConfig` below.
+      const registryConfig = {
+        getBackgroundTaskRegistry: () => ({ get: () => undefined }),
+      } as unknown as Config;
+      const { lastFrame } = render(
+        <SettingsContext.Provider
+          value={
+            { merged: { ui: { showToolCallArgs: true } } } as LoadedSettings
+          }
+        >
+          <ConfigContext.Provider value={registryConfig}>
+            <ToolGroupMessage
+              {...baseProps}
+              contentWidth={120}
+              toolCalls={agents}
+              isPending={false}
+            />
+          </ConfigContext.Provider>
+        </SettingsContext.Provider>,
       );
-      // Still the panel, not per-agent ToolMessages. Ctrl+O (fullDetail) is
-      // the documented way to expand these — covered by its own test above.
-      expect(lastFrame() ?? '').not.toContain('MockSubagent[agent-1]');
+      const frame = lastFrame() ?? '';
+      // Positive first: the dense panel really rendered (an empty frame would
+      // satisfy the negation below on its own).
+      expect(frame).toContain('Parallel agents');
+      // And not per-agent ToolMessages. Ctrl+O (fullDetail) is the documented
+      // way to expand these — covered by its own test above.
+      expect(frame).not.toContain('MockSubagent[agent-1]');
     });
 
     it('renders without a SettingsProvider (defaults to off)', () => {
