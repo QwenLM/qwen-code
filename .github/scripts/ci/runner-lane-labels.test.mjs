@@ -102,8 +102,10 @@ const workflowFiles = readdirSync(workflowsDir)
 // reshaped, the tripwire — not silence — says so.
 function runnerSetAssignments(text) {
   return [
-    ...text.matchAll(/^\s*[A-Za-z_][A-Za-z0-9_]*='(\[[^\n]*\])'\s*$/gm),
-  ].map((m) => m[1]);
+    ...text.matchAll(
+      /^\s*[A-Za-z_][A-Za-z0-9_]*=(['"])(\[[^\n]*?\])\1\s*(?:#.*)?$/gm,
+    ),
+  ].map((m) => m[2]);
 }
 
 // Extracts the JSON-ish label arrays embedded in a GitHub expression, e.g.
@@ -279,6 +281,19 @@ function laneTestPlan(file, text) {
   // A full set of concrete labels, ready for the registry rules.
   function checkSet(labels, origin) {
     const lc = labels.map((l) => String(l).toLowerCase());
+    // GitHub routes a self-hosted job only to runners carrying EVERY listed
+    // label, and no runner carries two operating systems — a copy-edit that
+    // adds the new OS label without removing the old produces a set no
+    // machine can match, queueing forever. Case-folded, per the header.
+    if (lc.includes('linux') && lc.includes('windows')) {
+      problem(
+        `${file}: ${origin} mixes mutually exclusive platform labels`,
+        `label set [${labels.join(', ')}] asks for linux AND windows on one ` +
+          `runner; no such machine can exist, so the job queues forever ` +
+          `with no error.`,
+      );
+      return;
+    }
     if (!lc.includes('self-hosted')) {
       if (lc.every((l) => HOSTED_LABEL.test(l))) {
         return; // hosted set — not this guard's jurisdiction
@@ -420,6 +435,29 @@ function laneTestPlan(file, text) {
               );
               continue;
             }
+            // An indirect operand beside the literals (the
+            // `needs.…outputs.… || '["ubuntu-latest"]'` consumer shape) is
+            // vouched only by the producer assignment the assembly scan
+            // found in this same file. Accepting it on faith would let a
+            // producer written in any shape the scan cannot read ship an
+            // unregistered lane behind a green guard.
+            const residue = stripQuotesAndParens(
+              call[1].replace(/\[[^[\]]*\]/g, ''),
+            ).replace(/\|\||&&|\s/g, '');
+            if (
+              /[A-Za-z_]/.test(residue) &&
+              selfHostedAssemblies.length === 0
+            ) {
+              problem(
+                `${file}: ${origin} consumes a runner set with no checkable producer`,
+                `'${arm}' reads an indirect operand, but this file has no ` +
+                  `runner-set assignment the assembly scan can vouch for — ` +
+                  `the lane behind the indirection is unchecked, so the ` +
+                  `guard fails closed. Assemble the set as a whole-line ` +
+                  `VAR='["…"]' assignment (single or double quotes).`,
+              );
+              continue;
+            }
             for (const { raw, tokens } of arrays) {
               if (tokens.length === 0) {
                 problem(
@@ -495,6 +533,14 @@ function laneTestPlan(file, text) {
     return null;
   }
 
+  // Computed up front so a consumer arm (fromJSON over an indirect operand)
+  // can require a checkable producer in the same file.
+  const selfHostedAssemblies = runnerSetAssignments(text).filter((raw) =>
+    [...raw.matchAll(/["']([^"']+)["']/g)].some(
+      (m) => m[1].toLowerCase() === 'self-hosted',
+    ),
+  );
+
   let doc;
   try {
     doc = parse(text);
@@ -525,11 +571,8 @@ function laneTestPlan(file, text) {
     checkValue(runsOn, job, `jobs.${jobName}.runs-on`);
   }
 
-  for (const raw of runnerSetAssignments(text)) {
+  for (const raw of selfHostedAssemblies) {
     const tokens = [...raw.matchAll(/["']([^"']+)["']/g)].map((m) => m[1]);
-    if (!tokens.some((l) => l.toLowerCase() === 'self-hosted')) {
-      continue; // hosted assignment (the pick_runner fallback branch)
-    }
     checkSet(tokens, `runner-set assignment ${raw}`);
   }
 
@@ -759,15 +802,61 @@ describe('laneTestPlan fail-closed behavior', () => {
     assert.deepEqual(lanes, ['ecs-qwen']);
   });
 
-  it('accepts the fromJSON consumer shape with an indirect first operand', () => {
-    const plan = laneTestPlan(
+  // R6-1: a consumer arm (fromJSON over an indirect operand) is vouched only
+  // by a producer assignment the assembly scan can read in the same file.
+  const consumer = `'\${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'`;
+  const producer = (q) =>
+    `    steps:\n      - run: |-\n          ubuntu_runner=${q}["self-hosted", "linux", "x64", "ecs-qwen"]${q}\n`;
+
+  it('accepts the consumer shape when its producer assignment is present', () => {
+    const plan = laneTestPlan('probe.yml', wrap(consumer, producer("'")));
+    assert.deepEqual(plan.problems, []);
+    assert.deepEqual(plan.lanes, ['ecs-qwen']);
+  });
+
+  it('reads a double-quoted producer assignment the same way', () => {
+    const plan = laneTestPlan('probe.yml', wrap(consumer, producer('"')));
+    assert.deepEqual(plan.problems, []);
+    assert.deepEqual(plan.lanes, ['ecs-qwen']);
+  });
+
+  it('fails closed on the consumer shape with no checkable producer', () => {
+    const { problems } = laneTestPlan('probe.yml', wrap(consumer));
+    assert.equal(problems.length, 1);
+    assert.match(blob(problems[0]), /no checkable producer/);
+  });
+
+  it('catches an invented lane in a double-quoted producer assignment', () => {
+    const { problems } = laneTestPlan(
       'probe.yml',
       wrap(
-        `'\${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'`,
+        consumer,
+        `    steps:\n      - run: |-\n          ubuntu_runner="["self-hosted", "linux", "x64", "ecs-invented"]"\n`,
       ),
     );
-    assert.deepEqual(plan.problems, []);
-    assert.deepEqual(plan.lanes, []);
+    assert.equal(problems.length, 1);
+    assert.match(blob(problems[0]), /not a registered lane/);
+  });
+
+  // R6-2: no runner carries two operating systems; a set demanding both can
+  // match no machine and queues forever. Lane is registered on purpose so
+  // only the exclusivity check can catch it.
+  it('catches mutually exclusive platform labels', () => {
+    const { problems } = laneTestPlan(
+      'probe.yml',
+      wrap(`['self-hosted', 'linux', 'windows', 'x64', 'ecs-qwen']`),
+    );
+    assert.equal(problems.length, 1);
+    assert.match(blob(problems[0]), /mutually exclusive platform labels/);
+  });
+
+  it('catches mixed-case exclusive platform labels', () => {
+    const { problems } = laneTestPlan(
+      'probe.yml',
+      wrap(`['self-hosted', 'Linux', 'WINDOWS', 'X64', 'ecs-qwen']`),
+    );
+    assert.equal(problems.length, 1);
+    assert.match(blob(problems[0]), /mutually exclusive platform labels/);
   });
 
   it('catches a second static lane smuggled beside a registered one', () => {
