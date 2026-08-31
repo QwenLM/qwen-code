@@ -177,14 +177,61 @@ function valueArms(body) {
     }
   }
   arms.push(current);
-  // value = last && operand of each || part, outer parens stripped
-  return arms.map((ops) => {
+  // For each || part every operand that can BE the value is judged: the
+  // last && operand always, and for a parenthesized (a || b) value, both
+  // alternatives — GitHub's truthy-first || can route either. Stripping
+  // the parens re-exposes top-level operators, so recurse until each arm
+  // is operator-free.
+  const out = [];
+  for (const ops of arms) {
     let v = ops[ops.length - 1].trim();
     while (v.startsWith('(') && v.endsWith(')')) {
       v = v.slice(1, -1).trim();
     }
-    return v;
-  });
+    if (/\|\||&&/.test(stripQuotesAndParens(v))) {
+      out.push(...valueArms(v));
+    } else {
+      out.push(v);
+    }
+  }
+  return out;
+}
+
+// The arm text with quoted spans and paren/bracket bodies blanked, so an
+// operator test sees only TOP-LEVEL operators.
+function stripQuotesAndParens(arm) {
+  let depth = 0;
+  let quote = null;
+  let out = '';
+  for (let i = 0; i < arm.length; i += 1) {
+    const ch = arm[i];
+    if (quote) {
+      if (ch === quote) {
+        if (quote === "'" && arm[i + 1] === "'") {
+          i += 1;
+          continue;
+        }
+        quote = null;
+      }
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      continue;
+    }
+    if (ch === '(' || ch === '[') {
+      depth += 1;
+      continue;
+    }
+    if (ch === ')' || ch === ']') {
+      depth -= 1;
+      continue;
+    }
+    if (depth === 0) {
+      out += ch;
+    }
+  }
+  return out;
 }
 
 const WHOLE_EXPRESSION = /^\$\{\{[\s\S]*\}\}$/;
@@ -341,19 +388,39 @@ function laneTestPlan(file, text) {
         // latest'` and `|| matrix.os` arms).
         const body = t.replace(/^\$\{\{/, '').replace(/\}\}$/, '');
         for (const arm of valueArms(body)) {
-          const arrays = embeddedArrays(arm);
-          if (arrays !== null) {
+          // Closed allowlist of arm shapes; anything else fails closed.
+          // Order matters: a quoted scalar is judged as the STRING GitHub
+          // reads it as, before any bracket text inside it can be mistaken
+          // for a label set (a quoted literal array arm is one label no
+          // runner carries).
+          const scalar =
+            arm.match(/^'((?:[^']|'')*)'$/) ?? arm.match(/^"([^"]*)"$/);
+          if (scalar) {
+            checkScalarLabel(
+              scalar[1].replaceAll("''", "'"),
+              `${origin} → ${arm}`,
+            );
+            continue;
+          }
+          const call = arm.match(/^fromJSON\(([\s\S]*)\)$/);
+          if (call) {
+            // The whole arm is one fromJSON(...) call. Judge every literal
+            // array inside it — both the routing conditionals' arms and the
+            // `needs.… || '["ubuntu-latest"]'` consumer shape, whose
+            // indirection is checked at its assembly site (pick_runner scan).
+            // No exemptions: condition operands never reach this loop (the
+            // arm split excludes them), so an all-caps array HERE is a lane
+            // request and is judged like any other.
+            const arrays = embeddedArrays(call[1]);
+            if (arrays === null) {
+              problem(
+                `${file}: ${origin} has an array-less fromJSON arm`,
+                `'${arm}' builds the runner set from no literal array this ` +
+                  `guard can read — it fails closed.`,
+              );
+              continue;
+            }
             for (const { raw, tokens } of arrays) {
-              // An all-caps token list (["OWNER","MEMBER","COLLABORATOR"])
-              // is a contains()-operand — author associations, not runner
-              // labels. Runner labels are lowercase-with-hyphens; nothing
-              // the fleet registers matches /^[A-Z_]+$/.
-              if (
-                tokens.length > 0 &&
-                tokens.every((t2) => /^[A-Z_]+$/.test(t2))
-              ) {
-                continue;
-              }
               if (tokens.length === 0) {
                 problem(
                   `${file}: ${origin} embeds an unquoted array`,
@@ -364,15 +431,6 @@ function laneTestPlan(file, text) {
               }
               checkSet(tokens, `${origin} → ${raw}`);
             }
-            continue;
-          }
-          const scalar =
-            arm.match(/^'((?:[^']|'')*)'$/) ?? arm.match(/^"([^"]*)"$/);
-          if (scalar) {
-            checkScalarLabel(
-              scalar[1].replaceAll("''", "'"),
-              `${origin} → ${arm}`,
-            );
             continue;
           }
           const ref =
@@ -400,11 +458,10 @@ function laneTestPlan(file, text) {
           }
           problem(
             `${file}: ${origin} is an unresolvable expression`,
-            `value arm '${arm}' embeds no label array, is not a quoted ` +
-              `scalar, and resolves to nothing defined in this file — the ` +
-              `guard cannot vouch for it, so it fails closed. Inline the ` +
-              `label set, or resolve it from matrix/env values defined in ` +
-              `this workflow.`,
+            `value arm '${arm}' is none of the judgeable shapes (quoted ` +
+              `scalar, fromJSON(...) with a literal array, bare matrix./` +
+              `env. reference) — the guard cannot vouch for it, so it ` +
+              `fails closed.`,
           );
         }
         return;
@@ -660,6 +717,57 @@ describe('laneTestPlan fail-closed behavior', () => {
     );
     assert.deepEqual(plan.problems, []);
     assert.deepEqual(plan.lanes, ['ecs-qwen']);
+  });
+
+  // R5-1: the arm ladder is a closed allowlist. Each demonstrated escape is
+  // pinned: an all-caps array in a VALUE arm is judged (condition operands
+  // never reach the ladder, so no exemption exists to hide behind), a quoted
+  // literal array arm is the one string label GitHub reads it as, and a
+  // parenthesized (a || b) value judges both alternatives.
+  it('catches an all-caps invented lane in a fromJSON arm', () => {
+    const { problems } = laneTestPlan(
+      'probe.yml',
+      wrap(
+        `'\${{ x && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["MYLANE"]'') }}'`,
+      ),
+    );
+    assert.equal(problems.length, 1);
+    assert.match(blob(problems[0]), /neither hosted nor self-hosted/);
+  });
+
+  it('catches a quoted literal array riding a fallback arm', () => {
+    const { problems } = laneTestPlan(
+      'probe.yml',
+      wrap(
+        `'\${{ x && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || ''["self-hosted", "linux", "x64", "ecs-light"]'' }}'`,
+      ),
+    );
+    assert.equal(problems.length, 1);
+    assert.match(blob(problems[0]), /quoted literal array/);
+  });
+
+  it('judges both alternatives of a parenthesized value', () => {
+    const { problems, lanes } = laneTestPlan(
+      'probe.yml',
+      wrap(
+        `'\${{ (matrix.os || fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'')) }}'`,
+        `    strategy:\n      matrix:\n        os: ['ecs-invented']\n`,
+      ),
+    );
+    assert.equal(problems.length, 1);
+    assert.match(blob(problems[0]), /single non-hosted label/);
+    assert.deepEqual(lanes, ['ecs-qwen']);
+  });
+
+  it('accepts the fromJSON consumer shape with an indirect first operand', () => {
+    const plan = laneTestPlan(
+      'probe.yml',
+      wrap(
+        `'\${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'`,
+      ),
+    );
+    assert.deepEqual(plan.problems, []);
+    assert.deepEqual(plan.lanes, []);
   });
 
   it('catches a second static lane smuggled beside a registered one', () => {
