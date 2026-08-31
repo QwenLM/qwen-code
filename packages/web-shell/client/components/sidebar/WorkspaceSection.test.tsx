@@ -11,6 +11,7 @@ import type {
   DaemonWorkspaceGitStatus,
 } from '@qwen-code/sdk/daemon';
 import gitStyles from '../ChatEditor.module.css';
+import type { WorkspaceSessionStats } from './workspaceOverviewModel';
 
 const {
   workspaceGit,
@@ -47,9 +48,11 @@ const {
 });
 
 // Mock useWorkspace so BranchPickerPopover can render without a real provider.
-vi.mock('@qwen-code/webui/daemon-react-sdk', async (importOriginal) => {
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', async (importOriginal) => {
   const actual =
-    await importOriginal<typeof import('@qwen-code/webui/daemon-react-sdk')>();
+    await importOriginal<
+      typeof import('@qwen-code/web-shell/daemon-react-sdk')
+    >();
   return {
     ...actual,
     useWorkspace: () => ({
@@ -133,8 +136,18 @@ function renderSection(
     sessionCatalogRequestsEnabled: boolean;
     sessionGroupCatalog: DaemonSessionGroupCatalog;
     sessionLiveStateEnabled: boolean;
+    overviewEnabled: boolean;
+    renderHeader: (expanded: boolean) => ReactNode;
+    headerActions: (
+      visible: boolean,
+      context: { overview: unknown; gitBranch: string | null | undefined },
+    ) => ReactNode;
+    sessionStats: WorkspaceSessionStats | null;
+    renderSessions: boolean;
     excludePinned: boolean;
     searchQuery: string;
+    gitBranchWanted: boolean;
+    compact: boolean;
   }> = {},
 ): void {
   act(() => {
@@ -165,10 +178,42 @@ function renderSection(
             <div key={session.sessionId}>{session.displayName}</div>
           )}
           onOpenGitDiff={overrides.onOpenGitDiff}
+          overviewEnabled={overrides.overviewEnabled}
+          renderHeader={overrides.renderHeader}
+          headerActions={overrides.headerActions}
+          sessionStats={overrides.sessionStats}
+          renderSessions={overrides.renderSessions}
+          gitBranchWanted={overrides.gitBranchWanted}
+          compact={overrides.compact}
         />
       </I18nProvider>,
     );
   });
+}
+
+/** A client whose facet calls are observable, for the overview gating tests. */
+function makeOverviewClient(
+  sessions: DaemonSessionSummary[] = [],
+): DaemonClient & { workspaceMcp: ReturnType<typeof vi.fn> } {
+  const workspaceMcp = vi.fn().mockResolvedValue({
+    v: 1,
+    workspaceCwd: '/tmp/project',
+    initialized: true,
+    discoveryState: 'completed',
+    servers: [],
+  });
+  const client = {
+    workspaceMcp,
+    workspaceByCwd: vi.fn(() => ({
+      workspaceGit,
+      workspaceMcp,
+      listWorkspaceSessionsPage: vi.fn().mockResolvedValue({ sessions }),
+      listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+    })),
+  };
+  return client as unknown as DaemonClient & {
+    workspaceMcp: ReturnType<typeof vi.fn>;
+  };
 }
 
 async function flush(): Promise<void> {
@@ -1159,6 +1204,337 @@ describe('isAbsolutePath', () => {
   });
 });
 
+describe('WorkspaceSection overview', () => {
+  it('fetches nothing while a custom header renderer hides every consumer', async () => {
+    const client = makeOverviewClient();
+    renderSection({
+      client,
+      expanded: true,
+      overviewEnabled: true,
+      renderHeader: () => <span>custom header</span>,
+    });
+    await flush();
+    expect(client.workspaceMcp).not.toHaveBeenCalled();
+    expect(
+      container.querySelector('[data-web-shell-workspace-path]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-workspace-overview]'),
+    ).toBeNull();
+
+    // Control arm: the default header renders the path and chips and fetches.
+    renderSection({ client, expanded: true, overviewEnabled: true });
+    await flush();
+    expect(client.workspaceMcp).toHaveBeenCalledTimes(1);
+    expect(
+      container.querySelector('[data-web-shell-workspace-path]')?.textContent,
+    ).toBe('/tmp/project');
+  });
+
+  it('renders no path or chips for a synthetic workspace without a real cwd', async () => {
+    const client = makeOverviewClient();
+    renderSection({
+      client,
+      workspace: { ...trustedWorkspace, id: 'synthetic', cwd: 'My Project' },
+      expanded: true,
+      overviewEnabled: true,
+    });
+    await flush();
+    expect(client.workspaceMcp).not.toHaveBeenCalled();
+    expect(
+      container.querySelector('[data-web-shell-workspace-path]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-workspace-overview]'),
+    ).toBeNull();
+  });
+
+  it('keeps the last session counts while the row is collapsed', async () => {
+    const client = makeOverviewClient([
+      {
+        sessionId: 'a',
+        workspaceCwd: '/tmp/other',
+        displayName: 'Running',
+        hasActivePrompt: true,
+      },
+      { sessionId: 'b', workspaceCwd: '/tmp/other', displayName: 'Idle' },
+    ]);
+    const workspace = {
+      ...untrustedWorkspace,
+      trusted: true,
+      id: 'other',
+      cwd: '/tmp/other',
+    };
+    renderSection({ client, workspace, expanded: true, overviewEnabled: true });
+    await flush();
+    const counts = () =>
+      container.querySelector<HTMLElement>('[class*="headerCounts"]');
+    expect(counts()?.textContent).toBe('12');
+    expect(
+      counts()?.querySelector('[class*="headerCountRunning"]')?.textContent,
+    ).toBe('1');
+
+    renderSection({
+      client,
+      workspace,
+      expanded: false,
+      overviewEnabled: true,
+    });
+    await flush();
+    expect(
+      container.querySelector('[data-web-shell-workspace-path]'),
+    ).toBeNull();
+    expect(counts()?.textContent).toBe('12');
+  });
+
+  it('shows no counts, path or chips when the overview is disabled', async () => {
+    const client = makeOverviewClient([
+      { sessionId: 'a', workspaceCwd: '/tmp/project', hasActivePrompt: true },
+    ]);
+    renderSection({ client, expanded: true });
+    await flush();
+    expect(client.workspaceMcp).not.toHaveBeenCalled();
+    expect(container.querySelector('[class*="headerCounts"]')).toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-workspace-path]'),
+    ).toBeNull();
+  });
+});
+
+describe('WorkspaceSection counts across a source switch', () => {
+  it('shows no counts while the new source is still loading', async () => {
+    let resolveChannel: (page: {
+      sessions: DaemonSessionSummary[];
+    }) => void = () => {};
+    const channelPage = new Promise<{ sessions: DaemonSessionSummary[] }>(
+      (resolve) => {
+        resolveChannel = resolve;
+      },
+    );
+    const defaultPage = Promise.resolve({
+      sessions: [
+        { sessionId: 'a', workspaceCwd: '/tmp/other', hasActivePrompt: true },
+        { sessionId: 'b', workspaceCwd: '/tmp/other' },
+        { sessionId: 'c', workspaceCwd: '/tmp/other' },
+      ] as DaemonSessionSummary[],
+    });
+    const listWorkspaceSessionsPage = vi.fn(
+      (options?: { sourceType?: string }) =>
+        options?.sourceType === 'channel' ? channelPage : defaultPage,
+    );
+    const client = {
+      workspaceByCwd: vi.fn(() => ({
+        workspaceGit,
+        listWorkspaceSessionsPage,
+        listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+      })),
+    } as unknown as DaemonClient;
+    const workspace = { ...trustedWorkspace, id: 'other', cwd: '/tmp/other' };
+    const counts = () =>
+      container.querySelector<HTMLElement>('[class*="headerCounts"]');
+
+    renderSection({
+      client,
+      workspace,
+      expanded: true,
+      overviewEnabled: true,
+      sourceType: 'default',
+    });
+    await flush();
+    expect(counts()?.textContent).toBe('13');
+
+    // The channel query starts without a page: stale default counts above an
+    // empty channel list would mislead, so the header shows none.
+    renderSection({
+      client,
+      workspace,
+      expanded: true,
+      overviewEnabled: true,
+      sourceType: 'channel',
+    });
+    await flush();
+    expect(counts()).toBeNull();
+
+    resolveChannel({
+      sessions: [
+        { sessionId: 'x', workspaceCwd: '/tmp/other', sourceType: 'channel' },
+      ] as DaemonSessionSummary[],
+    });
+    await flush();
+    expect(counts()?.textContent).toBe('1');
+
+    // Collapsing keeps the last counts of the active source.
+    renderSection({
+      client,
+      workspace,
+      expanded: false,
+      overviewEnabled: true,
+      sourceType: 'channel',
+    });
+    await flush();
+    expect(counts()?.textContent).toBe('1');
+  });
+});
+
+describe('WorkspaceSection overview gates', () => {
+  it('never asks an untrusted workspace for facets', async () => {
+    const client = makeOverviewClient();
+    renderSection({
+      client,
+      workspace: untrustedWorkspace,
+      expanded: true,
+      overviewEnabled: true,
+    });
+    await flush();
+    expect(client.workspaceMcp).not.toHaveBeenCalled();
+    expect(
+      container.querySelector('[data-web-shell-workspace-overview]'),
+    ).toBeNull();
+  });
+
+  it('polls git for the header actions even without a diff handler', async () => {
+    workspaceGit.mockResolvedValue({
+      v: 2,
+      workspaceCwd: '/tmp/project',
+      branch: 'main',
+    });
+    const headerActions = vi.fn(() => null);
+    renderSection({
+      client: makeOverviewClient(),
+      headerActions,
+      gitBranchWanted: true,
+    });
+    await flush();
+    expect(workspaceGit).toHaveBeenCalled();
+    const branches = headerActions.mock.calls.map(
+      ([, context]) => context.gitBranch,
+    );
+    expect(branches).toContain('main');
+    // The chip itself still needs the diff handler.
+    expect(gitChip()).toBeNull();
+  });
+
+  it('skips the git poll when no header action reads the branch', async () => {
+    workspaceGit.mockResolvedValue({
+      v: 2,
+      workspaceCwd: '/tmp/project',
+      branch: 'main',
+    });
+    const headerActions = vi.fn(() => null);
+    renderSection({ client: makeOverviewClient(), headerActions });
+    await flush();
+    expect(workspaceGit).not.toHaveBeenCalled();
+    expect(headerActions).toHaveBeenCalled();
+  });
+
+  it('shows no counts while parent-owned stats are loading', async () => {
+    const client = makeOverviewClient();
+    const counts = () =>
+      container.querySelector<HTMLElement>('[class*="headerCounts"]');
+    // Production wiring for the primary row: the sidebar lists its sessions
+    // itself, so the section renders none and owns no catalog query.
+    renderSection({
+      client,
+      expanded: true,
+      overviewEnabled: true,
+      renderSessions: false,
+      sessionStats: { total: 4, running: 1, attention: 2, truncated: true },
+    });
+    await flush();
+    expect(counts()?.textContent).toBe('214+');
+    expect(
+      counts()?.querySelector('[class*="headerCountAttention"]')?.textContent,
+    ).toBe('2');
+    expect(
+      counts()?.querySelector('[class*="headerCountTotal"]')?.textContent,
+    ).toBe('4+');
+    expect(
+      counts()
+        ?.querySelector('[class*="headerCountTotal"]')
+        ?.getAttribute('aria-label'),
+    ).toBe('4+ sessions');
+    // A source switch: the sidebar has no page for the new source yet, and
+    // the retained counts must not fill the gap.
+    renderSection({
+      client,
+      expanded: true,
+      overviewEnabled: true,
+      renderSessions: false,
+      sessionStats: null,
+    });
+    await flush();
+    expect(counts()).toBeNull();
+  });
+
+  it('passes the overview snapshot to the header actions', async () => {
+    const headerActions = vi.fn(() => null);
+    renderSection({
+      client: makeOverviewClient(),
+      expanded: true,
+      overviewEnabled: true,
+      headerActions,
+    });
+    await flush();
+    await flush();
+    expect(
+      headerActions.mock.calls.some(([, context]) => Boolean(context.overview)),
+    ).toBe(true);
+  });
+});
+
+describe('WorkspaceSection retained counts across a source switch', () => {
+  it('drops counts retained for a previous source while collapsed', async () => {
+    const channelPage = new Promise<{ sessions: DaemonSessionSummary[] }>(
+      () => {},
+    );
+    const defaultPage = Promise.resolve({
+      sessions: [
+        { sessionId: 'a', workspaceCwd: '/tmp/other' },
+        { sessionId: 'b', workspaceCwd: '/tmp/other' },
+        { sessionId: 'c', workspaceCwd: '/tmp/other' },
+      ] as DaemonSessionSummary[],
+    });
+    const listWorkspaceSessionsPage = vi.fn(
+      (options?: { sourceType?: string }) =>
+        options?.sourceType === 'channel' ? channelPage : defaultPage,
+    );
+    const client = {
+      workspaceByCwd: vi.fn(() => ({
+        workspaceGit,
+        listWorkspaceSessionsPage,
+        listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+      })),
+    } as unknown as DaemonClient;
+    const workspace = { ...trustedWorkspace, id: 'other', cwd: '/tmp/other' };
+    const counts = () =>
+      container.querySelector<HTMLElement>('[class*="headerCounts"]');
+    const render = (expanded: boolean, sourceType: string) =>
+      renderSection({
+        client,
+        workspace,
+        expanded,
+        overviewEnabled: true,
+        sourceType,
+      });
+
+    render(true, 'default');
+    await flush();
+    expect(counts()?.textContent).toBe('3');
+    render(false, 'default');
+    await flush();
+    expect(counts()?.textContent).toBe('3');
+    // The global source switches while the row stays collapsed: the default
+    // source's counts no longer describe the active source.
+    render(false, 'channel');
+    await flush();
+    expect(counts()).toBeNull();
+    // Switching back restores the counts that source still owns.
+    render(false, 'default');
+    await flush();
+    expect(counts()?.textContent).toBe('3');
+  });
+});
+
 describe('WorkspaceSection pinned group members (issue #10391)', () => {
   function makeOrganizationClient(
     sessions: Array<Partial<DaemonSessionSummary>>,
@@ -1351,5 +1727,131 @@ describe('WorkspaceSection pinned group members (issue #10391)', () => {
     expect(ungrouped?.textContent).toContain('\u00b7 1');
     expect(ungrouped?.textContent).toContain('Plain session');
     expect(ungrouped?.textContent ?? '').not.toContain('Pinned free');
+  });
+});
+
+describe('WorkspaceSection overview plumbing', () => {
+  it('still fetches for a custom header when header actions consume the snapshot', async () => {
+    const client = makeOverviewClient();
+    const headerActions = vi.fn(() => null);
+    renderSection({
+      client,
+      expanded: true,
+      overviewEnabled: true,
+      renderHeader: () => <span>custom header</span>,
+      headerActions,
+    });
+    await flush();
+    await flush();
+    expect(client.workspaceMcp).toHaveBeenCalledTimes(1);
+    expect(
+      headerActions.mock.calls.some(([, context]) => Boolean(context.overview)),
+    ).toBe(true);
+    // The path and chips stay hidden under a custom header.
+    expect(
+      container.querySelector('[data-web-shell-workspace-overview]'),
+    ).toBeNull();
+  });
+
+  it('passes compact mode through to the path and chips', async () => {
+    renderSection({
+      client: makeOverviewClient(),
+      expanded: true,
+      overviewEnabled: true,
+      compact: true,
+    });
+    await flush();
+    await flush();
+    const path = container.querySelector<HTMLElement>(
+      '[data-web-shell-workspace-path]',
+    );
+    expect(path?.className).toMatch(/pathCompact/);
+    expect(
+      container.querySelectorAll('[data-web-shell-workspace-overview]').length,
+    ).toBeGreaterThan(0);
+    expect(container.querySelector('[class*="chipLabel"]')).toBeNull();
+  });
+
+  it('keeps the last snapshot for the header actions while collapsed', async () => {
+    const client = makeOverviewClient();
+    const headerActions = vi.fn(() => null);
+    renderSection({
+      client,
+      expanded: true,
+      overviewEnabled: true,
+      headerActions,
+    });
+    await flush();
+    await flush();
+    expect(
+      headerActions.mock.calls.some(([, context]) => Boolean(context.overview)),
+    ).toBe(true);
+    headerActions.mockClear();
+    renderSection({
+      client,
+      expanded: false,
+      overviewEnabled: true,
+      headerActions,
+    });
+    await flush();
+    const lastCall = headerActions.mock.calls.at(-1);
+    expect(lastCall?.[1].overview).toBeDefined();
+    // Collapsed rows do not refetch.
+    expect(client.workspaceMcp).toHaveBeenCalledTimes(1);
+  });
+
+  it('refetches the facets when the reload token changes', async () => {
+    const client = makeOverviewClient();
+    renderSection({
+      client,
+      expanded: true,
+      overviewEnabled: true,
+      reloadToken: 0,
+    });
+    await flush();
+    expect(client.workspaceMcp).toHaveBeenCalledTimes(1);
+    renderSection({
+      client,
+      expanded: true,
+      overviewEnabled: true,
+      reloadToken: 1,
+    });
+    await flush();
+    expect(client.workspaceMcp).toHaveBeenCalledTimes(2);
+  });
+
+  it('marks the total as a lower bound when the daemon capped its scan', async () => {
+    const workspaceMcp = vi.fn().mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/tmp/other',
+      initialized: true,
+      servers: [],
+    });
+    const client = {
+      workspaceByCwd: vi.fn(() => ({
+        workspaceGit,
+        workspaceMcp,
+        listWorkspaceSessionsPage: vi.fn().mockResolvedValue({
+          sessions: [
+            { sessionId: 'a', workspaceCwd: '/tmp/other' },
+            { sessionId: 'b', workspaceCwd: '/tmp/other' },
+            { sessionId: 'c', workspaceCwd: '/tmp/other' },
+          ],
+          // No next page, but the scan hit the daemon's cap.
+          truncated: true,
+        }),
+        listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+      })),
+    } as unknown as DaemonClient;
+    renderSection({
+      client,
+      workspace: { ...trustedWorkspace, id: 'other', cwd: '/tmp/other' },
+      expanded: true,
+      overviewEnabled: true,
+    });
+    await flush();
+    expect(
+      container.querySelector('[class*="headerCountTotal"]')?.textContent,
+    ).toBe('3+');
   });
 });

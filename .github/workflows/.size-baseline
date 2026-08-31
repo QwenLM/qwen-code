@@ -13,6 +13,7 @@
 # sibling .md and long steps into .github/scripts/ first; if the growth is
 # real, bump the number and say why in the PR.
 2226 assign-issue-owner.yml
+2125 assign-pr-owner.yml
 3480 audio-capture-prebuilds.yml
 9023 auto-minimize-spam.yml
 9256 build-and-publish-image.yml
@@ -36,9 +37,9 @@
 5942 qwen-autofix-fork-signal.yml
 454547 qwen-autofix.yml
 7061 qwen-ci-flaky-rerun.yml
-173139 qwen-code-pr-review.yml
+205562 qwen-code-pr-review.yml
 79041 qwen-fleet-shepherd.yml
-20525 qwen-issue-followup-bot.yml
+22680 qwen-issue-followup-bot.yml
 5760 qwen-pr-safety-precheck.yml
 27648 qwen-triage-finalize.yml
 350381 qwen-triage.yml

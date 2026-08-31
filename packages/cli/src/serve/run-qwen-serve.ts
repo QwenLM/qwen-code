@@ -6,6 +6,7 @@
 
 import { X509Certificate, createHash, timingSafeEqual } from 'node:crypto';
 import { execFile } from 'node:child_process';
+import { lookup } from 'node:dns/promises';
 import * as fs from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import * as https from 'node:https';
@@ -84,8 +85,9 @@ import {
   hostAssignsIpv6Loopback,
   isOwnInterfaceAddress,
 } from './local-bind-addresses.js';
-import { isHostGateLoopback, isLoopbackBind } from './loopback-binds.js';
+import { isLoopbackAddress, isLoopbackBind } from './loopback-binds.js';
 import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
+import { installSelfOriginStripMiddleware } from './server/self-origin.js';
 import { resolveWebShellDir } from './web-shell-resolver.js';
 import { resolveServeToken } from './serve-token.js';
 import { acpChildExtraArgs } from './acp-child-extra-args.js';
@@ -93,7 +95,9 @@ import {
   allowOriginCors,
   bearerAuth,
   denyBrowserOriginCors,
+  findNonLoopbackHttpOrigin,
   hostAllowlist,
+  isTrustedLoopbackMode,
   parseAllowOriginPatterns,
 } from './auth.js';
 import type { LocalControlService } from './local-control/index.js';
@@ -786,23 +790,7 @@ export function assertChannelWorkerDaemonUrlIsLocal(
         `a zone-less literal address of one of this machine's interfaces.`,
     );
   }
-  if (isHostGateLoopback(host)) return;
-  if (isLoopbackBind(host)) {
-    // A wide 127/8 bind passes `isLoopbackBind` and the kernel routes it to
-    // loopback, but the primary Host gate answers only the spellings in
-    // `LOOPBACK_BINDS` — every other 127.x.y.z gets 403 before a route.
-    // Order matters: this refusal must run BEFORE the own-interface escape
-    // below — a wide loopback address can be assigned to a local interface
-    // (`ip addr add 127.0.0.2/8 dev lo`), and the gate 403s it either way.
-    throw new Error(
-      `Channels cannot start: --hostname "${hostname}" is a loopback ` +
-        `address the daemon's Host header gate refuses (it answers only ` +
-        `127.0.0.1, localhost, and [::1]), so channel workers cannot reach ` +
-        `the daemon on it. Bind to one of those spellings, to the wildcard ` +
-        `(0.0.0.0 / ::), or to a literal address of one of this machine's ` +
-        `interfaces.`,
-    );
-  }
+  if (isLoopbackBind(host)) return;
   if (isOwnInterfaceAddress(host)) return;
   throw new Error(
     `Channels cannot start: --hostname "${hostname}" is not a loopback bind ` +
@@ -1037,9 +1025,14 @@ export function describeWorkerTlsTrustGaps(opts: {
   // leaf (what the `mkcert` flow this project documents produces) never
   // terminates the chain — unless something else in the worker's bundle
   // carries the issuer that does.
+  // One clock for the whole report: the walk's issuer preference and the
+  // per-member validity flags below must judge the same sampled instant, or
+  // the walk can anchor through a certificate the report then contradicts.
+  const now = Date.now();
   const anchorPath = walkWorkerAnchorPath(
     x509,
     workerTrustStore,
+    now,
     // The `servingBlocks === undefined` fallback prepends the leaf too, but
     // that file already reports its own gap below and the workers receive it
     // verbatim; only the partial-read case needs the distinction.
@@ -1230,7 +1223,6 @@ export function describeWorkerTlsTrustGaps(opts: {
   // `X509Certificate.verify` checks signatures only and never consults dates,
   // so an expired root or intermediate anchors "fine" here while every worker
   // handshake fails CERT_HAS_EXPIRED. Boot validation covers the leaf alone.
-  const now = Date.now();
   for (const member of anchorPath.path) {
     if (member.fingerprint256 === x509.fingerprint256) continue;
     const subject = member.subject.replace(/\r?\n/g, ', ');
@@ -1251,20 +1243,22 @@ export function describeWorkerTlsTrustGaps(opts: {
       );
       continue;
     }
-    if (new Date(member.validTo).getTime() < now) {
-      gaps.push(
-        `--tls-cert "${opts.certPath}" chains through "${subject}", which ` +
-          `expired on ${member.validTo} — every worker handshake to the ` +
-          `daemon will fail CERT_HAS_EXPIRED. Renew that chain member and ` +
-          `restart.`,
-      );
-    } else if (new Date(member.validFrom).getTime() > now) {
-      gaps.push(
-        `--tls-cert "${opts.certPath}" chains through "${subject}", which is ` +
-          `not yet valid (validFrom: ${member.validFrom}) — every worker ` +
-          `handshake to the daemon will fail CERT_NOT_YET_VALID. Check that ` +
-          `chain member's notBefore date or the system clock.`,
-      );
+    if (!certValidAt(member, now)) {
+      if (new Date(member.validTo).getTime() < now) {
+        gaps.push(
+          `--tls-cert "${opts.certPath}" chains through "${subject}", which ` +
+            `expired on ${member.validTo} — every worker handshake to the ` +
+            `daemon will fail CERT_HAS_EXPIRED. Renew that chain member and ` +
+            `restart.`,
+        );
+      } else {
+        gaps.push(
+          `--tls-cert "${opts.certPath}" chains through "${subject}", which is ` +
+            `not yet valid (validFrom: ${member.validFrom}) — every worker ` +
+            `handshake to the daemon will fail CERT_NOT_YET_VALID. Check that ` +
+            `chain member's notBefore date or the system clock.`,
+        );
+      }
     }
   }
   const host = workerDialHost(opts.daemonUrl);
@@ -1452,6 +1446,14 @@ function cannotIssueCertificates(cert: X509Certificate): boolean {
   return !isV1Certificate(cert) && keyUsage === undefined;
 }
 
+/** Whether `cert`'s validity window contains `now`. */
+function certValidAt(cert: X509Certificate, now: number): boolean {
+  return (
+    new Date(cert.validFrom).getTime() <= now &&
+    new Date(cert.validTo).getTime() >= now
+  );
+}
+
 function isSelfSignedCert(x509: X509Certificate): boolean {
   if (x509.subject !== x509.issuer) return false;
   try {
@@ -1581,6 +1583,12 @@ function walkWorkerAnchorPath(
   leaf: X509Certificate,
   chain: readonly X509Certificate[],
   /**
+   * The instant the report samples trust at. The issuer preference must judge
+   * the same clock the caller's per-member validity flags do, or the walk can
+   * anchor through a certificate the report then contradicts.
+   */
+  now: number,
+  /**
    * Whether `leaf` is a certificate the workers' loader actually hands them.
    * It is not when the caller had to PREPEND the boot-parsed leaf because the
    * serving file's own block is not one the loader takes.
@@ -1650,11 +1658,19 @@ function walkWorkerAnchorPath(
         : { anchored: true, path };
     }
     walked.add(current.fingerprint256);
-    const issuer: X509Certificate | undefined = chain.find(
+    const issuers = chain.filter(
       (candidate) =>
         !walked.has(candidate.fingerprint256) &&
         certIssuedBy(current, candidate),
     );
+    // A renewed CA leaves two certificates in the bundle that share a subject
+    // AND a key, so both verify what they issued. Taking whichever one came
+    // first reported the expired copy as the path the handshake depends on and
+    // told the operator to renew a CA they had already renewed, while the
+    // merged bundle authorizes through the renewed copy. OpenSSL may use
+    // either, so prefer the copy that is usable now.
+    const issuer: X509Certificate | undefined =
+      issuers.find((candidate) => certValidAt(candidate, now)) ?? issuers[0];
     // `certIssuedBy` asks only "did this sign that": name match plus signature.
     // OpenSSL asks a second question of every certificate it uses AS an issuer,
     // and answering only the first is how a chain that walks THROUGH an
@@ -2025,6 +2041,10 @@ export interface RunQwenServeDeps {
   bridge?: AcpSessionBridge;
   /** Test/embed override for the plain HTTP server constructor. */
   httpServerFactory?: (app: Application) => Server;
+  /** Test override for resolving `localhost` before authority is derived. */
+  bindHostnameLookup?: (
+    hostname: string,
+  ) => Promise<{ address: string; family: number }>;
   /**
    * Whether to start the real ACP child eagerly after listen. Production
    * keeps this on; tests can disable it so boot-path assertions do not wait
@@ -2213,6 +2233,7 @@ async function loadServeRuntimeModules() {
     workspaceSkillsStatusModule,
     totalSessionAdmissionModule,
     workspaceRegistryModule,
+    workspaceRuntimeCoordinatorModule,
     promptLedgerModule,
   ] = await Promise.all([
     import('./server.js'),
@@ -2226,6 +2247,7 @@ async function loadServeRuntimeModules() {
     import('./workspace-skills-status.js'),
     import('./total-session-admission.js'),
     import('./workspace-registry.js'),
+    import('./workspace-runtime-coordinator.js'),
     import('./prompt-terminal-ledger.js'),
   ]);
   return {
@@ -2254,6 +2276,8 @@ async function loadServeRuntimeModules() {
       workspaceRegistryModule.createWorkspaceSessionOwnerIndex,
     createWorkspaceGenerationGuard:
       workspaceRegistryModule.createWorkspaceGenerationGuard,
+    getWorkspaceRuntimeCoordinatorIfSupported:
+      workspaceRuntimeCoordinatorModule.getWorkspaceRuntimeCoordinatorIfSupported,
     createPromptLedgerSink: promptLedgerModule.createPromptLedgerSink,
   };
 }
@@ -2288,6 +2312,7 @@ function currentServeFeaturesForRunQwenServe(
   opts: ServeOptions,
   sessionShellCommandEnabled: boolean,
   sessionArtifactsPersistenceAvailable: boolean,
+  workspaceRuntimeAvailable: boolean,
   currentSessionSchedulingAvailable: boolean,
   env: Readonly<Record<string, string | undefined>>,
   nativeDirectoryPickerAvailable: boolean,
@@ -2321,6 +2346,7 @@ function currentServeFeaturesForRunQwenServe(
     // path (serve-features.ts) so the bootstrap `/capabilities` window doesn't
     // briefly under-report them.
     nativeDirectoryPickerAvailable,
+    workspaceRuntimeAvailable,
     clientMcpOverWsEnabled: opts.clientMcpOverWs === true,
     cdpTunnelOverWsEnabled: opts.cdpTunnelOverWs === true,
     browserAutomationMcpAvailable: isBrowserAutomationMcpAvailable(opts, env),
@@ -2333,6 +2359,7 @@ function createBootstrapCapabilities(input: {
   qwenCodeVersion?: string;
   sessionShellCommandEnabled: boolean;
   sessionArtifactsPersistenceAvailable: boolean;
+  workspaceRuntimeAvailable: boolean;
   currentSessionSchedulingAvailable: boolean;
   permissionPolicy: PermissionPolicy | undefined;
   env: Readonly<Record<string, string | undefined>>;
@@ -2349,6 +2376,7 @@ function createBootstrapCapabilities(input: {
       input.opts,
       input.sessionShellCommandEnabled,
       input.sessionArtifactsPersistenceAvailable,
+      input.workspaceRuntimeAvailable,
       input.currentSessionSchedulingAvailable,
       input.env,
       input.nativeDirectoryPickerAvailable,
@@ -2392,56 +2420,6 @@ function validateRateLimitOptions(opts: ServeOptions): void {
       `Invalid rateLimitWindowMs: ${opts.rateLimitWindowMs}. Must be an integer >= 1000.`,
     );
   }
-}
-
-function installSameOriginOriginStrip(
-  app: Application,
-  getPort: () => number,
-): void {
-  let cachedStripPort = -1;
-  let cachedSelfOrigins: Set<string> = new Set();
-  app.use((req: Request, _res: Response, next: NextFunction) => {
-    const origin = req.headers.origin;
-    if (origin) {
-      const port = getPort();
-      if (port !== cachedStripPort) {
-        cachedStripPort = port;
-        // Both schemes: under `--tls-cert/--tls-key` the loopback web
-        // shell is served over https, so its same-origin requests carry
-        // an `https://` Origin. Loopback hosts are trusted as same-origin
-        // regardless of scheme, so listing both is safe even on plain HTTP
-        // (the https entries simply never match without TLS).
-        cachedSelfOrigins = new Set([
-          `http://127.0.0.1:${port}`,
-          `http://localhost:${port}`,
-          `http://[::1]:${port}`,
-          `http://host.docker.internal:${port}`,
-          `https://127.0.0.1:${port}`,
-          `https://localhost:${port}`,
-          `https://[::1]:${port}`,
-          `https://host.docker.internal:${port}`,
-        ]);
-        // RFC 7230 §5.4: browsers omit the port in the Origin header when
-        // it matches the scheme default (http→80, https→443). Accept the
-        // port-less forms so the origin check doesn't fail on port 443.
-        if (port === 80 || port === 443) {
-          for (const host of [
-            '127.0.0.1',
-            'localhost',
-            '[::1]',
-            'host.docker.internal',
-          ]) {
-            cachedSelfOrigins.add(`http://${host}`);
-            cachedSelfOrigins.add(`https://${host}`);
-          }
-        }
-      }
-      if (cachedSelfOrigins.has(origin)) {
-        delete req.headers.origin;
-      }
-    }
-    next();
-  });
 }
 
 export function createLazyBridgeProxy(
@@ -2544,6 +2522,7 @@ function createBootstrapServeApp(input: {
   qwenCodeVersion?: string;
   sessionShellCommandEnabled: boolean;
   sessionArtifactsPersistenceAvailable: boolean;
+  workspaceRuntimeAvailable: boolean;
   currentSessionSchedulingAvailable: boolean;
   permissionPolicy: PermissionPolicy | undefined;
   multiWorkspaceCapabilitiesRequireRuntime: boolean;
@@ -2563,6 +2542,7 @@ function createBootstrapServeApp(input: {
     qwenCodeVersion,
     sessionShellCommandEnabled,
     sessionArtifactsPersistenceAvailable,
+    workspaceRuntimeAvailable,
     currentSessionSchedulingAvailable,
     permissionPolicy,
     multiWorkspaceCapabilitiesRequireRuntime,
@@ -2578,7 +2558,7 @@ function createBootstrapServeApp(input: {
   // at `createApp` time (server.ts).
   const nativeDirectoryPickerAvailable = isNativeDirectoryPickerAvailable();
 
-  installSameOriginOriginStrip(app, getPort);
+  installSelfOriginStripMiddleware(app, getPort, opts.hostname);
   if (opts.allowOrigins && opts.allowOrigins.length > 0) {
     app.use(allowOriginCors(parseAllowOriginPatterns(opts.allowOrigins)));
   } else {
@@ -2634,6 +2614,7 @@ function createBootstrapServeApp(input: {
         qwenCodeVersion,
         sessionShellCommandEnabled,
         sessionArtifactsPersistenceAvailable,
+        workspaceRuntimeAvailable,
         currentSessionSchedulingAvailable,
         permissionPolicy,
         env: process.env,
@@ -2775,6 +2756,7 @@ function createBootstrapServeApp(input: {
           opts,
           sessionShellCommandEnabled,
           sessionArtifactsPersistenceAvailable,
+          workspaceRuntimeAvailable,
           currentSessionSchedulingAvailable,
           process.env,
           nativeDirectoryPickerAvailable,
@@ -3213,7 +3195,7 @@ async function runQwenServeImpl(
   // copy before freezing runtime environments or starting auxiliary workers.
   delete process.env[EXTERNAL_TOOL_GUARD_TOKEN_ENV];
   const channelDeliveryAuthorizations = new ChannelDeliveryAuthorizationStore();
-  const shouldPreheat = !deps.bridge && shouldPreheatBridge(deps);
+  let shouldPreheat = !deps.bridge && shouldPreheatBridge(deps);
   const startup: DaemonStartupSnapshot = {
     processStartedAt: new Date(
       Date.now() - Math.round(process.uptime() * 1000),
@@ -3293,13 +3275,27 @@ async function runQwenServeImpl(
   loggerLifecycle.scrubApplied(restoreScrubbedLoaderEnv);
 
   const token = resolveServeToken(optsIn.token);
+  const bindHostname =
+    optsIn.hostname.toLowerCase() === 'localhost'
+      ? (await (deps.bindHostnameLookup ?? lookup)(optsIn.hostname)).address
+      : optsIn.hostname;
+  const trustedLoopbackMode = isTrustedLoopbackMode({
+    loopbackBind: isLoopbackAddress(bindHostname),
+    tokenConfigured: token !== undefined,
+    requireAuth: optsIn.requireAuth === true,
+  });
   const channelDeliveryDiagnosticRedaction: WorkerDiagnosticRedactionOptions = {
     workerEnv: daemonRuntimeBaseEnv,
     ...(token ? { daemonToken: token } : {}),
   };
   const sessionShellCommandEnabled =
-    optsIn.enableSessionShell === true && token !== undefined;
-  if (optsIn.enableSessionShell === true && token === undefined) {
+    optsIn.enableSessionShell === true &&
+    (token !== undefined || trustedLoopbackMode);
+  if (
+    optsIn.enableSessionShell === true &&
+    token === undefined &&
+    !trustedLoopbackMode
+  ) {
     writeStderrLine(
       `qwen serve: --enable-session-shell ignored because no bearer token ` +
         `is configured. Set ${QWEN_SERVER_TOKEN_ENV} or pass --token to ` +
@@ -3333,6 +3329,7 @@ async function runQwenServeImpl(
   // resolved below.
   const opts: ServeOptions = {
     ...optsIn,
+    hostname: bindHostname,
     token,
     promptDeadlineMs,
     writerIdleTimeoutMs,
@@ -3530,7 +3527,7 @@ async function runQwenServeImpl(
     throw new Error(
       `Refusing to bind ${opts.hostname}:${opts.port} without a bearer token. ` +
         `Set ${QWEN_SERVER_TOKEN_ENV} or pass --token, or rebind to loopback ` +
-        `(127.0.0.1, localhost, ::1, or [::1]).`,
+        `(127.0.0.0/8, localhost, ::1, or [::1]).`,
     );
   }
   // `--require-auth` extends the "must have a token" rule to loopback
@@ -3560,14 +3557,8 @@ async function runQwenServeImpl(
     // `InvalidAllowOriginPatternError` already names the bad pattern
     // and the canonical form; surface it verbatim.
     const parsed = parseAllowOriginPatterns(opts.allowOrigins);
-    // `*` admits cross-origin requests from any browser tab on the
-    // host. On a token-less loopback default that's a wide-open API
-    // surface — any page (https://evil.example.com, attacker-controlled
-    // ad-frame) can read every route. Refuse to start so operators
-    // don't ship this combination by accident. Mirrors the
-    // `--require-auth + no token` boot-refusal above. A token (any
-    // source: --token, env, --require-auth) makes the bearer the
-    // security boundary, so `*` is acceptable under that posture.
+    // A token (any source: --token, env, --require-auth) makes the bearer the
+    // security boundary for wildcard and remotely hosted browser origins.
     if (parsed.allowAny && !token) {
       throw new Error(
         `Refusing to start with --allow-origin '*' but no bearer token ` +
@@ -3577,6 +3568,17 @@ async function runQwenServeImpl(
           `origins instead of '*'.`,
       );
     }
+    const nonLoopbackHttpOrigin = findNonLoopbackHttpOrigin(parsed);
+    if (nonLoopbackHttpOrigin && !token) {
+      throw new Error(
+        `Refusing to start with --allow-origin ${JSON.stringify(
+          nonLoopbackHttpOrigin,
+        )} but no bearer token configured. Non-loopback HTTP(S) browser ` +
+          `origins can drive the full operator API, including code execution ` +
+          `as the daemon user. Set ${QWEN_SERVER_TOKEN_ENV} or pass --token, ` +
+          `or use a loopback origin.`,
+      );
+    }
     writeStderrLine(
       `qwen serve: --allow-origin: ${opts.allowOrigins.join(', ')}` +
         (parsed.allowAny
@@ -3584,7 +3586,11 @@ async function runQwenServeImpl(
             'token gates API routes; the Web Shell static assets stay ' +
             'pre-auth in every mode unless --no-web, and /health stays ' +
             'pre-auth on loopback unless --require-auth is set)'
-          : ''),
+          : trustedLoopbackMode
+            ? ' (WARNING: these browser origins receive full API authority ' +
+              'without a bearer token in trusted loopback mode and can ' +
+              'execute code as the daemon user)'
+            : ''),
     );
   }
   if (opts.allowPrivateAuthBaseUrl) {
@@ -4235,6 +4241,9 @@ async function runQwenServeImpl(
   };
   let runtimeApp: Application | undefined;
   let runtimeAppForCleanup: Application | undefined;
+  let getWorkspaceRuntimeCoordinatorIfSupported:
+    | (typeof import('./workspace-runtime-coordinator.js'))['getWorkspaceRuntimeCoordinatorIfSupported']
+    | undefined;
   let bridgeRef: AcpSessionBridge | undefined = deps.bridge;
   let managedProcessRegistry:
     | {
@@ -4623,6 +4632,8 @@ async function runQwenServeImpl(
         cliVersionPromise,
         import('../config/daemon-trust-policy.js'),
       ]);
+    getWorkspaceRuntimeCoordinatorIfSupported =
+      runtime.getWorkspaceRuntimeCoordinatorIfSupported;
     cliVersion = resolvedCliVersion;
     settingsRuntime.environment.preResolveHomeEnvOverrides();
     const bootTrustSnapshot = await trustPolicy.readDaemonTrustPolicySnapshot();
@@ -4633,6 +4644,10 @@ async function runQwenServeImpl(
     );
     const trustedWorkspace =
       deps.trustedWorkspace ?? bootPrimaryTrustDecision.targetTrusted;
+    if (shouldPreheat && !trustedWorkspace) {
+      shouldPreheat = false;
+      startup.preheat.status = 'not_scheduled';
+    }
     const workspaceTrustHotReloadAvailable =
       deps.trustedWorkspace === undefined &&
       deps.bridge === undefined &&
@@ -4784,6 +4799,7 @@ async function runQwenServeImpl(
       overlayKeys: string[];
       envFilePaths: string[];
       effectiveEnv: NodeJS.ProcessEnv;
+      workflowsEnabledBySettings: boolean;
       envFileReadFailed: boolean;
       envFileReadFailures: Array<{ path: string; error: string }>;
       fallbackReason?: string;
@@ -4791,6 +4807,8 @@ async function runQwenServeImpl(
       mode: 'runtime-overlay' as const,
       overlayKeys: [...runtimeEnvSnapshot.overlayKeys],
       effectiveEnv: runtimeEffectiveEnv,
+      workflowsEnabledBySettings:
+        runtimeBootSettings?.merged.tools?.workflowsEnabled === true,
       envFilePaths: [...runtimeEnvSnapshot.envFilePaths],
       envFileReadFailed: runtimeEnvSnapshot.envFileReadFailed,
       envFileReadFailures: [...runtimeEnvSnapshot.envFileReadFailures],
@@ -5066,6 +5084,26 @@ async function runQwenServeImpl(
     // `mcp_register`). Inert unless `opts.clientMcpOverWs` is on.
     const clientMcpSenderRegistry = new ClientMcpSenderRegistry();
     const runtimeBridges: AcpSessionBridge[] = [];
+    // Epoch sources are deliberately never evicted: a removed workspace
+    // that is re-registered under the same cwd must continue from its
+    // last epoch, otherwise clients holding the old epoch would observe
+    // a regression.
+    const runtimeEpochSources = new Map<
+      string,
+      { current(): number; allocate(): number }
+    >();
+    const runtimeEpochSourceFor = (workspaceCwd: string) => {
+      let source = runtimeEpochSources.get(workspaceCwd);
+      if (!source) {
+        let epoch = 0;
+        source = {
+          current: () => epoch,
+          allocate: () => ++epoch,
+        };
+        runtimeEpochSources.set(workspaceCwd, source);
+      }
+      return source;
+    };
     const totalSessionAdmission = runtime.createTotalSessionAdmissionController(
       {
         maxTotalSessions: opts.maxTotalSessions,
@@ -5128,14 +5166,9 @@ async function runQwenServeImpl(
     ) =>
       withSettingsLock(workspace, async () => {
         assertGenerationOpen?.();
-        const {
-          resolveSkillSettings,
-          skillSettingStrings,
-          updateWorkspaceSkillSettingLists,
-        } = await import('../config/skill-settings.js');
+        const { skillSettingStrings, updateWorkspaceSkillSettingLists } =
+          await import('../config/skill-settings.js');
         const fresh = loadSettingsForPersistence(workspace);
-        const normalizedName = skillName.trim().toLowerCase();
-        const resolved = resolveSkillSettings(fresh);
         const workspaceDisabled = skillSettingStrings(
           fresh,
           WORKSPACE_SETTING_SCOPE,
@@ -5150,8 +5183,6 @@ async function runQwenServeImpl(
           { disabled: workspaceDisabled, enabled: workspaceEnabled },
           skillName,
           enabled,
-          resolved.defaultDisabledNames.has(normalizedName) &&
-            !resolved.enabledNames.has(normalizedName),
         );
         const settingsChanges: Array<{
           key: 'skills.disabled' | 'skills.enabled';
@@ -5198,13 +5229,9 @@ async function runQwenServeImpl(
     ): Promise<PersistDisabledSkillsBatchResult> =>
       withSettingsLock(workspace, async () => {
         assertGenerationOpen?.();
-        const {
-          resolveSkillSettings,
-          skillSettingStrings,
-          updateWorkspaceSkillSettingLists,
-        } = await import('../config/skill-settings.js');
+        const { skillSettingStrings, updateWorkspaceSkillSettingLists } =
+          await import('../config/skill-settings.js');
         const fresh = loadSettingsForPersistence(workspace);
-        const resolved = resolveSkillSettings(fresh);
         const initialDisabled = skillSettingStrings(
           fresh,
           WORKSPACE_SETTING_SCOPE,
@@ -5219,13 +5246,10 @@ async function runQwenServeImpl(
         const outcomes: PersistDisabledSkillsBatchResult['outcomes'] = [];
 
         for (const skillName of skillNames) {
-          const normalizedName = skillName.trim().toLowerCase();
           const updated = updateWorkspaceSkillSettingLists(
             next,
             skillName,
             enabled,
-            resolved.defaultDisabledNames.has(normalizedName) &&
-              !resolved.enabledNames.has(normalizedName),
           );
           const changed =
             JSON.stringify(updated.disabled) !==
@@ -5461,6 +5485,7 @@ async function runQwenServeImpl(
           ? { permissionResponseTimeoutMs: opts.permissionResponseTimeoutMs }
           : {}),
         boundWorkspace,
+        runtimeEpochSource: runtimeEpochSourceFor(boundWorkspace),
         // Prompt terminal ledger: persisted beside the transcript so a
         // restarted daemon can reconcile dangling prompts on cold load.
         promptLedger: runtime.createPromptLedgerSink(
@@ -5510,6 +5535,92 @@ async function runQwenServeImpl(
     }
     runtimeBridges.push(bridge);
     let invalidatePrimaryServeFeaturesCache = () => {};
+    const reloadPrimaryDaemonEnv = (
+      workspace: string,
+      assertGenerationOpen?: () => void,
+    ) =>
+      withSettingsLock(workspace, async () => {
+        assertGenerationOpen?.();
+        const fresh = settingsRuntime.settings.loadSettings(workspace, {
+          skipLoadEnvironment: true,
+          skipWorkspaceSettings: !trustedWorkspace,
+          workspaceTrusted: trustedWorkspace,
+        });
+        assertGenerationOpen?.();
+        let refreshedRuntimeEnv: ReturnType<
+          EnvironmentRuntime['buildRuntimeEnvironment']
+        >;
+        try {
+          refreshedRuntimeEnv =
+            settingsRuntime.environment.buildRuntimeEnvironment(
+              fresh.merged,
+              workspace,
+              daemonRuntimeBaseEnv,
+              trustedWorkspace,
+            );
+        } catch (err) {
+          const fallbackReason =
+            err instanceof Error ? err.message : String(err);
+          primaryRuntimeEnv.fallbackReason = fallbackReason;
+          daemonLog.warn(
+            'failed to rebuild runtime env snapshot before daemon env reload; preserving previous runtime env',
+            {
+              error: fallbackReason,
+            },
+          );
+          return {
+            updatedKeys: [],
+            removedKeys: [],
+            runtimeEnvironmentApplied: false,
+          };
+        }
+        logRuntimeEnvFileReadFailures(workspace, refreshedRuntimeEnv);
+        if (refreshedRuntimeEnv.envFileReadFailed) {
+          return {
+            updatedKeys: [],
+            removedKeys: [],
+            runtimeEnvironmentApplied: false,
+          };
+        }
+        const result = settingsRuntime.settings.reloadEnvironment(
+          fresh.merged,
+          workspace,
+          trustedWorkspace,
+          { failClosedOnEnvFileReadError: true },
+        );
+        if (result.envFileReadFailed) {
+          return {
+            updatedKeys: [],
+            removedKeys: [],
+            runtimeEnvironmentApplied: false,
+          };
+        }
+        replaceRuntimeEffectiveEnv(refreshedRuntimeEnv.effectiveEnv);
+        primaryRuntimeEnv.workflowsEnabledBySettings =
+          fresh.merged.tools?.workflowsEnabled === true;
+        delete primaryRuntimeEnv.fallbackReason;
+        primaryRuntimeEnv.envFileReadFailed =
+          refreshedRuntimeEnv.envFileReadFailed;
+        primaryRuntimeEnv.envFileReadFailures.splice(
+          0,
+          primaryRuntimeEnv.envFileReadFailures.length,
+          ...refreshedRuntimeEnv.envFileReadFailures,
+        );
+        primaryRuntimeEnv.overlayKeys.splice(
+          0,
+          primaryRuntimeEnv.overlayKeys.length,
+          ...refreshedRuntimeEnv.overlayKeys,
+        );
+        primaryRuntimeEnv.envFilePaths.splice(
+          0,
+          primaryRuntimeEnv.envFilePaths.length,
+          ...refreshedRuntimeEnv.envFilePaths,
+        );
+        return {
+          ...result,
+          runtimeEnvironmentApplied: true,
+        };
+      });
     const workspaceService = runtime.createDaemonWorkspaceService({
       boundWorkspace,
       isWorkspaceTrusted: () => trustedWorkspace,
@@ -5527,76 +5638,7 @@ async function runQwenServeImpl(
       persistSetting: persistSettingFn,
       persistSettings: persistSettingsFn,
       preheatAcpChild: () => bridge.preheat(),
-      reloadDaemonEnv: (workspace, assertGenerationOpen) =>
-        withSettingsLock(workspace, async () => {
-          assertGenerationOpen?.();
-          const fresh = settingsRuntime.settings.loadSettings(workspace, {
-            skipLoadEnvironment: true,
-            skipWorkspaceSettings: !trustedWorkspace,
-            workspaceTrusted: trustedWorkspace,
-          });
-          assertGenerationOpen?.();
-          const result = settingsRuntime.settings.reloadEnvironment(
-            fresh.merged,
-            workspace,
-            trustedWorkspace,
-          );
-          let refreshedRuntimeEnv: ReturnType<
-            EnvironmentRuntime['buildRuntimeEnvironment']
-          >;
-          let fallbackReason: string | undefined;
-          try {
-            refreshedRuntimeEnv =
-              settingsRuntime.environment.buildRuntimeEnvironment(
-                fresh.merged,
-                workspace,
-                daemonRuntimeBaseEnv,
-                trustedWorkspace,
-              );
-          } catch (err) {
-            fallbackReason = err instanceof Error ? err.message : String(err);
-            daemonLog.warn(
-              'failed to rebuild runtime env snapshot after daemon env reload; preserving previous runtime env',
-              {
-                error: fallbackReason,
-              },
-            );
-            refreshedRuntimeEnv = {
-              effectiveEnv: { ...runtimeEffectiveEnv },
-              overlayKeys: [...primaryRuntimeEnv.overlayKeys],
-              envFilePaths: [...primaryRuntimeEnv.envFilePaths],
-              envFileReadFailed: primaryRuntimeEnv.envFileReadFailed ?? false,
-              envFileReadFailures: [
-                ...(primaryRuntimeEnv.envFileReadFailures ?? []),
-              ],
-            };
-          }
-          logRuntimeEnvFileReadFailures(workspace, refreshedRuntimeEnv);
-          replaceRuntimeEffectiveEnv(refreshedRuntimeEnv.effectiveEnv);
-          if (fallbackReason) {
-            primaryRuntimeEnv.fallbackReason = fallbackReason;
-          } else {
-            delete primaryRuntimeEnv.fallbackReason;
-          }
-          primaryRuntimeEnv.envFileReadFailed =
-            refreshedRuntimeEnv.envFileReadFailed;
-          primaryRuntimeEnv.envFileReadFailures.splice(
-            0,
-            primaryRuntimeEnv.envFileReadFailures.length,
-            ...refreshedRuntimeEnv.envFileReadFailures,
-          );
-          primaryRuntimeEnv.overlayKeys.splice(
-            0,
-            primaryRuntimeEnv.overlayKeys.length,
-            ...refreshedRuntimeEnv.overlayKeys,
-          );
-          primaryRuntimeEnv.envFilePaths.splice(
-            0,
-            primaryRuntimeEnv.envFilePaths.length,
-            ...refreshedRuntimeEnv.envFilePaths,
-          );
-          return result;
-        }),
+      reloadDaemonEnv: reloadPrimaryDaemonEnv,
       queryWorkspaceStatus: (method, idle) =>
         bridge.queryWorkspaceStatus(method, idle),
       invokeWorkspaceCommand: (method, params, invokeOpts) =>
@@ -5646,6 +5688,7 @@ async function runQwenServeImpl(
         overlayKeys: string[];
         envFilePaths: string[];
         effectiveEnv: NodeJS.ProcessEnv;
+        workflowsEnabledBySettings: boolean;
         envFileReadFailed: boolean;
         envFileReadFailures: Array<{ path: string; error: string }>;
         fallbackReason?: string;
@@ -5683,6 +5726,7 @@ async function runQwenServeImpl(
         overlayKeys: string[];
         envFilePaths: string[];
         effectiveEnv: NodeJS.ProcessEnv;
+        workflowsEnabledBySettings: boolean;
         envFileReadFailed: boolean;
         envFileReadFailures: Array<{ path: string; error: string }>;
         fallbackReason?: string;
@@ -5690,6 +5734,8 @@ async function runQwenServeImpl(
         mode: 'runtime-overlay',
         overlayKeys: [...snapshot.overlayKeys],
         effectiveEnv,
+        workflowsEnabledBySettings:
+          settings?.merged.tools?.workflowsEnabled === true,
         envFilePaths: [...snapshot.envFilePaths],
         envFileReadFailed: snapshot.envFileReadFailed,
         envFileReadFailures: [...snapshot.envFileReadFailures],
@@ -5707,6 +5753,93 @@ async function runQwenServeImpl(
         },
       };
     };
+
+    const reloadRuntimeOverlaySnapshotForModelProviders = (
+      workspace: string,
+      trusted: boolean,
+      env: ReturnType<typeof createRuntimeEnvMetadata>,
+      assertGenerationOpen?: () => void,
+    ) =>
+      withSettingsLock(workspace, async () => {
+        assertGenerationOpen?.();
+        const fresh = settingsRuntime.settings.loadSettings(workspace, {
+          skipLoadEnvironment: true,
+          skipWorkspaceSettings: !trusted,
+          workspaceTrusted: trusted,
+        });
+        assertGenerationOpen?.();
+        let refreshedRuntimeEnv: ReturnType<
+          EnvironmentRuntime['buildRuntimeEnvironment']
+        >;
+        try {
+          refreshedRuntimeEnv =
+            settingsRuntime.environment.buildRuntimeEnvironment(
+              fresh.merged,
+              workspace,
+              daemonRuntimeBaseEnv,
+              trusted,
+            );
+        } catch (err) {
+          env.metadata.fallbackReason =
+            err instanceof Error ? err.message : String(err);
+          daemonLog.warn(
+            'failed to rebuild runtime overlay for model-provider reload; preserving previous runtime env',
+            { workspace, error: env.metadata.fallbackReason },
+          );
+          return {
+            updatedKeys: [],
+            removedKeys: [],
+            runtimeEnvironmentApplied: false,
+          };
+        }
+        logRuntimeEnvFileReadFailures(workspace, refreshedRuntimeEnv);
+        if (refreshedRuntimeEnv.envFileReadFailed) {
+          return {
+            updatedKeys: [],
+            removedKeys: [],
+            runtimeEnvironmentApplied: false,
+          };
+        }
+        assertGenerationOpen?.();
+        try {
+          env.replace(refreshedRuntimeEnv.effectiveEnv);
+          env.metadata.envFileReadFailed =
+            refreshedRuntimeEnv.envFileReadFailed;
+          env.metadata.envFileReadFailures.splice(
+            0,
+            env.metadata.envFileReadFailures.length,
+            ...refreshedRuntimeEnv.envFileReadFailures,
+          );
+          env.metadata.overlayKeys.splice(
+            0,
+            env.metadata.overlayKeys.length,
+            ...refreshedRuntimeEnv.overlayKeys,
+          );
+          env.metadata.envFilePaths.splice(
+            0,
+            env.metadata.envFilePaths.length,
+            ...refreshedRuntimeEnv.envFilePaths,
+          );
+          delete env.metadata.fallbackReason;
+          return {
+            updatedKeys: [],
+            removedKeys: [],
+            runtimeEnvironmentApplied: true,
+          };
+        } catch (err) {
+          env.metadata.fallbackReason =
+            err instanceof Error ? err.message : String(err);
+          daemonLog.warn(
+            'failed to apply runtime overlay for model-provider reload; preserving previous runtime env',
+            { workspace, error: env.metadata.fallbackReason },
+          );
+          return {
+            updatedKeys: [],
+            removedKeys: [],
+            runtimeEnvironmentApplied: false,
+          };
+        }
+      });
 
     const readLiveConversationScheduledTasks = async () => {
       if (!fs.existsSync(liveConversationWorkspace.rootPath)) return [];
@@ -5913,6 +6046,7 @@ async function runQwenServeImpl(
           ? { permissionResponseTimeoutMs: opts.permissionResponseTimeoutMs }
           : {}),
         boundWorkspace: workspaceInput.cwd,
+        runtimeEpochSource: runtimeEpochSourceFor(workspaceInput.cwd),
         promptLedger: runtime.createPromptLedgerSink(
           workspaceInput.cwd,
           secondaryEnv.sessionRuntimeBaseDir,
@@ -5994,21 +6128,59 @@ async function runQwenServeImpl(
               workspaceTrusted: secondaryTrusted,
             });
             assertGenerationOpen?.();
-            const result = settingsRuntime.settings.reloadEnvironment(
-              fresh.merged,
-              workspace,
-              secondaryTrusted,
-            );
+            let runtimeEnvironmentApplied = false;
+            let refreshedRuntimeEnv: ReturnType<
+              EnvironmentRuntime['buildRuntimeEnvironment']
+            >;
             try {
-              const refreshedRuntimeEnv =
+              refreshedRuntimeEnv =
                 settingsRuntime.environment.buildRuntimeEnvironment(
                   fresh.merged,
                   workspace,
                   daemonRuntimeBaseEnv,
                   secondaryTrusted,
                 );
-              logRuntimeEnvFileReadFailures(workspace, refreshedRuntimeEnv);
+            } catch (err) {
+              secondaryEnv.metadata.fallbackReason =
+                err instanceof Error ? err.message : String(err);
+              daemonLog.warn(
+                'failed to rebuild secondary runtime env snapshot before daemon env reload; preserving previous runtime env',
+                {
+                  workspace,
+                  error: secondaryEnv.metadata.fallbackReason,
+                },
+              );
+              return {
+                updatedKeys: [],
+                removedKeys: [],
+                runtimeEnvironmentApplied,
+              };
+            }
+            logRuntimeEnvFileReadFailures(workspace, refreshedRuntimeEnv);
+            if (refreshedRuntimeEnv.envFileReadFailed) {
+              return {
+                updatedKeys: [],
+                removedKeys: [],
+                runtimeEnvironmentApplied: false,
+              };
+            }
+            const result = settingsRuntime.settings.reloadEnvironment(
+              fresh.merged,
+              workspace,
+              secondaryTrusted,
+              { failClosedOnEnvFileReadError: true },
+            );
+            if (result.envFileReadFailed) {
+              return {
+                updatedKeys: [],
+                removedKeys: [],
+                runtimeEnvironmentApplied: false,
+              };
+            }
+            try {
               secondaryEnv.replace(refreshedRuntimeEnv.effectiveEnv);
+              secondaryEnv.metadata.workflowsEnabledBySettings =
+                fresh.merged.tools?.workflowsEnabled === true;
               secondaryEnv.metadata.envFileReadFailed =
                 refreshedRuntimeEnv.envFileReadFailed;
               secondaryEnv.metadata.envFileReadFailures.splice(
@@ -6027,19 +6199,28 @@ async function runQwenServeImpl(
                 ...refreshedRuntimeEnv.envFilePaths,
               );
               delete secondaryEnv.metadata.fallbackReason;
+              runtimeEnvironmentApplied = true;
+              return { ...result, runtimeEnvironmentApplied };
             } catch (err) {
               secondaryEnv.metadata.fallbackReason =
                 err instanceof Error ? err.message : String(err);
               daemonLog.warn(
-                'failed to rebuild secondary runtime env snapshot after daemon env reload; preserving previous runtime env',
+                'failed to apply secondary runtime env snapshot after daemon env reload; preserving previous runtime env',
                 {
                   workspace,
                   error: secondaryEnv.metadata.fallbackReason,
                 },
               );
+              return { ...result, runtimeEnvironmentApplied };
             }
-            return result;
           }),
+        reloadModelProvidersDaemonEnv: (workspace, assertGenerationOpen) =>
+          reloadRuntimeOverlaySnapshotForModelProviders(
+            workspace,
+            secondaryTrusted,
+            secondaryEnv,
+            assertGenerationOpen,
+          ),
         queryWorkspaceStatus: (method, idle) =>
           secondaryBridge.queryWorkspaceStatus(method, idle),
         invokeWorkspaceCommand: (method, params, invokeOpts) =>
@@ -6531,6 +6712,7 @@ async function runQwenServeImpl(
             ? { permissionResponseTimeoutMs: opts.permissionResponseTimeoutMs }
             : {}),
           boundWorkspace: cwd,
+          runtimeEpochSource: runtimeEpochSourceFor(cwd),
           // Live-conversation workspaces keep transcripts outside the
           // runtime storage layout, so no ledger sink is wired there.
           ...(provenance === 'live-conversation'
@@ -6627,24 +6809,62 @@ async function runQwenServeImpl(
                 workspaceTrusted: trusted,
               });
               assertGenerationOpen?.();
-              const result = settingsRuntime.settings.reloadEnvironment(
-                fresh.merged,
-                workspace,
-                trusted,
-              );
               // Mirror the startup secondary-workspace path: rebuild the runtime
               // env snapshot and update the metadata so `.env` changes actually
               // propagate to child processes spawned by this workspace's bridge.
+              let runtimeEnvironmentApplied = false;
+              let refreshedRuntimeEnv: ReturnType<
+                EnvironmentRuntime['buildRuntimeEnvironment']
+              >;
               try {
-                const refreshedRuntimeEnv =
+                refreshedRuntimeEnv =
                   settingsRuntime.environment.buildRuntimeEnvironment(
                     fresh.merged,
                     workspace,
                     daemonRuntimeBaseEnv,
                     trusted,
                   );
-                logRuntimeEnvFileReadFailures(workspace, refreshedRuntimeEnv);
+              } catch (err) {
+                wsEnv.metadata.fallbackReason =
+                  err instanceof Error ? err.message : String(err);
+                daemonLog.warn(
+                  'failed to rebuild dynamic runtime env snapshot before daemon env reload; preserving previous runtime env',
+                  {
+                    workspace,
+                    error: wsEnv.metadata.fallbackReason,
+                  },
+                );
+                return {
+                  updatedKeys: [],
+                  removedKeys: [],
+                  runtimeEnvironmentApplied,
+                };
+              }
+              logRuntimeEnvFileReadFailures(workspace, refreshedRuntimeEnv);
+              if (refreshedRuntimeEnv.envFileReadFailed) {
+                return {
+                  updatedKeys: [],
+                  removedKeys: [],
+                  runtimeEnvironmentApplied: false,
+                };
+              }
+              const result = settingsRuntime.settings.reloadEnvironment(
+                fresh.merged,
+                workspace,
+                trusted,
+                { failClosedOnEnvFileReadError: true },
+              );
+              if (result.envFileReadFailed) {
+                return {
+                  updatedKeys: [],
+                  removedKeys: [],
+                  runtimeEnvironmentApplied: false,
+                };
+              }
+              try {
                 wsEnv.replace(refreshedRuntimeEnv.effectiveEnv);
+                wsEnv.metadata.workflowsEnabledBySettings =
+                  fresh.merged.tools?.workflowsEnabled === true;
                 wsEnv.metadata.envFileReadFailed =
                   refreshedRuntimeEnv.envFileReadFailed;
                 wsEnv.metadata.envFileReadFailures.splice(
@@ -6663,19 +6883,35 @@ async function runQwenServeImpl(
                   ...refreshedRuntimeEnv.envFilePaths,
                 );
                 delete wsEnv.metadata.fallbackReason;
+                runtimeEnvironmentApplied = true;
+                return { ...result, runtimeEnvironmentApplied };
               } catch (err) {
                 wsEnv.metadata.fallbackReason =
                   err instanceof Error ? err.message : String(err);
                 daemonLog.warn(
-                  'failed to rebuild dynamic runtime env snapshot after daemon env reload; preserving previous runtime env',
+                  'failed to apply dynamic runtime env snapshot after daemon env reload; preserving previous runtime env',
                   {
                     workspace,
                     error: wsEnv.metadata.fallbackReason,
                   },
                 );
+                return { ...result, runtimeEnvironmentApplied };
               }
-              return result;
             }),
+          ...(buildOptions?.primary === true
+            ? {}
+            : {
+                reloadModelProvidersDaemonEnv: (
+                  workspace: string,
+                  assertGenerationOpen?: () => void,
+                ) =>
+                  reloadRuntimeOverlaySnapshotForModelProviders(
+                    workspace,
+                    trusted,
+                    wsEnv,
+                    assertGenerationOpen,
+                  ),
+              }),
           queryWorkspaceStatus: (method, idle) =>
             wsBridge.queryWorkspaceStatus(method, idle),
           invokeWorkspaceCommand: (method, params, invokeOpts) =>
@@ -6908,6 +7144,9 @@ async function runQwenServeImpl(
         const existing = runtimeCleanupPromises.get(runtimeToDrain);
         if (existing) return existing;
         const cleanup = (async () => {
+          runtime
+            .getWorkspaceRuntimeCoordinatorIfSupported(runtimeToDrain)
+            ?.dispose();
           const containmentErrors: Error[] = [];
           try {
             await workspaceVoiceCoordinator.disposeRuntime(
@@ -7550,6 +7789,9 @@ async function runQwenServeImpl(
     qwenCodeVersion: cliVersion,
     sessionShellCommandEnabled,
     sessionArtifactsPersistenceAvailable,
+    workspaceRuntimeAvailable:
+      deps.bridge === undefined ||
+      typeof deps.bridge.getWorkspaceRuntimeLifecycleSnapshot === 'function',
     currentSessionSchedulingAvailable: false,
     permissionPolicy,
     multiWorkspaceCapabilitiesRequireRuntime: workspaceInputs.length > 1,
@@ -7815,7 +8057,7 @@ async function runQwenServeImpl(
       const addr = server.address();
       actualPort = typeof addr === 'object' && addr ? addr.port : opts.port;
       const scheme = tlsOptions ? 'https' : 'http';
-      const url = `${scheme}://${formatHostForUrl(opts.hostname)}:${actualPort}`;
+      const url = `${scheme}://${formatHostForUrl(optsIn.hostname)}:${actualPort}`;
       const liveRuntimeBaseDir = path.dirname(daemonLogBaseDir);
       const liveDiscoveryOwners: Array<{
         runtimeBaseDir: string;
@@ -8348,8 +8590,11 @@ async function runQwenServeImpl(
             );
           }
           const workerRuntime = await ensureChannelRuntime();
+          // TLS needs the operator spelling for SNI/SAN matching; plain HTTP
+          // keeps the DNS-pinned bind address so workers do not resolve again.
+          const workerHostname = tlsOptions ? optsIn.hostname : opts.hostname;
           const workerDaemonUrl = formatChannelWorkerDaemonUrl(
-            opts.hostname,
+            workerHostname,
             actualPort,
             tlsOptions !== undefined,
             typeof addr === 'object' &&
@@ -8362,7 +8607,7 @@ async function runQwenServeImpl(
           (
             deps.channelWorkerUrlCertifier ??
             assertChannelWorkerDaemonUrlIsLocal
-          )(workerDaemonUrl, opts.hostname);
+          )(workerDaemonUrl, workerHostname);
           if (
             tlsOptions &&
             tlsCertPath &&
@@ -8739,6 +8984,19 @@ async function runQwenServeImpl(
             cancelLiveDiscoveryRetry();
             channelControlDraining = true;
             const initiallyMountedApp = runtimeApp ?? runtimeAppForCleanup;
+            const beginRuntimeCoordinatorDrains = (
+              app: typeof initiallyMountedApp,
+            ): void => {
+              const registry = app?.locals?.['workspaceRegistry'] as
+                | WorkspaceRegistry
+                | undefined;
+              for (const workspaceRuntime of registry?.list() ?? []) {
+                getWorkspaceRuntimeCoordinatorIfSupported?.(
+                  workspaceRuntime,
+                )?.beginDrain();
+              }
+            };
+            beginRuntimeCoordinatorDrains(initiallyMountedApp);
             const initiallyMountedManagement = initiallyMountedApp?.locals?.[
               'workspaceManagementHandle'
             ] as { sealAndWait?: () => Promise<void> } | undefined;
@@ -8952,6 +9210,7 @@ async function runQwenServeImpl(
                     err instanceof Error ? err : null,
                   );
                 });
+                beginRuntimeCoordinatorDrains(appForCleanup);
                 startProcessRegistryShutdown();
                 disposeRuntimeAppResources(appForCleanup);
                 disposeDaemonEventLoopMonitor();
@@ -9094,7 +9353,10 @@ async function runQwenServeImpl(
       );
       if (!token) {
         writeStderrLine(
-          `qwen serve: bearer auth disabled (loopback default). Set ${QWEN_SERVER_TOKEN_ENV} to enable.`,
+          `qwen serve: trusted loopback mode; local callers have full API ` +
+            `access without bearer authentication, including code execution ` +
+            `as the daemon user. Use --require-auth with ` +
+            `${QWEN_SERVER_TOKEN_ENV} on shared or untrusted hosts.`,
         );
         if (opts.clientMcpOverWs === true) {
           writeStderrLine(
@@ -9229,6 +9491,36 @@ async function runQwenServeImpl(
     const tryListen = (attemptPort: number, attempt: number): void => {
       const handleListening = (): void => {
         server.removeListener('error', handleError);
+        const address = server.address();
+        if (
+          trustedLoopbackMode &&
+          (typeof address !== 'object' ||
+            address === null ||
+            !isLoopbackAddress(address.address))
+        ) {
+          const resolvedAddress =
+            typeof address === 'object' && address !== null
+              ? address.address
+              : String(address);
+          const error = new Error(
+            `Refusing trusted-loopback mode because ${opts.hostname} ` +
+              `bound to non-loopback address ${resolvedAddress}. Set ` +
+              `${QWEN_SERVER_TOKEN_ENV} or pass --token, or bind to an ` +
+              `explicit loopback address.`,
+          );
+          removeCurrentServePidfile();
+          markServeAppStartupFailed(error);
+          void serveAppLifecycle.close().then(
+            () => reject(error),
+            (closeError: unknown) =>
+              reject(
+                closeError instanceof Error
+                  ? new AggregateError([error, closeError], error.message)
+                  : error,
+              ),
+          );
+          return;
+        }
         onListening();
       };
       const handleError = (err: NodeJS.ErrnoException): void => {

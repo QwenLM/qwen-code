@@ -348,7 +348,7 @@ export class SessionShellDisabledError extends Error {
 
 /**
  * Thrown when a direct daemon shell command has no client id bound to the
- * addressed session. The bearer token authenticates the caller to the daemon;
+ * addressed session. Deployment policy authorizes the caller to the daemon;
  * this error means the caller has not proven ownership of the session.
  */
 export class SessionShellClientRequiredError extends Error {
@@ -623,10 +623,12 @@ export class SessionBusyError extends Error {
 export class WorkspaceDrainingError extends Error {
   readonly code = 'workspace_draining';
   readonly workspaceCwd: string;
-  constructor(workspaceCwd: string) {
+  override readonly cause: unknown;
+  constructor(workspaceCwd: string, cause?: unknown) {
     super(`Workspace ${JSON.stringify(workspaceCwd)} is being removed`);
     this.name = 'WorkspaceDrainingError';
     this.workspaceCwd = workspaceCwd;
+    this.cause = cause;
   }
 }
 
