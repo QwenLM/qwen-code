@@ -136,6 +136,27 @@ describe('runtime status discovery', () => {
   );
 
   it.skipIf(process.platform !== 'linux')(
+    'treats identity-less claims as active under a namespace-aware reader',
+    () => {
+      expect(readPidNamespaceId()).not.toBeNull();
+
+      expect(
+        isRuntimeStatusActive({
+          schemaVersion: RUNTIME_STATUS_SCHEMA_VERSION,
+          pid: 2_000_000_000,
+          sessionId: 'abc',
+          workDir: '/remote',
+          hostname: os.hostname(),
+          startedAt: Date.now() / 1000,
+          qwenVersion: null,
+          pidNamespaceId: null,
+          procStartToken: null,
+        }),
+      ).toBe(true);
+    },
+  );
+
+  it.skipIf(process.platform !== 'linux')(
     'uses the proc start token for claims in the current pid namespace',
     () => {
       const currentNamespace = readPidNamespaceId();

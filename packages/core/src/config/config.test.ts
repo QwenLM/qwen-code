@@ -2272,6 +2272,41 @@ describe('Server Config (config.ts)', () => {
       },
     );
 
+    it.skipIf(process.platform === 'linux')(
+      'does not demote an equal-pid sidecar that carries a foreign pid namespace',
+      async () => {
+        expect(readPidNamespaceId()).toBeNull();
+        const config = new Config(baseParams);
+        const sessionId = config.getSessionId();
+        const statusPath = config.storage.getRuntimeStatusPath(sessionId);
+        config.markRuntimeStatusEnabled();
+        const readSpy = vi
+          .spyOn(runtimeStatus, 'readRuntimeStatus')
+          .mockResolvedValue({
+            schemaVersion: runtimeStatus.RUNTIME_STATUS_SCHEMA_VERSION,
+            pid: process.pid,
+            sessionId,
+            workDir: config.getTargetDir(),
+            hostname: os.hostname(),
+            startedAt: Date.now() / 1000,
+            qwenVersion: null,
+            pidNamespaceId: 1,
+            procStartToken: null,
+          });
+        const writeSpy = vi
+          .spyOn(runtimeStatus, 'writeRuntimeStatus')
+          .mockResolvedValue(statusPath);
+
+        await config.shutdown();
+
+        expect(readSpy).toHaveBeenCalledWith(statusPath);
+        expect(writeSpy).not.toHaveBeenCalled();
+
+        readSpy.mockRestore();
+        writeSpy.mockRestore();
+      },
+    );
+
     it('leaves sibling same-session sidecars intact when shutting down', async () => {
       const config = new Config(baseParams);
       const sessionId = config.getSessionId();

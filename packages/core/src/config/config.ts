@@ -5948,9 +5948,7 @@ export class Config {
             if (
               status?.pid === process.pid &&
               status.sessionId === this.sessionId &&
-              (status.pidNamespaceId == null ||
-                currentNamespace == null ||
-                status.pidNamespaceId === currentNamespace) &&
+              (status.pidNamespaceId ?? null) === currentNamespace &&
               isSameProcess(process.pid, status.procStartToken)
             ) {
               await writeRuntimeStatus(statusPath, {

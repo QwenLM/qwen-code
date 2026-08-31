@@ -240,20 +240,28 @@ export function isRuntimeStatusActive(status: RuntimeStatus): boolean {
   if (status.pid <= 0) return false;
   if (status.hostname !== os.hostname()) return true;
   const currentNamespace = readPidNamespaceId();
+  if ((status.pidNamespaceId != null) !== (currentNamespace != null)) {
+    return true;
+  }
+  if (status.pidNamespaceId == null && status.procStartToken != null) {
+    return true;
+  }
   if (status.pidNamespaceId != null && currentNamespace != null) {
     if (status.pidNamespaceId !== currentNamespace) return true;
-    if (hasForeignBootId(status.procStartToken)) return true;
+    if (hasForeignOrUnverifiableBootId(status.procStartToken)) return true;
     return isSameProcess(status.pid, status.procStartToken);
   }
   return isPidAlive(status.pid);
 }
 
-function hasForeignBootId(procStartToken: string | null | undefined): boolean {
+function hasForeignOrUnverifiableBootId(
+  procStartToken: string | null | undefined,
+): boolean {
   if (procStartToken == null) return false;
   const match = /^([0-9a-f-]+):\d+$/i.exec(procStartToken);
   if (!match) return false;
   const localBootId = readLocalBootId();
-  return localBootId !== null && match[1] !== localBootId;
+  return localBootId === null || match[1] !== localBootId;
 }
 
 function parseRuntimeStatus(data: unknown): RuntimeStatus | null {
