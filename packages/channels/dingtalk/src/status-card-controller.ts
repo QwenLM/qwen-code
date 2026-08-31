@@ -516,6 +516,7 @@ export class StatusCardController {
       this.options.onError?.('status card finalization', error);
       if (isRetryableDingtalkCardError(error)) {
         this.scheduleTerminalRetry(record);
+        return true;
       } else {
         this.removeRecord(record);
       }

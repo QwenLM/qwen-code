@@ -789,6 +789,11 @@ export class DingtalkChannel extends ChannelBase {
       this.interactiveCardClient = new DingtalkInteractiveCardClient({
         robotCode: config.clientId,
         getAccessToken: () => this.getProactiveToken(),
+        invalidateAccessToken: (token) => {
+          if (this.proactiveToken?.token === token) {
+            this.proactiveToken = undefined;
+          }
+        },
       });
       if (
         this.interactiveCardConfig.statusCard.enabled &&

@@ -15,10 +15,18 @@ function response(body: unknown = {}, status = 200): Response {
   });
 }
 
-function createClient(): DingtalkInteractiveCardClient {
+function createClient(
+  options: {
+    getAccessToken?: () => Promise<string>;
+    invalidateAccessToken?: (token: string) => void;
+  } = {},
+): DingtalkInteractiveCardClient {
   return new DingtalkInteractiveCardClient({
     robotCode: 'robot-code',
-    getAccessToken: vi.fn().mockResolvedValue('access-token'),
+    getAccessToken:
+      options.getAccessToken ?? vi.fn().mockResolvedValue('access-token'),
+    invalidateAccessToken:
+      options.invalidateAccessToken ?? vi.fn<(token: string) => void>(),
     fetch: fetchMock,
   });
 }
@@ -190,7 +198,52 @@ describe('DingtalkInteractiveCardClient', () => {
     },
   );
 
-  it.each([400, 401, 403, 404])(
+  it('refreshes the access token and retries once on HTTP 401', async () => {
+    const getAccessToken = vi
+      .fn<() => Promise<string>>()
+      .mockResolvedValueOnce('stale-token')
+      .mockResolvedValueOnce('fresh-token');
+    const invalidateAccessToken = vi.fn<(token: string) => void>();
+    fetchMock
+      .mockResolvedValueOnce(response({}, 401))
+      .mockResolvedValueOnce(response());
+
+    await createClient({
+      getAccessToken,
+      invalidateAccessToken,
+    }).updateInstance({
+      outTrackId: 'status-1',
+      cardParamMap: {},
+    });
+
+    expect(invalidateAccessToken).toHaveBeenCalledOnce();
+    expect(invalidateAccessToken).toHaveBeenCalledWith('stale-token');
+    expect(
+      fetchMock.mock.calls.map(
+        ([, init]) =>
+          (init?.headers as Record<string, string>)[
+            'x-acs-dingtalk-access-token'
+          ],
+      ),
+    ).toEqual(['stale-token', 'fresh-token']);
+  });
+
+  it('stops after one token refresh when HTTP 401 persists', async () => {
+    const invalidateAccessToken = vi.fn<(token: string) => void>();
+    fetchMock.mockResolvedValue(response({}, 401));
+
+    await expect(
+      createClient({ invalidateAccessToken }).updateInstance({
+        outTrackId: 'status-1',
+        cardParamMap: {},
+      }),
+    ).rejects.toMatchObject<DingtalkCardRequestError>({ retryable: false });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(invalidateAccessToken).toHaveBeenCalledOnce();
+  });
+
+  it.each([400, 403, 404])(
     'classifies HTTP %s as non-retryable',
     async (status) => {
       fetchMock.mockResolvedValueOnce(response({}, status));

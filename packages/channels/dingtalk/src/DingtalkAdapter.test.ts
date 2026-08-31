@@ -355,6 +355,69 @@ it('does not initialize or subscribe to cards when configuration is omitted', ()
   ).toBeUndefined();
 });
 
+it('refreshes the shared proactive token after a card request returns 401', async () => {
+  let tokenRequests = 0;
+  let cardRequests = 0;
+  const fetchSpy = vi
+    .spyOn(globalThis, 'fetch')
+    .mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes('/gettoken?')) {
+        tokenRequests++;
+        return new Response(
+          JSON.stringify({
+            access_token: tokenRequests === 1 ? 'stale-token' : 'fresh-token',
+            expires_in: 7200,
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === 'https://api.dingtalk.com/v1.0/card/instances') {
+        cardRequests++;
+        return cardRequests === 1
+          ? new Response('expired', { status: 401 })
+          : new Response('{}', { status: 200 });
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+  const channel = createChannel();
+  const state = channel as unknown as {
+    proactiveToken?: { token: string; expiresAt: number };
+    interactiveCardClient: {
+      options: { invalidateAccessToken(token: string): void };
+      updateInstance(input: {
+        outTrackId: string;
+        cardParamMap: Record<string, unknown>;
+      }): Promise<void>;
+    };
+  };
+  const cardClient = state.interactiveCardClient;
+
+  await cardClient.updateInstance({
+    outTrackId: 'status-1',
+    cardParamMap: {},
+  });
+
+  expect(tokenRequests).toBe(2);
+  expect(cardRequests).toBe(2);
+  expect(
+    fetchSpy.mock.calls
+      .filter(
+        ([input]) =>
+          String(input) === 'https://api.dingtalk.com/v1.0/card/instances',
+      )
+      .map(
+        ([, init]) =>
+          (init?.headers as Record<string, string>)[
+            'x-acs-dingtalk-access-token'
+          ],
+      ),
+  ).toEqual(['stale-token', 'fresh-token']);
+  state.interactiveCardClient.options.invalidateAccessToken('stale-token');
+  expect(state.proactiveToken?.token).toBe('fresh-token');
+  fetchSpy.mockRestore();
+});
+
 function createCallbackResultChannel(
   result: DingtalkCardCallbackResult,
 ): DingtalkChannelInstance {

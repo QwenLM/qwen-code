@@ -992,7 +992,7 @@ describe('StatusCardController', () => {
 
     await expect(
       controller.complete('segment-1', 'final answer'),
-    ).resolves.toBe(false);
+    ).resolves.toBe(true);
     expect(client.updateInstance).toHaveBeenCalledOnce();
 
     await vi.advanceTimersByTimeAsync(999);
@@ -1107,7 +1107,7 @@ describe('StatusCardController', () => {
     vi.setSystemTime(20_000);
     await expect(
       controller.complete('segment-1', 'final answer'),
-    ).resolves.toBe(false);
+    ).resolves.toBe(true);
 
     expect(client.updateInstance).toHaveBeenCalledOnce();
     await vi.advanceTimersByTimeAsync(999);
@@ -1149,7 +1149,7 @@ describe('StatusCardController', () => {
     );
 
     await expect(controller.complete('segment-1', 'answer')).resolves.toBe(
-      false,
+      true,
     );
     expect(client.updateInstance).toHaveBeenCalledOnce();
 
@@ -1259,7 +1259,7 @@ describe('StatusCardController', () => {
     );
     await expect(
       controller.complete('terminal-segment', 'answer'),
-    ).resolves.toBe(false);
+    ).resolves.toBe(true);
 
     const streamCalls = vi.mocked(client.openOrUpdateStream).mock.calls.length;
     const updateCalls = vi.mocked(client.updateInstance).mock.calls.length;

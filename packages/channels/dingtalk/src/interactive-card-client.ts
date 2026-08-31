@@ -56,6 +56,7 @@ export interface UpdateCardInput {
 export interface DingtalkInteractiveCardClientOptions {
   robotCode: string;
   getAccessToken(): Promise<string>;
+  invalidateAccessToken(token: string): void;
   fetch?: typeof fetch;
 }
 
@@ -165,23 +166,30 @@ export class DingtalkInteractiveCardClient {
     body: unknown,
     templateId?: string,
   ): Promise<unknown> {
-    const token = await this.options.getAccessToken();
-    const response = await this.fetch(`${DINGTALK_API}${path}`, {
-      method,
-      headers: {
-        'Content-Type': 'application/json',
-        'x-acs-dingtalk-access-token': token,
-      },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(CARD_FETCH_TIMEOUT_MS),
-    });
-    if (!response.ok) {
-      const detail = (await response.text().catch(() => '')).slice(0, 300);
-      throw new DingtalkCardRequestError(
-        `DingTalk Card OpenAPI ${method} ${path} failed${templateId ? ` for ${templateId}` : ''}: HTTP ${response.status}${detail ? ` ${detail}` : ''}`,
-        isRetryableStatus(response.status),
-      );
+    for (let attempt = 0; ; attempt++) {
+      const token = await this.options.getAccessToken();
+      const response = await this.fetch(`${DINGTALK_API}${path}`, {
+        method,
+        headers: {
+          'Content-Type': 'application/json',
+          'x-acs-dingtalk-access-token': token,
+        },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(CARD_FETCH_TIMEOUT_MS),
+      });
+      if (response.status === 401 && attempt === 0) {
+        this.options.invalidateAccessToken(token);
+        await response.body?.cancel();
+        continue;
+      }
+      if (!response.ok) {
+        const detail = (await response.text().catch(() => '')).slice(0, 300);
+        throw new DingtalkCardRequestError(
+          `DingTalk Card OpenAPI ${method} ${path} failed${templateId ? ` for ${templateId}` : ''}: HTTP ${response.status}${detail ? ` ${detail}` : ''}`,
+          isRetryableStatus(response.status),
+        );
+      }
+      return response.json().catch(() => undefined);
     }
-    return response.json().catch(() => undefined);
   }
 }

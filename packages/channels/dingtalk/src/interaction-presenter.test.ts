@@ -1043,6 +1043,30 @@ describe('DingtalkInteractionPresenter', () => {
     );
   });
 
+  it('does not fall back while terminal card recovery owns delivery', async () => {
+    const { client, presenter, sendFallback } = createHarness();
+    let terminalAttempts = 0;
+    vi.mocked(client.updateInstance).mockImplementation(async (request) => {
+      if (request.cardParamMap.flowStatus !== 3) return;
+      terminalAttempts++;
+      if (terminalAttempts === 1) {
+        throw new Error('terminal connection lost');
+      }
+    });
+    presenter.appendOutput(segment('segment-1'), 'final answer');
+
+    await expect(
+      presenter.closeOutput('segment-1', 'final answer', 'completed'),
+    ).resolves.toBe(true);
+
+    expect(sendFallback).not.toHaveBeenCalled();
+    expect(terminalAttempts).toBe(1);
+    await vi.waitFor(() => expect(terminalAttempts).toBe(2), {
+      timeout: 1_500,
+    });
+    expect(sendFallback).not.toHaveBeenCalled();
+  });
+
   it('keeps the card sender prefix out of a non-card fallback', async () => {
     const { client, presenter, sendFallback } = createHarness();
     presenter.registerRun('run-1', 'owner-1', target, 'session-1', {
