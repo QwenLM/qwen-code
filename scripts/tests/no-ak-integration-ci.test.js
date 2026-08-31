@@ -6,7 +6,6 @@
 
 import { execFileSync } from 'node:child_process';
 import {
-  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -14,7 +13,6 @@ import {
   realpathSync,
   rmSync,
   symlinkSync,
-  writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -31,171 +29,7 @@ const CONFIGURE_ACTION_PATH =
 const NODE_ACTION_PATH = '.github/actions/self-hosted-node/action.yml';
 const GUARD_STEP = 'Verify checkout includes expected head commit';
 
-function runClassifierTrust(
-  step,
-  {
-    sameRepo,
-    permission,
-    apiFails = false,
-    eventName = 'pull_request',
-    prAuthor = 'contributor',
-  },
-) {
-  const body = step.match(/run: \|-\n([\s\S]*)$/)?.[1] ?? '';
-  const script = body.replace(/^ {10}/gm, '');
-  const dir = mkdtempSync(path.join(tmpdir(), 'classifier-trust-'));
-  const output = path.join(dir, 'github-output');
-  const gh = path.join(dir, 'gh');
-  try {
-    writeFileSync(
-      gh,
-      [
-        '#!/usr/bin/env bash',
-        '[[ "${GH_STUB_FAIL}" == "true" ]] && exit 1',
-        'printf \'%s\\n\' "${GH_STUB_PERMISSION}"',
-      ].join('\n'),
-      { mode: 0o755 },
-    );
-    chmodSync(gh, 0o755);
-    writeFileSync(output, '');
-    const stdout = execFileSync('bash', ['-c', script], {
-      encoding: 'utf8',
-      env: {
-        ...process.env,
-        PATH: `${dir}:${process.env.PATH ?? ''}`,
-        GITHUB_EVENT_NAME: eventName,
-        GITHUB_OUTPUT: output,
-        GITHUB_REPOSITORY: 'QwenLM/qwen-code',
-        SAME_REPO: String(sameRepo),
-        PR_AUTHOR: prAuthor,
-        GH_STUB_PERMISSION: permission,
-        GH_STUB_FAIL: String(apiFails),
-      },
-    });
-    return {
-      output: readFileSync(output, 'utf8').trim(),
-      stdout,
-    };
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-}
-
 describe('no-AK integration CI wiring', () => {
-  // bash + a Unix ':'-joined PATH + an extensionless shebang stub: the
-  // Windows lane cannot express this fixture (see the exclusion note in
-  // scripts/tests/vitest.config.ts), and this file's other bash-driven
-  // cases already gate to the Linux lane as the authoritative coverage.
-  it.runIf(process.platform === 'linux')(
-    'executes the classifier trust decision fail-closed',
-    () => {
-      const workflow = readFileSync(
-        path.join(ROOT, '.github/workflows/ci.yml'),
-        'utf8',
-      );
-      const step = getWorkflowStep(
-        getWorkflowJob(workflow, 'classify_pr'),
-        'Determine classifier trust',
-      );
-
-      expect(
-        runClassifierTrust(step, {
-          sameRepo: true,
-          permission: '',
-          apiFails: true,
-        }).output,
-      ).toBe('can_trust_pr_classifier=true');
-      expect(
-        runClassifierTrust(step, { sameRepo: false, permission: 'write' })
-          .output,
-      ).toBe('can_trust_pr_classifier=true');
-      expect(
-        runClassifierTrust(step, { sameRepo: false, permission: 'read' })
-          .output,
-      ).toBe('can_trust_pr_classifier=false');
-      expect(
-        runClassifierTrust(step, {
-          sameRepo: false,
-          permission: '',
-          apiFails: true,
-        }).output,
-      ).toBe('can_trust_pr_classifier=false');
-    },
-  );
-
-  it.runIf(process.platform === 'linux')(
-    'logs the reason behind the classifier trust verdict',
-    () => {
-      // A lookup failure, a below-write permission, and a granted write
-      // used to print the identical trusted true/false line, so a real API
-      // outage was indistinguishable from an actual permission decision.
-      const workflow = readFileSync(
-        path.join(ROOT, '.github/workflows/ci.yml'),
-        'utf8',
-      );
-      const step = getWorkflowStep(
-        getWorkflowJob(workflow, 'classify_pr'),
-        'Determine classifier trust',
-      );
-
-      const trusted = runClassifierTrust(step, {
-        sameRepo: true,
-        permission: '',
-        apiFails: true,
-      });
-      expect(trusted.stdout).toContain('PR classifier trusted: true');
-      expect(trusted.stdout).toContain('same-repo');
-
-      const deniedApi = runClassifierTrust(step, {
-        sameRepo: false,
-        permission: '',
-        apiFails: true,
-      });
-      const deniedRead = runClassifierTrust(step, {
-        sameRepo: false,
-        permission: 'read',
-      });
-      const granted = runClassifierTrust(step, {
-        sameRepo: false,
-        permission: 'write',
-      });
-
-      expect(deniedApi.stdout).toContain('PR classifier trusted: false');
-      expect(deniedRead.stdout).toContain('PR classifier trusted: false');
-      expect(granted.stdout).toContain('PR classifier trusted: true');
-      expect(granted.stdout).toContain('write');
-      expect(deniedRead.stdout).toContain('read');
-      // The two denials must stay distinguishable: an API outage (empty
-      // permission) and a real below-write permission are different
-      // remedies, and the verdict line alone cannot tell them apart.
-      expect(deniedApi.stdout).not.toBe(deniedRead.stdout);
-
-      // The two remaining reason branches need the same pin. The merge
-      // queue runs this step on every merge_group event, so an edit that
-      // drops or swaps these reason assignments would otherwise ship with
-      // every test green while the log silently reports a stale cause.
-      const nonPrEvent = runClassifierTrust(step, {
-        sameRepo: false,
-        permission: 'write',
-        eventName: 'merge_group',
-      });
-      expect(nonPrEvent.output).toBe('can_trust_pr_classifier=false');
-      expect(nonPrEvent.stdout).toContain('PR classifier trusted: false');
-      expect(nonPrEvent.stdout).toContain('not a pull_request');
-
-      const missingAuthor = runClassifierTrust(step, {
-        sameRepo: false,
-        permission: 'write',
-        prAuthor: '',
-      });
-      expect(missingAuthor.output).toBe('can_trust_pr_classifier=false');
-      expect(missingAuthor.stdout).toContain('PR classifier trusted: false');
-      expect(missingAuthor.stdout).toContain('PR author missing');
-
-      expect(nonPrEvent.stdout).not.toBe(missingAuthor.stdout);
-    },
-  );
-
   it.runIf(process.platform === 'linux')(
     'keeps Linux Unix socket paths short and identity-stable',
     () => {
@@ -379,37 +213,59 @@ describe('no-AK integration CI wiring', () => {
     expect(getWorkflowStep(gateJob, 'Checkout')).toContain(
       "format('refs/pull/{0}/head', github.event.pull_request.number)",
     );
-    const classifierTrust = getWorkflowStep(
+    const trustedClassifierCheckout = getWorkflowStep(
       classifyJob,
-      'Determine classifier trust',
+      'Checkout trusted CI classifier',
     );
     expect(classifyJob).toContain(
-      "can_trust_pr_classifier: '${{ steps.classifier_trust.outputs.can_trust_pr_classifier }}'",
+      "ci_profile: '${{ steps.ci_profile.outputs.ci_profile }}'",
     );
-    expect(classifierTrust).toContain('collaborators/${PR_AUTHOR}/permission');
-    expect(classifierTrust).toContain('can_trust=false');
-    expect(classifierTrust).toContain('"${SAME_REPO}" == "true"');
-    expect(classifierTrust).toContain('admin|maintain|write');
-    expect(classifierTrust).toContain('2>/dev/null || true');
-    expect(classifierTrust).not.toContain('AUTHOR_ASSOCIATION');
+    expect(trustedClassifierCheckout).toContain(
+      'if: "${{ github.event_name == \'pull_request\' }}"',
+    );
+    expect(trustedClassifierCheckout).toContain(
+      "repository: '${{ github.repository }}'",
+    );
+    expect(trustedClassifierCheckout).toContain(
+      "ref: '${{ github.event.pull_request.base.sha }}'",
+    );
+    expect(trustedClassifierCheckout).toContain(
+      "path: 'trusted-ci-classifier'",
+    );
+    expect(trustedClassifierCheckout).toContain(
+      "sparse-checkout: '.github/scripts/ci'",
+    );
+    expect(trustedClassifierCheckout).toContain('persist-credentials: false');
+    expect(trustedClassifierCheckout).not.toContain('head.sha');
+
+    const trustedClassifier = getWorkflowStep(
+      classifyJob,
+      'Classify CI profile from trusted base',
+    );
+    expect(trustedClassifier).toContain(
+      'trusted-ci-classifier/.github/scripts/ci/classify-pr-profile.sh "${GITHUB_REPOSITORY}" "${PR_NUMBER}"',
+    );
+    expect(trustedClassifier).toContain('docs_only|github_ci_only|full) ;;');
+    expect(trustedClassifier).toContain('profile=full');
+    expect(classifyJob).not.toContain('collaborators/${PR_AUTHOR}/permission');
+    expect(classifyJob).not.toContain('CI_BOT_PAT');
     expect(workflow).toContain(
       '.github/scripts/update-ecs-runner-qwen-workflow.test.mjs',
     );
 
-    // The profile gate is classified in this job: depending on `test` for
-    // its ci_profile output would queue the check behind the hour-long unit
-    // run. Pin the wrapper so the two classifiers cannot drift.
-    for (const classify of [
-      getWorkflowStep(ubuntuJob, 'Classify CI profile'),
-      getWorkflowStep(gateJob, 'Classify CI profile'),
+    // Both consumers use the profile that was already computed from the
+    // base checkout. Neither may execute a classifier from the PR checkout.
+    for (const profileStep of [
+      getWorkflowStep(ubuntuJob, 'Use trusted CI profile'),
+      getWorkflowStep(gateJob, 'Use trusted CI profile'),
     ]) {
-      expect(classify).toContain(
-        '.github/scripts/ci/classify-pr-profile.sh "${GITHUB_REPOSITORY}" "${PR_NUMBER}"',
+      expect(profileStep).toContain("id: 'ci_profile'");
+      expect(profileStep).toContain(
+        "TRUSTED_CI_PROFILE: '${{ needs.classify_pr.outputs.ci_profile }}'",
       );
-      expect(classify).toContain("id: 'ci_profile'");
-      expect(classify).toContain(
-        "CAN_TRUST_PR_CLASSIFIER: '${{ needs.classify_pr.outputs.can_trust_pr_classifier }}'",
-      );
+      expect(profileStep).toContain('profile="${TRUSTED_CI_PROFILE:-full}"');
+      expect(profileStep).not.toContain('classify-pr-profile.sh');
+      expect(profileStep).not.toContain('GH_TOKEN');
     }
     for (const stepName of [
       'Setup Node.js (hosted)',

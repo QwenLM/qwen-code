@@ -115,7 +115,7 @@ jobs:
     outputs:
       skip_ci: '${{ steps.release_sync.outputs.skip_ci }}'
       ubuntu_runner: '${{ steps.pick_runner.outputs.ubuntu_runner }}'
-      can_trust_pr_classifier: '${{ steps.classifier_trust.outputs.can_trust_pr_classifier }}'
+      ci_profile: '${{ steps.ci_profile.outputs.ci_profile }}'
     steps:
       - name: 'Detect release version-sync PR'
         id: 'release_sync'
@@ -189,39 +189,50 @@ jobs:
           echo "ubuntu_runner=${ubuntu_runner}" >> "${GITHUB_OUTPUT}"
           echo "Selected Linux runner: ${ubuntu_runner}"
 
-      - name: 'Determine classifier trust'
-        id: 'classifier_trust'
+      # The product jobs later check out the PR head. Classify before that
+      # from an explicit base-SHA checkout so no fork can replace the
+      # classifier implementation it asks CI to execute. The event token only
+      # needs PR read access.
+      - name: 'Checkout trusted CI classifier'
+        if: "${{ github.event_name == 'pull_request' }}"
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          repository: '${{ github.repository }}'
+          ref: '${{ github.event.pull_request.base.sha }}'
+          path: 'trusted-ci-classifier'
+          sparse-checkout: '.github/scripts/ci'
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: 'Classify CI profile from trusted base'
+        id: 'ci_profile'
         env:
           GH_TOKEN: '${{ github.token }}'
-          SAME_REPO: '${{ github.event.pull_request.head.repo.full_name == github.repository }}'
-          PR_AUTHOR: '${{ github.event.pull_request.user.login }}'
+          PR_NUMBER: "${{ github.event_name == 'pull_request' && github.event.pull_request.number || '' }}"
         run: |-
-          can_trust=false
-          reason='not a pull_request event'
-          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
-            if [[ "${SAME_REPO}" == "true" ]]; then
-              can_trust=true
-              reason='same-repo PR'
-            elif [[ -z "${PR_AUTHOR}" ]]; then
-              reason='PR author missing from the event payload'
-            else
-              permission="$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${PR_AUTHOR}/permission" --jq '.permission' 2>/dev/null || true)"
-              case "${permission}" in
-                admin|maintain|write)
-                  can_trust=true
-                  reason="base repo permission '${permission}'"
-                  ;;
-                '')
-                  reason='permission lookup returned nothing (API error or not a collaborator)'
-                  ;;
-                *)
-                  reason="base repo permission '${permission}' is below write"
-                  ;;
-              esac
+          profile=full
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" && -n "${PR_NUMBER}" ]]; then
+            set +e
+            profile="$(trusted-ci-classifier/.github/scripts/ci/classify-pr-profile.sh "${GITHUB_REPOSITORY}" "${PR_NUMBER}")"
+            classify_rc=$?
+            set -e
+            if [ "$classify_rc" -eq 2 ]; then
+              echo "::warning::Unable to list PR changed files; running full CI."
+              profile=full
+            elif [ "$classify_rc" -ne 0 ]; then
+              echo "::error::Trusted CI profile classifier exited non-zero; running full CI."
+              profile=full
             fi
           fi
-          echo "can_trust_pr_classifier=${can_trust}" >> "${GITHUB_OUTPUT}"
-          echo "PR classifier trusted: ${can_trust} (${reason})"
+          case "${profile}" in
+            docs_only|github_ci_only|full) ;;
+            *)
+              echo "::error::Trusted CI profile classifier returned '${profile}'; running full CI."
+              profile=full
+              ;;
+          esac
+          echo "ci_profile=${profile}" >> "${GITHUB_OUTPUT}"
+          echo "Selected trusted CI profile: ${profile}"
 
   #
   # Test: Node
@@ -414,36 +425,17 @@ jobs:
         with:
           expected_sha: "${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}"
 
-      - name: 'Classify CI profile'
+      - name: 'Use trusted CI profile'
         id: 'ci_profile'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         env:
-          GH_TOKEN: '${{ github.token }}'
-          PR_NUMBER: "${{ github.event_name == 'pull_request' && github.event.pull_request.number || '' }}"
-          CAN_TRUST_PR_CLASSIFIER: '${{ needs.classify_pr.outputs.can_trust_pr_classifier }}'
+          TRUSTED_CI_PROFILE: '${{ needs.classify_pr.outputs.ci_profile }}'
         run: |-
-          profile=full
-          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" && -n "${PR_NUMBER}" ]]; then
-            if [[ "${CAN_TRUST_PR_CLASSIFIER}" == "true" ]]; then
-              # Fetch + classify through the shared wrapper (also used by the
-              # review workflow's docs-only gate) so the classifier's input
-              # contract lives in one place. Exit 2 = listing failed,
-              # 3 = classifier failed.
-              set +e
-              profile="$(.github/scripts/ci/classify-pr-profile.sh "${GITHUB_REPOSITORY}" "${PR_NUMBER}")"
-              classify_rc=$?
-              set -e
-              if [ "$classify_rc" -eq 2 ]; then
-                echo "::warning::Unable to list PR changed files; running full CI."
-                profile=full
-              elif [ "$classify_rc" -ne 0 ]; then
-                echo "::error::CI profile classifier exited non-zero; running full CI."
-                profile=full
-              fi
-            else
-              echo "Untrusted fork PR detected; running full CI."
-            fi
-          fi
+          profile="${TRUSTED_CI_PROFILE:-full}"
+          case "${profile}" in
+            docs_only|github_ci_only|full) ;;
+            *) profile=full ;;
+          esac
           echo "ci_profile=${profile}" >> "${GITHUB_OUTPUT}"
           echo "Selected CI profile: ${profile}"
 
@@ -1475,34 +1467,18 @@ jobs:
         with:
           expected_sha: "${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}"
 
-      # KEEP IN SYNC with the `test` job's classifier step: same wrapper, same
-      # fallbacks, so a docs-only or github-ci-only PR skips this gate exactly
-      # when it skips the unit run.
-      - name: 'Classify CI profile'
+      # KEEP IN SYNC with the `test` job's profile step so a docs-only or
+      # github-ci-only PR skips this gate exactly when it skips the unit run.
+      - name: 'Use trusted CI profile'
         id: 'ci_profile'
         env:
-          GH_TOKEN: '${{ github.token }}'
-          PR_NUMBER: "${{ github.event_name == 'pull_request' && github.event.pull_request.number || '' }}"
-          CAN_TRUST_PR_CLASSIFIER: '${{ needs.classify_pr.outputs.can_trust_pr_classifier }}'
+          TRUSTED_CI_PROFILE: '${{ needs.classify_pr.outputs.ci_profile }}'
         run: |-
-          profile=full
-          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" && -n "${PR_NUMBER}" ]]; then
-            if [[ "${CAN_TRUST_PR_CLASSIFIER}" == "true" ]]; then
-              set +e
-              profile="$(.github/scripts/ci/classify-pr-profile.sh "${GITHUB_REPOSITORY}" "${PR_NUMBER}")"
-              classify_rc=$?
-              set -e
-              if [ "$classify_rc" -eq 2 ]; then
-                echo "::warning::Unable to list PR changed files; running full CI."
-                profile=full
-              elif [ "$classify_rc" -ne 0 ]; then
-                echo "::error::CI profile classifier exited non-zero; running full CI."
-                profile=full
-              fi
-            else
-              echo "Untrusted fork PR detected; running full CI."
-            fi
-          fi
+          profile="${TRUSTED_CI_PROFILE:-full}"
+          case "${profile}" in
+            docs_only|github_ci_only|full) ;;
+            *) profile=full ;;
+          esac
           echo "ci_profile=${profile}" >> "${GITHUB_OUTPUT}"
           echo "Selected CI profile: ${profile}"
 
