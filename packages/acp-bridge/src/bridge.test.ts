@@ -1550,6 +1550,48 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  describe('setUserLanguage', () => {
+    it('rejects with SessionNotFoundError when no channel is live', async () => {
+      const channelFactory = vi.fn();
+      const bridge = makeBridge({ channelFactory });
+
+      await expect(
+        bridge.setUserLanguage({ language: 'zh', syncOutputLanguage: false }),
+      ).rejects.toBeInstanceOf(SessionNotFoundError);
+      // Never spins up a channel just for the sync — a runtime without one
+      // has no sessions to refresh and re-reads the files at next spawn.
+      expect(channelFactory).not.toHaveBeenCalled();
+
+      await bridge.shutdown();
+    });
+
+    it('forwards the sync over the live channel without a session id', async () => {
+      const handle = makeChannel({
+        extMethodImpl: async (method, params) =>
+          method === SERVE_CONTROL_EXT_METHODS.userLanguage
+            ? {
+                language: (params as { language: string }).language,
+                sessions: 2,
+                failed: 0,
+              }
+            : {},
+      });
+      const channelFactory = vi.fn().mockResolvedValue(handle.channel);
+      const bridge = makeBridge({ channelFactory });
+      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await expect(
+        bridge.setUserLanguage({ language: 'zh', syncOutputLanguage: true }),
+      ).resolves.toEqual({ language: 'zh', sessions: 2, failed: 0 });
+      expect(handle.agent.extMethodCalls).toContainEqual({
+        method: SERVE_CONTROL_EXT_METHODS.userLanguage,
+        params: { language: 'zh', syncOutputLanguage: true },
+      });
+
+      await bridge.shutdown();
+    });
+  });
+
   it('wraps a Goal control request in the envelope the agent reads', async () => {
     // The agent's `sessionGoalControl` handler reads `params['request']`; this
     // method is its only producer, and a flattened envelope makes every
@@ -36697,6 +36739,292 @@ describe('createAcpSessionBridge — child-resource refresh', () => {
       }
     } finally {
       await bridge.shutdown();
+    }
+  });
+});
+
+describe('DAEMON-005: sessionPromptSettledCloseGraceMs — deferred prompt-settled close', () => {
+  it('keeps session alive during grace window after prompt settles with no subscriber', async () => {
+    vi.useFakeTimers();
+    try {
+      const handle = makeChannel();
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionPromptSettledCloseGraceMs: 30_000,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'hi' }],
+      });
+
+      // Client detaches after receiving the result
+      await bridge.detachClient(session.sessionId, session.clientId);
+      expect(bridge.sessionCount).toBe(1);
+
+      // Advance to just before the grace window ends — session must survive
+      await vi.advanceTimersByTimeAsync(29_000);
+      expect(bridge.sessionCount).toBe(1);
+
+      // Advance past the grace window — session should now close
+      await vi.advanceTimersByTimeAsync(2_000);
+      await vi.waitFor(() => {
+        expect(bridge.sessionCount).toBe(0);
+      });
+
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('cancels deferred close when a poll-based client re-subscribes within grace window', async () => {
+    vi.useFakeTimers();
+    try {
+      const handle = makeChannel();
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionPromptSettledCloseGraceMs: 30_000,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'hi' }],
+      });
+
+      // Client detaches — starts the grace timer
+      await bridge.detachClient(session.sessionId, session.clientId);
+      expect(bridge.sessionCount).toBe(1);
+
+      // Advance into the grace window
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(bridge.sessionCount).toBe(1);
+
+      // Poll client reconnects via subscribeEvents — must cancel the timer
+      const abort = new AbortController();
+      bridge.subscribeEvents(session.sessionId, { signal: abort.signal });
+
+      // Advance well past the original deadline — session must still be alive
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(bridge.sessionCount).toBe(1);
+
+      abort.abort();
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('closes session immediately after prompt settles when grace is 0 (default)', async () => {
+    vi.useFakeTimers();
+    try {
+      const handle = makeChannel();
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        // default: 0 — original behavior preserved
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'hi' }],
+      });
+
+      // Detach the only client
+      await bridge.detachClient(session.sessionId, session.clientId);
+
+      // With grace=0 the session closes synchronously on detach (no timer)
+      await vi.waitFor(() => {
+        expect(bridge.sessionCount).toBe(0);
+      });
+
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('re-arms remaining grace after subscribe → Abort churn', async () => {
+    vi.useFakeTimers();
+    try {
+      const handle = makeChannel();
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionPromptSettledCloseGraceMs: 30_000,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'hi' }],
+      });
+
+      // Detach starts the grace timer.
+      await bridge.detachClient(session.sessionId, session.clientId);
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(bridge.sessionCount).toBe(1);
+
+      // Poll client reconnects and then aborts mid-window. Aborting the
+      // subscription alone does not detach the bridge client; the HTTP layer
+      // does that via detachClient after the pump settles.
+      const abort = new AbortController();
+      bridge.subscribeEvents(session.sessionId, { signal: abort.signal });
+      await vi.advanceTimersByTimeAsync(5_000);
+      abort.abort();
+      await bridge.detachClient(session.sessionId, session.clientId);
+
+      // Session must close at the original deadline (10s + 5s elapsed = 15s,
+      // remaining 15s), not at a fresh 30s after the abort.
+      await vi.advanceTimersByTimeAsync(14_000);
+      expect(bridge.sessionCount).toBe(1);
+      await vi.advanceTimersByTimeAsync(2_000);
+      await vi.waitFor(() => {
+        expect(bridge.sessionCount).toBe(0);
+      });
+
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('preserves deferred close when subscribeEvents throws', async () => {
+    vi.useFakeTimers();
+    try {
+      const handle = makeChannel();
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionPromptSettledCloseGraceMs: 30_000,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'hi' }],
+      });
+
+      // Detach starts the grace timer.
+      await bridge.detachClient(session.sessionId, session.clientId);
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(bridge.sessionCount).toBe(1);
+
+      // Force the EventBus subscribe to fail. The pending close must survive.
+      vi.spyOn(EventBus.prototype, 'subscribe').mockImplementationOnce(() => {
+        throw new Error('subscribe boom');
+      });
+      expect(() => bridge.subscribeEvents(session.sessionId, {})).toThrow(
+        'subscribe boom',
+      );
+
+      // Session still closes at the original deadline.
+      await vi.advanceTimersByTimeAsync(19_000);
+      expect(bridge.sessionCount).toBe(1);
+      await vi.advanceTimersByTimeAsync(2_000);
+      await vi.waitFor(() => {
+        expect(bridge.sessionCount).toBe(0);
+      });
+
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not orphan the timer across two prompt settles inside one grace window', async () => {
+    vi.useFakeTimers();
+    try {
+      const handle = makeChannel();
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionPromptSettledCloseGraceMs: 30_000,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      // First prompt settles with no subscriber.
+      await bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'first' }],
+      });
+      await bridge.detachClient(session.sessionId, session.clientId);
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(bridge.sessionCount).toBe(1);
+
+      // Reconnect, send a second prompt, and detach again. The second
+      // schedulePromptSettledClose must clear the first timer instead of
+      // leaking it; if it leaked, the first timer would close the session
+      // at 30s even though the second prompt reset the clock.
+      const abort1 = new AbortController();
+      bridge.subscribeEvents(session.sessionId, { signal: abort1.signal });
+      await bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'second' }],
+      });
+      abort1.abort();
+      await bridge.detachClient(session.sessionId, session.clientId);
+
+      // Advance to 35s absolute: well past the first timer's 30s deadline,
+      // but only 25s after the second prompt settled.
+      await vi.advanceTimersByTimeAsync(25_000);
+      expect(bridge.sessionCount).toBe(1);
+
+      // Advance 6s more to pass the second deadline.
+      await vi.advanceTimersByTimeAsync(6_000);
+      await vi.waitFor(() => {
+        expect(bridge.sessionCount).toBe(0);
+      });
+
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('preserves the grace hold when killSession is refused by the agent', async () => {
+    vi.useFakeTimers();
+    try {
+      const handle = makeChannel({
+        extMethodImpl: (method) => {
+          if (method === 'qwen/control/session/close') {
+            throw RequestError.methodNotFound(method);
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionPromptSettledCloseGraceMs: 30_000,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'hi' }],
+      });
+
+      // Detach starts the grace timer.
+      await bridge.detachClient(session.sessionId, session.clientId);
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(bridge.sessionCount).toBe(1);
+
+      // Kill is refused. The grace hold must survive so a reconnecting client
+      // can still cancel the deferred close inside the original window.
+      await expect(bridge.killSession(session.sessionId)).resolves.toBe(false);
+      expect(bridge.sessionCount).toBe(1);
+
+      // Reconnect within the original grace window — the session must stay
+      // open well past the original deadline because the reconnect cancelled
+      // the deferred close.
+      const abort = new AbortController();
+      bridge.subscribeEvents(session.sessionId, { signal: abort.signal });
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(bridge.sessionCount).toBe(1);
+
+      abort.abort();
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
     }
   });
 });

@@ -1180,6 +1180,7 @@ export interface BridgeDaemonStatusLimits {
   } | null;
   channelIdleTimeoutMs: number;
   sessionIdleTimeoutMs: number;
+  sessionPromptSettledCloseGraceMs: number;
 }
 
 export interface BridgeDaemonSessionDiagnostic {
@@ -1958,6 +1959,29 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     language: string;
     outputLanguage: string | null;
     refreshed: boolean;
+  }>;
+
+  /**
+   * Sessionless user-level language sync (daemon `POST /language`). The
+   * daemon process has already persisted the user-scope settings and the
+   * global output-language file; the runtime only switches its own process
+   * UI language, reloads user-scope settings from disk, and — when
+   * `syncOutputLanguage` is true — refreshes every local session's system
+   * prompt. Project-bound output-language files are intentionally left
+   * alone: a session with its own registered path keeps its override.
+   *
+   * Runs on whatever ACP channel is already live; throws
+   * `SessionNotFoundError` when no channel is up, which callers must treat
+   * as "runtime skipped" (nothing to refresh — the next channel spawn
+   * reads the persisted files).
+   */
+  setUserLanguage(params: {
+    language: string;
+    syncOutputLanguage: boolean;
+  }): Promise<{
+    language: string;
+    sessions: number;
+    failed: number;
   }>;
 
   /** Apply Codex's realtime-active world-state transition to one session. */

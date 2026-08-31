@@ -780,6 +780,7 @@ export type {
   SetModelResult,
   DaemonSessionConfigOptionResult,
   SetSessionLanguageResult,
+  SetUserLanguageResult,
   KnownDaemonSessionArtifactChangeAction,
   KnownDaemonSessionArtifactKind,
   KnownDaemonSessionArtifactPersistenceWarning,

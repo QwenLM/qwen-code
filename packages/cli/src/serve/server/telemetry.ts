@@ -687,6 +687,9 @@ export function resolveDaemonTelemetryRoute(
   if (req.method === 'POST' && path === '/workspace/reload') {
     return { route: 'POST /workspace/reload' };
   }
+  if (req.method === 'POST' && path === '/language') {
+    return { route: 'POST /language' };
+  }
   const mcpRestart = path.match(/^\/workspace\/mcp\/([^/]+)\/restart$/);
   if (mcpRestart?.[1] && req.method === 'POST') {
     return { route: 'POST /workspace/mcp/:server/restart' };
