@@ -18,7 +18,11 @@ import type {
   DaemonWorkspaceCapability,
   DaemonWorkspaceGitStatus,
 } from '@qwen-code/sdk/daemon';
-import { FolderClosedIcon, FolderOpenIcon } from 'lucide-react';
+import {
+  CalendarClockIcon,
+  FolderClosedIcon,
+  FolderOpenIcon,
+} from 'lucide-react';
 import { GitBranchIndicator } from '../GitBranchIndicator';
 import { BranchPickerPopover } from '../BranchPickerPopover';
 import { useI18n } from '../../i18n';
@@ -41,6 +45,7 @@ import { SessionGroupSection } from './SessionGroupSection';
 import { SessionDetailsTooltip } from './SessionDetailsTooltip';
 import { sessionMatchesGitQuery } from './sessionSearch';
 import { measureSessionTitleScroll } from './sessionTitleScroll';
+import { getScheduledTaskSessionGroup } from './scheduled-task-session-groups';
 import { groupSessionsByChannelType } from './channelSessionGroups';
 import { useWorkspaceOverview } from './useWorkspaceOverview';
 import { WorkspaceOverview } from './WorkspaceOverview';
@@ -581,23 +586,49 @@ export function WorkspaceSection({
       : visibleSessions.slice(0, SIDEBAR_SESSION_PREVIEW_LIMIT);
 
   const groupedSessions = useMemo(() => {
-    if (!organizationEnabled || channelGroupingEnabled || groups.length === 0)
-      return null;
+    if (channelGroupingEnabled) return null;
     const assigned = new Set<string>();
-    const sections = groups.map((group) => {
-      // Group sections derive from the search-filtered list, not the
-      // pinned-filtered one: pinned members are lifted into the Pinned
-      // section, but dropping them here rendered a group whose members are
-      // all pinned as `· 0`, indistinguishable from lost memberships
-      // (#10391).
-      const items = searchedSessions.filter(
-        (session) => session.groupId === group.id,
-      );
-      items.forEach((session) => assigned.add(session.sessionId));
-      return { group, sessions: items };
-    });
+    const sections = organizationEnabled
+      ? groups.map((group) => {
+          // Group sections derive from the search-filtered list, not the
+          // pinned-filtered one: pinned members are lifted into the Pinned
+          // section, but dropping them here rendered a group whose members are
+          // all pinned as `· 0`, indistinguishable from lost memberships
+          // (#10391).
+          const items = searchedSessions.filter(
+            (session) => session.groupId === group.id,
+          );
+          items.forEach((session) => assigned.add(session.sessionId));
+          return { group, sessions: items };
+        })
+      : [];
+    const scheduledSections = new Map<
+      string,
+      {
+        id: string;
+        label: string;
+        sessions: DaemonSessionSummary[];
+      }
+    >();
+    for (const session of searchedSessions) {
+      if (assigned.has(session.sessionId)) continue;
+      const scheduledTaskGroup = getScheduledTaskSessionGroup(session);
+      if (!scheduledTaskGroup) continue;
+      const section = scheduledSections.get(scheduledTaskGroup.id);
+      if (section) {
+        section.sessions.push(session);
+      } else {
+        scheduledSections.set(scheduledTaskGroup.id, {
+          ...scheduledTaskGroup,
+          sessions: [session],
+        });
+      }
+      assigned.add(session.sessionId);
+    }
+    if (sections.length === 0 && scheduledSections.size === 0) return null;
     return {
       sections,
+      scheduledSections: [...scheduledSections.values()],
       // Pinned sessions without a group stay Pinned-section-only; they never
       // spill into Ungrouped.
       ungrouped: visibleSessions.filter(
@@ -794,9 +825,12 @@ export function WorkspaceSection({
               // when the grouped view has nothing to render either.
               !(
                 groupedSessions &&
-                groupedSessions.sections.some(
+                (groupedSessions.sections.some(
                   (section) => section.sessions.length > 0,
-                )
+                ) ||
+                  groupedSessions.scheduledSections.some(
+                    (section) => section.sessions.length > 0,
+                  ))
               ) ? (
               // A source switch swaps the query key; until the new source's
               // page settles there is no data yet, so the "no sessions" notice
@@ -861,6 +895,29 @@ export function WorkspaceSection({
                     actionsDisabled={groupActionsDisabled}
                   >
                     {sessions.map((session) => renderSession(session))}
+                  </SessionGroupSection>
+                ))}
+                {groupedSessions.scheduledSections.map((section) => (
+                  <SessionGroupSection
+                    id={section.id}
+                    key={`${section.id}:${sourceType ?? ''}`}
+                    label={section.label}
+                    count={section.sessions.length}
+                    limitSessions={limitSessions && !searchActive}
+                    icon={
+                      <CalendarClockIcon data-web-shell-scheduled-task-group />
+                    }
+                    expanded={!collapsedGroupIds.has(section.id)}
+                    onToggle={() => {
+                      setCollapsedGroupIds((current) => {
+                        const next = new Set(current);
+                        if (next.has(section.id)) next.delete(section.id);
+                        else next.add(section.id);
+                        return next;
+                      });
+                    }}
+                  >
+                    {section.sessions.map((session) => renderSession(session))}
                   </SessionGroupSection>
                 ))}
                 {groupedSessions.ungrouped.length > 0 && (

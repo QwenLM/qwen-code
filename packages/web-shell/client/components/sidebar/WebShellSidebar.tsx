@@ -112,6 +112,7 @@ import {
   replaceOwnedCollapsedSessionSectionIds,
 } from './collapsedSessionSections';
 import { measureSessionTitleScroll } from './sessionTitleScroll';
+import { getScheduledTaskSessionGroup } from './scheduled-task-session-groups';
 import {
   SESSION_LIST_PAGE_SIZE,
   SESSION_ORGANIZATION_FEATURE,
@@ -149,11 +150,6 @@ const SESSION_MENU_PORTAL_STYLE: CSSProperties = {
 const GROUP_MENU_MARGIN = 8;
 const CUSTOM_GROUP_COLOR_OPTION = '__custom__';
 const DEFAULT_CUSTOM_GROUP_COLOR: DaemonSessionGroupHexColor = '#416ef5';
-// Mirrors `SCHEDULED_TASK_RUN_SOURCE_ID_PREFIX` in acp-bridge/session-source.ts
-// (the client cannot import that package). Per-run scheduled task children keep
-// the `default` source type so they list with ordinary conversations.
-const SCHEDULED_TASK_RUN_SOURCE_ID_PREFIX = 'scheduled_task_run:';
-
 type SidebarSessionSource = 'default' | 'channel';
 
 function matchesSessionSource(
@@ -170,9 +166,7 @@ function matchesSessionSource(
 function isScheduledTaskSession(session: DaemonSessionSummary): boolean {
   return (
     session.sourceType === 'scheduled_task' ||
-    (session.sourceType === 'default' &&
-      session.sourceId?.startsWith(SCHEDULED_TASK_RUN_SOURCE_ID_PREFIX) ===
-        true)
+    getScheduledTaskSessionGroup(session) !== undefined
   );
 }
 
@@ -329,7 +323,7 @@ const SESSION_GROUP_COLORS: DaemonSessionGroupPresetColor[] = [
 
 type GroupEditorMode = 'create' | 'edit';
 
-type SessionSectionKind = 'color' | 'group' | 'recent';
+type SessionSectionKind = 'color' | 'group' | 'scheduled-task' | 'recent';
 
 interface SessionSection {
   id: string;
@@ -3755,7 +3749,6 @@ export function WebShellSidebar({
   );
 
   const sessionSections = useMemo<SessionSection[]>(() => {
-    if (!organizationEnabled) return [];
     const searching = searchQuery.trim().length > 0;
     const validGroupIds = new Set(groups.map((group) => group.id));
     const sessionsByColor = new Map<
@@ -3763,6 +3756,7 @@ export function WebShellSidebar({
       DaemonSessionSummary[]
     >();
     const sessionsByGroupId = new Map<string, DaemonSessionSummary[]>();
+    const scheduledTaskSections = new Map<string, SessionSection>();
     for (const group of groups) {
       sessionsByGroupId.set(group.id, []);
     }
@@ -3778,7 +3772,11 @@ export function WebShellSidebar({
     for (const session of searchedSessions) {
       // Color takes precedence: the picker keeps color and group mutually
       // exclusive, but stay defensive if a store somehow carries both.
-      if (session.color && SESSION_GROUP_COLORS.includes(session.color)) {
+      if (
+        organizationEnabled &&
+        session.color &&
+        SESSION_GROUP_COLORS.includes(session.color)
+      ) {
         const bucket = sessionsByColor.get(session.color) ?? [];
         bucket.push(session);
         sessionsByColor.set(session.color, bucket);
@@ -3790,6 +3788,20 @@ export function WebShellSidebar({
           : undefined;
       if (groupSessions) {
         groupSessions.push(session);
+        continue;
+      }
+      const scheduledTaskGroup = getScheduledTaskSessionGroup(session);
+      if (scheduledTaskGroup) {
+        const section = scheduledTaskSections.get(scheduledTaskGroup.id);
+        if (section) {
+          section.sessions.push(session);
+        } else {
+          scheduledTaskSections.set(scheduledTaskGroup.id, {
+            ...scheduledTaskGroup,
+            kind: 'scheduled-task',
+            sessions: [session],
+          });
+        }
         continue;
       }
       // On sources with a Pinned section, a pinned session without a
@@ -3828,6 +3840,7 @@ export function WebShellSidebar({
         sessions: groupSessions,
       });
     }
+    sections.push(...scheduledTaskSections.values());
     if (recentSessions.length > 0 && sections.length > 0) {
       sections.push({
         id: RECENT_SESSION_SECTION_ID,
@@ -3855,8 +3868,8 @@ export function WebShellSidebar({
       // until it settles; wait for a page fetched for the channel source.
       if (settledSessionsSourceRef.current !== 'channel') return;
     } else {
-      if (!organizationEnabled) return;
-      if (!groupsCatalogReady || !sessionsCatalogReady) return;
+      if (!sessionsCatalogReady) return;
+      if (organizationEnabled && !groupsCatalogReady) return;
     }
     const unseenIds = activeSections
       .map((section) => section.id)
@@ -4686,9 +4699,6 @@ export function WebShellSidebar({
     if (selectedSessionSource === 'channel') {
       return renderFlatSessions();
     }
-    if (!organizationEnabled) {
-      return renderFlatSessions();
-    }
     if (sessionSections.length === 0) {
       return renderFlatSessions();
     }
@@ -4703,6 +4713,11 @@ export function WebShellSidebar({
           label={section.label}
           count={section.sessions.length}
           color={section.color}
+          icon={
+            section.kind === 'scheduled-task' ? (
+              <CalendarClockIcon data-web-shell-scheduled-task-group />
+            ) : undefined
+          }
           limitSessions={editingSessionIdentity === null && !searchQuery.trim()}
           expanded={expanded}
           onToggle={() => toggleSessionSection(section.id)}

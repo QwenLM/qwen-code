@@ -828,6 +828,51 @@ describe('WorkspaceSection label', () => {
 });
 
 describe('WorkspaceSection session loading', () => {
+  it('groups scheduled-task runs without a session-organization capability', async () => {
+    const sessions = [
+      {
+        sessionId: 'run-1',
+        displayName: 'Review PRs · 08-31 09:30',
+        sourceType: 'default',
+        sourceId: 'scheduled_task_run:task-1',
+      },
+      {
+        sessionId: 'run-2',
+        displayName: 'Review PRs · 08-31 08:30',
+        sourceType: 'default',
+        sourceId: 'scheduled_task_run:task-1',
+      },
+      {
+        sessionId: 'ordinary',
+        displayName: 'Ordinary session',
+        sourceType: 'default',
+      },
+    ] as DaemonSessionSummary[];
+    const client = {
+      workspaceByCwd: vi.fn(() => ({
+        workspaceGit,
+        listWorkspaceSessionsPage: vi.fn().mockResolvedValue({ sessions }),
+        listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+      })),
+    } as unknown as DaemonClient;
+
+    renderSection({ client, expanded: true, sourceType: 'default' });
+    await flush();
+
+    const taskGroup = container.querySelector(
+      'section[aria-label="Review PRs"]',
+    );
+    expect(taskGroup).not.toBeNull();
+    expect(
+      taskGroup?.querySelector('[data-web-shell-scheduled-task-group]'),
+    ).not.toBeNull();
+    expect(taskGroup?.textContent).toContain('Review PRs · 08-31 09:30');
+    expect(taskGroup?.textContent).toContain('Review PRs · 08-31 08:30');
+    expect(
+      container.querySelector('section[aria-label="Ungrouped"]')?.textContent,
+    ).toContain('Ordinary session');
+  });
+
   it('shows five sessions and resets Show all after the workspace closes', async () => {
     const sessions = Array.from({ length: 6 }, (_, index) => ({
       sessionId: `session-${index + 1}`,

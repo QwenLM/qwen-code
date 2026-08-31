@@ -4349,21 +4349,38 @@ describe('WebShellSidebar session source switch', () => {
     expect(container.textContent).toContain('Channel session');
   });
 
-  it('renders scheduled-task runs with a flat source icon', async () => {
+  it('groups scheduled-task runs under the task title and source icon', async () => {
     const scheduledRun: DaemonSessionSummary = {
       sessionId: 'scheduled-run',
-      displayName: 'Hourly review',
+      displayName: 'Hourly review · 08-31 09:30',
       workspaceCwd: '/tmp/project',
       sourceType: 'default',
       sourceId: 'scheduled_task_run:task-1',
     };
-    active.sessions.push(scheduledRun);
+    active.sessions.push(scheduledRun, {
+      ...scheduledRun,
+      sessionId: 'scheduled-run-2',
+      displayName: 'Hourly review · 08-31 08:30',
+    });
     renderSidebar();
     await ensureWorkspaceExpanded('project');
 
+    const group = container.querySelector(
+      'section[aria-label="Hourly review"]',
+    );
+    expect(group).not.toBeNull();
+    expect(
+      group?.querySelector('[data-web-shell-scheduled-task-group]'),
+    ).not.toBeNull();
+    expect(
+      group?.querySelectorAll('[data-web-shell-session-title]'),
+    ).toHaveLength(2);
+
     const title = Array.from(
       container.querySelectorAll('[data-web-shell-session-title]'),
-    ).find((candidate) => candidate.textContent === 'Hourly review');
+    ).find(
+      (candidate) => candidate.textContent === 'Hourly review · 08-31 09:30',
+    );
     const row = title?.closest('[role="button"]');
     expect(row).toBeTruthy();
     const sourceIcon = row?.querySelector(
@@ -4384,7 +4401,9 @@ describe('WebShellSidebar session source switch', () => {
     const completedRow = Array.from(
       container.querySelectorAll('[data-web-shell-session-title]'),
     )
-      .find((candidate) => candidate.textContent === 'Hourly review')
+      .find(
+        (candidate) => candidate.textContent === 'Hourly review · 08-31 09:30',
+      )
       ?.closest('[role="button"]');
     expect(
       completedRow?.querySelector('[data-web-shell-scheduled-task-session]'),
