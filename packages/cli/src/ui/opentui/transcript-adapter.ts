@@ -88,7 +88,11 @@ export function transcribeSession(
       continue;
     }
     if (o.type === 'system') {
-      if (o.subtype === 'slash_command' && o.systemPayload?.rawCommand) {
+      if (
+        o.subtype === 'slash_command' &&
+        o.systemPayload?.phase === 'invocation' &&
+        o.systemPayload?.rawCommand
+      ) {
         const cmd = o.systemPayload.rawCommand;
         events.push({ type: 'user', text: cmd });
         prompts.push(cmd);
