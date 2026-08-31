@@ -34,7 +34,6 @@ interface StatusRecord {
   phase: DingtalkPresentationPhase;
   startedAt: number;
   lastStatusSecond: number;
-  lastStatusPhase?: DingtalkPresentationPhase;
   ready: Promise<boolean>;
   terminal: boolean;
   streamFailed: boolean;
@@ -60,6 +59,22 @@ function boundContent(content: string): string {
   if (content.length <= CONTENT_LIMIT) return content;
   return `${TRUNCATION_MARKER}${content.slice(
     content.length - (CONTENT_LIMIT - TRUNCATION_MARKER.length),
+  )}`;
+}
+
+function activeContent(
+  phase: DingtalkPresentationPhase,
+  content: string,
+): string {
+  const label = DINGTALK_PRESENTATION_PHASE_LABELS[phase];
+  const sanitized = sanitizeStreamingImageMarkers(content);
+  if (!sanitized) return label;
+
+  const prefix = `${label}\n\n`;
+  const available = CONTENT_LIMIT - prefix.length;
+  if (sanitized.length <= available) return `${prefix}${sanitized}`;
+  return `${prefix}${TRUNCATION_MARKER}${sanitized.slice(
+    sanitized.length - (available - TRUNCATION_MARKER.length),
   )}`;
 }
 
@@ -95,7 +110,7 @@ export class StatusCardController {
     if (record.terminal) return;
     record.content = boundContent(content);
     if (record.streamFailed) return;
-    record.pendingSnapshot = sanitizeStreamingImageMarkers(record.content);
+    record.pendingSnapshot = activeContent(record.phase, record.content);
     this.scheduleFlush(record);
   }
 
@@ -202,12 +217,21 @@ export class StatusCardController {
         continue;
       }
       record.phase = phase;
-      const update = record.writeChain.then(async () => {
-        if (!(await record.ready) || record.terminal || record.streamFailed) {
-          return;
-        }
-        await this.updateActiveStatus(record, phase);
-      });
+      const update = record.writeChain
+        .then(async () => {
+          if (!(await record.ready) || record.terminal || record.streamFailed) {
+            return;
+          }
+          await this.options.client.openOrUpdateStream({
+            outTrackId: record.outTrackId,
+            key: 'content',
+            content: activeContent(phase, record.content),
+            finalize: false,
+          });
+        })
+        .catch((error) => {
+          this.latchStreamFailure(record, error);
+        });
       record.writeChain = update;
       updates.push(update);
     }
@@ -271,7 +295,7 @@ export class StatusCardController {
     target: { chatId: string; isGroup: boolean },
   ): Promise<boolean> {
     try {
-      const initialContent = sanitizeStreamingImageMarkers(record.content);
+      const initialContent = activeContent(record.phase, record.content);
       await this.options.client.createAndDeliver({
         templateId: STATUS_CARD_TEMPLATE_ID,
         outTrackId: record.outTrackId,
@@ -279,10 +303,7 @@ export class StatusCardController {
         cardParamMap: {
           content: initialContent,
           flowStatus: 2,
-          statusLine: this.statusLine(
-            record,
-            DINGTALK_PRESENTATION_PHASE_LABELS[record.phase],
-          ).text,
+          statusLine: this.statusLine(record).text,
           hasAction: 'true',
           stop_action: 'true',
         },
@@ -293,7 +314,6 @@ export class StatusCardController {
         content: initialContent,
         finalize: false,
       });
-      record.lastStatusPhase = 'thinking';
       return true;
     } catch (error) {
       this.options.onError?.('status card creation', error);
@@ -345,15 +365,7 @@ export class StatusCardController {
         });
         await this.updateActiveStatus(record);
       })
-      .catch((error) => {
-        record.streamFailed = true;
-        record.pendingSnapshot = undefined;
-        if (record.statusTimer) {
-          clearTimeout(record.statusTimer);
-          record.statusTimer = undefined;
-        }
-        this.options.onError?.('status card streaming', error);
-      });
+      .catch((error) => this.latchStreamFailure(record, error));
     const tracked = write.finally(() => {
       if (record.inFlight === tracked) {
         record.inFlight = undefined;
@@ -441,7 +453,7 @@ export class StatusCardController {
 
   private statusLine(
     record: StatusRecord,
-    state: string,
+    state?: string,
   ): { text: string; second: number } {
     const second = Math.max(
       0,
@@ -454,28 +466,16 @@ export class StatusCardController {
     };
   }
 
-  private async updateActiveStatus(
-    record: StatusRecord,
-    phase = record.phase,
-  ): Promise<void> {
+  private async updateActiveStatus(record: StatusRecord): Promise<void> {
     if (record.terminal || record.streamFailed) return;
-    const status = this.statusLine(
-      record,
-      DINGTALK_PRESENTATION_PHASE_LABELS[phase],
-    );
-    if (
-      status.second === record.lastStatusSecond &&
-      phase === record.lastStatusPhase
-    ) {
-      return;
-    }
+    const status = this.statusLine(record);
+    if (status.second === record.lastStatusSecond) return;
     try {
       await this.options.client.updateInstance({
         outTrackId: record.outTrackId,
         cardParamMap: { statusLine: status.text },
       });
       record.lastStatusSecond = status.second;
-      record.lastStatusPhase = phase;
       record.consecutiveStatusFailures = 0;
       // A success revives the per-second chain even when only a low-frequency
       // breaker probe is scheduled.
@@ -488,6 +488,16 @@ export class StatusCardController {
       record.consecutiveStatusFailures++;
       this.options.onError?.('status card metadata', error);
     }
+  }
+
+  private latchStreamFailure(record: StatusRecord, error: unknown): void {
+    record.streamFailed = true;
+    record.pendingSnapshot = undefined;
+    if (record.statusTimer) {
+      clearTimeout(record.statusTimer);
+      record.statusTimer = undefined;
+    }
+    this.options.onError?.('status card streaming', error);
   }
 
   private scheduleStatusRefresh(

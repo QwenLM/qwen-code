@@ -97,7 +97,7 @@ describe('StatusCardController', () => {
     await vi.waitFor(() =>
       expect(client.openOrUpdateStream).toHaveBeenCalledWith(
         expect.objectContaining({
-          content: 'first',
+          content: '🤔 Thinking\n\nfirst',
           finalize: false,
         }),
       ),
@@ -113,14 +113,14 @@ describe('StatusCardController', () => {
       expect(client.createAndDeliver).toHaveBeenCalledWith(
         expect.objectContaining({
           cardParamMap: expect.objectContaining({
-            content: '@Alice',
+            content: '🤔 Thinking\n\n@Alice',
           }),
         }),
       ),
     );
     expect(client.openOrUpdateStream).toHaveBeenCalledWith(
       expect.objectContaining({
-        content: '@Alice',
+        content: '🤔 Thinking\n\n@Alice',
         finalize: false,
       }),
     );
@@ -146,6 +146,7 @@ describe('StatusCardController', () => {
     const content = vi.mocked(client.openOrUpdateStream).mock.calls[0]![0]
       .content;
     expect(content.length).toBeLessThanOrEqual(20_000);
+    expect(content.startsWith('🤔 Thinking\n\n')).toBe(true);
     expect(content).toContain('[Earlier output truncated]');
     expect(content.endsWith('b'.repeat(2_000))).toBe(true);
   });
@@ -165,7 +166,9 @@ describe('StatusCardController', () => {
       .mocked(client.openOrUpdateStream)
       .mock.calls.map(([request]) => request.content);
     expect(streamContents.join('\n')).not.toContain('/Users/ben/private');
-    expect(streamContents.at(-1)).toBe('before [Image pending] after');
+    expect(streamContents.at(-1)).toBe(
+      '🤔 Thinking\n\nbefore [Image pending] after',
+    );
   });
 
   it('hides image paths when a streaming card is cancelled', async () => {
@@ -211,7 +214,8 @@ describe('StatusCardController', () => {
     expect(client.createAndDeliver).toHaveBeenCalledWith(
       expect.objectContaining({
         cardParamMap: expect.objectContaining({
-          statusLine: '🤔 Thinking · qwen3.7-max · 0s',
+          content: '🤔 Thinking\n\nfirst',
+          statusLine: 'qwen3.7-max · 0s',
         }),
       }),
     );
@@ -223,7 +227,7 @@ describe('StatusCardController', () => {
     expect(client.updateInstance).toHaveBeenCalledWith(
       expect.objectContaining({
         cardParamMap: {
-          statusLine: '🤔 Thinking · qwen3.7-max · 2s',
+          statusLine: 'qwen3.7-max · 2s',
         },
       }),
     );
@@ -233,7 +237,7 @@ describe('StatusCardController', () => {
     expect(client.updateInstance).toHaveBeenCalledWith(
       expect.objectContaining({
         cardParamMap: {
-          statusLine: '🤔 Thinking · qwen3.7-max · 3s',
+          statusLine: 'qwen3.7-max · 3s',
         },
       }),
     );
@@ -250,7 +254,8 @@ describe('StatusCardController', () => {
     expect(client.createAndDeliver).toHaveBeenCalledWith(
       expect.objectContaining({
         cardParamMap: expect.objectContaining({
-          statusLine: '🤔 Thinking · 0s',
+          content: '🤔 Thinking\n\nfirst',
+          statusLine: '0s',
         }),
       }),
     );
@@ -260,7 +265,7 @@ describe('StatusCardController', () => {
     expect(client.updateInstance).toHaveBeenCalledWith(
       expect.objectContaining({
         cardParamMap: {
-          statusLine: '🤔 Thinking · 2s',
+          statusLine: '2s',
         },
       }),
     );
@@ -281,15 +286,13 @@ describe('StatusCardController', () => {
     void controller.updateRunPhase('run-1', 'searching');
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(client.updateInstance).toHaveBeenCalledWith(
+    expect(client.openOrUpdateStream).toHaveBeenCalledWith(
       expect.objectContaining({
-        cardParamMap: {
-          statusLine: '🔎 Searching · qwen3.7-max · 0s',
-        },
+        content: '🔎 Searching',
+        finalize: false,
       }),
     );
-    expect(client.updateInstance).toHaveBeenCalledTimes(1);
-    expect(client.openOrUpdateStream).toHaveBeenCalledTimes(1);
+    expect(client.openOrUpdateStream).toHaveBeenCalledTimes(2);
 
     vi.mocked(client.updateInstance).mockClear();
     vi.setSystemTime(1_200);
@@ -297,8 +300,36 @@ describe('StatusCardController', () => {
     expect(client.updateInstance).toHaveBeenCalledWith(
       expect.objectContaining({
         cardParamMap: {
-          statusLine: '🔎 Searching · qwen3.7-max · 2s',
+          statusLine: 'qwen3.7-max · 2s',
         },
+      }),
+    );
+  });
+
+  it('keeps the replying phase in the body while streaming output', async () => {
+    vi.useFakeTimers();
+    const { client, controller } = createHarness();
+
+    controller.ensure(segment(), target);
+    await vi.advanceTimersByTimeAsync(0);
+    await controller.updateRunPhase('run-1', 'replying');
+    controller.replace(segment(), target, 'answer');
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(client.openOrUpdateStream).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        content: '✍️ Replying\n\nanswer',
+        finalize: false,
+      }),
+    );
+
+    await controller.complete('segment-1', 'answer');
+    expect(client.updateInstance).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        cardParamMap: expect.objectContaining({
+          content: 'answer',
+          copy_content: 'answer',
+        }),
       }),
     );
   });
@@ -330,7 +361,7 @@ describe('StatusCardController', () => {
     await vi.advanceTimersByTimeAsync(500);
     expect(client.openOrUpdateStream).toHaveBeenCalledWith(
       expect.objectContaining({
-        content: 'firstsecond',
+        content: '🤔 Thinking\n\nfirstsecond',
         finalize: false,
       }),
     );
@@ -565,7 +596,7 @@ describe('StatusCardController', () => {
     );
     const gate = deferred<void>();
     vi.mocked(client.openOrUpdateStream).mockImplementation(async (request) => {
-      if (request.content === 'first more') await gate.promise;
+      if (request.content === '🤔 Thinking\n\nfirst more') await gate.promise;
     });
     controller.replace(segment(), target, 'first more');
 
@@ -581,7 +612,7 @@ describe('StatusCardController', () => {
       vi
         .mocked(client.openOrUpdateStream)
         .mock.calls.map(([request]) => request.content),
-    ).toContain('first more second');
+    ).toContain('🤔 Thinking\n\nfirst more second');
   });
 
   it('awaits in-flight creation before reporting liveness', async () => {

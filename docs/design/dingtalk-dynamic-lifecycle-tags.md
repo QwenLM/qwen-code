@@ -14,13 +14,13 @@ Expose agent progress consistently on both the inbound DingTalk message and the 
 
 Reaction operations for one inbound message are serialized so a late API response cannot restore an obsolete tag. If a status recall fails, the replacement is skipped to avoid stacking contradictory statuses.
 
-The same lifecycle mapping drives the interactive response card's existing `statusLine`. A newly created card starts at `🤔 Thinking`; tool activity replaces that line with the mapped phase before any response text exists, and the first response chunk changes it to `✍️ Replying`. Elapsed-time refreshes preserve the current phase instead of resetting it to a generic running state. Duplicate phase events are coalesced.
+The same lifecycle mapping drives a replaceable first line in the interactive response card body. A newly created card starts at `🤔 Thinking`; tool activity replaces that line with the mapped phase before any response text exists, and the first response chunk changes it to `✍️ Replying`. While a response streams, its content appears below that phase line. Duplicate phase events are coalesced.
 
-Tool parameters, tool output, and model reasoning are not added to card content. The card body remains reserved for the assistant response.
+The running card's `statusLine` contains only the configured model and elapsed time. On completion, the process line is removed from the body so only the final assistant response remains; the existing terminal state, model, and elapsed time stay in `statusLine`. Tool parameters, tool output, and model reasoning are not added to card content.
 
 ## Delivery modes
 
-Lifecycle presentation is driven by channel lifecycle events, independently of response delivery. Plain replies, interactive status cards, and block-streaming cards therefore share the same inbound-message tag behavior. Interactive cards also project the current phase into `statusLine`; block streaming does not create a status card and continues to rely on the inbound-message tags for progress.
+Lifecycle presentation is driven by channel lifecycle events, independently of response delivery. Plain replies, interactive status cards, and block-streaming cards therefore share the same inbound-message tag behavior. Interactive cards also project the current phase into the body; block streaming does not create a status card and continues to rely on the inbound-message tags for progress.
 
 Reaction failures and status-card metadata failures are isolated from each other and from response delivery.
 

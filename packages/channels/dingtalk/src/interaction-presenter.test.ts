@@ -165,7 +165,7 @@ describe('DingtalkInteractionPresenter', () => {
         expect.objectContaining({
           templateId: STATUS_CARD_TEMPLATE_ID,
           cardParamMap: expect.objectContaining({
-            content: '',
+            content: '🤔 Thinking',
             flowStatus: 2,
           }),
         }),
@@ -180,15 +180,14 @@ describe('DingtalkInteractionPresenter', () => {
     presenter.updateStatusCardPhase('run-1', 'searching');
 
     await vi.waitFor(() => {
-      expect(client.updateInstance).toHaveBeenCalledWith(
+      expect(client.openOrUpdateStream).toHaveBeenCalledWith(
         expect.objectContaining({
-          cardParamMap: {
-            statusLine: expect.stringMatching(/^🔎 Searching · \d+s$/u),
-          },
+          content: '🔎 Searching',
+          finalize: false,
         }),
       );
     });
-    expect(client.openOrUpdateStream).toHaveBeenCalledTimes(1);
+    expect(client.openOrUpdateStream).toHaveBeenCalledTimes(2);
   });
 
   it('adds the group sender only to the final model output', async () => {
@@ -204,7 +203,7 @@ describe('DingtalkInteractionPresenter', () => {
       expect(client.createAndDeliver).toHaveBeenCalledWith(
         expect.objectContaining({
           cardParamMap: expect.objectContaining({
-            content: '',
+            content: '🤔 Thinking',
           }),
         }),
       );
@@ -213,7 +212,7 @@ describe('DingtalkInteractionPresenter', () => {
         .mock.calls.map(([request]) => request.content)
         .filter(Boolean)
         .at(-1);
-      expect(streamed).toBe('正在分析');
+      expect(streamed).toBe('🤔 Thinking\n\n正在分析');
     });
 
     await presenter.closeOutput(
@@ -590,7 +589,7 @@ describe('DingtalkInteractionPresenter', () => {
       vi
         .mocked(client.openOrUpdateStream)
         .mock.calls.map(([request]) => request.content),
-    ).toContain('segment one');
+    ).toContain('🤔 Thinking\n\nsegment one');
 
     presenter.appendOutput(segment('segment-2'), 'segment two');
     await presenter.closeOutput('segment-2', '', 'completed');
@@ -615,7 +614,9 @@ describe('DingtalkInteractionPresenter', () => {
     // boundary deliberately re-sends the whole segment rather than risk
     // losing the suffix that never reached the card.
     expect(client.openOrUpdateStream).toHaveBeenCalledWith(
-      expect.objectContaining({ content: 'intermediate result' }),
+      expect.objectContaining({
+        content: '🤔 Thinking\n\nintermediate result',
+      }),
     );
     vi.mocked(client.openOrUpdateStream).mockRejectedValueOnce(
       new Error('stream blip'),
@@ -879,7 +880,7 @@ describe('DingtalkInteractionPresenter', () => {
       vi
         .mocked(client.openOrUpdateStream)
         .mock.calls.map(([request]) => request.content),
-    ).toContain('segment one');
+    ).toContain('🤔 Thinking\n\nsegment one');
   });
 
   it('falls back at a boundary when the in-flight card creation fails', async () => {
