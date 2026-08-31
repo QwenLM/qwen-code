@@ -6,7 +6,13 @@
 
 import { describe, it, expect } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -43,6 +49,12 @@ describe('serve-bridge bin artifact', () => {
 
   it('emits exactly one hashbang, on line 1, and parses', async () => {
     const outDir = mkdtempSync(join(tmpdir(), 'serve-bridge-bin-'));
+    // The bundle is ESM but must keep the shipped name `bin.js`
+    // (`bin.qwen-serve-mcp` maps to a `.js` file), and nothing above
+    // os.tmpdir() declares a module goal, so `node --check` below would lean
+    // on module-syntax detection — default-enabled only from Node 22.7, while
+    // the package supports >=22.0.0. Declare the goal instead.
+    writeFileSync(join(outDir, 'package.json'), '{"type": "module"}\n');
     const outfile = join(outDir, 'bin.js');
     try {
       await esbuild.build(serveBridgeBinBuildOptions(rootDir, outfile));
