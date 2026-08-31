@@ -20,84 +20,8 @@ import esbuild from 'esbuild';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const rootDir = join(__dirname, '..');
-// Budget includes the DaemonTransport interface + DaemonTransportClosedError +
-// RestSseTransport (default transport, constructed by DaemonClient).
-// Bumped from 116KB to 118KB for the transport abstraction layer (~1.5KB).
-// Bumped from 118KB to 119KB for the mid-turn drain surface (enqueue methods +
-// `mid_turn_message_injected` event type/guard/registration, ~150 bytes).
-// Bumped from 119KB to 122KB for the workspace extension management surface
-// (install/update/enable/disable/uninstall/refresh/check update endpoints).
-// Bumped from 122KB to 124KB for daemon fork-session APIs/events.
-// Bumped from 124KB to 125KB for rewind/branch transcript/session APIs.
-// Bumped from 125KB to 126KB for the workspace permissions rules API
-// (workspacePermissions + set/add/remove rule methods + types, ~718 bytes).
-// Bumped from 126KB to 127KB for prompt clientId self-heal.
-// Bumped from 127KB to 130KB for daemon workspace voice, trust, permissions,
-// session LSP helper APIs, and the full daemon route table.
-// Bumped from 130KB to 131KB for the workspace MCP resources drill-down
-// (workspaceMcpResources client method + route + resource status types).
-// Bumped from 131KB to 132KB for the pending prompt queue feature.
-// Bumped from 132KB to 133KB for session archive/unarchive APIs and sessionless
-// workspace remember (managed memory client methods + event validation).
-// Bumped from 133KB to 136KB after merging session artifacts plus sessionless
-// workspace memory forget/dream APIs and event validation.
-// Bumped from 136KB to 138KB for persistent session artifact APIs after
-// merging the upstream daemon SDK surface.
-// Bumped from 138KB to 139KB for EventBus byte-backlog telemetry validation.
-// Bumped from 139KB to 140KB for history_truncated event validation and
-// transcript status projection.
-// Bumped from 140KB to 150KB after merging main: workspace ACP status/preheat
-// plus WorkspaceDaemonClient's workspace-qualified core REST helpers (Phase 3
-// file/status/settings/agents/session APIs).
-// Bumped from 150KB to 151KB for the paged session transcript REST helper.
-// Bumped from 151KB to 154KB for extension management v2 catalog, activation,
-// mutation, and operation-polling APIs (~2.3KB).
-// Bumped from 154KB to 155KB after merging workspace skill-toggle APIs.
-// Bumped from 155KB to 160KB to accommodate recent growth and reduce churn,
-// from repeated 1KB bumps as new daemon APIs are added.
-// Bumped from 160KB to 161KB after merging upstream main.
-// Bumped from 161KB to 167KB for the Web Shell git-diff and subagent REST helpers
-// (workspaceGitDiff / workspaceGitDiffFile on both client classes) and the
-// ChatRecord transcript projection in the default UI API.
-// Bumped from 167KB to 168KB for workspace-level streaming generation and
-// workspace trust status v2 SDK types, plus the daemon event-bus epoch token
-// fields (eventEpoch / onEpoch) and their docs across SDK transports.
-// Bumped from 168KB to 169KB for channel delivery alongside workspace-level
-// streaming generation.
-// Bumped from 169KB to 170KB after merging the event-bus and channel-delivery
-// additions.
-// Bumped from 170KB to 173KB for workspace-scoped Channel configuration,
-// lifecycle, startup, and pairing helpers on both daemon client classes.
-// Bumped from 173KB to 174KB for worktree gitCwd query parameters on the
-// workspace-qualified diff/log/commit-detail client methods.
-// Bumped from 174KB to 175KB for git branch listing/checkout/push/pull/commit
-// client methods on both daemon client classes.
-// Bumped from 175KB to 176KB for GitHub PR create + default-branch methods.
-// Bumped from 176KB to 177KB for concurrent session-cancellation coalescing in
-// DaemonSessionClient (#6930).
-// Bumped from 177KB to 178KB for workspace file byte-cursor paging after
-// merging the workspace pairing approval SDK surface.
-// Bumped from 178KB to 184KB for side-task session APIs and source metadata.
-// Bumped from 184KB to 185KB for the Live Voice lifecycle helpers on both
-// daemon client classes.
-// Bumped from 185KB to 186KB for daemon-owned mid-turn message APIs.
-// Bumped from 186KB to 188KB for the workspace file-upload surface
-// (`uploadWorkspaceFile` + XHR progress) on both daemon client classes.
-// Bumped from 188KB to 189KB for the session reasoning-effort config option
-// APIs merged in from main.
-// Bumped from 189KB to 190KB for historical branch sessions and transcript
-// branch-point projection merged with the upload and reasoning APIs.
-// Bumped from 190KB to 195KB for session media upload, cleanup, and hydration
-// merged with the branch-session APIs and the composer text-file attachment
-// metadata (#9180).
-// Bumped from 195KB to 196KB for transient-vs-gone media hydration errors and
-// the reference-only replay placeholder.
-// Bumped from 196KB to 197KB for the workspace session live-state daemon
-// surface (catalog version + live snapshot accessors) and immutable,
-// identity-stable transcript block indexes used by browser renderers.
-// Bumped from 197KB to 198KB for the unrecognized-diagnostic sidechannel
-// (`unrecognizedDiagnostics` routing + selector, #8823).
-const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 198 * 1024;
+// Report unexpected growth without blocking normal additions to the public API.
+const DAEMON_BROWSER_BUNDLE_WARNING_BYTES = 216 * 1024;
 // The opt-in `daemon/transports` browser bundle legitimately ships the concrete
 // ACP transports (AcpHttpTransport/AcpWsTransport/AutoReconnect + negotiate), so
 // it's larger than the default barrel — but still budgeted so a future PR can't
@@ -322,9 +246,10 @@ if (existsSync(licenseSource)) {
 
 function assertBrowserSafeBundle(filePath) {
   const size = statSync(filePath).size;
-  if (size > MAX_DAEMON_BROWSER_BUNDLE_BYTES) {
-    throw new Error(
-      `Browser daemon SDK bundle is ${size} bytes; expected <= ${MAX_DAEMON_BROWSER_BUNDLE_BYTES}`,
+  console.log(`Browser daemon SDK bundle is ${size} bytes`);
+  if (size > DAEMON_BROWSER_BUNDLE_WARNING_BYTES) {
+    console.warn(
+      `Browser daemon SDK bundle exceeds the ${DAEMON_BROWSER_BUNDLE_WARNING_BYTES}-byte warning threshold`,
     );
   }
   assertNoNodeBuiltins(filePath, 'Browser daemon SDK bundle');

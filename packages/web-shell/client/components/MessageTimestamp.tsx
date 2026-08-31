@@ -1,4 +1,8 @@
 import { useCallback, useState, type ReactNode } from 'react';
+import {
+  warnClipboardWriteFailure,
+  writeClipboardText,
+} from '../utils/clipboard';
 import styles from './MessageTimestamp.module.css';
 
 interface MessageTimestampProps {
@@ -28,13 +32,12 @@ export function MessageTimestamp({
   const [copied, setCopied] = useState(false);
   const handleCopy = useCallback(() => {
     if (!copyText) return;
-    void navigator.clipboard
-      ?.writeText(copyText)
+    void writeClipboardText(copyText)
       .then(() => {
         setCopied(true);
         window.setTimeout(() => setCopied(false), 2000);
       })
-      .catch(() => {});
+      .catch(warnClipboardWriteFailure);
   }, [copyText]);
   if (timestamp === undefined && !copyText && !toolGroupSpacing) {
     return <>{children}</>;

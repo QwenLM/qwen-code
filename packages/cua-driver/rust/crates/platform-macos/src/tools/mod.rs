@@ -33,6 +33,7 @@ pub(crate) mod get_screen_size;
 mod health_report;
 mod move_cursor;
 mod page;
+mod perform_secondary_action;
 pub(crate) mod px_frame;
 mod set_config;
 mod type_text_chars;
@@ -45,7 +46,10 @@ use cua_driver_core::{
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::{ax::cache::ElementCache, cursor::state::CursorRegistry};
+use crate::{
+    ax::{cache::ElementCache, revision::MacObservationRevisions},
+    cursor::state::CursorRegistry,
+};
 
 fn pid_window_target_candidates(pid: i64) -> Vec<WindowTargetCandidate> {
     let Ok(pid) = i32::try_from(pid) else {
@@ -90,6 +94,7 @@ mod pid_window_target_tests {
             layer: 0,
             z_index: 1,
             is_on_screen: true,
+            current_space_id: None,
             on_current_space: None,
             space_ids: None,
         }
@@ -106,6 +111,9 @@ mod pid_window_target_tests {
         ));
     }
 }
+
+#[cfg(test)]
+mod background_input_regression_tests;
 
 fn pid_window_guarded<T: Tool + 'static>(
     tool: T,
@@ -177,6 +185,106 @@ impl DeliveryMode {
     }
 }
 
+/// Convert a pure background-input refusal into the structured refusal result
+/// shape shared by exact-target tools: `code`, `effect: "refused"`, the
+/// requested target, and the safe next route when one exists. No actuator ran.
+pub(crate) fn background_refusal_result(
+    pid: i32,
+    window_id: u32,
+    refusal: &cua_driver_core::background_input::BackgroundRefusal,
+) -> cua_driver_core::protocol::ToolResult {
+    let mut structured = serde_json::json!({
+        "code": refusal.code,
+        "effect": "refused",
+        "pid": pid,
+        "window_id": window_id,
+        "reason": refusal.reason,
+    });
+    if let Some(advice) = refusal.advice {
+        structured["escalation"] = serde_json::json!({
+            "recommended": advice,
+            "reason": refusal.reason,
+        });
+    }
+    cua_driver_core::protocol::ToolResult::error(format!(
+        "Background input refused ({}): {}",
+        refusal.code, refusal.reason
+    ))
+    .with_structured(structured)
+}
+
+/// Exclusive per-process ownership of one background mutation. Callers must
+/// keep this value alive through actuator dispatch, focus restoration, and
+/// target-bound verification.
+pub(crate) struct BackgroundMutationLease {
+    pid: i32,
+    _guard: tokio::sync::OwnedMutexGuard<()>,
+}
+
+impl BackgroundMutationLease {
+    /// Revalidate another actuator class while retaining the same per-PID
+    /// lease. This supports explicit ladders without deadlocking by attempting
+    /// to reacquire the coordinator recursively.
+    pub(crate) async fn gate_again(
+        &self,
+        window_id: u32,
+        element_ptr: Option<usize>,
+        action: cua_driver_core::background_input::BackgroundAction,
+    ) -> Result<(), cua_driver_core::protocol::ToolResult> {
+        decide_background_window_action(self.pid, window_id, element_ptr, action).await
+    }
+}
+
+async fn decide_background_window_action(
+    pid: i32,
+    window_id: u32,
+    element_ptr: Option<usize>,
+    action: cua_driver_core::background_input::BackgroundAction,
+) -> Result<(), cua_driver_core::protocol::ToolResult> {
+    use cua_driver_core::background_input::{
+        decide_background_input, BackgroundInputDecision, ExactWindowTarget,
+    };
+    let facts = match tokio::task::spawn_blocking(move || {
+        crate::ax::exact_target::gather_background_facts(pid, window_id, element_ptr)
+    })
+    .await
+    {
+        Ok(facts) => facts,
+        Err(error) => {
+            return Err(cua_driver_core::protocol::ToolResult::error(format!(
+                "Could not gather exact-target facts for pid {pid} window {window_id}: {error}"
+            )));
+        }
+    };
+    match decide_background_input(ExactWindowTarget { pid, window_id }, &facts, action) {
+        BackgroundInputDecision::Execute { .. } => Ok(()),
+        BackgroundInputDecision::Refuse(refusal) => {
+            Err(background_refusal_result(pid, window_id, &refusal))
+        }
+    }
+}
+
+/// Acquire the per-PID mutation coordinator, gather fresh exact-target facts,
+/// and ask the pure core for one background decision. `element_ptr` must stay
+/// retained by the caller until the returned lease is dropped.
+pub(crate) async fn gate_background_window_action(
+    pid: i32,
+    window_id: u32,
+    element_ptr: Option<usize>,
+    action: cua_driver_core::background_input::BackgroundAction,
+) -> Result<BackgroundMutationLease, cua_driver_core::protocol::ToolResult> {
+    let lease = acquire_background_mutation(pid).await;
+    lease.gate_again(window_id, element_ptr, action).await?;
+    Ok(lease)
+}
+
+pub(crate) async fn acquire_background_mutation(pid: i32) -> BackgroundMutationLease {
+    BackgroundMutationLease {
+        pid,
+        _guard: crate::background_mutation::acquire(pid).await,
+    }
+}
+
 /// Finish the post-action observation window. Embedded interactive clients
 /// that already observe the target continuously may opt out through the
 /// private registry argument to avoid adding a one-second acknowledgement
@@ -230,6 +338,7 @@ pub(crate) async fn focus_by_pixel(
     session: Option<String>,
     session_id: Option<String>,
     from_zoom: bool,
+    mutation_lease: Option<&BackgroundMutationLease>,
 ) -> Result<(), cua_driver_core::protocol::ToolResult> {
     use cua_driver_core::tool::Tool;
     let mut click_args = serde_json::json!({
@@ -239,6 +348,15 @@ pub(crate) async fn focus_by_pixel(
     });
     if let Some(wid) = window_id {
         click_args["window_id"] = serde_json::json!(wid);
+        if let Some(lease) = mutation_lease {
+            lease
+                .gate_again(
+                    wid,
+                    None,
+                    cua_driver_core::background_input::BackgroundAction::WindowPointer,
+                )
+                .await?;
+        }
     }
     if let Some(ref s) = session {
         click_args["session"] = serde_json::json!(s);
@@ -249,17 +367,27 @@ pub(crate) async fn focus_by_pixel(
     if from_zoom {
         click_args["from_zoom"] = serde_json::json!(true);
     }
-    let focus = click::ClickTool::new(state.clone())
-        .invoke(click_args)
-        .await;
+    let click_tool = click::ClickTool::new(state.clone());
+    let click = click_tool.invoke(click_args);
+    let focus = if let Some(lease) = mutation_lease {
+        crate::background_mutation::with_held_lease(lease.pid, click).await
+    } else {
+        click.await
+    };
     if focus.is_error != Some(true) {
         // AXFocused is non-destructive: unlike a second real click, it keeps a
         // Cmd+A selection intact before a follow-up type_text or Cmd+V.
         tokio::time::sleep(std::time::Duration::from_millis(120)).await;
-        return Ok(());
-    }
-
-    if !foreground {
+        // A background focus-click is `effect:"unverifiable"` by construction:
+        // it cannot prove the renderer moved its first responder. Returning on
+        // "it didn't error" therefore skipped the real-click fallback below
+        // whenever the click was a silent no-op — advancing on transport
+        // success alone, which is exactly what the ladder forbids. Confirm the
+        // focus actually moved before claiming this rung worked.
+        if !foreground || pixel_focus_landed(pid, window_id, x, y).await {
+            return Ok(());
+        }
+    } else if !foreground {
         return Err(cua_driver_core::protocol::ToolResult::error(format!(
             "focus pixel-click at ({x:.0},{y:.0}) failed."
         )));
@@ -295,6 +423,51 @@ pub(crate) async fn focus_by_pixel(
     // Brief settle so the renderer registers focus before the keystrokes.
     tokio::time::sleep(std::time::Duration::from_millis(120)).await;
     Ok(())
+}
+
+/// Confirm that a focus pixel-click actually moved the application's focused
+/// element onto the clicked point.
+///
+/// The background focus-click reports `effect:"unverifiable"`, so this is the
+/// read-back that lets [`focus_by_pixel`] decide whether the cheap rung worked
+/// or the real-click fallback is still required. It reuses the same
+/// window-local-pixels → screen translation the click itself used, so the
+/// comparison is in one coordinate space.
+///
+/// Returns `false` whenever the answer cannot be established (no window id,
+/// untranslatable frame, unreadable focused element or rect). That is the
+/// conservative direction: an unprovable focus escalates to the stronger rung
+/// rather than being reported as success.
+async fn pixel_focus_landed(pid: i32, window_id: Option<u32>, x: f64, y: f64) -> bool {
+    let Some(wid) = window_id else {
+        return false;
+    };
+    tokio::task::spawn_blocking(move || {
+        let Ok(frame) = px_frame::resolve_window_px_frame(wid) else {
+            return false;
+        };
+        let (screen_x, screen_y, _, _) = frame.to_screen(x, y);
+        unsafe {
+            let Some(focused) = crate::ax::bindings::focused_element_of_pid(pid) else {
+                return false;
+            };
+            let rect = crate::ax::bindings::element_screen_rect(focused);
+            core_foundation::base::CFRelease(focused as core_foundation::base::CFTypeRef);
+            let Some(rect) = rect else {
+                return false;
+            };
+            point_within_rect(rect, screen_x, screen_y)
+        }
+    })
+    .await
+    .unwrap_or(false)
+}
+
+/// Whether `[x, y, width, height]` (screen coordinates, top-left origin)
+/// contains the point. A degenerate rect never contains anything, so an app
+/// reporting a zero-sized focused element escalates rather than false-confirms.
+fn point_within_rect([rx, ry, rw, rh]: [f64; 4], x: f64, y: f64) -> bool {
+    rw > 0.0 && rh > 0.0 && x >= rx && x < rx + rw && y >= ry && y < ry + rh
 }
 
 /// Thread-safe per-pid zoom context registry.
@@ -556,6 +729,9 @@ pub struct ToolState {
     pub cursor_registry: Arc<CursorRegistry>,
     pub zoom_registry: Arc<ZoomRegistry>,
     pub resize_registry: Arc<ResizeRegistry>,
+    pub observation_revisions: Arc<MacObservationRevisions>,
+    watched_targets: std::sync::Mutex<std::collections::HashSet<(i32, u32)>>,
+    watcher_started: std::sync::atomic::AtomicBool,
     /// Global, disk-persisted config — the base layer and the only one the
     /// anonymous session / CLI writes.
     pub config: Arc<std::sync::RwLock<DriverConfig>>,
@@ -595,6 +771,9 @@ impl ToolState {
             cursor_registry: Arc::new(CursorRegistry::new()),
             zoom_registry: Arc::new(ZoomRegistry::new()),
             resize_registry: Arc::new(ResizeRegistry::new()),
+            observation_revisions: Arc::new(MacObservationRevisions::new()),
+            watched_targets: std::sync::Mutex::new(Default::default()),
+            watcher_started: std::sync::atomic::AtomicBool::new(false),
             // Load persisted config from ~/.cua-driver/config.json so that
             // `qwen-cua-driver config set` changes carry over into MCP sessions.
             config: Arc::new(std::sync::RwLock::new(load_driver_config())),
@@ -603,6 +782,63 @@ impl ToolState {
             cursor_overlay_available,
             host_owns_permission_ux,
             host_bundle_id,
+        }
+    }
+
+    pub(crate) fn watch_target(self: &Arc<Self>, pid: i32, window_id: u32) {
+        self.watched_targets
+            .lock()
+            .unwrap()
+            .insert((pid, window_id));
+        if self
+            .watcher_started
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            return;
+        }
+        let weak = Arc::downgrade(self);
+        if std::thread::Builder::new()
+            .name("cua-ax-target-sweeper".into())
+            .spawn(move || loop {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                let Some(state) = weak.upgrade() else {
+                    break;
+                };
+                let targets = state
+                    .watched_targets
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .copied()
+                    .collect::<Vec<_>>();
+                let windows = crate::windows::all_windows();
+                for (pid, window_id) in targets {
+                    let process_alive = unsafe { libc::kill(pid, 0) } == 0
+                        || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
+                    let window_alive = windows
+                        .iter()
+                        .any(|window| window.pid == pid && window.window_id == window_id);
+                    if process_alive && window_alive {
+                        continue;
+                    }
+                    state.element_cache.clear_target(pid, window_id);
+                    state.observation_revisions.clear_target(pid, window_id);
+                    if process_alive {
+                        cua_driver_core::element_token::global().clear_target(pid, window_id);
+                    } else {
+                        cua_driver_core::element_token::global().clear_pid(pid);
+                    }
+                    state
+                        .watched_targets
+                        .lock()
+                        .unwrap()
+                        .remove(&(pid, window_id));
+                }
+            })
+            .is_err()
+        {
+            self.watcher_started
+                .store(false, std::sync::atomic::Ordering::Release);
         }
     }
 }
@@ -655,11 +891,13 @@ pub fn register_all(
                     Some(state) => cua_driver_core::session::bounded_cursor_outcome(
                         true,
                         state.config.enabled,
+                        crate::cursor::overlay::is_visible_for_session(session_id),
                         Some(state.config.theme_id.as_str()),
                         motion_customized,
                         active_cursor_count,
                     ),
                     None => cua_driver_core::session::bounded_cursor_outcome(
+                        false,
                         false,
                         false,
                         None,
@@ -674,6 +912,7 @@ pub fn register_all(
     if let Some(runtime_scope) = cua_driver_core::tool::current_dispatch_runtime_scope() {
         let prefix = format!("__cua_runtime_{runtime_scope}:");
         let cursor_registry = state.cursor_registry.clone();
+        let observation_revisions = state.observation_revisions.clone();
         registry.retain_runtime_cleanup(move || {
             for cursor in cursor_registry
                 .all_states()
@@ -683,6 +922,8 @@ pub fn register_all(
                 cursor_registry.remove(&cursor.config.cursor_id);
                 crate::cursor::overlay::remove_cursor(cursor.config.cursor_id);
             }
+            observation_revisions.clear_runtime(&runtime_scope);
+            cua_driver_core::observation_revision::revision_tokens().clear_runtime(&runtime_scope);
         });
     }
     // Share the element cache with the recording-hook layer so it can
@@ -695,9 +936,12 @@ pub fn register_all(
     {
         let session_config = state.session_config.clone();
         let cursor_registry = state.cursor_registry.clone();
+        let observation_revisions = state.observation_revisions.clone();
         let registration =
             cua_driver_core::session::register_scoped_session_end_hook(move |session_id| {
                 session_config.clear(session_id);
+                observation_revisions.clear_session(session_id);
+                cua_driver_core::observation_revision::revision_tokens().clear_session(session_id);
                 // Per-session agent cursor: the session_id is the cursor key when
                 // the caller gave no explicit cursor_id, so dropping it here both
                 // prunes the metadata registry and stops the overlay painting that
@@ -708,6 +952,11 @@ pub fn register_all(
                 crate::cursor::overlay::remove_cursor(session_id.to_owned());
             });
         registry.retain_session_end_hook(registration);
+        let revive_registration =
+            cua_driver_core::session::register_scoped_session_revive_hook(move |session_id| {
+                crate::cursor::overlay::revive_cursor(session_id.to_owned());
+            });
+        registry.retain_session_revive_hook(revive_registration);
     }
 
     registry.register(Box::new(list_apps::ListAppsTool));
@@ -766,6 +1015,10 @@ pub fn register_all(
     ));
     registry.register(pid_window_guarded(
         scroll::ScrollTool::new(state.clone()),
+        &pid_window_candidates,
+    ));
+    registry.register(pid_window_guarded(
+        perform_secondary_action::PerformSecondaryActionTool::new(state.clone()),
         &pid_window_candidates,
     ));
     cua_driver_core::clipboard::register_clipboard_tools(
@@ -993,6 +1246,43 @@ mod cursor_overlay_facility_tests {
 // macOS cursor sampler (CoreGraphics), so the start-guard test runs here in
 // platform-macos where build.rs links the frameworks — the core crate's test
 // binary has no CoreGraphics linkage.
+#[cfg(test)]
+mod pixel_focus_readback_tests {
+    use super::point_within_rect;
+
+    #[test]
+    fn confirms_a_point_inside_the_focused_element() {
+        let composer = [100.0, 800.0, 250.0, 24.0];
+        assert!(point_within_rect(composer, 220.0, 812.0));
+        assert!(
+            point_within_rect(composer, 100.0, 800.0),
+            "top-left is inside"
+        );
+    }
+
+    #[test]
+    fn rejects_a_point_outside_the_focused_element() {
+        // The WhatsApp case: the click targeted the composer but focus stayed on
+        // the transcript above it, so the clicked point is not inside the
+        // focused element's rect and the caller must escalate.
+        let transcript = [100.0, 100.0, 640.0, 690.0];
+        assert!(!point_within_rect(transcript, 220.0, 812.0));
+    }
+
+    #[test]
+    fn excludes_the_far_edges() {
+        let rect = [0.0, 0.0, 10.0, 10.0];
+        assert!(!point_within_rect(rect, 10.0, 5.0));
+        assert!(!point_within_rect(rect, 5.0, 10.0));
+    }
+
+    #[test]
+    fn a_degenerate_rect_never_confirms() {
+        assert!(!point_within_rect([5.0, 5.0, 0.0, 0.0], 5.0, 5.0));
+        assert!(!point_within_rect([5.0, 5.0, -3.0, 10.0], 5.0, 6.0));
+    }
+}
+
 #[cfg(test)]
 mod recording_start_guard_tests {
     use cua_driver_core::recording::RecordingSession;

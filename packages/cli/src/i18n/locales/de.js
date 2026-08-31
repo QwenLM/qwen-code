@@ -444,6 +444,7 @@ export default {
   'Tool Output Truncation Lines': 'Zeilen für Werkzeugausgabe-Kürzung',
   'Folder Trust': 'Ordnervertrauen',
   'Tool Schema Compliance': 'Tool Schema-Konformität',
+  Unset: 'Nicht festgelegt',
   // Settings enum options
   'Auto (detect from system)': 'Automatisch (vom System erkennen)',
   'Auto (follow user input)': 'Automatisch (Benutzereingabe folgen)',
@@ -1056,6 +1057,12 @@ export default {
     'Chatverlauf-Komprimierung hat die Größe nicht reduziert. Dies kann auf Probleme mit dem Komprimierungs-Prompt hindeuten.',
   'Could not compress chat history due to a token counting error.':
     'Chatverlauf konnte aufgrund eines Token-Zählfehlers nicht komprimiert werden.',
+  'Could not compress chat history because the compression summary was empty.':
+    'Chatverlauf konnte nicht komprimiert werden, da die Komprimierungszusammenfassung leer war.',
+  'Could not compress chat history because the compression summary was truncated.':
+    'Chatverlauf konnte nicht komprimiert werden, da die Komprimierungszusammenfassung abgeschnitten wurde.',
+  'Could not compress chat history due to an API error.':
+    'Chatverlauf konnte aufgrund eines API-Fehlers nicht komprimiert werden.',
   // ============================================================================
   // Commands - Directory
   // ============================================================================
@@ -1529,6 +1536,7 @@ export default {
   'rejected — edit config to re-approve':
     'abgelehnt — Konfiguration bearbeiten, um erneut zu genehmigen',
   'Background agent needs approval': 'Hintergrund-Agent wartet auf Genehmigung',
+  'from nested agent': 'von verschachteltem Agent',
   'Approve or deny the request above':
     'Genehmigen oder lehnen Sie die obige Anfrage ab',
   Running: 'Läuft',

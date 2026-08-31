@@ -10,7 +10,7 @@ import {
   SkillCommandLoader,
 } from './SkillCommandLoader.js';
 import { skillArgsPath } from './skill-args-file.js';
-import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CommandKind, type CommandContext } from '../ui/commands/types.js';
@@ -64,6 +64,10 @@ describe('SkillCommandLoader', () => {
       // assertions about "all skills surface" stay true; per-test cases
       // override to verify the filter behavior.
       getDisabledSkillNames: vi.fn().mockReturnValue(new Set<string>()),
+      isSkillEnabled: vi.fn(
+        (skill: SkillConfig) =>
+          !mockConfig.getDisabledSkillNames().has(skill.name.toLowerCase()),
+      ),
     } as unknown as Config;
   });
 
@@ -330,6 +334,7 @@ describe('SkillCommandLoader', () => {
       const skill = makeSkill({
         level: 'extension',
         extensionName: 'superpowers-lab',
+        extensionDisplayName: 'Superpowers Lab',
         description: 'Use tmux for interactive commands',
       });
       mockSkillManager.listSkills.mockImplementation(
@@ -342,8 +347,11 @@ describe('SkillCommandLoader', () => {
 
       expect(commands[0].modelInvocable).toBe(true);
       expect(commands[0].source).toBe('plugin-command');
-      expect(commands[0].sourceLabel).toBe('Extension: superpowers-lab');
+      expect(commands[0].sourceLabel).toBe('Extension: Superpowers Lab');
       expect(commands[0].sourceDetail).toBe('extension');
+      expect(commands[0].skillDetail).toMatchObject({
+        extensionName: 'superpowers-lab',
+      });
     });
 
     it('should be modelInvocable when whenToUse is present', async () => {
@@ -362,6 +370,7 @@ describe('SkillCommandLoader', () => {
       const commands = await loader.loadCommands(signal);
 
       expect(commands[0].modelInvocable).toBe(true);
+      expect(commands[0].sourceLabel).toBe('Extension: superpowers-lab');
     });
 
     it('should NOT be modelInvocable when description and whenToUse are absent', async () => {
@@ -500,6 +509,47 @@ describe('SkillCommandLoader', () => {
   });
 
   describe('skills.disabled filter', () => {
+    it('rejects a stale action before granting tools or writing arguments', async () => {
+      const skill = makeSkill({
+        name: 'stale-extension-action',
+        level: 'extension',
+        extensionName: 'suite',
+        allowedTools: ['Edit'],
+      });
+      mockSkillManager.listSkills.mockImplementation(
+        ({ level }: { level: string }) =>
+          Promise.resolve(level === 'extension' ? [skill] : []),
+      );
+      const [command] = await new SkillCommandLoader(mockConfig).loadCommands(
+        signal,
+      );
+      vi.mocked(mockConfig.isSkillEnabled).mockReturnValue(false);
+      const dir = mkdtempSync(join(tmpdir(), 'stale-skill-action-'));
+      const cwd = process.cwd();
+      process.chdir(dir);
+      try {
+        const result = await command.action?.(
+          {
+            invocation: {
+              raw: '/stale-extension-action payload',
+              args: 'payload',
+            },
+          } as CommandContext,
+          'payload',
+        );
+
+        expect(result).toMatchObject({ type: 'message', messageType: 'error' });
+        expect(mockAddSessionAllowRule).not.toHaveBeenCalled();
+        expect(existsSync(skillArgsPath(skill.name))).toBe(false);
+        expect(
+          await new SkillCommandLoader(mockConfig).loadCommands(signal),
+        ).toEqual([]);
+      } finally {
+        process.chdir(cwd);
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
     it('omits disabled skills (case-insensitive) from the command list', async () => {
       mockSkillManager.listSkills.mockImplementation(
         ({ level }: { level: string }) => {

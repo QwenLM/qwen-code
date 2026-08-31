@@ -183,6 +183,24 @@ export const legacySessionTelemetryRoutes = [
   },
   {
     method: 'POST',
+    path: '/session/:id/tasks/:taskId/workflow-action',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/tasks/:taskId/workflow-action',
+  },
+  {
+    method: 'POST',
+    path: '/session/:id/goal',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/goal',
+  },
+  {
+    method: 'GET',
+    path: '/session/:id/goal',
+    attribution: 'handler_resolved',
+    route: 'GET /session/:id/goal',
+  },
+  {
+    method: 'POST',
     path: '/session/:id/goal/clear',
     attribution: 'handler_resolved',
     route: 'POST /session/:id/goal/clear',
@@ -195,21 +213,21 @@ export const legacySessionTelemetryRoutes = [
   },
   {
     method: 'POST',
-    path: '/session/:id/media',
+    path: '/session/:id/attachments',
     attribution: 'handler_resolved',
-    route: 'POST /session/:id/media',
+    route: 'POST /session/:id/attachments',
   },
   {
     method: 'GET',
-    path: '/session/:id/media/:mediaId',
+    path: '/session/:id/attachments/:attachmentId',
     attribution: 'handler_resolved',
-    route: 'GET /session/:id/media/:mediaId',
+    route: 'GET /session/:id/attachments/:attachmentId',
   },
   {
     method: 'DELETE',
-    path: '/session/:id/media/:mediaId',
+    path: '/session/:id/attachments/:attachmentId',
     attribution: 'handler_resolved',
-    route: 'DELETE /session/:id/media/:mediaId',
+    route: 'DELETE /session/:id/attachments/:attachmentId',
   },
   {
     method: 'POST',
@@ -662,6 +680,9 @@ export function resolveDaemonTelemetryRoute(
   }
   if (req.method === 'POST' && path === '/workspace/reload') {
     return { route: 'POST /workspace/reload' };
+  }
+  if (req.method === 'POST' && path === '/language') {
+    return { route: 'POST /language' };
   }
   const mcpRestart = path.match(/^\/workspace\/mcp\/([^/]+)\/restart$/);
   if (mcpRestart?.[1] && req.method === 'POST') {

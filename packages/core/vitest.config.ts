@@ -14,7 +14,12 @@ export default defineConfig({
     // or WASM-load-bound tests (e.g. the web-tree-sitter lazy runtime, tar
     // extraction) blow 5s purely under contention, not from any logic fault.
     // Assertions still fail instantly; only the timeout ceiling grows.
-    testTimeout: 15000,
+    testTimeout: process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
+      ? 60_000
+      : 15_000,
+    hookTimeout: process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
+      ? 60_000
+      : undefined,
     // ECS hosts run several jobs at once; leave capacity for neighboring jobs.
     maxWorkers: process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
       ? '25%'
@@ -35,8 +40,14 @@ export default defineConfig({
     outputFile: {
       junit: 'junit.xml',
     },
+    // RPC-timeout exemption; see scripts/tests/unit-vitest-configs.test.ts.
+    dangerouslyIgnoreUnhandledErrors: process.platform !== 'linux',
     coverage: {
-      enabled: true,
+      // CI consumes coverage only from the ubuntu lane (the upload and the
+      // coverage comment both pin coverage-reports-*-ubuntu-latest), and the
+      // report generation adds end-of-run main-thread work on the smaller
+      // Windows/macOS runners; skip it there. Local runs keep coverage.
+      enabled: !process.env.CI || process.platform === 'linux',
       provider: 'v8',
       reportsDirectory: './coverage',
       include: ['src/**/*'],

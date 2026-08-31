@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { CacheSafeParams } from './forkedAgent.js';
+import type { CacheSafeParams } from '../agents/forkedAgent.js';
 import type { Config } from '../config/config.js';
 import { createDebugLogger } from './debugLogger.js';
 
@@ -33,13 +33,13 @@ export function buildBtwPrompt(question: string): string {
 export function buildBtwCacheSafeParams(
   config: Config,
 ): CacheSafeParams | null {
-  const geminiClient = config.getGeminiClient();
+  const llmClient = config.getLlmClient();
   try {
-    const chat = geminiClient.getChat();
+    const chat = llmClient.getChat();
     const generationConfig = chat.getGenerationConfig();
     if (!generationConfig) return null;
     const maxHistoryEntries = 40;
-    const history = geminiClient.getHistoryTail(maxHistoryEntries, true);
+    const history = llmClient.getHistoryTail(maxHistoryEntries, true);
     return {
       generationConfig: structuredClone(generationConfig),
       history,

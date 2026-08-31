@@ -242,9 +242,18 @@ describe('transcriptBlocksToDaemonMessages', () => {
   });
 
   it('preserves user file attachment metadata', () => {
+    const data = new Blob(['line one']);
     const messages = transcriptBlocksToDaemonMessages([
       textBlock('user-1', 'user', 'check this', 1, false, {
-        files: [{ name: 'app.log', mimeType: 'text/plain' }],
+        files: [
+          {
+            name: 'app.log',
+            mimeType: 'text/plain',
+            data,
+            text: 'line one',
+            attachmentId: 'app.log',
+          },
+        ],
       }),
     ]);
 
@@ -252,8 +261,29 @@ describe('transcriptBlocksToDaemonMessages', () => {
       id: 'user-1',
       role: 'user',
       content: 'check this',
-      files: [{ name: 'app.log', mimeType: 'text/plain' }],
+      files: [
+        {
+          name: 'app.log',
+          mimeType: 'text/plain',
+          data,
+          text: 'line one',
+          attachmentId: 'app.log',
+        },
+      ],
     });
+  });
+
+  it('preserves literal attachment-looking user text', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('user-1', 'user', 'check this\n\n@attachment:///data.json', 1),
+    ]);
+
+    expect(messages[0]).toMatchObject({
+      id: 'user-1',
+      role: 'user',
+      content: 'check this\n\n@attachment:///data.json',
+    });
+    expect(messages[0]).not.toHaveProperty('files');
   });
 
   it('preserves user input annotations metadata', () => {
@@ -320,6 +350,61 @@ describe('transcriptBlocksToDaemonMessages', () => {
         id: 'assistant-1',
         role: 'assistant',
         content: '正常回复',
+        isStreaming: false,
+        timestamp: 2,
+      },
+    ]);
+  });
+
+  it('keeps vision bridge notices separate from assistant output', () => {
+    const notice = {
+      status: 'skipped',
+      convertedCount: 0,
+      omittedCount: 0,
+      modelName: 'qwen3.6-plus',
+      modelEndpoint: 'idealab.alibaba-inc.com',
+      egressOccurred: true,
+    };
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('assistant-0', 'assistant', 'Earlier reply', 0),
+      textBlock(
+        'vision-notice',
+        'assistant',
+        'Vision bridge cancelled.',
+        1,
+        false,
+        {
+          meta: {
+            source: 'vision_bridge_notice',
+            qwenDiscreteMessage: true,
+            visionBridgeNotice: notice,
+          },
+        },
+      ),
+      textBlock('assistant-1', 'assistant', 'Normal reply', 2),
+    ]);
+
+    expect(messages).toEqual([
+      {
+        id: 'assistant-0',
+        role: 'assistant',
+        content: 'Earlier reply',
+        isStreaming: false,
+        timestamp: 0,
+      },
+      {
+        id: 'vision-notice',
+        role: 'system',
+        content: 'Vision bridge cancelled.',
+        variant: 'info',
+        source: 'vision_bridge_notice',
+        data: notice,
+        timestamp: 1,
+      },
+      {
+        id: 'assistant-1',
+        role: 'assistant',
+        content: 'Normal reply',
         isStreaming: false,
         timestamp: 2,
       },
@@ -493,11 +578,15 @@ describe('transcriptBlocksToDaemonMessages', () => {
           content: '检查项目结构',
           priority: 'medium',
           status: 'pending',
+          _meta: { qwenTodo: { id: 'inspect' } },
         },
         {
           content: '运行类型检查',
           priority: 'high',
           status: 'in_progress',
+          _meta: {
+            qwenTodo: { id: 'typecheck', blockedBy: ['inspect'] },
+          },
         },
       ],
     };
@@ -513,16 +602,17 @@ describe('transcriptBlocksToDaemonMessages', () => {
         timestamp: 1,
         todos: [
           {
-            id: 'plan-0',
+            id: 'inspect',
             content: '检查项目结构',
             priority: 'medium',
             status: 'pending',
           },
           {
-            id: 'plan-1',
+            id: 'typecheck',
             content: '运行类型检查',
             priority: 'high',
             status: 'in_progress',
+            blockedBy: ['inspect'],
           },
         ],
       },
@@ -610,6 +700,45 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
   });
 
+  it('extracts file attachments from mid-turn injected message items', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      statusBlock('mid-1', 'explain this', 1, {
+        source: 'mid_turn_message_injected',
+        data: {
+          sessionId: 's1',
+          messages: ['explain this'],
+          items: [
+            {
+              content: [
+                {
+                  type: 'resource',
+                  attachmentId: 'notes.txt',
+                  mimeType: 'text/plain',
+                  size: 5,
+                },
+              ],
+            },
+          ],
+        },
+      }),
+    ]);
+
+    expect(messages).toEqual([
+      expect.objectContaining({
+        role: 'system',
+        content: 'explain this',
+        source: 'mid_turn_message_injected',
+        files: [
+          {
+            name: 'notes.txt',
+            attachmentId: 'notes.txt',
+            mimeType: 'text/plain',
+          },
+        ],
+      }),
+    ]);
+  });
+
   it('shows the degraded-media notice when the echo text is empty', () => {
     // When the stored media is gone at drain, the daemon echoes an empty
     // messages array whose items carry only the placeholder text block; the
@@ -626,7 +755,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
               content: [
                 {
                   type: 'text',
-                  text: '[Attached media is no longer available]',
+                  text: '[Attachment is no longer available]',
                 },
               ],
             },
@@ -638,7 +767,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
     expect(messages).toEqual([
       expect.objectContaining({
         role: 'system',
-        content: '[Attached media is no longer available]',
+        content: '[Attachment is no longer available]',
         source: 'mid_turn_message_injected',
       }),
     ]);
@@ -760,7 +889,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
   });
 
-  it('keeps each TodoWrite call as a distinct tool entry with its own todos', () => {
+  it('merges adjacent TodoWrite calls into one tool group like any tool', () => {
     const messages = transcriptBlocksToDaemonMessages([
       toolBlock('todo-1', 'todo-call-1', 'completed', 1, {
         title: 'Update Todos',
@@ -790,9 +919,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
       }),
     ]);
 
-    // Each TodoWrite update stands alone in its own group (it renders as a
-    // self-contained collapsible checklist), rather than merging with adjacent
-    // tool calls.
+    // TodoWrite is an ordinary tool: adjacent calls share one group box.
     expect(messages).toEqual([
       {
         id: 'tg-todo-1',
@@ -803,13 +930,6 @@ describe('transcriptBlocksToDaemonMessages', () => {
             callId: 'todo-call-1',
             toolName: 'TodoWrite',
           }),
-        ],
-      },
-      {
-        id: 'tg-todo-2',
-        role: 'tool_group',
-        timestamp: 2,
-        tools: [
           expect.objectContaining({
             callId: 'todo-call-2',
             toolName: 'TodoWrite',
@@ -959,7 +1079,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
   });
 
-  it('never merges todo_write updates into or after a regular tool_group', () => {
+  it('merges todo_write updates with adjacent tool calls like any tool', () => {
     const messages = transcriptBlocksToDaemonMessages([
       toolBlock('t1', 'tc1', 'completed', 1, { toolName: 'Read' }),
       toolBlock('todo-1', 'todo-call-1', 'completed', 2, {
@@ -971,9 +1091,14 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
 
     expect(messages).toMatchObject([
-      { role: 'tool_group', tools: [{ callId: 'tc1' }] },
-      { role: 'tool_group', tools: [{ callId: 'todo-call-1' }] },
-      { role: 'tool_group', tools: [{ callId: 'tc2' }] },
+      {
+        role: 'tool_group',
+        tools: [
+          { callId: 'tc1' },
+          { callId: 'todo-call-1' },
+          { callId: 'tc2' },
+        ],
+      },
     ]);
   });
 
@@ -3526,7 +3651,11 @@ describe('transcriptBlocksToDaemonMessages', () => {
       toolBlock('agent-end', 'agent-1', 'completed', 20, {
         title: 'Agent: work done',
         toolName: 'agent',
-        rawOutput: { type: 'task_execution', totalTokens: 500 },
+        rawOutput: {
+          type: 'task_execution',
+          executionMode: 'background',
+          totalTokens: 500,
+        },
         updatedAt: 25,
       }),
     ]);
@@ -3537,10 +3666,56 @@ describe('transcriptBlocksToDaemonMessages', () => {
     expect(tool?.title).toBe('Agent: work done');
     expect(tool?.status).toBe('completed');
     expect(tool?.endTime).toBe(25);
+    expect(tool?.executionMode).toBe('background');
     expect(tool?.rawOutput).toEqual({
       type: 'task_execution',
+      executionMode: 'background',
       totalTokens: 500,
     });
+  });
+
+  it('rejects an unknown executionMode literal from task_execution rawOutput', () => {
+    // Only the two known literals may flow through as authoritative; any
+    // other value (corrupted recording, future runtime mode) must fall back
+    // to the compatibility heuristic instead of forcing a classification.
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('agent-start', 'agent-1', 'in_progress', 10, {
+        title: 'Agent: work',
+        toolName: 'agent',
+        rawInput: { subagent_type: 'general-purpose' },
+        rawOutput: { type: 'task_execution', executionMode: 'detached' },
+      }),
+    ]);
+
+    const tool =
+      messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(tool?.executionMode).toBeUndefined();
+    expect(tool?.rawOutput).toEqual({
+      type: 'task_execution',
+      executionMode: 'detached',
+    });
+  });
+
+  it('accepts the foreground executionMode literal over the frozen heuristic', () => {
+    // Shaped as a downgraded nested agent's block in the child session's
+    // transcript: top-level-shaped (no parentToolCallId) with an empty arg
+    // object. Without the authoritative literal, the frozen compatibility
+    // heuristic's defaultsToBackground branch would classify exactly this
+    // block background and hide the inline result — the literal must win so
+    // the downgrade direction stays pinned end-to-end.
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('agent-start', 'agent-1', 'in_progress', 10, {
+        title: 'Agent: work',
+        toolName: 'agent',
+        rawInput: {},
+        rawOutput: { type: 'task_execution', executionMode: 'foreground' },
+      }),
+    ]);
+
+    const tool =
+      messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(tool?.executionMode).toBe('foreground');
+    expect(tool?.status).toBe('in_progress');
   });
 
   it('does not merge assistant across error block', () => {

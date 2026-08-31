@@ -467,6 +467,7 @@ export default {
     'Linhas de Truncamento de Saída de Ferramenta',
   'Folder Trust': 'Confiança de Pasta',
   'Tool Schema Compliance': 'Conformidade de Tool Schema',
+  Unset: 'Não definido',
 
   // Settings enum options
   'Auto (detect from system)': 'Automático (detectar do sistema)',
@@ -1059,6 +1060,12 @@ export default {
     'A compressão do histórico do chat não reduziu o tamanho. Isso pode indicar problemas com o prompt de compressão.',
   'Could not compress chat history due to a token counting error.':
     'Não foi possível comprimir o histórico do chat devido a um erro de contagem de tokens.',
+  'Could not compress chat history because the compression summary was empty.':
+    'Não foi possível comprimir o histórico do chat porque o resumo da compressão estava vazio.',
+  'Could not compress chat history because the compression summary was truncated.':
+    'Não foi possível comprimir o histórico do chat porque o resumo da compressão foi truncado.',
+  'Could not compress chat history due to an API error.':
+    'Não foi possível comprimir o histórico do chat devido a um erro da API.',
   // ============================================================================
   // Commands - Directory
   // ============================================================================
@@ -1562,6 +1569,7 @@ export default {
     'rejeitado — edite a configuração para reaprovar',
   'Background agent needs approval':
     'Agente em segundo plano precisa de aprovação',
+  'from nested agent': 'do agent aninhado',
   'Approve or deny the request above': 'Aprove ou negue a solicitação acima',
   Running: 'Em execução',
   Pausing: 'Pausando',

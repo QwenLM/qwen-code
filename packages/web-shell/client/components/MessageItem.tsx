@@ -5,7 +5,7 @@ import type {
   PermissionRequest,
   TodoItem,
 } from '../adapters/types';
-import { CompactModeContext } from '../App';
+import { CompactModeContext } from '../WebShellContexts';
 import type { WebShellAssistantTurnFooterRenderInfo } from '../customization';
 import { useI18n } from '../i18n';
 import { ErrorBoundary } from './ErrorBoundary';
@@ -18,11 +18,13 @@ import {
 } from './messages/AssistantMessage';
 import { SystemMessage } from './messages/SystemMessage';
 import { ToolGroup } from './messages/ToolGroup';
+import { isSummaryRunId } from './summaryRunId';
 import { PlanMessage } from './messages/PlanMessage';
 import { BtwMessage } from './messages/BtwMessage';
 import { UserShellMessage } from './messages/UserShellMessage';
 import { InsightProgress } from './InsightProgress';
 import { InsightReady } from './InsightReady';
+import type { AttachmentPreviewRequest } from '../adapters/messageTypes';
 
 interface MessageItemProps {
   message: Message;
@@ -31,12 +33,14 @@ interface MessageItemProps {
   onShowContextDetail?: () => void;
   /** Click an uploaded image in a user message to preview it in the right panel. */
   onImagePreview?: (src: string, alt?: string) => void;
+  onAttachmentPreview?: (file: AttachmentPreviewRequest) => void;
+  onInsightReportOpen?: (path: string) => void;
   workspaceCwd?: string;
-  isLatest?: boolean;
   showRetryHint?: boolean;
   onRetryClick?: () => void;
   sendFailed?: boolean;
   onRetrySend?: () => void;
+  onEditUserMessage?: () => void;
   onBranchSession?: (branchRecordId?: string) => void | Promise<void>;
   branchRecordId?: string;
   showAssistantActions?: boolean;
@@ -51,12 +55,14 @@ export const MessageItem = memo(function MessageItem({
   pendingApproval,
   onShowContextDetail,
   onImagePreview,
+  onAttachmentPreview,
+  onInsightReportOpen,
   workspaceCwd,
-  isLatest = false,
   showRetryHint = false,
   onRetryClick,
   sendFailed = false,
   onRetrySend,
+  onEditUserMessage,
   onBranchSession,
   branchRecordId,
   showAssistantActions = false,
@@ -90,7 +96,9 @@ export const MessageItem = memo(function MessageItem({
             isLocateFlashing={isLocateFlashing}
             sendFailed={sendFailed}
             onRetrySend={onRetrySend}
+            onEdit={onEditUserMessage}
             onImagePreview={onImagePreview}
+            onAttachmentPreview={onAttachmentPreview}
           />
         );
       case 'assistant':
@@ -121,6 +129,7 @@ export const MessageItem = memo(function MessageItem({
           <ToolGroup
             tools={message.tools}
             thoughts={message.thoughts}
+            compactSummary={compactMode && isSummaryRunId(message.id)}
             pendingApproval={pendingApproval}
             workspaceCwd={workspaceCwd}
             isLocateFlashing={isLocateFlashing}
@@ -143,9 +152,10 @@ export const MessageItem = memo(function MessageItem({
             source={message.source}
             data={message.data}
             images={message.images}
+            files={message.files}
             onShowContextDetail={onShowContextDetail}
             onImagePreview={onImagePreview}
-            isLatest={isLatest}
+            onAttachmentPreview={onAttachmentPreview}
             showRetryHint={showRetryHint && message.retryable === true}
             onRetryClick={onRetryClick}
           />
@@ -173,7 +183,12 @@ export const MessageItem = memo(function MessageItem({
           />
         );
       case 'insight_ready':
-        return <InsightReady path={message.path} />;
+        return (
+          <InsightReady
+            path={message.path}
+            onInsightReportOpen={onInsightReportOpen}
+          />
+        );
       case 'insight_error':
         return (
           <div style={{ color: 'var(--error-color, #e06c75)' }}>
@@ -287,12 +302,14 @@ function areMessageItemPropsEqual(
   if (prev.pendingApproval?.id !== next.pendingApproval?.id) return false;
   if (prev.onShowContextDetail !== next.onShowContextDetail) return false;
   if (prev.onImagePreview !== next.onImagePreview) return false;
+  if (prev.onAttachmentPreview !== next.onAttachmentPreview) return false;
   if (prev.workspaceCwd !== next.workspaceCwd) return false;
-  if (prev.isLatest !== next.isLatest) return false;
   if (prev.showRetryHint !== next.showRetryHint) return false;
   if (prev.onRetryClick !== next.onRetryClick) return false;
   if (prev.sendFailed !== next.sendFailed) return false;
   if (prev.onRetrySend !== next.onRetrySend) return false;
+  if (prev.onEditUserMessage !== next.onEditUserMessage) return false;
+  if (prev.onInsightReportOpen !== next.onInsightReportOpen) return false;
   if (prev.onBranchSession !== next.onBranchSession) return false;
   if (prev.branchRecordId !== next.branchRecordId) return false;
   if (prev.showAssistantActions !== next.showAssistantActions) return false;

@@ -463,6 +463,7 @@ export default {
   'Tool Output Truncation Lines': 'Лимит строк вывода инструментов',
   'Folder Trust': 'Доверие к папке',
   'Tool Schema Compliance': 'Соответствие Tool Schema',
+  Unset: 'Не задано',
   // Варианты перечислений настроек
   'Auto (detect from system)': 'Авто (определить из системы)',
   'Auto (follow user input)': 'Авто (следовать вводу пользователя)',
@@ -1065,6 +1066,12 @@ export default {
     'Сжатие истории чата не уменьшило размер. Это может указывать на проблемы с промптом сжатия.',
   'Could not compress chat history due to a token counting error.':
     'Не удалось сжать историю чата из-за ошибки подсчета токенов.',
+  'Could not compress chat history because the compression summary was empty.':
+    'Не удалось сжать историю чата, потому что сводка сжатия была пустой.',
+  'Could not compress chat history because the compression summary was truncated.':
+    'Не удалось сжать историю чата, потому что сводка сжатия была усечена.',
+  'Could not compress chat history due to an API error.':
+    'Не удалось сжать историю чата из-за ошибки API.',
   // ============================================================================
   // Команды - Директория
   // ============================================================================
@@ -1479,6 +1486,7 @@ export default {
     'отклонено — измените конфигурацию для повторного подтверждения',
   'Background agent needs approval': 'Фоновый агент требует подтверждения',
   'Approve or deny the request above': 'Подтвердите или отклоните запрос выше',
+  'from nested agent': 'от вложенного агента',
   Running: 'Выполняется',
   Pausing: 'Приостанавливается',
   Paused: 'Приостановлено',

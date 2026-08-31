@@ -7,14 +7,15 @@ import {
   DaemonHttpError,
   type DaemonStatusTranscriptBlock,
   type DaemonTranscriptBlock,
+  type DaemonTranscriptBlockChangeSummary,
 } from '@qwen-code/sdk/daemon';
 import {
   type BackgroundAgentResolution,
   getBackgroundAgentNotificationKey,
   getPendingBackgroundAgentKey,
+  projectStreamingTailMessages,
   reconcileBackgroundAgentResolutions,
   transcriptBlocksToLocalizedMessages,
-  useMessages,
   useMessagesFromBlocks,
 } from './useMessages';
 import type { Message } from '../adapters/types';
@@ -34,7 +35,23 @@ const hookState = vi.hoisted(() => {
   };
 });
 
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+const adapterSpies = vi.hoisted(() => ({ project: vi.fn() }));
+
+vi.mock('../adapters/transcriptToMessages', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../adapters/transcriptToMessages')>();
+  return {
+    ...actual,
+    transcriptBlocksToDaemonMessages: (
+      ...args: Parameters<typeof actual.transcriptBlocksToDaemonMessages>
+    ) => {
+      adapterSpies.project();
+      return actual.transcriptBlocksToDaemonMessages(...args);
+    },
+  };
+});
+
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useConnection: () => hookState.connection,
   useTranscriptBlocks: () => hookState.blocks,
   useWorkspace: () => ({ client: hookState.client }),
@@ -98,51 +115,431 @@ describe('transcriptBlocksToLocalizedMessages', () => {
     ]);
   });
 
-  it('preserves projected history identity for a streaming tail update only', async () => {
+  it.each(['assistant', 'thought'] as const)(
+    'skips complete projection for a streaming %s tail update',
+    async (kind) => {
+      const container = document.createElement('div');
+      const root = createRoot(container);
+      const t = (key: string) => key;
+      const source = {};
+      let latest: Message[] = [];
+      const user = baseBlock({ id: 'user', kind: 'user', text: 'hello' });
+      const tail = baseBlock({
+        id: kind,
+        kind,
+        text: 'a',
+        streaming: true,
+        serverTimestamp: 1_001,
+      });
+      function Consumer({
+        blocks,
+        summary,
+      }: {
+        blocks: DaemonTranscriptBlock[];
+        summary: DaemonTranscriptBlockChangeSummary;
+      }) {
+        latest = useMessagesFromBlocks(t, blocks, summary);
+        return null;
+      }
+
+      adapterSpies.project.mockClear();
+      await act(async () =>
+        root.render(
+          createElement(Consumer, {
+            blocks: [user, tail],
+            summary: {
+              source,
+              revision: 1,
+              tailAppendBarrierRevision: 1,
+            },
+          }),
+        ),
+      );
+      const firstProjection = latest;
+      const initialProjectionCount = adapterSpies.project.mock.calls.length;
+      const grownTail = {
+        ...tail,
+        text: 'ab',
+        updatedAt: 2,
+        serverTimestamp: 1_002,
+      };
+      await act(async () =>
+        root.render(
+          createElement(Consumer, {
+            blocks: [user, grownTail],
+            summary: {
+              source,
+              revision: 2,
+              tailAppendBarrierRevision: 1,
+              tailBlockId: kind,
+            },
+          }),
+        ),
+      );
+
+      expect(adapterSpies.project).toHaveBeenCalledTimes(
+        initialProjectionCount,
+      );
+      expect(latest[0]).toBe(firstProjection[0]);
+      expect(latest[1]).not.toBe(firstProjection[1]);
+      expect(latest[1]).toMatchObject({
+        content: 'ab',
+        isStreaming: true,
+        timestamp: 1_002,
+      });
+
+      const changedUser = { ...user, text: 'changed', updatedAt: 2 };
+      await act(async () =>
+        root.render(
+          createElement(Consumer, {
+            blocks: [changedUser, grownTail],
+            summary: {
+              source,
+              revision: 3,
+              tailAppendBarrierRevision: 3,
+            },
+          }),
+        ),
+      );
+      expect(adapterSpies.project).toHaveBeenCalledTimes(
+        initialProjectionCount + 1,
+      );
+      expect(latest[0]).not.toBe(firstProjection[0]);
+
+      await act(async () => root.unmount());
+    },
+  );
+
+  it('does not scan transcript history for a summarized tail append', async () => {
     const container = document.createElement('div');
     const root = createRoot(container);
     const t = (key: string) => key;
-    let latest: Message[] = [];
+    const source = {};
+    const history = Array.from({ length: 100 }, (_, index) =>
+      baseBlock({ id: `user-${index}`, kind: 'user', text: `${index}` }),
+    );
+    const tail = baseBlock({
+      id: 'thought',
+      kind: 'thought',
+      text: 'a',
+      streaming: true,
+    });
+    let indexedReads = 0;
+    const countReads = (blocks: DaemonTranscriptBlock[]) =>
+      new Proxy(blocks, {
+        get(target, property, receiver) {
+          if (typeof property === 'string' && /^\d+$/.test(property)) {
+            indexedReads += 1;
+          }
+          return Reflect.get(target, property, receiver);
+        },
+      });
+    function Consumer({
+      blocks,
+      summary,
+    }: {
+      blocks: DaemonTranscriptBlock[];
+      summary: DaemonTranscriptBlockChangeSummary;
+    }) {
+      useMessagesFromBlocks(t, blocks, summary);
+      return null;
+    }
+
+    await act(async () =>
+      root.render(
+        createElement(Consumer, {
+          blocks: countReads([...history, tail]),
+          summary: {
+            source,
+            revision: 1,
+            tailAppendBarrierRevision: 1,
+          },
+        }),
+      ),
+    );
+
+    indexedReads = 0;
+    await act(async () =>
+      root.render(
+        createElement(Consumer, {
+          blocks: countReads([...history, { ...tail, text: 'ab' }]),
+          summary: {
+            source,
+            revision: 2,
+            tailAppendBarrierRevision: 1,
+            tailBlockId: tail.id,
+          },
+        }),
+      ),
+    );
+
+    expect(indexedReads).toBeLessThan(10);
+    await act(async () => root.unmount());
+  });
+
+  it('rejects matching revisions from a different transcript store', () => {
+    const t = (key: string) => key;
+    const thought = baseBlock({
+      id: 'thought',
+      kind: 'thought',
+      text: 'a',
+      streaming: true,
+    });
+    const messages = transcriptBlocksToLocalizedMessages([thought], t);
+
+    expect(
+      projectStreamingTailMessages(
+        {
+          blocks: [thought],
+          messages,
+          t,
+          blockChangeSummary: {
+            source: {},
+            revision: 1,
+            tailAppendBarrierRevision: 1,
+          },
+        },
+        [{ ...thought, text: 'ab' }],
+        t,
+        {
+          source: {},
+          revision: 2,
+          tailAppendBarrierRevision: 1,
+          tailBlockId: thought.id,
+        },
+      ),
+    ).toBeUndefined();
+  });
+
+  it('reuses only valid streaming history without a block change summary', () => {
+    const t = (key: string) => key;
     const user = baseBlock({ id: 'user', kind: 'user', text: 'hello' });
     const assistant = baseBlock({
       id: 'assistant',
       kind: 'assistant',
       text: 'a',
       streaming: true,
-      serverTimestamp: 1_001,
     });
-    function Consumer({ blocks }: { blocks: DaemonTranscriptBlock[] }) {
-      latest = useMessagesFromBlocks(t, blocks);
+    const messages = transcriptBlocksToLocalizedMessages([user, assistant], t);
+
+    const projected = projectStreamingTailMessages(
+      { blocks: [user, assistant], messages, t },
+      [user, { ...assistant, text: 'ab' }],
+      t,
+    );
+
+    expect(projected?.[0]).toBe(messages[0]);
+    expect(projected?.[1]).not.toBe(messages[1]);
+    expect(projected?.[1]).toMatchObject({ content: 'ab' });
+    expect(
+      projectStreamingTailMessages(
+        { blocks: [user, assistant], messages, t },
+        [
+          { ...user, text: 'changed' },
+          { ...assistant, text: 'ab' },
+        ],
+        t,
+      ),
+    ).toBeUndefined();
+    expect(
+      projectStreamingTailMessages(
+        { blocks: [user, assistant], messages, t },
+        [user, { ...assistant, text: 'replacement' }],
+        t,
+      ),
+    ).toBeUndefined();
+  });
+
+  it('projects an insight marker that spans the appended-text boundary', async () => {
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    const t = (key: string) => key;
+    const source = {};
+    const thought = baseBlock({
+      id: 'thought',
+      kind: 'thought',
+      text: 'prefix "insi',
+      streaming: true,
+    });
+    let latest: Message[] = [];
+    function Consumer({
+      blocks,
+      summary,
+    }: {
+      blocks: DaemonTranscriptBlock[];
+      summary: DaemonTranscriptBlockChangeSummary;
+    }) {
+      latest = useMessagesFromBlocks(t, blocks, summary);
       return null;
     }
 
     await act(async () =>
-      root.render(createElement(Consumer, { blocks: [user, assistant] })),
-    );
-    const firstProjection = latest;
-    const grownAssistant = {
-      ...assistant,
-      text: 'ab',
-      updatedAt: 2,
-      serverTimestamp: 1_002,
-    };
-    await act(async () =>
-      root.render(createElement(Consumer, { blocks: [user, grownAssistant] })),
-    );
-
-    expect(latest[0]).toBe(firstProjection[0]);
-    expect(latest[1]).not.toBe(firstProjection[1]);
-    expect(latest[1]).toMatchObject({ content: 'ab', isStreaming: true });
-
-    const changedUser = { ...user, text: 'changed', updatedAt: 2 };
-    await act(async () =>
       root.render(
-        createElement(Consumer, { blocks: [changedUser, grownAssistant] }),
+        createElement(Consumer, {
+          blocks: [thought],
+          summary: {
+            source,
+            revision: 1,
+            tailAppendBarrierRevision: 1,
+          },
+        }),
       ),
     );
-    expect(latest[0]).not.toBe(firstProjection[0]);
+    adapterSpies.project.mockClear();
+    await act(async () =>
+      root.render(
+        createElement(Consumer, {
+          blocks: [{ ...thought, text: 'prefix "insight_progress":{}' }],
+          summary: {
+            source,
+            revision: 2,
+            tailAppendBarrierRevision: 1,
+            tailBlockId: thought.id,
+          },
+        }),
+      ),
+    );
 
+    expect(adapterSpies.project).toHaveBeenCalledOnce();
+    expect(latest).toMatchObject([
+      { role: 'thinking', content: 'prefix "insight_progress":{}' },
+    ]);
     await act(async () => root.unmount());
+  });
+
+  it('projects a later append that completes an insight message', () => {
+    const t = (key: string) => key;
+    const user = baseBlock({ id: 'user', kind: 'user', text: 'hello' });
+    const assistant = baseBlock({
+      id: 'assistant',
+      kind: 'assistant',
+      text: '{"insight_progress":{"stage":"scanning","progress":10}',
+      streaming: true,
+    });
+    const completedAssistant = {
+      ...assistant,
+      text: `${assistant.text}}`,
+    };
+    const messages = transcriptBlocksToLocalizedMessages([user, assistant], t);
+    const source = {};
+
+    const projected = projectStreamingTailMessages(
+      {
+        blocks: [user, assistant],
+        messages,
+        t,
+        blockChangeSummary: {
+          source,
+          revision: 1,
+          tailAppendBarrierRevision: 1,
+        },
+      },
+      [user, completedAssistant],
+      t,
+      {
+        source,
+        revision: 2,
+        tailAppendBarrierRevision: 1,
+        tailBlockId: assistant.id,
+      },
+    );
+
+    expect(projected?.[0]).toBe(messages[0]);
+    expect(projected).toMatchObject([
+      { role: 'user' },
+      { role: 'insight_progress' },
+    ]);
+    expect(
+      projectStreamingTailMessages(
+        { blocks: [user, assistant], messages, t },
+        [user, completedAssistant],
+        t,
+      ),
+    ).toMatchObject([{ role: 'user' }, { role: 'insight_progress' }]);
+
+    const partialReady = {
+      ...completedAssistant,
+      text: `${completedAssistant.text}\n{"insight_ready":{"path":"/tmp/report.md"`,
+    };
+    const partialReadyMessages = projectStreamingTailMessages(
+      {
+        blocks: [user, completedAssistant],
+        messages: projected!,
+        t,
+        blockChangeSummary: {
+          source,
+          revision: 2,
+          tailAppendBarrierRevision: 1,
+        },
+      },
+      [user, partialReady],
+      t,
+      {
+        source,
+        revision: 3,
+        tailAppendBarrierRevision: 1,
+        tailBlockId: assistant.id,
+      },
+    );
+    const completedReady = {
+      ...partialReady,
+      text: `${partialReady.text}}}`,
+    };
+    const readyMessages = projectStreamingTailMessages(
+      {
+        blocks: [user, partialReady],
+        messages: partialReadyMessages!,
+        t,
+        blockChangeSummary: {
+          source,
+          revision: 3,
+          tailAppendBarrierRevision: 1,
+        },
+      },
+      [user, completedReady],
+      t,
+      {
+        source,
+        revision: 4,
+        tailAppendBarrierRevision: 1,
+        tailBlockId: assistant.id,
+      },
+    );
+
+    expect(readyMessages?.[0]).toBe(messages[0]);
+    expect(readyMessages).toMatchObject([
+      { role: 'user' },
+      { role: 'insight_ready', path: '/tmp/report.md' },
+    ]);
+  });
+
+  it('falls back when an insight tail has no matching projected message', () => {
+    const t = (key: string) => key;
+    const thought = baseBlock({
+      id: 'merged-thought',
+      kind: 'thought',
+      text: 'prefix "insi',
+      streaming: true,
+    });
+
+    expect(
+      projectStreamingTailMessages(
+        {
+          blocks: [thought],
+          messages: [
+            {
+              id: 'earlier-assistant',
+              role: 'thinking',
+              content: thought.text,
+              isStreaming: true,
+            },
+          ],
+          t,
+        },
+        [{ ...thought, text: 'prefix "insight_progress":{}' }],
+        t,
+      ),
+    ).toBeUndefined();
   });
 
   it.each([undefined, ''])(
@@ -229,12 +626,23 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-function mountStatusConsumer(options: { allTools?: boolean } = {}) {
+function mountStatusConsumer(
+  options: {
+    allTools?: boolean;
+    getBlockChangeSummary?: () =>
+      | DaemonTranscriptBlockChangeSummary
+      | undefined;
+  } = {},
+) {
   const container = document.createElement('div');
   const root = createRoot(container);
   const t = (key: string) => key;
   function Consumer() {
-    const messages = useMessages(t);
+    const messages = useMessagesFromBlocks(
+      t,
+      hookState.blocks,
+      options.getBlockChangeSummary?.(),
+    );
     const status = options.allTools
       ? messages
           .flatMap((message) =>
@@ -257,6 +665,229 @@ function mountStatusConsumer(options: { allTools?: boolean } = {}) {
 }
 
 describe('background agent task reconciliation', () => {
+  it('reuses reconciled history across a streaming thought tail append', async () => {
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    const t = (key: string) => key;
+    const source = {};
+    const agent = backgroundAgentBlock('agent-call');
+    const tail = baseBlock({
+      id: 'thought',
+      kind: 'thought',
+      text: 'a',
+      streaming: true,
+    });
+    let latest: Message[] = [];
+    hookState.connection.status = 'connected';
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession.mockResolvedValue(
+      backgroundAgentResolution('completed'),
+    );
+    function Consumer({
+      blocks,
+      summary,
+    }: {
+      blocks: DaemonTranscriptBlock[];
+      summary: DaemonTranscriptBlockChangeSummary;
+    }) {
+      latest = useMessagesFromBlocks(t, blocks, summary);
+      return null;
+    }
+
+    await act(async () =>
+      root.render(
+        createElement(Consumer, {
+          blocks: [agent, tail],
+          summary: {
+            source,
+            revision: 1,
+            tailAppendBarrierRevision: 1,
+          },
+        }),
+      ),
+    );
+    await vi.waitFor(() =>
+      expect(latest[0]).toMatchObject({
+        role: 'tool_group',
+        tools: [{ status: 'completed' }],
+      }),
+    );
+
+    adapterSpies.project.mockClear();
+    await act(async () =>
+      root.render(
+        createElement(Consumer, {
+          blocks: [agent, { ...tail, text: 'ab' }],
+          summary: {
+            source,
+            revision: 2,
+            tailAppendBarrierRevision: 1,
+            tailBlockId: tail.id,
+          },
+        }),
+      ),
+    );
+
+    expect(adapterSpies.project).not.toHaveBeenCalled();
+    expect(latest).toMatchObject([
+      { role: 'tool_group', tools: [{ status: 'completed' }] },
+      { role: 'thinking', content: 'ab' },
+    ]);
+    await act(async () => root.unmount());
+  });
+
+  it('keeps agent reconciliation when an insight tail has no projected message', async () => {
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    const t = (key: string) => key;
+    const source = {};
+    const agent = backgroundAgentBlock('agent-call');
+    // An empty assistant block projects no message (unlike thought), so the
+    // insight append below hits the "no matching projected message" fallback.
+    const tail = baseBlock({
+      id: 'empty-assistant',
+      kind: 'assistant',
+      text: '',
+      streaming: true,
+    });
+    let latest: Message[] = [];
+    hookState.connection.status = 'connected';
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession.mockResolvedValue(
+      backgroundAgentResolution('completed'),
+    );
+    function Consumer({
+      blocks,
+      summary,
+    }: {
+      blocks: DaemonTranscriptBlock[];
+      summary: DaemonTranscriptBlockChangeSummary;
+    }) {
+      latest = useMessagesFromBlocks(t, blocks, summary);
+      return null;
+    }
+
+    await act(async () =>
+      root.render(
+        createElement(Consumer, {
+          blocks: [agent, tail],
+          summary: {
+            source,
+            revision: 1,
+            tailAppendBarrierRevision: 1,
+          },
+        }),
+      ),
+    );
+    await vi.waitFor(() =>
+      expect(latest[0]).toMatchObject({
+        role: 'tool_group',
+        tools: [{ status: 'completed' }],
+      }),
+    );
+
+    await act(async () =>
+      root.render(
+        createElement(Consumer, {
+          blocks: [
+            agent,
+            { ...tail, text: 'prefix "insight_progress":{}', updatedAt: 2 },
+          ],
+          summary: {
+            source,
+            revision: 2,
+            tailAppendBarrierRevision: 1,
+            tailBlockId: tail.id,
+          },
+        }),
+      ),
+    );
+
+    expect(latest[0]).toMatchObject({
+      role: 'tool_group',
+      tools: [{ status: 'completed' }],
+    });
+    await act(async () => root.unmount());
+  });
+
+  it('keeps agent reconciliation when an insight tail matches a projected message', async () => {
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    const t = (key: string) => key;
+    const source = {};
+    const agent = backgroundAgentBlock('agent-call');
+    // An empty thought block projects a thinking message (unlike assistant),
+    // so the insight append below matches the tail's projected message.
+    const tail = baseBlock({
+      id: 'empty-thought',
+      kind: 'thought',
+      text: '',
+      streaming: true,
+    });
+    let latest: Message[] = [];
+    hookState.connection.status = 'connected';
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession.mockResolvedValue(
+      backgroundAgentResolution('completed'),
+    );
+    function Consumer({
+      blocks,
+      summary,
+    }: {
+      blocks: DaemonTranscriptBlock[];
+      summary: DaemonTranscriptBlockChangeSummary;
+    }) {
+      latest = useMessagesFromBlocks(t, blocks, summary);
+      return null;
+    }
+
+    await act(async () =>
+      root.render(
+        createElement(Consumer, {
+          blocks: [agent, tail],
+          summary: {
+            source,
+            revision: 1,
+            tailAppendBarrierRevision: 1,
+          },
+        }),
+      ),
+    );
+    await vi.waitFor(() =>
+      expect(latest[0]).toMatchObject({
+        role: 'tool_group',
+        tools: [{ status: 'completed' }],
+      }),
+    );
+    const reconciledToolGroup = latest[0];
+
+    adapterSpies.project.mockClear();
+    await act(async () =>
+      root.render(
+        createElement(Consumer, {
+          blocks: [
+            agent,
+            { ...tail, text: 'prefix "insight_progress":{}', updatedAt: 2 },
+          ],
+          summary: {
+            source,
+            revision: 2,
+            tailAppendBarrierRevision: 1,
+            tailBlockId: tail.id,
+          },
+        }),
+      ),
+    );
+
+    expect(adapterSpies.project).toHaveBeenCalled();
+    expect(latest[0]).toBe(reconciledToolGroup);
+    expect(latest).toMatchObject([
+      { role: 'tool_group', tools: [{ status: 'completed' }] },
+      { role: 'thinking', content: 'prefix "insight_progress":{}' },
+    ]);
+    await act(async () => root.unmount());
+  });
+
   it('uses terminal agent notifications as a reconciliation trigger without requiring toolUseId', () => {
     expect(
       getBackgroundAgentNotificationKey([
@@ -833,6 +1464,12 @@ describe('background agent task reconciliation', () => {
 
   it('resets accumulated missing-agent misses when an approval engages', async () => {
     vi.useFakeTimers();
+    const source = {};
+    let summary: DaemonTranscriptBlockChangeSummary = {
+      source,
+      revision: 1,
+      tailAppendBarrierRevision: 1,
+    };
     // Phase 1: no permission yet — one probe fires and 404s (miss 1).
     hookState.blocks = [
       baseBlock({
@@ -854,7 +1491,9 @@ describe('background agent task reconciliation', () => {
         'not found',
       ),
     );
-    const { container, render, unmount } = mountStatusConsumer();
+    const { container, render, unmount } = mountStatusConsumer({
+      getBlockChangeSummary: () => summary,
+    });
 
     await act(async () => render());
     await vi.waitFor(() =>
@@ -883,6 +1522,11 @@ describe('background agent task reconciliation', () => {
       }),
       hookState.blocks[0],
     ];
+    summary = {
+      source,
+      revision: 2,
+      tailAppendBarrierRevision: 2,
+    };
     await act(async () => render());
     expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1);
 
@@ -896,6 +1540,11 @@ describe('background agent task reconciliation', () => {
       },
       hookState.blocks[1],
     ];
+    summary = {
+      source,
+      revision: 3,
+      tailAppendBarrierRevision: 3,
+    };
     await act(async () => render());
     await vi.waitFor(() =>
       expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(2),

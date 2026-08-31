@@ -37,6 +37,7 @@ import {
   PromptDeadlineExceededError,
   PromptQueueFullError,
   RestoreInProgressError,
+  SessionLimitExceededError,
   SessionShellClientRequiredError,
   SessionShellDisabledError,
   SessionBusyError,
@@ -44,8 +45,12 @@ import {
   TotalSessionLimitExceededError,
   WorkspaceMismatchError,
 } from './bridgeErrors.js';
+import type { StandaloneSessionSpawnError } from './bridgeErrors.js';
 import { MAX_WORKSPACE_PATH_LENGTH } from './workspacePaths.js';
-import { SESSION_SOURCE_META_KEY } from './session-source.js';
+import {
+  DAEMON_OWNED_STANDALONE_CREATION_KEY,
+  SESSION_SOURCE_META_KEY,
+} from './session-source.js';
 import {
   classifyTurnErrorKind,
   extractErrorMessage,
@@ -64,7 +69,9 @@ import {
 } from './externalToolGuard.js';
 import type { ChannelFactory } from './channel.js';
 import type {
+  BridgeOptions,
   BridgeFreshSessionAdmissionContext,
+  BridgeRuntimeEpochSource,
   BridgeTelemetry,
 } from './bridgeOptions.js';
 import { createInMemoryChannel } from './inMemoryChannel.js';
@@ -86,6 +93,8 @@ import {
   ACTIVE_WORK_MAX_SNAPSHOT_SESSIONS,
   ACTIVE_WORK_NOTIFICATION_METHOD,
   ACTIVE_WORK_STALE_INTERVALS,
+  CHANNEL_LIVENESS_META_KEY,
+  CHANNEL_LIVENESS_VERSION,
   gradeActiveWorkCoverage,
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
@@ -93,6 +102,11 @@ import {
   WORKTREE_MCP_DEFER_META_KEY,
   LOAD_REPLAY_HIDE_INHERITED_META_KEY,
 } from './bridgeTypes.js';
+import {
+  CHANNEL_LIVENESS_INTERVAL_MS,
+  CHANNEL_LIVENESS_PROBE_TIMEOUT_MS,
+  CHANNEL_LIVENESS_TIMEOUT_CODE,
+} from './channel-liveness.js';
 import {
   ApprovalMode,
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
@@ -111,13 +125,15 @@ import {
   WS_B,
   SESS_A,
 } from './internal/testUtils.js';
-import { SessionArtifactAuthorizationError } from './sessionArtifacts.js';
 import {
-  SESSION_MEDIA_MAX_TOTAL_BYTES,
-  SessionMediaStore,
-} from './sessionMedia.js';
+  SessionArtifactAuthorizationError,
+  SessionArtifactStore,
+} from './sessionArtifacts.js';
+import { SessionAttachmentStore } from './sessionAttachments.js';
+import { MultiClientPermissionMediator } from './permissionMediator.js';
 import {
   REQUESTED_SESSION_ID_META_KEY,
+  SESSION_INITIALIZATION_DEADLINE_META_KEY,
   MID_TURN_QUEUE_DRAIN_METHOD,
   MID_TURN_RECONCILIATION_RING_SIZE,
   PROMPT_CANCEL_METHOD,
@@ -224,6 +240,31 @@ function recordRestoreEvents(): {
   };
 }
 
+function recordNewSessionEvents(): {
+  telemetry: BridgeTelemetry;
+  named: (suffix: string) => Array<Record<string, unknown>>;
+} {
+  const events: Array<{ name: string; attributes: Record<string, unknown> }> =
+    [];
+  return {
+    named: (suffix) =>
+      events
+        .filter((event) => event.name === `session.new.${suffix}`)
+        .map((event) => event.attributes),
+    telemetry: {
+      captureContext: () => undefined,
+      runWithContext: async (_captured, fn) => await fn(),
+      withSpan: async (_operation, _attributes, fn) => await fn(),
+      event: (name, attributes) => {
+        if (name.startsWith('session.new.')) {
+          events.push({ name, attributes: { ...attributes } });
+        }
+      },
+      injectPromptContext: (request) => request,
+    },
+  };
+}
+
 async function advanceRestoreDeadline(timeoutMs: number): Promise<void> {
   await vi.advanceTimersByTimeAsync(0);
   await vi.advanceTimersByTimeAsync(timeoutMs);
@@ -277,6 +318,18 @@ function activeWorkInitializeResponse(
   };
 }
 
+function channelLivenessInitializeResponse(): InitializeResponse {
+  return {
+    protocolVersion: PROTOCOL_VERSION,
+    agentInfo: { name: 'channel-liveness-agent', version: '0' },
+    authMethods: [],
+    agentCapabilities: {},
+    _meta: {
+      [CHANNEL_LIVENESS_META_KEY]: { v: CHANNEL_LIVENESS_VERSION },
+    },
+  };
+}
+
 function agentHold(id: string) {
   return { category: 'agent' as const, id };
 }
@@ -302,6 +355,20 @@ function reportingGrade(bridge: {
 }
 
 describe('createAcpSessionBridge', () => {
+  it.each([undefined, 60_000])(
+    'rejects a fractional initialization timeout with restore timeout %s',
+    (sessionRestoreTimeoutMs) => {
+      expect(() =>
+        makeBridge({
+          initializeTimeoutMs: 20.5,
+          ...(sessionRestoreTimeoutMs !== undefined
+            ? { sessionRestoreTimeoutMs }
+            : {}),
+        }),
+      ).toThrow(/positive integer/);
+    },
+  );
+
   describe('active work', () => {
     it('negotiates the capability and counts accepted prompts locally', async () => {
       const prompt = deferred<PromptResponse>();
@@ -768,6 +835,93 @@ describe('createAcpSessionBridge', () => {
       expect(bridge.sessionCount).toBe(1);
       // The refusal's hold set is adopted, so the daemon now agrees it is busy.
       expect(bridge.activeWork).toBe(true);
+
+      await bridge.shutdown();
+    });
+
+    it.each([
+      {
+        count: ACTIVE_WORK_MAX_SESSION_HOLDS,
+        expectedActiveWork: true,
+      },
+      {
+        count: ACTIVE_WORK_MAX_SESSION_HOLDS + 1,
+        expectedActiveWork: false,
+      },
+    ])(
+      'bounds close-refusal adoption at $count holds',
+      async ({ count, expectedActiveWork }) => {
+        const refusalHolds = Array.from({ length: count }, (_unused, index) =>
+          agentHold(`h${index}`),
+        );
+        const handle = makeChannel({
+          initializeImpl: () => activeWorkInitializeResponse(),
+          extMethodImpl: async (method, params) => {
+            if (method !== SERVE_CONTROL_EXT_METHODS.sessionClose) return {};
+            if (params?.[ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM] === true) {
+              return { closed: false, holds: refusalHolds };
+            }
+            return { closed: true };
+          },
+        });
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+          sessionReapIntervalMs: 0,
+        });
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        await sendActiveWorkSnapshot(handle, 1, [
+          { sessionId: session.sessionId, holds: [] },
+        ]);
+
+        await bridge.detachClient(session.sessionId, session.clientId);
+
+        expect(bridge.sessionCount).toBe(1);
+        expect(bridge.activeWork).toBe(expectedActiveWork);
+        expect(reportingGrade(bridge)).toBe('full');
+
+        await bridge.shutdown();
+      },
+    );
+
+    it('retains a stale non-empty cache after an oversized close refusal', async () => {
+      const refusalHolds = Array.from(
+        { length: ACTIVE_WORK_MAX_SESSION_HOLDS + 1 },
+        (_unused, index) => agentHold(`h${index}`),
+      );
+      const handle = makeChannel({
+        initializeImpl: () => activeWorkInitializeResponse(),
+        extMethodImpl: async (method, params) => {
+          if (method !== SERVE_CONTROL_EXT_METHODS.sessionClose) return {};
+          if (params?.[ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM] === true) {
+            return { closed: false, holds: refusalHolds };
+          }
+          return { closed: true };
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionReapIntervalMs: 0,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await sendActiveWorkSnapshot(handle, 1, [
+        { sessionId: session.sessionId, holds: [agentHold('cached-agent')] },
+      ]);
+
+      vi.useFakeTimers();
+      try {
+        vi.setSystemTime(
+          Date.now() +
+            ACTIVE_WORK_HEARTBEAT_INTERVAL_MS * ACTIVE_WORK_STALE_INTERVALS +
+            1_000,
+        );
+        await bridge.detachClient(session.sessionId, session.clientId);
+
+        expect(bridge.sessionCount).toBe(1);
+        expect(bridge.activeWork).toBe(true);
+        expect(reportingGrade(bridge)).toBe('partial');
+      } finally {
+        vi.useRealTimers();
+      }
 
       await bridge.shutdown();
     });
@@ -1396,6 +1550,82 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  describe('setUserLanguage', () => {
+    it('rejects with SessionNotFoundError when no channel is live', async () => {
+      const channelFactory = vi.fn();
+      const bridge = makeBridge({ channelFactory });
+
+      await expect(
+        bridge.setUserLanguage({ language: 'zh', syncOutputLanguage: false }),
+      ).rejects.toBeInstanceOf(SessionNotFoundError);
+      // Never spins up a channel just for the sync — a runtime without one
+      // has no sessions to refresh and re-reads the files at next spawn.
+      expect(channelFactory).not.toHaveBeenCalled();
+
+      await bridge.shutdown();
+    });
+
+    it('forwards the sync over the live channel without a session id', async () => {
+      const handle = makeChannel({
+        extMethodImpl: async (method, params) =>
+          method === SERVE_CONTROL_EXT_METHODS.userLanguage
+            ? {
+                language: (params as { language: string }).language,
+                sessions: 2,
+                failed: 0,
+              }
+            : {},
+      });
+      const channelFactory = vi.fn().mockResolvedValue(handle.channel);
+      const bridge = makeBridge({ channelFactory });
+      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await expect(
+        bridge.setUserLanguage({ language: 'zh', syncOutputLanguage: true }),
+      ).resolves.toEqual({ language: 'zh', sessions: 2, failed: 0 });
+      expect(handle.agent.extMethodCalls).toContainEqual({
+        method: SERVE_CONTROL_EXT_METHODS.userLanguage,
+        params: { language: 'zh', syncOutputLanguage: true },
+      });
+
+      await bridge.shutdown();
+    });
+  });
+
+  it('wraps a Goal control request in the envelope the agent reads', async () => {
+    // The agent's `sessionGoalControl` handler reads `params['request']`; this
+    // method is its only producer, and a flattened envelope makes every
+    // POST /session/:id/goal fail with "Invalid or missing Goal control
+    // request" while the route and agent tests stay green.
+    const snapshot = { v: 2, activity: 'idle', goal: null };
+    const handle = makeChannel({
+      extMethodImpl: async (method) =>
+        method === SERVE_CONTROL_EXT_METHODS.sessionGoalControl
+          ? { snapshot }
+          : {},
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const request = { action: 'create' as const, objective: 'ship it' };
+
+    await expect(
+      bridge.controlSessionGoal(session.sessionId, request),
+    ).resolves.toEqual({ snapshot });
+    expect(handle.agent.extMethodCalls).toContainEqual({
+      method: SERVE_CONTROL_EXT_METHODS.sessionGoalControl,
+      params: { sessionId: session.sessionId, request },
+    });
+
+    await expect(
+      bridge.controlSessionGoal(
+        '11111111-2222-3333-4444-555555555555',
+        request,
+      ),
+    ).rejects.toBeInstanceOf(SessionNotFoundError);
+
+    await bridge.shutdown();
+  });
+
   it('serves completed MCP status without restarting an idle channel', async () => {
     const makeMcpChannel = () =>
       makeChannel({
@@ -1808,6 +2038,16 @@ describe('createAcpSessionBridge', () => {
 
   it('forwards the Live managed relocation capability to the ACP child', async () => {
     const target = path.join(WS_A, 'conversation-managed');
+    const expectation = {
+      canonicalSessionId: '11111111-1111-1111-1111-111111111111',
+      root: { canonicalPath: WS_A, device: 1, inode: 2 },
+      child: {
+        name: 'conversation-managed',
+        canonicalPath: target,
+        device: 1,
+        inode: 3,
+      },
+    };
     const sessionCdCalls: unknown[] = [];
     const handle = makeChannel({
       extMethodImpl: async (method, params) => {
@@ -1831,6 +2071,7 @@ describe('createAcpSessionBridge', () => {
       path: target,
       allowedRoots: [WS_A],
       managedRelocation: 'live-conversation',
+      conversationDirectoryExpectation: expectation,
     });
     const attached = await bridge.resumeSession({
       sessionId: session.sessionId,
@@ -1843,6 +2084,7 @@ describe('createAcpSessionBridge', () => {
         path: target,
         allowedRoots: [WS_A],
         managedRelocation: 'live-conversation',
+        conversationDirectoryExpectation: expectation,
       },
     ]);
     expect(attached).toMatchObject({
@@ -1850,6 +2092,300 @@ describe('createAcpSessionBridge', () => {
       currentCwd: target,
       attached: true,
     });
+    await bridge.shutdown();
+  });
+
+  it('holds standalone prompts until the exact managed binding is released', async () => {
+    const sessionId = '11111111-1111-4111-8111-111111111111';
+    const target = path.join(WS_A, 'conversation-standalone');
+    const expectation = {
+      canonicalSessionId: sessionId,
+      root: { canonicalPath: WS_A, device: 1, inode: 2 },
+      child: {
+        name: 'conversation-standalone',
+        canonicalPath: target,
+        device: 1,
+        inode: 3,
+      },
+    };
+    const handle = makeChannel({
+      resumeSessionImpl: () => ({}),
+      extMethodImpl: async (method) => {
+        if (method === SERVE_CONTROL_EXT_METHODS.sessionCd) {
+          return { previousCwd: WS_A, newCwd: target, warnings: [] };
+        }
+        if (
+          method ===
+          SERVE_CONTROL_EXT_METHODS.sessionManagedConversationBindingCommit
+        ) {
+          return { committed: true };
+        }
+        if (
+          method ===
+          SERVE_CONTROL_EXT_METHODS.sessionManagedConversationBindingRelease
+        ) {
+          return { released: true };
+        }
+        return {};
+      },
+    });
+    const artifactRestores: Array<{
+      workspaceCwd: string;
+      workspaceAccess?: 'metadata-only';
+    }> = [];
+    const artifactRestoreSpy = vi
+      .spyOn(SessionArtifactStore.prototype, 'restore')
+      .mockImplementation(async function (
+        this: SessionArtifactStore,
+        _snapshot,
+        options,
+      ) {
+        const workspaceCwd = (this as unknown as { workspaceCwd: string })
+          .workspaceCwd;
+        artifactRestores.push({
+          workspaceCwd,
+          ...(options?.workspaceAccess
+            ? { workspaceAccess: options.workspaceAccess }
+            : {}),
+        });
+        return workspaceCwd === target ? ['late binding warning'] : [];
+      });
+    const originalUpsertMany = SessionArtifactStore.prototype.upsertMany;
+    const artifactUpsertWorkspaceRoots: string[] = [];
+    const artifactUpsertSpy = vi
+      .spyOn(SessionArtifactStore.prototype, 'upsertMany')
+      .mockImplementation(function (this: SessionArtifactStore, ...args) {
+        artifactUpsertWorkspaceRoots.push(
+          (this as unknown as { workspaceCwd: string }).workspaceCwd,
+        );
+        return originalUpsertMany.apply(this, args);
+      });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    try {
+      await bridge.restoreStandaloneSession('resume', {
+        sessionId,
+        workspaceCwd: WS_A,
+      });
+      const prompt = {
+        sessionId,
+        prompt: [{ type: 'text' as const, text: 'hello' }],
+      };
+
+      await expect(bridge.sendPrompt(sessionId, prompt)).rejects.toMatchObject({
+        data: { errorKind: 'working_directory_missing' },
+      });
+      await expect(bridge.getSessionArtifacts(sessionId)).rejects.toMatchObject(
+        {
+          data: { errorKind: 'working_directory_missing' },
+        },
+      );
+      expect(artifactRestores).toEqual([
+        { workspaceCwd: WS_A, workspaceAccess: 'metadata-only' },
+      ]);
+      await bridge.changeSessionCwd(sessionId, {
+        path: target,
+        allowedRoots: [WS_A],
+        managedRelocation: 'live-conversation',
+        conversationDirectoryExpectation: expectation,
+      });
+      await expect(bridge.sendPrompt(sessionId, prompt)).rejects.toMatchObject({
+        data: { errorKind: 'working_directory_missing' },
+      });
+      await bridge.commitManagedConversationBinding(sessionId, expectation);
+      expect(artifactRestores).toEqual([
+        { workspaceCwd: WS_A, workspaceAccess: 'metadata-only' },
+        { workspaceCwd: target, workspaceAccess: 'metadata-only' },
+      ]);
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining(
+          `session=${sessionId} action=restore_warning warning="late binding warning"`,
+        ),
+      );
+      await handle.agentConnection.sessionUpdate({
+        sessionId,
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'artifact-before-release',
+          status: 'completed',
+          content: [],
+          _meta: {
+            toolName: ToolNames.ARTIFACT,
+            artifacts: [
+              {
+                title: 'Deferred artifact',
+                url: 'https://example.com/deferred-artifact',
+              },
+            ],
+          },
+        },
+      });
+      expect(artifactUpsertWorkspaceRoots).toEqual([]);
+      await expect(bridge.sendPrompt(sessionId, prompt)).rejects.toMatchObject({
+        data: { errorKind: 'working_directory_missing' },
+      });
+      await expect(bridge.getSessionArtifacts(sessionId)).rejects.toMatchObject(
+        {
+          data: { errorKind: 'working_directory_missing' },
+        },
+      );
+      await bridge.releaseManagedConversationBinding(sessionId, expectation);
+      expect(artifactUpsertWorkspaceRoots).toEqual([]);
+      const deferredArtifactId = stableSessionArtifactId(
+        sessionId,
+        'url:https://example.com/deferred-artifact',
+      );
+      await expect(
+        bridge.removeSessionArtifact(sessionId, deferredArtifactId),
+      ).resolves.toMatchObject({
+        changes: [
+          {
+            action: 'removed',
+            artifactId: deferredArtifactId,
+            reason: 'explicit',
+          },
+        ],
+      });
+      expect(artifactUpsertWorkspaceRoots).toEqual([target]);
+      await expect(
+        bridge.getSessionArtifacts(sessionId),
+      ).resolves.toMatchObject({ artifacts: [] });
+      await expect(bridge.sendPrompt(sessionId, prompt)).resolves.toMatchObject(
+        {
+          stopReason: 'end_turn',
+        },
+      );
+      expect(handle.agent.promptCalls).toHaveLength(1);
+    } finally {
+      artifactRestoreSpy.mockRestore();
+      artifactUpsertSpy.mockRestore();
+      stderr.mockRestore();
+      await bridge.shutdown();
+    }
+  });
+
+  it('rejects a standalone managed relocation when the child reports another cwd', async () => {
+    const sessionId = '33333333-3333-4333-8333-333333333333';
+    const target = path.join(WS_A, 'conversation-standalone');
+    const expectation = {
+      canonicalSessionId: sessionId,
+      root: { canonicalPath: WS_A, device: 1, inode: 2 },
+      child: {
+        name: 'conversation-standalone',
+        canonicalPath: target,
+        device: 1,
+        inode: 3,
+      },
+    };
+    const handle = makeChannel({
+      resumeSessionImpl: () => ({}),
+      extMethodImpl: async (method) =>
+        method === SERVE_CONTROL_EXT_METHODS.sessionCd
+          ? {
+              previousCwd: WS_A,
+              newCwd: path.join(WS_A, 'unexpected'),
+              warnings: [],
+            }
+          : {},
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    await bridge.restoreStandaloneSession('resume', {
+      sessionId,
+      workspaceCwd: WS_A,
+    });
+
+    await expect(
+      bridge.changeSessionCwd(sessionId, {
+        path: target,
+        allowedRoots: [WS_A],
+        managedRelocation: 'live-conversation',
+        conversationDirectoryExpectation: expectation,
+      }),
+    ).rejects.toMatchObject({
+      data: { errorKind: 'working_directory_missing' },
+    });
+    expect(bridge.getSessionCurrentCwd(sessionId)).toBe(WS_A);
+
+    await bridge.shutdown();
+  });
+
+  it('rechecks a standalone binding when a queued prompt reaches dispatch', async () => {
+    const sessionId = '22222222-2222-4222-8222-222222222222';
+    const target = path.join(WS_A, 'conversation-standalone');
+    const expectation = {
+      canonicalSessionId: sessionId,
+      root: { canonicalPath: WS_A, device: 1, inode: 2 },
+      child: {
+        name: 'conversation-standalone',
+        canonicalPath: target,
+        device: 1,
+        inode: 3,
+      },
+    };
+    const secondCd = deferred<{
+      previousCwd: string;
+      newCwd: string;
+      warnings: string[];
+    }>();
+    let cdCalls = 0;
+    const handle = makeChannel({
+      resumeSessionImpl: () => ({}),
+      extMethodImpl: async (method) => {
+        if (method === SERVE_CONTROL_EXT_METHODS.sessionCd) {
+          cdCalls++;
+          return cdCalls === 1
+            ? { previousCwd: WS_A, newCwd: target, warnings: [] }
+            : secondCd.promise;
+        }
+        if (
+          method ===
+          SERVE_CONTROL_EXT_METHODS.sessionManagedConversationBindingCommit
+        ) {
+          return { committed: true };
+        }
+        if (
+          method ===
+          SERVE_CONTROL_EXT_METHODS.sessionManagedConversationBindingRelease
+        ) {
+          return { released: true };
+        }
+        return {};
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    await bridge.restoreStandaloneSession('resume', {
+      sessionId,
+      workspaceCwd: WS_A,
+    });
+    await bridge.changeSessionCwd(sessionId, {
+      path: target,
+      allowedRoots: [WS_A],
+      managedRelocation: 'live-conversation',
+      conversationDirectoryExpectation: expectation,
+    });
+    await bridge.commitManagedConversationBinding(sessionId, expectation);
+    await bridge.releaseManagedConversationBinding(sessionId, expectation);
+
+    const relocation = bridge.changeSessionCwd(sessionId, {
+      path: target,
+      allowedRoots: [WS_A],
+      managedRelocation: 'live-conversation',
+      conversationDirectoryExpectation: expectation,
+    });
+    const queuedPrompt = bridge.sendPrompt(sessionId, {
+      sessionId,
+      prompt: [{ type: 'text', text: 'must remain held' }],
+    });
+    secondCd.resolve({ previousCwd: target, newCwd: target, warnings: [] });
+
+    await relocation;
+    await expect(queuedPrompt).rejects.toMatchObject({
+      data: { errorKind: 'working_directory_missing' },
+    });
+    expect(handle.agent.promptCalls).toHaveLength(0);
+
     await bridge.shutdown();
   });
 
@@ -2709,7 +3245,9 @@ describe('createAcpSessionBridge', () => {
       availableSkills: [],
     });
     await expect(
-      bridge.getSessionTasksStatus(session.sessionId),
+      bridge.getSessionTasksStatus(session.sessionId, {
+        includeWorkflows: true,
+      }),
     ).resolves.toMatchObject({
       sessionId: session.sessionId,
       tasks: [],
@@ -2733,6 +3271,10 @@ describe('createAcpSessionBridge', () => {
       'qwen/status/session/tasks',
       'qwen/status/session/lsp',
     ]);
+    expect(handles[0]?.agent.extMethodCalls[2]?.params).toMatchObject({
+      sessionId: session.sessionId,
+      includeWorkflows: true,
+    });
 
     await bridge.shutdown();
   });
@@ -3696,50 +4238,110 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('separates concurrent skill-only and full refreshes for every session', async () => {
+    const skillsGate = deferred<Record<string, unknown>>();
+    const fullGate = deferred<Record<string, unknown>>();
+    const handle = makeChannel({
+      extMethodImpl: async (method, params) =>
+        method === SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh
+          ? await (params['skillsOnly'] ? skillsGate.promise : fullGate.promise)
+          : {},
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    try {
+      const first = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      const second = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      const skills = bridge.refreshExtensionsForAllSessions(undefined, {
+        skillsOnly: true,
+      });
+      const duplicate = bridge.refreshExtensionsForAllSessions(undefined, {
+        skillsOnly: true,
+      });
+      const full = bridge.refreshExtensionsForAllSessions();
+      await vi.waitFor(() =>
+        expect(handle.agent.extMethodCalls).toHaveLength(4),
+      );
+      expect(handle.agent.extMethodCalls.map(({ params }) => params)).toEqual([
+        { sessionId: first.sessionId, skillsOnly: true },
+        {
+          sessionId: second.sessionId,
+          refreshBootstrap: false,
+          skillsOnly: true,
+        },
+        { sessionId: first.sessionId },
+        { sessionId: second.sessionId, refreshBootstrap: false },
+      ]);
+      skillsGate.resolve({});
+      await expect(skills).resolves.toEqual({ refreshed: 2, failed: 0 });
+      await expect(duplicate).resolves.toEqual({ refreshed: 2, failed: 0 });
+      fullGate.reject(new Error('full refresh failed'));
+      await expect(full).resolves.toEqual({ refreshed: 0, failed: 2 });
+    } finally {
+      skillsGate.resolve({});
+      fullGate.resolve({});
+      await bridge.shutdown();
+    }
+  });
+
   it('bounds a hung session extension refresh', async () => {
     vi.useFakeTimers();
     const refreshGate = deferred<Record<string, unknown>>();
-    const handle = makeChannel({
+    const stalledHandle = makeChannel({
       extMethodImpl: async (method) =>
         method === SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh
           ? await refreshGate.promise
           : {},
     });
+    const replacementHandle = makeChannel();
+    const channelFactory = vi
+      .fn()
+      .mockResolvedValueOnce(stalledHandle.channel)
+      .mockResolvedValueOnce(replacementHandle.channel);
     const bridge = makeBridge({
-      channelFactory: async () => handle.channel,
+      channelFactory,
     });
     try {
-      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
       const refresh = bridge.refreshExtensionsForAllSessions();
+      const overlappingRefresh = bridge.refreshExtensionsForAllSessions();
 
       await vi.advanceTimersByTimeAsync(30_000);
 
       await expect(refresh).resolves.toEqual({ refreshed: 0, failed: 1 });
-
-      const retry = bridge.refreshExtensionsForAllSessions();
+      await expect(overlappingRefresh).resolves.toEqual({
+        refreshed: 0,
+        failed: 1,
+      });
+      expect(stalledHandle.killed).toBe(false);
       expect(
-        handle.agent.extMethodCalls.filter(
+        stalledHandle.agent.extMethodCalls.filter(
           (call) =>
             call.method ===
             SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh,
         ),
       ).toHaveLength(1);
-      await vi.advanceTimersByTimeAsync(30_000);
-      await expect(retry).resolves.toEqual({ refreshed: 0, failed: 1 });
 
-      refreshGate.resolve({});
-      await vi.advanceTimersByTimeAsync(0);
+      await bridge.closeSession(session.sessionId);
+      expect(stalledHandle.killed).toBe(true);
+      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
       await expect(bridge.refreshExtensionsForAllSessions()).resolves.toEqual({
         refreshed: 1,
         failed: 0,
       });
+      expect(channelFactory).toHaveBeenCalledTimes(2);
       expect(
-        handle.agent.extMethodCalls.filter(
+        replacementHandle.agent.extMethodCalls.filter(
           (call) =>
             call.method ===
             SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh,
         ),
-      ).toHaveLength(2);
+      ).toHaveLength(1);
     } finally {
       refreshGate.resolve({});
       vi.useRealTimers();
@@ -9315,6 +9917,28 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('reaps a sole failed restore even with a positive idle timeout', async () => {
+    const handle = makeChannel({
+      loadSessionImpl: () => {
+        throw new Error('restore failed on an empty channel');
+      },
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      channelIdleTimeoutMs: 60_000,
+    });
+
+    await expect(
+      bridge.loadSession({
+        sessionId: 'failed-restore',
+        workspaceCwd: WS_A,
+      }),
+    ).rejects.toThrow();
+    expect(handle.killed).toBe(true);
+
+    await bridge.shutdown();
+  });
+
   it('keeps a shared channel usable when restore fails beside a live session', async () => {
     const handles: ChannelHandle[] = [];
     const factory: ChannelFactory = async () => {
@@ -9394,7 +10018,8 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
-  it('maps an ACP missing persisted session to SessionNotFoundError', async () => {
+  it('maps a missing persisted session and arms idle channel reaping', async () => {
+    vi.useFakeTimers();
     const handles: ChannelHandle[] = [];
     const factory: ChannelFactory = async () => {
       const h = makeChannel({
@@ -9405,21 +10030,31 @@ describe('createAcpSessionBridge', () => {
       handles.push(h);
       return h.channel;
     };
-    const bridge = makeBridge({ channelFactory: factory });
-
-    await expect(
-      bridge.loadSession({
-        sessionId: 'missing-persisted',
-        workspaceCwd: WS_A,
-      }),
-    ).rejects.toMatchObject({
-      name: 'SessionNotFoundError',
-      sessionId: 'missing-persisted',
+    const bridge = makeBridge({
+      channelFactory: factory,
+      channelIdleTimeoutMs: 5_000,
     });
-    expect(bridge.sessionCount).toBe(0);
-    expect(handles[0]?.killed).toBe(false);
 
-    await bridge.shutdown();
+    try {
+      await expect(
+        bridge.loadSession({
+          sessionId: 'missing-persisted',
+          workspaceCwd: WS_A,
+        }),
+      ).rejects.toMatchObject({
+        name: 'SessionNotFoundError',
+        sessionId: 'missing-persisted',
+      });
+      expect(bridge.sessionCount).toBe(0);
+      expect(handles[0]?.killed).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(5_001);
+
+      expect(handles[0]?.killed).toBe(true);
+    } finally {
+      await bridge.shutdown();
+      vi.useRealTimers();
+    }
   });
 
   // The `isAcpSessionResourceNotFound` `message`-fallback path can't
@@ -9848,6 +10483,7 @@ describe('createAcpSessionBridge', () => {
     const releaseAdmission = vi.fn();
     const handle = makeChannel({
       loadSessionImpl: () => lateRestore.promise,
+      extMethodImpl: activeWorkCloseImpl,
     });
     const restoreEvents = recordRestoreEvents();
     const bridge = makeBridge({
@@ -10161,6 +10797,7 @@ describe('createAcpSessionBridge', () => {
     const lateRestore = deferred<LoadSessionResponse>();
     const handle = makeChannel({
       loadSessionImpl: () => lateRestore.promise,
+      extMethodImpl: activeWorkCloseImpl,
       newSessionImpl: async (params) => {
         const requestedSessionId =
           typeof params._meta === 'object' && params._meta !== null
@@ -10231,6 +10868,7 @@ describe('createAcpSessionBridge', () => {
     const lateRestore = deferred<LoadSessionResponse>();
     const handle = makeChannel({
       loadSessionImpl: () => lateRestore.promise,
+      extMethodImpl: activeWorkCloseImpl,
       newSessionImpl: async (params) => {
         const requestedSessionId =
           typeof params._meta === 'object' && params._meta !== null
@@ -10434,11 +11072,67 @@ describe('createAcpSessionBridge', () => {
     }
   });
 
+  it('clears overdue state per restore while another remains within grace', async () => {
+    vi.useFakeTimers();
+    const lateA = deferred<LoadSessionResponse>();
+    const lateB = deferred<LoadSessionResponse>();
+    const handle = makeChannel({
+      loadSessionImpl: (params) =>
+        params.sessionId === 'overdue-a' ? lateA.promise : lateB.promise,
+      extMethodImpl: (method) =>
+        method === SERVE_CONTROL_EXT_METHODS.sessionClose
+          ? { closed: true }
+          : {},
+    });
+    const bridge = makeBridge({
+      sessionScope: 'thread',
+      maxSessions: 5,
+      sessionRestoreTimeoutMs: 20,
+      channelFactory: async () => handle.channel,
+    });
+    try {
+      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const restoreA = bridge
+        .loadSession({ sessionId: 'overdue-a', workspaceCwd: WS_A })
+        .catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(10);
+      const restoreB = bridge
+        .loadSession({ sessionId: 'within-grace-b', workspaceCwd: WS_A })
+        .catch((error: unknown) => error);
+
+      await vi.advanceTimersByTimeAsync(10);
+      expect(await restoreA).toBeInstanceOf(SessionRestoreTimeoutError);
+      await vi.advanceTimersByTimeAsync(10);
+      expect(await restoreB).toBeInstanceOf(SessionRestoreTimeoutError);
+      await vi.advanceTimersByTimeAsync(10);
+      await expect(
+        bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+      ).rejects.toMatchObject({ reason: 'restore_settlement_overdue' });
+
+      lateA.resolve({});
+      await vi.advanceTimersByTimeAsync(0);
+      await expect(
+        bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+      ).resolves.toMatchObject({ sessionId: expect.any(String) });
+
+      await vi.advanceTimersByTimeAsync(10);
+      await expect(
+        bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+      ).rejects.toMatchObject({ reason: 'restore_settlement_overdue' });
+      lateB.reject(new Error('late failure'));
+      await vi.advanceTimersByTimeAsync(0);
+    } finally {
+      await bridge.shutdown();
+      vi.useRealTimers();
+    }
+  });
+
   it('stops condemning a channel once its abandoned restore settles cleanly', async () => {
     vi.useFakeTimers();
     const lateRestore = deferred<LoadSessionResponse>();
     const handle = makeChannel({
       loadSessionImpl: () => lateRestore.promise,
+      extMethodImpl: activeWorkCloseImpl,
     });
     const bridge = makeBridge({
       sessionScope: 'thread',
@@ -10712,6 +11406,7 @@ describe('createAcpSessionBridge', () => {
         params.sessionId === 'restore-first'
           ? firstRestore.promise
           : secondRestore.promise,
+      extMethodImpl: activeWorkCloseImpl,
     });
     const bridge = makeBridge({
       sessionScope: 'thread',
@@ -10812,6 +11507,56 @@ describe('createAcpSessionBridge', () => {
             call.params['sessionId'] === 'restore-timeout-pending-spawn',
         ),
       ).toHaveLength(1);
+      expect(handle.killed).toBe(false);
+    } finally {
+      await bridge.shutdown();
+      vi.useRealTimers();
+    }
+  });
+
+  it('quarantines fresh work when late restore cleanup is refused', async () => {
+    vi.useFakeTimers();
+    const lateRestore = deferred<LoadSessionResponse>();
+    const handle = makeChannel({
+      loadSessionImpl: () => lateRestore.promise,
+      extMethodImpl: (method, params) => {
+        if (
+          method === SERVE_CONTROL_EXT_METHODS.sessionClose &&
+          params['sessionId'] === 'restore-close-refused'
+        ) {
+          return { closed: false, holds: [agentHold('late-agent')] };
+        }
+        return { closed: true, holds: [] };
+      },
+    });
+    const bridge = makeBridge({
+      sessionScope: 'thread',
+      sessionRestoreTimeoutMs: 20,
+      channelFactory: async () => handle.channel,
+    });
+    try {
+      const sibling = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const timedOut = bridge
+        .loadSession({
+          sessionId: 'restore-close-refused',
+          workspaceCwd: WS_A,
+        })
+        .catch((error: unknown) => error);
+      await advanceRestoreDeadline(20);
+      expect(await timedOut).toBeInstanceOf(SessionRestoreTimeoutError);
+
+      lateRestore.resolve({});
+      await vi.advanceTimersByTimeAsync(0);
+
+      await expect(
+        bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+      ).rejects.toMatchObject({ reason: 'restore_cleanup_failed' });
+      await expect(
+        bridge.sendPrompt(sibling.sessionId, {
+          sessionId: sibling.sessionId,
+          prompt: [{ type: 'text', text: 'still alive' }],
+        }),
+      ).resolves.toMatchObject({ stopReason: 'end_turn' });
       expect(handle.killed).toBe(false);
     } finally {
       await bridge.shutdown();
@@ -11522,14 +12267,17 @@ describe('createAcpSessionBridge', () => {
     // `channel.exited` fires (OS-level reap), not be eagerly cleared
     // by `shutdown()`.
     const killSyncInvoked: string[] = [];
+    const teardown = deferred<void>();
     const factory: ChannelFactory = async () => {
       const h = makeChannel({ sessionIdPrefix: 's' });
+      const realKill = h.channel.kill;
       const realKillSync = h.channel.killSync;
       h.channel = {
         ...h.channel,
-        kill: () =>
-          // Never resolve — simulates a stuck SIGTERM grace window.
-          new Promise(() => {}),
+        kill: async () => {
+          await teardown.promise;
+          await realKill();
+        },
         killSync: () => {
           killSyncInvoked.push('called');
           realKillSync();
@@ -11540,8 +12288,7 @@ describe('createAcpSessionBridge', () => {
     const bridge = makeBridge({ channelFactory: factory });
     await bridge.spawnOrAttach({ workspaceCwd: WS_A });
 
-    // Kick off shutdown — its `channel.kill()` will hang on the
-    // never-resolving Promise above, so the entry maps clear but
+    // Kick off shutdown — its `channel.kill()` is held below, so the entry maps clear but
     // the channel-kill await never finishes. This is the mid-drain
     // state.
     const shutdownPromise = bridge.shutdown();
@@ -11558,10 +12305,8 @@ describe('createAcpSessionBridge', () => {
     // sync prefix.
     expect(killSyncInvoked).toHaveLength(1);
 
-    // Cleanup: the never-resolving kill keeps shutdownPromise
-    // pending forever. Don't await it (would hang the test). The
-    // test runner GCs it when this `it` returns.
-    void shutdownPromise;
+    teardown.resolve();
+    await shutdownPromise;
   });
 
   it('killAllSync force-kills the channel during the initialize handshake (tanzhenxin cold-spawn-window)', async () => {
@@ -11735,6 +12480,155 @@ describe('createAcpSessionBridge', () => {
     // pattern as the BkUyD test above. The test runner GCs the
     // dangling promises when this `it` returns.
     void killPromise;
+  });
+
+  describe('channel liveness', () => {
+    it('advertises v1 but stays disabled when the child does not acknowledge it', async () => {
+      vi.useFakeTimers();
+      try {
+        const handle = makeChannel();
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+        });
+        await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+        expect(handle.agent.initializeCalls[0]?._meta).toMatchObject({
+          [CHANNEL_LIVENESS_META_KEY]: { v: CHANNEL_LIVENESS_VERSION },
+        });
+        await vi.advanceTimersByTimeAsync(
+          CHANNEL_LIVENESS_INTERVAL_MS + CHANNEL_LIVENESS_PROBE_TIMEOUT_MS * 2,
+        );
+        expect(handle.agent.extMethodCalls).not.toContainEqual(
+          expect.objectContaining({
+            method: SERVE_STATUS_EXT_METHODS.channelPing,
+          }),
+        );
+        expect(handle.killed).toBe(false);
+        await bridge.shutdown();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('fails the transport after two unanswered channel probes', async () => {
+      vi.useFakeTimers();
+      try {
+        const event = vi.fn();
+        const channelLifecycle = vi.fn();
+        const handle = makeChannel({
+          initializeImpl: () => channelLivenessInitializeResponse(),
+          extMethodImpl: (method) =>
+            method === SERVE_STATUS_EXT_METHODS.channelPing
+              ? new Promise(() => {})
+              : {},
+        });
+        const baseKill = handle.channel.kill;
+        const transportFail = vi.fn((error: unknown) => {
+          void baseKill();
+          return error;
+        });
+        handle.channel = {
+          ...handle.channel,
+          transportGuard: {
+            maxActiveHandlers: 10,
+            maxActiveHandlerBytes: 1024 * 1024,
+            reserveOutboundOperation: () => () => {},
+            reservePreparedResponse: () => {},
+            fail: transportFail,
+          },
+        };
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+          sessionScope: 'thread',
+          telemetry: {
+            captureContext: () => undefined,
+            runWithContext: async (_captured, fn) => await fn(),
+            withSpan: async (_operation, _attributes, fn) => await fn(),
+            event,
+            injectPromptContext: (request) => request,
+            metrics: {
+              sessionLifecycle: vi.fn(),
+              channelLifecycle,
+              promptQueueWait: vi.fn(),
+              promptDuration: vi.fn(),
+              cancelled: vi.fn(),
+            },
+          },
+        });
+        const first = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        const second = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        expect(bridge.sessionCount).toBe(2);
+        const firstEvents: BridgeEvent[] = [];
+        const secondEvents: BridgeEvent[] = [];
+        const firstDrain = (async () => {
+          for await (const event of bridge.subscribeEvents(first.sessionId)) {
+            firstEvents.push(event);
+          }
+        })();
+        const secondDrain = (async () => {
+          for await (const event of bridge.subscribeEvents(second.sessionId)) {
+            secondEvents.push(event);
+          }
+        })();
+
+        await vi.advanceTimersByTimeAsync(CHANNEL_LIVENESS_INTERVAL_MS);
+        const firstProbeCalls = handle.agent.extMethodCalls.filter(
+          ({ method }) => method === SERVE_STATUS_EXT_METHODS.channelPing,
+        );
+        expect(firstProbeCalls).toEqual([
+          {
+            method: SERVE_STATUS_EXT_METHODS.channelPing,
+            params: { v: CHANNEL_LIVENESS_VERSION, nonce: 0 },
+          },
+        ]);
+        await vi.advanceTimersByTimeAsync(CHANNEL_LIVENESS_PROBE_TIMEOUT_MS);
+        expect(transportFail).not.toHaveBeenCalled();
+        expect(
+          handle.agent.extMethodCalls.filter(
+            ({ method }) => method === SERVE_STATUS_EXT_METHODS.channelPing,
+          ),
+        ).toHaveLength(2);
+
+        await vi.advanceTimersByTimeAsync(CHANNEL_LIVENESS_PROBE_TIMEOUT_MS);
+        await handle.channel.exited;
+        await Promise.all([firstDrain, secondDrain]);
+
+        expect(transportFail).toHaveBeenCalledOnce();
+        expect(transportFail.mock.calls[0]?.[0]).toMatchObject({
+          code: CHANNEL_LIVENESS_TIMEOUT_CODE,
+        });
+        expect(bridge.sessionCount).toBe(0);
+        expect(firstEvents.at(-1)).toMatchObject({
+          type: 'session_died',
+          data: { sessionId: first.sessionId, reason: 'channel_closed' },
+        });
+        expect(secondEvents.at(-1)).toMatchObject({
+          type: 'session_died',
+          data: { sessionId: second.sessionId, reason: 'channel_closed' },
+        });
+        expect(channelLifecycle).toHaveBeenCalledWith('exit', false);
+        expect(event).toHaveBeenCalledWith(
+          'channel.liveness_failed',
+          expect.objectContaining({
+            'qwen-code.daemon.channel.session_count': 2,
+            'qwen-code.daemon.channel.transport_error_code':
+              CHANNEL_LIVENESS_TIMEOUT_CODE,
+          }),
+        );
+        expect(event).toHaveBeenCalledWith(
+          'channel.exited',
+          expect.objectContaining({
+            'qwen-code.daemon.channel.transport_failed': true,
+            'qwen-code.daemon.channel.transport_failure_initiated_teardown': true,
+            'qwen-code.daemon.channel.transport_error_code':
+              CHANNEL_LIVENESS_TIMEOUT_CODE,
+          }),
+        );
+        await bridge.shutdown();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 
   it('transport failure marks the channel dying before process exit', async () => {
@@ -12119,6 +13013,628 @@ describe('createAcpSessionBridge', () => {
     expect(retry.sessionId).toContain('c1');
   });
 
+  it('closes a session created after the public newSession deadline', async () => {
+    const late = deferred<NewSessionResponse>();
+    const closeCalls: Array<Record<string, unknown>> = [];
+    const newSessionEvents = recordNewSessionEvents();
+    const handle = makeChannel({
+      newSessionImpl: (params, agent) =>
+        agent.newSessionCalls.length === 2
+          ? late.promise
+          : { sessionId: `visible-${agent.newSessionCalls.length}` },
+      extMethodImpl: (method, params) => {
+        if (method === SERVE_CONTROL_EXT_METHODS.sessionClose) {
+          closeCalls.push(params);
+          return { closed: true };
+        }
+        return {};
+      },
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      initializeTimeoutMs: 20,
+      maxSessions: 2,
+      sessionScope: 'thread',
+      telemetry: newSessionEvents.telemetry,
+    });
+    const sibling = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    await expect(
+      bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+    ).rejects.toBeInstanceOf(BridgeTimeoutError);
+    expect(handle.killed).toBe(false);
+    expect(bridge.sessionCount).toBe(1);
+    expect(newSessionEvents.named('public_result')).toEqual([
+      expect.objectContaining({
+        'qwen-code.daemon.session_new.result': 'timeout',
+        'qwen-code.daemon.session_new.channel_was_empty': false,
+      }),
+    ]);
+    expect(
+      handle.agent.newSessionCalls[1]?._meta?.[
+        SESSION_INITIALIZATION_DEADLINE_META_KEY
+      ],
+    ).toEqual(expect.any(Number));
+    await expect(
+      bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+    ).rejects.toBeInstanceOf(SessionLimitExceededError);
+
+    late.resolve({ sessionId: 'hidden-late' });
+    await vi.waitFor(() =>
+      expect(closeCalls).toContainEqual(
+        expect.objectContaining({ sessionId: 'hidden-late' }),
+      ),
+    );
+    expect(bridge.sessionCount).toBe(1);
+
+    const next = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    expect(next.sessionId).toBe('visible-3');
+    expect(bridge.sessionCount).toBe(2);
+    expect(sibling.sessionId).toBe('visible-1');
+    await bridge.shutdown();
+  });
+
+  it('reports and reaps a timed-out newSession on an empty channel', async () => {
+    vi.useFakeTimers();
+    const newSessionEvents = recordNewSessionEvents();
+    const handle = makeChannel({
+      newSessionImpl: () => new Promise<NewSessionResponse>(() => {}),
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      initializeTimeoutMs: 20,
+      telemetry: newSessionEvents.telemetry,
+    });
+    try {
+      const timedOut = bridge
+        .spawnOrAttach({ workspaceCwd: WS_A })
+        .catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(20);
+
+      expect(await timedOut).toBeInstanceOf(BridgeTimeoutError);
+      expect(newSessionEvents.named('public_result')).toEqual([
+        expect.objectContaining({
+          'qwen-code.daemon.session_new.result': 'timeout',
+          'qwen-code.daemon.session_new.channel_was_empty': true,
+        }),
+      ]);
+      expect(handle.killed).toBe(true);
+    } finally {
+      await bridge.shutdown();
+      vi.useRealTimers();
+    }
+  });
+
+  it('returns an empty-channel timeout without waiting for channel kill', async () => {
+    vi.useFakeTimers();
+    const handle = makeChannel({
+      newSessionImpl: () => new Promise<NewSessionResponse>(() => {}),
+    });
+    const kill = vi.fn(() => new Promise<void>(() => {}));
+    handle.channel = { ...handle.channel, kill };
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      initializeTimeoutMs: 20,
+    });
+    try {
+      const timedOut = bridge
+        .spawnOrAttach({ workspaceCwd: WS_A })
+        .catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(20);
+
+      expect(await timedOut).toBeInstanceOf(BridgeTimeoutError);
+      expect(kill).toHaveBeenCalledOnce();
+    } finally {
+      handle.channel.killSync();
+      vi.useRealTimers();
+    }
+  });
+
+  it('treats a missing late newSession as conclusively cleaned up', async () => {
+    vi.useFakeTimers();
+    const late = deferred<NewSessionResponse>();
+    const newSessionEvents = recordNewSessionEvents();
+    const handle = makeChannel({
+      newSessionImpl: (_params, agent) =>
+        agent.newSessionCalls.length === 2
+          ? late.promise
+          : { sessionId: `visible-${agent.newSessionCalls.length}` },
+      extMethodImpl: (method, params) => {
+        if (method === SERVE_CONTROL_EXT_METHODS.sessionClose) {
+          throw RequestError.resourceNotFound(
+            `session:${String(params['sessionId'])}`,
+          );
+        }
+        return {};
+      },
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      initializeTimeoutMs: 20,
+      maxSessions: 2,
+      sessionScope: 'thread',
+      telemetry: newSessionEvents.telemetry,
+    });
+    try {
+      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const timedOut = bridge
+        .spawnOrAttach({ workspaceCwd: WS_A })
+        .catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(20);
+      expect(await timedOut).toBeInstanceOf(BridgeTimeoutError);
+
+      late.resolve({ sessionId: 'already-gone' });
+      await vi.advanceTimersByTimeAsync(0);
+      await expect(
+        bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+      ).resolves.toMatchObject({ sessionId: 'visible-3' });
+      expect(newSessionEvents.named('cleanup')).toEqual([
+        expect.objectContaining({
+          'qwen-code.daemon.session_new.cleanup_result': 'not_found',
+          'session.id': 'already-gone',
+        }),
+      ]);
+    } finally {
+      await bridge.shutdown();
+      vi.useRealTimers();
+    }
+  });
+
+  it('holds a requested id until an abandoned newSession settles', async () => {
+    const late = deferred<NewSessionResponse>();
+    const handle = makeChannel({
+      newSessionImpl: (_params, agent) =>
+        agent.newSessionCalls.length === 2
+          ? late.promise
+          : { sessionId: `visible-${agent.newSessionCalls.length}` },
+      extMethodImpl: () => ({ closed: true }),
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      initializeTimeoutMs: 20,
+      sessionScope: 'thread',
+    });
+    await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    await expect(
+      bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionId: 'requested-late',
+      }),
+    ).rejects.toBeInstanceOf(BridgeTimeoutError);
+    await expect(
+      bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionId: 'requested-late',
+      }),
+    ).rejects.toMatchObject({
+      activeAction: 'spawn',
+      requestedAction: 'spawn',
+      reason: 'awaiting_abandoned_cleanup',
+      retryAfterSeconds: 5,
+    });
+    await expect(
+      bridge.loadSession({
+        sessionId: 'requested-late',
+        workspaceCwd: WS_A,
+      }),
+    ).rejects.toMatchObject({
+      activeAction: 'spawn',
+      requestedAction: 'load',
+      reason: 'awaiting_abandoned_cleanup',
+      retryAfterSeconds: 5,
+    });
+
+    late.resolve({ sessionId: 'requested-late' });
+    await vi.waitFor(() =>
+      expect(handle.agent.extMethodCalls).toContainEqual(
+        expect.objectContaining({
+          method: SERVE_CONTROL_EXT_METHODS.sessionClose,
+          params: expect.objectContaining({ sessionId: 'requested-late' }),
+        }),
+      ),
+    );
+    await expect(
+      bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionId: 'requested-late',
+      }),
+    ).resolves.toMatchObject({ sessionId: 'visible-3' });
+    await bridge.shutdown();
+  });
+
+  it('does not close a late newSession id owned by an in-flight restore', async () => {
+    const lateNewSession = deferred<NewSessionResponse>();
+    const restoring = deferred<LoadSessionResponse>();
+    const closeCalls: Array<Record<string, unknown>> = [];
+    const handle = makeChannel({
+      newSessionImpl: (_params, agent) =>
+        agent.newSessionCalls.length === 2
+          ? lateNewSession.promise
+          : { sessionId: `visible-${agent.newSessionCalls.length}` },
+      loadSessionImpl: () => restoring.promise,
+      extMethodImpl: (method, params) => {
+        if (method === SERVE_CONTROL_EXT_METHODS.sessionClose) {
+          closeCalls.push(params);
+          return { closed: true };
+        }
+        return {};
+      },
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      initializeTimeoutMs: 20,
+      sessionScope: 'thread',
+    });
+    try {
+      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await expect(
+        bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+      ).rejects.toBeInstanceOf(BridgeTimeoutError);
+
+      const restore = bridge.loadSession({
+        sessionId: 'restoring',
+        workspaceCwd: WS_A,
+      });
+      await vi.waitFor(() =>
+        expect(handle.agent.loadSessionCalls).toHaveLength(1),
+      );
+
+      lateNewSession.resolve({ sessionId: 'restoring' });
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(closeCalls).toHaveLength(0);
+
+      restoring.resolve({});
+      await expect(restore).resolves.toMatchObject({
+        sessionId: 'restoring',
+      });
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(closeCalls).toHaveLength(0);
+      expect(() => bridge.getSessionSummary('restoring')).not.toThrow();
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
+  it('does not close a late newSession id owned by an in-flight spawn', async () => {
+    vi.useFakeTimers();
+    const lateAnonymous = deferred<NewSessionResponse>();
+    const requestedSpawn = deferred<NewSessionResponse>();
+    const closeCalls: Array<Record<string, unknown>> = [];
+    const handle = makeChannel({
+      newSessionImpl: (_params, agent) => {
+        if (agent.newSessionCalls.length === 2) return lateAnonymous.promise;
+        if (agent.newSessionCalls.length === 3) return requestedSpawn.promise;
+        return { sessionId: `visible-${agent.newSessionCalls.length}` };
+      },
+      extMethodImpl: (method, params) => {
+        if (method === SERVE_CONTROL_EXT_METHODS.sessionClose) {
+          closeCalls.push(params);
+          return { closed: true };
+        }
+        return {};
+      },
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      initializeTimeoutMs: 20,
+      sessionScope: 'thread',
+    });
+    try {
+      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const timedOut = bridge
+        .spawnOrAttach({ workspaceCwd: WS_A })
+        .catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(20);
+      expect(await timedOut).toBeInstanceOf(BridgeTimeoutError);
+
+      const spawning = bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionId: 'requested-in-flight',
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(handle.agent.newSessionCalls).toHaveLength(3);
+
+      lateAnonymous.resolve({ sessionId: 'requested-in-flight' });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(closeCalls).toHaveLength(0);
+
+      requestedSpawn.resolve({ sessionId: 'requested-in-flight' });
+      await expect(spawning).resolves.toMatchObject({
+        sessionId: 'requested-in-flight',
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(closeCalls).toHaveLength(0);
+      expect(() =>
+        bridge.getSessionSummary('requested-in-flight'),
+      ).not.toThrow();
+    } finally {
+      await bridge.shutdown();
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps the public timeout contract when the agent enforces the deadline', async () => {
+    const newSessionEvents = recordNewSessionEvents();
+    const handle = makeChannel({
+      newSessionImpl: (_params, agent) => {
+        if (agent.newSessionCalls.length === 1) {
+          return { sessionId: 'visible-sibling' };
+        }
+        throw new RequestError(
+          -32603,
+          'Session initialization deadline exceeded',
+          { errorKind: 'session_initialization_timeout' },
+        );
+      },
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      initializeTimeoutMs: 1_000,
+      sessionScope: 'thread',
+      telemetry: newSessionEvents.telemetry,
+    });
+    await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    await expect(
+      bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+    ).rejects.toMatchObject({
+      name: 'BridgeTimeoutError',
+      label: 'newSession',
+      timeoutMs: 1_000,
+    });
+    expect(handle.killed).toBe(false);
+    expect(bridge.sessionCount).toBe(1);
+    expect(newSessionEvents.named('public_result')).toEqual([
+      expect.objectContaining({
+        'qwen-code.daemon.session_new.result': 'timeout',
+        'qwen-code.daemon.session_new.timeout_ms': 1_000,
+        'qwen-code.daemon.session_new.channel_was_empty': false,
+      }),
+    ]);
+    await bridge.shutdown();
+  });
+
+  it('refuses fresh sessions when late newSession close is refused', async () => {
+    vi.useFakeTimers();
+    const late = deferred<NewSessionResponse>();
+    const handle = makeChannel({
+      newSessionImpl: (_params, agent) =>
+        agent.newSessionCalls.length === 2
+          ? late.promise
+          : { sessionId: `visible-${agent.newSessionCalls.length}` },
+      initializeImpl: () =>
+        activeWorkInitializeResponse({
+          categories: [...ACTIVE_WORK_LEGACY_HOLD_CATEGORIES],
+        }),
+      extMethodImpl: (method, params) => {
+        if (method === SERVE_CONTROL_EXT_METHODS.sessionClose) {
+          return params['sessionId'] === 'hidden-late'
+            ? { closed: false, holds: [agentHold('late-agent')] }
+            : new Promise<Record<string, unknown>>(() => {});
+        }
+        return {};
+      },
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      initializeTimeoutMs: 20_000,
+      sessionScope: 'thread',
+    });
+    try {
+      const sibling = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const timedOut = bridge
+        .spawnOrAttach({ workspaceCwd: WS_A })
+        .catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(await timedOut).toBeInstanceOf(BridgeTimeoutError);
+
+      late.resolve({ sessionId: 'hidden-late' });
+      await vi.advanceTimersByTimeAsync(0);
+      await expect(
+        bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+      ).rejects.toMatchObject({ reason: 'new_session_cleanup_failed' });
+      await expect(
+        bridge.sendPrompt(sibling.sessionId, {
+          sessionId: sibling.sessionId,
+          prompt: [{ type: 'text', text: 'still alive' }],
+        }),
+      ).resolves.toMatchObject({ stopReason: 'end_turn' });
+      expect(handle.killed).toBe(false);
+
+      const detached = bridge.detachClient(sibling.sessionId, sibling.clientId);
+      await vi.advanceTimersByTimeAsync(ACTIVE_WORK_CLOSE_TIMEOUT_MS);
+      await detached;
+      expect(handle.killed).toBe(true);
+    } finally {
+      await bridge.shutdown();
+      vi.useRealTimers();
+    }
+  });
+
+  it('refuses fresh sessions when an abandoned newSession does not settle', async () => {
+    vi.useFakeTimers();
+    const handle = makeChannel({
+      initializeImpl: () =>
+        activeWorkInitializeResponse({
+          categories: [...ACTIVE_WORK_LEGACY_HOLD_CATEGORIES],
+        }),
+      newSessionImpl: (_params, agent) =>
+        agent.newSessionCalls.length === 2
+          ? new Promise<NewSessionResponse>(() => {})
+          : { sessionId: `visible-${agent.newSessionCalls.length}` },
+      extMethodImpl: (method) =>
+        method === SERVE_CONTROL_EXT_METHODS.sessionClose
+          ? new Promise<Record<string, unknown>>(() => {})
+          : {},
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      initializeTimeoutMs: 20,
+      sessionScope: 'thread',
+    });
+    try {
+      const sibling = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const timedOut = bridge
+        .spawnOrAttach({ workspaceCwd: WS_A })
+        .catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(20);
+      expect(await timedOut).toBeInstanceOf(BridgeTimeoutError);
+      await vi.advanceTimersByTimeAsync(20);
+
+      await expect(
+        bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+      ).rejects.toMatchObject({ reason: 'new_session_settlement_overdue' });
+      await expect(
+        bridge.sendPrompt(sibling.sessionId, {
+          sessionId: sibling.sessionId,
+          prompt: [{ type: 'text', text: 'still alive' }],
+        }),
+      ).resolves.toMatchObject({ stopReason: 'end_turn' });
+      expect(handle.killed).toBe(false);
+
+      const detached = bridge.detachClient(sibling.sessionId, sibling.clientId);
+      await vi.advanceTimersByTimeAsync(ACTIVE_WORK_CLOSE_TIMEOUT_MS);
+      await detached;
+      expect(handle.killed).toBe(true);
+    } finally {
+      await bridge.shutdown();
+      vi.useRealTimers();
+    }
+  });
+
+  it('reopens fresh admission when an overdue newSession settles cleanly', async () => {
+    vi.useFakeTimers();
+    const late = deferred<NewSessionResponse>();
+    const handle = makeChannel({
+      newSessionImpl: (_params, agent) =>
+        agent.newSessionCalls.length === 2
+          ? late.promise
+          : { sessionId: `visible-${agent.newSessionCalls.length}` },
+      extMethodImpl: (method) =>
+        method === SERVE_CONTROL_EXT_METHODS.sessionClose
+          ? { closed: true }
+          : {},
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      initializeTimeoutMs: 20,
+      sessionScope: 'thread',
+    });
+    try {
+      const sibling = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const timedOut = bridge
+        .spawnOrAttach({ workspaceCwd: WS_A })
+        .catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(20);
+      expect(await timedOut).toBeInstanceOf(BridgeTimeoutError);
+      await vi.advanceTimersByTimeAsync(20);
+      await expect(
+        bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+      ).rejects.toMatchObject({ reason: 'new_session_settlement_overdue' });
+
+      late.resolve({ sessionId: 'hidden-late' });
+      await vi.advanceTimersByTimeAsync(0);
+      await expect(
+        bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+      ).resolves.toMatchObject({ sessionId: 'visible-3' });
+      expect(handle.killed).toBe(false);
+      expect(sibling.sessionId).toBe('visible-1');
+    } finally {
+      await bridge.shutdown();
+      vi.useRealTimers();
+    }
+  });
+
+  it('tracks settlement overdue state per abandoned newSession', async () => {
+    vi.useFakeTimers();
+    const lateA = deferred<NewSessionResponse>();
+    const lateB = deferred<NewSessionResponse>();
+    const handle = makeChannel({
+      newSessionImpl: (_params, agent) => {
+        if (agent.newSessionCalls.length === 2) return lateA.promise;
+        if (agent.newSessionCalls.length === 3) return lateB.promise;
+        return { sessionId: `visible-${agent.newSessionCalls.length}` };
+      },
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      initializeTimeoutMs: 20,
+      sessionScope: 'thread',
+    });
+    try {
+      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const abandonedA = bridge
+        .spawnOrAttach({ workspaceCwd: WS_A })
+        .catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(10);
+      const abandonedB = bridge
+        .spawnOrAttach({ workspaceCwd: WS_A })
+        .catch((error: unknown) => error);
+
+      await vi.advanceTimersByTimeAsync(10);
+      expect(await abandonedA).toBeInstanceOf(BridgeTimeoutError);
+      await vi.advanceTimersByTimeAsync(10);
+      expect(await abandonedB).toBeInstanceOf(BridgeTimeoutError);
+      await vi.advanceTimersByTimeAsync(10);
+      await expect(
+        bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+      ).rejects.toMatchObject({ reason: 'new_session_settlement_overdue' });
+
+      lateA.reject(new Error('late failure A'));
+      await vi.advanceTimersByTimeAsync(0);
+      await expect(
+        bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+      ).resolves.toMatchObject({ sessionId: 'visible-4' });
+
+      lateB.reject(new Error('late failure B'));
+      await vi.advanceTimersByTimeAsync(0);
+    } finally {
+      await bridge.shutdown();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(['load', 'resume'] as const)(
+    'counts an abandoned newSession against %s admission capacity',
+    async (action) => {
+      vi.useFakeTimers();
+      const handle = makeChannel({
+        newSessionImpl: (_params, agent) =>
+          agent.newSessionCalls.length === 2
+            ? new Promise<NewSessionResponse>(() => {})
+            : { sessionId: `visible-${agent.newSessionCalls.length}` },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        initializeTimeoutMs: 20,
+        maxSessions: 2,
+        sessionScope: 'thread',
+      });
+      try {
+        await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        const timedOut = bridge
+          .spawnOrAttach({ workspaceCwd: WS_A })
+          .catch((error: unknown) => error);
+        await vi.advanceTimersByTimeAsync(20);
+        expect(await timedOut).toBeInstanceOf(BridgeTimeoutError);
+
+        const request = {
+          sessionId: `capacity-${action}`,
+          workspaceCwd: WS_A,
+        };
+        const result =
+          action === 'load'
+            ? bridge.loadSession(request)
+            : bridge.resumeSession(request);
+        await expect(result).rejects.toBeInstanceOf(SessionLimitExceededError);
+      } finally {
+        await bridge.shutdown();
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it('killAllSync force-kills BOTH the dying channel AND the fresh attach-target (BkUyD overwrite race)', async () => {
     // The killSession → spawnOrAttach race opens a window where two
     // channels are simultaneously "alive" from the daemon's
@@ -12339,6 +13855,97 @@ describe('createAcpSessionBridge', () => {
       expect(
         handle.agent.promptCalls[0]?._meta?.['qwen.daemon.continueLastTurn'],
       ).toBe(undefined);
+      await bridge.shutdown();
+    });
+
+    it('strips a client-spoofed restoreAskUserQuestion meta key', async () => {
+      const handle = makeChannel();
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'spoof restore' }],
+        _meta: { 'qwen.daemon.restoreAskUserQuestion': true },
+      } as PromptRequest);
+
+      expect(
+        handle.agent.promptCalls[0]?._meta?.[
+          'qwen.daemon.restoreAskUserQuestion'
+        ],
+      ).toBe(undefined);
+      await bridge.shutdown();
+    });
+
+    it('does not auto-restore ask_user_question when the switch is off', async () => {
+      const handle = makeChannel({
+        loadSessionImpl: () => ({
+          configOptions: [],
+          _meta: { 'qwen.daemon.restoreAskUserQuestion': true },
+        }),
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+
+      await bridge.loadSession({
+        sessionId: 'persisted-auq',
+        workspaceCwd: WS_A,
+      });
+      await Promise.resolve();
+      expect(handle.agent.promptCalls).toHaveLength(0);
+      await bridge.shutdown();
+    });
+
+    it('fires a tracked restore prompt when load hints and the switch is on', async () => {
+      const handle = makeChannel({
+        promptImpl: () => ({ stopReason: 'end_turn' }),
+        loadSessionImpl: () => ({
+          configOptions: [],
+          _meta: { 'qwen.daemon.restoreAskUserQuestion': true },
+        }),
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        restoreAskUserQuestion: true,
+      });
+
+      await bridge.loadSession({
+        sessionId: 'persisted-auq',
+        workspaceCwd: WS_A,
+        clientId: 'client-1',
+      });
+      await vi.waitFor(() => {
+        expect(handle.agent.promptCalls).toHaveLength(1);
+      });
+      expect(handle.agent.promptCalls[0]?.prompt).toEqual([]);
+      expect(
+        handle.agent.promptCalls[0]?._meta?.[
+          'qwen.daemon.restoreAskUserQuestion'
+        ],
+      ).toBe(true);
+      await bridge.shutdown();
+    });
+
+    it('does not fire a restore prompt without an attached client', async () => {
+      const handle = makeChannel({
+        promptImpl: () => ({ stopReason: 'end_turn' }),
+        loadSessionImpl: () => ({
+          configOptions: [],
+          _meta: { 'qwen.daemon.restoreAskUserQuestion': true },
+        }),
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        restoreAskUserQuestion: true,
+      });
+
+      // Internal restores (boot rehydrate, keepalive) pass no clientId;
+      // nobody could answer the re-hung question, so it must not fire.
+      await bridge.loadSession({
+        sessionId: 'persisted-auq',
+        workspaceCwd: WS_A,
+      });
+      await Promise.resolve();
+      expect(handle.agent.promptCalls).toHaveLength(0);
       await bridge.shutdown();
     });
 
@@ -13280,7 +14887,7 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
-    it('keeps media references on the event bus and resolves bytes for ACP', async () => {
+    it('keeps attachment references on the event bus and resolves bytes for ACP', async () => {
       const prompts: PromptRequest[] = [];
       const factory: ChannelFactory = async () =>
         makeChannel({
@@ -13291,7 +14898,7 @@ describe('createAcpSessionBridge', () => {
         }).channel;
       const bridge = makeBridge({ channelFactory: factory });
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
-      const reference = await bridge.storeSessionMedia(
+      const reference = await bridge.storeSessionAttachment(
         session.sessionId,
         Uint8Array.from([1, 2, 3]),
         'image/png',
@@ -13323,11 +14930,73 @@ describe('createAcpSessionBridge', () => {
       expect(prompts[0]?.prompt).toEqual([
         { type: 'image', data: 'AQID', mimeType: 'image/png' },
       ]);
-      expect(prompts[0]?._meta?.['qwen.daemon.mediaReferences']).toEqual([
+      expect(prompts[0]?._meta?.['qwen.daemon.attachmentReferences']).toEqual([
         reference,
       ]);
       expect(await echoed).toEqual(reference);
       abort.abort();
+      await bridge.shutdown();
+    });
+
+    it('resolves text and binary file attachment references for ACP', async () => {
+      const prompts: PromptRequest[] = [];
+      const bridge = makeBridge({
+        channelFactory: async () =>
+          makeChannel({
+            promptImpl: (request) => {
+              prompts.push(request);
+              return { stopReason: 'end_turn' };
+            },
+          }).channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const textReference = await bridge.storeSessionAttachment(
+        session.sessionId,
+        new TextEncoder().encode('hello'),
+        'text/plain',
+        { clientId: session.clientId },
+        'notes.txt',
+      );
+      const binaryReference = await bridge.storeSessionAttachment(
+        session.sessionId,
+        Uint8Array.from([0, 255, 1]),
+        'application/pdf',
+        { clientId: session.clientId },
+        'report.pdf',
+      );
+
+      await bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [textReference, binaryReference],
+        },
+        undefined,
+        { clientId: session.clientId },
+      );
+
+      expect(prompts[0]?.prompt).toEqual([
+        {
+          type: 'resource',
+          resource: {
+            uri: 'attachment:///notes.txt',
+            mimeType: 'text/plain',
+            text: 'hello',
+          },
+        },
+        {
+          type: 'resource',
+          resource: {
+            uri: 'attachment:///report.pdf',
+            mimeType: 'application/pdf',
+            blob: 'AP8B',
+          },
+        },
+      ]);
+      expect(prompts[0]?._meta?.['qwen.daemon.attachmentReferences']).toEqual([
+        textReference,
+        binaryReference,
+      ]);
       await bridge.shutdown();
     });
 
@@ -13371,86 +15040,23 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
-    it('retains uploaded media across last-client detach and session load', async () => {
+    it('retains uploaded attachments across last-client detach and session load', async () => {
+      const root = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-bridge-attachments-'),
+      );
       const bridge = makeBridge({
         channelFactory: async () =>
           makeChannel({
             loadSessionImpl: () => ({}),
           }).channel,
+        sessionAttachmentsRoot: root,
       });
-      const session = await bridge.spawnOrAttach({
-        workspaceCwd: WS_A,
-        sessionScope: 'thread',
-      });
-      const reference = await bridge.storeSessionMedia(
-        session.sessionId,
-        Uint8Array.from([1, 2, 3]),
-        'image/png',
-        { clientId: session.clientId },
-      );
-
-      await bridge.detachClient(session.sessionId, session.clientId);
-      expect(bridge.sessionCount).toBe(0);
-
-      const restored = await bridge.loadSession({
-        sessionId: session.sessionId,
-        workspaceCwd: WS_A,
-      });
-      expect(
-        await bridge.readSessionMedia(restored.sessionId, reference.mediaId, {
-          clientId: restored.clientId,
-        }),
-      ).toEqual({ data: Buffer.from([1, 2, 3]), mimeType: 'image/png' });
-
-      await bridge.shutdown();
-    });
-
-    it('retains uploaded media across idle timeout and session load', async () => {
-      const bridge = makeBridge({
-        channelFactory: async () =>
-          makeChannel({ loadSessionImpl: () => ({}) }).channel,
-      });
-      const session = await bridge.spawnOrAttach({
-        workspaceCwd: WS_A,
-        sessionScope: 'thread',
-      });
-      const reference = await bridge.storeSessionMedia(
-        session.sessionId,
-        Uint8Array.from([1, 2, 3]),
-        'image/png',
-        { clientId: session.clientId },
-      );
-
-      await bridge.closeSession(session.sessionId, undefined, {
-        reason: 'idle_timeout',
-      });
-      const restored = await bridge.loadSession({
-        sessionId: session.sessionId,
-        workspaceCwd: WS_A,
-      });
-
-      expect(
-        await bridge.readSessionMedia(restored.sessionId, reference.mediaId, {
-          clientId: restored.clientId,
-        }),
-      ).toEqual({ data: Buffer.from([1, 2, 3]), mimeType: 'image/png' });
-      await bridge.shutdown();
-    });
-
-    it('reaps retained media after a detached session exceeds the media TTL', async () => {
-      vi.useFakeTimers();
       try {
-        const bridge = makeBridge({
-          channelFactory: async () =>
-            makeChannel({ loadSessionImpl: () => ({}) }).channel,
-          sessionReapIntervalMs: 60 * 60_000,
-          sessionIdleTimeoutMs: 0,
-        });
         const session = await bridge.spawnOrAttach({
           workspaceCwd: WS_A,
           sessionScope: 'thread',
         });
-        const reference = await bridge.storeSessionMedia(
+        const reference = await bridge.storeSessionAttachment(
           session.sessionId,
           Uint8Array.from([1, 2, 3]),
           'image/png',
@@ -13458,63 +15064,53 @@ describe('createAcpSessionBridge', () => {
         );
 
         await bridge.detachClient(session.sessionId, session.clientId);
-        await vi.advanceTimersByTimeAsync(4 * 60 * 60_000);
+        expect(bridge.sessionCount).toBe(0);
 
         const restored = await bridge.loadSession({
           sessionId: session.sessionId,
           workspaceCwd: WS_A,
         });
         expect(
-          await bridge.readSessionMedia(restored.sessionId, reference.mediaId, {
-            clientId: restored.clientId,
-          }),
-        ).toBeUndefined();
-
-        await bridge.shutdown();
+          await bridge.readSessionAttachment(
+            restored.sessionId,
+            reference.attachmentId,
+            {
+              clientId: restored.clientId,
+            },
+          ),
+        ).toEqual({ data: Buffer.from([1, 2, 3]), mimeType: 'image/png' });
       } finally {
-        vi.useRealTimers();
+        await bridge.shutdown();
+        await fsp.rm(root, { recursive: true, force: true });
       }
     });
 
-    it('still sweeps retained media when the session reaper is disabled', async () => {
-      // sessionReapIntervalMs: 0 turns off idle-session reaping, but the
-      // retained-media TTL sweep must keep running — it is the only runtime
-      // release path for detach-retained media.
-      vi.useFakeTimers();
+    it('deletes persisted attachments only when session cleanup requests it', async () => {
+      const root = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-bridge-attachments-delete-'),
+      );
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+        sessionAttachmentsRoot: root,
+      });
       try {
-        const bridge = makeBridge({
-          channelFactory: async () =>
-            makeChannel({ loadSessionImpl: () => ({}) }).channel,
-          sessionReapIntervalMs: 0,
-          sessionIdleTimeoutMs: 0,
-        });
-        const session = await bridge.spawnOrAttach({
-          workspaceCwd: WS_A,
-          sessionScope: 'thread',
-        });
-        const reference = await bridge.storeSessionMedia(
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        const reference = await bridge.storeSessionAttachment(
           session.sessionId,
-          Uint8Array.from([1, 2, 3]),
+          Uint8Array.of(1, 2, 3),
           'image/png',
           { clientId: session.clientId },
         );
 
-        await bridge.detachClient(session.sessionId, session.clientId);
-        await vi.advanceTimersByTimeAsync(4 * 60 * 60_000);
+        await bridge.closeSession(session.sessionId);
+        await bridge.deleteSessionAttachments(session.sessionId);
 
-        const restored = await bridge.loadSession({
-          sessionId: session.sessionId,
-          workspaceCwd: WS_A,
-        });
-        expect(
-          await bridge.readSessionMedia(restored.sessionId, reference.mediaId, {
-            clientId: restored.clientId,
-          }),
-        ).toBeUndefined();
-
-        await bridge.shutdown();
+        const reopened = new SessionAttachmentStore(root, session.sessionId);
+        expect(await reopened.read(reference.attachmentId)).toBeUndefined();
+        await reopened.close();
       } finally {
-        vi.useRealTimers();
+        await bridge.shutdown();
+        await fsp.rm(root, { recursive: true, force: true });
       }
     });
 
@@ -13525,7 +15121,7 @@ describe('createAcpSessionBridge', () => {
       // degrading to the crash-path detach retention. (A structured
       // RequestError answer is the separate definitive-refusal case, where
       // kill spares the channel and retries later.)
-      const close = vi.spyOn(SessionMediaStore.prototype, 'close');
+      const close = vi.spyOn(SessionAttachmentStore.prototype, 'close');
       const handle = makeChannel({
         extMethodImpl: (method) => {
           if (method === SERVE_CONTROL_EXT_METHODS.sessionClose) {
@@ -13540,7 +15136,7 @@ describe('createAcpSessionBridge', () => {
       });
       try {
         const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
-        await bridge.storeSessionMedia(
+        await bridge.storeSessionAttachment(
           session.sessionId,
           Uint8Array.from([1, 2, 3]),
           'image/png',
@@ -14711,6 +16307,9 @@ describe('createAcpSessionBridge', () => {
     });
 
     it('creates a persisted branch even when live session capacity is full', async () => {
+      const attachmentRoot = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-branch-attachments-'),
+      );
       const handle = makeChannel({
         extMethodImpl: async (method) => {
           if (method !== SERVE_CONTROL_EXT_METHODS.sessionBranch) return {};
@@ -14721,25 +16320,47 @@ describe('createAcpSessionBridge', () => {
       const bridge = makeBridge({
         channelFactory: async () => handle.channel,
         maxSessions: 1,
+        sessionAttachmentsRoot: attachmentRoot,
       });
-      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      try {
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        const attachment = await bridge.storeSessionAttachment(
+          session.sessionId,
+          Uint8Array.of(1, 2, 3),
+          'application/json',
+          { clientId: session.clientId },
+          'notes.json',
+        );
 
-      const branch = await bridge.branchSession(session.sessionId, {
-        name: 'Branch 1',
-        atRecordId: '11111111-1111-4111-8111-111111111111',
-      });
+        const branch = await bridge.branchSession(session.sessionId, {
+          name: 'Branch 1',
+          atRecordId: '11111111-1111-4111-8111-111111111111',
+        });
 
-      expect(branch).toEqual({
-        sessionId: 'branch-1',
-        displayName: 'Branch 1',
-        forkedFrom: {
-          sessionId: session.sessionId,
-          displayName: session.sessionId.slice(0, 8),
-        },
-      });
-      expect(handle.agent.loadSessionCalls).toEqual([]);
+        expect(branch).toEqual({
+          sessionId: 'branch-1',
+          displayName: 'Branch 1',
+          forkedFrom: {
+            sessionId: session.sessionId,
+            displayName: session.sessionId.slice(0, 8),
+          },
+        });
+        expect(handle.agent.loadSessionCalls).toEqual([]);
 
-      await bridge.shutdown();
+        const branchAttachments = new SessionAttachmentStore(
+          attachmentRoot,
+          branch.sessionId,
+        );
+        await expect(
+          branchAttachments.read(attachment.attachmentId),
+        ).resolves.toEqual({
+          data: Buffer.from([1, 2, 3]),
+          mimeType: 'application/json',
+        });
+      } finally {
+        await bridge.shutdown();
+        await fsp.rm(attachmentRoot, { recursive: true, force: true });
+      }
     });
 
     it('restores a latest-state branch for v1 callers', async () => {
@@ -14754,6 +16375,13 @@ describe('createAcpSessionBridge', () => {
         channelFactory: async () => handle.channel,
       });
       const source = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const attachment = await bridge.storeSessionAttachment(
+        source.sessionId,
+        Uint8Array.of(1, 2, 3),
+        'application/json',
+        { clientId: source.clientId },
+        'notes.json',
+      );
 
       const branch = await bridge.branchSession(source.sessionId, {
         name: 'Live branch',
@@ -14772,6 +16400,16 @@ describe('createAcpSessionBridge', () => {
       if (!('clientId' in branch)) {
         throw new Error('latest-state branch was not restored');
       }
+      await expect(
+        bridge.readSessionAttachment(
+          branch.sessionId,
+          attachment.attachmentId,
+          { clientId: branch.clientId },
+        ),
+      ).resolves.toEqual({
+        data: Buffer.from([1, 2, 3]),
+        mimeType: 'application/json',
+      });
       await expect(
         bridge.sendPrompt(
           branch.sessionId,
@@ -15393,7 +17031,7 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
-    it('removes uploaded media owned by a deleted queued prompt', async () => {
+    it('keeps uploaded attachments after deleting a queued prompt', async () => {
       let release!: () => void;
       const gate = new Promise<void>((resolve) => {
         release = resolve;
@@ -15419,7 +17057,7 @@ describe('createAcpSessionBridge', () => {
         undefined,
         { promptId: 'media-delete-blocker' },
       );
-      const reference = await bridge.storeSessionMedia(
+      const reference = await bridge.storeSessionAttachment(
         session.sessionId,
         Uint8Array.of(1, 2, 3),
         'image/png',
@@ -15442,10 +17080,14 @@ describe('createAcpSessionBridge', () => {
         }),
       ).toEqual({ removed: true });
       expect(
-        await bridge.readSessionMedia(session.sessionId, reference.mediaId, {
-          clientId: session.clientId,
-        }),
-      ).toBeUndefined();
+        await bridge.readSessionAttachment(
+          session.sessionId,
+          reference.attachmentId,
+          {
+            clientId: session.clientId,
+          },
+        ),
+      ).toEqual({ data: Buffer.from([1, 2, 3]), mimeType: 'image/png' });
 
       release();
       await running;
@@ -18462,7 +20104,7 @@ describe('createAcpSessionBridge', () => {
     /** Spin up a bridge with a hand-driven channel; returns the bridge,
      *  session, and a function the test uses to call `requestPermission`
      *  from the agent side. */
-    async function setupForPermission() {
+    async function setupForPermission(opts: Partial<BridgeOptions> = {}) {
       let capturedConn: AgentSideConnection | undefined;
       const handles: Array<{ killed: boolean }> = [];
       const factory: ChannelFactory = async () => {
@@ -18492,10 +20134,102 @@ describe('createAcpSessionBridge', () => {
           },
         };
       };
-      const bridge = makeBridge({ channelFactory: factory });
+      const bridge = makeBridge({ ...opts, channelFactory: factory });
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
       return { bridge, session, conn: capturedConn!, handles };
     }
+
+    it('disables the permission timer by default and honors an explicit timeout', async () => {
+      const requestPermission = (
+        conn: AgentSideConnection,
+        sessionId: string,
+        toolCall: Record<string, unknown>,
+      ) =>
+        (
+          conn as unknown as {
+            requestPermission(p: unknown): Promise<unknown>;
+          }
+        ).requestPermission({
+          sessionId,
+          toolCall,
+          options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }],
+        });
+      const resolvePending = (
+        bridge: ReturnType<typeof makeBridge>,
+        sessionId: string,
+      ) => {
+        const requestId =
+          bridge.getSessionSummary(sessionId)?.pendingInteractions?.[0]
+            ?.requestId;
+        expect(requestId).toBeDefined();
+        bridge.respondToPermission(requestId!, {
+          outcome: { outcome: 'selected', optionId: 'allow' },
+        });
+      };
+      const exerciseBothInteractionKinds = async (
+        bridge: ReturnType<typeof makeBridge>,
+        sessionId: string,
+        conn: AgentSideConnection,
+        expectedTimeoutMs: number,
+      ) => {
+        const toolCalls = [
+          { toolCallId: 'ordinary', title: 'Need permission' },
+          {
+            toolCallId: 'question',
+            title: 'Need an answer',
+            _meta: { qwenInteractionKind: 'user_question' },
+          },
+        ];
+        for (const toolCall of toolCalls) {
+          const firstRelevantCall = mediatorRequest.mock.calls.length;
+          const response = requestPermission(conn, sessionId, toolCall);
+          await vi.waitFor(() => expect(bridge.pendingPermissionCount).toBe(1));
+          expect(mediatorRequest.mock.calls).toHaveLength(
+            firstRelevantCall + 1,
+          );
+          expect(mediatorRequest.mock.calls[firstRelevantCall]?.[1]).toBe(
+            expectedTimeoutMs,
+          );
+          resolvePending(bridge, sessionId);
+          await response;
+        }
+      };
+      const mediatorRequest = vi.spyOn(
+        MultiClientPermissionMediator.prototype,
+        'request',
+      );
+      try {
+        const { bridge, session, conn } = await setupForPermission();
+        try {
+          await exerciseBothInteractionKinds(
+            bridge,
+            session.sessionId,
+            conn,
+            0,
+          );
+        } finally {
+          await bridge.cancelSession(session.sessionId);
+          await bridge.shutdown();
+        }
+
+        const configured = await setupForPermission({
+          permissionResponseTimeoutMs: 45_000,
+        });
+        try {
+          await exerciseBothInteractionKinds(
+            configured.bridge,
+            configured.session.sessionId,
+            configured.conn,
+            45_000,
+          );
+        } finally {
+          await configured.bridge.cancelSession(configured.session.sessionId);
+          await configured.bridge.shutdown();
+        }
+      } finally {
+        mediatorRequest.mockRestore();
+      }
+    });
 
     it('publishes a permission_request event with a generated requestId and awaits a vote', async () => {
       const { bridge, session, conn } = await setupForPermission();
@@ -19553,7 +21287,9 @@ describe('createAcpSessionBridge', () => {
       // with no way to recover.
       const { bridge } = setup({
         setModelImpl: async () => {
-          throw new Error('unknown model');
+          throw new RequestError(-32603, 'Internal error', {
+            details: 'unknown model detail',
+          });
         },
       });
       const session = await bridge.spawnOrAttach({
@@ -19575,6 +21311,7 @@ describe('createAcpSessionBridge', () => {
       expect(first.value?.data).toMatchObject({
         sessionId: session.sessionId,
         requestedModelId: 'definitely-not-a-real-model',
+        error: 'unknown model detail',
       });
       abort.abort();
       await bridge.shutdown();
@@ -19659,100 +21396,6 @@ describe('createAcpSessionBridge', () => {
 
       abort.abort();
       await bridge.shutdown();
-    });
-
-    it('reaps retained media after an unexpectedly closed session expires', async () => {
-      vi.useFakeTimers();
-      const close = vi.spyOn(SessionMediaStore.prototype, 'close');
-      const handle = makeChannel();
-      const bridge = makeBridge({
-        channelFactory: async () => handle.channel,
-        sessionReapIntervalMs: 1_000,
-        sessionIdleTimeoutMs: 0,
-      });
-      try {
-        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
-        await bridge.storeSessionMedia(
-          session.sessionId,
-          Uint8Array.of(1),
-          'image/png',
-          { clientId: session.clientId },
-        );
-
-        handle.crash();
-        await vi.waitFor(() => expect(bridge.sessionCount).toBe(0));
-        await vi.advanceTimersByTimeAsync(2 * 60 * 60 * 1_000);
-        expect(close).not.toHaveBeenCalled();
-        await vi.advanceTimersByTimeAsync(60 * 60 * 1_000 + 1_000);
-
-        expect(close).toHaveBeenCalledOnce();
-      } finally {
-        await bridge.shutdown();
-        close.mockRestore();
-        vi.useRealTimers();
-      }
-    });
-
-    it('does not reap retained media while a restore of the session is in flight', async () => {
-      // A restore registers inFlightRestores synchronously but lands in byId
-      // only after the async channel-spawn/loadSession gap. A sweep tick
-      // inside that gap must not release the media being restored, or the
-      // restored session non-deterministically loses every attachment.
-      vi.useFakeTimers();
-      const handles: ChannelHandle[] = [];
-      const load = deferred<LoadSessionResponse>();
-      const factory: ChannelFactory = async () => {
-        const h = makeChannel({ loadSessionImpl: () => load.promise });
-        handles.push(h);
-        return h.channel;
-      };
-      const bridge = makeBridge({
-        channelFactory: factory,
-        sessionReapIntervalMs: 1_000,
-        sessionIdleTimeoutMs: 0,
-        sessionRestoreTimeoutMs: 4 * 60 * 60 * 1_000,
-      });
-      try {
-        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
-        const reference = await bridge.storeSessionMedia(
-          session.sessionId,
-          Uint8Array.of(1),
-          'image/png',
-          { clientId: session.clientId },
-        );
-
-        // Crash path: entry removed from byId, media retained with a
-        // detachedAt stamp.
-        handles[0]!.crash();
-        await vi.waitFor(() => expect(bridge.sessionCount).toBe(0));
-
-        // Start the restore and hold it open inside the loadSession gap.
-        const restore = bridge.loadSession({
-          sessionId: session.sessionId,
-          workspaceCwd: WS_A,
-        });
-        await vi.waitFor(() => {
-          expect(handles).toHaveLength(2);
-          expect(handles[1]!.agent.loadSessionCalls).toHaveLength(1);
-        });
-
-        // Sweep ticks straddling the TTL boundary land inside the gap.
-        await vi.advanceTimersByTimeAsync(3 * 60 * 60 * 1_000 + 61_000);
-
-        load.resolve({});
-        await restore;
-
-        // The retained media survived the restore.
-        const media = await bridge.readSessionMedia(
-          session.sessionId,
-          reference.mediaId,
-        );
-        expect(media).toBeDefined();
-        expect([...(media?.data ?? [])]).toEqual([1]);
-      } finally {
-        await bridge.shutdown();
-        vi.useRealTimers();
-      }
     });
 
     it('exit fired on planned shutdown does NOT trigger the unexpected-cleanup path', async () => {
@@ -20193,6 +21836,15 @@ describe('createAcpSessionBridge', () => {
         /initializeTimeoutMs/,
       );
       expect(() => makeBridge({ initializeTimeoutMs: -1 })).toThrow(
+        /initializeTimeoutMs/,
+      );
+      expect(() => makeBridge({ initializeTimeoutMs: Number.NaN })).toThrow(
+        /initializeTimeoutMs/,
+      );
+      expect(() => makeBridge({ initializeTimeoutMs: Infinity })).toThrow(
+        /initializeTimeoutMs/,
+      );
+      expect(() => makeBridge({ initializeTimeoutMs: 2_147_483_648 })).toThrow(
         /initializeTimeoutMs/,
       );
     });
@@ -21023,9 +22675,423 @@ describe('createAcpSessionBridge', () => {
       );
       await bridge.shutdown();
     });
+
+    it('keeps exact current-cwd inspection separate from the public summary', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      expect(bridge.getSessionCurrentCwd(session.sessionId)).toBe(WS_A);
+      expect(bridge.getSessionSummary(session.sessionId)).not.toHaveProperty(
+        'currentCwd',
+      );
+      expect(() => bridge.getSessionCurrentCwd('missing')).toThrow(
+        SessionNotFoundError,
+      );
+
+      await bridge.shutdown();
+    });
   });
 
   describe('session source metadata', () => {
+    it('durably anchors a source-less default session on demand', async () => {
+      const handle = makeChannel({
+        extMethodImpl: async (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.sessionSource
+            ? { persisted: true }
+            : {},
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+
+      await expect(
+        bridge.ensureDefaultSessionPersisted!(session.sessionId),
+      ).resolves.toBeUndefined();
+      expect(handle.agent.extMethodCalls).toContainEqual({
+        method: SERVE_CONTROL_EXT_METHODS.sessionSource,
+        params: {
+          sessionId: session.sessionId,
+          sourceType: 'default',
+        },
+      });
+
+      await bridge.shutdown();
+    });
+
+    it('rejects when the child cannot persist the default session anchor', async () => {
+      const handle = makeChannel({
+        extMethodImpl: async (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.sessionSource
+            ? { persisted: false }
+            : {},
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await expect(
+        bridge.ensureDefaultSessionPersisted!(session.sessionId),
+      ).rejects.toThrow('could not be persisted');
+      await expect(
+        bridge.ensureDefaultSessionPersisted!('missing'),
+      ).rejects.toThrow(SessionNotFoundError);
+
+      await bridge.shutdown();
+    });
+
+    it('rejects the reserved standalone source before spawning a child', async () => {
+      const factory = vi.fn<ChannelFactory>();
+      const bridge = makeBridge({ channelFactory: factory });
+
+      await expect(
+        bridge.spawnOrAttach({
+          workspaceCwd: WS_A,
+          sessionScope: 'thread',
+          sourceType: 'standalone',
+        }),
+      ).rejects.toThrow(InvalidSessionMetadataError);
+      expect(factory).not.toHaveBeenCalled();
+
+      await bridge.shutdown();
+    });
+
+    it.each(['load', 'resume'] as const)(
+      'rejects the reserved standalone source before generic %s restore',
+      async (action) => {
+        const factory = vi.fn<ChannelFactory>();
+        const bridge = makeBridge({ channelFactory: factory });
+        const request = {
+          sessionId: `standalone-${action}`,
+          workspaceCwd: WS_A,
+          sourceType: 'standalone',
+        };
+
+        await expect(
+          action === 'load'
+            ? bridge.loadSession(request)
+            : bridge.resumeSession(request),
+        ).rejects.toThrow(InvalidSessionMetadataError);
+        expect(factory).not.toHaveBeenCalled();
+
+        await bridge.shutdown();
+      },
+    );
+
+    it.each(['load', 'resume'] as const)(
+      'restores standalone sessions only through the daemon-owned %s surface',
+      async (action) => {
+        const handle = makeChannel();
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+        });
+
+        await bridge.restoreStandaloneSession(action, {
+          sessionId: `standalone-${action}`,
+          workspaceCwd: WS_A,
+          ...(action === 'load' ? { historyReplay: 'response' as const } : {}),
+        });
+
+        const call =
+          action === 'load'
+            ? handle.agent.loadSessionCalls[0]
+            : handle.agent.resumeSessionCalls[0];
+        expect(call?._meta).toMatchObject({
+          [SESSION_SOURCE_META_KEY]: {
+            sourceType: 'standalone',
+            [DAEMON_OWNED_STANDALONE_CREATION_KEY]: true,
+          },
+        });
+
+        await bridge.shutdown();
+      },
+    );
+
+    it('creates standalone sessions only through the daemon-owned surface', async () => {
+      const sessionId = '11111111-1111-4111-8111-111111111111';
+      const handle = makeChannel({
+        newSessionImpl: (params) => ({
+          sessionId: String(params._meta?.[REQUESTED_SESSION_ID_META_KEY]),
+        }),
+        extMethodImpl: async (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.sessionSource
+            ? { persisted: true }
+            : {},
+      });
+      const bridge = makeBridge({
+        sessionScope: 'single',
+        channelFactory: async () => handle.channel,
+      });
+
+      const session = await bridge.spawnStandaloneSession({
+        workspaceCwd: WS_A,
+        sessionId,
+      });
+
+      expect(session).toMatchObject({
+        sessionId,
+        attached: false,
+        sourceType: 'standalone',
+        sourcePersisted: true,
+      });
+      expect(handle.agent.newSessionCalls[0]?._meta).toMatchObject({
+        [REQUESTED_SESSION_ID_META_KEY]: sessionId,
+        [SESSION_SOURCE_META_KEY]: {
+          sourceType: 'standalone',
+          [DAEMON_OWNED_STANDALONE_CREATION_KEY]: true,
+        },
+      });
+      expect(handle.agent.extMethodCalls).toContainEqual({
+        method: SERVE_CONTROL_EXT_METHODS.sessionSource,
+        params: {
+          sessionId,
+          sourceType: 'standalone',
+          [DAEMON_OWNED_STANDALONE_CREATION_KEY]: true,
+        },
+      });
+      await expect(
+        bridge.sendPrompt(sessionId, {
+          sessionId,
+          prompt: [{ type: 'text', text: 'must remain held' }],
+        }),
+      ).rejects.toMatchObject({
+        data: { errorKind: 'working_directory_missing' },
+      });
+
+      await bridge.shutdown();
+    });
+
+    it('persists standalone parent lineage through the daemon-owned child surface', async () => {
+      const sessionId = '33333333-3333-4333-8333-333333333333';
+      const parentSessionId = '11111111-1111-4111-8111-111111111111';
+      const handle = makeChannel({
+        newSessionImpl: (params) => ({
+          sessionId: String(params._meta?.[REQUESTED_SESSION_ID_META_KEY]),
+        }),
+        extMethodImpl: async (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.sessionParent ||
+          method === SERVE_CONTROL_EXT_METHODS.sessionSource
+            ? { persisted: true }
+            : {},
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+
+      const session = await bridge.spawnStandaloneSession({
+        workspaceCwd: WS_A,
+        sessionId,
+        parentSessionId,
+      });
+
+      expect(session).toMatchObject({
+        sessionId,
+        sourceType: 'standalone',
+        sourcePersisted: true,
+        parentSessionPersisted: true,
+      });
+      expect(handle.agent.extMethodCalls).toContainEqual({
+        method: SERVE_CONTROL_EXT_METHODS.sessionParent,
+        params: { sessionId, parentSessionId },
+      });
+      expect(bridge.getSessionSummary(sessionId)).toMatchObject({
+        sourceType: 'standalone',
+        parentSessionId,
+      });
+
+      await bridge.shutdown();
+    });
+
+    it('rejects generic standalone branch, cwd, and persistent approval mutations before ACP dispatch', async () => {
+      const sessionId = '22222222-2222-4222-8222-222222222222';
+      const handle = makeChannel({
+        newSessionImpl: (params) => ({
+          sessionId: String(params._meta?.[REQUESTED_SESSION_ID_META_KEY]),
+        }),
+        extMethodImpl: async (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.sessionSource
+            ? { persisted: true }
+            : {},
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      await bridge.spawnStandaloneSession({ workspaceCwd: WS_A, sessionId });
+      const callsBeforeMutations = handle.agent.extMethodCalls.length;
+
+      await expect(bridge.branchSession(sessionId, {})).rejects.toThrow(
+        InvalidSessionMetadataError,
+      );
+      await expect(
+        bridge.changeSessionCwd(sessionId, { path: path.join(WS_A, 'other') }),
+      ).rejects.toMatchObject({
+        data: { errorKind: 'working_directory_missing' },
+      });
+      await expect(
+        bridge.setSessionApprovalMode(sessionId, ApprovalMode.YOLO, {
+          persist: true,
+        }),
+      ).rejects.toThrow(InvalidSessionMetadataError);
+      expect(handle.agent.extMethodCalls).toHaveLength(callsBeforeMutations);
+
+      await bridge.shutdown();
+    });
+
+    it('keeps a standalone model selection session-scoped', async () => {
+      const sessionId = '11111111-1111-4111-8111-111111111111';
+      const handle = makeChannel({
+        newSessionImpl: (params) => ({
+          sessionId: String(params._meta?.[REQUESTED_SESSION_ID_META_KEY]),
+        }),
+        extMethodImpl: async (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.sessionSource
+            ? { persisted: true }
+            : {},
+      });
+      const setModelCalls: Array<{ sessionId: string; modelId: string }> = [];
+      (
+        handle.agent as unknown as {
+          unstable_setSessionModel: (params: {
+            sessionId: string;
+            modelId: string;
+          }) => Promise<Record<string, unknown>>;
+        }
+      ).unstable_setSessionModel = async (params) => {
+        setModelCalls.push(params);
+        return {
+          _meta: { qwenModelSwitch: { modelId: params.modelId } },
+        };
+      };
+      const bridge = makeBridge({
+        sessionScope: 'single',
+        channelFactory: async () => handle.channel,
+      });
+
+      await bridge.spawnStandaloneSession({
+        workspaceCwd: WS_A,
+        sessionId,
+        modelServiceId: 'standalone-model',
+      });
+
+      expect(setModelCalls).toEqual([
+        { sessionId, modelId: 'standalone-model' },
+      ]);
+      const abort = new AbortController();
+      const iterator = bridge
+        .subscribeEvents(sessionId, {
+          lastEventId: 0,
+          signal: abort.signal,
+        })
+        [Symbol.asyncIterator]();
+      await expect(iterator.next()).resolves.toMatchObject({
+        value: {
+          type: 'model_switched',
+          data: { sessionId, modelId: 'standalone-model' },
+        },
+      });
+      const nextEvent = iterator.next();
+      const noSettingsChanged = await Promise.race([
+        nextEvent.then((result) => result.value?.type !== 'settings_changed'),
+        new Promise<true>((resolve) => setTimeout(() => resolve(true), 20)),
+      ]);
+      expect(noSettingsChanged).toBe(true);
+      abort.abort();
+
+      const directAbort = new AbortController();
+      const directIterator = bridge
+        .subscribeEvents(sessionId, {
+          lastEventId: bridge.getSessionLastEventId(sessionId),
+          signal: directAbort.signal,
+        })
+        [Symbol.asyncIterator]();
+      await bridge.setSessionModel(sessionId, {
+        sessionId,
+        modelId: 'standalone-model-2',
+      });
+      await expect(directIterator.next()).resolves.toMatchObject({
+        value: { type: 'replay_complete' },
+      });
+      await expect(directIterator.next()).resolves.toMatchObject({
+        value: {
+          type: 'model_switched',
+          data: { sessionId, modelId: 'standalone-model-2' },
+        },
+      });
+      const directNextEvent = directIterator.next();
+      const noDirectSettingsChanged = await Promise.race([
+        directNextEvent.then(
+          (result) => result.value?.type !== 'settings_changed',
+        ),
+        new Promise<true>((resolve) => setTimeout(() => resolve(true), 20)),
+      ]);
+      expect(noDirectSettingsChanged).toBe(true);
+      directAbort.abort();
+
+      await bridge.shutdown();
+    });
+
+    it('reports whether standalone creation reached newSession dispatch', async () => {
+      const sessionId = '11111111-1111-4111-8111-111111111111';
+      const beforeDispatch = makeBridge({
+        channelFactory: async () => Promise.reject(new Error('spawn failed')),
+      });
+      const afterDispatchHandle = makeChannel({
+        newSessionImpl: async () => Promise.reject(new Error('agent failed')),
+      });
+      const afterDispatch = makeBridge({
+        channelFactory: async () => afterDispatchHandle.channel,
+      });
+
+      await expect(
+        beforeDispatch.spawnStandaloneSession({
+          workspaceCwd: WS_A,
+          sessionId,
+        }),
+      ).rejects.toMatchObject({
+        name: 'StandaloneSessionSpawnError',
+        dispatched: false,
+      } satisfies Partial<StandaloneSessionSpawnError>);
+      await expect(
+        afterDispatch.spawnStandaloneSession({
+          workspaceCwd: WS_A,
+          sessionId,
+        }),
+      ).rejects.toMatchObject({
+        name: 'StandaloneSessionSpawnError',
+        dispatched: true,
+      } satisfies Partial<StandaloneSessionSpawnError>);
+
+      await beforeDispatch.shutdown();
+      await afterDispatch.shutdown();
+    });
+
+    it('rejects the reserved standalone source before branching', async () => {
+      const handle = makeChannel();
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await expect(
+        bridge.branchSession(session.sessionId, {
+          sourceType: 'standalone',
+        }),
+      ).rejects.toThrow(InvalidSessionMetadataError);
+      expect(handle.agent.extMethodCalls).not.toContainEqual(
+        expect.objectContaining({
+          method: SERVE_CONTROL_EXT_METHODS.sessionBranch,
+        }),
+      );
+
+      await bridge.shutdown();
+    });
+
     it('persists and returns source metadata in status and list summaries', async () => {
       const handles: ChannelHandle[] = [];
       const bridge = makeBridge({
@@ -21302,7 +23368,12 @@ describe('createAcpSessionBridge', () => {
 
     it('carries persisted source metadata into ACP session restore', async () => {
       for (const action of ['load', 'resume'] as const) {
-        const handle = makeChannel();
+        const handle = makeChannel({
+          extMethodImpl: async (method) =>
+            method === SERVE_CONTROL_EXT_METHODS.sessionSource
+              ? { persisted: true }
+              : {},
+        });
         const bridge = makeBridge({
           channelFactory: async () => handle.channel,
         });
@@ -21313,24 +23384,145 @@ describe('createAcpSessionBridge', () => {
           sourceId: 'dingtalk-main',
         };
 
-        if (action === 'load') {
-          await bridge.loadSession(request);
-        } else {
-          await bridge.resumeSession(request);
-        }
+        const restored =
+          action === 'load'
+            ? await bridge.loadSession(request)
+            : await bridge.resumeSession(request);
 
         const call =
           action === 'load'
             ? handle.agent.loadSessionCalls[0]
             : handle.agent.resumeSessionCalls[0];
+        expect(restored).toMatchObject({
+          sourceType: 'channel',
+          sourceId: 'dingtalk-main',
+          sourcePersisted: true,
+        });
         expect(call?._meta).toMatchObject({
           [SESSION_SOURCE_META_KEY]: {
             sourceType: 'channel',
             sourceId: 'dingtalk-main',
           },
         });
+        expect(handle.agent.extMethodCalls).toContainEqual({
+          method: SERVE_CONTROL_EXT_METHODS.sessionSource,
+          params: {
+            sessionId: request.sessionId,
+            sourceType: 'channel',
+            sourceId: 'dingtalk-main',
+          },
+        });
         await bridge.shutdown();
       }
+    });
+
+    it('backfills missing source metadata when restoring an existing entry', async () => {
+      const handle = makeChannel({
+        extMethodImpl: async (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.sessionSource
+            ? { persisted: true }
+            : {},
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+
+      const restored = await bridge.resumeSession({
+        sessionId: session.sessionId,
+        workspaceCwd: WS_A,
+        sourceType: 'channel',
+        sourceId: 'dingtalk-main',
+      });
+
+      expect(restored).toMatchObject({
+        sessionId: session.sessionId,
+        sourceType: 'channel',
+        sourceId: 'dingtalk-main',
+        sourcePersisted: true,
+      });
+      expect(bridge.getSessionSummary(session.sessionId)).toMatchObject({
+        sourceType: 'channel',
+        sourceId: 'dingtalk-main',
+      });
+      expect(handle.agent.extMethodCalls).toContainEqual({
+        method: SERVE_CONTROL_EXT_METHODS.sessionSource,
+        params: {
+          sessionId: session.sessionId,
+          sourceType: 'channel',
+          sourceId: 'dingtalk-main',
+        },
+      });
+
+      await bridge.shutdown();
+    });
+
+    it('rejects an existing-entry restore when the channel exits during source persistence', async () => {
+      const sourceStarted = deferred<void>();
+      const sourceRelease = deferred<Record<string, unknown>>();
+      const handle = makeChannel({
+        extMethodImpl: async (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionSource) {
+            sourceStarted.resolve();
+            return sourceRelease.promise;
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+
+      const restoring = bridge.resumeSession({
+        sessionId: session.sessionId,
+        workspaceCwd: WS_A,
+        sourceType: 'channel',
+        sourceId: 'dingtalk-main',
+      });
+      await sourceStarted.promise;
+      handle.crash();
+
+      await expect(restoring).rejects.toThrow(SessionNotFoundError);
+      sourceRelease.resolve({ persisted: false });
+      await bridge.shutdown();
+    });
+
+    it('rejects a cold restore when the channel exits during source persistence', async () => {
+      const sourceStarted = deferred<void>();
+      const sourceRelease = deferred<Record<string, unknown>>();
+      const handle = makeChannel({
+        extMethodImpl: async (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionSource) {
+            sourceStarted.resolve();
+            return sourceRelease.promise;
+          }
+          return {};
+        },
+        resumeSessionImpl: () => ({}),
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+
+      const restoring = bridge.resumeSession({
+        sessionId: 'restore-source-channel-exit',
+        workspaceCwd: WS_A,
+        sourceType: 'channel',
+        sourceId: 'dingtalk-main',
+      });
+      await sourceStarted.promise;
+      handle.crash();
+
+      await expect(restoring).rejects.toThrow(SessionNotFoundError);
+      sourceRelease.resolve({ persisted: false });
+      await bridge.shutdown();
     });
 
     it('does not replace the source when single scope attaches', async () => {
@@ -21358,26 +23550,117 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
-    it('passes source metadata in the resume request without a second control call', async () => {
+    it('does not replace an existing source when restore requests a new one', async () => {
       const handle = makeChannel({
+        extMethodImpl: async (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.sessionSource
+            ? { persisted: false }
+            : {},
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const first = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sourceType: 'scheduled_task',
+        sourceId: 'task-1',
+      });
+
+      const restored = await bridge.resumeSession({
+        sessionId: first.sessionId,
+        workspaceCwd: WS_A,
+        sourceType: 'channel',
+        sourceId: 'dingtalk-main',
+      });
+
+      expect(restored).toMatchObject({
+        sessionId: first.sessionId,
+        sourceType: 'scheduled_task',
+        sourceId: 'task-1',
+      });
+      expect(bridge.getSessionSummary(first.sessionId)).toMatchObject({
+        sourceType: 'scheduled_task',
+        sourceId: 'task-1',
+      });
+      expect(handle.agent.extMethodCalls).not.toContainEqual({
+        method: SERVE_CONTROL_EXT_METHODS.sessionSource,
+        params: {
+          sessionId: first.sessionId,
+          sourceType: 'channel',
+          sourceId: 'dingtalk-main',
+        },
+      });
+
+      await bridge.shutdown();
+    });
+
+    it('keeps restore live-only when source persistence fails', async () => {
+      const handle = makeChannel({
+        extMethodImpl: async (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionSource) {
+            throw new Error('persist failed');
+          }
+          return {};
+        },
         resumeSessionImpl: () => ({}),
       });
       const bridge = makeBridge({
         channelFactory: async () => handle.channel,
       });
 
-      await bridge.resumeSession({
+      const restored = await bridge.resumeSession({
+        sessionId: 'restore-source-failed',
+        workspaceCwd: WS_A,
+        sourceType: 'channel',
+        sourceId: 'dingtalk-main',
+      });
+
+      expect(restored).toMatchObject({
+        sessionId: 'restore-source-failed',
+        sourceType: 'channel',
+        sourceId: 'dingtalk-main',
+        sourcePersisted: false,
+      });
+      expect(bridge.getSessionSummary('restore-source-failed')).toMatchObject({
+        sourceType: 'channel',
+        sourceId: 'dingtalk-main',
+      });
+
+      await bridge.shutdown();
+    });
+
+    it('persists source metadata after resume restores a session', async () => {
+      const handle = makeChannel({
+        extMethodImpl: async (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.sessionSource
+            ? { persisted: true }
+            : {},
+        resumeSessionImpl: () => ({}),
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+
+      const restored = await bridge.resumeSession({
         sessionId: 'persisted-live-session',
         workspaceCwd: WS_A,
         sourceType: 'default',
         sourceId: 'realtime_voice:p1:h1:a1:call-1',
       });
 
-      expect(handle.agent.extMethodCalls).not.toContainEqual(
-        expect.objectContaining({
-          method: SERVE_CONTROL_EXT_METHODS.sessionSource,
-        }),
-      );
+      expect(restored).toMatchObject({
+        sourceType: 'default',
+        sourceId: 'realtime_voice:p1:h1:a1:call-1',
+        sourcePersisted: true,
+      });
+      expect(handle.agent.extMethodCalls).toContainEqual({
+        method: SERVE_CONTROL_EXT_METHODS.sessionSource,
+        params: {
+          sessionId: 'persisted-live-session',
+          sourceType: 'default',
+          sourceId: 'realtime_voice:p1:h1:a1:call-1',
+        },
+      });
       expect(handle.agent.resumeSessionCalls[0]?._meta).toEqual({
         [SESSION_SOURCE_META_KEY]: {
           sourceType: 'default',
@@ -21931,6 +24214,19 @@ describe('createAcpSessionBridge', () => {
             sessionId: session.sessionId,
             modelId: 'qwen3-coder',
           },
+          { clientId: 'client-not-issued' },
+        ),
+      ).rejects.toBeInstanceOf(InvalidClientIdError);
+      await expect(
+        bridge.cancelSessionTask(session.sessionId, 'task-1', 'workflow', {
+          clientId: 'client-not-issued',
+        }),
+      ).rejects.toBeInstanceOf(InvalidClientIdError);
+      await expect(
+        bridge.controlSessionWorkflowTask(
+          session.sessionId,
+          'task-1',
+          'rerun',
           { clientId: 'client-not-issued' },
         ),
       ).rejects.toBeInstanceOf(InvalidClientIdError);
@@ -25952,21 +28248,21 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
-    it('continues closing the session when media cleanup fails', async () => {
+    it('continues closing the session when attachment close fails', async () => {
       const handle = makeChannel();
       const bridge = makeBridge({
         channelFactory: async () => handle.channel,
         channelIdleTimeoutMs: 0,
       });
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
-      await bridge.storeSessionMedia(
+      await bridge.storeSessionAttachment(
         session.sessionId,
         Uint8Array.of(1),
         'image/png',
         { clientId: session.clientId },
       );
       const closeMedia = vi
-        .spyOn(SessionMediaStore.prototype, 'close')
+        .spyOn(SessionAttachmentStore.prototype, 'close')
         .mockRejectedValueOnce(new Error('cleanup failed'));
       const stderr = vi
         .spyOn(process.stderr, 'write')
@@ -25982,7 +28278,7 @@ describe('createAcpSessionBridge', () => {
           { sessionId: session.sessionId },
         ]);
         expect(stderr).toHaveBeenCalledWith(
-          expect.stringContaining('failed to release media for closed session'),
+          expect.stringContaining('failed to close attachments for session'),
         );
       } finally {
         closeMedia.mockRestore();
@@ -26108,6 +28404,63 @@ describe('createAcpSessionBridge', () => {
       });
 
       await bridge.shutdown();
+    });
+
+    it('tracks a stuck final cancel and retires its channel at the deadline', async () => {
+      const stalledWriteStarted = deferred<void>();
+      const stalledWrite = deferred<void>();
+      const handle = makeChannel();
+      const originalWritable = handle.channel.stream.writable;
+      let writesBeforeStall = Number.POSITIVE_INFINITY;
+      handle.channel.stream = {
+        ...handle.channel.stream,
+        writable: new WritableStream({
+          async write(message) {
+            if (writesBeforeStall === 0) {
+              stalledWriteStarted.resolve();
+              await stalledWrite.promise;
+              return;
+            }
+            writesBeforeStall--;
+            const writer = originalWritable.getWriter();
+            try {
+              await writer.write(message);
+            } finally {
+              writer.releaseLock();
+            }
+          },
+        }),
+      };
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        initializeTimeoutMs: 20,
+        channelIdleTimeoutMs: 60_000,
+      });
+
+      try {
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        writesBeforeStall = 1;
+        const close = bridge.closeSession(session.sessionId);
+        await stalledWriteStarted.promise;
+
+        expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toMatchObject({
+          state: 'active',
+          runtimeLive: true,
+          activeWork: true,
+        });
+        await expect(close).resolves.toBeUndefined();
+        expect(handle.killed).toBe(true);
+        await vi.waitFor(() =>
+          expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toMatchObject({
+            state: 'cold',
+            runtimeLive: false,
+            activeWork: false,
+          }),
+        );
+      } finally {
+        stalledWrite.resolve();
+        await bridge.shutdown();
+      }
     });
 
     it('resolves pending permissions before waiting for agent close during kill', async () => {
@@ -26417,6 +28770,579 @@ describe('createAcpSessionBridge', () => {
       expect(() =>
         bridge.updateSessionMetadata(session.sessionId, {
           displayName: 'bad\nname',
+        }),
+      ).toThrow(InvalidSessionMetadataError);
+
+      await bridge.closeSession(session.sessionId);
+      await bridge.shutdown();
+    });
+
+    it('stores a pr binding, exposes it in summaries, and publishes an event', async () => {
+      const handles: Array<{ killed: boolean }> = [];
+      const factory: ChannelFactory = async () => {
+        const h = makeChannel();
+        handles.push(h);
+        return h.channel;
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const events: BridgeEvent[] = [];
+      const sub = bridge.subscribeEvents(session.sessionId);
+      const drain = (async () => {
+        for await (const ev of sub) events.push(ev);
+      })();
+      await new Promise((r) => setImmediate(r));
+
+      const pr = { number: 9517, url: 'https://github.com/o/r/pull/9517' };
+      const effective = bridge.updateSessionMetadata(session.sessionId, {
+        pr,
+      });
+
+      expect(effective.prs).toEqual([pr]);
+      expect(bridge.getSessionSummary(session.sessionId).prs).toEqual([pr]);
+      await new Promise((r) => setImmediate(r));
+      const metaEvent = events.find(
+        (e) =>
+          e.type === 'session_metadata_updated' &&
+          (e.data as { prs?: unknown }).prs !== undefined,
+      );
+      expect(metaEvent).toBeDefined();
+      expect((metaEvent?.data as { prs: Array<typeof pr> }).prs).toEqual([pr]);
+
+      await bridge.closeSession(session.sessionId);
+      await drain;
+      await bridge.shutdown();
+    });
+
+    it('publishes the full seeded binding history in the reply and event after an entry re-creation', async () => {
+      // Daemon restart / close / archive-restore re-creates the entry with
+      // an empty in-memory pr list; the serve layer re-hydrates it from the
+      // persisted sidecar before binding, and both the reply and the
+      // `session_metadata_updated` event must carry the full history, not
+      // just the fresh binding.
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const events: BridgeEvent[] = [];
+      const sub = bridge.subscribeEvents(session.sessionId);
+      const drain = (async () => {
+        for await (const ev of sub) events.push(ev);
+      })();
+      await new Promise((r) => setImmediate(r));
+
+      const persisted = {
+        number: 9500,
+        url: 'https://github.com/o/r/pull/9500',
+      };
+      bridge.seedSessionPrs?.(session.sessionId, [persisted]);
+
+      const fresh = { number: 9517, url: 'https://github.com/o/r/pull/9517' };
+      const effective = bridge.updateSessionMetadata(session.sessionId, {
+        pr: fresh,
+      });
+
+      expect(effective.prs).toEqual([persisted, fresh]);
+      expect(bridge.getSessionSummary(session.sessionId).prs).toEqual([
+        persisted,
+        fresh,
+      ]);
+      await new Promise((r) => setImmediate(r));
+      const metaEvent = events.find(
+        (e) =>
+          e.type === 'session_metadata_updated' &&
+          (e.data as { prs?: unknown }).prs !== undefined,
+      );
+      expect(metaEvent).toBeDefined();
+      expect((metaEvent?.data as { prs: Array<typeof fresh> }).prs).toEqual([
+        persisted,
+        fresh,
+      ]);
+
+      await bridge.closeSession(session.sessionId);
+      await drain;
+      await bridge.shutdown();
+    });
+
+    it('keeps this-daemon-lifetime bindings over a late seed', async () => {
+      // Seeding is recovery for re-created entries only; once the entry
+      // holds bindings from this daemon lifetime they are authoritative.
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const bound = { number: 9517, url: 'https://github.com/o/r/pull/9517' };
+      bridge.updateSessionMetadata(session.sessionId, { pr: bound });
+      bridge.seedSessionPrs?.(session.sessionId, [
+        { number: 1, url: 'https://github.com/o/r/pull/1' },
+      ]);
+
+      expect(bridge.getSessionSummary(session.sessionId).prs).toEqual([bound]);
+
+      await bridge.closeSession(session.sessionId);
+      await bridge.shutdown();
+    });
+
+    it('replaces this-daemon-lifetime bindings on setSessionPrs', async () => {
+      // The backfill cap trim evicts persisted bindings; the hydrated live
+      // entry must follow the sidecar (unlike seed, which defers to
+      // existing bindings) or the summary merge resurrects the evicted
+      // numbers. Unknown session ids are no-ops, not throws.
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      bridge.updateSessionMetadata(session.sessionId, {
+        pr: { number: 1, url: 'https://github.com/o/r/pull/1' },
+      });
+      expect(() =>
+        bridge.setSessionPrs?.('no-such-session', [
+          { number: 9, url: 'https://github.com/o/r/pull/9' },
+        ]),
+      ).not.toThrow();
+      bridge.setSessionPrs?.(session.sessionId, [
+        {
+          number: 3,
+          url: 'https://github.com/o/r/pull/3',
+          state: 'merged',
+        },
+        { number: 4, url: 'https://github.com/o/r/pull/4' },
+      ]);
+
+      expect(bridge.getSessionSummary(session.sessionId).prs).toEqual([
+        { number: 3, url: 'https://github.com/o/r/pull/3', state: 'merged' },
+        { number: 4, url: 'https://github.com/o/r/pull/4' },
+      ]);
+
+      await bridge.closeSession(session.sessionId);
+      await bridge.shutdown();
+    });
+
+    it('logs a stderr audit record when a pr binding is added', async () => {
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      try {
+        const bridge = makeBridge({
+          channelFactory: async () => makeChannel().channel,
+        });
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+        bridge.updateSessionMetadata(session.sessionId, {
+          pr: { number: 9517, url: 'https://github.com/o/r/pull/9517' },
+        });
+
+        expect(stderrSpy).toHaveBeenCalledWith(
+          expect.stringContaining('updated session metadata'),
+        );
+        // The audit line prints the id through JSON.stringify, which escapes
+        // the backslashes of a Windows-spelled session id.
+        expect(stderrSpy).toHaveBeenCalledWith(
+          expect.stringContaining(
+            JSON.stringify(session.sessionId).slice(1, -1),
+          ),
+        );
+        expect(stderrSpy).toHaveBeenCalledWith(
+          expect.stringContaining('pr=9517'),
+        );
+
+        await bridge.shutdown();
+      } finally {
+        stderrSpy.mockRestore();
+      }
+    });
+
+    it('accumulates multiple bindings and re-binding moves a number to latest', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const prA = { number: 9500, url: 'https://github.com/o/r/pull/9500' };
+      const prB = { number: 9517, url: 'https://github.com/o/r/pull/9517' };
+      bridge.updateSessionMetadata(session.sessionId, { pr: prA });
+      const effective = bridge.updateSessionMetadata(session.sessionId, {
+        pr: prB,
+      });
+      expect(effective.prs).toEqual([prA, prB]);
+
+      const prA2 = {
+        number: 9500,
+        url: 'https://github.com/o/r/pull/9500?v=2',
+      };
+      const rebound = bridge.updateSessionMetadata(session.sessionId, {
+        pr: prA2,
+      });
+      expect(rebound.prs).toEqual([prB, prA2]);
+
+      await bridge.closeSession(session.sessionId);
+      await bridge.shutdown();
+    });
+
+    it('does not republish when the same pr is bound again', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const events: BridgeEvent[] = [];
+      const sub = bridge.subscribeEvents(session.sessionId);
+      const drain = (async () => {
+        for await (const ev of sub) events.push(ev);
+      })();
+      await new Promise((r) => setImmediate(r));
+
+      const pr = { number: 9517, url: 'https://github.com/o/r/pull/9517' };
+      bridge.updateSessionMetadata(session.sessionId, { pr });
+      bridge.updateSessionMetadata(session.sessionId, { pr });
+
+      await new Promise((r) => setImmediate(r));
+      const prEvents = events.filter(
+        (e) =>
+          e.type === 'session_metadata_updated' &&
+          (e.data as { prs?: unknown }).prs !== undefined,
+      );
+      expect(prEvents).toHaveLength(1);
+
+      await bridge.closeSession(session.sessionId);
+      await drain;
+      await bridge.shutdown();
+    });
+
+    it('republishes when the same binding returns with a new state', async () => {
+      // The same-binding early return must compare state too: the sidecar
+      // write the caller makes after this returns would otherwise disagree
+      // with the live entry, the event stream, and the response.
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const before = bridge.getSessionCatalogVersion().revision;
+
+      const events: BridgeEvent[] = [];
+      const sub = bridge.subscribeEvents(session.sessionId);
+      const drain = (async () => {
+        for await (const ev of sub) events.push(ev);
+      })();
+      await new Promise((r) => setImmediate(r));
+
+      bridge.updateSessionMetadata(session.sessionId, {
+        pr: {
+          number: 9517,
+          url: 'https://github.com/o/r/pull/9517',
+          state: 'open',
+        },
+      });
+      const effective = bridge.updateSessionMetadata(session.sessionId, {
+        pr: {
+          number: 9517,
+          url: 'https://github.com/o/r/pull/9517',
+          state: 'merged',
+        },
+      });
+
+      expect(effective.prs).toEqual([
+        {
+          number: 9517,
+          url: 'https://github.com/o/r/pull/9517',
+          state: 'merged',
+        },
+      ]);
+      expect(bridge.getSessionSummary(session.sessionId).prs).toEqual(
+        effective.prs,
+      );
+      expect(bridge.getSessionCatalogVersion().revision).toBe(before + 2);
+
+      await new Promise((r) => setImmediate(r));
+      const prEvents = events.filter(
+        (e) =>
+          e.type === 'session_metadata_updated' &&
+          (e.data as { prs?: unknown }).prs !== undefined,
+      );
+      // Both binds publish: subscribers must see the open->merged
+      // transition, not only the final live entry.
+      expect(prEvents).toHaveLength(2);
+      expect(
+        (prEvents[1]?.data as { prs: Array<{ state?: string }> }).prs?.[0]
+          ?.state,
+      ).toBe('merged');
+
+      await bridge.closeSession(session.sessionId);
+      await drain;
+      await bridge.shutdown();
+    });
+
+    it('preserves the known state on a stateless re-bind', async () => {
+      // Mirrors the sidecar's `bound.state ?? known?.state`: SDK/ACP
+      // clients omit state on re-bind, and the live entry must not reset.
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      bridge.updateSessionMetadata(session.sessionId, {
+        pr: {
+          number: 9517,
+          url: 'https://github.com/o/r/pull/9517',
+          state: 'merged',
+        },
+      });
+      const effective = bridge.updateSessionMetadata(session.sessionId, {
+        pr: {
+          number: 9517,
+          url: 'https://github.com/o/r/pull/9517?v=2',
+        },
+      });
+
+      expect(effective.prs).toEqual([
+        {
+          number: 9517,
+          url: 'https://github.com/o/r/pull/9517?v=2',
+          state: 'merged',
+        },
+      ]);
+      expect(bridge.getSessionSummary(session.sessionId).prs).toEqual(
+        effective.prs,
+      );
+
+      await bridge.closeSession(session.sessionId);
+      await bridge.shutdown();
+    });
+
+    it('does not carry state across a cross-repository re-bind', async () => {
+      // Twin of the sidecar's url-gated carry: a same-numbered PR of
+      // another repository is a different PR and must not inherit the
+      // previous binding's state.
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      bridge.updateSessionMetadata(session.sessionId, {
+        pr: {
+          number: 9517,
+          url: 'https://github.com/repo-a/o/pull/9517',
+          state: 'merged',
+        },
+      });
+      const effective = bridge.updateSessionMetadata(session.sessionId, {
+        pr: {
+          number: 9517,
+          url: 'https://github.com/repo-b/o/pull/9517',
+        },
+      });
+
+      expect(effective.prs).toEqual([
+        { number: 9517, url: 'https://github.com/repo-b/o/pull/9517' },
+      ]);
+      expect(bridge.getSessionSummary(session.sessionId).prs).toEqual(
+        effective.prs,
+      );
+
+      await bridge.closeSession(session.sessionId);
+      await bridge.shutdown();
+    });
+
+    it('rejects a pr state outside the enum and names the constraint', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      // 'draft' is a likely mistake: gh reports it, but the sidecar and
+      // the badge only know open/merged/closed.
+      expect(() =>
+        bridge.updateSessionMetadata(session.sessionId, {
+          pr: {
+            number: 9517,
+            url: 'https://github.com/o/r/pull/9517',
+            state: 'draft',
+          } as { number: number; url: string },
+        }),
+      ).toThrow(/`state` of `open`, `merged`, or `closed`/);
+
+      await bridge.closeSession(session.sessionId);
+      await bridge.shutdown();
+    });
+
+    it('propagates state through seedSessionPrs', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      bridge.seedSessionPrs?.(session.sessionId, [
+        {
+          number: 9500,
+          url: 'https://github.com/o/r/pull/9500',
+          state: 'merged',
+        },
+      ]);
+
+      expect(bridge.getSessionSummary(session.sessionId).prs).toEqual([
+        {
+          number: 9500,
+          url: 'https://github.com/o/r/pull/9500',
+          state: 'merged',
+        },
+      ]);
+
+      await bridge.closeSession(session.sessionId);
+      await bridge.shutdown();
+    });
+
+    it('bumps the catalog revision when a pr is bound', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const before = bridge.getSessionCatalogVersion().revision;
+
+      bridge.updateSessionMetadata(session.sessionId, {
+        pr: { number: 9517, url: 'https://github.com/o/r/pull/9517' },
+      });
+
+      expect(bridge.getSessionCatalogVersion().revision).toBe(before + 1);
+      // Repeating the same binding must not bump again.
+      bridge.updateSessionMetadata(session.sessionId, {
+        pr: { number: 9517, url: 'https://github.com/o/r/pull/9517' },
+      });
+      expect(bridge.getSessionCatalogVersion().revision).toBe(before + 1);
+
+      await bridge.closeSession(session.sessionId);
+      await bridge.shutdown();
+    });
+
+    it('echoes the current displayName on the pr metadata event', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      bridge.updateSessionMetadata(session.sessionId, {
+        displayName: 'My Session',
+      });
+
+      const events: BridgeEvent[] = [];
+      const sub = bridge.subscribeEvents(session.sessionId);
+      const drain = (async () => {
+        for await (const ev of sub) events.push(ev);
+      })();
+      await new Promise((r) => setImmediate(r));
+
+      bridge.updateSessionMetadata(session.sessionId, {
+        pr: { number: 9517, url: 'https://github.com/o/r/pull/9517' },
+      });
+
+      await new Promise((r) => setImmediate(r));
+      const prEvent = events.find(
+        (e) =>
+          e.type === 'session_metadata_updated' &&
+          (e.data as { prs?: unknown }).prs !== undefined,
+      );
+      // SDK folds treat an absent displayName as "cleared", so the pr event
+      // must echo the current name instead of blanking the title.
+      expect((prEvent?.data as { displayName?: string }).displayName).toBe(
+        'My Session',
+      );
+
+      await bridge.closeSession(session.sessionId);
+      await drain;
+      await bridge.shutdown();
+    });
+
+    it('caps the binding list at MAX_SESSION_PRS, dropping the oldest', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      for (let i = 1; i <= 12; i++) {
+        bridge.updateSessionMetadata(session.sessionId, {
+          pr: { number: i, url: `https://github.com/o/r/pull/${i}` },
+        });
+      }
+
+      const prs = bridge.getSessionSummary(session.sessionId).prs;
+      expect(prs).toHaveLength(10);
+      expect(prs?.[0]?.number).toBe(3);
+      expect(prs?.[9]?.number).toBe(12);
+
+      await bridge.closeSession(session.sessionId);
+      await bridge.shutdown();
+    });
+
+    it('does not apply displayName when the combined pr is invalid', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      expect(() =>
+        bridge.updateSessionMetadata(session.sessionId, {
+          displayName: 'should-not-apply',
+          pr: { number: -1, url: 'https://github.com/o/r/pull/1' },
+        }),
+      ).toThrow(InvalidSessionMetadataError);
+      expect(
+        bridge.getSessionSummary(session.sessionId).displayName,
+      ).toBeUndefined();
+
+      await bridge.closeSession(session.sessionId);
+      await bridge.shutdown();
+    });
+
+    it('does not apply the pr binding when the combined displayName is invalid', async () => {
+      // Mirror of the invalid-pr case: the validate-everything-first rule
+      // must protect both directions — a reorder regression would persist,
+      // publish, and catalog-bump a binding for a rejected request.
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      expect(() =>
+        bridge.updateSessionMetadata(session.sessionId, {
+          displayName: 'bad\nname',
+          pr: { number: 9517, url: 'https://github.com/o/r/pull/9517' },
+        }),
+      ).toThrow(InvalidSessionMetadataError);
+      expect(bridge.getSessionSummary(session.sessionId).prs).toBeUndefined();
+
+      await bridge.closeSession(session.sessionId);
+      await bridge.shutdown();
+    });
+
+    it.each([
+      [
+        'non-integer number',
+        { number: 1.5, url: 'https://github.com/o/r/pull/1' },
+      ],
+      ['missing url', { number: 1 }],
+      ['empty url', { number: 1, url: '' }],
+      ['non-http url', { number: 1, url: 'javascript:alert(1)' }],
+      [
+        'url with a control character',
+        // \n in the url would forge a second line in the stderr audit log.
+        { number: 1, url: 'https://github.com/o/r/pull/1\nforged' },
+      ],
+      [
+        'url over 2048 characters',
+        { number: 1, url: `https://github.com/${'a'.repeat(2048)}` },
+      ],
+      ['null', null],
+    ])('rejects an invalid pr: %s', async (_label, pr) => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      expect(() =>
+        bridge.updateSessionMetadata(session.sessionId, {
+          pr: pr as { number: number; url: string },
         }),
       ).toThrow(InvalidSessionMetadataError);
 
@@ -26863,6 +29789,80 @@ describe('extractErrorMessage', () => {
         },
       }),
     ).toBe('<503> model serving is throttled');
+  });
+
+  it('extracts nested provider messages from data.error.message', () => {
+    // Shape the ACP SDK produces when the agent throws an error whose
+    // message is a JSON string: internalError(JSON.parse(message)).
+    expect(
+      extractErrorMessage(
+        new RequestError(-32603, 'Internal error', {
+          error: {
+            message:
+              'The engine is currently overloaded, please try again later',
+            type: 'engine_overloaded_error',
+          },
+        }),
+      ),
+    ).toBe('The engine is currently overloaded, please try again later');
+  });
+
+  it('extracts string data.error from JSON-RPC error data', () => {
+    expect(
+      extractErrorMessage({
+        code: -32603,
+        message: 'Internal error',
+        data: { error: 'plain string detail' },
+      }),
+    ).toBe('plain string detail');
+  });
+
+  it('prefers top-level data.details over nested data.error.message', () => {
+    expect(
+      extractErrorMessage({
+        code: -32603,
+        message: 'Internal error',
+        data: { details: 'top', error: { message: 'nested' } },
+      }),
+    ).toBe('top');
+  });
+
+  it('prefers top-level data.message over nested data.error.message', () => {
+    expect(
+      extractErrorMessage({
+        code: -32603,
+        message: 'Internal error',
+        data: { message: 'top', error: { message: 'nested' } },
+      }),
+    ).toBe('top');
+  });
+
+  it('falls back to message when data.error has no usable string', () => {
+    expect(
+      extractErrorMessage(
+        new RequestError(-32603, 'Internal error', {
+          error: { type: 'engine_overloaded_error' },
+        }),
+      ),
+    ).toBe('Internal error');
+  });
+
+  it('falls back to message when data.error is an empty string', () => {
+    expect(
+      extractErrorMessage(
+        new RequestError(-32603, 'Internal error', { error: '' }),
+      ),
+    ).toBe('Internal error');
+  });
+
+  it('falls back to message when data.error.message is an empty string', () => {
+    expect(
+      extractErrorMessage(
+        new RequestError(-32603, 'Internal error', {
+          error: { message: '' },
+        }),
+      ),
+    ).toBe('Internal error');
   });
 
   it('extracts details from Error subclasses with JSON-RPC data', () => {
@@ -28046,7 +31046,9 @@ describe('createHttpAcpBridge — side-channel state layer (#4511)', () => {
           get(target, prop) {
             if (prop === 'unstable_setSessionModel') {
               return async () => {
-                throw new Error('agent refused model switch');
+                throw new RequestError(-32603, 'Internal error', {
+                  message: 'agent refused model switch',
+                });
               };
             }
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -28082,6 +31084,9 @@ describe('createHttpAcpBridge — side-channel state layer (#4511)', () => {
       const it2 = iter[Symbol.asyncIterator]();
       const next = await it2.next();
       expect(next.value?.type).toBe('model_switch_failed');
+      expect(next.value?.data).toMatchObject({
+        error: 'agent refused model switch',
+      });
       // Give any (incorrectly) scheduled reconcile a tick to fire.
       await new Promise((r) => setTimeout(r, 10));
       expect(statusReads).toBe(0);
@@ -28580,6 +31585,1148 @@ describe('channelIdleTimeoutMs', () => {
 });
 
 describe('preheat', () => {
+  it('reports cold, starting, and idle from one atomic lifecycle snapshot', async () => {
+    const handle = makeChannel();
+    const factoryResult = deferred<typeof handle.channel>();
+    const factory: ChannelFactory = async () => await factoryResult.promise;
+    const bridge = makeBridge({ channelFactory: factory });
+
+    expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toEqual({
+      state: 'cold',
+      runtimeLive: false,
+      runtimeEpoch: 0,
+      activeWork: false,
+    });
+
+    const preheat = bridge.preheat();
+    await vi.waitFor(() => {
+      expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toMatchObject({
+        state: 'starting',
+        runtimeLive: false,
+        runtimeEpoch: 0,
+        activeWork: true,
+      });
+    });
+
+    factoryResult.resolve(handle.channel);
+    await preheat;
+    expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toEqual({
+      state: 'idle',
+      runtimeLive: true,
+      runtimeEpoch: 1,
+      activeWork: false,
+    });
+
+    await bridge.shutdown();
+  });
+
+  it('keeps an outer runtime reservation after channel startup completes', async () => {
+    const handle = makeChannel();
+    const preheatInnerCompleted = deferred<void>();
+    const releasePreheat = deferred<void>();
+    const telemetry: BridgeTelemetry = {
+      captureContext: () => undefined,
+      runWithContext: (_captured, fn) => fn(),
+      async withSpan(operation, _attributes, fn) {
+        const result = await fn();
+        if (operation === 'channel.preheat') {
+          preheatInnerCompleted.resolve();
+          await releasePreheat.promise;
+        }
+        return result;
+      },
+      event() {},
+      injectPromptContext: (request) => request,
+    };
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      telemetry,
+    });
+
+    const preheat = bridge.preheat();
+    await preheatInnerCompleted.promise;
+    expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toMatchObject({
+      state: 'active',
+      runtimeLive: true,
+      activeWork: true,
+    });
+
+    releasePreheat.resolve();
+    await preheat;
+    expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toMatchObject({
+      state: 'idle',
+      runtimeLive: true,
+      activeWork: false,
+    });
+
+    await bridge.shutdown();
+  });
+
+  it('rejects a channel that exits before initialization can publish it', async () => {
+    const handle = makeChannel({
+      initializeImpl: async () => {
+        handle.crash({ exitCode: 1, signalCode: null });
+        await Promise.resolve();
+        return {
+          protocolVersion: PROTOCOL_VERSION,
+          agentInfo: { name: 'fake-agent', version: '0' },
+          authMethods: [],
+          agentCapabilities: {},
+        };
+      },
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+    });
+
+    await expect(bridge.preheat()).rejects.toBeInstanceOf(
+      BridgeChannelClosedError,
+    );
+    expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toEqual({
+      state: 'cold',
+      runtimeLive: false,
+      runtimeEpoch: 0,
+      activeWork: false,
+    });
+
+    await bridge.shutdown();
+  });
+
+  it('clears a timed-out physical spawn so a later preheat can retry', async () => {
+    vi.useFakeTimers();
+    try {
+      const handle = makeChannel();
+      const stuckFactory = new Promise<never>(() => {});
+      let factoryCalls = 0;
+      const factory: ChannelFactory = async () => {
+        factoryCalls++;
+        if (factoryCalls === 1) return await stuckFactory;
+        return handle.channel;
+      };
+      const bridge = makeBridge({
+        channelFactory: factory,
+        initializeTimeoutMs: 50,
+      });
+
+      const firstPreheat = bridge.preheat();
+      void firstPreheat.catch(() => undefined);
+      await vi.waitFor(() => expect(factoryCalls).toBe(1));
+      expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!().state).toBe(
+        'starting',
+      );
+
+      await vi.advanceTimersByTimeAsync(50);
+      await expect(firstPreheat).rejects.toThrow(/channel factory timed out/);
+      expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toEqual({
+        state: 'cold',
+        runtimeLive: false,
+        runtimeEpoch: 0,
+        activeWork: false,
+      });
+
+      await bridge.preheat();
+      expect(factoryCalls).toBe(2);
+      expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toMatchObject({
+        state: 'idle',
+        runtimeLive: true,
+        runtimeEpoch: 1,
+      });
+
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('kills a channel returned after its factory deadline without publishing it', async () => {
+    vi.useFakeTimers();
+    try {
+      const handle = makeChannel();
+      const factoryResult = deferred<typeof handle.channel>();
+      const bridge = makeBridge({
+        channelFactory: async () => await factoryResult.promise,
+        initializeTimeoutMs: 50,
+      });
+
+      const preheat = bridge.preheat();
+      void preheat.catch(() => undefined);
+      await vi.waitFor(() => {
+        expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!().state).toBe(
+          'starting',
+        );
+      });
+      await vi.advanceTimersByTimeAsync(50);
+      await expect(preheat).rejects.toThrow(/channel factory timed out/);
+
+      factoryResult.resolve(handle.channel);
+      await vi.waitFor(() => expect(handle.killed).toBe(true));
+      expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toEqual({
+        state: 'cold',
+        runtimeLive: false,
+        runtimeEpoch: 0,
+        activeWork: false,
+      });
+
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps runtime epochs monotonic across bridge replacement', async () => {
+    let runtimeEpoch = 0;
+    const runtimeEpochSource: BridgeRuntimeEpochSource = {
+      current: () => runtimeEpoch,
+      allocate: () => ++runtimeEpoch,
+    };
+    const firstHandle = makeChannel();
+    const firstBridge = makeBridge({
+      channelFactory: async () => firstHandle.channel,
+      runtimeEpochSource,
+    });
+
+    await firstBridge.preheat();
+    expect(
+      firstBridge.getWorkspaceRuntimeLifecycleSnapshot!().runtimeEpoch,
+    ).toBe(1);
+    await firstBridge.shutdown();
+
+    const secondHandle = makeChannel();
+    const secondBridge = makeBridge({
+      channelFactory: async () => secondHandle.channel,
+      runtimeEpochSource,
+    });
+    expect(secondBridge.getWorkspaceRuntimeLifecycleSnapshot!()).toMatchObject({
+      state: 'cold',
+      runtimeLive: false,
+      runtimeEpoch: 1,
+    });
+
+    await secondBridge.preheat();
+    expect(
+      secondBridge.getWorkspaceRuntimeLifecycleSnapshot!().runtimeEpoch,
+    ).toBe(2);
+    await secondBridge.shutdown();
+  });
+
+  it('keeps an idle-timeout-zero channel alive while workspace status is pending', async () => {
+    const statusResult = deferred<Record<string, unknown>>();
+    const statusMethod = 'qwen/status/workspace/test';
+    const handle = makeChannel({
+      extMethodImpl: async (method) => {
+        if (method === statusMethod) return await statusResult.promise;
+        return {};
+      },
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      channelIdleTimeoutMs: 0,
+    });
+    await bridge.preheat();
+
+    const status = bridge.queryWorkspaceStatus(statusMethod, () => ({
+      idle: true,
+    }));
+    await vi.waitFor(() =>
+      expect(handle.agent.extMethodCalls).toContainEqual({
+        method: statusMethod,
+        params: { cwd: WS_A },
+      }),
+    );
+    expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toMatchObject({
+      state: 'active',
+      runtimeLive: true,
+      activeWork: true,
+    });
+    expect(handle.killed).toBe(false);
+
+    statusResult.resolve({ ready: true });
+    await expect(status).resolves.toEqual({ ready: true });
+    expect(handle.killed).toBe(false);
+    expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toMatchObject({
+      state: 'idle',
+      runtimeLive: true,
+      activeWork: false,
+    });
+
+    await bridge.shutdown();
+  });
+
+  it('reaps an idle-timeout-zero channel whose session is removed mid-initialization', async () => {
+    const handle = makeChannel({
+      extMethodImpl: (method) => {
+        if (method === SERVE_CONTROL_EXT_METHODS.sessionApprovalMode) {
+          throw new Error('approval mode rejected');
+        }
+        return {};
+      },
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      channelIdleTimeoutMs: 0,
+    });
+
+    const err = await bridge
+      .spawnOrAttach({
+        workspaceCwd: WS_A,
+        approvalMode: ApprovalMode.YOLO,
+      })
+      .then(
+        () => null,
+        (e: unknown) => e,
+      );
+
+    expect(err).not.toBeNull();
+    await vi.waitFor(() => expect(handle.killed).toBe(true));
+    await vi.waitFor(() =>
+      expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toMatchObject({
+        state: 'cold',
+        runtimeLive: false,
+        activeWork: false,
+      }),
+    );
+
+    await bridge.shutdown();
+  });
+
+  it('aborts the startup signal when channel initialization fails', async () => {
+    let capturedSignal: AbortSignal | undefined;
+    const handle = makeChannel({
+      initializeThrows: new Error('handshake refused'),
+    });
+    const bridge = makeBridge({
+      channelFactory: async (_workspaceCwd, _childEnvOverrides, signal) => {
+        capturedSignal = signal;
+        return handle.channel;
+      },
+    });
+
+    const err = await bridge.preheat().then(
+      () => null,
+      (e: unknown) => e,
+    );
+
+    expect(err).not.toBeNull();
+    expect(capturedSignal?.aborted).toBe(true);
+    expect(handle.killed).toBe(true);
+    await bridge.shutdown();
+  });
+
+  it('aborts the startup signal when the runtime epoch regresses', async () => {
+    let capturedSignal: AbortSignal | undefined;
+    const handle = makeChannel();
+    const bridge = makeBridge({
+      channelFactory: async (_workspaceCwd, _childEnvOverrides, signal) => {
+        capturedSignal = signal;
+        return handle.channel;
+      },
+      runtimeEpochSource: {
+        current: () => 5,
+        allocate: () => 5,
+      },
+    });
+
+    await expect(bridge.preheat()).rejects.toThrow(/monotonically/);
+    expect(capturedSignal?.aborted).toBe(true);
+    expect(handle.killed).toBe(true);
+    await bridge.shutdown();
+  });
+
+  it('aborts the startup signal when the channel factory times out', async () => {
+    vi.useFakeTimers();
+    try {
+      let capturedSignal: AbortSignal | undefined;
+      const handle = makeChannel();
+      const factoryResult = deferred<typeof handle.channel>();
+      const bridge = makeBridge({
+        channelFactory: async (_workspaceCwd, _childEnvOverrides, signal) => {
+          capturedSignal = signal;
+          return await factoryResult.promise;
+        },
+        initializeTimeoutMs: 50,
+      });
+
+      const preheat = bridge.preheat();
+      void preheat.catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(50);
+      await expect(preheat).rejects.toThrow(/channel factory timed out/);
+      expect(capturedSignal?.aborted).toBe(true);
+
+      factoryResult.resolve(handle.channel);
+      await vi.waitFor(() => expect(handle.killed).toBe(true));
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    {
+      label: 'MCP initialization',
+      method: SERVE_CONTROL_EXT_METHODS.workspaceMcpInitialize,
+      timeoutMs: 50,
+      invoke: (bridge: ReturnType<typeof makeBridge>) =>
+        bridge.initializeWorkspaceMcp(),
+    },
+    {
+      label: 'MCP authentication',
+      method: SERVE_CONTROL_EXT_METHODS.workspaceMcpManage,
+      timeoutMs: 600_000,
+      invoke: (bridge: ReturnType<typeof makeBridge>) =>
+        bridge.manageMcpServer('aone', 'authenticate', undefined),
+    },
+  ])(
+    'retires a kept-alive channel when $label exceeds its physical lease',
+    async ({ method, timeoutMs, invoke }) => {
+      vi.useFakeTimers();
+      try {
+        const stalledResult = deferred<Record<string, unknown>>();
+        const firstHandle = makeChannel({
+          extMethodImpl: async (candidate) =>
+            candidate === method ? await stalledResult.promise : {},
+        });
+        const secondHandle = makeChannel();
+        const channelFactory = vi
+          .fn()
+          .mockResolvedValueOnce(firstHandle.channel)
+          .mockResolvedValueOnce(secondHandle.channel);
+        const bridge = makeBridge({
+          channelFactory,
+          initializeTimeoutMs: 50,
+        });
+
+        await bridge.preheat({ keepAliveMs: 600_000 });
+        expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toMatchObject({
+          state: 'idle',
+          runtimeLive: true,
+          runtimeEpoch: 1,
+        });
+
+        const request = invoke(bridge);
+        void request.catch(() => undefined);
+        await vi.waitFor(() =>
+          expect(firstHandle.agent.extMethodCalls).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                method,
+              }),
+            ]),
+          ),
+        );
+
+        await vi.advanceTimersByTimeAsync(timeoutMs);
+        await expect(request).rejects.toBeInstanceOf(BridgeTimeoutError);
+        expect(firstHandle.killed).toBe(true);
+        await vi.waitFor(() =>
+          expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toMatchObject({
+            state: 'cold',
+            runtimeLive: false,
+            runtimeEpoch: 1,
+            activeWork: false,
+          }),
+        );
+
+        await bridge.preheat({ keepAliveMs: 600_000 });
+        expect(channelFactory).toHaveBeenCalledTimes(2);
+        expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toMatchObject({
+          state: 'idle',
+          runtimeLive: true,
+          runtimeEpoch: 2,
+        });
+
+        await bridge.shutdown();
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it('retires a kept-alive channel when MCP detail discovery times out', async () => {
+    vi.useFakeTimers();
+    const detailResult = deferred<Record<string, unknown>>();
+    const firstHandle = makeChannel({
+      extMethodImpl: async (method) => {
+        if (method === SERVE_STATUS_EXT_METHODS.workspaceMcp) {
+          return {
+            v: 1,
+            workspaceCwd: WS_A,
+            initialized: true,
+            discoveryState: 'completed',
+            servers: [{ name: 'aone', mcpStatus: 'connected' }],
+          };
+        }
+        if (
+          method === SERVE_STATUS_EXT_METHODS.workspaceMcpTools ||
+          method === SERVE_STATUS_EXT_METHODS.workspaceMcpResources
+        ) {
+          return await detailResult.promise;
+        }
+        return {};
+      },
+    });
+    const secondHandle = makeChannel();
+    const channelFactory = vi
+      .fn()
+      .mockResolvedValueOnce(firstHandle.channel)
+      .mockResolvedValueOnce(secondHandle.channel);
+    const bridge = makeBridge({
+      channelFactory,
+      initializeTimeoutMs: 50,
+    });
+
+    try {
+      await bridge.preheat({ keepAliveMs: 600_000 });
+      const status = bridge.queryWorkspaceStatus(
+        SERVE_STATUS_EXT_METHODS.workspaceMcp,
+        () => ({ discoveryState: 'not_started', servers: [] }),
+      );
+      void status.catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(firstHandle.agent.extMethodCalls).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            method: SERVE_STATUS_EXT_METHODS.workspaceMcpTools,
+          }),
+          expect.objectContaining({
+            method: SERVE_STATUS_EXT_METHODS.workspaceMcpResources,
+          }),
+        ]),
+      );
+
+      await vi.advanceTimersByTimeAsync(50);
+      await expect(status).resolves.toMatchObject({
+        discoveryState: 'completed',
+      });
+      expect(firstHandle.killed).toBe(true);
+      await vi.waitFor(() =>
+        expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toMatchObject({
+          state: 'cold',
+          runtimeLive: false,
+          runtimeEpoch: 1,
+          activeWork: false,
+        }),
+      );
+
+      await bridge.preheat({ keepAliveMs: 600_000 });
+      expect(channelFactory).toHaveBeenCalledTimes(2);
+      expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toMatchObject({
+        state: 'idle',
+        runtimeLive: true,
+        runtimeEpoch: 2,
+      });
+    } finally {
+      detailResult.resolve({});
+      await bridge.shutdown();
+      vi.useRealTimers();
+    }
+  });
+
+  it('defers MCP detail timeout retirement until active sessions drain', async () => {
+    vi.useFakeTimers();
+    const detailResult = deferred<Record<string, unknown>>();
+    const handle = makeChannel({
+      extMethodImpl: async (method) => {
+        if (method === SERVE_STATUS_EXT_METHODS.workspaceMcp) {
+          return {
+            v: 1,
+            workspaceCwd: WS_A,
+            initialized: true,
+            discoveryState: 'completed',
+            servers: [{ name: 'aone', mcpStatus: 'connected' }],
+          };
+        }
+        if (
+          method === SERVE_STATUS_EXT_METHODS.workspaceMcpTools ||
+          method === SERVE_STATUS_EXT_METHODS.workspaceMcpResources
+        ) {
+          return await detailResult.promise;
+        }
+        return {};
+      },
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      initializeTimeoutMs: 50,
+    });
+
+    try {
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const status = bridge.queryWorkspaceStatus(
+        SERVE_STATUS_EXT_METHODS.workspaceMcp,
+        () => ({ discoveryState: 'not_started', servers: [] }),
+      );
+      await vi.advanceTimersByTimeAsync(50);
+
+      await expect(status).resolves.toMatchObject({
+        discoveryState: 'completed',
+      });
+      expect(handle.killed).toBe(false);
+      await expect(
+        bridge.sendPrompt(session.sessionId, {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'still alive' }],
+        }),
+      ).resolves.toMatchObject({ stopReason: 'end_turn' });
+
+      await bridge.closeSession(session.sessionId);
+      expect(handle.killed).toBe(true);
+    } finally {
+      detailResult.resolve({});
+      await bridge.shutdown();
+      vi.useRealTimers();
+    }
+  });
+
+  it('defers a workspace status timeout until active sessions drain', async () => {
+    vi.useFakeTimers();
+    const stalledStatus = deferred<Record<string, unknown>>();
+    const handle = makeChannel({
+      extMethodImpl: async (method) =>
+        method === SERVE_STATUS_EXT_METHODS.workspaceMcp
+          ? await stalledStatus.promise
+          : {},
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      initializeTimeoutMs: 50,
+      channelIdleTimeoutMs: 600_000,
+    });
+
+    try {
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const status = bridge.queryWorkspaceStatus(
+        SERVE_STATUS_EXT_METHODS.workspaceMcp,
+        () => ({ discoveryState: 'not_started', servers: [] }),
+      );
+      void status.catch(() => undefined);
+
+      await vi.advanceTimersByTimeAsync(50);
+      await expect(status).rejects.toBeInstanceOf(BridgeTimeoutError);
+      expect(handle.killed).toBe(false);
+      expect(bridge.sessionCount).toBe(1);
+      await expect(
+        bridge.sendPrompt(session.sessionId, {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'still alive' }],
+        }),
+      ).resolves.toMatchObject({ stopReason: 'end_turn' });
+
+      await bridge.closeSession(session.sessionId);
+      expect(handle.killed).toBe(true);
+    } finally {
+      stalledStatus.resolve({});
+      await bridge.shutdown();
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps a shared channel while a timed-out new session RPC settles', async () => {
+    vi.useFakeTimers();
+    const stalledStarted = deferred<void>();
+    const stalled = deferred<Record<string, unknown>>();
+    let newSessionCalls = 0;
+    const firstHandle = makeChannel({
+      extMethodImpl: activeWorkCloseImpl,
+      newSessionImpl: async () => {
+        newSessionCalls++;
+        if (newSessionCalls === 1) {
+          return { sessionId: 'live-session' };
+        }
+        stalledStarted.resolve();
+        return (await stalled.promise) as NewSessionResponse;
+      },
+    });
+    const secondHandle = makeChannel();
+    const channelFactory = vi
+      .fn()
+      .mockResolvedValueOnce(firstHandle.channel)
+      .mockResolvedValueOnce(secondHandle.channel);
+    const bridge = makeBridge({
+      channelFactory,
+      initializeTimeoutMs: 50,
+      sessionScope: 'thread',
+    });
+
+    try {
+      await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      const request = bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      void request.catch(() => undefined);
+      await stalledStarted.promise;
+
+      await vi.advanceTimersByTimeAsync(50);
+      await expect(request).rejects.toBeInstanceOf(BridgeTimeoutError);
+      expect(firstHandle.killed).toBe(false);
+      expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toMatchObject({
+        state: 'active',
+        runtimeLive: true,
+        runtimeEpoch: 1,
+        activeWork: true,
+      });
+
+      stalled.resolve({ sessionId: 'late-session' });
+      await vi.advanceTimersByTimeAsync(0);
+      await bridge.preheat({ keepAliveMs: 600_000 });
+      expect(channelFactory).toHaveBeenCalledTimes(1);
+      expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toMatchObject({
+        state: 'active',
+        runtimeLive: true,
+        runtimeEpoch: 1,
+      });
+    } finally {
+      stalled.resolve({ sessionId: 'late-session' });
+      await bridge.shutdown();
+      vi.useRealTimers();
+    }
+  });
+
+  it('transfers an outer reservation before an idle workspace call drains', async () => {
+    const statusResult = deferred<Record<string, unknown>>();
+    const initializeResult = deferred<Record<string, unknown>>();
+    const statusMethod = 'qwen/status/workspace/reservation-race';
+    const handle = makeChannel({
+      extMethodImpl: async (method) => {
+        if (method === statusMethod) return await statusResult.promise;
+        if (method === SERVE_CONTROL_EXT_METHODS.workspaceMcpInitialize) {
+          return await initializeResult.promise;
+        }
+        return {};
+      },
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      channelIdleTimeoutMs: 0,
+    });
+    await bridge.preheat();
+
+    const status = bridge.queryWorkspaceStatus(statusMethod, () => ({
+      idle: true,
+    }));
+    await vi.waitFor(() =>
+      expect(handle.agent.extMethodCalls).toContainEqual({
+        method: statusMethod,
+        params: { cwd: WS_A },
+      }),
+    );
+
+    statusResult.resolve({ ready: true });
+    const initialize = bridge.initializeWorkspaceMcp();
+    await vi.waitFor(() =>
+      expect(handle.agent.extMethodCalls).toContainEqual({
+        method: SERVE_CONTROL_EXT_METHODS.workspaceMcpInitialize,
+        params: { cwd: WS_A },
+      }),
+    );
+    expect(handle.killed).toBe(false);
+
+    initializeResult.resolve({ accepted: false });
+    await expect(status).resolves.toEqual({ ready: true });
+    await expect(initialize).resolves.toEqual({ accepted: false });
+    expect(handle.killed).toBe(true);
+
+    await bridge.shutdown();
+  });
+
+  it('terminates the owning channel when MCP discovery exceeds its lease', async () => {
+    vi.useFakeTimers();
+    try {
+      const handle = makeChannel({
+        extMethodImpl: async (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.workspaceMcpInitialize
+            ? { accepted: true }
+            : {},
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+
+      await expect(bridge.initializeWorkspaceMcp()).resolves.toEqual({
+        accepted: true,
+      });
+      expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toMatchObject({
+        state: 'active',
+        runtimeLive: true,
+        activeWork: true,
+      });
+
+      await vi.advanceTimersByTimeAsync(300_000);
+      expect(handle.killed).toBe(true);
+      await vi.waitFor(() =>
+        expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toMatchObject({
+          state: 'cold',
+          runtimeLive: false,
+          activeWork: false,
+        }),
+      );
+
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('defers an MCP discovery timeout until active sessions drain', async () => {
+    vi.useFakeTimers();
+    try {
+      const handle = makeChannel({
+        extMethodImpl: async (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.workspaceMcpInitialize
+            ? { accepted: true }
+            : {},
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        channelIdleTimeoutMs: 600_000,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await bridge.initializeWorkspaceMcp();
+      await vi.advanceTimersByTimeAsync(300_000);
+
+      expect(handle.killed).toBe(false);
+      expect(bridge.sessionCount).toBe(1);
+
+      await bridge.closeSession(session.sessionId);
+      expect(handle.killed).toBe(true);
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('defers missing MCP auth retirement until active sessions drain', async () => {
+    vi.useFakeTimers();
+    try {
+      const handle = makeChannel({
+        extMethodImpl: async (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.workspaceMcpManage) {
+            return {
+              serverName: 'aone',
+              action: 'authenticate',
+              ok: true,
+              pending: true,
+            };
+          }
+          if (method === SERVE_STATUS_EXT_METHODS.workspaceMcp) {
+            return {
+              v: 1,
+              workspaceCwd: WS_A,
+              initialized: true,
+              discoveryState: 'completed',
+              servers: [],
+            };
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        channelIdleTimeoutMs: 600_000,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await expect(
+        bridge.manageMcpServer('aone', 'authenticate', undefined),
+      ).resolves.toMatchObject({
+        serverName: 'aone',
+        action: 'authenticate',
+        pending: true,
+      });
+      expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toMatchObject({
+        state: 'active',
+        runtimeLive: true,
+        activeWork: true,
+      });
+
+      await vi.advanceTimersByTimeAsync(600_000);
+      expect(handle.killed).toBe(false);
+      expect(bridge.sessionCount).toBe(1);
+
+      await bridge.closeSession(session.sessionId);
+      expect(handle.killed).toBe(true);
+      expect(bridge.sessionCount).toBe(0);
+
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('rechecks MCP auth before its deadline can terminate active sessions', async () => {
+    vi.useFakeTimers();
+    try {
+      let statusRequests = 0;
+      const handle = makeChannel({
+        extMethodImpl: async (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.workspaceMcpManage) {
+            return {
+              serverName: 'aone',
+              action: 'authenticate',
+              ok: true,
+              pending: true,
+            };
+          }
+          if (method === SERVE_STATUS_EXT_METHODS.workspaceMcp) {
+            statusRequests += 1;
+            return {
+              v: 1,
+              workspaceCwd: WS_A,
+              initialized: true,
+              discoveryState: 'completed',
+              servers: [
+                {
+                  name: 'aone',
+                  authenticationState:
+                    statusRequests === 1 ? 'pending' : 'succeeded',
+                },
+              ],
+            };
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await bridge.manageMcpServer('aone', 'authenticate', undefined);
+      expect(statusRequests).toBe(1);
+
+      await vi.advanceTimersByTimeAsync(600_000);
+      await vi.waitFor(() => expect(statusRequests).toBe(2));
+      expect(handle.killed).toBe(false);
+      expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toMatchObject({
+        state: 'active',
+        runtimeLive: true,
+        activeWork: true,
+      });
+
+      await bridge.closeSession(session.sessionId);
+      expect(handle.killed).toBe(true);
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not let a superseded MCP auth timer terminate the renewed channel', async () => {
+    vi.useFakeTimers();
+    try {
+      let authenticationRequests = 0;
+      let statusRequests = 0;
+      const expiryStatusStarted = deferred<void>();
+      const expiryStatus = deferred<Record<string, unknown>>();
+      const handle = makeChannel({
+        extMethodImpl: async (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.workspaceMcpManage) {
+            authenticationRequests++;
+            return {
+              serverName: 'aone',
+              action: 'authenticate',
+              ok: true,
+              pending: true,
+            };
+          }
+          if (method === SERVE_STATUS_EXT_METHODS.workspaceMcp) {
+            statusRequests++;
+            if (statusRequests === 2) {
+              expiryStatusStarted.resolve();
+              return await expiryStatus.promise;
+            }
+            return {
+              v: 1,
+              workspaceCwd: WS_A,
+              initialized: true,
+              discoveryState: 'completed',
+              servers: [{ name: 'aone', authenticationState: 'pending' }],
+            };
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await bridge.manageMcpServer('aone', 'authenticate', undefined);
+
+      const expiry = vi.advanceTimersByTimeAsync(600_000);
+      await expiryStatusStarted.promise;
+      const renewal = bridge.manageMcpServer('aone', 'authenticate', undefined);
+      await vi.waitFor(() => expect(authenticationRequests).toBe(2));
+      expiryStatus.resolve({
+        v: 1,
+        workspaceCwd: WS_A,
+        initialized: true,
+        discoveryState: 'completed',
+        servers: [{ name: 'aone', authenticationState: 'pending' }],
+      });
+      await Promise.all([expiry, renewal]);
+
+      expect(handle.killed).toBe(false);
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('honors the longest keep-alive from concurrent preheats', async () => {
+    vi.useFakeTimers();
+    try {
+      const handle = makeChannel();
+      const factoryResult = deferred<typeof handle.channel>();
+      let factoryCalls = 0;
+      const bridge = makeBridge({
+        channelFactory: async () => {
+          factoryCalls++;
+          return await factoryResult.promise;
+        },
+      });
+
+      const shortPreheat = bridge.preheat({ keepAliveMs: 1_000 });
+      const longPreheat = bridge.preheat({ keepAliveMs: 10_000 });
+      await vi.waitFor(() => expect(factoryCalls).toBe(1));
+      factoryResult.resolve(handle.channel);
+      await Promise.all([shortPreheat, longPreheat]);
+
+      await vi.advanceTimersByTimeAsync(9_999);
+      expect(handle.killed).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(handle.killed).toBe(true);
+
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('arms a keep-alive when a concurrent plain preheat finishes last', async () => {
+    vi.useFakeTimers();
+    try {
+      const handle = makeChannel();
+      const releasePlainPreheat = deferred<void>();
+      let preheatSpanCount = 0;
+      const telemetry: BridgeTelemetry = {
+        captureContext: () => undefined,
+        runWithContext: (_captured, fn) => fn(),
+        async withSpan(operation, _attributes, fn) {
+          const preheatIndex =
+            operation === 'channel.preheat' ? ++preheatSpanCount : 0;
+          const result = await fn();
+          if (preheatIndex === 2) await releasePlainPreheat.promise;
+          return result;
+        },
+        event() {},
+        injectPromptContext: (request) => request,
+      };
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        telemetry,
+      });
+
+      const keptAlive = bridge.preheat({ keepAliveMs: 600_000 });
+      const plain = bridge.preheat();
+      await keptAlive;
+      expect(handle.killed).toBe(false);
+
+      releasePlainPreheat.resolve();
+      await plain;
+      await vi.advanceTimersByTimeAsync(599_999);
+      expect(handle.killed).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(handle.killed).toBe(true);
+
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('renews an explicitly ensured runtime warm window', async () => {
+    vi.useFakeTimers();
+    try {
+      const handle = makeChannel();
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+
+      await bridge.preheat({ keepAliveMs: 600_000 });
+      expect(bridge.getDaemonStatusSnapshot().limits.channelIdleTimeoutMs).toBe(
+        0,
+      );
+      await vi.advanceTimersByTimeAsync(300_000);
+      await bridge.preheat({ keepAliveMs: 600_000 });
+      await vi.advanceTimersByTimeAsync(599_999);
+      expect(handle.killed).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(handle.killed).toBe(true);
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps the longer explicit keep-alive over a configured idle timeout', async () => {
+    vi.useFakeTimers();
+    try {
+      const handle = makeChannel();
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        channelIdleTimeoutMs: 30_000,
+      });
+
+      await bridge.preheat({ keepAliveMs: 600_000 });
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(handle.killed).toBe(false);
+      await vi.advanceTimersByTimeAsync(570_000);
+      expect(handle.killed).toBe(true);
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('clamps explicit keep-alive to the setTimeout maximum', async () => {
+    vi.useFakeTimers();
+    try {
+      const handle = makeChannel();
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+
+      await bridge.preheat({ keepAliveMs: 2_147_483_648 });
+      await vi.advanceTimersByTimeAsync(2_147_483_646);
+      expect(handle.killed).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(handle.killed).toBe(true);
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    ['an omitted timeout', undefined],
+    ['an explicit zero timeout', 0],
+  ] as const)('preserves the preheated channel with %s', async (_, timeout) => {
+    const handle = makeChannel();
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      ...(timeout === undefined ? {} : { channelIdleTimeoutMs: timeout }),
+    });
+
+    await bridge.preheat();
+
+    expect(handle.killed).toBe(false);
+    expect(bridge.isChannelLive()).toBe(true);
+    await bridge.shutdown();
+  });
+
   it('spawns channel that is reused by first session', async () => {
     let factoryCalls = 0;
     const factory: ChannelFactory = async () => {
@@ -28602,7 +32749,7 @@ describe('preheat', () => {
     await bridge.shutdown();
   });
 
-  it('is a no-op after shutdown', async () => {
+  it('rejects after shutdown without spawning a channel', async () => {
     let factoryCalls = 0;
     const factory: ChannelFactory = async () => {
       factoryCalls++;
@@ -28610,7 +32757,9 @@ describe('preheat', () => {
     };
     const bridge = makeBridge({ channelFactory: factory });
     await bridge.shutdown();
-    await bridge.preheat();
+    await expect(bridge.preheat()).rejects.toThrow(
+      'AcpSessionBridge is shutting down',
+    );
     expect(factoryCalls).toBe(0);
   });
 
@@ -28680,6 +32829,7 @@ describe('session idle reaper', () => {
       // reaper can catch this.
       await vi.advanceTimersByTimeAsync(6_000);
       expect(bridge.sessionCount).toBe(0);
+      expect(handle.killed).toBe(true);
 
       await bridge.shutdown();
     } finally {
@@ -29697,6 +33847,103 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     await bridge.shutdown();
   });
 
+  /**
+   * A Goal turn runs inside the child via `prompt()` directly, so the bridge
+   * never sees a `session/prompt` RPC for it and `pendingPromptCount` stays 0
+   * for its whole duration. The child still drains this queue between tool
+   * batches, so the session is busy: without the `goalTurnActive` check every
+   * mid-turn insert during a Goal turn would be refused as idle — while the
+   * client enables the affordance precisely because a Goal turn is non-idle.
+   */
+  it('accepts a rejectIfIdle insert while a child-driven Goal turn runs', async () => {
+    const handle = makeChannel({});
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    await handle.agentConnection.extNotification('_qwencode/start_turn', {
+      sessionId: session.sessionId,
+      source: 'goal',
+    });
+
+    expect(
+      bridge.enqueueMidTurnMessage(
+        session.sessionId,
+        'insert me',
+        { clientId: session.clientId },
+        'goal-insert',
+        { rejectIfIdle: true },
+      ),
+    ).toEqual({ accepted: true, messageId: 'goal-insert' });
+    // Queued for the child's drain, NOT promoted into a prompt of its own.
+    expect(bridge.getPendingPrompts(session.sessionId)).toEqual([]);
+    expect(
+      bridge.getMidTurnMessages(session.sessionId, {
+        clientId: session.clientId,
+      }).messages,
+    ).toEqual([
+      expect.objectContaining({ messageId: 'goal-insert', text: 'insert me' }),
+    ]);
+
+    await bridge.shutdown();
+  });
+
+  it('promotes what the ending Goal turn never drained', async () => {
+    let release: (() => void) | undefined;
+    const handle = makeChannel({
+      promptImpl: async () => {
+        await new Promise<void>((res) => {
+          release = res;
+        });
+        return { stopReason: 'end_turn' };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    await handle.agentConnection.extNotification('_qwencode/start_turn', {
+      sessionId: session.sessionId,
+      source: 'goal',
+    });
+    expect(
+      bridge.enqueueMidTurnMessage(
+        session.sessionId,
+        'never drained',
+        { clientId: session.clientId },
+        'goal-undrained',
+        { rejectIfIdle: true },
+      ),
+    ).toEqual({ accepted: true, messageId: 'goal-undrained' });
+
+    // A Goal turn owns no prompt slot, so its end is the only signal that can
+    // settle what its last drain missed.
+    await handle.agentConnection.extNotification('_qwencode/end_turn', {
+      sessionId: session.sessionId,
+      reason: 'end_turn',
+      source: 'goal',
+      promptId: `${session.sessionId}########1`,
+    });
+
+    await vi.waitFor(() =>
+      expect(bridge.getPendingPrompts(session.sessionId)).toEqual([
+        expect.objectContaining({
+          promptId: 'goal-undrained',
+          text: 'never drained',
+        }),
+      ]),
+    );
+    expect(
+      bridge.getMidTurnMessages(session.sessionId, {
+        clientId: session.clientId,
+      }).messages,
+    ).toEqual([]);
+
+    release?.();
+    await vi.waitFor(() =>
+      expect(bridge.getPendingPrompts(session.sessionId)).toEqual([]),
+    );
+    await bridge.shutdown();
+  });
+
   it('rejects a whitespace-only message even while busy', async () => {
     const { factory, release } = hangingPromptFactory();
     const bridge = makeBridge({ channelFactory: factory });
@@ -29774,7 +34021,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     await bridge.shutdown();
   });
 
-  it('removes uploaded media owned by a deleted mid-turn message', async () => {
+  it('keeps uploaded attachments after deleting a mid-turn message', async () => {
     const { factory, release } = hangingPromptFactory();
     const bridge = makeBridge({ channelFactory: factory });
     const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
@@ -29787,7 +34034,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       undefined,
       { clientId: session.clientId },
     );
-    const reference = await bridge.storeSessionMedia(
+    const reference = await bridge.storeSessionAttachment(
       session.sessionId,
       Uint8Array.of(1, 2, 3),
       'image/png',
@@ -29809,10 +34056,14 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       }),
     ).toEqual({ removed: true });
     expect(
-      await bridge.readSessionMedia(session.sessionId, reference.mediaId, {
-        clientId: session.clientId,
-      }),
-    ).toBeUndefined();
+      await bridge.readSessionAttachment(
+        session.sessionId,
+        reference.attachmentId,
+        {
+          clientId: session.clientId,
+        },
+      ),
+    ).toEqual({ data: Buffer.from([1, 2, 3]), mimeType: 'image/png' });
 
     release();
     await prompt;
@@ -29835,7 +34086,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       )
       .catch(() => {});
     await new Promise((r) => setTimeout(r, 10));
-    const reference = await bridge.storeSessionMedia(
+    const reference = await bridge.storeSessionAttachment(
       session.sessionId,
       Uint8Array.of(1, 2, 3),
       'image/png',
@@ -29857,7 +34108,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     ).toEqual({ removed: true });
 
     // The removal settled the id; a same-id retry must hit the settled ring
-    // and ack, not throw session_media_gone (410).
+    // and ack, not throw session_attachments_gone (410).
     expect(
       bridge.enqueueMidTurnMessage(
         session.sessionId,
@@ -30345,7 +34596,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       { clientId: session.clientId },
     );
     await vi.waitFor(() => expect(prompts).toHaveLength(1));
-    const reference = await bridge.storeSessionMedia(
+    const reference = await bridge.storeSessionAttachment(
       session.sessionId,
       Uint8Array.of(1),
       'image/png',
@@ -30364,9 +34615,13 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       { clientId: session.clientId },
       'normal-message',
     );
-    await bridge.removeSessionMedia(session.sessionId, reference.mediaId, {
-      clientId: session.clientId,
-    });
+    await bridge.removeSessionAttachment(
+      session.sessionId,
+      reference.attachmentId,
+      {
+        clientId: session.clientId,
+      },
+    );
 
     releases[0]!();
     await first;
@@ -30374,7 +34629,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     expect(prompts[1]).toEqual([
       {
         type: 'text',
-        text: 'expired attachment\n[Attached media is no longer available]',
+        text: 'expired attachment\n[Attachment is no longer available]',
       },
     ]);
     releases[1]!();
@@ -30409,13 +34664,13 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       { clientId: session.clientId },
     );
     await vi.waitFor(() => expect(prompts).toHaveLength(1));
-    const kept = await bridge.storeSessionMedia(
+    const kept = await bridge.storeSessionAttachment(
       session.sessionId,
       Uint8Array.of(1, 2),
       'image/png',
       { clientId: session.clientId },
     );
-    const removed = await bridge.storeSessionMedia(
+    const removed = await bridge.storeSessionAttachment(
       session.sessionId,
       Uint8Array.of(3, 4),
       'image/png',
@@ -30428,9 +34683,13 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       'mixed-media',
       { content: [removed, kept] },
     );
-    await bridge.removeSessionMedia(session.sessionId, removed.mediaId, {
-      clientId: session.clientId,
-    });
+    await bridge.removeSessionAttachment(
+      session.sessionId,
+      removed.attachmentId,
+      {
+        clientId: session.clientId,
+      },
+    );
 
     releases[0]!();
     await first;
@@ -30438,7 +34697,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     expect(prompts[1]).toEqual([
       {
         type: 'text',
-        text: 'two images\n[Attached media is no longer available]',
+        text: 'two images\n[Attachment is no longer available]',
       },
       { type: 'image', data: 'AQI=', mimeType: 'image/png' },
     ]);
@@ -30468,13 +34727,13 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       { clientId: session.clientId, promptId: 'prompt-p1' },
     );
     await vi.waitFor(() => expect(prompts).toHaveLength(1));
-    const kept = await bridge.storeSessionMedia(
+    const kept = await bridge.storeSessionAttachment(
       session.sessionId,
       Uint8Array.of(1, 2),
       'image/png',
       { clientId: session.clientId },
     );
-    const removed = await bridge.storeSessionMedia(
+    const removed = await bridge.storeSessionAttachment(
       session.sessionId,
       Uint8Array.of(3, 4),
       'image/png',
@@ -30503,9 +34762,13 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     // m1 promoted to running; m2 admitted queued behind it.
     await vi.waitFor(() => expect(prompts).toHaveLength(2));
 
-    await bridge.removeSessionMedia(session.sessionId, removed.mediaId, {
-      clientId: session.clientId,
-    });
+    await bridge.removeSessionAttachment(
+      session.sessionId,
+      removed.attachmentId,
+      {
+        clientId: session.clientId,
+      },
+    );
 
     releases[1]!();
     await vi.waitFor(() => expect(prompts).toHaveLength(3));
@@ -30514,7 +34777,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     expect(prompts[2]).toEqual([
       {
         type: 'text',
-        text: 'm2\n[Attached media is no longer available]',
+        text: 'm2\n[Attachment is no longer available]',
       },
       { type: 'image', data: 'AQI=', mimeType: 'image/png' },
     ]);
@@ -30522,75 +34785,6 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     await vi.waitFor(() =>
       expect(bridge.getPendingPrompts(session.sessionId)).toEqual([]),
     );
-    await bridge.shutdown();
-  });
-
-  it('rejects queued inline media past the session byte budget', async () => {
-    // Inline base64 never passes through the media store, so admission must
-    // budget the aggregate queued inline bytes per session instead of
-    // letting a full queue pin hundreds of MiB.
-    const releases: Array<() => void> = [];
-    const handle = makeChannel({
-      promptImpl: async () => {
-        await new Promise<void>((resolve) => releases.push(resolve));
-        return { stopReason: 'end_turn' };
-      },
-    });
-    const bridge = makeBridge({ channelFactory: async () => handle.channel });
-    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
-    const busy = bridge
-      .sendPrompt(
-        session.sessionId,
-        {
-          sessionId: session.sessionId,
-          prompt: [{ type: 'text', text: 't1' }],
-        },
-        undefined,
-        { clientId: session.clientId },
-      )
-      .catch(() => {});
-    await new Promise((r) => setTimeout(r, 10));
-
-    const half = 'x'.repeat(SESSION_MEDIA_MAX_TOTAL_BYTES / 2 + 1024);
-    const inline = {
-      type: 'image',
-      data: half,
-      mimeType: 'image/png',
-    } as const;
-    expect(
-      bridge.enqueueMidTurnMessage(
-        session.sessionId,
-        'first half',
-        { clientId: session.clientId },
-        'inline-1',
-        { content: [inline] },
-      ),
-    ).toEqual({ accepted: true, messageId: 'inline-1' });
-    // The second payload pushes the queued inline total past the budget.
-    expect(
-      bridge.enqueueMidTurnMessage(
-        session.sessionId,
-        'second half',
-        { clientId: session.clientId },
-        'inline-2',
-        { content: [inline] },
-      ),
-    ).toEqual({ accepted: false });
-    // A small inline payload stays admissible under the budget.
-    expect(
-      bridge.enqueueMidTurnMessage(
-        session.sessionId,
-        'small',
-        { clientId: session.clientId },
-        'inline-3',
-        {
-          content: [{ type: 'image', data: 'aW1n', mimeType: 'image/png' }],
-        },
-      ),
-    ).toEqual({ accepted: true, messageId: 'inline-3' });
-
-    releases[0]!();
-    await busy;
     await bridge.shutdown();
   });
 
@@ -30621,7 +34815,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       { clientId: session.clientId, promptId: 'prompt-p1' },
     );
     await vi.waitFor(() => expect(prompts).toHaveLength(1));
-    const reference = await bridge.storeSessionMedia(
+    const reference = await bridge.storeSessionAttachment(
       session.sessionId,
       Uint8Array.of(1),
       'image/png',
@@ -30652,9 +34846,13 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     await first;
     await vi.waitFor(() => expect(prompts).toHaveLength(2));
 
-    await bridge.removeSessionMedia(session.sessionId, reference.mediaId, {
-      clientId: session.clientId,
-    });
+    await bridge.removeSessionAttachment(
+      session.sessionId,
+      reference.attachmentId,
+      {
+        clientId: session.clientId,
+      },
+    );
     // An ordinary prompt admitted after the media message must stay behind it.
     const p3 = bridge.sendPrompt(
       session.sessionId,
@@ -30670,7 +34868,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     expect(prompts[2]).toEqual([
       {
         type: 'text',
-        text: 'm2\n[Attached media is no longer available]',
+        text: 'm2\n[Attachment is no longer available]',
       },
     ]);
     releases[2]!();
@@ -30726,7 +34924,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       { clientId: session.clientId, promptId: 'prompt-p1' },
     );
     await vi.waitFor(() => expect(prompts).toHaveLength(1));
-    const reference = await bridge.storeSessionMedia(
+    const reference = await bridge.storeSessionAttachment(
       session.sessionId,
       Uint8Array.of(1),
       'image/png',
@@ -30759,7 +34957,10 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     await vi.waitFor(() => expect(prompts).toHaveLength(2));
 
     // Media disappears between admission and dispatch (async arm).
-    await bridge.removeSessionMedia(session.sessionId, reference.mediaId);
+    await bridge.removeSessionAttachment(
+      session.sessionId,
+      reference.attachmentId,
+    );
 
     releases[1]!();
     // The degraded prompt must still reach the child — a re-admitted
@@ -30769,7 +34970,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     expect(prompts[2]).toEqual([
       {
         type: 'text',
-        text: 'm2\n[Attached media is no longer available]',
+        text: 'm2\n[Attachment is no longer available]',
       },
     ]);
     releases[2]!();
@@ -30807,10 +35008,13 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     const admission = bridge.enqueueMidTurnMessage(
       session.sessionId,
       'leftover',
+      { clientId: session.clientId },
+      'leftover-public',
+      { rejectIfIdle: true },
     );
     expect(admission).toEqual({
       accepted: true,
-      messageId: expect.any(String),
+      messageId: 'leftover-public',
     });
     releases[0]!();
     await t1;
@@ -30820,6 +35024,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       expect.objectContaining({
         promptId: admission.messageId,
         text: 'leftover',
+        originatorClientId: session.clientId,
       }),
     ]);
     releases[1]!();
@@ -31208,12 +35413,16 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       .catch(() => {});
     await new Promise((r) => setTimeout(r, 10));
 
-    const admission = bridge.enqueueMidTurnMessage(session.sessionId, 'hi', {
-      clientId: session.clientId,
-    });
+    const admission = bridge.enqueueMidTurnMessage(
+      session.sessionId,
+      'hi',
+      { clientId: session.clientId },
+      'public-mid-turn',
+      { rejectIfIdle: true },
+    );
     expect(admission).toEqual({
       accepted: true,
-      messageId: expect.any(String),
+      messageId: 'public-mid-turn',
     });
 
     // Subscribe before the drain so the live injection frame is captured. The
@@ -31471,7 +35680,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     await bridge.shutdown();
   });
 
-  it('getMidTurnMessages returns media blocks so a refresh keeps images', async () => {
+  it('getMidTurnMessages returns attachment blocks so a refresh keeps them', async () => {
     let release: (() => void) | undefined;
     const handle = makeChannel({
       promptImpl: async () => {
@@ -31501,13 +35710,30 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       data: 'aW1n',
       mimeType: 'image/png',
     } as const;
+    const resource = {
+      type: 'resource',
+      resource: {
+        uri: 'file:///notes.txt',
+        mimeType: 'text/plain',
+        text: 'notes',
+      },
+    } as const;
     expect(
       bridge.enqueueMidTurnMessage(
         session.sessionId,
         'with media',
         { clientId: session.clientId },
         'media-snap',
-        { content: [image] },
+        { content: [image, resource] },
+      ),
+    ).toEqual({ accepted: true, messageId: 'media-snap' });
+    expect(
+      bridge.enqueueMidTurnMessage(
+        session.sessionId,
+        'with media',
+        { clientId: session.clientId },
+        'media-snap',
+        { content: [image, resource] },
       ),
     ).toEqual({ accepted: true, messageId: 'media-snap' });
 
@@ -31520,7 +35746,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
         {
           messageId: 'media-snap',
           text: 'with media',
-          content: [image],
+          content: [image, resource],
         },
       ],
       settledMessageIds: [],
@@ -31532,7 +35758,61 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     await bridge.shutdown();
   });
 
-  it('getPendingPrompts returns media blocks so a refresh keeps images', async () => {
+  it('rejects queued inline attachments past the session byte budget', async () => {
+    const releases: Array<() => void> = [];
+    const handle = makeChannel({
+      promptImpl: async () => {
+        await new Promise<void>((resolve) => releases.push(resolve));
+        return { stopReason: 'end_turn' };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const busy = bridge.sendPrompt(
+      session.sessionId,
+      {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'go' }],
+      },
+      undefined,
+      { clientId: session.clientId },
+    );
+    await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(1));
+
+    const half = 'x'.repeat(50 * 1024 * 1024 + 1024);
+    const inline = {
+      type: 'resource',
+      resource: {
+        uri: 'file:///large.txt',
+        mimeType: 'text/plain',
+        text: half,
+      },
+    } as const;
+    expect(
+      bridge.enqueueMidTurnMessage(
+        session.sessionId,
+        'first half',
+        { clientId: session.clientId },
+        'inline-1',
+        { content: [inline] },
+      ),
+    ).toEqual({ accepted: true, messageId: 'inline-1' });
+    expect(
+      bridge.enqueueMidTurnMessage(
+        session.sessionId,
+        'second half',
+        { clientId: session.clientId },
+        'inline-2',
+        { content: [inline] },
+      ),
+    ).toEqual({ accepted: false });
+
+    releases[0]!();
+    await busy;
+    await bridge.shutdown();
+  });
+
+  it('getPendingPrompts returns attachment blocks for refresh', async () => {
     let release: (() => void) | undefined;
     const handle = makeChannel({
       promptImpl: async () => {
@@ -31550,6 +35830,13 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       data: 'aW1n',
       mimeType: 'image/png',
     } as const;
+    const resource = await bridge.storeSessionAttachment(
+      session.sessionId,
+      new TextEncoder().encode('notes'),
+      'text/plain',
+      { clientId: session.clientId },
+      'notes.txt',
+    );
 
     // Start first prompt that will hang
     bridge.sendPrompt(
@@ -31567,7 +35854,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       session.sessionId,
       {
         sessionId: session.sessionId,
-        prompt: [{ type: 'text', text: 'with media' }, image],
+        prompt: [{ type: 'text', text: 'with media' }, image, resource],
       },
       undefined,
       { clientId: session.clientId, promptId: 'media-prompt' },
@@ -31582,7 +35869,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     expect(mediaEntry).toMatchObject({
       promptId: 'media-prompt',
       text: 'with media',
-      content: [image],
+      content: [image, resource],
     });
 
     release?.();
@@ -32064,6 +36351,31 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     await bridge.shutdown();
   });
 
+  it('rejects a public enqueue on idle only when rejectIfIdle is set', async () => {
+    let promptCalls = 0;
+    const handle = makeChannel({
+      promptImpl: async () => {
+        promptCalls++;
+        return { stopReason: 'end_turn' };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    expect(
+      bridge.enqueueMidTurnMessage(
+        session.sessionId,
+        'public message',
+        { clientId: session.clientId },
+        'public-idle',
+        { rejectIfIdle: true },
+      ),
+    ).toEqual({ accepted: false });
+    expect(promptCalls).toBe(0);
+    expect(bridge.getPendingPrompts(session.sessionId)).toEqual([]);
+    await bridge.shutdown();
+  });
+
   it('still queues a queueOnly enqueue while the session is busy', async () => {
     const release = deferred<void>();
     const prompts: string[] = [];
@@ -32424,6 +36736,292 @@ describe('createAcpSessionBridge — child-resource refresh', () => {
       }
     } finally {
       await bridge.shutdown();
+    }
+  });
+});
+
+describe('DAEMON-005: sessionPromptSettledCloseGraceMs — deferred prompt-settled close', () => {
+  it('keeps session alive during grace window after prompt settles with no subscriber', async () => {
+    vi.useFakeTimers();
+    try {
+      const handle = makeChannel();
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionPromptSettledCloseGraceMs: 30_000,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'hi' }],
+      });
+
+      // Client detaches after receiving the result
+      await bridge.detachClient(session.sessionId, session.clientId);
+      expect(bridge.sessionCount).toBe(1);
+
+      // Advance to just before the grace window ends — session must survive
+      await vi.advanceTimersByTimeAsync(29_000);
+      expect(bridge.sessionCount).toBe(1);
+
+      // Advance past the grace window — session should now close
+      await vi.advanceTimersByTimeAsync(2_000);
+      await vi.waitFor(() => {
+        expect(bridge.sessionCount).toBe(0);
+      });
+
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('cancels deferred close when a poll-based client re-subscribes within grace window', async () => {
+    vi.useFakeTimers();
+    try {
+      const handle = makeChannel();
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionPromptSettledCloseGraceMs: 30_000,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'hi' }],
+      });
+
+      // Client detaches — starts the grace timer
+      await bridge.detachClient(session.sessionId, session.clientId);
+      expect(bridge.sessionCount).toBe(1);
+
+      // Advance into the grace window
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(bridge.sessionCount).toBe(1);
+
+      // Poll client reconnects via subscribeEvents — must cancel the timer
+      const abort = new AbortController();
+      bridge.subscribeEvents(session.sessionId, { signal: abort.signal });
+
+      // Advance well past the original deadline — session must still be alive
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(bridge.sessionCount).toBe(1);
+
+      abort.abort();
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('closes session immediately after prompt settles when grace is 0 (default)', async () => {
+    vi.useFakeTimers();
+    try {
+      const handle = makeChannel();
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        // default: 0 — original behavior preserved
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'hi' }],
+      });
+
+      // Detach the only client
+      await bridge.detachClient(session.sessionId, session.clientId);
+
+      // With grace=0 the session closes synchronously on detach (no timer)
+      await vi.waitFor(() => {
+        expect(bridge.sessionCount).toBe(0);
+      });
+
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('re-arms remaining grace after subscribe → Abort churn', async () => {
+    vi.useFakeTimers();
+    try {
+      const handle = makeChannel();
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionPromptSettledCloseGraceMs: 30_000,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'hi' }],
+      });
+
+      // Detach starts the grace timer.
+      await bridge.detachClient(session.sessionId, session.clientId);
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(bridge.sessionCount).toBe(1);
+
+      // Poll client reconnects and then aborts mid-window. Aborting the
+      // subscription alone does not detach the bridge client; the HTTP layer
+      // does that via detachClient after the pump settles.
+      const abort = new AbortController();
+      bridge.subscribeEvents(session.sessionId, { signal: abort.signal });
+      await vi.advanceTimersByTimeAsync(5_000);
+      abort.abort();
+      await bridge.detachClient(session.sessionId, session.clientId);
+
+      // Session must close at the original deadline (10s + 5s elapsed = 15s,
+      // remaining 15s), not at a fresh 30s after the abort.
+      await vi.advanceTimersByTimeAsync(14_000);
+      expect(bridge.sessionCount).toBe(1);
+      await vi.advanceTimersByTimeAsync(2_000);
+      await vi.waitFor(() => {
+        expect(bridge.sessionCount).toBe(0);
+      });
+
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('preserves deferred close when subscribeEvents throws', async () => {
+    vi.useFakeTimers();
+    try {
+      const handle = makeChannel();
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionPromptSettledCloseGraceMs: 30_000,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'hi' }],
+      });
+
+      // Detach starts the grace timer.
+      await bridge.detachClient(session.sessionId, session.clientId);
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(bridge.sessionCount).toBe(1);
+
+      // Force the EventBus subscribe to fail. The pending close must survive.
+      vi.spyOn(EventBus.prototype, 'subscribe').mockImplementationOnce(() => {
+        throw new Error('subscribe boom');
+      });
+      expect(() => bridge.subscribeEvents(session.sessionId, {})).toThrow(
+        'subscribe boom',
+      );
+
+      // Session still closes at the original deadline.
+      await vi.advanceTimersByTimeAsync(19_000);
+      expect(bridge.sessionCount).toBe(1);
+      await vi.advanceTimersByTimeAsync(2_000);
+      await vi.waitFor(() => {
+        expect(bridge.sessionCount).toBe(0);
+      });
+
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not orphan the timer across two prompt settles inside one grace window', async () => {
+    vi.useFakeTimers();
+    try {
+      const handle = makeChannel();
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionPromptSettledCloseGraceMs: 30_000,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      // First prompt settles with no subscriber.
+      await bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'first' }],
+      });
+      await bridge.detachClient(session.sessionId, session.clientId);
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(bridge.sessionCount).toBe(1);
+
+      // Reconnect, send a second prompt, and detach again. The second
+      // schedulePromptSettledClose must clear the first timer instead of
+      // leaking it; if it leaked, the first timer would close the session
+      // at 30s even though the second prompt reset the clock.
+      const abort1 = new AbortController();
+      bridge.subscribeEvents(session.sessionId, { signal: abort1.signal });
+      await bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'second' }],
+      });
+      abort1.abort();
+      await bridge.detachClient(session.sessionId, session.clientId);
+
+      // Advance to 35s absolute: well past the first timer's 30s deadline,
+      // but only 25s after the second prompt settled.
+      await vi.advanceTimersByTimeAsync(25_000);
+      expect(bridge.sessionCount).toBe(1);
+
+      // Advance 6s more to pass the second deadline.
+      await vi.advanceTimersByTimeAsync(6_000);
+      await vi.waitFor(() => {
+        expect(bridge.sessionCount).toBe(0);
+      });
+
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('preserves the grace hold when killSession is refused by the agent', async () => {
+    vi.useFakeTimers();
+    try {
+      const handle = makeChannel({
+        extMethodImpl: (method) => {
+          if (method === 'qwen/control/session/close') {
+            throw RequestError.methodNotFound(method);
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionPromptSettledCloseGraceMs: 30_000,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'hi' }],
+      });
+
+      // Detach starts the grace timer.
+      await bridge.detachClient(session.sessionId, session.clientId);
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(bridge.sessionCount).toBe(1);
+
+      // Kill is refused. The grace hold must survive so a reconnecting client
+      // can still cancel the deferred close inside the original window.
+      await expect(bridge.killSession(session.sessionId)).resolves.toBe(false);
+      expect(bridge.sessionCount).toBe(1);
+
+      // Reconnect within the original grace window — the session must stay
+      // open well past the original deadline because the reconnect cancelled
+      // the deferred close.
+      const abort = new AbortController();
+      bridge.subscribeEvents(session.sessionId, { signal: abort.signal });
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(bridge.sessionCount).toBe(1);
+
+      abort.abort();
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
     }
   });
 });

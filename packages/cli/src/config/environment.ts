@@ -172,6 +172,45 @@ export function resetEnvironmentTrackingForTesting(): void {
 }
 
 /**
+ * True when `key`'s current value in `process.env` was written by a FILE the
+ * loader read — a `.env` on the way up from cwd, or a settings `env` block —
+ * rather than by the process's actual environment.
+ *
+ * The distinction matters wherever a value decides something the file's author
+ * must not decide. `<repo>/.qwen/.env` is repository content: it is read from
+ * the checkout under review, and folder trust defaults off, so a fresh runner
+ * admits it. A setting that a repository is deliberately barred from making
+ * through `settings.json` (see `operatorReviewSettings`, which skips the
+ * workspace scope) is barred for nothing if the same value can arrive through
+ * the env layer that outranks it.
+ *
+ * Callers that consult this are saying: an operator may set this, a repository
+ * may not. The operator's routes remain their settings file and their real
+ * shell environment — including a workflow's `env:` block, which is a process
+ * variable and not file-sourced.
+ */
+export function isFileSourcedEnvKey(key: string): boolean {
+  if (dotEnvSourcedKeys.has(key) || settingsEnvSourcedKeys.has(key)) {
+    return true;
+  }
+  // Case-INSENSITIVELY on Windows, where env lookup is: a `.env` committed as
+  // `docker_host=…` writes that spelling into the tracking set and reaches the
+  // child exactly as `DOCKER_HOST` would, so an exact-case membership test
+  // answers "not from a file" about a value that is. `config/shared-env-keys.ts`
+  // folds case for the same reason, and this file's own callers ask a security
+  // question rather than a bookkeeping one.
+  if (process.platform !== 'win32') return false;
+  const lower = key.toLowerCase();
+  for (const tracked of dotEnvSourcedKeys) {
+    if (tracked.toLowerCase() === lower) return true;
+  }
+  for (const tracked of settingsEnvSourcedKeys) {
+    if (tracked.toLowerCase() === lower) return true;
+  }
+  return false;
+}
+
+/**
  * Collects environment variables from user-level `.env` files and returns
  * them as a plain dictionary **without** mutating `process.env`.
  *
@@ -615,6 +654,11 @@ export function loadEnvironment(
 export interface EnvReloadResult {
   updatedKeys: string[];
   removedKeys: string[];
+  envFileReadFailed?: boolean;
+}
+
+export interface EnvReloadOptions {
+  failClosedOnEnvFileReadError?: boolean;
 }
 
 /**
@@ -626,6 +670,7 @@ export function reloadEnvironment(
   settings: Settings,
   workspaceCwd: string,
   workspaceTrusted?: boolean,
+  options: EnvReloadOptions = {},
 ): EnvReloadResult {
   const userLevelPaths = getUserLevelEnvPaths();
   const envFilePaths = findEnvFiles(
@@ -635,6 +680,14 @@ export function reloadEnvironment(
     workspaceTrusted,
   );
   const parsedEnvFiles = parseEnvFiles(envFilePaths, userLevelPaths);
+
+  if (parsedEnvFiles.readFailed && options.failClosedOnEnvFileReadError) {
+    return {
+      updatedKeys: [],
+      removedKeys: [],
+      envFileReadFailed: true,
+    };
+  }
 
   if (process.env['CLOUD_SHELL'] === 'true') {
     setUpCloudShellEnvironmentInEnv(process.env, parsedEnvFiles.files);
@@ -751,5 +804,9 @@ export function reloadEnvironment(
     settingsEnvSourcedKeys.add(key);
   }
 
-  return { updatedKeys, removedKeys };
+  return {
+    updatedKeys,
+    removedKeys,
+    ...(dotEnvReadFailed ? { envFileReadFailed: true } : {}),
+  };
 }

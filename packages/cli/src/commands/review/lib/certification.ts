@@ -22,6 +22,7 @@
  */
 
 import type { AgentRecord } from './transcripts.js';
+import { serializedArgsNamePath } from './transcripts.js';
 import { briefPath } from './prompt-record.js';
 
 /**
@@ -61,19 +62,37 @@ export function declaresOwnUncoverable(
 }
 
 /**
+ * Does ANY of these serialized tool-call args name the EXACT `path`?
+ *
+ * The match itself lives in `transcripts.ts` beside the code that serializes
+ * the args, and `parseTranscript`'s diff-read half calls the same function —
+ * so the bar's "exact path, not a look-alike" guarantee has ONE definition,
+ * not one per half. This wrapper only spreads it over a record's call list;
+ * every path atom below routes through it.
+ *
+ * The name is deliberately not `namesPath`: `findings.ts` has a
+ * module-private `namesPath` that matches a path named in PROSE on a name
+ * boundary — it credits `rm /plan/chunk-3.brief.md` for naming the brief.
+ * Unifying these two would make `openedBrief` credit an agent for deleting a
+ * file it never opened, so they keep distinct names to stop a future reader
+ * treating either as THE path matcher.
+ */
+function argsNameExactPath(args: readonly string[], path: string): boolean {
+  return args.some((a) => serializedArgsNamePath(a, path));
+}
+
+/**
  * Did this record's agent open the brief recorded under `key`? Compared as a
  * whole JSON string value (`successfulCallArgs` are serialized args), so a
- * `${brief}.bak` cannot be credited for the brief — the same trap
- * `parseTranscript` avoids for the diff path. "Open" is mention-level: any
- * successful tool whose args name the exact path.
+ * `${brief}.bak` cannot be credited for the brief. "Open" is mention-level:
+ * any successful tool whose args name the exact path.
  */
 export function openedBrief(
   rec: AgentRecord,
   planPath: string,
   key: string,
 ): boolean {
-  const needle = JSON.stringify(briefPath(planPath, key));
-  return rec.successfulCallArgs.some((a) => a.includes(needle));
+  return argsNameExactPath(rec.successfulCallArgs, briefPath(planPath, key));
 }
 
 /**
@@ -87,8 +106,10 @@ export function readBrief(
   planPath: string,
   key: string,
 ): boolean {
-  const needle = JSON.stringify(briefPath(planPath, key));
-  return rec.successfulReadFileArgs.some((a) => a.includes(needle));
+  return argsNameExactPath(
+    rec.successfulReadFileArgs,
+    briefPath(planPath, key),
+  );
 }
 
 /**
@@ -104,6 +125,5 @@ export function readFindingsPointer(
   pointer: string | null,
 ): boolean {
   if (pointer === null) return true;
-  const needle = JSON.stringify(pointer);
-  return rec.successfulReadFileArgs.some((a) => a.includes(needle));
+  return argsNameExactPath(rec.successfulReadFileArgs, pointer);
 }
