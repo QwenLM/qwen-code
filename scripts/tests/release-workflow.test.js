@@ -141,7 +141,7 @@ describe('CUA release workflow', () => {
   });
 });
 
-// The canonical workspace restoration script shared by all five
+// The canonical workspace restoration script shared by all nine
 // 'Restore workspace ownership' copies in release.yml. The full wipe (vs
 // serve-ab.yml's keep-and-scrub) is deliberate on this lane: release
 // checkouts carry CI_BOT_PAT and the npm OIDC id-token, so no pre-existing
@@ -157,7 +157,7 @@ const canonicalWipe = `set -uo pipefail
 # wipe — rather than keeping and scrubbing .git like serve-ab.yml —
 # is deliberate: these checkouts run with CI_BOT_PAT and the npm
 # OIDC id-token, so no pre-existing repo state may survive into
-# them; the accepted cost is re-fetching full history each run.
+# them; the accepted cost is fetching a fresh ref each run.
 #
 # Guards ported from serve-ab.yml's wipe (#9220, #9265): under a
 # mangled env even \`/home\` or an empty string reached the rm. A
@@ -310,7 +310,11 @@ describe('release workflow', () => {
 
     expect(checkoutJobs.map(([id]) => id)).toEqual([
       'prepare',
-      'quality',
+      'quality_static',
+      'quality_build',
+      'quality_typecheck',
+      'workspace_tests',
+      'quality_scripts',
       'integration_none',
       'integration_docker',
       'publish',
@@ -332,10 +336,129 @@ describe('release workflow', () => {
       expect(checkoutIndex, id).toBeGreaterThan(0);
       // Full-string equality against the shared constant: commenting out
       // the find, inserting an early exit, or dropping the chown/chmod
-      // ladder uniformly from all five copies keeps every substring and
+      // ladder uniformly from all nine copies keeps every substring and
       // equality-across-copies pin green while reopening the incident.
       expect(job.steps[restoreIndex]?.run, id).toBe(canonicalWipe);
     }
+  });
+
+  it('uses shallow history only for validation jobs', () => {
+    const checkoutDepth = (id) =>
+      releaseYaml.jobs[id].steps.find((step) =>
+        String(step.uses ?? '').includes('actions/checkout'),
+      ).with['fetch-depth'];
+
+    expect(checkoutDepth('prepare')).toBe(0);
+    expect(checkoutDepth('publish')).toBe(0);
+    for (const id of [
+      'quality_static',
+      'quality_build',
+      'quality_typecheck',
+      'workspace_tests',
+      'quality_scripts',
+      'integration_none',
+      'integration_docker',
+    ]) {
+      expect(checkoutDepth(id), id).toBe(1);
+    }
+  });
+
+  it('pins validation and publishing to the commit resolved by prepare', () => {
+    expect(releaseYaml.jobs.prepare.outputs.release_sha).toBe(
+      '${{ steps.source.outputs.release_sha }}',
+    );
+    const sourceStep = releaseYaml.jobs.prepare.steps.find(
+      (step) => step.id === 'source',
+    );
+    expect(sourceStep.run).toContain('git rev-parse HEAD');
+
+    for (const id of [
+      'quality_static',
+      'quality_build',
+      'quality_typecheck',
+      'workspace_tests',
+      'quality_scripts',
+      'integration_none',
+      'integration_docker',
+      'publish',
+    ]) {
+      const checkout = releaseYaml.jobs[id].steps.find((step) =>
+        String(step.uses ?? '').includes('actions/checkout'),
+      );
+      expect(checkout.with.ref, id).toBe(
+        '${{ needs.prepare.outputs.release_sha }}',
+      );
+    }
+  });
+
+  it('allows build artifact replacement when all jobs are rerun', () => {
+    const upload = releaseYaml.jobs.quality_build.steps.find((step) =>
+      String(step.uses ?? '').includes('actions/upload-artifact'),
+    );
+    expect(upload.with.name).toBe('release-quality-build');
+    expect(upload.with.overwrite).toBe(true);
+  });
+
+  it('fans workspace tests into three complete Vitest shards', () => {
+    const job = releaseYaml.jobs.workspace_tests;
+    expect(job.strategy).toEqual({
+      'fail-fast': false,
+      matrix: { shard: [1, 2, 3] },
+    });
+    const testStep = job.steps.find(
+      (step) => step.name === 'Run Workspace Tests',
+    );
+    expect(testStep.run).toBe(
+      'npm run test:release:workspaces -- --shard=${{ matrix.shard }}/3 --passWithNoTests',
+    );
+
+    const rootPackage = JSON.parse(readFileSync('package.json', 'utf8'));
+    const expandWorkspace = (pattern) => {
+      if (pattern.endsWith('/*')) {
+        const parent = pattern.slice(0, -2);
+        return readdirSync(parent, { withFileTypes: true })
+          .filter((entry) => entry.isDirectory())
+          .map((entry) => join(parent, entry.name, 'package.json'))
+          .filter(existsSync);
+      }
+      const manifest = join(pattern, 'package.json');
+      return existsSync(manifest) ? [manifest] : [];
+    };
+    const excluded = new Set(
+      rootPackage.workspaces
+        .filter((pattern) => pattern.startsWith('!'))
+        .flatMap((pattern) => expandWorkspace(pattern.slice(1))),
+    );
+    const workspacePackages = rootPackage.workspaces
+      .filter((pattern) => !pattern.startsWith('!'))
+      .flatMap(expandWorkspace)
+      .filter((path) => !excluded.has(path))
+      .map((path) => [path, JSON.parse(readFileSync(path, 'utf8'))])
+      .filter(([, packageJson]) => packageJson.scripts?.['test:ci']);
+
+    expect(workspacePackages.length).toBeGreaterThan(0);
+    for (const [path, packageJson] of workspacePackages) {
+      expect(packageJson.scripts['test:ci'], path).toContain('vitest run');
+    }
+  });
+
+  it('keeps publishing behind one fail-closed quality aggregate', () => {
+    const quality = releaseYaml.jobs.quality;
+    expect(quality.needs).toEqual([
+      'quality_static',
+      'quality_build',
+      'quality_typecheck',
+      'workspace_tests',
+      'quality_scripts',
+    ]);
+    expect(quality.if).toBe(
+      "${{ always() && github.event.inputs.force_skip_tests != 'true' }}",
+    );
+    expect(quality.steps[0].run).toContain(
+      'if [[ "${result}" != \'success\' ]]',
+    );
+    expect(releaseYaml.jobs.publish.needs).toContain('quality');
+    expect(releaseYaml.jobs.publish.needs).not.toContain('workspace_tests');
   });
 
   it('keeps workspace cleanup from inspecting or signaling host processes', () => {
@@ -901,6 +1024,11 @@ describe('release workflow', () => {
       Object.fromEntries(
         [
           'prepare',
+          'quality_static',
+          'quality_build',
+          'quality_typecheck',
+          'workspace_tests',
+          'quality_scripts',
           'quality',
           'integration_none',
           'integration_docker',
@@ -909,7 +1037,12 @@ describe('release workflow', () => {
       ),
     ).toEqual({
       prepare: 30,
-      quality: 120,
+      quality_static: 30,
+      quality_build: 45,
+      quality_typecheck: 30,
+      workspace_tests: 45,
+      quality_scripts: 30,
+      quality: 5,
       integration_none: 120,
       integration_docker: 120,
       notify_failure: 10,
@@ -917,7 +1050,11 @@ describe('release workflow', () => {
 
     for (const id of [
       'prepare',
-      'quality',
+      'quality_static',
+      'quality_build',
+      'quality_typecheck',
+      'workspace_tests',
+      'quality_scripts',
       'integration_none',
       'integration_docker',
     ]) {
@@ -977,8 +1114,7 @@ describe('release workflow', () => {
   it('fails the release when the review source stamp did not land', () => {
     // The runtime staleness check degrades to "could not check" without the
     // stamp this step is guarding. The publish job itself does not re-run
-    // the scripts suite — the quality job that gates it does (`npm run
-    // test:release` ends with `npm run test:scripts`), but
+    // the scripts suite — the quality_scripts job that gates it does, but
     // `force_skip_tests: 'true'` skips that job entirely — so a future
     // change that removes the stamp step or this guard must fail here
     // instead of shipping a release that silently lost its digest.
@@ -1192,7 +1328,11 @@ describe('release lane runner routing', () => {
   it('routes validation jobs to ECS with a hosted emergency fallback', () => {
     const validationJobs = [
       'prepare',
-      'quality',
+      'quality_static',
+      'quality_build',
+      'quality_typecheck',
+      'workspace_tests',
+      'quality_scripts',
       'integration_none',
       'integration_docker',
     ];
@@ -1220,6 +1360,8 @@ describe('release lane runner routing', () => {
   });
 
   it('keeps publishing and failure notification on hosted runners', () => {
+    expect(releaseYaml.jobs.quality['runs-on']).toBe('ubuntu-latest');
+    expect(releaseYaml.jobs.quality['runs-on']).not.toContain('ecs-qwen');
     expect(releaseYaml.jobs.publish['runs-on']).toBe('ubuntu-latest');
     expect(releaseYaml.jobs.publish['runs-on']).not.toContain('ecs-qwen');
     expect(releaseYaml.jobs.notify_failure['runs-on']).toBe('ubuntu-latest');
