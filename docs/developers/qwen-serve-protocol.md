@@ -209,7 +209,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'mcp_workspace_pool', 'mcp_pool_restart',
  'require_auth', 'allow_origin', 'auth_device_flow',
  'permission_mediation', 'prompt_absolute_deadline', 'writer_idle_timeout',
- 'non_blocking_prompt', 'session_language', 'session_rewind',
+ 'non_blocking_prompt', 'session_language', 'user_language_sync', 'session_rewind',
  'workspace_hooks', 'session_hooks', 'workspace_extensions',
  'session_branch', 'rate_limit', 'workspace_reload', 'channel_delivery',
  'multi_workspace_sessions', 'multi_workspace_session_rewind',
@@ -516,6 +516,7 @@ operator diagnostic snapshot documented below.
 | `prompt_absolute_deadline`          | `--prompt-deadline-ms` / `QWEN_SERVE_PROMPT_DEADLINE_MS` / `ServeOptions.promptDeadlineMs` is set to a positive integer.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `writer_idle_timeout`               | `--writer-idle-timeout-ms` / `QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS` / `ServeOptions.writerIdleTimeoutMs` is set to a positive integer.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `workspace_settings`                | the daemon was created with settings persistence available.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `user_language_sync`                | the daemon was created with settings persistence available (same condition as `workspace_settings`), so the sessionless `POST /language` route is registered.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `workspace_voice`                   | settings persistence is available, so the legacy primary workspace Voice settings routes are active.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `workspace_voice_transcription`     | the primary workspace has a configured Voice transcription model.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `session_shell_command`             | Session shell execution is explicitly enabled and effective under bearer auth or trusted-loopback authority; calls still require a session-bound client id.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
@@ -3077,6 +3078,48 @@ Errors (non-2xx):
 - `500` — internal error (e.g. `ToolRegistry` not initialized).
 
 SSE events (workspace-scoped): `mcp_server_restarted` with `{serverName, durationMs, originatorClientId?}` on success; `mcp_server_restart_refused` with `{serverName, reason, originatorClientId?}` on soft skip.
+
+#### `POST /language`
+
+Capability tag: `user_language_sync` (conditional — advertised only when settings persistence is available, same condition as `workspace_settings`). Bridge → ACP extMethod `qwen/control/user/language` per trusted runtime with a live channel.
+
+Sessionless **user-level** language sync (issue #10234), for hosts that need to switch language before any session exists (e.g. a welcome page). Ownership classification: process-global — it mutates user-global state only (`~/.qwen/settings.json`, the global `~/.qwen/output-language.md`) plus best-effort runtime refresh, so it takes neither a workspace selector nor a session id. Registered behind the non-strict `mutate()` gate, matching the sibling `POST /session/:id/language`.
+
+The daemon process is the single writer: it persists `general.language` (and, when `syncOutputLanguage` is true, `general.outputLanguage` plus the global `output-language.md`) before fanning out. Each trusted runtime then switches its own process UI language and reloads user-scope settings from disk; when `syncOutputLanguage` is true, it also refreshes every local session's system instruction. Differences from the session-scoped route:
+
+- Project-bound output-language files are NOT rewritten — a session whose workspace has its own `.qwen/output-language.md` keeps that override (project scope wins on refresh).
+- Zero sessions and zero live runtime channels are a **success**, not an error; a runtime without a live channel is skipped (not failed) and reads the persisted files when its channel next spawns.
+- Untrusted workspace runtimes are skipped, matching the session route's `403 untrusted_workspace` posture.
+
+Request:
+
+```json
+{ "language": "zh", "syncOutputLanguage": true }
+```
+
+`language` must be one of the codes listed in `/capabilities` `supportedLanguages` (plus `'auto'`); `syncOutputLanguage` defaults to `false`.
+
+Response (200):
+
+```json
+{
+  "language": "zh",
+  "outputLanguage": "Chinese",
+  "refresh": { "runtimes": 1, "sessions": 2, "failed": 0 }
+}
+```
+
+`language` is the daemon-resolved UI locale, so an `'auto'` request can return a concrete language; hosts should read the persisted `general.language` setting for selector state. `outputLanguage` is `null` when `syncOutputLanguage` was false. `refresh.runtimes` counts runtimes that applied the switch over a live channel; `refresh.sessions` sums per-session system-instruction refreshes; `refresh.failed` aggregates per-session refresh failures and failed runtimes (fan-out is best-effort and never fails the request after persistence succeeded).
+
+Errors:
+
+- `400 {code: 'invalid_language', allowed: [...]}` — unknown language code.
+- `400 {code: 'invalid_sync_flag'}` — `syncOutputLanguage` is non-boolean.
+- `400 {code: 'invalid_client_id'}` — `X-Qwen-Client-Id` is not a client known to any runtime (header is optional; omit it when no session exists).
+- `500 {code: 'persist_error'}` — user-settings or output-language file write failed; the failing step and everything after it did not run (earlier applied steps, such as the `general.language` write, are not rolled back).
+- `404` — daemon predates the route, or was built without settings persistence (check the capability tag).
+
+SSE event (workspace-scoped, on every runtime's session buses): `language_changed` with `{language, outputLanguage, userLevel: true, originatorClientId?}`. The `userLevel: true` marker distinguishes this fan-out from the session route's per-session event, which carries `sessionId` instead.
 
 ### `GET /session/:id/events` (SSE)
 

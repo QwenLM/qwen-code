@@ -40,7 +40,10 @@ import {
   normalizeMaxJournalEvents,
   type JournalGrowthSessionLimit,
 } from '@qwen-code/acp-bridge/replayWindowLimits';
-import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
+import {
+  DEFAULT_RING_SIZE,
+  type BridgeEvent,
+} from '@qwen-code/acp-bridge/eventBus';
 import { resolveSessionRestoreTimeoutMs } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
 import type { NdJsonMessageObservation } from '@qwen-code/acp-bridge/ndJsonStream';
 import { getDeviceFlowRegistry } from './auth/device-flow.js';
@@ -422,8 +425,8 @@ const RUNTIME_STARTUP_TIMEOUT_ENV = 'QWEN_SERVE_RUNTIME_STARTUP_TIMEOUT_MS';
 const MAX_EVENT_RING_SIZE = 1_000_000;
 const DEFAULT_MAX_SESSIONS = 32;
 const DEFAULT_MAX_PENDING_PROMPTS_PER_SESSION = 5;
-const DEFAULT_EVENT_RING_SIZE = 8000;
 const DEFAULT_SESSION_IDLE_TIMEOUT_MS = 30 * 60_000;
+const DEFAULT_SESSION_PROMPT_SETTLED_CLOSE_GRACE_MS = 0;
 const WORKSPACE_SETTING_SCOPE =
   'Workspace' as import('../config/settings.js').SettingScope;
 
@@ -2312,6 +2315,12 @@ function sessionIdleTimeoutMs(value: number | undefined): number {
     : DEFAULT_SESSION_IDLE_TIMEOUT_MS;
 }
 
+function sessionPromptSettledCloseGraceMs(value: number | undefined): number {
+  return value !== undefined
+    ? channelIdleTimeoutMs(value)
+    : DEFAULT_SESSION_PROMPT_SETTLED_CLOSE_GRACE_MS;
+}
+
 function currentServeFeaturesForRunQwenServe(
   opts: ServeOptions,
   sessionShellCommandEnabled: boolean,
@@ -2733,7 +2742,7 @@ function createBootstrapServeApp(input: {
           opts.maxPendingPromptsPerSession,
         ),
         listenerMaxConnections: listenerMaxConnections(opts.maxConnections),
-        eventRingSize: opts.eventRingSize ?? DEFAULT_EVENT_RING_SIZE,
+        eventRingSize: opts.eventRingSize ?? DEFAULT_RING_SIZE,
         compactedReplayMaxBytes:
           opts.compactedReplayMaxBytes ?? DEFAULT_COMPACTED_REPLAY_MAX_BYTES,
         maxJournalEvents: opts.maxJournalEvents ?? DEFAULT_MAX_JOURNAL_EVENTS,
@@ -2742,6 +2751,9 @@ function createBootstrapServeApp(input: {
         writerIdleTimeoutMs: positiveFiniteOrNull(opts.writerIdleTimeoutMs),
         channelIdleTimeoutMs: channelIdleTimeoutMs(opts.channelIdleTimeoutMs),
         sessionIdleTimeoutMs: sessionIdleTimeoutMs(opts.sessionIdleTimeoutMs),
+        sessionPromptSettledCloseGraceMs: sessionPromptSettledCloseGraceMs(
+          opts.sessionPromptSettledCloseGraceMs,
+        ),
         acpConnectionCap: null,
         acpPreAttachMaxFramesPerStream: null,
         acpPreAttachMaxFramesPerConnection: null,
@@ -4080,6 +4092,13 @@ async function runQwenServeImpl(
     if (!isNonNegativeIntegerMs(opts.sessionIdleTimeoutMs)) {
       throw new TypeError(
         `Invalid sessionIdleTimeoutMs: ${opts.sessionIdleTimeoutMs}. Must be a non-negative integer (milliseconds, 0 = disabled).`,
+      );
+    }
+  }
+  if (opts.sessionPromptSettledCloseGraceMs !== undefined) {
+    if (!isNonNegativeIntegerMs(opts.sessionPromptSettledCloseGraceMs)) {
+      throw new TypeError(
+        `Invalid sessionPromptSettledCloseGraceMs: ${opts.sessionPromptSettledCloseGraceMs}. Must be a non-negative integer (milliseconds, 0 = disabled).`,
       );
     }
   }
@@ -5499,6 +5518,12 @@ async function runQwenServeImpl(
         ...(opts.sessionIdleTimeoutMs !== undefined
           ? { sessionIdleTimeoutMs: opts.sessionIdleTimeoutMs }
           : {}),
+        ...(opts.sessionPromptSettledCloseGraceMs !== undefined
+          ? {
+              sessionPromptSettledCloseGraceMs:
+                opts.sessionPromptSettledCloseGraceMs,
+            }
+          : {}),
         ...(opts.permissionResponseTimeoutMs !== undefined
           ? { permissionResponseTimeoutMs: opts.permissionResponseTimeoutMs }
           : {}),
@@ -6059,6 +6084,12 @@ async function runQwenServeImpl(
           : {}),
         ...(opts.sessionIdleTimeoutMs !== undefined
           ? { sessionIdleTimeoutMs: opts.sessionIdleTimeoutMs }
+          : {}),
+        ...(opts.sessionPromptSettledCloseGraceMs !== undefined
+          ? {
+              sessionPromptSettledCloseGraceMs:
+                opts.sessionPromptSettledCloseGraceMs,
+            }
           : {}),
         ...(opts.permissionResponseTimeoutMs !== undefined
           ? { permissionResponseTimeoutMs: opts.permissionResponseTimeoutMs }
@@ -6725,6 +6756,12 @@ async function runQwenServeImpl(
             : {}),
           ...(opts.sessionIdleTimeoutMs !== undefined
             ? { sessionIdleTimeoutMs: opts.sessionIdleTimeoutMs }
+            : {}),
+          ...(opts.sessionPromptSettledCloseGraceMs !== undefined
+            ? {
+                sessionPromptSettledCloseGraceMs:
+                  opts.sessionPromptSettledCloseGraceMs,
+              }
             : {}),
           ...(opts.permissionResponseTimeoutMs !== undefined
             ? { permissionResponseTimeoutMs: opts.permissionResponseTimeoutMs }

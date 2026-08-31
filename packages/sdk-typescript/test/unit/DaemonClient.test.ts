@@ -5162,6 +5162,61 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('setUserLanguage (#10234)', () => {
+    it('POSTs to the sessionless /language route and returns the typed result', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          language: 'zh',
+          outputLanguage: 'Chinese',
+          refresh: { runtimes: 1, sessions: 2, failed: 0 },
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = await client.setUserLanguage('zh', {
+        syncOutputLanguage: true,
+      });
+      expect(result).toEqual({
+        language: 'zh',
+        outputLanguage: 'Chinese',
+        refresh: { runtimes: 1, sessions: 2, failed: 0 },
+      });
+      expect(calls[0]?.url).toBe('http://daemon/language');
+      expect(calls[0]?.method).toBe('POST');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        language: 'zh',
+        syncOutputLanguage: true,
+      });
+    });
+
+    it('defaults syncOutputLanguage to false and forwards the client id', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          language: 'en',
+          outputLanguage: null,
+          refresh: { runtimes: 0, sessions: 0, failed: 0 },
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.setUserLanguage('en', { clientId: 'client-1' });
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        language: 'en',
+        syncOutputLanguage: false,
+      });
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+
+    it('throws DaemonHttpError when an older daemon returns 404', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(404, { error: 'Not Found' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(client.setUserLanguage('zh')).rejects.toMatchObject({
+        status: 404,
+      });
+    });
+  });
+
   describe('recapSession (#4175 follow-up)', () => {
     it('POSTs an empty body and returns the typed recap', async () => {
       const { fetch, calls } = recordingFetch(() =>
