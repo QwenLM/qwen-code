@@ -72,7 +72,12 @@ function makeSystemMessage(id: string): Message {
   return { id, role: 'system', content: 'heads up', variant: 'error' };
 }
 
-function makeBackgroundNotification(id: string, toolUseId?: string): Message {
+function makeBackgroundNotification(
+  id: string,
+  toolUseId?: string,
+  status = 'completed',
+  timestamp?: number,
+): Message {
   return {
     id,
     role: 'system',
@@ -81,9 +86,10 @@ function makeBackgroundNotification(id: string, toolUseId?: string): Message {
     source: 'background_notification',
     data: {
       kind: 'agent',
-      status: 'completed',
+      status,
       ...(toolUseId ? { toolUseId } : {}),
     },
+    ...(timestamp !== undefined ? { timestamp } : {}),
   };
 }
 
@@ -348,6 +354,80 @@ describe('groupParallelAgents', () => {
         'call-a2',
       ]);
     }
+  });
+
+  it('normalizes matched terminal agent notifications before grouping', () => {
+    const items = groupParallelAgents([
+      makeBackgroundAgentToolGroup('a1'),
+      makeBackgroundAgentToolGroup('a2'),
+      makeBackgroundNotification('done-a1', 'call-a1'),
+      makeBackgroundNotification('done-a2', 'call-a2'),
+    ]);
+
+    expect(items[0]).toMatchObject({
+      type: 'parallel_agents',
+      agents: [{ status: 'completed' }, { status: 'completed' }],
+    });
+  });
+
+  it.each([
+    ['failed', 'failed', 'background'],
+    ['cancelled', 'completed', 'cancelled'],
+    ['canceled', 'completed', 'cancelled'],
+  ] as const)(
+    'normalizes a %s agent notification before grouping',
+    (notificationStatus, toolStatus, rawStatus) => {
+      const items = groupParallelAgents([
+        makeBackgroundAgentToolGroup('a1'),
+        makeBackgroundNotification(
+          'done-a1',
+          'call-a1',
+          notificationStatus,
+          1_234,
+        ),
+      ]);
+
+      expect(items[0]).toMatchObject({
+        type: 'message',
+        message: {
+          role: 'tool_group',
+          tools: [
+            {
+              status: toolStatus,
+              endTime: 1_234,
+              rawOutput: {
+                type: 'task_execution',
+                taskDescription: 'task a1',
+                status: rawStatus,
+              },
+            },
+          ],
+        },
+      });
+    },
+  );
+
+  it('does not normalize an explicitly non-terminal agent notification', () => {
+    const items = groupParallelAgents([
+      makeBackgroundAgentToolGroup('a1'),
+      {
+        id: 'running-a1',
+        role: 'system',
+        content: 'Background agent is still running.',
+        variant: 'info',
+        source: 'background_notification',
+        data: {
+          kind: 'agent',
+          status: 'in_progress',
+          toolUseId: 'call-a1',
+        },
+      },
+    ]);
+
+    expect(items[0]).toMatchObject({
+      type: 'message',
+      message: { role: 'tool_group', tools: [{ status: 'pending' }] },
+    });
   });
 
   it('preserves background thought narration when it is not between launches', () => {
@@ -1133,6 +1213,7 @@ function collapseItems(
     waitForUnmatchedAgentCompletions: boolean;
     terminalBackgroundShellTaskIds: ReadonlySet<string>;
     automaticallyExpandedAgentKeys: ReadonlySet<string>;
+    paginatedExpanded: ReadonlySet<string>;
     enabled: boolean;
   }> = {},
 ): DisplayItem[] {
@@ -1145,6 +1226,7 @@ function collapseItems(
       opts.waitForUnmatchedAgentCompletions ?? true,
     terminalBackgroundShellTaskIds: opts.terminalBackgroundShellTaskIds,
     automaticallyExpandedAgentKeys: opts.automaticallyExpandedAgentKeys,
+    paginatedExpanded: opts.paginatedExpanded,
     enabled: opts.enabled ?? true,
   });
 }
@@ -1188,6 +1270,80 @@ describe('applyTurnCollapse', () => {
       toolCallCount: 2,
     });
     expect(collapseOf(out, 1)).toBeUndefined();
+  });
+
+  it('folds vision bridge notices and restores them when expanded', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      {
+        id: 'vision-notice',
+        role: 'system',
+        content: 'Vision bridge cancelled.',
+        variant: 'info',
+        source: 'vision_bridge_notice',
+      },
+      makeAssistantMessage('a1'),
+    ]);
+
+    const collapsed = collapseItems(items);
+    expect(rowIds(collapsed)).toEqual(['u1', 'tc-u1', 'a1']);
+    expect(collapseOf(collapsed, 0)).toMatchObject({
+      collapsed: true,
+      hiddenCount: 1,
+    });
+
+    const expanded = collapseItems(items, {
+      overrides: new Map([['u1', true]]),
+    });
+    expect(rowIds(expanded)).toEqual(['u1', 'tc-u1', 'vision-notice', 'a1']);
+    expect(collapseOf(expanded, 0)).toMatchObject({
+      collapsed: false,
+      hiddenCount: 1,
+    });
+  });
+
+  it('keeps a turn expanded when its tail was shown before pagination completed its head', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makeMultiToolGroup('g1'),
+      makeAssistantMessage('a1'),
+      makeUserMessage('u2'),
+      makeMultiToolGroup('g2'),
+      makeAssistantMessage('a2'),
+    ]);
+    const out = collapseItems(items, {
+      paginatedExpanded: new Set(['u1']),
+    });
+    // The pagination-completed turn stays open (its steps are visible); the
+    // following complete turn still collapses as usual.
+    expect(rowIds(out)).toEqual([
+      'u1',
+      'tc-u1',
+      'g1',
+      'a1',
+      'u2',
+      'tc-u2',
+      'a2',
+    ]);
+    expect(collapseOf(out, 0)).toMatchObject({
+      collapsed: false,
+      hiddenCount: 1,
+    });
+    expect(collapseOf(out, 4)).toMatchObject({ collapsed: true });
+  });
+
+  it('lets an explicit user toggle override the pagination keep-open', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makeMultiToolGroup('g1'),
+      makeAssistantMessage('a1'),
+    ]);
+    const out = collapseItems(items, {
+      paginatedExpanded: new Set(['u1']),
+      overrides: new Map([['u1', false]]),
+    });
+    expect(rowIds(out)).toEqual(['u1', 'tc-u1', 'a1']);
+    expect(collapseOf(out, 0)).toMatchObject({ collapsed: true });
   });
 
   it('keeps every row but still tags the head when the turn is expanded', () => {

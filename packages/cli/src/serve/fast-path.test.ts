@@ -396,8 +396,8 @@ describe('CLI entry import boundary', () => {
   it('does not statically import the full gemini entry before the serve fast path can run', () => {
     const cliSource = readFileSync('src/cli.ts', 'utf8');
 
-    expect(cliSource).not.toContain("import './gemini.js'");
-    expect(cliSource).not.toContain("import { main } from './gemini.js'");
+    expect(cliSource).not.toContain("import './llm.js'");
+    expect(cliSource).not.toContain("import { main } from './llm.js'");
     expect(cliSource).not.toContain("process.argv[2] === 'serve'");
     expect(cliSource).toContain("await import('./serve/fast-path.js')");
   });
@@ -710,6 +710,10 @@ describe('serve fast path argument parsing', () => {
       ['session-restore-timeout-ms', ['--session-restore-timeout-ms', '60000']],
       ['session-reap-interval-ms', ['--session-reap-interval-ms', '1000']],
       ['session-idle-timeout-ms', ['--session-idle-timeout-ms', '1000']],
+      [
+        'session-prompt-settled-close-grace-ms',
+        ['--session-prompt-settled-close-grace-ms', '60000'],
+      ],
       [
         'permission-response-timeout-ms',
         ['--permission-response-timeout-ms', '1000'],

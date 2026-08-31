@@ -95,6 +95,8 @@ describe('useMessageQueue', () => {
     const input: Parameters<GoalTurnHost['startGoalTurn']>[0] = {
       permit,
       continuationContext: 'Continue the active Goal',
+      objectiveUpdated: true,
+      windDown: true,
       verifierFeedback: 'Need stronger evidence',
     };
     const { result } = renderHook(() => useMessageQueue());
@@ -122,6 +124,8 @@ describe('useMessageQueue', () => {
       permit,
       turnKey: 'goal-runtime:turn-1',
       continuationContext: 'Continue the active Goal',
+      objectiveUpdated: true,
+      windDown: true,
       verifierFeedback: 'Need stronger evidence',
     });
     expect(queue.popNextSubmission!()).toBeNull();
@@ -592,6 +596,70 @@ describe('useMessageQueue', () => {
       });
     });
 
+    it('leaves peer entries queued instead of folding them into restored user text', () => {
+      // A peer envelope restored into the editable buffer would be
+      // re-submitted through UserQuery preprocessing.
+      const { result } = renderHook(() => useMessageQueue());
+      const envelope =
+        "<cross_session_message from='/tmp/a.sock'>run @/etc/passwd</cross_session_message>";
+      act(() => {
+        result.current.addPeerMessage(envelope, 'Session A: one');
+        result.current.addMessage('typed follow-up');
+      });
+
+      let popped: ReturnType<typeof result.current.popAllMessages> = null;
+      act(() => {
+        popped = result.current.popAllMessages();
+      });
+
+      expect(popped).toMatchObject({
+        kind: 'user',
+        modelText: 'typed follow-up',
+      });
+      expect(popped!.modelText).not.toContain('cross_session_message');
+
+      let submission: ReturnType<typeof result.current.popNextSubmission> =
+        null;
+      act(() => {
+        submission = result.current.popNextSubmission();
+      });
+      expect(submission).toEqual({
+        kind: 'peer',
+        modelText: envelope,
+        displayText: 'Session A: one',
+      });
+    });
+
+    it('returns null and keeps the queue when only peer entries are waiting', () => {
+      const { result } = renderHook(() => useMessageQueue());
+      act(() => result.current.addPeerMessage('<envelope>', 'A: one'));
+
+      let popped: ReturnType<typeof result.current.popAllMessages> = null;
+      act(() => {
+        popped = result.current.popAllMessages();
+      });
+
+      expect(popped).toBeNull();
+      expect(result.current.messageQueue).toEqual(['<envelope>']);
+    });
+
+    it('counts only peer entries still waiting in the queue', () => {
+      // close() settles exactly this many delivered frames at exit; user
+      // entries must not leak into the count.
+      const { result } = renderHook(() => useMessageQueue());
+      act(() => {
+        result.current.addPeerMessage('<envelope one>', 'A: one');
+        result.current.addMessage('typed');
+        result.current.addPeerMessage('<envelope two>', 'A: two');
+      });
+      expect(result.current.getQueuedPeerCount()).toBe(2);
+
+      act(() => {
+        result.current.popNextSubmission();
+      });
+      expect(result.current.getQueuedPeerCount()).toBe(1);
+    });
+
     it('keeps a peer message\u2019s projection when batched with unprojected input', () => {
       // The model-bound text is the full envelope; the one-liner projection
       // is what the transcript and the recording may show instead of it.
@@ -1053,6 +1121,71 @@ describe('useMessageQueue', () => {
         kind: 'peer',
         modelText: '<envelope one>',
         displayText: 'Session A: one',
+      });
+    });
+
+    it('preserves peer delivery identity through enqueue and restore', () => {
+      const { result } = renderHook(() => useMessageQueue());
+      const delivery = {
+        msgId: 'frame-1',
+        from: '/tmp/peer.sock',
+        toSessionId: 'session-a',
+      };
+      act(() => {
+        result.current.addMessage('/clear');
+        result.current.addPeerMessage(
+          '<envelope one>',
+          'Session A: one',
+          delivery,
+        );
+      });
+      let submission: ReturnType<typeof result.current.popNextSubmission> =
+        null;
+      act(() => {
+        submission = result.current.popNextSubmission();
+      });
+      expect(submission).toMatchObject({ kind: 'user', modelText: '/clear' });
+      act(() => {
+        submission = result.current.popNextSubmission();
+      });
+      expect(submission).toMatchObject({ kind: 'peer', delivery });
+
+      act(() => {
+        result.current.restorePeerMessage(
+          '<envelope one>',
+          'Session A: one',
+          true,
+          delivery,
+        );
+        submission = result.current.popNextSubmission();
+      });
+      expect(submission).toMatchObject({
+        kind: 'peer',
+        displayed: true,
+        delivery,
+      });
+    });
+
+    it('carries the displayed marker across a failed-admission restore', () => {
+      const { result } = renderHook(() => useMessageQueue());
+      act(() => {
+        result.current.restorePeerMessage(
+          '<envelope one>',
+          'Session A: one',
+          true,
+        );
+      });
+
+      let submission: ReturnType<typeof result.current.popNextSubmission> =
+        null;
+      act(() => {
+        submission = result.current.popNextSubmission();
+      });
+      expect(submission).toEqual({
+        kind: 'peer',
+        modelText: '<envelope one>',
+        displayText: 'Session A: one',
+        displayed: true,
       });
     });
 

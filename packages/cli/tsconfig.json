@@ -14,6 +14,9 @@
       "@qwen-code/qwen-code-core/transcriptRecords": [
         "../core/src/utils/transcript-records.ts"
       ],
+      "@qwen-code/qwen-code-core/noFollowOpen": [
+        "../core/src/utils/no-follow-open.ts"
+      ],
       "@qwen-code/qwen-code-core/*": ["../core/src/*"],
       "@qwen-code/acp-bridge": ["../acp-bridge/src/index.ts"],
       "@qwen-code/acp-bridge/transcriptReplay": [
@@ -104,7 +107,7 @@
     "src/ui/hooks/useCommandCompletion.test.ts",
     "src/ui/hooks/useFocus.test.ts",
     "src/ui/hooks/useFolderTrust.test.ts",
-    "src/ui/hooks/useGeminiStream.test.tsx",
+    "src/ui/hooks/use-llm-stream.test.tsx",
     "src/ui/hooks/useKeypress.test.ts",
     "src/ui/hooks/usePhraseCycler.test.ts",
     "src/ui/utils/computeStats.test.ts",
@@ -122,6 +125,7 @@
     { "path": "../channels/telegram" },
     { "path": "../channels/weixin" },
     { "path": "../channels/dingtalk" },
+    { "path": "../channels/dws" },
     { "path": "../channels/wecom" },
     { "path": "../channels/feishu" },
     { "path": "../channels/gitlab" }

@@ -21,7 +21,9 @@ import {
   isCacheableReadResult,
   processSingleFileContent,
 } from '../utils/fileUtils.js';
+import { hasVerifiableInode } from '../utils/file-identity.js';
 import { getFolderStructure } from '../utils/getFolderStructure.js';
+import { openNoFollow } from '../utils/no-follow-open.js';
 
 /**
  * Options for reading multiple files.
@@ -159,6 +161,18 @@ export async function readManyFiles(
       const displayPath = displayPaths?.get(fullPath) ?? fullPath;
       const validatedIdentity = validatedPathIdentities?.get(fullPath);
       if (validatedPathIdentities && !validatedIdentity) continue;
+      if (validatedIdentity && !hasVerifiableInode(validatedIdentity.ino)) {
+        if (!seenFiles.has(fullPath)) {
+          seenFiles.add(fullPath);
+          const { contentParts: errorParts, info } = createFileReadErrorResult(
+            displayPath,
+            'Validated file identity is unavailable on this filesystem (inode is 0).',
+          );
+          contentParts.push(...errorParts);
+          files.push(info);
+        }
+        continue;
+      }
       if (
         validatedIdentity &&
         !(await matchesValidatedPathIdentity(fullPath, validatedIdentity))
@@ -223,18 +237,7 @@ export async function readManyFiles(
           } catch (error) {
             if (signal?.aborted || isAbortError(error)) throw error;
             const errorMessage = getErrorMessage(error);
-            readResult = {
-              contentParts: [
-                { text: `\nContent from ${displayPath}:\n` },
-                { text: `Error reading ${displayPath}: ${errorMessage}` },
-              ],
-              info: {
-                filePath: displayPath,
-                content: `Error reading ${displayPath}: ${errorMessage}`,
-                isDirectory: false,
-                error: errorMessage,
-              },
-            };
+            readResult = createFileReadErrorResult(displayPath, errorMessage);
           }
         } else {
           try {
@@ -293,17 +296,14 @@ async function readValidatedTextFileContent(
   signal: AbortSignal | undefined,
   displayPath: string,
 ): ReturnType<typeof readFileContent> {
-  const source = await fs.promises.open(
-    filePath,
-    (fs.constants.O_RDONLY ?? 0) | (fs.constants.O_NOFOLLOW ?? 0),
-  );
+  // Where O_NOFOLLOW does not exist (Windows) the helper compensates with
+  // an lstat/open/fstat identity check instead of collapsing to a plain
+  // open that follows symlinks (#8227); the validated-identity re-check
+  // below remains the second layer.
+  const source = await openNoFollow(filePath);
   try {
     const stats = await source.stat();
-    if (
-      !stats.isFile() ||
-      stats.dev !== expected.dev ||
-      stats.ino !== expected.ino
-    ) {
+    if (!fileStatsMatchValidatedIdentity(stats, expected)) {
       return null;
     }
     return await readFileContent(
@@ -334,10 +334,28 @@ async function matchesValidatedPathIdentity(
     const canonicalPath = await fs.promises.realpath(filePath);
     if (canonicalPath !== filePath) return false;
     const stats = await fs.promises.stat(canonicalPath);
-    return stats.dev === expected.dev && stats.ino === expected.ino;
+    return statsMatchValidatedIdentity(stats, expected);
   } catch {
     return false;
   }
+}
+
+function statsMatchValidatedIdentity(
+  stats: fs.Stats,
+  expected: ReadManyFilesPathIdentity,
+): boolean {
+  return (
+    hasVerifiableInode(stats.ino) &&
+    stats.dev === expected.dev &&
+    stats.ino === expected.ino
+  );
+}
+
+function fileStatsMatchValidatedIdentity(
+  stats: fs.Stats,
+  expected: ReadManyFilesPathIdentity,
+): boolean {
+  return stats.isFile() && statsMatchValidatedIdentity(stats, expected);
 }
 
 async function snapshotValidatedFile(
@@ -358,17 +376,12 @@ async function snapshotValidatedFile(
     | undefined;
   try {
     signal?.throwIfAborted();
-    const source = await fs.promises.open(
-      filePath,
-      (fs.constants.O_RDONLY ?? 0) | (fs.constants.O_NOFOLLOW ?? 0),
-    );
+    // See readValidatedTextFileContent: the helper keeps the no-follow
+    // guarantee on platforms without O_NOFOLLOW (#8227).
+    const source = await openNoFollow(filePath);
     try {
       const stats = await source.stat();
-      if (
-        !stats.isFile() ||
-        stats.dev !== expected.dev ||
-        stats.ino !== expected.ino
-      ) {
+      if (!fileStatsMatchValidatedIdentity(stats, expected)) {
         return undefined;
       }
       if (stats.size > SNAPSHOT_MAX_SIZE_BYTES) {
@@ -464,6 +477,25 @@ async function readDirectory(
       filePath: displayPath,
       content: structure,
       isDirectory: true,
+    },
+  };
+}
+
+function createFileReadErrorResult(
+  displayPath: string,
+  errorMessage: string,
+): { contentParts: Part[]; info: FileReadInfo } {
+  const content = `Error reading ${displayPath}: ${errorMessage}`;
+  return {
+    contentParts: [
+      { text: `\nContent from ${displayPath}:\n` },
+      { text: content },
+    ],
+    info: {
+      filePath: displayPath,
+      content,
+      isDirectory: false,
+      error: errorMessage,
     },
   };
 }

@@ -47,7 +47,7 @@ import type { PromptFile, PromptImage } from '../adapters/promptTypes';
 import {
   useOptionalWorkspace,
   type UseDaemonFollowupSuggestionReturn,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import {
   getImplicitTabCompletion,
   getMissingSlashPrefixCompletion,
@@ -1095,6 +1095,7 @@ export interface UseComposerCoreOptions {
   ) => boolean | void;
   onInputTextChange?: (text: string) => void;
   onCycleMode?: () => void;
+  cycleModeOnTab?: boolean;
   onToggleShortcuts?: () => void;
   disabled?: boolean;
   /**
@@ -1109,6 +1110,7 @@ export interface UseComposerCoreOptions {
   commands: CommandInfo[];
   skills?: SkillInfo[];
   slashCommandCategoryOrder?: CommandDisplayCategoryOrder;
+  autoSubmitSlashCommands?: boolean;
   queuedMessages?: string[];
   onPopQueuedMessages?: () => boolean;
   onClearQueuedMessages?: () => boolean;
@@ -1333,6 +1335,7 @@ function createImageIngestionLane(generation: number): ImageIngestionLane {
 export interface UseComposerCoreReturn {
   containerRef: React.RefObject<HTMLDivElement | null>;
   viewRef: React.RefObject<EditorView | null>;
+  workspaceActionsRef: React.RefObject<AtMentionWorkspaceActions | undefined>;
   mobileComposer: MobileComposerBackend | null;
   focus: () => void;
   submitText: () => void;
@@ -1379,9 +1382,10 @@ export interface UseComposerCoreReturn {
   onAcceptFollowup: UseDaemonFollowupSuggestionReturn['onAcceptFollowup'];
   onDismissFollowup: UseDaemonFollowupSuggestionReturn['onDismissFollowup'];
   slashMenu: SlashMenuState | null;
+  openSlashMenu: () => boolean;
   closeSlashMenu: () => void;
   selectSlashCompletion: (index: number) => boolean;
-  acceptSlashCompletion: (index?: number) => boolean;
+  acceptSlashCompletion: (index?: number, submit?: boolean) => boolean;
   atMenu: AtMentionMenuState | null;
   closeAtMenu: () => void;
   selectAtCompletion: (index: number) => boolean;
@@ -1399,6 +1403,7 @@ export function useComposerCore(
     onSubmit,
     onInputTextChange,
     onCycleMode,
+    cycleModeOnTab = false,
     onToggleShortcuts,
     disabled = false,
     fileDragEnabled = true,
@@ -1406,6 +1411,7 @@ export function useComposerCore(
     commands,
     skills = [],
     slashCommandCategoryOrder,
+    autoSubmitSlashCommands = false,
     queuedMessages = [],
     onPopQueuedMessages,
     currentMode = 'default',
@@ -1516,6 +1522,8 @@ export function useComposerCore(
   }, []);
   const onCycleModeRef = useRef(onCycleMode);
   onCycleModeRef.current = onCycleMode;
+  const cycleModeOnTabRef = useRef(cycleModeOnTab);
+  cycleModeOnTabRef.current = cycleModeOnTab;
   const onToggleShortcutsRef = useRef(onToggleShortcuts);
   onToggleShortcutsRef.current = onToggleShortcuts;
   const disabledRef = useRef(disabled);
@@ -2182,6 +2190,46 @@ export function useComposerCore(
     closeAtMenuState();
   }, [clearAutoAtTriggerIfIntact, closeAtMenuState]);
 
+  const openSlashMenu = useCallback(() => {
+    const view = viewRef.current;
+    if (
+      !view ||
+      disabledRef.current ||
+      shellModeRef.current ||
+      historyBrowseActiveRef.current
+    ) {
+      return false;
+    }
+    closeAtMenu();
+    let cursor = view.state.selection.main.head;
+    const line = view.state.doc.lineAt(cursor);
+    if (!line.text.startsWith('/')) {
+      if (view.state.doc.length > 0) return false;
+      view.dispatch({
+        changes: { from: cursor, to: cursor, insert: '/' },
+        selection: { anchor: cursor + 1 },
+        scrollIntoView: true,
+      });
+      cursor += 1;
+    }
+    const result = getSlashCommandCompletionResult(
+      view.state.doc.toString(),
+      cursor,
+      commandsRef.current,
+      skillsRef.current,
+      languageRef.current,
+      tRef.current,
+      slashCommandCategoryOrderRef.current ?? DEFAULT_COMMAND_CATEGORY_ORDER,
+    );
+    if (!result) return false;
+    setSlashMenu({
+      ...result,
+      selectedIndex: 0,
+    });
+    view.focus();
+    return true;
+  }, [closeAtMenu, setSlashMenu]);
+
   const closeAtMenuIfOpenFn = atMenu.closeIfOpen;
   const closeAtMenuIfOpen = useCallback(() => {
     const result = closeAtMenuIfOpenFn();
@@ -2278,20 +2326,33 @@ export function useComposerCore(
     [setSlashMenu],
   );
 
-  const acceptSlashCompletion = useCallback((index?: number) => {
-    const view = viewRef.current;
-    const current = slashMenuRef.current;
-    if (!view || !current) return false;
-    const item = current.items[index ?? current.selectedIndex];
-    if (!item) return false;
-    view.dispatch({
-      changes: { from: current.from, to: current.to, insert: item.apply },
-      selection: { anchor: current.from + item.apply.length },
-      scrollIntoView: true,
-    });
-    view.focus();
-    return true;
-  }, []);
+  const acceptSlashCompletion = useCallback(
+    (index?: number, submit = false) => {
+      const view = viewRef.current;
+      const current = slashMenuRef.current;
+      if (!view || !current) return false;
+      const item = current.items[index ?? current.selectedIndex];
+      if (!item) return false;
+      const commandReplacesEntireDraft =
+        current.from === 0 && current.to === view.state.doc.length;
+      view.dispatch({
+        changes: { from: current.from, to: current.to, insert: item.apply },
+        selection: { anchor: current.from + item.apply.length },
+        scrollIntoView: true,
+      });
+      view.focus();
+      if (
+        submit &&
+        autoSubmitSlashCommands &&
+        item.autoSubmit &&
+        commandReplacesEntireDraft
+      ) {
+        submitTextRef.current(view);
+      }
+      return true;
+    },
+    [autoSubmitSlashCommands],
+  );
 
   // Track whether editor has content for send button state
   const [hasContent, setHasContent] = useState(false);
@@ -2841,9 +2902,30 @@ export function useComposerCore(
             return true;
           }
           if (slashMenuRef.current) {
-            return acceptSlashCompletion();
+            return acceptSlashCompletion(undefined, true);
           }
           if (completionStatus(view.state) === 'active') return false;
+          const text = view.state.doc.toString();
+          const subcommandResult = getSlashCommandCompletionResult(
+            `${text} `,
+            text.length + 1,
+            commandsRef.current,
+            skillsRef.current,
+            languageRef.current,
+            (key) => tRef.current(key),
+            slashCommandCategoryOrderRef.current ??
+              DEFAULT_COMMAND_CATEGORY_ORDER,
+          );
+          if (
+            /^\/[^\s/]+$/.test(text) &&
+            subcommandResult?.kind === 'subcommand'
+          ) {
+            view.dispatch({
+              changes: { from: text.length, insert: ' ' },
+              selection: { anchor: text.length + 1 },
+            });
+            return true;
+          }
           const followup = followupStateRef.current;
           const hasInlineTags = hasInlineComposerTags(view);
           const followupCompletion = hasInlineTags
@@ -3022,10 +3104,12 @@ export function useComposerCore(
             return true;
           }
           if (slashMenuRef.current) {
-            return acceptSlashCompletion();
+            if (acceptSlashCompletion()) return true;
+            if (!cycleModeOnTabRef.current) return false;
           }
           if (completionStatus(view.state) === 'active') {
-            return acceptCompletion(view);
+            if (acceptCompletion(view)) return true;
+            if (!cycleModeOnTabRef.current) return false;
           }
           const text = view.state.doc.toString();
           const implicitResult = getImplicitTabCompletion(
@@ -3058,6 +3142,9 @@ export function useComposerCore(
               selection: { anchor: missingSlash.length },
             });
             return true;
+          }
+          if (cycleModeOnTabRef.current) {
+            onCycleModeRef.current?.();
           }
           return true;
         },
@@ -3156,8 +3243,11 @@ export function useComposerCore(
       }
     });
 
+    const initialDraft =
+      loadComposerDraft(draftIdentityRef.current.storageKey) ?? '';
     const state = EditorState.create({
-      doc: loadComposerDraft(draftIdentityRef.current.storageKey) ?? '',
+      doc: initialDraft,
+      selection: { anchor: initialDraft.length },
       extensions: [
         Prec.highest(submitKeymap),
         minimalSetup,
@@ -3497,15 +3587,22 @@ export function useComposerCore(
         [
           command.name,
           command.description ?? '',
+          command.completionLabel ?? '',
+          command.completionSection ?? '',
           command.source ?? '',
           command.displayCategory ?? '',
           command.argumentHint ?? '',
           command.subcommands?.join(',') ?? '',
+          command.autoSubmit ? '1' : '0',
         ].join('\u0000'),
       )
       .join('\u0001'),
     skills
-      .map((skill) => [skill.name, skill.description].join('\u0000'))
+      .map((skill) =>
+        [skill.name, skill.description, skill.argumentHint ?? ''].join(
+          '\u0000',
+        ),
+      )
       .join('\u0001'),
     slashCommandCategoryOrder?.join('|') ?? '',
   ].join('\u0002');
@@ -4043,6 +4140,14 @@ export function useComposerCore(
     const view = viewRef.current;
     if (!view && !isTouchComposer) return;
 
+    if (input.clearAttachments) {
+      pastedImagesRef.current = [];
+      pastedFilesRef.current = [];
+      restoredInputAnnotationsRef.current = [];
+      setPastedImages([]);
+      setPastedFiles([]);
+    }
+
     const tagPlacement = input.tagPlacement ?? 'top';
     if (input.tags !== undefined && tagPlacement === 'top') {
       setComposerTags([...input.tags]);
@@ -4380,6 +4485,7 @@ export function useComposerCore(
   return {
     containerRef,
     viewRef,
+    workspaceActionsRef,
     mobileComposer: isTouchComposer
       ? {
           textareaRef: mobileTextareaRef,
@@ -4456,6 +4562,7 @@ export function useComposerCore(
     onDismissFollowup:
       onDismissFollowup as UseDaemonFollowupSuggestionReturn['onDismissFollowup'],
     slashMenu,
+    openSlashMenu,
     closeSlashMenu,
     selectSlashCompletion,
     acceptSlashCompletion,

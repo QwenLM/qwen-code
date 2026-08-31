@@ -23,7 +23,6 @@ import {
 } from './peer-frames.js';
 import {
   MAX_CONCURRENT_SENDS,
-  probePeerSocket,
   sendPeerFrame,
   PeerSendError,
 } from './uds-client.js';
@@ -83,14 +82,6 @@ async function settle(): Promise<void> {
 }
 
 describe.skipIf(isWindows)('startPeerInbox', () => {
-  it('probes a listening inbox and rejects a stale path', async () => {
-    const started = await listen();
-    await expect(probePeerSocket(started.socketPath)).resolves.toBe(true);
-    await started.close();
-    inbox = null;
-    await expect(probePeerSocket(started.socketPath, 25)).resolves.toBe(false);
-  });
-
   it('receives a frame written by the client', async () => {
     const started = await listen();
     await sendPeerFrame(started.socketPath, buildUserFrame({ content: 'hi' }));

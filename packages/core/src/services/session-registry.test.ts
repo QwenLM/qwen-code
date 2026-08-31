@@ -14,11 +14,11 @@ import {
   getSessionRegistryDir,
   listLiveSessions,
   patchSessionRecord,
-  readOwnSessionRecord,
   registerSession,
   resetRegisteredRecordPathForTest,
   unregisterSession,
   SESSION_REGISTRY_SCHEMA_VERSION,
+  readOwnSessionRecord,
 } from './session-registry.js';
 import {
   readLocalBootId,
@@ -605,9 +605,9 @@ describe('never-throw guarantee', () => {
     __setMockGlobalDir(null);
 
     await expect(listLiveSessions()).resolves.toEqual([]);
-    await expect(
-      patchSessionRecord({ sessionId: 'new' }),
-    ).resolves.toBeUndefined();
+    // Resolves (never rejects); the patch did not apply, so it reports
+    // false rather than the historical void.
+    await expect(patchSessionRecord({ sessionId: 'new' })).resolves.toBe(false);
     await expect(
       registerSession({ sessionId: 's1', cwd: '/w/app' }),
     ).resolves.toBe(false);
@@ -639,6 +639,17 @@ describe('patchSessionRecord', () => {
     expect(record.startedAt).toBe(before.startedAt);
   });
 
+  it('reports true when the patch was written', async () => {
+    await registerSession({ sessionId: 'old', cwd: '/w/app' });
+    await expect(patchSessionRecord({ name: 'renamed' })).resolves.toBe(true);
+  });
+
+  it('reports false when the patch was skipped', async () => {
+    // No registration: the missing-record skip must be observable, or a
+    // caller with no later retry vehicle cannot tell it never landed.
+    await expect(patchSessionRecord({ name: 'renamed' })).resolves.toBe(false);
+  });
+
   it('does not recreate a record once the session’s record is gone', async () => {
     // register + unregister leaves the directory but no record; the only
     // thing standing between a patch and a half-populated record on disk
@@ -652,28 +663,6 @@ describe('patchSessionRecord', () => {
 
     expect(await listLiveSessions()).toEqual([]);
     await expect(fs.stat(getSessionRecordPath())).rejects.toThrow();
-  });
-
-  it('reads only this process own live registered record', async () => {
-    await registerSession({ sessionId: 'self', cwd: '/w/app' });
-    await expect(readOwnSessionRecord()).resolves.toMatchObject({
-      pid: process.pid,
-      sessionId: 'self',
-      cwd: '/w/app',
-    });
-
-    const foreign = liveBody({ pid: process.pid + 1, sessionId: 'foreign' });
-    await writeRaw(`${process.pid}.json`, foreign);
-    await expect(readOwnSessionRecord()).resolves.toBeNull();
-  });
-
-  it('does not adopt a stale record when this process never registered', async () => {
-    await writeRaw(
-      `${process.pid}.json`,
-      liveBody({ pid: process.pid, sessionId: 'stale' }),
-    );
-
-    await expect(readOwnSessionRecord()).resolves.toBeNull();
   });
 
   it('leaves a foreign record sitting at this pid’s path untouched', async () => {
@@ -1378,5 +1367,69 @@ describe('listLiveSessions', () => {
 
     const live = await listLiveSessions();
     expect(live.map((r) => r.sessionId)).toEqual(['s-parent', 's-self']);
+  });
+});
+
+describe('readOwnSessionRecord', () => {
+  it('is null before this process registers', async () => {
+    expect(await readOwnSessionRecord()).toBeNull();
+  });
+
+  it("returns this process's record, including a patched ipcPath", async () => {
+    await registerSession({ sessionId: 's1', cwd: '/w/app' });
+    await patchSessionRecord({ ipcPath: '/tmp/self.sock' });
+    expect(await readOwnSessionRecord()).toMatchObject({
+      pid: process.pid,
+      sessionId: 's1',
+      cwd: '/w/app',
+      ipcPath: '/tmp/self.sock',
+    });
+  });
+
+  it("is null for a foreign record sitting at this pid's path", async () => {
+    // Same guard patchSessionRecord applies: a record whose pid does not
+    // match this process is not ours to read back, whatever its filename.
+    await registerSession({ sessionId: 's0', cwd: '/w/app' });
+    await writeRaw(
+      `${process.pid}.json`,
+      liveBody({ pid: process.pid + 1, sessionId: 'theirs' }),
+    );
+    expect(await readOwnSessionRecord()).toBeNull();
+  });
+
+  it.runIf(process.platform === 'linux')(
+    'is null for a stale record left by a dead previous incarnation of this PID',
+    async () => {
+      const bootId = readLocalBootId();
+      expect(bootId).not.toBeNull();
+      await registerSession({ sessionId: 's0', cwd: '/w/app' });
+      await writeRaw(
+        `${process.pid}.json`,
+        liveBody({ procStart: `${bootId}:1`, sessionId: 'incarnation-a' }),
+      );
+      expect(await readOwnSessionRecord()).toBeNull();
+    },
+  );
+
+  it.runIf(process.platform === 'linux')(
+    "is null when this process's own start token is unreadable",
+    async () => {
+      await registerSession({ sessionId: 's0', cwd: '/w/app' });
+      vi.spyOn(processLiveness, 'readProcStartToken').mockReturnValue(null);
+      expect(await readOwnSessionRecord()).toBeNull();
+    },
+  );
+
+  it('still reads a record written without a start token', async () => {
+    await registerSession({ sessionId: 's0', cwd: '/w/app' });
+    await writeRaw(`${process.pid}.json`, liveBody({ sessionId: 'tokenless' }));
+    expect(await readOwnSessionRecord()).toMatchObject({
+      sessionId: 'tokenless',
+    });
+  });
+
+  it('never throws when the home directory is unavailable', async () => {
+    __setMockGlobalDir(null);
+    await expect(readOwnSessionRecord()).resolves.toBeNull();
   });
 });

@@ -43,6 +43,7 @@ function held(over: {
   content?: string;
   fromName?: string;
   cause?: HeldMessage['cause'];
+  heldAt?: number;
 }): HeldMessage {
   return {
     frame: {
@@ -55,13 +56,15 @@ function held(over: {
       message: { role: 'user', content: over.content ?? 'do a thing' },
     },
     cause: over.cause ?? 'mode-mismatch',
-    heldAt: 1_000,
+    heldAt: over.heldAt ?? 1_000,
   };
 }
 
 interface Fake {
   getHeld: () => readonly HeldMessage[];
   decide: ReturnType<typeof vi.fn>;
+  recordHeldListing: ReturnType<typeof vi.fn>;
+  heldSetChangedSinceListing: () => boolean;
 }
 
 function makeContext(
@@ -98,12 +101,31 @@ async function run(
 
 let messages: HeldMessage[];
 let fake: Fake;
+let listed: ReadonlyArray<{ id: string; heldAt: number }> | null;
 
 beforeEach(() => {
   messages = [];
+  listed = null;
   fake = {
     getHeld: () => messages,
     decide: vi.fn(() => 'done'),
+    recordHeldListing: vi.fn(
+      (entries: readonly HeldMessage[]) =>
+        (listed = entries.map((entry) => ({
+          id: entry.frame.msgId,
+          heldAt: entry.heldAt,
+        }))),
+    ),
+    // Mirrors PeerMessaging: decisions bind to the last recorded listing,
+    // entry identity included — a re-admitted id gets a fresh heldAt.
+    heldSetChangedSinceListing: () =>
+      listed === null ||
+      listed.length !== messages.length ||
+      messages.some(
+        (entry, index) =>
+          entry.frame.msgId !== listed![index].id ||
+          entry.heldAt !== listed![index].heldAt,
+      ),
   };
 });
 
@@ -307,6 +329,7 @@ describe('/peers', () => {
 
   it('accepts one message by short id', async () => {
     messages = [held({ msgId: 'aaaaaa11-0000-4000-8000-000000000000' })];
+    await run(fake, '');
     const result = await run(fake, 'accept aaaaaa');
     expect(fake.decide).toHaveBeenCalledWith(
       'aaaaaa11-0000-4000-8000-000000000000',
@@ -317,6 +340,7 @@ describe('/peers', () => {
 
   it('denies one message by short id', async () => {
     messages = [held({ msgId: 'aaaaaa11-0000-4000-8000-000000000000' })];
+    await run(fake, '');
     await run(fake, 'deny aaaaaa');
     expect(fake.decide).toHaveBeenCalledWith(
       'aaaaaa11-0000-4000-8000-000000000000',
@@ -329,6 +353,7 @@ describe('/peers', () => {
       held({ msgId: 'aaaaaa11-0000-4000-8000-000000000000' }),
       held({ msgId: 'aaaaaa22-0000-4000-8000-000000000000' }),
     ];
+    await run(fake, '');
     const result = await run(fake, 'accept aaaaaa');
     expect(result.messageType).toBe('error');
     expect(fake.decide).not.toHaveBeenCalled();
@@ -336,6 +361,7 @@ describe('/peers', () => {
 
   it('reports an unmatched id', async () => {
     messages = [held({ msgId: 'aaaaaa11-0000-4000-8000-000000000000' })];
+    await run(fake, '');
     const result = await run(fake, 'accept zzzzzz');
     expect(result.messageType).toBe('error');
     expect(result.content).toContain('No held message matches');
@@ -343,6 +369,7 @@ describe('/peers', () => {
 
   it('handles a message that vanished between listing and deciding', async () => {
     messages = [held({ msgId: 'aaaaaa11-0000-4000-8000-000000000000' })];
+    await run(fake, '');
     fake.decide = vi.fn(() => 'gone');
     const result = await run(fake, 'accept aaaaaa');
     expect(result.content).toContain('no longer waiting');
@@ -359,12 +386,14 @@ describe('/peers', () => {
       return 'done';
     });
 
+    await run(fake, '');
     const result = await run(fake, 'accept all');
     expect(fake.decide).toHaveBeenCalledTimes(2);
     expect(result.content).toContain('Released 2 messages');
   });
 
   it('says nothing is waiting rather than pretending it acted', async () => {
+    await run(fake, '');
     const result = await run(fake, 'accept all');
     expect(result.content).toContain('No messages');
     expect(fake.decide).not.toHaveBeenCalled();
@@ -377,6 +406,7 @@ describe('/peers', () => {
       held({ msgId: 'all-nodes-restart-001' }),
       held({ msgId: 'bbbbbb22-0000-4000-8000-000000000000' }),
     ];
+    await run(fake, '');
     const result = await run(fake, 'accept ALL');
     expect(fake.decide).toHaveBeenCalledTimes(2);
     expect(result.content).toContain('Released 2 messages');
@@ -384,6 +414,7 @@ describe('/peers', () => {
 
   it('reports a failed delivery honestly instead of claiming release', async () => {
     messages = [held({ msgId: 'aaaaaa11-0000-4000-8000-000000000000' })];
+    await run(fake, '');
     fake.decide = vi.fn(() => 'failed');
     const result = await run(fake, 'accept aaaaaa');
     expect(result.messageType).toBe('error');
@@ -399,9 +430,79 @@ describe('/peers', () => {
       .fn()
       .mockReturnValueOnce('done')
       .mockReturnValueOnce('failed');
+    await run(fake, '');
     const result = await run(fake, 'accept all');
     expect(result.content).toContain('Released 1 message.');
     expect(result.content).toContain('1 could not be delivered');
     expect(result.content).toContain('still waiting');
+  });
+
+  it('requires a listing before deciding anything', async () => {
+    // A handle told out-of-band by a peer must not be decidable.
+    messages = [held({ msgId: 'aaaaaa11-0000-4000-8000-000000000000' })];
+    const result = await run(fake, 'accept aaaaaa');
+    expect(result.messageType).toBe('error');
+    expect(result.content).toContain('run /peers');
+    expect(fake.decide).not.toHaveBeenCalled();
+  });
+
+  it('refuses a decision when the held set drifted after the listing', async () => {
+    // Between listing and decision the set can evict and repark under
+    // the same typable prefix; the accept must bind to what was reviewed.
+    messages = [
+      held({
+        msgId: 'aaaaaa11-0000-4000-8000-000000000000',
+        content: 'benign',
+      }),
+    ];
+    await run(fake, '');
+    messages = [
+      held({
+        msgId: 'aaaaaa22-0000-4000-8000-000000000000',
+        content: 'malicious',
+      }),
+    ];
+    const result = await run(fake, 'accept aaaaaa');
+    expect(result.messageType).toBe('error');
+    expect(result.content).toContain('changed since you listed it');
+    expect(fake.decide).not.toHaveBeenCalled();
+  });
+
+  it('refuses a decision when a re-admitted id reused the reviewed handle', async () => {
+    // An evicted id's tombstone prunes and the id becomes re-admittable;
+    // same id, same position — only the fresh heldAt tells the swapped
+    // entry apart from the one the user reviewed.
+    messages = [
+      held({
+        msgId: 'aaaaaa11-0000-4000-8000-000000000000',
+        content: 'benign',
+      }),
+    ];
+    await run(fake, '');
+    messages = [
+      held({
+        msgId: 'aaaaaa11-0000-4000-8000-000000000000',
+        content: 'swapped',
+        heldAt: 2_000,
+      }),
+    ];
+    const result = await run(fake, 'accept aaaaaa');
+    expect(result.messageType).toBe('error');
+    expect(result.content).toContain('changed since you listed it');
+    expect(fake.decide).not.toHaveBeenCalled();
+  });
+
+  it('allows consecutive decisions after one listing', async () => {
+    messages = [
+      held({ msgId: 'aaaaaa11-0000-4000-8000-000000000000' }),
+      held({ msgId: 'bbbbbb22-0000-4000-8000-000000000000' }),
+    ];
+    fake.decide = vi.fn(() => {
+      messages.shift();
+      return 'done';
+    });
+    await run(fake, '');
+    expect((await run(fake, 'accept aaaaaa')).content).toContain('Released');
+    expect((await run(fake, 'accept bbbbbb')).content).toContain('Released');
   });
 });

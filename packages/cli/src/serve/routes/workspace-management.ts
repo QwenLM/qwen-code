@@ -19,6 +19,7 @@ import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from '../workspace-registry.js';
+import { getWorkspaceRuntimeCoordinatorIfSupported } from '../workspace-runtime-coordinator.js';
 import { isInternalWorkspaceRuntime } from '../workspace-runtime-visibility.js';
 import type { AcpHttpHandle } from '../acp-http/index.js';
 import {
@@ -85,6 +86,7 @@ export interface WorkspaceRemovalActivity {
   memoryTasks: number;
   channelWorkers: number;
   voiceSessions: number;
+  workspaceRuntime: number;
 }
 
 export interface WorkspaceRuntimeRemovalController {
@@ -112,6 +114,7 @@ export interface WorkspaceManagementHandle {
       runtime: WorkspaceRuntime,
     ) => void | Promise<void>,
   ): Promise<WorkspaceRuntime>;
+  quarantineOwnedRuntime(runtime: WorkspaceRuntime): Promise<void>;
 }
 
 export function registerWorkspaceManagementRoutes(
@@ -348,6 +351,74 @@ export function registerWorkspaceManagementRoutes(
           });
       }
       inFlight.delete(canonicalCwd);
+      operationFinished();
+    }
+  };
+
+  const quarantineOwnedRuntime = async (
+    runtime: WorkspaceRuntime,
+  ): Promise<void> => {
+    if (
+      runtime.primary ||
+      runtime.provenance !== 'live-conversation' ||
+      !runtime.trusted ||
+      runtime.removable !== false
+    ) {
+      throw new Error(
+        'Only the owned Conversations runtime may be quarantined',
+      );
+    }
+    if (!runtimeRemoval) {
+      throw new Error('Managed workspace runtime removal is unavailable');
+    }
+    if (sealed) throw new Error('Daemon is shutting down');
+    if (inFlight.has(runtime.workspaceCwd)) {
+      throw new Error('Workspace runtime transition is already in progress');
+    }
+    inFlight.set(runtime.workspaceCwd, 'removal');
+    operationStarted();
+    let disposed = false;
+    const failures: unknown[] = [];
+    try {
+      if (!workspaceRegistry.beginDrain(runtime)) {
+        throw new Error('Workspace runtime is no longer active');
+      }
+      try {
+        runtimeRemoval.beginDrain(runtime);
+      } catch (error) {
+        failures.push(error);
+      }
+      try {
+        workspaceRegistry.commitDrain(runtime);
+      } catch (error) {
+        failures.push(error);
+      }
+      try {
+        await runtimeRemoval.disposeRuntime(runtime, 'workspace_removed');
+        disposed = true;
+      } catch (error) {
+        failures.push(error);
+      }
+      if (disposed) {
+        try {
+          runtimeRemoval.completeDrain(runtime);
+        } catch (error) {
+          failures.push(error);
+        }
+        try {
+          workspaceRegistry.completeDrain(runtime);
+        } catch (error) {
+          failures.push(error);
+        }
+      }
+      if (failures.length > 0) {
+        throw new AggregateError(
+          failures,
+          'Failed to quarantine the Conversations runtime',
+        );
+      }
+    } finally {
+      inFlight.delete(runtime.workspaceCwd);
       operationFinished();
     }
   };
@@ -1176,6 +1247,11 @@ export function registerWorkspaceManagementRoutes(
       memoryTasks: acpActivity.memoryTasks,
       channelWorkers: controllerActivity.channelWorkers,
       voiceSessions: controllerActivity.voiceSessions,
+      workspaceRuntime:
+        getWorkspaceRuntimeCoordinatorIfSupported(runtime)?.hasActiveWork() ===
+        true
+          ? 1
+          : 0,
     };
   };
   const isBusy = (activity: WorkspaceRemovalActivity): boolean =>
@@ -1386,6 +1462,9 @@ export function registerWorkspaceManagementRoutes(
       let controllerDraining = false;
       let acpDraining = false;
       let removalCommitted = false;
+      let runtimeCoordinatorDraining = false;
+      const runtimeCoordinator =
+        getWorkspaceRuntimeCoordinatorIfSupported(runtime);
       const rollbackDrain = (): void => {
         if (removalCommitted) return;
         if (acpDraining) {
@@ -1403,6 +1482,14 @@ export function registerWorkspaceManagementRoutes(
             // Continue rolling back the remaining gates.
           }
           controllerDraining = false;
+        }
+        if (runtimeCoordinatorDraining) {
+          try {
+            runtimeCoordinator?.cancelDrain();
+          } catch {
+            // Continue rolling back the remaining gates.
+          }
+          runtimeCoordinatorDraining = false;
         }
         if (registryDraining) {
           try {
@@ -1484,6 +1571,7 @@ export function registerWorkspaceManagementRoutes(
         registryDraining = false;
         controllerDraining = false;
         acpDraining = false;
+        runtimeCoordinatorDraining = false;
       };
 
       try {
@@ -1495,6 +1583,8 @@ export function registerWorkspaceManagementRoutes(
           });
           return;
         }
+        runtimeCoordinator?.beginDrain();
+        runtimeCoordinatorDraining = runtimeCoordinator !== undefined;
         runtimeRemoval.beginDrain(runtime);
         controllerDraining = true;
         getAcpHandle?.()?.beginWorkspaceDrain(runtime.workspaceId);
@@ -1784,6 +1874,7 @@ export function registerWorkspaceManagementRoutes(
 
   return {
     publishOwnedRuntime,
+    quarantineOwnedRuntime,
     async sealAndWait() {
       sealed = true;
       if (activeOperations === 0) return;

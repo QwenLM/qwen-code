@@ -361,12 +361,17 @@ export async function registerSession(
  * `procStart` and `pidNs` are excluded from the patch for the same
  * reason the pid is: they are the identity the sweep trusts, and a
  * caller-supplied value could only corrupt it.
+ *
+ * Reports whether the patch was actually written: every skip below is
+ * silent on the wire, and at least one caller (the peer inbox address
+ * advertise) has no later event that would retry a skipped patch, so it
+ * must be able to tell success from a no-op.
  */
 export async function patchSessionRecord(
   patch: Partial<
     Omit<SessionRegistryRecord, 'pid' | 'schemaVersion' | 'procStart' | 'pidNs'>
   >,
-): Promise<void> {
+): Promise<boolean> {
   try {
     // Inside the try: the fallback `getGlobalQwenDir()` resolution reads
     // the home directory and can throw, and this function promises never
@@ -380,7 +385,7 @@ export async function patchSessionRecord(
     // would write back something the reader will neither show nor sweep
     // — permanent litter.
     if (existing.status !== 'ok' || !matchesLocalIdentity(existing.record)) {
-      return;
+      return false;
     }
     const record = existing.record;
     // The identity check alone also passes for a stale record left by a
@@ -395,33 +400,17 @@ export async function patchSessionRecord(
     // patch and let a later /clear or /cd retry it.
     const currentToken = readProcStartToken(process.pid);
     if (record.procStart !== null && record.procStart !== currentToken) {
-      return;
+      return false;
     }
     await atomicWriteJSON(
       filePath,
       { ...record, ...patch },
       { mode: REGISTRY_FILE_MODE, forceMode: true, noFollow: true },
     );
+    return true;
   } catch (error) {
     debugLogger.debug(`patchSessionRecord failed: ${describe(error)}`);
-  }
-}
-
-/** Read this process's live record without adopting a stale PID collision. */
-export async function readOwnSessionRecord(): Promise<SessionRegistryRecord | null> {
-  if (registeredRecordPath === null) return null;
-  try {
-    const existing = await readRecord(registeredRecordPath);
-    if (
-      existing.status !== 'ok' ||
-      !matchesLocalIdentity(existing.record) ||
-      !isSameProcess(existing.record.pid, existing.record.procStart)
-    ) {
-      return null;
-    }
-    return existing.record;
-  } catch {
-    return null;
+    return false;
   }
 }
 
@@ -454,6 +443,35 @@ export async function unregisterSession(): Promise<void> {
   } catch (error) {
     if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return;
     debugLogger.debug(`unregisterSession failed: ${describe(error)}`);
+  }
+}
+
+/**
+ * This process's own record, as the registry currently holds it.
+ *
+ * Null when this session never registered, when its record is not
+ * readable, or when the record at this PID's path was written by another
+ * incarnation of the PID (another namespace, another boot, or a dead
+ * predecessor whose token no longer matches) — the same tests
+ * `patchSessionRecord` applies before it will merge into a record, so a
+ * caller never reads back a record that a patch would have refused to
+ * touch. Never throws.
+ */
+export async function readOwnSessionRecord(): Promise<SessionRegistryRecord | null> {
+  try {
+    const existing = await readRecord(thisProcessRecordPath());
+    if (existing.status !== 'ok' || !matchesLocalIdentity(existing.record)) {
+      return null;
+    }
+    const record = existing.record;
+    const currentToken = readProcStartToken(process.pid);
+    if (record.procStart !== null && record.procStart !== currentToken) {
+      return null;
+    }
+    return record;
+  } catch (error) {
+    debugLogger.debug(`readOwnSessionRecord failed: ${describe(error)}`);
+    return null;
   }
 }
 

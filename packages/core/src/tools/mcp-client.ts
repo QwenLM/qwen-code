@@ -35,12 +35,18 @@ import { ServiceAccountImpersonationProvider } from '../mcp/sa-impersonation-pro
 import { DiscoveredMCPTool } from './mcp-tool.js';
 import type { McpToolAnnotations } from './mcp-tool.js';
 import { SdkControlClientTransport } from './sdk-control-client-transport.js';
-import { MCPServerStatus, updateMCPServerStatus } from './mcp-status.js';
+import {
+  MCPServerStatus,
+  recordMCPServerLastError,
+  updateMCPServerStatus,
+} from './mcp-status.js';
 export {
   addMCPStatusChangeListener,
   getAllMCPServerStatuses,
+  getMCPServerLastError,
   getMCPServerStatus,
   MCPServerStatus,
+  recordMCPServerLastError,
   removeMCPServerStatus,
   removeMCPStatusChangeListener,
   updateMCPServerStatus,
@@ -64,7 +70,10 @@ import {
   resetDispatcherCache,
 } from '../utils/runtimeFetchOptions.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { discoveryTimeoutFor } from './mcp-discovery-timeout.js';
+import {
+  discoveryTimeoutFor,
+  runWithTimeout,
+} from './mcp-discovery-timeout.js';
 import { retryWithBackoff } from './mcp-retry.js';
 import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
 import { sanitizeChildEnv } from '../utils/sanitize-child-env.js';
@@ -99,6 +108,12 @@ export const MCP_APP_RESOURCE_MIME_TYPE = 'text/html;profile=mcp-app';
 
 const debugLogger = createDebugLogger('MCP');
 const AUTOMATIC_MCP_OAUTH_TIMEOUT_MS = 60_000;
+/**
+ * Upper bound for the session-termination DELETE in `disconnect()`. The SDK
+ * call has no timeout of its own; a live-but-unresponsive server must not
+ * hang teardown (see `disconnect()`).
+ */
+const TERMINATE_SESSION_TIMEOUT_MS = 2_000;
 
 const invocationContextTransports = new WeakSet<Transport>();
 const invocationContextClients = new WeakSet<Client>();
@@ -113,8 +128,15 @@ function bindInvocationContextPolicy(
   }
 }
 
-const STREAMABLE_HTTP_GET_SSE_FALLBACK_STATUSES = new Set([400]);
+const STREAMABLE_HTTP_GET_SSE_FALLBACK_STATUSES = new Set([400, 404]);
 const STREAMABLE_HTTP_GET_SSE_ERROR_BODY_LIMIT = 512;
+// The MCP undici dispatcher runs with headersTimeout: 0, bodyTimeout: 0
+// (see getOrCreateMcpDispatcher in runtimeFetchOptions.ts), and every caller
+// of the optional GET/SSE probe is fire-and-forget, so nothing above this
+// wrapper will ever time out a body that sends headers but never completes.
+// This excerpt is best-effort diagnostics only — bound it so a stalled body
+// can't leak a reader/connection for the life of the process.
+const STREAMABLE_HTTP_GET_SSE_EXCERPT_TIMEOUT_MS = 2_000;
 
 export function getMcpOAuthDialogInstruction(
   action: 'authenticate' | 're-authenticate',
@@ -162,11 +184,11 @@ async function readResponseBodyExcerpt(
     return undefined;
   }
 
-  const decoder = new TextDecoder();
-  let body = '';
-  let bytesRead = 0;
-  let truncated = false;
-  try {
+  const readLoop = async (): Promise<string | undefined> => {
+    const decoder = new TextDecoder();
+    let body = '';
+    let bytesRead = 0;
+    let truncated = false;
     while (bytesRead < STREAMABLE_HTTP_GET_SSE_ERROR_BODY_LIMIT) {
       const { done, value } = await reader.read();
       if (done) {
@@ -210,7 +232,23 @@ async function readResponseBodyExcerpt(
       excerpt.length > STREAMABLE_HTTP_GET_SSE_ERROR_BODY_LIMIT
       ? `${excerpt.slice(0, STREAMABLE_HTTP_GET_SSE_ERROR_BODY_LIMIT)}...`
       : excerpt;
+  };
+
+  try {
+    return await runWithTimeout(
+      readLoop(),
+      STREAMABLE_HTTP_GET_SSE_EXCERPT_TIMEOUT_MS,
+      'Streamable HTTP GET SSE fallback body excerpt',
+    );
   } catch {
+    // Timed out (or the read failed): drop the diagnostics and cancel this
+    // clone's tee branch so the abandoned read settles instead of dangling.
+    // Cancelling one branch alone does not run the underlying source's
+    // cancel algorithm — it's the caller's response.body?.cancel() below
+    // that cancels the sibling branch and actually releases the connection.
+    reader.cancel().catch(() => {
+      // Best-effort cleanup; the caller still returns the 405 sentinel.
+    });
     return undefined;
   }
 }
@@ -235,8 +273,14 @@ function isStreamableHttpGetSseRequest(init?: RequestInit): boolean {
 
 /**
  * Wraps fetch to preserve OAuth challenges before the SDK discards response
- * metadata and to normalize Spring AI-style 400 responses to the SDK's
- * unsupported sentinel for the optional Streamable HTTP GET SSE request.
+ * metadata and to normalize conventional "GET not supported" rejections of
+ * the optional Streamable HTTP GET SSE request to the SDK's unsupported
+ * sentinel: Spring AI rejects it with 400 (#4521), and servers with no GET
+ * route at all — e.g. the official SDK's stateless
+ * `StreamableHTTPServerTransport` behind Express, whose default fallthrough
+ * answers 404 — reject it with 404 (#8784). A raw 405 needs no rewriting
+ * (the SDK tolerates it natively) and 401 must stay untouched (the OAuth
+ * challenge detection above depends on observing it).
  *
  * SDK coupling: `StreamableHTTPClientTransport._startOrAuthSse()` treats a
  * 405 response as "GET SSE unsupported" and continues in POST-only mode.
@@ -585,6 +629,17 @@ export class McpClient {
         }
       }
       this.updateStatus(MCPServerStatus.DISCONNECTED);
+      // Preserve the cause: the manager's discovery catch swallows this
+      // error (best-effort discovery), leaving the status registry's enum as
+      // the only other witness. Recording it lets status consumers (e.g.
+      // `qwen mcp reconnect`) tell the user WHY the connection failed
+      // instead of a bare "status: disconnected" (issue #9944).
+      // Same guard as `updateStatus()`: a late rejection from a doomed
+      // in-flight connect (server disabled/removed mid-connect) must not
+      // resurrect a cause entry that `removeMCPServerStatus` already dropped.
+      if (!this.isDisconnecting) {
+        recordMCPServerLastError(this.serverName, getErrorMessage(error));
+      }
       throw error;
     }
   }
@@ -718,6 +773,13 @@ export class McpClient {
       return { tools, prompts, resources };
     } catch (error) {
       this.updateStatus(MCPServerStatus.DISCONNECTED);
+      // Same carrier as `connect()`'s catch: the manager swallows this error
+      // for best-effort discovery; keep the cause retrievable for status
+      // consumers (issue #9944). Gated like the status write so a server
+      // removed mid-discovery doesn't get an orphan cause entry resurrected.
+      if (!this.isDisconnecting) {
+        recordMCPServerLastError(this.serverName, getErrorMessage(error));
+      }
       throw error;
     }
   }
@@ -743,6 +805,42 @@ export class McpClient {
     updateMCPServerStatus(this.serverName, MCPServerStatus.DISCONNECTED);
     this.isDisconnecting = true;
     if (this.transport) {
+      // Streamable HTTP only: the SDK's `transport.close()` aborts local
+      // state but leaves the server-side session alive. Per spec, a client
+      // that no longer needs a session SHOULD terminate it explicitly
+      // (`terminateSession()` sends the DELETE). Without this, a session we
+      // abandon keeps occupying the server: single-session HTTP servers
+      // then reject every later `initialize` with "Server already
+      // initialized" (issue #9944 — e.g. the internal reconnect path or a
+      // later `qwen mcp reconnect` can never recover them), and
+      // multi-session servers accumulate orphaned sessions. Best-effort —
+      // a dead/unreachable server must not block teardown. Must run BEFORE
+      // `close()` aborts the transport's request machinery.
+      const streamableTransport = this.transport as {
+        terminateSession?: () => Promise<void>;
+      };
+      if (typeof streamableTransport.terminateSession === 'function') {
+        try {
+          // Bound the DELETE: the SDK's `terminateSession()` has no timeout
+          // of its own (the MCP undici dispatcher runs with
+          // `headersTimeout: 0, bodyTimeout: 0`), and the transport's abort
+          // controller is only aborted by `close()` below — after this
+          // await. A live-but-unresponsive server would otherwise hang
+          // `disconnect()` (and every teardown caller) indefinitely. On
+          // timeout `runWithTimeout` rejects into the catch below (logged,
+          // then falls through to `close()`, which aborts the still-in-flight
+          // request) — same contract as the pool spawn/restart bounds.
+          await runWithTimeout(
+            streamableTransport.terminateSession(),
+            TERMINATE_SESSION_TIMEOUT_MS,
+            `terminateSession for server '${this.serverName}'`,
+          );
+        } catch (error) {
+          debugLogger.debug(
+            `Could not terminate MCP session for server '${this.serverName}' during disconnect (continuing): ${getErrorMessage(error)}`,
+          );
+        }
+      }
       await this.transport.close();
     }
     this.client.close();

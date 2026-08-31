@@ -9,6 +9,7 @@
  * local IPC path.
  */
 
+import { randomBytes } from 'node:crypto';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
@@ -22,25 +23,42 @@ import * as path from 'node:path';
  */
 export const MAX_SOCKET_PATH_BYTES = 103;
 
-/** Directory name holding one socket per live session. */
+/** Directory name (or prefix, in shared temp dirs) holding a socket. */
 export const SOCKET_DIR_NAME = 'qwen-socks';
 
 /**
  * Resolve this process's socket path.
  *
  * Prefers `$XDG_RUNTIME_DIR` — a per-user tmpfs that the OS cleans up on
- * logout, which is exactly the lifetime a session socket wants. Falls back
- * to the system temp directory, and then, if the result would be too long
- * to bind, to a short fixed path under `/tmp` keyed by uid so two users on
- * one box cannot collide.
+ * logout, which is exactly the lifetime a session socket wants. Already
+ * per-user, so the directory name there needs no user key.
+ *
+ * Anywhere else the temp directory can be shared with other users, and a
+ * fixed or uid-derived directory name is either a cross-user collision
+ * (whoever creates it first locks everyone else out) or a pre-creatable
+ * denial-of-service target. Use an unpredictable name there instead;
+ * peers learn the address from the session registry record, not from a
+ * well-known path. Falls back to `/tmp` itself when even that is too
+ * long to bind.
  */
 export function resolvePeerSocketPath(pid: number = process.pid): string {
-  const runtimeDir = process.env['XDG_RUNTIME_DIR'] || os.tmpdir();
-  const preferred = path.join(runtimeDir, SOCKET_DIR_NAME, `${pid}.sock`);
-  if (Buffer.byteLength(preferred) <= MAX_SOCKET_PATH_BYTES) return preferred;
+  const runtimeDir = process.env['XDG_RUNTIME_DIR'];
+  if (runtimeDir) {
+    const preferred = path.join(runtimeDir, SOCKET_DIR_NAME, `${pid}.sock`);
+    if (Buffer.byteLength(preferred) <= MAX_SOCKET_PATH_BYTES) {
+      return preferred;
+    }
+  }
 
-  const uid = typeof process.getuid === 'function' ? process.getuid() : 0;
-  return path.join('/tmp', `${SOCKET_DIR_NAME}-${uid}`, `${pid}.sock`);
+  const nonce = randomBytes(8).toString('hex');
+  const fallback = path.join(
+    os.tmpdir(),
+    `${SOCKET_DIR_NAME}-${nonce}`,
+    `${pid}.sock`,
+  );
+  if (Buffer.byteLength(fallback) <= MAX_SOCKET_PATH_BYTES) return fallback;
+
+  return path.join('/tmp', `${SOCKET_DIR_NAME}-${nonce}`, `${pid}.sock`);
 }
 
 /**

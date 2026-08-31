@@ -46,8 +46,8 @@ import { HEADLESS_YOLO_NO_SANDBOX_WARNING } from '../utils/headlessSafetyWarning
  * Pause the current async function indefinitely. Used after the daemon
  * listener is up so yargs `parse()` never resolves — if it did, the
  * top-level CLI would fall through to the interactive (TUI) entry point
- * in `gemini.tsx`. SIGINT / SIGTERM in `runQwenServe` is the sole exit
- * route.
+ * in `llm.tsx`. SIGINT / SIGTERM / SIGHUP in `runQwenServe` is the sole
+ * exit route.
  */
 function blockForever(): Promise<never> {
   return new Promise<never>(() => {});
@@ -233,6 +233,7 @@ interface ServeArgs {
   'session-restore-timeout-ms'?: number;
   'session-reap-interval-ms'?: number;
   'session-idle-timeout-ms'?: number;
+  'session-prompt-settled-close-grace-ms'?: number;
   'permission-response-timeout-ms'?: number;
   'external-tool-guard-mode': 'off' | 'required';
   'external-tool-guard-endpoint'?: string;
@@ -269,7 +270,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         type: 'string',
         default: DEFAULT_SERVE_HOSTNAME,
         description:
-          'Interface to bind. Loopback (127.0.0.1, localhost, ::1, [::1]) is auth-free; anything else requires a token.',
+          'Interface to bind. Loopback (127.0.0.0/8, localhost, ::1, [::1]) is auth-free; anything else requires a token.',
       })
       .option('token', {
         type: 'string',
@@ -337,7 +338,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         type: 'boolean',
         default: false,
         description:
-          'Enable direct POST /session/:id/shell execution. Requires a bearer token and a session-bound client id on each call.',
+          'Enable direct POST /session/:id/shell execution. Available with bearer auth or trusted loopback; each call still requires a session-bound client id.',
       })
       .option('tls-cert', {
         type: 'string',
@@ -483,8 +484,8 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         type: 'boolean',
         default: true,
         description:
-          'HTTP bridge mode: attempt to preheat one primary `qwen --acp` child; trusted ' +
-          'secondaries start one on demand. Stage 2 native in-process mode is ' +
+          'HTTP bridge mode: attempt to preheat the primary `qwen --acp` child; ' +
+          'trusted secondaries start one on demand. Stage 2 native in-process mode is ' +
           'not yet implemented; this flag will become opt-in then.',
       })
       .option('memory-budget-mb', {
@@ -582,8 +583,8 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       .option('channel-idle-timeout-ms', {
         type: 'number',
         description:
-          'Milliseconds to keep ACP child alive after last session closes. ' +
-          '0 or unset = immediate kill (default).',
+          'Compatibility auto-reap delay for an idle workspace ACP child. ' +
+          '0 or unset = reap after work drains; keepalive windows may extend it (default).',
       })
       .option('initialize-timeout-ms', {
         type: 'number',
@@ -607,6 +608,14 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         description:
           'Idle timeout before a disconnected session is reaped (ms). ' +
           '0 = disabled. Default: 1800000 (30 min).',
+      })
+      .option('session-prompt-settled-close-grace-ms', {
+        type: 'number',
+        description:
+          'Grace period after a prompt settles before an otherwise-idle ' +
+          'session may be auto-closed (ms). Poll-based SSE clients use this ' +
+          'window to reconnect without triggering a session rebuild. ' +
+          '0 = disabled (immediate close). Default: 0.',
       })
       .option('permission-response-timeout-ms', {
         type: 'number',
@@ -907,6 +916,12 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           : {}),
         ...(argv['session-idle-timeout-ms'] !== undefined
           ? { sessionIdleTimeoutMs: argv['session-idle-timeout-ms'] }
+          : {}),
+        ...(argv['session-prompt-settled-close-grace-ms'] !== undefined
+          ? {
+              sessionPromptSettledCloseGraceMs:
+                argv['session-prompt-settled-close-grace-ms'],
+            }
           : {}),
         ...(argv['permission-response-timeout-ms'] !== undefined
           ? {

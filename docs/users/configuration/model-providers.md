@@ -469,9 +469,11 @@ Coding Plan model configurations are versioned. When Qwen Code detects a newer v
 
 - Replace the existing Coding Plan model configurations with the latest versions
 - Preserve any custom model configurations you've added manually
-- Automatically switch to the first model in the updated configuration
+- Leave your selected model unchanged; if it is no longer in the updated
+  configuration, use `/model` to choose a new one
 
-The update process ensures you always have access to the latest model configurations and features without manual intervention.
+The update process refreshes the model configurations and features without
+changing your selected model.
 
 ### Manual Configuration (Advanced)
 
@@ -656,6 +658,8 @@ The optional `reasoning` field under `generationConfig` controls how aggressivel
 Setting `reasoning: false` (the literal boolean) explicitly disables thinking on every provider — useful for cheap side queries that don't benefit from reasoning. This is honored at the request level too via `request.config.thinkingConfig.includeThoughts: false` for one-off calls (e.g. suggestion generation).
 
 On a `api.deepseek.com` baseURL, the OpenAI pipeline emits the explicit `thinking: { type: 'disabled' }` field that DeepSeek V4+ requires — the server-side default is `'enabled'`, so simply omitting `reasoning_effort` would still pay thinking latency/cost. Self-hosted DeepSeek backends (sglang/vllm) and other OpenAI-compatible servers do **not** receive this field; if you need to disable thinking on those, inject `thinking: { type: 'disabled' }` (or whatever knob your inference framework exposes) via `samplingParams`/`extra_body`.
+
+On an `openrouter.ai` baseURL, the OpenAI pipeline emits OpenRouter's provider-level `reasoning: { enabled: false }` field when reasoning is disabled. Other OpenAI-compatible servers do not receive this OpenRouter-specific field; use `samplingParams`/`extra_body` for their native disable knob.
 
 ### Interaction with `samplingParams` (OpenAI-compatible only)
 

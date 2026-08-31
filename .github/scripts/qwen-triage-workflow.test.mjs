@@ -100,7 +100,8 @@ const followupWorkflowPath = join(
   'qwen-issue-followup-bot.yml',
 );
 const followupDoc = parse(readFileSync(followupWorkflowPath, 'utf8'));
-const followupStep = followupDoc.jobs['follow-up-issues'].steps.find(
+const followupJob = followupDoc.jobs['follow-up-issues'];
+const followupStep = followupJob.steps.find(
   (s) => s.name === 'Run Qwen issue follow-up',
 );
 const ciWebShellJob = ciDoc.jobs.web_shell_e2e_smoke;
@@ -241,20 +242,62 @@ describe('qwen-triage: agent tool/permission settings', () => {
 
 // The same settings_json → settings bug survived in two more workflows after
 // the triage fix. An unknown action input is dropped without error, so the
-// /resolve agent ran every time with no turn cap, no tool allowlist, and no
-// sandbox — on a runner pool its runs-on comment chose specifically because
-// `sandbox: true` needs docker — and the follow-up bot ran uncapped too.
-// These blocks were therefore never validated by anything; parse them here.
+// /resolve agent ran every time with no turn cap and no tool allowlist, and
+// the follow-up bot ran uncapped too. These blocks were therefore never
+// validated by anything; parse them here.
+//
+// The sandbox key is pinned to FALSE, not true. The fix that made the block
+// take effect (#9252) also switched the container on, and /resolve went from
+// 84% pushed to 0 of 81 in a row: the versioned ghcr image lags the npm
+// release (#9898) so the agent died at startup, or it hung silently to the job
+// timeout. No sandboxed /resolve run has ever pushed a resolution.
 describe('qwen-code-pr-review.yml resolve-pr: agent settings', () => {
-  it('passes `settings:` (not the silently-dropped `settings_json:`)', () => {
-    assertSettingsContract(resolveConflictsStep, 'resolve_conflicts');
+  // The agent is a direct `qwen` invocation (no qwen-code-action), so the
+  // settings travel as a step env value that the run block writes to a
+  // per-run QWEN_HOME — nothing can be silently dropped by an input name.
+  const resolveSettings = (label) => {
+    assert.ok(resolveConflictsStep, `${label} must keep its agent step`);
+    assert.equal(
+      resolveConflictsStep.uses,
+      undefined,
+      `${label} must invoke qwen directly, not through an action (its $GITHUB_ENV/$GITHUB_PATH cannot be decoyed)`,
+    );
+    const raw = resolveConflictsStep.env?.QWEN_SETTINGS;
+    assert.ok(typeof raw === 'string', `${label} must carry QWEN_SETTINGS`);
+    assert.ok(
+      resolveConflictsStep.run.includes('> "$QWEN_HOME/settings.json"'),
+      `${label} must write QWEN_SETTINGS to the per-run QWEN_HOME`,
+    );
+    assert.ok(
+      resolveConflictsStep.run.includes('export QWEN_HOME'),
+      `${label} must export QWEN_HOME so the qwen process reads the per-run settings`,
+    );
+    // A fork PR can commit .qwen/settings.json (the workspace layer), which
+    // the CLI merges ABOVE the user layer written above — an attacker file
+    // would override tools.sandbox and maxSessionTurns. The run block must
+    // remove it; out-setting it from the user layer cannot work.
+    assert.ok(
+      resolveConflictsStep.run.includes('rm -f .qwen/settings.json'),
+      `${label} must remove a fork-PR-committed workspace settings file`,
+    );
+    const settings = JSON.parse(raw);
+    for (const key of ['coreTools', 'maxSessionTurns', 'sandbox']) {
+      assert.equal(
+        settings[key],
+        undefined,
+        `${label}: v1 top-level \`${key}\` is a legacy key — use the v2 shape`,
+      );
+    }
+    return settings;
+  };
+
+  it('writes its settings to a per-run QWEN_HOME instead of an action input', () => {
+    resolveSettings('resolve_conflicts');
+    assert.equal(resolveConflictsStep.with, undefined);
   });
 
   it('settings is valid JSON pinning the turn cap, allowlist, and sandbox', () => {
-    const settings = assertSettingsContract(
-      resolveConflictsStep,
-      'resolve_conflicts',
-    );
+    const settings = resolveSettings('resolve_conflicts');
     assert.equal(
       settings.model?.maxSessionTurns,
       400,
@@ -275,29 +318,345 @@ describe('qwen-code-pr-review.yml resolve-pr: agent settings', () => {
     ]) {
       assert.ok(core.includes(t), `tools.core must include ${t}`);
     }
-    // The runs-on comment pins this job to hosted runners because the sandbox
-    // needs docker; dropping the key would pay that routing cost for nothing.
+    // Explicit false, not absent: absent means "whatever the CLI defaults to
+    // or QWEN_SANDBOX says", and the one time this flipped on it took the
+    // command down for 13 days (see the describe comment).
     assert.equal(
       settings.tools?.sandbox,
-      true,
-      'tools.sandbox must stay true — the runs-on routing depends on it',
+      false,
+      'tools.sandbox must stay false — every sandboxed /resolve run has failed; re-enable only with a dry-run that finishes inside the container',
     );
   });
 
-  it('keeps resolve-pr on hosted runners (sandbox: true needs docker)', () => {
-    // The routing half of the sandbox coupling: the ECS pool ships no
-    // container runtime, so an ECS-routed sandboxed agent dies at startup.
-    assert.equal(
-      resolvePrJob['runs-on'],
-      'ubuntu-latest',
-      'resolve-pr must stay on hosted runners — sandbox: true needs docker, absent on the ECS pool',
+  it('pins the CLI version instead of following `latest`', () => {
+    // `latest` ties the job to the npm release pipeline of the moment: on
+    // 2026-08-15 the dist-tag pointed at an unresolvable 0.21.12 and every
+    // /resolve died on `npm error notarget` before the agent started.
+    const install = resolvePrJob.steps.find(
+      (s) => s.name === 'Install Qwen CLI',
     );
+    assert.ok(install, 'resolve-pr must install the CLI in its own step');
+    assert.match(
+      String(install.env?.QWEN_CLI_VERSION),
+      /^\d+\.\d+\.\d+$/,
+      'QWEN_CLI_VERSION must be an exact semver, not a dist-tag',
+    );
+    assert.ok(
+      install.run.includes('@qwen-code/qwen-code@${QWEN_CLI_VERSION}'),
+      'the install must use the pinned version',
+    );
+  });
+
+  it('decoys the runner command files for the agent invocation', () => {
+    // The agent has arbitrary shell; whatever it appends to $GITHUB_ENV or
+    // $GITHUB_PATH would apply to the credentialed push step of the same
+    // job. The invocation must see invocation-scoped decoys, inside a
+    // parsing-off window, with no token in its environment.
+    const run = resolveConflictsStep.run;
+    for (const file of [
+      'GITHUB_PATH',
+      'GITHUB_ENV',
+      'GITHUB_OUTPUT',
+      'GITHUB_STEP_SUMMARY',
+    ]) {
+      assert.ok(
+        run.includes(`${file}="$decoy_dir/`),
+        `${file} must point at the decoy for the qwen invocation`,
+      );
+    }
+    // The decoys only mask the invocation's env: the REAL runner command
+    // files stay discoverable by the agent (the step's parent-shell
+    // /proc/<pid>/environ is same-uid readable, $RUNNER_TEMP is enumerable),
+    // and anything planted there applies to every later step — shell lookup
+    // included. The step must therefore truncate all four after the agent,
+    // on every exit path.
+    const statusIdx = run.indexOf('status=$?');
+    assert.ok(statusIdx > -1, 'the run block must capture the qwen exit status');
+    for (const file of [
+      'GITHUB_ENV',
+      'GITHUB_PATH',
+      'GITHUB_OUTPUT',
+      'GITHUB_STEP_SUMMARY',
+    ]) {
+      const trunc = `: > "\${${file}:?}" || true`;
+      const idx = run.indexOf(trunc);
+      assert.ok(idx > -1, `${file} must be truncated after the qwen invocation`);
+      assert.ok(
+        idx > statusIdx,
+        `${file} truncation must run on the exit path, after status=$?`,
+      );
+    }
+    // A hung agent must end inside the script (GNU timeout), not by the
+    // runner killing the process tree — only then are the resume and the
+    // truncation above reached (mirrors 'Run review').
+    assert.ok(run.includes('timeout --kill-after=10s'));
+    // The workspace-layer settings file is removed BEFORE qwen starts: a
+    // fork-committed .qwen/settings.json would otherwise outrank the
+    // per-run home written above for the whole run.
+    const settingsRm = run.indexOf('rm -f .qwen/settings.json');
+    assert.ok(settingsRm > -1, 'the workspace settings file must be removed');
+    assert.ok(
+      settingsRm < run.indexOf('timeout --kill-after=10s'),
+      'the workspace settings removal must precede the qwen invocation',
+    );
+    assert.ok(run.includes('echo "::stop-commands::${stop_token}"'));
+    assert.ok(run.includes("printf '\\n::%s::\\n' \"$stop_token\""));
+    assert.ok(run.includes('--approval-mode yolo'));
+    for (const key of Object.keys(resolveConflictsStep.env)) {
+      assert.ok(
+        !/TOKEN|PAT/.test(key),
+        `agent env must carry no credential, found ${key}`,
+      );
+    }
+    // Dead keys: the run block reads none of them (PROMPT interpolates
+    // pr_number directly) and the CLI consumes no such env vars — they only
+    // clutter the env surface this step's containment comment says to audit.
+    for (const key of ['PR_NUMBER', 'BASE_REF', 'HEAD_REF']) {
+      assert.equal(
+        resolveConflictsStep.env[key],
+        undefined,
+        `agent env must not carry dead key ${key} (keep the copies on 'Report result' / 'Report skipped request')`,
+      );
+    }
+  });
+
+  it('keeps every credential out of the agent job once the agent has run', () => {
+    // Structural containment: the agent runs --yolo without a sandbox and
+    // can leave anything on its runner (config scopes, hooks, moved refs,
+    // PATH shims, the real $GITHUB_ENV, a detached process reading /proc).
+    // Rather than chase each entrance with a scrub, nothing credentialed
+    // runs on that runner after the agent: the push and the result comment
+    // live in `publish-resolution`, whose runner never executed the agent.
+    const steps = resolvePrJob.steps;
+    const agentIdx = steps.findIndex((s) => s.id === 'resolve_conflicts');
+    assert.ok(agentIdx > -1);
+    const secretRef = (v) =>
+      typeof v === 'string' && v.includes('${{ secrets.');
+    for (const s of steps.slice(agentIdx + 1)) {
+      if (s.name === 'Report skipped request') {
+        // The one exception: it runs only when the agent did NOT run.
+        assert.ok(
+          String(s.if).includes("steps.prepare.outputs.decision == 'skip'") &&
+            !String(s.if).includes("decision == 'run'"),
+          'Report skipped request must be gated on the agent not having run',
+        );
+        continue;
+      }
+      for (const [key, value] of Object.entries(s.env ?? {})) {
+        assert.ok(
+          !secretRef(value),
+          `'${s.name}' runs after the agent and must not carry a secret (${key})`,
+        );
+      }
+      for (const [key, value] of Object.entries(s.with ?? {})) {
+        assert.ok(
+          !secretRef(value),
+          `'${s.name}' runs after the agent and must not carry a secret (${key})`,
+        );
+      }
+    }
+    // What crosses the job boundary is a bundle and report files, verified
+    // on the other side; the verdict on the agent step crosses as an output.
+    const packageStep = steps.find((s) => s.name === 'Package resolution');
+    assert.ok(packageStep, 'resolve-pr must package the resolution');
+    assert.ok(
+      packageStep.run.includes(
+        'git bundle create "${WORKDIR}/resolution.bundle" "${HEAD_SHA}..refs/heads/qwen-resolve/pr-${PR_NUMBER}"',
+      ),
+    );
+    assert.equal(
+      resolvePrJob.outputs.agent_outcome,
+      '${{ steps.resolve_conflicts.outcome }}',
+    );
+    assert.equal(
+      resolvePrJob.outputs.decision,
+      '${{ steps.prepare.outputs.decision }}',
+    );
+  });
+
+  it('publishes from a job that never ran the agent, from GitHub-fetched refs and a verified bundle', () => {
+    const publish = prReviewDoc.jobs['publish-resolution'];
+    assert.ok(publish, 'publish-resolution must exist');
+    assert.deepEqual(publish.needs, ['resolve-pr']);
+    assert.equal(
+      publish.if,
+      "${{ always() && needs.resolve-pr.outputs.decision == 'run' }}",
+    );
+    assert.equal(publish['runs-on'], 'ubuntu-latest');
+    assert.deepEqual(publish.permissions, { contents: 'read' });
+    // The publisher uses a PER-RUN concurrency group, NOT the shared
+    // head-write one: it is reached only after resolve-pr uploaded a
+    // completed resolution, and GitHub replaces the single pending job in a
+    // group when another is queued, so sharing the head-write group would let
+    // a second /resolve or an autofix writer silently cancel this pending
+    // publisher and drop a resolution that already succeeded. A per-run group
+    // can never be replaced; competing publishers are made safe by the
+    // force-with-lease push, not by the group.
+    assert.match(publish.concurrency.group, /\$\{\{\s*github\.run_id\s*\}\}/);
+    assert.notEqual(publish.concurrency.group, resolvePrJob.concurrency.group);
+    assert.match(resolvePrJob.concurrency.group, /^qwen-pr-head-write-/);
+    assert.equal(publish.concurrency['cancel-in-progress'], false);
+    // The atomic guard for two concurrent publishers is the lease, pinned to
+    // the head the agent resolved from.
+    const reportRun = publish.steps.find((s) => s.name === 'Report result').run;
+    assert.ok(
+      reportRun.includes(
+        '--force-with-lease="refs/heads/${HEAD_REF}:${HEAD_SHA}"',
+      ),
+      'the publisher push must be force-with-lease pinned to HEAD_SHA',
+    );
+    // No agent here, and the token-bearing step is here and nowhere else.
+    assert.ok(publish.steps.every((s) => s.id !== 'resolve_conflicts'));
+    assert.ok(publish.steps.every((s) => !(s.run ?? '').includes('qwen ')));
+    const report = publish.steps.find((s) => s.name === 'Report result');
+    assert.equal(report.env.PUSH_TOKEN, '${{ secrets.CI_DEV_BOT_PAT }}');
+    assert.ok(report.run.includes('x-access-token:${PUSH_TOKEN}'));
+    assert.ok(
+      resolvePrJob.steps.every(
+        (s) => !(s.run ?? '').includes('x-access-token:'),
+      ),
+    );
+    // Fresh checkout, refs from GitHub, compared against the head the agent
+    // resolved from; the resolution enters only as a verified bundle that
+    // must descend from that head.
+    const checkout = publish.steps.find((s) =>
+      s.uses?.startsWith('actions/checkout@'),
+    );
+    assert.equal(checkout.with['persist-credentials'], false);
+    const verify = publish.steps.find((s) => s.id === 'verify');
+    assert.equal(
+      verify.env.HEAD_SHA,
+      '${{ needs.resolve-pr.outputs.head_sha }}',
+    );
+    assert.equal(
+      verify.env.RESOLVE_OUTCOME,
+      '${{ needs.resolve-pr.outputs.agent_outcome }}',
+    );
+    for (const line of [
+      'git fetch origin "+refs/pull/${PR_NUMBER}/head:${HEAD_FETCH_REF}"',
+      'git update-ref "$HEAD_FETCH_REF" "$HEAD_SHA"',
+      'git bundle verify "$bundle"',
+      'git merge-base --is-ancestor "$HEAD_SHA" HEAD',
+    ]) {
+      assert.ok(verify.run.includes(line), `verify must contain: ${line}`);
+    }
+    assert.ok(
+      verify.run.indexOf('git bundle verify') <
+        verify.run.indexOf('git fetch "$bundle"'),
+      'the bundle must verify before it is fetched',
+    );
+    assert.ok(
+      verify.run.indexOf('git merge-base --is-ancestor') <
+        verify.run.indexOf('git ls-files -u'),
+      'lineage must be checked before any content check',
+    );
+    // The artifact is the same one the agent job uploads. The name carries
+    // run_attempt on both sides: a re-run keeps the run_id, and without the
+    // suffix the re-run would republish attempt 1's stale bundle. The
+    // DOWNLOAD spells the attempt that RAN THE AGENT, not the publish job's
+    // own run_attempt: a partial "Re-run failed jobs" re-runs only the
+    // publish job, whose attempt number has no artifact. A missing artifact
+    // with a successful agent step is the lost artifact, never an infra
+    // failure of the agent run.
+    const download = publish.steps.find((s) =>
+      s.uses?.startsWith('actions/download-artifact@'),
+    );
+    assert.equal(download['continue-on-error'], true);
+    assert.equal(
+      download.with.name,
+      'qwen-resolve-pr-${{ needs.resolve-pr.outputs.pr_number }}-attempt-${{ needs.resolve-pr.outputs.agent_run_attempt }}',
+    );
+    assert.equal(
+      resolvePrJob.outputs.agent_run_attempt,
+      '${{ steps.resolve.outputs.run_attempt }}',
+    );
+    const resolveStep = resolvePrJob.steps.find((s) => s.id === 'resolve');
+    assert.ok(
+      resolveStep.run.includes(
+        'echo "run_attempt=${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"',
+      ),
+      'the attempt that ran the agent must cross the job boundary',
+    );
+    const upload = resolvePrJob.steps.find((s) =>
+      s.uses?.startsWith('actions/upload-artifact@'),
+    );
+    assert.equal(
+      upload.with.name,
+      'qwen-resolve-pr-${{ steps.resolve.outputs.pr_number }}-attempt-${{ github.run_attempt }}',
+    );
+    assert.ok(verify.run.includes('failure_kind=infra'));
+    assert.ok(verify.run.includes('failure_kind=artifact_missing'));
+    assert.ok(verify.run.includes('its run artifact is missing'));
+  });
+
+  it('keeps both /resolve jobs on ephemeral hosted runners', () => {
+    // resolve-pr runs an unsandboxed agent; publish-resolution force-pushes
+    // to the PR head with a PAT. A fresh runner for each is the cheapest
+    // guarantee that nothing from an earlier attempt — or from the other
+    // job — is carried into either.
+    for (const name of ['resolve-pr', 'publish-resolution']) {
+      assert.equal(
+        prReviewDoc.jobs[name]['runs-on'],
+        'ubuntu-latest',
+        `${name} must stay on an ephemeral hosted runner`,
+      );
+    }
   });
 });
 
 describe('qwen-issue-followup-bot.yml: agent settings', () => {
   it('passes `settings:` (not the silently-dropped `settings_json:`)', () => {
     assertSettingsContract(followupStep, 'the follow-up step');
+  });
+
+  it('installs the pinned CLI job-locally so the pin binds BOTH lanes', () => {
+    // The action's 'Install Qwen Code' step skips when `qwen` is already on
+    // PATH (verified at the pinned action SHA) — always true on the ecs-qwen
+    // pool this job routes to by default, whose fleet CLI
+    // update-ecs-runner-qwen.yml maintains at `latest`. An input-only pin
+    // never bound that primary lane, so the bot there ran whatever the fleet
+    // update last installed — the exact 2026-08-15 notarget outage class the
+    // pin exists to prevent. The job-local install is prepended to PATH, so
+    // the pinned copy outranks the fleet CLI on ecs-qwen and is the only CLI
+    // on the ubuntu-latest fallback lane; without a contract test a future
+    // edit silently reverts the bot to the fleet dist-tag with nothing red
+    // at merge time.
+    const install = followupJob.steps.find((s) => s.id === 'install_qwen');
+    assert.ok(install, 'the pinned CLI install step must exist');
+    assert.match(
+      String(install.env?.QWEN_CLI_VERSION),
+      /^\d+\.\d+\.\d+$/,
+      'the install must pin an exact CLI version, not a dist-tag',
+    );
+    assert.ok(
+      install.run.includes('npm install --prefix') &&
+        install.run.includes('"@qwen-code/qwen-code@${QWEN_CLI_VERSION}"'),
+      'the install must be job-local (--prefix) and pinned to QWEN_CLI_VERSION',
+    );
+    assert.ok(
+      install.run.includes('--registry=https://registry.npmjs.org'),
+      'the install must pin the registry, not the runner npm mirror',
+    );
+    assert.ok(
+      install.run.includes(
+        'echo "${install_dir}/node_modules/.bin" >> "${GITHUB_PATH}"',
+      ),
+      'the job-local bin dir must be prepended to PATH to outrank the fleet CLI',
+    );
+    // PATH prepends apply only to LATER steps, and the action's own install
+    // skips on any `qwen` already on PATH: if the install stops preceding
+    // the action step, the fleet CLI wins on ecs-qwen again.
+    assert.ok(
+      followupJob.steps.indexOf(install) <
+        followupJob.steps.indexOf(followupStep),
+      'the pinned install must run before the action step',
+    );
+    // Single source of truth: the action input is the installed version, so
+    // it can never drift from what actually runs.
+    assert.equal(
+      String(followupStep.with?.qwen_cli_version),
+      '${{ steps.install_qwen.outputs.version }}',
+    );
   });
 
   it('settings is valid JSON pinning the turn cap and gh allowlist', () => {
@@ -682,13 +1041,40 @@ describe('ci.yml: self-hosted checkout jobs restore ownership unconditionally', 
     );
     assert.match(
       ciCleanStep.run,
-      /\[ ! -L "\$GITHUB_WORKSPACE\/\.qwen" \]/,
-      'cleanup must not follow a symlinked .qwen: chmod -R dereferences a symlinked argument and would widen an outside tree',
+      /\[ -d "\$stale_qwen" \] && \[ ! -L "\$stale_qwen" \]/,
+      'cleanup must not follow a symlinked qwen state: chmod -R dereferences a symlinked argument and would widen an outside tree',
     );
     assert.doesNotMatch(
       ciCleanStep.run,
       /\.stale\./,
       'cleanup must not reference .stale.* dirs once rename-aside is gone',
+    );
+  });
+});
+
+describe('qwen-triage: maintainer resolver heredoc vs the backtick deny rule', () => {
+  it('keeps the resolver bash block backtick-free so the deny rule never fires', () => {
+    // The triage lane's permissions.deny includes run_shell_command(*`*):
+    // any command text containing a backtick is EXECUTION_DENIED before
+    // approval. A template literal (or a backticked comment) inside the
+    // resolver heredoc would therefore kill the whole command, and
+    // deferrals would silently lose their deterministic assignee.
+    const settings = assertSettingsContract(triageStep, 'triage settings');
+    const deny = settings.permissions?.deny ?? [];
+    assert.ok(
+      deny.includes('run_shell_command(*`*)'),
+      'permissions.deny must keep the backtick rule',
+    );
+    const blocks = [...prSkill.matchAll(/```bash\n([\s\S]*?)\n```/g)].map(
+      (m) => m[1],
+    );
+    const resolver = blocks.find(
+      (b) => b.includes("<<'EOF'") && b.includes('collaborators'),
+    );
+    assert.ok(resolver, 'maintainer resolver heredoc block must exist');
+    assert.ok(
+      !resolver.includes('`'),
+      'resolver block must contain no backtick, or the deny rule blocks it',
     );
   });
 });
@@ -3078,34 +3464,22 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
     );
   });
 
-  it('desktop-app and docs-site trees are skipped despite their build vite.config', () => {
-    // Round-6 Critical: each packages/desktop/apps/* carries its own
-    // package.json plus a BUILD vite.config.ts, which fooled the generic
-    // resolver into treating bun-family tests as runnable — 102 of 319
-    // real desktop test files misclassified, published under a false
-    // "include-set mismatch" diagnosis while draining the wall budget.
+  it('the docs-site tree is skipped despite its vitest.config', () => {
     const { res, outputs, log, counts } = runGate({
       layout: {
-        'packages/desktop/apps/electron/package.json': '{}',
-        'packages/desktop/apps/electron/vite.config.ts': '',
-        'packages/desktop/apps/electron/src/a.test.ts': '',
         'docs-site/package.json': '{}',
         'docs-site/vitest.config.js': '',
         'docs-site/b.test.ts': '',
       },
-      list: 'packages/desktop/apps/electron/src/a.test.ts\ndocs-site/b.test.ts\n',
+      list: 'docs-site/b.test.ts\n',
     });
     assert.equal(res.status, 0, res.stderr);
     assert.equal(outputs.flake_verdict, 'n/a');
     assert.match(
       log,
-      /outside the npm-workspace install set \(unsupported runner family\), skipped: packages\/desktop\/apps\/electron\/src\/a\.test\.ts/,
-    );
-    assert.match(
-      log,
       /outside the npm-workspace install set \(unsupported runner family\), skipped: docs-site\/b\.test\.ts/,
     );
-    assert.equal(counts('a.test.ts'), 0, 'no invocation may be attempted');
+    assert.equal(counts('b.test.ts'), 0, 'no invocation may be attempted');
   });
 
   it('a recorded file missing at gate time is skip-logged, never marked F', () => {

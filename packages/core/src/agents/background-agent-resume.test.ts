@@ -182,7 +182,7 @@ describe('BackgroundAgentResumeService', () => {
       getSessionId: () => 'session-1',
       getProjectRoot: () => tempDir,
       getCliVersion: () => 'test-version',
-      getGeminiClient: () =>
+      getLlmClient: () =>
         options.currentForkRuntime
           ? {
               getChat: () => ({
@@ -201,6 +201,7 @@ describe('BackgroundAgentResumeService', () => {
           : undefined,
       getSkillManager: () => options.skillManager,
       getDisabledSkillNames: () => new Set<string>(),
+      isSkillEnabled: () => true,
       getModelInvocableCommandsProvider: () => undefined,
       getSkipStartupContext: () => true,
       getTranscriptPath: () => path.join(tempDir, 'session.jsonl'),
@@ -958,6 +959,14 @@ describe('BackgroundAgentResumeService', () => {
     );
 
     expect(resumed).toBeDefined();
+    expect(subagentManager.createAgentHeadless).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.objectContaining({
+        taskName: 'Resume with hooks',
+        subagentId: agentId,
+      }),
+    );
     expect(hookSystem.fireSubagentStartEvent).toHaveBeenCalledWith(
       agentId,
       'researcher',
@@ -2450,6 +2459,8 @@ describe('BackgroundAgentResumeService', () => {
         ],
         executionAllowedTools: expectedExecutionAllowedTools,
       });
+      expect(createArgs?.[9]).toBe(launchPrompt);
+      expect(createArgs?.[10]).toBe(agentId);
       expect(executeContext).toBeDefined();
       const contextArg = executeContext as
         | { get(key: string): unknown }

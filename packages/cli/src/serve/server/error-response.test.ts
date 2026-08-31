@@ -14,20 +14,34 @@ import {
   SessionWriterLostError,
   SessionWriterUnavailableError,
 } from '@qwen-code/qwen-code-core';
+import type { DaemonLogger } from '../daemon-logger.js';
+import {
+  WorkspaceRuntimeInitializationError,
+  WorkspaceRuntimeStillStartingError,
+} from '../workspace-runtime-coordinator.js';
 import { sendBridgeError } from './error-response.js';
 import { DaemonDrainingError } from './session-archive.js';
+import {
+  BridgeTimeoutError,
+  WorkspaceDrainingError,
+} from '../acp-session-bridge.js';
+import { StandaloneSessionServiceError } from '../conversations/standalone-session-service.js';
+import { ConversationRuntimeOwnershipError } from '../conversations/conversation-runtime-errors.js';
 
 function responseMock(): {
   response: Response;
+  set: ReturnType<typeof vi.fn>;
   status: ReturnType<typeof vi.fn>;
   json: ReturnType<typeof vi.fn>;
 } {
+  const set = vi.fn();
   const status = vi.fn();
   const json = vi.fn();
-  const response = { status, json };
+  const response = { set, status, json };
+  set.mockReturnValue(response);
   status.mockReturnValue(response);
   json.mockReturnValue(response);
-  return { response: response as unknown as Response, status, json };
+  return { response: response as unknown as Response, set, status, json };
 }
 
 describe('sendBridgeError session writer errors', () => {
@@ -62,6 +76,118 @@ describe('sendBridgeError session writer errors', () => {
         'The daemon is draining and no longer accepts session maintenance.',
       code: 'daemon_draining',
       errorKind: 'daemon_draining',
+    });
+  });
+
+  it('maps session initialization timeouts with the public retry contract', () => {
+    const { response, status, json, set } = responseMock();
+    const error = new BridgeTimeoutError('newSession', 10_000);
+
+    sendBridgeError(response, error);
+
+    expect(set).toHaveBeenCalledWith('Retry-After', '10');
+    expect(status).toHaveBeenCalledWith(504);
+    expect(json).toHaveBeenCalledWith({
+      error: error.message,
+      code: 'init_timeout',
+      errorKind: 'init_timeout',
+      retryable: true,
+      timeoutMs: 10_000,
+    });
+  });
+
+  it('leaves non-session-initialization bridge timeouts on the generic path', () => {
+    const { response, status, json, set } = responseMock();
+    const error = new BridgeTimeoutError('initialize', 10_000);
+
+    sendBridgeError(response, error);
+
+    expect(set).not.toHaveBeenCalled();
+    expect(status).toHaveBeenCalledWith(500);
+    expect(json).toHaveBeenCalledWith({ error: error.message });
+  });
+
+  it.each([
+    ['conversation_runtime_in_use', true],
+    ['conversation_runtime_unavailable', true],
+    ['conversation_root_compromised', false],
+    ['conversation_runtime_ownership_compromised', false],
+  ] as const)(
+    'maps Conversations runtime ownership %s to 503',
+    (code, retryable) => {
+      const { response, status, json } = responseMock();
+      const error = new ConversationRuntimeOwnershipError(code, retryable);
+
+      sendBridgeError(response, error);
+
+      expect(status).toHaveBeenCalledWith(503);
+      expect(json).toHaveBeenCalledWith({
+        error: error.message,
+        code,
+        retryable,
+      });
+    },
+  );
+
+  it.each([
+    ['invalid_request', 400, false],
+    ['standalone_session_not_found', 404, false],
+    ['session_busy', 409, true],
+    ['working_directory_compromised', 409, false],
+    ['deletion_recovery_compromised', 409, false],
+    ['standalone_session_operation_failed', 500, false],
+    ['standalone_creation_rolled_back', 500, true],
+    ['standalone_creation_outcome_unknown', 500, false],
+    ['transcript_deletion_failed', 500, true],
+    ['transcript_deletion_outcome_unknown', 500, false],
+    ['working_directory_recovery_failed', 500, true],
+  ] as const)(
+    'maps standalone service %s to %i',
+    (code, expectedStatus, retryable) => {
+      const { response, status, json, set } = responseMock();
+      const error = new StandaloneSessionServiceError(
+        code,
+        'session-1',
+        'public standalone error',
+        retryable,
+      );
+
+      sendBridgeError(response, error);
+
+      expect(status).toHaveBeenCalledWith(expectedStatus);
+      expect(json).toHaveBeenCalledWith({
+        error: 'public standalone error',
+        code,
+        errorKind: code,
+        retryable,
+        sessionId: 'session-1',
+      });
+      expect(set).toHaveBeenCalledTimes(retryable ? 1 : 0);
+    },
+  );
+
+  it('records 500-class standalone failures with request context', () => {
+    const { response } = responseMock();
+    const daemonLog = {
+      warn: vi.fn(),
+    } as unknown as DaemonLogger;
+    const error = new StandaloneSessionServiceError(
+      'standalone_creation_outcome_unknown',
+      'session-1',
+      'standalone outcome unknown',
+    );
+
+    sendBridgeError(
+      response,
+      error,
+      { route: 'POST /standalone/session', sessionId: 'session-1' },
+      daemonLog,
+    );
+
+    expect(daemonLog.warn).toHaveBeenCalledWith('standalone outcome unknown', {
+      route: 'POST /standalone/session',
+      sessionId: 'session-1',
+      errorType: 'StandaloneSessionServiceError',
     });
   });
 
@@ -138,6 +264,85 @@ describe('sendBridgeError session writer errors', () => {
     });
   });
 
+  it('maps runtime still starting to 503 with Retry-After', () => {
+    const { response, set, status, json } = responseMock();
+    const daemonLog = {
+      error: vi.fn(),
+    } as unknown as DaemonLogger;
+
+    sendBridgeError(
+      response,
+      new WorkspaceRuntimeStillStartingError(),
+      { route: 'POST /workspace/runtime/ensure' },
+      daemonLog,
+    );
+
+    expect(set).toHaveBeenCalledWith('Retry-After', '5');
+    expect(status).toHaveBeenCalledWith(503);
+    expect(json).toHaveBeenCalledWith({
+      error: 'Workspace runtime is still starting',
+      code: 'runtime_still_starting',
+    });
+    expect(daemonLog.error).toHaveBeenCalledWith(
+      'Workspace runtime is still starting',
+      expect.any(WorkspaceRuntimeStillStartingError),
+      { route: 'POST /workspace/runtime/ensure' },
+    );
+  });
+
+  it('logs the cause of runtime initialization failures', () => {
+    const { response, set, status, json } = responseMock();
+    const cause = new Error('child initialize failed');
+    const daemonLog = {
+      error: vi.fn(),
+    } as unknown as DaemonLogger;
+
+    sendBridgeError(
+      response,
+      new WorkspaceRuntimeInitializationError(cause),
+      { route: 'POST /workspace/runtime/ensure' },
+      daemonLog,
+    );
+
+    expect(daemonLog.error).toHaveBeenCalledWith(
+      'child initialize failed',
+      cause,
+      { route: 'POST /workspace/runtime/ensure' },
+    );
+    expect(set).toHaveBeenCalledWith('Retry-After', '5');
+    expect(status).toHaveBeenCalledWith(503);
+    expect(json).toHaveBeenCalledWith({
+      error: 'Workspace runtime failed to initialize',
+      code: 'runtime_initialization_failed',
+    });
+  });
+
+  it('logs the cause of a runtime failure hidden by workspace draining', () => {
+    const { response, set, status, json } = responseMock();
+    const cause = new Error('preheat failed');
+    const daemonLog = {
+      error: vi.fn(),
+    } as unknown as DaemonLogger;
+
+    sendBridgeError(
+      response,
+      new WorkspaceDrainingError('/workspace', cause),
+      { route: 'POST /workspace/runtime/ensure' },
+      daemonLog,
+    );
+
+    expect(daemonLog.error).toHaveBeenCalledWith('preheat failed', cause, {
+      route: 'POST /workspace/runtime/ensure',
+    });
+    expect(set).toHaveBeenCalledWith('Retry-After', '5');
+    expect(status).toHaveBeenCalledWith(503);
+    expect(json).toHaveBeenCalledWith({
+      error: 'Workspace "/workspace" is being removed',
+      code: 'workspace_draining',
+      workspaceCwd: '/workspace',
+    });
+  });
+
   it('maps an untrusted workspace bridge error to 403', () => {
     const { response, status, json } = responseMock();
     const error = Object.assign(new Error('Workspace is not trusted'), {
@@ -152,6 +357,44 @@ describe('sendBridgeError session writer errors', () => {
       code: 'untrusted_workspace',
     });
   });
+
+  it.each([
+    {
+      kind: 'session_busy',
+      message: 'The session is busy.',
+      retryable: true,
+    },
+    {
+      kind: 'working_directory_missing',
+      message: 'The standalone working directory is missing.',
+      retryable: true,
+    },
+    {
+      kind: 'working_directory_compromised',
+      message: 'The standalone working directory identity is compromised.',
+      retryable: false,
+    },
+  ] as const)(
+    'maps $kind without exposing child error details',
+    ({ kind, message, retryable }) => {
+      const { response, status, json, set } = responseMock();
+      const error = Object.assign(new Error('/private/path leaked'), {
+        data: { errorKind: kind, path: '/private/path' },
+      });
+
+      sendBridgeError(response, error, { sessionId: 'session-1' });
+
+      expect(status).toHaveBeenCalledWith(409);
+      expect(json).toHaveBeenCalledWith({
+        error: message,
+        code: kind,
+        errorKind: kind,
+        retryable,
+        sessionId: 'session-1',
+      });
+      expect(set).toHaveBeenCalledTimes(retryable ? 1 : 0);
+    },
+  );
 
   it.each([
     ['goal_conflict', 409],

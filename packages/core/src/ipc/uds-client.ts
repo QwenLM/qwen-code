@@ -29,7 +29,6 @@ const debugLogger = createDebugLogger('PEER_IPC');
 
 /** Give up on a peer that accepts a connection but never drains it. */
 export const SEND_TIMEOUT_MS = 5_000;
-export const PROBE_TIMEOUT_MS = 250;
 
 /**
  * Most concurrent outbound sends allowed.
@@ -40,8 +39,23 @@ export const PROBE_TIMEOUT_MS = 250;
  * timeout) can exhaust this session's fd limit with receipts alone — the
  * outbound mirror of what MAX_PEER_CONNECTIONS stops on the inbound side.
  * Sends over the ceiling are dropped; receipts are best-effort anyway.
+ *
+ * Must stay above MAX_HELD_MESSAGES: closing a session bursts one expiry
+ * receipt per held message all at once, and a ceiling below the burst
+ * drops the tail — the senders of the oldest held messages would never
+ * learn their message expired.
  */
-export const MAX_CONCURRENT_SENDS = 32;
+export const MAX_CONCURRENT_SENDS = 64;
+
+/**
+ * How long a reachability probe waits for a connection.
+ *
+ * Discovery probes every registered session concurrently, so this bounds
+ * the cost of a `list_agents` call to about one probe however many
+ * sessions are registered. A local socket accepts in microseconds; a
+ * quarter second is already generous for a machine under load.
+ */
+export const PROBE_TIMEOUT_MS = 250;
 
 let inFlightSends = 0;
 
@@ -148,36 +162,6 @@ export function sendPeerFrame(
   });
 }
 
-/** Dial only long enough to prove that a registered peer is reachable. */
-export function probePeerSocket(
-  socketPath: string,
-  timeoutMs: number = PROBE_TIMEOUT_MS,
-): Promise<boolean> {
-  return new Promise((resolve) => {
-    if (!isLocalIpcPath(socketPath)) {
-      resolve(false);
-      return;
-    }
-
-    const socket = net.connect({ path: socketPath });
-    socket.unref();
-    let settled = false;
-    const finish = (reachable: boolean) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(deadline);
-      socket.destroy();
-      resolve(reachable);
-    };
-    const deadline = setTimeout(() => finish(false), timeoutMs);
-    deadline.unref();
-    socket.on('connect', () => finish(true));
-    socket.on('error', (error: NodeJS.ErrnoException) =>
-      finish(error.code === 'EBUSY' || error.code === 'EAGAIN'),
-    );
-  });
-}
-
 /**
  * Best-effort delivery receipt.
  *
@@ -198,4 +182,40 @@ export async function sendDeliveryStatus(
       }`,
     );
   }
+}
+
+/**
+ * True when something is listening on `socketPath`.
+ *
+ * A full listen backlog (EAGAIN on POSIX, EBUSY on Windows named pipes)
+ * counts as alive: the peer is listening but momentarily saturated, which
+ * is a busy session, not a dead one. Everything else — including a socket
+ * file left behind by a crashed process — is dead, which is the point: a
+ * stale socket inode still stats fine, so only a dial can tell the
+ * difference.
+ */
+export function probePeerSocket(socketPath: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    if (!isLocalIpcPath(socketPath)) {
+      resolve(false);
+      return;
+    }
+    const socket = net.connect({ path: socketPath });
+    let settled = false;
+    const settle = (alive: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      socket.destroy();
+      resolve(alive);
+    };
+    // An absolute deadline rather than socket.setTimeout, for the same
+    // reason sendPeerFrame uses one: an idle timer is reset by any byte.
+    const deadline = setTimeout(() => settle(false), PROBE_TIMEOUT_MS);
+    deadline.unref();
+    socket.on('connect', () => settle(true));
+    socket.on('error', (error: NodeJS.ErrnoException) =>
+      settle(error.code === 'EAGAIN' || error.code === 'EBUSY'),
+    );
+  });
 }

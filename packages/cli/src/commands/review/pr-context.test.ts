@@ -237,7 +237,7 @@ describe('buildMarkdown section order', () => {
       );
       process.env['QWEN_CODE_MODEL_IDENTITY'] = 'other-model@9f8e7d6c';
       expect(buildMarkdown('1', 'o/r', meta, [], [], [], ledger)).toContain(
-        'Do NOT pass the reviewed-at sha',
+        'Do NOT pass the anchor above',
       );
     } finally {
       if (prev === undefined) delete process.env['QWEN_CODE_MODEL_IDENTITY'];
@@ -792,6 +792,57 @@ describe('extractCodeRefs', () => {
 });
 
 describe('carriesBlockerSignal', () => {
+  it('strips every GFM quoting form, in renderer precedence, before scanning (R14-4)', () => {
+    // ~~~ fences, a 4-backtick fence CONTAINING ```, inline code spans and
+    // indented code are all quoted text; a mid-line ``` run is not a fence;
+    // whichever of a fence / an HTML comment opens first owns the text.
+    expect(
+      carriesBlockerSignal('note\n~~~\n[critical] in tilde fence\n~~~\n'),
+    ).toBe(false);
+    expect(
+      carriesBlockerSignal('note\n````\n```\n[critical] nested\n```\n````\n'),
+    ).toBe(false);
+    expect(carriesBlockerSignal('see `[critical]` in the log')).toBe(false);
+    expect(carriesBlockerSignal('para\n\n    [critical] indented code\n')).toBe(
+      false,
+    );
+    // A mid-line ``` run is text, not a delimiter: the blocker claim before
+    // it and after it are both still the comment's own words.
+    expect(carriesBlockerSignal('this is blocking ``` still ``` yes')).toBe(
+      true,
+    );
+    // A `<!--` INSIDE a fence is fence content — it must not pair with a
+    // `-->` outside and delete a visible claim across the boundary.
+    expect(
+      carriesBlockerSignal('```\n<!--\n```\nthis is a blocker --> for real'),
+    ).toBe(true);
+    // A fence opener INSIDE an open comment is comment text: the comment
+    // still closes where it closes.
+    expect(carriesBlockerSignal('<!-- ``` -->\nmust-fix before merge')).toBe(
+      true,
+    );
+  });
+
+  it('ignores blocker tokens inside a fenced code block — quoted output is not a claim (R14-4)', () => {
+    // The posting contract mandates a fenced witness under every finding, and
+    // program output routinely prints literal markers ("[Critical]", "still
+    // fails"). Scanning inside the fence would self-promote a non-blocking
+    // Suggestion into the blocker section every round.
+    const fenced =
+      'Suggestion: tidy the helper.\n\nWitness:\n```\n[Critical] printed by the suite\nstill fails here\nblocking: test log\n```\n';
+    expect(carriesBlockerSignal(fenced)).toBe(false);
+    // The identical tokens OUTSIDE a fence still promote.
+    expect(carriesBlockerSignal('[Critical] printed by the suite')).toBe(true);
+    // An unclosed fence swallows the rest, as GitHub renders it.
+    expect(carriesBlockerSignal('note\n```\n[critical] never closed')).toBe(
+      false,
+    );
+    // A blocker claim BEFORE the fence is still seen.
+    expect(carriesBlockerSignal('This is a blocker.\n```\nlog\n```')).toBe(
+      true,
+    );
+  });
+
   it('recognises a blocker that never uses the [Critical] marker', () => {
     // The real PR #6486 heading. Only /review emits `[Critical]`; a human
     // types whatever they type, and the old literal-marker gate saw none of it.
@@ -1478,6 +1529,331 @@ describe('latestLedger — the split trust surface', () => {
       'bot',
     );
     expect(own?.ledger).toEqual(anchored);
+  });
+
+  it('grafts the anchor forward from an earlier OWN marker when the winner closed without one', () => {
+    // Issue #9902: a fail-closed round withholds its anchor on purpose, but
+    // the withhold is about THAT round's range — the anchor an earlier clean
+    // round certified stays true, and scoping the next round `sha..HEAD`
+    // re-covers the gap. Recovery used to read only the winning marker, so
+    // one non-clean round dropped the incremental state permanently and
+    // every later round re-read the whole diff.
+    const failClosed = (round: number) =>
+      `x <!-- qwen-review-ledger {"v":1,"round":${round},"findings":[{"id":"R${round}-1","sev":"C","file":"b.ts","title":"uncertified"}]} -->`;
+    const { recovered } = recoverLedger(
+      [
+        review('bot', '2026-01-01T00:00:00Z', serializeLedger(anchored)),
+        review('bot', '2026-01-02T00:00:00Z', failClosed(3)),
+        review('bot', '2026-01-03T00:00:00Z', failClosed(4)),
+      ],
+      'bot',
+    );
+    // The work list is the winner's (round-first); the anchor is round 2's.
+    expect(recovered?.ledger.round).toBe(4);
+    expect(recovered?.ledger.sha).toBe(anchored.sha);
+    expect(recovered?.ledger.model).toBe(anchored.model);
+    // …and the provenance rides, so the renderer never claims round 4
+    // "reviewed at" a sha it certified nothing about.
+    expect(recovered?.anchorFromRound).toBe(2);
+  });
+
+  it('never grafts a FOREIGN anchor — the graft source is own markers only', () => {
+    // The strip and the graft are the same rule at two seams: an untrusted
+    // body must not decide which lines this pipeline stops looking at, and
+    // recovering around the strip through the lookback would reopen it.
+    const failClosed =
+      'x <!-- qwen-review-ledger {"v":1,"round":3,"findings":[{"id":"R3-1","sev":"C","file":"b.ts","title":"uncertified"}]} -->';
+    const { recovered } = recoverLedger(
+      [
+        review('stranger', '2026-01-01T00:00:00Z', serializeLedger(anchored)),
+        review('bot', '2026-01-02T00:00:00Z', failClosed),
+      ],
+      'bot',
+    );
+    expect(recovered?.ledger.round).toBe(3);
+    expect(recovered?.ledger.sha).toBeUndefined();
+    expect(recovered?.ledger.model).toBeUndefined();
+    expect(recovered?.anchorFromRound).toBeUndefined();
+  });
+
+  it('grafts the own anchor over a FOREIGN winner — the sha still never crosses accounts', () => {
+    // The winner is another account's higher-round marker (its anchor is
+    // stripped at the seam), but this account's OWN earlier marker carried
+    // one it certified. Restoring it is the union's own principle applied to
+    // the anchor: nothing foreign enters; the own certified state rides.
+    const foreignWinner =
+      'y <!-- qwen-review-ledger {"v":1,"round":5,"findings":[{"id":"R5-1","sev":"S","file":"c.ts","title":"theirs"}]} -->';
+    const { recovered } = recoverLedger(
+      [
+        review('bot', '2026-01-01T00:00:00Z', serializeLedger(anchored)),
+        review('ci-bot', '2026-01-02T00:00:00Z', foreignWinner),
+      ],
+      'bot',
+    );
+    expect(recovered?.ledger.round).toBe(5);
+    expect(recovered?.foreign).toBe(true);
+    expect(recovered?.ledger.sha).toBe(anchored.sha);
+    expect(recovered?.ledger.model).toBe(anchored.model);
+    expect(recovered?.anchorFromRound).toBe(2);
+  });
+
+  it('never grafts on an ANONYMOUS walk — no marker is attributable without a login', () => {
+    // Same fail-safe as the anonymous strip: with `me` unknown every marker
+    // walks as foreign, and a drive-by anchor must not scope the diff.
+    const failClosed =
+      'x <!-- qwen-review-ledger {"v":1,"round":3,"findings":[]} -->';
+    const { recovered } = recoverLedger(
+      [
+        review('bot', '2026-01-01T00:00:00Z', serializeLedger(anchored)),
+        review('bot', '2026-01-02T00:00:00Z', failClosed),
+      ],
+      null,
+    );
+    expect(recovered?.ledger.sha).toBeUndefined();
+    expect(recovered?.anchorFromRound).toBeUndefined();
+  });
+
+  it('does not graft when the winner carries its own anchor', () => {
+    const { recovered } = recoverLedger(
+      [review('bot', '2026-01-01T00:00:00Z', serializeLedger(anchored))],
+      'bot',
+    );
+    expect(recovered?.ledger.sha).toBe(anchored.sha);
+    // The anchor is the winner's own — no provenance to disclose.
+    expect(recovered?.anchorFromRound).toBeUndefined();
+  });
+
+  it('never grafts onto a PARTIAL work list — dropped entries would retire silently', () => {
+    // A fail-closed round that ran FULL range sheds findings spanning the
+    // whole diff, some before the candidate sha; grafting past them scopes
+    // `sha..HEAD` and the dropped entries never re-enter view — the exact
+    // shape the serializer's truncation withhold exists to prevent. The
+    // partial list degrades to the full range instead.
+    const truncated =
+      'x <!-- qwen-review-ledger {"v":1,"round":4,"findings":[{"id":"R4-1","sev":"C","file":"b.ts","title":"kept"}],"dropped":7} -->';
+    const { recovered } = recoverLedger(
+      [
+        review('bot', '2026-01-01T00:00:00Z', serializeLedger(anchored)),
+        review('bot', '2026-01-02T00:00:00Z', truncated),
+      ],
+      'bot',
+    );
+    expect(recovered?.ledger.round).toBe(4);
+    expect(recovered?.ledger.sha).toBeUndefined();
+    expect(recovered?.anchorFromRound).toBeUndefined();
+  });
+
+  it('never grafts from a SAME-round marker — one round cannot both certify and withhold', () => {
+    // Two same-round own markers (a concurrent lane): one closed cleanly
+    // with an anchor, one closed without and won the tiebreak. Grafting the
+    // same round's sha would render "round N certified it; round N closed
+    // without an anchor" — a self-contradiction in the provenance the
+    // wording exists to keep honest. The shape degrades to the full range.
+    const failClosed =
+      'x <!-- qwen-review-ledger {"v":1,"round":2,"findings":[{"id":"R2-1","sev":"C","file":"b.ts","title":"uncertified"}]} -->';
+    const { recovered } = recoverLedger(
+      [
+        review('bot', '2026-01-01T00:00:00Z', serializeLedger(anchored)),
+        review('bot', '2026-01-02T00:00:00Z', failClosed),
+      ],
+      'bot',
+    );
+    expect(recovered?.ledger.round).toBe(2);
+    expect(recovered?.ledger.sha).toBeUndefined();
+    expect(recovered?.anchorFromRound).toBeUndefined();
+  });
+
+  it('grafts the LATEST anchored own marker, not the earliest', () => {
+    // Two clean own rounds, then a fail-closed winner: the graft must take
+    // the newer sha — scoping from the older one re-reads code the newer
+    // round already certified, and an older sha may have been rebased away
+    // while the newer one is still valid.
+    const older =
+      'x <!-- qwen-review-ledger {"v":1,"round":2,"findings":[],"sha":"aaaa1111aaaa1111","model":"m@1a2b3c4d"} -->';
+    const newer =
+      'x <!-- qwen-review-ledger {"v":1,"round":5,"findings":[],"sha":"bbbb2222bbbb2222","model":"m@1a2b3c4d"} -->';
+    const failClosed =
+      'x <!-- qwen-review-ledger {"v":1,"round":6,"findings":[{"id":"R6-1","sev":"C","file":"b.ts","title":"uncertified"}]} -->';
+    const { recovered } = recoverLedger(
+      [
+        review('bot', '2026-01-01T00:00:00Z', older),
+        review('bot', '2026-01-02T00:00:00Z', newer),
+        review('bot', '2026-01-03T00:00:00Z', failClosed),
+      ],
+      'bot',
+    );
+    expect(recovered?.ledger.sha).toBe('bbbb2222bbbb2222');
+    expect(recovered?.anchorFromRound).toBe(5);
+  });
+
+  it('never grafts an anchor the winner itself RAN at — the same-sha stop would abandon the work list', () => {
+    // A fail-closed round at an UNMOVED head — the documented `--comment`
+    // full review of an up-to-date PR, or a model-switch full review — ran
+    // at exactly the head the candidate anchor certifies. Grafting it hands
+    // Step 1 `--since <sha>` with the sha equal to the live head: fetch-pr
+    // rules `upToDate`, and the same-sha stop ends the round before any
+    // agent launches — the winner's work list is never re-ruled, and every
+    // later round at the same head repeats the stop, freezing the PR's
+    // review state until new commits land. Before the graft the side file
+    // had no sha there and the round was full-range; the refuse keeps it so.
+    // (Step 1's fence on the stop itself covers the shapes this equality
+    // cannot see — a missing commit_id, a rewound head.)
+    const head = 'a'.repeat(40);
+    const atHead = `x <!-- qwen-review-ledger {"v":1,"round":2,"findings":[],"sha":"${head}","model":"m@1a2b3c4d"} -->`;
+    const failClosed =
+      'x <!-- qwen-review-ledger {"v":1,"round":3,"findings":[{"id":"R3-1","sev":"C","file":"b.ts","title":"uncertified"}]} -->';
+    const { recovered } = recoverLedger(
+      [
+        { ...review('bot', '2026-01-01T00:00:00Z', atHead), commit_id: head },
+        {
+          ...review('bot', '2026-01-02T00:00:00Z', failClosed),
+          commit_id: head,
+        },
+      ],
+      'bot',
+    );
+    expect(recovered?.ledger.round).toBe(3);
+    expect(recovered?.ledger.sha).toBeUndefined();
+    expect(recovered?.anchorFromRound).toBeUndefined();
+    // …but one commit lands between the certified head and the winner's
+    // head, and `sha..HEAD` re-covers a real gap again — the graft rides.
+    const moved = recoverLedger(
+      [
+        { ...review('bot', '2026-01-01T00:00:00Z', atHead), commit_id: head },
+        {
+          ...review('bot', '2026-01-02T00:00:00Z', failClosed),
+          commit_id: 'b'.repeat(40),
+        },
+      ],
+      'bot',
+    );
+    expect(moved.recovered?.ledger.sha).toBe(head);
+    expect(moved.recovered?.anchorFromRound).toBe(2);
+  });
+
+  it('never grafts an anchor the FOREIGN winner ran at — the same-sha stop would abandon the merged list', () => {
+    // The same abandonment through the foreign seam: the winner is another
+    // account's marker (its anchor stripped), and it ran at the head this
+    // account's own earlier marker certified. A graft there hands Step 1
+    // the same same-sha stop; the merged work list is owed rulings by
+    // whoever runs next, so the refuse is account-blind.
+    const head = 'c'.repeat(40);
+    const ownAtHead = `x <!-- qwen-review-ledger {"v":1,"round":2,"findings":[],"sha":"${head}","model":"m@1a2b3c4d"} -->`;
+    const foreignWinner =
+      'y <!-- qwen-review-ledger {"v":1,"round":5,"findings":[{"id":"R5-1","sev":"S","file":"c.ts","title":"theirs"}]} -->';
+    const { recovered } = recoverLedger(
+      [
+        {
+          ...review('bot', '2026-01-01T00:00:00Z', ownAtHead),
+          commit_id: head,
+        },
+        {
+          ...review('ci-bot', '2026-01-02T00:00:00Z', foreignWinner),
+          commit_id: head,
+        },
+      ],
+      'bot',
+    );
+    expect(recovered?.ledger.round).toBe(5);
+    expect(recovered?.ledger.sha).toBeUndefined();
+    expect(recovered?.anchorFromRound).toBeUndefined();
+  });
+
+  it('never grafts past a union re-capped OVER the findings cap — the merge-generated dropped counts too', () => {
+    // A foreign winner whose union with this account's findings exceeds
+    // LEDGER_MAX_FINDINGS gets its `dropped` only AFTER the re-cap. Reading
+    // the winner's PRE-merge `dropped` (none) would fire the graft past the
+    // capped list — the exact silent-retirement shape the guard exists to
+    // prevent.
+    const ownFindings = Array.from({ length: 26 }, (_, i) => ({
+      id: `R2-${i + 1}`,
+      sev: 'S' as const,
+      file: 'own.ts',
+      title: `own ${i + 1}`,
+    }));
+    const foreignFindings = Array.from({ length: 26 }, (_, i) => ({
+      id: `R5-${i + 1}`,
+      sev: 'S' as const,
+      file: 'theirs.ts',
+      title: `theirs ${i + 1}`,
+    }));
+    const ownAnchored: Ledger = {
+      v: 1,
+      round: 2,
+      findings: ownFindings,
+      sha: 'abc1234def567890',
+      model: 'm@1a2b3c4d',
+    };
+    const foreignWinner = `y <!-- qwen-review-ledger ${JSON.stringify({
+      v: 1,
+      round: 5,
+      findings: foreignFindings,
+    })} -->`;
+    const { recovered } = recoverLedger(
+      [
+        review('bot', '2026-01-01T00:00:00Z', serializeLedger(ownAnchored)),
+        review('ci-bot', '2026-01-02T00:00:00Z', foreignWinner),
+      ],
+      'bot',
+    );
+    expect(recovered?.ledger.round).toBe(5);
+    expect(recovered?.merged).toBe(true);
+    expect(recovered?.ledger.findings).toHaveLength(LEDGER_MAX_FINDINGS);
+    expect(recovered?.ledger.dropped).toBe(2);
+    // The union overflow makes the work list PARTIAL — the graft refuses.
+    expect(recovered?.ledger.sha).toBeUndefined();
+    expect(recovered?.anchorFromRound).toBeUndefined();
+  });
+
+  it('never grafts over a foreign winner POSTED truncated — its dropped survives the strip', () => {
+    // The winner was itself capped when it posted. `dropped` is not a
+    // volume field, so stripForeignVolume keeps it, and the graft guard
+    // must read it: a graft over a truncated list retires the dropped
+    // entries outside the grafted scope. The own list is empty, so no
+    // merge re-derives the count — the refusal pins the strip's survival.
+    const ownClean =
+      'x <!-- qwen-review-ledger {"v":1,"round":2,"findings":[],"sha":"abc1234def567890","model":"m@1a2b3c4d"} -->';
+    const foreignWinner =
+      'y <!-- qwen-review-ledger {"v":1,"round":5,"findings":[{"id":"R5-1","sev":"S","file":"c.ts","title":"kept"}],"dropped":3} -->';
+    const { recovered } = recoverLedger(
+      [
+        review('bot', '2026-01-01T00:00:00Z', ownClean),
+        review('ci-bot', '2026-01-02T00:00:00Z', foreignWinner),
+      ],
+      'bot',
+    );
+    expect(recovered?.ledger.round).toBe(5);
+    expect(recovered?.ledger.dropped).toBe(3);
+    expect(recovered?.ledger.sha).toBeUndefined();
+    expect(recovered?.anchorFromRound).toBeUndefined();
+  });
+
+  it('never grafts when the own latest marker parses empty but PARTIAL — its dropped is invisible to the merge', () => {
+    // The completeness guard reads `ledger.dropped`, but a FOREIGN winner's
+    // own-side count reaches it only through the merge branch — gated on a
+    // non-empty own list. An own latest marker that parses to zero findings
+    // with non-zero `dropped` (entries the admission test rejects under
+    // version drift, or a hand-edited marker) therefore never enters the
+    // merge, the winner's own `dropped` is zero, and the guard would graft
+    // past findings that are in no work list and may reference code before
+    // the candidate sha — the silent retirement the guard exists to
+    // prevent. The shape degrades to the full range instead.
+    const ownPartial =
+      'x <!-- qwen-review-ledger {"v":1,"round":4,"findings":[],"dropped":2} -->';
+    const foreignWinner =
+      'y <!-- qwen-review-ledger {"v":1,"round":5,"findings":[{"id":"R5-1","sev":"S","file":"c.ts","title":"theirs"}]} -->';
+    const { recovered } = recoverLedger(
+      [
+        review('bot', '2026-01-01T00:00:00Z', serializeLedger(anchored)),
+        review('bot', '2026-01-02T00:00:00Z', ownPartial),
+        review('ci-bot', '2026-01-03T00:00:00Z', foreignWinner),
+      ],
+      'bot',
+    );
+    expect(recovered?.ledger.round).toBe(5);
+    expect(recovered?.foreign).toBe(true);
+    expect(recovered?.ledger.sha).toBeUndefined();
+    expect(recovered?.anchorFromRound).toBeUndefined();
   });
 
   it('drops the churn state from ANOTHER account, keeping the work list', () => {
@@ -2374,7 +2750,7 @@ describe('renderLedgerSection', () => {
     // file stayed green: the antecedent that says WHAT to pass, and the
     // statement that the CLI is what validates and scopes it. Without the
     // first, `pass it as --since <sha>` refers to nothing.
-    expect(anchored).toContain('The reviewed-at sha is the incremental anchor');
+    expect(anchored).toContain('The anchor above is the incremental anchor');
     expect(anchored).toContain('validates it against the fetched history');
     // …and the two fragments the block's own comment claims but does not
     // reach: the command that takes the flag, and what it does with it.
@@ -2400,16 +2776,159 @@ describe('renderLedgerSection', () => {
     );
     expect(noSha).not.toContain('reviewed at');
     // …and the routing tail goes with it: asserting only the space-form
-    // phrase let a mutant hoist the tail out of the ternary, since its own
-    // wording says "reviewed-at sha".
+    // phrase let a mutant hoist the tail out of the ternary, since the tail
+    // does not itself contain the heading phrase.
     expect(noSha).not.toContain('--since');
     // Every sentence of the tail, not just the ones carrying `--since`. The
-    // first one is written "reviewed-at sha" — hyphenated — so it matches
-    // neither the space-form phrase nor `--since`, and could be hoisted out
-    // of the ternary with every assertion above still green: a sha-less
-    // ledger would then render a dangling reference to a reviewed-at sha the
-    // side file deliberately withholds.
-    expect(noSha).not.toContain('reviewed-at sha');
+    // first one reads "The anchor above" — matching neither the space-form
+    // phrase nor `--since` — and could be hoisted out of the ternary with
+    // every assertion above still green: a sha-less ledger would then render
+    // a dangling reference to an anchor the side file deliberately withholds.
+    expect(noSha).not.toContain('The anchor above');
+  });
+
+  it('says "anchoring at", never "reviewed at", when the anchor was grafted forward', () => {
+    // A grafted anchor (issue #9902) is an EARLIER round's verdict carried
+    // by a round that certified no range. "Round 4, reviewed at sha" would
+    // attribute round 2's reading to round 4 — and Step 1's orchestrator
+    // acts on which round read what.
+    const grafted = renderLedgerSection(
+      {
+        v: 1,
+        round: 4,
+        findings: [{ id: 'R4-1', sev: 'C', file: 'a.ts', title: 't' }],
+        sha: 'abc1234def56789',
+        model: 'm@1a2b3c4d',
+      },
+      'm@1a2b3c4d',
+      null,
+      false,
+      null,
+      2,
+    );
+    expect(grafted).toContain('anchoring at `abc1234def56789`');
+    expect(grafted).toContain(
+      "carried forward from this account's round-2 marker",
+    );
+    expect(grafted).toContain('round 4 itself closed without an anchor');
+    expect(grafted).not.toContain('reviewed at');
+    // …and never the hyphenated form either: anchorRuling's verdict says
+    // "The anchor above", not "the reviewed-at sha" — the heading says
+    // "anchoring at", and the one section must not contradict itself.
+    expect(grafted).not.toContain('reviewed-at');
+    expect(grafted).toContain('The anchor above is the incremental anchor');
+    // The routing tail still fires — the graft IS the recovered anchor Step
+    // 1 passes, under the same-model contract of the round that made it.
+    expect(grafted).toContain(
+      'pass it as `--since <sha> --since-model <model>`',
+    );
+  });
+
+  it('drops the full-range fallback wording when a graft over a foreign winner supplies the anchor', () => {
+    // "This round is full-range unless a local cache supplies one" is the
+    // no-anchor reading; with a graft in hand the anchor already came from
+    // this account's own earlier marker, and the section must say which.
+    const grafted = renderLedgerSection(
+      {
+        v: 1,
+        round: 5,
+        findings: [{ id: 'R5-1', sev: 'C', file: 'a.ts', title: 't' }],
+        sha: 'abc1234def56789',
+        model: 'm@1a2b3c4d',
+      },
+      'm@1a2b3c4d',
+      'ci-bot',
+      false,
+      null,
+      2,
+    );
+    expect(grafted).toContain('the sha never crosses accounts');
+    expect(grafted).toContain('not the foreign one');
+    // The graft-over-foreign clause must not claim to know how the foreign
+    // round closed: it may have closed cleanly and had its anchor STRIPPED
+    // at the seam, or been fail-closed and carried none — the renderer
+    // cannot tell a stripped anchor from an absent one, so the clause states
+    // only what it knows: nothing usable crossed.
+    expect(grafted).toContain(
+      "round 5's marker carried no anchor this account could use",
+    );
+    expect(grafted).not.toContain('closed without an anchor');
+    expect(grafted).not.toContain(
+      'this round is full-range unless a local cache supplies one',
+    );
+    // …while the un-grafted foreign winner keeps the fallback wording.
+    const ungrafted = renderLedgerSection(
+      {
+        v: 1,
+        round: 5,
+        findings: [{ id: 'R5-1', sev: 'C', file: 'a.ts', title: 't' }],
+      },
+      'm@1a2b3c4d',
+      'ci-bot',
+    );
+    expect(ungrafted).toContain(
+      'this round is full-range unless a local cache supplies one',
+    );
+  });
+
+  it('keeps the graft provenance clause in the MERGED branch too — the production shape of a foreign-winner graft', () => {
+    // The merged-foreign branch interpolates the same no-crossing wording,
+    // and a foreign-winner graft over non-empty own findings renders
+    // through it (`mergedOverOwn` true) — the recovery test's exact shape.
+    // Re-inlining the old fallback text in that branch alone would say
+    // "full-range unless a local cache supplies one" beside a grafted
+    // anchor and a `--since` routing verdict: contradictory prose in the
+    // context file the orchestrator acts on, with every test green.
+    const merged = renderLedgerSection(
+      {
+        v: 1,
+        round: 5,
+        findings: [{ id: 'R5-1', sev: 'C', file: 'a.ts', title: 't' }],
+        sha: 'abc1234def56789',
+        model: 'm@1a2b3c4d',
+      },
+      'm@1a2b3c4d',
+      'ci-bot',
+      true,
+      null,
+      2,
+    );
+    expect(merged).toContain('MERGED over this account');
+    expect(merged).toContain('the sha never crosses accounts');
+    expect(merged).toContain('not the foreign one');
+    expect(merged).not.toContain(
+      'this round is full-range unless a local cache supplies one',
+    );
+  });
+
+  it('drops the "certified it" clause when the graft source carries no model', () => {
+    // An attribution-off source round posts a marker with a sha and NO model,
+    // so a graft can carry a model-less anchor. The heading then must not
+    // assert "the round that certified it" beside the ruling's "certified by
+    // nothing" — one section contradicting itself is the exact defect class
+    // the "anchoring at" wording exists to prevent. The ruling's absence text
+    // names BOTH causes of a model-less marker, not just the pre-field one.
+    const graftNoModel = renderLedgerSection(
+      {
+        v: 1,
+        round: 4,
+        findings: [{ id: 'R4-1', sev: 'C', file: 'a.ts', title: 't' }],
+        sha: 'abc1234def56789',
+      },
+      'm@1a2b3c4d',
+      null,
+      false,
+      null,
+      2,
+    );
+    expect(graftNoModel).toContain('anchoring at `abc1234def56789`');
+    expect(graftNoModel).toContain(
+      "carried forward from this account's round-2 marker",
+    );
+    expect(graftNoModel).not.toContain('the round that certified it');
+    expect(graftNoModel).toContain('attribution off');
+    expect(graftNoModel).toContain('predates the field');
+    expect(graftNoModel).toContain('Do NOT pass the anchor above');
   });
 
   it('refuses when the side file holds a DIFFERENT anchor than the one recovered', () => {
@@ -2490,7 +3009,7 @@ describe('renderLedgerSection', () => {
       ledger('m@9f8e7d6c'),
       'm@1a2b3c4d',
     );
-    expect(otherProvider).toContain('Do NOT pass the reviewed-at sha');
+    expect(otherProvider).toContain('Do NOT pass the anchor above');
     expect(otherProvider).toContain('Review the FULL range');
     expect(otherProvider).not.toContain('--since <sha>');
     // It names both sides, so a maintainer asking "why the full diff again?"
@@ -2513,7 +3032,7 @@ describe('renderLedgerSection', () => {
     // identity at all: both are "unknown", and unknown is a mismatch.
     const preField = renderLedgerSection(ledger(), 'm@1a2b3c4d');
     expect(preField).not.toContain(' by `');
-    expect(preField).toContain('the marker predates the field');
+    expect(preField).toContain('predates the field');
     expect(preField).toContain('Do NOT pass');
     const noRuntime = renderLedgerSection(ledger('m@1a2b3c4d'), '');
     expect(noRuntime).toContain('an unpublished identity');
@@ -3148,6 +3667,51 @@ describe('runPrContext identity failure (handler level)', () => {
     expect(ctx).not.toContain('THEIR claims');
   });
 
+  it('wires the grafted anchor provenance through the handler to context and side file', async () => {
+    // The provenance is one hardcodable constant: with
+    // `prevRecovered?.anchorFromRound` dropped at the buildMarkdown call
+    // site every other test stays green — the recovery tests assert the
+    // field on the return value and the renderer tests pass it directly,
+    // but no handler fixture held a fail-closed winner beside an earlier
+    // own marker that carries the anchor. The shipped context would then
+    // claim round 3 "reviewed at" a sha round 2 certified.
+    currentUserMock.mockReturnValue('bot');
+    ghApiAllMock.mockReset();
+    ghApiAllMock
+      .mockReturnValueOnce([])
+      .mockReturnValueOnce([])
+      .mockReturnValueOnce([
+        {
+          id: 41,
+          user: { login: 'bot' },
+          state: 'COMMENTED',
+          submitted_at: '2026-08-01',
+          body: 'x <!-- qwen-review-ledger {"v":1,"round":2,"findings":[{"id":"R2-1","sev":"S","file":"a.ts","title":"t"}],"sha":"deadbeef00112233","model":"m@1a2b3c4d"} -->',
+        },
+        {
+          id: 42,
+          user: { login: 'bot' },
+          state: 'COMMENTED',
+          submitted_at: '2026-08-02',
+          body: 'x <!-- qwen-review-ledger {"v":1,"round":3,"findings":[{"id":"R3-1","sev":"C","file":"b.ts","title":"uncertified"}]} -->',
+        },
+      ]);
+    await run();
+    const ctx = contextWrite();
+    expect(ctx).toContain('anchoring at');
+    expect(ctx).toContain('round-2 marker');
+    expect(ctx).not.toContain('reviewed at');
+    // The side file carries the grafted sha AND its provenance — what
+    // compose-review's chain check reads to tell a carried anchor from a
+    // certified one.
+    const sideWrite = writeFileSyncMock.mock.calls.find((c) =>
+      String(c[0]).includes('prev-ledger.json'),
+    );
+    expect(sideWrite).toBeDefined();
+    expect(String(sideWrite?.[1])).toContain('"sha": "deadbeef00112233"');
+    expect(String(sideWrite?.[1])).toContain('"anchorFromRound": 2');
+  });
+
   it('round-trips the review commit_id through the GitHub reader into the side file', async () => {
     // The age reference crosses TWO mapping seams: the reader's
     // `commit_id → commitId` spread and `toRawReview`'s `commitId →
@@ -3577,5 +4141,37 @@ describe('prContextCommand handler — Aone routing', () => {
     expect(written).not.toContain('--host ghe.example.com');
     // The refetches still carry --pr (per-MR addressing is host-agnostic).
     expect(written).toContain('--pr 7');
+  });
+});
+
+describe("the work-list table carries a Critical's axes (#10291)", () => {
+  it('spells the recorded axes beside the severity, and nothing beside an unclassified entry', () => {
+    const md = renderLedgerSection(
+      {
+        v: 1,
+        round: 7,
+        findings: [
+          {
+            id: 'R6-1',
+            sev: 'C',
+            d: 'f',
+            b: 'n',
+            file: 'src/sparse.ts',
+            line: 12,
+            title: 'sparse wedge',
+          },
+          { id: 'R6-2', sev: 'C', d: 'c', file: 'src/stop.ts', title: 'lie' },
+          { id: 'R6-3', sev: 'C', file: 'src/x.ts', title: 'unclassified' },
+        ],
+      },
+      'm',
+    );
+    expect(md).toContain(
+      '| R6-1 | Critical (fails-closed, new-surface) | `src/sparse.ts:12` | sparse wedge |',
+    );
+    expect(md).toContain(
+      '| R6-2 | Critical (certifies-falsely) | `src/stop.ts` | lie |',
+    );
+    expect(md).toContain('| R6-3 | Critical | `src/x.ts` | unclassified |');
   });
 });

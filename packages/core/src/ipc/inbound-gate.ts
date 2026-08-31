@@ -71,6 +71,16 @@ export type HoldCause =
 export const MAX_HELD_MESSAGES = 50;
 
 /**
+ * Cap on settled-id memory.
+ *
+ * Tombstones only have to outlive a sender's retry window; a map that
+ * grew with every id the session ever saw would be the same leak the
+ * hold buffer's ceiling exists to prevent. Oldest is pruned first,
+ * mirroring the hold buffer.
+ */
+export const MAX_SETTLED_IDS = 512;
+
+/**
  * True when a human prompt still inspects each action this session takes.
  *
  * YOLO reviews nothing. AUTO_EDIT approves edit-shaped confirmations
@@ -123,8 +133,16 @@ export interface InboundGateOptions {
   /** Report a terminal outcome back to the sender. Best-effort. */
   reportStatus?: (
     frame: PeerUserFrame,
-    status: 'held' | 'denied' | 'expired' | 'delivered',
+    status: 'held' | 'denied' | 'expired' | 'delivered' | 'misaddressed',
   ) => void;
+  /**
+   * The session id this process holds now, when pinning is wired. A
+   * parked frame pinned to another id was addressed to whoever held the
+   * socket before an in-process session swap (/clear, /resume), and a
+   * release path must drop it as misaddressed rather than deliver it
+   * into the session that replaced its addressee.
+   */
+  getSessionId?: () => string | undefined;
   /** Called whenever the held set changes, for UI. */
   onHeldChange?: (held: readonly HeldMessage[]) => void;
 }
@@ -135,6 +153,17 @@ export interface InboundGateOptions {
  */
 export class InboundGate {
   private readonly held: HeldMessage[] = [];
+  /**
+   * Canonicalized ids this gate already settled, with their verdict.
+   * A re-sent id repeats its verdict instead of re-entering the gate:
+   * the duplicate guard over `held` alone would let a peer slip a
+   * different body behind an id the user already decided — or saw
+   * evicted — and have it decided again.
+   */
+  private readonly settled = new Map<
+    string,
+    'delivered' | 'denied' | 'expired' | 'misaddressed'
+  >();
   private shuttingDown = false;
 
   constructor(private readonly options: InboundGateOptions) {}
@@ -212,6 +241,18 @@ export class InboundGate {
 
   /** Run a freshly-arrived message through the gate. */
   admit(frame: PeerUserFrame): GateDecision {
+    // An id that is already settled has a final answer: repeat its
+    // receipt and stop. This is what keeps a re-send from re-parking a
+    // swapped body under a handle the user already reviewed.
+    const settled = this.settled.get(canonicalizeMsgId(frame.msgId));
+    if (settled !== undefined) {
+      debugLogger.debug(
+        `re-sent msgId ${frame.msgId}; repeating earlier verdict ${settled}`,
+      );
+      void this.report(frame, settled);
+      return 'refused';
+    }
+
     // An id that is already parked has an answer. A second frame under
     // the same id is the sender retrying, or a peer slipping a different
     // body behind an id the user has already been shown — and two entries
@@ -228,7 +269,7 @@ export class InboundGate {
       )
     ) {
       debugLogger.debug(`duplicate msgId ${frame.msgId}; already held`);
-      this.report(frame, 'held');
+      void this.report(frame, 'held');
       return 'held';
     }
 
@@ -237,7 +278,7 @@ export class InboundGate {
 
     if (policy === 'refuse') {
       debugLogger.debug(`refused peer message ${frame.msgId}`);
-      this.report(frame, 'denied');
+      void this.report(frame, 'denied');
       return 'refused';
     }
 
@@ -249,13 +290,18 @@ export class InboundGate {
       debugLogger.debug(
         `not admitting peer message ${frame.msgId} during shutdown; expiring it`,
       );
-      this.report(frame, 'expired');
+      void this.report(frame, 'expired');
       return 'refused';
     }
 
     if (policy === 'accept') {
       const ok = this.tryDeliver(frame);
-      this.report(frame, ok ? 'delivered' : 'expired');
+      if (ok) {
+        this.recordSettled(frame.msgId, 'delivered');
+      }
+      // A failed delivery is transient (the input queue is full); the id
+      // is deliberately not settled, so an honest sender retry can land.
+      void this.report(frame, ok ? 'delivered' : 'expired');
       return ok ? 'accept' : 'refused';
     }
 
@@ -263,7 +309,8 @@ export class InboundGate {
       const evicted = this.held.shift();
       if (evicted) {
         debugLogger.debug(`hold buffer full; expiring ${evicted.frame.msgId}`);
-        this.report(evicted.frame, 'expired');
+        this.recordSettled(evicted.frame.msgId, 'expired');
+        void this.report(evicted.frame, 'expired');
       }
     }
 
@@ -272,7 +319,7 @@ export class InboundGate {
     debugLogger.debug(
       `held peer message ${frame.msgId} (cause=${cause}, ${this.held.length} held)`,
     );
-    this.report(frame, 'held');
+    void this.report(frame, 'held');
     this.notifyHeldChange();
     return 'held';
   }
@@ -299,15 +346,26 @@ export class InboundGate {
     if (!entry) return 'gone';
 
     if (decision === 'approve') {
+      if (!this.pinStillValid(entry.frame)) {
+        // Dropped, not released: the id is tombstoned like every other
+        // terminal outcome, and the caller is told the message is gone
+        // rather than that it will appear on the next turn.
+        this.recordSettled(entry.frame.msgId, 'misaddressed');
+        void this.report(entry.frame, 'misaddressed');
+        this.notifyHeldChange();
+        return 'gone';
+      }
       if (!this.tryDeliver(entry.frame)) {
         this.held.splice(index, 0, entry);
-        this.report(entry.frame, 'held');
+        void this.report(entry.frame, 'held');
         this.notifyHeldChange();
         return 'failed';
       }
-      this.report(entry.frame, 'delivered');
+      this.recordSettled(entry.frame.msgId, 'delivered');
+      void this.report(entry.frame, 'delivered');
     } else {
-      this.report(entry.frame, 'denied');
+      this.recordSettled(entry.frame.msgId, 'denied');
+      void this.report(entry.frame, 'denied');
     }
     this.notifyHeldChange();
     return 'done';
@@ -337,7 +395,8 @@ export class InboundGate {
         release.push(entry);
       } else if (policy === 'refuse') {
         dropped += 1;
-        this.report(entry.frame, 'denied');
+        this.recordSettled(entry.frame.msgId, 'denied');
+        void this.report(entry.frame, 'denied');
       } else {
         const cause = decision.policy === 'hold' ? decision.cause : entry.cause;
         stillHeld.push(cause === entry.cause ? entry : { ...entry, cause });
@@ -345,15 +404,23 @@ export class InboundGate {
     }
 
     let released = 0;
+    let misaddressed = 0;
     for (const entry of release) {
+      if (!this.pinStillValid(entry.frame)) {
+        misaddressed += 1;
+        this.recordSettled(entry.frame.msgId, 'misaddressed');
+        void this.report(entry.frame, 'misaddressed');
+        continue;
+      }
       if (this.tryDeliver(entry.frame)) {
         released += 1;
-        this.report(entry.frame, 'delivered');
+        this.recordSettled(entry.frame.msgId, 'delivered');
+        void this.report(entry.frame, 'delivered');
       } else {
         // A failed delivery must not drop a message the user can still
         // review: park it again and tell the sender it is still waiting.
         stillHeld.push(entry);
-        this.report(entry.frame, 'held');
+        void this.report(entry.frame, 'held');
       }
     }
 
@@ -362,7 +429,7 @@ export class InboundGate {
 
     if (release.length > 0 || dropped > 0) {
       debugLogger.debug(
-        `reevaluate (${reason}): released ${released}, dropped ${dropped}, ${this.held.length} still held`,
+        `reevaluate (${reason}): released ${released}, dropped ${dropped}, misaddressed ${misaddressed}, ${this.held.length} still held`,
       );
       this.notifyHeldChange();
     }
@@ -375,17 +442,49 @@ export class InboundGate {
    * A sender blocked on a decision has to learn that no decision is
    * coming; silence would look identical to "delivered and ignored".
    */
-  shutdown(): void {
+  shutdown(): Promise<void> {
     this.shuttingDown = true;
-    if (this.held.length === 0) return;
+    if (this.held.length === 0) return Promise.resolve();
     const settling = this.held.splice(0, this.held.length);
     debugLogger.debug(
       `shutdown: expiring ${settling.length} held peer message(s)`,
     );
-    for (const entry of settling) {
-      this.report(entry.frame, 'expired');
-    }
+    const receipts = settling.map((entry) =>
+      this.report(entry.frame, 'expired'),
+    );
     this.notifyHeldChange();
+    // The caller tears the socket down next and the process exits right
+    // after: a receipt still in flight when close resolves is a receipt
+    // the sender never receives.
+    return Promise.allSettled(receipts).then(() => undefined);
+  }
+
+  /** Remember a settled id, pruning the oldest beyond the cap. */
+  private recordSettled(
+    msgId: string,
+    verdict: 'delivered' | 'denied' | 'expired' | 'misaddressed',
+  ): void {
+    const key = canonicalizeMsgId(msgId);
+    // Delete-then-set refreshes recency: Map iterates in insertion
+    // order, and the prune below drops the oldest.
+    this.settled.delete(key);
+    this.settled.set(key, verdict);
+    while (this.settled.size > MAX_SETTLED_IDS) {
+      const oldest = this.settled.keys().next().value;
+      if (oldest === undefined) break;
+      this.settled.delete(oldest);
+    }
+  }
+
+  /**
+   * A frame's pin is judged at arrival, but a session swap can happen
+   * while it sits parked; the release paths re-judge against the id the
+   * session holds now, not the one the frame saw on arrival.
+   */
+  private pinStillValid(frame: PeerUserFrame): boolean {
+    if (frame.toSessionId === undefined) return true;
+    const ownSessionId = this.options.getSessionId?.();
+    return ownSessionId === undefined || frame.toSessionId === ownSessionId;
   }
 
   /**
@@ -399,16 +498,17 @@ export class InboundGate {
    */
   private report(
     frame: PeerUserFrame,
-    status: 'held' | 'denied' | 'expired' | 'delivered',
-  ): void {
+    status: 'held' | 'denied' | 'expired' | 'delivered' | 'misaddressed',
+  ): Promise<void> {
     try {
-      this.options.reportStatus?.(frame, status);
+      return Promise.resolve(this.options.reportStatus?.(frame, status));
     } catch (error) {
       debugLogger.debug(
         `reportStatus(${status}) threw: ${
           error instanceof Error ? error.message : String(error)
         }`,
       );
+      return Promise.resolve();
     }
   }
 

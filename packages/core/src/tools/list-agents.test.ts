@@ -5,58 +5,54 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { createHash } from 'node:crypto';
 import type { Config } from '../config/config.js';
 import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
-import { ListAgentsTool } from './list-agents.js';
 
-const peerMocks = vi.hoisted(() => ({
-  getOwnPeerIdentity: vi.fn(),
-  listMessageablePeers: vi.fn(),
-}));
-
+const getOwnPeerIdentity = vi.fn();
+const listMessageablePeers = vi.fn();
 vi.mock('../ipc/peer-send.js', () => ({
-  getOwnPeerIdentity: peerMocks.getOwnPeerIdentity,
+  getOwnPeerIdentity: (...args: unknown[]) => getOwnPeerIdentity(...args),
 }));
 vi.mock('../ipc/peer-directory.js', async () => {
-  const real = await vi.importActual<typeof import('../ipc/peer-directory.js')>(
-    '../ipc/peer-directory.js',
-  );
-  return { ...real, listMessageablePeers: peerMocks.listMessageablePeers };
+  const actual = await vi.importActual<
+    typeof import('../ipc/peer-directory.js')
+  >('../ipc/peer-directory.js');
+  return {
+    ...actual,
+    listMessageablePeers: (...args: unknown[]) => listMessageablePeers(...args),
+  };
 });
 
-const peerAddress = (
-  sessionId: string,
-  ipcPath: string,
-  pid: number,
-  procStart: string,
-  startedAt: number,
-) =>
-  `qwen-session:${createHash('sha256')
-    .update(sessionId)
-    .update('\0')
-    .update(ipcPath)
-    .update('\0')
-    .update(String(pid))
-    .update('\0')
-    .update(procStart)
-    .update('\0')
-    .update(String(startedAt))
-    .digest('hex')}`;
+import { ListAgentsTool } from './list-agents.js';
+import { resolvePeerTarget } from '../ipc/peer-directory.js';
+
+function peerRow(over: Record<string, unknown> = {}) {
+  return {
+    sessionId: 's1',
+    name: 'docs-cd',
+    ref: 'abc123',
+    cwd: '/w/docs',
+    pid: 200,
+    ipcPath: '/tmp/s1.sock',
+    startedAt: 1_700_000_000_000,
+    ...over,
+  };
+}
 
 describe('ListAgentsTool', () => {
   let registry: BackgroundTaskRegistry;
   let tool: ListAgentsTool;
-  let crossSessionMessagingEnabled: boolean;
 
   beforeEach(() => {
-    peerMocks.getOwnPeerIdentity.mockReset().mockResolvedValue(null);
-    peerMocks.listMessageablePeers.mockReset().mockResolvedValue([]);
+    getOwnPeerIdentity.mockReset();
+    listMessageablePeers.mockReset();
+    // Cross-session messaging off unless a test turns it on.
+    getOwnPeerIdentity.mockResolvedValue(null);
+    listMessageablePeers.mockResolvedValue([]);
     registry = new BackgroundTaskRegistry();
-    crossSessionMessagingEnabled = false;
     tool = new ListAgentsTool({
       getBackgroundTaskRegistry: () => registry,
-      isCrossSessionMessagingEnabled: () => crossSessionMessagingEnabled,
+      getTeamManager: () => null,
     } as unknown as Config);
   });
 
@@ -143,94 +139,289 @@ describe('ListAgentsTool', () => {
       ],
     });
   });
+});
 
-  it('lists reachable peer sessions with unambiguous addresses', async () => {
-    crossSessionMessagingEnabled = true;
-    registry.register({
-      agentId: 'agent-running',
-      description: 'Inspect runtime',
-      isBackgrounded: true,
-      status: 'running',
-      startTime: 1,
-      abortController: new AbortController(),
-      outputFile: '/tmp/agent-running.jsonl',
-    });
-    peerMocks.getOwnPeerIdentity.mockResolvedValue({
-      sessionId: 'self',
-      ipcPath: '/tmp/self.sock',
-      name: 'self',
-      address: peerAddress('self', '/tmp/self.sock', 1, 'process-1', 0),
-    });
-    peerMocks.listMessageablePeers.mockResolvedValue([
-      {
-        sessionId: 'self',
-        name: 'self',
-        ref: '000000',
-        cwd: '/work/self',
-        pid: 1,
-        procStart: 'process-1',
-        ipcPath: '/tmp/self.sock',
-        startedAt: 0,
-      },
-      {
-        sessionId: 'peer-a',
-        name: 'app',
-        ref: 'aaaaaa',
-        cwd: '/work/a',
-        pid: 2,
-        procStart: 'process-2',
-        ipcPath: '/tmp/a.sock',
-        startedAt: 1,
-      },
-      {
-        sessionId: 'peer-b',
-        name: 'app',
-        ref: 'bbbbbb',
-        cwd: '/work/b',
-        pid: 3,
-        procStart: 'process-3',
-        ipcPath: '/tmp/b.sock',
-        startedAt: 2,
-      },
+describe('ListAgentsTool — peer sessions', () => {
+  const SELF = {
+    ipcPath: '/tmp/self.sock',
+    name: 'self-00',
+    sessionId: 'self',
+    ref: 'se1f00',
+  };
+
+  function toolWith(
+    registry = new BackgroundTaskRegistry(),
+    teammates: string[] = [],
+  ) {
+    return new ListAgentsTool({
+      getBackgroundTaskRegistry: () => registry,
+      getTeamManager: () =>
+        teammates.length === 0
+          ? null
+          : {
+              getTeamFile: () => ({
+                leadAgentId: 'lead-1',
+                members: teammates.map((name) => ({ name })),
+              }),
+            },
+    } as unknown as Config);
+  }
+
+  async function run(tool = toolWith()) {
+    return tool.validateBuildAndExecute({}, new AbortController().signal);
+  }
+
+  beforeEach(() => {
+    getOwnPeerIdentity.mockReset();
+    listMessageablePeers.mockReset();
+    getOwnPeerIdentity.mockResolvedValue(SELF);
+    listMessageablePeers.mockResolvedValue([]);
+  });
+
+  it('does not look for peers when this session has no inbox', async () => {
+    getOwnPeerIdentity.mockResolvedValue(null);
+    const result = await run();
+    expect(listMessageablePeers).not.toHaveBeenCalled();
+    expect(result.llmContent).not.toContain('reachable');
+  });
+
+  it('says so when messaging is on but no other session is reachable', async () => {
+    const result = await run();
+    expect(result.llmContent).toContain('no other Qwen Code session');
+    expect(result.llmContent).toContain('Named Agent Team teammates');
+    // The description promises the session's own name; the empty case
+    // must keep that promise too.
+    expect(result.llmContent).toContain('This session is named "self-00"');
+  });
+
+  it('appends the ref when a teammate shadows the bare name', async () => {
+    // send_message tries teammates first with a sanitized lookup, so a
+    // peer whose name sanitizes to a teammate's is unreachable bare.
+    listMessageablePeers.mockResolvedValue([
+      peerRow({ sessionId: 's1', name: 'Docs-CD', ref: 'aaa111' }),
+      peerRow({ sessionId: 's2', name: 'other-ef', ref: 'bbb222' }),
     ]);
-
-    const result = await tool.validateBuildAndExecute(
-      {},
-      new AbortController().signal,
+    const parsed = JSON.parse(
+      String((await run(toolWith(undefined, ['docs-cd']))).llmContent),
     );
+    expect(parsed.sessions.map((s: { to: string }) => s.to)).toEqual([
+      'Docs-CD [aaa111]',
+      'other-ef',
+    ]);
+  });
 
-    expect(JSON.parse(String(result.llmContent))).toEqual({
-      agents: [
-        {
-          task_id: 'agent-running',
-          description: 'Inspect runtime',
-          status: 'running',
-          can_message: true,
-        },
-      ],
+  it('lists a peer with a bare name as its address, and names itself', async () => {
+    listMessageablePeers.mockResolvedValue([peerRow()]);
+    const parsed = JSON.parse(String((await run()).llmContent));
+    expect(parsed).toEqual({
+      agents: [],
+      self: { name: 'self-00', ref: 'se1f00' },
       sessions: [
         {
-          to: peerAddress('peer-a', '/tmp/a.sock', 2, 'process-2', 1),
-          name: 'app',
-          ref: 'aaaaaa',
-          cwd: '/work/a',
-          started_at: '1970-01-01T00:00:00.001Z',
-        },
-        {
-          to: peerAddress('peer-b', '/tmp/b.sock', 3, 'process-3', 2),
-          name: 'app',
-          ref: 'bbbbbb',
-          cwd: '/work/b',
-          started_at: '1970-01-01T00:00:00.002Z',
+          to: 'docs-cd',
+          name: 'docs-cd',
+          ref: 'abc123',
+          cwd: '/w/docs',
+          started_at: new Date(1_700_000_000_000).toISOString(),
         },
       ],
     });
   });
 
-  it('does not inspect the peer registry when the experiment is off', async () => {
-    await tool.validateBuildAndExecute({}, new AbortController().signal);
+  it('appends the ref only when two sessions share a name', async () => {
+    listMessageablePeers.mockResolvedValue([
+      peerRow({ sessionId: 's1', ref: 'aaa111' }),
+      peerRow({ sessionId: 's2', ref: 'bbb222', cwd: '/w/other' }),
+    ]);
+    const parsed = JSON.parse(String((await run()).llmContent));
+    expect(parsed.sessions.map((s: { to: string }) => s.to)).toEqual([
+      'docs-cd [aaa111]',
+      'docs-cd [bbb222]',
+    ]);
+  });
 
-    expect(peerMocks.getOwnPeerIdentity).not.toHaveBeenCalled();
-    expect(peerMocks.listMessageablePeers).not.toHaveBeenCalled();
+  it('appends the ref when a bracketed name is shadowed by a teammate', async () => {
+    listMessageablePeers.mockResolvedValue([
+      peerRow({ sessionId: 's1', name: 'notes [draft]', ref: 'aaa111' }),
+    ]);
+    const parsed = JSON.parse(
+      String((await run(toolWith(undefined, ['notes-draft']))).llmContent),
+    );
+    expect(parsed.sessions[0].to).toBe('notes [draft] [aaa111]');
+  });
+
+  it('keeps printed addresses distinct when a literal name mimics one', async () => {
+    const peers = [
+      peerRow({ sessionId: 's1', name: 'docs-cd', ref: 'aaa111' }),
+      peerRow({
+        sessionId: 's2',
+        name: 'docs-cd [aaa111]',
+        ref: 'bbb222',
+        ipcPath: '/tmp/s2.sock',
+      }),
+    ];
+    listMessageablePeers.mockResolvedValue(peers);
+    const parsed = JSON.parse(
+      String((await run(toolWith(undefined, ['docs-cd']))).llmContent),
+    );
+    const addresses = parsed.sessions.map(
+      (session: { to: string }) => session.to,
+    );
+    expect(new Set(addresses).size).toBe(2);
+    expect(addresses).toEqual(['[aaa111]', 'docs-cd [aaa111] [bbb222]']);
+    for (const [index, address] of addresses.entries()) {
+      expect(resolvePeerTarget(peers, address)).toEqual({
+        kind: 'one',
+        peer: peers[index],
+      });
+    }
+  });
+
+  it('appends the ref for leader handles intercepted by team routing', async () => {
+    listMessageablePeers.mockResolvedValue([
+      peerRow({ sessionId: 's1', name: 'leader', ref: 'aaa111' }),
+      peerRow({
+        sessionId: 's2',
+        name: 'lead-1',
+        ref: 'bbb222',
+        ipcPath: '/tmp/s2.sock',
+      }),
+    ]);
+    const parsed = JSON.parse(
+      String((await run(toolWith(undefined, ['worker']))).llmContent),
+    );
+    expect(
+      parsed.sessions.map((session: { to: string }) => session.to),
+    ).toEqual(['leader [aaa111]', 'lead-1 [bbb222]']);
+  });
+
+  it('omits started_at when the registry timestamp is outside Date range', async () => {
+    listMessageablePeers.mockResolvedValue([
+      peerRow({ sessionId: 's1', startedAt: 9e15 }),
+    ]);
+    const parsed = JSON.parse(String((await run()).llmContent));
+    expect(parsed.sessions[0]).not.toHaveProperty('started_at');
+  });
+
+  it('excludes this session from its own listing', async () => {
+    listMessageablePeers.mockResolvedValue([
+      peerRow({ name: 'self-00', ipcPath: '/tmp/self.sock' }),
+      peerRow({ sessionId: 's2', ref: 'bbb222' }),
+    ]);
+    const parsed = JSON.parse(String((await run()).llmContent));
+    expect(parsed.sessions).toHaveLength(1);
+    expect(parsed.sessions[0].name).toBe('docs-cd');
+  });
+
+  it('excludes a differently named twin of this session', async () => {
+    // `qwen --resume <id>` from another directory: same session id under
+    // a second process. sendToPeer refuses it as self, so advertising it
+    // would hand the model a dead address.
+    listMessageablePeers.mockResolvedValue([
+      peerRow({
+        sessionId: 'self',
+        ref: 'se1f00',
+        name: 'self-old',
+        cwd: '/w/old',
+        ipcPath: '/tmp/old.sock',
+      }),
+      peerRow({ sessionId: 's2', ref: 'bbb222' }),
+    ]);
+    const parsed = JSON.parse(String((await run()).llmContent));
+    expect(parsed.sessions).toHaveLength(1);
+    expect(parsed.sessions[0].name).toBe('docs-cd');
+  });
+
+  it("keeps a peer that merely shares this session's name", async () => {
+    listMessageablePeers.mockResolvedValue([
+      peerRow({ name: 'self-00', ipcPath: '/tmp/self.sock' }),
+      peerRow({
+        sessionId: 's2',
+        ref: 'bbb222',
+        name: 'self-00',
+        cwd: '/w/twin',
+        ipcPath: '/tmp/s2.sock',
+      }),
+    ]);
+    const parsed = JSON.parse(String((await run()).llmContent));
+    expect(parsed.sessions).toEqual([
+      expect.objectContaining({
+        name: 'self-00',
+        ref: 'bbb222',
+        cwd: '/w/twin',
+      }),
+    ]);
+  });
+
+  it('never advertises the broadcast keyword as a peer address', async () => {
+    listMessageablePeers.mockResolvedValue([
+      peerRow({ sessionId: 's1', name: '*', ref: 'aaa111' }),
+    ]);
+    const parsed = JSON.parse(String((await run()).llmContent));
+    expect(parsed.sessions).toHaveLength(1);
+    expect(parsed.sessions[0].to).not.toBe('*');
+    expect(parsed.sessions[0].to).toContain('aaa111');
+  });
+
+  it('intercepts the leader handle only while a team is active', async () => {
+    listMessageablePeers.mockResolvedValue([
+      peerRow({ sessionId: 's1', name: 'leader', ref: 'aaa111' }),
+    ]);
+    const noTeam = JSON.parse(String((await run()).llmContent));
+    expect(noTeam.sessions[0].to).toBe('leader');
+    const withTeam = JSON.parse(
+      String((await run(toolWith(undefined, ['alice']))).llmContent),
+    );
+    expect(withTeam.sessions[0].to).toBe('leader [aaa111]');
+  });
+
+  it('omits a peer that no address in the grammar can single out', async () => {
+    // Same name and the same ref: every candidate is ambiguous for both.
+    listMessageablePeers.mockResolvedValue([
+      peerRow({ sessionId: 's1', name: 'docs-cd', ref: 'aaa111' }),
+      peerRow({ sessionId: 's2', name: 'docs-cd', ref: 'aaa111', cwd: '/w/2' }),
+      peerRow({ sessionId: 's3', name: 'other-ef', ref: 'bbb222' }),
+    ]);
+    const parsed = JSON.parse(String((await run()).llmContent));
+    expect(parsed.sessions.map((s: { to: string }) => s.to)).toEqual([
+      'other-ef',
+    ]);
+  });
+
+  it('counts both kinds in the display line', async () => {
+    const registry = new BackgroundTaskRegistry();
+    registry.register({
+      agentId: 'a1',
+      description: 'do a thing',
+      status: 'running',
+      isBackgrounded: true,
+      startTime: 1,
+      abortController: new AbortController(),
+      outputFile: '/tmp/a1.jsonl',
+    });
+    listMessageablePeers.mockResolvedValue([peerRow()]);
+    const result = await run(toolWith(registry));
+    expect(result.returnDisplay).toBe(
+      'Listed 1 background agent and 1 other session.',
+    );
+  });
+
+  it('omits the sessions key entirely when there are none', async () => {
+    const registry = new BackgroundTaskRegistry();
+    registry.register({
+      agentId: 'a1',
+      description: 'do a thing',
+      status: 'running',
+      isBackgrounded: true,
+      startTime: 1,
+      abortController: new AbortController(),
+      outputFile: '/tmp/a1.jsonl',
+    });
+    const parsed = JSON.parse(
+      String((await run(toolWith(registry))).llmContent),
+    );
+    expect(parsed.sessions).toBeUndefined();
+    expect(parsed.self).toEqual({ name: 'self-00', ref: 'se1f00' });
+    expect(parsed.agents).toHaveLength(1);
   });
 });

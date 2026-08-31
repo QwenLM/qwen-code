@@ -32,7 +32,10 @@ import {
   LEDGER_ID_TOKEN,
   LEDGER_MAX_FILE,
   LEDGER_MAX_ROUND,
+  LEDGER_MAX_TITLE,
+  claimLocator,
   isStandInName,
+  type LedgerClosure,
   type LedgerFinding,
 } from './ledger.js';
 import { mdField } from './md-field.js';
@@ -96,6 +99,28 @@ export interface DraftedFinding {
   fixInduced?: boolean;
 }
 
+/**
+ * One subsystem whose Criticals keep regrowing (#9905): a file that closed
+ * Critical(s) in the previous round and again this round — the previous
+ * marker's minted closures (`r === round - 1`) and this round's
+ * (`r === round`) — while posting a fresh Critical on it now. That is the
+ * patch-and-regress shape: each fix grew the next Critical in the same
+ * mechanism, which is a claim about the MECHANISM, not about any one
+ * finding.
+ */
+export interface SuccessorChain {
+  /** The subsystem, named by the file every generation landed on. */
+  file: string;
+  /**
+   * The closure ids of each of the two rounds, oldest first —
+   * `[round N-1's, round N's]`. `newIds` is the chain's final generation
+   * but is NOT in this array; the renderer appends it.
+   */
+  generations: string[][];
+  /** The fresh Critical ids this round posts on the file. */
+  newIds: string[];
+}
+
 /** What the previous round left behind, and how far it can be trusted. */
 export interface PrevRound {
   /** Inline comments the previous round posted, when it recorded the number. */
@@ -132,6 +157,15 @@ export interface PrevRound {
    */
   merged?: boolean;
   /**
+   * Its findings were adopted by an ANONYMOUS whole-write — recovery ran
+   * with no identity to vouch them (`pr-context` stamps the record). Not
+   * `foreign` to the disclosure caveat — an unknown identity is not a
+   * foreign author — but the absence-based inferences read the list like a
+   * pure-foreign one: a vanished id may sit in a list no identity vouched,
+   * so the closure mint and the `land-and-defer` gate both withhold.
+   */
+  anonymousAdoption?: boolean;
+  /**
    * The posting floor it ran under, when its marker recorded one. A round
    * that posted under a different floor is not a comparable point on this
    * loop's volume trend — the posture changed, not the loop.
@@ -145,13 +179,24 @@ export interface PrevRound {
   /** Its own round number; 0 when nothing was recovered. */
   round?: number;
   /**
-   * Whether it carried an incremental anchor. Read only by the
-   * mechanism-health check: two consecutive withholds mean every later round
-   * re-reads the whole diff until a round's marker carries an anchor again —
-   * which a clean close does not guarantee, because the marker also
-   * withholds on a missing fetched sha and on a model-identity drift.
+   * Whether it carried an incremental anchor THIS round can use — a grafted
+   * one whose certifier mismatches, or whose re-run this round's fetch
+   * refused or resolved to the head, does not count (Step 1 cannot scope to
+   * it, so the chain is still broken). Read only by the mechanism-health
+   * check: two consecutive withholds mean every later round re-reads the
+   * whole diff until a round's marker carries an anchor again or a graft
+   * lands that the round running it can use — which a clean close does not
+   * guarantee, because the marker also withholds on a missing fetched sha
+   * and on a model-identity drift.
    */
   anchored?: boolean;
+  /**
+   * The Criticals that round closed — the closures its marker minted (each
+   * carries `r === round`). Absent on every marker written before the field
+   * existed, which reads as "no closures recorded" and silences the
+   * successor-chain signal: thin history stays silent rather than guesses.
+   */
+  closed?: readonly LedgerClosure[];
 }
 
 export interface ConvergenceDiagnosis {
@@ -171,6 +216,13 @@ export interface ConvergenceDiagnosis {
   prevFresh?: number;
   /** Files that carried findings before and carry more now. */
   clusters: RecurrenceCluster[];
+  /**
+   * Subsystems whose Criticals keep regrowing (#9905) — the sharper form of
+   * a recurrence cluster: not "the file sees findings again" but "the last
+   * two rounds each CLOSED a Critical here and this round posts another",
+   * the patch-and-regress chain where each fix grows the next Critical.
+   */
+  successorChains: SuccessorChain[];
   /** True when this round's volume did not fall below the previous round's. */
   volumeNotShrinking: boolean;
   /** Carried through from `PrevRound` so the rendering can disclose them. */
@@ -244,11 +296,14 @@ export type CriticalFloorKind =
  *   spend the code set's only real property — that a code means a fact was
  *   observed — on a constant.
  *
- * That is the whole menu: eleven codes in the design, four emitted here,
- * seven named above.
+ * That is the whole menu: twelve codes in the design, five emitted here
+ * (`successor-chain` joined the four existing codes with #9905 — its
+ * measurement is the closure lineage the marker now records), seven named
+ * above.
  */
 export const RECOMMENDATION_CODES = [
   'root-cause-triage',
+  'successor-chain',
   'land-and-defer',
   'batch-fixes',
   'stem-surface',
@@ -278,7 +333,8 @@ export interface Recommendation {
  */
 export interface MechanismHealth {
   /**
-   * The floor resolved to `critical`, and Suggestions posted inline anyway.
+   * The floor resolved to `critical`, and findings it would have deferred —
+   * Suggestions, or an axes-pair Critical (#10291) — posted inline anyway.
    * The posture is nominally engaged and mechanically is not.
    */
   postureNotEngaging: boolean;
@@ -286,11 +342,10 @@ export interface MechanismHealth {
    * This round did not close cleanly — unproven scope, a dimension gap that
    * is not depth-only, or any verdict cap other than an unreviewable
    * dimension — which withholds the incremental anchor, and the round it
-   * recovered carried none either. Two
-   * consecutive withholds mean the next round re-reads the whole diff, and
-   * the round after that, until something clears it: the closed loop
-   * measured at 119 minutes and 34M tokens on a PR whose code had not
-   * changed a line.
+   * recovered carried none this round could use. Two consecutive withholds
+   * mean the next round re-reads the whole diff, and the round after that,
+   * until something clears it: the closed loop measured at 119 minutes and
+   * 34M tokens on a PR whose code had not changed a line.
    *
    * A stated limit: those are the only withholding legs visible from here.
    * The marker also withholds when the plan carries no fetched sha, when it
@@ -437,6 +492,23 @@ export function diagnoseConvergence(input: {
    * previous work list this round does not re-post was fixed.
    */
   openCriticals?: number;
+  /**
+   * The closures THIS round mints — the previous work list's Criticals this
+   * round does not re-post — computed by the caller from the same built
+   * ledger the marker stamps, so the marker's `closed` field and this
+   * signal can never disagree about what closed when. Empty whenever the
+   * previous work list is incomplete: a vanished id in a truncated list
+   * may be the budget, not a ruling, so a partial list mints nothing.
+   */
+  closuresThisRound?: readonly LedgerClosure[];
+  /**
+   * This round's findings AS THE BUILT LEDGER stamps them. The successor
+   * chain reads its new side from here — the built ids, post readback and
+   * admission — rather than from the drafts, so the note's `R<round>-<n>`
+   * references are the ones the posted review and the next round's work
+   * list actually use.
+   */
+  thisRoundFindings?: readonly LedgerFinding[];
 }): ConvergenceDiagnosis | null {
   const priorByFile = new Map<string, Set<number>>();
   for (const f of input.prev.findings) {
@@ -548,6 +620,103 @@ export function diagnoseConvergence(input: {
       (a.file < b.file ? -1 : a.file > b.file ? 1 : 0),
   );
 
+  // The successor chain (#9905): a file that CLOSED a Critical in each of
+  // the last two rounds — this round's minted set (`r === round`) and the
+  // previous marker's (`r === round - 1`) — while this round posts a FRESH
+  // Critical on it. The cluster signal above says "the file sees findings
+  // again"; this says "the fix closed one and the mechanism grew another",
+  // twice in a row — the #9659 rebound shape, where every finding was
+  // individually correct and the subsystem was diverging. Joined by file,
+  // deterministically, like the cluster.
+  const successorChains: SuccessorChain[] = [];
+  const closedNow = input.closuresThisRound ?? [];
+  const closedPrev = input.prev.closed ?? [];
+  const thisRoundFindings = input.thisRoundFindings ?? [];
+  // The fresh side's claim-identity defense — the mint's mirror. A re-post
+  // whose readback lost the carried id is stamped with a FRESH id in the
+  // build (see `idFor`), so `birthRound === round` alone counts a
+  // still-standing claim as the chain's new generation — the note firing
+  // over a claim the same round's work list says never left. Join on the
+  // locator projection the mint uses, over the recovered previous list:
+  // PRESENT in it is evidence regardless of its completeness, and its
+  // titles are already write-capped, so the built side caps before
+  // projecting the way the serializer would.
+  if (
+    input.round >= 2 &&
+    closedNow.length > 0 &&
+    closedPrev.length > 0 &&
+    thisRoundFindings.length > 0
+  ) {
+    const standingPrevClaims = new Set(
+      input.prev.findings
+        .map((g) => claimLocator(g.title))
+        .filter((k) => k !== ''),
+    );
+    const freshCriticalsByFile = new Map<string, string[]>();
+    for (const f of thisRoundFindings) {
+      if (f.sev !== 'C') continue;
+      // The stand-in rule the cluster join applies: a pathless or body-only
+      // Critical names no subsystem. `k` is respected the same way — the
+      // built ledger flags a REAL path that happens to spell like one.
+      if (isStandInName(f.file) && f.k !== 1) continue;
+      // The built id's round IS the first-reported round: a fresh finding
+      // was stamped this round, a carried one keeps its original id.
+      if (birthRound(f.id) !== input.round) continue;
+      // A re-mint of a claim still standing in the previous list is a
+      // re-post, not a new generation — see `standingPrevClaims` above.
+      const locator = claimLocator(f.title.slice(0, LEDGER_MAX_TITLE));
+      if (locator !== '' && standingPrevClaims.has(locator)) continue;
+      const ids = freshCriticalsByFile.get(f.file);
+      if (ids) ids.push(f.id);
+      else freshCriticalsByFile.set(f.file, [f.id]);
+    }
+    for (const [file, newIds] of freshCriticalsByFile) {
+      const generations: string[][] = [];
+      for (const [closures, r] of [
+        [closedPrev, input.round - 1],
+        [closedNow, input.round],
+      ] as const) {
+        const idsAt = closures
+          .filter(
+            (c) =>
+              c.r === r &&
+              // Stand-in-named closures never join: `LedgerClosure` carries
+              // no `k`, so a body-only closure is indistinguishable from a
+              // closure on a REAL file spelled like the stand-in. Joining
+              // them would post a lineage over a mechanism the closures
+              // never anchored on — silence, never a guess.
+              !isStandInName(c.f) &&
+              // Closures are capped at LEDGER_MAX_FILE on every route while
+              // this side keys on the RAW built path, so an exact join is
+              // permanently silent past the cap — mirror `priorFor`'s slice
+              // fallback, or the advisory disarms on exactly the deep
+              // subsystems it exists for.
+              (c.f === file ||
+                (file.length > LEDGER_MAX_FILE &&
+                  c.f === file.slice(0, LEDGER_MAX_FILE))),
+          )
+          .map((c) => c.id);
+        if (idsAt.length === 0) {
+          generations.length = 0;
+          break;
+        }
+        generations.push(idsAt);
+      }
+      if (generations.length === 0) continue;
+      successorChains.push({ file, generations, newIds });
+    }
+    // Sorted, like the cluster above, so WHICH diverging subsystems the two
+    // `.slice(0, MAX_RENDERED_CLUSTERS)` consumers name is a measured
+    // property, never the map's insertion order: the most new work first,
+    // closure volume second, the code-unit path the tie-break.
+    successorChains.sort(
+      (a, b) =>
+        b.newIds.length - a.newIds.length ||
+        b.generations.flat().length - a.generations.flat().length ||
+        (a.file < b.file ? -1 : a.file > b.file ? 1 : 0),
+    );
+  }
+
   // A round that produced NO fresh finding is the observation a convergence
   // trend most wants, not a symptom: zero new work is where a settling loop
   // lands, and `0 >= 0` would otherwise narrate "the volume is not falling"
@@ -589,7 +758,12 @@ export function diagnoseConvergence(input: {
     fresh.length > 0 &&
     fresh.length >= input.prev.fresh;
 
-  if (clusters.length === 0 && !volumeNotShrinking) return null;
+  if (
+    clusters.length === 0 &&
+    !volumeNotShrinking &&
+    successorChains.length === 0
+  )
+    return null;
 
   return {
     ...(input.openCriticals === undefined
@@ -603,6 +777,7 @@ export function diagnoseConvergence(input: {
       : { prevPosted: input.prev.posted }),
     ...(input.prev.fresh === undefined ? {} : { prevFresh: input.prev.fresh }),
     clusters,
+    successorChains,
     volumeNotShrinking,
     truncatedEvidence: input.prev.truncated === true,
     foreignEvidence: input.prev.foreign === true,
@@ -611,6 +786,28 @@ export function diagnoseConvergence(input: {
       ? {}
       : { criticalFloorKind: input.criticalFloorKind }),
   };
+}
+
+/**
+ * The per-generation id bound for a rendered chain, so a round that closed
+ * a whole family on the file cannot grow the paragraph unboundedly.
+ */
+const MAX_CHAIN_IDS_PER_GENERATION = 6;
+
+/**
+ * The chain as the paragraph and the recommendation's basis render it —
+ * `R9-1 → R10-2/R10-3 → R11-4`, oldest generation first, the new ids last.
+ * ONE renderer for both, so the prose and the machine-readable half cannot
+ * disagree about the lineage they name.
+ */
+export function renderSuccessorChain(c: SuccessorChain): string {
+  const renderGeneration = (ids: string[]): string => {
+    const shown = ids.slice(0, MAX_CHAIN_IDS_PER_GENERATION).join('/');
+    return ids.length > MAX_CHAIN_IDS_PER_GENERATION
+      ? `${shown} … (+${ids.length - MAX_CHAIN_IDS_PER_GENERATION})`
+      : shown;
+  };
+  return [...c.generations, c.newIds].map(renderGeneration).join(' → ');
 }
 
 /**
@@ -630,6 +827,17 @@ export function recommendationsFor(d: ConvergenceDiagnosis): Recommendation[] {
     out.push({
       code: 'root-cause-triage',
       basis: `${d.clusters.length} file(s) carried findings in earlier rounds and carry new ones now: ${shown.join(', ')}${d.clusters.length > shown.length ? ', …' : ''}`,
+    });
+  }
+  if (d.successorChains.length > 0) {
+    const shown = d.successorChains
+      .slice(0, MAX_RENDERED_CLUSTERS)
+      .map((c) => `${c.file} (${renderSuccessorChain(c)})`);
+    out.push({
+      code: 'successor-chain',
+      basis:
+        `${d.successorChains.length} subsystem(s) closed Critical(s) in the previous round and again this round, and post a new one now: ` +
+        `${shown.join(', ')}${d.successorChains.length > shown.length ? ', …' : ''}`,
     });
   }
   if (d.volumeNotShrinking) {
@@ -677,18 +885,18 @@ export function renderMechanismHealth(
   const zh: string[] = [];
   if (h.postureNotEngaging) {
     en.push(
-      `the posting floor for this round resolved to critical, and Suggestion-level findings posted inline anyway — the posture is engaged in name and not in effect`,
+      `the posting floor for this round resolved to critical, and findings the floor would have deferred posted inline anyway — the posture is engaged in name and not in effect`,
     );
     zh.push(
-      `本轮的发布下限解析为 critical，但仍有 Suggestion 级发现以行内评论发布——该姿态名义上生效、实际未生效`,
+      `本轮的发布下限解析为 critical，但仍有本应被下限延后的发现以行内评论发布——该姿态名义上生效、实际未生效`,
     );
   }
   if (h.anchorChainBroken) {
     en.push(
-      `this round did not close cleanly, so it withholds the incremental anchor — and the round it recovered had none either, so the next review re-reads the whole diff and will keep doing so until a round's marker carries an anchor again`,
+      `this round did not close cleanly, so it withholds the incremental anchor — and the round it recovered had no anchor this round could use either — none at all, one with no certifier, one certified by an identity other than the one this round runs under, or one this round's fetch refused or resolved to the head — so the next review re-reads the whole diff unless recovery grafts an earlier own anchor that the round running it can use onto the complete work list this round leaves behind, and keeps doing so until a round's marker carries an anchor again or a graft lands that the round running it can use`,
     );
     zh.push(
-      `本轮未能干净收尾，因而扣留了增量锚点，而它恢复到的那一轮也没有锚点，因此下一次评审将重读整个 diff——并会一直如此，直到某一轮的标记重新带上锚点`,
+      `本轮未能干净收尾，因而扣留了增量锚点，而它恢复到的那一轮也没有留下本轮可用的锚点——要么完全没有、要么没有认证者、要么由本轮运行身份之外的身份认证、要么被本轮的获取拒绝或解析为头提交——因此下一次评审将重读整个 diff，除非恢复流程把本轮能使用的更早自有锚点嫁接到本轮留下的完整工作清单上；并会一直如此，直到某一轮的标记重新带上锚点，或落地的嫁接能被运行该轮的评审使用`,
     );
   }
   if (en.length === 0) return null;
@@ -761,6 +969,27 @@ export function renderConvergenceDiagnosis(d: ConvergenceDiagnosis): {
   // recurrence and a flat trend together.
   const reasonsEn: string[] = [];
   const reasonsZh: string[] = [];
+  if (d.successorChains.length > 0) {
+    // The sharpest shape, named first: not "the file sees findings again"
+    // but "the last two rounds each CLOSED a Critical here and this round
+    // posts another" — the chain is named in full because the ids are the
+    // evidence the author acts on. `mdField` on every segment: the file is
+    // PR-controlled and the ids arrive over the marker.
+    const shown = d.successorChains.slice(0, MAX_RENDERED_CLUSTERS);
+    const more = d.successorChains.length - shown.length;
+    const chainsEn = shown
+      .map((c) => `${mdField(c.file)} (${mdField(renderSuccessorChain(c))})`)
+      .join('; ');
+    const chainsZh = shown
+      .map((c) => `${mdField(c.file)}(${mdField(renderSuccessorChain(c))})`)
+      .join('；');
+    reasonsEn.push(
+      `⚠️ Divergence: the same subsystem closed Critical(s) in the previous round and again this round, and posts a new one now — ${chainsEn}${more > 0 ? `; and ${more} more` : ''}.`,
+    );
+    reasonsZh.push(
+      `⚠️ 发散：同一子系统在上一轮和本轮各关闭了至少一个 Critical，本轮又出现了新的 Critical——${chainsZh}${more > 0 ? `；另有 ${more} 个` : ''}。`,
+    );
+  }
   if (d.clusters.length > 0) {
     reasonsEn.push(
       `Findings keep coming back to the same files: ${clusterEn}${more > 0 ? `, and ${more} more file(s)` : ''}.`,
@@ -780,11 +1009,14 @@ export function renderConvergenceDiagnosis(d: ConvergenceDiagnosis): {
   // affects only the WORK LIST, so it qualifies the recurrence reading
   // alone. Provenance is broader: a foreign marker carries the previous
   // round's VOLUME too, and the volume reading cites that number as this
-  // loop's own baseline — gated on clusters, the disclosure never reached
-  // exactly the branch an attacker-supplied count controls.
+  // loop's own baseline — and its MINTED CLOSURES too, which the chain
+  // cites as this loop's own lineage. Gated on clusters, the disclosure
+  // never reached exactly the branches an attacker-supplied count or
+  // closure list controls.
   const citesWorkList = d.clusters.length > 0;
   const citesPrevVolume =
     d.prevPosted !== undefined || d.prevFresh !== undefined;
+  const citesClosures = d.successorChains.length > 0;
   const caveatsEn: string[] = [];
   const caveatsZh: string[] = [];
   // Truncation qualifies BOTH readings, not only the recurrence one: the
@@ -813,12 +1045,25 @@ export function renderConvergenceDiagnosis(d: ConvergenceDiagnosis): {
     );
     caveatsZh.push(`上一轮的工作清单为放进标记而被截断，${what.zh}`);
   }
-  if (d.foreignEvidence && (citesWorkList || citesPrevVolume)) {
-    const what = citesWorkList
-      ? citesPrevVolume
-        ? { en: `those rounds and its counts`, zh: `上述轮次与其计数` }
-        : { en: `those rounds`, zh: `上述轮次` }
-      : { en: `those counts`, zh: `该计数` };
+  if (
+    d.foreignEvidence &&
+    (citesWorkList || citesPrevVolume || citesClosures)
+  ) {
+    const partsEn: string[] = [];
+    const partsZh: string[] = [];
+    if (citesWorkList) {
+      partsEn.push(`those rounds`);
+      partsZh.push(`上述轮次`);
+    }
+    if (citesPrevVolume) {
+      partsEn.push(citesWorkList ? `its counts` : `those counts`);
+      partsZh.push(citesWorkList ? `其计数` : `该计数`);
+    }
+    if (citesClosures) {
+      partsEn.push(`the closure lineage named above`);
+      partsZh.push(`上述闭包血缘`);
+    }
+    const what = { en: partsEn.join(` and `), zh: partsZh.join(`与`) };
     caveatsEn.push(
       d.mergedEvidence
         ? `the previous round was recovered from a marker this account did not post and merged over this account's own entries, so some of ${what.en} may not be this account's own`
@@ -828,6 +1073,20 @@ export function renderConvergenceDiagnosis(d: ConvergenceDiagnosis): {
       d.mergedEvidence
         ? `上一轮的数据来自并非本账号发布的标记，并与本账号自己的条目合并，${what.zh}中的部分可能不属于本账号`
         : `上一轮的数据来自并非本账号发布的标记，${what.zh}可能不属于本账号`,
+    );
+  }
+  // The chain's newest generation is fresh-stamped BY CONSTRUCTION — the
+  // fresh scan admits no carried id — and a re-voice of a still-open claim
+  // whose readback lost its id is textually indistinguishable from a new
+  // Critical. Blanket suppression cannot separate that shape from the
+  // legitimate rebound the signal exists for, so the note discloses the
+  // identity gap instead of asserting the generation is new.
+  if (d.successorChains.length > 0) {
+    caveatsEn.push(
+      `the chain's newest generation carries ids stamped this round — a still-open claim re-voiced without its carried id reads the same there as a new Critical`,
+    );
+    caveatsZh.push(
+      `链条最新一代携带的 id 由本轮铸造——一个未解决断言若在不携带原 id 的情况下被重新表述，在那里与新的 Critical 无法区分`,
     );
   }
   const caveatEn =
@@ -876,6 +1135,8 @@ export function renderConvergenceDiagnosis(d: ConvergenceDiagnosis): {
 
   const clusterAdviceEn = `A cluster that keeps producing siblings usually means the fixes are treating instances of a shared root cause — triaging that cause before the next round, or splitting an independent cluster into its own pull request, tends to end the loop faster than fixing them one at a time.`;
   const clusterAdviceZh = `一个不断再生兄弟发现的簇，通常意味着逐条修复只在处理同一根因的实例——先定位并处理该根因，或把独立的簇拆成单独的 PR，通常比逐条修复更快结束循环。`;
+  const chainAdviceEn = `A mechanism whose fix grows the next Critical is diverging, not converging — raising the pattern with the mechanism's owner before the next round tends to end the loop faster than patching it again.`;
+  const chainAdviceZh = `每次修复都长出下一个 Critical 的机制是在发散而非收敛——先把这一模式提给该机制的负责人，通常比继续打补丁更快结束循环。`;
   const landEn = `No Critical finding is open on this round, so merging and moving the remaining Suggestion threads to a follow-up issue is available as an ending — a merged pull request cannot diverge further.`;
   const landZh = `本轮没有未决的 Critical，因此"合入后把剩余 Suggestion 线程转到后续 issue"是一个可选的结束方式——已合入的 PR 不会继续发散。`;
 
@@ -884,6 +1145,7 @@ export function renderConvergenceDiagnosis(d: ConvergenceDiagnosis): {
   // describe different rounds — and this module's whole claim is that its
   // advice is matched to what it measured.
   const adviceEn = [
+    has('successor-chain') ? chainAdviceEn : null,
     has('root-cause-triage') ? clusterAdviceEn : null,
     has('batch-fixes') ? floorEn : null,
     has('land-and-defer') ? landEn : null,
@@ -891,6 +1153,7 @@ export function renderConvergenceDiagnosis(d: ConvergenceDiagnosis): {
     .filter(Boolean)
     .join(' ');
   const adviceZh = [
+    has('successor-chain') ? chainAdviceZh : null,
     has('root-cause-triage') ? clusterAdviceZh : null,
     has('batch-fixes') ? floorZh : null,
     has('land-and-defer') ? landZh : null,

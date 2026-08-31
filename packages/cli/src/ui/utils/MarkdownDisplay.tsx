@@ -190,7 +190,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   const tableSeparatorRegex = TABLE_SEPARATOR_RE;
 
   // Rendered-height-aware slice of the pending preview (shared with
-  // useGeminiStream's incremental commit — see pending-rendered-height.ts — so the
+  // useLlmStream's incremental commit — see pending-rendered-height.ts — so the
   // two agree on how tall the content renders). Guarantees the live frame never
   // exceeds the viewport, so ink cannot fall into its from-top full-redraw path
   // (the scroll-to-top lock). Note keptLines can be 0 when even the first

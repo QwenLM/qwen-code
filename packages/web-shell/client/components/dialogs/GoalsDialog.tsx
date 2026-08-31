@@ -10,7 +10,7 @@ import { canResumeGoal } from '../../utils/goalGate';
 import {
   useWorkspaceActions,
   type DaemonGoal,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import { Pause, Pencil, Play, Trash2 } from 'lucide-react';
 import { useI18n } from '../../i18n';
 import { DialogShell } from './DialogShell';
@@ -367,8 +367,6 @@ export function GoalsDialog({
           // pause/resume are gated.
           const canEdit = goal.status !== 'complete';
           const canPause = goal.status === 'active';
-          // An evidence-limited stop is terminal for resume: the reducer rejects it
-          // with an invalid-transition 409, so the control must not be offered.
           // Shared with `GoalStatusStrip` so the two gates cannot drift apart.
           const canResume = canResumeGoal(goal);
           return (

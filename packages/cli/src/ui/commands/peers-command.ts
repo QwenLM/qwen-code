@@ -149,6 +149,10 @@ export const peersCommand: SlashCommand = {
     const [verb, ...rest] = args.trim().split(/\s+/).filter(Boolean);
 
     if (verb === undefined || verb === 'list') {
+      // Decisions bind to this listing: record exactly which messages
+      // the user is reviewing so a later accept/deny can refuse when the
+      // set has shifted underneath.
+      peerMessaging.recordHeldListing(held);
       return {
         type: 'message',
         messageType: 'info',
@@ -175,6 +179,19 @@ export const peersCommand: SlashCommand = {
       };
     }
 
+    // The held set moves between listing and decision (arrivals,
+    // evictions, releases): a handle that uniquely named the message the
+    // user reviewed can resolve to a different one by now. Refuse
+    // instead of deciding on a stale review.
+    if (peerMessaging.heldSetChangedSinceListing()) {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content:
+          'The waiting list changed since you listed it — run /peers again to review what is waiting now.',
+      };
+    }
+
     if (held.length === 0) {
       return {
         type: 'message',
@@ -196,6 +213,8 @@ export const peersCommand: SlashCommand = {
         if (outcome === 'done') count += 1;
         else if (outcome === 'failed') failed += 1;
       }
+      // The user now knows what remains; bind later decisions to it.
+      peerMessaging.recordHeldListing(peerMessaging.getHeld());
       return {
         type: 'message',
         messageType: 'info',
@@ -228,6 +247,8 @@ export const peersCommand: SlashCommand = {
     }
 
     const outcome = peerMessaging.decide(resolved.msgId, decision);
+    // The user now knows what remains; bind later decisions to it.
+    peerMessaging.recordHeldListing(peerMessaging.getHeld());
     if (outcome === 'gone') {
       return {
         type: 'message',

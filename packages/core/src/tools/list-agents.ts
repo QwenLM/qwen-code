@@ -6,9 +6,10 @@
 
 import type { Config } from '../config/config.js';
 import {
-  formatPeerAddress,
+  advertisablePeerAddress,
   listMessageablePeers,
 } from '../ipc/peer-directory.js';
+import { isInProcessRecipient } from '../ipc/peer-routing.js';
 import { getOwnPeerIdentity } from '../ipc/peer-send.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
 import {
@@ -20,11 +21,6 @@ import {
 } from './tools.js';
 
 export type ListAgentsParams = Record<string, never>;
-
-function formatStartedAt(value: number): string {
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? 'unknown' : date.toISOString();
-}
 
 class ListAgentsInvocation extends BaseToolInvocation<
   ListAgentsParams,
@@ -38,7 +34,7 @@ class ListAgentsInvocation extends BaseToolInvocation<
   }
 
   getDescription(): string {
-    return 'List addressable agents and peer sessions';
+    return 'List ordinary background subagents and reachable sessions';
   }
 
   async execute(): Promise<ToolResult> {
@@ -61,33 +57,61 @@ class ListAgentsInvocation extends BaseToolInvocation<
           : {}),
       }));
 
-    const self = this.config.isCrossSessionMessagingEnabled()
-      ? await getOwnPeerIdentity()
-      : null;
+    // Peer sessions are only listed once this session has an inbox of its
+    // own: without one a message could be sent but never answered, and
+    // advertising a one-way address invites exactly that.
+    // Every incarnation of this session is dropped, not just its own
+    // socket: `qwen --resume <id>` in a second pane runs the same id under
+    // another process, and a twin advertised here would be sent to as a
+    // peer — sendToPeer excludes by the same rule, so the listing never
+    // shows an address the send path treats as self.
+    const self = await getOwnPeerIdentity();
     const peers = self
       ? (await listMessageablePeers()).filter(
-          (peer) => peer.ipcPath !== self.ipcPath,
+          (peer) =>
+            peer.ipcPath !== self.ipcPath && peer.sessionId !== self.sessionId,
         )
       : [];
-    const sessions = peers.map((peer) => ({
-      to: formatPeerAddress(peer),
-      name: peer.name,
-      ref: peer.ref,
-      cwd: peer.cwd,
-      started_at: formatStartedAt(peer.startedAt),
-    }));
+
+    // send_message claims some addresses before it looks at peers — the
+    // broadcast keyword, and with a team active the leader handle, the
+    // lead agent id and member names. Validate every candidate against
+    // that same rule and the peer-address grammar before advertising it.
+    const teamFile = this.config.getTeamManager()?.getTeamFile();
+    const isReserved = (address: string): boolean =>
+      isInProcessRecipient(address, teamFile);
+    const sessions = peers.flatMap((peer) => {
+      const to = advertisablePeerAddress(peer, peers, isReserved);
+      // A ref collision plus adversarial literal names can leave no string
+      // in the supported grammar that uniquely selects this peer. Do not
+      // advertise a misleading address that would route elsewhere.
+      if (to === undefined) return [];
+      // A registry writer can record a finite-but-Date-invalid startedAt;
+      // toISOString would throw and take the whole listing down with it.
+      const startedAt = new Date(peer.startedAt);
+      return [
+        {
+          to,
+          name: peer.name,
+          ref: peer.ref,
+          cwd: peer.cwd,
+          ...(Number.isNaN(startedAt.getTime())
+            ? {}
+            : { started_at: startedAt.toISOString() }),
+        },
+      ];
+    });
 
     if (agents.length === 0 && sessions.length === 0) {
-      if (self) {
-        const message =
-          'No ordinary background subagents are available in this session, and no other reachable Qwen Code sessions were found.';
-        return { llmContent: message, returnDisplay: message };
-      }
       const message =
-        'No ordinary background subagents are available in this session. ' +
+        'No ordinary background subagents are available in this session' +
+        (self
+          ? ', and no other Qwen Code session on this machine is reachable. '
+          : '. ') +
         'Named Agent Team teammates are not listed here; their results are ' +
         'delivered automatically through team messaging, so do not use ' +
-        'list_agents to wait for a teammate.';
+        'list_agents to wait for a teammate.' +
+        (self ? ` This session is named "${self.name}".` : '');
       return { llmContent: message, returnDisplay: message };
     }
 
@@ -106,6 +130,10 @@ class ListAgentsInvocation extends BaseToolInvocation<
     return {
       llmContent: JSON.stringify({
         agents,
+        // This session's own handle, so a model that sees its own name in
+        // a peer's message — or is told "reply to X" — can recognise it
+        // instead of trying to message itself.
+        ...(self ? { self: { name: self.name, ref: self.ref } } : {}),
         ...(sessions.length > 0 ? { sessions } : {}),
       }),
       returnDisplay: `Listed ${counts.join(' and ')}.`,
@@ -124,15 +152,16 @@ export class ListAgentsTool extends BaseDeclarativeTool<
       ListAgentsTool.Name,
       ToolDisplayNames.LIST_AGENTS,
       'List addressable ordinary background subagents in the current ' +
-        'session, including agents restored from a prior session run, plus ' +
-        'other reachable Qwen Code sessions on this machine when experimental ' +
-        'cross-session messaging is enabled. Use a session\'s "to" value ' +
-        'verbatim with send_message. Named ' +
-        'Agent Team teammates are NOT listed here: they have their own team ' +
-        'lifecycle and deliver their final reports automatically, so do not ' +
-        'use list_agents (or poll task_list) to wait for a teammate. Use the ' +
-        'returned task_id with send_message to continue a running, paused, ' +
-        'or completed agent.',
+        'session, including agents restored from a prior session run, and — ' +
+        'when cross-session messaging is enabled — the other Qwen Code ' +
+        "sessions running on this machine, plus this session's own name. " +
+        'Named Agent Team teammates are NOT listed here: they have their own ' +
+        'team lifecycle and deliver their final reports automatically, so do ' +
+        'not use list_agents (or poll task_list) to wait for a teammate. Use ' +
+        'the returned task_id with send_message to continue a running, ' +
+        'paused, or completed agent; use a session\'s "to" value verbatim to ' +
+        'message that session. Other sessions are peers, not your workers — ' +
+        "do not delegate this session's work to them.",
       Kind.Read,
       {
         type: 'object',
