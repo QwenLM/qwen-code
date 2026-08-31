@@ -364,18 +364,33 @@ jobs:
             exit 0
           fi
           # Fail closed: any API error or non-write permission denies the run.
+          # But ask more than once before a transient GitHub error becomes the
+          # denial: a 503 ("No server is currently available") here has
+          # silently dropped real /resolve requests — the commenter had write,
+          # no job started, and nothing on the PR said why.
           api_error_file="$(mktemp)"
-          if ! permission="$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${principal}/permission" --jq '.permission' 2>"$api_error_file")"; then
+          permission=''
+          attempt=0
+          while :; do
+            attempt=$((attempt + 1))
+            if permission="$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${principal}/permission" --jq '.permission' 2>"$api_error_file")"; then
+              break
+            fi
             api_error="$(cat "$api_error_file")"
-            rm -f "$api_error_file"
             api_error="${api_error:-unknown error}"
             api_error="${api_error//$'\r'/ }"
             api_error="${api_error//$'\n'/ }"
+            if [ "$attempt" -lt 3 ] && grep -qiE 'HTTP 5[0-9][0-9]|No server is currently available|connection reset|timed out|unexpected EOF' "$api_error_file"; then
+              echo "Permission API call for ${principal} failed transiently (attempt ${attempt} of 3): ${api_error}; retrying."
+              sleep $((attempt * 5))
+              continue
+            fi
+            rm -f "$api_error_file"
             echo "::error::Permission API call failed for ${principal}: ${api_error}"
             echo "Failed to check permission for ${principal} (API error: ${api_error}); denying." >> "$GITHUB_STEP_SUMMARY"
             echo "should_review=false" >> "$GITHUB_OUTPUT"
             exit 0
-          fi
+          done
           rm -f "$api_error_file"
           case "$permission" in
             admin|maintain|write)
@@ -2663,11 +2678,11 @@ jobs:
           pr_json="${WORKDIR}/pr.json"
           gh pr view "$PR_NUMBER" \
             --repo "$REPO" \
-            --json state,isDraft,headRefName,headRefOid,headRepository,headRepositoryOwner,baseRefName,url,title \
+            --json state,headRefName,headRefOid,headRepository,headRepositoryOwner,maintainerCanModify,baseRefName,url,title \
             > "$pr_json"
 
           state="$(jq -r '.state' "$pr_json")"
-          is_draft="$(jq -r '.isDraft' "$pr_json")"
+          maintainer_can_modify="$(jq -r '.maintainerCanModify' "$pr_json")"
           head_ref="$(jq -r '.headRefName' "$pr_json")"
           head_sha="$(jq -r '.headRefOid' "$pr_json")"
           head_repo_owner="$(jq -r '.headRepositoryOwner.login // ""' "$pr_json")"
@@ -2689,13 +2704,24 @@ jobs:
           if [ "$state" != "OPEN" ]; then
             finish_without_agent skip "PR #${PR_NUMBER} is ${state}."
           fi
-          if [ "$is_draft" = "true" ]; then
-            finish_without_agent skip "PR #${PR_NUMBER} is draft."
-          fi
+          # Drafts are not refused. /resolve is an explicit request by someone
+          # with write permission, and a draft with conflicts is exactly where
+          # resolving them is cheapest; the old gate only turned such requests
+          # into a skip comment (182 of them). The automatic review lane keeps
+          # its own draft gate — this is about the command only.
+          #
           # A deleted head repository makes headRepository null, so head_repo would
           # be "/" or "owner/" and the push URL malformed. Bail before the fetch.
           if [ -z "$head_repo_owner" ] || [ -z "$head_repo_name" ]; then
             finish_without_agent unsupported "PR #${PR_NUMBER}'s head repository was deleted; cannot push a resolution back."
+          fi
+          # A fork PR is pushable only through "Allow edits by maintainers".
+          # When it is off, the agent run is wasted: the resolution is produced
+          # and then rejected at the push (10 runs so far). Say so up front.
+          # (GitHub also refuses maintainer edits on organization-owned forks
+          # even when the box is ticked; that case still surfaces at the push.)
+          if [ "$head_repo" != "$REPO" ] && [ "$maintainer_can_modify" != "true" ]; then
+            finish_without_agent unsupported "PR #${PR_NUMBER} comes from the fork \`${head_repo}\` with **Allow edits by maintainers** off, so a resolution could not be pushed back to it. Enable that option on the PR and re-run /resolve, or merge \`${base_ref}\` into \`${head_ref}\` locally."
           fi
 
           # Fetch the PR head through refs/pull/N/head — the base repo mirrors it
@@ -3269,6 +3295,12 @@ jobs:
           HEAD_REF: '${{ needs.resolve-pr.outputs.head_ref }}'
           HEAD_SHA: '${{ needs.resolve-pr.outputs.head_sha }}'
           HEAD_REPO: '${{ needs.resolve-pr.outputs.head_repo }}'
+          # The replay merges the base branch again; without this the step's
+          # `set -u` aborts on the first ${BASE_REF} — a test pins env coverage.
+          BASE_REF: '${{ needs.resolve-pr.outputs.base_ref }}'
+          # Test hook for the replay's fetch URL; empty in production, where
+          # the replay fetches https://github.com/<repo>.git.
+          RESOLVE_ORIGIN_URL: ''
           OUTCOME: '${{ steps.verify.outputs.outcome }}'
           FAILURE_KIND: '${{ steps.verify.outputs.failure_kind }}'
           RESOLVE_OUTCOME: '${{ needs.resolve-pr.outputs.agent_outcome }}'
@@ -3316,61 +3348,189 @@ jobs:
           }
 
           push_fail_reason=''
+          replayed_on=''
+          push_log="${WORKDIR}/push.log"
+
+          # Push the resolved branch back to the PR head. For a fork PR the head
+          # lives in the contributor's repository (HEAD_REPO), reachable only via
+          # "Allow edits by maintainers"; for an in-repo PR HEAD_REPO == REPO, so
+          # the same push works. The token is passed inline so it never lands in
+          # .git/config (origin keeps its credential-free URL). git redacts the
+          # token from its own output; push.log is only grepped to classify the
+          # failure and is never echoed into the PR comment.
+          # SECURITY: the push token carries the `workflow` scope, so a conflict
+          # the agent resolves inside a .github/workflows/** file is pushed to the
+          # (possibly fork) head branch and then runs in that repo's Actions. This
+          # is bounded by the no-token agent, the scope guard (only base-changed
+          # files), and write+ maintainer authorization, and it lands in the
+          # contributor's own CI context — not this repo's. The push runs on a
+          # runner the agent never touched (this job), from a checkout whose
+          # refs came from GitHub and whose only agent-supplied input is the
+          # verified bundle, so nothing the agent could plant reaches it.
+          push_resolution() {
+            git push --no-verify \
+              --force-with-lease="refs/heads/${HEAD_REF}:${HEAD_SHA}" \
+              "https://x-access-token:${PUSH_TOKEN}@github.com/${HEAD_REPO}.git" \
+              "HEAD:refs/heads/${HEAD_REF}" 2> "$push_log"
+          }
+
+          # Classify in priority order:
+          # 1. workflow_scope — resolving merges the base branch in, which
+          #    carries its .github/workflows/** changes; GitHub rejects any PAT
+          #    without the `workflow` scope from updating workflow files. Anchor
+          #    on GitHub's server phrase "refusing to allow ... workflow" — NOT a
+          #    loose `workflow.*scope`, which the attacker-controlled branch name
+          #    in git's `! [remote rejected] HEAD -> <branch>` echo could trip
+          #    (e.g. a branch named `fix-workflow-scope`), producing a comment
+          #    that tells maintainers to grant the bot the workflow scope.
+          # 2. moved — the head branch advanced, so force-with-lease declined.
+          #    Tested BEFORE permission: git echoes the destination ref into
+          #    the same log (`HEAD -> <branch> (stale info)`), so a branch
+          #    named e.g. fix/permission-prompt or fix-403-error would match a
+          #    permission substring and the replay would never run. A genuine
+          #    permission denial never carries a lease-decline phrase. The
+          #    same echo cuts the other way: `force-with-lease` and
+          #    `non-fast-forward` are legal branch-name substrings, so match
+          #    git's parenthesised reason — `(stale info)`, `(fetch first)`,
+          #    `(non-fast-forward)` — not the bare words, and anchor it to
+          #    end-of-line: git prints the reason last on the rejection line,
+          #    so a branch merely containing `(non-fast-forward)` still ends
+          #    with the real reason and does not match.
+          # 3. permission — 403, or a 404 "not found" (GitHub hides repos a token
+          #    can't see) which is an access problem in practice.
+          classify_push_failure() {
+            if grep -qiE 'refusing to allow.*workflow' "$push_log"; then
+              push_fail_reason='workflow_scope'
+            elif grep -qiE '\((stale info|fetch first|non-fast-forward)\)$' "$push_log"; then
+              push_fail_reason='moved'
+            elif grep -qiE '403|permission|not authorized|forbidden|protected branch|cannot be updated|not found|does not exist' "$push_log"; then
+              push_fail_reason='permission'
+            else
+              push_fail_reason='other'
+            fi
+          }
+
+          # The head moved while the agent worked. That lost 17 of the 294
+          # resolutions ever produced — the largest single loss after the agent
+          # itself — and nearly all such pushes are unrelated to the conflict
+          # (a CI fix, a review nit). So: fetch the new head, redo the merge on
+          # top of it, and wherever it still conflicts take the agent's version
+          # of that file IF the new head has not touched the file since the SHA
+          # the agent resolved from. Any other conflict gives up and reports
+          # "moved" exactly as before, with the original resolution attached.
+          # The replayed tree is then held to the same structural checks
+          # 'Resolution check' applied to the first merge — no markers, merges
+          # cleanly, only base-changed files — before it is pushed with a lease
+          # on the NEW head. The agent is never re-run.
+          replay_give_up() {
+            echo "Replay gave up: $1"
+            git merge --abort > /dev/null 2>&1 || true
+            git checkout -q -f "qwen-resolve/pr-${PR_NUMBER}" > /dev/null 2>&1 || true
+          }
+          replay_on_moved_head() {
+            local resolved_commit new_ref new_sha file
+            local markers merge_base base_changed replay_changed out_of_scope
+            # The replay commits (`git commit -C` below reuses the agent's
+            # author and message; the committer comes from the environment).
+            # The publish job's fresh checkout carries no committer identity —
+            # supply it here, never from config.
+            export GIT_COMMITTER_NAME='qwen-code-dev-bot'
+            export GIT_COMMITTER_EMAIL='qwen-code-dev-bot@users.noreply.github.com'
+            # Conflicted filenames are literal paths, not glob patterns: a file
+            # named `spec[1].md` would otherwise widen the per-file diff,
+            # checkout, and rm pathspecs to its sibling `spec1.md`.
+            export GIT_LITERAL_PATHSPECS=1
+            resolved_commit="$(git rev-parse HEAD)"
+            new_ref="refs/remotes/origin/qwen-resolve/pr-${PR_NUMBER}/moved"
+            # Fetch by URL, not by remote name: the replay must not depend on
+            # the checkout's remote configuration, and RESOLVE_ORIGIN_URL
+            # exists so the fixture test can point this at a local bare
+            # repository.
+            git fetch "${RESOLVE_ORIGIN_URL:-https://github.com/${REPO}.git}" "+refs/pull/${PR_NUMBER}/head:${new_ref}" || { replay_give_up "could not fetch the new head."; return 1; }
+            new_sha="$(git rev-parse "$new_ref")"
+            if [ "$new_sha" = "$HEAD_SHA" ]; then
+              replay_give_up "the PR head is still ${HEAD_SHA}; the push was declined for another reason."
+              return 1
+            fi
+            git checkout -q -B "qwen-resolve/pr-${PR_NUMBER}-replay" "$new_ref" || { replay_give_up "could not check out ${new_sha}."; return 1; }
+            if ! git merge --no-commit --no-ff "origin/${BASE_REF}" > /dev/null 2>&1; then
+              while IFS= read -r -d '' file; do
+                if git diff --quiet "$HEAD_SHA" "$new_sha" -- "$file"; then
+                  # A deletion IS the agent's version of the file: checkout
+                  # fails on a path absent from the resolved commit.
+                  if git cat-file -e "${resolved_commit}:${file}" 2>/dev/null; then
+                    git checkout "$resolved_commit" -- "$file" || { replay_give_up "could not take the agent's version of ${file}."; return 1; }
+                  else
+                    git rm -q -- "$file" || { replay_give_up "could not take the agent's deletion of ${file}."; return 1; }
+                  fi
+                else
+                  replay_give_up "${file} still conflicts and the new head changed it since ${HEAD_SHA}."
+                  return 1
+                fi
+              done < <(git diff --name-only --diff-filter=U -z)
+            fi
+            if git ls-files -u | grep -q .; then
+              replay_give_up "unresolved paths remain."
+              return 1
+            fi
+            if git diff --cached --quiet; then
+              replay_give_up "merging ${BASE_REF} into ${new_sha} changes nothing."
+              return 1
+            fi
+            git commit -q -C "$resolved_commit" || { replay_give_up "could not commit the replay."; return 1; }
+            markers="$(git diff --name-only -z --diff-filter=ACMRT "$new_sha" HEAD |
+              xargs -0 -r grep -InE -e '^(<<<<<<<|>>>>>>>) ' -- || true)"
+            if [ -n "$markers" ]; then
+              replay_give_up "conflict markers after replay."
+              return 1
+            fi
+            if ! git merge-tree --write-tree "origin/${BASE_REF}" HEAD > /dev/null 2>&1; then
+              replay_give_up "the replay still conflicts with ${BASE_REF}."
+              return 1
+            fi
+            merge_base="$(git merge-base "origin/${BASE_REF}" "$new_sha")"
+            base_changed="$(git diff --name-only -z "${merge_base}" "origin/${BASE_REF}" | sort -zu | tr '\0' '\n')"
+            replay_changed="$(git diff --name-only -z "$new_sha" HEAD | sort -zu | tr '\0' '\n')"
+            out_of_scope="$(comm -23 <(printf '%s\n' "$replay_changed") <(printf '%s\n' "$base_changed"))"
+            if [ -n "$out_of_scope" ]; then
+              replay_give_up "files outside the base-changed set: $(printf '%s ' $out_of_scope)"
+              return 1
+            fi
+            replayed_on="$new_sha"
+            HEAD_SHA="$new_sha"
+            echo "Head moved to ${new_sha} while resolving; replayed the resolution on top of it."
+            return 0
+          }
+
           if [ "$OUTCOME" = "fixed" ] && [ "$DRY_RUN" != "true" ]; then
             if [ -z "${PUSH_TOKEN}" ]; then
               echo "::error::CI_DEV_BOT_PAT is required to push conflict fixes."
               exit 1
             fi
-            # Push the resolved branch back to the PR head. For a fork PR the head
-            # lives in the contributor's repository (HEAD_REPO), reachable only via
-            # "Allow edits by maintainers"; for an in-repo PR HEAD_REPO == REPO, so
-            # the same push works. The token is passed inline so it never lands in
-            # .git/config (origin keeps its credential-free URL). git redacts the
-            # token from its own output; push.log is only grepped to classify the
-            # failure and is never echoed into the PR comment.
-            # SECURITY: the push token carries the `workflow` scope, so a conflict
-            # the agent resolves inside a .github/workflows/** file is pushed to the
-            # (possibly fork) head branch and then runs in that repo's Actions. This
-            # is bounded by the no-token agent, the scope guard (only base-changed
-            # files), and write+ maintainer authorization, and it lands in the
-            # contributor's own CI context — not this repo's. The push runs on a
-            # runner the agent never touched (this job), from a checkout whose
-            # refs came from GitHub and whose only agent-supplied input is the
-            # verified bundle, so nothing the agent could plant reaches it.
-            push_log="${WORKDIR}/push.log"
-            if git push --no-verify \
-              --force-with-lease="refs/heads/${HEAD_REF}:${HEAD_SHA}" \
-              "https://x-access-token:${PUSH_TOKEN}@github.com/${HEAD_REPO}.git" \
-              "HEAD:refs/heads/${HEAD_REF}" 2> "$push_log"; then
+            if push_resolution; then
               :
             else
-              push_failed=true
-              # Classify in priority order:
-              # 1. workflow_scope — resolving merges the base branch in, which
-              #    carries its .github/workflows/** changes; GitHub rejects any PAT
-              #    without the `workflow` scope from updating workflow files. Anchor
-              #    on GitHub's server phrase "refusing to allow ... workflow" — NOT a
-              #    loose `workflow.*scope`, which the attacker-controlled branch name
-              #    in git's `! [remote rejected] HEAD -> <branch>` echo could trip
-              #    (e.g. a branch named `fix-workflow-scope`), producing a comment
-              #    that tells maintainers to grant the bot the workflow scope.
-              # 2. permission — 403, or a 404 "not found" (GitHub hides repos a token
-              #    can't see) which is an access problem in practice.
-              # 3. moved — the head branch advanced, so force-with-lease declined.
-              if grep -qiE 'refusing to allow.*workflow' "$push_log"; then
-                push_fail_reason='workflow_scope'
-              elif grep -qiE '403|permission|not authorized|forbidden|protected branch|cannot be updated|not found|does not exist' "$push_log"; then
-                push_fail_reason='permission'
-              elif grep -qiE 'stale info|force-with-lease|non-fast-forward|fetch first' "$push_log"; then
-                push_fail_reason='moved'
+              classify_push_failure
+              if [ "$push_fail_reason" = "moved" ] && replay_on_moved_head && push_resolution; then
+                # The run artifact uploaded earlier describes the ORIGINAL
+                # resolution; what was just pushed is its replay onto the new
+                # head. Record the pushed tree so the upload step after this
+                # one preserves it beside the original (the replay-success
+                # comment points at it).
+                mkdir -p "${WORKDIR}/pushed"
+                git rev-parse HEAD > "${WORKDIR}/pushed/pushed.sha" || true
+                git diff "origin/${BASE_REF}...HEAD" > "${WORKDIR}/pushed/pushed.diff" || true
               else
-                push_fail_reason='other'
+                push_failed=true
+                # A replay that reached its own push leaves that push's log
+                # behind; classify whatever is there now.
+                classify_push_failure
+                echo "::error::Push to ${HEAD_REPO} failed (reason=${push_fail_reason})."
+                # Echo the git error for diagnosis with the token scrubbed. git already
+                # redacts the URL password to ***; this is belt-and-suspenders.
+                echo '--- git push stderr (token redacted) ---'
+                sed -E 's#x-access-token:[^@]*@#x-access-token:***@#g' "$push_log" || true
               fi
-              echo "::error::Push to ${HEAD_REPO} failed (reason=${push_fail_reason})."
-              # Echo the git error for diagnosis with the token scrubbed. git already
-              # redacts the URL password to ***; this is belt-and-suspenders.
-              echo '--- git push stderr (token redacted) ---'
-              sed -E 's#x-access-token:[^@]*@#x-access-token:***@#g' "$push_log" || true
             fi
           fi
 
@@ -3395,6 +3555,8 @@ jobs:
                   esac
                 elif [ "$DRY_RUN" = "true" ]; then
                   echo "Qwen Code resolved the merge conflicts in dry-run mode. No branch update was pushed."
+                elif [ -n "$replayed_on" ]; then
+                  echo "Qwen Code resolved the merge conflicts and pushed the branch update. The head branch moved to \`${replayed_on}\` while the conflicts were being resolved; the resolution was replayed on top of it and re-checked before the push — where a file still conflicted and the new commits had not touched it, the replay took the agent's version. The pushed branch is that replay: its diff against \`${BASE_REF}\` is attached as the \`qwen-resolve-pr-${PR_NUMBER}-pushed\` artifact on the [workflow run](${RUN_URL}); the \`qwen-resolve-pr-${PR_NUMBER}-attempt-${AGENT_RUN_ATTEMPT}\` artifact describes the original resolution it was replayed from."
                 else
                   echo "Qwen Code resolved the merge conflicts and pushed the branch update."
                 fi
@@ -3448,3 +3610,15 @@ jobs:
           if [ "$OUTCOME" != "fixed" ] && [ "$OUTCOME" != "noop" ]; then
             exit 1
           fi
+
+      # Only populated when a moved head was replayed: the tree that was
+      # actually pushed, beside the attempt-suffixed run artifact that holds
+      # the original resolution. always() so it still runs when 'Report
+      # result' exits 1; the job-level gate already carries the decision check.
+      - name: 'Upload pushed tree'
+        if: '${{ always() }}'
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'qwen-resolve-pr-${{ needs.resolve-pr.outputs.pr_number }}-pushed'
+          path: '${{ env.WORKDIR }}/pushed/'
+          if-no-files-found: 'ignore'

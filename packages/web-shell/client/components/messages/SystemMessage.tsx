@@ -1,11 +1,17 @@
-import { memo } from 'react';
+import { memo, useCallback, useState } from 'react';
 import {
+  CheckIcon,
   CircleCheckIcon,
   CircleMinusIcon,
   CircleXIcon,
+  CopyIcon,
   InfoIcon,
 } from 'lucide-react';
 import { useI18n } from '../../i18n';
+import {
+  warnClipboardWriteFailure,
+  writeClipboardText,
+} from '../../utils/clipboard';
 import {
   ContextUsageMessage,
   parseContextUsageMessage,
@@ -106,6 +112,15 @@ export const SystemMessage = memo(function SystemMessage({
   onRetryClick,
 }: SystemMessageProps) {
   const { t } = useI18n();
+  const [copied, setCopied] = useState(false);
+  const handleCopy = useCallback(() => {
+    void writeClipboardText(content)
+      .then(() => {
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 2000);
+      })
+      .catch(warnClipboardWriteFailure);
+  }, [content]);
   if (source === 'mid_turn_message_injected') {
     return (
       <UserMessage
@@ -316,6 +331,23 @@ export const SystemMessage = memo(function SystemMessage({
               onClick={onRetryClick}
             >
               {t('retry.hint')}
+            </button>
+          </div>
+        )}
+        {source === 'turn_error' && variant === 'error' && (
+          <div className={styles.actions} data-web-shell-message-actions>
+            <button
+              type="button"
+              className={styles.copyButton}
+              title={t('common.copy')}
+              aria-label={t('common.copy')}
+              onClick={handleCopy}
+            >
+              {copied ? (
+                <CheckIcon aria-hidden="true" />
+              ) : (
+                <CopyIcon aria-hidden="true" />
+              )}
             </button>
           </div>
         )}
