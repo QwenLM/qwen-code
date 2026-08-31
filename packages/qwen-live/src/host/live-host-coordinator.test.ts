@@ -1138,10 +1138,19 @@ describe('LiveHostCoordinator', () => {
     });
 
     const capture = value.captureScreenContext('coordinator-1');
+    // Attach the rejection handler BEFORE advancing the clock: the
+    // timeout fires synchronously inside advanceTimersByTimeAsync, and an
+    // unhandled rejection at that instant fails the whole CI run (vitest
+    // counts it as an error even though every test passes).
+    // The handler must exist before the clock advances (see comment above);
+    // awaited on the line after advanceTimersByTimeAsync, which the lint
+    // rule cannot see across the assignment.
+    // eslint-disable-next-line vitest/valid-expect
+    const rejection = expect(capture).rejects.toThrow('timed out');
     expect(pendingAppshotCount(value)).toBe(1);
     await vi.advanceTimersByTimeAsync(51);
 
-    await expect(capture).rejects.toThrow('timed out');
+    await rejection;
     expect(pendingAppshotCount(value)).toBe(0);
   });
 
