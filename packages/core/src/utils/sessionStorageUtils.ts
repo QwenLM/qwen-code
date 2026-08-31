@@ -13,25 +13,10 @@
 
 import fs from 'node:fs';
 
+import { openSyncNoFollow } from './no-follow-open.js';
+
 /** Size of the head/tail buffer for lite metadata reads (64KB). */
 export const LITE_READ_BUF_SIZE = 64 * 1024;
-
-/**
- * Flags used when opening session files for metadata reads. `O_NOFOLLOW`
- * refuses to follow symlinks — defense in depth so a symlink planted in
- * `~/.qwen/tmp/<hash>/chats/` (by another local user or an extension with
- * filesystem access) can't redirect a metadata read to an unrelated file.
- * Falls back to plain read-only when the flag isn't available (e.g. Windows
- * doesn't expose O_NOFOLLOW; the constant is `undefined` there).
- *
- * Computed lazily so tests that stub out `fs` don't blow up at module-init
- * time trying to read `fs.constants.O_RDONLY`.
- */
-function getReadOpenFlags(): number {
-  const constants = fs.constants;
-  if (!constants) return 0;
-  return (constants.O_RDONLY ?? 0) | (constants.O_NOFOLLOW ?? 0);
-}
 
 function readLatestTailIfGrown(
   fd: number,
@@ -315,7 +300,11 @@ export function readLastJsonStringFieldSync(
     const fileSize = stats.size;
     if (fileSize === 0) return undefined;
 
-    fd = fs.openSync(filePath, getReadOpenFlags());
+    // O_NOFOLLOW (or the compensating identity check where the flag does
+    // not exist, e.g. Windows) refuses a symlink planted over the session
+    // file — defense in depth so a planted link can't redirect a metadata
+    // read to an unrelated file (#8227).
+    fd = openSyncNoFollow(filePath);
 
     // Phase 1: tail window — fast path. This is where every well-behaved
     // session keeps its current title (ChatRecordingService re-anchors
@@ -418,7 +407,11 @@ export function readLastJsonStringFieldsSync(
     const fileSize = stats.size;
     if (fileSize === 0) return emptyResult;
 
-    fd = fs.openSync(filePath, getReadOpenFlags());
+    // O_NOFOLLOW (or the compensating identity check where the flag does
+    // not exist, e.g. Windows) refuses a symlink planted over the session
+    // file — defense in depth so a planted link can't redirect a metadata
+    // read to an unrelated file (#8227).
+    fd = openSyncNoFollow(filePath);
 
     // Phase 1: tail window fast path. See the single-field variant for
     // the head-or-tail invariant and buffer-pool semantics.

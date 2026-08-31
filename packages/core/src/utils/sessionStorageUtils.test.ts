@@ -774,3 +774,101 @@ describe('sessionStorageUtils', () => {
     });
   });
 });
+
+describe('sessionStorageUtils when O_NOFOLLOW is unavailable (Windows flag set)', () => {
+  // Windows has no O_NOFOLLOW; the constant is `undefined` there and flag
+  // expressions like `(O_RDONLY | (O_NOFOLLOW ?? 0))` silently collapse to a
+  // plain open that follows symlinks (#8227). Stub the constant away to run
+  // that exact path on Linux CI and pin the compensating refusal.
+  const itNoSymlink = process.platform === 'win32' ? it.skip : it;
+
+  itNoSymlink(
+    'does not read session metadata through a symlinked session file',
+    async () => {
+      const dir = fs.mkdtempSync(
+        path.join(os.tmpdir(), 'session-storage-nofollow-'),
+      );
+      vi.resetModules();
+      vi.doMock('node:fs', async (importOriginal) => {
+        const actual = await importOriginal<typeof import('node:fs')>();
+        // sessionStorageUtils uses a DEFAULT import of node:fs, so the
+        // `default` property must carry the stubbed constants too.
+        const modified = {
+          ...actual,
+          constants: { ...actual.constants, O_NOFOLLOW: undefined },
+        };
+        return { ...modified, default: modified };
+      });
+
+      try {
+        const secretPath = path.join(dir, 'secret.jsonl');
+        const sessionPath = path.join(dir, 'session.jsonl');
+        fs.writeFileSync(
+          secretPath,
+          '{"subtype":"custom_title","customTitle":"leaked-secret"}\n',
+        );
+        fs.symlinkSync(secretPath, sessionPath);
+
+        const { readLastJsonStringFieldSync: readFieldUnmocked } = await import(
+          './sessionStorageUtils.js'
+        );
+        expect(
+          readFieldUnmocked(sessionPath, 'customTitle', 'custom_title'),
+        ).toBeUndefined();
+      } finally {
+        vi.doUnmock('node:fs');
+        vi.resetModules();
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  itNoSymlink(
+    'does not read session metadata through a symlinked session file (multi-field)',
+    async () => {
+      // Mirror of the single-field refusal test for the plural variant,
+      // rerouted through the same helper in the same pass: a symlink
+      // planted over the session file must not leak customTitle /
+      // titleSource through readLastJsonStringFieldsSync either.
+      const dir = fs.mkdtempSync(
+        path.join(os.tmpdir(), 'session-storage-nofollow-fields-'),
+      );
+      vi.resetModules();
+      vi.doMock('node:fs', async (importOriginal) => {
+        const actual = await importOriginal<typeof import('node:fs')>();
+        // sessionStorageUtils uses a DEFAULT import of node:fs, so the
+        // `default` property must carry the stubbed constants too.
+        const modified = {
+          ...actual,
+          constants: { ...actual.constants, O_NOFOLLOW: undefined },
+        };
+        return { ...modified, default: modified };
+      });
+
+      try {
+        const secretPath = path.join(dir, 'secret.jsonl');
+        const sessionPath = path.join(dir, 'session.jsonl');
+        fs.writeFileSync(
+          secretPath,
+          '{"subtype":"custom_title","customTitle":"leaked-secret","titleSource":"auto"}\n',
+        );
+        fs.symlinkSync(secretPath, sessionPath);
+
+        const { readLastJsonStringFieldsSync: readFieldsUnmocked } =
+          await import('./sessionStorageUtils.js');
+        expect(
+          readFieldsUnmocked(
+            sessionPath,
+            'customTitle',
+            ['titleSource'],
+            'custom_title',
+          ),
+        ).toEqual({ customTitle: undefined, titleSource: undefined });
+      } finally {
+        vi.doUnmock('node:fs');
+        vi.resetModules();
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+});
