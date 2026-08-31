@@ -4009,12 +4009,10 @@ function composeReviewBody(
   if (stopReRuleGranted) {
     // No agents ran: the round IS the capture's stop decision plus the
     // orchestrator's re-rule of the open ledger. Disclosed on every verdict
-    // so the body says what kind of round this was.
-    gateDisclosed.push(
-      'Decided-stop re-rule: the verdict below is the re-rule of the ' +
-        "cache ledger's open Criticals against the current tree — no " +
-        'review agents ran this round.',
-    );
+    // so the body says what kind of round this was — through its OWN block
+    // (`stopRoundBlock` below), never `gateDisclosed`: that channel's one
+    // renderer wraps every entry in "Not linted (tool limitation…)", and a
+    // round kind is not a linting gap.
     // The body↔disposition cross-check, over the FINAL local set — the
     // ingested entries plus the deferral channel's relocated Criticals,
     // past the gate-repost dedup — because that set is what the body posts.
@@ -5860,6 +5858,27 @@ function composeReviewBody(
         }
       : undefined;
 
+  // The round-kind disclosure, on its own line — never inside the lint
+  // gate's "Not linted" wrapper: a decided-stop re-rule is not a tool
+  // limitation, and a reader handed "Not linted: Decided-stop re-rule …"
+  // reads the round kind as a linting gap. Rendered on the two events a
+  // granted stop can produce (REQUEST_CHANGES and COMMENT; APPROVE is
+  // demoted before the body composes).
+  const stopRoundBlock: Bi[] = stopReRuleGranted
+    ? [
+        {
+          trim: 2,
+          en:
+            'Decided-stop re-rule: the verdict below is the re-rule of the ' +
+            "cache ledger's open Criticals against the current tree — no " +
+            'review agents ran this round.',
+          zh:
+            '决定性停止重裁：以下裁决是对 cache 台账中 open Critical 在当前' +
+            '树上的重裁——本轮没有任何评审 agent 运行。',
+        },
+      ]
+    : [];
+
   // A deferred checker (actionlint's embedded shell): disclosed on EVERY verdict —
   // including Approve — so the reader knows a workflow's shell was not linted, but
   // it does not cap the verdict (it is a tool limitation, not a finding or an
@@ -6272,6 +6291,7 @@ function composeReviewBody(
       ...cannotTellBlock,
       ...notReviewedForBody,
       ...unverifiedTagsBlock,
+      ...stopRoundBlock,
       ...deferredBlock,
       ...testPlanBlock,
       ...repositoryContextBlock,
@@ -6561,6 +6581,10 @@ function composeReviewBody(
   // 6a. Verification outstanding at loop end — the findings file's surviving
   //     `— [unverified]` tags, machine-read.
   clauses.push(...unverifiedTagsBlock);
+
+  // 6b-. Round-kind disclosure (non-capping) — a decided-stop re-rule says
+  //      what kind of round this was, on its own line.
+  clauses.push(...stopRoundBlock);
 
   // 6b. Deferred-checker disclosure (non-capping) — a workflow whose embedded
   //     shell actionlint would lint but we do not yet trust.
@@ -7886,7 +7910,13 @@ export function verdictLine(r: ComposeReviewResult): string {
   } else if (r.baseEvent === 'APPROVE' && r.event !== 'APPROVE') {
     const reasons = r.cappedBy.map((c) => why[c] ?? c);
     if (r.downgraded) reasons.push('a presubmit check failed');
-    line += ` — an Approve was NOT available: ${reasons.join('; ')}`;
+    // Empty reasons is a real state, not a gap: the decided-stop re-rule
+    // demotes a cleared round's APPROVE to COMMENT with no cap and no
+    // presubmit — joining an empty list printed a dangling colon there.
+    line += reasons.length
+      ? ` — an Approve was NOT available: ${reasons.join('; ')}`
+      : ' — a decided-stop re-rule reviews nothing new, so a cleared ' +
+        'round comments rather than approves';
   } else if (r.downgradedFrom === 'Request changes') {
     // The decisive case, and the one a review caught. A presubmit downgrade can
     // move a REQUEST_CHANGES — a review with **confirmed Criticals** — down to

@@ -753,19 +753,17 @@ async function runReview(args: RunReviewArgs): Promise<void> {
     newestArtifactSince(REVIEWS_DIR, reportPatternFor(targetClass), cutoffMs)
       ?.path ?? null;
 
-  // A round the CAPTURE decided had nothing to review is complete, even
-  // though no composed verdict may exist: a stop whose ledger holds nothing
-  // open composes none, and a stop with open Criticals composes one via
-  // Step 1's re-rule, read above exactly like a full round's. Polling for
-  // the verdict alone
-  // reported "Review did not complete" over a round whose own output was
-  // decided — a cached second round on an unchanged tree, or a clean tree
-  // whose earlier blocker the ledger still renders as standing. The signal is
-  // a field the CLI wrote into its own plan, not a sentence the model chose.
-  // The in-run snapshot first: it holds the stamped verdict even if a
-  // concurrent run overwrote or swept the shared sidecar since. The
-  // post-close scan covers a child that wrote the sidecar and exited inside
-  // one poll tick.
+  // The capture's decided-stop signal, read so the completion check below
+  // can tell "the capture decided this round" from "the run wandered off".
+  // Every decided capture stop composes a verdict via Step 1's re-rule (a
+  // REQUEST_CHANGES over standing blockers, or a no-event Comment when the
+  // ledger holds no open Criticals) — the sidecar alone never completes one
+  // (see the exit-contract comment on `exitCodeFor`); only the two PR stops
+  // ride on the sidecar by itself. The signal is a file the CLI wrote, not
+  // a sentence the model chose. The in-run snapshot first: it holds the
+  // stamped verdict even if a concurrent run overwrote or swept the shared
+  // sidecar since. The post-close scan covers a child that wrote the
+  // sidecar and exited inside one poll tick.
   const stop =
     capturedStop ?? nothingToReviewFrom(targetClass, cutoffMs, runId);
   // The PR stops (up-to-date, empty-diff) consume no plan and compose no

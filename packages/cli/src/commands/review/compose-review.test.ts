@@ -15894,6 +15894,29 @@ describe('composeReview — the decided-stop re-rule', () => {
     ).toThrow(/no nothingToReview decision/);
   });
 
+  it('renders the round-kind disclosure on its own line, never under "Not linted"', () => {
+    // The disclosure used to ride gateDisclosed, whose only renderer wraps
+    // every entry in "Not linted (tool limitation…)" — a round kind is not
+    // a linting gap.
+    const r = reRule();
+    expect(r.body).toContain('Decided-stop re-rule');
+    expect(r.body).not.toMatch(/Not linted[^\n]*Decided-stop re-rule/);
+  });
+
+  it('says why a cleared stop is a Comment — no dangling colon', () => {
+    // The stop demotion is the one APPROVE→COMMENT mover with empty
+    // cappedBy and no presubmit downgrade; joining the empty reason list
+    // printed 'an Approve was NOT available: ' over nothing.
+    const r = reRule({
+      planPath: stopPlan({ name: 'cleared-line', reason: 'clean-tree' }),
+      stopReRule: { dispositions: [{ id: 'R1-1', ruling: 'fixed' }] },
+      bodyCriticals: [],
+    });
+    const line = verdictLine(r);
+    expect(line).toContain('reviews nothing new');
+    expect(line).not.toMatch(/NOT available:\s*$/);
+  });
+
   it('refuses a decided-stop plan composed WITHOUT stopReRule', () => {
     // The mirror of the forged-flag refusal above: a stop plan walked
     // through the regular floors would compose a non-blocking artifact,
