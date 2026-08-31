@@ -2154,6 +2154,16 @@ export class CoreToolScheduler {
       return `Tool "${unknownToolName}" is a built-in tool that is disabled by default because glob covers directory listing in most cases. Enable it with the tools.listDirectory.enabled setting. Use glob instead.`;
     }
 
+    if (
+      canonicalName === ToolNames.TODO_WRITE &&
+      !(await this.toolRegistry.ensureTool(canonicalName))
+    ) {
+      if (this.config.getDisabledTools().has(canonicalName)) {
+        return `Tool "${unknownToolName}" has been disabled for this workspace via the workspace tools toggle. Re-enable it there; the tools.todoWrite.enabled setting only controls whether the tool is registered by default.`;
+      }
+      return `Tool "${unknownToolName}" is a built-in tool that is disabled by default. Enable it with the tools.todoWrite.enabled setting and restart Qwen Code.`;
+    }
+
     // Standard "not found" message with Levenshtein suggestions
     const suggestion = this.getToolSuggestion(unknownToolName, topN);
     return `Tool "${unknownToolName}" not found in registry. Tools must use the exact names that are registered.${suggestion}`;

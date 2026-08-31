@@ -2918,6 +2918,23 @@ describe('mergeExcludeTools', () => {
     expect(config.isLsToolEnabled()).toBe(true);
   });
 
+  it('should default tools.todoWrite.enabled to false', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv, undefined, []);
+    expect(config.isTodoWriteEnabled()).toBe(false);
+  });
+
+  it('should enable todo_write when tools.todoWrite.enabled is true', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: { todoWrite: { enabled: true } },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.isTodoWriteEnabled()).toBe(true);
+  });
+
   it('should force tools.toolSearch.threshold to 0 in safe mode', async () => {
     process.argv = ['node', 'script.js', '--safe-mode'];
     const argv = await parseArguments();

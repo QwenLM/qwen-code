@@ -74,6 +74,7 @@ const createMockConfig = (
   getSessionId: () => 'test-session',
   getUserMemory: () => '',
   getOutputStyle: (): ReturnType<typeof getBuiltInOutputStyle> => undefined,
+  isTodoWriteEnabled: () => false,
   getAutoMemoryPrompt: () => '',
   getToolRegistry: () => ({
     getFunctionDeclarations: () => [],
@@ -418,6 +419,7 @@ describe('ArenaManager', () => {
       mockConfig = {
         ...createMockConfig(tempDir, { worktreeBaseDir: tempDir }),
         getOutputStyle: () => getBuiltInOutputStyle('Concise'),
+        isTodoWriteEnabled: () => true,
       };
       const manager = new ArenaManager(mockConfig as never);
 
@@ -436,6 +438,7 @@ describe('ArenaManager', () => {
           'This is a non-interactive, single-turn run',
         );
         expect(systemPrompt).toContain('# Output Style: Concise');
+        expect(systemPrompt).toContain('# Task Management');
       }
     });
 

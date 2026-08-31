@@ -212,6 +212,7 @@ describe('AgentTool', () => {
       getTranscriptPath: vi.fn().mockReturnValue('/test/transcript'),
       getTeamManager: vi.fn().mockReturnValue(undefined),
       isAgentTeamEnabled: vi.fn().mockReturnValue(false),
+      isTodoWriteEnabled: vi.fn().mockReturnValue(true),
       getApprovalMode: vi.fn().mockReturnValue('default'),
       getModel: vi.fn().mockReturnValue('parent-model'),
       getContentGeneratorConfig: vi.fn().mockReturnValue({
@@ -566,6 +567,19 @@ describe('AgentTool', () => {
         'current todo list',
       );
       expect(agentTool.description).toContain('set `todo_id`');
+    });
+
+    it('omits the todo association when todo_write is disabled', async () => {
+      vi.mocked(config.isTodoWriteEnabled).mockReturnValue(false);
+      const tool = new AgentTool(config);
+      await vi.runAllTimersAsync();
+
+      const properties = tool.schema.parametersJsonSchema as {
+        properties: { todo_id?: unknown };
+      };
+      expect(properties.properties.todo_id).toBeUndefined();
+      expect(tool.description).not.toContain('todo_id');
+      tool.dispose();
     });
 
     it('declares fork_turns for fork agents without a none option', () => {

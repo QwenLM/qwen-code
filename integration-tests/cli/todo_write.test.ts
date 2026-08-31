@@ -4,17 +4,139 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import {
+  CONTAINER_SANDBOX_NO_PROXY,
+  fakeServerHostOptions,
+  IS_CONTAINER_SANDBOX,
   TestRig,
   printDebugInfo,
   validateModelOutput,
 } from '../test-helper.js';
+import { fakeToolCall, startFakeOpenAIServer } from '../fake-openai-server.js';
+import { join } from 'node:path';
+
+async function runForcedTodoCall(rig: TestRig) {
+  let streamingRequestIndex = 0;
+  const fakeServer = await startFakeOpenAIServer(({ body }) => {
+    if (body['stream'] !== true) {
+      return { content: '{"selected_memories":[]}' };
+    }
+    if (streamingRequestIndex++ === 0) {
+      return {
+        toolCalls: [
+          fakeToolCall('todo_write', {
+            todos: [{ id: '1', content: 'Verify Todo', status: 'pending' }],
+          }),
+        ],
+      };
+    }
+    return { content: 'done' };
+  }, fakeServerHostOptions());
+
+  const noProxy = IS_CONTAINER_SANDBOX
+    ? CONTAINER_SANDBOX_NO_PROXY
+    : '127.0.0.1,localhost';
+  vi.stubEnv('OPENAI_API_KEY', 'fake-key');
+  vi.stubEnv('OPENAI_BASE_URL', fakeServer.baseUrl);
+  vi.stubEnv('OPENAI_MODEL', 'fake-model');
+  vi.stubEnv('QWEN_MODEL', 'fake-model');
+  vi.stubEnv('QWEN_HOME', join(rig.testDir!, '.qwen-home'));
+  vi.stubEnv('QWEN_RUNTIME_DIR', join(rig.testDir!, '.qwen-home'));
+  vi.stubEnv('NO_PROXY', noProxy);
+  vi.stubEnv('no_proxy', noProxy);
+
+  try {
+    await rig.run(
+      'Complete the requested action.',
+      '--auth-type',
+      'openai',
+      '--model',
+      'fake-model',
+      '--openai-base-url',
+      fakeServer.baseUrl,
+      '--openai-api-key',
+      'fake-key',
+    );
+    return fakeServer.requests
+      .filter(({ body }) => body['stream'] === true)
+      .map(({ body }) => body);
+  } finally {
+    await fakeServer.close();
+  }
+}
 
 describe('todo_write', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('should not declare todo_write by default', async () => {
+    const rig = new TestRig();
+    await rig.setup('should not declare todo_write by default');
+
+    const requests = await runForcedTodoCall(rig);
+    const initialRequest = requests[0];
+    const tools = (initialRequest?.['tools'] ?? []) as Array<{
+      function?: { name?: string };
+    }>;
+    const systemMessage = (
+      (initialRequest?.['messages'] ?? []) as Array<{
+        role?: string;
+        content?: unknown;
+      }>
+    ).find(({ role }) => role === 'system');
+    const baseSystemPrompt = String(systemMessage?.content).split(
+      '\n\n---\n\n',
+      1,
+    )[0];
+    const toolDescriptionsWithTodo = tools
+      .filter((tool) => JSON.stringify(tool).includes('todo_write'))
+      .map((tool) => tool.function?.name);
+
+    expect(tools.map((tool) => tool.function?.name)).not.toContain(
+      'todo_write',
+    );
+    expect(baseSystemPrompt).not.toContain('todo_write');
+    expect(toolDescriptionsWithTodo).toEqual([]);
+    expect(requests.length).toBeGreaterThanOrEqual(2);
+    expect(JSON.stringify(requests[1])).toContain('disabled by default');
+    expect(JSON.stringify(requests[1])).toContain('tools.todoWrite.enabled');
+  });
+
+  it('should declare and execute todo_write when enabled', async () => {
+    const rig = new TestRig();
+    await rig.setup('should declare and execute todo_write when enabled', {
+      settings: { tools: { todoWrite: { enabled: true } } },
+    });
+
+    const requests = await runForcedTodoCall(rig);
+    const initialRequest = requests[0];
+    const tools = (initialRequest?.['tools'] ?? []) as Array<{
+      function?: { name?: string };
+    }>;
+    const systemMessage = (
+      (initialRequest?.['messages'] ?? []) as Array<{
+        role?: string;
+        content?: unknown;
+      }>
+    ).find(({ role }) => role === 'system');
+    const baseSystemPrompt = String(systemMessage?.content).split(
+      '\n\n---\n\n',
+      1,
+    )[0];
+    const toolResultRequest = JSON.stringify(requests[1]);
+
+    expect(tools.map((tool) => tool.function?.name)).toContain('todo_write');
+    expect(baseSystemPrompt).toContain('# Task Management');
+    expect(toolResultRequest).toContain('Verify Todo');
+  });
+
   it('should be able to create and manage a todo list', async () => {
     const rig = new TestRig();
-    await rig.setup('should be able to create and manage a todo list');
+    await rig.setup('should be able to create and manage a todo list', {
+      settings: { tools: { todoWrite: { enabled: true } } },
+    });
 
     const prompt = `Please create a todo list with these three simple tasks:
 1. Buy milk

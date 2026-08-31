@@ -9078,6 +9078,34 @@ describe('Server Config (config.ts)', () => {
       ).toContain(ToolNames.LS);
     });
 
+    it('does not register todo_write by default', async () => {
+      const config = new Config(baseParams);
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+      expect(
+        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+      ).not.toContain(ToolNames.TODO_WRITE);
+    });
+
+    it('registers todo_write when todoWriteEnabled is true', async () => {
+      const config = new Config({ ...baseParams, todoWriteEnabled: true });
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+      expect(
+        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+      ).toContain(ToolNames.TODO_WRITE);
+    });
+
     it.each([
       { label: 'the canonical name', entry: ToolNames.LS },
       { label: 'an alias', entry: 'ListFiles' },
@@ -9477,6 +9505,7 @@ describe('Server Config (config.ts)', () => {
         ...baseParams,
         useRipgrep: false,
         coreTools: undefined,
+        todoWriteEnabled: true,
         // Mirrors the CLI wiring. `permissions.allow` is deliberately left
         // unset: the eager/deferred split is driven solely by tools.eager
         // (#10075).
@@ -9601,11 +9630,12 @@ describe('Server Config (config.ts)', () => {
         (call) => call[0],
       ) as string[];
 
-      // Without an allowlist nothing is gated at registry level
+      // Without an allowlist ordinary built-ins are not gated at registry
+      // level, but opt-in tools remain disabled.
       expect(registered).toContain(ToolNames.SEND_MESSAGE);
       expect(registered).toContain(ToolNames.UPDATE_GOAL);
       expect(registered).toContain(ToolNames.AGENT);
-      expect(registered).toContain(ToolNames.TODO_WRITE);
+      expect(registered).not.toContain(ToolNames.TODO_WRITE);
       expect(registered).toContain(ToolNames.READ_FILE);
     });
 

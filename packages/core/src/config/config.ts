@@ -1067,6 +1067,8 @@ export interface ConfigParameters {
    * listing the tool in the `coreTools` allowlist also re-enables it.
    */
   lsToolEnabled?: boolean;
+  /** Opt-in flag for the built-in `todo_write` tool. */
+  todoWriteEnabled?: boolean;
   agentTeamEnabled?: boolean;
   workflowsEnabled?: boolean;
   artifactEnabled?: boolean;
@@ -2335,6 +2337,7 @@ export class Config {
    * (the setting declares `requiresRestart`); `Infinity` = no expiry. */
   private readonly cronRecurringMaxAgeDays: number;
   private readonly lsToolEnabled: boolean = false;
+  private readonly todoWriteEnabled: boolean = false;
   private readonly agentTeamEnabled: boolean = false;
   private readonly artifactEnabled: boolean = true;
   private readonly artifactAutoOpen: boolean = true;
@@ -2650,6 +2653,7 @@ export class Config {
       params.cronRecurringMaxAgeDays,
     );
     this.lsToolEnabled = params.lsToolEnabled ?? false;
+    this.todoWriteEnabled = params.todoWriteEnabled ?? false;
     this.agentTeamEnabled = params.agentTeamEnabled ?? false;
     this.artifactEnabled = params.artifactEnabled ?? true;
     this.artifactAutoOpen = params.artifactAutoOpen ?? true;
@@ -7631,6 +7635,10 @@ export class Config {
     );
   }
 
+  isTodoWriteEnabled(): boolean {
+    return this.todoWriteEnabled;
+  }
+
   isAgentTeamEnabled(): boolean {
     // Agent team is experimental and opt-in: enabled via settings or env var
     if (process.env['QWEN_CODE_ENABLE_AGENT_TEAM'] === '1') return true;
@@ -9361,10 +9369,12 @@ export class Config {
       const { ShellTool } = await import('../tools/shell.js');
       return new ShellTool(this);
     });
-    await registerLazy(ToolNames.TODO_WRITE, async () => {
-      const { TodoWriteTool } = await import('../tools/todoWrite.js');
-      return new TodoWriteTool(this);
-    });
+    if (this.isTodoWriteEnabled()) {
+      await registerLazy(ToolNames.TODO_WRITE, async () => {
+        const { TodoWriteTool } = await import('../tools/todoWrite.js');
+        return new TodoWriteTool(this);
+      });
+    }
     await registerLazy(ToolNames.REPORT_FINDINGS, async () => {
       const { ReportFindingsTool } = await import(
         '../tools/report-findings.js'

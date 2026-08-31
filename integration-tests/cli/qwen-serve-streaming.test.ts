@@ -318,6 +318,7 @@ beforeAll(async () => {
     path.join(qwenHome, 'settings.json'),
     JSON.stringify({
       experimental: { todoStopGuard: true },
+      tools: { todoWrite: { enabled: true } },
       ui: { enableFollowupSuggestions: false },
     }),
   );
@@ -346,8 +347,8 @@ beforeAll(async () => {
       // tests below would all silently 404. A scratch workspace (not
       // the checkout) also keeps sessions hermetic: the daemon merges
       // the workspace's `.qwen/settings.json` into every session, and
-      // a stray one on a shared runner (e.g. a `tools.sandbox` mode or
-      // a `tools.core` allowlist missing `todo_write`) silently breaks
+      // a stray one on a shared runner (e.g. a `tools.sandbox` mode or a
+      // disabled `tools.todoWrite` setting) silently breaks
       // the Stop Guard flow below.
       '--workspace',
       workspaceDir,
