@@ -938,10 +938,35 @@ export class DaemonClient {
     } catch {
       /* body unreadable */
     }
-    const detail =
-      body && typeof body === 'object' && 'error' in body
-        ? String((body as { error: unknown }).error)
+    const errorBody =
+      body && typeof body === 'object' && !Array.isArray(body)
+        ? (body as Record<string, unknown>)
+        : undefined;
+    let detail =
+      errorBody && 'error' in errorBody
+        ? String(errorBody['error'])
         : `HTTP ${res.status}`;
+    // Only unwrap opaque JSON-RPC 5xx responses. Specific top-level errors may
+    // intentionally hide diagnostic data that should not become display text.
+    if (
+      res.status >= 500 &&
+      errorBody?.['error'] === 'Internal error' &&
+      typeof errorBody['code'] === 'number'
+    ) {
+      const data = errorBody['data'];
+      if (typeof data === 'string' && data.length > 0) {
+        detail = data;
+      } else if (data && typeof data === 'object' && !Array.isArray(data)) {
+        const record = data as Record<string, unknown>;
+        const details = record['details'];
+        const message = record['message'];
+        if (typeof details === 'string' && details.length > 0) {
+          detail = details;
+        } else if (typeof message === 'string' && message.length > 0) {
+          detail = message;
+        }
+      }
+    }
     if (sessionId && res.status === 503 && body && typeof body === 'object') {
       const data = body as {
         code?: unknown;
