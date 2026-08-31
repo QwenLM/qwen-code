@@ -18,7 +18,6 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { Response } from 'express';
 import { restoreRetryAfterSeconds } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
-import { BridgeTimeoutError } from '@qwen-code/acp-bridge/status';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   BranchWhilePromptActiveError,
