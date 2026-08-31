@@ -532,6 +532,7 @@ describe('Server Config (config.ts)', () => {
   const USER_MEMORY = 'Test User Memory';
   const TELEMETRY_SETTINGS = { enabled: false };
   const EMBEDDING_MODEL = 'gemini-embedding';
+  const TEST_PID_NAMESPACE_ID = 12345;
   const baseParams: ConfigParameters = {
     cwd: '/tmp',
     embeddingModel: EMBEDDING_MODEL,
@@ -556,9 +557,16 @@ describe('Server Config (config.ts)', () => {
     }
     (fs.existsSync as Mock).mockReturnValue(true);
     (fs.readdirSync as Mock).mockReturnValue([]);
-    (fs.statSync as Mock).mockReturnValue({
-      isDirectory: vi.fn().mockReturnValue(true),
-    });
+    (fs.statSync as Mock).mockImplementation((filePath) =>
+      filePath.toString() === '/proc/self/ns/pid'
+        ? {
+            ino: TEST_PID_NAMESPACE_ID,
+            isDirectory: vi.fn().mockReturnValue(false),
+          }
+        : {
+            isDirectory: vi.fn().mockReturnValue(true),
+          },
+    );
     vi.mocked(fs.realpathSync).mockImplementation((path) => path.toString());
     (fs.mkdirSync as Mock).mockImplementation(() => undefined);
     (fs.writeFileSync as Mock).mockImplementation(() => undefined);
