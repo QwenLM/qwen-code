@@ -4552,7 +4552,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           clearTodoStopGuardTrust: vi.fn(),
           getDefaultReasoningConfig: vi.fn(),
           reloadReasoningSelection: vi.fn(),
-          persistReasoningSelection: vi.fn().mockReturnValue(true),
+          persistReasoningSelection: vi.fn(),
           hardSuspendTodoStopGuard: vi.fn(),
           releaseTodoStopGuardQueuedPromptWait: vi.fn().mockReturnValue(true),
           isIdle: vi.fn().mockReturnValue(true),
@@ -9017,91 +9017,59 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     },
   );
 
-  it('does not guess reasoning capabilities for an unregistered Qwen model', async () => {
-    const sessionId = 'unregistered-qwen-reasoning';
-    const innerConfig = await setupSessionMocks(sessionId);
-    innerConfig.getModel = vi.fn().mockReturnValue('qwen-plus');
-
-    const { agent, agentPromise } = await bootAcpAgent();
-    try {
-      const session = (await agent.newSession({
-        cwd: '/tmp',
-        mcpServers: [],
-      })) as SetSessionConfigOptionResponse;
-      expect(
-        session.configOptions.find((item) => item.id === 'reasoning_effort'),
-      ).toBeUndefined();
-
-      await expect(
-        agent.setSessionConfigOption({
-          sessionId,
-          configId: 'reasoning_effort',
-          value: 'high',
-        }),
-      ).rejects.toThrow('Reasoning is not supported by the current model');
-      expect(innerConfig.setReasoningEffort).not.toHaveBeenCalled();
-    } finally {
-      mockConnectionState.resolve();
-      await agentPromise;
-    }
-  });
-
-  it('does not expose reasoning controls on an opaque model route', async () => {
-    const sessionId = 'qwen38-opaque-route-reasoning';
-    const innerConfig = await setupSessionMocks(sessionId);
-    let currentEffort: string | undefined;
-    innerConfig.getModel = vi.fn().mockReturnValue('qwen3.8-max');
-    innerConfig.getAuthType = vi.fn().mockReturnValue('openai');
-    innerConfig.getCurrentModelRegistryBaseUrl = vi
-      .fn()
-      .mockReturnValue('https://one.example/v1');
-    innerConfig.getAllConfiguredModels = vi.fn().mockReturnValue([
-      {
-        id: 'qwen3.8-max',
-        label: 'Qwen 3.8 Max One',
-        authType: 'openai',
-        baseUrl: 'https://one.example/v1',
-        registryBaseUrl: 'https://one.example/v1',
-      },
-      {
-        id: 'qwen3.8-max',
-        label: 'Qwen 3.8 Max Two',
-        authType: 'openai',
-        baseUrl: 'https://two.example/v1',
-        registryBaseUrl: 'https://two.example/v1',
-      },
-    ]);
-    innerConfig.getReasoningEffort = vi.fn(() => currentEffort);
-    innerConfig.setReasoningEffort = vi.fn((effort: string | undefined) => {
-      currentEffort = effort;
-    });
-
-    const { agent, agentPromise } = await bootAcpAgent();
-    try {
-      const session = (await agent.newSession({
-        cwd: '/tmp',
-        mcpServers: [],
-      })) as SetSessionConfigOptionResponse;
-      expect(
-        session.configOptions.find((item) => item.id === 'model')?.currentValue,
-      ).toMatch(/^qwen-route:v1:/);
-      expect(
-        session.configOptions.find((item) => item.id === 'reasoning_effort'),
-      ).toBeUndefined();
-
-      await expect(
-        agent.setSessionConfigOption({
-          sessionId,
-          configId: 'reasoning_effort',
-          value: 'medium',
-        }),
-      ).rejects.toThrow('Reasoning is not supported by the current model');
-      expect(innerConfig.setReasoningEffort).not.toHaveBeenCalled();
-    } finally {
-      mockConnectionState.resolve();
-      await agentPromise;
-    }
-  });
+  it.each([
+    { modelId: 'qwen-plus', value: 'high', opaque: false },
+    { modelId: 'qwen3.8-max', value: 'medium', opaque: true },
+  ])(
+    'hides and rejects unsupported reasoning for $modelId with opaque=$opaque',
+    async ({ modelId, value, opaque }) => {
+      const sessionId = 'unsupported-reasoning';
+      const innerConfig = await setupSessionMocks(sessionId);
+      innerConfig.getModel = vi.fn().mockReturnValue(modelId);
+      if (opaque) {
+        innerConfig.getAuthType = vi.fn().mockReturnValue('openai');
+        innerConfig.getCurrentModelRegistryBaseUrl = vi
+          .fn()
+          .mockReturnValue('https://one.example/v1');
+        innerConfig.getAllConfiguredModels = vi.fn().mockReturnValue(
+          ['one', 'two'].map((name) => ({
+            id: modelId,
+            label: name,
+            authType: 'openai',
+            baseUrl: `https://${name}.example/v1`,
+            registryBaseUrl: `https://${name}.example/v1`,
+          })),
+        );
+      }
+      const { agent, agentPromise } = await bootAcpAgent();
+      try {
+        const session = (await agent.newSession({
+          cwd: '/tmp',
+          mcpServers: [],
+        })) as SetSessionConfigOptionResponse;
+        if (opaque) {
+          expect(
+            session.configOptions.find((item) => item.id === 'model')
+              ?.currentValue,
+          ).toMatch(/^qwen-route:v1:/);
+        }
+        expect(
+          session.configOptions.find((item) => item.id === 'reasoning_effort'),
+        ).toBeUndefined();
+        await expect(
+          agent.setSessionConfigOption({
+            sessionId,
+            configId: 'reasoning_effort',
+            value,
+          }),
+        ).rejects.toThrow('Reasoning is not supported by the current model');
+        expect(innerConfig.setReasoningEffort).not.toHaveBeenCalled();
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
 
   it('projects toggle-only Qwen reasoning without effort tiers', async () => {
     const sessionId = 'qwen37-toggle-reasoning-session';
@@ -25921,7 +25889,7 @@ describe('sessionLanguage multi-session propagation', () => {
       providerConfig,
       {},
     );
-    expect(cfg.refreshAuth).toHaveBeenCalledWith('openai');
+    expect(cfg.refreshAuth).toHaveBeenCalledWith('openai', undefined);
 
     mockConnectionState.resolve();
     await agentPromise;

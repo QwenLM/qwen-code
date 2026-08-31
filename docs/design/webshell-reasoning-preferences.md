@@ -34,9 +34,10 @@ order: create, attach, set model, persist reasoning, then submit the prompt.
 For a regular live session, WebShell sends reasoning changes immediately with
 `persist: true`. Managed standalone conversations keep their existing
 session-only settings boundary and use `persist: false`. WebShell updates its
-state only from the daemon's confirmed
-`configOptions` response. The daemon writes the setting and live state before
-returning success.
+state only from the daemon's confirmed `configOptions` response. The session
+owns preference writes and rollback across writable scopes; a failed write
+also restores the live overrides. Model reconciliation reuses the same reset
+operation. Requested persistence completes before the daemon reports success.
 
 Turning thinking off sends `none`. Turning it on again sends `default`, which
 removes `none` and uses the model default instead of restoring the old tier.

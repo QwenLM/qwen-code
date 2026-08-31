@@ -51,11 +51,6 @@ const MODEL_CONFIGURATIONS: Readonly<
   },
 };
 
-function isQwenFamilyModel(modelId: string): boolean {
-  const normalized = modelId.toLowerCase();
-  return normalized.startsWith('qwen') || normalized === 'coder-model';
-}
-
 export const REASONING_EFFORT_DEFAULT = 'default';
 export const REASONING_EFFORT_NONE = 'none';
 
@@ -63,16 +58,6 @@ export type ReasoningSelection =
   | ReasoningEffort
   | typeof REASONING_EFFORT_NONE
   | typeof REASONING_EFFORT_DEFAULT;
-
-const REASONING_SELECTIONS = new Set<string>([
-  REASONING_EFFORT_NONE,
-  REASONING_EFFORT_DEFAULT,
-  'low',
-  'medium',
-  'high',
-  'xhigh',
-  'max',
-]);
 
 export const PERSIST_REASONING_SELECTION_META_KEY =
   'qwenCode/persistReasoningSelection';
@@ -122,9 +107,10 @@ export function getModelConfiguration(modelId: string | undefined):
 export function parseReasoningSelection(
   value: unknown,
 ): ReasoningSelection | undefined {
-  return typeof value === 'string' && REASONING_SELECTIONS.has(value)
-    ? (value as ReasoningSelection)
-    : undefined;
+  if (value === REASONING_EFFORT_NONE || value === REASONING_EFFORT_DEFAULT) {
+    return value;
+  }
+  return REASONING_EFFORT_TIERS.find((tier) => tier === value);
 }
 
 export function isReasoningSelectionSupported(
@@ -135,14 +121,15 @@ export function isReasoningSelectionSupported(
   if (!modelId) return false;
   const reasoning = getModelConfiguration(modelId)?.reasoning;
   if (!reasoning?.thinking) {
-    if (isQwenFamilyModel(modelId)) return false;
-    if (selection === REASONING_EFFORT_DEFAULT) return true;
-    if (selection === REASONING_EFFORT_NONE) return !thinkingMandatory;
-    return REASONING_EFFORT_TIERS.includes(selection);
+    const normalized = modelId.toLowerCase();
+    if (normalized.startsWith('qwen') || normalized === 'coder-model')
+      return false;
   }
   if (selection === REASONING_EFFORT_DEFAULT) return true;
   if (selection === REASONING_EFFORT_NONE) return !thinkingMandatory;
-  return !reasoning.toggleOnly && reasoning.efforts.includes(selection);
+  return reasoning?.thinking
+    ? !reasoning.toggleOnly && reasoning.efforts.includes(selection)
+    : REASONING_EFFORT_TIERS.includes(selection);
 }
 
 export function applyReasoningSelection(

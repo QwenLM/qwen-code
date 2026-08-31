@@ -3281,63 +3281,49 @@ describe('createDaemonSessionActions', () => {
     });
   });
 
-  it('applies a reasoning effort only when the daemon confirms it', async () => {
-    const session = createMockSession('session-a');
-    session.setConfigOption.mockResolvedValueOnce({
-      configOptions: reasoningConfigOptions('medium'),
-      persisted: true,
-    });
-    const { actions, getConnection } = createActionsHarness({
-      connection: {
-        status: 'connected',
-        sessionId: 'session-a',
-        currentModel: 'qwen3.8-max',
-      },
-      session,
-    });
-
-    await expect(
-      actions.setReasoningEffort('medium', { persist: true }),
-    ).resolves.toBeUndefined();
-
-    expect(session.setConfigOption).toHaveBeenCalledWith(
-      'reasoning_effort',
-      'medium',
-      { persist: true },
-    );
-    expect(getConnection().reasoning).toEqual({
-      enabled: true,
-      effort: 'medium',
-      efforts: ['low', 'medium', 'xhigh'],
-    });
-  });
-
-  it('keeps the confirmed persisted reasoning preview after clearing the session', async () => {
-    const session = createMockSession('session-a');
-    session.setConfigOption.mockResolvedValueOnce({
-      configOptions: reasoningConfigOptions('medium'),
-      persisted: true,
-    });
-    const { actions, getConnection } = createActionsHarness({
-      connection: {
-        status: 'connected',
-        sessionId: 'session-a',
-        currentModel: 'qwen3.8-max',
-        providers: workspaceProvidersStatus('low'),
-      },
-      session,
-    });
-
-    await actions.setReasoningEffort('medium', { persist: true });
-    await actions.clearSession();
-
-    expect(getConnection().sessionId).toBeUndefined();
-    expect(getConnection().models?.[0]?.reasoningPreview).toMatchObject({
-      enabled: true,
-      effort: 'medium',
-      efforts: ['low', 'medium', 'xhigh'],
-    });
-  });
+  it.each([false, true])(
+    'applies confirmed reasoning with a provider preview=%s',
+    async (withProviders) => {
+      const session = createMockSession('session-a');
+      session.setConfigOption.mockResolvedValueOnce({
+        configOptions: reasoningConfigOptions('medium'),
+        persisted: true,
+      });
+      const { actions, getConnection } = createActionsHarness({
+        connection: {
+          status: 'connected',
+          sessionId: 'session-a',
+          currentModel: 'qwen3.8-max',
+          ...(withProviders
+            ? { providers: workspaceProvidersStatus('low') }
+            : {}),
+        },
+        session,
+      });
+      await expect(
+        actions.setReasoningEffort('medium', { persist: true }),
+      ).resolves.toBeUndefined();
+      expect(session.setConfigOption).toHaveBeenCalledWith(
+        'reasoning_effort',
+        'medium',
+        { persist: true },
+      );
+      expect(getConnection().reasoning).toEqual({
+        enabled: true,
+        effort: 'medium',
+        efforts: ['low', 'medium', 'xhigh'],
+      });
+      if (withProviders) {
+        await actions.clearSession();
+        expect(getConnection().sessionId).toBeUndefined();
+        expect(getConnection().models?.[0]?.reasoningPreview).toMatchObject({
+          enabled: true,
+          effort: 'medium',
+          efforts: ['low', 'medium', 'xhigh'],
+        });
+      }
+    },
+  );
 
   it('captures and marks a clear before waiting for persisted reasoning', async () => {
     const session = createMockSession('session-a');

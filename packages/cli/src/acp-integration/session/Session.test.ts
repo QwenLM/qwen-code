@@ -5990,34 +5990,29 @@ describe('Session', () => {
         settings: { model: { reasoningEffort: selection } },
         originalSettings: { model: { reasoningEffort: selection } },
       };
-      const workspace: ReasoningSettingsLayer = {
-        settings: { model: { reasoningEffort: selection } },
-        originalSettings: { model: { reasoningEffort: selection } },
-      };
+      const workspace = structuredClone(user);
       const live: Partial<ContentGeneratorConfig> & { model: string } = {
         model: currentModel,
         ...(options.thinkingMandatory ? { thinkingMandatory: true } : {}),
         reasoning: selection === 'none' ? false : { effort: selection },
       };
-      const rebuildable: Partial<ContentGeneratorConfig> = {
-        ...live,
-        reasoning: selection === 'none' ? false : { effort: selection },
-      };
+      const rebuildable: Partial<ContentGeneratorConfig> =
+        structuredClone(live);
       Object.assign(mockSettings, {
         isTrusted: options.trusted === true,
         user,
         workspace,
+        forScope: vi.fn((scope: SettingScope) =>
+          scope === SettingScope.Workspace ? workspace : user,
+        ),
         merged: { model: { reasoningEffort: selection } },
         recomputeMerged: vi.fn(() => {
-          const workspaceValue = workspace.settings.model.reasoningEffort;
-          const userValue = user.settings.model.reasoningEffort;
-          mockSettings.merged.model = {
-            ...(options.trusted && workspaceValue !== undefined
-              ? { reasoningEffort: workspaceValue }
-              : userValue !== undefined
-                ? { reasoningEffort: userValue }
-                : {}),
-          };
+          const value =
+            (options.trusted
+              ? workspace.settings.model.reasoningEffort
+              : undefined) ?? user.settings.model.reasoningEffort;
+          mockSettings.merged.model =
+            value === undefined ? {} : { reasoningEffort: value };
         }),
       });
       vi.mocked(mockSettings.setValue).mockImplementation(
@@ -6379,49 +6374,63 @@ describe('Session', () => {
       expect(state.live.reasoning).toBeUndefined();
     });
 
-    it('keeps a compatible persisted tier when switching models', async () => {
-      const state = installReasoningPreference('low');
-
-      await session.setModel({
-        sessionId: 'test-session-id',
-        modelId: `qwen3.8-max(${AuthType.USE_OPENAI})`,
-      });
-
-      expect(state.user.settings.model.reasoningEffort).toBe('low');
-      expect(state.live.reasoning).toEqual({ effort: 'low' });
-      expect(state.rebuildable.reasoning).toEqual({ effort: 'low' });
-      expect(mockSettings.setValue).not.toHaveBeenCalledWith(
-        expect.anything(),
-        'model.reasoningEffort',
+    it.each([
+      ['low', 'qwen3.8-max', {}, { effort: 'low' }, 'low'],
+      ['none', 'qwen3.7-plus', {}, false, 'none'],
+      [
+        'low',
+        'qwen3.8-max',
+        { defaultReasoning: false },
+        { effort: 'low' },
+        'low',
+      ],
+      [
+        'low',
+        'qwen3.8-max',
+        { defaultReasoning: { budget_tokens: 42000 } },
+        { effort: 'low', budget_tokens: 42000 },
+        'low',
+      ],
+      ['max', 'qwen3.7-plus', { defaultReasoning: false }, false, undefined],
+      ['max', 'qwen3.7-plus', {}, undefined, undefined],
+      ['none', 'qwen-plus', {}, undefined, undefined],
+      [
+        'none',
+        'qwen3.8-max',
+        { thinkingMandatory: true },
         undefined,
-        expect.anything(),
-        expect.anything(),
-      );
-    });
+        undefined,
+      ],
+    ] as const)(
+      'reconciles reasoning %s for %s with %j',
+      async (selection, modelId, options, expected, stored) => {
+        const state = installReasoningPreference(selection, options);
+        await session.setModel({
+          sessionId: 'test-session-id',
+          modelId: `${modelId}(${AuthType.USE_OPENAI})`,
+        });
 
-    it('keeps a compatible thinking disable after a model rebuild', async () => {
-      const state = installReasoningPreference('none');
-      await session.setModel({
-        sessionId: 'test-session-id',
-        modelId: `qwen3.7-plus(${AuthType.USE_OPENAI})`,
-      });
-      expect(state.user.settings.model.reasoningEffort).toBe('none');
-      expect(state.live.reasoning).toBe(false);
-      expect(state.rebuildable.reasoning).toBe(false);
-    });
-
-    it('treats a compatible persisted tier as an explicit thinking enable', async () => {
-      const state = installReasoningPreference('low', {
-        defaultReasoning: false,
-      });
-      await session.setModel({
-        sessionId: 'test-session-id',
-        modelId: `qwen3.8-max(${AuthType.USE_OPENAI})`,
-      });
-      expect(state.user.settings.model.reasoningEffort).toBe('low');
-      expect(state.live.reasoning).toEqual({ effort: 'low' });
-      expect(state.rebuildable.reasoning).toEqual({ effort: 'low' });
-    });
+        expect(state.live.reasoning).toEqual(expected);
+        expect(state.rebuildable.reasoning).toEqual(expected);
+        expect(state.user.settings.model).toStrictEqual(
+          stored === undefined ? {} : { reasoningEffort: stored },
+        );
+        if (stored !== undefined) {
+          expect(mockSettings.setValue).not.toHaveBeenCalledWith(
+            expect.anything(),
+            'model.reasoningEffort',
+            undefined,
+            expect.anything(),
+            expect.anything(),
+          );
+        }
+        if ('defaultReasoning' in options) {
+          expect(session.getDefaultReasoningConfig()).toEqual(
+            options.defaultReasoning,
+          );
+        }
+      },
+    );
 
     it('retains a compatible preference when switching to a runtime snapshot', async () => {
       const state = installReasoningPreference('low');
@@ -6475,38 +6484,6 @@ describe('Session', () => {
         );
       },
     );
-
-    it('restores a configured thinking disable when an incompatible tier is cleared', async () => {
-      const state = installReasoningPreference('max', {
-        defaultReasoning: false,
-      });
-      await session.setModel({
-        sessionId: 'test-session-id',
-        modelId: `qwen3.7-plus(${AuthType.USE_OPENAI})`,
-      });
-      expect(state.user.settings.model).not.toHaveProperty('reasoningEffort');
-      expect(state.live.reasoning).toBe(false);
-      expect(state.rebuildable.reasoning).toBe(false);
-    });
-
-    it('preserves configured reasoning siblings while reapplying a compatible tier', async () => {
-      const state = installReasoningPreference('low', {
-        defaultReasoning: { budget_tokens: 42000 },
-      });
-      state.live.reasoning = false;
-      state.rebuildable.reasoning = false;
-      await session.setModel({
-        sessionId: 'test-session-id',
-        modelId: `qwen3.8-max(${AuthType.USE_OPENAI})`,
-      });
-      expect(state.live.reasoning).toEqual({
-        effort: 'low',
-        budget_tokens: 42000,
-      });
-      expect(session.getDefaultReasoningConfig()).toEqual({
-        budget_tokens: 42000,
-      });
-    });
 
     it('does not treat a runtime snapshot of a previous selection as the model default', () => {
       installReasoningPreference('none');
@@ -6574,101 +6551,66 @@ describe('Session', () => {
       );
     });
 
-    it('persists none in the model scope and removes a shadowing workspace tier', () => {
-      const state = installReasoningPreference('max', { trusted: true });
-
-      expect(session.persistReasoningSelection('none')).toBe(true);
-
-      expect(state.user.settings.model.reasoningEffort).toBe('none');
-      expect(state.workspace.settings.model).not.toHaveProperty(
-        'reasoningEffort',
-      );
-      expect(mockSettings.merged.model?.reasoningEffort).toBe('none');
-    });
-
-    it('does not delete a sibling preference when the target write fails', () => {
-      const state = installReasoningPreference('low', { trusted: true });
-      Object.assign(state.workspace.settings, { modelProviders: {} });
-      Object.assign(state.workspace.originalSettings, { modelProviders: {} });
-      delete state.workspace.settings.model.reasoningEffort;
-      delete state.workspace.originalSettings.model.reasoningEffort;
-      mockSettings.recomputeMerged();
-      const setValue = vi.mocked(mockSettings.setValue);
-      const write = setValue.getMockImplementation();
-      setValue.mockImplementation((scope, key, value, ...rest) => {
-        if (
-          scope === SettingScope.Workspace &&
-          key === 'model.reasoningEffort' &&
-          value === 'medium'
-        ) {
-          throw new Error('workspace settings are read-only');
+    it.each(['none', 'default'] as const)(
+      'persists %s in the model scope and removes shadowing tiers',
+      (selection) => {
+        const state = installReasoningPreference('max', { trusted: true });
+        session.persistReasoningSelection(selection);
+        for (const field of ['settings', 'originalSettings'] as const) {
+          expect(state.user[field].model).toStrictEqual(
+            selection === 'default' ? {} : { reasoningEffort: selection },
+          );
+          expect(state.workspace[field].model).not.toHaveProperty(
+            'reasoningEffort',
+          );
         }
-        return write?.(scope, key, value, ...rest);
-      });
+        expect(mockSettings.merged.model?.reasoningEffort).toBe(
+          selection === 'default' ? undefined : selection,
+        );
+      },
+    );
 
-      expect(() => session.persistReasoningSelection('medium')).toThrow(
-        'workspace settings are read-only',
-      );
-
-      expect(state.user.settings.model.reasoningEffort).toBe('low');
-      expect(state.workspace.settings.model).not.toHaveProperty(
-        'reasoningEffort',
-      );
-    });
-
-    it('rolls back earlier scope clears when a later clear fails', () => {
-      const state = installReasoningPreference('max', { trusted: true });
-      const setValue = vi.mocked(mockSettings.setValue);
-      const write = setValue.getMockImplementation();
-      setValue.mockImplementation((scope, key, value, ...rest) => {
-        if (
-          scope === SettingScope.User &&
-          key === 'model.reasoningEffort' &&
-          value === undefined
-        ) {
-          throw new Error('user settings are read-only');
+    it.each(['medium', 'default'] as const)(
+      'preserves scope values when persisting %s fails',
+      (selection) => {
+        const state = installReasoningPreference(
+          selection === 'medium' ? 'low' : 'max',
+          { trusted: true },
+        );
+        if (selection === 'medium') {
+          Object.assign(state.workspace.settings, { modelProviders: {} });
+          Object.assign(state.workspace.originalSettings, {
+            modelProviders: {},
+          });
+          delete state.workspace.settings.model.reasoningEffort;
+          delete state.workspace.originalSettings.model.reasoningEffort;
+          mockSettings.recomputeMerged();
         }
-        return write?.(scope, key, value, ...rest);
-      });
-
-      expect(() => session.persistReasoningSelection('default')).toThrow(
-        'user settings are read-only',
-      );
-
-      expect(state.workspace.settings.model.reasoningEffort).toBe('max');
-      expect(state.user.settings.model.reasoningEffort).toBe('max');
-    });
-
-    it('treats default as a delete command across writable scopes', () => {
-      const state = installReasoningPreference('max', { trusted: true });
-
-      expect(session.persistReasoningSelection('default')).toBe(true);
-
-      expect(state.user.settings.model).not.toHaveProperty('reasoningEffort');
-      expect(state.workspace.settings.model).not.toHaveProperty(
-        'reasoningEffort',
-      );
-      expect(mockSettings.merged.model?.reasoningEffort).toBeUndefined();
-    });
-
-    it.each([
-      ['max', 'qwen3.7-plus', false],
-      ['none', 'qwen-plus', false],
-      ['none', 'qwen3.8-max', true],
-    ] as const)(
-      'clears %s when switching to incompatible model %s with mandatory=%s',
-      async (selection, modelId, thinkingMandatory) => {
-        const state = installReasoningPreference(selection, {
-          thinkingMandatory,
+        const files = [state.user, state.workspace];
+        const before = files.map((file) => ({ ...file.settings.model }));
+        const setValue = vi.mocked(mockSettings.setValue);
+        const write = setValue.getMockImplementation();
+        setValue.mockImplementation((scope, key, value, ...rest) => {
+          if (
+            key === 'model.reasoningEffort' &&
+            scope ===
+              (selection === 'medium'
+                ? SettingScope.Workspace
+                : SettingScope.User) &&
+            value === (selection === 'medium' ? selection : undefined)
+          ) {
+            throw new Error('settings are read-only');
+          }
+          return write?.(scope, key, value, ...rest);
         });
 
-        await session.setModel({
-          sessionId: 'test-session-id',
-          modelId: `${modelId}(${AuthType.USE_OPENAI})`,
+        expect(() => session.persistReasoningSelection(selection)).toThrow(
+          'settings are read-only',
+        );
+        files.forEach((file, index) => {
+          expect(file.settings.model).toStrictEqual(before[index]);
+          expect(file.originalSettings.model).toStrictEqual(before[index]);
         });
-
-        expect(state.user.settings.model).not.toHaveProperty('reasoningEffort');
-        expect(state.live.reasoning).toBeUndefined();
       },
     );
 

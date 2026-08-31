@@ -5752,7 +5752,6 @@ class QwenAgent implements Agent {
     }
 
     return this.runInSessionContext(session, async () => {
-      let reasoningSelectionPersisted = false;
       switch (configId) {
         case 'mode': {
           await this.setSessionMode({
@@ -5785,12 +5784,12 @@ class QwenAgent implements Agent {
                 ? [choice.value]
                 : choice.options.map((nested) => nested.value),
             ) ?? [];
-          const supported =
-            option !== undefined &&
-            selected !== undefined &&
-            (selected === REASONING_EFFORT_DEFAULT ||
-              choices.includes(selected));
-          if (!supported || !selected) {
+          if (
+            !option ||
+            !selected ||
+            (selected !== REASONING_EFFORT_DEFAULT &&
+              !choices.includes(selected))
+          ) {
             const allowedChoices = modelReasoning
               ? choices
               : [
@@ -5812,6 +5811,16 @@ class QwenAgent implements Agent {
           const tierSelected =
             selected !== REASONING_EFFORT_NONE &&
             selected !== REASONING_EFFORT_DEFAULT;
+          if (
+            !modelReasoning &&
+            tierSelected &&
+            generation.reasoning === false
+          ) {
+            throw RequestError.invalidParams(
+              undefined,
+              'Reasoning effort cannot be applied while thinking is disabled',
+            );
+          }
           const defaultReasoning = session.getDefaultReasoningConfig();
           const previous = {
             reasoning: generation.reasoning,
@@ -5834,28 +5843,20 @@ class QwenAgent implements Agent {
                 generation[source] = next;
               }
             }
-            if (
-              !modelReasoning &&
-              tierSelected &&
-              generation.reasoning === false
-            ) {
-              config.setReasoningEffort?.(selected);
-            } else {
-              applyReasoningSelection(config, selected, defaultReasoning);
-              if (!modelReasoning && selected !== REASONING_EFFORT_NONE) {
-                config.setReasoningEffort?.(
-                  selected === REASONING_EFFORT_DEFAULT
-                    ? defaultReasoning
-                      ? defaultReasoning.effort
-                      : undefined
-                    : selected,
-                );
-              }
+            applyReasoningSelection(config, selected, defaultReasoning);
+            if (!modelReasoning && selected !== REASONING_EFFORT_NONE) {
+              config.setReasoningEffort?.(
+                selected === REASONING_EFFORT_DEFAULT
+                  ? defaultReasoning
+                    ? defaultReasoning.effort
+                    : undefined
+                  : selected,
+              );
             }
-            const confirmedOption = this.buildConfigOptions(config).find(
+            const configOptions = this.buildConfigOptions(config);
+            const confirmedValue = configOptions.find(
               (candidate) => candidate.id === 'reasoning_effort',
-            );
-            const confirmedValue = confirmedOption?.currentValue;
+            )?.currentValue;
             const confirmed =
               selected === REASONING_EFFORT_DEFAULT
                 ? confirmedValue !== undefined
@@ -5869,16 +5870,20 @@ class QwenAgent implements Agent {
               );
             }
             if (persist) {
-              reasoningSelectionPersisted =
-                session.persistReasoningSelection(selected);
+              session.persistReasoningSelection(selected);
             }
+            return {
+              configOptions,
+              ...(persist
+                ? { _meta: { [REASONING_SELECTION_PERSISTED_META_KEY]: true } }
+                : {}),
+            };
           } catch (error) {
             Object.assign(generation, previous);
             if (rebuildable)
               rebuildable.reasoning = previousRebuildableReasoning;
             throw error;
           }
-          break;
         }
         default:
           throw RequestError.invalidParams(
@@ -5889,13 +5894,6 @@ class QwenAgent implements Agent {
 
       return {
         configOptions: this.buildConfigOptions(session.getConfig()),
-        ...(reasoningSelectionPersisted
-          ? {
-              _meta: {
-                [REASONING_SELECTION_PERSISTED_META_KEY]: true,
-              },
-            }
-          : {}),
       };
     });
   }
@@ -13281,11 +13279,7 @@ class QwenAgent implements Agent {
     authType: AuthType,
     isInitialAuth?: boolean,
   ): Promise<void> {
-    if (isInitialAuth === undefined) {
-      await config.refreshAuth(authType);
-    } else {
-      await config.refreshAuth(authType, isInitialAuth);
-    }
+    await config.refreshAuth(authType, isInitialAuth);
     if (settings.merged.model?.reasoningEffort !== REASONING_EFFORT_NONE) {
       return;
     }

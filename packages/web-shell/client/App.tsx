@@ -1271,21 +1271,11 @@ type PendingReasoningIntent = {
   value: ReasoningSelection;
 };
 
-type ReasoningEffortSelection = Exclude<ReasoningSelection, 'none' | 'default'>;
-
-function isReasoningEffortSelection(
-  value: ReasoningSelection,
-): value is ReasoningEffortSelection {
-  return value !== 'none' && value !== 'default';
-}
-
 function getReasoningSelection(
   reasoning: DaemonReasoningControls,
 ): ReasoningSelection {
   if (!reasoning.enabled) return 'none';
-  return isReasoningEffortSelection(reasoning.effort)
-    ? reasoning.effort
-    : 'default';
+  return reasoning.effort === 'none' ? 'default' : reasoning.effort;
 }
 
 function reasoningPreviewSupports(
@@ -6822,12 +6812,11 @@ export function App({
             ? validPendingReasoningIntent.value !== 'none'
             : welcomeReasoningPreview.enabled,
           effort:
-            validPendingReasoningIntent &&
-            isReasoningEffortSelection(validPendingReasoningIntent.value)
-              ? validPendingReasoningIntent.value
-              : validPendingReasoningIntent
-                ? (welcomeReasoningPreview.defaultEffort ?? 'default')
-                : welcomeReasoningPreview.effort,
+            validPendingReasoningIntent?.value === 'none' ||
+            validPendingReasoningIntent?.value === 'default'
+              ? (welcomeReasoningPreview.defaultEffort ?? 'default')
+              : (validPendingReasoningIntent?.value ??
+                welcomeReasoningPreview.effort),
         }
       : undefined;
   // The workspace the Changes dialog reads — the same active workspace the

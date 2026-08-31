@@ -24,9 +24,7 @@ import type {
   DaemonTokenUsage,
 } from './types.js';
 
-type ReasoningEffortSelection = Exclude<ReasoningSelection, 'none' | 'default'>;
-
-const REASONING_SELECTIONS = new Set<ReasoningSelection>([
+const REASONING_SELECTIONS: readonly ReasoningSelection[] = [
   'none',
   'default',
   'low',
@@ -34,28 +32,12 @@ const REASONING_SELECTIONS = new Set<ReasoningSelection>([
   'high',
   'xhigh',
   'max',
-]);
-
-const REASONING_EFFORT_DEFAULT: ReasoningSelection = 'default';
+];
 
 function parseReasoningSelection(
   value: string | undefined,
 ): ReasoningSelection | undefined {
-  return value && REASONING_SELECTIONS.has(value as ReasoningSelection)
-    ? (value as ReasoningSelection)
-    : undefined;
-}
-
-function isReasoningEffortSelection(
-  value: string | undefined,
-): value is ReasoningEffortSelection {
-  return (
-    value === 'low' ||
-    value === 'medium' ||
-    value === 'high' ||
-    value === 'xhigh' ||
-    value === 'max'
-  );
+  return REASONING_SELECTIONS.find((selection) => selection === value);
 }
 
 export function mapProviderStatus(
@@ -192,7 +174,9 @@ export function mapReasoningControls(
   );
   if (!currentValue || !values.includes(currentValue)) return undefined;
   if (thinkingMandatory && currentValue === 'none') return undefined;
-  const effortValues = values.filter(isReasoningEffortSelection);
+  const effortValues = values.filter(
+    (value) => value !== 'none' && value !== 'default',
+  );
   if (reasoningMeta?.['toggleOnly'] === true) {
     if (!values.includes('default')) return undefined;
     return {
@@ -203,19 +187,13 @@ export function mapReasoningControls(
     };
   }
   if (effortValues.length === 0) return undefined;
-  const rawDefaultEffort = parseReasoningSelection(
-    getString(reasoningMeta, 'defaultEffort'),
+  const defaultEffort = effortValues.find(
+    (value) => value === getString(reasoningMeta, 'defaultEffort'),
   );
-  const defaultEffort =
-    isReasoningEffortSelection(rawDefaultEffort) &&
-    effortValues.includes(rawDefaultEffort)
-      ? rawDefaultEffort
-      : undefined;
   const effort =
-    isReasoningEffortSelection(currentValue) &&
-    effortValues.includes(currentValue)
-      ? currentValue
-      : (defaultEffort ?? REASONING_EFFORT_DEFAULT);
+    effortValues.find((value) => value === currentValue) ??
+    defaultEffort ??
+    'default';
   return {
     enabled: currentValue !== 'none',
     effort,
