@@ -25955,112 +25955,6 @@ describe('sessionLanguage multi-session propagation', () => {
     await agentPromise;
   });
 
-  it('propagates tools.workflowsEnabled to existing sessions on reload', async () => {
-    // R11-2: /capabilities reads the flag live from the reloaded
-    // settings, but a session alive before the reload was constructed
-    // with the old value. Without propagation its control surfaces kept
-    // answering canUseWorkflowControls with the stale value while the
-    // capabilities advertisement said the opposite.
-    let mergedSettings: Record<string, unknown> = {
-      tools: { workflowsEnabled: true },
-    };
-    const settings = {
-      get merged() {
-        return mergedSettings;
-      },
-      reloadScopeFromDisk: vi.fn(() => {
-        mergedSettings = { tools: { workflowsEnabled: false } };
-      }),
-      getUserHooks: vi.fn().mockReturnValue({}),
-      getProjectHooks: vi.fn().mockReturnValue({}),
-    } as unknown as LoadedSettings;
-    let workflowsEnabled = true;
-    const registryCancel = vi.fn();
-    const cfg = makeConfig({
-      getSessionId: vi.fn().mockReturnValue('s-wf-reload'),
-      isWorkflowsEnabled: vi.fn(() => workflowsEnabled),
-      setWorkflowsEnabled: vi.fn((enabled: boolean) => {
-        workflowsEnabled = enabled;
-      }),
-      setDisabledTools: vi.fn(),
-      getBareMode: vi.fn().mockReturnValue(false),
-      getFolderTrustFeature: vi.fn().mockReturnValue(false),
-      getFolderTrust: vi.fn().mockReturnValue(true),
-      getWorkflowRunRegistry: vi.fn().mockReturnValue({
-        get: vi.fn().mockReturnValue({ runId: 'wf_1', status: 'running' }),
-        getHandle: vi.fn().mockReturnValue(undefined),
-        cancel: registryCancel,
-      }),
-      isSessionWorkflowEnabled: vi.fn().mockReturnValue(false),
-    });
-    const sendAvailableCommandsUpdate = vi.fn().mockResolvedValue(undefined);
-
-    vi.mocked(loadSettings).mockReturnValue(settings);
-    vi.mocked(loadCliConfig).mockResolvedValue(cfg as unknown as Config);
-    vi.mocked(Session).mockImplementation(
-      () =>
-        ({
-          getId: vi.fn().mockReturnValue('s-wf-reload'),
-          shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
-          getConfig: vi.fn().mockReturnValue(cfg),
-          isIdle: vi.fn().mockReturnValue(true),
-          sendAvailableCommandsUpdate,
-          installRewriter: vi.fn(),
-          installGoalTerminalObserver: vi.fn(),
-          startCronScheduler: vi.fn(),
-          dispose: vi.fn(),
-        }) as unknown as InstanceType<typeof Session>,
-    );
-    vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
-      availableCommands: [],
-      availableSkills: [],
-    });
-
-    const agentPromise = runAcpAgent(
-      makeConfig() as unknown as Config,
-      settings,
-      mockArgv,
-    );
-    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
-    const agent = capturedAgentFactory!({
-      get closed() {
-        return mockConnectionState.promise;
-      },
-    });
-
-    await agent.newSession({ cwd: '/reload', mcpServers: [] });
-    const cancelWorkflow = () =>
-      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTaskCancel, {
-        sessionId: 's-wf-reload',
-        taskId: 'wf_1',
-        taskKind: 'workflow',
-      });
-    await expect(cancelWorkflow()).resolves.toMatchObject({ cancelled: true });
-    expect(registryCancel).toHaveBeenCalledOnce();
-
-    const result = await agent.extMethod(
-      SERVE_CONTROL_EXT_METHODS.workspaceReload,
-      {},
-    );
-
-    expect(result).toMatchObject({ sessionsRefreshed: ['s-wf-reload'] });
-    expect(
-      (cfg as typeof cfg & { setWorkflowsEnabled: ReturnType<typeof vi.fn> })
-        .setWorkflowsEnabled,
-    ).toHaveBeenCalledWith(false);
-    // The `workflows` command left with the flag: the client is told.
-    expect(sendAvailableCommandsUpdate).toHaveBeenCalledOnce();
-    // The existing session now answers with the reloaded value.
-    await expect(cancelWorkflow()).resolves.toEqual({
-      cancelled: false,
-      reason: 'disabled',
-    });
-    expect(registryCancel).toHaveBeenCalledOnce();
-
-    mockConnectionState.resolve();
-    await agentPromise;
-  });
-
   it('re-derives the Session Workflow gate when workspace reload flips it', async () => {
     let mergedSettings: Record<string, unknown> = {
       experimental: { sessionWorkflow: false },
@@ -27485,6 +27379,113 @@ describe('sessionLanguage multi-session propagation', () => {
     expect(approvalMode).toBe('default');
     expect(clearActiveTodoPlanRevision).not.toHaveBeenCalled();
     expect(clearTodoStopGuardTrust).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('propagates tools.workflowsEnabled to existing sessions on reload', async () => {
+    // R11-2: /capabilities reads the flag live from the reloaded
+    // settings, but a session alive before the reload was constructed
+    // with the old value. Without propagation its control surfaces kept
+    // answering canUseWorkflowControls with the stale value while the
+    // capabilities advertisement said the opposite.
+    let mergedSettings: Record<string, unknown> = {
+      tools: { workflowsEnabled: true },
+    };
+    const settings = {
+      get merged() {
+        return mergedSettings;
+      },
+      reloadScopeFromDisk: vi.fn(() => {
+        mergedSettings = { tools: { workflowsEnabled: false } };
+      }),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+    let workflowsEnabled = true;
+    const registryCancel = vi.fn();
+    const cfg = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('s-wf-reload'),
+      isWorkflowsEnabled: vi.fn(() => workflowsEnabled),
+      setWorkflowsEnabled: vi.fn((enabled: boolean) => {
+        workflowsEnabled = enabled;
+      }),
+      setDisabledTools: vi.fn(),
+      getBareMode: vi.fn().mockReturnValue(false),
+      getFolderTrustFeature: vi.fn().mockReturnValue(false),
+      getFolderTrust: vi.fn().mockReturnValue(true),
+      getWorkflowRunRegistry: vi.fn().mockReturnValue({
+        get: vi.fn().mockReturnValue({ runId: 'wf_1', status: 'running' }),
+        getHandle: vi.fn().mockReturnValue(undefined),
+        cancel: registryCancel,
+      }),
+    });
+    const sendAvailableCommandsUpdate = vi.fn().mockResolvedValue(undefined);
+
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    vi.mocked(loadCliConfig).mockResolvedValue(cfg as unknown as Config);
+    vi.mocked(Session).mockImplementation(
+      () =>
+        ({
+          getId: vi.fn().mockReturnValue('s-wf-reload'),
+          shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
+          getConfig: vi.fn().mockReturnValue(cfg),
+          isIdle: vi.fn().mockReturnValue(true),
+          sendAvailableCommandsUpdate,
+          clearActiveTodoPlanRevision: vi.fn(),
+          clearTodoStopGuardTrust: vi.fn(),
+          installRewriter: vi.fn(),
+          installGoalTerminalObserver: vi.fn(),
+          startCronScheduler: vi.fn(),
+          dispose: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+    vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
+      availableCommands: [],
+      availableSkills: [],
+    });
+
+    const agentPromise = runAcpAgent(
+      makeConfig() as unknown as Config,
+      settings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+
+    await agent.newSession({ cwd: '/reload', mcpServers: [] });
+    const cancelWorkflow = () =>
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTaskCancel, {
+        sessionId: 's-wf-reload',
+        taskId: 'wf_1',
+        taskKind: 'workflow',
+      });
+    await expect(cancelWorkflow()).resolves.toMatchObject({ cancelled: true });
+    expect(registryCancel).toHaveBeenCalledOnce();
+
+    const result = await agent.extMethod(
+      SERVE_CONTROL_EXT_METHODS.workspaceReload,
+      {},
+    );
+
+    expect(result).toMatchObject({ sessionsRefreshed: ['s-wf-reload'] });
+    expect(
+      (cfg as typeof cfg & { setWorkflowsEnabled: ReturnType<typeof vi.fn> })
+        .setWorkflowsEnabled,
+    ).toHaveBeenCalledWith(false);
+    // The `workflows` command left with the flag: the client is told.
+    expect(sendAvailableCommandsUpdate).toHaveBeenCalledOnce();
+    // The existing session now answers with the reloaded value.
+    await expect(cancelWorkflow()).resolves.toEqual({
+      cancelled: false,
+      reason: 'disabled',
+    });
+    expect(registryCancel).toHaveBeenCalledOnce();
 
     mockConnectionState.resolve();
     await agentPromise;

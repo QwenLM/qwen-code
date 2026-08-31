@@ -12688,29 +12688,29 @@ class QwenAgent implements Agent {
                 newMerged.tools?.disabled,
               );
               config.setDisabledTools(new Set(disabled));
+            }
 
-              // `/capabilities` reads `tools.workflowsEnabled` live from
-              // the reloaded settings; a session alive before the reload
-              // was constructed with the old value and would keep
-              // answering canUseWorkflowControls with it, so the
-              // advertisement and the controls it gates would diverge.
-              // The merged view is already workspace-stripped, so a repo
-              // cannot self-grant here any more than at construction.
-              const workflowsWereEnabled = config.isWorkflowsEnabled();
-              config.setWorkflowsEnabled(
-                newMerged.tools?.workflowsEnabled === true,
-              );
-              if (config.isWorkflowsEnabled() !== workflowsWereEnabled) {
-                // The `workflows` slash command comes and goes with the
-                // flag; a client holding the old list would keep offering
-                // (or hiding) it.
-                try {
-                  await session.sendAvailableCommandsUpdate();
-                } catch (err) {
-                  debugLogger.warn(
-                    `reload: sendAvailableCommandsUpdate failed for session ${id}: ${err}`,
-                  );
-                }
+            // `/capabilities` reads `tools.workflowsEnabled` live from
+            // the reloaded settings; a session alive before the reload
+            // was constructed with the old value and would keep
+            // answering canUseWorkflowControls with it, so the
+            // advertisement and the controls it gates would diverge.
+            // The merged view is already workspace-stripped, so a repo
+            // cannot self-grant here any more than at construction.
+            const workflowsWereEnabled = config.isWorkflowsEnabled();
+            config.setWorkflowsEnabled(
+              newMerged.tools?.workflowsEnabled === true,
+            );
+            if (config.isWorkflowsEnabled() !== workflowsWereEnabled) {
+              // The `workflows` slash command comes and goes with the
+              // flag; a client holding the old list would keep offering
+              // (or hiding) it.
+              try {
+                await session.sendAvailableCommandsUpdate();
+              } catch (err) {
+                debugLogger.warn(
+                  `reload: sendAvailableCommandsUpdate failed for session ${id}: ${err}`,
+                );
               }
             }
 
