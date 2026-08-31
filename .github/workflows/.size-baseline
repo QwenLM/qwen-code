@@ -37,9 +37,9 @@
 5942 qwen-autofix-fork-signal.yml
 458099 qwen-autofix.yml
 7061 qwen-ci-flaky-rerun.yml
-210742 qwen-code-pr-review.yml
+243164 qwen-code-pr-review.yml
 79041 qwen-fleet-shepherd.yml
-20525 qwen-issue-followup-bot.yml
+22680 qwen-issue-followup-bot.yml
 5760 qwen-pr-safety-precheck.yml
 27648 qwen-triage-finalize.yml
 350381 qwen-triage.yml

@@ -148,8 +148,8 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
     // skill that the same-turn <system-reminder> just announced as available.
     // (refreshSkills now only updates in-memory sets; it no longer mutates the
     // tool declaration or calls setTools — see SKILL_TOOL_DESCRIPTION.)
-    this.removeChangeListener = this.skillManager.addChangeListener(() =>
-      this.refreshSkills(),
+    this.removeChangeListener = this.skillManager.addChangeListener((options) =>
+      this.refreshSkills(options),
     );
 
     // Populate the runtime sets asynchronously.
@@ -173,7 +173,7 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
    * available skills comes from the `<available_skills>` snapshot in the startup
    * prelude plus per-turn `<system-reminder>` deltas.
    */
-  async refreshSkills(): Promise<void> {
+  async refreshSkills(options?: { throwOnError?: boolean }): Promise<void> {
     try {
       // Invalidate the memoization cache so this refresh picks up any
       // skill-set mutations (file edits, conditional activations, config
@@ -194,6 +194,7 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
       this.pendingConditionalSkillNames = new Set();
       this.modelInvocableCommands = [];
       this.hiddenSkillNames = new Set();
+      if (options?.throwOnError) throw error;
     }
   }
 
@@ -212,7 +213,8 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
 
     // Check file-based skills
     const skillExists = this.availableSkills.some(
-      (skill) => skill.name === params.skill,
+      (skill) =>
+        skill.name === params.skill && this.config.isSkillEnabled(skill),
     );
     if (skillExists) return null;
 
@@ -233,7 +235,13 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
     // `fileBasedSkillNames` exclusion in `refreshSkills`, a disabled skill
     // no longer shadows a same-named non-skill command, and we don't want
     // this branch to block the legitimate command path.
-    if (this.config.getDisabledSkillNames().has(params.skill.toLowerCase())) {
+    const knownSkill = this.skillManager
+      .getCachedSkills()
+      ?.find((skill) => skill.name === params.skill);
+    if (
+      this.config.getDisabledSkillNames().has(params.skill.toLowerCase()) ||
+      (knownSkill && !this.config.isSkillEnabled(knownSkill))
+    ) {
       return `Skill "${params.skill}" is disabled. Re-enable it via /skills or remove it from skills.disabled.`;
     }
 
@@ -291,9 +299,15 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
     } else {
       commands = this.modelInvocableCommands;
     }
+    const knownSkills = this.skillManager.getCachedSkills() ?? [];
     const shadowedNames = new Set<string>([
-      ...this.availableSkills.map((skill) => skill.name),
-      ...this.pendingConditionalSkillNames,
+      ...this.availableSkills
+        .filter((skill) => this.config.isSkillEnabled(skill))
+        .map((skill) => skill.name),
+      ...Array.from(this.pendingConditionalSkillNames).filter((name) => {
+        const skill = knownSkills.find((candidate) => candidate.name === name);
+        return !skill || this.config.isSkillEnabled(skill);
+      }),
     ]);
     return commands.filter((cmd) => !shadowedNames.has(cmd.name));
   }
@@ -471,6 +485,56 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
     }
   }
 
+  private async executeDisabledSkill(): Promise<ToolResult> {
+    let disabledCommandFallbackAttempted = false;
+    if (this.commandExecutor) {
+      disabledCommandFallbackAttempted = true;
+      // Wrap in try/catch matching the non-disabled path's graceful
+      // degradation: if the MCP server throws
+      // (network error, timeout, protocol violation), fall through to
+      // the disabled-error message instead of propagating an unhandled
+      // rejection out of execute(). Without this, disabling a skill
+      // makes the system MORE fragile to MCP failures, not less.
+      try {
+        const content = await this.commandExecutor(
+          this.params.skill,
+          this.params.args ?? '',
+        );
+        if (content && typeof content === 'object' && 'error' in content) {
+          return {
+            llmContent: content.error,
+            returnDisplay: content.error,
+          };
+        }
+        if (typeof content === 'string') {
+          // Delegated to a same-named non-skill command (file command
+          // or MCP prompt). Don't emit `SkillLaunchEvent` and don't
+          // track via `onSkillLoaded` — no skill body was loaded, and
+          // conflating the two would inflate skill telemetry /
+          // `/context` skill-token attribution with command runs.
+          return {
+            llmContent: [{ text: content }],
+            returnDisplay: `Delegated to command: ${this.params.skill}`,
+          };
+        }
+      } catch {
+        // Fall through to the disabled-error message below.
+      }
+    }
+    logSkillLaunch(
+      this.config,
+      new SkillLaunchEvent(this.params.skill, false, this.promptId),
+    );
+    if (!disabledCommandFallbackAttempted) {
+      recordSkillInvocation(this.config, {
+        skillName: this.params.skill,
+        success: false,
+      });
+    }
+    const msg = `Skill "${this.params.skill}" is disabled. Re-enable it via /skills or remove it from skills.disabled.`;
+    return { llmContent: msg, returnDisplay: msg };
+  }
+
   async execute(
     _signal?: AbortSignal,
     _updateOutput?: (output: ToolResultDisplay) => void,
@@ -530,53 +594,7 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
       .getDisabledSkillNames()
       .has(this.params.skill.toLowerCase());
     if (disabled) {
-      let disabledCommandFallbackAttempted = false;
-      if (this.commandExecutor) {
-        disabledCommandFallbackAttempted = true;
-        // Wrap in try/catch matching the non-disabled path's graceful
-        // degradation: if the MCP server throws
-        // (network error, timeout, protocol violation), fall through to
-        // the disabled-error message instead of propagating an unhandled
-        // rejection out of execute(). Without this, disabling a skill
-        // makes the system MORE fragile to MCP failures, not less.
-        try {
-          const content = await this.commandExecutor(
-            this.params.skill,
-            this.params.args ?? '',
-          );
-          if (content && typeof content === 'object' && 'error' in content) {
-            return {
-              llmContent: content.error,
-              returnDisplay: content.error,
-            };
-          }
-          if (typeof content === 'string') {
-            // Delegated to a same-named non-skill command (file command
-            // or MCP prompt). Don't emit `SkillLaunchEvent` and don't
-            // track via `onSkillLoaded` — no skill body was loaded, and
-            // conflating the two would inflate skill telemetry /
-            // `/context` skill-token attribution with command runs.
-            return {
-              llmContent: [{ text: content }],
-              returnDisplay: `Delegated to command: ${this.params.skill}`,
-            };
-          }
-        } catch {
-          // Fall through to the disabled-error message below.
-        }
-      }
-      logSkillLaunch(
-        this.config,
-        new SkillLaunchEvent(this.params.skill, false, this.promptId),
-      );
-      if (!disabledCommandFallbackAttempted) {
-        recordSkillInvocation(this.config, {
-          skillName: this.params.skill,
-          success: false,
-        });
-      }
-      const msg = `Skill "${this.params.skill}" is disabled. Re-enable it via /skills or remove it from skills.disabled.`;
-      return { llmContent: msg, returnDisplay: msg };
+      return this.executeDisabledSkill();
     }
 
     let commandFallbackAttempted = false;
@@ -586,6 +604,9 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
       const skill = await this.skillManager.loadSkillForRuntime(
         this.params.skill,
       );
+      if (skill && !this.config.isSkillEnabled(skill)) {
+        return this.executeDisabledSkill();
+      }
 
       if (!skill) {
         // Try model-invocable command executor (e.g. MCP prompts)
