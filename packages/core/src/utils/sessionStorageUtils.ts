@@ -419,7 +419,7 @@ export function readLastMatchingLineFieldSync(
     const fileSize = stats.size;
     if (fileSize === 0) return { matched: false, reason: 'absent' };
 
-    fd = fs.openSync(filePath, getReadOpenFlags());
+    fd = openSyncNoFollow(filePath);
     const buffer =
       scratchBuffer && scratchBuffer.length >= LITE_READ_BUF_SIZE
         ? scratchBuffer
