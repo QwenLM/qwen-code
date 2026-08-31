@@ -47,8 +47,10 @@ import type {
   DaemonSession,
   DaemonSessionStatsStatus,
   DaemonSessionSupportedCommandsStatus,
-  DaemonSessionTaskStatus,
+  DaemonSessionTaskWithWorkflowStatus,
   DaemonSessionTasksStatus,
+  DaemonSessionWorkflowTaskStatus,
+  DaemonSessionWorkflowTasksStatus,
   HeartbeatResult,
   GoalControlRequest,
   GoalStateResponse,
@@ -948,9 +950,9 @@ export class DaemonSessionClient {
 
   /**
    * Execute a direct daemon-side shell command for this session. Requires the
-   * daemon to opt in to direct session shell and bearer auth; this wrapper
-   * automatically forwards the client id bound when the session was created
-   * or attached.
+   * daemon to opt in to direct session shell with bearer auth or
+   * trusted-loopback authority; this wrapper automatically forwards the client
+   * id bound when the session was created or attached.
    */
   shellCommand(
     command: string,
@@ -984,18 +986,38 @@ export class DaemonSessionClient {
     return this.client.sessionTasks(this.sessionId, this.clientId);
   }
 
+  workflowTasks(): Promise<DaemonSessionWorkflowTasksStatus> {
+    return this.client.sessionWorkflowTasks(this.sessionId, this.clientId);
+  }
+
   lspStatus(): Promise<DaemonSessionLspStatus> {
     return this.client.sessionLspStatus(this.sessionId, this.clientId);
   }
 
   cancelTask(
     taskId: string,
-    kind: DaemonSessionTaskStatus['kind'],
+    kind: DaemonSessionTaskWithWorkflowStatus['kind'],
   ): Promise<{ cancelled: boolean }> {
     return this.client.sessionTaskCancel(
       this.sessionId,
       taskId,
       kind,
+      this.clientId,
+    );
+  }
+
+  controlWorkflowTask(
+    taskId: string,
+    action: 'pause' | 'resume' | 'retry' | 'rerun' | 'delete-history',
+  ): Promise<{
+    changed: boolean;
+    status?: DaemonSessionWorkflowTaskStatus['status'];
+    taskId?: string;
+  }> {
+    return this.client.sessionWorkflowTaskAction(
+      this.sessionId,
+      taskId,
+      action,
       this.clientId,
     );
   }

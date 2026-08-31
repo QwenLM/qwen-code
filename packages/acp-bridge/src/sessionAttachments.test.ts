@@ -1046,7 +1046,20 @@ describe('SessionAttachmentStore', () => {
       'application/octet-stream',
       'kept.bin',
     );
+    const originalOpen = fs.open.bind(fs);
     const originalStat = fs.stat.bind(fs);
+    const open = vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
+      const handle = await originalOpen(...args);
+      if (String(args[0]) === root) {
+        const handleStat = handle.stat.bind(handle);
+        handle.stat = (async (...statArgs) => {
+          const result = await handleStat(...statArgs);
+          Object.defineProperty(result, 'ino', { value: 1 });
+          return result;
+        }) as typeof handle.stat;
+      }
+      return handle;
+    });
     const stat = vi.spyOn(fs, 'stat').mockImplementation(async (...args) => {
       const result = await originalStat(...args);
       if (String(args[0]) === root) {
@@ -1065,6 +1078,7 @@ describe('SessionAttachmentStore', () => {
         fs.stat(path.join(root, 'session-session-a', 'kept.bin')),
       ).resolves.toBeDefined();
     } finally {
+      open.mockRestore();
       stat.mockRestore();
       rename.mockRestore();
       await fs.rm(root, { recursive: true, force: true });

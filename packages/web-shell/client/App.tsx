@@ -33,7 +33,7 @@ import {
   type DaemonSessionNotice,
   type DaemonSessionOwnerSnapshot,
   type DaemonStreamingState,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import {
   DaemonHttpError,
   isDaemonTurnError,
@@ -57,12 +57,14 @@ import type {
 
 import { isGoalGateBlocked as isGoalGateBlockedFor } from './utils/goalGate';
 import { type SessionGitIntent } from './components/GitModePopover';
+import { gitModeIntentMustReset } from './utils/gitModeIntent';
 import { LocalControlQrButton } from './components/LocalControlQrButton';
 import {
   SESSION_LIST_PAGE_SIZE,
   SESSION_MONITOR_TOOL_CORRELATION_FEATURE,
   SESSION_SIDE_TASK_FEATURE,
   SESSION_TRANSCRIPT_PAGINATION_FEATURE,
+  WEB_SHELL_SESSION_SOURCE_TYPE,
   WEB_SHELL_SIDE_TASK_SOURCE_TYPE,
 } from './constants/sessions';
 import { extractPendingPermission } from './adapters/transcriptAdapter';
@@ -123,6 +125,7 @@ import { ResumeDialog } from './components/dialogs/ResumeDialog';
 import { DialogShell } from './components/dialogs/DialogShell';
 import {
   ModelDialog,
+  type ModelDialogModel,
   type ModelDialogMode,
 } from './components/dialogs/ModelDialog';
 import { ModelFallbacksDialog } from './components/dialogs/ModelFallbacksDialog';
@@ -203,6 +206,7 @@ import {
   WebShellSidebar,
   type WebShellSidebarBranding,
   type WebShellSidebarFooterOptions,
+  type WebShellSidebarWorkspaceOverviewOptions,
   type WebShellSidebarLockedWorkspace,
   type WebShellSidebarPrimaryNavOptions,
   type WebShellSidebarSessionActionsOptions,
@@ -286,7 +290,12 @@ import {
 } from './utils/composerInputState';
 import { isDefinitelyRejectedPromptAdmission } from './utils/promptAdmission';
 import { base64ToBlob } from './utils/base64';
-import type { ACPToolCall, Message, PermissionRequest } from './adapters/types';
+import type {
+  ACPToolCall,
+  CommandInfo,
+  Message,
+  PermissionRequest,
+} from './adapters/types';
 import {
   backgroundShellTaskId,
   isBackgroundSubAgentToolCall,
@@ -935,6 +944,11 @@ export interface WebShellSidebarOptions {
   footer?: false | WebShellSidebarFooterOptions;
   /** Customize the workspace row shown when lockWorkspaceCwd is active. */
   lockedWorkspace?: WebShellSidebarLockedWorkspace;
+  /**
+   * Session counts, full path and facet chips (MCP, skills, …) on workspace
+   * rows. Pass `false` to keep plain folder headers.
+   */
+  workspaceOverview?: false | WebShellSidebarWorkspaceOverviewOptions;
 }
 
 export type SessionChangeEvent =
@@ -975,12 +989,19 @@ export type WebShellSlashCommandHandler = (
 ) => boolean | void;
 
 export interface WebShellProps {
+  /** Host-specific label for the Ask User Question free-text choice. */
+  askUserFreeTextLabel?: string;
   /** Called whenever the attached daemon session or workspace changes. */
   onSessionIdChange?: (
     sessionId: string | undefined,
     workspaceId?: string,
     workspaceCwd?: string,
   ) => void;
+  /** Called when the active session id or display name changes. */
+  onSessionInfoChange?: (session: {
+    sessionId?: string;
+    sessionName?: string;
+  }) => void;
   /** Called after a new session is created. Session setup waits up to 30 seconds. */
   onSessionCreated?: (sessionId: string) => Promise<void> | void;
   /** Visual theme for the embedded shell. */
@@ -1022,6 +1043,12 @@ export interface WebShellProps {
    * a turn output such as review changes, an artifact, or a scheduled task.
    */
   onRightPanelOpen?: (request: TurnOutputOpenRequest) => void;
+  /** Override file-review links without replacing the other right panels. */
+  onFileReviewOpen?: (
+    request: Extract<TurnOutputOpenRequest, { kind: 'review' }>,
+  ) => void;
+  /** Open a completed Insight report in a host-native surface. */
+  onInsightReportOpen?: (path: string) => void;
   /**
    * Controls which turn output cards appear below messages. Defaults to all.
    */
@@ -1030,6 +1057,35 @@ export interface WebShellProps {
   shellRef?: React.Ref<WebShellApi>;
   /** Built-in composer toolbar actions to show. Defaults to all actions. */
   composerToolbarActions?: readonly ComposerToolbarAction[];
+  /** Optionally filter main-model entries without changing shared defaults. */
+  mainModelFilter?: (model: ModelDialogModel) => boolean;
+  /** Stack completion details vertically for narrow embedded hosts. */
+  compactComposerOverlays?: boolean;
+  /** Submit slash items marked as immediate actions when selected. */
+  autoSubmitSlashCommands?: boolean;
+  /** Host-only slash entries or presentation overrides. */
+  additionalSlashCommands?: readonly CommandInfo[];
+  /** Keep Context Usage available while restored-session usage is loading. */
+  contextUsageAlwaysVisible?: boolean;
+  /** Let the host expose the last user turn's edit-and-resend action. */
+  userMessageEditing?: boolean;
+  /**
+   * Called before WebShell starts its built-in user-message edit flow. Return
+   * true when the host owns the edit-and-resend lifecycle.
+   */
+  onUserMessageEditRequest?: (
+    turnIndex: number,
+    content: string,
+  ) => boolean | void;
+  /** Cycle the approval mode when an otherwise-unhandled Tab is pressed. */
+  cycleModeOnTab?: boolean;
+  /**
+   * Creator attribution recorded on sessions this shell creates, and the
+   * source filter embedded hosts use to list only their own sessions. Defaults
+   * to the browser Web Shell's `'default'`; the VS Code companion overrides it
+   * so its sessions stay distinguishable from CLI and browser ones.
+   */
+  sessionSourceType?: string;
   /** Built-in actions appended to the context-sensitive default toolbar. */
   composerToolbarAdditionalActions?: readonly ComposerToolbarAction[];
   /**
@@ -1052,7 +1108,12 @@ export interface WebShellProps {
    * at most once per animation frame during active generation.
    */
   onTranscriptChange?: (blocks: readonly DaemonTranscriptBlock[]) => void;
-  /** Called when a critical error occurs (auth failure, session gone, etc). */
+  /**
+   * Called when a critical error occurs (auth failure, session gone, etc).
+   * Each distinct connection error value is reported once; reporting resets
+   * when the connection recovers. Replacing the handler while an error
+   * persists does not re-deliver that error.
+   */
   onError?: (error: Error) => void;
   /** Called when `/bug` is invoked. Receives system info. If omitted, web-shell opens the report URL itself. */
   onBugReport?: (info: BugReportInfo) => void;
@@ -1213,6 +1274,7 @@ type PendingReasoningIntent = {
 };
 
 const emptyComposerApi: WebShellComposerApi = {
+  focus: () => {},
   insertText: () => {},
   setText: () => {},
   addTags: () => {},
@@ -1228,6 +1290,7 @@ const EMPTY_SESSION_WORKFLOW_TODOS: FloatingTodosState = {
   allCompleted: false,
   sourceMessageId: null,
 };
+const EMPTY_ADDITIONAL_SLASH_COMMANDS: readonly CommandInfo[] = [];
 const DEFAULT_CHAT_MAX_WIDTH = 1000;
 const DEFAULT_CHAT_HEADER_ITEMS: readonly WebShellChatHeaderItem[] = [
   'title',
@@ -1271,6 +1334,7 @@ function resolveSidebarOptions(sidebar: WebShellProps['sidebar']): {
   sessionActions?: WebShellSidebarSessionActionsOptions;
   footer?: false | WebShellSidebarFooterOptions;
   lockedWorkspace?: WebShellSidebarLockedWorkspace;
+  workspaceOverview?: false | WebShellSidebarWorkspaceOverviewOptions;
 } {
   if (sidebar === true) {
     return {
@@ -1299,6 +1363,7 @@ function resolveSidebarOptions(sidebar: WebShellProps['sidebar']): {
     sessionActions: sidebar.sessionActions,
     footer: sidebar.footer,
     lockedWorkspace: sidebar.lockedWorkspace,
+    workspaceOverview: sidebar.workspaceOverview,
   };
 }
 
@@ -1986,7 +2051,9 @@ function readScopedModelSetting(
 }
 
 export function App({
+  askUserFreeTextLabel,
   onSessionIdChange,
+  onSessionInfoChange,
   onSessionCreated,
   theme: providedTheme,
   onThemeChange,
@@ -2034,9 +2101,20 @@ export function App({
   onSplitSessionIdsChange,
   renderPaneHeaderActions,
   onRightPanelOpen,
+  onFileReviewOpen,
+  onInsightReportOpen,
   messageTurnOutputs,
   shellRef,
   composerToolbarActions,
+  mainModelFilter,
+  compactComposerOverlays = false,
+  autoSubmitSlashCommands = false,
+  additionalSlashCommands = EMPTY_ADDITIONAL_SLASH_COMMANDS,
+  contextUsageAlwaysVisible = false,
+  userMessageEditing = false,
+  onUserMessageEditRequest,
+  cycleModeOnTab = false,
+  sessionSourceType = WEB_SHELL_SESSION_SOURCE_TYPE,
   composerToolbarAdditionalActions,
   composerPlaceholders,
   compactThinking = false,
@@ -2246,6 +2324,7 @@ export function App({
   ]);
   const customization = useMemo(
     () => ({
+      askUserFreeTextLabel,
       composerTagIcons,
       builtinAtProviders,
       atProviders,
@@ -2273,6 +2352,7 @@ export function App({
       fileUploadDirectory,
     }),
     [
+      askUserFreeTextLabel,
       composerTagIcons,
       builtinAtProviders,
       atProviders,
@@ -3906,6 +3986,10 @@ export function App({
   );
   const handleTurnOutputOpen = useCallback(
     (request: TurnOutputOpenRequest) => {
+      if (request.kind === 'review' && onFileReviewOpen) {
+        onFileReviewOpen(request);
+        return;
+      }
       if (onRightPanelOpen) {
         onRightPanelOpen(request);
         return;
@@ -4003,6 +4087,7 @@ export function App({
     },
     [
       getDefaultReviewPanelWidth,
+      onFileReviewOpen,
       onRightPanelOpen,
       openReviewPanel,
       openScheduledTaskPanel,
@@ -6062,9 +6147,17 @@ export function App({
     return false;
   }, [pushToast, t]);
   const sessionDisplayName = connection.displayName ?? sessionStatusDisplayName;
+  useEffect(() => {
+    onSessionInfoChange?.({
+      sessionId: connection.sessionId,
+      sessionName: sessionDisplayName,
+    });
+  }, [connection.sessionId, onSessionInfoChange, sessionDisplayName]);
   const [currentMode, setCurrentMode] = useState('default');
   const currentModeRef = useRef(currentMode);
   currentModeRef.current = currentMode;
+  const sessionSourceTypeRef = useRef(sessionSourceType);
+  sessionSourceTypeRef.current = sessionSourceType;
   const setPendingMode = useCallback((modeId: string) => {
     currentModeRef.current = modeId;
     setCurrentMode(modeId);
@@ -6211,6 +6304,7 @@ export function App({
             gitModeIntentRef.current.mode === 'branch'
               ? { name: gitModeIntentRef.current.name }
               : undefined,
+          sessionSourceType: sessionSourceTypeRef.current,
           onSessionCreated: onSessionCreatedRef.current,
           onSessionAllocated: (sessionId) => {
             preparingSessionIdRef.current = sessionId;
@@ -6728,17 +6822,39 @@ export function App({
   const gitDiffWorkspaceCwd = isKnownLiveWorkspaceCwd(activeWorkspaceCwd)
     ? undefined
     : activeWorkspaceCwd;
+  const activeWorkspaceTrusted = ordinaryWorkspaces.find(
+    (entry) => entry.cwd === activeWorkspaceCwd,
+  )?.trusted;
   const gitModeEligible = Boolean(
     !connection.sessionId &&
-      ordinaryWorkspaces.find((entry) => entry.cwd === activeWorkspaceCwd)
-        ?.trusted &&
+      activeWorkspaceTrusted &&
       selectedWorkspaceGitStatus?.branch,
   );
+  // An armed branch/worktree intent survives a transient status gap (a
+  // failed poll round, a refetch still in flight); only a definitive answer
+  // clears it. The chip stays hidden meanwhile because it keys on
+  // `gitModeEligible`.
+  // The status is keyed by workspace: right after a draft re-target the
+  // state still holds the previous workspace's answer (the git-status effect
+  // clears it only after this commit), and a definitive no-branch answer for
+  // the workspace being left must not clear an intent armed for the new one.
+  // Same cwd-keying as the `git_status_changed` mirror effect above.
+  const gitModeIntentInvalid = gitModeIntentMustReset({
+    sessionId: connection.sessionId,
+    workspaceTrusted: activeWorkspaceTrusted,
+    gitStatus:
+      selectedWorkspaceGitStatus?.workspaceCwd === activeWorkspaceCwd
+        ? selectedWorkspaceGitStatus
+        : undefined,
+  });
+  // Re-run on intent changes as well: an intent set while a session already
+  // exists (or the workspace is untrusted / not a repo) has nothing to apply
+  // to and must not survive into the next draft.
   useEffect(() => {
-    if (!gitModeEligible) {
+    if (gitModeIntentInvalid && gitModeIntent.mode !== 'current') {
       setGitModeIntent({ mode: 'current' });
     }
-  }, [gitModeEligible]);
+  }, [gitModeIntentInvalid, gitModeIntent]);
   const handleOpenGitDiff = useCallback(() => {
     if (!gitDiffWorkspaceCwd) return;
     setGitDialog({
@@ -8303,11 +8419,21 @@ export function App({
     onConnectionChange?.(connection.status);
   }, [connection.status, onConnectionChange]);
 
+  // Report each distinct connection.error value only once. Hosts may pass an
+  // inline onError (or one whose identity changes) and update their own state
+  // when it fires; the resulting re-render then hands this effect a fresh
+  // callback identity, which would re-notify the same persistent error
+  // forever (#10406).
+  const lastReportedConnectionErrorRef = useRef<string | undefined>(undefined);
   useEffect(() => {
-    if (connection.error) {
-      const error = new Error(connection.error);
-      onError?.(error);
+    if (!connection.error) {
+      lastReportedConnectionErrorRef.current = undefined;
+      return;
     }
+    if (lastReportedConnectionErrorRef.current === connection.error) return;
+    if (!onError) return;
+    lastReportedConnectionErrorRef.current = connection.error;
+    onError(new Error(connection.error));
   }, [connection.error, onError]);
 
   useLayoutEffect(() => {
@@ -8547,6 +8673,9 @@ export function App({
   ]);
 
   const handleCycleMode = useCallback(() => {
+    // findIndex, not indexOf: narrowing currentMode to the tuple member type
+    // silently degrades when the SDK's declaration bundle leaves its
+    // permission-mode import dangling, and the build must survive both states.
     const idx = MODES_CYCLE.findIndex((mode) => mode === currentMode);
     const next = MODES_CYCLE[(idx + 1) % MODES_CYCLE.length];
     handleSetMode(next);
@@ -8708,16 +8837,33 @@ export function App({
   const createNewSession = useCallback(
     async (
       workspaceCwd?: string,
-      /** Preserve the current full-page view and/or active panel while clearing. */
-      opts?: { keepView?: boolean; keepPanel?: boolean },
+      opts?: {
+        /** Preserve the current full-page view and/or active panel while clearing. */
+        keepView?: boolean;
+        keepPanel?: boolean;
+        /**
+         * Git mode the new draft starts with. Set here, in the same
+         * synchronous step that resets the previous intent, so the very
+         * first prompt — even one submitted while the clear is still in
+         * flight — sees it, and no later arm can land on a draft that has
+         * since been re-targeted or turned into a session.
+         */
+        gitIntent?: SessionGitIntent;
+      },
     ) => {
       const targetWorkspaceCwd = lockedWorkspaceCwd ?? workspaceCwd;
       composerSourceVersionRef.current += 1;
       selectedWorkspaceCwdRef.current = targetWorkspaceCwd;
       setSelectedWorkspaceCwd(targetWorkspaceCwd);
       // Starting a fresh chat drops any pending git mode intent so it never
-      // leaks into the next created session.
-      setGitModeIntent({ mode: 'current' });
+      // leaks into the next created session; a caller-supplied intent takes
+      // its place. The ref is written too so a prompt admitted before the
+      // next render reads the same answer.
+      const nextGitIntent: SessionGitIntent = opts?.gitIntent ?? {
+        mode: 'current',
+      };
+      gitModeIntentRef.current = nextGitIntent;
+      setGitModeIntent(nextGitIntent);
       // Close the drawer before awaiting so a failed createSession() doesn't leave
       // it stuck open with the page scroll still locked, matching loadSidebarSession.
       closeMobileDrawer();
@@ -8792,9 +8938,17 @@ export function App({
           await createNewSession(workspaceCwd);
           return;
         }
+        // The composer picker fires for its checked row too; re-selecting
+        // the draft's own workspace changes nothing and must keep an armed
+        // intent. Compared before the ref is overwritten below. `undefined`
+        // is the primary selection on both sides.
+        const sameTarget = workspaceCwd === selectedWorkspaceCwdRef.current;
         composerSourceVersionRef.current += 1;
         selectedWorkspaceCwdRef.current = workspaceCwd;
         setSelectedWorkspaceCwd(workspaceCwd);
+        // The intent was armed for the previous draft workspace; a switch
+        // must not carry a branch/worktree request over to another repo.
+        if (!sameTarget) setGitModeIntent({ mode: 'current' });
       } finally {
         if (workspaceSwitchTokenRef.current === token) {
           workspaceSwitchTokenRef.current = null;
@@ -9747,6 +9901,35 @@ export function App({
         .rewindSession(promptId, { rewindFiles: false })
         .then(() => undefined),
     [sessionActions],
+  );
+
+  const editUserMessage = useCallback(
+    async (turnIndex: number, content: string) => {
+      if (onUserMessageEditRequest?.(turnIndex, content) === true) return;
+
+      const restoreComposer = () => {
+        editorRef.current?.setText(content);
+        editorRef.current?.focus();
+      };
+
+      restoreComposer();
+      window.setTimeout(restoreComposer, 0);
+      try {
+        const { snapshots } = await sessionActions.getRewindSnapshots();
+        const snapshot = snapshots.find(
+          (entry) => entry.turnIndex === turnIndex,
+        );
+        if (!snapshot) throw new Error(t('rewind.empty'));
+        await sessionActions.rewindSession(snapshot.promptId, {
+          rewindFiles: false,
+        });
+      } catch (error) {
+        reportError(error, t('rewind.failed', { reason: String(error) }));
+      } finally {
+        restoreComposer();
+      }
+    },
+    [onUserMessageEditRequest, reportError, sessionActions, t],
   );
 
   const handleRewindError = useCallback(
@@ -11721,14 +11904,23 @@ export function App({
 
   const handleDeleteModel = useCallback(
     (target: { authType: string; modelId: string; baseUrl?: string }) => {
+      const owner = sessionOwnerGuard.capture();
       const modelActionToken = ++modelActionTokenRef.current;
       setModelActionBusy(true);
       workspaceActions
         .deleteModel(target)
         .then((result) => {
+          if (owner.isCurrent() && result?.runtimeSync?.status === 'failed') {
+            store.dispatch([
+              {
+                type: 'status',
+                text: t('settings.models.runtimeSyncFailed'),
+              },
+            ]);
+          }
           // A scrubbed fallback requires a restart — surface it like the
           // settings panel does.
-          if (result?.requiresRestart) {
+          if (owner.isCurrent() && result?.requiresRestart) {
             store.dispatch([
               { type: 'status', text: t('settings.requiresRestart') },
             ]);
@@ -11750,6 +11942,7 @@ export function App({
           });
         })
         .catch((error: unknown) => {
+          if (!owner.isCurrent()) return;
           reportError(error, t('settings.models.deleteFailed'));
         })
         .finally(() => {
@@ -11765,6 +11958,7 @@ export function App({
       reloadProviders,
       reloadWorkspaceSettings,
       reportError,
+      sessionOwnerGuard,
       store,
       t,
     ],
@@ -11987,6 +12181,7 @@ export function App({
         retainedCommands,
         refreshedSkillCommands,
         getLocalCommands(t, { sideTaskAvailable: sideTasksAvailable }),
+        [...additionalSlashCommands],
       ),
       t,
     )
@@ -12003,6 +12198,7 @@ export function App({
         };
       });
   }, [
+    additionalSlashCommands,
     connection.commands,
     connection.skills,
     hiddenCommands,
@@ -12429,6 +12625,9 @@ export function App({
               <ModelDialog
                 mode={modelDialogMode}
                 models={modelDialogMode === 'voice' ? voiceModels : undefined}
+                filterModel={
+                  modelDialogMode === 'main' ? mainModelFilter : undefined
+                }
                 currentModelId={
                   modelDialogMode === 'voice'
                     ? currentVoiceModel
@@ -12813,7 +13012,11 @@ export function App({
                   mobileOpen={mobileDrawerOpen}
                   onMobileClose={closeMobileDrawer}
                   selectedWorkspaceCwd={selectedWorkspaceCwd}
-                  onSelectWorkspace={setSelectedWorkspaceCwd}
+                  onSelectWorkspace={(workspaceCwd) => {
+                    setSelectedWorkspaceCwd(workspaceCwd);
+                    // Same one-shot rule as the composer's own selector.
+                    setGitModeIntent({ mode: 'current' });
+                  }}
                   onOpenGitDiff={(workspaceCwd) =>
                     setGitDialog({
                       workspaceCwd,
@@ -12846,6 +13049,20 @@ export function App({
                   workspaces={workspaces}
                   lockedWorkspaceCwd={lockedWorkspaceCwd}
                   lockedWorkspace={sidebarOptions.lockedWorkspace}
+                  workspaceOverview={sidebarOptions.workspaceOverview}
+                  onOpenWorkspaceManagement={(target) => {
+                    closeMobileDrawer();
+                    openPanel(target);
+                  }}
+                  onNewWorktreeSession={(workspaceCwd) =>
+                    // The intent travels with the draft it belongs to: set
+                    // inside createNewSession's synchronous step, it is what
+                    // the first prompt reads, and any later session start or
+                    // workspace switch resets it like any other intent.
+                    createNewSession(workspaceCwd, {
+                      gitIntent: { mode: 'worktree' },
+                    })
+                  }
                   branding={sidebarOptions.branding}
                   primaryNav={sidebarOptions.primaryNav}
                   showSessionSourceSwitch={
@@ -13729,6 +13946,15 @@ export function App({
                                     : visibleFailedPromptBlock?.id
                                 }
                                 onRetryFailedPrompt={handleFailedPromptRetry}
+                                onEditUserMessage={
+                                  userMessageEditing
+                                    ? (turnIndex, content) =>
+                                        void editUserMessage(
+                                          turnIndex,
+                                          content,
+                                        )
+                                    : undefined
+                                }
                                 onBranchSession={handleBranchCurrentSession}
                                 bottomOverlayInset={bottomPanelInset}
                                 welcomeHeader={
@@ -13761,6 +13987,7 @@ export function App({
                                 onTurnOutputOpen={handleTurnOutputOpen}
                                 onImagePreview={openImagePanel}
                                 onAttachmentPreview={openAttachmentPanel}
+                                onInsightReportOpen={onInsightReportOpen}
                                 onReviewChanges={openReviewPanel}
                                 onOpenArtifact={openArtifactPanel}
                                 onOpenScheduledTask={openScheduledTaskPanel}
@@ -13923,6 +14150,7 @@ export function App({
                             onError={reportError}
                             variant="floating"
                             keyboardActive={askUserOverlayVisible}
+                            customInputLabel={askUserFreeTextLabel}
                           />
                         </div>
                       )}
@@ -14089,6 +14317,7 @@ export function App({
                         )}
                         <ChatEditor
                           ref={setEditorHandle}
+                          compactOverlays={compactComposerOverlays}
                           onSubmit={handleEditorSubmit}
                           onInputTextChange={handleComposerTextChange}
                           onAttachmentsChange={
@@ -14098,6 +14327,7 @@ export function App({
                           onImagePreview={openImagePanel}
                           onAttachmentPreview={openAttachmentPanel}
                           onCycleMode={handleCycleMode}
+                          cycleModeOnTab={cycleModeOnTab}
                           onToggleShortcuts={handleToggleShortcuts}
                           onCancel={handleCancel}
                           isRunning={
@@ -14118,6 +14348,7 @@ export function App({
                           commands={commands}
                           skills={composerSkills}
                           slashCommandCategoryOrder={slashCommandCategoryOrder}
+                          autoSubmitSlashCommands={autoSubmitSlashCommands}
                           builtinAtProviders={builtinAtProviders}
                           atProviders={atProviders}
                           composerTagIcons={composerTagIcons}
@@ -14156,6 +14387,9 @@ export function App({
                           visibleToolbarActions={visibleComposerToolbarActions}
                           tokenCount={connection.tokenCount ?? 0}
                           contextWindow={connection.contextWindow ?? 0}
+                          contextUsageAlwaysVisible={
+                            contextUsageAlwaysVisible
+                          }
                           onShowContextUsage={handleShowContextUsage}
                           availableModels={availableModels}
                           onSelectMode={handleSetMode}

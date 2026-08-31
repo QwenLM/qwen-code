@@ -631,17 +631,6 @@ const SETTINGS_SCHEMA = {
           'or set a specific language.',
         showInDialog: true,
       },
-      dynamicCommandTranslation: {
-        type: 'boolean',
-        label: 'Language: Dynamic Command Translation',
-        category: 'General',
-        requiresRestart: false,
-        default: false,
-        description:
-          'Enable AI translation for dynamic slash command descriptions. ' +
-          'When disabled, dynamic commands use their original descriptions and do not trigger translation model calls.',
-        showInDialog: true,
-      },
       terminalBell: {
         type: 'boolean',
         label: 'Terminal Bell Notification',
@@ -1606,6 +1595,16 @@ const SETTINGS_SCHEMA = {
           'Run-level wall-clock budget for headless / unattended runs, in seconds. -1 means unlimited; otherwise must be in [1, ~2,147,483] (sub-second values and values above ~24 days are rejected as typos). Overridable per-invocation via --max-wall-time (which also accepts duration suffixes like 5m, 1.5h).',
         showInDialog: false,
       },
+      goalTokenBudget: {
+        type: 'integer',
+        label: 'Goal Token Budget',
+        category: 'Model',
+        requiresRestart: false,
+        default: undefined as number | undefined,
+        description:
+          'Autonomous spend window armed on each new Goal, in tokens as counted by the Goal meter (totalTokenCount summed over every model call the Goal makes in its own turns; side queries and checkpoint verification are not metered). When a Goal spends its window it gets one wind-down turn to hand off, then stops until you resume it, which arms another window. Unset uses the built-in default of 30,000,000; -1 means unlimited. Zero, values above 300,000,000 (10x the default, a typo guard), other negative, fractional, or non-number values are rejected at startup.',
+        showInDialog: false,
+      },
       maxToolCalls: {
         type: 'number',
         label: 'Max Tool Calls',
@@ -2534,6 +2533,31 @@ const SETTINGS_SCHEMA = {
               'environments.',
             showInDialog: false,
           },
+          mcp: {
+            type: 'object',
+            label: 'Auto Mode MCP Tools',
+            category: 'Tools',
+            requiresRestart: true,
+            default: {},
+            description: 'AUTO classifier controls for third-party MCP tools.',
+            showInDialog: false,
+            properties: {
+              forwardArguments: {
+                type: 'boolean',
+                label: 'Forward MCP Arguments To Classifier',
+                category: 'Tools',
+                requiresRestart: true,
+                default: true,
+                description:
+                  'Forward MCP tool arguments (bounded and truncated) to the ' +
+                  'AUTO classifier so it can judge what the agent is about ' +
+                  'to send to the server. When false the classifier sees ' +
+                  'only the tool name, which usually results in a ' +
+                  'conservative block.',
+                showInDialog: false,
+              },
+            },
+          },
         },
       },
     },
@@ -3280,7 +3304,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: false,
         description:
-          'Experimental. Let Qwen Code sessions on this machine send each other messages over a per-session local socket. Off by default; turning it on both opens this session to peer messages and makes it discoverable to others.',
+          'Experimental. Let Qwen Code sessions on this machine send each other messages over a per-session local socket. Off by default; turning it on opens this session to peer messages, makes it discoverable to others, and lets its model address them from send_message.',
         showInDialog: false,
       },
       crossSessionInbound: {
