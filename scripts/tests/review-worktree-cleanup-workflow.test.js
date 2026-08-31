@@ -347,6 +347,14 @@ describe('review worktree cleanup steps', () => {
       const restoreIdx = steps.findIndex(
         (s) => s.name === 'Restore workspace ownership',
       );
+      // Existence, not just ordering: with the step gone restoreIdx is -1
+      // and the ordering comparison below still passes, while root-owned
+      // leftovers defeat the sweep and the checkout again (the EACCES
+      // incident class the restore step exists for).
+      expect(
+        restoreIdx,
+        `job "${id}" lost its ownership restore`,
+      ).toBeGreaterThan(-1);
       expect(cleanIdx, id).toBeGreaterThan(restoreIdx);
       expect(cleanIdx, id).toBeLessThan(checkoutIdx);
       expectCleanupRecipe(run);
