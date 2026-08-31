@@ -366,7 +366,18 @@ gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body-file /tmp/stag
     identical line text occurs many times (blank lines make
     this commonplace), so one occurrence in the closer's patch covers
     exactly one occurrence in this PR's patch — a closer that deletes
-    one blank line never covers this PR deleting three. A section with
+    one blank line never covers this PR deleting three. These occurrences
+    are matched hunk by hunk, never anywhere in the file: an added or
+    deleted line is covered only when the counterpart's matched section
+    carries the same line text in a hunk
+    at a corresponding position with matching surrounding context lines —
+    a closer that deletes a given line inside one function never covers
+    this PR deleting the same line text inside a sibling function, even
+    though each patch deletes that line exactly once at the same path —
+    and when the same line text is added or deleted in more than one
+    hunk of either patch, the occurrences cannot be paired
+    one-to-one by position, so that line text cannot establish coverage.
+    A section with
     no line-level
     representation (a pure rename, a binary, a mode change, an empty
     file) is covered only by an equivalent change to the same path in
@@ -379,12 +390,21 @@ gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body-file /tmp/stag
     while keeping the file (an emptied result, `index <hash>..e69de29`)
     leaves the file on the default branch and does not cover the
     deletion, and symmetrically a creation (`--- /dev/null` /
-    `new file mode`) is covered only by a same-path creation; mode
-    values — wherever a mode header appears (`new file mode`,
-    `deleted file mode`, or an `old mode`/`new mode` pair), with or
-    without content lines, the counterpart must carry the same mode
-    value or values, because a blob encodes content, not mode, so
-    identical content under 100644 does not cover 100755; rename pairs
+    `new file mode`) is covered only by a same-path creation, and
+    the kind binds both ways — when the counterpart section is a
+    deletion or a creation, this PR's own section must be of the same
+    kind, because a closer that deletes a file this PR merely modifies
+    leaves the default branch without the file this PR's patch edits,
+    so the modification never landed; mode values — wherever a mode
+    header appears (`new file mode`, `deleted file mode`, or an
+    `old mode`/`new mode` pair), with or without content lines,
+    the counterpart must carry the same mode value or values, and
+    the match is directional for an `old mode`/`new mode` pair — the
+    counterpart's `old mode` against this section's `old mode` and its
+    `new mode` against its `new mode` — because the unordered pair
+    cannot tell a change from its reversal, and a blob encodes content,
+    not mode, so identical content under 100644 does not cover 100755;
+    rename pairs
     — any section carrying `rename from`/`rename to` headers requires
     the identical pair in the counterpart, same source and same target,
     whether or not the section also edits content; blob hashes — a
@@ -416,13 +436,19 @@ gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body-file /tmp/stag
   - **Any remaining delta** — no closer fully subsumes this PR: for each
     closer, an added production line ITS patch does not add, a deleted
     production line ITS patch does not delete, a line ITS patch adds or
-    deletes fewer times than this PR does, any non-production change, or a
-    section with no line-level representation (rename, binary, mode change,
+    deletes fewer times than this PR does, an added or deleted production
+    line ITS patch carries only at a non-corresponding hunk position or
+    without matching surrounding context lines, a line text
+    that either patch adds or deletes in more than one hunk,
+    any non-production change, or a section with no line-level
+    representation (rename, binary, mode change,
     empty file) ITS patch does not equivalently change at the same path —
     where "equivalently" is the structural test above: a deletion ITS
     patch does not also perform at the same path
-    (emptying a file is not deleting it), a mode value, a rename from/to
-    pair, a resulting blob hash of a line-less section, or a
+    (emptying a file is not deleting it), a counterpart deletion or
+    creation this PR's own section does not match in kind, a mode value,
+    an `old mode`/`new mode` pair matched in the wrong direction, a rename
+    from/to pair, a resulting blob hash of a line-less section, or a
     trailing-newline state ITS counterpart section does not match
     → submit exactly one `CHANGES_REQUESTED` review: name the resolved
     closers,

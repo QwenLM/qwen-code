@@ -7330,6 +7330,25 @@ describe('stage 1-pre duplicate gate', () => {
     expect(section).toContain('the identical pair in the counterpart');
     expect(section).toContain('covered only when the resulting blob hash');
     expect(section).toContain('No newline at end of file');
+    // Position, mode orientation, and existence converse: occurrence
+    // counts alone cannot say WHERE in a file a covered line lands, so a
+    // closer deleting a line inside one function covers this PR deleting
+    // the same line text inside a sibling function (one deletion each at
+    // the same path, every written structural clause agrees) while the
+    // default branch still carries the line; an unordered mode value pair
+    // cannot tell a change from its reversal; and a counterpart that
+    // deletes a file this PR merely modifies leaves the default branch
+    // without the edited file. Each pin is unique to its clause:
+    // removing any one clause must turn its pin red.
+    expect(section).toContain(
+      'matched hunk by hunk, never anywhere in the file',
+    );
+    expect(section).toContain(
+      'at a corresponding position with matching surrounding context lines',
+    );
+    expect(section).toContain('one-to-one by position');
+    expect(section).toContain('the match is directional');
+    expect(section).toContain('the kind binds both ways');
   });
 
   it('never closes a diff with no production changes', () => {
@@ -7394,6 +7413,15 @@ describe('stage 1-pre duplicate gate', () => {
       'where "equivalently" is the structural test above',
     );
     expect(section).toContain('emptying a file is not deleting it');
+    // The position, mode-orientation, and existence-converse criteria
+    // are mirrored in negated form, keeping the enumeration the exact
+    // negation of the definition.
+    expect(section).toContain('non-corresponding hunk position');
+    expect(section).toContain(
+      'that either patch adds or deletes in more than one hunk',
+    );
+    expect(section).toContain('does not match in kind');
+    expect(section).toContain('matched in the wrong direction');
   });
 
   it('guards every patch fetch fail-closed', () => {
