@@ -264,6 +264,42 @@ export function useSessionCatalogController(client: DaemonClient) {
           store.invalidateWorkspace(workspaceCwd, { interactive: true }),
         );
       },
+      invalidateSessionLists(
+        workspaceCwd: string,
+        archiveStates: ReadonlyArray<DaemonSessionArchiveState>,
+        options: { interactive?: boolean } = {},
+      ) {
+        update(() =>
+          store.invalidateSessionLists(workspaceCwd, archiveStates, options),
+        );
+      },
+      patchSession(
+        workspaceCwd: string,
+        sessionId: string,
+        patch: Partial<
+          Omit<DaemonSessionSummary, 'sessionId' | 'workspaceCwd'>
+        >,
+      ) {
+        update(() => store.patchSession(workspaceCwd, sessionId, patch));
+      },
+      removeSession(
+        workspaceCwd: string,
+        sessionId: string,
+        options: {
+          archiveStates?: ReadonlyArray<DaemonSessionArchiveState>;
+        } = {},
+      ) {
+        update(() => store.removeSession(workspaceCwd, sessionId, options));
+      },
+      addSession(
+        workspaceCwd: string,
+        session: DaemonSessionSummary,
+        options: {
+          archiveStates?: ReadonlyArray<DaemonSessionArchiveState>;
+        } = {},
+      ) {
+        update(() => store.addSession(workspaceCwd, session, options));
+      },
       sessionCreated(workspaceCwd: string, _sessionId: string) {
         update(() => {
           store.invalidateWorkspace(workspaceCwd);
@@ -427,25 +463,37 @@ export function useWebShellSessions(options: WebShellSessionsOptions = {}) {
     },
     [invalidate, workspace.actions],
   );
+  // An archive move only shifts the session between the active and archived
+  // lists, so a targeted invalidation suffices; the workspace-wide invalidate
+  // would also refetch unrelated queries of the same workspace.
+  const invalidateArchiveLists = useCallback(() => {
+    // Interactive, mirroring refreshWorkspace: the user just triggered the
+    // archive move, so the reconcile must not sit through a retry backoff.
+    if (workspaceCwd) {
+      controller.invalidateSessionLists(workspaceCwd, ['active', 'archived'], {
+        interactive: true,
+      });
+    }
+  }, [controller, workspaceCwd]);
   const archiveSession = useCallback(
     async (sessionId: string) => {
       try {
         return await workspace.actions.archiveSession(sessionId);
       } finally {
-        invalidate();
+        invalidateArchiveLists();
       }
     },
-    [invalidate, workspace.actions],
+    [invalidateArchiveLists, workspace.actions],
   );
   const unarchiveSession = useCallback(
     async (sessionId: string) => {
       try {
         return await workspace.actions.unarchiveSession(sessionId);
       } finally {
-        invalidate();
+        invalidateArchiveLists();
       }
     },
-    [invalidate, workspace.actions],
+    [invalidateArchiveLists, workspace.actions],
   );
   const releaseSession = useCallback(
     async (sessionId: string) => {
