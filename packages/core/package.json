@@ -77,6 +77,7 @@
     "@opentelemetry/instrumentation-http": "^0.221.0",
     "@opentelemetry/instrumentation-undici": "^0.31.0",
     "@opentelemetry/sdk-node": "^0.221.0",
+    "@qwen-code/channel-base": "file:../channels/base",
     "@xterm/headless": "5.5.0",
     "ajv": "^8.17.1",
     "ajv-formats": "^3.0.0",

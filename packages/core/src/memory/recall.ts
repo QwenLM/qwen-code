@@ -5,6 +5,10 @@
  */
 
 import * as path from 'node:path';
+import {
+  codePointBigrams,
+  normalizeRecallText,
+} from '@qwen-code/channel-base/recallTokenizer';
 import type { Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
@@ -102,10 +106,6 @@ const RECALL_TOKEN_RUN = new RegExp(
 /** Whether a matched run is CJK, and therefore bigram-tokenized. */
 const CJK_RUN_START = new RegExp(`^${CJK_CLASS}`, 'u');
 
-function normalizeRecallText(text: string): string {
-  return text.normalize('NFKC').toLowerCase();
-}
-
 function tokenize(text: string): string[] {
   const normalized = normalizeRecallText(text);
   const edgeSize = MAX_HEURISTIC_QUERY_TOKENS / 2;
@@ -131,10 +131,8 @@ function tokenize(text: string): string[] {
   for (const match of normalized.matchAll(RECALL_TOKEN_RUN)) {
     const run = match[0];
     if (CJK_RUN_START.test(run)) {
-      let previous = '';
-      for (const codePoint of run) {
-        if (previous) addToken(previous + codePoint);
-        previous = codePoint;
+      for (const bigram of codePointBigrams(run)) {
+        addToken(bigram);
       }
     } else {
       addToken(run);
