@@ -210,6 +210,29 @@ describe('WorkspaceSessionProvider targets', () => {
     });
   });
 
+  it('drops an unavailable explicit context for a primary new session', async () => {
+    await act(async () => {
+      root.render(
+        <WorkspaceSessionProvider
+          sessionId="session-missing"
+          sessionContext={{ kind: 'workspace', cwd: '/work/missing' }}
+          webShellProps={{}}
+        />,
+      );
+    });
+
+    const startFresh = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'New session',
+    );
+    await act(async () => startFresh?.click());
+
+    expect(mocks.providerProps.at(-1)).toMatchObject({
+      sessionId: undefined,
+      sessionContext: undefined,
+      workspaceCwd: undefined,
+    });
+  });
+
   it('does not keep the previous app visible while a target is unresolved', async () => {
     const onSessionIdChange = await renderTarget('session-a', '/work/a');
     mocks.workspace = {

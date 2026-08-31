@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   archive: vi.fn(),
   unarchive: vi.fn(),
   rename: vi.fn(),
+  exportSession: vi.fn(),
   t: vi.fn((key: string) => key),
   workspace: {} as Record<string, unknown>,
 }));
@@ -65,7 +66,22 @@ describe('StandaloneRecents', () => {
     mocks.archive.mockReset();
     mocks.unarchive.mockReset();
     mocks.rename.mockReset();
+    mocks.exportSession.mockReset();
     mocks.rename.mockResolvedValue(undefined);
+    mocks.exportSession.mockResolvedValue({
+      content: '<p>chat</p>',
+      filename: 'chat.html',
+      mimeType: 'text/html',
+    });
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: vi.fn(() => 'blob:standalone-export'),
+    });
+    Object.defineProperty(URL, 'revokeObjectURL', {
+      configurable: true,
+      value: vi.fn(),
+    });
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
     mocks.list.mockImplementation(
       async ({ archiveState }: { archiveState: string }) => ({
         sessions:
@@ -84,6 +100,7 @@ describe('StandaloneRecents', () => {
         archiveStandaloneSessions: mocks.archive,
         unarchiveStandaloneSessions: mocks.unarchive,
         renameStandaloneSession: mocks.rename,
+        exportStandaloneSession: mocks.exportSession,
       },
     };
     container = document.createElement('div');
@@ -94,6 +111,7 @@ describe('StandaloneRecents', () => {
   afterEach(() => {
     act(() => root.unmount());
     container.remove();
+    vi.restoreAllMocks();
   });
 
   async function render(
@@ -148,6 +166,65 @@ describe('StandaloneRecents', () => {
       archiveState: 'archived',
       pageSize: 50,
     });
+  });
+
+  it('preserves appended active pages across export and archived expansion', async () => {
+    mocks.list.mockImplementation(
+      async ({
+        archiveState,
+        cursor,
+      }: {
+        archiveState: string;
+        cursor?: string;
+      }) => {
+        if (archiveState === 'archived') {
+          return {
+            sessions: [
+              summary('archived', 'Archived chat', { isArchived: true }),
+            ],
+          };
+        }
+        return cursor === 'page-2'
+          ? { sessions: [summary('page-2', 'Page two chat')] }
+          : {
+              sessions: [summary('page-1', 'Page one chat')],
+              nextCursor: 'page-2',
+            };
+      },
+    );
+    await render();
+    const showAll = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'sidebar.showAllSessions',
+    );
+    await act(async () => showAll?.click());
+    expect(container.textContent).toContain('Page two chat');
+
+    const exportButtons = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).filter((button) => button.textContent === 'sidebar.export');
+    await act(async () => exportButtons.at(-1)?.click());
+    await vi.waitFor(() => expect(mocks.exportSession).toHaveBeenCalledOnce());
+    expect(container.textContent).toContain('Page two chat');
+    expect(
+      mocks.list.mock.calls.filter(
+        ([options]) =>
+          options.archiveState === 'active' && options.cursor === undefined,
+      ),
+    ).toHaveLength(1);
+
+    const archivedToggle = Array.from(
+      container.querySelectorAll('button'),
+    ).find((button) => button.textContent?.includes('sidebar.archivedTitle'));
+    await act(async () => archivedToggle?.click());
+
+    expect(container.textContent).toContain('Page two chat');
+    expect(container.textContent).toContain('Archived chat');
+    expect(
+      mocks.list.mock.calls.filter(
+        ([options]) =>
+          options.archiveState === 'active' && options.cursor === undefined,
+      ),
+    ).toHaveLength(1);
   });
 
   it('reports a failed standalone session open', async () => {

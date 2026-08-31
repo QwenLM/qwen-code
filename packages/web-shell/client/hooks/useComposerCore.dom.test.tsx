@@ -473,6 +473,21 @@ describe('useComposerCore history and drafts', () => {
     ).toEqual(['standalone prompt']);
   });
 
+  it('keeps legacy prompt history available in the Live scope', async () => {
+    localStorage.setItem(
+      getPromptHistoryStorageKey(),
+      JSON.stringify(['legacy Live prompt']),
+    );
+    await mount({
+      sessionId: 'session-a',
+      composerScopeKey: 'live',
+      disableLegacyHistoryFallback: false,
+    });
+
+    act(() => pressHistoryKey('ArrowUp'));
+    expect(latest!.getText()).toBe('legacy Live prompt');
+  });
+
   it('resets history navigation when the session changes', async () => {
     const mounted = await mount({
       sessionId: 'session-a',

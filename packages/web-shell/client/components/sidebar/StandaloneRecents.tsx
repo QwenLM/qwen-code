@@ -68,6 +68,17 @@ function appendUnique(
   ];
 }
 
+function mergeRefreshedPage(
+  current: readonly DaemonStandaloneSessionSummary[],
+  refreshed: readonly DaemonStandaloneSessionSummary[],
+): DaemonStandaloneSessionSummary[] {
+  const refreshedIds = new Set(refreshed.map((session) => session.sessionId));
+  return [
+    ...refreshed,
+    ...current.filter((session) => !refreshedIds.has(session.sessionId)),
+  ];
+}
+
 function downloadExport(result: {
   content: string;
   filename: string;
@@ -101,16 +112,20 @@ export function StandaloneRecents({
   const streamingState = useStreamingState();
   const previousStreamingStateRef = useRef(streamingState);
   const loadGenerationRef = useRef(0);
+  const archivedLoadGenerationRef = useRef(0);
   const busySessionIdRef = useRef<string | undefined>(undefined);
   const { t } = useI18n();
   const [active, setActive] = useState<DaemonStandaloneSessionSummary[]>([]);
+  const activeRef = useRef(active);
+  activeRef.current = active;
   const [archived, setArchived] = useState<DaemonStandaloneSessionSummary[]>(
     [],
   );
   const [activeCursor, setActiveCursor] = useState<string>();
   const [archivedCursor, setArchivedCursor] = useState<string>();
   const [archivedExpanded, setArchivedExpanded] = useState(false);
-  const [loading, setLoading] = useState(false);
+  const [loadingActive, setLoadingActive] = useState(false);
+  const [loadingArchived, setLoadingArchived] = useState(false);
   const [loadingMore, setLoadingMore] = useState<DaemonSessionArchiveState>();
   const [busySessionId, setBusySessionId] = useState<string>();
   const [renameCandidate, setRenameCandidate] =
@@ -122,45 +137,71 @@ export function StandaloneRecents({
     workspace.capabilities?.features?.includes(
       STANDALONE_SESSIONS_CAPABILITY,
     ) === true;
+  const loading = loadingActive || (archivedExpanded && loadingArchived);
 
-  const load = useCallback(async () => {
-    if (!supported) return;
-    const generation = loadGenerationRef.current + 1;
-    loadGenerationRef.current = generation;
-    setLoadingMore(undefined);
-    setLoading(true);
-    try {
-      const [activePage, archivedPage] = await Promise.all([
-        workspace.client.listStandaloneSessionsPage({
+  const load = useCallback(
+    async (preserveActivePages = false) => {
+      if (!supported) return;
+      const generation = loadGenerationRef.current + 1;
+      loadGenerationRef.current = generation;
+      setLoadingMore((current) => (current === 'active' ? undefined : current));
+      setLoadingActive(true);
+      try {
+        const activePage = await workspace.client.listStandaloneSessionsPage({
           archiveState: 'active',
           pageSize: PAGE_SIZE,
-        }),
-        archivedExpanded
-          ? workspace.client.listStandaloneSessionsPage({
-              archiveState: 'archived',
-              pageSize: PAGE_SIZE,
-            })
-          : undefined,
-      ]);
-      if (loadGenerationRef.current !== generation) return;
-      setActive(withoutChildren(activePage.sessions));
-      setActiveCursor(activePage.nextCursor);
-      if (archivedPage) {
-        setArchived(withoutChildren(archivedPage.sessions));
-        setArchivedCursor(archivedPage.nextCursor);
+        });
+        if (loadGenerationRef.current !== generation) return;
+        const activeSessions = withoutChildren(activePage.sessions);
+        const preserveLoadedPages =
+          preserveActivePages && activeRef.current.length > 0;
+        setActive((current) =>
+          preserveLoadedPages
+            ? mergeRefreshedPage(current, activeSessions)
+            : activeSessions,
+        );
+        if (!preserveLoadedPages) setActiveCursor(activePage.nextCursor);
+      } catch (error) {
+        if (loadGenerationRef.current !== generation) return;
+        onError(error, t('sidebar.standaloneLoadFailed'));
+      } finally {
+        if (loadGenerationRef.current === generation) setLoadingActive(false);
       }
+    },
+    [onError, supported, t, workspace.client],
+  );
+
+  const loadArchived = useCallback(async () => {
+    if (!supported) return;
+    const generation = archivedLoadGenerationRef.current + 1;
+    archivedLoadGenerationRef.current = generation;
+    setLoadingMore((current) => (current === 'archived' ? undefined : current));
+    setLoadingArchived(true);
+    try {
+      const page = await workspace.client.listStandaloneSessionsPage({
+        archiveState: 'archived',
+        pageSize: PAGE_SIZE,
+      });
+      if (archivedLoadGenerationRef.current !== generation) return;
+      setArchived(withoutChildren(page.sessions));
+      setArchivedCursor(page.nextCursor);
     } catch (error) {
-      if (loadGenerationRef.current !== generation) return;
+      if (archivedLoadGenerationRef.current !== generation) return;
       onError(error, t('sidebar.standaloneLoadFailed'));
     } finally {
-      if (loadGenerationRef.current === generation) setLoading(false);
+      if (archivedLoadGenerationRef.current === generation) {
+        setLoadingArchived(false);
+      }
     }
-  }, [archivedExpanded, onError, supported, t, workspace.client]);
+  }, [onError, supported, t, workspace.client]);
 
   const loadMore = useCallback(
     async (archiveState: DaemonSessionArchiveState, cursor: string) => {
       if (loadingMore) return;
-      const generation = loadGenerationRef.current;
+      const generation =
+        archiveState === 'active'
+          ? loadGenerationRef.current
+          : archivedLoadGenerationRef.current;
       setLoadingMore(archiveState);
       try {
         const page = await workspace.client.listStandaloneSessionsPage({
@@ -168,7 +209,13 @@ export function StandaloneRecents({
           cursor,
           pageSize: PAGE_SIZE,
         });
-        if (loadGenerationRef.current !== generation) return;
+        if (
+          (archiveState === 'active'
+            ? loadGenerationRef.current
+            : archivedLoadGenerationRef.current) !== generation
+        ) {
+          return;
+        }
         const sessions = withoutChildren(page.sessions);
         if (archiveState === 'active') {
           setActive((current) => appendUnique(current, sessions));
@@ -178,36 +225,57 @@ export function StandaloneRecents({
           setArchivedCursor(page.nextCursor);
         }
       } catch (error) {
-        if (loadGenerationRef.current !== generation) return;
+        if (
+          (archiveState === 'active'
+            ? loadGenerationRef.current
+            : archivedLoadGenerationRef.current) !== generation
+        ) {
+          return;
+        }
         onError(error, t('sidebar.standaloneLoadFailed'));
       } finally {
-        if (loadGenerationRef.current === generation) setLoadingMore(undefined);
+        if (
+          (archiveState === 'active'
+            ? loadGenerationRef.current
+            : archivedLoadGenerationRef.current) === generation
+        ) {
+          setLoadingMore(undefined);
+        }
       }
     },
     [loadingMore, onError, t, workspace.client],
   );
 
   useEffect(() => {
-    void load();
+    void load(true);
   }, [currentSessionId, load]);
+
+  useEffect(() => {
+    if (archivedExpanded) void loadArchived();
+  }, [archivedExpanded, loadArchived]);
 
   useEffect(() => {
     const previous = previousStreamingStateRef.current;
     previousStreamingStateRef.current = streamingState;
-    if (previous !== 'idle' && streamingState === 'idle') void load();
+    if (previous !== 'idle' && streamingState === 'idle') void load(true);
   }, [load, streamingState]);
+
+  const refreshLists = useCallback(async () => {
+    await Promise.all([load(), archivedExpanded ? loadArchived() : undefined]);
+  }, [archivedExpanded, load, loadArchived]);
 
   const run = useCallback(
     async (
       sessionId: string,
       action: () => Promise<void>,
+      refresh = true,
     ): Promise<boolean> => {
       if (busySessionIdRef.current) return false;
       busySessionIdRef.current = sessionId;
       setBusySessionId(sessionId);
       try {
         await action();
-        await load();
+        if (refresh) await refreshLists();
         return true;
       } catch (error) {
         onError(error, t('sidebar.standaloneActionFailed'));
@@ -217,7 +285,7 @@ export function StandaloneRecents({
         setBusySessionId(undefined);
       }
     },
-    [load, onError, t],
+    [onError, refreshLists, t],
   );
 
   const archiveSession = useCallback(
@@ -341,14 +409,18 @@ export function StandaloneRecents({
                   setRenameValue(sessionLabel(session));
                 }}
                 onExport={() => {
-                  void run(session.sessionId, async () => {
-                    downloadExport(
-                      await workspace.client.exportStandaloneSession(
-                        session.sessionId,
-                        { format: 'html' },
-                      ),
-                    );
-                  });
+                  void run(
+                    session.sessionId,
+                    async () => {
+                      downloadExport(
+                        await workspace.client.exportStandaloneSession(
+                          session.sessionId,
+                          { format: 'html' },
+                        ),
+                      );
+                    },
+                    false,
+                  );
                 }}
                 onArchive={
                   isCurrent ? undefined : () => void archiveSession(session)
@@ -400,14 +472,18 @@ export function StandaloneRecents({
               busy={busySessionId === session.sessionId}
               onOpen={() => undefined}
               onExport={() => {
-                void run(session.sessionId, async () => {
-                  downloadExport(
-                    await workspace.client.exportStandaloneSession(
-                      session.sessionId,
-                      { format: 'html' },
-                    ),
-                  );
-                });
+                void run(
+                  session.sessionId,
+                  async () => {
+                    downloadExport(
+                      await workspace.client.exportStandaloneSession(
+                        session.sessionId,
+                        { format: 'html' },
+                      ),
+                    );
+                  },
+                  false,
+                );
               }}
               onUnarchive={() => void unarchiveSession(session)}
               onDelete={() => setDeleteCandidate(session)}
@@ -438,13 +514,27 @@ export function StandaloneRecents({
               event.preventDefault();
               const displayName = renameValue.trim();
               if (!displayName) return;
-              void run(renameCandidate.sessionId, async () => {
-                await workspace.client.renameStandaloneSession(
-                  renameCandidate.sessionId,
-                  displayName,
-                );
-                onRenameSession?.(renameCandidate.sessionId, displayName);
-              }).then((succeeded) => {
+              void run(
+                renameCandidate.sessionId,
+                async () => {
+                  await workspace.client.renameStandaloneSession(
+                    renameCandidate.sessionId,
+                    displayName,
+                  );
+                  const updateName = (
+                    sessions: readonly DaemonStandaloneSessionSummary[],
+                  ) =>
+                    sessions.map((session) =>
+                      session.sessionId === renameCandidate.sessionId
+                        ? { ...session, displayName }
+                        : session,
+                    );
+                  setActive(updateName);
+                  setArchived(updateName);
+                  onRenameSession?.(renameCandidate.sessionId, displayName);
+                },
+                false,
+              ).then((succeeded) => {
                 if (succeeded) setRenameCandidate(undefined);
               });
             }}

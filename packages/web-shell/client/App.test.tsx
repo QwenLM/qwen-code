@@ -1157,6 +1157,7 @@ vi.mock('./components/sidebar/WebShellSidebar', async () => {
       ) => Promise<boolean> | boolean | void;
       onSelectWorkspace?: (workspaceCwd: string | undefined) => void;
       onLoadSession?: (sessionId: string) => Promise<void> | void;
+      onLoadStandaloneSession?: (sessionId: string) => Promise<void> | void;
       onSelectCurrentSession?: () => void;
       onSessionsDeleted?: (sessionIds: string[]) => void;
       onOpenAddWorkspace?: () => void;
@@ -1245,6 +1246,19 @@ vi.mock('./components/sidebar/WebShellSidebar', async () => {
             onClick: () => props.onLoadSession?.('session-2'),
           },
           'load session',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'load-standalone-session',
+            type: 'button',
+            onClick: () => {
+              void Promise.resolve(
+                props.onLoadStandaloneSession?.('standalone-session-2'),
+              ).catch(() => undefined);
+            },
+          },
+          'load standalone session',
         ),
         React.createElement(
           'button',
@@ -20461,6 +20475,116 @@ describe('App session callbacks', () => {
     ).toBe('Session Overview');
   });
 
+  it('does not reopen a controlled split after exit while classification is pending', async () => {
+    const classification = deferred<never>();
+    const notStandalone = new DaemonHttpError(
+      404,
+      { code: 'standalone_session_not_found' },
+      'not found',
+    );
+    mockWorkspace.capabilities = {
+      features: ['standalone_sessions_v1'],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    mockWorkspace.client.getStandaloneSession
+      .mockRejectedValueOnce(notStandalone)
+      .mockReturnValueOnce(classification.promise);
+    const onSplitSessionIdsChange = vi.fn();
+    const { container, rerender } = renderApp({
+      sidebar: false,
+      splitSessionIds: ['current-session'],
+      onSplitSessionIdsChange,
+    });
+    await flush();
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).not.toBeNull();
+
+    rerender({
+      sidebar: false,
+      splitSessionIds: ['older-session'],
+      onSplitSessionIdsChange,
+    });
+    await vi.waitFor(() => {
+      expect(mockWorkspace.client.getStandaloneSession).toHaveBeenCalledWith(
+        'older-session',
+      );
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="split-back"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      classification.reject(notStandalone);
+      await Promise.resolve();
+    });
+
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).toBeNull();
+    expect(onSplitSessionIdsChange).toHaveBeenCalledWith([]);
+  });
+
+  it('keeps controlled split ids while a standalone navigation can still fail', async () => {
+    const notStandalone = new DaemonHttpError(
+      404,
+      { code: 'standalone_session_not_found' },
+      'not found',
+    );
+    mockWorkspace.capabilities = {
+      features: ['standalone_sessions_v1'],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    mockWorkspace.client.getStandaloneSession.mockRejectedValue(notStandalone);
+    const load = deferred<void>();
+    mockSessionActions.loadSession.mockReturnValueOnce(load.promise);
+    const onSplitSessionIdsChange = vi.fn();
+    const { container } = renderApp({
+      sidebar: true,
+      splitSessionIds: ['s1', 's2'],
+      onSplitSessionIdsChange,
+    });
+    await flush();
+    onSplitSessionIdsChange.mockClear();
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="load-standalone-session"]',
+        )
+        ?.click();
+    });
+    await flush();
+
+    expect(onSplitSessionIdsChange).not.toHaveBeenCalledWith([]);
+    await act(async () => {
+      load.reject(notStandalone);
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(onSplitSessionIdsChange).not.toHaveBeenCalledWith([]);
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).not.toBeNull();
+  });
+
   it('notifies external callers when split session ids change inside WebShell', async () => {
     const onSplitSessionIdsChange = vi.fn();
     const { container, rerender } = renderApp({
@@ -20626,8 +20750,7 @@ describe('App session callbacks', () => {
     mockWorkspace.client.getStandaloneSession.mockReturnValueOnce(
       classification.promise,
     );
-    const shellRef = createRef<WebShellApi>();
-    const { container } = renderApp({ shellRef });
+    const { container } = renderApp();
     await flush();
 
     await act(async () => {
@@ -20638,15 +20761,25 @@ describe('App session callbacks', () => {
         ?.click();
       await Promise.resolve();
     });
-    act(() => {
+    await act(async () => {
       testState.latestSessionOverviewProps?.onOpenSplit?.(['older-session']);
-      shellRef.current?.openSplitView();
+      await vi.waitFor(() => {
+        expect(mockWorkspace.client.getStandaloneSession).toHaveBeenCalledWith(
+          'older-session',
+        );
+      });
+    });
+    act(() => {
+      testState.latestSessionOverviewProps?.onOpenSession?.(
+        'session-2',
+        '/tmp/project',
+      );
     });
     await flush();
 
     expect(
-      container.querySelector('[data-testid="split-initial"]')?.textContent,
-    ).toBe('session-1');
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).toBeNull();
 
     await act(async () => {
       classification.reject(
@@ -20660,8 +20793,9 @@ describe('App session callbacks', () => {
     });
 
     expect(
-      container.querySelector('[data-testid="split-initial"]')?.textContent,
-    ).toBe('session-1');
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).toBeNull();
+    expect(loadSplitSessions()).toEqual([]);
   });
 
   it('requests controlled split ids from the external shell ref', async () => {
@@ -23790,6 +23924,46 @@ describe('App session callbacks', () => {
     expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
   });
 
+  it('keeps a legacy Live runtime cwd out of workspace product context', async () => {
+    mockConnection.sessionContext = undefined;
+    mockConnection.workspaceCwd = '/internal/conversations';
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/workspace',
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/workspace',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'live',
+          cwd: '/internal/conversations',
+          primary: false,
+          trusted: true,
+          kind: 'live',
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+
+    renderApp();
+    await flush();
+
+    expect(testState.latestChatEditorProps).toMatchObject({
+      atWorkspaceCwd: undefined,
+      composerScopeKey: 'live',
+      workspaceFeaturesEnabled: false,
+    });
+    expect(testState.latestSettingsHookOptions).toEqual({
+      autoLoad: false,
+      enabled: false,
+    });
+    expect(testState.latestProvidersHookOptions).toEqual({
+      autoLoad: false,
+      enabled: false,
+    });
+  });
+
   it('creates an explicit standalone draft without workspace-only fields', async () => {
     mockConnection.sessionId = undefined;
     mockConnection.sessionContext = { kind: 'standalone' };
@@ -26334,6 +26508,37 @@ describe('App /goal command', () => {
     expect(container.querySelector('[data-testid="goals-page"]')).toBeNull();
   });
 
+  it('does not create a goal session in an untrusted primary workspace', async () => {
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/tmp/project',
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: false,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/goal';
+    await clickSubmit(container);
+    await flush();
+    const onCreateGoal = testState.latestGoalsProps?.onCreateGoal;
+    if (!onCreateGoal) throw new Error('onCreateGoal was not captured');
+    mockSessionActions.clearSession.mockClear();
+    mockSessionActions.controlGoal.mockClear();
+
+    await act(async () => {
+      await onCreateGoal('all tests pass');
+    });
+
+    expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
+    expect(mockSessionActions.controlGoal).not.toHaveBeenCalled();
+  });
+
   it.each(['resolve', 'reject'] as const)(
     'ignores a stale Goal edit %s after the session changes',
     async (outcome) => {
@@ -27332,6 +27537,36 @@ describe('App manual-run orchestration (scheduled tasks)', () => {
       await new Promise((r) => setTimeout(r, 0));
     });
     expect(editorInsertText).toHaveBeenCalled();
+  });
+
+  it('does not start task creation in an untrusted primary workspace', async () => {
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/tmp/project',
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: false,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/schedule';
+    await clickSubmit(container);
+    await flush();
+    const onCreateViaChat =
+      testState.latestScheduledTasksProps?.onCreateViaChat;
+    if (!onCreateViaChat) throw new Error('onCreateViaChat was not captured');
+    mockSessionActions.clearSession.mockClear();
+    editorInsertText.mockClear();
+
+    act(() => onCreateViaChat());
+    await flush();
+
+    expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
+    expect(editorInsertText).not.toHaveBeenCalled();
   });
 
   it('"create via chat" does NOT prime the composer when the new session fails', async () => {

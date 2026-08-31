@@ -316,10 +316,12 @@ function WorkspaceSessionProviderWorkspace({
       key="main-session"
       sessionId={effectiveSessionId}
       sessionContext={
-        sessionContext ??
-        (targetWorkspace
-          ? { kind: 'workspace', cwd: targetWorkspace.cwd }
-          : undefined)
+        usePrimaryNewSession
+          ? undefined
+          : (sessionContext ??
+            (targetWorkspace
+              ? { kind: 'workspace', cwd: targetWorkspace.cwd }
+              : undefined))
       }
       workspaceCwd={
         sessionContext?.kind === 'workspace' || !sessionContext
