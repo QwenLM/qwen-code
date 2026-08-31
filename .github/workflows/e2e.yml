@@ -216,8 +216,9 @@ jobs:
           OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
           KEEP_OUTPUT: 'true'
           VERBOSE: 'true'
-          # Mapped for integration-tests/vitest.config.ts, which exempts
-          # self-hosted runners from pressure-flake unhandled errors.
+          # Mapped for integration-tests/vitest.config.ts, which caps each
+          # shared-pool shard at one fork and exempts pressure-flake unhandled
+          # errors.
           RUNNER_ENVIRONMENT: '${{ runner.environment }}'
         run: |-
           export TMPDIR="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
