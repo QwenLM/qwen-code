@@ -523,26 +523,62 @@ jobs:
           npm run bundle
 
       - name: 'Set up Docker'
+        if: "${{ runner.environment != 'self-hosted' }}"
         uses: 'docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5' # ratchet:docker/setup-buildx-action@v4
 
-      - name: 'Build Sandbox'
+      - name: 'Run Docker Integration Tests'
         env:
           QWEN_SANDBOX: 'docker'
-        run: |-
-          npm run build:sandbox -- -s
-
-      - name: 'Run CLI Docker Integration Tests'
-        env:
+          BUILD_SANDBOX_FLAGS: '--label org.qwen-code.ci.sandbox=true'
           RUNNER_ENVIRONMENT: '${{ runner.environment }}'
         run: |-
+          set -euo pipefail
+          sandbox_revision="$(git rev-parse HEAD)"
+          sandbox_image="$(node -p "require('./packages/cli/package.json').config.sandboxImageUri")-release-${sandbox_revision}"
+
+          acquire_daemon_write_lock() {
+            lock_deadline=$((SECONDS + 1800))
+            until flock --nonblock 9; do
+              if (( SECONDS >= lock_deadline )); then
+                echo "::error::docker daemon write lock not acquired within 30 minutes"
+                exit 1
+              fi
+              sleep 1
+            done
+          }
+
+          if [ "$RUNNER_ENVIRONMENT" = 'self-hosted' ]; then
+            mkdir -p "${HOME}/.cache/qwen-code-ci"
+            exec 8>"${HOME}/.cache/qwen-code-ci/docker-sandbox-build-release-${sandbox_revision}.lock"
+            if ! flock --wait 1800 8; then
+              echo "::error::docker build coordinator lock not acquired within 30 minutes"
+              exit 1
+            fi
+            exec 9>"${HOME}/.cache/qwen-code-ci/docker-sandbox-daemon.lock"
+            if ! flock --shared --wait 1800 9; then
+              echo "::error::docker daemon read lock not acquired within 30 minutes"
+              exit 1
+            fi
+          fi
+
+          if ! docker image inspect "$sandbox_image" > /dev/null 2>&1; then
+            if [ "$RUNNER_ENVIRONMENT" = 'self-hosted' ]; then
+              flock --unlock 9
+              acquire_daemon_write_lock
+            fi
+            docker image prune --all --force --filter 'label=org.qwen-code.ci.sandbox=true' --filter 'until=24h' || echo "::warning::old CI sandbox image cleanup failed on ${RUNNER_NAME:-this runner}"
+            npm run build:sandbox -- -s --no-prune -i "$sandbox_image"
+          fi
+          sandbox_image_id="$(docker image inspect --format '{{.Id}}' "$sandbox_image")"
+          export QWEN_SANDBOX_IMAGE="$sandbox_image_id"
+          if [ "$RUNNER_ENVIRONMENT" = 'self-hosted' ]; then
+            flock --shared 9
+            flock --unlock 8
+          fi
+
           # The package.json docker test scripts each rebuild the sandbox image.
           # Run vitest directly here so this job reuses the image built above.
           QWEN_SANDBOX=docker npx vitest run --root ./integration-tests cli
-
-      - name: 'Run Interactive Docker Integration Tests'
-        env:
-          RUNNER_ENVIRONMENT: '${{ runner.environment }}'
-        run: |-
           QWEN_SANDBOX=docker npx vitest run --root ./integration-tests interactive
 
   audio_capture_prebuilds:

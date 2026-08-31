@@ -10,6 +10,14 @@ import { SkillError } from '@qwen-code/qwen-code-core';
 
 export const STATUS_SCHEMA_VERSION = 1 as const;
 
+export interface ServeWorkspaceRuntimeStatus {
+  v: typeof STATUS_SCHEMA_VERSION;
+  workspaceCwd: string;
+  state: 'cold' | 'starting' | 'active' | 'idle' | 'stopping';
+  runtimeLive: boolean;
+  runtimeEpoch: number;
+}
+
 /**
  * Closed enumeration of structured error categories surfaced on diagnostic
  * status cells. Cells produced by `/workspace/preflight`, `/workspace/env`,
@@ -174,6 +182,15 @@ export const SERVE_CONTROL_EXT_METHODS = {
   workspaceMemoryRemember: 'qwen/control/workspace/memory/remember',
   workspaceMemoryForget: 'qwen/control/workspace/memory/forget',
   workspaceMemoryDream: 'qwen/control/workspace/memory/dream',
+  /**
+   * Sessionless user-level language sync: the runtime switches its process
+   * UI language, reloads the user-scope settings the daemon already
+   * persisted, and, when `syncOutputLanguage` is true, refreshes every local
+   * session's system instruction.
+   * Params: `{ language, syncOutputLanguage }`; result:
+   * `{ language, sessions, failed }`.
+   */
+  userLanguage: 'qwen/control/user/language',
   // Runtime MCP server mutation ext-methods
   sessionTaskCancel: 'qwen/control/session/task/cancel',
   sessionWorkflowTaskAction: 'qwen/control/session/task/workflow-action',

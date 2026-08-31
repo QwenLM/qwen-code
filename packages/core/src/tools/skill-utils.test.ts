@@ -82,6 +82,7 @@ describe('collectAvailableSkillEntries memoize cache', () => {
   function mockConfig(): Config {
     return {
       getDisabledSkillNames: vi.fn().mockReturnValue(new Set<string>()),
+      isSkillEnabled: vi.fn().mockReturnValue(true),
       getModelInvocableCommandsProvider: vi.fn().mockReturnValue(null),
     } as unknown as Config;
   }
