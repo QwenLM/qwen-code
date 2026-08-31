@@ -358,7 +358,15 @@ export interface DaemonGitPullResult {
    * working tree may carry conflict markers.
    */
   stashRestoreConflict?: boolean;
-  /** SHA of the kept auto-stash entry when `stashRestoreConflict` is set. */
+  /**
+   * Present and true when the pull and restore succeeded but a stash
+   * entry was kept on the stack; `output` carries the notice.
+   */
+  stashKept?: boolean;
+  /**
+   * SHA of the kept auto-stash entry when `stashRestoreConflict` or
+   * `stashKept` is set.
+   */
   stashSha?: string;
 }
 

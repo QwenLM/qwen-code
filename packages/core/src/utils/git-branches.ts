@@ -513,7 +513,16 @@ export interface GitPullResult {
    * notice and the entry's SHA.
    */
   stashRestoreConflict?: boolean;
-  /** SHA of the kept auto-stash entry when `stashRestoreConflict` is set. */
+  /**
+   * Present and true when the pull and restore succeeded but a stash entry
+   * was kept on the stack (a failed drop, or a displaced entry that needs
+   * recovering); `output` carries the notice and `stashSha` the entry.
+   */
+  stashKept?: boolean;
+  /**
+   * SHA of the kept auto-stash entry when `stashRestoreConflict` or
+   * `stashKept` is set.
+   */
   stashSha?: string;
 }
 
@@ -588,6 +597,21 @@ function gitDetail(err: unknown): string {
 function exitCode(err: unknown): number | undefined {
   const code = (err as { code?: unknown } | null)?.code;
   return typeof code === 'number' ? code : undefined;
+}
+
+/**
+ * Exit code of a failed pull for recovery purposes. A pull killed without
+ * a numeric code — our own 30s timeout (`killed`), an external or OOM kill
+ * (`signal`) — may already have written MERGE_HEAD or the rebase dir, so
+ * it counts as 1 (state possibly created); the tip-identity check still
+ * decides whether that state is actually the pull's own.
+ */
+function pullExitCode(err: unknown): number | undefined {
+  const code = exitCode(err);
+  if (code !== undefined) return code;
+  const e = err as { killed?: boolean; signal?: unknown } | null;
+  if (e && (e.killed === true || typeof e.signal === 'string')) return 1;
+  return undefined;
 }
 
 /** Absolute paths of the given `--git-path` names, in order. */
@@ -937,7 +961,7 @@ async function stashPull(
     output = (await runGit(cwd, pullArgs(opts), env)).trim();
   } catch (err) {
     const detail = gitDetail(err);
-    await abortOwnPullState(cwd, exitCode(err), env);
+    await abortOwnPullState(cwd, pullExitCode(err), env);
     if (stashed === undefined) {
       // Nothing to restore, but the update still failed under the stash
       // flow — report it as such so the client shows git's reason instead
@@ -957,7 +981,17 @@ async function stashPull(
   if (stashed === undefined) return { success: true, output };
   const restore = await restoreStash(cwd, stashed, env);
   if (restore.restored) {
-    return { success: true, output: `${output}\n${restore.output}`.trim() };
+    if (restore.output === '') return { success: true, output };
+    // The restore left a notice — the entry could not be dropped, or a
+    // displaced entry needs recovering. Mark the result so the client can
+    // keep that notice visible; it is the only record of where the
+    // entries went.
+    return {
+      success: true,
+      stashKept: true,
+      stashSha: stashed,
+      output: `${output}\n${restore.output}`.trim(),
+    };
   }
   return {
     success: true,
@@ -1012,7 +1046,20 @@ async function forcePull(
   // refusal after the local changes are already gone. A fast-forward is
   // the same commit whether merged or rebased, so the `rebase` option has
   // nothing to add here.
-  const output = await runGit(cwd, ['merge', '--ff-only', validated], env);
+  let output: string;
+  try {
+    output = await runGit(cwd, ['merge', '--ff-only', validated], env);
+  } catch (err) {
+    // A validated fast-forward can still be refused — e.g. a tracked file
+    // carrying the skip-worktree bit survives reset+clean and blocks the
+    // checkout. Type it: the raw text would send the route's classifier
+    // back to dirty_working_tree and the panel would loop on a discard
+    // that can never succeed.
+    throw new GitPullFailure(
+      'pull_failed',
+      `discard applied, but the update failed:\n${gitDetail(err)}`,
+    );
+  }
   return { success: true, output: output.trim() };
 }
 

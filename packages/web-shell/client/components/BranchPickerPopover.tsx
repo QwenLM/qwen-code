@@ -553,6 +553,10 @@ export function BranchPickerPopover({
             }),
             'warning',
           );
+        } else if (result.stashKept) {
+          // A kept or displaced stash entry: the output is the only record
+          // of where it went, so render it sticky like the conflict case.
+          showStatus(result.output, 'warning');
         } else {
           showStatus(result.output || t('branchPicker.pullSuccess'), 'success');
         }

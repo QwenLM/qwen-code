@@ -584,6 +584,35 @@ describe('BranchPickerPopover actions', () => {
     expect(footerText()).toContain('dcda4a53ed65');
   });
 
+  it('keeps a kept-entry notice, as a warning, across a reopen', async () => {
+    workspaceGitPull.mockRejectedValueOnce(dirtyTreeError());
+    workspaceGitPull.mockResolvedValueOnce({
+      success: true,
+      output:
+        'Updating 1..2\nrestored; stash entry aaaa was kept because the stash changed while dropping it, and the displaced entry bbbb could not be stored back — recover it with: git stash store bbbb',
+      stashKept: true,
+      stashSha: 'aaaa',
+    });
+    mountWithBranches();
+    await flush();
+
+    clickButton('Update Project');
+    await flush();
+    clickButton('Stash Changes and Update');
+    await flush();
+
+    expect(footerText()).toContain('recover it with: git stash store bbbb');
+
+    mount({ open: false });
+    await flush();
+    mount({ open: true });
+    await flush();
+
+    // The notice is the only record of where the entries went; it must
+    // survive the reopen reset like the conflict warning does.
+    expect(footerText()).toContain('recover it with: git stash store bbbb');
+  });
+
   it('keeps the panel with the daemon explanation when discarding is unsupported', async () => {
     workspaceGitPull.mockRejectedValueOnce(dirtyTreeError());
     workspaceGitPull.mockRejectedValueOnce(

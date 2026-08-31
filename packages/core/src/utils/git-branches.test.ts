@@ -1025,6 +1025,13 @@ describe('gitPull dirty-tree flows against a concurrent terminal', () => {
 
       expect(result.success).toBe(true);
       expect(result.output).toContain('was kept');
+      // Structured, so the client renders the notice sticky.
+      expect(result.stashKept).toBe(true);
+      expect(result.stashSha).toBe(
+        git(dir, 'rev-parse', 'refs/stash^{commit}').trim() === ''
+          ? undefined
+          : result.stashSha,
+      );
       expect(read(dir, 'a.txt')).toBe('local edit\n');
       const entries = stashList(dir);
       expect(entries).toHaveLength(2);
@@ -1268,6 +1275,7 @@ describe('gitPull dirty-tree flows against a concurrent terminal', () => {
           script: `if [ -f "${mark}" ]; then exit 128; fi; exec "$REAL" "$@"`,
         },
       ]);
+      const headBefore = headSha(dir);
 
       const failure = await expectPullFailure(
         gitPull(dir, { stash: true }, env),
@@ -1277,7 +1285,9 @@ describe('gitPull dirty-tree flows against a concurrent terminal', () => {
       expect(failure.message).toContain('qwen-code: auto-stash before pull');
       expect(failure.message).toContain('was not attempted');
       expect(stashList(dir)).toHaveLength(1);
-      expect(headSha(dir)).toBe(git(dir, 'rev-parse', 'HEAD').trim());
+      // The update was never attempted: HEAD must not have advanced to the
+      // reachable upstream commit.
+      expect(headSha(dir)).toBe(headBefore);
     },
   );
 
@@ -1334,6 +1344,7 @@ describe('gitPull dirty-tree flows against a concurrent terminal', () => {
       const entries = stashList(dir);
       expect(entries).toHaveLength(1);
       expect(entries[0]).toContain('qwen-code: auto-stash before pull');
+      expect(result.stashKept).toBe(true);
       const match = /git stash store ([0-9a-f]{40})/.exec(result.output);
       expect(match).not.toBeNull();
       expect(git(dir, 'cat-file', '-t', match![1]!).trim()).toBe('commit');
@@ -1413,6 +1424,58 @@ describe('gitPull dirty-tree flows against a concurrent terminal', () => {
     expect(force.success).toBe(true);
     expect(read(dir, 'even-more.txt')).toBe('x\n');
     expect(read(dir, 'a.txt')).toBe('one\n');
+  });
+
+  it.skipIf(!unix)(
+    'aborts and restores when the pull is killed mid-integration',
+    async () => {
+      const { dir, clone } = makeUpstream();
+      remoteCommit(clone, 'a.txt', 'remote\n');
+      commitFile(dir, 'a.txt', 'local commit\n');
+      const headBefore = headSha(dir);
+      fs.writeFileSync(path.join(dir, 'c.txt'), 'untracked\n');
+      // The pull writes its conflicted MERGE_HEAD and then dies the way a
+      // timeout kill arrives: by signal, with no numeric exit code.
+      const env = gitShim(hermeticEnv(), [
+        {
+          match: 'pull*',
+          script:
+            '"$REAL" fetch -q; "$REAL" merge @{upstream} >/dev/null 2>&1; kill -TERM $$',
+        },
+      ]);
+
+      const failure = await expectPullFailure(
+        gitPull(dir, { stash: true }, env),
+        'pull_failed',
+      );
+
+      expect(failure.message).toContain('your local changes were restored');
+      expect(fs.existsSync(path.join(dir, '.git', 'MERGE_HEAD'))).toBe(false);
+      expect(headSha(dir)).toBe(headBefore);
+      expect(read(dir, 'a.txt')).toBe('local commit\n');
+      expect(read(dir, 'c.txt')).toBe('untracked\n');
+      expect(stashList(dir)).toEqual([]);
+    },
+  );
+
+  it('types the force failure when a skip-worktree file blocks the validated update', async () => {
+    const { dir, clone } = makeUpstream();
+    remoteCommit(clone, 'a.txt', 'remote\n');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'hidden edit\n');
+    git(dir, 'update-index', '--skip-worktree', 'a.txt');
+    fs.writeFileSync(path.join(dir, 'b.txt'), 'untracked\n');
+    const headBefore = headSha(dir);
+
+    const failure = await expectPullFailure(
+      gitPull(dir, { force: true }, hermeticEnv()),
+      'pull_failed',
+    );
+
+    // Typed, so the route cannot re-classify it as dirty_working_tree and
+    // loop the panel on a discard that can never succeed.
+    expect(failure.message).toContain('discard applied, but the update failed');
+    expect(headSha(dir)).toBe(headBefore);
+    expect(read(dir, 'a.txt')).toBe('hidden edit\n');
   });
 
   it('refuses stash and force pulls while a git am is stopped, keeping it', async () => {
