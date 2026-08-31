@@ -1042,6 +1042,35 @@ describe('DingtalkInteractionPresenter', () => {
     );
   });
 
+  it('retains card content when a response-boundary fallback fails', async () => {
+    const { client, presenter, sendFallback } = createHarness();
+    presenter.startStatusCard('run-1');
+    await vi.waitFor(() =>
+      expect(client.openOrUpdateStream).toHaveBeenCalledOnce(),
+    );
+    vi.mocked(client.openOrUpdateStream).mockRejectedValueOnce(
+      new DingtalkCardRequestError('stream unavailable', false),
+    );
+    sendFallback.mockRejectedValueOnce(new Error('fallback unavailable'));
+    presenter.appendOutput(segment('segment-1'), 'only retained answer');
+
+    await expect(
+      presenter.closeOutput('segment-1', '', 'response_boundary'),
+    ).rejects.toThrow('fallback unavailable');
+    presenter.terminalizeRun('run-1', 'completed');
+
+    await vi.waitFor(() =>
+      expect(client.updateInstance).toHaveBeenCalledWith(
+        expect.objectContaining({
+          cardParamMap: expect.objectContaining({
+            content: 'only retained answer',
+            flowStatus: 3,
+          }),
+        }),
+      ),
+    );
+  });
+
   it.each([
     ['cancel_command', 'Stopped'],
     ['steer', 'Cancelled'],

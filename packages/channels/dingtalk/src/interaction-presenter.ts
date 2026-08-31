@@ -209,13 +209,13 @@ export class DingtalkInteractionPresenter {
           text || presentation.content,
         );
         if (!fallbackText || !this.options.sendFallback) return false;
-        statusCards?.abandon(statusContext.segmentId);
         await this.sendFallback(
           run,
           presentation.context.target.chatId,
           fallbackText,
           presentation.context.sessionId,
         );
+        statusCards?.abandon(statusContext.segmentId);
         return true;
       }
       if (reason === 'input_requested') {
@@ -231,13 +231,13 @@ export class DingtalkInteractionPresenter {
           text || presentation.content,
         );
         if (!fallbackText || !this.options.sendFallback) return false;
-        statusCards?.abandon(statusContext.segmentId);
         await this.sendFallback(
           run,
           presentation.context.target.chatId,
           fallbackText,
           presentation.context.sessionId,
         );
+        statusCards?.abandon(statusContext.segmentId);
         return true;
       }
       statusCards?.ensure(statusContext, this.cardTarget(statusContext.target));
@@ -252,13 +252,13 @@ export class DingtalkInteractionPresenter {
         text || presentation.content,
       );
       if (!fallbackText || !this.options.sendFallback) return false;
-      statusCards?.abandon(statusContext.segmentId);
       await this.sendFallback(
         run,
         presentation.context.target.chatId,
         fallbackText,
         presentation.context.sessionId,
       );
+      statusCards?.abandon(statusContext.segmentId);
       return true;
     });
   }

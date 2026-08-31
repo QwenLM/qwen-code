@@ -56,10 +56,12 @@ function tracking(controller: StatusCardController) {
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
-  const promise = new Promise<T>((res) => {
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
     resolve = res;
+    reject = rej;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 function createHarness(
@@ -836,6 +838,34 @@ describe('StatusCardController', () => {
     await expect(live).resolves.toBe(true);
   });
 
+  it('closes a card created while its segment is abandoned', async () => {
+    const { client, controller } = createHarness();
+    const creation = deferred<void>();
+    vi.mocked(client.createAndDeliver).mockImplementationOnce(
+      async () => creation.promise,
+    );
+    controller.replace(segment(), target, 'answer');
+    await vi.waitFor(() =>
+      expect(client.createAndDeliver).toHaveBeenCalledOnce(),
+    );
+
+    controller.abandon('segment-1');
+    creation.resolve();
+
+    await vi.waitFor(() =>
+      expect(client.updateInstance).toHaveBeenCalledWith(
+        expect.objectContaining({
+          cardParamMap: {
+            flowStatus: 3,
+            hasAction: 'false',
+            stop_action: 'false',
+          },
+        }),
+      ),
+    );
+    expect(client.openOrUpdateStream).not.toHaveBeenCalled();
+  });
+
   it('does not retry or claim delivery after a non-retryable creation failure', async () => {
     vi.useFakeTimers();
     const { client, controller } = createHarness();
@@ -1164,20 +1194,57 @@ describe('StatusCardController', () => {
 
   it('stops retrying after a failed boundary drain is abandoned', async () => {
     vi.useFakeTimers();
+    vi.setSystemTime(0);
     const { client, controller } = createHarness();
     controller.replace(segment(), target, 'first');
     await vi.advanceTimersByTimeAsync(0);
-    vi.mocked(client.openOrUpdateStream).mockRejectedValueOnce(
-      new Error('stream blip'),
+    const drain = deferred<void>();
+    vi.mocked(client.openOrUpdateStream).mockImplementationOnce(
+      async () => drain.promise,
     );
     controller.replace(segment(), target, 'first more');
 
-    await expect(controller.flushPending('segment-1')).resolves.toBe(false);
+    const flushed = controller.flushPending('segment-1');
+    await vi.advanceTimersByTimeAsync(1_000);
+    drain.reject(new Error('stream blip'));
+    await expect(flushed).resolves.toBe(false);
+    const updatesBeforeAbandon = vi.mocked(client.updateInstance).mock.calls
+      .length;
+    controller.abandon('segment-1');
+
+    await vi.advanceTimersByTimeAsync(60_000);
     expect(client.openOrUpdateStream).toHaveBeenCalledTimes(2);
+    expect(client.updateInstance).toHaveBeenCalledTimes(
+      updatesBeforeAbandon + 1,
+    );
+    expect(client.updateInstance).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        cardParamMap: {
+          flowStatus: 3,
+          hasAction: 'false',
+          stop_action: 'false',
+        },
+      }),
+    );
+  });
+
+  it('keeps a terminal retry when abandon races finalization', async () => {
+    vi.useFakeTimers();
+    const { client, controller } = createHarness();
+    controller.replace(segment(), target, 'answer');
+    await vi.advanceTimersByTimeAsync(0);
+    vi.mocked(client.updateInstance).mockRejectedValueOnce(
+      new Error('terminal connection lost'),
+    );
+
+    await expect(controller.complete('segment-1', 'answer')).resolves.toBe(
+      true,
+    );
+    expect(client.updateInstance).toHaveBeenCalledOnce();
     controller.abandon('segment-1');
 
     await vi.advanceTimersByTimeAsync(1_000);
-    expect(client.openOrUpdateStream).toHaveBeenCalledTimes(2);
+    expect(client.updateInstance).toHaveBeenCalledTimes(2);
   });
 
   it('re-arms flushes promptly after a boundary drain recovers a failed write', async () => {

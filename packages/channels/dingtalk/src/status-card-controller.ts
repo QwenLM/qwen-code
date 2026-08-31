@@ -169,8 +169,22 @@ export class StatusCardController {
 
   abandon(segmentId: string): void {
     const record = this.recordsBySegment.get(segmentId);
-    if (!record) return;
+    if (!record || record.terminal) return;
+    record.terminal = true;
     record.hasPendingWrite = false;
+    void record.ready.then((ready) => {
+      if (!ready) return;
+      void this.options.client
+        .updateInstance({
+          outTrackId: record.outTrackId,
+          cardParamMap: {
+            flowStatus: 3,
+            hasAction: 'false',
+            stop_action: 'false',
+          },
+        })
+        .catch(() => {});
+    });
     this.removeRecord(record);
   }
 
@@ -337,6 +351,7 @@ export class StatusCardController {
       }
     }
     if (this.disposed) return false;
+    if (this.recordsBySegment.get(record.segmentId) !== record) return true;
 
     try {
       await this.options.client.openOrUpdateStream({
