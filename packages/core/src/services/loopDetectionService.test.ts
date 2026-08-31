@@ -2142,6 +2142,12 @@ describe('LoopDetectionService', () => {
     const retryEvent = {
       type: LlmEventType.Retry,
     } as ServerLlmStreamEvent;
+    const modelFallbackEvent = {
+      type: LlmEventType.ModelFallback,
+      fromModel: 'primary',
+      toModel: 'fallback',
+      fallbackIndex: 1,
+    } as ServerLlmStreamEvent;
     const finishedEvent = {
       type: LlmEventType.Finished,
       value: { reason: 'STOP' },
@@ -2353,14 +2359,17 @@ describe('LoopDetectionService', () => {
       expect(loggers.logLoopDetected).not.toHaveBeenCalled();
     });
 
-    it('rolls back a failed attempt on retry so its calls do not count', () => {
+    it.each([
+      ['retry', retryEvent],
+      ['model fallback', modelFallbackEvent],
+    ])('rolls back a failed attempt on %s', (_name, restartEvent) => {
       service.reset('');
-      // Attempt makes 6 calls, then the API retries (no round-trip committed
-      // yet, so the rollback floor is 0).
+      // Attempt makes 6 calls, then the API restarts it (no round-trip
+      // committed yet, so the rollback floor is 0).
       for (let i = 0; i < 6; i++) {
         service.checkAlwaysOnSafeties(createToolCallRequestEvent('t', { i }));
       }
-      service.checkAlwaysOnSafeties(retryEvent);
+      service.checkAlwaysOnSafeties(restartEvent);
       // The 6 discarded calls must not count: a full hard cap's worth of fresh
       // diverse calls stays under the limit, and only the (hardCap+1)-th fires.
       // (If the rollback had failed, the 6 prior calls would push the fire

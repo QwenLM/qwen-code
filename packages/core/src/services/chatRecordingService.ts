@@ -341,6 +341,8 @@ export interface ChatRecord {
 
   /** Token usage statistics */
   usageMetadata?: GenerateContentResponseUsageMetadata;
+  /** Whether usage is a conservative substitute rather than a fresh provider boundary. */
+  usageMetadataIsEstimated?: boolean;
   /** Model used for this response */
   model?: string;
   /** Context window size of the model used for this response */
@@ -2109,6 +2111,7 @@ export class ChatRecordingService {
     model: string;
     message?: PartListUnion;
     tokens?: GenerateContentResponseUsageMetadata;
+    usageMetadataIsEstimated?: boolean;
     contextWindowSize?: number;
     goalContext?: GoalTurnPermit;
     goalTokensAlreadyAccumulated?: boolean;
@@ -2128,6 +2131,9 @@ export class ChatRecordingService {
 
       if (data.tokens) {
         record.usageMetadata = data.tokens;
+        if (data.usageMetadataIsEstimated) {
+          record.usageMetadataIsEstimated = true;
+        }
         if (data.goalContext && !data.goalTokensAlreadyAccumulated) {
           this.accumulateGoalTurnTokens(data.goalContext.turnId, data.tokens);
         }

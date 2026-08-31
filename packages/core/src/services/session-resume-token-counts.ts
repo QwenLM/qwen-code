@@ -34,7 +34,7 @@ export class ResumeTokenCountsAccumulator {
         this.value = {
           promptTokenCount: candidate,
           outputTokenCount: getUsageOutputTokenCountForPromptEstimate(usage),
-          isEstimated: false,
+          isEstimated: record.usageMetadataIsEstimated ?? false,
         };
       }
       return;

@@ -78,6 +78,64 @@ describe('startSpeculation', () => {
     expect(forkedAgentMocks.runForkedAgent).not.toHaveBeenCalled();
   });
 
+  it('applies fresh and continuation retry semantics to speculative output', async () => {
+    const config = {
+      getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
+      getCwd: vi.fn().mockReturnValue(process.cwd()),
+      getFastModel: vi.fn().mockReturnValue(undefined),
+      getSessionId: vi.fn().mockReturnValue('spec-session'),
+    } as unknown as Config;
+    forkedAgentMocks.runForkedAgent.mockResolvedValue({
+      jsonResult: { suggestion: '' },
+    });
+    forkedAgentMocks.sendMessageStream.mockImplementation(async function* () {
+      yield {
+        type: 'chunk',
+        value: {
+          candidates: [{ content: { parts: [{ text: 'discarded' }] } }],
+        },
+      };
+      yield { type: 'retry' };
+      yield {
+        type: 'chunk',
+        value: {
+          candidates: [
+            {
+              content: {
+                parts: [
+                  { text: 'kept' },
+                  {
+                    functionCall: {
+                      id: 'revoked',
+                      name: 'read_file',
+                      args: { path: 'stale' },
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      };
+      yield { type: 'retry', isContinuation: true };
+      yield {
+        type: 'chunk',
+        value: {
+          candidates: [{ content: { parts: [{ text: ' suffix' }] } }],
+        },
+      };
+    });
+
+    const state = await startSpeculation(config, 'test');
+    await vi.waitFor(() => expect(state.status).toBe('completed'));
+
+    expect(state.messages[1]?.parts).toEqual([
+      { text: 'kept' },
+      { text: ' suffix' },
+    ]);
+    await abortSpeculation(state);
+  });
+
   it('stops before executing a permission-deferred tool', async () => {
     const ensureTool = vi.fn();
     const toolRegistry = {
