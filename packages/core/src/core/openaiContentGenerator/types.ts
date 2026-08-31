@@ -37,25 +37,6 @@ export interface StreamingTextDeltaState {
   /** Integer token-estimate units accumulated from normalized emitted text. */
   emittedTokenUnits?: number;
   cumulativeMode: boolean;
-  /**
-   * Set per chunk by the converter on the content channel while a
-   * pre-demotion opening-shaped thinking-tag candidate is held (issue
-   * #9348 R8-1): prefix-overlapping chunks carrying a full opening tag
-   * word must be emitted verbatim instead of sliced against the baseline,
-   * because the held bytes were never emitted and a genuine nested opener
-   * is undecidable from a cumulative re-send by prefix comparison alone.
-   */
-  tagHoldActive?: boolean;
-  /**
-   * Per-delta regime signal written by normalizeStreamingTextDelta: true
-   * when the last delta was emitted verbatim by one of the tag-hold overlap
-   * guards (prefix overlap against the baseline while `tagHoldActive` was
-   * set). The guard zone reads it to decide strip-vs-append for shapes that
-   * are byte-identical between a cumulative re-send of the held block and a
-   * genuinely fresh nested respell — content comparison alone cannot tell
-   * them apart (issue #9348 R11-2).
-   */
-  tagHoldVerbatimEmission?: boolean;
 }
 
 export interface RequestContext {
@@ -107,47 +88,6 @@ export interface RequestContext {
   hasThinkingTagInReasoning?: boolean;
   hasVisibleContent?: boolean;
   atVisibleLineStart?: boolean;
-  /**
-   * Set once the inline thinking parser demotes a balanced content block to
-   * the thought channel (issue #9348). After a demotion any further complete
-   * thinking tag in visible content is embedded/stray and fails closed;
-   * literal tag references are only sanctioned before a demotion happens.
-   */
-  inlineThinkingBlockDemoted?: boolean;
-  /**
-   * Trailing suffix of emitted visible text held back after an inline
-   * thinking block demotion (issue #9348). Once visible content exists the
-   * candidate machinery is disengaged, so a thinking tag assembled across
-   * chunk boundaries would never appear complete in any one chunk; any
-   * trailing suffix that could still complete into a tag is held here, the
-   * leak gate runs on tail + next chunk, and finish fails closed when the
-   * held suffix already contains a full tag word (sub-word fragments are
-   * released as literal text — they can no longer become a tag).
-   */
-  pendingPostDemotionTagTail?: string;
-  /**
-   * Full accepted content-channel sequence since the first inline thinking
-   * demotion (issue #9348). Short cumulative replays can pass through
-   * normalizeStreamingTextDelta verbatim, so this sequence provides exact
-   * replay evidence: an equal sequence is dropped unless it consists of
-   * balanced thinking blocks only (a genuine consecutive identical block
-   * is undecidable from a replay of a blocks-only sequence and is appended
-   * instead), and a prefix-extending sequence contributes only its new
-   * suffix. A proper-prefix re-send (rewind replay) is appended, not
-   * dropped — it is indistinguishable from a genuine consecutive/nested
-   * block opener by content comparison. Individual suffix equality is
-   * deliberately insufficient because genuine adjacent deltas may repeat.
-   */
-  postDemotionReplayText?: string;
-  /**
-   * Set once a chunk carrying finish_reason has been converted (issue #9348).
-   * The pipeline treats content arriving after the finish chunk as droppable
-   * (finishYielded / pendingFinishResponse merging), so the converter must
-   * not fail closed a completed turn on post-finish redelivered tag-shaped
-   * text — visible content arriving after this point is dropped instead of
-   * running through the replay and leaked-tag gates.
-   */
-  finishChunkConverted?: boolean;
   pendingThinkingTagCandidate?: {
     text: string;
     closingTagName?: 'think' | 'thinking';

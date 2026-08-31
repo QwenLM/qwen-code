@@ -626,17 +626,7 @@ export class ContentGenerationPipeline {
         }
       }
 
-      // Clean-EOF backstops: run only when no finish chunk was ever
-      // converted (neither yielded nor still pending). Once a finish chunk
-      // has been seen, the converter has already flushed the held parts into
-      // the finish response, so anything still held at EOF is post-finish
-      // redelivered content the merge logic intentionally drops (the merge
-      // base discarded it too) — yielding it here would append a duplicated
-      // or stray response after the finish response on
-      // hasThinkingTagInReasoning turns.
       if (
-        !finishYielded &&
-        !pendingFinishResponse &&
         context.pendingThinkingTagCandidate &&
         !context.pendingThinkingTagCandidate.closingTagName &&
         !/\S/.test(context.pendingThinkingTagCandidate.text)
@@ -654,94 +644,11 @@ export class ContentGenerationPipeline {
           ];
           yield response;
         }
-      } else if (
-        !finishYielded &&
-        !pendingFinishResponse &&
-        context.pendingThinkingTagCandidate
-      ) {
-        const heldCandidateText = context.pendingThinkingTagCandidate.text;
-        context.pendingThinkingTagCandidate = undefined;
-        if (/<\/?think(?:ing)?/i.test(heldCandidateText)) {
-          throw new InvalidStreamError(
-            'Model response leaked thinking tags.',
-            'PROTOCOL_TAG_LEAK',
-          );
-        }
-        // Sub-word fragment (e.g. a truncated '<thi'): it can no longer
-        // become a tag once the stream has ended. Release it as literal
-        // text — aligned with the finish-time checks — instead of
-        // hard-failing a truncated turn.
-        const pendingParts = context.pendingUntrustedResponseParts;
-        context.pendingUntrustedResponseParts = undefined;
-        const response = new GenerateContentResponse();
-        response.candidates = [
-          {
-            content: {
-              parts: [...(pendingParts ?? []), { text: heldCandidateText }],
-              role: 'model',
-            },
-            index: 0,
-          },
-        ];
-        yield response;
-      }
-
-      if (
-        !finishYielded &&
-        !pendingFinishResponse &&
-        context.pendingPostDemotionTagTail
-      ) {
-        const tail = context.pendingPostDemotionTagTail;
-        context.pendingPostDemotionTagTail = undefined;
-        if (/<\/?think(?:ing)?/i.test(tail)) {
-          throw new InvalidStreamError(
-            'Model response leaked thinking tags.',
-            'PROTOCOL_TAG_LEAK',
-          );
-        }
-        // Sub-word fragment (e.g. a truncated '<thi'): release it as literal
-        // text, merged with the held parts the way the sibling candidate
-        // branch above does — on hasThinkingTagInReasoning turns every
-        // non-finish chunk is held by shouldHoldParts, so yielding only the
-        // tail would silently discard the demoted thought, the reasoning
-        // thought, and all visible text accumulated so far.
-        const pendingParts = context.pendingUntrustedResponseParts;
-        context.pendingUntrustedResponseParts = undefined;
-        const response = new GenerateContentResponse();
-        response.candidates = [
-          {
-            content: {
-              parts: [...(pendingParts ?? []), { text: tail }],
-              role: 'model',
-            },
-            index: 0,
-          },
-        ];
-        yield response;
-      }
-
-      // Root-level flush of anything still held: with no candidate and no
-      // post-demotion tail pending (the common clean-EOF shape — visible text
-      // that does not end in a tag-like suffix), no backstop above runs, yet
-      // on hasThinkingTagInReasoning turns every non-finish chunk was held by
-      // shouldHoldParts and the converter's finish-time flush never executed
-      // because no finish chunk arrived. Completing with zero responses would
-      // silently discard the held content; yield it instead.
-      if (
-        !finishYielded &&
-        !pendingFinishResponse &&
-        context.pendingUntrustedResponseParts?.length
-      ) {
-        const pendingParts = context.pendingUntrustedResponseParts;
-        context.pendingUntrustedResponseParts = undefined;
-        const response = new GenerateContentResponse();
-        response.candidates = [
-          {
-            content: { parts: pendingParts, role: 'model' },
-            index: 0,
-          },
-        ];
-        yield response;
+      } else if (context.pendingThinkingTagCandidate) {
+        throw new InvalidStreamError(
+          'Model response leaked thinking tags.',
+          'PROTOCOL_TAG_LEAK',
+        );
       }
 
       // Stage 2d: If there's still a pending finish response at the end

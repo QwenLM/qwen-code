@@ -12,11 +12,6 @@ const debugLogger = createDebugLogger('TAGGED_THINKING_PARSER');
 // Parser uses a binary mode toggle rather than a tag stack, so
 // <think>content</thinking> is valid and cross-matching is intentional.
 // MiniMax only uses one tag type per response in practice.
-// Literal-tag grammar for the taggedThinkingTags route: only the exact
-// '<think>'/'<thinking>' strings, no whitespace inside tags. The contentOnly
-// route pairs tags with a separate whitespace-tolerant scanner family in
-// converter.ts (THINKING_TAG_PATTERN / scanBalancedThinkingBlock) — review
-// both grammars together when changing either, so the routes stay in sync.
 const OPEN_TAGS = ['<think>', '<thinking>'] as const;
 const CLOSE_TAGS = ['</think>', '</thinking>'] as const;
 
