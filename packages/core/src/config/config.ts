@@ -220,7 +220,6 @@ import {
   unregisterSessionProjectDir,
 } from '../utils/sessionIdContext.js';
 import { Storage } from './storage.js';
-import { persistUsageBeforeTranscriptDeletion } from '../services/usageHistoryService.js';
 import {
   ChatRecordingService,
   type ChatRecordingFailureEvent,
@@ -3546,22 +3545,13 @@ export class Config {
       })();
     }
 
-    // Fire-and-forget sweep of orphaned project snapshots under
-    // `<runtime>/projects/` — sessions that ran from one-shot temp dirs
-    // (or since-deleted worktrees) leave entries whose recorded cwd no
-    // longer exists (issue #7906). Startup is the single cleanup path:
-    // delayed removal keeps shutdown simple and gives ambiguous entries
-    // the stale + marker grace windows before deletion. Unconditional
-    // (not gated on bare mode) because temp-dir sessions are common in
-    // scripted/bare usage. Fresh entries skip after a stat-only walk;
-    // only stale deletion candidates pay a handful of bounded record reads.
-    // setImmediate defers actual I/O past the startup hot path. Removals
-    // and per-entry failures are logged so a missing-history report has
-    // something to grep for; transcripts are usage-salvaged first (#7384).
+    // Fire-and-forget sweep of empty project entries under
+    // `<runtime>/projects/`. Entries with transcripts or sidecars may be
+    // shared across sessions/processes/hosts, so startup does not try to
+    // infer ownership from stale cwd evidence.
     setImmediate(() => {
       void Storage.cleanOrphanProjectDirs(
         sanitizeCwd(this.storage.getProjectRoot()),
-        (entryPath) => this.salvageSessionUsage(entryPath),
       )
         .then(({ removed, errors }) => {
           for (const name of removed) {
@@ -4481,16 +4471,15 @@ export class Config {
     //
     // Always write the new per-pid sidecar: if the startup write failed,
     // a later session transition can heal this process's membership
-    // evidence. Only clear the previous per-pid sidecar when this process
-    // knows it established one.
+    // evidence. The clear decision is evaluated inside the serialized
+    // write chain so back-to-back transitions observe earlier queued heals.
     if (isSessionTransition) {
       const newPath = this.storage.getRuntimeStatusPath(this.sessionId);
       const cliVersion = this.cliVersion ?? null;
       const workDir = this.targetDir;
       const newSessionId = this.sessionId;
-      const shouldClearPrevious = this.runtimeStatusEnabled;
       this.queueRuntimeStatusWrite(async () => {
-        if (shouldClearPrevious) {
+        if (this.runtimeStatusEnabled) {
           await clearRuntimeStatus(
             this.storage.getRuntimeStatusPath(previousSessionId),
           );
@@ -4674,18 +4663,6 @@ export class Config {
       .catch(() => {
         // ignored: runtime status must not disrupt session control flow.
       });
-  }
-
-  /**
-   * Salvages usage summaries from an entry's transcripts before its
-   * deletion (#7384): daemon/Web Shell/crashed sessions never persist
-   * usage otherwise, and the usage dashboard replays exactly these
-   * transcripts. `persistUsageBeforeTranscriptDeletion` never throws.
-   */
-  private async salvageSessionUsage(projectDir: string): Promise<void> {
-    for (const transcript of Storage.listTranscriptPaths(projectDir)) {
-      await persistUsageBeforeTranscriptDeletion(transcript);
-    }
   }
 
   /**

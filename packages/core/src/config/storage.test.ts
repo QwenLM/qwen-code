@@ -731,84 +731,12 @@ describe('Storage – runtime base dir async context isolation', () => {
 describe('Storage – cleanOrphanProjectDirs', () => {
   let baseDir: string;
   let projectsDir: string;
-  let aliveCwd: string;
-  /** A temp cwd that never exists. */
-  let goneCwd: string;
-  let tmpdirSpy: ReturnType<typeof vi.spyOn> | undefined;
 
   const STALE_AGE_MS = 2 * 24 * 60 * 60 * 1000;
-  /** A long-dead pid: kill(pid, 0) fails with ESRCH/EINVAL, not EPERM. */
-  const DEAD_PID = 2_000_000_000;
 
-  const writeSession = (entry: string, cwd: string) => {
-    const chats = path.join(projectsDir, entry, 'chats');
-    actualFs.mkdirSync(chats, { recursive: true });
-    actualFs.writeFileSync(
-      path.join(chats, 'session-1.jsonl'),
-      JSON.stringify({ cwd, type: 'user' }) + '\n',
-    );
-  };
-
-  const writeRuntimeSidecar = (
-    filePath: string,
-    fields: {
-      pid: number;
-      workDir: string;
-      hostname?: string;
-      pidNamespaceId?: number | null;
-      procStartToken?: string | null;
-    },
-  ) => {
-    actualFs.writeFileSync(
-      filePath,
-      JSON.stringify({
-        schema_version: 1,
-        pid: fields.pid,
-        session_id: 'session-1',
-        work_dir: fields.workDir,
-        hostname: fields.hostname ?? os.hostname(),
-        started_at: Date.now() / 1000,
-        qwen_version: null,
-        pid_namespace_id: fields.pidNamespaceId ?? null,
-        proc_start_token: fields.procStartToken ?? null,
-      }),
-    );
-  };
-
-  /** Ages an entry — directory and every file under it — past the 24 h
-   * grace window. Files matter because the sweep gates on the newest
-   * file mtime, not the entry dir's own mtime. */
-  const ageEntry = (entry: string) => {
+  const ageEntry = (entryPath: string) => {
     const past = new Date(Date.now() - STALE_AGE_MS);
-    const root = path.join(projectsDir, entry);
-    const age = (dir: string) => {
-      for (const dirent of actualFs.readdirSync(dir, { withFileTypes: true })) {
-        const child = path.join(dir, dirent.name);
-        if (dirent.isDirectory()) age(child);
-        actualFs.utimesSync(child, past, past);
-      }
-      actualFs.utimesSync(dir, past, past);
-    };
-    age(root);
-  };
-
-  /** Ages a single file past the grace window. */
-  const ageFile = (filePath: string) => {
-    const past = new Date(Date.now() - STALE_AGE_MS);
-    actualFs.utimesSync(filePath, past, past);
-  };
-
-  /**
-   * Runs the full disappearance-grace cycle: first sweep writes the marker,
-   * then age it and sweep again to reach deletion.
-   */
-  const sweepPastMarkerGrace = async (
-    entry: string,
-    onBeforeRemove?: (entryPath: string) => Promise<void>,
-  ) => {
-    await Storage.cleanOrphanProjectDirs('current', onBeforeRemove);
-    ageFile(path.join(projectsDir, entry, '.qwen-orphan-since'));
-    return Storage.cleanOrphanProjectDirs('current', onBeforeRemove);
+    actualFs.utimesSync(entryPath, past, past);
   };
 
   // The env var beats setRuntimeBaseDir() in getRuntimeBaseDir():
@@ -831,28 +759,13 @@ describe('Storage – cleanOrphanProjectDirs', () => {
       (...args: Parameters<typeof actualFs.mkdirSync>) =>
         actualFs.mkdirSync(...args),
     );
-    // Pin the temp root: the merge-queue legs put the ambient temp root
-    // outside the allowlist (POSIX exports TMPDIR=$RUNNER_TEMP; the
-    // Windows runner action overrides TEMP/TMP the same way), which would
-    // flip every temp-classification fixture here.
-    tmpdirSpy = vi
-      .spyOn(os, 'tmpdir')
-      .mockReturnValue(
-        process.platform === 'win32' ? 'C:\\Windows\\Temp' : '/tmp',
-      );
     baseDir = actualFs.mkdtempSync(path.join(os.tmpdir(), 'storage-orphan-'));
     projectsDir = path.join(baseDir, 'projects');
     actualFs.mkdirSync(projectsDir, { recursive: true });
-    aliveCwd = actualFs.mkdtempSync(path.join(os.tmpdir(), 'alive-cwd-'));
-    goneCwd = path.join(
-      os.tmpdir(),
-      `qwen-orphan-gone-${Math.random().toString(36).slice(2)}`,
-    );
     Storage.setRuntimeBaseDir(baseDir);
   });
 
   afterEach(() => {
-    tmpdirSpy?.mockRestore();
     Storage.setRuntimeBaseDir(null);
     if (originalRuntimeEnv !== undefined) {
       process.env['QWEN_RUNTIME_DIR'] = originalRuntimeEnv;
@@ -860,710 +773,55 @@ describe('Storage – cleanOrphanProjectDirs', () => {
       delete process.env['QWEN_RUNTIME_DIR'];
     }
     actualFs.rmSync(baseDir, { recursive: true, force: true });
-    actualFs.rmSync(aliveCwd, { recursive: true, force: true });
   });
 
-  it('removes stale entries whose temp cwd no longer exists', async () => {
-    writeSession('-tmp-gone-sess', goneCwd);
-    ageEntry('-tmp-gone-sess');
-    const result = await sweepPastMarkerGrace('-tmp-gone-sess');
-    expect(actualFs.existsSync(path.join(projectsDir, '-tmp-gone-sess'))).toBe(
-      false,
-    );
-    expect(result.removed).toContain('-tmp-gone-sess');
-    expect(result.errors).toEqual([]);
-  });
-
-  it('keeps stale entries whose non-temp cwd no longer exists', async () => {
-    const nonTempGoneCwd = path.join(
-      process.cwd(),
-      `qwen-orphan-gone-${Math.random().toString(36).slice(2)}`,
-    );
-    writeSession('-non-temp-gone', nonTempGoneCwd);
-    ageEntry('-non-temp-gone');
-
-    await Storage.cleanOrphanProjectDirs('current');
-
-    expect(actualFs.existsSync(path.join(projectsDir, '-non-temp-gone'))).toBe(
-      true,
-    );
-    expect(
-      actualFs.existsSync(
-        path.join(projectsDir, '-non-temp-gone', '.qwen-orphan-since'),
-      ),
-    ).toBe(false);
-  });
-
-  it('keeps a stale entry read by a resume during salvage', async () => {
-    const resumeStorage = new Storage(goneCwd);
-    const entryName = path.basename(resumeStorage.getProjectDir());
-    writeSession(entryName, goneCwd);
-    ageEntry(entryName);
-
-    const result = await sweepPastMarkerGrace(entryName, async () => {
-      await resumeStorage.runWithProjectDirReadClaim(async () => {
-        expect(
-          actualFs.readFileSync(
-            path.join(projectsDir, entryName, 'chats', 'session-1.jsonl'),
-            'utf8',
-          ),
-        ).toContain(goneCwd);
-      });
-    });
-
-    expect(actualFs.existsSync(resumeStorage.getProjectDir())).toBe(true);
-    expect(result.removed).not.toContain(entryName);
-    expect(result.errors).toEqual([]);
-    expect(
-      actualFs.existsSync(
-        path.join(resumeStorage.getProjectDir(), '.qwen-orphan-since'),
-      ),
-    ).toBe(true);
-  });
-
-  it('does not mark a healthy entry when reading its transcript', async () => {
-    const resumeStorage = new Storage(aliveCwd);
-    const entryName = path.basename(resumeStorage.getProjectDir());
-    writeSession(entryName, aliveCwd);
-
-    await resumeStorage.runWithProjectDirReadClaim(async () => {
-      expect(
-        actualFs.readFileSync(
-          path.join(projectsDir, entryName, 'chats', 'session-1.jsonl'),
-          'utf8',
-        ),
-      ).toContain(aliveCwd);
-    });
-
-    expect(
-      actualFs.existsSync(
-        path.join(resumeStorage.getProjectDir(), '.qwen-orphan-since'),
-      ),
-    ).toBe(false);
-  });
-
-  it('does not remove an entry after a resume renews its grace', async () => {
-    const resumeStorage = new Storage(goneCwd);
-    const entryName = path.basename(resumeStorage.getProjectDir());
-    writeSession(entryName, goneCwd);
-    ageEntry(entryName);
-    await Storage.cleanOrphanProjectDirs('current');
-    ageFile(path.join(projectsDir, entryName, '.qwen-orphan-since'));
-
-    const result = await resumeStorage.runWithProjectDirReadClaim(() =>
-      Storage.cleanOrphanProjectDirs('current'),
-    );
-
-    expect(actualFs.existsSync(resumeStorage.getProjectDir())).toBe(true);
-    expect(result.removed).not.toContain(entryName);
-  });
-
-  it('keeps fresh entries even when their cwd is gone (grace window)', async () => {
-    writeSession('-fresh-gone-sess', goneCwd);
-    await Storage.cleanOrphanProjectDirs('current');
-    expect(
-      actualFs.existsSync(path.join(projectsDir, '-fresh-gone-sess')),
-    ).toBe(true);
-  });
-
-  it('keeps fresh gone-cwd entries without any runtime sidecar (R2-1)', async () => {
-    // Headless/ACP/SDK/serve sessions never write a sidecar; a running
-    // one stays protected through its ongoing appends alone.
-    writeSession('-headless-live', goneCwd);
-    ageEntry('-headless-live');
-    // Simulate an in-progress append: the transcript is fresh again.
-    actualFs.utimesSync(
-      path.join(projectsDir, '-headless-live', 'chats', 'session-1.jsonl'),
-      new Date(),
-      new Date(),
-    );
-    await Storage.cleanOrphanProjectDirs('current');
-    expect(actualFs.existsSync(path.join(projectsDir, '-headless-live'))).toBe(
-      true,
-    );
-  });
-
-  it('keeps entries whose recorded cwd still exists', async () => {
-    writeSession('-alive-proj', aliveCwd);
-    await Storage.cleanOrphanProjectDirs('current');
-    expect(actualFs.existsSync(path.join(projectsDir, '-alive-proj'))).toBe(
-      true,
-    );
-  });
-
-  it('keeps stale entries where any recorded cwd still exists', async () => {
-    // `/cd` relocation keeps the old cwd on line 1 and appends records
-    // under the new one — deletion needs EVERY recorded cwd gone, so a
-    // live cwd in the tail line must veto removal.
-    const chats = path.join(projectsDir, '-multi-cwd', 'chats');
-    actualFs.mkdirSync(chats, { recursive: true });
+  it('keeps stale entries that contain any persisted content', async () => {
+    const entry = path.join(projectsDir, '-recorded');
+    actualFs.mkdirSync(path.join(entry, 'chats'), { recursive: true });
     actualFs.writeFileSync(
-      path.join(chats, 'session-1.jsonl'),
-      JSON.stringify({ cwd: goneCwd, type: 'user' }) +
-        '\n' +
-        JSON.stringify({ cwd: process.cwd(), type: 'model' }) +
-        '\n',
+      path.join(entry, 'chats', 'session-1.jsonl'),
+      JSON.stringify({ cwd: '/tmp/gone', type: 'qwen' }) + '\n',
     );
-    ageEntry('-multi-cwd');
-    await Storage.cleanOrphanProjectDirs('current');
-    expect(actualFs.existsSync(path.join(projectsDir, '-multi-cwd'))).toBe(
-      true,
-    );
-    // Kept via the live-cwd veto, not via the marker branch: no marker
-    // may be written, or a later disappearance would lose its grace.
-    expect(
-      actualFs.existsSync(
-        path.join(projectsDir, '-multi-cwd', '.qwen-orphan-since'),
-      ),
-    ).toBe(false);
-  });
-
-  it('keeps stale entries owned by a live session (runtime sidecar pid)', async () => {
-    writeSession('-live-sess', goneCwd);
-    writeRuntimeSidecar(
-      path.join(projectsDir, '-live-sess', 'chats', 'session-1.runtime.json'),
-      { pid: process.pid, workDir: goneCwd },
-    );
-    ageEntry('-live-sess');
-    // The session is still running: its sidecar was just refreshed.
-    actualFs.utimesSync(
-      path.join(projectsDir, '-live-sess', 'chats', 'session-1.runtime.json'),
-      new Date(),
-      new Date(),
-    );
-    await Storage.cleanOrphanProjectDirs('current');
-    expect(actualFs.existsSync(path.join(projectsDir, '-live-sess'))).toBe(
-      true,
-    );
-  });
-
-  it('removes stale entries whose runtime sidecar pid is dead', async () => {
-    writeSession('-dead-sess', goneCwd);
-    writeRuntimeSidecar(
-      path.join(projectsDir, '-dead-sess', 'chats', 'session-1.runtime.json'),
-      { pid: DEAD_PID, workDir: goneCwd },
-    );
-    ageEntry('-dead-sess');
-    await sweepPastMarkerGrace('-dead-sess');
-    expect(actualFs.existsSync(path.join(projectsDir, '-dead-sess'))).toBe(
-      false,
-    );
-  });
-
-  it('keeps stale entries claimed by another hostname', async () => {
-    writeSession('-foreign-live', goneCwd);
-    writeRuntimeSidecar(
-      path.join(
-        projectsDir,
-        '-foreign-live',
-        'chats',
-        'session-1.runtime.json',
-      ),
-      {
-        pid: DEAD_PID,
-        workDir: goneCwd,
-        hostname: 'another-machine.example',
-      },
-    );
-    ageEntry('-foreign-live');
-
-    await Storage.cleanOrphanProjectDirs('current');
-
-    expect(actualFs.existsSync(path.join(projectsDir, '-foreign-live'))).toBe(
-      true,
-    );
-    expect(
-      actualFs.existsSync(
-        path.join(projectsDir, '-foreign-live', '.qwen-orphan-since'),
-      ),
-    ).toBe(false);
-  });
-
-  it.skipIf(process.platform !== 'linux')(
-    'keeps stale entries claimed from another pid namespace (R23-1)',
-    async () => {
-      writeSession('-foreign-namespace-live', goneCwd);
-      writeRuntimeSidecar(
-        path.join(
-          projectsDir,
-          '-foreign-namespace-live',
-          'chats',
-          'session-1.runtime.json',
-        ),
-        {
-          pid: DEAD_PID,
-          workDir: goneCwd,
-          pidNamespaceId: actualFs.statSync('/proc/self/ns/pid').ino + 1,
-        },
-      );
-      ageEntry('-foreign-namespace-live');
-      actualFs.writeFileSync(
-        path.join(projectsDir, '-foreign-namespace-live', '.qwen-orphan-since'),
-        String(Date.now() - STALE_AGE_MS),
-      );
-      ageFile(
-        path.join(projectsDir, '-foreign-namespace-live', '.qwen-orphan-since'),
-      );
-
-      await Storage.cleanOrphanProjectDirs('current');
-
-      expect(
-        actualFs.existsSync(path.join(projectsDir, '-foreign-namespace-live')),
-      ).toBe(true);
-    },
-  );
-
-  it('keeps entries with foreign-host runtime sidecars even when demoted (R23-3)', async () => {
-    writeSession('-foreign-demoted', goneCwd);
-    writeRuntimeSidecar(
-      path.join(
-        projectsDir,
-        '-foreign-demoted',
-        'chats',
-        'session-1.runtime.json',
-      ),
-      {
-        pid: 0,
-        workDir: goneCwd,
-        hostname: 'another-machine.example',
-      },
-    );
-    ageEntry('-foreign-demoted');
-
-    await Storage.cleanOrphanProjectDirs('current');
-
-    expect(
-      actualFs.existsSync(path.join(projectsDir, '-foreign-demoted')),
-    ).toBe(true);
-    expect(
-      actualFs.existsSync(
-        path.join(projectsDir, '-foreign-demoted', '.qwen-orphan-since'),
-      ),
-    ).toBe(false);
-  });
-
-  it('reads cwds from sidecars and archived transcripts', async () => {
-    // No top-level chat log at all — only sidecar and archive forms. If
-    // the sweep ignored those shapes, cwds would be empty and the
-    // non-empty entry would survive.
-    const entry = path.join(projectsDir, '-sidecar-sess');
-    const chats = path.join(entry, 'chats');
-    const archive = path.join(chats, 'archive');
-    actualFs.mkdirSync(archive, { recursive: true });
-    writeRuntimeSidecar(path.join(chats, 'session-1.runtime.json'), {
-      pid: DEAD_PID,
-      workDir: `${goneCwd}-1`,
-    });
-    actualFs.writeFileSync(
-      path.join(archive, 'session-0.jsonl'),
-      JSON.stringify({ cwd: `${goneCwd}-3` }) + '\n',
-    );
-    ageEntry('-sidecar-sess');
-    await sweepPastMarkerGrace('-sidecar-sess');
-    expect(actualFs.existsSync(entry)).toBe(false);
-  });
-
-  it('keeps stale entries when a sidecar-recorded cwd still exists', async () => {
-    const entry = path.join(projectsDir, '-sidecar-alive');
-    const chats = path.join(entry, 'chats');
-    actualFs.mkdirSync(chats, { recursive: true });
-    writeRuntimeSidecar(path.join(chats, 'session-1.runtime.json'), {
-      pid: DEAD_PID,
-      workDir: process.cwd(),
-    });
-    ageEntry('-sidecar-alive');
-    await Storage.cleanOrphanProjectDirs('current');
+    ageEntry(entry);
+    const result = await Storage.cleanOrphanProjectDirs('current');
     expect(actualFs.existsSync(entry)).toBe(true);
+    expect(result).toEqual({ removed: [], errors: [] });
   });
 
-  it('keeps stale entries whose temp cwd still exists', async () => {
-    const survived = actualFs.mkdtempSync(
-      path.join(os.tmpdir(), 'qwen-temp-survived-'),
-    );
-    writeSession('-temp-crash', survived);
-    ageEntry('-temp-crash');
+  it('removes empty entries older than one day', async () => {
+    const stale = path.join(projectsDir, '-stale-empty');
+    actualFs.mkdirSync(stale, { recursive: true });
+    ageEntry(stale);
+    const result = await Storage.cleanOrphanProjectDirs('current');
+    expect(actualFs.existsSync(stale)).toBe(false);
+    expect(result).toEqual({ removed: ['-stale-empty'], errors: [] });
+  });
+
+  it('keeps fresh empty entries', async () => {
+    const fresh = path.join(projectsDir, '-fresh-empty');
+    actualFs.mkdirSync(fresh, { recursive: true });
     await Storage.cleanOrphanProjectDirs('current');
-    expect(actualFs.existsSync(path.join(projectsDir, '-temp-crash'))).toBe(
-      true,
-    );
-    actualFs.rmSync(survived, { recursive: true, force: true });
+    expect(actualFs.existsSync(fresh)).toBe(true);
   });
 
-  it('keeps a live-but-idle temp session at the deletion gate (R11-1)', async () => {
-    // Idle >24 h: the sidecar aged past the trust window and there were
-    // no appends, so the entry gate lets the marker flow run. The
-    // deletion gate must still re-check pid liveness without that
-    // window — the process is provably alive.
-    const survived = actualFs.mkdtempSync(
-      path.join(os.tmpdir(), 'qwen-idle-live-'),
-    );
-    const entry = path.join(projectsDir, '-idle-live');
-    const chats = path.join(entry, 'chats');
-    actualFs.mkdirSync(chats, { recursive: true });
-    actualFs.writeFileSync(
-      path.join(chats, 'session-1.jsonl'),
-      JSON.stringify({ cwd: survived, type: 'user' }) + '\n',
-    );
-    writeRuntimeSidecar(path.join(chats, 'session-1.runtime.json'), {
-      pid: process.pid,
-      workDir: survived,
-    });
-    ageEntry('-idle-live');
-    await Storage.cleanOrphanProjectDirs('current');
-    await Storage.cleanOrphanProjectDirs('current');
-    expect(actualFs.existsSync(entry)).toBe(true);
-    expect(actualFs.existsSync(path.join(entry, '.qwen-orphan-since'))).toBe(
-      false,
-    );
-  });
-
-  it('cleans entries whose only artifact is a sidecar pointing at a gone worktree (R5-1)', async () => {
-    // A worktree session killed before its first record leaves only
-    // the .worktree.json sidecar — the exact orphan shape from #7906.
-    // Without a worktreePath read such an entry never reaches the
-    // marker flow (the sidecar itself defeats the empty-entry branch).
-    const chats = path.join(projectsDir, '-sidecar-only', 'chats');
-    actualFs.mkdirSync(chats, { recursive: true });
-    actualFs.writeFileSync(
-      path.join(chats, 'session-1.worktree.json'),
-      JSON.stringify({ slug: 'feat-x', worktreePath: goneCwd }),
-    );
-    ageEntry('-sidecar-only');
-    await sweepPastMarkerGrace('-sidecar-only');
-    expect(actualFs.existsSync(path.join(projectsDir, '-sidecar-only'))).toBe(
-      false,
-    );
-  });
-
-  it('removes an entry reduced to just the orphan marker (R7-1)', async () => {
-    // A marked entry whose records /cd moved elsewhere: the marker is
-    // sweep bookkeeping, not content — counting it would block the
-    // empty-entry branch forever.
+  it('keeps stale entries whose only file is an old orphan marker', async () => {
     const entry = path.join(projectsDir, '-marker-only');
-    actualFs.mkdirSync(path.join(entry, 'chats'), { recursive: true });
+    actualFs.mkdirSync(entry, { recursive: true });
     actualFs.writeFileSync(
       path.join(entry, '.qwen-orphan-since'),
       String(Date.now() - STALE_AGE_MS),
     );
-    ageEntry('-marker-only');
-    await Storage.cleanOrphanProjectDirs('current');
-    expect(actualFs.existsSync(entry)).toBe(false);
-  });
-
-  it('keeps an entry reduced to workflow residue (R9-1)', async () => {
-    // Workflow snapshots and journals carry no cwd proving their source
-    // project is gone (chat recording disabled + workflows enabled is a
-    // real configuration), so residue must fail closed: leaked, never
-    // deleted.
-    const entry = path.join(projectsDir, '-workflow-residue');
-    actualFs.mkdirSync(path.join(entry, 'chats'), { recursive: true });
-    actualFs.mkdirSync(path.join(entry, 'workflows', 'run-1'), {
-      recursive: true,
-    });
-    actualFs.writeFileSync(
-      path.join(entry, 'workflows', 'run-1.json'),
-      JSON.stringify({ runId: 'run-1' }),
-    );
-    actualFs.writeFileSync(
-      path.join(entry, 'workflows', 'run-1', 'journal.jsonl'),
-      JSON.stringify({ step: 1 }) + '\n',
-    );
-    ageEntry('-workflow-residue');
-    await Storage.cleanOrphanProjectDirs('current');
-    expect(actualFs.existsSync(entry)).toBe(true);
-  });
-
-  it('treats a torn final record as incomplete evidence (R10-11)', async () => {
-    // All writers terminate records with '\n', so a non-terminated tail
-    // at EOF is a torn write (kill -9 mid-append). Its cwd — possibly
-    // the only live one — was cut off, so the sibling's gone cwd alone
-    // must not start the marker flow.
-    const entry = path.join(projectsDir, '-torn-tail');
-    actualFs.mkdirSync(path.join(entry, 'chats'), { recursive: true });
-    actualFs.writeFileSync(
-      path.join(entry, 'chats', 'torn.jsonl'),
-      JSON.stringify({ cwd: goneCwd, type: 'qwen' }) +
-        '\n' +
-        '{"cwd":"/live/proj',
-    );
-    ageEntry('-torn-tail');
-    await Storage.cleanOrphanProjectDirs('current');
-    expect(actualFs.existsSync(entry)).toBe(true);
-    expect(actualFs.existsSync(path.join(entry, '.qwen-orphan-since'))).toBe(
-      false,
-    );
-  });
-
-  it('treats a torn sidecar as incomplete evidence (self-review)', async () => {
-    // Sidecars are rewritten in place on runtime status updates; a
-    // kill -9 mid-write leaves torn JSON. Its work_dir — possibly the
-    // only live cwd — is lost, so the sibling's gone cwd alone must
-    // not start the marker flow. (Torn JSON, not chmod, so the test is
-    // platform- and uid-independent.)
-    const entry = path.join(projectsDir, '-torn-sidecar');
-    actualFs.mkdirSync(path.join(entry, 'chats'), { recursive: true });
-    actualFs.writeFileSync(
-      path.join(entry, 'chats', 'gone.jsonl'),
-      JSON.stringify({ cwd: goneCwd, type: 'qwen' }) + '\n',
-    );
-    actualFs.writeFileSync(
-      path.join(entry, 'chats', 'sess-1.runtime.json'),
-      '{"work_dir":"/live/proj',
-    );
-    expect(Storage.hasLiveSession(entry, false)).toBe(true);
-    ageEntry('-torn-sidecar');
-    await Storage.cleanOrphanProjectDirs('current');
-    expect(actualFs.existsSync(entry)).toBe(true);
-    expect(actualFs.existsSync(path.join(entry, '.qwen-orphan-since'))).toBe(
-      false,
-    );
-  });
-
-  it('treats an over-budget transcript as incomplete evidence (R9-7)', async () => {
-    // A single record longer than the scan budget aborts the scan. The
-    // sibling transcript records a gone cwd, which alone would start the
-    // marker flow — but the over-budget one could hide a live cwd, so
-    // partial evidence must veto: no marker, no deletion.
-    const entry = path.join(projectsDir, '-over-budget');
-    actualFs.mkdirSync(path.join(entry, 'chats'), { recursive: true });
-    actualFs.writeFileSync(
-      path.join(entry, 'chats', 'huge.jsonl'),
-      'x'.repeat(8 * 1024 * 1024 + 1),
-    );
-    actualFs.writeFileSync(
-      path.join(entry, 'chats', 'gone.jsonl'),
-      JSON.stringify({ cwd: goneCwd, type: 'qwen' }) + '\n',
-    );
-    ageEntry('-over-budget');
-    await Storage.cleanOrphanProjectDirs('current');
-    expect(actualFs.existsSync(entry)).toBe(true);
-    expect(actualFs.existsSync(path.join(entry, '.qwen-orphan-since'))).toBe(
-      false,
-    );
-  });
-
-  it('clears an old marker when partial evidence includes a live cwd (R23-2)', async () => {
-    const entry = path.join(projectsDir, '-partial-live-cwd');
-    actualFs.mkdirSync(path.join(entry, 'chats'), { recursive: true });
-    actualFs.mkdirSync(path.join(entry, 'subagents', 'sess-1'), {
-      recursive: true,
-    });
-    actualFs.writeFileSync(
-      path.join(entry, 'chats', 'torn.runtime.json'),
-      '{"work_dir":"/missing',
-    );
-    actualFs.writeFileSync(
-      path.join(entry, 'subagents', 'sess-1', 'agent-1.jsonl'),
-      JSON.stringify({ cwd: process.cwd(), type: 'agent' }) + '\n',
-    );
-    actualFs.writeFileSync(
-      path.join(entry, '.qwen-orphan-since'),
-      String(Date.now() - STALE_AGE_MS),
-    );
-    ageEntry('-partial-live-cwd');
-
-    await Storage.cleanOrphanProjectDirs('current');
-
-    expect(actualFs.existsSync(entry)).toBe(true);
-    expect(actualFs.existsSync(path.join(entry, '.qwen-orphan-since'))).toBe(
-      false,
-    );
-  });
-
-  it('keeps POSIX-looking Windows drive mounts on mocked win32 hosts (R23-3)', async () => {
-    const originalPlatform = process.platform;
-    writeSession('-container-path', '/c/Users/example/project');
-    ageEntry('-container-path');
-    try {
-      Object.defineProperty(process, 'platform', { value: 'win32' });
-      await Storage.cleanOrphanProjectDirs('current');
-    } finally {
-      Object.defineProperty(process, 'platform', { value: originalPlatform });
-    }
-
-    expect(actualFs.existsSync(path.join(projectsDir, '-container-path'))).toBe(
-      true,
-    );
-    expect(
-      actualFs.existsSync(
-        path.join(projectsDir, '-container-path', '.qwen-orphan-since'),
-      ),
-    ).toBe(false);
-  });
-
-  it.skipIf(process.platform === 'win32')(
-    'keeps Windows absolute paths on POSIX hosts (R23-3)',
-    async () => {
-      writeSession('-windows-path', 'C:\\Users\\example\\project');
-      ageEntry('-windows-path');
-
-      await Storage.cleanOrphanProjectDirs('current');
-
-      expect(actualFs.existsSync(path.join(projectsDir, '-windows-path'))).toBe(
-        true,
-      );
-      expect(
-        actualFs.existsSync(
-          path.join(projectsDir, '-windows-path', '.qwen-orphan-since'),
-        ),
-      ).toBe(false);
-    },
-  );
-
-  it('keeps an entry reduced to subagent transcripts of a live cwd (R7-2)', async () => {
-    // Subagent records carry their launch cwd: a live project must veto
-    // exactly like chat records do.
-    const entry = path.join(projectsDir, '-subagent-live');
-    actualFs.mkdirSync(path.join(entry, 'subagents', 'sess-1'), {
-      recursive: true,
-    });
-    actualFs.writeFileSync(
-      path.join(entry, 'subagents', 'sess-1', 'agent-1.jsonl'),
-      JSON.stringify({ cwd: process.cwd(), type: 'agent' }) + '\n',
-    );
-    ageEntry('-subagent-live');
-    await Storage.cleanOrphanProjectDirs('current');
-    expect(actualFs.existsSync(entry)).toBe(true);
-  });
-
-  it('removes an entry reduced to subagent transcripts of a gone cwd (R7-2)', async () => {
-    // The scan must reach subagents/: without it the residue blocks the
-    // empty-entry branch forever and the entry never enters the marker
-    // flow.
-    const entry = path.join(projectsDir, '-subagent-gone');
-    actualFs.mkdirSync(path.join(entry, 'subagents', 'sess-1'), {
-      recursive: true,
-    });
-    actualFs.writeFileSync(
-      path.join(entry, 'subagents', 'sess-1', 'agent-1.jsonl'),
-      JSON.stringify({ cwd: goneCwd, type: 'agent' }) + '\n',
-    );
-    ageEntry('-subagent-gone');
-    await sweepPastMarkerGrace('-subagent-gone');
-    expect(actualFs.existsSync(entry)).toBe(false);
-  });
-
-  it('marks gone temp entries first and removes only once the marker ages (R2-2)', async () => {
-    writeSession('-marked-gone', goneCwd);
-    ageEntry('-marked-gone');
-    const marker = path.join(projectsDir, '-marked-gone', '.qwen-orphan-since');
-
-    await Storage.cleanOrphanProjectDirs('current');
-    expect(actualFs.existsSync(path.join(projectsDir, '-marked-gone'))).toBe(
-      true,
-    );
-    expect(actualFs.existsSync(marker)).toBe(true);
-    // Write-once invariant: the marker's mtime is the grace anchor, so
-    // the second pass must not rewrite it.
-    const graceAnchor = actualFs.statSync(marker).mtimeMs;
-
-    // Second pass: marker is still fresh — still kept.
-    await Storage.cleanOrphanProjectDirs('current');
-    expect(actualFs.existsSync(path.join(projectsDir, '-marked-gone'))).toBe(
-      true,
-    );
-    expect(actualFs.statSync(marker).mtimeMs).toBe(graceAnchor);
-
-    ageFile(marker);
-    await Storage.cleanOrphanProjectDirs('current');
-    expect(actualFs.existsSync(path.join(projectsDir, '-marked-gone'))).toBe(
-      false,
-    );
-  });
-
-  it('keeps live cwd evidence found behind a symlinked directory', async () => {
-    const entry = path.join(projectsDir, '-symlinked-live');
-    const archiveTarget = actualFs.mkdtempSync(
-      path.join(os.tmpdir(), 'qwen-archive-target-'),
-    );
-    actualFs.mkdirSync(path.join(entry, 'chats'), { recursive: true });
-    actualFs.writeFileSync(
-      path.join(archiveTarget, 'session-1.jsonl'),
-      JSON.stringify({ cwd: process.cwd(), type: 'user' }) + '\n',
-    );
-    actualFs.symlinkSync(archiveTarget, path.join(entry, 'chats', 'archive'));
-    try {
-      ageEntry('-symlinked-live');
-      await Storage.cleanOrphanProjectDirs('current');
-      expect(actualFs.existsSync(entry)).toBe(true);
-      expect(actualFs.existsSync(path.join(entry, '.qwen-orphan-since'))).toBe(
-        false,
-      );
-    } finally {
-      actualFs.rmSync(archiveTarget, { recursive: true, force: true });
-    }
-  });
-
-  it('runs the salvage hook before removal and reports it (R2-3)', async () => {
-    writeSession('-hooked', goneCwd);
-    ageEntry('-hooked');
-    const seen: string[] = [];
-    const hook = async (entryPath: string) => {
-      // Ordering: salvage must run BEFORE the deletion, so the entry is
-      // still readable when the hook fires.
-      expect(actualFs.existsSync(entryPath)).toBe(true);
-      seen.push(entryPath);
-    };
-    await sweepPastMarkerGrace('-hooked', hook);
-    expect(seen).toEqual([path.join(projectsDir, '-hooked')]);
-  });
-
-  it('aborts removal when the entry becomes fresh during salvage (R4-1)', async () => {
-    // The salvage await widens the check-then-delete window: a new
-    // session may start writing into the doomed entry in that time, and
-    // the re-check before rmSync must abort.
-    writeSession('-raced', goneCwd);
-    ageEntry('-raced');
-    const hook = async (entryPath: string) => {
-      actualFs.writeFileSync(
-        path.join(entryPath, 'chats', 'session-1.jsonl'),
-        JSON.stringify({ cwd: goneCwd }) + '\n',
-      );
-    };
-    await sweepPastMarkerGrace('-raced', hook);
-    expect(actualFs.existsSync(path.join(projectsDir, '-raced'))).toBe(true);
-  });
-
-  it('keeps stale entries with files but no readable cwd records', async () => {
-    const entry = path.join(projectsDir, '-unparsable');
-    actualFs.mkdirSync(path.join(entry, 'chats'), { recursive: true });
-    actualFs.writeFileSync(
-      path.join(entry, 'chats', 'state.txt'),
-      'no cwd record here',
-    );
-    ageEntry('-unparsable');
+    ageEntry(entry);
     await Storage.cleanOrphanProjectDirs('current');
     expect(actualFs.existsSync(entry)).toBe(true);
   });
 
   it('never touches the current project entry', async () => {
-    writeSession('current', goneCwd);
-    ageEntry('current');
+    const current = path.join(projectsDir, 'current');
+    actualFs.mkdirSync(current, { recursive: true });
+    ageEntry(current);
     await Storage.cleanOrphanProjectDirs('current');
-    expect(actualFs.existsSync(path.join(projectsDir, 'current'))).toBe(true);
-    // Self-skip must not even write a marker: the active session's own
-    // entry getting GC'd would delete its transcripts mid-run.
-    expect(
-      actualFs.existsSync(
-        path.join(projectsDir, 'current', '.qwen-orphan-since'),
-      ),
-    ).toBe(false);
-  });
-
-  it('removes empty record-less entries older than one day', async () => {
-    const stale = path.join(projectsDir, '-stale-empty');
-    actualFs.mkdirSync(stale, { recursive: true });
-    const past = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
-    actualFs.utimesSync(stale, past, past);
-    await Storage.cleanOrphanProjectDirs('current');
-    expect(actualFs.existsSync(stale)).toBe(false);
-  });
-
-  it('keeps fresh empty record-less entries (concurrent session guard)', async () => {
-    const fresh = path.join(projectsDir, '-fresh-empty');
-    actualFs.mkdirSync(path.join(fresh, 'chats'), { recursive: true });
-    await Storage.cleanOrphanProjectDirs('current');
-    expect(actualFs.existsSync(fresh)).toBe(true);
+    expect(actualFs.existsSync(current)).toBe(true);
   });
 
   it('is a no-op when the projects dir does not exist', async () => {
@@ -1572,30 +830,6 @@ describe('Storage – cleanOrphanProjectDirs', () => {
       removed: [],
       errors: [],
     });
-  });
-});
-
-describe('Storage – listTranscriptPaths', () => {
-  let dir: string;
-
-  beforeEach(() => {
-    dir = actualFs.mkdtempSync(path.join(os.tmpdir(), 'storage-transcripts-'));
-  });
-
-  afterEach(() => {
-    actualFs.rmSync(dir, { recursive: true, force: true });
-  });
-
-  it('lists jsonl transcripts including archived ones, not sidecars', () => {
-    const chats = path.join(dir, 'chats');
-    const archive = path.join(chats, 'archive');
-    actualFs.mkdirSync(archive, { recursive: true });
-    actualFs.writeFileSync(path.join(chats, 's1.jsonl'), '{}\n');
-    actualFs.writeFileSync(path.join(chats, 's1.runtime.json'), '{}');
-    actualFs.writeFileSync(path.join(archive, 's0.jsonl'), '{}\n');
-    expect(Storage.listTranscriptPaths(dir).sort()).toEqual(
-      [path.join(chats, 's1.jsonl'), path.join(archive, 's0.jsonl')].sort(),
-    );
   });
 });
 

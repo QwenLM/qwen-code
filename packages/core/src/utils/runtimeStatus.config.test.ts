@@ -12,9 +12,10 @@
 import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
+import * as runtimeStatus from './runtimeStatus.js';
 import { readRuntimeStatus, writeRuntimeStatus } from './runtimeStatus.js';
 import {
   listLiveSessions,
@@ -128,6 +129,47 @@ describe('Config.startNewSession runtime.json swap', () => {
     expect(entries.filter((e) => e.endsWith('.runtime.json'))).toEqual([
       `${sessionA}.${process.pid}.runtime.json`,
     ]);
+  });
+
+  it('clears an intermediate healed sidecar during queued transitions', async () => {
+    const sessionA = 'aaaaaaaa-1111-2222-3333-aaaaaaaaaaaa';
+    const sessionB = 'bbbbbbbb-1111-2222-3333-bbbbbbbbbbbb';
+    const sessionC = 'cccccccc-1111-2222-3333-cccccccccccc';
+    const config = makeConfig(sessionA);
+    const actualWriteRuntimeStatus = writeRuntimeStatus;
+    let firstWriteStarted!: () => void;
+    let finishFirstWrite!: () => void;
+    const firstWriteStartedPromise = new Promise<void>((resolve) => {
+      firstWriteStarted = resolve;
+    });
+    const finishFirstWritePromise = new Promise<void>((resolve) => {
+      finishFirstWrite = resolve;
+    });
+    const writeSpy = vi
+      .spyOn(runtimeStatus, 'writeRuntimeStatus')
+      .mockImplementation(async (filePath, fields) => {
+        if (fields.sessionId === sessionB) {
+          firstWriteStarted();
+          await finishFirstWritePromise;
+        }
+        return actualWriteRuntimeStatus(filePath, fields);
+      });
+
+    config.startNewSession(sessionB);
+    await firstWriteStartedPromise;
+    config.startNewSession(sessionC);
+    finishFirstWrite();
+
+    const cPath = config.storage.getRuntimeStatusPath(sessionC);
+    const finalStatus = await waitFor(() => readRuntimeStatus(cPath));
+    expect(finalStatus?.sessionId).toBe(sessionC);
+
+    const entries = await readdir(path.dirname(cPath));
+    expect(entries.filter((e) => e.endsWith('.runtime.json'))).toEqual([
+      `${sessionC}.${process.pid}.runtime.json`,
+    ]);
+
+    writeSpy.mockRestore();
   });
 });
 

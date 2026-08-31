@@ -71,7 +71,6 @@ import {
 import { logRipgrepFallback } from '../telemetry/loggers.js';
 import { RipgrepFallbackEvent } from '../telemetry/types.js';
 import { ToolRegistry } from '../tools/tool-registry.js';
-import { persistUsageBeforeTranscriptDeletion } from '../services/usageHistoryService.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { fireNotificationHook } from '../core/toolHookTriggers.js';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
@@ -159,10 +158,6 @@ vi.mock('node:fs', async (importOriginal) => {
 });
 
 // Mock dependencies that might be called during Config construction or createServerConfig
-vi.mock('../services/usageHistoryService.js', () => ({
-  persistUsageBeforeTranscriptDeletion: vi.fn().mockResolvedValue(false),
-}));
-
 vi.mock('../tools/tool-registry', () => {
   const ToolRegistryMock = vi.fn();
   ToolRegistryMock.prototype.registerTool = vi.fn();
@@ -8532,7 +8527,7 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('Config startup orphan-project sweep wiring (issue #7906)', () => {
-    it('schedules cleanOrphanProjectDirs with the project id and a salvage hook', async () => {
+    it('schedules cleanOrphanProjectDirs with the project id', async () => {
       const sweepSpy = vi
         .spyOn(Storage, 'cleanOrphanProjectDirs')
         .mockResolvedValue({ removed: [], errors: [] });
@@ -8544,37 +8539,9 @@ describe('Server Config (config.ts)', () => {
         await new Promise((resolve) => setImmediate(resolve));
         expect(sweepSpy).toHaveBeenCalledWith(
           sanitizeCwd(config.storage.getProjectRoot()),
-          expect.any(Function),
         );
       } finally {
         sweepSpy.mockRestore();
-      }
-    });
-
-    it('salvages usage from an entry’s transcripts via the hook', async () => {
-      // Derive the transcript path from the argument so the test also
-      // pins that the hook receives the doomed entry's path (a hook
-      // salvaging the wrong directory would yield a different path).
-      const listSpy = vi
-        .spyOn(Storage, 'listTranscriptPaths')
-        .mockImplementation((dir: string) => [`${dir}/sess.jsonl`]);
-      const sweepSpy = vi
-        .spyOn(Storage, 'cleanOrphanProjectDirs')
-        .mockResolvedValue({ removed: [], errors: [] });
-      try {
-        const config = new Config(baseParams);
-        await config.initialize();
-        await new Promise((resolve) => setImmediate(resolve));
-        const hook = sweepSpy.mock.calls[0]?.[1];
-        expect(hook).toBeDefined();
-        await hook?.('/some/entry');
-        expect(listSpy).toHaveBeenCalledWith('/some/entry');
-        expect(persistUsageBeforeTranscriptDeletion).toHaveBeenCalledWith(
-          '/some/entry/sess.jsonl',
-        );
-      } finally {
-        sweepSpy.mockRestore();
-        listSpy.mockRestore();
       }
     });
 

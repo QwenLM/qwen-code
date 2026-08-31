@@ -8,14 +8,8 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import * as fs from 'node:fs';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import {
-  getProjectHash,
-  QWEN_DIR,
-  sanitizeCwd,
-  isTempDirPath,
-} from '../utils/paths.js';
+import { getProjectHash, QWEN_DIR, sanitizeCwd } from '../utils/paths.js';
 import { FatalConfigError } from '../utils/errors.js';
-import { hasActiveRuntimeStatusClaimSync } from '../utils/runtimeStatus.js';
 
 export { QWEN_DIR } from '../utils/paths.js';
 export const GOOGLE_ACCOUNTS_FILENAME = 'google_accounts.json';
@@ -643,86 +637,22 @@ export class Storage {
     fs.mkdirSync(this.getProjectTempDir(), { recursive: true });
   }
 
-  /**
-   * Staleness threshold applied to every sweep gate: the newest-file
-   * freshness check, the orphan marker's grace window, and the
-   * empty-directory age check.
-   *
-   * Freshness protects running sessions, including sidecar-less ones
-   * (headless, ACP, SDK, `qwen serve` — only the interactive TUI writes
-   * runtime sidecars): a live session keeps appending, so the newest
-   * file mtime inside its entry stays fresh.
-   *
-   * The marker gives transiently absent working directories (ejected
-   * removable media, network mounts not up at boot) a grace window
-   * measured from when their absence was FIRST observed — an entry's
-   * own mtime cannot serve here because appends inside `chats/` never
-   * advance it.
-   */
+  /** Age threshold for removing project entries that never gained content. */
   private static readonly ORPHAN_STALE_AGE_MS = 24 * 60 * 60 * 1000;
 
-  /**
-   * Marker file recording when an entry's non-temp cwds were first seen
-   * gone. Its mtime is the grace anchor; a resume claim renews the grace
-   * episode before reading the transcript.
-   */
-  private static readonly ORPHAN_MARKER_FILE = '.qwen-orphan-since';
-
-  /** Refreshes an orphan marker before reading a marked project entry. */
   async runWithProjectDirReadClaim<T>(operation: () => Promise<T>): Promise<T> {
-    const entryPath = this.getProjectDir();
-    const markerPath = path.join(entryPath, Storage.ORPHAN_MARKER_FILE);
-    let marked: boolean;
-    try {
-      marked =
-        fs.statSync(entryPath).isDirectory() && fs.existsSync(markerPath);
-    } catch {
-      return operation();
-    }
-    if (!marked) {
-      return operation();
-    }
-    try {
-      if (fs.statSync(entryPath).isDirectory() && fs.existsSync(markerPath)) {
-        const now = new Date();
-        fs.utimesSync(markerPath, now, now);
-      }
-    } catch {
-      // Renewal is best-effort: a failed utimes (ENOENT when the sweep
-      // races us, EROFS/EACCES on a degraded mount, EIO/ENOSPC) must not
-      // abort the read — the same filesystem error would block the
-      // sweep's rmSync equally, so the claim-less read is safe.
-    }
     return operation();
   }
 
   /**
-   * Per-transcript scan budget. Oversized files mark the evidence
-   * incomplete, which vetoes deletion (keep-only).
-   */
-  private static readonly CWD_SCAN_MAX_FILE_BYTES = 8 * 1024 * 1024;
-
-  /**
    * Removes orphaned project snapshot directories under
-   * `<runtime>/projects/` (issue #7906). Record-bearing entries are
-   * deletion candidates only when every recorded cwd is a trusted OS temp
-   * path that no longer exists. Non-temp paths, existing temp paths,
-   * foreign path namespaces, live runtime sidecars, recent file activity,
-   * `currentProjectId`, and incomplete evidence all fail closed.
-   *
-   * Candidates are marked first and removed only after the marker grace
-   * window. Entries without any readable records are only removed when
-   * completely empty (marker aside) and older than one day.
-   *
-   * `onBeforeRemove` runs before each deletion so callers can salvage
-   * derived state (e.g. usage summaries) from the transcripts; its
-   * failures never block removal. Per-entry failures are collected in
-   * `errors`, removed entry names in `removed`.
+   * `<runtime>/projects/` (issue #7906). This startup sweep is
+   * deliberately conservative: it only removes stale entries that never
+   * gained any content. Record-bearing entries may be shared by multiple
+   * sessions, processes, or hosts; proving they are unowned needs a
+   * durable ownership protocol and is outside this small cleanup.
    */
-  static async cleanOrphanProjectDirs(
-    currentProjectId: string,
-    onBeforeRemove?: (entryPath: string) => Promise<void>,
-  ): Promise<{
+  static async cleanOrphanProjectDirs(currentProjectId: string): Promise<{
     removed: string[];
     errors: Array<{ entry: string; error: unknown }>;
   }> {
@@ -742,69 +672,15 @@ export class Storage {
     }
     const now = Date.now();
     for (const entry of entries) {
-      // Yield between entries: scanning a stale candidate streams its
-      // transcripts synchronously and must not hog the freshly started
-      // session's event loop.
       await new Promise((resolve) => setImmediate(resolve));
       const entryPath = path.join(projectsDir, entry);
       if (entry === currentProjectId) {
-        // The active session's own entry: also clear any marker an
-        // earlier absence episode left behind, so a later disappearance
-        // gets a full grace window again.
-        Storage.removeOrphanMarker(entryPath);
         continue;
       }
       try {
-        // A still-running session owns this entry even if its cwd was
-        // deleted underneath it (worktree teardown mid-session); its
-        // runtime sidecar carries a live pid.
-        if (Storage.hasLiveSession(entryPath)) {
-          Storage.removeOrphanMarker(entryPath);
-          continue;
-        }
-        // Sidecars are best-effort liveness evidence. A running
-        // sidecar-less session is protected by its ongoing appends instead.
-        const newest = Storage.newestFileMtimeMs(entryPath);
-        if (newest > 0 && now - newest <= Storage.ORPHAN_STALE_AGE_MS) {
-          Storage.removeOrphanMarker(entryPath);
-          continue;
-        }
-        const { cwds, incomplete, keepOnly } =
-          Storage.collectRecordedCwds(entryPath);
-        if (keepOnly || cwds.some((cwd) => !Storage.isRemovableTempCwd(cwd))) {
-          Storage.removeOrphanMarker(entryPath);
-          continue;
-        }
-        if (incomplete) {
-          continue;
-        }
-        if (cwds.length > 0) {
-          // Only disappeared temp-root sessions are in scope for #7906.
-          // Non-temp paths may be absent because of another host, OS path
-          // namespace, or temporarily unavailable mount, so they fail closed.
-          if (Storage.orphanMarkerExpired(entryPath, now)) {
-            await Storage.removeEntry(
-              entryPath,
-              entry,
-              onBeforeRemove,
-              result,
-              cwds,
-            );
-          } else {
-            Storage.ensureOrphanMarker(entryPath);
-          }
-          continue;
-        }
-        // No readable records: only remove if the entry is completely
-        // empty (marker aside) and stale, so a concurrently starting
-        // session is never hit mid-write.
-        const stat = fs.statSync(entryPath);
-        if (
-          stat.isDirectory() &&
-          now - stat.mtimeMs > Storage.ORPHAN_STALE_AGE_MS &&
-          Storage.countFiles(entryPath) === 0
-        ) {
-          await Storage.removeEntry(entryPath, entry, onBeforeRemove, result);
+        if (Storage.isStaleEmptyEntry(entryPath, now)) {
+          fs.rmSync(entryPath, { recursive: true, force: true });
+          result.removed.push(entry);
         }
       } catch (error) {
         result.errors.push({ entry, error });
@@ -813,371 +689,26 @@ export class Storage {
     return result;
   }
 
-  private static async removeEntry(
-    entryPath: string,
-    entry: string,
-    onBeforeRemove: ((entryPath: string) => Promise<void>) | undefined,
-    result: {
-      removed: string[];
-      errors: Array<{ entry: string; error: unknown }>;
-    },
-    cwds?: string[],
-  ): Promise<void> {
-    // Final liveness gate, ahead of salvage: the entry gate distrusts a
-    // sidecar older than the staleness window (pid-recycle risk), but
-    // an idle session writes nothing — sidecar and appends age together
-    // — so a live-but-idle session can reach this point. Re-check
-    // without that window: a recycled pid only fails keep-only, like
-    // every other gate. Salvaging first would double-count a session
-    // still accruing usage.
-    if (Storage.hasLiveSession(entryPath, false)) {
-      Storage.removeOrphanMarker(entryPath);
-      return;
-    }
-    if (onBeforeRemove) {
-      try {
-        await onBeforeRemove(entryPath);
-      } catch {
-        // Salvage failures must never block removal.
-      }
-    }
-    // The salvage await widens the check-then-delete window. Re-run every
-    // cheap gate before rmSync.
-    if (cwds) {
-      const markerPath = path.join(entryPath, Storage.ORPHAN_MARKER_FILE);
-      if (!fs.existsSync(markerPath)) {
-        return;
-      }
-      if (
-        Date.now() - fs.statSync(markerPath).mtimeMs <=
-        Storage.ORPHAN_STALE_AGE_MS
-      ) {
-        return;
-      }
-      if (cwds.some((cwd) => !Storage.isRemovableTempCwd(cwd))) {
-        Storage.removeOrphanMarker(entryPath);
-        return;
-      }
-    }
-    if (Storage.hasLiveSession(entryPath, false)) {
-      return;
-    }
-    const newest = Storage.newestFileMtimeMs(entryPath);
-    if (newest > 0 && Date.now() - newest <= Storage.ORPHAN_STALE_AGE_MS) {
-      Storage.removeOrphanMarker(entryPath);
-      return;
-    }
-    fs.rmSync(entryPath, { recursive: true, force: true });
-    result.removed.push(entry);
-  }
-
-  /** Newest mtime among the entry's files (depth ≤ 2); 0 when none. */
-  private static newestFileMtimeMs(dirPath: string, depth = 0): number {
-    if (depth > 2) return 0;
-    let dirents: fs.Dirent[];
+  private static isStaleEmptyEntry(entryPath: string, now: number): boolean {
+    let stat: fs.Stats;
     try {
-      dirents = fs.readdirSync(dirPath, { withFileTypes: true });
-    } catch {
-      return 0;
-    }
-    let newest = 0;
-    for (const dirent of dirents) {
-      // The marker is sweep bookkeeping, not session activity — it must
-      // not keep the entry fresh.
-      if (depth === 0 && dirent.name === Storage.ORPHAN_MARKER_FILE) continue;
-      const child = path.join(dirPath, dirent.name);
-      try {
-        newest = Math.max(
-          newest,
-          dirent.isDirectory()
-            ? Storage.newestFileMtimeMs(child, depth + 1)
-            : fs.statSync(child).mtimeMs,
-        );
-      } catch {
-        // Entry vanished mid-sweep.
-      }
-    }
-    return newest;
-  }
-
-  /** True once a previously written marker has aged past the grace. */
-  private static orphanMarkerExpired(entryPath: string, now: number) {
-    try {
-      return (
-        now -
-          fs.statSync(path.join(entryPath, Storage.ORPHAN_MARKER_FILE))
-            .mtimeMs >
-        Storage.ORPHAN_STALE_AGE_MS
-      );
+      stat = fs.statSync(entryPath);
     } catch {
       return false;
     }
-  }
-
-  /** Writes the disappearance marker once; rewrites would reset the grace. */
-  private static ensureOrphanMarker(entryPath: string): void {
-    const markerPath = path.join(entryPath, Storage.ORPHAN_MARKER_FILE);
-    try {
-      fs.statSync(markerPath);
-    } catch {
-      try {
-        fs.writeFileSync(markerPath, String(Date.now()));
-      } catch {
-        // Best effort: the next sweep retries.
-      }
-    }
-  }
-
-  private static removeOrphanMarker(entryPath: string): void {
-    try {
-      fs.rmSync(path.join(entryPath, Storage.ORPHAN_MARKER_FILE), {
-        force: true,
-      });
-    } catch {
-      // Nothing to clear.
-    }
-  }
-
-  /**
-   * Collects every working directory recorded in an entry's artifacts.
-   * Chat logs contribute the cwd of every record they hold (`/cd` hops
-   * leave earlier cwds on earlier lines and move the file); runtime
-   * sidecars contribute `work_dir`; worktree sidecars contribute
-   * `worktreePath` (a sidecar-only entry — a worktree session killed
-   * before its first record — must reach the marker flow, not the
-   * empty-entry branch it can never satisfy); subagent transcripts
-   * contribute the cwd they were launched from, so an entry reduced to
-   * subagent residue (`/cd` moves only the session files) keeps its
-   * veto protection for a live project. Subdirectories
-   * (`chats/archive/`) are scanned too. Scanning stops once a cwd is
-   * found that still exists outside temp roots: such a cwd vetoes
-   * removal for every caller, and transcripts can be large.
-   *
-   * `incomplete` reports a scan whose evidence may be partial — an
-   * artifact that failed to parse, failed to read, or exceeded the
-   * per-file byte budget. Callers must treat incomplete evidence as
-   * vetoing deletion.
-   */
-  static collectRecordedCwds(entryPath: string): {
-    cwds: string[];
-    incomplete: boolean;
-    keepOnly: boolean;
-  } {
-    const cwds = new Set<string>();
-    const state = { incomplete: false, keepOnly: false };
-    Storage.scanDirForCwds(path.join(entryPath, 'chats'), cwds, 0, state);
-    Storage.scanDirForCwds(path.join(entryPath, 'subagents'), cwds, 0, state);
-    return {
-      cwds: [...cwds],
-      incomplete: state.incomplete,
-      keepOnly: state.keepOnly,
-    };
-  }
-
-  /**
-   * Deletion is authorized only for the issue #7906 shape: a recorded cwd
-   * that was under a trusted OS temp root and no longer exists.
-   */
-  private static isRemovableTempCwd(cwd: string): boolean {
-    return (
-      !Storage.isUnevaluableCwd(cwd) &&
-      isTempDirPath(cwd) &&
-      !fs.existsSync(cwd)
-    );
-  }
-
-  private static isUnevaluableCwd(cwd: string): boolean {
-    if (/^[A-Za-z]:[\\/]/.test(cwd)) {
-      return process.platform !== 'win32';
-    }
-    return process.platform === 'win32' && /^\/[A-Za-z](?:\/|$)/.test(cwd);
-  }
-
-  private static scanDirForCwds(
-    dir: string,
-    cwds: Set<string>,
-    depth: number,
-    state: { incomplete: boolean; keepOnly: boolean },
-  ): boolean {
-    if (depth > 2) return false;
-    let dirents: fs.Dirent[];
-    try {
-      dirents = fs.readdirSync(dir, { withFileTypes: true });
-    } catch {
-      // Absent directory = no evidence; an existing-but-unreadable one
-      // means the evidence set may be partial.
-      if (fs.existsSync(dir)) state.incomplete = true;
+    if (
+      !stat.isDirectory() ||
+      now - stat.mtimeMs <= Storage.ORPHAN_STALE_AGE_MS
+    ) {
       return false;
     }
-    for (const dirent of dirents) {
-      const entryPath = path.join(dir, dirent.name);
-      let vetoed = false;
-      if (dirent.name.endsWith('.jsonl')) {
-        vetoed = Storage.scanFileForCwds(entryPath, cwds, state);
-      } else if (dirent.name.endsWith('.runtime.json')) {
-        const hostname = Storage.readJsonStringField(
-          entryPath,
-          'hostname',
-          state,
-        );
-        if (hostname && hostname !== os.hostname()) {
-          state.keepOnly = true;
-          vetoed = true;
-        }
-        const cwd = Storage.readJsonStringField(entryPath, 'work_dir', state);
-        if (cwd) {
-          cwds.add(cwd);
-          vetoed ||= !Storage.isRemovableTempCwd(cwd);
-        }
-      } else if (dirent.name.endsWith('.worktree.json')) {
-        // `worktreePath`, not `originalCwd`: the repo root stays alive
-        // after the worktree is removed and would veto cleanup forever.
-        const cwd = Storage.readJsonStringField(
-          entryPath,
-          'worktreePath',
-          state,
-        );
-        if (cwd) {
-          cwds.add(cwd);
-          vetoed = !Storage.isRemovableTempCwd(cwd);
-        }
-      } else if (
-        dirent.isDirectory() ||
-        Storage.isDirectoryLike(entryPath, state)
-      ) {
-        vetoed = Storage.scanDirForCwds(entryPath, cwds, depth + 1, state);
-      }
-      if (vetoed) return true;
-    }
-    return false;
+    return Storage.countFiles(entryPath) === 0;
   }
 
-  private static isDirectoryLike(
-    entryPath: string,
-    state: { incomplete: boolean },
-  ): boolean {
-    try {
-      return fs.statSync(entryPath).isDirectory();
-    } catch {
-      state.incomplete = true;
-      return false;
-    }
-  }
-
-  /** Reads a bounded transcript and records every line's cwd. */
-  private static scanFileForCwds(
-    filePath: string,
-    cwds: Set<string>,
-    state: { incomplete: boolean; keepOnly: boolean },
-  ): boolean {
-    try {
-      if (fs.statSync(filePath).size > Storage.CWD_SCAN_MAX_FILE_BYTES) {
-        state.incomplete = true;
-        return false;
-      }
-      const text = fs.readFileSync(filePath, 'utf8');
-      if (text !== '' && !text.endsWith('\n')) {
-        state.incomplete = true;
-        return false;
-      }
-      for (const line of text.split('\n')) {
-        if (!line) continue;
-        const record = JSON.parse(line) as Record<string, unknown>;
-        const cwd = record['cwd'];
-        if (typeof cwd === 'string' && cwd) {
-          cwds.add(cwd);
-          if (!Storage.isRemovableTempCwd(cwd)) return true;
-        }
-      }
-      return false;
-    } catch {
-      state.incomplete = true;
-      return false;
-    }
-  }
-
-  private static readJsonStringField(
-    filePath: string,
-    field: string,
-    state: { incomplete: boolean; keepOnly: boolean },
-  ): string | null {
-    try {
-      const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8')) as Record<
-        string,
-        unknown
-      >;
-      const value = parsed[field];
-      return typeof value === 'string' && value ? value : null;
-    } catch {
-      // A torn or unreadable sidecar (rewritten in place on runtime
-      // status updates) loses its cwd evidence — fail closed, like an
-      // unreadable transcript.
-      state.incomplete = true;
-      return null;
-    }
-  }
-
-  /**
-   * True when the entry holds a runtime sidecar whose pid is still alive
-   * — i.e. a session is running from this entry right now. With
-   * `distrustStaleSidecars` off, a sidecar's pid is trusted regardless
-   * of its age: the sweep deletion gate uses that mode, where a false
-   * "live" can only leak the entry, never delete a live session's records.
-   */
-  static hasLiveSession(
-    entryPath: string,
-    distrustStaleSidecars = true,
-  ): boolean {
-    return hasActiveRuntimeStatusClaimSync(
-      path.join(entryPath, 'chats'),
-      distrustStaleSidecars ? Storage.ORPHAN_STALE_AGE_MS : undefined,
-    );
-  }
-
-  /** Every `*.jsonl` transcript under `<projectDir>/chats` (depth ≤ 2). */
-  static listTranscriptPaths(projectDir: string): string[] {
-    const out: string[] = [];
-    Storage.collectTranscriptPaths(path.join(projectDir, 'chats'), out, 0);
-    return out;
-  }
-
-  private static collectTranscriptPaths(
-    dir: string,
-    out: string[],
-    depth: number,
-  ): void {
-    if (depth > 2) return;
-    let dirents: fs.Dirent[];
-    try {
-      dirents = fs.readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const dirent of dirents) {
-      const child = path.join(dir, dirent.name);
-      if (dirent.isDirectory()) {
-        Storage.collectTranscriptPaths(child, out, depth + 1);
-      } else if (dirent.name.endsWith('.jsonl')) {
-        out.push(child);
-      }
-    }
-  }
-
-  /**
-   * Counts content that must keep an entry alive. The orphan marker is
-   * sweep bookkeeping, not session content. Everything else — including
-   * qwen-owned residue such as workflow snapshots and journals — is
-   * content: residue carries no cwd the source project could be
-   * recognized by, so it cannot prove its own project is gone, and
-   * deleting it on absence of evidence would risk `/workflows` history
-   * of a live project (fail closed).
-   */
+  /** Counts files under an entry; any file means the entry has content. */
   private static countFiles(dirPath: string, depth = 0): number {
     let count = 0;
     for (const entry of fs.readdirSync(dirPath, { withFileTypes: true })) {
-      if (depth === 0 && entry.name === Storage.ORPHAN_MARKER_FILE) {
-        continue;
-      }
       const child = path.join(dirPath, entry.name);
       count += entry.isDirectory() ? Storage.countFiles(child, depth + 1) : 1;
     }
