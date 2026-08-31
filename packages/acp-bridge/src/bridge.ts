@@ -80,6 +80,7 @@ import {
   type ServeSessionContextStatus,
   type ServeSessionLspStatus,
   type ServeSessionTasksStatus,
+  type ServeSessionWorkflowTaskStatus,
   type ServeWorkspaceMcpResourcesStatus,
   type ServeWorkspaceMcpStatus,
   type ServeWorkspaceMcpToolsStatus,
@@ -1765,7 +1766,10 @@ function broadcastTurnComplete(
  * objects with a `message` property.
  * JSON-RPC internal errors carry the generic `"Internal error"` as
  * `message`; the actual detail often lives in `data.details` or
- * provider-specific `data.message`.
+ * provider-specific `data.message`. When the agent throws an error whose
+ * message is itself a JSON string (e.g. a provider error body surfaced as
+ * stream content), the ACP SDK ships `JSON.parse(message)` as `data`, which
+ * nests the provider text at `data.error.message` — read that shape too.
  */
 export function extractErrorMessage(err: unknown): string {
   if (err instanceof Error) {
@@ -1789,6 +1793,16 @@ function extractJsonRpcErrorDetail(data: unknown): string | undefined {
     const details = (data as Record<string, unknown>)['details'];
     if (typeof details === 'string' && details.length > 0) return details;
     const message = (data as Record<string, unknown>)['message'];
+    if (typeof message === 'string' && message.length > 0) return message;
+    return extractNestedErrorDetail((data as Record<string, unknown>)['error']);
+  }
+  return undefined;
+}
+
+function extractNestedErrorDetail(error: unknown): string | undefined {
+  if (typeof error === 'string' && error.length > 0) return error;
+  if (typeof error === 'object' && error !== null) {
+    const message = (error as Record<string, unknown>)['message'];
     if (typeof message === 'string' && message.length > 0) return message;
   }
   return undefined;
@@ -5118,38 +5132,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
       let sourcePersisted: boolean | undefined;
       if (entry.sourceType) {
-        try {
-          const sourceResult = await Promise.race([
-            withTimeout(
-              entry.connection.extMethod(
-                SERVE_CONTROL_EXT_METHODS.sessionSource,
-                {
-                  sessionId: entry.sessionId,
-                  sourceType: entry.sourceType,
-                  ...(entry.sourceId !== undefined
-                    ? { sourceId: entry.sourceId }
-                    : {}),
-                  ...(daemonOwnedStandaloneCreation
-                    ? { [DAEMON_OWNED_STANDALONE_CREATION_KEY]: true }
-                    : {}),
-                },
-              ),
-              initTimeoutMs,
-              'sessionSource',
-            ),
-            getTransportClosedReject(entry),
-          ]);
-          sourcePersisted =
-            (sourceResult as { persisted?: boolean } | undefined)?.persisted ===
-            true;
-        } catch (err) {
-          sourcePersisted = false;
-          writeStderrLine(
-            `qwen serve: source metadata for ${entry.sessionId} was not persisted ` +
-              `(${err instanceof Error ? err.message : String(err)}) — the source is live-only ` +
-              `until restart (reported to the caller via sourcePersisted=false)`,
-          );
-        }
+        sourcePersisted = await persistSessionSource(
+          entry,
+          entry.sessionId,
+          daemonOwnedStandaloneCreation,
+        );
       }
 
       // ACP `newSession` doesn't take a model id; honor the caller's
@@ -5332,7 +5319,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           data: {
             sessionId: entry.sessionId,
             requestedModelId: modelId,
-            error: err instanceof Error ? err.message : String(err),
+            error: extractErrorMessage(err),
           },
           ...(originatorClientId ? { originatorClientId } : {}),
         });
@@ -6490,6 +6477,63 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     return entry;
   };
 
+  async function persistSessionSource(
+    entry: SessionEntry,
+    logContext: string,
+    daemonOwnedStandaloneCreation = false,
+  ): Promise<boolean> {
+    try {
+      const sourceResult = await Promise.race([
+        withTimeout(
+          entry.connection.extMethod(SERVE_CONTROL_EXT_METHODS.sessionSource, {
+            sessionId: entry.sessionId,
+            sourceType: entry.sourceType,
+            ...(entry.sourceId !== undefined
+              ? { sourceId: entry.sourceId }
+              : {}),
+            ...(daemonOwnedStandaloneCreation
+              ? { [DAEMON_OWNED_STANDALONE_CREATION_KEY]: true }
+              : {}),
+          }),
+          initTimeoutMs,
+          'sessionSource',
+        ),
+        getTransportClosedReject(entry),
+      ]);
+      return (
+        (sourceResult as { persisted?: boolean } | undefined)?.persisted ===
+        true
+      );
+    } catch (err) {
+      writeStderrLine(
+        `qwen serve: source metadata for ${logContext} was not persisted ` +
+          `(${err instanceof Error ? err.message : String(err)}) — the source is live-only ` +
+          `until restart (reported to the caller via sourcePersisted=false)`,
+      );
+      return false;
+    }
+  }
+
+  async function applyRestoreSourceIfMissing(
+    entry: SessionEntry,
+    req: BridgeRestoreSessionRequest,
+  ): Promise<boolean | undefined> {
+    if (entry.sourceType !== undefined || req.sourceType === undefined) {
+      return undefined;
+    }
+    entry.sourceType = req.sourceType;
+    if (req.sourceId !== undefined) {
+      entry.sourceId = req.sourceId;
+    } else {
+      delete entry.sourceId;
+    }
+    markSessionCatalogChanged();
+    return await persistSessionSource(
+      entry,
+      `${entry.sessionId} during session restore`,
+    );
+  }
+
   const prepareStandaloneArtifactWorkspace = async (
     entry: SessionEntry,
   ): Promise<void> => {
@@ -7187,8 +7231,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       existing.attachCount++;
       const clientId = registerClient(existing, req.clientId);
       recordAttachRef(existing, clientId);
+      let previousApprovalMode: ApprovalMode | undefined;
       if (req.approvalMode) {
-        const previousApprovalMode = await applyApprovalModeForAttach(
+        previousApprovalMode = await applyApprovalModeForAttach(
           existing,
           req.approvalMode,
           clientId,
@@ -7204,6 +7249,20 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           await rollbackAttachRegistration(existing, clientId);
           throw error;
         }
+      }
+      const sourcePersisted = await applyRestoreSourceIfMissing(existing, req);
+      try {
+        assertAttachableSessionEntry(req.sessionId, existing);
+      } catch (error) {
+        if (previousApprovalMode !== undefined) {
+          await rollbackApprovalModeForRejectedAttach(
+            existing,
+            previousApprovalMode,
+            clientId,
+          );
+        }
+        await rollbackAttachRegistration(existing, clientId);
+        throw error;
       }
       return {
         sessionId: existing.sessionId,
@@ -7223,6 +7282,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         state: existing.restoreState ?? {},
         hasActivePrompt:
           existing.promptActive || existing.goalTurnActive === true,
+        ...(sourcePersisted !== undefined ? { sourcePersisted } : {}),
         ...replayFields,
         ...(historyAnchorRecordId !== undefined
           ? { historyAnchorRecordId }
@@ -7356,8 +7416,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // This coalescer's attachCount contribution was pre-folded via
       // `coalesceState.count`, so only the ledger is updated here.
       recordAttachRef(entry, clientId);
+      let previousApprovalMode: ApprovalMode | undefined;
       if (req.approvalMode) {
-        const previousApprovalMode = await applyApprovalModeForAttach(
+        previousApprovalMode = await applyApprovalModeForAttach(
           entry,
           req.approvalMode,
           clientId,
@@ -7374,12 +7435,29 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           throw error;
         }
       }
+      const sourcePersisted = await applyRestoreSourceIfMissing(entry, req);
+      try {
+        assertAttachableSessionEntry(restored.sessionId, entry);
+      } catch (error) {
+        if (previousApprovalMode !== undefined) {
+          await rollbackApprovalModeForRejectedAttach(
+            entry,
+            previousApprovalMode,
+            clientId,
+          );
+        }
+        await rollbackAttachRegistration(entry, clientId);
+        throw error;
+      }
       return {
         ...restored,
         attached: true,
         clientId,
         createdAt: entry.createdAt,
         hasActivePrompt: entry.promptActive || entry.goalTurnActive === true,
+        ...(entry.sourceType ? { sourceType: entry.sourceType } : {}),
+        ...(entry.sourceId !== undefined ? { sourceId: entry.sourceId } : {}),
+        ...(sourcePersisted !== undefined ? { sourcePersisted } : {}),
         ...(waiterReplayFields ?? {}),
       };
     }
@@ -7804,8 +7882,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         racedEntry.attachCount += 1 + coalesceState.count;
         const clientId = registerClient(racedEntry, req.clientId);
         recordAttachRef(racedEntry, clientId);
+        let previousApprovalMode: ApprovalMode | undefined;
         if (req.approvalMode) {
-          let previousApprovalMode: ApprovalMode;
           try {
             const result = await applyApprovalMode(
               racedEntry,
@@ -7845,6 +7923,27 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           clientId,
           options,
         );
+        const sourcePersisted = await applyRestoreSourceIfMissing(
+          racedEntry,
+          req,
+        );
+        try {
+          assertAttachableSessionEntry(req.sessionId, racedEntry);
+        } catch (error) {
+          if (previousApprovalMode !== undefined) {
+            await rollbackApprovalModeForRejectedAttach(
+              racedEntry,
+              previousApprovalMode,
+              clientId,
+            );
+          }
+          await rollbackAttachRegistration(
+            racedEntry,
+            clientId,
+            1 + coalesceState.count,
+          );
+          throw error;
+        }
         return {
           sessionId: racedEntry.sessionId,
           workspaceCwd: racedEntry.workspaceCwd,
@@ -7865,6 +7964,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             restorePromptAdmitted ||
             racedEntry.promptActive ||
             racedEntry.goalTurnActive === true,
+          ...(sourcePersisted !== undefined ? { sourcePersisted } : {}),
           ...replayFieldsFor(racedEntry, action, liveReplayMode),
         };
       }
@@ -7959,8 +8059,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       }
       assertAttachableSessionEntry(req.sessionId, entry);
       const clientId = registerClient(entry, req.clientId);
+      let previousApprovalMode: ApprovalMode | undefined;
       if (req.approvalMode) {
-        await applyApprovalModeForAttach(entry, req.approvalMode, clientId);
+        previousApprovalMode = await applyApprovalModeForAttach(
+          entry,
+          req.approvalMode,
+          clientId,
+        );
         assertAttachableSessionEntry(req.sessionId, entry);
       }
       // Fold synchronous coalesce reservations into the new entry's
@@ -7978,6 +8083,26 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         clientId,
         options,
       );
+      const sourcePersisted = entry.sourceType
+        ? await persistSessionSource(
+            entry,
+            `${entry.sessionId} during session restore`,
+            daemonOwnedStandaloneRestore,
+          )
+        : undefined;
+      try {
+        assertAttachableSessionEntry(req.sessionId, entry);
+      } catch (error) {
+        if (previousApprovalMode !== undefined) {
+          await rollbackApprovalModeForRejectedAttach(
+            entry,
+            previousApprovalMode,
+            clientId,
+          );
+        }
+        await rollbackAttachRegistration(entry, clientId);
+        throw error;
+      }
       // Explicit `session/load` / `session/resume` is "give me THIS
       // id"; it must NOT become the implicit attach target for
       // subsequent omitted-id `POST /session` callers under `single`
@@ -7993,6 +8118,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         createdAt: entry.createdAt,
         ...(entry.sourceType ? { sourceType: entry.sourceType } : {}),
         ...(entry.sourceId !== undefined ? { sourceId: entry.sourceId } : {}),
+        ...(sourcePersisted !== undefined ? { sourcePersisted } : {}),
         state: publicState,
         ...(deferArtifactWorkspace || artifactRestoreWarnings.length > 0
           ? { artifactWarnings: artifactRestoreWarnings }
@@ -11304,10 +11430,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       );
     },
 
-    async getSessionTasksStatus(sessionId) {
+    async getSessionTasksStatus(sessionId, opts) {
       return requestSessionStatus<ServeSessionTasksStatus>(
         sessionId,
         SERVE_STATUS_EXT_METHODS.sessionTasks,
+        { includeWorkflows: opts?.includeWorkflows === true },
       );
     },
 
@@ -11322,12 +11449,29 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       return requestSessionTranscriptPage(req);
     },
 
-    async cancelSessionTask(sessionId, taskId, taskKind) {
+    async cancelSessionTask(sessionId, taskId, taskKind, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      resolveTrustedClientId(entry, context?.clientId);
       return requestSessionStatus<{ cancelled: boolean }>(
         sessionId,
         SERVE_CONTROL_EXT_METHODS.sessionTaskCancel,
         { taskId, taskKind },
       );
+    },
+
+    async controlSessionWorkflowTask(sessionId, taskId, action, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      resolveTrustedClientId(entry, context?.clientId);
+      return requestSessionStatus<{
+        changed: boolean;
+        status?: ServeSessionWorkflowTaskStatus['status'];
+        taskId?: string;
+      }>(sessionId, SERVE_CONTROL_EXT_METHODS.sessionWorkflowTaskAction, {
+        taskId,
+        action,
+      });
     },
 
     async controlSessionGoal(sessionId, request, context) {
@@ -11702,7 +11846,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           data: {
             sessionId: entry.sessionId,
             requestedModelId: req.modelId,
-            error: err instanceof Error ? err.message : String(err),
+            error: extractErrorMessage(err),
           },
           ...(originatorClientId ? { originatorClientId } : {}),
         });

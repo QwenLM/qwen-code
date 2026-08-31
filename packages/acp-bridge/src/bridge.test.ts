@@ -3202,7 +3202,9 @@ describe('createAcpSessionBridge', () => {
       availableSkills: [],
     });
     await expect(
-      bridge.getSessionTasksStatus(session.sessionId),
+      bridge.getSessionTasksStatus(session.sessionId, {
+        includeWorkflows: true,
+      }),
     ).resolves.toMatchObject({
       sessionId: session.sessionId,
       tasks: [],
@@ -3226,6 +3228,10 @@ describe('createAcpSessionBridge', () => {
       'qwen/status/session/tasks',
       'qwen/status/session/lsp',
     ]);
+    expect(handles[0]?.agent.extMethodCalls[2]?.params).toMatchObject({
+      sessionId: session.sessionId,
+      includeWorkflows: true,
+    });
 
     await bridge.shutdown();
   });
@@ -21145,7 +21151,9 @@ describe('createAcpSessionBridge', () => {
       // with no way to recover.
       const { bridge } = setup({
         setModelImpl: async () => {
-          throw new Error('unknown model');
+          throw new RequestError(-32603, 'Internal error', {
+            details: 'unknown model detail',
+          });
         },
       });
       const session = await bridge.spawnOrAttach({
@@ -21167,6 +21175,7 @@ describe('createAcpSessionBridge', () => {
       expect(first.value?.data).toMatchObject({
         sessionId: session.sessionId,
         requestedModelId: 'definitely-not-a-real-model',
+        error: 'unknown model detail',
       });
       abort.abort();
       await bridge.shutdown();
@@ -23223,7 +23232,12 @@ describe('createAcpSessionBridge', () => {
 
     it('carries persisted source metadata into ACP session restore', async () => {
       for (const action of ['load', 'resume'] as const) {
-        const handle = makeChannel();
+        const handle = makeChannel({
+          extMethodImpl: async (method) =>
+            method === SERVE_CONTROL_EXT_METHODS.sessionSource
+              ? { persisted: true }
+              : {},
+        });
         const bridge = makeBridge({
           channelFactory: async () => handle.channel,
         });
@@ -23234,24 +23248,145 @@ describe('createAcpSessionBridge', () => {
           sourceId: 'dingtalk-main',
         };
 
-        if (action === 'load') {
-          await bridge.loadSession(request);
-        } else {
-          await bridge.resumeSession(request);
-        }
+        const restored =
+          action === 'load'
+            ? await bridge.loadSession(request)
+            : await bridge.resumeSession(request);
 
         const call =
           action === 'load'
             ? handle.agent.loadSessionCalls[0]
             : handle.agent.resumeSessionCalls[0];
+        expect(restored).toMatchObject({
+          sourceType: 'channel',
+          sourceId: 'dingtalk-main',
+          sourcePersisted: true,
+        });
         expect(call?._meta).toMatchObject({
           [SESSION_SOURCE_META_KEY]: {
             sourceType: 'channel',
             sourceId: 'dingtalk-main',
           },
         });
+        expect(handle.agent.extMethodCalls).toContainEqual({
+          method: SERVE_CONTROL_EXT_METHODS.sessionSource,
+          params: {
+            sessionId: request.sessionId,
+            sourceType: 'channel',
+            sourceId: 'dingtalk-main',
+          },
+        });
         await bridge.shutdown();
       }
+    });
+
+    it('backfills missing source metadata when restoring an existing entry', async () => {
+      const handle = makeChannel({
+        extMethodImpl: async (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.sessionSource
+            ? { persisted: true }
+            : {},
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+
+      const restored = await bridge.resumeSession({
+        sessionId: session.sessionId,
+        workspaceCwd: WS_A,
+        sourceType: 'channel',
+        sourceId: 'dingtalk-main',
+      });
+
+      expect(restored).toMatchObject({
+        sessionId: session.sessionId,
+        sourceType: 'channel',
+        sourceId: 'dingtalk-main',
+        sourcePersisted: true,
+      });
+      expect(bridge.getSessionSummary(session.sessionId)).toMatchObject({
+        sourceType: 'channel',
+        sourceId: 'dingtalk-main',
+      });
+      expect(handle.agent.extMethodCalls).toContainEqual({
+        method: SERVE_CONTROL_EXT_METHODS.sessionSource,
+        params: {
+          sessionId: session.sessionId,
+          sourceType: 'channel',
+          sourceId: 'dingtalk-main',
+        },
+      });
+
+      await bridge.shutdown();
+    });
+
+    it('rejects an existing-entry restore when the channel exits during source persistence', async () => {
+      const sourceStarted = deferred<void>();
+      const sourceRelease = deferred<Record<string, unknown>>();
+      const handle = makeChannel({
+        extMethodImpl: async (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionSource) {
+            sourceStarted.resolve();
+            return sourceRelease.promise;
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+
+      const restoring = bridge.resumeSession({
+        sessionId: session.sessionId,
+        workspaceCwd: WS_A,
+        sourceType: 'channel',
+        sourceId: 'dingtalk-main',
+      });
+      await sourceStarted.promise;
+      handle.crash();
+
+      await expect(restoring).rejects.toThrow(SessionNotFoundError);
+      sourceRelease.resolve({ persisted: false });
+      await bridge.shutdown();
+    });
+
+    it('rejects a cold restore when the channel exits during source persistence', async () => {
+      const sourceStarted = deferred<void>();
+      const sourceRelease = deferred<Record<string, unknown>>();
+      const handle = makeChannel({
+        extMethodImpl: async (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionSource) {
+            sourceStarted.resolve();
+            return sourceRelease.promise;
+          }
+          return {};
+        },
+        resumeSessionImpl: () => ({}),
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+
+      const restoring = bridge.resumeSession({
+        sessionId: 'restore-source-channel-exit',
+        workspaceCwd: WS_A,
+        sourceType: 'channel',
+        sourceId: 'dingtalk-main',
+      });
+      await sourceStarted.promise;
+      handle.crash();
+
+      await expect(restoring).rejects.toThrow(SessionNotFoundError);
+      sourceRelease.resolve({ persisted: false });
+      await bridge.shutdown();
     });
 
     it('does not replace the source when single scope attaches', async () => {
@@ -23279,26 +23414,117 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
-    it('passes source metadata in the resume request without a second control call', async () => {
+    it('does not replace an existing source when restore requests a new one', async () => {
       const handle = makeChannel({
+        extMethodImpl: async (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.sessionSource
+            ? { persisted: false }
+            : {},
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const first = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sourceType: 'scheduled_task',
+        sourceId: 'task-1',
+      });
+
+      const restored = await bridge.resumeSession({
+        sessionId: first.sessionId,
+        workspaceCwd: WS_A,
+        sourceType: 'channel',
+        sourceId: 'dingtalk-main',
+      });
+
+      expect(restored).toMatchObject({
+        sessionId: first.sessionId,
+        sourceType: 'scheduled_task',
+        sourceId: 'task-1',
+      });
+      expect(bridge.getSessionSummary(first.sessionId)).toMatchObject({
+        sourceType: 'scheduled_task',
+        sourceId: 'task-1',
+      });
+      expect(handle.agent.extMethodCalls).not.toContainEqual({
+        method: SERVE_CONTROL_EXT_METHODS.sessionSource,
+        params: {
+          sessionId: first.sessionId,
+          sourceType: 'channel',
+          sourceId: 'dingtalk-main',
+        },
+      });
+
+      await bridge.shutdown();
+    });
+
+    it('keeps restore live-only when source persistence fails', async () => {
+      const handle = makeChannel({
+        extMethodImpl: async (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionSource) {
+            throw new Error('persist failed');
+          }
+          return {};
+        },
         resumeSessionImpl: () => ({}),
       });
       const bridge = makeBridge({
         channelFactory: async () => handle.channel,
       });
 
-      await bridge.resumeSession({
+      const restored = await bridge.resumeSession({
+        sessionId: 'restore-source-failed',
+        workspaceCwd: WS_A,
+        sourceType: 'channel',
+        sourceId: 'dingtalk-main',
+      });
+
+      expect(restored).toMatchObject({
+        sessionId: 'restore-source-failed',
+        sourceType: 'channel',
+        sourceId: 'dingtalk-main',
+        sourcePersisted: false,
+      });
+      expect(bridge.getSessionSummary('restore-source-failed')).toMatchObject({
+        sourceType: 'channel',
+        sourceId: 'dingtalk-main',
+      });
+
+      await bridge.shutdown();
+    });
+
+    it('persists source metadata after resume restores a session', async () => {
+      const handle = makeChannel({
+        extMethodImpl: async (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.sessionSource
+            ? { persisted: true }
+            : {},
+        resumeSessionImpl: () => ({}),
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+
+      const restored = await bridge.resumeSession({
         sessionId: 'persisted-live-session',
         workspaceCwd: WS_A,
         sourceType: 'default',
         sourceId: 'realtime_voice:p1:h1:a1:call-1',
       });
 
-      expect(handle.agent.extMethodCalls).not.toContainEqual(
-        expect.objectContaining({
-          method: SERVE_CONTROL_EXT_METHODS.sessionSource,
-        }),
-      );
+      expect(restored).toMatchObject({
+        sourceType: 'default',
+        sourceId: 'realtime_voice:p1:h1:a1:call-1',
+        sourcePersisted: true,
+      });
+      expect(handle.agent.extMethodCalls).toContainEqual({
+        method: SERVE_CONTROL_EXT_METHODS.sessionSource,
+        params: {
+          sessionId: 'persisted-live-session',
+          sourceType: 'default',
+          sourceId: 'realtime_voice:p1:h1:a1:call-1',
+        },
+      });
       expect(handle.agent.resumeSessionCalls[0]?._meta).toEqual({
         [SESSION_SOURCE_META_KEY]: {
           sourceType: 'default',
@@ -23852,6 +24078,19 @@ describe('createAcpSessionBridge', () => {
             sessionId: session.sessionId,
             modelId: 'qwen3-coder',
           },
+          { clientId: 'client-not-issued' },
+        ),
+      ).rejects.toBeInstanceOf(InvalidClientIdError);
+      await expect(
+        bridge.cancelSessionTask(session.sessionId, 'task-1', 'workflow', {
+          clientId: 'client-not-issued',
+        }),
+      ).rejects.toBeInstanceOf(InvalidClientIdError);
+      await expect(
+        bridge.controlSessionWorkflowTask(
+          session.sessionId,
+          'task-1',
+          'rerun',
           { clientId: 'client-not-issued' },
         ),
       ).rejects.toBeInstanceOf(InvalidClientIdError);
@@ -29359,6 +29598,80 @@ describe('extractErrorMessage', () => {
     ).toBe('<503> model serving is throttled');
   });
 
+  it('extracts nested provider messages from data.error.message', () => {
+    // Shape the ACP SDK produces when the agent throws an error whose
+    // message is a JSON string: internalError(JSON.parse(message)).
+    expect(
+      extractErrorMessage(
+        new RequestError(-32603, 'Internal error', {
+          error: {
+            message:
+              'The engine is currently overloaded, please try again later',
+            type: 'engine_overloaded_error',
+          },
+        }),
+      ),
+    ).toBe('The engine is currently overloaded, please try again later');
+  });
+
+  it('extracts string data.error from JSON-RPC error data', () => {
+    expect(
+      extractErrorMessage({
+        code: -32603,
+        message: 'Internal error',
+        data: { error: 'plain string detail' },
+      }),
+    ).toBe('plain string detail');
+  });
+
+  it('prefers top-level data.details over nested data.error.message', () => {
+    expect(
+      extractErrorMessage({
+        code: -32603,
+        message: 'Internal error',
+        data: { details: 'top', error: { message: 'nested' } },
+      }),
+    ).toBe('top');
+  });
+
+  it('prefers top-level data.message over nested data.error.message', () => {
+    expect(
+      extractErrorMessage({
+        code: -32603,
+        message: 'Internal error',
+        data: { message: 'top', error: { message: 'nested' } },
+      }),
+    ).toBe('top');
+  });
+
+  it('falls back to message when data.error has no usable string', () => {
+    expect(
+      extractErrorMessage(
+        new RequestError(-32603, 'Internal error', {
+          error: { type: 'engine_overloaded_error' },
+        }),
+      ),
+    ).toBe('Internal error');
+  });
+
+  it('falls back to message when data.error is an empty string', () => {
+    expect(
+      extractErrorMessage(
+        new RequestError(-32603, 'Internal error', { error: '' }),
+      ),
+    ).toBe('Internal error');
+  });
+
+  it('falls back to message when data.error.message is an empty string', () => {
+    expect(
+      extractErrorMessage(
+        new RequestError(-32603, 'Internal error', {
+          error: { message: '' },
+        }),
+      ),
+    ).toBe('Internal error');
+  });
+
   it('extracts details from Error subclasses with JSON-RPC data', () => {
     expect(
       extractErrorMessage(
@@ -30540,7 +30853,9 @@ describe('createHttpAcpBridge — side-channel state layer (#4511)', () => {
           get(target, prop) {
             if (prop === 'unstable_setSessionModel') {
               return async () => {
-                throw new Error('agent refused model switch');
+                throw new RequestError(-32603, 'Internal error', {
+                  message: 'agent refused model switch',
+                });
               };
             }
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -30576,6 +30891,9 @@ describe('createHttpAcpBridge — side-channel state layer (#4511)', () => {
       const it2 = iter[Symbol.asyncIterator]();
       const next = await it2.next();
       expect(next.value?.type).toBe('model_switch_failed');
+      expect(next.value?.data).toMatchObject({
+        error: 'agent refused model switch',
+      });
       // Give any (incorrectly) scheduled reconcile a tick to fire.
       await new Promise((r) => setTimeout(r, 10));
       expect(statusReads).toBe(0);
