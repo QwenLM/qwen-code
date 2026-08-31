@@ -194,35 +194,97 @@ const MARKER_RESERVE = LEDGER_MAX_BYTES + 2;
 const BODY_SAFETY_MARGIN = 512;
 
 /**
- * The capture's own decided-stop reason — the `nothingToReview.reason`
- * field `capture-local` writes when the round is one of the three decided
- * stops — or null when the plan carries no decision. The FIELD is the
- * capture's own: no full-round plan carries it, so a model-written
- * `stopReRule` on a full round finds nothing here and is refused. (The path
- * arrives through the model-written state — the same seam every other
- * `planPath` reader here trusts.) The REASON is returned, not discarded: it
- * certifies what could have moved since the ledger round, and the grant's
- * per-reason ruling constraints below read that certification.
+ * Everything the decided-stop grant reads off the plan and the cache it
+ * names, taken in ONE read each. The grant used to re-read both files per
+ * consumer — the fence hashed the cache in one `readFileSync` and the
+ * ledger enumeration read it again in another — and nothing bound the bytes
+ * the fence certified to the bytes the grant enumerated: a writer
+ * alternating the model-writable cache between the stamped state and an
+ * emptied one won that race in a measured probe. The snapshot is the one
+ * owner of the bytes for the whole grant; the hash and the enumeration are
+ * projections of the same buffer.
+ *
+ * `reason` is the capture's own decided-stop reason — the
+ * `nothingToReview.reason` field `capture-local` writes when the round is
+ * one of the three decided stops — or null when the plan carries no
+ * decision. The FIELD is the capture's own: no full-round plan carries it,
+ * so a model-written `stopReRule` on a full round finds nothing here and is
+ * refused. (The path arrives through the model-written state — the same
+ * seam every other `planPath` reader here trusts.) The REASON certifies
+ * what could have moved since the ledger round, and the grant's per-reason
+ * ruling constraints read that certification.
  */
-function decidedStopReason(planPath: string | undefined): string | null {
-  if (!planPath) return null;
+interface StopSnapshot {
+  reason: string | null;
+  target: string | null;
+  cachePath: string | null;
+  /**
+   * The scope-emptied split key the capture published — the paths whose
+   * recorded change is gone. A `superseded` disposition is deduced ONLY
+   * from membership here; absent or empty licences none.
+   */
+  supersededPaths: readonly string[];
+  cache:
+    | { kind: 'no-path' }
+    | { kind: 'missing' }
+    | { kind: 'unreadable' }
+    | { kind: 'bytes'; bytes: Buffer };
+}
+
+function readStopSnapshot(planPath: string | undefined): StopSnapshot {
+  const empty: StopSnapshot = {
+    reason: null,
+    target: null,
+    cachePath: null,
+    supersededPaths: [],
+    cache: { kind: 'no-path' },
+  };
+  if (!planPath) return empty;
+  let plan: {
+    nothingToReview?: unknown;
+    target?: unknown;
+    cachePath?: unknown;
+    incremental?: { scope?: { supersededPaths?: unknown } };
+  };
   try {
-    const plan = JSON.parse(readFileSync(planPath, 'utf8')) as {
-      nothingToReview?: unknown;
-    };
-    const stop = plan.nothingToReview;
-    if (
-      typeof stop !== 'object' ||
-      stop === null ||
-      typeof (stop as { reason?: unknown }).reason !== 'string' ||
-      (stop as { reason: string }).reason === ''
-    ) {
-      return null;
-    }
-    return (stop as { reason: string }).reason;
+    plan = JSON.parse(readFileSync(planPath, 'utf8')) as typeof plan;
   } catch {
-    return null;
+    return empty;
   }
+  if (typeof plan !== 'object' || plan === null) return empty;
+  const stop = plan.nothingToReview;
+  const reason =
+    typeof stop === 'object' &&
+    stop !== null &&
+    typeof (stop as { reason?: unknown }).reason === 'string' &&
+    (stop as { reason: string }).reason !== ''
+      ? (stop as { reason: string }).reason
+      : null;
+  const target =
+    typeof plan.target === 'string' && plan.target !== '' ? plan.target : null;
+  const cachePath =
+    typeof plan.cachePath === 'string' && plan.cachePath !== ''
+      ? plan.cachePath
+      : null;
+  const rawSuperseded = plan.incremental?.scope?.supersededPaths;
+  const supersededPaths = Array.isArray(rawSuperseded)
+    ? rawSuperseded.filter((p): p is string => typeof p === 'string')
+    : [];
+  let cache: StopSnapshot['cache'] = { kind: 'no-path' };
+  if (cachePath !== null) {
+    try {
+      cache = { kind: 'bytes', bytes: readFileSync(cachePath) };
+    } catch (err) {
+      // A cache that does not exist recorded no findings — an EMPTY
+      // baseline, not an unreadable one. Every other read failure is
+      // unreadable: the grant must refuse, never enumerate a guess.
+      cache =
+        (err as NodeJS.ErrnoException).code === 'ENOENT'
+          ? { kind: 'missing' }
+          : { kind: 'unreadable' };
+    }
+  }
+  return { reason, target, cachePath, supersededPaths, cache };
 }
 
 /**
@@ -256,18 +318,17 @@ const STOP_REASON_REFUSAL: Record<string, string> = {
 
 /**
  * The cache ledger's bytes bound into the stop fence — the SHA-256 of the
- * file the plan names, or null when there is no file to hash. A cache that
+ * snapshot's bytes, or null when there is no file to hash. A cache that
  * does not exist holds no findings, so null IS a stampable value: the
  * capture stamps it when nothing was cached, and the grant fails closed on
- * a file that appeared since.
+ * a file that appeared since. Computed from the SNAPSHOT, never a second
+ * disk read: the hash the fence certifies and the ledger the grant
+ * enumerates must be projections of one buffer (the TOCTOU the snapshot
+ * exists to close).
  */
-function cacheFindingsHash(cachePath: string | undefined): string | null {
-  if (typeof cachePath !== 'string' || cachePath === '') return null;
-  try {
-    return createHash('sha256').update(readFileSync(cachePath)).digest('hex');
-  } catch {
-    return null;
-  }
+function cacheFindingsHash(cache: StopSnapshot['cache']): string | null {
+  if (cache.kind !== 'bytes') return null;
+  return createHash('sha256').update(cache.bytes).digest('hex');
 }
 
 /**
@@ -275,42 +336,42 @@ function cacheFindingsHash(cachePath: string | undefined): string | null {
  * against the ONE sidecar the capture could have stamped for THIS plan —
  * never the family: a family scan let a sidecar stamped for another target
  * vouch for this one. The fence binds what it finds three ways — the run
- * id the parent published, the plan's own stop reason (the licence-bearing
- * field is the capture's, not the plan's; `run.ts`'s `readStopSidecar`
- * reads it from the sidecar too), and the cache ledger's content hash the
- * capture stamped at stop time, so the grant's baseline is the ledger the
- * capture saw. No published id (an interactive round no `review run` gate
- * reads) → no fence to match, the plan-shape check stands alone. Anything
- * else — no usable target, a missing or foreign-stamped sidecar, a
- * departed reason, cache path, or hash — fails closed. Returns null when
- * the fence passes; the refusal line's second half otherwise.
+ * id the parent published (when one is), the plan's own stop reason (the
+ * licence-bearing field is the capture's, not the plan's; `run.ts`'s
+ * `readStopSidecar` reads it from the sidecar too), and the cache ledger's
+ * content hash the capture stamped at stop time, so the grant's baseline
+ * is the ledger the capture saw. With NO published id (an interactive
+ * round no `review run` gate reads) the run-id equality alone is waived —
+ * the sidecar itself is still required, and its reason, cache path, and
+ * findings hash still bind: `capture-local` stamps all three with or
+ * without a parent, so there is always something to match, and skipping
+ * the fence outright left every interactive grant gated by nothing but
+ * model-supplied inputs. Anything else — no usable target, a missing,
+ * unparsable, or foreign-stamped sidecar, a departed reason, cache path,
+ * or hash — fails closed. Returns null when the fence passes; the refusal
+ * line's second half otherwise.
  */
 function stopSidecarFenceRefusal(
-  planPath: string | undefined,
+  snap: StopSnapshot,
   planStopReason: string,
   env: NodeJS.ProcessEnv | undefined,
 ): string | null {
-  const runId = (env ?? process.env)['QWEN_REVIEW_RUN_ID'];
-  if (typeof runId !== 'string' || runId === '') return null;
-  let plan: { target?: unknown; cachePath?: unknown } | null;
-  try {
-    plan = JSON.parse(readFileSync(planPath ?? '', 'utf8')) as {
-      target?: unknown;
-      cachePath?: unknown;
-    };
-  } catch {
-    plan = null;
-  }
-  const target =
-    plan !== null && typeof plan.target === 'string' && plan.target !== ''
-      ? plan.target
-      : null;
-  if (target === null) {
+  const runIdRaw = (env ?? process.env)['QWEN_REVIEW_RUN_ID'];
+  const runId =
+    typeof runIdRaw === 'string' && runIdRaw !== '' ? runIdRaw : null;
+  if (snap.target === null) {
     return (
-      'a run id is published but the plan carries no usable target — the ' +
-      'sidecar the capture stamped for this re-rule cannot be located.'
+      'the plan carries no usable target — the sidecar the capture ' +
+      'stamped for this re-rule cannot be located.'
     );
   }
+  const noSidecar =
+    runId !== null
+      ? 'a run id is published but no stop sidecar carries its stamp — a ' +
+        'stale or foreign stop plan matches the shape but never the fence.'
+      : "no stop sidecar carries the capture's stamp for this plan — a " +
+        'stop plan without its capture-written sidecar is a shape, not a ' +
+        'decision.';
   let stop: {
     runId?: unknown;
     reason?: unknown;
@@ -318,23 +379,18 @@ function stopSidecarFenceRefusal(
     findingsHash?: unknown;
   };
   try {
-    stop = JSON.parse(readFileSync(tmpFile(target, 'stop.json'), 'utf8')) as {
-      runId?: unknown;
-      reason?: unknown;
-      cachePath?: unknown;
-      findingsHash?: unknown;
-    };
+    const parsed: unknown = JSON.parse(
+      readFileSync(tmpFile(snap.target, 'stop.json'), 'utf8'),
+    );
+    // `JSON.parse('null')` succeeds — a null or non-object sidecar must be
+    // the designed refusal, never a bare TypeError off a property read.
+    if (typeof parsed !== 'object' || parsed === null) return noSidecar;
+    stop = parsed as typeof stop;
   } catch {
-    return (
-      'a run id is published but no stop sidecar carries its stamp — a ' +
-      'stale or foreign stop plan matches the shape but never the fence.'
-    );
+    return noSidecar;
   }
-  if (stop.runId !== runId) {
-    return (
-      'a run id is published but no stop sidecar carries its stamp — a ' +
-      'stale or foreign stop plan matches the shape but never the fence.'
-    );
+  if (runId !== null && stop.runId !== runId) {
+    return noSidecar;
   }
   if (stop.reason !== planStopReason) {
     return (
@@ -343,17 +399,13 @@ function stopSidecarFenceRefusal(
       'own decision, not a reason chosen for it.'
     );
   }
-  const planCachePath =
-    plan !== null && typeof plan.cachePath === 'string' && plan.cachePath !== ''
-      ? plan.cachePath
-      : null;
-  if (stop.cachePath !== planCachePath) {
+  if (stop.cachePath !== snap.cachePath) {
     return (
       'the stamped stop sidecar names a different cache than the plan — ' +
       "the grant's baseline must be the ledger the capture saw."
     );
   }
-  if (stop.findingsHash !== cacheFindingsHash(planCachePath ?? undefined)) {
+  if (stop.findingsHash !== cacheFindingsHash(snap.cache)) {
     return (
       'the cache findings are not the ones the capture stamped — the ' +
       'ledger moved between capture and compose.'
@@ -363,40 +415,41 @@ function stopSidecarFenceRefusal(
 }
 
 /**
- * The OPEN Critical entries in the cache ledger the plan names — the exact
- * set a decided-stop re-rule owes a ruling for, each with the title the
- * ledger recorded under its id when it carries one (the body↔disposition
- * cross-check binds a re-assertion's content against it). Null when the
- * plan names no cache or the ledger cannot be read: the completeness check
- * then refuses, because a re-rule whose baseline cannot be read cannot be
- * shown complete. One exception: a cache file that does not exist recorded
- * no findings, so the baseline is EMPTY, not unreadable — that is the
+ * The status vocabulary a ledger row may carry — Step 6's own ruling
+ * discipline. Anything else is a DRIFTED row, and a drifted row is an
+ * unreadable baseline, never a skipped one: `status: 'oppn'` silently
+ * shrank the open set below what the ledger really held.
+ */
+const LEDGER_STATUS_VOCABULARY = new Set(['open', 'fixed', 'superseded']);
+
+/**
+ * The OPEN Critical entries in the cache ledger the snapshot read — the
+ * exact set a decided-stop re-rule owes a ruling for, each with the title
+ * the ledger recorded under its id when it carries one (the
+ * body↔disposition cross-check binds a re-assertion's content against it)
+ * and the file it cited (the scope-emptied `superseded` deduction reads
+ * membership in `supersededPaths` off it). Null when the plan names no
+ * cache or the ledger cannot be read: the completeness check then refuses,
+ * because a re-rule whose baseline cannot be read cannot be shown
+ * complete. One exception: a cache file that does not exist recorded no
+ * findings, so the baseline is EMPTY, not unreadable — that is the
  * nothing-open stop's no-event compose. The cache is model-written (Step
- * 8's prose rules), so
- * every entry is re-validated, and a shape violation is an unreadable
- * baseline — never a skipped row: skipping shrinks the open set below what
- * the ledger really holds, and the grant would issue over Criticals it
- * could not enumerate.
+ * 8's prose rules), so every entry is re-validated, and a shape violation
+ * — a drifted `status` string included — is an unreadable baseline, never
+ * a skipped row: skipping shrinks the open set below what the ledger
+ * really holds, and the grant would issue over Criticals it could not
+ * enumerate. Enumerated from the SNAPSHOT's bytes — the same buffer the
+ * fence hashed — so no second read can race the certification.
  */
 function openLedgerCriticalEntries(
-  planPath: string | undefined,
-): Array<{ id: string; title?: string }> | null {
-  if (!planPath) return null;
+  snap: StopSnapshot,
+): Array<{ id: string; title?: string; file?: string }> | null {
+  if (snap.cache.kind === 'no-path' || snap.cache.kind === 'unreadable') {
+    return null;
+  }
+  if (snap.cache.kind === 'missing') return [];
   try {
-    const plan = JSON.parse(readFileSync(planPath, 'utf8')) as {
-      cachePath?: unknown;
-    };
-    if (typeof plan.cachePath !== 'string' || plan.cachePath === '') {
-      return null;
-    }
-    let cacheRaw: string;
-    try {
-      cacheRaw = readFileSync(plan.cachePath, 'utf8');
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
-      return null;
-    }
-    const cache = JSON.parse(cacheRaw) as unknown;
+    const cache = JSON.parse(snap.cache.bytes.toString('utf8')) as unknown;
     if (typeof cache !== 'object' || cache === null || Array.isArray(cache)) {
       return null;
     }
@@ -404,13 +457,14 @@ function openLedgerCriticalEntries(
     if (!('findings' in cache)) return [];
     // Present but not an array — the baseline is unreadable, not empty.
     if (!Array.isArray(cache.findings)) return null;
-    const entries: Array<{ id: string; title?: string }> = [];
+    const entries: Array<{ id: string; title?: string; file?: string }> = [];
     for (const f of cache.findings) {
       const e = f as {
         id?: unknown;
         severity?: unknown;
         status?: unknown;
         title?: unknown;
+        file?: unknown;
       };
       if (
         typeof e !== 'object' ||
@@ -418,7 +472,8 @@ function openLedgerCriticalEntries(
         typeof e.id !== 'string' ||
         e.id === '' ||
         (e.severity !== 'Critical' && e.severity !== 'Suggestion') ||
-        typeof e.status !== 'string'
+        typeof e.status !== 'string' ||
+        !LEDGER_STATUS_VOCABULARY.has(e.status)
       ) {
         return null;
       }
@@ -427,6 +482,9 @@ function openLedgerCriticalEntries(
           id: e.id,
           ...(typeof e.title === 'string' && e.title.trim() !== ''
             ? { title: e.title.trim() }
+            : {}),
+          ...(typeof e.file === 'string' && e.file !== ''
+            ? { file: e.file }
             : {}),
         });
       }
@@ -3759,9 +3817,41 @@ function composeReviewBody(
   // prose, not provenance, so it loses the deterministic exception too.
   let unvouchedReAssertions = 0;
   let unvouchedTaggedReAssertions = 0;
+  let unvouchedRelocatedDeterministic = 0;
   const stopReRuleGranted = (() => {
-    const srr = input.stopReRule;
-    if (srr === undefined) return false;
+    // Model-written state: the declared type promises an object, the file
+    // on disk can hand anything — a `null` here must be the designed
+    // refusal, never a bare TypeError off a property read.
+    const srrRaw: unknown = input.stopReRule;
+    // ONE plan read and ONE cache read for the whole grant — the fence's
+    // hash and the completeness check's enumeration are projections of the
+    // same snapshot, so nothing can move between certification and use.
+    const snap = readStopSnapshot(input.planPath);
+    if (srrRaw === undefined) {
+      // A decided stop composes ONLY through its re-rule: a stop plan
+      // walked through the regular floors would mint a non-blocking
+      // verdict over a ledger nobody re-ruled, and `run.ts` would read it
+      // as this round's completion — exit 0 over the standing blockers.
+      if (snap.reason !== null) {
+        throw new Error(
+          `compose-review refused: the plan carries a decided stop ` +
+            `('${snap.reason}') but no stopReRule — a decided stop ` +
+            'composes only through its re-rule.',
+        );
+      }
+      return false;
+    }
+    if (
+      srrRaw === null ||
+      typeof srrRaw !== 'object' ||
+      Array.isArray(srrRaw)
+    ) {
+      throw new Error(
+        'stopReRule refused: stopReRule must be an object carrying ' +
+          'dispositions — one entry per open ledger Critical.',
+      );
+    }
+    const srr = srrRaw as { dispositions?: unknown };
     if (!Array.isArray(srr.dispositions)) {
       throw new Error(
         'stopReRule.dispositions must be an array — one entry per open ' +
@@ -3775,7 +3865,23 @@ function composeReviewBody(
           'verified, and no verifier ran this round.',
       );
     }
-    const stopReason = decidedStopReason(input.planPath);
+    // The floor's reroute and the model's own deferral channel are the same
+    // hole from two sides: a Critical riding either leg posts in the body's
+    // deferral list without ever reaching the body↔disposition bind. On a
+    // stop round nothing new was reviewed, so a deferral-channel Critical
+    // can only be a rerouted draft or a claim the bind cannot reach —
+    // refuse both, before any floor is skipped.
+    if (
+      reroute.entries.some((e) => e.severity === 'Critical') ||
+      modelDeferred.some((e) => e.severity === 'Critical')
+    ) {
+      throw new Error(
+        'stopReRule refused: a Critical rides the deferral channel — every ' +
+          'Critical on a stop re-rule must be a bound re-assertion in ' +
+          'bodyCriticals, and the deferral channel is not bound.',
+      );
+    }
+    const stopReason = snap.reason;
     if (stopReason === null) {
       throw new Error(
         'stopReRule refused: the plan carries no nothingToReview decision — ' +
@@ -3795,25 +3901,24 @@ function composeReviewBody(
           'grant fails closed on a reason it cannot rule.',
       );
     }
-    const fenceRefusal = stopSidecarFenceRefusal(
-      input.planPath,
-      stopReason,
-      input.env,
-    );
+    const fenceRefusal = stopSidecarFenceRefusal(snap, stopReason, input.env);
     if (fenceRefusal !== null) {
       throw new Error(`stopReRule refused: ${fenceRefusal}`);
     }
-    const ledger = openLedgerCriticalEntries(input.planPath);
+    const ledger = openLedgerCriticalEntries(snap);
     if (ledger === null) {
       throw new Error(
         'stopReRule refused: the ledger the plan names cannot be read — a ' +
           're-rule whose baseline is unreadable cannot be shown complete.',
       );
     }
+    const ledgerFiles = new Map<string, string>();
     for (const e of ledger) {
       if (e.title !== undefined) ledgerTitles.set(e.id, e.title);
+      if (e.file !== undefined) ledgerFiles.set(e.id, e.file);
     }
-    for (const d of srr.dispositions) {
+    for (const dRaw of srr.dispositions as unknown[]) {
+      const d = dRaw as { id?: unknown; ruling?: unknown } | null;
       if (
         typeof d?.id !== 'string' ||
         d.id === '' ||
@@ -3829,7 +3934,7 @@ function composeReviewBody(
           `stopReRule refused: duplicate disposition for ${d.id}.`,
         );
       }
-      stopRulings.set(d.id, d.ruling);
+      stopRulings.set(d.id, d.ruling as string);
     }
     const ledgerSet = new Set(ledger.map((e) => e.id));
     for (const id of ledgerSet) {
@@ -3854,6 +3959,27 @@ function composeReviewBody(
           `stopReRule refused: ${id} is ruled ${ruling} under ` +
             `${stopReason} — ${STOP_REASON_REFUSAL[stopReason]}.`,
         );
+      }
+      // `scope-emptied` licences `superseded` as a DEDUCED ruling, and the
+      // deduction's input is the capture-published split: the cited file's
+      // membership in `supersededPaths`. A ruling is only deduced when the
+      // machine reads the deduction's input — a `superseded` whose cited
+      // file the capture did not name as superseded (or whose row records
+      // no file at all) is a judgement wearing a deduction's licence.
+      // `clean-tree` is the JUDGED stop; its `superseded` needs no split.
+      if (ruling === 'superseded' && stopReason === 'scope-emptied') {
+        const cited = ledgerFiles.get(id);
+        if (cited === undefined || !snap.supersededPaths.includes(cited)) {
+          throw new Error(
+            `stopReRule refused: ${id} is ruled superseded but ` +
+              (cited === undefined
+                ? 'the ledger records no file for it'
+                : `its cited file '${cited}' is not in the plan's ` +
+                  'supersededPaths') +
+              ' — a deduced supersession must read its deduction from the ' +
+              "capture's published split.",
+          );
+        }
       }
     }
     // The body↔disposition cross-check is NOT here: it runs below, over the
@@ -3908,11 +4034,14 @@ function composeReviewBody(
     // under that id — the SKILL's verbatim re-assertion contract makes
     // the equality exact. An id alone would let a brand-new claim wear a
     // verified id's exemption. An entry the ledger recorded no title for
-    // keeps its id binding but loses the verify-floor exemption below.
+    // keeps its id binding but loses the verify-floor exemption below —
+    // returned to the caller, because the relocated leg must also strip
+    // such an entry's deterministic-source credit (its typed `source` is
+    // prose on a round no tool ran, exactly like an own-leg tag).
     const bindEntry = (
       claim: { id?: string; fixInduced: boolean; title: string },
       scanText?: string,
-    ): void => {
+    ): boolean => {
       if (claim.fixInduced) {
         throw new Error(
           `stopReRule refused: ${claim.id ?? 'a body Critical'} carries ` +
@@ -3937,7 +4066,9 @@ function composeReviewBody(
         );
       }
       const recorded = ledgerTitles.get(id);
+      let unvouched = false;
       if (recorded === undefined) {
+        unvouched = true;
         unvouchedReAssertions++;
         if (scanText !== undefined && DETERMINISTIC_TAG_RE.test(scanText)) {
           unvouchedTaggedReAssertions++;
@@ -3951,6 +4082,7 @@ function composeReviewBody(
         );
       }
       carriedIds.add(id);
+      return unvouched;
     };
     const ownCount = bodyCriticals.length - relocatedCriticals.length;
     for (const entry of bodyCriticals.slice(0, ownCount)) {
@@ -3962,7 +4094,23 @@ function composeReviewBody(
       );
     }
     for (const entry of relocatedEntries) {
-      bindEntry(readClaim(entry.title));
+      // The relocated leg binds the COLLAPSED title, symmetric with the
+      // collapse the own leg's entries get at ingest: a multi-line title
+      // whose first line matches the recorded claim must not smuggle new
+      // claims in its tail past a first-line-only readback — the ledger
+      // builder records only the first line, so no future round would ever
+      // rule on the tail. The leading-invisible strip is the same symmetry.
+      const unvouched = bindEntry(
+        readClaim(collapseEntry(entry.title).replace(LEADING_INVISIBLE_RE, '')),
+      );
+      // An unvouched relocated re-assertion loses its deterministic-source
+      // credit: `relocatedDeterministic` counted it on the typed `source`
+      // alone, and on a granted stop no tool ran that could make that
+      // source provenance — without this the unverified softening below is
+      // defeated by exactly the entries nobody's recorded title vouched.
+      if (unvouched && DETERMINISTIC_SOURCES.has(entry.source)) {
+        unvouchedRelocatedDeterministic++;
+      }
     }
     for (const id of stillStands) {
       if (!carriedIds.has(id)) {
@@ -4032,8 +4180,14 @@ function composeReviewBody(
     // softening reads. Vouched re-assertions keep theirs — they re-assert
     // findings a full round verified, tag and all — and the CLI-minted
     // nonConvergence Critical is deterministic by provenance and never
-    // rides this term.
-    (stopReRuleGranted ? unvouchedTaggedReAssertions : 0);
+    // rides this term. The relocated term is the same correction on the
+    // other leg: an unvouched relocated entry was counted into
+    // `relocatedDeterministic` on its typed `source` alone, and adding it
+    // back here keeps its blocker unverified-softenable like its own-leg
+    // twin.
+    (stopReRuleGranted
+      ? unvouchedTaggedReAssertions + unvouchedRelocatedDeterministic
+      : 0);
   const criticalsNeedingVerify = stopReRuleGranted
     ? // Every posted blocker on a granted stop re-rule is a re-assertion,
       // under its original id, of a finding a previous full round verified —
@@ -4807,9 +4961,15 @@ function composeReviewBody(
   // Presubmit downgrades apply after the caps and only when the verdict they
   // name was the one on the table — `baseEvent` is the row before every cap,
   // so a softening cap that ran first cannot erase the presubmit's reasons.
+  // Never on a granted stop re-rule: no presubmit ran this round (no agents
+  // did), so `input.presubmit` can only be stale or forged there — and a
+  // model-written `downgradeRequestChanges: true` was the one softening
+  // channel the grant did not machine-check, moving a certified-standing
+  // blocker to COMMENT and exit 0 under `--fail-on request-changes`.
   let downgraded = false;
   let downgradedFrom: 'Approve' | 'Request changes' | null = null;
   if (
+    !stopReRuleGranted &&
     (event === 'APPROVE' || (baseEvent === 'APPROVE' && event === 'COMMENT')) &&
     downgradeApprove
   ) {
@@ -4817,6 +4977,7 @@ function composeReviewBody(
     downgraded = true;
     downgradedFrom = 'Approve';
   } else if (
+    !stopReRuleGranted &&
     (event === 'REQUEST_CHANGES' ||
       (baseEvent === 'REQUEST_CHANGES' && event === 'COMMENT')) &&
     downgradeRequestChanges
@@ -7261,8 +7422,19 @@ export const composeReviewCommand: CommandModule = {
     // from. `event` + `cappedBy` alone cannot reconstruct it — a presubmit
     // downgrade also depends on `downgraded`/`downgradedFrom` — and Step 8's
     // archived report copies this line rather than re-deriving a lossy one.
+    // The parent's run stamp is echoed into the artifact, mirroring the stop
+    // sidecar's fence: `run.ts` accepts only a verdict stamped by ITS run,
+    // so a leftover artifact from a concurrent same-stem run — or a file
+    // written around this command — never reads as this round's verdict.
+    // Absent when no parent published one (an interactive compose), which
+    // is exactly when no gate is reading.
+    const composedRunId = process.env['QWEN_REVIEW_RUN_ID'];
     const json = JSON.stringify(
-      { ...result, verdictLine: verdictLine(result) },
+      {
+        ...result,
+        verdictLine: verdictLine(result),
+        ...(composedRunId ? { runId: composedRunId } : {}),
+      },
       null,
       2,
     );
