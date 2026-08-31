@@ -37,7 +37,7 @@ const failureIssue = parse(
 // `on:` parses as the boolean true in YAML 1.1.
 const triggers = ci[true] ?? ci['on'];
 const LANES = ['test_macos', 'test_windows'];
-const PUSH_JOBS = ['classify_pr', 'test'];
+const PUSH_JOBS = ['classify_pr', 'test', 'static_checks'];
 const condOf = (job) => String(ci.jobs[job].if ?? '');
 
 // The extended ceilings are scoped to the ECS pool: `runs-on` falls back to
@@ -78,6 +78,16 @@ it('keeps the shared Linux test lane above its contention budget on ECS', () => 
 it('keeps the shared Linux test lane on its pre-contention ceiling when hosted', () => {
   expect(timeoutMinutesOn('test', HOSTED_RUNNER)).toBe(60);
   expect(timeoutMinutesOn('test', '')).toBe(60);
+});
+
+it('keeps the static-checks lane on its per-pool budgets', () => {
+  // Split from `test` so the ~20-50 minute static block stops spending the
+  // unit-test lane's clock; same trigger condition, so a push run keeps
+  // lint and static analysis post-merge.
+  expect(condOf('static_checks')).toBe(condOf('test'));
+  expect(timeoutMinutesOn('static_checks', ECS_RUNNER)).toBe(75);
+  expect(timeoutMinutesOn('static_checks', HOSTED_RUNNER)).toBe(45);
+  expect(timeoutMinutesOn('static_checks', '')).toBe(45);
 });
 
 it('keeps the no-AK gate above its dependency-install budget on ECS', () => {
