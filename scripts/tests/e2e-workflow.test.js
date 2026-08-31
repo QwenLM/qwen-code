@@ -119,9 +119,15 @@ describe('e2e workflow', () => {
     // both routings instead of pinning a bare number — the same
     // substitute-then-evaluate technique ci-platform-lanes.test.js uses —
     // so a regression to an unconditional ceiling fails here instead of
-    // reading as a passing constant.
-    const timeoutMinutesOn = ({ repository, ecsDisabled }) => {
-      const expr = String(yml.jobs['e2e-test-linux']['timeout-minutes'])
+    // reading as a passing constant. `runs-on` and `timeout-minutes` carry
+    // that routing predicate as two hand-written copies (ci.yml derives
+    // both from one classify_pr output), so the mirror test evaluates both
+    // against one oracle: an edit that changes one expression and forgets
+    // the other fails here instead of leaving the suite green.
+    const ECS_POOL_LABELS = ['self-hosted', 'linux', 'x64', 'ecs-qwen'];
+    const job = yml.jobs['e2e-test-linux'];
+    const evaluateRoutingExpr = (raw, { repository, ecsDisabled }) => {
+      const expr = String(raw)
         .replace(/^\$\{\{\s*/, '')
         .replace(/\s*\}\}$/, '')
         .replace(/github\.repository/g, JSON.stringify(repository))
@@ -129,34 +135,43 @@ describe('e2e workflow', () => {
           /vars\.MAINTAINER_ECS_RUNNER_DISABLED/g,
           JSON.stringify(ecsDisabled),
         )
-        .replace(/fromJSON\(/g, '(');
+        .replace(/fromJSON\(/g, 'JSON.parse(');
       if (/github\.|vars\.|needs\.|steps\.|fromJSON\(/.test(expr)) {
         throw new Error(
-          `e2e-test-linux timeout carries a term this guard does not model: ${expr}`,
+          `e2e-test-linux routing carries a term this guard does not model: ${expr}`,
         );
       }
-      return Number(new Function(`return (${expr});`)());
+      return new Function(`return (${expr});`)();
+    };
+    const timeoutMinutesOn = (routing) =>
+      evaluateRoutingExpr(job['timeout-minutes'], routing);
+    const routedToPool = (routing) =>
+      JSON.stringify(evaluateRoutingExpr(job['runs-on'], routing)) ===
+      JSON.stringify(ECS_POOL_LABELS);
+
+    const poolRouting = { repository: 'QwenLM/qwen-code', ecsDisabled: '' };
+    const forkRouting = { repository: 'some-fork/qwen-code', ecsDisabled: '' };
+    const killSwitchRouting = {
+      repository: 'QwenLM/qwen-code',
+      ecsDisabled: 'true',
     };
 
     it('keeps a contended ECS shard above the install/build/test budget', () => {
-      expect(
-        timeoutMinutesOn({ repository: 'QwenLM/qwen-code', ecsDisabled: '' }),
-      ).toBe(90);
+      expect(timeoutMinutesOn(poolRouting)).toBe(90);
     });
 
     it('keeps the hosted fallback on the pre-contention ceiling', () => {
-      expect(
-        timeoutMinutesOn({
-          repository: 'some-fork/qwen-code',
-          ecsDisabled: '',
-        }),
-      ).toBe(60);
-      expect(
-        timeoutMinutesOn({
-          repository: 'QwenLM/qwen-code',
-          ecsDisabled: 'true',
-        }),
-      ).toBe(60);
+      expect(timeoutMinutesOn(forkRouting)).toBe(60);
+      expect(timeoutMinutesOn(killSwitchRouting)).toBe(60);
+    });
+
+    it('keeps the ceiling mirrored with the runs-on routing', () => {
+      for (const routing of [poolRouting, forkRouting, killSwitchRouting]) {
+        expect(
+          timeoutMinutesOn(routing) === 90,
+          `timeout and runs-on disagree for ${JSON.stringify(routing)}`,
+        ).toBe(routedToPool(routing));
+      }
     });
   });
 });
