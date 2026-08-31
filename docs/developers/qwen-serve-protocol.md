@@ -3107,7 +3107,7 @@ Response (200):
 }
 ```
 
-`outputLanguage` is `null` when `syncOutputLanguage` was false. `refresh.runtimes` counts runtimes that applied the switch over a live channel; `refresh.sessions` sums per-session system-instruction refreshes; `refresh.failed` aggregates per-session refresh failures and failed runtimes (fan-out is best-effort and never fails the request after persistence succeeded).
+`language` is the daemon-resolved UI locale, so an `'auto'` request can return a concrete language; hosts should read the persisted `general.language` setting for selector state. `outputLanguage` is `null` when `syncOutputLanguage` was false. `refresh.runtimes` counts runtimes that applied the switch over a live channel; `refresh.sessions` sums per-session system-instruction refreshes; `refresh.failed` aggregates per-session refresh failures and failed runtimes (fan-out is best-effort and never fails the request after persistence succeeded).
 
 Errors:
 
