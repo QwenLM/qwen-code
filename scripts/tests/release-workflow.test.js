@@ -18,9 +18,11 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { globSync } from 'glob';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
+import { getWorkspacePackageJsonPaths } from '../workspaces.js';
 
 // `realpath -m` (the script's canonicalization line) is a GNU coreutils
 // extension. Probe the host before asserting GNU-specific path behavior.
@@ -446,6 +448,39 @@ describe('release workflow', () => {
     expect(workspacePackages.length).toBeGreaterThan(0);
     for (const [path, packageJson] of workspacePackages) {
       expect(packageJson.scripts['test:ci'], path).toContain('vitest run');
+    }
+  });
+
+  it('discovers at least one test file in every test:ci workspace', () => {
+    // --passWithNoTests lets a shard that received no files exit 0, but it
+    // would also turn a workspace that lost every test file green in all
+    // three shards; the monolithic test:release exited 1 in that case and
+    // blocked the release. This ratchet runs in the same test:scripts lane
+    // (quality_scripts) that gates the release, so a workspace whose test
+    // discovery comes up empty blocks publish again.
+    //
+    // Discovery mirrors vitest's default include pattern. Every workspace's
+    // test:ci runs vitest with that default or a narrower include (the
+    // custom configs list 'src/**/*.test.ts' or 'scripts/**/*.test.js'),
+    // so zero matches here means zero discoverable tests under vitest too.
+    const rootPackage = JSON.parse(readFileSync('package.json', 'utf8'));
+    const testCiWorkspaces = getWorkspacePackageJsonPaths(
+      process.cwd(),
+      rootPackage.workspaces,
+    )
+      .map((path) => [path, JSON.parse(readFileSync(path, 'utf8'))])
+      .filter(([, packageJson]) => packageJson.scripts?.['test:ci']);
+    expect(testCiWorkspaces.length).toBeGreaterThan(0);
+    for (const [path] of testCiWorkspaces) {
+      const testFiles = globSync('**/*.{test,spec}.?(c|m)[jt]s?(x)', {
+        cwd: dirname(path),
+        ignore: ['**/node_modules/**', '**/dist/**', '**/e2e/**'],
+      });
+      expect(
+        testFiles.length,
+        `${path} defines test:ci but matches no test file; every shard ` +
+          'would pass with zero tests executed for this workspace',
+      ).toBeGreaterThan(0);
     }
   });
 
