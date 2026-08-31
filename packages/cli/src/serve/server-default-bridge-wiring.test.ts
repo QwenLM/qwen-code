@@ -46,6 +46,14 @@ function makeBridge(
   } as unknown as AcpSessionBridge;
 }
 
+// The ecs-qwen pool runs several jobs at once; under that contention these
+// tests pass alone in milliseconds but blow the 15s ceiling without any
+// real hang. Give that pool the raised budget its other suites already use.
+const timeoutMs = process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
+  ? 60_000
+  : 15_000;
+vi.setConfig({ testTimeout: timeoutMs, hookTimeout: timeoutMs });
+
 describe('createServeApp default bridge wiring', () => {
   afterEach(() => {
     vi.doUnmock('./acp-session-bridge.js');

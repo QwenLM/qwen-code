@@ -283,6 +283,38 @@ jobs:
           echo "scheduled_limit=${SCHEDULED_LIMIT_INPUT}" >> "${GITHUB_OUTPUT}"
           echo "Issue follow-up state: event=${EVENT_NAME} dispatch_dry=${DISPATCH_DRY_RUN} schedule_dry=${SCHEDULE_DRY_RUN} resolved_dry_run=${dry_run} scheduled_limit=${SCHEDULED_LIMIT_INPUT}"
 
+      - name: 'Install pinned Qwen CLI'
+        id: 'install_qwen'
+        env:
+          # Pinned, not `latest`: the CLI is installed from npm at run
+          # time, and every consumer following the dist-tag died on
+          # `npm error notarget` when it moved to an unresolvable version
+          # on 2026-08-15. resolve-pr pins the same version for the same
+          # reason; bump the two together.
+          QWEN_CLI_VERSION: '0.21.10'
+        run: |-
+          set -euo pipefail
+          # Job-local, not `npm install -g`: this job's default lane is
+          # the ecs-qwen pool, whose system-wide CLI
+          # update-ecs-runner-qwen.yml maintains at `latest` for the
+          # agent fleet — a global install here would fight that
+          # contract. The pinned copy is prepended to PATH instead, so it
+          # outranks the fleet CLI on ecs-qwen and is the only CLI on the
+          # ubuntu-latest fallback lane. The action's 'Install Qwen Code'
+          # step skips when `qwen` is already on PATH (verified at the
+          # pinned action SHA), so the agent runs THIS install on both
+          # lanes: an input-only pin never bound ecs-qwen, the exact
+          # outage class this step exists to prevent.
+          install_dir="${RUNNER_TEMP}/qwen-cli"
+          npm install --prefix "${install_dir}" --loglevel=error --no-audit \
+            --registry=https://registry.npmjs.org \
+            "@qwen-code/qwen-code@${QWEN_CLI_VERSION}"
+          echo "${install_dir}/node_modules/.bin" >> "${GITHUB_PATH}"
+          qwen_bin="${install_dir}/node_modules/.bin/qwen"
+          installed_version="$("${qwen_bin}" --version)"
+          echo "version=${installed_version}" >> "${GITHUB_OUTPUT}"
+          echo "Installed qwen ${installed_version} at ${install_dir}"
+
       - name: 'Run Qwen issue follow-up'
         uses: 'QwenLM/qwen-code-action@05f81718976f3b7da657422e6e8e4d372b8621d7'
         env:
@@ -297,6 +329,11 @@ jobs:
           OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          # The install step above already put the pinned CLI first on
+          # PATH on both lanes, and the action's own install skips when
+          # `qwen` is present — this declares the installed version to
+          # the action, so the input can never drift from what runs.
+          qwen_cli_version: '${{ steps.install_qwen.outputs.version }}'
           # The input name is `settings` — this action version has no
           # `settings_json` input, and an unknown input is silently dropped,
           # which is what happened to this block until the rename.

@@ -460,6 +460,48 @@ describe('acpRouteTable – matchRoute', () => {
     const result = matchRoute('/session/s17/tasks', 'GET');
     expect(result).not.toBeNull();
     expect(result!.mapping.method).toBe('_qwen/session/tasks');
+    const params = result!.mapping.extractParams(
+      result!.segments,
+      undefined,
+      'GET',
+      new URLSearchParams('includeWorkflows=true'),
+    );
+    expect(params).toEqual({ sessionId: 's17', includeWorkflows: true });
+  });
+
+  it('POST /session/:id/tasks/:taskId/cancel maps to _qwen/session/tasks/cancel', () => {
+    const result = matchRoute('/session/s17/tasks/task%2F1/cancel', 'POST');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/session/tasks/cancel');
+    const params = result!.mapping.extractParams(
+      result!.segments,
+      { kind: 'workflow' },
+      'POST',
+    );
+    expect(params).toEqual({
+      sessionId: 's17',
+      taskId: 'task/1',
+      kind: 'workflow',
+    });
+  });
+
+  it('POST /session/:id/tasks/:taskId/workflow-action maps to _qwen/session/tasks/workflow_action', () => {
+    const result = matchRoute(
+      '/session/s17/tasks/workflow%201/workflow-action',
+      'POST',
+    );
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/session/tasks/workflow_action');
+    const params = result!.mapping.extractParams(
+      result!.segments,
+      { action: 'retry' },
+      'POST',
+    );
+    expect(params).toEqual({
+      sessionId: 's17',
+      taskId: 'workflow 1',
+      action: 'retry',
+    });
   });
 
   it('GET /session/:id/lsp maps to _qwen/session/lsp', () => {
