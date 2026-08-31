@@ -11,7 +11,9 @@ import * as path from 'node:path';
 import { parseCallerSuppliedSessionId } from '../../config/session-id.js';
 import {
   getConversationDirectoryName,
+  hasVerifiableInode,
   isSameConversationPath,
+  normalizedInode,
   type ConversationRootIdentity,
 } from '../../utils/conversation-directory-identity.js';
 import { getConversationRuntimeOwnerPath } from './conversation-runtime-ownership.js';
@@ -112,10 +114,6 @@ function parseSessionId(value: string): string {
     throw new StandaloneDeletionJournalError('compromised');
   }
   return parsed.sessionId;
-}
-
-function hasVerifiableInode(inode: number): boolean {
-  return inode !== 0;
 }
 
 function sameDirectoryIdentity(
@@ -637,7 +635,7 @@ export class StandaloneDeletionJournal {
     }
     return {
       device: stat.dev,
-      inode: stat.ino,
+      inode: normalizedInode(stat.ino),
       inodeVerifiable: hasVerifiableInode(stat.ino),
     };
   }
@@ -710,7 +708,7 @@ export class StandaloneDeletionJournal {
       const opened = await handle.stat();
       const openedIdentity = {
         device: opened.dev,
-        inode: opened.ino,
+        inode: normalizedInode(opened.ino),
         inodeVerifiable: hasVerifiableInode(opened.ino),
       };
       if (
@@ -736,7 +734,7 @@ export class StandaloneDeletionJournal {
     const opened = await directory.handle.stat();
     const openedIdentity = {
       device: opened.dev,
-      inode: opened.ino,
+      inode: normalizedInode(opened.ino),
       inodeVerifiable: hasVerifiableInode(opened.ino),
     };
     if (

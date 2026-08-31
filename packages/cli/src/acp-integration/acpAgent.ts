@@ -134,11 +134,20 @@ import {
   type WorkspaceRememberContextMode,
   type ChatRecord,
   type ToolInvocationGuard,
+  type WorkflowParams,
+  type WorkflowToolResult,
+  type WorkflowRunRegistry,
+  getWorkflowTaskMutationKey,
+  isTerminalWorkflowStatus,
+  tryWithWorkflowTaskMutation,
+  listSavedWorkflows,
+  listWorkflowSnapshots,
   type TurnResultRecordPayload,
   sessionIdContext,
 } from '@qwen-code/qwen-code-core';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
+import { isDeepStrictEqual } from 'node:util';
 import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
 import {
   AgentSideConnection,
@@ -227,7 +236,9 @@ import { createLoadedSettingsAdapter } from '../config/loadedSettingsAdapter.js'
 import { isCompatibleLiveSessionSource } from '../runtime/live-session-source.js';
 import {
   getConversationDirectoryName,
+  hasVerifiableInode,
   isSameConversationPath,
+  isSameDirectoryIdentity,
 } from '../utils/conversation-directory-identity.js';
 import type { ApprovalModeValue } from './session/types.js';
 import { z } from 'zod';
@@ -398,6 +409,8 @@ import {
   LOAD_REPLAY_VERSION,
   PROMPT_CANCEL_METHOD,
   REQUESTED_SESSION_ID_META_KEY,
+  SESSION_INITIALIZATION_DEADLINE_META_KEY,
+  SESSION_INITIALIZATION_TIMEOUT_ERROR_KIND,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
   isValidTrustedModelPrompt,
   WORKTREE_MCP_DEFER_META_KEY,
@@ -432,6 +445,25 @@ import {
   type GenerationEvent,
 } from './generation.js';
 
+type SessionOwnedWorkflowTool = {
+  buildSessionOwnedBackground(
+    params: Omit<WorkflowParams, 'run_in_background'>,
+  ): {
+    execute(signal: AbortSignal): Promise<WorkflowToolResult>;
+  };
+};
+
+function isSessionOwnedWorkflowTool(
+  value: unknown,
+): value is SessionOwnedWorkflowTool {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'buildSessionOwnedBackground' in value &&
+    typeof value.buildSessionOwnedBackground === 'function'
+  );
+}
+
 const debugLogger = createDebugLogger('ACP_AGENT');
 const QWEN_ACP_LOCAL_READ_ROOTS_ENV = 'QWEN_ACP_LOCAL_READ_ROOTS';
 const POSIX_TMP_LOCAL_READ_ROOT = '/tmp';
@@ -440,6 +472,7 @@ const POSIX_TMP_LOCAL_READ_ROOT = '/tmp';
 const BTW_CHILD_TIMEOUT_MS = 55_000;
 const MCP_OAUTH_START_TIMEOUT_MS = 30_000;
 const SESSION_DRAIN_TIMEOUT_MS = 30_000;
+const SESSION_ID_RE = /^[0-9a-fA-F-]{32,36}$/;
 // Must be less than WORKSPACE_MEMORY_REMEMBER_TIMEOUT_MS (300s) in bridge.ts.
 const WORKSPACE_MEMORY_REMEMBER_CHILD_TIMEOUT_MS = 295_000;
 
@@ -3198,6 +3231,26 @@ function isOwnerOnlyDirectory(stats: Stats): boolean {
   return (stats.mode & 0o077) === 0;
 }
 
+/**
+ * Deliberately local, NOT the module's `hasRootIdentity`: the wire
+ * expectation payload `{ device, inode }` carries no `inodeVerifiable`
+ * field, so verifiability must keep being derived from `inode !== 0` here
+ * (the parser admits only safe integers >= 0, so the two derivations
+ * coincide). The comparison itself must stay in lockstep with
+ * `hasRootIdentity` in utils/conversation-directory-identity.ts.
+ */
+function hasExpectedManagedDirectoryIdentity(
+  stats: Stats,
+  expected: { device: number; inode: number },
+): boolean {
+  const inodeVerifiable = hasVerifiableInode(stats.ino);
+  return (
+    stats.dev === expected.device &&
+    inodeVerifiable === (expected.inode !== 0) &&
+    (!inodeVerifiable || stats.ino === expected.inode)
+  );
+}
+
 function hasOnlyKeys(
   value: Record<string, unknown>,
   keys: readonly string[],
@@ -3315,10 +3368,8 @@ async function assertManagedConversationDirectoryIdentity(
     !isOwnerOnlyDirectory(rootBefore) ||
     !isOwnerOnlyDirectory(rootAfter) ||
     !isSameConversationPath(canonicalRoot, expectation.root.canonicalPath) ||
-    rootBefore.dev !== expectation.root.device ||
-    rootBefore.ino !== expectation.root.inode ||
-    rootAfter.dev !== expectation.root.device ||
-    rootAfter.ino !== expectation.root.inode
+    !hasExpectedManagedDirectoryIdentity(rootBefore, expectation.root) ||
+    !hasExpectedManagedDirectoryIdentity(rootAfter, expectation.root)
   ) {
     throw managedConversationDirectoryError(false);
   }
@@ -3339,10 +3390,8 @@ async function assertManagedConversationDirectoryIdentity(
     !isOwnerOnlyDirectory(childBefore) ||
     !isOwnerOnlyDirectory(childAfter) ||
     !isSameConversationPath(canonicalChild, expectation.child.canonicalPath) ||
-    childBefore.dev !== expectation.child.device ||
-    childBefore.ino !== expectation.child.inode ||
-    childAfter.dev !== expectation.child.device ||
-    childAfter.ino !== expectation.child.inode
+    !hasExpectedManagedDirectoryIdentity(childBefore, expectation.child) ||
+    !hasExpectedManagedDirectoryIdentity(childAfter, expectation.child)
   ) {
     throw managedConversationDirectoryError(false);
   }
@@ -3350,8 +3399,16 @@ async function assertManagedConversationDirectoryIdentity(
 
 class QwenAgent implements Agent {
   private sessions: Map<string, Session> = new Map();
+  private modelProviderReloadRevision = 0;
   private readonly historyMutationTails = new Map<string, Promise<void>>();
   private readonly startingSessionIds = new Set<string>();
+  /**
+   * R7-10: workflow registries of sessions already removed from
+   * `this.sessions` whose runs have not finished settling. Consulted by
+   * `isWorkflowRunLiveOutsideSession` so a delete-history cannot delete
+   * an orphaned live run out from under itself. Pruned as they drain.
+   */
+  private readonly detachedWorkflowRegistries = new Set<WorkflowRunRegistry>();
   private activePromptCalls = new Map<string, Set<ActivePromptCall>>();
   private workspaceMcpDiscoveryConfig: Config | undefined;
   private workspaceMcpDiscoveryPromise: Promise<void> | undefined;
@@ -3737,55 +3794,57 @@ class QwenAgent implements Agent {
     settings: LoadedSettings,
   ): Promise<void> {
     if (this.workspaceMcpDiscoveryConfig) return;
-    const cwd = this.config.getTargetDir();
-    const config = await this.runWithPinnedRuntimeBaseDir(settings, cwd, () =>
-      loadCliConfig(
-        settings.merged,
-        {
-          ...this.argv,
-          sessionId: 'workspace-mcp-discovery',
-          resume: undefined,
-          continue: false,
-          chatRecording: false,
-        },
-        cwd,
-        undefined,
-        {
-          userHooks: settings.getUserHooks(),
-          projectHooks: settings.getProjectHooks(),
-        },
-        buildDisabledSkillNamesProvider(settings),
-      ),
-    );
-    config.setMcpTransportPool(this.mcpPool);
-    try {
-      await config.initialize({
-        skipLlmInitialization: true,
-        skipFileCheckpointing: true,
-        skipHooks: true,
-        skipSkillManager: true,
-        skipMcpDiscovery: true,
-        lenientToolWarmup: true,
-      });
-      const manager = config.getToolRegistry()?.getMcpClientManager();
-      if (!manager) {
-        throw new Error('MCP client manager is unavailable');
-      }
-      await manager.discoverAllMcpToolsIncremental(config);
-      if (manager.getDiscoveryState() === MCPDiscoveryState.NOT_STARTED) {
-        throw new Error(
-          'MCP discovery did not start. The workspace may not be trusted.',
-        );
-      }
-      this.workspaceMcpDiscoveryConfig = config;
-    } catch (error) {
+    return sessionIdContext.run('workspace-mcp-discovery', async () => {
+      const cwd = this.config.getTargetDir();
+      const config = await this.runWithPinnedRuntimeBaseDir(settings, cwd, () =>
+        loadCliConfig(
+          settings.merged,
+          {
+            ...this.argv,
+            sessionId: 'workspace-mcp-discovery',
+            resume: undefined,
+            continue: false,
+            chatRecording: false,
+          },
+          cwd,
+          undefined,
+          {
+            userHooks: settings.getUserHooks(),
+            projectHooks: settings.getProjectHooks(),
+          },
+          buildDisabledSkillNamesProvider(settings),
+        ),
+      );
+      config.setMcpTransportPool(this.mcpPool);
       try {
-        await config.getToolRegistry()?.stop();
-      } catch {
-        // Preserve the initialization failure that made this config unusable.
+        await config.initialize({
+          skipLlmInitialization: true,
+          skipFileCheckpointing: true,
+          skipHooks: true,
+          skipSkillManager: true,
+          skipMcpDiscovery: true,
+          lenientToolWarmup: true,
+        });
+        const manager = config.getToolRegistry()?.getMcpClientManager();
+        if (!manager) {
+          throw new Error('MCP client manager is unavailable');
+        }
+        await manager.discoverAllMcpToolsIncremental(config);
+        if (manager.getDiscoveryState() === MCPDiscoveryState.NOT_STARTED) {
+          throw new Error(
+            'MCP discovery did not start. The workspace may not be trusted.',
+          );
+        }
+        this.workspaceMcpDiscoveryConfig = config;
+      } catch (error) {
+        try {
+          await config.getToolRegistry()?.stop();
+        } catch {
+          // Preserve the initialization failure that made this config unusable.
+        }
+        throw error;
       }
-      throw error;
-    }
+    });
   }
 
   private initializeWorkspaceMcpDiscovery(): { accepted: boolean } {
@@ -3991,6 +4050,25 @@ class QwenAgent implements Agent {
       cleanupErrors.push(error);
     }
     this.sessions.delete(sessionId);
+    // R7-10: the registry outlives the session map entry while its runs
+    // settle. Keep it reachable so the liveness gate still sees them.
+    // Retention is bookkeeping, not cleanup: a Config that cannot answer
+    // must not turn a successful close into a shutdown failure.
+    try {
+      // Prune here as well as on the delete-history path: a daemon that
+      // closes sessions mid-run but never deletes history would otherwise
+      // retain every one of their registries for its whole lifetime.
+      this.pruneDrainedWorkflowRegistries();
+      const registry = session.getConfig().getWorkflowRunRegistry?.();
+      if (registry && QwenAgent.isWorkflowRegistryDraining(registry)) {
+        this.detachedWorkflowRegistries.add(registry);
+      }
+    } catch (error) {
+      debugLogger.warn(
+        `Session ${sessionId}: could not retain its workflow registry for liveness checks:`,
+        error,
+      );
+    }
     // A Session missing from the next snapshot is how the daemon learns the
     // child released it — including when it never saw our close response.
     this.activeWorkReporter?.notifyChanged();
@@ -4685,6 +4763,49 @@ class QwenAgent implements Agent {
     };
   }
 
+  private createSessionInitializationDeadline(raw: unknown):
+    | {
+        signal: AbortSignal;
+        dispose: () => void;
+      }
+    | undefined {
+    if (raw === undefined || !this.isTrustedManagedParent()) return undefined;
+    if (typeof raw !== 'number' || !Number.isSafeInteger(raw) || raw <= 0) {
+      throw RequestError.invalidParams(
+        { errorKind: 'invalid_session_initialization_deadline' },
+        `\`_meta["${SESSION_INITIALIZATION_DEADLINE_META_KEY}"]\` must be a positive safe integer`,
+      );
+    }
+
+    const remainingMs = raw - Date.now();
+    if (remainingMs > 2_147_483_647) {
+      throw RequestError.invalidParams(
+        { errorKind: 'invalid_session_initialization_deadline' },
+        `\`_meta["${SESSION_INITIALIZATION_DEADLINE_META_KEY}"]\` exceeds the supported timer range`,
+      );
+    }
+
+    const controller = new AbortController();
+    const timeoutError = new RequestError(
+      ACP_ERROR_CODES.INTERNAL_ERROR,
+      'Session initialization deadline exceeded',
+      { errorKind: SESSION_INITIALIZATION_TIMEOUT_ERROR_KIND },
+    );
+    let timer: NodeJS.Timeout | undefined;
+    if (remainingMs <= 0) {
+      controller.abort(timeoutError);
+    } else {
+      timer = setTimeout(() => controller.abort(timeoutError), remainingMs);
+      timer.unref();
+    }
+    return {
+      signal: controller.signal,
+      dispose: () => {
+        if (timer) clearTimeout(timer);
+      },
+    };
+  }
+
   async newSession(params: NewSessionRequest): Promise<NewSessionResponse> {
     const { cwd, mcpServers } = params;
     const parsedSessionId = parseCallerSuppliedSessionId(
@@ -4702,7 +4823,14 @@ class QwenAgent implements Agent {
     const releaseStartingSessionId = requestedSessionId
       ? this.reserveStartingSessionId(requestedSessionId)
       : undefined;
+    let initializationDeadline:
+      | { signal: AbortSignal; dispose: () => void }
+      | undefined;
     try {
+      initializationDeadline = this.createSessionInitializationDeadline(
+        params._meta?.[SESSION_INITIALIZATION_DEADLINE_META_KEY],
+      );
+      initializationDeadline?.signal.throwIfAborted();
       const sessionSource = getSessionSource(params);
       const provisionalStandalone = isReservedStandaloneSessionSourceType(
         sessionSource?.sourceType,
@@ -4734,6 +4862,8 @@ class QwenAgent implements Agent {
             loadSettingsCached(cwd),
           );
           this.settings = settings;
+          const deferMcpDiscovery = shouldDeferMcpDiscovery(params);
+          const configProviderRevision = this.modelProviderReloadRevision;
           const config = await profiler.time('config_setup', () =>
             this.newSessionConfig(
               cwd,
@@ -4742,17 +4872,24 @@ class QwenAgent implements Agent {
               sessionSource,
               requestedSessionId,
               undefined,
-              shouldDeferMcpDiscovery(params)
-                ? { skipMcpDiscovery: true }
+              initializationDeadline || deferMcpDiscovery
+                ? {
+                    ...(initializationDeadline
+                      ? { signal: initializationDeadline.signal }
+                      : {}),
+                    ...(deferMcpDiscovery ? { skipMcpDiscovery: true } : {}),
+                  }
                 : undefined,
             ),
           );
           let session: Session;
           try {
+            initializationDeadline?.signal.throwIfAborted();
             if (!provisionalStandalone) {
               await profiler.time('auth', () =>
                 this.ensureAuthenticated(config),
               );
+              initializationDeadline?.signal.throwIfAborted();
               profiler.timeSync('file_system_setup', () =>
                 this.setupFileSystem(config),
               );
@@ -4760,6 +4897,10 @@ class QwenAgent implements Agent {
             session = await profiler.time('session_register', () =>
               this.createAndStoreSession(config, settings, undefined, {
                 deferWorkspaceActivation: provisionalStandalone,
+                ...(initializationDeadline
+                  ? { signal: initializationDeadline.signal }
+                  : {}),
+                configProviderRevision,
               }),
             );
           } catch (error) {
@@ -4784,6 +4925,7 @@ class QwenAgent implements Agent {
         parentContext ? { parentContext } : {},
       );
     } finally {
+      initializationDeadline?.dispose();
       releaseStartingSessionId?.();
     }
   }
@@ -4982,6 +5124,7 @@ class QwenAgent implements Agent {
       // agent-level readers at this request's workspace.
       this.settings = settings;
 
+      const configProviderRevision = this.modelProviderReloadRevision;
       const config = await profiler.time('config_setup', () =>
         this.newSessionConfig(
           params.cwd,
@@ -5044,6 +5187,7 @@ class QwenAgent implements Agent {
         await profiler.time('session_register', () =>
           this.createAndStoreSession(config, settings, undefined, {
             deferWorkspaceActivation: provisionalStandalone,
+            configProviderRevision,
             ...(provisionalStandalone
               ? {
                   beforeDeferredWorkspaceActivation: () =>
@@ -5155,7 +5299,7 @@ class QwenAgent implements Agent {
                 );
               }
             },
-            beforeSessionCreate: () => {
+            beforeSessionPublish: () => {
               response = buildResponse();
             },
             primeSession: (createdSession) => {
@@ -5365,6 +5509,7 @@ class QwenAgent implements Agent {
       profiler.setSessionId(sessionId);
       this.settings = settings;
 
+      const configProviderRevision = this.modelProviderReloadRevision;
       const config = await profiler.time('config_setup', () =>
         this.newSessionConfig(
           params.cwd,
@@ -5397,6 +5542,7 @@ class QwenAgent implements Agent {
         await profiler.time('session_register', () =>
           this.createAndStoreSession(config, settings, undefined, {
             deferWorkspaceActivation: provisionalStandalone,
+            configProviderRevision,
             ...(provisionalStandalone
               ? {
                   beforeDeferredWorkspaceActivation: () =>
@@ -5416,7 +5562,7 @@ class QwenAgent implements Agent {
               sessionSource ?? {},
             ),
             replayHistory: false,
-            beforeSessionCreate: () => {
+            beforeSessionPublish: () => {
               response = profiler.timeSync('response_build', () => ({
                 modes: this.buildModesData(config),
                 models: this.buildAvailableModels(config),
@@ -7488,19 +7634,49 @@ class QwenAgent implements Agent {
     sessionId: string,
   ): Promise<ServeSessionSupportedCommandsStatus> {
     const session = this.sessionOrThrow(sessionId);
+    const config = session.getConfig();
     const { availableCommands, availableSkills } =
       await session.buildAvailableCommandsSnapshot();
+    const workflowsEnabled = this.canUseWorkflowControls(config);
+    const savedWorkflows = workflowsEnabled
+      ? (await listSavedWorkflows(config)).map(({ name, source }) => ({
+          name,
+          source,
+        }))
+      : [];
     return {
       v: STATUS_SCHEMA_VERSION,
       sessionId,
-      availableCommands,
+      availableCommands:
+        workflowsEnabled || !config.isWorkflowsEnabled()
+          ? availableCommands
+          : availableCommands.filter((command) => command.name !== 'workflows'),
       availableSkills: availableSkills ?? [],
+      workflowsEnabled,
+      savedWorkflows,
     };
   }
 
-  private buildSessionTasksStatus(sessionId: string): ServeSessionTasksStatus {
+  private canUseWorkflowControls(config: Config): boolean {
+    return (
+      config.isWorkflowsEnabled() &&
+      !config.getBareMode() &&
+      (!config.getFolderTrustFeature() || config.getFolderTrust())
+    );
+  }
+
+  private async buildSessionTasksStatus(
+    sessionId: string,
+    includeWorkflows = false,
+  ): Promise<ServeSessionTasksStatus> {
     const session = this.sessionOrThrow(sessionId);
-    return buildSessionTasksStatus(sessionId, session.getConfig());
+    return buildSessionTasksStatus(
+      sessionId,
+      session.getConfig(),
+      Date.now(),
+      includeWorkflows ? await session.refreshWorkflowHistory() : [],
+      { includeWorkflows },
+    );
   }
 
   private buildSessionLspStatus(sessionId: string): ServeSessionLspStatus {
@@ -7946,9 +8122,15 @@ class QwenAgent implements Agent {
         typeof sessionId === 'string' && sessionId.length > 0
           ? this.sessions.get(sessionId)
           : undefined;
-      if (session && this.isSessionScopedExtMethod(method)) {
-        return await this.runInSessionContext(session, () =>
-          this.extMethodInternal(method, normalizedParams),
+      if (
+        typeof sessionId === 'string' &&
+        sessionId.length > 0 &&
+        this.isSessionScopedExtMethod(method) &&
+        (session !== undefined || SESSION_ID_RE.test(sessionId))
+      ) {
+        return await sessionIdContext.run(
+          session?.getConfig().getSessionId() ?? sessionId,
+          () => this.extMethodInternal(method, normalizedParams),
         );
       }
 
@@ -7971,8 +8153,6 @@ class QwenAgent implements Agent {
     const requestedCwd =
       typeof params['cwd'] === 'string' ? params['cwd'] : undefined;
     const cwd = requestedCwd || process.cwd();
-    const SESSION_ID_RE = /^[0-9a-fA-F-]{32,36}$/;
-
     switch (method) {
       case SERVE_STATUS_EXT_METHODS.channelPing: {
         const nonce = params['nonce'];
@@ -8297,10 +8477,12 @@ class QwenAgent implements Agent {
             'Invalid or missing sessionId',
           );
         }
-        return this.buildSessionTasksStatus(sessionId) as unknown as Record<
-          string,
-          unknown
-        >;
+        const session = this.sessionOrThrow(sessionId);
+        return (await this.buildSessionTasksStatus(
+          sessionId,
+          params['includeWorkflows'] === true &&
+            this.canUseWorkflowControls(session.getConfig()),
+        )) as unknown as Record<string, unknown>;
       }
       case SERVE_STATUS_EXT_METHODS.sessionLspStatus: {
         const sessionId = params['sessionId'];
@@ -8597,6 +8779,14 @@ class QwenAgent implements Agent {
           throw RequestError.invalidParams(undefined, 'Invalid contextMode');
         }
         const contextMode: WorkspaceRememberContextMode = rawContextMode;
+        const rawScope = params['scope'];
+        if (
+          rawScope !== undefined &&
+          rawScope !== 'project' &&
+          rawScope !== 'user'
+        ) {
+          throw RequestError.invalidParams(undefined, 'Invalid scope');
+        }
         if (!this.config.isManagedMemoryAvailable()) {
           throw new RequestError(
             -32009,
@@ -8616,6 +8806,7 @@ class QwenAgent implements Agent {
             projectRoot,
             content: content.trim(),
             contextMode,
+            ...(rawScope ? { scope: rawScope } : {}),
             abortSignal: childSignal,
           });
           if (result.filesTouched.length > 0) {
@@ -8688,6 +8879,14 @@ class QwenAgent implements Agent {
             'Query exceeds maximum size',
           );
         }
+        const rawScope = params['scope'];
+        if (
+          rawScope !== undefined &&
+          rawScope !== 'project' &&
+          rawScope !== 'user'
+        ) {
+          throw RequestError.invalidParams(undefined, 'Invalid scope');
+        }
         if (!this.config.isManagedMemoryAvailable()) {
           throw new RequestError(
             -32009,
@@ -8708,6 +8907,7 @@ class QwenAgent implements Agent {
             .forget(projectRoot, trimmedQuery, {
               config: hiddenConfig,
               abortSignal: childSignal,
+              ...(rawScope ? { scope: rawScope } : {}),
             });
           return {
             summary:
@@ -10003,16 +10203,16 @@ class QwenAgent implements Agent {
           if (
             !isOwnerOnlyDirectory(rootBefore) ||
             !isOwnerOnlyDirectory(rootAfter) ||
-            rootBefore.dev !== rootAfter.dev ||
-            rootBefore.ino !== rootAfter.ino ||
+            !isSameDirectoryIdentity(rootBefore, rootAfter) ||
             (conversationDirectoryExpectation !== undefined &&
               (!isSameConversationPath(
                 canonicalRoot,
                 conversationDirectoryExpectation.root.canonicalPath,
               ) ||
-                rootAfter.dev !==
-                  conversationDirectoryExpectation.root.device ||
-                rootAfter.ino !== conversationDirectoryExpectation.root.inode))
+                !hasExpectedManagedDirectoryIdentity(
+                  rootAfter,
+                  conversationDirectoryExpectation.root,
+                )))
           ) {
             if (conversationDirectoryExpectation !== undefined) {
               throw managedConversationDirectoryError(false);
@@ -10045,17 +10245,16 @@ class QwenAgent implements Agent {
           if (
             !isOwnerOnlyDirectory(targetBefore) ||
             !isOwnerOnlyDirectory(targetAfter) ||
-            targetBefore.dev !== targetAfter.dev ||
-            targetBefore.ino !== targetAfter.ino ||
+            !isSameDirectoryIdentity(targetBefore, targetAfter) ||
             (conversationDirectoryExpectation !== undefined &&
               (!isSameConversationPath(
                 canonicalPath,
                 conversationDirectoryExpectation.child.canonicalPath,
               ) ||
-                targetAfter.dev !==
-                  conversationDirectoryExpectation.child.device ||
-                targetAfter.ino !==
-                  conversationDirectoryExpectation.child.inode)) ||
+                !hasExpectedManagedDirectoryIdentity(
+                  targetAfter,
+                  conversationDirectoryExpectation.child,
+                ))) ||
             relativeTarget.length === 0 ||
             relativeTarget.startsWith('..') ||
             path.isAbsolute(relativeTarget) ||
@@ -10086,11 +10285,12 @@ class QwenAgent implements Agent {
           }
           if (
             !isOwnerOnlyDirectory(rootFinal) ||
-            rootFinal.dev !== rootAfter.dev ||
-            rootFinal.ino !== rootAfter.ino ||
+            !isSameDirectoryIdentity(rootFinal, rootAfter) ||
             (conversationDirectoryExpectation !== undefined &&
-              (rootFinal.dev !== conversationDirectoryExpectation.root.device ||
-                rootFinal.ino !== conversationDirectoryExpectation.root.inode))
+              !hasExpectedManagedDirectoryIdentity(
+                rootFinal,
+                conversationDirectoryExpectation.root,
+              ))
           ) {
             if (conversationDirectoryExpectation !== undefined) {
               throw managedConversationDirectoryError(false);
@@ -10745,11 +10945,12 @@ class QwenAgent implements Agent {
         if (
           taskKind !== 'agent' &&
           taskKind !== 'shell' &&
-          taskKind !== 'monitor'
+          taskKind !== 'monitor' &&
+          taskKind !== 'workflow'
         ) {
           throw RequestError.invalidParams(
             undefined,
-            'taskKind must be "agent", "shell", or "monitor"',
+            'taskKind must be "agent", "shell", "monitor", or "workflow"',
           );
         }
         debugLogger.info(
@@ -10810,11 +11011,248 @@ class QwenAgent implements Agent {
             );
             return { cancelled: true, status: task.status };
           }
+          case 'workflow': {
+            if (!this.canUseWorkflowControls(config)) {
+              return { cancelled: false, reason: 'disabled' };
+            }
+            const registry = config.getWorkflowRunRegistry();
+            const task = registry.get(taskId);
+            // A reserved-but-unregistered run has no entry yet: the runner
+            // is still loading its script or replaying its journal. The
+            // liveness gate already treats that window as live; cancel
+            // must too, or the client is told "not_found" about a run it
+            // can see starting, and cannot stop it until it registers.
+            // A retry reuses its runId, so during ITS starting window the
+            // old terminal entry is still there — a live reservation
+            // shadowed by a terminal entry is the same starting run, not
+            // a "not_running" one.
+            if (
+              (!task || isTerminalWorkflowStatus(task.status)) &&
+              registry.isStarting?.(taskId)
+            ) {
+              registry.cancelStarting(taskId);
+              debugLogger.info(
+                `sessionTaskCancel completed sessionId=${sessionId} taskId=${taskId} taskKind=${taskKind} status=starting`,
+              );
+              return { cancelled: true, status: 'cancelled' };
+            }
+            if (
+              !task ||
+              (task.status !== 'running' &&
+                task.status !== 'pausing' &&
+                task.status !== 'paused')
+            ) {
+              const reason = task ? 'not_running' : 'not_found';
+              debugLogger.info(
+                `sessionTaskCancel skipped sessionId=${sessionId} taskId=${taskId} taskKind=${taskKind} reason=${reason} status=${task?.status ?? 'missing'}`,
+              );
+              return { cancelled: false, reason, status: task?.status };
+            }
+            const handle = registry.getHandle(taskId);
+            registry.cancel(taskId, Date.now());
+            if (handle) await handle.completion;
+            debugLogger.info(
+              `sessionTaskCancel completed sessionId=${sessionId} taskId=${taskId} taskKind=${taskKind} status=${task.status}`,
+            );
+            return { cancelled: true, status: task.status };
+          }
           default: {
             const exhaustive: never = taskKind;
             throw new Error(`Unhandled task kind: ${exhaustive}`);
           }
         }
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionWorkflowTaskAction: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        const taskId = params['taskId'];
+        if (typeof taskId !== 'string' || taskId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing taskId',
+          );
+        }
+        const action = params['action'];
+        if (
+          action !== 'pause' &&
+          action !== 'resume' &&
+          action !== 'retry' &&
+          action !== 'rerun' &&
+          action !== 'delete-history' &&
+          action !== 'run-saved'
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'action must be "pause", "resume", "retry", "rerun", "delete-history", or "run-saved"',
+          );
+        }
+        const session = this.sessionOrThrow(sessionId);
+        const config = session.getConfig();
+        if (!this.canUseWorkflowControls(config)) {
+          return { changed: false };
+        }
+        const mutationClaim =
+          action === 'run-saved'
+            ? getWorkflowTaskMutationKey(config, taskId, 'saved')
+            : getWorkflowTaskMutationKey(config, taskId);
+        if (action === 'delete-history') {
+          const attempt = await tryWithWorkflowTaskMutation(
+            mutationClaim,
+            async () => {
+              const changed = await session.deleteWorkflowHistory(taskId);
+              if (changed) {
+                // Every session shares the one store: drop the sibling
+                // registries' terminal entries too, or a retry from a
+                // sibling re-persists the just-deleted run — and mark the
+                // deletion in each sibling's history, or a sibling refresh
+                // that began reading the directory before this delete
+                // landed merges the stale listing and republishes the run.
+                for (const [siblingId, sibling] of this.sessions) {
+                  if (siblingId === sessionId) continue;
+                  sibling
+                    .getConfig()
+                    .getWorkflowRunRegistry()
+                    .removeTerminal(taskId);
+                  sibling.noteExternalWorkflowDeletion(taskId);
+                }
+              }
+              return { changed };
+            },
+          );
+          if (!attempt.acquired) {
+            return { changed: false };
+          }
+          return attempt.value;
+        }
+        const registry = config.getWorkflowRunRegistry();
+        if (action === 'run-saved') {
+          const attempt = await tryWithWorkflowTaskMutation(
+            mutationClaim,
+            async () => {
+              const savedWorkflow = (await listSavedWorkflows(config)).find(
+                (entry) => entry.name === taskId,
+              );
+              if (!savedWorkflow) return { changed: false };
+              const workflowTool = config
+                .getToolRegistry()
+                .getTool(ToolNames.WORKFLOW);
+              if (!isSessionOwnedWorkflowTool(workflowTool)) {
+                throw RequestError.invalidParams(
+                  undefined,
+                  'The workflow tool is unavailable; cannot run this saved workflow.',
+                );
+              }
+              const result = (await workflowTool
+                .buildSessionOwnedBackground({
+                  scriptPath: savedWorkflow.scriptPath,
+                })
+                .execute(new AbortController().signal)) as WorkflowToolResult;
+              const startedTask = result.workflowRunId
+                ? registry.get(result.workflowRunId)
+                : undefined;
+              return startedTask
+                ? {
+                    changed: true,
+                    status: startedTask.status,
+                    taskId: startedTask.runId,
+                  }
+                : { changed: false };
+            },
+          );
+          if (!attempt.acquired) {
+            return { changed: false };
+          }
+          return attempt.value;
+        }
+        const task = registry.get(taskId);
+        if (!task) return { changed: false };
+        if (action === 'retry' || action === 'rerun') {
+          // A retry reuses its runId over the one journal/snapshot store
+          // every session shares, so "failed with no handle" in THIS
+          // session's registry is not enough: a sibling may have retried
+          // it already and be running it now — the task-global claim is
+          // released as soon as the background start returns, while the
+          // run is still live. Two runners on one runId interleave the
+          // journal and race the snapshot write. Checked synchronously
+          // beside canStart — no await precedes the claim — so the answer
+          // cannot go stale before the claim is taken.
+          const liveElsewhere =
+            action === 'retry' &&
+            (registry.isStarting?.(taskId) === true ||
+              this.isWorkflowRunLiveOutsideSession(sessionId, taskId));
+          const canStart =
+            action === 'retry'
+              ? task.status === 'failed' &&
+                !registry.getHandle(taskId) &&
+                !liveElsewhere
+              : task.status === 'completed' ||
+                task.status === 'failed' ||
+                task.status === 'cancelled';
+          if (!canStart || !task.script) {
+            return { changed: false, status: task.status };
+          }
+          const attempt = await tryWithWorkflowTaskMutation(
+            mutationClaim,
+            async () => {
+              const workflowTool = config
+                .getToolRegistry()
+                .getTool(ToolNames.WORKFLOW);
+              if (!isSessionOwnedWorkflowTool(workflowTool)) {
+                throw RequestError.invalidParams(
+                  undefined,
+                  `The workflow tool is unavailable; cannot ${action} this run.`,
+                );
+              }
+              const startParams: Omit<WorkflowParams, 'run_in_background'> = {
+                script: task.script,
+                args: task.args,
+                ...(action === 'retry' ? { resumeFromRunId: task.runId } : {}),
+              };
+              const result = (await workflowTool
+                .buildSessionOwnedBackground(startParams)
+                .execute(new AbortController().signal)) as WorkflowToolResult;
+              if (action === 'rerun') {
+                const rerunTask = result.workflowRunId
+                  ? registry.get(result.workflowRunId)
+                  : undefined;
+                if (rerunTask) {
+                  registry.setLineage(rerunTask.runId, task.runId, 'rerun');
+                }
+                return rerunTask
+                  ? {
+                      changed: true,
+                      status: rerunTask.status,
+                      taskId: rerunTask.runId,
+                    }
+                  : { changed: false, status: task.status };
+              }
+              // `execute()` reports a start that never registered — a
+              // cancel landing in the retry's starting window, whether from
+              // `cancelStarting` or a session dispose — by omitting
+              // `workflowRunId`, the same shape the rerun and run-saved
+              // branches gate on. Answering `changed: true` there tells the
+              // client a run exists that nothing will ever progress.
+              return result.workflowRunId
+                ? {
+                    changed: true,
+                    status: registry.get(result.workflowRunId)?.status,
+                  }
+                : { changed: false, status: task.status };
+            },
+          );
+          if (!attempt.acquired) {
+            return { changed: false, status: task.status };
+          }
+          return attempt.value;
+        }
+        const changed =
+          action === 'pause' ? registry.pause(taskId) : registry.resume(taskId);
+        return { changed, status: task.status };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionGoalClear: {
         const sessionId = params['sessionId'];
@@ -11989,6 +12427,57 @@ class QwenAgent implements Agent {
           unknown
         >;
       }
+      case SERVE_CONTROL_EXT_METHODS.workspaceModelProvidersReload: {
+        if (
+          !this.settings.reloadScopesFromDiskAtomically([
+            SettingScope.User,
+            SettingScope.Workspace,
+          ])
+        ) {
+          debugLogger.warn('Model-provider settings reload failed');
+          return { configsRefreshed: 0, configsFailed: 1 };
+        }
+        this.modelProviderReloadRevision += 1;
+        const merged = this.settings.merged;
+        reloadEnvironment(merged, cwd);
+        const providerProtocol = merged.providerProtocol ?? {};
+        let configsRefreshed = 0;
+        let configsFailed = 0;
+
+        const reloadConfig = (config: Config, id: string) => {
+          try {
+            config.reloadModelProvidersConfig(
+              merged.modelProviders,
+              providerProtocol,
+            );
+            configsRefreshed += 1;
+          } catch {
+            configsFailed += 1;
+            debugLogger.warn(`Model-provider reload failed for ${id}`);
+          }
+        };
+
+        reloadConfig(this.config, 'bootstrap');
+        for (const config of this.initializingConfigs) {
+          if (config !== this.config) {
+            reloadConfig(config, `initializing:${config.getSessionId()}`);
+          }
+        }
+        for (const [id, session] of this.sessions) {
+          try {
+            session.reloadModelProvidersFromDisk();
+            configsRefreshed += 1;
+          } catch {
+            configsFailed += 1;
+            debugLogger.warn(`Model-provider reload failed for session ${id}`);
+          }
+        }
+
+        return {
+          configsRefreshed,
+          configsFailed,
+        };
+      }
       case SERVE_CONTROL_EXT_METHODS.workspaceReload: {
         const oldMerged = structuredClone(this.settings.merged);
 
@@ -12001,6 +12490,11 @@ class QwenAgent implements Agent {
         const changed = diffSettingsKeys(oldMerged, newMerged);
         const envChanged =
           envResult.updatedKeys.length > 0 || envResult.removedKeys.length > 0;
+        const providersChanged =
+          changed.has('modelProviders') || changed.has('providerProtocol');
+        if (providersChanged) {
+          this.modelProviderReloadRevision += 1;
+        }
 
         const sessions = [...this.sessions.entries()];
         const refreshed: string[] = [];
@@ -12014,8 +12508,6 @@ class QwenAgent implements Agent {
             }
             const config = session.getConfig();
             const authType = config.getAuthType();
-            const providersChanged =
-              changed.has('modelProviders') || changed.has('providerProtocol');
 
             // Long-lived ACP sessions never restart, so honor providerProtocol
             // changes here too (its requiresRestart only gates the TUI path) and
@@ -12063,6 +12555,30 @@ class QwenAgent implements Agent {
                 newMerged.tools?.disabled,
               );
               config.setDisabledTools(new Set(disabled));
+
+              // `/capabilities` reads `tools.workflowsEnabled` live from
+              // the reloaded settings; a session alive before the reload
+              // was constructed with the old value and would keep
+              // answering canUseWorkflowControls with it, so the
+              // advertisement and the controls it gates would diverge.
+              // The merged view is already workspace-stripped, so a repo
+              // cannot self-grant here any more than at construction.
+              const workflowsWereEnabled = config.isWorkflowsEnabled();
+              config.setWorkflowsEnabled(
+                newMerged.tools?.workflowsEnabled === true,
+              );
+              if (config.isWorkflowsEnabled() !== workflowsWereEnabled) {
+                // The `workflows` slash command comes and goes with the
+                // flag; a client holding the old list would keep offering
+                // (or hiding) it.
+                try {
+                  await session.sendAvailableCommandsUpdate();
+                } catch (err) {
+                  debugLogger.warn(
+                    `reload: sendAvailableCommandsUpdate failed for session ${id}: ${err}`,
+                  );
+                }
+              }
 
               const newMode = newMerged.tools?.approvalMode;
               if (
@@ -12329,25 +12845,44 @@ class QwenAgent implements Agent {
     chatRecording?: boolean,
     restoreOptions?: SelectiveSessionRestoreOptions,
   ): Promise<Config> {
+    // Transcript replay is the only recording-disabled Config and must remain
+    // id-less; it borrows the validated target session context from extMethod.
+    const preserveIdlessSession =
+      sessionId === undefined && chatRecording === false;
+    const inheritedSessionId = preserveIdlessSession
+      ? sessionIdContext.getStore()
+      : undefined;
+    // A generated id exists only to bind the debug-log context before Config
+    // construction; loadCliConfig must not treat it as caller-supplied (the
+    // occupancy check is for caller-chosen ids that may have a case-twin).
+    const sessionIdGenerated =
+      sessionId === undefined && !preserveIdlessSession;
+    const effectiveSessionId =
+      sessionId ?? (sessionIdGenerated ? randomUUID() : undefined);
+    const debugSessionId =
+      effectiveSessionId ?? inheritedSessionId ?? 'transcript-replay';
     try {
       this.assertManagedSessionAdmission();
-      return await this.runWithPinnedRuntimeBaseDir(settings, cwd, async () => {
-        await this.retryPendingConfigCleanup(
-          Storage.getRuntimeBaseDir(),
-          sessionId,
-        );
-        return this.newSessionConfigInRuntimeContext(
-          cwd,
-          mcpServers,
-          settings,
-          sessionSource,
-          sessionId,
-          resume,
-          initializeOptions,
-          chatRecording,
-          restoreOptions,
-        );
-      });
+      return await sessionIdContext.run(debugSessionId, () =>
+        this.runWithPinnedRuntimeBaseDir(settings, cwd, async () => {
+          await this.retryPendingConfigCleanup(
+            Storage.getRuntimeBaseDir(),
+            effectiveSessionId,
+          );
+          return this.newSessionConfigInRuntimeContext(
+            cwd,
+            mcpServers,
+            settings,
+            sessionSource,
+            effectiveSessionId,
+            resume,
+            initializeOptions,
+            chatRecording,
+            restoreOptions,
+            sessionIdGenerated,
+          );
+        }),
+      );
     } catch (error) {
       if (error instanceof SessionIdConflictError) {
         throw new RequestError(ACP_ERROR_CODES.INVALID_PARAMS, error.message, {
@@ -12377,6 +12912,7 @@ class QwenAgent implements Agent {
     initializeOptions: ConfigInitializeOptions = {},
     chatRecording?: boolean,
     restoreOptions?: SelectiveSessionRestoreOptions,
+    sessionIdGenerated?: boolean,
   ): Promise<Config> {
     const provisionalWorkspace = isReservedStandaloneSessionSourceType(
       sessionSource?.sourceType,
@@ -12452,7 +12988,11 @@ class QwenAgent implements Agent {
     const sessionArg =
       resume === true
         ? { resume: sessionId, sessionId: undefined }
-        : { sessionId, resume: undefined };
+        : {
+            sessionId,
+            sessionIdGenerated: sessionIdGenerated === true || undefined,
+            resume: undefined,
+          };
     const argvForSession = {
       ...this.argv,
       ...(provisionalWorkspace ? { experimentalLsp: false } : {}),
@@ -12590,23 +13130,25 @@ class QwenAgent implements Agent {
       typeof config.setMcpBudgetEventCallback === 'function' &&
       wiredSessionId !== undefined
     ) {
-      const sid = wiredSessionId;
+      const acpSessionId = wiredSessionId;
       config.setMcpBudgetEventCallback((event) => {
-        // Fire-and-forget. `.catch` suppresses unhandled rejections
-        // and logs at debug level for operator visibility.
-        void this.connection
-          .extNotification('qwen/notify/session/mcp-budget-event', {
-            v: 1,
-            sessionId: sid,
-            ...event,
-          })
-          .catch((err: unknown) => {
-            debugLogger.debug(
-              `MCP budget extNotification dropped ` +
-                `(session=${sid}, kind=${event.kind}): ` +
-                `${err instanceof Error ? err.message : String(err)}`,
-            );
-          });
+        sessionIdContext.run(config.getSessionId(), () => {
+          // Fire-and-forget. `.catch` suppresses unhandled rejections
+          // and logs at debug level for operator visibility.
+          void this.connection
+            .extNotification('qwen/notify/session/mcp-budget-event', {
+              v: 1,
+              sessionId: acpSessionId,
+              ...event,
+            })
+            .catch((err: unknown) => {
+              debugLogger.debug(
+                `MCP budget extNotification dropped ` +
+                  `(session=${acpSessionId}, kind=${event.kind}): ` +
+                  `${err instanceof Error ? err.message : String(err)}`,
+              );
+            });
+        });
       });
     }
     try {
@@ -12696,6 +13238,89 @@ class QwenAgent implements Agent {
     config.setFileSystemService(acpFileSystemService);
   }
 
+  /**
+   * All sessions in this child share one workflow snapshot store but each
+   * keeps a private run registry, so one session's history deletion must
+   * see every sibling registry — or it can delete a run another session
+   * is still executing or settling. A handle outlives the terminal
+   * transition until the snapshot write lands, so it blocks too.
+   *
+   * R7-10: iterating `this.sessions` alone left a blind spot the width of
+   * a whole run. A workflow can outlive its owning session's removal —
+   * explicit close/kill/shutdown use force semantics, and a background
+   * run owns a detached controller — so once `removeStoredSessionEntry`
+   * deleted the session, a still-settling run became invisible here and
+   * unreachable by the delete handler's sibling `removeTerminal` loop. A
+   * sibling `delete-history` then passed every check, removed the LIVE
+   * run's journal directory and snapshot, and answered `{changed: true}`;
+   * the orphan kept going and its settlement `writeWorkflowSnapshot`
+   * recreated the file — resurrection, plus a run whose journal was rm'd
+   * under it.
+   *
+   * The repair has two halves. `Session.dispose()` now aborts its
+   * workflow registry the way it already aborts the agent registry, so an
+   * orphan settles instead of running on; and the registry of a removed
+   * session stays reachable here until its runs drain, so the gate keeps
+   * answering for the settlement window that abort cannot compress to
+   * zero (the handle is released only after the snapshot write lands).
+   */
+  private isWorkflowRunLiveOutsideSession(
+    excludeSessionId: string,
+    runId: string,
+  ): boolean {
+    for (const [sessionId, session] of this.sessions) {
+      if (sessionId === excludeSessionId) continue;
+      if (
+        QwenAgent.isWorkflowRunLiveInRegistry(
+          session.getConfig().getWorkflowRunRegistry(),
+          runId,
+        )
+      ) {
+        return true;
+      }
+    }
+    this.pruneDrainedWorkflowRegistries();
+    for (const registry of this.detachedWorkflowRegistries) {
+      if (QwenAgent.isWorkflowRunLiveInRegistry(registry, runId)) return true;
+    }
+    return false;
+  }
+
+  private static isWorkflowRunLiveInRegistry(
+    registry: WorkflowRunRegistry,
+    runId: string,
+  ): boolean {
+    if (registry.isStarting?.(runId)) return true;
+    const entry = registry.get(runId);
+    if (entry && !isTerminalWorkflowStatus(entry.status)) return true;
+    return registry.getHandle(runId) !== undefined;
+  }
+
+  /**
+   * Registries of removed sessions are retained only while they still
+   * hold work — an aborted run keeps its handle until settlement releases
+   * it. Dropping drained ones keeps this from becoming a leak that grows
+   * with every closed session.
+   */
+  private pruneDrainedWorkflowRegistries(): void {
+    for (const registry of this.detachedWorkflowRegistries) {
+      if (!QwenAgent.isWorkflowRegistryDraining(registry)) {
+        this.detachedWorkflowRegistries.delete(registry);
+      }
+    }
+  }
+
+  /** Still holding work: an active entry, or a handle awaiting settlement. */
+  private static isWorkflowRegistryDraining(
+    registry: WorkflowRunRegistry,
+  ): boolean {
+    if (registry.hasRunningEntries?.()) return true;
+    return (
+      registry.list?.().some((entry) => registry.getHandle(entry.runId)) ??
+      false
+    );
+  }
+
   private async createAndStoreSession(
     config: Config,
     settings: LoadedSettings,
@@ -12704,21 +13329,25 @@ class QwenAgent implements Agent {
       replayHistory?: boolean;
       enableLiveScreenContext?: boolean;
       deferWorkspaceActivation?: boolean;
+      configProviderRevision?: number;
       beforeDeferredWorkspaceActivation?: () => Promise<void>;
       prepareBeforeSessionCreate?: () => Promise<void>;
-      beforeSessionCreate?: () => void;
+      beforeSessionPublish?: () => void;
       primeSession?: (session: Session) => void;
       beforeStartPostReplayServices?: (session: Session) => Promise<void>;
+      signal?: AbortSignal;
     } = {},
   ): Promise<Session> {
+    options.signal?.throwIfAborted();
     this.assertManagedSessionAdmission();
     const sessionId = normalizeSessionIdForLookup(config.getSessionId());
     const llmClient = config.getLlmClient();
     const needsInitialize = !llmClient.isInitialized();
 
     if (needsInitialize && options.deferWorkspaceActivation !== true) {
-      await llmClient.initialize();
+      await llmClient.initialize(undefined, options.signal);
     }
+    options.signal?.throwIfAborted();
     this.assertManagedSessionAdmission();
 
     if (this.sessions.has(sessionId)) {
@@ -12730,6 +13359,7 @@ class QwenAgent implements Agent {
     }
 
     await options.prepareBeforeSessionCreate?.();
+    options.signal?.throwIfAborted();
     this.assertManagedSessionAdmission();
     if (this.sessions.has(sessionId)) {
       throw new RequestError(
@@ -12738,8 +13368,7 @@ class QwenAgent implements Agent {
         { errorKind: 'session_id_conflict', sessionId },
       );
     }
-    options.beforeSessionCreate?.();
-
+    const workflowHistory = await listWorkflowSnapshots(config);
     const session = new Session(
       sessionId,
       config,
@@ -12747,6 +13376,8 @@ class QwenAgent implements Agent {
       settings,
       (operation) => this.runExclusiveHistoryMutation(sessionId, operation),
       () => this.activeWorkReporter?.notifyChanged(),
+      workflowHistory,
+      (runId) => this.isWorkflowRunLiveOutsideSession(sessionId, runId),
     );
     const replaySessionHistory = async () => {
       if (
@@ -12775,6 +13406,18 @@ class QwenAgent implements Agent {
       session.installManagedConversationActivation(
         async () => {
           this.assertManagedSessionAdmission();
+          const settingsReloaded =
+            settings.reloadScopesFromDiskAtomically?.([
+              SettingScope.User,
+              SettingScope.Workspace,
+            ]) !== false;
+          if (settingsReloaded) {
+            reloadEnvironment(settings.merged, config.getTargetDir());
+          } else {
+            debugLogger.warn(
+              'Deferred session settings reload failed; keeping current environment',
+            );
+          }
           if (options.beforeDeferredWorkspaceActivation) {
             await options.beforeDeferredWorkspaceActivation();
           } else {
@@ -12807,6 +13450,60 @@ class QwenAgent implements Agent {
       // the session is published: the permission check is async, and the tool
       // must be declared before the first prompt can be served.
       await registerCreateSubSessionTool(config);
+      options.signal?.throwIfAborted();
+      let forceAuthenticationRefresh =
+        options.deferWorkspaceActivation !== true &&
+        options.configProviderRevision !== this.modelProviderReloadRevision;
+      while (true) {
+        const providerReloadRevision = this.modelProviderReloadRevision;
+        const previousModelProviders = settings.merged.modelProviders;
+        const previousProviderProtocol = settings.merged.providerProtocol;
+        const settingsReloaded =
+          settings.reloadScopesFromDiskAtomically?.([
+            SettingScope.User,
+            SettingScope.Workspace,
+          ]) !== false;
+        if (!settingsReloaded) {
+          if (providerReloadRevision !== options.configProviderRevision) {
+            throw new Error(
+              'Unable to reload model-provider settings from disk.',
+            );
+          }
+          debugLogger.warn(
+            'Final model-provider settings reload failed; keeping current settings',
+          );
+        }
+        config.reloadModelProvidersConfig?.(
+          settings.merged.modelProviders,
+          settings.merged.providerProtocol ?? {},
+        );
+        if (options.deferWorkspaceActivation !== true) {
+          const envReload = reloadEnvironment(
+            settings.merged,
+            config.getTargetDir(),
+          );
+          const providerSettingsChanged =
+            !isDeepStrictEqual(
+              previousModelProviders,
+              settings.merged.modelProviders,
+            ) ||
+            !isDeepStrictEqual(
+              previousProviderProtocol,
+              settings.merged.providerProtocol,
+            );
+          if (
+            forceAuthenticationRefresh ||
+            providerSettingsChanged ||
+            envReload.updatedKeys.length > 0 ||
+            envReload.removedKeys.length > 0
+          ) {
+            await this.ensureAuthenticated(config);
+          }
+        }
+        if (providerReloadRevision === this.modelProviderReloadRevision) break;
+        forceAuthenticationRefresh = true;
+      }
+      options.beforeSessionPublish?.();
       options.primeSession?.(session);
       if (options.deferWorkspaceActivation !== true) {
         config.hydrateSessionRestoreFileHistory?.();
