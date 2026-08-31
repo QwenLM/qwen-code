@@ -45,6 +45,40 @@ describe.sequential('repository-local Git execution hooks', () => {
     }
   });
 
+  it('keeps AST and fallback Git helper rules in lockstep', async () => {
+    const cases: Array<{
+      command: string;
+      ast: 'read-only' | 'unknown';
+      fallback: boolean;
+    }> = [
+      { command: 'git remote show -n origin', ast: 'read-only', fallback: true },
+      {
+        command: 'git remote show origin -- -n',
+        ast: 'unknown',
+        fallback: false,
+      },
+      { command: 'git show --remerge-diff', ast: 'unknown', fallback: false },
+      {
+        command: 'git log --diff-merges=remerge -1',
+        ast: 'unknown',
+        fallback: false,
+      },
+      {
+        command: 'git log --diff-merges=r -1',
+        ast: 'unknown',
+        fallback: false,
+      },
+      { command: 'git log --format=%G? -1', ast: 'unknown', fallback: false },
+    ];
+
+    for (const testCase of cases) {
+      expect(await classifyShellCommandSafety(testCase.command)).toBe(
+        testCase.ast,
+      );
+      expect(isShellCommandReadOnly(testCase.command)).toBe(testCase.fallback);
+    }
+  });
+
   it('requires no-query mode before the option terminator for git remote show', async () => {
     expect(await classifyShellCommandSafety('git remote show origin')).toBe(
       'unknown',
@@ -82,6 +116,16 @@ describe.sequential('repository-local Git execution hooks', () => {
         false,
       );
     }
+
+    for (const command of [
+      'git log -1',
+      'git show HEAD',
+      'git rev-parse HEAD',
+    ]) {
+      expect(await isShellCommandReadOnlyASTInDirectory(command, cwd)).toBe(
+        true,
+      );
+    }
   });
 
   it('does not mistake boolean fsmonitor values for helper commands', async () => {
@@ -101,6 +145,13 @@ describe.sequential('repository-local Git execution hooks', () => {
       await isShellCommandReadOnlyASTInDirectory('git log -1', commandCwd),
     ).toBe(false);
 
+    const coreCommandCwd = createRepo();
+    config(coreCommandCwd, 'core.pager', '/tmp/core-pager-helper');
+    expect(getLocalGitConfigRisk(coreCommandCwd).pager).toBe(true);
+    expect(
+      await isShellCommandReadOnlyASTInDirectory('git status', coreCommandCwd),
+    ).toBe(false);
+
     for (const value of ['false', 'true', '0', '1']) {
       const cwd = createRepo();
       config(cwd, 'core.pager', value);
@@ -118,17 +169,26 @@ describe.sequential('repository-local Git execution hooks', () => {
     ).toBe(true);
   });
 
-  it('uses Git boolean semantics for signature and promisor switches', async () => {
-    const signatureCwd = createRepo();
-    config(signatureCwd, 'log.showSignature', '-1');
-    config(signatureCwd, 'gpg.program', '/tmp/gpg-helper');
-    expect(getLocalGitConfigRisk(signatureCwd).signatureVerifier).toBe(true);
-    expect(
-      await isShellCommandReadOnlyASTInDirectory('git log -1', signatureCwd),
-    ).toBe(false);
+  it('uses fail-closed Git boolean semantics for signature and promisor switches', async () => {
+    for (const value of ['-1', '+1', '0x1', '01', '1k']) {
+      const signatureCwd = createRepo();
+      config(signatureCwd, 'log.showSignature', value);
+      config(signatureCwd, 'gpg.program', '/tmp/gpg-helper');
+      expect(getLocalGitConfigRisk(signatureCwd).signatureVerifier).toBe(true);
+      expect(
+        await isShellCommandReadOnlyASTInDirectory('git log -1', signatureCwd),
+      ).toBe(false);
+    }
+
+    const falseSignatureCwd = createRepo();
+    config(falseSignatureCwd, 'log.showSignature', '0');
+    config(falseSignatureCwd, 'gpg.program', '/tmp/gpg-helper');
+    expect(getLocalGitConfigRisk(falseSignatureCwd).signatureVerifier).toBe(
+      false,
+    );
 
     const promisorCwd = createRepo();
-    config(promisorCwd, 'remote.origin.promisor', '-1');
+    config(promisorCwd, 'remote.origin.promisor', '+1');
     expect(getLocalGitConfigRisk(promisorCwd).promisorRemote).toBe(true);
     expect(
       await isShellCommandReadOnlyASTInDirectory('git show HEAD', promisorCwd),
@@ -159,7 +219,7 @@ describe.sequential('repository-local Git execution hooks', () => {
     }
   });
 
-  it('detects repository-local pretty formats that request signature verification', async () => {
+  it('detects effective pretty formats that request signature verification', async () => {
     for (const [key, value] of [
       ['format.pretty', 'format:%G? %s'],
       ['pretty.audit', 'format:%G? %s'],
@@ -172,9 +232,30 @@ describe.sequential('repository-local Git execution hooks', () => {
         await isShellCommandReadOnlyASTInDirectory('git log -1', cwd),
       ).toBe(false);
     }
+
+    const globalCwd = createRepo();
+    const globalConfig = path.join(globalCwd, 'global-pretty.gitconfig');
+    writeFileSync(globalConfig, '[format]\n\tpretty = format:%G? %s\n');
+    config(globalCwd, 'gpg.program', '/tmp/gpg-helper');
+    const previousGlobal = process.env['GIT_CONFIG_GLOBAL'];
+    const previousNoSystem = process.env['GIT_CONFIG_NOSYSTEM'];
+    process.env['GIT_CONFIG_GLOBAL'] = globalConfig;
+    process.env['GIT_CONFIG_NOSYSTEM'] = '1';
+    try {
+      expect(getLocalGitConfigRisk(globalCwd).signatureVerifier).toBe(true);
+      expect(
+        await isShellCommandReadOnlyASTInDirectory('git log -1', globalCwd),
+      ).toBe(false);
+    } finally {
+      if (previousGlobal === undefined) delete process.env['GIT_CONFIG_GLOBAL'];
+      else process.env['GIT_CONFIG_GLOBAL'] = previousGlobal;
+      if (previousNoSystem === undefined)
+        delete process.env['GIT_CONFIG_NOSYSTEM'];
+      else process.env['GIT_CONFIG_NOSYSTEM'] = previousNoSystem;
+    }
   });
 
-  it('gates clean and process filters with a default-deny consumer model', async () => {
+  it('gates clean and process filters while preserving proven non-consumers', async () => {
     for (const key of ['filter.demo.clean', 'filter.demo.process']) {
       const cwd = createRepo();
       config(cwd, key, '/tmp/filter-helper');
@@ -195,7 +276,31 @@ describe.sequential('repository-local Git execution hooks', () => {
           false,
         );
       }
+
+      for (const command of [
+        'git log -1',
+        'git show HEAD',
+        'git rev-parse HEAD',
+      ]) {
+        expect(await isShellCommandReadOnlyASTInDirectory(command, cwd)).toBe(
+          true,
+        );
+      }
     }
+  });
+
+  it('honors worktree-scoped executable driver config', async () => {
+    const cwd = createRepo();
+    config(cwd, 'extensions.worktreeConfig', 'true');
+    execFileSync(
+      'git',
+      ['config', '--worktree', 'diff.audit.command', '/tmp/worktree-driver'],
+      { cwd },
+    );
+    expect(getLocalGitConfigRisk(cwd).diffDriverCommand).toBe(true);
+    expect(await isShellCommandReadOnlyASTInDirectory('git diff', cwd)).toBe(
+      false,
+    );
   });
 
   it('ignores executable diff-driver helpers from global scope', async () => {
@@ -229,7 +334,7 @@ describe.sequential('repository-local Git execution hooks', () => {
     }
   });
 
-  it('gates every observed partial-clone materializer except the narrow safe log form', async () => {
+  it('fails closed for every read-only Git command in a promisor repository', async () => {
     const cwd = createRepo();
     config(cwd, 'extensions.partialClone', 'origin');
     expect(getLocalGitConfigRisk(cwd).promisorRemote).toBe(true);
@@ -239,6 +344,10 @@ describe.sequential('repository-local Git execution hooks', () => {
       'git cat-file -p HEAD:file',
       'git diff',
       'git grep needle HEAD',
+      'git log -1',
+      'git log --max-count=1',
+      'git log -1 -- file.txt',
+      'git log --max-count=1 -- file.txt',
       'git log -p -1',
       'git log -Sneedle -1',
       'git log -Gneedle -1',
@@ -251,17 +360,12 @@ describe.sequential('repository-local Git execution hooks', () => {
       'git log --cc -1',
       'git ls-files --with-tree=HEAD',
       'git show HEAD',
+      'git status',
     ]) {
       expect(await isShellCommandReadOnlyASTInDirectory(command, cwd)).toBe(
         false,
       );
     }
-    expect(await isShellCommandReadOnlyASTInDirectory('git log -1', cwd)).toBe(
-      true,
-    );
-    expect(
-      await isShellCommandReadOnlyASTInDirectory('git log --max-count=1', cwd),
-    ).toBe(true);
   });
 
   it('detects every repository-local promisor configuration branch', () => {
@@ -278,7 +382,7 @@ describe.sequential('repository-local Git execution hooks', () => {
     expect(getLocalGitConfigRisk(filterCwd).promisorRemote).toBe(true);
   });
 
-  it('gates repository-local merge drivers and remerge options', async () => {
+  it('gates repository-local merge drivers and remerge options without over-denying non-consumers', async () => {
     const cwd = createRepo();
     config(cwd, 'merge.audit.driver', '/tmp/merge-helper %O %A %B');
     expect(getLocalGitConfigRisk(cwd).mergeDriver).toBe(true);
@@ -288,12 +392,22 @@ describe.sequential('repository-local Git execution hooks', () => {
     expect(
       await isShellCommandReadOnlyASTInDirectory('git show HEAD', cwd),
     ).toBe(false);
+    expect(await isShellCommandReadOnlyASTInDirectory('git diff', cwd)).toBe(
+      true,
+    );
+    expect(await isShellCommandReadOnlyASTInDirectory('git status', cwd)).toBe(
+      true,
+    );
     expect(await classifyShellCommandSafety('git show --remerge-diff')).toBe(
       'unknown',
     );
     expect(
       await classifyShellCommandSafety('git log --diff-merges=remerge -1'),
     ).toBe('unknown');
+    expect(
+      await classifyShellCommandSafety('git log --diff-merges=r -1'),
+    ).toBe('unknown');
+    expect(isShellCommandReadOnly('git log --diff-merges=r -1')).toBe(false);
   });
 
   it('fails closed for every probed Git config risk when the AST parser is unavailable', async () => {

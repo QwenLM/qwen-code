@@ -139,7 +139,7 @@ const WRITE_GIT_SUBCOMMAND =
 const WRITE_GIT_REMOTE_ACTION =
   /^(add|remove|rm|rename|set-branches|set-head|set-url|update)$/;
 const GIT_EXTERNAL_HELPER_OPTION =
-  /^--(?:ext-diff|filters|show-signature|textconv|open-files-in-pager|remerge-diff)(?:=|$)|^--diff-merges=remerge$/;
+  /^--(?:ext-diff|filters|show-signature|textconv|open-files-in-pager|remerge-diff)(?:=|$)|^--diff-merges=(?:remerge|r)$/;
 const GIT_COMMIT_VALUE_OPTION =
   /^(?:-[CcFmt]|--(?:author|cleanup|date|file|fixup|message|pathspec-from-file|reedit-message|reuse-message|squash|template|trailer))$/;
 /** git branch flags that mutate state. */
@@ -1119,24 +1119,21 @@ function evaluateStatementSafety(node: SyntaxNode): ShellCommandSafety {
   return childrenSafety(node, 'unknown');
 }
 
-function isKnownSafePromisorCommand(
-  subcommand: string,
-  rest: string[],
-): boolean {
-  if (subcommand !== 'log') return false;
-  const options = beforeTerminator(rest);
-  return (
-    options.length === 1 &&
-    (options[0] === '-1' || options[0] === '--max-count=1')
-  );
-}
+const FS_MONITOR_AND_FILTER_SAFE_SUBCOMMANDS = new Set([
+  'branch',
+  'cat-file',
+  'log',
+  'remote',
+  'rev-parse',
+  'show',
+]);
 
 function localGitConfigMakesCommandUnsafe(
   root: SyntaxNode,
   cwd: string,
 ): boolean {
   let changedDirectory = false;
-  const gitReads: Array<{ subcommand: string; rest: string[] }> = [];
+  const gitReads: string[] = [];
 
   for (const command of collectDescendants(root, new Set(['command']))) {
     const name = getCommandName(command);
@@ -1152,18 +1149,18 @@ function localGitConfigMakesCommandUnsafe(
     const subcommand = (args[0] ?? '').toLowerCase();
     if (!READ_ONLY_GIT_SUBCOMMANDS.has(subcommand)) continue;
     if (changedDirectory) return true;
-    gitReads.push({ subcommand, rest: args.slice(1) });
+    gitReads.push(subcommand);
   }
 
   if (gitReads.length === 0) return false;
   const risk = getLocalGitConfigRisk(cwd);
 
-  // Invert the old consumer blocklist model. For broad execution mechanisms
-  // we default to unsafe and only keep narrowly-proven non-consumers as safe.
-  // This prevents each newly-discovered Git flag from becoming a new bypass.
-  if (risk.pager) return true;
+  // Broad execution mechanisms are fail-closed. Only narrowly proven
+  // non-consumers stay auto-approved; promisor repositories get no exemption
+  // because even resolving HEAD can materialize a missing commit object.
+  if (risk.pager || risk.promisorRemote) return true;
 
-  return gitReads.some(({ subcommand, rest }) => {
+  return gitReads.some((subcommand) => {
     if (
       (risk.diffExternal || risk.diffDriverCommand) &&
       subcommand === 'diff'
@@ -1175,25 +1172,14 @@ function localGitConfigMakesCommandUnsafe(
     )
       return true;
     if (
-      risk.fsmonitor &&
-      !['branch', 'cat-file', 'log', 'remote', 'rev-parse', 'show'].includes(
-        subcommand,
-      )
-    )
-      return true;
-    if (
-      risk.worktreeFilter &&
-      !['branch', 'cat-file', 'log', 'remote', 'rev-parse', 'show'].includes(
-        subcommand,
-      )
+      (risk.fsmonitor || risk.worktreeFilter) &&
+      !FS_MONITOR_AND_FILTER_SAFE_SUBCOMMANDS.has(subcommand)
     )
       return true;
     if (
       risk.signatureVerifier &&
       ['log', 'show'].includes(subcommand)
     )
-      return true;
-    if (risk.promisorRemote && !isKnownSafePromisorCommand(subcommand, rest))
       return true;
     if (risk.mergeDriver && ['log', 'show'].includes(subcommand)) return true;
     return false;

@@ -87,7 +87,7 @@ const BLOCKED_GIT_REMOTE_ACTIONS = new Set([
   'update',
 ]);
 const GIT_EXTERNAL_HELPER_OPTION =
-  /(?:^--(?:ext-diff|filters|show-signature|textconv|open-files-in-pager|remerge-diff)(?:=|$)|^--diff-merges=remerge$|%G[?GKFPST])/;
+  /(?:^--(?:ext-diff|filters|show-signature|textconv|open-files-in-pager|remerge-diff)(?:=|$)|^--diff-merges=(?:remerge|r)$|%G[?GKFPST])/;
 
 const SAFE_SED_OPTION = /^(?:-[nErsuz]|--(?:quiet|silent))$/;
 

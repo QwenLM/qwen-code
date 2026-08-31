@@ -6,6 +6,7 @@
 
 import { spawnSync } from 'node:child_process';
 import { statSync } from 'node:fs';
+import { createDebugLogger } from './debugLogger.js';
 
 interface LocalGitConfigRisk {
   diffExternal: boolean;
@@ -18,6 +19,8 @@ interface LocalGitConfigRisk {
   promisorRemote: boolean;
   mergeDriver: boolean;
 }
+
+const debugLogger = createDebugLogger('GIT_CONFIG_SAFETY');
 
 const NO_RISK: LocalGitConfigRisk = {
   diffExternal: false,
@@ -99,12 +102,17 @@ const MERGE_DRIVER_KEY = new RegExp(MERGE_DRIVER_KEY_PATTERN, 'i');
 const BOOLEAN_VALUE = /^(?:true|false|yes|no|on|off|0|1)$/i;
 const SIGNATURE_PLACEHOLDER = /%G[?GKFPST]/;
 
-// Git accepts textual booleans and any non-zero integer as true. Keep this
-// separate from BOOLEAN_VALUE: for fsmonitor/pager, an unrecognised value must
-// continue to fail closed as a potential command rather than being normalised.
-const isGitTrueValue = (value: string): boolean =>
-  /^(?:true|yes|on)$/i.test(value) ||
-  (/^-?\d+$/.test(value) && Number(value) !== 0);
+// Git accepts textual booleans plus multiple numeric spellings (for example
+// +1, 0x1 and unit-suffixed non-zero values). At this security boundary only
+// explicit false values or numeric zero may fail open; anything unrecognised
+// must conservatively count as true/risky. Keep this separate from
+// BOOLEAN_VALUE because fsmonitor/pager unknown values are potential commands.
+const isGitTrueValue = (value: string): boolean => {
+  if (value === '' || /^(?:false|no|off)$/i.test(value)) return false;
+  if (/^(?:true|yes|on)$/i.test(value)) return true;
+  const numeric = Number(value);
+  return Number.isNaN(numeric) ? true : numeric !== 0;
+};
 
 export function getLocalGitConfigRisk(cwd: string): LocalGitConfigRisk {
   try {
@@ -171,6 +179,15 @@ export function getLocalGitConfigRisk(cwd: string): LocalGitConfigRisk {
       const value = localValue(key);
       return value !== undefined && predicate(value);
     });
+  const hasEffectiveValueMatchingPredicate = (
+    pattern: RegExp,
+    predicate: (value: string) => boolean,
+  ): boolean =>
+    [...effective.keys()].some((key) => {
+      if (!pattern.test(key)) return false;
+      const value = effectiveValue(key);
+      return value !== undefined && predicate(value);
+    });
   const hasLocalNonBooleanValueMatching = (pattern: RegExp): boolean =>
     hasLocalValueMatchingPredicate(
       pattern,
@@ -187,15 +204,15 @@ export function getLocalGitConfigRisk(cwd: string): LocalGitConfigRisk {
     (localGpgProgram ?? '') !== '' ||
     hasLocalValueMatching(GPG_FORMAT_PROGRAM_KEY);
   const logShowSignature = effectiveValue('log.showsignature') ?? '';
-  const localFormatPretty = localValue('format.pretty') ?? '';
-  const localPrettyRequestsSignature =
-    SIGNATURE_PLACEHOLDER.test(localFormatPretty) ||
-    hasLocalValueMatchingPredicate(PRETTY_FORMAT_KEY, (value) =>
+  const effectiveFormatPretty = effectiveValue('format.pretty') ?? '';
+  const effectivePrettyRequestsSignature =
+    SIGNATURE_PLACEHOLDER.test(effectiveFormatPretty) ||
+    hasEffectiveValueMatchingPredicate(PRETTY_FORMAT_KEY, (value) =>
       SIGNATURE_PLACEHOLDER.test(value),
     );
   const partialCloneExtension = localValue('extensions.partialclone') ?? '';
 
-  return {
+  const risk: LocalGitConfigRisk = {
     diffExternal: diffExternal !== undefined && diffExternal !== '',
     diffDriverCommand: hasLocalValueMatching(DIFF_DRIVER_COMMAND_KEY),
     diffDriverTextconv: hasLocalValueMatching(DIFF_DRIVER_TEXTCONV_KEY),
@@ -211,11 +228,23 @@ export function getLocalGitConfigRisk(cwd: string): LocalGitConfigRisk {
       hasLocalNonBooleanValueMatching(PAGER_COMMAND_KEY),
     signatureVerifier:
       hasLocalGpgProgram &&
-      (isGitTrueValue(logShowSignature) || localPrettyRequestsSignature),
+      (isGitTrueValue(logShowSignature) || effectivePrettyRequestsSignature),
     promisorRemote:
       partialCloneExtension !== '' ||
       hasLocalTrueValueMatching(PROMISOR_REMOTE_KEY) ||
       hasLocalValueMatching(PARTIAL_CLONE_FILTER_KEY),
     mergeDriver: hasLocalValueMatching(MERGE_DRIVER_KEY),
   };
+
+  const activeRisks = Object.entries(risk)
+    .filter(([, active]) => active)
+    .map(([name]) => name);
+  if (activeRisks.length > 0) {
+    debugLogger.debug('Repository Git config execution risks detected', {
+      cwd,
+      risks: activeRisks,
+    });
+  }
+
+  return risk;
 }
