@@ -10260,7 +10260,7 @@ describe('runQwenServe channel worker supervisor', () => {
     expect(pidfile.removeServeServiceInfo).toHaveBeenCalledWith(process.pid);
   });
 
-  it('force-kills channel worker, bridge, and pidfile on a second shutdown signal', async () => {
+  it('forces exit on a second shutdown signal delivered after the dedupe window', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-worker-force-')),
     );
@@ -10311,12 +10311,14 @@ describe('runQwenServe channel worker supervisor', () => {
       expect(signalListener).toBeDefined();
 
       const firstSignal = signalListener!('SIGTERM');
-      await Promise.resolve();
-      const secondSignal = signalListener!('SIGTERM');
-      await secondSignal;
+      // Wait past the duplicate-delivery dedupe window so the second signal
+      // reads as a genuine operator double-press, not a forwarded duplicate.
+      // The fast mock drain settles within that wait, so the second signal
+      // must take the force-exit branch instead of being deduplicated.
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      await signalListener!('SIGTERM');
 
-      expect(worker.killAllSync).toHaveBeenCalled();
-      expect(bridge.killAllSync).toHaveBeenCalled();
+      expect(worker.stop).toHaveBeenCalled();
       expect(pidfile.removeServeServiceInfo).toHaveBeenCalledWith(process.pid);
       expect(exitSpy).toHaveBeenCalledWith(1);
 
@@ -10324,6 +10326,70 @@ describe('runQwenServe channel worker supervisor', () => {
       await firstSignal;
     } finally {
       finishBridgeShutdown?.();
+      await handle.close();
+      exitSpy.mockRestore();
+    }
+  });
+
+  it('ignores a duplicate shutdown signal delivered within the dedupe window of drain start', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-signal-dedupe-')),
+    );
+    const bridge = makeFakeBridge();
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+    });
+    const pidfile = makePidfileDeps();
+    const exitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((() => undefined) as never);
+    const existingSigtermListeners = new Set(process.rawListeners('SIGTERM'));
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        bridge,
+        channelWorkerSupervisorFactory: vi.fn(() => worker),
+        channelServicePidfile: pidfile,
+      },
+    );
+
+    try {
+      const signalListener = process
+        .rawListeners('SIGTERM')
+        .find(
+          (listener) =>
+            !existingSigtermListeners.has(listener) &&
+            listener.name === 'onSignal',
+        ) as ((signal: NodeJS.Signals) => Promise<void>) | undefined;
+      expect(signalListener).toBeDefined();
+
+      // Process-group shape: the npm launcher (or a cgroup-wide stop)
+      // delivers the same signal twice, milliseconds apart. The second
+      // delivery must not force-exit a drain that just started.
+      const firstSignal = signalListener!('SIGTERM');
+      await signalListener!('SIGTERM');
+      await firstSignal;
+
+      expect(worker.killAllSync).not.toHaveBeenCalled();
+      expect(bridge.killAllSync).not.toHaveBeenCalled();
+      expect(exitSpy).toHaveBeenCalledWith(0);
+    } finally {
+      for (const listener of process.rawListeners('SIGTERM')) {
+        if (!existingSigtermListeners.has(listener)) {
+          process.removeListener('SIGTERM', listener as never);
+        }
+      }
       await handle.close();
       exitSpy.mockRestore();
     }
@@ -10387,6 +10453,9 @@ describe('runQwenServe channel worker supervisor', () => {
       const logPath = path.join(tmpDir, 'debug', 'daemon', 'daemon.log');
       expect(fs.readFileSync(logPath, 'utf8')).not.toContain('daemon stopped');
 
+      // Wait past the duplicate-delivery dedupe window: this second signal
+      // is the operator's deliberate retry, not a forwarded duplicate.
+      await new Promise((resolve) => setTimeout(resolve, 60));
       await signalListener!('SIGTERM');
       expect(worker.stop).toHaveBeenCalledTimes(2);
       expect(worker.killAllSync).not.toHaveBeenCalled();

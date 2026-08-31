@@ -649,6 +649,30 @@ describe('getInstallationInfo', () => {
     expect(infoDisabled.updateMessage).toContain('Please run npm install');
   });
 
+  it('should route the npm platform-runtime channel to a manual npm update', () => {
+    // npm-bin.js runs the CLI from the platform package under its bundled
+    // Bun, where the managed-npm-update machinery (npm resolution off
+    // execPath, base manifest off argv[1]) cannot work.
+    const platformCli =
+      '/usr/local/lib/node_modules/@qwen-code/qwen-code-linux-x64/lib/cli-entry.js';
+    process.argv[1] = platformCli;
+    mockedRealPathSync.mockReturnValue(platformCli);
+    mockedExecSync.mockImplementation(() => {
+      throw new Error('Command failed');
+    });
+
+    const info = getInstallationInfo(projectRoot, true);
+
+    expect(info.packageManager).toBe(PackageManager.NPM);
+    expect(info.isGlobal).toBe(true);
+    // No updateCommand -> handleAutoUpdate never spawns the Node-shaped
+    // managed update child under the Bun runtime.
+    expect(info.updateCommand).toBeUndefined();
+    expect(info.updateMessage).toContain(
+      'npm install -g @qwen-code/qwen-code@latest',
+    );
+  });
+
   it('should ask for sudo and NOT migrate to standalone when the npm global prefix is not writable', () => {
     const globalPath = `/usr/lib/node_modules/@qwen-code/qwen-code/cli-entry.js`;
     process.argv[1] = globalPath;

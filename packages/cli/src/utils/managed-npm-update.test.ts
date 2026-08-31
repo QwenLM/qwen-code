@@ -27,6 +27,14 @@ function makeTemporaryDirectory(): string {
   return directory;
 }
 
+const PLATFORM_RUNTIME_PACKAGES = [
+  '@qwen-code/qwen-code-darwin-arm64',
+  '@qwen-code/qwen-code-darwin-x64',
+  '@qwen-code/qwen-code-linux-arm64',
+  '@qwen-code/qwen-code-linux-x64',
+  '@qwen-code/qwen-code-win-x64',
+];
+
 function writeInstallation(prefix: string, version: string): void {
   const packageRoot = path.join(
     prefix,
@@ -37,7 +45,15 @@ function writeInstallation(prefix: string, version: string): void {
   fs.mkdirSync(packageRoot, { recursive: true });
   fs.writeFileSync(
     path.join(packageRoot, 'package.json'),
-    JSON.stringify({ name: '@qwen-code/qwen-code', version }),
+    JSON.stringify({
+      name: '@qwen-code/qwen-code',
+      version,
+      // Mirror the published manifest: the purge under test derives its
+      // deletion set from these keys.
+      optionalDependencies: Object.fromEntries(
+        PLATFORM_RUNTIME_PACKAGES.map((name) => [name, version]),
+      ),
+    }),
   );
   fs.writeFileSync(path.join(packageRoot, 'cli.js'), '');
   fs.writeFileSync(
@@ -174,6 +190,17 @@ describe('managed npm update', () => {
       ): ReturnType<typeof spawn> => {
         const prefix = args[args.indexOf('--prefix') + 1]!;
         writeInstallation(prefix, '2.0.0');
+        // npm also installs the platform runtimes the manifest declares;
+        // the update must drop them before activation.
+        for (const platformPackage of [
+          '@qwen-code/qwen-code-linux-x64',
+          '@qwen-code/qwen-code-win-x64',
+        ]) {
+          fs.mkdirSync(
+            path.join(prefix, 'node_modules', ...platformPackage.split('/')),
+            { recursive: true },
+          );
+        }
         const child = new EventEmitter();
         queueMicrotask(() => child.emit('close', 0));
         return child as ReturnType<typeof spawn>;
@@ -227,6 +254,28 @@ describe('managed npm update', () => {
         ),
       ),
     ).toMatchObject({ version: '2.0.0' });
+    // The platform runtimes must not be retained under the activated version
+    // directory: each is a ~100-200 MB payload the node-run staged payload
+    // never uses, and versions are retained indefinitely.
+    const versionDir = path.join(
+      updateRoot,
+      createHash('sha256')
+        .update(fs.realpathSync(bootstrap))
+        .digest('hex')
+        .slice(0, 16),
+      'versions',
+      '2.0.0',
+    );
+    for (const platformPackage of [
+      '@qwen-code/qwen-code-linux-x64',
+      '@qwen-code/qwen-code-win-x64',
+    ]) {
+      expect(
+        fs.existsSync(
+          path.join(versionDir, 'node_modules', ...platformPackage.split('/')),
+        ),
+      ).toBe(false);
+    }
   });
 
   it.each([

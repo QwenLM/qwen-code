@@ -245,6 +245,29 @@ export function prepareManagedNpmUpdate(
   };
 }
 
+function removeStagedPlatformRuntimes(stagingDir: string): void {
+  let manifest: { optionalDependencies?: Record<string, unknown> };
+  try {
+    manifest = JSON.parse(
+      fs.readFileSync(
+        path.join(packageDir(stagingDir), 'package.json'),
+        'utf8',
+      ),
+    );
+  } catch {
+    // No readable manifest means validateInstallation fails with a clearer
+    // error right after; nothing to purge.
+    return;
+  }
+  for (const dependency of Object.keys(manifest.optionalDependencies ?? {})) {
+    if (!dependency.startsWith(`${PACKAGE_NAME}-`)) continue;
+    fs.rmSync(path.join(stagingDir, 'node_modules', ...dependency.split('/')), {
+      recursive: true,
+      force: true,
+    });
+  }
+}
+
 export async function installManagedNpmUpdate(
   version: string,
   bootstrapPath = process.env['QWEN_CODE_CLI'],
@@ -280,6 +303,16 @@ export async function installManagedNpmUpdate(
         else reject(new Error(`npm install exited with code ${code}`));
       });
     });
+    // The staged payload only ever runs under Node (cli-entry.js spawns
+    // process.execPath; the Bun platform channel never reaches this path —
+    // getInstallationInfo routes it to a manual `npm install -g` update), so
+    // the platform runtime packages inherited from the manifest are dead
+    // weight that would persist under the managed versions directory forever.
+    // Drop them before activation; --omit=optional is not the tool because
+    // sharp/node-pty/clipboard/audio-capture ARE needed by the node-run
+    // payload. The purge set derives from the staged manifest so a
+    // RELEASE_TARGETS add/rename cannot leak a new platform package here.
+    removeStagedPlatformRuntimes(update.stagingDir);
     await activateManagedNpmUpdate(update, version, bootstrapPath);
   } catch (error) {
     await cleanupManagedNpmUpdate(update);

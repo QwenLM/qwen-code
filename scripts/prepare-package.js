@@ -269,6 +269,11 @@ function writeDistPackageJson(rootDir, distDir) {
   fs.chmodSync(cliEntryPath, 0o755);
   console.log('Created dist cli-entry.js wrapper');
 
+  const npmBinPath = path.join(distDir, 'npm-bin.js');
+  fs.copyFileSync(path.join(__dirname, 'npm-bin.js'), npmBinPath);
+  fs.chmodSync(npmBinPath, 0o755);
+  console.log('Created dist npm-bin.js launcher');
+
   const rootPackageJson = JSON.parse(
     fs.readFileSync(path.join(rootDir, 'package.json'), 'utf-8'),
   );
@@ -307,10 +312,14 @@ function writeDistPackageJson(rootDir, distDir) {
     type: 'module',
     main: 'cli.js',
     bin: {
-      qwen: 'cli-entry.js',
+      // Resolves the per-platform optional dependency (bundled Bun runtime)
+      // and runs the CLI under it; when the platform package is unavailable
+      // it falls back to cli-entry.js under node.
+      qwen: 'npm-bin.js',
     },
     files: [
       'cli-entry.js',
+      'npm-bin.js',
       'cli.js',
       // Worker thread entry loaded by FzfWorkerHandle at runtime via
       // `resolveBundleDir(import.meta.url)` + `path.join(dir, 'fzfWorker.js')`.
@@ -327,17 +336,27 @@ function writeDistPackageJson(rootDir, distDir) {
       'bundled',
       'web-shell',
       // OpenTUI renderer runtime assets (tree-sitter grammars, parser worker,
-      // web-tree-sitter wasm) are intentionally NOT published in the npm
-      // package: npm installs run on Node, where the runtime gate falls back
-      // to ink, so the assets would be dead weight (~22MB on the linux CI
-      // platform's native render library alone) against the unpacked-size
-      // budget. Standalone archives (which bake Bun and do render OpenTUI)
-      // carry them via create-standalone-package.js instead.
+      // web-tree-sitter wasm) are intentionally NOT published in this JS
+      // tarball: they ship inside the per-platform runtime packages below,
+      // which also carry the pinned Bun build — duplicating them here would
+      // add ~22MB of dead weight against the unpacked-size budget for node
+      // installs that cannot use them anyway.
     ],
     config: rootPackageJson.config,
     dependencies: {},
     optionalDependencies: {
       '@qwen-code/audio-capture': rootPackageJson.version,
+      // Prebuilt OpenTUI runtimes (pinned Bun + native renderer + CLI bundle)
+      // published by scripts/package-npm-platform-packages.js. os/cpu fields
+      // in each platform package make npm install exactly one per host; the
+      // npm-bin.js bin launcher resolves it at runtime. Version-locked to the
+      // main package version (the same treatment @qwen-code/audio-capture
+      // gets; the node-pty/clipboard groups pin their own upstream versions).
+      '@qwen-code/qwen-code-darwin-arm64': rootPackageJson.version,
+      '@qwen-code/qwen-code-darwin-x64': rootPackageJson.version,
+      '@qwen-code/qwen-code-linux-arm64': rootPackageJson.version,
+      '@qwen-code/qwen-code-linux-x64': rootPackageJson.version,
+      '@qwen-code/qwen-code-win-x64': rootPackageJson.version,
       '@lydell/node-pty': '1.2.0-beta.10',
       '@lydell/node-pty-darwin-arm64': '1.2.0-beta.10',
       '@lydell/node-pty-darwin-x64': '1.2.0-beta.10',

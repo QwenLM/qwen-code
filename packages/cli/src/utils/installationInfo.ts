@@ -282,6 +282,21 @@ export function getInstallationInfo(
       };
     }
 
+    // Check for the npm platform runtime channel: npm-bin.js runs the CLI
+    // from @qwen-code/qwen-code-<os>-<arch> under its bundled Bun, so
+    // process.execPath is not Node-shaped and the managed-npm-update
+    // machinery (npm resolution off execPath, base manifest off argv[1])
+    // cannot work there. Offer the channel-preserving manual update instead;
+    // npm then refreshes the main package and its platform package together.
+    if (realPath.includes('/node_modules/@qwen-code/qwen-code-')) {
+      return {
+        packageManager: PackageManager.NPM,
+        isGlobal: true,
+        updateMessage:
+          'Running on the prebuilt platform runtime. Please run "npm install -g @qwen-code/qwen-code@latest" to update.',
+      };
+    }
+
     // Check if the npm global package directory is writable to determine
     // whether `npm install -g` would require sudo.
     const npmPackageDir = path.dirname(path.dirname(realPath));

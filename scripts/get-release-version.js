@@ -183,6 +183,11 @@ function detectRollbackAndGetBaseline(npmDistTag) {
 export const PUBLISHED_PACKAGES = [
   '@qwen-code/qwen-code',
   '@qwen-code/audio-capture',
+  '@qwen-code/qwen-code-darwin-arm64',
+  '@qwen-code/qwen-code-darwin-x64',
+  '@qwen-code/qwen-code-linux-arm64',
+  '@qwen-code/qwen-code-linux-x64',
+  '@qwen-code/qwen-code-win-x64',
   '@qwen-code/channel-base',
   '@qwen-code/channel-dingtalk',
   '@qwen-code/channel-feishu',

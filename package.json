@@ -84,6 +84,7 @@
     "package:hosted-installation": "node scripts/build-hosted-installation-assets.js",
     "package:standalone": "node scripts/create-standalone-package.js",
     "package:standalone:release": "node scripts/build-standalone-release.js",
+    "package:npm-platform": "node scripts/package-npm-platform-packages.js",
     "verify:installation-release": "node scripts/verify-installation-release.js",
     "release:version": "node scripts/version.js",
     "changelog": "node scripts/generate-changelog.js",

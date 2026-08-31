@@ -66,8 +66,13 @@ ENV PATH=$PATH:/usr/local/share/npm-global/bin
 # Copy bundled package from builder stage
 COPY --from=builder /home/node/app/dist/*.tgz /tmp/
 
-# Install built packages globally
-RUN npm install -g /tmp/*.tgz \
+# Install built packages globally.
+# --omit=optional: the image must run the CLI bundle it was built from, via
+# the node fallback in npm-bin.js — not the prebuilt runtime a platform
+# package would resolve to (which tracks the last npm release, not this
+# tree). Optional native deps (sharp, node-pty, clipboard) degrade the same
+# way and are not needed for the container use cases.
+RUN npm install -g --omit=optional /tmp/*.tgz \
   && npm cache clean --force \
   && rm -rf /tmp/*.tgz
 

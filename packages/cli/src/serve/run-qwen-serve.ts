@@ -395,6 +395,9 @@ const DEFAULT_RUNTIME_STARTUP_TIMEOUT_MS = 120_000;
 const FAST_PATH_RUNTIME_START_AFTER_HEALTH_MS = 50;
 // Keep manual/non-probed starts moving; health probes cancel this fallback.
 const FAST_PATH_RUNTIME_START_FALLBACK_MS = 1_000;
+// Same shape as gemini.tsx's SIGINT_RERAISE_IGNORE_MS: signals redelivered
+// within this window of drain start come from process-group forwarding.
+const SERVE_SIGNAL_DEDUPE_WINDOW_MS = 50;
 const RUNTIME_STARTUP_TIMEOUT_ENV = 'QWEN_SERVE_RUNTIME_STARTUP_TIMEOUT_MS';
 const MAX_EVENT_RING_SIZE = 1_000_000;
 const DEFAULT_MAX_SESSIONS = 32;
@@ -6889,6 +6892,7 @@ async function runQwenServeImpl(
         await unpublishLiveDiscovery();
       };
       let shuttingDown = false;
+      let drainStartedAt: number | undefined;
       let closePromise: Promise<void> | undefined;
       let runtimeStartupTimer: NodeJS.Timeout | undefined;
       let runtimeStartAfterHealthTimer: NodeJS.Timeout | undefined;
@@ -7314,6 +7318,21 @@ async function runQwenServeImpl(
       // drain completes. The handler is registered just before `resolve()`.
       const onSignal = async (signal: NodeJS.Signals) => {
         if (shuttingDown) {
+          if (
+            drainStartedAt !== undefined &&
+            Date.now() - drainStartedAt <= SERVE_SIGNAL_DEDUPE_WINDOW_MS
+          ) {
+            // Duplicate delivery, not an operator double-press: the npm
+            // launcher shares the foreground process group and forwards the
+            // signal it received, and cgroup-wide stops (systemd's default
+            // KillMode) reach this process twice. A forwarded duplicate
+            // arrives within milliseconds; a genuine second press is far
+            // slower, so the force-exit branch below keeps its meaning.
+            daemonLog.warn(
+              `ignoring duplicate ${signal} within ${SERVE_SIGNAL_DEDUPE_WINDOW_MS}ms of drain start`,
+            );
+            return;
+          }
           // Second signal forces exit. During drain (up to
           // ~15s for a stuck child + the 5s force-close timer) an
           // operator's reflexive `^C^C` would otherwise be dropped.
@@ -7350,6 +7369,7 @@ async function runQwenServeImpl(
           loggerLifecycle.signalOwned();
         }
         daemonLog.warn(`received ${signal}, draining`);
+        drainStartedAt = Date.now();
         try {
           await handle.close();
           process.exit(runtimeStartupError === undefined ? 0 : 1);
