@@ -1189,6 +1189,8 @@ function localGitConfigMakesCommandUnsafe(
   );
 }
 
+// GIT_CONFIG_COUNT/GIT_CONFIG_KEY_* are rejected at the raw shell permission
+// boundary before wrapper stripping; this layer protects on-disk repository config.
 function fallbackGitConfigMakesCommandUnsafe(
   command: string,
   cwd: string,

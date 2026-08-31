@@ -89,7 +89,7 @@ describe('isShellCommandReadOnlyAST', () => {
       }
     });
 
-    it('downgrades only the two reproduced command/config pairs', async () => {
+    it('downgrades Git commands for the repository-local hooks they consume', async () => {
       const cwd = createRepo();
       gitConfig(cwd, 'diff.external', 'example-external-diff');
       expect(await isShellCommandReadOnlyASTInDirectory('git diff', cwd)).toBe(
@@ -101,12 +101,17 @@ describe('isShellCommandReadOnlyAST', () => {
 
       gitConfig(cwd, '--unset', 'diff.external');
       gitConfig(cwd, 'core.fsmonitor', 'example-fsmonitor');
-      expect(
-        await isShellCommandReadOnlyASTInDirectory('git status', cwd),
-      ).toBe(false);
-      expect(await isShellCommandReadOnlyASTInDirectory('git diff', cwd)).toBe(
-        true,
-      );
+      for (const command of [
+        'git status',
+        'git diff',
+        'git blame file.txt',
+        'git grep needle',
+        'git ls-files',
+      ]) {
+        expect(await isShellCommandReadOnlyASTInDirectory(command, cwd)).toBe(
+          false,
+        );
+      }
 
       gitConfig(cwd, 'core.fsmonitor', 'false');
       expect(

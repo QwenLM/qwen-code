@@ -2029,6 +2029,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
    * AST-based permission check for the shell command.
    * - Substitution-bearing commands (any form, including inside an
    *   env-prefix wrapper that `stripShellWrapper` would discard) → 'ask'
+   * - Commands with leading environment assignments → 'ask' before wrapper stripping
    * - Read-only commands (via AST analysis) → 'allow'
    * - All other commands → 'ask'
    */
@@ -2040,7 +2041,13 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // `echo ok`, which the AST classifies as read-only. Without this
     // gate the command auto-executes silently with no confirmation
     // dialog and no warning. See PR #4386 R6 (cid 3298521039).
-    if (hasShellSubstitution(this.params.command)) {
+    // GIT_CONFIG_COUNT/GIT_CONFIG_KEY_* can inject executable Git config
+    // only into the spawned child. Keep all leading env assignments visible
+    // to the permission boundary instead of stripping them first.
+    if (
+      hasShellSubstitution(this.params.command) ||
+      LEADING_ENV_ASSIGNMENT_RE.test(this.params.command)
+    ) {
       return 'ask';
     }
 

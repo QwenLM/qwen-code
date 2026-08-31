@@ -7266,6 +7266,20 @@ describe('ShellTool', () => {
       expect(await invocation.getDefaultPermission()).toBe('ask');
     });
 
+    it('should keep env-prefixed Git wrappers confirmable before stripping', async () => {
+      for (const command of [
+        `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=diff.external GIT_CONFIG_VALUE_0=/tmp/helper bash -c 'git diff'`,
+        `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0=/tmp/helper git status`,
+      ]) {
+        const invocation = shellTool.build({
+          command,
+          is_background: false,
+        });
+
+        expect(await invocation.getDefaultPermission()).toBe('ask');
+      }
+    });
+
     it('should request confirmation for a non-read-only command and return details', async () => {
       const params = { command: 'npm install', is_background: false };
       const invocation = shellTool.build(params);

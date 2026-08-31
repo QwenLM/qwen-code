@@ -46,8 +46,7 @@ const FILTER_PROCESS_KEY_PATTERN = String.raw`^filter\..*\.process$`;
 const PAGER_COMMAND_KEY_PATTERN = String.raw`^pager\..*$`;
 const GPG_FORMAT_PROGRAM_KEY_PATTERN = String.raw`^gpg\..*\.program$`;
 const PROMISOR_REMOTE_KEY_PATTERN = String.raw`^remote\..*\.promisor$`;
-const PARTIAL_CLONE_FILTER_KEY_PATTERN =
-  String.raw`^remote\..*\.partialclonefilter$`;
+const PARTIAL_CLONE_FILTER_KEY_PATTERN = String.raw`^remote\..*\.partialclonefilter$`;
 
 // Keep this as a list of simple Git-supported key regexes. In particular, do
 // not use JavaScript-only constructs such as non-capturing groups: this value
@@ -80,10 +79,7 @@ const DIFF_DRIVER_TEXTCONV_KEY = new RegExp(
 const FILTER_CLEAN_KEY = new RegExp(FILTER_CLEAN_KEY_PATTERN, 'i');
 const FILTER_PROCESS_KEY = new RegExp(FILTER_PROCESS_KEY_PATTERN, 'i');
 const PAGER_COMMAND_KEY = new RegExp(PAGER_COMMAND_KEY_PATTERN, 'i');
-const GPG_FORMAT_PROGRAM_KEY = new RegExp(
-  GPG_FORMAT_PROGRAM_KEY_PATTERN,
-  'i',
-);
+const GPG_FORMAT_PROGRAM_KEY = new RegExp(GPG_FORMAT_PROGRAM_KEY_PATTERN, 'i');
 const PROMISOR_REMOTE_KEY = new RegExp(PROMISOR_REMOTE_KEY_PATTERN, 'i');
 const PARTIAL_CLONE_FILTER_KEY = new RegExp(
   PARTIAL_CLONE_FILTER_KEY_PATTERN,
@@ -185,8 +181,7 @@ export function getLocalGitConfigRisk(cwd: string): LocalGitConfigRisk {
     pager:
       (corePager !== '' && !BOOLEAN_VALUE.test(corePager)) ||
       hasLocalNonBooleanValueMatching(PAGER_COMMAND_KEY),
-    signatureVerifier:
-      hasLocalGpgProgram && TRUE_VALUE.test(logShowSignature),
+    signatureVerifier: hasLocalGpgProgram && TRUE_VALUE.test(logShowSignature),
     promisorRemote:
       partialCloneExtension !== '' ||
       hasLocalTrueValueMatching(PROMISOR_REMOTE_KEY) ||
