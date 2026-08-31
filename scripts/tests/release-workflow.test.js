@@ -303,6 +303,17 @@ mkdir "\${release_state}/gh" || exit 1
 } >> "\${GITHUB_ENV:?}"`;
 
 describe('release workflow', () => {
+  // The shard-completeness pin and the zero-test ratchet must gate on the
+  // same workspace set, so resolve it once through
+  // getWorkspacePackageJsonPaths -- the same resolver scripts/clean.js
+  // consumes -- instead of letting each test carry its own selection copy.
+  const getTestCiWorkspaces = () => {
+    const rootPackage = JSON.parse(readFileSync('package.json', 'utf8'));
+    return getWorkspacePackageJsonPaths(process.cwd(), rootPackage.workspaces)
+      .map((path) => [path, JSON.parse(readFileSync(path, 'utf8'))])
+      .filter(([, packageJson]) => packageJson.scripts?.['test:ci']);
+  };
+
   it('cleans every shared ECS workspace before checkout', () => {
     const checkoutJobs = Object.entries(releaseYaml.jobs).filter(([, job]) =>
       (job.steps ?? []).some((step) =>
@@ -425,13 +436,7 @@ describe('release workflow', () => {
       'npm run test:release:workspaces -- --shard=${{ matrix.shard }}/3 --passWithNoTests',
     );
 
-    const rootPackage = JSON.parse(readFileSync('package.json', 'utf8'));
-    const workspacePackages = getWorkspacePackageJsonPaths(
-      process.cwd(),
-      rootPackage.workspaces,
-    )
-      .map((path) => [path, JSON.parse(readFileSync(path, 'utf8'))])
-      .filter(([, packageJson]) => packageJson.scripts?.['test:ci']);
+    const workspacePackages = getTestCiWorkspaces();
 
     expect(workspacePackages.length).toBeGreaterThan(0);
     for (const [path, packageJson] of workspacePackages) {
@@ -451,13 +456,7 @@ describe('release workflow', () => {
     // test:ci runs vitest with that default or a narrower include (the
     // custom configs list 'src/**/*.test.ts' or 'scripts/**/*.test.js'),
     // so zero matches here means zero discoverable tests under vitest too.
-    const rootPackage = JSON.parse(readFileSync('package.json', 'utf8'));
-    const testCiWorkspaces = getWorkspacePackageJsonPaths(
-      process.cwd(),
-      rootPackage.workspaces,
-    )
-      .map((path) => [path, JSON.parse(readFileSync(path, 'utf8'))])
-      .filter(([, packageJson]) => packageJson.scripts?.['test:ci']);
+    const testCiWorkspaces = getTestCiWorkspaces();
     expect(testCiWorkspaces.length).toBeGreaterThan(0);
     for (const [path] of testCiWorkspaces) {
       const testFiles = globSync('**/*.{test,spec}.?(c|m)[jt]s?(x)', {
