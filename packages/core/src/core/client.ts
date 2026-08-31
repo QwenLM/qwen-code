@@ -57,7 +57,11 @@ import { createSessionStartProfiler } from './session-start-profiler.js';
 const debugLogger = createDebugLogger('CLIENT');
 
 // Core modules
-import { LlmChat, type RepairOrphanedToolUseOptions } from './llm-chat.js';
+import {
+  LlmChat,
+  type RepairOrphanedToolUseOptions,
+  userContentPushSnapshotKey,
+} from './llm-chat.js';
 import { restorableAskUserQuestionCallIds } from './ask-user-question-restore.js';
 import { getRecentGitStatus } from '../utils/gitUtils.js';
 import {
@@ -67,7 +71,9 @@ import {
   getCustomSystemPrompt,
   getPlanModeSystemReminder,
   resolveInteractionMode,
+  resolveMainSessionOutputStyle,
 } from './prompts.js';
+import { getOutputStyleTurnReminder } from './output-styles.js';
 import {
   CompressionStatus,
   LlmEventType,
@@ -125,6 +131,7 @@ import {
   getDirectoryContextString,
   getInitialChatHistory,
   getStartupContextLength,
+  wrapSystemReminder,
   type AgentAvailabilityEntry,
 } from './environmentContext.js';
 import {
@@ -367,7 +374,11 @@ export function getMainSessionBaseSystemPrompt(
         config.getModel(),
         undefined,
         resolveInteractionMode(config),
-        config.getOutputStyle(),
+        // The prompt and the per-turn reminder must agree on which style is
+        // in force, so both read it from the same resolver rather than from
+        // `getOutputStyle()` directly — a prompt override carries no style
+        // section, and a session must not be reminded of one it lacks.
+        resolveMainSessionOutputStyle(config),
       );
 }
 
@@ -496,7 +507,11 @@ export class LlmClient {
     this.loopDetector = new LoopDetectionService(config);
   }
 
-  async initialize(sessionStartSource?: SessionStartSource) {
+  async initialize(
+    sessionStartSource?: SessionStartSource,
+    signal?: AbortSignal,
+  ) {
+    signal?.throwIfAborted();
     const sessionId = this.config.getSessionId();
     this.lastPromptId = sessionId;
 
@@ -517,6 +532,7 @@ export class LlmClient {
       await this.startChat(
         restoreRuntime.apiHistory,
         sessionStartSource ?? SessionStartSource.Resume,
+        signal,
       );
       this.restoreLoadedSkillsFromHistory(restoreRuntime.apiHistory);
       const chat = this.getChat();
@@ -548,6 +564,7 @@ export class LlmClient {
       await this.startChat(
         resumedHistory,
         sessionStartSource ?? SessionStartSource.Resume,
+        signal,
       );
       this.restoreLoadedSkillsFromHistory(resumedHistory);
       const chat = this.getChat();
@@ -567,12 +584,13 @@ export class LlmClient {
       this.restoreAttributionFromSession(resumedSessionData.conversation);
     } else {
       if (sessionStartSource !== undefined) {
-        await this.startChat(undefined, sessionStartSource);
+        await this.startChat(undefined, sessionStartSource, signal);
       } else {
-        await this.startChat();
+        await this.startChat(undefined, undefined, signal);
       }
     }
 
+    signal?.throwIfAborted();
     this.initializedSessionId = sessionId;
 
     // Clean up stale tool result files from previous sessions (fire-and-forget)
@@ -2000,6 +2018,7 @@ export class LlmClient {
 
   private async fireSessionStartHook(
     source: SessionStartSource,
+    signal?: AbortSignal,
   ): Promise<string | undefined> {
     const hookSystem = this.config.getHookSystem();
     if (
@@ -2011,13 +2030,23 @@ export class LlmClient {
     }
 
     try {
-      const output = await hookSystem.fireSessionStartEvent(
-        source,
-        this.config.getModel() ?? '',
-        this.toPermissionMode(this.config.getApprovalMode()),
-      );
+      const output = signal
+        ? await hookSystem.fireSessionStartEvent(
+            source,
+            this.config.getModel() ?? '',
+            this.toPermissionMode(this.config.getApprovalMode()),
+            undefined,
+            signal,
+          )
+        : await hookSystem.fireSessionStartEvent(
+            source,
+            this.config.getModel() ?? '',
+            this.toPermissionMode(this.config.getApprovalMode()),
+          );
+      signal?.throwIfAborted();
       return output?.getAdditionalContext()?.trim() || undefined;
     } catch (err) {
+      signal?.throwIfAborted();
       this.config.getDebugLogger().warn(`SessionStart hook failed: ${err}`);
       return undefined;
     }
@@ -2028,7 +2057,9 @@ export class LlmClient {
     sessionStartSource = extraHistory
       ? SessionStartSource.Resume
       : SessionStartSource.Startup,
+    signal?: AbortSignal,
   ): Promise<LlmChat> {
+    signal?.throwIfAborted();
     this.forceFullIdeContext = true;
     this.lastInjectedDate = undefined;
     // Clear stale cache params on session reset to prevent cross-session leakage
@@ -2141,7 +2172,7 @@ export class LlmClient {
 
       const sessionStartAdditionalContext = await profiler.time(
         'session_start_hook',
-        () => this.fireSessionStartHook(sessionStartSource),
+        () => this.fireSessionStartHook(sessionStartSource, signal),
       );
       this.lastSessionStartContext = sessionStartAdditionalContext;
       this.lastSessionStartSource = sessionStartAdditionalContext
@@ -2162,11 +2193,13 @@ export class LlmClient {
       await profiler.time('set_tools', () =>
         this.setTools({ skipHistoryReveal: true }),
       );
+      signal?.throwIfAborted();
 
       finishProfile(true);
       return this.chat;
     } catch (error) {
       finishProfile(false);
+      signal?.throwIfAborted();
       await reportError(
         error,
         'Error initializing chat session.',
@@ -2838,21 +2871,32 @@ export class LlmClient {
       return takePendingGoalEvents();
     };
     let strippedRetryEntries: Content[] = [];
-    // Snapshot of LlmChat's user-content push counter, taken right after the
-    // strip. The Retry's re-submitted content is the first thing the send
-    // pushes, so if the counter advances at all that content landed.
-    let pushCountAfterStrip = 0;
     const currentPushCount = () =>
       this.getChat().getUserContentPushCount?.() ?? 0;
 
+    // Settle a carrier exactly once. With `pushCountBefore`, acceptance
+    // compares the user-content push counter against that snapshot — for
+    // the attached carrier the snapshot published by `GeminiChat`
+    // immediately before this send's own push, for the recursive
+    // continuations below the snapshot taken immediately before their
+    // send. Without it (`undefined`), the send provably never pushed its
+    // user content — blocked by a UserPromptSubmit hook, or any exit
+    // before the push site — so restore unconditionally instead of
+    // comparing the push counter: the counter is global, and a concurrent
+    // submission admitted in the meantime pushes its own content into the
+    // same counter, which would read as "accepted" for content THIS send
+    // never pushed.
     const settleSteerInput = (
       steerInput: SteerInput | undefined,
-      pushCountBefore: number,
+      pushCountBefore?: number,
     ) => {
       if (!steerInput || this.settledSteerInputs.has(steerInput)) return;
       this.settledSteerInputs.add(steerInput);
       try {
-        if (currentPushCount() > pushCountBefore) {
+        if (
+          pushCountBefore !== undefined &&
+          currentPushCount() > pushCountBefore
+        ) {
           steerInput.accept();
         } else {
           steerInput.restore();
@@ -2863,7 +2907,29 @@ export class LlmClient {
     };
 
     const attachedSteerInput = options?.steerInput;
-    const attachedSteerPushCount = currentPushCount();
+    // Acceptance snapshot for the attached carrier: `GeminiChat` publishes
+    // the user-content push counter on the request array immediately
+    // before this send's history push (see `userContentPushSnapshotKey`
+    // in geminiChat.ts), so the comparison window around the push is
+    // empty. A client-side snapshot — even one retaken immediately before
+    // `turn.run` — would still cover the send-lock and `tryCompress`
+    // awaits inside `chat.sendMessageStream`, where a concurrently
+    // admitted send (e.g. /btw) can push and supply the observed counter
+    // growth for a send that then exits before its own push.
+    // `attachedSnapshotSource` is the array handed to `turn.run`; a send
+    // that exits before the publish never pushed, so it settles by
+    // unconditional restore. `pushInitiated` tracks whether the send ever
+    // reached `turn.run`; exits before it settle the same way.
+    let attachedSnapshotSource: readonly unknown[] | undefined;
+    const attachedPushSnapshot = (): number | undefined => {
+      const published = attachedSnapshotSource
+        ? (attachedSnapshotSource as unknown as Record<PropertyKey, unknown>)[
+            userContentPushSnapshotKey
+          ]
+        : undefined;
+      return typeof published === 'number' ? published : undefined;
+    };
+    let pushInitiated = false;
 
     const restoreStrippedRetryEntries = () => {
       if (strippedRetryEntries.length === 0) {
@@ -2880,14 +2946,15 @@ export class LlmClient {
       // grow" even after a successful push and duplicate the prompt. The counter
       // only advances on a push that survived (it's decremented if the push is
       // rolled back), so it is invariant under compression.
+      const pushCountBefore = attachedPushSnapshot();
       const pushCountNow = currentPushCount();
-      if (pushCountNow <= pushCountAfterStrip) {
+      if (pushCountBefore === undefined || pushCountNow <= pushCountBefore) {
         // Diagnostic: restoring means the send never pushed the re-submitted
         // content. If the counter were ever wrong, this line is the anchor for
         // a silent duplicate/loss.
         debugLogger.info('[Retry] restoring stripped orphan entries', {
           entries: strippedRetryEntries.length,
-          pushCountAfterStrip,
+          pushCountBefore,
           pushCountNow,
         });
         for (const entry of strippedRetryEntries) {
@@ -2901,7 +2968,6 @@ export class LlmClient {
 
     if (messageType === SendMessageType.Retry) {
       strippedRetryEntries = this.stripOrphanedUserEntriesFromHistory() ?? [];
-      pushCountAfterStrip = currentPushCount();
       // The matching dangling-`functionCall` repair runs inside
       // `chat.sendMessageStream` AFTER the user content is pushed, so any
       // tool_result the user is supplying (Retry of a ToolResult
@@ -3025,7 +3091,11 @@ export class LlmClient {
               originalPrompt: promptText,
             },
           };
-          settleSteerInput(attachedSteerInput, attachedSteerPushCount);
+          // A blocked send never reaches the history push: settle the
+          // attached carrier by unconditional restore, never by the push
+          // counter (a concurrent push inside the hook window above would
+          // otherwise masquerade as this send's acceptance).
+          settleSteerInput(attachedSteerInput);
           return new Turn(this.getChat(), prompt_id);
         }
 
@@ -3060,6 +3130,16 @@ export class LlmClient {
       for (const goalEvent of await finalizeInterruptedGoalTurn()) {
         yield goalEvent;
       }
+      // A hook failure (including an abort during the hook await) exits
+      // before the settlement try/finally below, and this send provably
+      // never pushed: settle the attached carrier here by unconditional
+      // restore instead of leaving it to caller-side failure handling.
+      // Symmetric with the Goal-admission catch below: re-add any Retry
+      // orphan entries popped above (a no-op today — hooks never fire for
+      // Retry, the only type that populates the entries — but keeps this
+      // exit safe under future hook-scope changes).
+      restoreStrippedRetryEntries();
+      settleSteerInput(attachedSteerInput);
       throw error;
     }
 
@@ -3128,6 +3208,18 @@ export class LlmClient {
       for (const goalEvent of await finalizeInterruptedGoalTurn()) {
         yield goalEvent;
       }
+      // A Goal admission failure rethrows before the settlement
+      // try/finally below, and this send provably never pushed: settle the
+      // attached carrier here by unconditional restore, the same contract
+      // as the hook-failure catch above. Idempotently safe via the
+      // `settledSteerInputs` guard when the caller side settles too.
+      // Re-add the Retry orphan entries popped above first: this catch
+      // exits before the settlement try/finally holding the only other
+      // `restoreStrippedRetryEntries` call site, so without this the
+      // popped entries stay dropped from history while the restored
+      // carrier re-records debt against entries that no longer exist.
+      restoreStrippedRetryEntries();
+      settleSteerInput(attachedSteerInput);
       throw error;
     }
     const isGoalRuntimeTurn = goalOrigin === 'runtime';
@@ -3281,6 +3373,15 @@ export class LlmClient {
         }
       }
 
+      // A runtime-scheduled Goal turn is not a session turn. `maxSessionTurns`
+      // counts every model call the user's own prompts drive, tool
+      // continuations included; a Goal that reads a few files per
+      // continuation would spend a user-set cap of N in N/4 continuations
+      // and die mid-run with no resume path in headless. Autonomous Goal
+      // spend is bounded by the Goal's own token budget instead (armed at
+      // creation, re-armed only by an explicit resume or edit), and the
+      // headless host excludes runtime Goal turns from the same cap for the
+      // same reason, so counting them here would split the two ceilings.
       if (messageType !== SendMessageType.Retry && !isGoalRuntimeTurn) {
         // Attribution snapshots are recorded on every non-retry turn. File
         // history snapshots are created only at UserQuery boundaries; later
@@ -3329,11 +3430,12 @@ export class LlmClient {
         }
       }
 
-      // Ensure turns never exceeds MAX_TURNS to prevent infinite loops
-      const boundedTurns =
-        messageType === SendMessageType.Goal
-          ? MAX_TURNS
-          : Math.min(turns, MAX_TURNS);
+      // Ensure turns never exceeds MAX_TURNS to prevent infinite loops. A
+      // runtime Goal turn honours the caller's budget like every other
+      // message type: each continuation is a fresh top-level send that
+      // starts from MAX_TURNS on its own, so nothing about a Goal needs to
+      // outlive one turn's recursion allowance.
+      const boundedTurns = Math.min(turns, MAX_TURNS);
       if (!boundedTurns) {
         this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
         endCurrentInteraction('error', 'max turns exhausted', 'max_turns');
@@ -3351,6 +3453,9 @@ export class LlmClient {
         ) {
           return undefined;
         }
+        // Same ceiling as the session-turn check above, same exclusion: a
+        // runtime Goal turn does not count toward `maxSessionTurns`, so it
+        // must not be refused steer input on that count either.
         const maxSessionTurns = this.config.getMaxSessionTurns();
         if (
           !isGoalRuntimeTurn &&
@@ -3548,6 +3653,16 @@ export class LlmClient {
           }
         }
 
+        // Remind the model of the style its system prompt carries: the
+        // section sits in the cached prompt and fades over a long
+        // conversation without a nudge next to the newest user text.
+        const outputStyle = resolveMainSessionOutputStyle(this.config);
+        if (outputStyle) {
+          systemReminders.push(
+            wrapSystemReminder(getOutputStyleTurnReminder(outputStyle)),
+          );
+        }
+
         const userQueryMemory =
           messageType === SendMessageType.UserQuery
             ? await this.consumeManagedAutoMemoryRecall('initial')
@@ -3685,6 +3800,13 @@ export class LlmClient {
             )
           : null;
 
+      // The acceptance snapshot for the attached carrier is published by
+      // `chat.sendMessageStream` on `requestToSend` immediately before the
+      // actual history push (see `userContentPushSnapshotKey`); a
+      // client-side snapshot taken here would still cover the send-lock
+      // and compression awaits between `turn.run` and that push.
+      attachedSnapshotSource = requestToSend;
+      pushInitiated = true;
       agentOutput.beginResponse();
       const resultStream = turn.run(model, requestToSend, signal);
       let didUpdateIdeContextState = false;
@@ -3698,7 +3820,7 @@ export class LlmClient {
             // UI history) ensures the queued user message renders above the
             // model's reply.  The outer finally re-runs settleSteerInput
             // as a no-op thanks to the settledSteerInputs guard.
-            settleSteerInput(attachedSteerInput, attachedSteerPushCount);
+            settleSteerInput(attachedSteerInput, attachedPushSnapshot());
             steerInputSettled = true;
           }
           if (event.type === LlmEventType.ToolCallRequest) {
@@ -4179,7 +4301,16 @@ export class LlmClient {
           // these semantics (fresh DaemonToolLoopState per continuation).
           // Runaway protection is preserved: the cap still bounds each
           // iteration, and the chain itself is bounded by
-          // stopHookBlockingCap / MAX_GOAL_ITERATIONS.
+          // stopHookBlockingCap / MAX_GOAL_ITERATIONS. Those are the only
+          // Goal-specific bounds on this path (a user-set maxSessionTurns
+          // still cuts the chain: each hook hop is a plain send with no
+          // Goal permit, so it counts as a session turn): the legacy hook
+          // Goal recurses inside one sendMessageStream call, so the
+          // runtime's token budget (which meters continuations the Goal
+          // runtime schedules) never sees it, and the recursion budget is
+          // not decremented below because a 50-iteration chain with steer
+          // and next-speaker continues would otherwise exhaust MAX_TURNS
+          // before its own iteration cap.
           this.loopDetector.reset(prompt_id);
 
           const activeGoal = getActiveGoal(this.config.getSessionId());
@@ -4450,7 +4581,17 @@ export class LlmClient {
         await releaseGoalPermitOnInterruptedExit();
       }
       closeGoalStateEvents();
-      settleSteerInput(attachedSteerInput, attachedSteerPushCount);
+      if (pushInitiated) {
+        // Snapshot published by the chat ⇒ compare against it; no snapshot
+        // ⇒ the send exited before its push site (no await between the
+        // publish and the push) and restores unconditionally.
+        settleSteerInput(attachedSteerInput, attachedPushSnapshot());
+      } else {
+        // Exited before `turn.run` (cancelled during the hook await, setup
+        // failure, ...): this send never pushed, so any counter comparison
+        // could be fooled by concurrent pushes.
+        settleSteerInput(attachedSteerInput);
+      }
       restoreStrippedRetryEntries();
       // Belt-and-suspenders: close out the MessageDisplay dispatcher on any
       // exit the explicit finish() sites above didn't cover (an uncaught

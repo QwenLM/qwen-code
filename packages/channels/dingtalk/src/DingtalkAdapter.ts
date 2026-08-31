@@ -18,7 +18,12 @@ import {
   sanitizeSenderName,
   truncateUtf16Units,
 } from '@qwen-code/channel-base';
-import { normalizeDingTalkMarkdown, extractTitle } from './markdown.js';
+import {
+  DINGTALK_CHUNK_LIMIT,
+  escapeDingTalkMarkdown,
+  normalizeDingTalkMarkdown,
+  extractTitle,
+} from './markdown.js';
 import { downloadMedia } from './media.js';
 import {
   DingTalkMediaUploadError,
@@ -850,7 +855,8 @@ export class DingtalkChannel extends ChannelBase {
         this.questionCardController = new QuestionCardController({
           client: this.interactiveCardClient,
           timeoutMs: this.interactiveCardConfig.questionCard.timeoutMs,
-          sendFallback: (chatId, text) => this.sendMessage(chatId, text),
+          sendFallback: (chatId, text, sourceLabel) =>
+            this.sendReply(chatId, text, undefined, sourceLabel),
           reserveRunProjection: (runId) =>
             this.interactionPresenter?.reserveProjection(runId),
           onError: (operation, error) => {
@@ -870,7 +876,9 @@ export class DingtalkChannel extends ChannelBase {
                   chatId: string,
                   text: string,
                   sessionId: string,
-                ) => this.sendFallbackReply(chatId, text, sessionId),
+                  sourceLabel?: string,
+                ) =>
+                  this.sendFallbackReply(chatId, text, sessionId, sourceLabel),
               }
             : {}),
         });
@@ -1208,6 +1216,7 @@ export class DingtalkChannel extends ChannelBase {
     chatId: string,
     text: string,
     atUserId?: string,
+    sourceLabel?: string,
   ): Promise<void> {
     // chatId is a conversationId — resolve to the latest sessionWebhook
     const webhook = this.webhooks.get(chatId);
@@ -1220,7 +1229,19 @@ export class DingtalkChannel extends ChannelBase {
 
     const outgoingText = await this.prepareOutgoingText(text);
     const mentionPrefix = atUserId ? `@${atUserId}\n\n` : '';
-    const chunks = normalizeDingTalkMarkdown(mentionPrefix + outgoingText);
+    const sourcePrefix =
+      sourceLabel && outgoingText.trim().length > 0
+        ? `${escapeDingTalkMarkdown(sourceLabel)}\n\n`
+        : '';
+    const contentLimit =
+      DINGTALK_CHUNK_LIMIT - mentionPrefix.length - sourcePrefix.length;
+    if (contentLimit <= 0) {
+      throw new Error('DingTalk source label exceeds the message limit.');
+    }
+    const chunks = normalizeDingTalkMarkdown(outgoingText, contentLimit).map(
+      (chunk, index) =>
+        `${index === 0 ? mentionPrefix : ''}${sourcePrefix}${chunk}`,
+    );
     const title = extractTitle(outgoingText);
 
     for (let i = 0; i < chunks.length; i++) {
@@ -1285,6 +1306,15 @@ export class DingtalkChannel extends ChannelBase {
     await this.sendReply(chatId, text);
   }
 
+  protected override async sendThreadMessage(
+    chatId: string,
+    _threadId: string | undefined,
+    text: string,
+    sourceLabel?: string,
+  ): Promise<void> {
+    await this.sendReply(chatId, text, undefined, sourceLabel);
+  }
+
   override supportsProactiveSend(): boolean {
     return true;
   }
@@ -1326,11 +1356,21 @@ export class DingtalkChannel extends ChannelBase {
   protected override async pushProactive(
     target: SessionTarget,
     text: string,
+    sourceLabel?: string,
   ): Promise<void> {
     if (!text.trim()) return;
 
     const outgoingText = await this.prepareOutgoingText(text);
-    const chunks = normalizeDingTalkMarkdown(outgoingText);
+    const sourcePrefix = sourceLabel
+      ? `${escapeDingTalkMarkdown(sourceLabel)}\n\n`
+      : '';
+    const contentLimit = DINGTALK_CHUNK_LIMIT - sourcePrefix.length;
+    if (contentLimit <= 0) {
+      throw new Error('DingTalk source label exceeds the message limit.');
+    }
+    const chunks = normalizeDingTalkMarkdown(outgoingText, contentLimit).map(
+      (chunk) => `${sourcePrefix}${chunk}`,
+    );
     const title = extractTitle(outgoingText);
 
     for (let i = 0; i < chunks.length; i++) {
@@ -1881,12 +1921,14 @@ export class DingtalkChannel extends ChannelBase {
       ) {
         this.cardRuns.set(event.runId, inboundOwner);
         this.cardRunBySession.set(event.sessionId, event.runId);
+        const sourceLabel = this.getResponseSourceLabel(event.sessionId);
         this.interactionPresenter?.registerRun(
           event.runId,
           event.owner.id,
           inboundOwner.target,
           event.sessionId,
           inboundOwner.sender,
+          ...(sourceLabel ? [sourceLabel] : []),
         );
         this.interactionPresenter?.startStatusCard(event.runId);
       }
@@ -2089,7 +2131,12 @@ export class DingtalkChannel extends ChannelBase {
     // prefix of '[FILE:' (at most 5 chars, no path bytes), so the worst case
     // is a stray fragment landing out of order with the next turn — not a
     // leak — and blocking settle on a delivery that may hang is worse.
-    void this.sendReply(chatId, tail).catch((err) => {
+    void this.sendReply(
+      chatId,
+      tail,
+      undefined,
+      this.getResponseSourceLabel(sessionId),
+    ).catch((err) => {
       process.stderr.write(
         `[DingTalk:${this.name}] projector tail delivery failed for session ${sessionId}: ${err instanceof Error ? err.message : String(err)}\n`,
       );
@@ -2105,17 +2152,19 @@ export class DingtalkChannel extends ChannelBase {
     chatId: string,
     text: string,
     sessionId: string,
+    sourceLabel?: string,
   ): Promise<void> {
     if (this.config.blockStreaming !== 'on') {
-      return super.deliverBackgroundReply(chatId, text, sessionId);
+      return super.deliverBackgroundReply(chatId, text, sessionId, sourceLabel);
     }
-    await this.sendReply(chatId, text);
+    await this.sendReply(chatId, text, undefined, sourceLabel);
   }
 
   protected override async sendResponseMessage(
     chatId: string,
     text: string,
     sessionId: string,
+    sourceLabel?: string,
   ): Promise<void> {
     let outgoingText = text;
     let consumesMention = true;
@@ -2132,7 +2181,12 @@ export class DingtalkChannel extends ChannelBase {
         ? this.sessionMentionTargets.get(sessionId)
         : undefined;
     if (atUserId) this.sessionMentionTargets.delete(sessionId);
-    await this.sendReply(chatId, outgoingText, atUserId);
+    await this.sendReply(
+      chatId,
+      outgoingText,
+      atUserId,
+      sourceLabel ?? this.getResponseSourceLabel(sessionId),
+    );
   }
 
   private projectBlockStreamChunk(
@@ -2165,13 +2219,14 @@ export class DingtalkChannel extends ChannelBase {
     chatId: string,
     text: string,
     sessionId: string,
+    sourceLabel?: string,
   ): Promise<void> {
     // Mid-run fallbacks must not consume the prompt's mention target: the
     // final answer of the same run still needs it.
     const atUserId = this.atSender
       ? this.sessionMentionTargets.get(sessionId)
       : undefined;
-    await this.sendReply(chatId, text, atUserId);
+    await this.sendReply(chatId, text, atUserId, sourceLabel);
   }
 
   protected override async onResponseComplete(
@@ -2197,7 +2252,12 @@ export class DingtalkChannel extends ChannelBase {
         return;
       }
     }
-    await this.sendResponseMessage(chatId, outgoingText, sessionId);
+    await this.sendResponseMessage(
+      chatId,
+      outgoingText,
+      sessionId,
+      segment?.sourceLabel,
+    );
   }
 
   protected override onOutputSegmentEnd(
@@ -2780,10 +2840,19 @@ export class DingtalkChannel extends ChannelBase {
         process.stderr.write(
           `[DingTalk:${this.name}] Error handling message: ${err}\n`,
         );
-        this.sendMessage(
-          chatId,
-          'Sorry, something went wrong processing your message.',
-        ).catch(() => {});
+        const sourceLabel = this.getInboundErrorSourceLabel(envelope);
+        const delivery = sourceLabel
+          ? this.sendThreadMessage(
+              chatId,
+              envelope.threadId,
+              'Sorry, something went wrong processing your message.',
+              sourceLabel,
+            )
+          : this.sendMessage(
+              chatId,
+              'Sorry, something went wrong processing your message.',
+            );
+        delivery.catch(() => {});
       });
     } catch (err) {
       process.stderr.write(

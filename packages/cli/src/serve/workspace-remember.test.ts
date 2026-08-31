@@ -648,7 +648,7 @@ describe('workspace memory remember routes', () => {
     });
   });
 
-  it('requires auth for task polling', async () => {
+  it('requires authority when trusted mode is omitted from the gate', async () => {
     const bridge = buildBridgeStub({});
     const app = buildApp(bridge, {
       tokenConfigured: false,

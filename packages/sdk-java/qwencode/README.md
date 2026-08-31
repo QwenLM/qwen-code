@@ -352,9 +352,8 @@ The SDK uses a thread pool for managing concurrent operations with the following
 
 The SDK provides specific exception types for different error scenarios:
 
-- `SessionControlException`: Thrown when there's an issue with session control (creation, initialization, etc.)
+- `SessionControlException`: Thrown when there's an issue with session control, including attempting to use a closed or unavailable session. Session construction and `start()` can throw it directly; `QwenCodeCli.newSession()` wraps lower-level creation and initialization failures in a `RuntimeException`.
 - `SessionSendPromptException`: Thrown when there's an issue sending a prompt or receiving a response
-- `SessionClosedException`: Thrown when attempting to use a closed session
 
 ## FAQ / Troubleshooting
 

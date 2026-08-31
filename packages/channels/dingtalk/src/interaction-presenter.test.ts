@@ -190,6 +190,69 @@ describe('DingtalkInteractionPresenter', () => {
     expect(client.openOrUpdateStream).toHaveBeenCalledTimes(2);
   });
 
+  it('renders one escaped source label through running, streaming, and terminal cards', async () => {
+    const { client, presenter } = createHarness();
+    presenter.registerRun(
+      'run-1',
+      'owner-1',
+      target,
+      'session-1',
+      undefined,
+      '[IMAGE: x · review_*]',
+    );
+
+    presenter.startStatusCard('run-1');
+    presenter.appendOutput(segment('segment-1'), 'analysis');
+
+    await vi.waitFor(() => {
+      expect(client.createAndDeliver).toHaveBeenCalledWith(
+        expect.objectContaining({
+          cardParamMap: expect.objectContaining({
+            content: '🤔 Thinking\n\n\\[IMAGE\\: x · review\\_\\*\\]',
+          }),
+        }),
+      );
+      expect(client.openOrUpdateStream).toHaveBeenCalledWith(
+        expect.objectContaining({
+          content: '🤔 Thinking\n\n\\[IMAGE\\: x · review\\_\\*\\]\n\nanalysis',
+        }),
+      );
+    });
+
+    await presenter.closeOutput('segment-1', 'final answer', 'completed');
+    expect(client.updateInstance).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cardParamMap: expect.objectContaining({
+          content: '\\[IMAGE\\: x · review\\_\\*\\]\n\nfinal answer',
+        }),
+      }),
+    );
+  });
+
+  it('preserves model text that starts with the source label', async () => {
+    const { client, presenter } = createHarness();
+    presenter.registerRun(
+      'run-1',
+      'owner-1',
+      target,
+      'session-1',
+      undefined,
+      '[review]',
+    );
+    const response = '[review]\nactual result';
+    presenter.appendOutput(segment('segment-1'), response);
+
+    await presenter.closeOutput('segment-1', response, 'completed');
+
+    expect(client.updateInstance).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cardParamMap: expect.objectContaining({
+          content: '\\[review\\]\n\n[review]\nactual result',
+        }),
+      }),
+    );
+  });
+
   it('adds the group sender only to the final model output', async () => {
     const { client, presenter } = createHarness();
     presenter.registerRun('run-1', 'owner-1', target, 'session-1', {
@@ -275,7 +338,7 @@ describe('DingtalkInteractionPresenter', () => {
   it('escapes markdown-sensitive sender names in card attribution', async () => {
     const { client, presenter } = createHarness();
     presenter.registerRun('run-1', 'owner-1', target, 'session-1', {
-      senderName: '衍_星#1 (ops)',
+      senderName: '衍_星#1:ops (oncall)',
     });
     presenter.appendOutput(segment('segment-1'), 'final answer');
 
@@ -286,8 +349,8 @@ describe('DingtalkInteractionPresenter', () => {
       .mock.calls.map(([request]) => request.cardParamMap)
       .find((payload) => payload.flowStatus === 3);
     expect(terminalPayload).toMatchObject({
-      content: '@衍\\_星\\#1 \\(ops\\)\n\nfinal answer',
-      copy_content: '@衍\\_星\\#1 \\(ops\\)\n\nfinal answer',
+      content: '@衍\\_星\\#1:ops \\(oncall\\)\n\nfinal answer',
+      copy_content: '@衍\\_星\\#1:ops \\(oncall\\)\n\nfinal answer',
     });
   });
 
@@ -694,9 +757,14 @@ describe('DingtalkInteractionPresenter', () => {
 
   it('attributes retained card content when a run completes without a final response', async () => {
     const { client, presenter, sendFallback } = createHarness();
-    presenter.registerRun('run-1', 'owner-1', target, 'session-1', {
-      senderName: '衍*星',
-    });
+    presenter.registerRun(
+      'run-1',
+      'owner-1',
+      target,
+      'session-1',
+      { senderName: '衍*星' },
+      '[review]',
+    );
     presenter.appendOutput(segment('segment-1'), 'intermediate');
     await presenter.closeOutput('segment-1', '', 'response_boundary');
 
@@ -708,8 +776,8 @@ describe('DingtalkInteractionPresenter', () => {
         .mock.calls.map(([request]) => request.cardParamMap)
         .find((payload) => payload.flowStatus === 3);
       expect(terminalPayload).toMatchObject({
-        content: '@衍\\*星\n\nintermediate',
-        copy_content: '@衍\\*星\n\nintermediate',
+        content: '@衍\\*星\n\n\\[review\\]\n\nintermediate',
+        copy_content: '@衍\\*星\n\n\\[review\\]\n\nintermediate',
       });
     });
     expect(sendFallback).not.toHaveBeenCalled();

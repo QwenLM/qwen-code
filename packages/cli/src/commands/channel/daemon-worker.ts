@@ -65,10 +65,7 @@ import {
   MAX_CHANNEL_STARTUP_FAILURE_MESSAGE_LENGTH,
   type ChannelStartupReportMessage,
 } from '../../serve/channel-worker-startup-ipc.js';
-import {
-  isHostGateLoopback,
-  isLoopbackBind,
-} from '../../serve/loopback-binds.js';
+import { isLoopbackBind } from '../../serve/loopback-binds.js';
 import { isOwnInterfaceAddress } from '../../serve/local-bind-addresses.js';
 import { ChannelLoopMcpWorkerHost } from '../../serve/channel-loop-mcp-ipc.js';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
@@ -151,6 +148,8 @@ interface DaemonSessionClientStaticLike {
       modelServiceId?: string;
       sessionScope: 'thread';
       approvalMode?: string;
+      sourceType?: string;
+      sourceId?: string;
     },
     clientId?: string,
   ): Promise<DaemonChannelSessionClient>;
@@ -214,6 +213,11 @@ export function createDaemonSessionFactory({
       // sessions remain thread-scoped so different channels never share the
       // daemon's default single session.
       sessionScope: 'thread' as const,
+      sourceType: 'channel',
+      // sourceId = channel instance name (e.g. feishu-main): distinguishes
+      // channel instances on the daemon data plane; the channel kind
+      // (dingtalk/feishu) is derivable from the name via the channel config.
+      ...(req.sourceId ? { sourceId: req.sourceId } : {}),
     };
     if (req.sessionId) {
       return await DaemonSessionClient.resume(
@@ -225,16 +229,7 @@ export function createDaemonSessionFactory({
     }
     return await DaemonSessionClient.createOrAttach(
       client,
-      {
-        ...daemonReq,
-        sourceType: 'channel',
-        // sourceId = channel instance name (e.g. feishu-main): distinguishes
-        // channel instances on the daemon data plane; the channel kind
-        // (dingtalk/feishu) is derivable from the name via the channel config.
-        // The load branch above deliberately omits it: loading never re-stamps
-        // creation attribution.
-        ...(req.sourceId ? { sourceId: req.sourceId } : {}),
-      },
+      daemonReq,
       clientId,
     );
   };
@@ -343,17 +338,7 @@ function validateDaemonWorkerUrl(daemonUrl: string): void {
         `literal address of one of this machine's interfaces.`,
     );
   }
-  if (isHostGateLoopback(parsed.hostname)) return;
-  if (isLoopbackBind(parsed.hostname)) {
-    // Order matters: this refusal must run BEFORE the own-interface escape
-    // below — a wide 127/8 address can be assigned to a local interface
-    // (`ip addr add 127.0.0.2/8 dev lo`), and the gate 403s it either way.
-    throw new Error(
-      `${QWEN_DAEMON_URL_ENV} points at a loopback address the daemon's ` +
-        `Host header gate refuses (it answers only 127.0.0.1, localhost, ` +
-        `and [::1]); use one of those spellings instead.`,
-    );
-  }
+  if (isLoopbackBind(parsed.hostname)) return;
   if (!isOwnInterfaceAddress(parsed.hostname)) {
     throw new Error(
       `${QWEN_DAEMON_URL_ENV} must use an http(s) loopback URL or a ` +
