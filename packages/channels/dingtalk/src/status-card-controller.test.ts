@@ -1206,11 +1206,20 @@ describe('StatusCardController', () => {
 
     const flushed = controller.flushPending('segment-1');
     await vi.advanceTimersByTimeAsync(1_000);
+    // Hold the heartbeat the status tick chained while the drain hung, so it
+    // is still in flight when abandon() detaches the record.
+    const heartbeat = deferred<void>();
+    vi.mocked(client.updateInstance).mockImplementation(async (request) => {
+      if (request.cardParamMap.flowStatus === undefined) {
+        await heartbeat.promise;
+      }
+    });
     drain.reject(new Error('stream blip'));
     await expect(flushed).resolves.toBe(false);
     const updatesBeforeAbandon = vi.mocked(client.updateInstance).mock.calls
       .length;
     controller.abandon('segment-1');
+    heartbeat.resolve();
 
     await vi.advanceTimersByTimeAsync(60_000);
     expect(client.openOrUpdateStream).toHaveBeenCalledTimes(2);
@@ -1245,6 +1254,14 @@ describe('StatusCardController', () => {
 
     await vi.advanceTimersByTimeAsync(1_000);
     expect(client.updateInstance).toHaveBeenCalledTimes(2);
+    expect(client.updateInstance).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        cardParamMap: expect.objectContaining({
+          content: 'answer',
+          flowStatus: 3,
+        }),
+      }),
+    );
   });
 
   it('re-arms flushes promptly after a boundary drain recovers a failed write', async () => {
