@@ -1425,6 +1425,7 @@ describe('MessageList — turn collapse (DOM)', () => {
         await Promise.resolve();
       });
       await nextFrame();
+      await nextFrame();
       expect(has(c, 't1')).toBe(true);
 
       // Page 2 anchors on the now-visible t1 row while the fetch is in flight.
@@ -1445,6 +1446,7 @@ describe('MessageList — turn collapse (DOM)', () => {
         await Promise.resolve();
       });
       await nextFrame();
+      await nextFrame();
       expect(isCollapsed(c, 't1')).toBe(true);
 
       // ...and pagination is not stuck: a third load still fires.
@@ -1464,6 +1466,8 @@ describe('MessageList — turn collapse (DOM)', () => {
         resolveLoad();
         await Promise.resolve();
       });
+      await nextFrame();
+      await nextFrame();
       // ...page 4 then completes that turn's head while its tail is already
       // on screen, so it stays expanded.
       // Re-top the container: re-renders snap it to the bottom while
