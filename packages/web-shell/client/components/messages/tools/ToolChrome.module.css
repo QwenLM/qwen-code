@@ -411,6 +411,12 @@
   overflow: hidden;
 }
 
+/* Collapsed groups that stay mounted (workflow details keep their live state)
+   collapse the grid row instead of unmounting via `display: none`. */
+.chatSummaryContentCollapsed {
+  grid-template-rows: 0fr;
+}
+
 .chatSummaryContentInner {
   min-height: 0;
   overflow: hidden;

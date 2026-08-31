@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type {
-  DaemonSessionTaskStatus,
+  DaemonSessionTaskWithWorkflowStatus,
   DaemonSessionWorkflowTaskStatus,
 } from '@qwen-code/sdk/daemon';
 import type { ACPToolCall } from '../adapters/types';
@@ -38,7 +38,7 @@ function workflowTool(overrides: Partial<ACPToolCall>): ACPToolCall {
 }
 
 describe('findWorkflowTaskForTool', () => {
-  const tasks: DaemonSessionTaskStatus[] = [
+  const tasks: DaemonSessionTaskWithWorkflowStatus[] = [
     workflowTask('wf_expected'),
     workflowTask('wf_other'),
   ];

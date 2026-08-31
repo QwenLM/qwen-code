@@ -111,6 +111,7 @@ function workflowTask(
     agentsDispatched: 0,
     agentsCompleted: 0,
     tokensSpent: 0,
+    tokenBudgetTotal: null,
     recentLogs: [],
     pendingApprovalCount: 0,
     pendingApprovals: [],

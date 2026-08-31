@@ -222,6 +222,14 @@
   color: var(--foreground);
 }
 
+/* Flexible middle column of `.detailRuns li` — truncate rather than widen the
+   row when a timestamp renders long. */
+.detailRunTime {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .detailRuns li[data-status='running'] .detailRunStatus {
   color: var(--agent-blue-500);
 }
