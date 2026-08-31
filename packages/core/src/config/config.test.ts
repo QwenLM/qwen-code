@@ -2181,6 +2181,7 @@ describe('Server Config (config.ts)', () => {
       const config = new Config(baseParams);
       const sessionId = config.getSessionId();
       const statusPath = config.storage.getRuntimeStatusPath(sessionId);
+      const currentNamespace = readPidNamespaceId();
       config.markRuntimeStatusEnabled(); // models the successful write
       const readSpy = vi
         .spyOn(runtimeStatus, 'readRuntimeStatus')
@@ -2192,7 +2193,7 @@ describe('Server Config (config.ts)', () => {
           hostname: os.hostname(),
           startedAt: Date.now() / 1000,
           qwenVersion: null,
-          pidNamespaceId: null,
+          pidNamespaceId: currentNamespace,
           procStartToken: null,
         });
       const writeSpy = vi
@@ -2321,6 +2322,7 @@ describe('Server Config (config.ts)', () => {
       const config = new Config(baseParams);
       const sessionId = config.getSessionId();
       const ownStatusPath = config.storage.getRuntimeStatusPath(sessionId);
+      const currentNamespace = readPidNamespaceId();
       const siblingStatusPath = config.storage.getRuntimeStatusPathForPid(
         sessionId,
         process.pid + 1,
@@ -2342,7 +2344,7 @@ describe('Server Config (config.ts)', () => {
           hostname: os.hostname(),
           startedAt: Date.now() / 1000,
           qwenVersion: null,
-          pidNamespaceId: null,
+          pidNamespaceId: currentNamespace,
           procStartToken: null,
         });
       const writeSpy = vi
@@ -7824,7 +7826,7 @@ describe('Server Config (config.ts)', () => {
         hostname: os.hostname(),
         startedAt: Date.now() / 1000,
         qwenVersion: null,
-        pidNamespaceId: null,
+        pidNamespaceId: readPidNamespaceId(),
         procStartToken: null,
       });
 
