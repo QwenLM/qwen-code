@@ -75,6 +75,7 @@ function createFakeConfig(options?: {
     getWorkflowRunRegistry: () => ({
       hasRunningEntries: () => false,
       list: () => [],
+      listStartingRunIds: () => [],
       abortAll: () => {},
       reset: () => {},
     }),
