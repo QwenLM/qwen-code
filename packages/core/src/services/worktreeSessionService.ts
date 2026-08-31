@@ -473,6 +473,9 @@ async function getRuntimeStatusPathState(
     if (isNodeError(error) && error.code === 'ESRCH') {
       return 'dead';
     }
+    if (isNodeError(error) && error.code === 'EPERM') {
+      return 'active';
+    }
     return 'unknown';
   }
 }

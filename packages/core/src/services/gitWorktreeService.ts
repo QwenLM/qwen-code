@@ -404,7 +404,7 @@ export class GitWorktreeService {
 
   private getGit(): Promise<SimpleGit> {
     this.gitPromise ??= loadSimpleGit().then(({ simpleGit }) =>
-      simpleGit(this.sourceRepoPath),
+      simpleGit(this.sourceRepoPath).env(gitEnv()),
     );
     return this.gitPromise;
   }
@@ -2427,7 +2427,7 @@ export class GitWorktreeService {
         return { success: false, error: 'Worktree marker owner changed' };
       }
       const { simpleGit } = await loadSimpleGit();
-      const worktreeGit = simpleGit(worktreePath);
+      const worktreeGit = simpleGit(worktreePath).env(gitEnv());
       const trackedMarker = await worktreeGit.raw([
         'ls-files',
         '-z',
@@ -2482,8 +2482,17 @@ export class GitWorktreeService {
       };
       const isClean = async () => {
         const status = await worktreeGit.status();
+        const hiddenIndexEntries = await worktreeGit.raw([
+          'ls-files',
+          '-v',
+          '-z',
+        ]);
+        const hasHiddenIndexBits = hiddenIndexEntries
+          .split('\0')
+          .some((entry) => /^(?:S|[a-z])/.test(entry));
         return (
           status.isClean() &&
+          !hasHiddenIndexBits &&
           !(await hasPopulatedGitlink()) &&
           (
             await worktreeGit.raw([

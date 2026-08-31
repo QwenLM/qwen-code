@@ -160,6 +160,78 @@ describe('prepared worktree cleanup', () => {
     ).resolves.toBeNull();
   });
 
+  it('removes the owning worktree despite an inherited GIT_DIR', async () => {
+    const { baseCommit, service, worktreePath } =
+      await createPreparedWorktree('isolated-env');
+    const decoyParent = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'git-env-decoy-'),
+    );
+    const decoy = path.join(decoyParent, 'repo');
+    execFileSync('git', ['clone', '-q', repo, decoy]);
+    execFileSync('git', ['config', 'user.name', 'Qwen Test'], { cwd: decoy });
+    execFileSync('git', ['config', 'user.email', 'qwen@example.invalid'], {
+      cwd: decoy,
+    });
+    execFileSync('git', ['commit', '--allow-empty', '-qm', 'decoy'], {
+      cwd: decoy,
+    });
+    const previousGitDir = process.env['GIT_DIR'];
+    const previousGitWorkTree = process.env['GIT_WORK_TREE'];
+    process.env['GIT_DIR'] = path.join(decoy, '.git');
+    delete process.env['GIT_WORK_TREE'];
+
+    try {
+      await expect(
+        service.removePreparedUserWorktree(
+          'isolated-env',
+          'session-a',
+          baseCommit,
+        ),
+      ).resolves.toEqual({ success: true });
+      await expect(fs.stat(worktreePath)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+    } finally {
+      if (previousGitDir === undefined) delete process.env['GIT_DIR'];
+      else process.env['GIT_DIR'] = previousGitDir;
+      if (previousGitWorkTree === undefined) {
+        delete process.env['GIT_WORK_TREE'];
+      } else {
+        process.env['GIT_WORK_TREE'] = previousGitWorkTree;
+      }
+      await fs.rm(decoyParent, { recursive: true, force: true });
+    }
+  });
+
+  it.each(['--skip-worktree', '--assume-unchanged'])(
+    'preserves modified files hidden by %s',
+    async (hiddenFlag) => {
+      await fs.writeFile(path.join(repo, 'tracked.txt'), 'base', 'utf8');
+      execFileSync('git', ['add', 'tracked.txt'], { cwd: repo });
+      const { baseCommit, service, worktreePath } =
+        await createPreparedWorktree('hidden-index');
+      const trackedPath = path.join(worktreePath, 'tracked.txt');
+      await fs.writeFile(trackedPath, 'user change', 'utf8');
+      execFileSync('git', ['update-index', hiddenFlag, 'tracked.txt'], {
+        cwd: worktreePath,
+      });
+
+      await expect(
+        service.removePreparedUserWorktree(
+          'hidden-index',
+          'session-a',
+          baseCommit,
+        ),
+      ).resolves.toEqual({
+        success: false,
+        error: 'Worktree contains changes',
+      });
+      await expect(fs.readFile(trackedPath, 'utf8')).resolves.toBe(
+        'user change',
+      );
+    },
+  );
+
   it('preserves a branch whose tip moves after worktree removal', async () => {
     const { baseCommit, service } = await createPreparedWorktree('moved');
     const tree = execFileSync('git', ['rev-parse', `${baseCommit}^{tree}`], {

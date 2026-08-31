@@ -538,35 +538,44 @@ describe('resolveBranchWorktreeBaseCheckout', () => {
       cwd: created.worktree.path,
     });
 
-    const resolved = await resolveBranchWorktreeBaseCheckout({
-      workspaceCwd: root,
-      sessionId: sourceSessionId,
-      snapshot: {
-        workspaceCwd: root,
-        effectiveCwd: created.worktree.path,
-        worktree: {
-          slug: 'source',
-          path: created.worktree.path,
-          branch: created.worktree.branch,
-        },
-      },
-      sidecarPath,
+    const decoyParent = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'git-env-decoy-'),
+    );
+    const decoy = path.join(decoyParent, 'repo');
+    execFileSync('git', ['clone', '-q', root, decoy]);
+    execFileSync('git', ['config', 'user.name', 'Qwen Test'], { cwd: decoy });
+    execFileSync('git', ['config', 'user.email', 'qwen@example.invalid'], {
+      cwd: decoy,
     });
-    expect(resolved).toMatchObject({
-      repoTop: await fs.realpath(root),
-      checkoutCwd: await fs.realpath(created.worktree.path),
-      headCommit: baseCommit,
-      branch: 'HEAD',
+    execFileSync('git', ['commit', '--allow-empty', '-qm', 'decoy'], {
+      cwd: decoy,
     });
-
-    const decoy = await fs.mkdtemp(path.join(os.tmpdir(), 'git-env-decoy-'));
-    execFileSync('git', ['init', '-q'], { cwd: decoy });
     const previousGitDir = process.env['GIT_DIR'];
     const previousGitWorkTree = process.env['GIT_WORK_TREE'];
     process.env['GIT_DIR'] = path.join(decoy, '.git');
-    process.env['GIT_WORK_TREE'] = decoy;
+    delete process.env['GIT_WORK_TREE'];
 
     try {
+      const resolved = await resolveBranchWorktreeBaseCheckout({
+        workspaceCwd: root,
+        sessionId: sourceSessionId,
+        snapshot: {
+          workspaceCwd: root,
+          effectiveCwd: created.worktree.path,
+          worktree: {
+            slug: 'source',
+            path: created.worktree.path,
+            branch: created.worktree.branch,
+          },
+        },
+        sidecarPath,
+      });
+      expect(resolved).toMatchObject({
+        repoTop: await fs.realpath(root),
+        checkoutCwd: await fs.realpath(created.worktree.path),
+        headCommit: baseCommit,
+        branch: 'HEAD',
+      });
       await expect(isBranchWorktreeCreationSupported(resolved!)).resolves.toBe(
         true,
       );
@@ -578,7 +587,7 @@ describe('resolveBranchWorktreeBaseCheckout', () => {
       } else {
         process.env['GIT_WORK_TREE'] = previousGitWorkTree;
       }
-      await fs.rm(decoy, { recursive: true, force: true });
+      await fs.rm(decoyParent, { recursive: true, force: true });
     }
   });
 });

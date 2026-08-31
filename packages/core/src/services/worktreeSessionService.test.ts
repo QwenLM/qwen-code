@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -225,6 +225,34 @@ describe('isSessionRuntimeActive', () => {
     await expect(
       getSessionRuntimeLiveness('owner-session', repoRoot),
     ).resolves.toBe('inactive');
+  });
+
+  it('treats EPERM from the local pid probe as active', async () => {
+    const repoRoot = path.join(tmpDir, 'repo');
+    await fs.mkdir(repoRoot, { recursive: true });
+    Storage.setRuntimeBaseDir(path.join(tmpDir, 'runtime'));
+    await writeRuntimeStatus(
+      new Storage(repoRoot).getRuntimeStatusPath('owner-session'),
+      {
+        sessionId: 'owner-session',
+        workDir: repoRoot,
+        pid: process.pid,
+      },
+    );
+    const error = Object.assign(new Error('operation not permitted'), {
+      code: 'EPERM',
+    });
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => {
+      throw error;
+    });
+
+    try {
+      await expect(
+        getSessionRuntimeLiveness('owner-session', repoRoot),
+      ).resolves.toBe('active');
+    } finally {
+      killSpy.mockRestore();
+    }
   });
 
   it('does not trust repo-contained dead runtime status as proof of inactivity', async () => {

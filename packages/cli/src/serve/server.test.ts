@@ -17633,6 +17633,7 @@ describe('createServeApp', () => {
           originalHeadCommit: 'abc123',
         };
       };
+      mockWt.readMarker = async () => sessionId;
 
       try {
         const options = { view: 'organized' as const };
@@ -17689,6 +17690,7 @@ describe('createServeApp', () => {
       } finally {
         releaseSidecar();
         mockWt.readSidecar = undefined;
+        mockWt.readMarker = undefined;
       }
     });
 
