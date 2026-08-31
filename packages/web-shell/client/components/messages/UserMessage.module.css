@@ -226,6 +226,42 @@
   height: 14px;
 }
 
+.editButton {
+  display: inline-flex;
+  width: 24px;
+  height: 24px;
+  align-items: center;
+  justify-content: center;
+  margin-top: 2px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  opacity: 0;
+}
+
+.chatMessageColumn:hover .editButton,
+.editButton:focus-visible {
+  opacity: 1;
+}
+
+.editButton:hover {
+  background: var(--vscode-toolbar-hoverBackground, var(--accent));
+  color: var(--foreground);
+}
+
+.editButton:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder, var(--ring));
+  outline-offset: -1px;
+}
+
+.editButton svg {
+  width: 14px;
+  height: 14px;
+}
+
 .chatContent {
   white-space: pre-wrap;
   word-break: break-word;

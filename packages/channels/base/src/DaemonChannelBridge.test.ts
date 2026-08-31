@@ -662,7 +662,7 @@ describe('DaemonChannelBridge', () => {
     bridge.stop();
   });
 
-  it('forwards sourceId to the session factory only for new sessions', async () => {
+  it('forwards source IDs to the session factory for new and loaded sessions', async () => {
     const events = new EventQueue();
     const session = createFakeSession(events);
     const factory = vi.fn().mockResolvedValue(session);
@@ -672,22 +672,25 @@ describe('DaemonChannelBridge', () => {
     });
 
     await bridge.start();
-    await bridge.newSession('/repo', { sourceId: 'feishu-main' });
-    await bridge.loadSession('session-1', '/repo', { sourceId: 'feishu-main' });
+    await bridge.newSession('/repo', {
+      sourceId: 'feishu-main',
+    });
+    await bridge.loadSession('session-1', '/repo', {
+      sourceId: 'feishu-main',
+    });
 
-    // New session: sourceId is forwarded to the factory (creation attribution);
     expect(factory).toHaveBeenNthCalledWith(1, {
       workspaceCwd: '/repo',
       modelServiceId: undefined,
       sessionScope: 'thread',
       sourceId: 'feishu-main',
     });
-    // Load: never forwarded even when provided — loads never re-stamp creation source.
     expect(factory).toHaveBeenNthCalledWith(2, {
       workspaceCwd: '/repo',
       modelServiceId: undefined,
       sessionId: 'session-1',
       sessionScope: 'thread',
+      sourceId: 'feishu-main',
     });
 
     events.close();
