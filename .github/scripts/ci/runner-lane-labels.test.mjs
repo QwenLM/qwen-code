@@ -13,11 +13,21 @@
 // runner configuration, not in this repo. What it does is make inventing one a
 // deliberate, reviewable edit here, next to the note saying the label must be
 // on the runners BEFORE the workflow lands. That ordering is the whole lesson.
+//
+// The guard parses the workflows with the real YAML parser and walks
+// `jobs.*.runs-on`, resolving in-file `${{ matrix.* }}` / `${{ env.* }}`
+// references to their defined values — three review rounds established that a
+// hand-rolled line reader fails open on spellings it does not recognize, and
+// that a YAML grammar's entrances cannot be enumerated shut. Everything the
+// walk cannot resolve to concrete labels FAILS the suite rather than being
+// skipped. `yaml` is the same root devDependency the sibling workflow tests
+// (ci-runner-routing.test.mjs and six others) already import.
 import assert from 'node:assert/strict';
 import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { parse } from 'yaml';
 
 const workflowsDir = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -50,7 +60,9 @@ const workflowsDir = join(
 // Adding an entry here is NOT what makes a label exist. Register it on the
 // runners first (`POST /repos/{owner}/{repo}/actions/runners/{id}/labels`),
 // confirm the runners report it, and only then merge the workflow that asks
-// for it.
+// for it. Comparisons are case-insensitive because GitHub's label matching
+// is (the fleet registers `Linux`/`X64` capitalized while ci.yml routes with
+// lowercase spellings, and both demonstrably match).
 const REGISTERED_LANES = new Set([
   'ecs-light',
   'ecs-agent',
@@ -64,193 +76,328 @@ const REGISTERED_LANES = new Set([
 // Platform labels every self-hosted runner reports; they never name a lane.
 const PLATFORM_LABELS = new Set(['self-hosted', 'linux', 'x64', 'windows']);
 
-// Expression labels the guard may skip: a genuinely runtime-resolved label
-// reads from one of these contexts (update-ecs-runner-qwen.yml fans out over
-// `${{ matrix.runner }}`). A `${{ ... }}` label that names NO runtime context
-// is a constant in costume — GitHub evaluates `${{ 'ecs-x' }}` to the string
-// `ecs-x` — and skipping it would let an invented lane ship, so it fails
-// closed instead.
-const RUNTIME_CONTEXT =
-  /\$\{\{[^}]*\b(matrix|needs|inputs|env|github|vars|secrets|strategy|steps)\s*\./;
+// Host-maintenance labels (update-ecs-runner-qwen.yml fans out over one
+// `ecs-update-*` registration per host). Valid beside self-hosted, but they
+// are not lanes: nothing routes ordinary work to them, so they are accepted
+// without feeding the referenced-lane accounting.
+const MAINTENANCE_LABEL = /^ecs-update-/i;
+
+// GitHub-hosted runner images; outside this guard's jurisdiction.
+const HOSTED_LABEL = /^(ubuntu|windows|macos)-/i;
 
 const workflowFiles = readdirSync(workflowsDir)
   .filter((name) => name.endsWith('.yml') || name.endsWith('.yaml'))
   .sort();
 
-// Candidate label-set texts come from two places:
-//  - `runs-on:` values (line-anchored so a bash `[ "$X" == "self-hosted" ]`
-//    in a run body is not mistaken for a label set; the key match tolerates
-//    a quoted key and space before the colon — both valid YAML),
-//  - whole-line `VAR='["…"]'` assignments, because ci.yml's pick_runner step
-//    assembles the Linux runner set OFF the runs-on line and four jobs
-//    consume it through `fromJSON(needs.classify_pr.outputs.ubuntu_runner)`.
-//    Without this, mutating that assignment to an invented lane ships green
-//    while the repo's main CI path queues forever. This is the one deliberate
-//    relaxation of the no-run-body rule, scoped to that exact shape.
-function candidateValues(text) {
-  const runsOn = [...text.matchAll(/^\s*(["']?)runs-on\1\s*:\s*(.*)$/gm)].map(
-    (m) => m[2],
-  );
-  const assignments = [
+// ci.yml's pick_runner step assembles the Linux runner set OFF the runs-on
+// line (`ubuntu_runner='["self-hosted", …]'`) and four jobs consume it
+// through `fromJSON(needs.classify_pr.outputs.ubuntu_runner)`. The consuming
+// expressions carry only the hosted fallback, so the lane on the repo's main
+// CI path is checkable ONLY at the assembly site. This scans run bodies for
+// that exact whole-line shape — the one deliberate look inside `run:` text.
+// Price of the textual scan, accepted and named: a matching line anywhere in
+// a run body is validated as (and counts as a reference to) a lane set even
+// if that code path is dead. A tripwire test below pins that the live ci.yml
+// assignments keep matching this shape; if they are ever re-quoted or
+// reshaped, the tripwire — not silence — says so.
+function runnerSetAssignments(text) {
+  return [
     ...text.matchAll(/^\s*[A-Za-z_][A-Za-z0-9_]*='(\[[^\n]*\])'\s*$/gm),
   ].map((m) => m[1]);
-  return [...runsOn, ...assignments];
 }
 
-// Classifies every candidate value: parsed self-hosted label sets land in
-// `sets`, and every spelling naming (or possibly hiding) self-hosted labels
-// that this parser cannot read lands in `unreadable` and FAILS the suite —
-// never silently in neither. The refusals are keyed on SHAPE, not on an
-// enumeration of spellings, because entrances cannot be enumerated out of a
-// YAML grammar: any block form (labels on following lines), alias, anchor,
-// comment-led value, unbalanced flow sequence, or self-hosted-naming value
-// that produced no parsed set is refused. Keeping the repo on single-line
-// quoted `runs-on` values is part of the contract; the failure message says
-// to inline the labels.
-function selfHostedLabelSets(text) {
-  const sets = [];
-  const unreadable = [];
-  for (const value of candidateValues(text)) {
-    const trimmed = value.trim();
-    // Any block scalar (|, |-, |+, |2, >, >-, …), block sequence (empty
-    // value), alias/anchor, or comment-led value: the labels live on lines
-    // this parser does not read, so it cannot vouch for them.
-    if (trimmed === '' || /^[|>*&#]/.test(trimmed)) {
-      unreadable.push(
-        `'runs-on: ${trimmed}' (block/alias/comment form — labels this guard cannot read)`,
-      );
-      continue;
-    }
-    // A flow sequence opened on this line but not closed on it (multi-line
-    // flow): the remaining labels are invisible here.
-    if (/\[/.test(value) && !/\]/.test(value)) {
-      unreadable.push(`unclosed flow sequence: '${trimmed}'`);
-      continue;
-    }
-    let parsedSelfHosted = false;
-    for (const match of value.matchAll(/\[[^[\]]*self-hosted[^[\]]*\]/gi)) {
-      const labels = [...match[0].matchAll(/["']{1,2}([^"']+)["']{1,2}/g)].map(
-        (m) => m[1],
-      );
-      if (labels.some((l) => l.toLowerCase() === 'self-hosted')) {
-        sets.push({ raw: match[0], labels });
-        parsedSelfHosted = true;
-      } else {
-        // The bracket group names self-hosted but quoted extraction found no
-        // labels: the unquoted flow spelling.
-        unreadable.push(`unquoted label list: ${match[0]}`);
-      }
-    }
-    if (!parsedSelfHosted && /self-hosted/i.test(value)) {
-      // Anything else that names self-hosted without yielding a parsed set —
-      // a bare `runs-on: self-hosted`, a partially-quoted list, a spelling
-      // this parser has never seen. Fail closed rather than guess.
-      unreadable.push(`unrecognized self-hosted spelling: '${trimmed}'`);
+// Extracts the JSON-ish label arrays embedded in a GitHub expression, e.g.
+// both arms of
+//   ${{ cond && fromJSON('["self-hosted", "linux", "x64", "ecs-qwen"]')
+//            || fromJSON('["ubuntu-latest"]') }}
+// Returns null when the expression embeds no array at all.
+function embeddedArrays(expr) {
+  const groups = [...expr.matchAll(/\[[^[\]]*\]/g)].map((m) => m[0]);
+  if (groups.length === 0) {
+    return null;
+  }
+  return groups.map((g) => {
+    const tokens = [...g.matchAll(/["']([^"']+)["']/g)].map((m) => m[1]);
+    return { raw: g, tokens };
+  });
+}
+
+const WHOLE_EXPRESSION = /^\$\{\{[\s\S]*\}\}$/;
+const MATRIX_REF = /^\$\{\{\s*matrix\.([A-Za-z0-9_-]+)\s*\}\}$/;
+const ENV_REF = /^\$\{\{\s*env\.([A-Za-z0-9_-]+)\s*\}\}$/;
+
+function matrixValues(job, key) {
+  const matrix = job?.strategy?.matrix;
+  if (!matrix || typeof matrix !== 'object') {
+    return null;
+  }
+  const values = [];
+  if (Array.isArray(matrix[key])) {
+    values.push(...matrix[key]);
+  }
+  for (const row of Array.isArray(matrix.include) ? matrix.include : []) {
+    if (row && typeof row === 'object' && key in row) {
+      values.push(row[key]);
     }
   }
-  return { sets, unreadable };
+  return values.length > 0 ? values : null;
 }
 
-// Turns one workflow's text into a test plan: the failing tests for every
-// unreadable spelling, the lane assertions for every parsed set, and the
-// lanes to record as referenced. Pure — no `it()` registration — so the
-// fail-closed describe below can execute the planned test bodies directly
-// and prove they throw. The main loop maps plans to `it()` one-to-one; the
-// `found` accounting also flows through the plan, so deleting that mapping
-// starves the "every registered lane is still referenced" assertion instead
-// of failing silently.
+function envValue(doc, job, key) {
+  for (const scope of [job?.env, doc?.env]) {
+    if (scope && typeof scope === 'object' && key in scope) {
+      return scope[key];
+    }
+  }
+  return null;
+}
+
+// Turns one workflow into a test plan: a `problems` entry FAILS the suite
+// (either an unregistered/ill-formed lane set, or a value the walk cannot
+// resolve — fail closed, never skipped), `lanes` records registry references.
+// Pure — no `it()` registration — so the fail-closed describe below executes
+// the outcomes directly and proves them.
 function laneTestPlan(file, text) {
-  const { sets, unreadable } = selfHostedLabelSets(text);
-  const tests = [];
+  const problems = [];
   const lanes = [];
+  const oks = []; // parsed sets that passed, for the synthetic assertions
 
-  for (const spelling of unreadable) {
-    tests.push({
-      name: `${file}: guard cannot read a runs-on`,
-      run: () => {
-        assert.fail(
-          `${spelling} — this guard cannot verify the lane, so it fails ` +
-            `closed. Inline the labels as a single-line quoted sequence ` +
-            `(or extend selfHostedLabelSets).`,
-        );
-      },
-    });
+  const problem = (name, message) => problems.push({ name, message });
+
+  // A full set of concrete labels, ready for the registry rules.
+  function checkSet(labels, origin) {
+    const lc = labels.map((l) => String(l).toLowerCase());
+    if (!lc.includes('self-hosted')) {
+      if (lc.every((l) => HOSTED_LABEL.test(l))) {
+        return; // hosted set — not this guard's jurisdiction
+      }
+      problem(
+        `${file}: ${origin} is neither hosted nor self-hosted`,
+        `label set [${labels.join(', ')}] names no self-hosted and no known ` +
+          `hosted image — an invented label here queues forever with no error.`,
+      );
+      return;
+    }
+    const rest = labels.filter(
+      (l) => !PLATFORM_LABELS.has(String(l).toLowerCase()),
+    );
+    if (rest.length === 1 && MAINTENANCE_LABEL.test(rest[0])) {
+      oks.push(origin);
+      return; // host-maintenance fan-out, valid but not a lane
+    }
+    if (rest.length !== 1) {
+      problem(
+        `${file}: ${origin} must name exactly one lane`,
+        `expected one lane label beside the platform labels, got ` +
+          `[${rest.join(', ')}]`,
+      );
+      return;
+    }
+    const lane = String(rest[0]).toLowerCase();
+    if (!REGISTERED_LANES.has(lane)) {
+      problem(
+        `${file}: ${origin} names an unregistered lane`,
+        `"${rest[0]}" is not a registered lane. Register the label on the ` +
+          `runners first, then add it to REGISTERED_LANES in this file. A ` +
+          `label no runner carries makes the job queue forever with no error.`,
+      );
+      return;
+    }
+    lanes.push(lane);
+    oks.push(origin);
   }
 
-  for (const { raw, labels } of sets) {
-    const laneLabels = labels.filter(
-      (l) => !PLATFORM_LABELS.has(l.toLowerCase()),
+  // One string label on its own (a scalar runs-on, or a resolved matrix/env
+  // value).
+  function checkScalarLabel(value, origin) {
+    const t = String(value).trim();
+    if (HOSTED_LABEL.test(t)) {
+      return;
+    }
+    if (t.startsWith('[')) {
+      problem(
+        `${file}: ${origin} is a quoted literal array`,
+        `'${t}' is a STRING scalar — GitHub reads the whole thing as one ` +
+          `label no runner carries. Unquote the flow sequence.`,
+      );
+      return;
+    }
+    problem(
+      `${file}: ${origin} is a single non-hosted label`,
+      `'${t}' routes to no known hosted image, and a bare self-hosted ` +
+        `label carries no checkable lane. Write the full quoted label set.`,
     );
-    const dynamic = laneLabels.filter((l) => l.includes('${{'));
+  }
 
-    if (dynamic.length > 0) {
-      // The skip below vouches only for label sets that are WHOLLY resolved
-      // at run time from a real context. A constant expression is not that —
-      // GitHub evaluates it to a plain string, so it can smuggle an invented
-      // lane — and a static lane written beside a dynamic one is not that
-      // either: the static half is checkable and must be checked.
-      const opaque = dynamic.filter((l) => !RUNTIME_CONTEXT.test(l));
-      const staticResidue = laneLabels.filter((l) => !l.includes('${{'));
-      if (opaque.length > 0 || staticResidue.length > 0) {
-        const parts = [
-          ...opaque.map(
-            (l) => `expression label is not a runtime context: ${l}`,
-          ),
-          ...staticResidue.map(
-            (l) => `static lane mixed with a dynamic fan-out: ${l}`,
-          ),
-        ];
-        tests.push({
-          name: `${file}: ${raw} mixes checkable labels into a dynamic set`,
-          run: () => {
-            assert.fail(
-              `${parts.join('; ')} — split the static lane onto its own ` +
-                `runs-on (or resolve it from a runtime context) so the ` +
-                `registry can vouch for it.`,
-            );
-          },
-        });
-        continue;
+  function checkValue(value, job, origin) {
+    if (Array.isArray(value)) {
+      const dynamic = value.filter((l) => String(l).includes('${{'));
+      if (dynamic.length === 0) {
+        checkSet(value, origin);
+        return;
       }
-      // Genuine runtime fan-out (e.g. update-ecs-runner-qwen.yml's
-      // `${{ matrix.runner }}` over the ecs-update-* hosts): resolves at run
-      // time, is not a lane, nothing routes ordinary work to it — skip.
+      if (dynamic.length > 1) {
+        problem(
+          `${file}: ${origin} has multiple dynamic labels`,
+          `cannot resolve more than one expression label in a set: ` +
+            `[${dynamic.join(', ')}]`,
+        );
+        return;
+      }
+      const resolved = resolveExpression(String(dynamic[0]), job);
+      if (resolved === null) {
+        problem(
+          `${file}: ${origin} has an unresolvable dynamic label`,
+          `'${dynamic[0]}' does not resolve to values defined in this file ` +
+            `— the guard cannot vouch for the lane, so it fails closed.`,
+        );
+        return;
+      }
+      for (const v of resolved) {
+        const expanded = value.map((l) => (l === dynamic[0] ? v : l));
+        if (expanded.some((l) => Array.isArray(l))) {
+          problem(
+            `${file}: ${origin} resolves a label to a list`,
+            `'${dynamic[0]}' resolves to a nested array inside a label set.`,
+          );
+          return;
+        }
+        checkSet(expanded, `${origin} (with ${dynamic[0]} = ${v})`);
+      }
+      return;
+    }
+    if (typeof value === 'string') {
+      const t = value.trim();
+      if (WHOLE_EXPRESSION.test(t)) {
+        const arrays = embeddedArrays(t);
+        if (arrays !== null) {
+          for (const { raw, tokens } of arrays) {
+            // An all-caps token list (["OWNER","MEMBER","COLLABORATOR"]) is a
+            // contains()-operand — author associations, not runner labels.
+            // Runner labels are lowercase-with-hyphens; nothing the fleet
+            // registers matches /^[A-Z_]+$/, so this cannot hide a lane.
+            if (tokens.length > 0 && tokens.every((t) => /^[A-Z_]+$/.test(t))) {
+              continue;
+            }
+            if (tokens.length === 0) {
+              problem(
+                `${file}: ${origin} embeds an unquoted array`,
+                `${raw} inside the expression has no quoted labels the ` +
+                  `guard can read.`,
+              );
+              continue;
+            }
+            checkSet(tokens, `${origin} → ${raw}`);
+          }
+          return;
+        }
+        const resolved = resolveExpression(t, job);
+        if (resolved === null) {
+          problem(
+            `${file}: ${origin} is an unresolvable expression`,
+            `'${t}' embeds no label array and resolves to nothing defined ` +
+              `in this file — the guard cannot vouch for it, so it fails ` +
+              `closed. Inline the label set, or resolve it from matrix/env ` +
+              `values defined in this workflow.`,
+          );
+          return;
+        }
+        for (const v of resolved) {
+          checkValue(v, job, `${origin} (= ${JSON.stringify(v)})`);
+        }
+        return;
+      }
+      if (t.includes('${{')) {
+        problem(
+          `${file}: ${origin} mixes text and expression`,
+          `'${t}' is neither a plain label nor a whole-value expression.`,
+        );
+        return;
+      }
+      checkScalarLabel(t, origin);
+      return;
+    }
+    problem(
+      `${file}: ${origin} has an unreadable type`,
+      `runs-on is a ${typeof value}; expected a string or a label list.`,
+    );
+  }
+
+  function resolveExpression(expr, job) {
+    const m = expr.match(MATRIX_REF);
+    if (m) {
+      return matrixValues(job, m[1]);
+    }
+    const e = expr.match(ENV_REF);
+    if (e) {
+      const v = envValue(doc, job, e[1]);
+      return v === null ? null : [v];
+    }
+    return null;
+  }
+
+  let doc;
+  try {
+    doc = parse(text);
+  } catch (error) {
+    problem(
+      `${file}: guard cannot parse the workflow`,
+      `YAML parse failed (${error.message.split('\n')[0]}) — nothing in ` +
+        `this file can be vouched for.`,
+    );
+    return { problems, lanes, oks };
+  }
+
+  for (const [jobName, job] of Object.entries(doc?.jobs ?? {})) {
+    if (!job || typeof job !== 'object') {
       continue;
     }
-
-    tests.push({
-      name: `${file}: ${raw} names exactly one registered lane`,
-      run: () => {
-        assert.equal(
-          laneLabels.length,
-          1,
-          `expected one lane label beside the platform labels, got [${laneLabels.join(', ')}]`,
-        );
-        assert.ok(
-          REGISTERED_LANES.has(laneLabels[0]),
-          `"${laneLabels[0]}" is not a registered lane. Register the label ` +
-            `on the runners first, then add it to REGISTERED_LANES in this ` +
-            `file. A label no runner carries makes the job queue forever ` +
-            `with no error.`,
-        );
-      },
-    });
-    for (const lane of laneLabels) {
-      lanes.push(lane);
+    const runsOn = job['runs-on'];
+    if (runsOn === undefined) {
+      if (typeof job.uses === 'string') {
+        continue; // reusable-workflow call; the callee declares its runners
+      }
+      problem(
+        `${file}: job ${jobName} has no runs-on`,
+        `neither runs-on nor uses — the guard cannot tell where this runs.`,
+      );
+      continue;
     }
+    checkValue(runsOn, job, `jobs.${jobName}.runs-on`);
   }
 
-  return { tests, lanes };
+  for (const raw of runnerSetAssignments(text)) {
+    const tokens = [...raw.matchAll(/["']([^"']+)["']/g)].map((m) => m[1]);
+    if (!tokens.some((l) => l.toLowerCase() === 'self-hosted')) {
+      continue; // hosted assignment (the pick_runner fallback branch)
+    }
+    checkSet(tokens, `runner-set assignment ${raw}`);
+  }
+
+  return { problems, lanes, oks };
 }
+
+// How many enforcement tests the main loop registered; the fail-closed
+// describe asserts this is live, because deleting the registration loop
+// otherwise leaves every real-workflow check dead while the synthetic
+// tests (which call laneTestPlan directly) stay green.
+let registeredEnforcementTests = 0;
 
 describe('self-hosted runs-on labels', () => {
   const found = new Map();
 
   for (const file of workflowFiles) {
     const text = readFileSync(join(workflowsDir, file), 'utf8');
-    const { tests, lanes } = laneTestPlan(file, text);
-    for (const planned of tests) {
-      it(planned.name, planned.run);
+    const { problems, lanes, oks } = laneTestPlan(file, text);
+    for (const p of problems) {
+      registeredEnforcementTests += 1;
+      it(p.name, () => {
+        assert.fail(p.message);
+      });
+    }
+    for (const origin of oks) {
+      registeredEnforcementTests += 1;
+      it(`${file}: ${origin} names a registered lane`, () => {});
     }
     for (const lane of lanes) {
       found.set(lane, (found.get(lane) ?? 0) + 1);
@@ -267,158 +414,240 @@ describe('self-hosted runs-on labels', () => {
       );
     }
   });
+
+  it('the pick_runner assembly in ci.yml still matches the scanned shape', () => {
+    const text = readFileSync(join(workflowsDir, 'ci.yml'), 'utf8');
+    const selfHosted = runnerSetAssignments(text).filter((raw) =>
+      /self-hosted/i.test(raw),
+    );
+    assert.ok(
+      selfHosted.length >= 2,
+      `expected the two pick_runner assignments to match the assignment ` +
+        `scan; found ${selfHosted.length}. If they were re-quoted or ` +
+        `reshaped, update runnerSetAssignments so the main CI routing lane ` +
+        `stays checked.`,
+    );
+  });
 });
 
-// The fail-closed contract, pinned on synthetic text so it cannot rot: every
-// candidate spelling must land in `sets` or in `unreadable` — never silently
-// in neither — and the planned test bodies must actually throw. Each refused
-// spelling below was verified to slip an invented lane past an earlier
-// parser unnoticed.
-describe('selfHostedLabelSets fail-closed parsing', () => {
-  const parses = [
-    [
-      `    runs-on: '\${{ x && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'`,
-      ['ecs-qwen'],
-    ],
-    [
-      `    runs-on: ['self-hosted', 'linux', 'x64', 'ecs-agent']`,
-      ['ecs-agent'],
-    ],
-    // Key-spelling tolerance: quoted key, and space before the colon.
-    [
-      `    "runs-on": ['self-hosted', 'linux', 'x64', 'ecs-light']`,
-      ['ecs-light'],
-    ],
-    [`    runs-on : ['self-hosted', 'linux', 'x64', 'ecs-qwen']`, ['ecs-qwen']],
-    // The pick_runner assignment shape: the runner set assembled off the
-    // runs-on line (ci.yml:183/186) must reach the same validation.
-    [
-      `            ubuntu_runner='["self-hosted", "linux", "x64", "ecs-qwen"]'`,
-      ['ecs-qwen'],
-    ],
-  ];
-  for (const [text, lanes] of parses) {
-    it(`parses: ${text.trim().slice(0, 60)}…`, () => {
-      const { sets, unreadable } = selfHostedLabelSets(text);
-      assert.equal(unreadable.length, 0);
-      assert.deepEqual(
-        sets.flatMap((s) =>
-          s.labels.filter((l) => !PLATFORM_LABELS.has(l.toLowerCase())),
-        ),
-        lanes,
-      );
-    });
-  }
+// The fail-closed contract, pinned on synthetic workflows so it cannot rot.
+// Two families: values the walk READS and judges (an invented lane is caught
+// whatever the YAML spelling), and values it cannot vouch for (which must
+// land in `problems`, never be skipped). Every case here was verified to
+// slip an invented lane past an earlier revision of this guard.
+describe('laneTestPlan fail-closed behavior', () => {
+  const wrap = (runsOn, extra = '') =>
+    `jobs:\n  a:\n    runs-on: ${runsOn}\n${extra}`;
 
-  // The whole block-form family, generated so a marker cannot quietly drop
-  // out of coverage, plus every other demonstrated fail-open entrance.
-  const refuses = [
-    ...['|', '|-', '|+', '|2', '>', '>-', '>-2'].map((marker) => [
-      `block scalar '${marker}'`,
-      `    runs-on: ${marker}\n      self-hosted`,
-    ]),
+  const caught = [
     [
       'block sequence',
-      `    runs-on:\n      - self-hosted\n      - linux\n      - x64\n      - ecs-invented`,
+      `\n      - self-hosted\n      - linux\n      - x64\n      - ecs-invented`,
     ],
+    ['unquoted flow sequence', `[self-hosted, linux, x64, ecs-invented]`],
     [
-      'block scalar with trailing comment',
-      `    runs-on: |- # labels below\n      self-hosted`,
-    ],
-    ['comment-led value', `    runs-on: # see below\n      - self-hosted`],
-    ['YAML alias', `    runs-on: *shared-runner`],
-    ['YAML anchor', `    runs-on: &shared-runner [self-hosted, ecs-invented]`],
-    [
-      'unquoted flow sequence',
-      `    runs-on: [self-hosted, linux, x64, ecs-invented]`,
+      'mixed quoted/unquoted flow sequence',
+      `['self-hosted', 'linux', 'x64', 'ecs-qwen', ecs-invented]`,
     ],
     [
       'multi-line flow sequence',
-      `    runs-on: [\n      'self-hosted', 'linux', 'x64', 'ecs-invented']`,
+      `[\n      'self-hosted', 'linux',\n      'x64', 'ecs-invented']`,
     ],
-    ['bare self-hosted', `    runs-on: self-hosted`],
     [
-      'partially quoted list',
-      `    runs-on: [self-hosted, 'linux', 'x64', ecs-invented]`,
+      'trailing comment',
+      `['self-hosted', 'linux', 'x64', 'ecs-invented'] # note`,
     ],
   ];
-  for (const [name, text] of refuses) {
-    it(`refuses to skip: ${name}`, () => {
-      const { sets, unreadable } = selfHostedLabelSets(text);
-      assert.equal(sets.length, 0);
-      assert.ok(
-        unreadable.length >= 1,
-        `the ${name} spelling parsed as neither a label set nor unreadable — ` +
-          `an invented lane written this way would ship past a green suite`,
+  const blob = (p) => `${p.name} ${p.message}`;
+  for (const [name, runsOn] of caught) {
+    it(`catches an invented lane in a ${name}`, () => {
+      const { problems } = laneTestPlan('probe.yml', wrap(runsOn));
+      assert.equal(problems.length, 1);
+      assert.match(
+        blob(problems[0]),
+        /not a registered lane|expected one lane label/,
       );
     });
   }
 
-  // Dynamic-label boundaries: a pure runtime fan-out skips, but a constant
-  // expression or a static lane hiding beside a dynamic one fails closed.
-  it('skips a pure runtime fan-out label set', () => {
-    const { tests, lanes } = laneTestPlan(
+  it('catches an invented lane behind a flow-mapping job', () => {
+    const { problems } = laneTestPlan(
       'probe.yml',
-      `    runs-on: ['self-hosted', 'linux', 'x64', '\${{ matrix.runner }}']`,
+      `jobs:\n  a: {runs-on: ['self-hosted', 'linux', 'x64', 'ecs-invented'], steps: []}`,
     );
-    assert.equal(tests.length, 0);
-    assert.equal(lanes.length, 0);
+    assert.equal(problems.length, 1);
+    assert.match(blob(problems[0]), /not a registered lane/);
   });
 
-  it('fails closed on a static lane mixed into a dynamic set', () => {
-    const { tests } = laneTestPlan(
+  it('catches an invented lane behind a quoted key', () => {
+    const { problems } = laneTestPlan(
       'probe.yml',
-      `    runs-on: ['self-hosted', 'linux', 'x64', 'ecs-invented', '\${{ matrix.runner }}']`,
+      `jobs:\n  a:\n    "runs-on": ['self-hosted', 'linux', 'x64', 'ecs-invented']`,
     );
-    assert.equal(tests.length, 1);
-    assert.throws(tests[0].run, /static lane mixed with a dynamic fan-out/);
+    assert.equal(problems.length, 1);
+    assert.match(blob(problems[0]), /not a registered lane/);
   });
 
-  it('fails closed on a constant expression label', () => {
-    const { tests } = laneTestPlan(
+  // In-file resolution: constants bound through env/matrix are read, not
+  // exempted — GitHub evaluates them, so the guard must too.
+  it('catches an invented lane bound through env', () => {
+    const { problems } = laneTestPlan(
       'probe.yml',
-      `    runs-on: ['self-hosted', 'linux', 'x64', '\${{ ''ecs-invented'' }}']`,
+      `env:\n  LANE: ecs-invented\njobs:\n  a:\n    runs-on: ['self-hosted', 'linux', 'x64', '\${{ env.LANE }}']`,
     );
-    assert.equal(tests.length, 1);
-    assert.throws(tests[0].run, /not a runtime context/);
+    assert.equal(problems.length, 1);
+    assert.match(blob(problems[0]), /not a registered lane/);
   });
 
-  // The registration wiring itself: an unreadable spelling must produce a
-  // planned test whose body throws, and an invented lane must produce a
-  // planned test whose body throws — so deleting or neutering the
-  // registration branch goes red here, not silently fail-open.
-  it('plans a throwing test for an unreadable spelling', () => {
-    const { tests } = laneTestPlan('probe.yml', `    runs-on: self-hosted`);
-    assert.equal(tests.length, 1);
-    assert.throws(tests[0].run, /cannot verify the lane/);
+  it('catches an invented lane bound through a matrix', () => {
+    const { problems } = laneTestPlan(
+      'probe.yml',
+      wrap(
+        `['self-hosted', 'linux', 'x64', '\${{ matrix.runner }}']`,
+        `    strategy:\n      matrix:\n        runner: ['ecs-invented']\n`,
+      ),
+    );
+    assert.equal(problems.length, 1);
+    assert.match(blob(problems[0]), /not a registered lane/);
   });
 
-  it('plans a throwing test for an invented lane', () => {
-    const { tests, lanes } = laneTestPlan(
+  it('catches an invented lane in a whole-value matrix runs-on', () => {
+    const { problems } = laneTestPlan(
       'probe.yml',
-      `    runs-on: ['self-hosted', 'linux', 'x64', 'ecs-invented']`,
+      wrap(
+        `'\${{ matrix.runner }}'`,
+        `    strategy:\n      matrix:\n        include:\n          - runner: ['self-hosted', 'linux', 'x64', 'ecs-invented']\n`,
+      ),
     );
-    assert.equal(tests.length, 1);
-    assert.throws(tests[0].run, /not a registered lane/);
-    assert.deepEqual(lanes, ['ecs-invented']);
+    assert.equal(problems.length, 1);
+    assert.match(blob(problems[0]), /not a registered lane/);
   });
 
-  it('plans a throwing test for an invented lane in a runner-set assignment', () => {
-    const { tests } = laneTestPlan(
+  it('catches a second static lane smuggled beside a registered one', () => {
+    const { problems } = laneTestPlan(
       'probe.yml',
-      `            ubuntu_runner='["self-hosted", "linux", "x64", "ecs-invented"]'`,
+      wrap(`['self-hosted', 'linux', 'x64', 'ecs-qwen', 'ecs-invented']`),
     );
-    assert.equal(tests.length, 1);
-    assert.throws(tests[0].run, /not a registered lane/);
+    assert.equal(problems.length, 1);
+    assert.match(blob(problems[0]), /expected one lane label/);
   });
 
-  it('plans a passing test for a registered lane', () => {
-    const { tests, lanes } = laneTestPlan(
+  it('catches an invented non-hosted set in an expression arm', () => {
+    const { problems } = laneTestPlan(
       'probe.yml',
-      `    runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']`,
+      wrap(
+        `'\${{ x && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ecs-invented"]'') }}'`,
+      ),
     );
-    assert.equal(tests.length, 1);
-    tests[0].run();
+    assert.equal(problems.length, 1);
+    assert.match(blob(problems[0]), /neither hosted nor self-hosted/);
+  });
+
+  const refused = [
+    [
+      'whole-value quoted literal array',
+      `'["self-hosted", "linux", "x64", "ecs-qwen"]'`,
+      /quoted literal array/,
+    ],
+    ['bare unknown scalar', `ecs-invented`, /single non-hosted label/],
+    ['bare self-hosted', `self-hosted`, /single non-hosted label/],
+    [
+      'unresolvable env reference',
+      `['self-hosted', 'linux', 'x64', '\${{ env.LANE }}']`,
+      /unresolvable dynamic label/,
+    ],
+    [
+      'unresolvable whole-value expression',
+      `'\${{ vars.LIGHT_RUNNER }}'`,
+      /unresolvable expression/,
+    ],
+    [
+      'text mixed with an expression',
+      `prefix-\${{ matrix.runner }}`,
+      /mixes text and expression/,
+    ],
+  ];
+  for (const [name, runsOn, message] of refused) {
+    it(`refuses to vouch for a ${name}`, () => {
+      const { problems, lanes } = laneTestPlan('probe.yml', wrap(runsOn));
+      assert.equal(lanes.length, 0);
+      assert.equal(problems.length, 1);
+      assert.match(blob(problems[0]), message);
+    });
+  }
+
+  it('refuses to vouch for an unparseable workflow', () => {
+    const { problems } = laneTestPlan('probe.yml', `jobs:\n  a: [unclosed`);
+    assert.equal(problems.length, 1);
+    assert.match(blob(problems[0]), /cannot parse/);
+  });
+
+  const accepted = [
+    [
+      'the conditional expression ci.yml routes with',
+      `'\${{ x && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'`,
+      ['ecs-qwen'],
+    ],
+    [
+      `a static quoted sequence`,
+      `['self-hosted', 'linux', 'x64', 'ecs-agent']`,
+      ['ecs-agent'],
+    ],
+    [
+      'a capitalized spelling (GitHub label matching is case-insensitive)',
+      `['self-hosted', 'Linux', 'X64', 'ECS-QWEN']`,
+      ['ecs-qwen'],
+    ],
+    [
+      'a registered lane with a trailing comment',
+      `['self-hosted', 'linux', 'x64', 'ecs-qwen'] # was ecs-old`,
+      ['ecs-qwen'],
+    ],
+    [`a hosted scalar`, `ubuntu-latest`, []],
+    [`a hosted whole-value matrix fan-out`, `'\${{ matrix.os }}'`, []],
+  ];
+  const extras = {
+    'a hosted whole-value matrix fan-out': `    strategy:\n      matrix:\n        os: ['ubuntu-latest', 'macos-14']\n`,
+  };
+  for (const [name, runsOn, lanes] of accepted) {
+    it(`accepts ${name}`, () => {
+      const plan = laneTestPlan('probe.yml', wrap(runsOn, extras[name] ?? ''));
+      assert.deepEqual(plan.problems, []);
+      assert.deepEqual(plan.lanes, lanes);
+    });
+  }
+
+  it('accepts the maintenance fan-out shape without counting a lane', () => {
+    const { problems, lanes, oks } = laneTestPlan(
+      'probe.yml',
+      wrap(
+        `['self-hosted', 'linux', 'x64', '\${{ matrix.runner }}']`,
+        `    strategy:\n      matrix:\n        runner: ['ecs-update-sg', 'ecs-update-hk-1']\n`,
+      ),
+    );
+    assert.deepEqual(problems, []);
+    assert.deepEqual(lanes, []);
+    assert.equal(oks.length, 2);
+  });
+
+  it('accepts the pick_runner assignment and counts its lane', () => {
+    const { problems, lanes } = laneTestPlan(
+      'probe.yml',
+      `jobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n` +
+        `      - run: |-\n` +
+        `          ubuntu_runner='["self-hosted", "linux", "x64", "ecs-qwen"]'\n`,
+    );
+    assert.deepEqual(problems, []);
     assert.deepEqual(lanes, ['ecs-qwen']);
+  });
+
+  it('the main loop actually registered enforcement tests', () => {
+    // Deleting the registration loop above leaves every real-workflow check
+    // dead while these synthetic tests stay green; this is the tripwire.
+    assert.ok(
+      registeredEnforcementTests > 0,
+      `no enforcement tests were registered from the real workflows — the ` +
+        `registration loop in the main describe is gone or neutered.`,
+    );
   });
 });
