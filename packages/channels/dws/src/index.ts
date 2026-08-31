@@ -86,6 +86,21 @@ export const plugin: ChannelPlugin = {
         description:
           'Poll pending todos assigned to this DWS account and run newly assigned or changed tasks',
       },
+      {
+        key: 'startReaction',
+        label: 'Start Reaction',
+        kind: 'string',
+        default: '🤔',
+        description:
+          'DingTalk reaction emoji or name added while a task is running. Leave empty to use 🤔',
+      },
+      {
+        key: 'endReaction',
+        label: 'End Reaction',
+        kind: 'string',
+        description:
+          'DingTalk reaction emoji or name added after a task ends. Leave empty to disable it',
+      },
     ],
     validateConfig: (config) => {
       if (
@@ -109,6 +124,11 @@ export const plugin: ChannelPlugin = {
         typeof config['watchTodos'] !== 'boolean'
       ) {
         return 'DWS watchTodos must be a boolean.';
+      }
+      for (const field of ['startReaction', 'endReaction'] as const) {
+        if (config[field] !== undefined && typeof config[field] !== 'string') {
+          return `DWS ${field} must be a string.`;
+        }
       }
       return undefined;
     },
