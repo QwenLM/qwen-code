@@ -26,6 +26,7 @@ import { ToolNames } from '../tools/tool-names.js';
 import {
   buildPermissionCheckContext,
   evaluatePermissionRules,
+  evaluateRestrictivePermissionRules,
 } from './permission-helpers.js';
 import type {
   PermissionCheckContext,
@@ -142,30 +143,15 @@ export async function evaluatePermissionFlow(
       ),
     ];
 
-    // PermissionManager guarantees deny > ask only within one evaluate call.
-    // These contexts intentionally represent different MCP spellings, so keep
-    // searching after an ask: a deny that matches a later spelling must still
-    // win globally. The first matching ask is applied only if no deny exists.
-    let restrictiveAskCtx: PermissionCheckContext | undefined;
-    for (const ctx of restrictiveContexts) {
-      if (!pm.hasRelevantRules(ctx)) continue;
-      const decision = await pm.evaluate(ctx);
-      if (decision === 'deny') {
-        finalPermission = 'deny';
-        restrictiveMatchCtx = ctx;
-        break;
-      }
-      if (decision === 'ask' && !restrictiveAskCtx) {
-        restrictiveAskCtx = ctx;
-      }
-    }
-
-    if (!restrictiveMatchCtx && restrictiveAskCtx) {
-      finalPermission = 'ask';
-      restrictiveMatchCtx = restrictiveAskCtx;
-      if (pm.hasMatchingAskRule(restrictiveAskCtx)) {
-        pmForcedAsk = true;
-      }
+    const restrictive = await evaluateRestrictivePermissionRules(
+      pm,
+      defaultPermission,
+      restrictiveContexts,
+    );
+    if (restrictive.matchedContext) {
+      finalPermission = restrictive.finalPermission;
+      pmForcedAsk = restrictive.pmForcedAsk;
+      restrictiveMatchCtx = restrictive.matchedContext;
     }
   }
 
