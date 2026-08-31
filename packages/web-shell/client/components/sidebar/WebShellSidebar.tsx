@@ -112,7 +112,11 @@ import {
   replaceOwnedCollapsedSessionSectionIds,
 } from './collapsedSessionSections';
 import { measureSessionTitleScroll } from './sessionTitleScroll';
-import { getScheduledTaskSessionGroup } from './scheduled-task-session-groups';
+import {
+  collectScheduledTaskSession,
+  getScheduledTaskSessionGroup,
+  type ScheduledTaskSessionSection,
+} from './scheduled-task-session-groups';
 import {
   SESSION_LIST_PAGE_SIZE,
   SESSION_ORGANIZATION_FEATURE,
@@ -1269,6 +1273,12 @@ export function WebShellSidebar({
   if (prevOrganizationEnabled !== organizationEnabled) {
     setPrevOrganizationEnabled(organizationEnabled);
     setGroupsCatalogReady(!organizationEnabled);
+    if (organizationEnabled) {
+      // An org-disabled settle may already have consumed the latch against
+      // scheduled-task sections alone; restore it so the first organized
+      // settle registers manual groups as initial instead of collapsing them.
+      awaitingInitialSessionCatalogBySourceRef.current[sessionSource] = true;
+    }
   }
   const [sidebarWidth, setSidebarWidth] = useState(readSidebarWidth);
   const [projectExpanded, setProjectExpanded] = useState(() =>
@@ -3756,7 +3766,10 @@ export function WebShellSidebar({
       DaemonSessionSummary[]
     >();
     const sessionsByGroupId = new Map<string, DaemonSessionSummary[]>();
-    const scheduledTaskSections = new Map<string, SessionSection>();
+    const scheduledTaskSections = new Map<
+      string,
+      ScheduledTaskSessionSection
+    >();
     for (const group of groups) {
       sessionsByGroupId.set(group.id, []);
     }
@@ -3790,18 +3803,7 @@ export function WebShellSidebar({
         groupSessions.push(session);
         continue;
       }
-      const scheduledTaskGroup = getScheduledTaskSessionGroup(session);
-      if (scheduledTaskGroup) {
-        const section = scheduledTaskSections.get(scheduledTaskGroup.id);
-        if (section) {
-          section.sessions.push(session);
-        } else {
-          scheduledTaskSections.set(scheduledTaskGroup.id, {
-            ...scheduledTaskGroup,
-            kind: 'scheduled-task',
-            sessions: [session],
-          });
-        }
+      if (collectScheduledTaskSession(scheduledTaskSections, session)) {
         continue;
       }
       // On sources with a Pinned section, a pinned session without a
@@ -3840,7 +3842,9 @@ export function WebShellSidebar({
         sessions: groupSessions,
       });
     }
-    sections.push(...scheduledTaskSections.values());
+    for (const section of scheduledTaskSections.values()) {
+      sections.push({ ...section, kind: 'scheduled-task' });
+    }
     if (recentSessions.length > 0 && sections.length > 0) {
       sections.push({
         id: RECENT_SESSION_SECTION_ID,

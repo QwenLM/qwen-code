@@ -45,7 +45,10 @@ import { SessionGroupSection } from './SessionGroupSection';
 import { SessionDetailsTooltip } from './SessionDetailsTooltip';
 import { sessionMatchesGitQuery } from './sessionSearch';
 import { measureSessionTitleScroll } from './sessionTitleScroll';
-import { getScheduledTaskSessionGroup } from './scheduled-task-session-groups';
+import {
+  collectScheduledTaskSession,
+  type ScheduledTaskSessionSection,
+} from './scheduled-task-session-groups';
 import { groupSessionsByChannelType } from './channelSessionGroups';
 import { useWorkspaceOverview } from './useWorkspaceOverview';
 import { WorkspaceOverview } from './WorkspaceOverview';
@@ -586,7 +589,9 @@ export function WorkspaceSection({
       : visibleSessions.slice(0, SIDEBAR_SESSION_PREVIEW_LIMIT);
 
   const groupedSessions = useMemo(() => {
-    if (channelGroupingEnabled) return null;
+    // The grouped branch has no trust gate of its own; untrusted secondary
+    // workspaces keep the flat branch's read-only "trust to open" rows.
+    if (channelGroupingEnabled || readOnly) return null;
     const assigned = new Set<string>();
     const sections = organizationEnabled
       ? groups.map((group) => {
@@ -602,28 +607,12 @@ export function WorkspaceSection({
           return { group, sessions: items };
         })
       : [];
-    const scheduledSections = new Map<
-      string,
-      {
-        id: string;
-        label: string;
-        sessions: DaemonSessionSummary[];
-      }
-    >();
+    const scheduledSections = new Map<string, ScheduledTaskSessionSection>();
     for (const session of searchedSessions) {
       if (assigned.has(session.sessionId)) continue;
-      const scheduledTaskGroup = getScheduledTaskSessionGroup(session);
-      if (!scheduledTaskGroup) continue;
-      const section = scheduledSections.get(scheduledTaskGroup.id);
-      if (section) {
-        section.sessions.push(session);
-      } else {
-        scheduledSections.set(scheduledTaskGroup.id, {
-          ...scheduledTaskGroup,
-          sessions: [session],
-        });
+      if (collectScheduledTaskSession(scheduledSections, session)) {
+        assigned.add(session.sessionId);
       }
-      assigned.add(session.sessionId);
     }
     if (sections.length === 0 && scheduledSections.size === 0) return null;
     return {
@@ -639,6 +628,7 @@ export function WorkspaceSection({
     channelGroupingEnabled,
     groups,
     organizationEnabled,
+    readOnly,
     searchedSessions,
     visibleSessions,
   ]);

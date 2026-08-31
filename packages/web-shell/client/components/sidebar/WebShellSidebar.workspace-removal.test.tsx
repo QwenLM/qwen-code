@@ -4375,6 +4375,13 @@ describe('WebShellSidebar session source switch', () => {
     expect(
       group?.querySelectorAll('[data-web-shell-session-title]'),
     ).toHaveLength(2);
+    expect(
+      Array.from(
+        container.querySelectorAll('[data-web-shell-session-title]'),
+      ).filter((candidate) =>
+        candidate.textContent?.startsWith('Hourly review ·'),
+      ),
+    ).toHaveLength(2);
 
     const title = Array.from(
       container.querySelectorAll('[data-web-shell-session-title]'),
@@ -5207,6 +5214,54 @@ describe('WebShellSidebar session source switch', () => {
     expect(
       window.localStorage.getItem(COLLAPSED_SESSION_SECTIONS_STORAGE_KEY) ?? '',
     ).not.toContain('channel-type:');
+  });
+
+  it('registers manual groups as initial when organization lands after a scheduled-task settle', async () => {
+    active.sessions.push({
+      sessionId: 'scheduled-run',
+      displayName: 'Hourly review · 08-31 09:30',
+      workspaceCwd: '/tmp/project',
+      sourceType: 'default',
+      sourceId: 'scheduled_task_run:task-1',
+    });
+
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+
+    // Organization is disabled, so the flat settle carries only the
+    // scheduled-task section. Nothing may be persisted as collapsed yet.
+    expect(
+      container.querySelector('section[aria-label="Hourly review"]'),
+    ).not.toBeNull();
+    expect(
+      window.localStorage.getItem(COLLAPSED_SESSION_SECTIONS_STORAGE_KEY) ?? '',
+    ).not.toContain('scheduled-task:');
+
+    // The session_organization capability lands mid-session and the groups
+    // catalog settles with a manual group.
+    const organized = {
+      ...capabilities,
+      features: [...capabilities.features, 'session_organization'],
+    };
+    connection.capabilities = organized;
+    workspace.capabilities = organized;
+    workspaceActions.listSessionGroups.mockResolvedValue({
+      groups: [{ id: 'manual-group', name: 'Manual group', color: 'blue' }],
+      colorOptions: ['blue'],
+    });
+    renderSidebar();
+    await settleGroupsCatalog();
+
+    const manualGroup = container.querySelector(
+      'section[aria-label="Manual group"]',
+    );
+    expect(manualGroup).not.toBeNull();
+    expect(
+      manualGroup!.querySelector('button[aria-expanded="true"]'),
+    ).not.toBeNull();
+    expect(
+      window.localStorage.getItem(COLLAPSED_SESSION_SECTIONS_STORAGE_KEY) ?? '',
+    ).not.toContain('group:');
   });
 });
 
