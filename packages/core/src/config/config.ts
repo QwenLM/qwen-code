@@ -4181,11 +4181,6 @@ export class Config {
     return this.modelsConfig.getModelProvidersConfig();
   }
 
-  /** The provider->protocol map currently applied by the model registry. */
-  getProviderProtocolConfig(): ProviderProtocolConfig | undefined {
-    return this.modelsConfig.getProviderProtocolConfig();
-  }
-
   /**
    * Refresh authentication and rebuild ContentGenerator.
    */

@@ -900,20 +900,6 @@ describe('ModelRegistry', () => {
       expect(registry.getModelProvidersConfig()).toBeUndefined();
     });
 
-    it('exposes the applied protocol map and preserves it when reload omits it', () => {
-      const bootProtocol: ProviderProtocolConfig = { idealab: 'openai' };
-      const registry = new ModelRegistry(undefined, bootProtocol);
-      expect(registry.getProviderProtocolConfig()).toEqual(bootProtocol);
-
-      // undefined preserves (hot-reload of modelProviders only)…
-      registry.reloadModels({ openai: [{ id: 'gpt-4' }] }, undefined);
-      expect(registry.getProviderProtocolConfig()).toEqual(bootProtocol);
-
-      // …while an explicit value replaces.
-      registry.reloadModels(undefined, {});
-      expect(registry.getProviderProtocolConfig()).toEqual({});
-    });
-
     it('should handle reload replacing same-id entries when baseUrls change', () => {
       const registry = new ModelRegistry({
         openai: [

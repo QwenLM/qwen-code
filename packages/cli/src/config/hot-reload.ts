@@ -12,7 +12,7 @@ import {
   getMCPServerStatus,
   type MCPServerConfig,
 } from '@qwen-code/qwen-code-core';
-import type { LoadedSettings, Settings } from './settings.js';
+import type { LoadedSettings } from './settings.js';
 import type { SettingsWatcher } from './settingsWatcher.js';
 import { assembleMcpServers } from './mcpServers.js';
 import {
@@ -25,11 +25,6 @@ const debugLogger = createDebugLogger('MCP_HOT_RELOAD');
 const modelProvidersDebugLogger = createDebugLogger(
   'MODEL_PROVIDERS_HOT_RELOAD',
 );
-
-function emitHotReloadNotice(message: string): void {
-  appEvents.emit(AppEvent.OpenDebugConsole);
-  appEvents.emit(AppEvent.LogError, message);
-}
 
 /**
  * The three connection-admission lists discovery consults to decide whether a
@@ -246,10 +241,12 @@ export function registerMcpHotReload(
           err instanceof Error ? (err.stack ?? err.message) : String(err)
         }`,
       );
-      // …but also open the debug console and preserve the LogError event for
-      // any future renderer. `debugLogger.error` only shows after the console
-      // opens, so a failed settings edit would otherwise be silent.
-      emitHotReloadNotice(
+      // …but also surface a concise, user-visible notice. `debugLogger.error`
+      // only shows under `--debug`, so a failed settings edit would otherwise
+      // silently do nothing with no indication anything went wrong. `LogError`
+      // is the same channel the CLI already renders to the user.
+      appEvents.emit(
+        AppEvent.LogError,
         'Failed to reload MCP server settings; existing MCP state may be unchanged. Run with --debug for details.',
       );
     }
@@ -289,10 +286,7 @@ export function registerMcpHotReload(
  * only the auth refresh on subsequent events (never the registry reload).
  *
  * `providerProtocol` stays boot-frozen: it is `requiresRestart` in the
- * schema, so it is passed as `undefined` — `ModelRegistry.reloadModels`
- * preserves the existing protocol map in that case. If the on-disk map
- * drifts from the applied map anyway (combined edit), an edge-triggered
- * restart notice is surfaced so the half-applied state is never silent.
+ * schema, so this listener does not pass it to the reload primitive.
  */
 export function registerModelProvidersHotReload(
   watcher: SettingsWatcher,
@@ -302,40 +296,12 @@ export function registerModelProvidersHotReload(
   modelProvidersDebugLogger.debug(
     'registered modelProviders hot-reload listener on SettingsWatcher',
   );
-  // Edge-triggered drift notice: notify on the false→true transition only, so
-  // a second independent drift (drift → revert → drift) notifies again.
-  let protocolDriftActive = false;
-  let lastNotifiedProtocol: Settings['providerProtocol'] | undefined;
   // Pending refreshAuth retry after a successful registry reload: the reload
   // already advanced applied state, so the modelProviders gate below would
   // skip every later unchanged event — re-attempt ONLY refreshAuth on
   // subsequent events (never the registry reload) until it succeeds.
   let refreshAuthRetryPending = false;
   const reconcile = async () => {
-    // Drift check runs on EVERY event (before the modelProviders gate): a
-    // protocol revert/edit that leaves providers unchanged must still update
-    // the edge state. Diff against the APPLIED protocol map, not a boot-time
-    // snapshot: an edit that lands before this listener attaches (or an
-    // out-of-band protocol reload, e.g. ACP) would otherwise misfire the
-    // notice in both directions (silently never, or spuriously).
-    const currentProtocol = settings.merged.providerProtocol ?? {};
-    const drifted = !equal(
-      config.getProviderProtocolConfig() ?? {},
-      currentProtocol,
-    );
-    if (
-      drifted &&
-      (!protocolDriftActive ||
-        !equal(currentProtocol, lastNotifiedProtocol ?? {}))
-    ) {
-      const message =
-        'providerProtocol changed; protocol mappings for custom providers require a restart to take effect.';
-      modelProvidersDebugLogger.warn(message);
-      emitHotReloadNotice(message);
-      lastNotifiedProtocol = { ...currentProtocol };
-    }
-    protocolDriftActive = drifted;
-
     const next = settings.merged.modelProviders;
     const providersUnchanged = equal(
       config.getModelProvidersConfig() ?? {},
@@ -351,16 +317,11 @@ export function registerModelProvidersHotReload(
       try {
         config.reloadModelProvidersConfig(next);
       } catch (err) {
-        // Same user-visible surfacing as the MCP listener: without this the
-        // watcher's Promise.allSettled swallows the error with only a debug
-        // warn. Applied state is unchanged, so the next event retries.
+        // Applied state is unchanged, so the next event retries.
         modelProvidersDebugLogger.error(
           `reloadModelProvidersConfig threw: ${
             err instanceof Error ? (err.stack ?? err.message) : String(err)
           }`,
-        );
-        emitHotReloadNotice(
-          'Failed to reload model provider settings; the model list may be unchanged. Run with --debug for details.',
         );
         return;
       }
@@ -391,9 +352,6 @@ export function registerModelProvidersHotReload(
         `refreshAuth after modelProviders reload threw: ${
           err instanceof Error ? (err.stack ?? err.message) : String(err)
         }`,
-      );
-      emitHotReloadNotice(
-        'Failed to refresh the active model provider; the model list was updated but the active client may still use the previous settings. Run with --debug for details.',
       );
     }
   };

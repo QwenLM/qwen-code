@@ -482,9 +482,7 @@ describe('registerMcpHotReload', () => {
     registerMcpHotReload(watcher, settings, fc.config, undefined);
 
     const spy = vi.fn();
-    const openDebugConsoleSpy = vi.fn();
     appEvents.on(AppEvent.LogError, spy);
-    appEvents.on(AppEvent.OpenDebugConsole, openDebugConsoleSpy);
     try {
       merged.mcpServers = { a: { command: 'a' } };
       // The listener swallows the reconcile error (one bad reload must not crash
@@ -497,12 +495,8 @@ describe('registerMcpHotReload', () => {
       expect(String(spy.mock.calls[0][0])).toMatch(
         /Failed to reload MCP server settings/,
       );
-      // The failure also opens the debug console via emitHotReloadNotice —
-      // reverting the catch to a bare LogError emit must fail here.
-      expect(openDebugConsoleSpy).toHaveBeenCalledOnce();
     } finally {
       appEvents.off(AppEvent.LogError, spy);
-      appEvents.off(AppEvent.OpenDebugConsole, openDebugConsoleSpy);
     }
   });
 
@@ -601,12 +595,8 @@ describe('registerModelProvidersHotReload', () => {
   let config: Config;
   /** The registry's APPLIED providers config (what the gate diffs against). */
   let applied: ModelProvidersConfig | undefined;
-  /** The registry's APPLIED provider->protocol map. */
-  let appliedProtocol: Record<string, string>;
-
   function makeModelConfig(initialApplied?: ModelProvidersConfig): void {
     applied = initialApplied;
-    appliedProtocol = {};
     reloadModelProvidersConfig = vi.fn((next?: ModelProvidersConfig) => {
       applied = next;
     });
@@ -616,7 +606,6 @@ describe('registerModelProvidersHotReload', () => {
       refreshAuth,
       getAuthType: () => AuthType.USE_OPENAI,
       getModelProvidersConfig: () => applied,
-      getProviderProtocolConfig: () => appliedProtocol,
     } as unknown as Config;
   }
 
@@ -701,72 +690,23 @@ describe('registerModelProvidersHotReload', () => {
     expect(refreshAuth).toHaveBeenCalledOnce();
   });
 
-  it('surfaces a throwing reload as a visible notice and retries on the next event', async () => {
+  it('retries a throwing reload on the next event', async () => {
     registerModelProvidersHotReload(watcher, settings, config);
     reloadModelProvidersConfig.mockImplementationOnce(() => {
       throw new Error('rebuild failed');
     });
 
-    const logErrorSpy = vi.fn();
-    const openDebugConsoleSpy = vi.fn();
-    appEvents.on(AppEvent.LogError, logErrorSpy);
-    appEvents.on(AppEvent.OpenDebugConsole, openDebugConsoleSpy);
-    try {
-      merged.modelProviders = {
-        openai: [{ id: 'gpt-x', baseUrl: 'https://x' }],
-      } as ModelProvidersConfig;
-      await listener([]);
+    merged.modelProviders = {
+      openai: [{ id: 'gpt-x', baseUrl: 'https://x' }],
+    } as ModelProvidersConfig;
+    await listener([]);
 
-      // Failure is user-visible, and applied state did NOT advance — the
-      // same edit retries and lands on the next event.
-      expect(openDebugConsoleSpy).toHaveBeenCalledOnce();
-      expect(logErrorSpy).toHaveBeenCalledOnce();
-      expect(String(logErrorSpy.mock.calls[0][0])).toContain(
-        'Failed to reload model provider settings',
-      );
-      await listener([]);
-      expect(reloadModelProvidersConfig).toHaveBeenCalledTimes(2);
-      expect(reloadModelProvidersConfig).toHaveBeenLastCalledWith(
-        merged.modelProviders,
-      );
-      expect(refreshAuth).toHaveBeenCalledOnce();
-      expect(logErrorSpy).toHaveBeenCalledOnce();
-    } finally {
-      appEvents.off(AppEvent.LogError, logErrorSpy);
-      appEvents.off(AppEvent.OpenDebugConsole, openDebugConsoleSpy);
-    }
-  });
-
-  it('surfaces a failing refreshAuth as a visible notice while the registry reload stays applied', async () => {
-    registerModelProvidersHotReload(watcher, settings, config);
-    refreshAuth.mockRejectedValueOnce(new Error('auth boom'));
-
-    const logErrorSpy = vi.fn();
-    const openDebugConsoleSpy = vi.fn();
-    appEvents.on(AppEvent.LogError, logErrorSpy);
-    appEvents.on(AppEvent.OpenDebugConsole, openDebugConsoleSpy);
-    try {
-      merged.modelProviders = {
-        openai: [{ id: 'gpt-x', baseUrl: 'https://x' }],
-      } as ModelProvidersConfig;
-      await listener([]);
-
-      // The registry reload applied even though the auth refresh failed…
-      expect(reloadModelProvidersConfig).toHaveBeenCalledOnce();
-      expect(reloadModelProvidersConfig).toHaveBeenCalledWith(
-        merged.modelProviders,
-      );
-      // …and the failure is user-visible instead of being swallowed by the
-      // watcher's Promise.allSettled with a debug-only warn.
-      expect(openDebugConsoleSpy).toHaveBeenCalledOnce();
-      expect(logErrorSpy).toHaveBeenCalledOnce();
-      expect(String(logErrorSpy.mock.calls[0][0])).toContain(
-        'Failed to refresh the active model provider',
-      );
-    } finally {
-      appEvents.off(AppEvent.LogError, logErrorSpy);
-      appEvents.off(AppEvent.OpenDebugConsole, openDebugConsoleSpy);
-    }
+    await listener([]);
+    expect(reloadModelProvidersConfig).toHaveBeenCalledTimes(2);
+    expect(reloadModelProvidersConfig).toHaveBeenLastCalledWith(
+      merged.modelProviders,
+    );
+    expect(refreshAuth).toHaveBeenCalledOnce();
   });
 
   it('retries only refreshAuth on later unchanged events after it failed once', async () => {
@@ -775,49 +715,24 @@ describe('registerModelProvidersHotReload', () => {
       .mockRejectedValueOnce(new Error('transient token blip'))
       .mockRejectedValueOnce(new Error('still flaky'));
 
-    const logErrorSpy = vi.fn();
-    const openDebugConsoleSpy = vi.fn();
-    appEvents.on(AppEvent.LogError, logErrorSpy);
-    appEvents.on(AppEvent.OpenDebugConsole, openDebugConsoleSpy);
-    try {
-      merged.modelProviders = {
-        openai: [{ id: 'gpt-x', baseUrl: 'https://x' }],
-      } as ModelProvidersConfig;
-      await listener([]);
+    merged.modelProviders = {
+      openai: [{ id: 'gpt-x', baseUrl: 'https://x' }],
+    } as ModelProvidersConfig;
+    await listener([]);
 
-      // Registry reload applied, auth refresh failed and was surfaced.
-      expect(reloadModelProvidersConfig).toHaveBeenCalledOnce();
-      expect(refreshAuth).toHaveBeenCalledOnce();
-      expect(logErrorSpy).toHaveBeenCalledOnce();
+    expect(reloadModelProvidersConfig).toHaveBeenCalledOnce();
+    expect(refreshAuth).toHaveBeenCalledOnce();
 
-      // Same snapshot again: the providers gate says "unchanged", but the
-      // pending retry must re-attempt ONLY refreshAuth — never the registry
-      // reload, so out-of-band registry rewrites are not clobbered. A
-      // failed retry stays flagged and surfaces again.
-      await listener([]);
-      expect(reloadModelProvidersConfig).toHaveBeenCalledOnce();
-      expect(refreshAuth).toHaveBeenCalledTimes(2);
-      expect(logErrorSpy).toHaveBeenCalledTimes(2);
+    // Same snapshot again: retry only refreshAuth, never the registry reload.
+    await listener([]);
+    expect(reloadModelProvidersConfig).toHaveBeenCalledOnce();
+    expect(refreshAuth).toHaveBeenCalledTimes(2);
 
-      // Third unchanged event: the retry succeeds this time and clears the
-      // flag, and a success emits no notice.
-      await listener([]);
-      expect(reloadModelProvidersConfig).toHaveBeenCalledOnce();
-      expect(refreshAuth).toHaveBeenCalledTimes(3);
-      expect(logErrorSpy).toHaveBeenCalledTimes(2);
-      expect(openDebugConsoleSpy).toHaveBeenCalledTimes(2);
-
-      // Flag cleared: a fourth unchanged event is a no-op again (coexists
-      // with the repeat-snapshot gate).
-      await listener([]);
-      expect(reloadModelProvidersConfig).toHaveBeenCalledOnce();
-      expect(refreshAuth).toHaveBeenCalledTimes(3);
-      expect(logErrorSpy).toHaveBeenCalledTimes(2);
-      expect(openDebugConsoleSpy).toHaveBeenCalledTimes(2);
-    } finally {
-      appEvents.off(AppEvent.LogError, logErrorSpy);
-      appEvents.off(AppEvent.OpenDebugConsole, openDebugConsoleSpy);
-    }
+    // A successful retry clears the flag.
+    await listener([]);
+    await listener([]);
+    expect(reloadModelProvidersConfig).toHaveBeenCalledOnce();
+    expect(refreshAuth).toHaveBeenCalledTimes(3);
   });
 
   it('reloads after an out-of-band registry rewrite desynced applied state', async () => {
@@ -866,90 +781,5 @@ describe('registerModelProvidersHotReload', () => {
       merged.modelProviders,
     );
     expect(refreshAuth).toHaveBeenCalledOnce();
-  });
-
-  it('opens the debug console for each providerProtocol drift notice', async () => {
-    registerModelProvidersHotReload(watcher, settings, config);
-
-    const logErrorSpy = vi.fn();
-    const openDebugConsoleSpy = vi.fn();
-    appEvents.on(AppEvent.LogError, logErrorSpy);
-    appEvents.on(AppEvent.OpenDebugConsole, openDebugConsoleSpy);
-    try {
-      // Combined edit: modelProviders (hot) + providerProtocol (restart-only).
-      merged.providerProtocol = {
-        idealab: 'openai',
-      } as Settings['providerProtocol'];
-      merged.modelProviders = {
-        idealab: [{ id: 'm-1', baseUrl: 'https://x' }],
-      } as ModelProvidersConfig;
-      await listener([]);
-
-      expect(openDebugConsoleSpy).toHaveBeenCalledOnce();
-      expect(logErrorSpy).toHaveBeenCalledOnce();
-      expect(String(logErrorSpy.mock.calls[0][0])).toContain(
-        'providerProtocol',
-      );
-
-      // While the drift persists, further hot-reloads do not re-emit.
-      merged.modelProviders = {
-        idealab: [{ id: 'm-2', baseUrl: 'https://x' }],
-      } as ModelProvidersConfig;
-      await listener([]);
-      expect(logErrorSpy).toHaveBeenCalledOnce();
-
-      // A protocol-only edit is suppressed by SettingsWatcher in production.
-      // The next hot-reloadable event must still notice the new drift rather
-      // than staying latched on the previous one.
-      merged.providerProtocol = {
-        idealab: 'anthropic',
-      } as Settings['providerProtocol'];
-      merged.modelProviders = {
-        idealab: [{ id: 'm-3', baseUrl: 'https://x' }],
-      } as ModelProvidersConfig;
-      await listener([]);
-      expect(openDebugConsoleSpy).toHaveBeenCalledTimes(2);
-      expect(logErrorSpy).toHaveBeenCalledTimes(2);
-
-      // Reverting the protocol clears the drift…
-      merged.providerProtocol = {} as Settings['providerProtocol'];
-      await listener([]);
-      expect(logErrorSpy).toHaveBeenCalledTimes(2);
-
-      // …so a second independent drift notifies again.
-      merged.providerProtocol = {
-        idealab: 'anthropic',
-      } as Settings['providerProtocol'];
-      await listener([]);
-      expect(openDebugConsoleSpy).toHaveBeenCalledTimes(3);
-      expect(logErrorSpy).toHaveBeenCalledTimes(3);
-    } finally {
-      appEvents.off(AppEvent.LogError, logErrorSpy);
-      appEvents.off(AppEvent.OpenDebugConsole, openDebugConsoleSpy);
-    }
-  });
-
-  it('does not emit a spurious drift notice after an out-of-band protocol reload', async () => {
-    registerModelProvidersHotReload(watcher, settings, config);
-
-    const spy = vi.fn();
-    appEvents.on(AppEvent.LogError, spy);
-    try {
-      // An ACP-style out-of-band reload applies a new protocol map; settings
-      // already carry the same value.
-      appliedProtocol = { idealab: 'openai' };
-      merged.providerProtocol = {
-        idealab: 'openai',
-      } as Settings['providerProtocol'];
-      merged.modelProviders = {
-        idealab: [{ id: 'm-1', baseUrl: 'https://x' }],
-      } as ModelProvidersConfig;
-      await listener([]);
-
-      expect(reloadModelProvidersConfig).toHaveBeenCalledOnce();
-      expect(spy).not.toHaveBeenCalled();
-    } finally {
-      appEvents.off(AppEvent.LogError, spy);
-    }
   });
 });
