@@ -1079,6 +1079,13 @@ describe('DaemonClient', () => {
         durationMs: 12,
       };
       const acpStatus = { channelLive: true };
+      const runtimeStatus = {
+        v: 1 as const,
+        workspaceCwd: '/work/a',
+        state: 'idle' as const,
+        runtimeLive: true,
+        runtimeEpoch: 1,
+      };
       const { fetch, calls } = recordingFetch((req) => {
         if (req.url.endsWith('/workspace/mcp')) return jsonResponse(200, mcp);
         if (req.url.endsWith('/workspace/skills')) {
@@ -1089,6 +1096,12 @@ describe('DaemonClient', () => {
         }
         if (req.url.endsWith('/workspace/acp/status')) {
           return jsonResponse(200, acpStatus);
+        }
+        if (
+          req.url.endsWith('/workspace/runtime/ensure') ||
+          req.url.endsWith('/workspace/runtime/status')
+        ) {
+          return jsonResponse(200, runtimeStatus);
         }
         if (req.url.endsWith('/workspace/providers')) {
           return jsonResponse(200, providers);
@@ -1101,12 +1114,20 @@ describe('DaemonClient', () => {
       await expect(client.workspaceSkills()).resolves.toEqual(skills);
       await expect(client.workspaceAcpPreheat(1234)).resolves.toEqual(preheat);
       await expect(client.workspaceAcpStatus()).resolves.toEqual(acpStatus);
+      await expect(client.ensureWorkspaceRuntime()).resolves.toEqual(
+        runtimeStatus,
+      );
+      await expect(client.workspaceRuntimeStatus()).resolves.toEqual(
+        runtimeStatus,
+      );
       await expect(client.workspaceProviders()).resolves.toEqual(providers);
       expect(calls.map((c) => [c.method, c.url])).toEqual([
         ['GET', 'http://daemon/workspace/mcp'],
         ['GET', 'http://daemon/workspace/skills'],
         ['POST', 'http://daemon/workspace/acp/preheat?timeoutMs=1234'],
         ['GET', 'http://daemon/workspace/acp/status'],
+        ['POST', 'http://daemon/workspace/runtime/ensure'],
+        ['GET', 'http://daemon/workspace/runtime/status'],
         ['GET', 'http://daemon/workspace/providers'],
       ]);
     });
@@ -1150,6 +1171,68 @@ describe('DaemonClient', () => {
         expect(calls.map((call) => [call.method, call.url])).toEqual([
           ['POST', 'http://daemon/workspace/acp/preheat?timeoutMs=1234'],
           ['GET', 'http://daemon/workspace/acp/status'],
+        ]);
+        expect(
+          calls.every(
+            (call) => call.headers['authorization'] === 'Bearer secret',
+          ),
+        ).toBe(true);
+        expect(transportFetch).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(['acp-http', 'acp-ws'] as const)(
+      'uses REST for primary and qualified runtime routes with %s',
+      async (transportType) => {
+        const runtimeStatus = {
+          v: 1 as const,
+          workspaceCwd: '/work/secondary',
+          state: 'idle' as const,
+          runtimeLive: true,
+          runtimeEpoch: 2,
+        };
+        const { fetch: restFetch, calls } = recordingFetch(() =>
+          jsonResponse(200, runtimeStatus),
+        );
+        const transportFetch = vi.fn(async () =>
+          jsonResponse(404, { error: 'ACP transport route not found' }),
+        );
+        const transport: DaemonTransport = {
+          type: transportType,
+          supportsReplay: transportType === 'acp-http',
+          connected: true,
+          restFetch,
+          fetch: transportFetch,
+          async *subscribeEvents() {},
+          dispose() {},
+        };
+        const client = new DaemonClient({
+          baseUrl: 'http://daemon',
+          token: 'secret',
+          transport,
+        });
+        const workspace = client.workspaceByCwd('/work/secondary');
+
+        await expect(client.ensureWorkspaceRuntime()).resolves.toEqual(
+          runtimeStatus,
+        );
+        await expect(client.workspaceRuntimeStatus()).resolves.toEqual(
+          runtimeStatus,
+        );
+        await expect(workspace.ensureRuntime()).resolves.toEqual(runtimeStatus);
+        await expect(workspace.runtimeStatus()).resolves.toEqual(runtimeStatus);
+
+        expect(calls.map((call) => [call.method, call.url])).toEqual([
+          ['POST', 'http://daemon/workspace/runtime/ensure'],
+          ['GET', 'http://daemon/workspace/runtime/status'],
+          [
+            'POST',
+            'http://daemon/workspaces/%2Fwork%2Fsecondary/runtime/ensure',
+          ],
+          [
+            'GET',
+            'http://daemon/workspaces/%2Fwork%2Fsecondary/runtime/status',
+          ],
         ]);
         expect(
           calls.every(
@@ -1498,6 +1581,53 @@ describe('DaemonClient', () => {
         channelLive: true,
       });
     });
+
+    it.each([
+      ['primary', (client: DaemonClient) => client.ensureWorkspaceRuntime()],
+      [
+        'qualified',
+        (client: DaemonClient) =>
+          client.workspaceByCwd('/work/secondary').ensureRuntime(),
+      ],
+    ] as const)(
+      'gives %s runtime ensure the server deadline plus client headroom',
+      async (_label, ensureRuntime) => {
+        vi.useFakeTimers();
+        try {
+          let requestSignal: AbortSignal | null | undefined;
+          const slowFetch = vi.fn(
+            (
+              _input: RequestInfo | URL,
+              init?: { signal?: AbortSignal | null },
+            ) =>
+              new Promise<Response>((_resolve, reject) => {
+                requestSignal = init?.signal;
+                init?.signal?.addEventListener('abort', () => {
+                  reject(
+                    init.signal!.reason ??
+                      new DOMException('aborted', 'AbortError'),
+                  );
+                });
+              }),
+          );
+          const client = new DaemonClient({
+            baseUrl: 'http://daemon',
+            fetch: slowFetch as unknown as typeof globalThis.fetch,
+            fetchTimeoutMs: 1,
+          });
+
+          const outcome = ensureRuntime(client).catch(
+            (error: unknown) => error,
+          );
+          await vi.advanceTimersByTimeAsync(61_999);
+          expect(requestSignal?.aborted).toBe(false);
+          await vi.advanceTimersByTimeAsync(1);
+          expect(await outcome).toMatchObject({ name: 'TimeoutError' });
+        } finally {
+          vi.useRealTimers();
+        }
+      },
+    );
 
     it('GETs /workspace/preflight and returns the preflight envelope unchanged', async () => {
       const preflight: DaemonWorkspacePreflightStatus = {
