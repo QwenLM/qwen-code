@@ -884,6 +884,8 @@ What does NOT pin an assumption: a comment; the finding's own prose; the fixer's
 
 **You write nothing.** This is the user's working tree with their fix in it — not a review worktree and not a scratch tree: a probe file you add or a line you mutate lands in their files. Reading, searching, and running an EXISTING test command are yours; creating, editing and mutating are not. So you do not prove a pin by mutation — you quote it, and where a quoted test would demonstrably stay green with the assumption violated, say so and count the assumption unpinned.
 
+An entry in the findings list may carry the line **"No hunk below touches this finding's location(s)"**. That is not a hunk to audit and not something to go hunting for: report it once as an unpinned line with \`(no hunk)\` where the file:line would go — the ledger marks it fixed and nothing in front of you attests that — and carry on with the hunks that ARE here. Had every listed finding carried that line the command would have refused to build this input, so at least one real edit is always in front of you.
+
 Scope discipline: a hunk that is a generated artifact, a lockfile, or a test the fix added is read for what it pins, not audited for assumptions of its own. Do not report a defect you happen to notice in or beside the hunks — that is a finding, and this audit files none: what you report is a disclosure to the person who will read the outcome, not a finding on the review, and it changes no verdict. If a defect is inseparable from an assumption, say it in one clause under that assumption; otherwise leave it.
 
 Your return is one of two shapes, and nothing else rides in it.

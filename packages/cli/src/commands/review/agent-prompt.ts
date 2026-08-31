@@ -2337,19 +2337,96 @@ export function findingsSection(
   );
 }
 
+/** The `/`-normalised form both sides of a path comparison are reduced to. */
+function normalizeAuditPath(path: string): string {
+  return path.replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\/+/, '');
+}
+
+/**
+ * The paths the hunks actually touch, taken from the patch's own headers.
+ *
+ * `--- a/…` / `+++ b/…` are the unambiguous pair and are read first; a
+ * rename with no content change and a bare mode change emit neither, so
+ * `rename from|to` and the `diff --git` line back them up. The `diff --git`
+ * split is deliberately GENEROUS — `a/<from> b/<to>` cannot be split
+ * unambiguously when a name holds ' b/' — and every candidate is kept: this
+ * list is used to decide whether a finding's claim is CORROBORATED, so an
+ * over-wide list can only fail to raise a question, never invent one.
+ */
+function hunkHeaderPaths(hunks: string): string[] {
+  const paths = new Set<string>();
+  const add = (path: string): void => {
+    const normalized = normalizeAuditPath(path);
+    if (normalized !== '' && normalized !== 'dev/null') paths.add(normalized);
+  };
+  for (const line of hunks.split('\n')) {
+    if (line.startsWith('--- a/')) add(line.slice(6));
+    else if (line.startsWith('+++ b/')) add(line.slice(6));
+    else if (line.startsWith('rename from ')) add(line.slice(12));
+    else if (line.startsWith('rename to ')) add(line.slice(10));
+    else if (line.startsWith('diff --git a/')) {
+      const rest = line.slice('diff --git '.length);
+      for (
+        let i = rest.indexOf(' b/');
+        i !== -1;
+        i = rest.indexOf(' b/', i + 1)
+      ) {
+        add(rest.slice(2, i));
+        add(rest.slice(i + 3));
+      }
+    }
+  }
+  return [...paths];
+}
+
+/**
+ * True when a finding names a location one of the hunks touches.
+ *
+ * Compared on a SEGMENT boundary in both directions: a finding's location is
+ * repo-relative, while a hunk header is relative to the repository the diff
+ * was taken in, and a review of a subdirectory target can leave the two
+ * rooted differently. A suffix match is the honest comparison there; an
+ * equality-only test would call every such finding unmatched and bury the
+ * real mismatches in noise.
+ */
+function findingTouchesHunks(
+  finding: Finding,
+  hunkPaths: readonly string[],
+): boolean {
+  return finding.locations.some((loc) => {
+    const a = normalizeAuditPath(loc.file);
+    if (a === '') return false;
+    return hunkPaths.some(
+      (b) => a === b || a.endsWith(`/${b}`) || b.endsWith(`/${a}`),
+    );
+  });
+}
+
 /**
  * The fix auditor's one input file: the `fixed` findings, then the hunks
  * `--fix` applied — rendered by the CLI from the outcome-bearing artifact and
  * the `fix-delta` diff, never assembled by the orchestrator.
  *
- * Three refusals, each a state where the audit could only return the
+ * Five refusals, each a state where the audit could only return the
  * all-clear and the all-clear would be a lie: an artifact whose outcomes were
  * never recorded (the audit cannot tell a fixed finding from a skipped one),
- * an artifact with no `fixed` finding (nothing was applied — the skill skips
- * the audit, and a build that reached here was misordered), and a hunks file
- * with nothing in it beside a ledger that says something was fixed (a fix that
+ * an artifact with no `fixed` finding AND no hunks (nothing was applied — the
+ * skill skips the audit, and a build that reached here was misordered), an
+ * artifact with no `fixed` finding BESIDE hunks that landed (the ledger and
+ * the tree disagree: edits are on disk that no outcome owns, and asserting
+ * "nothing was applied" over them would skip the audit of exactly the
+ * assumption-introducing class this step exists to catch), a hunks file with
+ * nothing in it beside a ledger that says something was fixed (a fix that
  * left no hunk in the tree is a claim, not an edit — the snapshot was taken
- * after the edits, or the edits never landed).
+ * after the edits, or the edits never landed), and hunks in which NO `fixed`
+ * finding's locations appear at all (the same claim-versus-edit lie, one
+ * step short of the degenerate case).
+ *
+ * Between the last two lies the per-finding case, which is annotated rather
+ * than refused: a fix can legitimately land in a file other than the one the
+ * finding names — the brief's own `none` return shape is for a hunk that
+ * closes no listed finding — so a single unmatched claim marks its entry and
+ * the audit proceeds, and only a wholesale mismatch refuses.
  */
 export function renderFixAuditInput(artifact: unknown, hunks: string): string {
   const findings = validateFindings(artifact);
@@ -2369,7 +2446,28 @@ export function renderFixAuditInput(artifact: unknown, hunks: string): string {
     );
   }
   const fixed = findings.filter((f) => f.outcome === 'fixed');
+  const hunkPaths = hunkHeaderPaths(hunks);
   if (fixed.length === 0) {
+    // Consult the tree BEFORE asserting anything about it. The sibling
+    // branch below refuses the mirror state — a ledger claiming an edit the
+    // tree does not hold — as a lie; this direction is the same lie
+    // reversed, and skipping the audit over it drops exactly the edits the
+    // audit exists for: a fixer that edits while recording `skipped` (the
+    // divergence this feature's own docs police), or an out-of-band write
+    // between `fix-delta --snapshot` and `--since`.
+    if (hunks.trim() !== '') {
+      throw new Error(
+        'agent-prompt: --role fix-audit: the ledger records no `fixed` ' +
+          `outcome, but --hunks carries edits (${hunkPaths.length} path(s)` +
+          `${hunkPaths.length > 0 ? `: ${hunkPaths.slice(0, 5).join(', ')}${hunkPaths.length > 5 ? ', …' : ''}` : ''}). ` +
+          'That is a ledger/tree mismatch, not an empty fix round: edits ' +
+          'landed that no outcome owns, so "nothing was applied" would be ' +
+          'false. Correct the ledger — record the outcomes the edits ' +
+          'actually earned (`review findings --outcomes …`) and rebuild the ' +
+          'artifact — then re-run this command; it is the ledger, not the ' +
+          'audit, that is wrong here.',
+      );
+    }
     throw new Error(
       'agent-prompt: --role fix-audit: no finding has outcome `fixed` — ' +
         'nothing was applied, so there is nothing to audit (a `skipped` or ' +
@@ -2395,6 +2493,26 @@ export function renderFixAuditInput(artifact: unknown, hunks: string): string {
     const more = f.locations.length - 1;
     return more > 0 ? `${loc} (+${more} more location(s))` : loc;
   };
+  // Claim versus edit, per finding. `fixed` says an edit landed; the hunks
+  // are the edits that landed. A `fixed` finding no hunk corroborates is
+  // either an edit that never landed (the tool failed, a later edit reverted
+  // it, it went to the wrong file) or one taken before the snapshot — and
+  // neither the brief's per-hunk method nor either of its return shapes can
+  // express "a listed finding is closed by no hunk", so without this the
+  // claim rides through unexamined and is re-reported to the client as
+  // closed.
+  const unmatched = fixed.filter((f) => !findingTouchesHunks(f, hunkPaths));
+  if (unmatched.length === fixed.length) {
+    throw new Error(
+      `agent-prompt: --hunks carries no edit for any of the ${fixed.length} ` +
+        `finding(s) the ledger marks fixed (${ids(fixed)}): no hunk touches ` +
+        'any location they name. A fix that left no hunk where the finding ' +
+        'is is a claim, not an edit — either the snapshot was taken after ' +
+        'the edits, or those outcomes are wrong and the ledger, not the ' +
+        'audit, is what to correct.',
+    );
+  }
+  const unmatchedIds = new Set(unmatched.map((f) => f.id));
   const entries = fixed.map((f) =>
     [
       `### ${f.id} — [${f.severity}] ${where(f)}`,
@@ -2402,6 +2520,17 @@ export function renderFixAuditInput(artifact: unknown, hunks: string): string {
       `Failure scenario: ${f.failureScenario}`,
       ...(f.fixWitness ? [`Fix witness: ${f.fixWitness}`] : []),
       ...(f.outcomeNote ? [`Fixer's note: ${f.outcomeNote}`] : []),
+      // Marked, not dropped: the entry still frames the hunks that DID land,
+      // and the reader needs to know which claim nothing here attests.
+      ...(unmatchedIds.has(f.id)
+        ? [
+            "No hunk below touches this finding's location(s) — the fix " +
+              'may have landed in another file, or it may not have landed ' +
+              'at all. Nothing in this input attests that this finding was ' +
+              'closed; audit the hunks that are here and report it as ' +
+              'unattested.',
+          ]
+        : []),
     ].join('\n'),
   );
   return [

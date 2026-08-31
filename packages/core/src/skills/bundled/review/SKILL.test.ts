@@ -1044,10 +1044,36 @@ describe('bundled review skill', () => {
     // paragraph must say so (with the disclosure line) rather than promise
     // an audit that dies on the missing plan.
     expect(step).toContain('only when the ledger holds no `fixed` outcome');
+    // …AND an empty hunks file. Zero `fixed` beside hunks that landed is
+    // the mirror of the empty-hunks lie — edits on disk that no outcome
+    // owns — and the command refuses it rather than letting the skip
+    // clause certify "nothing was applied" over them.
+    expect(step).toContain(
+      '**and `fix-delta --since` wrote an empty hunks file**',
+    );
+    expect(step).toContain('is not that state and is not skippable');
     expect(step).toContain(
       'Fix audit: not run — plan report swept by Step 9 cleanup',
     );
     expect(step).not.toContain('it gets the same audit');
+    // …and that reason is scoped to the target whose plan the sweep
+    // actually reaches. `cleanup` never globs the `file-review-…` family —
+    // this document's own Step 1/Step 9 contract, and what keeps a
+    // concurrent target's cleanup from killing a live file review's plan —
+    // so a blanket "nothing persists the plan" was a false statement of
+    // system state that dropped the audit on a live fix path where every
+    // input survives.
+    expect(step).toContain('**On a `local` target the plan is gone**');
+    expect(step).toContain(
+      '**On a FILE target no sweep ever reaches the plan**',
+    );
+    expect(step).toContain(
+      '**run the audit on this path exactly as Step 6B does**',
+    );
+    expect(step).toContain(
+      'Fix audit: not run — file-review plan removed at Step 9',
+    );
+    expect(step).not.toContain('nothing persists the plan');
     // The note-propagation mechanism: the ledger re-run that carries an
     // unpinned assumption into the artifact as `outcomeNote`, and the
     // re-issue clause that carries it to the client. Without both halves

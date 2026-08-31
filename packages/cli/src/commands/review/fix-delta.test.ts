@@ -83,6 +83,7 @@ import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -2333,4 +2334,336 @@ describe('fix-delta', () => {
       ).toBe(false);
     },
   );
+
+  // --- repo-local config steering: the probe children, the capture and the
+  // rendering are all steerable by the tree they measure unless they are
+  // pinned. Each pin below has its own witness.
+
+  it('never executes a discovered repository’s core.fsmonitor', () => {
+    // `core.fsmonitor` runs a COMMAND on `status` and on `ls-files -v`, and
+    // a repository the walk discovers in the working tree carries its own
+    // `.git/config` — writable by anything running as this user, the
+    // audited fix included. Without `-c core.fsmonitor=` the measurement
+    // becomes the execution, exactly as `worktree.ts` says of the tripwire
+    // it de-steers.
+    const marker = join(out, 'fsmonitor-ran');
+    const hook = join(out, 'fsmonitor.sh');
+    writeFileSync(hook, `#!/bin/sh\ntouch '${marker}'\nexit 1\n`);
+    chmodSync(hook, 0o755);
+    const nested = join(repo, 'planted');
+    mkdirSync(nested);
+    gitAt(nested, 'init', '-q', '-b', 'main');
+    gitAt(nested, 'config', 'user.email', 't@t.t');
+    gitAt(nested, 'config', 'user.name', 't');
+    writeFileSync(join(nested, 'f.txt'), 'v1\n');
+    gitAt(nested, 'add', '-A');
+    gitAt(nested, 'commit', '-qm', 'init');
+    gitAt(nested, 'config', 'core.fsmonitor', hook);
+
+    runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+    writeFileSync(join(repo, 'a.ts'), 'export const x = 5;\n');
+    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it('pins the audited work tree so core.worktree cannot answer for a decoy', () => {
+    // A repo-local `[core] worktree = <decoy>` redirects the probe's status
+    // at a pristine copy: the inner status answers clean while the edit
+    // sits on disk in the audited directory — the planted-decoy shape the
+    // probe says it exists to prevent, reached through config instead of a
+    // mangled name.
+    const decoy = join(out, 'decoy');
+    mkdirSync(decoy);
+    const nested = join(repo, 'planted');
+    mkdirSync(nested);
+    gitAt(nested, 'init', '-q', '-b', 'main');
+    gitAt(nested, 'config', 'user.email', 't@t.t');
+    gitAt(nested, 'config', 'user.name', 't');
+    writeFileSync(join(nested, 'f.txt'), 'v1\n');
+    gitAt(nested, 'add', '-A');
+    gitAt(nested, 'commit', '-qm', 'init');
+    writeFileSync(join(decoy, 'f.txt'), 'v1\n'); // the pristine copy
+    gitAt(nested, 'config', 'core.worktree', decoy);
+
+    runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+    writeFileSync(join(nested, 'f.txt'), 'the hidden fix\n');
+    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+
+    expect(readFileSync(hunksFile(), 'utf8')).toBe('');
+    const lines = stderr();
+    expect(
+      lines.some((l) => l.includes('cannot see') && l.includes('planted')),
+    ).toBe(true);
+    expect(lines.at(-1)).not.toContain('the tree is unchanged since');
+  });
+
+  it('names a nested repository planted under a side-file family name', () => {
+    // The families are excluded from capture and comparison because the
+    // flow writes them between the two states — but the flow writes FILES
+    // under `qwen-review-*`, never a repository. Excluding the family from
+    // the PROBE too let a repository planted at a family-shaped name fall
+    // out of every route at once: hidden from both trees by the capture
+    // pathspec, and never discovered by the status the probe reads.
+    const hidden = join(repo, 'subdir', '.qwen', 'tmp', 'qwen-review-hide');
+    mkdirSync(hidden, { recursive: true });
+    gitAt(hidden, 'init', '-q', '-b', 'main');
+    gitAt(hidden, 'config', 'user.email', 't@t.t');
+    gitAt(hidden, 'config', 'user.name', 't');
+    writeFileSync(join(hidden, 'f.txt'), 'v1\n');
+    gitAt(hidden, 'add', '-A');
+    gitAt(hidden, 'commit', '-qm', 'init');
+
+    runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+    writeFileSync(join(hidden, 'f.txt'), 'the hidden fix\n');
+    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+
+    expect(readFileSync(hunksFile(), 'utf8')).toBe('');
+    const lines = stderr();
+    expect(
+      lines.some(
+        (l) => l.includes('cannot see') && l.includes('qwen-review-hide'),
+      ),
+    ).toBe(true);
+    expect(lines.at(-1)).not.toContain('the tree is unchanged since');
+  });
+
+  it("still excludes the review's own side files under a subdirectory", () => {
+    // …and the de-globbed probe pathspec must not re-admit the bookkeeping
+    // the families exist to remove: the same subdirectory layout, holding
+    // what the flow actually writes there.
+    mkdirSync(
+      join(repo, 'subdir', '.qwen', 'tmp', 'qwen-review-local-prompts'),
+      {
+        recursive: true,
+      },
+    );
+    runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+    writeFileSync(
+      join(repo, 'subdir', '.qwen', 'tmp', 'qwen-review-local-prompts', 'p.md'),
+      'x\n',
+    );
+    writeFileSync(
+      join(repo, 'subdir', '.qwen', 'tmp', 'qwen-review-local-side.json'),
+      '{}\n',
+    );
+    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+
+    expect(readFileSync(hunksFile(), 'utf8')).toBe('');
+    const lines = stderr();
+    expect(lines.some((l) => l.includes('qwen-review-local'))).toBe(false);
+    expect(lines.at(-1)).toContain('the tree is unchanged since the snapshot');
+  });
+
+  it('names a repository a symlink target merely CONTAINS', () => {
+    // `add -A` records the link, never what is behind it, so a repository
+    // one level down the target is exactly as invisible as one the link
+    // points straight at. The branch returned silently when the target
+    // carried no `.git` of its own — neither probed nor disclosed.
+    const outside = join(out, 'linked');
+    const inner = join(outside, 'deep', 'repo');
+    mkdirSync(inner, { recursive: true });
+    gitAt(inner, 'init', '-q', '-b', 'main');
+    gitAt(inner, 'config', 'user.email', 't@t.t');
+    gitAt(inner, 'config', 'user.name', 't');
+    writeFileSync(join(inner, 'f.txt'), 'v1\n');
+    gitAt(inner, 'add', '-A');
+    gitAt(inner, 'commit', '-qm', 'init');
+    symlinkSync(outside, join(repo, 'link'));
+
+    runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+    writeFileSync(join(inner, 'f.txt'), 'the hidden fix\n');
+    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+
+    expect(readFileSync(hunksFile(), 'utf8')).toBe('');
+    const lines = stderr();
+    expect(
+      lines.some(
+        (l) => l.includes('cannot see') && l.includes('link/deep/repo'),
+      ),
+    ).toBe(true);
+    expect(lines.at(-1)).not.toContain('the tree is unchanged since');
+  });
+
+  it('re-reports a submodule whose interior state changed since the snapshot', () => {
+    // The mirror of "never reports a submodule whose only change is new
+    // commits", one level down: a level-2 gitlink that merely moved (the
+    // everyday `submodule update --remote` shape) stamps its PARENT as
+    // confirmed dirt in the outer status, and the baseline used to record
+    // that as a bare boolean — after which a fix's real edit inside the
+    // parent was filtered into the pre-existing note and the blind-spot
+    // warning went silent. The baseline records a DIGEST of the state
+    // inside, so dirt that changed since is fresh dirt.
+    const subSrc = plantCommittedSubmodule();
+    const depSrc = makeSubmoduleSource();
+    const sub = join(repo, 'sub');
+    const dep = join(sub, 'dep');
+    try {
+      gitAt(
+        sub,
+        '-c',
+        'protocol.file.allow=always',
+        'submodule',
+        'add',
+        '-q',
+        depSrc,
+        'dep',
+      );
+      gitAt(sub, 'commit', '-qm', 'add dep');
+      git('add', '-A');
+      git('commit', '-qm', 'advance sub');
+      // The level-2 gitlink moves: `sub` now reads ` M dep` — new commits
+      // only, nothing else dirty in it.
+      gitAt(dep, 'config', 'user.email', 't@t.t');
+      gitAt(dep, 'config', 'user.name', 't');
+      writeFileSync(join(dep, 'f.txt'), 'advanced\n');
+      gitAt(dep, 'add', '-A');
+      gitAt(dep, 'commit', '-qm', 'advance');
+
+      runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+      // The fix edits inside `sub` — invisible to both trees.
+      writeFileSync(join(sub, 'g.txt'), 'the fix\n');
+      runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+
+      expect(readFileSync(hunksFile(), 'utf8')).toBe('');
+      const lines = stderr();
+      expect(
+        lines.some((l) => l.includes('cannot see') && /\bsub\b/.test(l)),
+      ).toBe(true);
+      expect(lines.at(-1)).not.toContain('the tree is unchanged since');
+    } finally {
+      rmSync(subSrc, { recursive: true, force: true });
+      rmSync(depSrc, { recursive: true, force: true });
+    }
+  });
+
+  // POSIX-only: a byte that is not valid UTF-8 cannot be a name on NTFS.
+  it.skipIf(process.platform === 'win32')(
+    'keys the git-dir exclusion on bytes, not on the display decode',
+    () => {
+      // `decodePath` is not injective: the UTF-8 pair `C3 A9` and the lone
+      // invalid byte `E9` both render 'é'. Comparing the DECODED name
+      // against an in-worktree git dir named `gd-é` let a planted
+      // `gd-<0xE9>` repository answer to that name — pruned from every
+      // probe route, while `add -A` recorded only its gitlink, so an edit
+      // inside it appeared nowhere.
+      const wt = realpathSync(
+        mkdtempSync(join(tmpdir(), 'qwen-fix-delta-gdcollide-')),
+      );
+      const cwdHere = process.cwd();
+      try {
+        gitAt(
+          wt,
+          'init',
+          '-q',
+          '-b',
+          'main',
+          '--separate-git-dir',
+          join(wt, 'gd-é'),
+        );
+        gitAt(wt, 'config', 'user.email', 't@t.t');
+        gitAt(wt, 'config', 'user.name', 't');
+        writeFileSync(join(wt, 'a.ts'), 'export const x = 1;\n');
+        gitAt(wt, 'add', 'a.ts');
+        gitAt(wt, 'commit', '-qm', 'head');
+        const plant = Buffer.concat([
+          Buffer.from(join(wt, 'gd-')),
+          Buffer.from([0xe9]),
+        ]);
+        execFileSync('/bin/sh', [], {
+          input: Buffer.concat([
+            Buffer.from("set -e\nmkdir -p '"),
+            plant,
+            Buffer.from("'\n"),
+          ]),
+        });
+        initNestedRepoSh(plant);
+        process.chdir(wt);
+        const snap = join(out, 'gdcollide-snapshot.json');
+        const hunks = join(out, 'gdcollide-hunks.diff');
+        runFixDelta({ snapshot: true, since: undefined, out: snap });
+        overwriteSh(
+          Buffer.concat([plant, Buffer.from('/f.txt')]),
+          'the hidden fix',
+        );
+        runFixDelta({ snapshot: false, since: snap, out: hunks });
+
+        expect(readFileSync(hunks, 'utf8')).toBe('');
+        const lines = stderr();
+        expect(lines.some((l) => l.includes('cannot see'))).toBe(true);
+        expect(lines.at(-1)).not.toContain('the tree is unchanged since');
+      } finally {
+        process.chdir(cwdHere);
+        rmSync(wt, {
+          recursive: true,
+          force: true,
+          maxRetries: 3,
+          retryDelay: 100,
+        });
+      }
+    },
+  );
+
+  it('discloses a clean filter that steers what the capture stores', () => {
+    // `filter.<name>.clean` replaces a path's STORED content, so a real
+    // edit can be absent from both trees, or bytes the worktree never held
+    // can be attested as an edit that never landed. The capture cannot see
+    // the surface that shaped it — nothing in a comparison of two trees
+    // says how either was built — so it is named before the bytes it
+    // qualifies.
+    git('config', 'filter.hide.clean', 'cat /dev/null');
+    mkdirSync(join(repo, '.git', 'info'), { recursive: true });
+    writeFileSync(
+      join(repo, '.git', 'info', 'attributes'),
+      'a.ts filter=hide\n',
+    );
+
+    runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+    const snapLines = stderr();
+    expect(
+      snapLines.some(
+        (l) => l.includes('filter.hide.clean') && l.includes('info/attributes'),
+      ),
+    ).toBe(true);
+
+    writeFileSync(join(repo, 'a.ts'), 'export const x = 7;\n');
+    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+    expect(stderr().some((l) => l.includes('what `git add -A` stores'))).toBe(
+      true,
+    );
+  });
+
+  it('stays quiet about steering surfaces an ordinary repository does not have', () => {
+    // `git init` writes a comment-only `info/exclude`, and the disclosure
+    // must not fire on it — a note every run prints is a note nobody reads.
+    runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+    writeFileSync(join(repo, 'a.ts'), 'export const x = 7;\n');
+    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+    const lines = stderr();
+    expect(lines.some((l) => l.includes('repo-local surfaces'))).toBe(false);
+    expect(lines.some((l) => l.includes('steers how the hunks'))).toBe(false);
+  });
+
+  it('discloses an attributes rule that steers how the hunks render', () => {
+    // One `-diff` line forces a TEXT fix into an opaque base85 `GIT binary
+    // patch`: the hunks are non-empty, the file is listed, nothing fails —
+    // and the auditor all-clears an edit it cannot read, the failure the
+    // `--binary` flag above exists to prevent. The surface is plantable
+    // BETWEEN the two moments, so it is read at `--since` time.
+    runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+    mkdirSync(join(repo, '.git', 'info'), { recursive: true });
+    writeFileSync(join(repo, '.git', 'info', 'attributes'), 'a.ts -diff\n');
+    writeFileSync(join(repo, 'a.ts'), 'export const x = 7;\n');
+    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+
+    // The rendering really is unreadable…
+    expect(readFileSync(hunksFile(), 'utf8')).toContain('GIT binary patch');
+    // …and the run says so, naming the path and the surface.
+    expect(
+      stderr().some(
+        (l) =>
+          l.includes('steers how the hunks above render') && l.includes('a.ts'),
+      ),
+    ).toBe(true);
+  });
 });

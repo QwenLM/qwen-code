@@ -7365,6 +7365,59 @@ describe('the fix audit (--role fix-audit) — Step 6B, not a re-review', () => 
     }
   });
 
+  it('marks a fixed finding no hunk corroborates, and leaves the matched one alone', () => {
+    // `fixed` says an edit landed; the hunks are the edits that landed. The
+    // default artifact marks f1 AND f3 fixed while HUNKS touches only
+    // src/f1.ts — f3's edit never landed, went to another file, or the
+    // snapshot was taken after it. The brief works per hunk and neither of
+    // its return shapes can say "a listed finding is closed by no hunk", so
+    // without the marker the claim rides through unexamined and is
+    // re-reported to the client as closed.
+    const { plan, findings, hunks, dir } = setup({});
+    try {
+      handler({ plan, role: 'fix-audit', findings, hunks });
+      const printed = (writeStdoutLine as unknown as Mock).mock
+        .calls[0][0] as string;
+      const m = /^read_file\(file_path="([^"]*\.findings\.md)"\)$/m.exec(
+        printed,
+      );
+      const list = readFileSync(m![1], 'utf8');
+      const f3 = list.slice(list.indexOf('### f3'));
+      expect(f3).toContain("No hunk below touches this finding's location(s)");
+      // …and the corroborated one carries no such line.
+      const f1 = list.slice(list.indexOf('### f1'), list.indexOf('### f3'));
+      expect(f1).not.toContain('No hunk below touches');
+      // The brief tells the agent what to do with the marker.
+      expect(buildRoleBrief(PLAN, 'fix-audit')).toContain(
+        "No hunk below touches this finding's location(s)",
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('matches a finding whose location is rooted differently from the hunk header', () => {
+    // A finding's location is repo-relative while a hunk header is relative
+    // to the repository the diff was taken in; a review of a subdirectory
+    // target can leave the two rooted differently. An equality-only
+    // comparison would mark every such finding unattested and bury the real
+    // mismatches in noise.
+    const rendered = (renderFixAuditInput as (a: unknown, h: string) => string)(
+      [
+        {
+          id: 'c1',
+          severity: 'Critical',
+          summary: 'bound picked by hand',
+          failureScenario: 'the bound disagrees with the configured limit',
+          locations: [{ file: 'src/f1.ts', line: 40 }],
+          outcome: 'fixed',
+        },
+      ],
+      HUNKS.replace(/src\/f1\.ts/g, 'packages/cli/src/f1.ts'),
+    );
+    expect(rendered).not.toContain('No hunk below touches');
+  });
+
   it('a different set of hunks is a different launch — the key follows the content', () => {
     const a = setup({});
     const b = setup({ hunks: HUNKS.replace('hops', 'depth') });
@@ -7406,7 +7459,13 @@ describe('the fix audit (--role fix-audit) — Step 6B, not a re-review', () => 
           outcomeNote: 'keyed by (callId, runtimeId)',
         },
       ],
-      HUNKS,
+      // Hunks that touch this finding's OWN file: the claim-versus-edit
+      // reconciliation below refuses an input where no `fixed` finding is
+      // corroborated by any hunk, and this case is about the rendering.
+      'diff --git a/src/registry.ts b/src/registry.ts\n' +
+        '--- a/src/registry.ts\n+++ b/src/registry.ts\n@@ -8,3 +8,3 @@\n' +
+        '-  byCallId.set(callId, runtime);\n' +
+        '+  byCallId.set(`${callId}:${runtimeId}`, runtime);\n',
     );
     expect(rendered).toContain(
       '### c1 — [Critical] src/registry.ts:10 (+2 more location(s))',
@@ -7424,9 +7483,38 @@ describe('the fix audit (--role fix-audit) — Step 6B, not a re-review', () => 
       /carry no outcome[\s\S]*f2[\s\S]*review findings --outcomes/,
     ],
     [
-      'an artifact with no fixed finding',
-      { outcomes: { f1: 'skipped', f2: 'no_change_needed' } as const },
+      // Zero `fixed` AND an empty tree: the two agree, nothing was applied.
+      // The hunks are part of the state this message asserts, so the case
+      // that pins it has to hold them empty — the divergent state is the
+      // row below.
+      'an artifact with no fixed finding beside an empty hunks file',
+      {
+        outcomes: { f1: 'skipped', f2: 'no_change_needed' } as const,
+        hunks: '\n',
+      },
       /no finding has outcome `fixed`[\s\S]*Skip the audit/,
+    ],
+    [
+      // The mirror of the empty-hunks lie: the ledger owns no edit, the
+      // tree holds some. Asserting "nothing was applied" over it skips the
+      // audit of exactly the class this step exists to catch — a fixer that
+      // edited while recording `skipped`, or a write between the snapshot
+      // and the `--since`.
+      'an artifact with no fixed finding beside hunks that landed',
+      { outcomes: { f1: 'skipped', f2: 'no_change_needed' } as const },
+      /records no `fixed` outcome, but --hunks carries edits \(1 path\(s\): src\/f1\.ts\)[\s\S]*ledger\/tree mismatch[\s\S]*Correct the ledger/,
+    ],
+    [
+      // Every `fixed` claim uncorroborated by any hunk: the degenerate
+      // empty-hunks refusal one step short of empty.
+      'hunks in which no fixed finding appears at all',
+      {
+        hunks:
+          'diff --git a/src/elsewhere.ts b/src/elsewhere.ts\n' +
+          '--- a/src/elsewhere.ts\n+++ b/src/elsewhere.ts\n@@ -1 +1 @@\n' +
+          '-const a = 1;\n+const a = 2;\n',
+      },
+      /carries no edit for any of the 2 finding\(s\) the ledger marks fixed \(f1, f3\)[\s\S]*a claim, not an edit/,
     ],
     [
       'an empty hunks file beside a ledger that says something was fixed',
