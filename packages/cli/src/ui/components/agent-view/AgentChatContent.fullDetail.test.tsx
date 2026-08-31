@@ -75,7 +75,7 @@ const renderAt = (allExpanded: boolean) => {
       value={{
         allExpanded,
         expandedHeadIds: new Set<number>(),
-        toggleExpanded: () => {},
+        toggle: () => {},
       }}
     >
       <AgentChatContent core={makeCore()} instanceKey="a@team" />
