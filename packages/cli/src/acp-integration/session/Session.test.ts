@@ -77,6 +77,8 @@ const addToolArgumentsAttributesSpy = vi.hoisted(() => vi.fn());
 const addToolCallResultAttributesSpy = vi.hoisted(() => vi.fn());
 const logLoopDetectedSpy = vi.hoisted(() => vi.fn());
 const logRepeatedToolFailureGuardSpy = vi.hoisted(() => vi.fn());
+const deleteWorkflowSnapshotSpy = vi.hoisted(() => vi.fn());
+const listWorkflowSnapshotsSpy = vi.hoisted(() => vi.fn());
 const agentTelemetry = vi.hoisted(() => ({
   span: {},
   getActiveInteractionSpan: vi.fn(),
@@ -154,6 +156,8 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
       logRepeatedToolFailureGuardSpy(...args);
       return actual.logRepeatedToolFailureGuard(...args);
     },
+    deleteWorkflowSnapshot: deleteWorkflowSnapshotSpy,
+    listWorkflowSnapshots: listWorkflowSnapshotsSpy,
     // Transparent recording wrapper: records the constructor deps, then behaves
     // exactly like the real resolver (subclass → instanceof + methods preserved).
     LoopTickResolver: class extends actual.LoopTickResolver {
@@ -369,15 +373,76 @@ function setFakeHome(home: string): () => void {
   };
 }
 
-// Helper to create async generator with chunks (avoids memory leak)
+// Helper to create async generator with chunks (avoids memory leak).
+// COMPRESSED events carry `info` instead of `value`.
 function createStreamWithChunks(
-  chunks: Array<{ type: unknown; value: unknown }>,
+  chunks: Array<{ type: unknown; value?: unknown; info?: unknown }>,
 ) {
   return (async function* () {
     for (const chunk of chunks) {
       yield chunk;
     }
   })();
+}
+
+/**
+ * Builds a sendMessageStream mock for the #9529 session-token-limit tests:
+ * the first send streams usage metadata over the 100-token limit those tests
+ * configure (so the count lands in the session's route-scoped cache), and
+ * the second send returns an empty stream.
+ */
+function createOverLimitUsageSendStream() {
+  return vi
+    .fn()
+    .mockResolvedValueOnce(
+      createStreamWithChunks([
+        {
+          type: core.StreamEventType.CHUNK,
+          value: {
+            usageMetadata: {
+              totalTokenCount: 101,
+              promptTokenCount: 101,
+            },
+          },
+        },
+      ]),
+    )
+    .mockResolvedValueOnce(createEmptyStream());
+}
+
+/**
+ * Installs the shared vision-override mock surface for the #9529
+ * override-route tests: the 100-token session limit, the vision/primary
+ * route identity discriminator, the modality and vision-bridge selectors,
+ * and a base LLM client whose `resolveForModel` resolves to the vision
+ * agent. Returns the `resolveForModel` mock so a test can swap in a
+ * rejecting one (the fail-closed path) or assert on its calls.
+ */
+function setupVisionRouteOverrideMocks(
+  mockConfig: Config,
+  resolveForModel?: ReturnType<typeof vi.fn>,
+): ReturnType<typeof vi.fn> {
+  const resolver =
+    resolveForModel ??
+    vi.fn().mockResolvedValue({
+      contentGenerator: {},
+      contentGeneratorConfig: { model: 'vision-agent' },
+      model: 'vision-agent',
+    });
+  mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+  mockConfig.getModelRouteIdentity = vi.fn((model?: string) =>
+    model === 'vision-agent' ? 'route-vision' : 'route-primary',
+  );
+  mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+  mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+    id: 'vision-agent',
+    baseUrl: 'https://vision.example.com/v1',
+    agentCapable: true,
+  });
+  mockConfig.getBaseLlmClient = vi.fn().mockReturnValue({
+    resolveForModel: resolver,
+  });
+  return resolver;
 }
 
 /** Builds provider preparation metadata that arrives before complete arguments. */
@@ -499,8 +564,19 @@ describe('Session', () => {
     getFunctionDeclarationsFiltered: ReturnType<typeof vi.fn>;
   };
   let mockWorkflowRunRegistry: {
+    setCompletionCallback: ReturnType<typeof vi.fn>;
+    setStatusChangeCallback: ReturnType<typeof vi.fn>;
+    setSnapshotPersistedCallback: ReturnType<typeof vi.fn>;
+    clearStatusChangeCallback: ReturnType<typeof vi.fn>;
     setApprovalRequestCallback: ReturnType<typeof vi.fn>;
     resolvePendingApproval: ReturnType<typeof vi.fn>;
+    get: ReturnType<typeof vi.fn>;
+    getHandle: ReturnType<typeof vi.fn>;
+    isStarting: ReturnType<typeof vi.fn>;
+    listStartingRunIds: ReturnType<typeof vi.fn>;
+    removeTerminal: ReturnType<typeof vi.fn>;
+    list: ReturnType<typeof vi.fn>;
+    abortAll: ReturnType<typeof vi.fn>;
   };
   let mockGoalRuntime: {
     getSnapshot: ReturnType<typeof vi.fn>;
@@ -615,6 +691,10 @@ describe('Session', () => {
     addToolCallResultAttributesSpy.mockClear();
     logLoopDetectedSpy.mockReset();
     logRepeatedToolFailureGuardSpy.mockReset();
+    deleteWorkflowSnapshotSpy.mockReset();
+    deleteWorkflowSnapshotSpy.mockResolvedValue(true);
+    listWorkflowSnapshotsSpy.mockReset();
+    listWorkflowSnapshotsSpy.mockResolvedValue([]);
     agentTelemetry.getActiveInteractionSpan.mockReset();
     agentTelemetry.addAgentInputMessageAttributes.mockReset();
     agentTelemetry.captures.length = 0;
@@ -724,8 +804,19 @@ describe('Session', () => {
       ),
     };
     mockWorkflowRunRegistry = {
+      setCompletionCallback: vi.fn(),
+      setStatusChangeCallback: vi.fn(),
+      setSnapshotPersistedCallback: vi.fn(),
+      clearStatusChangeCallback: vi.fn(),
       setApprovalRequestCallback: vi.fn(),
       resolvePendingApproval: vi.fn().mockResolvedValue(true),
+      get: vi.fn().mockReturnValue(undefined),
+      getHandle: vi.fn().mockReturnValue(undefined),
+      isStarting: vi.fn().mockReturnValue(false),
+      listStartingRunIds: vi.fn().mockReturnValue([]),
+      removeTerminal: vi.fn().mockReturnValue(false),
+      list: vi.fn().mockReturnValue([]),
+      abortAll: vi.fn(),
     };
 
     mockChatRecordingService = {
@@ -849,6 +940,7 @@ describe('Session', () => {
       getDebugMode: vi.fn().mockReturnValue(false),
       getAuthType: vi.fn().mockImplementation(() => currentAuthType),
       getAllConfiguredModels: vi.fn().mockReturnValue([]),
+      reloadModelProvidersConfig: vi.fn(),
       isCronEnabled: vi.fn().mockReturnValue(false),
       getSessionTokenLimit: vi.fn().mockReturnValue(0),
       getStopHookBlockingCap: vi.fn().mockReturnValue(8),
@@ -883,6 +975,10 @@ describe('Session', () => {
       getWorkflowRunRegistry: vi.fn().mockReturnValue(mockWorkflowRunRegistry),
       getFileHistoryService: vi.fn().mockReturnValue(mockFileHistoryService),
       getDisabledSkillNames: vi.fn().mockReturnValue(new Set<string>()),
+      isSkillEnabled: vi.fn(
+        (skill: { name: string }) =>
+          !mockConfig.getDisabledSkillNames().has(skill.name.toLowerCase()),
+      ),
       setSubSessionSpawner: vi.fn(),
       getSubSessionSpawner: vi.fn(),
       setCurrentSessionScheduledTaskCreator: vi.fn(),
@@ -912,6 +1008,7 @@ describe('Session', () => {
       workspace: { settings: {} },
       setValue: vi.fn(),
       reloadScopeFromDisk: vi.fn(),
+      reloadScopesFromDiskAtomically: vi.fn().mockReturnValue(true),
     } as unknown as LoadedSettings;
 
     getAvailableCommandsSpy = vi.mocked(nonInteractiveCliCommands)
@@ -951,6 +1048,38 @@ describe('Session', () => {
     mockToolRegistry = undefined as unknown as typeof mockToolRegistry;
     vi.restoreAllMocks();
     vi.clearAllTimers();
+  });
+
+  it('reloads model providers from the session-owned settings', () => {
+    const modelProviders = {
+      idealab: [{ id: 'qwen3', baseUrl: 'https://idealab.example/v1' }],
+    };
+    Object.assign(mockSettings.merged, {
+      modelProviders,
+      providerProtocol: { idealab: 'openai' },
+    });
+
+    session.reloadModelProvidersFromDisk();
+
+    expect(mockSettings.reloadScopesFromDiskAtomically).toHaveBeenCalledWith([
+      SettingScope.User,
+      SettingScope.Workspace,
+    ]);
+    expect(mockConfig.reloadModelProvidersConfig).toHaveBeenCalledWith(
+      modelProviders,
+      { idealab: 'openai' },
+    );
+  });
+
+  it('does not apply stale model providers when a settings scope cannot reload', () => {
+    vi.mocked(mockSettings.reloadScopesFromDiskAtomically).mockReturnValueOnce(
+      false,
+    );
+
+    expect(() => session.reloadModelProvidersFromDisk()).toThrow(
+      'Unable to reload model-provider settings from disk.',
+    );
+    expect(mockConfig.reloadModelProvidersConfig).not.toHaveBeenCalled();
   });
 
   it('bounds textual tool results at the live ACP delivery boundary', async () => {
@@ -1047,7 +1176,9 @@ describe('Session', () => {
       );
     }
 
-    function holdIds(category: 'agent' | 'notification' | 'shell'): string[] {
+    function holdIds(
+      category: 'agent' | 'notification' | 'shell' | 'workflow',
+    ): string[] {
       return session
         .collectActiveWorkHolds()
         .filter((hold) => hold.category === category)
@@ -1147,6 +1278,54 @@ describe('Session', () => {
       session.dispose();
     });
 
+    it('holds executing workflow runs but never paused ones', () => {
+      mockWorkflowRunRegistry.list.mockReturnValue([
+        { runId: 'wf-running', status: 'running' },
+        { runId: 'wf-pausing', status: 'pausing' },
+        { runId: 'wf-paused', status: 'paused' },
+        { runId: 'wf-complete', status: 'completed' },
+      ]);
+      createReportingSession();
+
+      // Mirrors the registry's hasRunningEntries(): a paused run executes
+      // nothing and no backstop would ever release the hold, so it must
+      // not pin the session forever.
+      expect(holdIds('workflow')).toEqual(['wf-running', 'wf-pausing']);
+      expect(session.isIdle()).toBe(false);
+
+      mockWorkflowRunRegistry.list.mockReturnValue([
+        { runId: 'wf-paused', status: 'paused' },
+      ]);
+      expect(session.collectActiveWorkHolds()).toEqual([]);
+      expect(session.isIdle()).toBe(true);
+      session.dispose();
+    });
+
+    it('holds a workflow run that is reserved but not yet registered', () => {
+      // Between `reserveStart` and `register` the run has no `list()`
+      // entry, yet the registry's hasRunningEntries() and the liveness
+      // gates already count it as live. A daemon conditional close that
+      // read no hold here disposed the session and aborted the start
+      // under the client that just asked for it.
+      mockWorkflowRunRegistry.listStartingRunIds.mockReturnValue([
+        'wf-starting',
+      ]);
+      mockWorkflowRunRegistry.list.mockReturnValue([
+        { runId: 'wf-paused', status: 'paused' },
+      ]);
+      createReportingSession();
+
+      expect(holdIds('workflow')).toEqual(['wf-starting']);
+      expect(session.isIdle()).toBe(false);
+
+      // Registration takes over with the entry's own running hold; a
+      // failed or cancelled start drops the reservation.
+      mockWorkflowRunRegistry.listStartingRunIds.mockReturnValue([]);
+      expect(session.collectActiveWorkHolds()).toEqual([]);
+      expect(session.isIdle()).toBe(true);
+      session.dispose();
+    });
+
     it('tracks shell status changes and retracts only its callback', () => {
       createReportingSession();
       const statusChanged =
@@ -1228,6 +1407,37 @@ describe('Session', () => {
         expect(session.collectActiveWorkHolds()).toEqual([]),
       );
       expect(session.isIdle()).toBe(true);
+      session.dispose();
+    });
+
+    it('holds a queued workflow completion notification', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      createReportingSession();
+      const releaseCloseGate = session.beginClose();
+      const notify =
+        mockWorkflowRunRegistry.setCompletionCallback.mock.calls.at(
+          -1,
+        )?.[0] as (
+          displayText: string,
+          modelText: string,
+          meta: { runId: string; status: 'completed' },
+        ) => void;
+
+      notify('Workflow completed.', '<task-notification />', {
+        runId: 'wf-queued',
+        status: 'completed',
+      });
+
+      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+      expect(holdIds('notification')).toEqual(['wf-queued']);
+      expect(session.isIdle()).toBe(false);
+
+      releaseCloseGate();
+      await vi.waitFor(() =>
+        expect(session.collectActiveWorkHolds()).toEqual([]),
+      );
       session.dispose();
     });
 
@@ -2649,6 +2859,1017 @@ describe('Session', () => {
       .mocked(mockChat.sendMessageStream)
       .mock.calls.at(-1)?.[1] as { message: Part[] };
     expect(textParts(notificationCall.message)).toContain(reminder);
+  });
+
+  it('delivers background workflow completions through the session queue', async () => {
+    mockChat.sendMessageStream = vi
+      .fn()
+      .mockImplementation(async () => createEmptyStream());
+    const callback = mockWorkflowRunRegistry.setCompletionCallback.mock
+      .calls[0][0] as (
+      displayText: string,
+      modelText: string,
+      meta: {
+        runId: string;
+        status: 'completed' | 'failed';
+        todoWorkChainId?: string;
+      },
+    ) => void;
+
+    callback('Workflow completed.', '<task-notification/>', {
+      runId: 'wf_1234abcd',
+      status: 'completed',
+    });
+
+    await vi.waitFor(() =>
+      expect(mockChatRecordingService.recordNotification).toHaveBeenCalledWith(
+        [{ text: '<task-notification/>' }],
+        'Workflow completed.',
+        expect.objectContaining({
+          taskId: 'wf_1234abcd',
+          status: 'completed',
+          kind: 'workflow',
+        }),
+      ),
+    );
+  });
+
+  it('adds terminal workflow status changes to the session history cache', () => {
+    const callback = mockWorkflowRunRegistry.setStatusChangeCallback.mock
+      .calls[0][0] as (entry: core.WorkflowTask) => void;
+    callback({
+      id: 'wf_saved',
+      kind: 'workflow',
+      runId: 'wf_saved',
+      description: 'Review and fix',
+      meta: { name: 'review-and-fix', description: 'Review and fix' },
+      status: 'completed',
+      startTime: 1_000,
+      endTime: 2_000,
+      outputFile: '',
+      outputOffset: 0,
+      notified: true,
+      abortController: new AbortController(),
+      isBackgrounded: true,
+      currentPhase: null,
+      phases: ['Inspect'],
+      phaseVisits: [],
+      currentPhaseVisitId: null,
+      dispatches: [],
+      agentsDispatched: 1,
+      agentsCompleted: 1,
+      recentLogs: [],
+      events: [],
+      tokensSpent: 500,
+      tokenBudgetTotal: 2_000,
+      perPhaseTokens: new Map(),
+      pendingApprovals: [],
+      script: 'return 1;',
+    });
+
+    expect(session.getWorkflowHistory()).toEqual([
+      expect.objectContaining({
+        runId: 'wf_saved',
+        description: 'Review and fix',
+        status: 'completed',
+      }),
+    ]);
+  });
+
+  it('keeps cached terminal workflow history when its disk write is missing', async () => {
+    const callback = mockWorkflowRunRegistry.setStatusChangeCallback.mock
+      .calls[0][0] as (entry: core.WorkflowTask) => void;
+    callback({
+      id: 'wf-unpersisted',
+      kind: 'workflow',
+      runId: 'wf-unpersisted',
+      description: 'Unpersisted run',
+      meta: null,
+      status: 'completed',
+      startTime: 1_000,
+      endTime: 2_000,
+      outputFile: '',
+      outputOffset: 0,
+      notified: true,
+      abortController: new AbortController(),
+      isBackgrounded: true,
+      currentPhase: null,
+      phases: [],
+      phaseVisits: [],
+      currentPhaseVisitId: null,
+      dispatches: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      recentLogs: [],
+      events: [],
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      perPhaseTokens: new Map(),
+      pendingApprovals: [],
+      script: 'return 1;',
+    });
+    listWorkflowSnapshotsSpy.mockResolvedValueOnce([]);
+
+    await session.refreshWorkflowHistory();
+
+    expect(session.getWorkflowHistory()).toEqual([
+      expect.objectContaining({ runId: 'wf-unpersisted' }),
+    ]);
+  });
+
+  it('does not republish a run deleted while a refresh was still reading the disk', async () => {
+    // Refresh reads the directory and then merges without a claim, while
+    // deletion holds one: a delete that lands between the read and the
+    // merge was overwritten by the stale listing, and the run came back
+    // until the next refresh.
+    session.dispose();
+    const snapshot = {
+      runId: 'wf_stale',
+      meta: null,
+      status: 'failed' as const,
+      script: 'return 1;',
+      phases: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      perPhaseTokens: [],
+      recentLogs: [],
+      startTime: 1_000,
+      endTime: 2_000,
+    };
+    session = new Session(
+      'racing-session',
+      mockConfig,
+      mockClient,
+      mockSettings,
+      undefined,
+      undefined,
+      [snapshot],
+    );
+    let finishStaleRead!: (snapshots: Array<typeof snapshot>) => void;
+    listWorkflowSnapshotsSpy.mockImplementationOnce(
+      () =>
+        new Promise<Array<typeof snapshot>>((resolve) => {
+          finishStaleRead = resolve;
+        }),
+    );
+    const staleRefresh = session.refreshWorkflowHistory();
+    await vi.waitFor(() => expect(finishStaleRead).toBeDefined());
+
+    // The delete's own refresh sees the file, then removes it.
+    listWorkflowSnapshotsSpy.mockResolvedValueOnce([snapshot]);
+    await expect(session.deleteWorkflowHistory(snapshot.runId)).resolves.toBe(
+      true,
+    );
+    expect(session.getWorkflowHistory()).toEqual([]);
+
+    // The read that began before the delete now completes with the
+    // pre-delete listing.
+    finishStaleRead([snapshot]);
+    await staleRefresh;
+
+    expect(session.getWorkflowHistory()).toEqual([]);
+
+    // A later refresh that genuinely finds the run again (a retry reuses
+    // the runId) must not be suppressed by the old deletion.
+    listWorkflowSnapshotsSpy.mockResolvedValueOnce([snapshot]);
+    await session.refreshWorkflowHistory();
+    expect(session.getWorkflowHistory()).toEqual([
+      expect.objectContaining({ runId: 'wf_stale' }),
+    ]);
+  });
+
+  it('does not republish a run a sibling session deleted while this refresh was still reading the disk', async () => {
+    // The deletion-sequence marker is per-Session, but the store and the
+    // delete entrance are process-wide: session A's delete landing while
+    // session B's refresh had already read the directory left nothing in
+    // B to filter the stale listing, and B republished the run A's
+    // client was just told was gone. The delete handler now marks the
+    // deletion in every sibling, under its claim.
+    session.dispose();
+    const snapshot = {
+      runId: 'wf_cross',
+      meta: null,
+      status: 'failed' as const,
+      script: 'return 1;',
+      phases: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      perPhaseTokens: [],
+      recentLogs: [],
+      startTime: 1_000,
+      endTime: 2_000,
+    };
+    const deleting = new Session(
+      'deleting-session',
+      mockConfig,
+      mockClient,
+      mockSettings,
+      undefined,
+      undefined,
+      [snapshot],
+    );
+    session = new Session(
+      'observing-session',
+      mockConfig,
+      mockClient,
+      mockSettings,
+      undefined,
+      undefined,
+      [snapshot],
+    );
+    try {
+      let finishStaleRead!: (snapshots: Array<typeof snapshot>) => void;
+      listWorkflowSnapshotsSpy.mockImplementationOnce(
+        () =>
+          new Promise<Array<typeof snapshot>>((resolve) => {
+            finishStaleRead = resolve;
+          }),
+      );
+      const staleRefresh = session.refreshWorkflowHistory();
+      await vi.waitFor(() => expect(finishStaleRead).toBeDefined());
+
+      // The deleting session's own refresh sees the file, then removes
+      // it, and the handler propagates the deletion to the observer.
+      listWorkflowSnapshotsSpy.mockResolvedValueOnce([snapshot]);
+      await expect(
+        deleting.deleteWorkflowHistory(snapshot.runId),
+      ).resolves.toBe(true);
+      session.noteExternalWorkflowDeletion(snapshot.runId);
+      expect(session.getWorkflowHistory()).toEqual([]);
+
+      // The observer's read that began before the delete now completes
+      // with the pre-delete listing.
+      finishStaleRead([snapshot]);
+      await staleRefresh;
+
+      expect(session.getWorkflowHistory()).toEqual([]);
+
+      // A later refresh that genuinely finds the run again (a retry
+      // reuses the runId) is not suppressed by the old deletion.
+      listWorkflowSnapshotsSpy.mockResolvedValueOnce([snapshot]);
+      await session.refreshWorkflowHistory();
+      expect(session.getWorkflowHistory()).toEqual([
+        expect.objectContaining({ runId: 'wf_cross' }),
+      ]);
+    } finally {
+      deleting.dispose();
+    }
+  });
+
+  it('drops persisted workflow history deleted by another session', async () => {
+    session.dispose();
+    const snapshot = {
+      runId: 'wf_abcd',
+      meta: null,
+      status: 'failed' as const,
+      script: 'return 1;',
+      phases: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      perPhaseTokens: [],
+      recentLogs: [],
+      startTime: 1_000,
+      endTime: 2_000,
+    };
+    const deletingSession = new Session(
+      'deleting-session',
+      mockConfig,
+      mockClient,
+      mockSettings,
+      undefined,
+      undefined,
+      [snapshot],
+    );
+    session = new Session(
+      'observing-session',
+      mockConfig,
+      mockClient,
+      mockSettings,
+      undefined,
+      undefined,
+      [snapshot],
+    );
+    listWorkflowSnapshotsSpy.mockResolvedValueOnce([snapshot]);
+
+    await expect(
+      deletingSession.deleteWorkflowHistory(snapshot.runId),
+    ).resolves.toBe(true);
+    listWorkflowSnapshotsSpy.mockResolvedValueOnce([]);
+
+    await session.refreshWorkflowHistory();
+
+    expect(session.getWorkflowHistory()).toEqual([]);
+  });
+
+  it('lets a newer persisted snapshot win over a stale cached one', async () => {
+    const callback = mockWorkflowRunRegistry.setStatusChangeCallback.mock
+      .calls[0][0] as (entry: core.WorkflowTask) => void;
+    callback({
+      id: 'wf_reused',
+      kind: 'workflow',
+      runId: 'wf_reused',
+      description: 'Stale cached run',
+      meta: null,
+      status: 'failed',
+      startTime: 1_000,
+      endTime: 2_000,
+      error: 'old error',
+      outputFile: '',
+      outputOffset: 0,
+      notified: true,
+      abortController: new AbortController(),
+      isBackgrounded: true,
+      currentPhase: null,
+      phases: [],
+      phaseVisits: [],
+      currentPhaseVisitId: null,
+      dispatches: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      recentLogs: [],
+      events: [],
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      perPhaseTokens: new Map(),
+      pendingApprovals: [],
+      script: 'return 1;',
+    });
+    listWorkflowSnapshotsSpy.mockResolvedValueOnce([
+      {
+        runId: 'wf_reused',
+        meta: null,
+        status: 'completed' as const,
+        script: 'return 1;',
+        phases: [],
+        agentsDispatched: 0,
+        agentsCompleted: 0,
+        tokensSpent: 0,
+        tokenBudgetTotal: null,
+        perPhaseTokens: [],
+        recentLogs: [],
+        startTime: 3_000,
+        endTime: 4_000,
+      },
+    ]);
+
+    await session.refreshWorkflowHistory();
+
+    // The persisted copy is the newer authoritative projection of the
+    // reused runId; the stale callback cache must not shadow it.
+    expect(session.getWorkflowHistory()).toEqual([
+      expect.objectContaining({
+        runId: 'wf_reused',
+        status: 'completed',
+        startTime: 3_000,
+        endTime: 4_000,
+      }),
+    ]);
+  });
+
+  it('does not resurrect a sibling-deleted run cached through the status callback', async () => {
+    session.dispose();
+    const snapshot = {
+      runId: 'wf_abcd',
+      meta: null,
+      status: 'failed' as const,
+      script: 'return 1;',
+      phases: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      perPhaseTokens: [],
+      recentLogs: [],
+      startTime: 1_000,
+      endTime: 2_000,
+    };
+    const deletingSession = new Session(
+      'deleting-session',
+      mockConfig,
+      mockClient,
+      mockSettings,
+      undefined,
+      undefined,
+      [],
+    );
+    const observingSession = new Session(
+      'observing-session',
+      mockConfig,
+      mockClient,
+      mockSettings,
+      undefined,
+      undefined,
+      [],
+    );
+    // The observing session caches the terminal run through the
+    // status-change callback, exactly as it lands before the runner's
+    // snapshot write.
+    const callback =
+      mockWorkflowRunRegistry.setStatusChangeCallback.mock.calls.at(
+        -1,
+      )?.[0] as (entry: core.WorkflowTask) => void;
+    callback({
+      id: 'wf_abcd',
+      kind: 'workflow',
+      runId: 'wf_abcd',
+      description: 'Callback-cached run',
+      meta: null,
+      status: 'failed',
+      startTime: 1_000,
+      endTime: 2_000,
+      outputFile: '',
+      outputOffset: 0,
+      notified: true,
+      abortController: new AbortController(),
+      isBackgrounded: true,
+      currentPhase: null,
+      phases: [],
+      phaseVisits: [],
+      currentPhaseVisitId: null,
+      dispatches: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      recentLogs: [],
+      events: [],
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      perPhaseTokens: new Map(),
+      pendingApprovals: [],
+      script: 'return 1;',
+    });
+    expect(observingSession.getWorkflowHistory()).toEqual([
+      expect.objectContaining({ runId: 'wf_abcd' }),
+    ]);
+    // The runner then persists the snapshot; the registry notification
+    // retires the observing session's unpersisted cache entry.
+    const snapshotPersisted =
+      mockWorkflowRunRegistry.setSnapshotPersistedCallback.mock.calls.at(
+        -1,
+      )?.[0] as ((runId: string) => void) | undefined;
+    snapshotPersisted?.('wf_abcd');
+
+    listWorkflowSnapshotsSpy.mockResolvedValueOnce([snapshot]);
+    await expect(
+      deletingSession.deleteWorkflowHistory(snapshot.runId),
+    ).resolves.toBe(true);
+    listWorkflowSnapshotsSpy.mockResolvedValueOnce([]);
+
+    await observingSession.refreshWorkflowHistory();
+
+    expect(observingSession.getWorkflowHistory()).toEqual([]);
+  });
+
+  it('keeps a sibling-deleted run buried when a late status emission lands after persistence', async () => {
+    // R7-5: the existing non-resurrection test fires the status callback
+    // only BEFORE snapshotPersisted, so it cannot see the real ordering.
+    // The registry's dispatch-drain callbacks emit on TERMINAL entries
+    // with no status gate, and in-flight dispatches keep draining across
+    // the snapshot write — so a terminal emission routinely lands AFTER
+    // retirement, re-inserting the run as "never persisted". A sibling's
+    // deletion was then undone by the next refresh: absent on disk but
+    // present in the stale cache reads as a pending write. Retirement has
+    // to be a latch.
+    session.dispose();
+    const snapshot = {
+      runId: 'wf_abcd',
+      meta: null,
+      status: 'failed' as const,
+      script: 'return 1;',
+      phases: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      perPhaseTokens: [],
+      recentLogs: [],
+      startTime: 1_000,
+      endTime: 2_000,
+    };
+    const deletingSession = new Session(
+      'deleting-session',
+      mockConfig,
+      mockClient,
+      mockSettings,
+      undefined,
+      undefined,
+      [],
+    );
+    const observingSession = new Session(
+      'observing-session',
+      mockConfig,
+      mockClient,
+      mockSettings,
+      undefined,
+      undefined,
+      [],
+    );
+    const terminalEntry = {
+      id: 'wf_abcd',
+      kind: 'workflow' as const,
+      runId: 'wf_abcd',
+      description: 'Callback-cached run',
+      meta: null,
+      status: 'failed' as const,
+      startTime: 1_000,
+      endTime: 2_000,
+      outputFile: '',
+      outputOffset: 0,
+      notified: true,
+      abortController: new AbortController(),
+      isBackgrounded: true,
+      currentPhase: null,
+      phases: [],
+      phaseVisits: [],
+      currentPhaseVisitId: null,
+      dispatches: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      recentLogs: [],
+      events: [],
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      perPhaseTokens: new Map(),
+      pendingApprovals: [],
+      script: 'return 1;',
+    };
+    const callback =
+      mockWorkflowRunRegistry.setStatusChangeCallback.mock.calls.at(
+        -1,
+      )?.[0] as (entry: core.WorkflowTask) => void;
+    const snapshotPersisted =
+      mockWorkflowRunRegistry.setSnapshotPersistedCallback.mock.calls.at(
+        -1,
+      )?.[0] as ((runId: string) => void) | undefined;
+
+    callback(terminalEntry);
+    snapshotPersisted?.('wf_abcd');
+    // A draining dispatch emits once more on the already-terminal entry,
+    // after retirement. This is the ordering the bug lived in.
+    callback(terminalEntry);
+
+    listWorkflowSnapshotsSpy.mockResolvedValueOnce([snapshot]);
+    await expect(
+      deletingSession.deleteWorkflowHistory(snapshot.runId),
+    ).resolves.toBe(true);
+    listWorkflowSnapshotsSpy.mockResolvedValueOnce([]);
+
+    await observingSession.refreshWorkflowHistory();
+    expect(observingSession.getWorkflowHistory()).toEqual([]);
+  });
+
+  it('re-remembers a run whose id is registered again after persistence', async () => {
+    // The latch must not be permanent: a retry reuses the runId, so once
+    // the entry goes active again its next settlement has to be cached
+    // like any other, or a genuine re-run would vanish from the session's
+    // projection until its own snapshot write lands.
+    session.dispose();
+    const observingSession = new Session(
+      'observing-session',
+      mockConfig,
+      mockClient,
+      mockSettings,
+      undefined,
+      undefined,
+      [],
+    );
+    const base = {
+      id: 'wf_relive',
+      kind: 'workflow' as const,
+      runId: 'wf_relive',
+      description: 'Re-run',
+      meta: null,
+      startTime: 1_000,
+      outputFile: '',
+      outputOffset: 0,
+      notified: true,
+      abortController: new AbortController(),
+      isBackgrounded: true,
+      currentPhase: null,
+      phases: [],
+      phaseVisits: [],
+      currentPhaseVisitId: null,
+      dispatches: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      recentLogs: [],
+      events: [],
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      perPhaseTokens: new Map(),
+      pendingApprovals: [],
+      script: 'return 1;',
+    };
+    const callback =
+      mockWorkflowRunRegistry.setStatusChangeCallback.mock.calls.at(
+        -1,
+      )?.[0] as (entry: core.WorkflowTask) => void;
+    const snapshotPersisted =
+      mockWorkflowRunRegistry.setSnapshotPersistedCallback.mock.calls.at(
+        -1,
+      )?.[0] as ((runId: string) => void) | undefined;
+
+    callback({
+      ...base,
+      status: 'failed',
+      endTime: 2_000,
+    } as core.WorkflowTask);
+    snapshotPersisted?.('wf_relive');
+    // The retry re-registers the same runId and runs.
+    callback({
+      ...base,
+      status: 'running',
+      endTime: undefined,
+    } as core.WorkflowTask);
+    // Its own settlement must be cached again.
+    callback({
+      ...base,
+      status: 'completed',
+      endTime: 3_000,
+    } as core.WorkflowTask);
+
+    expect(observingSession.getWorkflowHistory()).toEqual([
+      expect.objectContaining({ runId: 'wf_relive', status: 'completed' }),
+    ]);
+  });
+
+  it('deletes a run that fell out of the capped history window', async () => {
+    // R7-4: `buildSessionTasksStatus` serializes every registry entry
+    // unconditionally, but deletion gated on membership in the
+    // MAX_RETAINED_SNAPSHOTS window, which `refreshWorkflowHistory`
+    // truncates by startTime. A long run that settles after ~30 newer
+    // ones started stayed listed via the registry yet fell out of the
+    // window — terminal, handle-free, live in no sibling, and permanently
+    // undeletable. Membership must be tested against the uncapped set.
+    session.dispose();
+    const target = {
+      runId: 'wf_oldest',
+      meta: null,
+      status: 'failed' as const,
+      script: 'return 1;',
+      phases: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      perPhaseTokens: [],
+      recentLogs: [],
+      startTime: 1_000,
+      endTime: 2_000,
+    };
+    // 30 strictly newer snapshots fill the window ahead of the target.
+    const newer = Array.from(
+      { length: core.MAX_RETAINED_SNAPSHOTS },
+      (_, i) => ({
+        ...target,
+        runId: `wf_newer${i}`,
+        startTime: 10_000 + i,
+        endTime: 20_000 + i,
+      }),
+    );
+    const deletingSession = new Session(
+      'deleting-session',
+      mockConfig,
+      mockClient,
+      mockSettings,
+      undefined,
+      undefined,
+      [],
+    );
+    mockWorkflowRunRegistry.get.mockReturnValue({
+      runId: target.runId,
+      status: 'failed',
+    });
+    mockWorkflowRunRegistry.removeTerminal.mockReturnValueOnce(true);
+    listWorkflowSnapshotsSpy.mockResolvedValueOnce([...newer, target]);
+
+    await expect(
+      deletingSession.deleteWorkflowHistory(target.runId),
+    ).resolves.toBe(true);
+    expect(deleteWorkflowSnapshotSpy).toHaveBeenCalledWith(
+      mockConfig,
+      target.runId,
+    );
+    expect(mockWorkflowRunRegistry.removeTerminal).toHaveBeenCalledWith(
+      target.runId,
+    );
+  });
+
+  it('rejects history deletion while a sibling session still owns the run', async () => {
+    session.dispose();
+    const snapshot = {
+      runId: 'wf_deadbeef',
+      meta: null,
+      status: 'failed' as const,
+      script: 'return 1;',
+      phases: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      perPhaseTokens: [],
+      recentLogs: [],
+      startTime: 1_000,
+      endTime: 2_000,
+    };
+    const siblingRegistry = {
+      get: vi.fn().mockReturnValue({ runId: 'wf_deadbeef', status: 'running' }),
+      getHandle: vi.fn().mockReturnValue(undefined),
+    };
+    const isWorkflowRunLiveInSiblingSession = (runId: string): boolean => {
+      const entry = siblingRegistry.get(runId) as
+        | { status: core.WorkflowStatus }
+        | undefined;
+      if (entry && !core.isTerminalWorkflowStatus(entry.status)) return true;
+      return siblingRegistry.getHandle(runId) !== undefined;
+    };
+    listWorkflowSnapshotsSpy.mockResolvedValue([snapshot]);
+    session = new Session(
+      'test-session-id',
+      mockConfig,
+      mockClient,
+      mockSettings,
+      undefined,
+      undefined,
+      [snapshot],
+      isWorkflowRunLiveInSiblingSession,
+    );
+
+    await expect(session.deleteWorkflowHistory(snapshot.runId)).resolves.toBe(
+      false,
+    );
+    expect(deleteWorkflowSnapshotSpy).not.toHaveBeenCalled();
+
+    // Once the sibling run settles terminal, deletion proceeds.
+    siblingRegistry.get.mockReturnValue({
+      runId: 'wf_deadbeef',
+      status: 'failed',
+    });
+    await expect(session.deleteWorkflowHistory(snapshot.runId)).resolves.toBe(
+      true,
+    );
+    expect(deleteWorkflowSnapshotSpy).toHaveBeenCalledWith(
+      mockConfig,
+      snapshot.runId,
+    );
+  });
+
+  it('does not report a deletion whose registry entry could not be retired', async () => {
+    // `removeTerminal` refuses a live or handle-held entry. Ignoring its
+    // answer reported success for a run that was still registered here,
+    // whose settlement then re-persisted the "deleted" history.
+    session.dispose();
+    const snapshot = {
+      runId: 'wf_stuck',
+      meta: null,
+      status: 'failed' as const,
+      script: 'return 1;',
+      phases: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      perPhaseTokens: [],
+      recentLogs: [],
+      startTime: 1_000,
+      endTime: 2_000,
+    };
+    session = new Session(
+      'test-session-id',
+      mockConfig,
+      mockClient,
+      mockSettings,
+      undefined,
+      undefined,
+      [snapshot],
+    );
+    listWorkflowSnapshotsSpy.mockResolvedValue([snapshot]);
+    mockWorkflowRunRegistry.get.mockReturnValue({
+      runId: snapshot.runId,
+      status: 'failed',
+    });
+    mockWorkflowRunRegistry.removeTerminal.mockReturnValueOnce(false);
+
+    await expect(session.deleteWorkflowHistory(snapshot.runId)).resolves.toBe(
+      false,
+    );
+    expect(deleteWorkflowSnapshotSpy).not.toHaveBeenCalled();
+    expect(session.getWorkflowHistory()).toHaveLength(1);
+
+    mockWorkflowRunRegistry.removeTerminal.mockReturnValueOnce(true);
+    await expect(session.deleteWorkflowHistory(snapshot.runId)).resolves.toBe(
+      true,
+    );
+    expect(deleteWorkflowSnapshotSpy).toHaveBeenCalledWith(
+      mockConfig,
+      snapshot.runId,
+    );
+  });
+
+  it('keeps cached history on disk failure and removes it after deletion', async () => {
+    session.dispose();
+    const onActiveWorkChanged = vi.fn();
+    session = new Session(
+      'test-session-id',
+      mockConfig,
+      mockClient,
+      mockSettings,
+      undefined,
+      onActiveWorkChanged,
+      [
+        {
+          runId: 'wf_abcd',
+          meta: { name: 'review-and-fix', description: 'Review and fix' },
+          status: 'failed',
+          script: 'return 1;',
+          phases: ['Inspect'],
+          agentsDispatched: 1,
+          agentsCompleted: 0,
+          tokensSpent: 500,
+          tokenBudgetTotal: 2_000,
+          perPhaseTokens: [],
+          recentLogs: [],
+          startTime: 1_000,
+          endTime: 2_000,
+        },
+      ],
+    );
+    listWorkflowSnapshotsSpy.mockResolvedValue(session.getWorkflowHistory());
+
+    deleteWorkflowSnapshotSpy.mockResolvedValueOnce(false);
+    await expect(session.deleteWorkflowHistory('wf_abcd')).resolves.toBe(false);
+    expect(session.getWorkflowHistory()).toHaveLength(1);
+    expect(onActiveWorkChanged).not.toHaveBeenCalled();
+
+    await expect(session.deleteWorkflowHistory('wf_abcd')).resolves.toBe(true);
+
+    expect(deleteWorkflowSnapshotSpy).toHaveBeenCalledWith(
+      mockConfig,
+      'wf_abcd',
+    );
+    expect(deleteWorkflowSnapshotSpy).toHaveBeenCalledTimes(2);
+    expect(session.getWorkflowHistory()).toEqual([]);
+    expect(onActiveWorkChanged).toHaveBeenCalledOnce();
+  });
+
+  it('keeps history unchanged when the requested saved run is unknown', async () => {
+    await expect(session.deleteWorkflowHistory('wf_missing')).resolves.toBe(
+      false,
+    );
+
+    expect(deleteWorkflowSnapshotSpy).not.toHaveBeenCalled();
+  });
+
+  it('waits for an active run owner to finish persistence before deletion', async () => {
+    session.dispose();
+    const snapshot = {
+      runId: 'wf_pending',
+      meta: null,
+      status: 'completed' as const,
+      script: 'return 1;',
+      phases: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      perPhaseTokens: [],
+      recentLogs: [],
+      startTime: 1_000,
+      endTime: 2_000,
+    };
+    let finishPersistence: (() => void) | undefined;
+    const completion = new Promise<void>((resolve) => {
+      finishPersistence = resolve;
+    });
+    mockWorkflowRunRegistry.getHandle.mockReturnValue({ completion });
+    listWorkflowSnapshotsSpy.mockResolvedValue([snapshot]);
+    session = new Session(
+      'test-session-id',
+      mockConfig,
+      mockClient,
+      mockSettings,
+      undefined,
+      undefined,
+      [snapshot],
+    );
+
+    const deletion = session.deleteWorkflowHistory(snapshot.runId);
+    await Promise.resolve();
+    expect(deleteWorkflowSnapshotSpy).not.toHaveBeenCalled();
+
+    finishPersistence?.();
+    await expect(deletion).resolves.toBe(true);
+    expect(deleteWorkflowSnapshotSpy).toHaveBeenCalledWith(
+      mockConfig,
+      snapshot.runId,
+    );
+  });
+
+  it('stops deletion when a retry activates the run during refresh', async () => {
+    const snapshot = {
+      runId: 'wf_abcd',
+      meta: null,
+      status: 'failed' as const,
+      script: 'return 1;',
+      phases: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      perPhaseTokens: [],
+      recentLogs: [],
+      startTime: 1_000,
+      endTime: 2_000,
+    };
+    let finishRefresh!: () => void;
+    listWorkflowSnapshotsSpy.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishRefresh = () => resolve([snapshot]);
+        }),
+    );
+    mockWorkflowRunRegistry.get.mockReturnValue({ status: 'failed' });
+
+    const deletion = session.deleteWorkflowHistory(snapshot.runId);
+    await vi.waitFor(() =>
+      expect(listWorkflowSnapshotsSpy).toHaveBeenCalledOnce(),
+    );
+    mockWorkflowRunRegistry.get.mockReturnValue({ status: 'running' });
+    finishRefresh();
+
+    await expect(deletion).resolves.toBe(false);
+    expect(deleteWorkflowSnapshotSpy).not.toHaveBeenCalled();
+  });
+
+  it('keeps deletion atomic with a direct workflow resume', async () => {
+    const snapshot = {
+      runId: 'wf_atomic',
+      meta: null,
+      status: 'failed' as const,
+      script: 'return 1;',
+      phases: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      perPhaseTokens: [],
+      recentLogs: [],
+      startTime: 1_000,
+      endTime: 2_000,
+    };
+    let finishDeletion: ((deleted: boolean) => void) | undefined;
+    deleteWorkflowSnapshotSpy.mockImplementationOnce(
+      () =>
+        new Promise<boolean>((resolve) => {
+          finishDeletion = resolve;
+        }),
+    );
+    listWorkflowSnapshotsSpy.mockResolvedValueOnce([snapshot]);
+    mockWorkflowRunRegistry.get.mockReturnValue({ status: 'failed' });
+    mockWorkflowRunRegistry.removeTerminal.mockReturnValueOnce(true);
+
+    const deletion = session.deleteWorkflowHistory(snapshot.runId);
+    await vi.waitFor(() =>
+      expect(deleteWorkflowSnapshotSpy).toHaveBeenCalledOnce(),
+    );
+
+    const resumeAttempt = await core.tryWithWorkflowTaskMutation(
+      core.getWorkflowTaskMutationKey(mockConfig, snapshot.runId),
+      async () => true,
+    );
+    expect(resumeAttempt).toEqual({ acquired: false });
+
+    finishDeletion?.(true);
+    await expect(deletion).resolves.toBe(true);
+  });
+
+  it('rejects history deletion while the workflow is starting', async () => {
+    mockWorkflowRunRegistry.get.mockReturnValue({ status: 'failed' });
+    mockWorkflowRunRegistry.isStarting.mockReturnValue(true);
+
+    await expect(session.deleteWorkflowHistory('wf_starting')).resolves.toBe(
+      false,
+    );
+
+    expect(listWorkflowSnapshotsSpy).not.toHaveBeenCalled();
+    expect(deleteWorkflowSnapshotSpy).not.toHaveBeenCalled();
+  });
+
+  it('rejects history deletion while the workflow is active', async () => {
+    mockWorkflowRunRegistry.get.mockReturnValue({ status: 'paused' });
+
+    await expect(session.deleteWorkflowHistory('wf_active')).resolves.toBe(
+      false,
+    );
+
+    expect(mockWorkflowRunRegistry.getHandle).not.toHaveBeenCalled();
+    expect(listWorkflowSnapshotsSpy).not.toHaveBeenCalled();
+    expect(deleteWorkflowSnapshotSpy).not.toHaveBeenCalled();
   });
 
   it('does not infer Todo ownership from Todo Stop Guard lineage', async () => {
@@ -4291,6 +5512,75 @@ describe('Session', () => {
           qwenTodoApproval: { planId: 'plan-1', sourceCallId: 'todo-call-1' },
         }),
       );
+    });
+  });
+
+  describe('output style turn reminder', () => {
+    function armStyle(styleName: string | undefined) {
+      mockConfig.getOutputStyle = vi
+        .fn()
+        .mockReturnValue(
+          styleName ? core.getBuiltInOutputStyle(styleName) : undefined,
+        );
+      mockConfig.getSystemPrompt = vi.fn().mockReturnValue(undefined);
+      mockConfig.getExperimentalZedIntegration = vi.fn().mockReturnValue(true);
+      mockConfig.isInteractive = vi.fn().mockReturnValue(false);
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              candidates: [{ content: { parts: [{ text: 'ok' }] } }],
+            },
+          },
+        ]),
+      );
+    }
+
+    it('sends the active style reminder with every ACP prompt', async () => {
+      armStyle('Concise');
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hi' }],
+      });
+
+      expect(textParts(firstSentMessage())).toContainEqual(
+        expect.stringMatching(
+          /^<system-reminder>\nConcise output style is active\. Be concise:.*\n<\/system-reminder>$/s,
+        ),
+      );
+    });
+
+    it('sends nothing when no style is active', async () => {
+      armStyle(undefined);
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hi' }],
+      });
+
+      expect(
+        textParts(firstSentMessage()).some((text) =>
+          text.includes('output style is active'),
+        ),
+      ).toBe(false);
+    });
+
+    it('stays silent when a custom system prompt carries no style section', async () => {
+      armStyle('Concise');
+      mockConfig.getSystemPrompt = vi.fn().mockReturnValue('You are terse.');
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hi' }],
+      });
+
+      expect(
+        textParts(firstSentMessage()).some((text) =>
+          text.includes('output style is active'),
+        ),
+      ).toBe(false);
     });
   });
 
@@ -12957,6 +14247,667 @@ describe('Session', () => {
         );
       });
 
+      it('does not drop a route-B send using a stale route-A token count after a model switch (#9529)', async () => {
+        mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+        // ACP model switches keep the same LlmChat instance, so only the
+        // route identity changes — the chat-instance reset in the session's
+        // token cache never fires (#9529, follow-up to #9454/#9506).
+        let routeIdentity = 'route-a';
+        mockConfig.getModelRouteIdentity = vi.fn(() => routeIdentity);
+
+        // Prompt 1 on route A: an API-reported count lands in the session's
+        // private token cache.
+        mockLlmClient.tryCompressChat.mockResolvedValueOnce({
+          originalTokenCount: 50,
+          newTokenCount: 50,
+          compressionStatus: core.CompressionStatus.NOOP,
+        });
+        mockChat.sendMessageStream = createOverLimitUsageSendStream();
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'first' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+
+        // Switch to route B on the same chat instance.
+        routeIdentity = 'route-b';
+
+        // Prompt 2 on route B reaches the session-token-limit gate without
+        // compression info (compression throws), so the gate falls back to the
+        // cached count. The stale route-A count (101 > 100) must not drop a
+        // route-B send.
+        mockLlmClient.tryCompressChat.mockRejectedValueOnce(
+          new Error('compression rate limited'),
+        );
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'second' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+      });
+
+      it('still intercepts a same-route send whose recorded count exceeds the session token limit (#9529)', async () => {
+        mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+        // The route never changes, so the route-scoped cache must keep the
+        // recorded count and let the gate trip exactly as it did before #9529.
+        mockConfig.getModelRouteIdentity = vi.fn(() => 'route-a');
+
+        mockLlmClient.tryCompressChat.mockResolvedValueOnce({
+          originalTokenCount: 50,
+          newTokenCount: 50,
+          compressionStatus: core.CompressionStatus.NOOP,
+        });
+        mockChat.sendMessageStream = createOverLimitUsageSendStream();
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'first' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+
+        // Same route, compression throws → the gate reads the recorded
+        // same-route count (101 > 100) and must still drop the send.
+        mockLlmClient.tryCompressChat.mockRejectedValueOnce(
+          new Error('compression rate limited'),
+        );
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'second' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'max_tokens' });
+
+        expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'requestRoute=route-a, activeModel=qwen3-code-plus',
+          ),
+        );
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+      });
+
+      it('does not drop a returning route send on a stale count after in-send compression rewrote the history (#9529)', async () => {
+        mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+        let routeIdentity = 'route-a';
+        mockConfig.getModelRouteIdentity = vi.fn(() => routeIdentity);
+
+        // Prompt 1 on route A: an API-reported over-limit count (101) lands
+        // in the session's route-scoped cache.
+        mockLlmClient.tryCompressChat.mockResolvedValueOnce({
+          originalTokenCount: 50,
+          newTokenCount: 50,
+          compressionStatus: core.CompressionStatus.NOOP,
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  usageMetadata: {
+                    totalTokenCount: 101,
+                    promptTokenCount: 101,
+                  },
+                },
+              },
+            ]),
+          )
+          // Prompt 2 on route B trips an in-send compression inside
+          // LlmChat.sendMessageStream (hard-tier rescue / reactive
+          // overflow). LlmChat clears its own keyed counts when it
+          // surfaces the COMPRESSED event; the session's fallback cache
+          // must be invalidated at the same point, or route A's stale
+          // pre-compression count survives the rewrite.
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.COMPRESSED,
+                info: {
+                  originalTokenCount: 101,
+                  newTokenCount: 40,
+                  compressionStatus: core.CompressionStatus.COMPRESSED,
+                },
+              },
+            ]),
+          )
+          // Prompt 3 back on route A: an empty stream.
+          .mockResolvedValueOnce(createEmptyStream());
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'first' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+
+        // Switch to route B on the same chat instance; its send compresses
+        // in-send.
+        routeIdentity = 'route-b';
+        mockLlmClient.tryCompressChat.mockResolvedValueOnce({
+          originalTokenCount: 50,
+          newTokenCount: 50,
+          compressionStatus: core.CompressionStatus.NOOP,
+        });
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'second' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+
+        // Back to route A while compression fails (rate limited): the gate
+        // falls back to the cache, which must no longer hold route A's
+        // stale pre-compression count (101 > 100) — the shared history was
+        // rewritten to 40 tokens by route B's in-send compression, so the
+        // send must go out.
+        routeIdentity = 'route-a';
+        mockLlmClient.tryCompressChat.mockRejectedValueOnce(
+          new Error('compression rate limited'),
+        );
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'third' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(3);
+      });
+
+      it('does not drop a send using another route token count (#9529)', async () => {
+        mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+        let routeIdentity = 'route-a';
+        mockConfig.getModelRouteIdentity = vi.fn(() => routeIdentity);
+
+        mockLlmClient.tryCompressChat.mockResolvedValueOnce({
+          originalTokenCount: 50,
+          newTokenCount: 50,
+          compressionStatus: core.CompressionStatus.NOOP,
+        });
+        mockChat.sendMessageStream = createOverLimitUsageSendStream();
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'first' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+
+        routeIdentity = 'route-b';
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'second' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+      });
+
+      it('does not drop a runtime-scoped override using the active route count (#9529)', async () => {
+        const resolveForModel = setupVisionRouteOverrideMocks(mockConfig);
+
+        mockLlmClient.tryCompressChat
+          .mockResolvedValueOnce({
+            originalTokenCount: 50,
+            newTokenCount: 50,
+            compressionStatus: core.CompressionStatus.NOOP,
+          })
+          .mockRejectedValueOnce(new Error('compression rate limited'));
+        mockChat.sendMessageStream = createOverLimitUsageSendStream();
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'primary route' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [
+              { type: 'text', text: 'look at this' },
+              { type: 'image', mimeType: 'image/png', data: 'iVBORw0KGgo=' },
+            ],
+          }),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+
+        expect(resolveForModel).toHaveBeenCalledWith(
+          'vision-agent\0https://vision.example.com/v1',
+          {
+            failClosed: true,
+          },
+        );
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+      });
+
+      it('fails closed when runtime-scoped route resolution rejects (#9529)', async () => {
+        setupVisionRouteOverrideMocks(
+          mockConfig,
+          vi.fn().mockRejectedValue(new Error('runtime unavailable')),
+        );
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [
+              { type: 'text', text: 'look at this' },
+              { type: 'image', mimeType: 'image/png', data: 'iVBORw0KGgo=' },
+            ],
+          }),
+        ).rejects.toThrow('runtime unavailable');
+
+        expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+      });
+
+      it('records an override send usage under the override route so the next same-override send trips the gate (#9529)', async () => {
+        // Full-turn vision selector: an image turn is sent under the \0 exact
+        // route override — a different route than the active one, driven
+        // through fullTurnModelOverride, which Session.prompt consumes.
+        setupVisionRouteOverrideMocks(mockConfig);
+
+        const visionPrompt: PromptRequest = {
+          sessionId: 'test-session-id',
+          prompt: [
+            { type: 'text', text: 'look at this' },
+            { type: 'image', mimeType: 'image/png', data: 'iVBORw0KGgo=' },
+          ],
+        };
+
+        // First override send goes out (compression info under the limit) and
+        // streams usage metadata over the limit; the count must be recorded
+        // under the override route key, not the active route's.
+        mockLlmClient.tryCompressChat.mockResolvedValueOnce({
+          originalTokenCount: 50,
+          newTokenCount: 50,
+          compressionStatus: core.CompressionStatus.NOOP,
+        });
+        mockChat.sendMessageStream = createOverLimitUsageSendStream();
+
+        await expect(session.prompt(visionPrompt)).resolves.toEqual({
+          stopReason: 'end_turn',
+        });
+        expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
+          'vision-agent\0https://vision.example.com/v1\0',
+          expect.any(Object),
+          expect.any(String),
+        );
+
+        // Second same-override send: compression throws, so the gate falls
+        // back to the cached count — which must be the first send's 101
+        // recorded under the override route (101 > 100 → drop). If the record
+        // had gone under the active route instead, the override-route cache
+        // would be empty and this send would wrongly go out.
+        mockLlmClient.tryCompressChat.mockRejectedValueOnce(
+          new Error('compression rate limited'),
+        );
+
+        await expect(session.prompt(visionPrompt)).resolves.toEqual({
+          stopReason: 'max_tokens',
+        });
+
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+      });
+
+      it('records a Stop-hook continuation usage under the continuation request route so the next same-route send trips the gate (#9529)', async () => {
+        setupVisionRouteOverrideMocks(mockConfig);
+        // The Stop hook blocks the first end-turn so the over-limit usage
+        // arrives on the continuation send inside #runStopContinuation; the
+        // second hook call lets the turn finish.
+        const messageBus = {
+          request: vi
+            .fn()
+            .mockResolvedValueOnce({
+              success: true,
+              output: {
+                decision: 'block',
+                reason: 'Continue after Stop hook',
+              },
+            })
+            .mockResolvedValueOnce({
+              success: true,
+              output: {},
+            }),
+        };
+        mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+        mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+        mockConfig.hasHooksForEvent = vi
+          .fn()
+          .mockImplementation((eventName: string) => eventName === 'Stop');
+        mockChat.getHistory = vi
+          .fn()
+          .mockReturnValue([
+            { role: 'model', parts: [{ text: 'response text' }] },
+          ]);
+        mockChat.getLastModelMessageText = vi
+          .fn()
+          .mockReturnValue('response text');
+
+        const visionPrompt: PromptRequest = {
+          sessionId: 'test-session-id',
+          prompt: [
+            { type: 'text', text: 'look at this' },
+            { type: 'image', mimeType: 'image/png', data: 'iVBORw0KGgo=' },
+          ],
+        };
+
+        // The primary override send completes without usage metadata; the
+        // continuation send then streams the over-limit usage, which must be
+        // recorded under the continuation's request route (the override
+        // route), not the active route's.
+        mockLlmClient.tryCompressChat
+          .mockResolvedValueOnce({
+            originalTokenCount: 50,
+            newTokenCount: 50,
+            compressionStatus: core.CompressionStatus.NOOP,
+          })
+          .mockResolvedValueOnce({
+            originalTokenCount: 50,
+            newTokenCount: 50,
+            compressionStatus: core.CompressionStatus.NOOP,
+          });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  candidates: [
+                    {
+                      content: { parts: [{ text: 'response text' }] },
+                      finishReason: 'STOP',
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  usageMetadata: {
+                    totalTokenCount: 101,
+                    promptTokenCount: 101,
+                  },
+                },
+              },
+            ]),
+          );
+
+        await expect(session.prompt(visionPrompt)).resolves.toEqual({
+          stopReason: 'end_turn',
+        });
+        // Both sends went out under the \0 exact-route override.
+        expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
+          'vision-agent\0https://vision.example.com/v1\0',
+          expect.any(Object),
+          expect.any(String),
+        );
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+
+        // Next same-override send: compression throws, so the gate falls
+        // back to the cached count — which must be the continuation send's
+        // 101 recorded under the override route (101 > 100 → drop). If the
+        // continuation record had gone under the active route instead, the
+        // override-route cache would be empty and this send would wrongly
+        // go out.
+        mockLlmClient.tryCompressChat.mockRejectedValueOnce(
+          new Error('compression rate limited'),
+        );
+
+        await expect(session.prompt(visionPrompt)).resolves.toEqual({
+          stopReason: 'max_tokens',
+        });
+
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+      });
+
+      it('retains a returning route token count after an A-B-A switch (#9529)', async () => {
+        mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+        let routeIdentity = 'route-a';
+        mockConfig.getModelRouteIdentity = vi.fn(() => routeIdentity);
+
+        mockLlmClient.tryCompressChat.mockResolvedValueOnce({
+          originalTokenCount: 50,
+          newTokenCount: 50,
+          compressionStatus: core.CompressionStatus.NOOP,
+        });
+        mockChat.sendMessageStream = createOverLimitUsageSendStream();
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'first' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+
+        routeIdentity = 'route-b';
+        mockLlmClient.tryCompressChat.mockRejectedValueOnce(
+          new Error('compression rate limited'),
+        );
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'second' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+
+        routeIdentity = 'route-a';
+        mockLlmClient.tryCompressChat.mockRejectedValueOnce(
+          new Error('compression rate limited'),
+        );
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'third' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'max_tokens' });
+
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+      });
+
+      it('records a cron tick usage under the request route even if the route switches mid-stream (#9529)', async () => {
+        mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+        let routeIdentity = 'route-a';
+        mockConfig.getModelRouteIdentity = vi.fn(() => routeIdentity);
+
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          start: vi.fn((callback: (job: { prompt: string }) => void) => {
+            callback({ prompt: 'scheduled prompt' });
+          }),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValueOnce(
+            (async function* () {
+              yield {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  usageMetadata: {
+                    totalTokenCount: 101,
+                    promptTokenCount: 101,
+                  },
+                },
+              };
+              // A model switch landing between request and record: the
+              // request route key was captured before this stream started,
+              // so the over-limit usage above must still be keyed under it.
+              routeIdentity = 'route-b';
+            })(),
+          );
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+        });
+
+        await vi.waitFor(() => {
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+          const internals = session as unknown as {
+            lastPromptTokenCount: number;
+            lastPromptTokenCountRouteKey: string | undefined;
+          };
+          expect(internals.lastPromptTokenCountRouteKey).toBe('route-a');
+          expect(internals.lastPromptTokenCount).toBe(101);
+        });
+      });
+
+      it('records a background-notification usage under the request route even if the route switches mid-stream (#9529)', async () => {
+        mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+        let routeIdentity = 'route-a';
+        mockConfig.getModelRouteIdentity = vi.fn(() => routeIdentity);
+
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValueOnce(
+            (async function* () {
+              yield {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  usageMetadata: {
+                    totalTokenCount: 101,
+                    promptTokenCount: 101,
+                  },
+                },
+              };
+              // A model switch landing between request and record: the
+              // request route key was captured before this stream started,
+              // so the over-limit usage above must still be keyed under it.
+              routeIdentity = 'route-b';
+            })(),
+          );
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'start background work' }],
+        });
+
+        const callback = mockBackgroundTaskRegistry.setNotificationCallback.mock
+          .calls[0][0] as (
+          displayText: string,
+          modelText: string,
+          meta: { agentId: string; status: string; toolUseId?: string },
+        ) => void;
+
+        callback(
+          'Background agent "worker" completed.',
+          '<task-notification><status>completed</status></task-notification>',
+          {
+            agentId: 'agent-1',
+            status: 'completed',
+            toolUseId: 'tool-1',
+          },
+        );
+
+        await vi.waitFor(() => {
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+          const internals = session as unknown as {
+            lastPromptTokenCount: number;
+            lastPromptTokenCountRouteKey: string | undefined;
+          };
+          expect(internals.lastPromptTokenCountRouteKey).toBe('route-a');
+          expect(internals.lastPromptTokenCount).toBe(101);
+        });
+      });
+
+      it('evicts the oldest route count once the retained-route budget is exhausted (#9529)', async () => {
+        mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+        let routeIdentity = 'route-0';
+        mockConfig.getModelRouteIdentity = vi.fn(() => routeIdentity);
+
+        // Record an over-limit count under nine distinct route keys on the
+        // same chat instance — one more than the retained-route budget, so
+        // the oldest entry must be evicted instead of growing unbounded.
+        const sendStreamMock = vi.fn();
+        for (let i = 1; i <= 9; i += 1) {
+          sendStreamMock.mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  usageMetadata: {
+                    totalTokenCount: 101,
+                    promptTokenCount: 101,
+                  },
+                },
+              },
+            ]),
+          );
+        }
+        sendStreamMock.mockResolvedValueOnce(createEmptyStream());
+        mockChat.sendMessageStream = sendStreamMock;
+
+        for (let i = 1; i <= 9; i += 1) {
+          routeIdentity = `route-${i}`;
+          mockLlmClient.tryCompressChat.mockResolvedValueOnce({
+            originalTokenCount: 50,
+            newTokenCount: 50,
+            compressionStatus: core.CompressionStatus.NOOP,
+          });
+          await expect(
+            session.prompt({
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: `prompt ${i}` }],
+            }),
+          ).resolves.toEqual({ stopReason: 'end_turn' });
+        }
+
+        // The evicted oldest route (route-1) reads back no cached count, so
+        // a send on it must go out instead of tripping the gate.
+        routeIdentity = 'route-1';
+        mockLlmClient.tryCompressChat.mockRejectedValueOnce(
+          new Error('compression rate limited'),
+        );
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'evicted route' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+
+        // A retained route (route-2) still trips the gate from the cache.
+        routeIdentity = 'route-2';
+        mockLlmClient.tryCompressChat.mockRejectedValueOnce(
+          new Error('compression rate limited'),
+        );
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'retained route' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'max_tokens' });
+
+        // Nine recording sends plus the evicted-route send; the
+        // retained-route send was dropped by the gate.
+        expect(sendStreamMock).toHaveBeenCalledTimes(10);
+      });
+
       it('returns cancelled when automatic compression is aborted', async () => {
         mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
         mockLlmClient.tryCompressChat.mockImplementation(
@@ -12987,6 +14938,93 @@ describe('Session', () => {
           stopReason: 'cancelled',
         });
         expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+        expect(mockChat.addHistory).toHaveBeenCalledWith({
+          role: 'user',
+          parts: expect.any(Array),
+        });
+        expect(mockClient.sessionUpdate).not.toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text:
+                'Session token limit exceeded: 101 tokens > 100 limit. ' +
+                'Please start a new session or increase the sessionTokenLimit in your settings.json.',
+            },
+          },
+        });
+      });
+
+      it('returns cancelled when a cancel lands in the override route-key resolution window (#9529)', async () => {
+        // First override send records an over-limit count under the
+        // override route; on the second same-override send the route-key
+        // resolution outlives a cancel. The abort re-check after the
+        // resolution must win over the session-token-limit gate (101 > 100
+        // cached), which would otherwise mislabel the cancel as
+        // 'max_tokens' and drop the user turn from history.
+        setupVisionRouteOverrideMocks(mockConfig);
+
+        const visionPrompt: PromptRequest = {
+          sessionId: 'test-session-id',
+          prompt: [
+            { type: 'text', text: 'look at this' },
+            { type: 'image', mimeType: 'image/png', data: 'iVBORw0KGgo=' },
+          ],
+        };
+
+        mockLlmClient.tryCompressChat.mockResolvedValueOnce({
+          originalTokenCount: 50,
+          newTokenCount: 50,
+          compressionStatus: core.CompressionStatus.NOOP,
+        });
+        mockChat.sendMessageStream = createOverLimitUsageSendStream();
+
+        await expect(session.prompt(visionPrompt)).resolves.toEqual({
+          stopReason: 'end_turn',
+        });
+
+        // Second same-override send: compression fails so the gate falls
+        // back to the cached over-limit count, and the route-key
+        // resolution hangs until released — the cancel lands inside that
+        // window and the resolver settles only afterwards.
+        mockLlmClient.tryCompressChat.mockRejectedValueOnce(
+          new Error('compression rate limited'),
+        );
+        let releaseRouteResolution!: () => void;
+        const resolveForModel = vi.fn().mockImplementation(
+          () =>
+            new Promise<{
+              contentGenerator: Record<string, never>;
+              contentGeneratorConfig: { model: string };
+              model: string;
+            }>((resolve) => {
+              releaseRouteResolution = () =>
+                resolve({
+                  contentGenerator: {},
+                  contentGeneratorConfig: { model: 'vision-agent' },
+                  model: 'vision-agent',
+                });
+            }),
+        );
+        mockConfig.getBaseLlmClient = vi
+          .fn()
+          .mockReturnValue({ resolveForModel });
+
+        const promptPromise = session.prompt(visionPrompt);
+        await vi.waitFor(() => {
+          expect(resolveForModel).toHaveBeenCalled();
+        });
+
+        await session.cancelPendingPrompt();
+        releaseRouteResolution();
+
+        await expect(promptPromise).resolves.toEqual({
+          stopReason: 'cancelled',
+        });
+        // The send never went out; the cancelled user turn was restored to
+        // history and no token-limit diagnostic was emitted.
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
         expect(mockChat.addHistory).toHaveBeenCalledWith({
           role: 'user',
           parts: expect.any(Array),
@@ -13053,22 +15091,7 @@ describe('Session', () => {
           newTokenCount: 0,
           compressionStatus: core.CompressionStatus.NOOP,
         });
-        mockChat.sendMessageStream = vi
-          .fn()
-          .mockResolvedValueOnce(
-            createStreamWithChunks([
-              {
-                type: core.StreamEventType.CHUNK,
-                value: {
-                  usageMetadata: {
-                    totalTokenCount: 101,
-                    promptTokenCount: 101,
-                  },
-                },
-              },
-            ]),
-          )
-          .mockResolvedValueOnce(createEmptyStream());
+        mockChat.sendMessageStream = createOverLimitUsageSendStream();
 
         await expect(
           session.prompt({
@@ -13086,7 +15109,7 @@ describe('Session', () => {
         expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
       });
 
-      it('falls back to the previous prompt token count when compressed token info is zero', async () => {
+      it('does not gate on the pre-compression count when compressed token info is zero', async () => {
         mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
         mockLlmClient.tryCompressChat
           .mockResolvedValueOnce({
@@ -13099,22 +15122,7 @@ describe('Session', () => {
             newTokenCount: 0,
             compressionStatus: core.CompressionStatus.COMPRESSED,
           });
-        mockChat.sendMessageStream = vi
-          .fn()
-          .mockResolvedValueOnce(
-            createStreamWithChunks([
-              {
-                type: core.StreamEventType.CHUNK,
-                value: {
-                  usageMetadata: {
-                    totalTokenCount: 101,
-                    promptTokenCount: 101,
-                  },
-                },
-              },
-            ]),
-          )
-          .mockResolvedValueOnce(createEmptyStream());
+        mockChat.sendMessageStream = createOverLimitUsageSendStream();
 
         await expect(
           session.prompt({
@@ -13122,14 +15130,19 @@ describe('Session', () => {
             prompt: [{ type: 'text', text: 'first' }],
           }),
         ).resolves.toEqual({ stopReason: 'end_turn' });
+        // The second send arrives with a successful COMPRESSED whose fresh
+        // count is unknown (0). The compression just rewrote the shared
+        // history, so the previously recorded count (101) measures
+        // destroyed history and must not drop the send — mirroring
+        // LlmChat, which clears its keyed counts on COMPRESSED (#9529).
         await expect(
           session.prompt({
             sessionId: 'test-session-id',
             prompt: [{ type: 'text', text: 'second' }],
           }),
-        ).resolves.toEqual({ stopReason: 'max_tokens' });
+        ).resolves.toEqual({ stopReason: 'end_turn' });
 
-        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
       });
 
       it('records prompt token count instead of total token count for later session-limit checks', async () => {
@@ -13174,7 +15187,7 @@ describe('Session', () => {
         expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
       });
 
-      it('resets the session-local token count when the active chat instance changes', async () => {
+      it('resets session-local route counts when the active chat instance changes', async () => {
         const clearedChat = {
           sendMessageStream: vi.fn().mockResolvedValue(createEmptyStream()),
           addHistory: vi.fn(),
@@ -13183,12 +15196,15 @@ describe('Session', () => {
           getLastModelMessageText: vi.fn().mockReturnValue(''),
         } as unknown as LlmChat;
         mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+        let routeIdentity = 'route-a';
+        mockConfig.getModelRouteIdentity = vi.fn(() => routeIdentity);
         mockLlmClient.tryCompressChat
           .mockResolvedValueOnce({
             originalTokenCount: 50,
             newTokenCount: 50,
             compressionStatus: core.CompressionStatus.NOOP,
           })
+          .mockRejectedValueOnce(new Error('compression unavailable'))
           .mockRejectedValueOnce(new Error('compression unavailable'));
         mockChat.sendMessageStream = vi.fn().mockResolvedValueOnce(
           createStreamWithChunks([
@@ -13212,6 +15228,7 @@ describe('Session', () => {
         ).resolves.toEqual({ stopReason: 'end_turn' });
 
         mockLlmClient.getChat.mockReturnValue(clearedChat);
+        routeIdentity = 'route-b';
 
         await expect(
           session.prompt({
@@ -13220,7 +15237,15 @@ describe('Session', () => {
           }),
         ).resolves.toEqual({ stopReason: 'end_turn' });
 
-        expect(clearedChat.sendMessageStream).toHaveBeenCalledTimes(1);
+        routeIdentity = 'route-a';
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'back to route A' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+
+        expect(clearedChat.sendMessageStream).toHaveBeenCalledTimes(2);
       });
 
       it('continues sending when the compression notification fails', async () => {
@@ -31489,6 +33514,26 @@ describe('Session', () => {
       expect(
         mockBackgroundShellRegistry.setNotificationCallback,
       ).toHaveBeenLastCalledWith(undefined);
+      expect(
+        mockWorkflowRunRegistry.setCompletionCallback,
+      ).toHaveBeenLastCalledWith(undefined);
+      expect(
+        mockWorkflowRunRegistry.clearStatusChangeCallback,
+      ).toHaveBeenCalledWith(expect.any(Function));
+      // R7-10: mirror the agent registry. A workflow run that outlives
+      // its session's removal is invisible to the delete-history liveness
+      // gate, and its settlement snapshot write recreates history a
+      // sibling session just deleted. Abort must precede the callback
+      // teardown so the cancellation still reaches this session's own
+      // bookkeeping.
+      expect(mockWorkflowRunRegistry.abortAll).toHaveBeenCalled();
+      expect(
+        mockWorkflowRunRegistry.abortAll.mock.invocationCallOrder.at(-1),
+      ).toBeLessThan(
+        mockWorkflowRunRegistry.setCompletionCallback.mock.invocationCallOrder.at(
+          -1,
+        )!,
+      );
     });
 
     it('aborts an active notificationAbortController and nulls the reference', () => {
@@ -35310,6 +37355,77 @@ describe('Session', () => {
         }),
         expect.objectContaining({
           taskId: 'baseline-monitor',
+          continuesTodoStopGuardWorkChain: true,
+        }),
+      ]);
+      internals.notificationProcessing = false;
+    });
+
+    it('classifies workflow notifications from the captured baseline', () => {
+      const baselineWorkflow = {
+        runId: 'baseline-workflow',
+        status: 'running',
+      };
+      let currentWorkflow: typeof baselineWorkflow | undefined =
+        baselineWorkflow;
+      mockWorkflowRunRegistry.list.mockImplementation(() =>
+        currentWorkflow ? [currentWorkflow] : [],
+      );
+      mockWorkflowRunRegistry.get.mockImplementation((runId: string) =>
+        currentWorkflow?.runId === runId ? currentWorkflow : undefined,
+      );
+      rebuildSessionWithGuard();
+      const internals = session as unknown as {
+        notificationProcessing: boolean;
+        notificationQueue: Array<{
+          taskId: string;
+          continuesTodoStopGuardWorkChain: boolean;
+        }>;
+      };
+      internals.notificationProcessing = true;
+      const callback =
+        mockWorkflowRunRegistry.setCompletionCallback.mock.calls.at(
+          -1,
+        )?.[0] as (
+          displayText: string,
+          modelText: string,
+          meta: {
+            runId: string;
+            status: 'completed';
+            todoWorkChainId?: string;
+          },
+        ) => void;
+
+      callback('baseline result', '<baseline-workflow />', {
+        runId: 'baseline-workflow',
+        status: 'completed',
+        todoWorkChainId: 'stale-chain',
+      });
+      currentWorkflow = {
+        runId: 'baseline-workflow',
+        status: 'running',
+      };
+      callback('retry result', '<retry-workflow />', {
+        runId: 'baseline-workflow',
+        status: 'completed',
+      });
+      currentWorkflow = undefined;
+      callback('new result', '<new-workflow />', {
+        runId: 'new-workflow',
+        status: 'completed',
+      });
+
+      expect(internals.notificationQueue).toEqual([
+        expect.objectContaining({
+          taskId: 'baseline-workflow',
+          continuesTodoStopGuardWorkChain: false,
+        }),
+        expect.objectContaining({
+          taskId: 'baseline-workflow',
+          continuesTodoStopGuardWorkChain: true,
+        }),
+        expect.objectContaining({
+          taskId: 'new-workflow',
           continuesTodoStopGuardWorkChain: true,
         }),
       ]);

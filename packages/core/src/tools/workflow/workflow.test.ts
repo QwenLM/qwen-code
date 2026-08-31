@@ -663,6 +663,11 @@ await agent('scan package.json')
         run_in_background: true,
       }),
     ).toThrow(/completion channel/i);
+    expect(() =>
+      new WorkflowTool(interactiveConfig).buildSessionOwnedBackground({
+        script: 'return 1',
+      }),
+    ).toThrow(/completion channel/i);
 
     interactiveRegistry.setCompletionCallback(vi.fn());
     const acpConfig = {
@@ -676,6 +681,32 @@ await agent('scan package.json')
         run_in_background: true,
       }),
     ).toThrow(/interactive TUI/i);
+  });
+
+  it('starts a session-owned background run outside the interactive TUI', async () => {
+    const registry = new WorkflowRunRegistry();
+    registry.setCompletionCallback(vi.fn());
+    const config = {
+      storage: new Storage(path.join(os.tmpdir(), 'workflow-session-owned')),
+      isInteractive: () => false,
+      getWorkflowRunRegistry: () => registry,
+      getSkipWorkflowUsageWarning: () => true,
+    } as unknown as Config;
+
+    const result = await new WorkflowTool(config, {
+      dispatch: async () => 'unused',
+    })
+      .buildSessionOwnedBackground({
+        script: `phase('Inspect'); return { status: 'ready' };`,
+      })
+      .execute(new AbortController().signal);
+
+    expect(result.workflowRunId).toMatch(/^wf_[0-9a-f]+$/);
+    const run = registry.get(result.workflowRunId!);
+    expect(run?.isBackgrounded).toBe(true);
+    await vi.waitFor(() =>
+      expect(registry.get(result.workflowRunId!)?.status).toBe('completed'),
+    );
   });
 
   it('does not register a background run when the caller is already aborted', async () => {
@@ -700,6 +731,92 @@ await agent('scan package.json')
     });
     expect(registry.list()).toHaveLength(0);
     expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it('reports a registry-side cancel during background preflight as cancelled, not failed', async () => {
+    // `sessionTaskCancel` on a run that is still loading aborts the run's
+    // own controller via `cancelStarting`; the caller's signal stays live,
+    // so the catch cannot recognise the outcome from `signal.aborted`.
+    const registry = new WorkflowRunRegistry();
+    registry.setCompletionCallback(vi.fn());
+    const config = {
+      storage: new Storage(path.join(os.tmpdir(), 'workflow-preflight-test')),
+      isInteractive: () => true,
+      getWorkflowRunRegistry: () => registry,
+    } as unknown as Config;
+    const caller = new AbortController();
+    const dispatch = vi.fn(async () => 'unused');
+    const load = vi
+      .spyOn(WorkflowJournal.prototype, 'load')
+      .mockImplementation(async () => {
+        expect(registry.cancelStarting('wf_1234abcd')).toBe(true);
+        return { results: new Map(), started: new Map() };
+      });
+
+    try {
+      const result = await new WorkflowTool(config, { dispatch })
+        .build({
+          script: 'return 1',
+          resumeFromRunId: 'wf_1234abcd',
+          run_in_background: true,
+        })
+        .execute(caller.signal);
+
+      expect(caller.signal.aborted).toBe(false);
+      expect(result).toEqual({
+        llmContent: 'Workflow was cancelled before it could start.',
+        returnDisplay: 'Workflow cancelled.',
+      });
+      expect(registry.list()).toHaveLength(0);
+      expect(registry.isStarting('wf_1234abcd')).toBe(false);
+      expect(dispatch).not.toHaveBeenCalled();
+    } finally {
+      load.mockRestore();
+    }
+  });
+
+  it('reports a registry-side cancel during foreground preflight as cancelled, not failed', async () => {
+    // The foreground path is the tool's default mode, and the same
+    // registry-side sources reach it: `sessionTaskCancel` fires
+    // `cancelStarting` on a resume whose terminal entry was evicted from
+    // the registry, and `abortAll` on session dispose. Registering anyway
+    // let the settlement classifier — blind to the run's own controller —
+    // settle the run `completed` for this dispatch-free script.
+    const registry = new WorkflowRunRegistry();
+    registry.setCompletionCallback(vi.fn());
+    const config = {
+      storage: new Storage(path.join(os.tmpdir(), 'workflow-preflight-test')),
+      isInteractive: () => true,
+      getWorkflowRunRegistry: () => registry,
+    } as unknown as Config;
+    const caller = new AbortController();
+    const dispatch = vi.fn(async () => 'unused');
+    const load = vi
+      .spyOn(WorkflowJournal.prototype, 'load')
+      .mockImplementation(async () => {
+        expect(registry.cancelStarting('wf_1234abcd')).toBe(true);
+        return { results: new Map(), started: new Map() };
+      });
+
+    try {
+      const result = await new WorkflowTool(config, { dispatch })
+        .build({
+          script: 'return 1',
+          resumeFromRunId: 'wf_1234abcd',
+        })
+        .execute(caller.signal);
+
+      expect(caller.signal.aborted).toBe(false);
+      expect(result).toEqual({
+        llmContent: 'Workflow was cancelled before it could start.',
+        returnDisplay: 'Workflow cancelled.',
+      });
+      expect(registry.list()).toHaveLength(0);
+      expect(registry.isStarting('wf_1234abcd')).toBe(false);
+      expect(dispatch).not.toHaveBeenCalled();
+    } finally {
+      load.mockRestore();
+    }
   });
 
   it('does not register when cancellation arrives during background preflight', async () => {
