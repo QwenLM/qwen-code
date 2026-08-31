@@ -1203,6 +1203,14 @@ describe('release lane runner routing', () => {
     }
   });
 
+  it('passes the runner environment to integration test configuration', () => {
+    for (const name of ['integration_none', 'integration_docker']) {
+      expect(releaseYaml.jobs[name].env.RUNNER_ENVIRONMENT, name).toBe(
+        '${{ runner.environment }}',
+      );
+    }
+  });
+
   it('keeps publishing and failure notification on hosted runners', () => {
     expect(releaseYaml.jobs.publish['runs-on']).toBe('ubuntu-latest');
     expect(releaseYaml.jobs.publish['runs-on']).not.toContain('ecs-qwen');
