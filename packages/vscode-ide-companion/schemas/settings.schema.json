@@ -1206,6 +1206,11 @@
       "description": "Settings for built-in and custom tools.",
       "type": "object",
       "properties": {
+        "codeModeOnly": {
+          "description": "Expose ordinary tools to the model only through the isolated exec JavaScript tool. Direct control tools remain available.",
+          "type": "boolean",
+          "default": false
+        },
         "sandbox": {
           "anyOf": [
             {
