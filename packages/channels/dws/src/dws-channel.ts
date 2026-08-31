@@ -17,6 +17,7 @@ import {
   type ChannelTaskLifecycleEvent,
   type CreatePairingRequestResult,
   type Envelope,
+  type SessionTarget,
 } from '@qwen-code/channel-base';
 import {
   DwsClient,
@@ -957,6 +958,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     chatId: string,
     threadId: string | undefined,
     text: string,
+    sourceLabel?: string,
   ): Promise<void> {
     if (!this.connected) {
       throw new Error(`[Channel:${this.name}] DWS channel is disconnected.`);
@@ -970,11 +972,17 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
           `[Channel:${this.name}] DWS todo delivery requires its taskId thread.`,
         );
       }
-      await this.client.addTodoComment(taskId, text);
+      await this.client.addTodoComment(
+        taskId,
+        this.formatMarkdownAttributedText(text, sourceLabel),
+      );
       return;
     }
     if (!this.documentSet.has(chatId)) {
-      await this.sendMessage(chatId, text);
+      await this.sendMessage(
+        chatId,
+        this.formatAttributedText(text, sourceLabel),
+      );
       return;
     }
     if (!threadId) {
@@ -982,15 +990,22 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         `[Channel:${this.name}] DWS document delivery requires a commentKey.`,
       );
     }
-    await this.client.replyToComment(chatId, threadId, text);
+    await this.client.replyToComment(
+      chatId,
+      threadId,
+      this.formatMarkdownAttributedText(text, sourceLabel),
+    );
   }
 
   protected override async sendResponseMessage(
     chatId: string,
     text: string,
     sessionId: string,
+    sourceLabel?: string,
   ): Promise<void> {
     if (isNoReply(text)) return;
+    const label = sourceLabel ?? this.getResponseSourceLabel(sessionId);
+    const markdown = this.formatMarkdownAttributedText(text, label);
     const threadId = this.getResponseThreadId(sessionId);
     const taskId =
       this.todoTargets.get(chatId) ??
@@ -1000,7 +1015,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         throw new Error(`[Channel:${this.name}] DWS channel is disconnected.`);
       }
       try {
-        await this.client.addTodoComment(taskId, text);
+        await this.client.addTodoComment(taskId, markdown);
       } catch (error) {
         if (
           !(error instanceof DwsCommandError) ||
@@ -1024,7 +1039,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         );
       }
       try {
-        await this.client.replyToComment(chatId, threadId, text);
+        await this.client.replyToComment(chatId, threadId, markdown);
       } catch (error) {
         if (
           !(error instanceof DwsCommandError) ||
@@ -1041,23 +1056,36 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     const messageId = this.getResponseMessageId(sessionId);
     const senderId = this.getResponseSenderId(sessionId);
     if (!messageId || !senderId) {
-      await this.sendMessage(chatId, text);
+      await this.sendMessage(chatId, this.formatAttributedText(text, label));
       return;
     }
     const idempotencyKey = stableUuid(
       `${this.name}\0${chatId}\0${messageId}\0${text}`,
     );
     if (this.findImTarget(chatId)?.kind === 'direct') {
-      await this.sendImText(chatId, text, idempotencyKey);
+      await this.sendImText(
+        chatId,
+        this.formatAttributedText(text, label),
+        idempotencyKey,
+      );
       return;
     }
     await this.client.replyToImMessage(
       chatId,
       messageId,
       senderId,
-      text,
+      this.formatAttributedText(text, label),
       idempotencyKey,
     );
+  }
+
+  protected override async pushProactive(
+    target: SessionTarget,
+    text: string,
+    sourceLabel?: string,
+  ): Promise<void> {
+    if (isNoReply(text)) return;
+    await super.pushProactive(target, text, sourceLabel);
   }
 
   protected async pollOnce(): Promise<void> {

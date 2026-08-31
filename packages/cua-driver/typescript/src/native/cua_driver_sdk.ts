@@ -43,6 +43,37 @@ export function createTrustedSession(driver: CuaDriverLike, options: TrustedSess
     ));
     }
 
+export async function createTrustedSessionAsync(driver: CuaDriverLike, options: TrustedSessionOptions, asyncOpts_?: { signal: AbortSignal }): Promise<CuaDriverSessionLike> /*throws*/ {
+    const __stack = uniffiIsDebug ? new Error().stack : undefined;
+    try {
+        return await uniffiRustCallAsync(
+            /*rustCaller:*/ uniffiCaller,
+            /*rustFutureFunc:*/ () => {
+                return nativeModule().uniffi_cua_driver_sdk_fn_func_create_trusted_session_async(FfiConverterTypeCuaDriver.lower(driver, nativeModule().rustbuffer_alloc),FfiConverterTypeTrustedSessionOptions.lower(options, nativeModule().rustbuffer_alloc)
+                );
+            },
+            /*pollFunc:*/ nativeModule().ffi_cua_driver_sdk_rust_future_poll_u64,
+            /*cancelFunc:*/ nativeModule().ffi_cua_driver_sdk_rust_future_cancel_u64,
+            /*completeFunc:*/ nativeModule().ffi_cua_driver_sdk_rust_future_complete_u64,
+            /*freeFunc:*/ nativeModule().ffi_cua_driver_sdk_rust_future_free_u64,
+            // Async returns always go through the JS-side converter: the
+            // FFI symbol returns the future handle (u64), and the user-level
+            // RustBuffer comes back via the shared `rust_future_complete_*`
+            // export. The bytes the runtime hands back must be deserialized
+            // here using the per-callable return-type converter.
+            /*liftFunc:*/ FfiConverterTypeCuaDriverSession.lift.bind(FfiConverterTypeCuaDriverSession),
+            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+            /*asyncOpts:*/ asyncOpts_,
+            /*errorHandler:*/ FfiConverterTypeDriverError.lift.bind(FfiConverterTypeDriverError)
+        );
+    } catch (__error: any) {
+        if (uniffiIsDebug && __error instanceof Error) {
+            __error.stack = __stack;
+        }
+        throw __error;
+    }
+    }
+
 export function currentMacOsPermissionStatus(): MacOsPermissionStatus {
     return ((__rb: Uint8Array) => {
         try {
@@ -159,7 +190,13 @@ export type RuntimeAuthorizationOptions = {
      */
     compatibilityBoundedManifestPath?: string,
     unrestrictedAcknowledged: boolean,
+    /**
+     * Zero together with `max_idle_ttl_seconds` permits owner-lifetime sessions.
+     */
     maxSessionTtlSeconds: bigint,
+    /**
+     * Zero together with `max_session_ttl_seconds` permits owner-lifetime sessions.
+     */
     maxIdleTtlSeconds: bigint
 }
 
@@ -1234,7 +1271,13 @@ const FfiConverterTypeToolResult = (() => {
 export type TrustedSessionOptions = {
     publicSession: string,
     mode: SessionPermissionMode,
+    /**
+     * Zero together with `idle_ttl_seconds` binds the session to owner lifetime.
+     */
     ttlSeconds: bigint,
+    /**
+     * Zero together with `ttl_seconds` disables idle expiration.
+     */
     idleTtlSeconds: bigint,
     capabilityManifestPath?: string,
     /**
@@ -4439,6 +4482,7 @@ export interface CuaDriverSessionLike {
  * cleanup, but trusted hosts should call it at their lifecycle boundary.
  */
     close(): void;
+    closeAsync(asyncOpts_?: { signal: AbortSignal }): Promise<void>;
     doubleClick(input: DoubleClickInput, asyncOpts_?: { signal: AbortSignal }) /*throws*/: Promise<ToolResult>;
     drag(input: DragInput, asyncOpts_?: { signal: AbortSignal }) /*throws*/: Promise<ToolResult>;
     endSession(input: EndSessionInput, asyncOpts_?: { signal: AbortSignal }) /*throws*/: Promise<EndSessionOutput>;
@@ -4637,6 +4681,33 @@ private constructor(pointer: UniffiHandle) {
             },
             /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
     );
+    }
+
+    async closeAsync(asyncOpts_?: { signal: AbortSignal }): Promise<void> {
+    const __stack = uniffiIsDebug ? new Error().stack : undefined;
+    try {
+        return await uniffiRustCallAsync(
+            /*rustCaller:*/ uniffiCaller,
+            /*rustFutureFunc:*/ () => {
+                return nativeModule().uniffi_cua_driver_sdk_fn_method_cuadriversession_close_async(
+                    uniffiTypeCuaDriverSessionObjectFactory.clonePointer(this)
+                );
+            },
+            /*pollFunc:*/ nativeModule().ffi_cua_driver_sdk_rust_future_poll_void,
+            /*cancelFunc:*/ nativeModule().ffi_cua_driver_sdk_rust_future_cancel_void,
+            /*completeFunc:*/ nativeModule().ffi_cua_driver_sdk_rust_future_complete_void,
+            /*freeFunc:*/ nativeModule().ffi_cua_driver_sdk_rust_future_free_void,
+            /*liftFunc:*/ (_v) => {},
+            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+            /*asyncOpts:*/ asyncOpts_,
+
+        );
+    } catch (__error: any) {
+        if (uniffiIsDebug && __error instanceof Error) {
+            __error.stack = __stack;
+        }
+        throw __error;
+    }
     }
 
     async doubleClick(input: DoubleClickInput, asyncOpts_?: { signal: AbortSignal }): Promise<ToolResult> /*throws*/ {
@@ -6568,6 +6639,9 @@ function uniffiEnsureInitialized() {
     if (nativeModule().uniffi_cua_driver_sdk_checksum_func_create_trusted_session() !== 50573) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_cua_driver_sdk_checksum_func_create_trusted_session");
     }
+    if (nativeModule().uniffi_cua_driver_sdk_checksum_func_create_trusted_session_async() !== 26348) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_cua_driver_sdk_checksum_func_create_trusted_session_async");
+    }
     if (nativeModule().uniffi_cua_driver_sdk_checksum_func_current_mac_os_permission_status() !== 22890) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_cua_driver_sdk_checksum_func_current_mac_os_permission_status");
     }
@@ -6774,6 +6848,9 @@ function uniffiEnsureInitialized() {
     }
     if (nativeModule().uniffi_cua_driver_sdk_checksum_method_cuadriversession_close() !== 58108) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_cua_driver_sdk_checksum_method_cuadriversession_close");
+    }
+    if (nativeModule().uniffi_cua_driver_sdk_checksum_method_cuadriversession_close_async() !== 14292) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_cua_driver_sdk_checksum_method_cuadriversession_close_async");
     }
     if (nativeModule().uniffi_cua_driver_sdk_checksum_method_cuadriversession_double_click() !== 51229) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_cua_driver_sdk_checksum_method_cuadriversession_double_click");

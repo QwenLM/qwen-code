@@ -9,7 +9,7 @@ import type {
   DaemonLiveSetupStatus,
   DaemonLiveSetupUpdate,
 } from '@qwen-code/sdk';
-import { useWorkspace } from '@qwen-code/webui/daemon-react-sdk';
+import { useWorkspace } from '@qwen-code/web-shell/daemon-react-sdk';
 
 const POLL_INTERVAL_MS = 1_000;
 

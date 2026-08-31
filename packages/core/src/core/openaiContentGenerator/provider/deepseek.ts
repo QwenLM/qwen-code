@@ -141,9 +141,7 @@ export class DeepSeekOpenAICompatibleProvider extends DefaultOpenAICompatiblePro
   }
 
   override getDefaultGenerationConfig(): GenerateContentConfig {
-    return {
-      temperature: 0,
-    };
+    return {};
   }
 }
 

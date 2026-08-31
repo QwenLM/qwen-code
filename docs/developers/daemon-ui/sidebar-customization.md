@@ -122,7 +122,7 @@ type WebShellSidebarFooterItem =
   | 'settings' // ⚙ Settings panel
   | 'version' // version label (e.g. "v0.19.10")
   | 'theme' // ☀/🌙 light/dark toggle
-  | 'sessionsOverview' // ▦ session overview panel (large screens only)
+  | 'sessionsOverview' // ▦ session overview panel
   | 'splitView' // ◧ split view (large screens only)
   | 'daemonStatus' // 📊 daemon status panel
   | 'collapse'; // ◁/▷ collapse/expand toggle
@@ -228,7 +228,6 @@ type WebShellSidebarSessionActionItem =
 /** Subset with working inline (hover-button) handlers. */
 type WebShellSidebarSessionInlineActionItem =
   | 'pin'
-  | 'archive'
   | 'rename'
   | 'export'
   | 'delete';
@@ -242,22 +241,22 @@ interface WebShellSidebarSessionActionsOptions {
 Controls which action buttons appear on session rows:
 
 - **`items`**: Master control for all actions (both inline and dropdown). If an item is not in `items`, it's hidden everywhere.
-- **`inlineItems`**: Controls which items appear as **inline buttons** (on hover). Defaults to `['pin']` — archive stays in the dropdown by default because the hover slot sits on the row's click target and is easy to hit by accident. Only items with working inline handlers can be used: `'pin'`, `'archive'`, `'rename'`, `'export'`, `'delete'`. `'details'` and `'group'` are dropdown-only.
+- **`inlineItems`**: Controls which items appear as **inline buttons** (on hover). Defaults to `['pin']`. Only items with working inline handlers can be used: `'pin'`, `'rename'`, `'export'`, `'delete'`. `'details'`, `'group'`, and `'archive'` are dropdown-only.
 
 **Visibility priority**: Both `items` AND the item's built-in condition AND `inlineItems` must all pass for the inline button to show. For example, `delete` as inline requires `items` to include `'delete'` AND `inlineItems` to include `'delete'`.
 
-| Value                                    | Effect                                |
-| ---------------------------------------- | ------------------------------------- |
-| `undefined` (default)                    | All actions shown, only pin as inline |
-| `{ inlineItems: ['pin', 'delete'] }`     | Pin + delete as inline buttons        |
-| `{ inlineItems: [] }`                    | No inline buttons at all              |
-| `{ inlineItems: ['archive', 'export'] }` | Archive + export as inline buttons    |
+| Value                                   | Effect                            |
+| --------------------------------------- | --------------------------------- |
+| `undefined` (default)                   | All actions shown, pin as inline  |
+| `{ inlineItems: ['pin', 'delete'] }`    | Pin + delete as inline buttons    |
+| `{ inlineItems: [] }`                   | No inline buttons at all          |
+| `{ inlineItems: ['rename', 'export'] }` | Rename + export as inline buttons |
 
 The dropdown trigger (⋮) is automatically hidden when no dropdown items
-are enabled. Inline buttons are only shown when both their capability
-condition and `items` include them. Archive is disabled on the current
-session and on any session with a running turn, because the daemon closes
-the live session when it archives.
+are enabled. Inline buttons are only shown when both
+their capability condition and `items` include them. Archive is disabled on
+the current session and on any session with a running turn, because the daemon
+closes the live session when it archives.
 
 ```tsx
 sidebar={{

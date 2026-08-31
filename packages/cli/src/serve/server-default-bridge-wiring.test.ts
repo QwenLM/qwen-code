@@ -125,7 +125,7 @@ describe('createServeApp default bridge wiring', () => {
     ).toEqual({
       kind: 'not_found',
     });
-  }, 15_000);
+  });
 
   it('keeps the same-host write route disabled for an injected filesystem factory', async () => {
     let bridgeOptions: BridgeOptions | undefined;
@@ -182,7 +182,7 @@ describe('createServeApp default bridge wiring', () => {
       }),
     ).rejects.toBe(boundaryError);
     expect(writeSameHostToolText).not.toHaveBeenCalled();
-  }, 15_000);
+  });
 
   it('wires total admission into the internally-created bridge', async () => {
     let freshSessionAdmission: BridgeFreshSessionAdmission | undefined;

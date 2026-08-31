@@ -8,7 +8,7 @@ import { logger } from '../../utils/logger.js';
 import * as vscode from 'vscode';
 import { BaseMessageHandler } from './BaseMessageHandler.js';
 import { getFileName } from '../utils/webviewUtils.js';
-import { showDiffCommand } from '../../commands/index.js';
+import { closeDiffCommand, showDiffCommand } from '../../commands/index.js';
 import {
   findLeftGroupOfChatWebview,
   findRightGroupOfChatWebview,
@@ -57,6 +57,8 @@ export class FileMessageHandler extends BaseMessageHandler {
       'getWorkspaceFiles',
       'openFile',
       'openDiff',
+      'openDiffList',
+      'closeDiff',
       'createAndOpenTempFile',
     ].includes(messageType);
   }
@@ -223,6 +225,17 @@ export class FileMessageHandler extends BaseMessageHandler {
 
       case 'openDiff':
         await this.handleOpenDiff(data);
+        break;
+
+      case 'openDiffList':
+        await this.handleOpenDiffList(data);
+        break;
+
+      case 'closeDiff':
+        await vscode.commands.executeCommand(
+          closeDiffCommand,
+          (data?.path as string) || '',
+        );
         break;
 
       case 'createAndOpenTempFile':
@@ -622,6 +635,55 @@ export class FileMessageHandler extends BaseMessageHandler {
         `Failed to open diff: ${getErrorMessage(error)}`,
       );
     }
+  }
+
+  private async handleOpenDiffList(
+    data: Record<string, unknown> | undefined,
+  ): Promise<void> {
+    const changes = Array.isArray(data?.changes)
+      ? (data.changes as Array<Record<string, unknown>>)
+      : [];
+    if (changes.length === 0) return;
+
+    const selectedPath = data?.selectedPath as string | undefined;
+    let selected = selectedPath
+      ? changes.find((change) => change.path === selectedPath)
+      : undefined;
+    if (!selected) {
+      const items = changes.flatMap((change) => {
+        const path = typeof change.path === 'string' ? change.path : '';
+        if (!path) return [];
+        const additions = Number(change.additions ?? 0);
+        const deletions = Number(change.deletions ?? 0);
+        return [
+          {
+            label: getFileName(path),
+            description: path,
+            detail: `+${additions} −${deletions}`,
+            change,
+          },
+        ];
+      });
+      selected = (
+        await vscode.window.showQuickPick(items, {
+          title: 'Review changes',
+          placeHolder: 'Select a file to open its diff',
+        })
+      )?.change;
+    }
+    if (!selected) return;
+
+    const diffs = Array.isArray(selected.diffs)
+      ? (selected.diffs as Array<Record<string, unknown>>)
+      : [];
+    const latest = diffs[diffs.length - 1];
+    const path = typeof selected.path === 'string' ? selected.path : '';
+    if (!path || !latest) return;
+    await this.handleOpenDiff({
+      path,
+      oldText: typeof latest.oldText === 'string' ? latest.oldText : '',
+      newText: typeof latest.newText === 'string' ? latest.newText : '',
+    });
   }
 
   /**

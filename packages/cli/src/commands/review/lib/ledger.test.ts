@@ -24,7 +24,11 @@ import {
   LEDGER_MAX_ID,
   LEDGER_MAX_CLOSED,
   LEDGER_ID_SHAPE,
+  LEDGER_MAX_REC_CODES,
+  LEDGER_MAX_REC_CODE,
+  axesOf,
   isLedgerFinding,
+  normalizeLedgerFinding,
   type Ledger,
   type LedgerFinding,
 } from './ledger.js';
@@ -1413,5 +1417,141 @@ describe('the flat streak', () => {
     expect(parseLedger(handCrafted({ flatRounds: 9999 }))?.flatRounds).toBe(3);
     // A streak AT the honest maximum rides untouched (round 5 → 3).
     expect(parseLedger(handCrafted({ flatRounds: 3 }))?.flatRounds).toBe(3);
+  });
+});
+
+describe('the recommendation-code carrier (#10107)', () => {
+  // The field is the workflow consumer's ONLY view of the diagnosis's
+  // machine-readable half, so the tests pin the two properties that carry
+  // the feature: it survives the byte cascade on exactly the over-cap
+  // markers where a non-converging loop lives, and it is write-only — a
+  // recovered marker contributes no codes, because nothing CLI-side may act
+  // on a value another account's writable surface controls.
+  const base = { v: 1 as const, round: 3, findings: [] };
+
+  it('carries the codes past the rung where the volume sheds', () => {
+    const fat = (n: number): LedgerFinding[] =>
+      Array.from({ length: n }, (_, i) => ({
+        id: `R3-${i + 1}`,
+        sev: 'S' as const,
+        file: `packages/cli/src/commands/review/deep/path/file-${i}.ts`,
+        title: 'x'.repeat(LEDGER_MAX_TITLE),
+      }));
+    let written = '';
+    for (let n = 1; n <= LEDGER_MAX_FINDINGS; n++) {
+      written = serializeLedger({
+        ...base,
+        findings: fat(n),
+        posted: 12,
+        prevPosted: 9,
+        rec: ['root-cause-triage', 'batch-fixes'],
+      });
+      if (!written.includes('"posted"')) break;
+    }
+    expect(written).not.toContain('"posted"');
+    expect(written).toContain('"rec":["root-cause-triage","batch-fixes"]');
+    expect(written.length).toBeLessThanOrEqual(LEDGER_MAX_BYTES);
+  });
+
+  it('omits an empty or absent set rather than spending bytes on it', () => {
+    expect(serializeLedger({ ...base })).not.toContain('"rec"');
+    expect(serializeLedger({ ...base, rec: [] })).not.toContain('"rec"');
+  });
+
+  it('bounds the shape: drops non-strings and overlong codes, dedupes, caps the count', () => {
+    const written = serializeLedger({
+      ...base,
+      rec: [
+        'batch-fixes',
+        'batch-fixes',
+        '',
+        'x'.repeat(LEDGER_MAX_REC_CODE + 1),
+        7 as unknown as string,
+        null as unknown as string,
+        ...Array.from({ length: LEDGER_MAX_REC_CODES + 3 }, (_, i) => `c${i}`),
+      ],
+    });
+    const parsed = JSON.parse(
+      written.replace('<!-- qwen-review-ledger ', '').replace(' -->', ''),
+    ) as { rec: string[] };
+    expect(parsed.rec[0]).toBe('batch-fixes');
+    expect(parsed.rec).toHaveLength(LEDGER_MAX_REC_CODES);
+    expect(new Set(parsed.rec).size).toBe(parsed.rec.length);
+    expect(parsed.rec.every((c) => c.length <= LEDGER_MAX_REC_CODE)).toBe(true);
+  });
+
+  it('is write-only: parseLedger recovers no codes from a marker that carries them', () => {
+    const written = serializeLedger({ ...base, rec: ['stem-surface'] });
+    expect(written).toContain('"rec":["stem-surface"]');
+    expect(parseLedger(written)).not.toHaveProperty('rec');
+  });
+
+  it('stays comment-safe under the -- escape a code could smuggle', () => {
+    // Codes are vocabulary-bound at the write site, but the serializer's
+    // escape must hold for the shape bound alone: a `--` inside the payload
+    // would close the HTML comment early and spill the tail as visible text.
+    const written = serializeLedger({ ...base, rec: ['a--b'] });
+    expect(written.indexOf('-->')).toBe(written.length - '-->'.length);
+    expect(
+      (
+        JSON.parse(
+          written.replace('<!-- qwen-review-ledger ', '').replace(' -->', ''),
+        ) as { rec: string[] }
+      ).rec,
+    ).toEqual(['a--b']);
+  });
+});
+
+describe('the finding axes (#10291)', () => {
+  it('round-trips a classified Critical, and spends no bytes on an unclassified one', () => {
+    const marker = serializeLedger({
+      v: 1,
+      round: 3,
+      findings: [
+        { id: 'R3-1', sev: 'C', d: 'f', b: 'n', file: 'a.ts', title: 'wedge' },
+        { id: 'R3-2', sev: 'C', d: 'c', file: 'b.ts', title: 'lie' },
+        { id: 'R3-3', sev: 'C', file: 'c.ts', title: 'unclassified' },
+      ],
+    });
+    const back = parseLedger(marker)!;
+    expect(back.findings[0]).toMatchObject({ d: 'f', b: 'n' });
+    expect(back.findings[1]).toMatchObject({ d: 'c' });
+    expect(back.findings[1].b).toBeUndefined();
+    expect(back.findings[2].d).toBeUndefined();
+    expect(back.findings[2].b).toBeUndefined();
+    expect(marker.match(/"d":/g)).toHaveLength(2);
+    expect(marker.match(/"b":/g)).toHaveLength(1);
+  });
+
+  it('normalises an unrecognised axis instead of dropping the finding — the fields decide nothing', () => {
+    // The marker is a cross-environment carrier: a later version adding a
+    // third direction, a hand edit, or a foreign marker must not make an
+    // older CLI drop the finding from the work list.
+    const marker =
+      '<!-- qwen-review-ledger {"v":1,"round":3,"findings":[' +
+      '{"id":"R3-1","sev":"C","file":"a.ts","title":"t","d":"x","b":"n"}' +
+      ']} -->';
+    const parsed = parseLedger(marker)!;
+    expect(parsed.findings).toEqual([
+      { id: 'R3-1', sev: 'C', file: 'a.ts', title: 't', b: 'n' },
+    ]);
+    expect(parsed.dropped).toBeUndefined();
+    expect(
+      normalizeLedgerFinding({
+        id: 'R3-1',
+        sev: 'C',
+        file: 'a.ts',
+        title: 't',
+        d: 'f',
+        b: 'z' as never,
+      }),
+    ).toEqual({ id: 'R3-1', sev: 'C', file: 'a.ts', title: 't', d: 'f' });
+  });
+
+  it('spells the axes out once, for every renderer', () => {
+    expect(axesOf({ d: 'f', b: 'n' })).toBe('fails-closed, new-surface');
+    expect(axesOf({ d: 'c' })).toBe('certifies-falsely');
+    expect(axesOf({ b: 'r' })).toBe('regression');
+    expect(axesOf({})).toBe('');
   });
 });

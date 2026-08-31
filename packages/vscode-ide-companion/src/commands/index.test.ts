@@ -7,6 +7,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   authCommand,
+  closeDiffCommand,
   focusChatCommand,
   openNewChatTabCommand,
   registerNewCommands,
@@ -173,6 +174,49 @@ describe('registerNewCommands', () => {
       'old',
       'new',
     );
+  });
+
+  it('closeDiff resolves relative paths against the workspace', async () => {
+    workspaceMock.workspaceFolders = [
+      { uri: { fsPath: '/workspace' }, name: 'workspace', index: 0 },
+    ];
+    const closeDiff = vi.fn().mockResolvedValue(undefined);
+
+    registerNewCommands(
+      context as never,
+      log,
+      { showDiff: vi.fn(), closeDiff } as never,
+      () => [],
+      vi.fn() as never,
+    );
+
+    await getRegisteredHandler(closeDiffCommand)('src/foo.ts');
+
+    expect(joinPath).toHaveBeenCalledWith(
+      { fsPath: '/workspace' },
+      'src/foo.ts',
+    );
+    expect(closeDiff).toHaveBeenCalledWith('/workspace/src/foo.ts', true);
+  });
+
+  it('closeDiff keeps absolute paths unchanged', async () => {
+    workspaceMock.workspaceFolders = [
+      { uri: { fsPath: '/workspace' }, name: 'workspace', index: 0 },
+    ];
+    const closeDiff = vi.fn().mockResolvedValue(undefined);
+
+    registerNewCommands(
+      context as never,
+      log,
+      { showDiff: vi.fn(), closeDiff } as never,
+      () => [],
+      vi.fn() as never,
+    );
+
+    await getRegisteredHandler(closeDiffCommand)('/workspace/src/foo.ts');
+
+    expect(joinPath).not.toHaveBeenCalled();
+    expect(closeDiff).toHaveBeenCalledWith('/workspace/src/foo.ts', true);
   });
 
   it('showDiff keeps UNC paths absolute', async () => {

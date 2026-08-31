@@ -84,7 +84,7 @@ const refreshSessionCatalogQueries = vi.hoisted(() => vi.fn());
 const useSessionCatalogQueries = vi.hoisted(() => vi.fn(() => []));
 const loadSession = vi.hoisted(() => vi.fn());
 
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useConnection: () => connection,
   useActions: () => ({ renameSession: vi.fn() }),
   useWorkspace: () => workspace,

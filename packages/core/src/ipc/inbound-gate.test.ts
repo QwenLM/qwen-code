@@ -468,6 +468,71 @@ describe('receipts', () => {
     expect(h.statuses.at(-1)).toEqual({ msgId: f.msgId, status: 'delivered' });
   });
 
+  it('drops an approved hold when a session swap invalidates its pin', () => {
+    let currentSessionId = 'session-a';
+    const delivered: PeerUserFrame[] = [];
+    const statuses: string[] = [];
+    const gate = new InboundGate({
+      getApprovalMode: () => ApprovalMode.YOLO,
+      getPolicySetting: () => undefined,
+      getSessionId: () => currentSessionId,
+      deliver: (candidate) => delivered.push(candidate),
+      reportStatus: (_candidate, status) => statuses.push(status),
+    });
+    const held = frame({
+      fromMode: 'prompting',
+      toSessionId: 'session-a',
+    });
+    expect(gate.admit(held)).toBe('held');
+
+    currentSessionId = 'session-b';
+    // 'gone', not 'done': the caller must not tell the user it was
+    // released when it was dropped.
+    expect(gate.decide(held.msgId, 'approve')).toBe('gone');
+    expect(delivered).toEqual([]);
+    expect(statuses).toEqual(['held', 'misaddressed']);
+  });
+
+  it('tombstones a misaddressed drop so a re-send repeats the verdict', () => {
+    for (const path of ['decide', 'reevaluate'] as const) {
+      let currentSessionId = 'session-a';
+      let mode = ApprovalMode.YOLO;
+      const delivered: PeerUserFrame[] = [];
+      const statuses: string[] = [];
+      const gate = new InboundGate({
+        getApprovalMode: () => mode,
+        getPolicySetting: () => undefined,
+        getSessionId: () => currentSessionId,
+        deliver: (candidate) => delivered.push(candidate),
+        reportStatus: (_candidate, status) => statuses.push(status),
+      });
+      const held = frame({ fromMode: 'prompting', toSessionId: 'session-a' });
+      expect(gate.admit(held)).toBe('held');
+      currentSessionId = 'session-b';
+      if (path === 'decide') {
+        gate.decide(held.msgId, 'approve');
+      } else {
+        // A mode change that would release the hold reaches the pin check.
+        mode = ApprovalMode.DEFAULT;
+        gate.reevaluate('test');
+      }
+      expect(statuses).toEqual(['held', 'misaddressed']);
+
+      // The user /resume-s session-a; a re-send of the same id with a
+      // swapped body passes the arrival pin check. It must not be
+      // re-decided — the drop was terminal.
+      currentSessionId = 'session-a';
+      const resent = {
+        ...held,
+        message: { role: 'user' as const, content: 'body-2' },
+      };
+      expect(gate.admit(resent)).toBe('refused');
+      expect(delivered).toEqual([]);
+      expect(gate.getHeld()).toHaveLength(0);
+      expect(statuses).toEqual(['held', 'misaddressed', 'misaddressed']);
+    }
+  });
+
   it('reports denied when a held message is rejected', () => {
     const h = harness({ mode: ApprovalMode.YOLO });
     const f = frame();
@@ -532,6 +597,32 @@ describe('reevaluate', () => {
     expect(h.gate.reevaluate('mode-changed')).toBe(1);
     expect(h.delivered).toEqual([f]);
     expect(h.gate.getHeld()).toHaveLength(0);
+  });
+
+  it('drops a releasable hold when a session swap invalidates its pin', () => {
+    let mode = ApprovalMode.YOLO;
+    let currentSessionId = 'session-a';
+    const delivered: PeerUserFrame[] = [];
+    const statuses: string[] = [];
+    const gate = new InboundGate({
+      getApprovalMode: () => mode,
+      getPolicySetting: () => undefined,
+      getSessionId: () => currentSessionId,
+      deliver: (candidate) => delivered.push(candidate),
+      reportStatus: (_candidate, status) => statuses.push(status),
+    });
+    const held = frame({
+      fromMode: 'prompting',
+      toSessionId: 'session-a',
+    });
+    expect(gate.admit(held)).toBe('held');
+
+    currentSessionId = 'session-b';
+    mode = ApprovalMode.DEFAULT;
+    expect(gate.reevaluate('mode-changed')).toBe(0);
+    expect(delivered).toEqual([]);
+    expect(gate.getHeld()).toEqual([]);
+    expect(statuses).toEqual(['held', 'misaddressed']);
   });
 
   it('drops the backlog when the policy becomes refuse', () => {

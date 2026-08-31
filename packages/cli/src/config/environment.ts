@@ -654,6 +654,11 @@ export function loadEnvironment(
 export interface EnvReloadResult {
   updatedKeys: string[];
   removedKeys: string[];
+  envFileReadFailed?: boolean;
+}
+
+export interface EnvReloadOptions {
+  failClosedOnEnvFileReadError?: boolean;
 }
 
 /**
@@ -665,6 +670,7 @@ export function reloadEnvironment(
   settings: Settings,
   workspaceCwd: string,
   workspaceTrusted?: boolean,
+  options: EnvReloadOptions = {},
 ): EnvReloadResult {
   const userLevelPaths = getUserLevelEnvPaths();
   const envFilePaths = findEnvFiles(
@@ -674,6 +680,14 @@ export function reloadEnvironment(
     workspaceTrusted,
   );
   const parsedEnvFiles = parseEnvFiles(envFilePaths, userLevelPaths);
+
+  if (parsedEnvFiles.readFailed && options.failClosedOnEnvFileReadError) {
+    return {
+      updatedKeys: [],
+      removedKeys: [],
+      envFileReadFailed: true,
+    };
+  }
 
   if (process.env['CLOUD_SHELL'] === 'true') {
     setUpCloudShellEnvironmentInEnv(process.env, parsedEnvFiles.files);
@@ -790,5 +804,9 @@ export function reloadEnvironment(
     settingsEnvSourcedKeys.add(key);
   }
 
-  return { updatedKeys, removedKeys };
+  return {
+    updatedKeys,
+    removedKeys,
+    ...(dotEnvReadFailed ? { envFileReadFailed: true } : {}),
+  };
 }

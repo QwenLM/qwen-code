@@ -247,6 +247,7 @@ class TestableGithubChannel extends GithubChannel {
   sourceMessageId: string | undefined;
   sourceSenderId: string | undefined;
   sourceMetadata: string | undefined;
+  inboundErrorSourceLabel: string | undefined;
   handleInboundHook: ((envelope: Envelope) => void | Promise<void>) | undefined;
 
   protected getResponseMessageId(_sessionId: string): string | undefined {
@@ -259,6 +260,12 @@ class TestableGithubChannel extends GithubChannel {
 
   protected getResponseMetadata(_sessionId: string): string | undefined {
     return this.sourceMetadata;
+  }
+
+  protected getInboundErrorSourceLabel(
+    _envelope: Envelope,
+  ): string | undefined {
+    return this.inboundErrorSourceLabel;
   }
 
   override async handleInbound(envelope: Envelope): Promise<void> {
@@ -2488,6 +2495,49 @@ describe('GithubChannel', () => {
       });
     });
 
+    it('attributes the published comment without changing raw audit metadata', async () => {
+      mockOctokit.rest.issues.createComment.mockResolvedValue({
+        data: { id: 2002, html_url: 'https://example.test/comment/2002' },
+      });
+      await connectForPublication();
+      const response = 'Reviewed the implementation.';
+      const publish = (
+        channel as unknown as {
+          publishFinalResponse: (
+            chatId: string,
+            threadId: string,
+            text: string,
+            sessionId: string,
+            sourceLabel?: string,
+          ) => Promise<void>;
+        }
+      ).publishFinalResponse.bind(channel);
+
+      await publish(
+        'owner/repo',
+        'issue:42',
+        response,
+        'session-publication',
+        '[review_*]',
+      );
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith({
+        owner: 'owner',
+        repo: 'repo',
+        issue_number: 42,
+        body: '\\[review\\_\\*\\]\nReviewed the implementation.',
+      });
+      const audits = readFileSync(auditPath(), 'utf-8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      expect(audits.at(-1)).toMatchObject({
+        bodyChars: Array.from(response).length,
+        bodySha256: createHash('sha256').update(response).digest('hex'),
+      });
+      expect(JSON.stringify(audits)).not.toContain('review_');
+    });
+
     it('uses the active prompt thread for final delivery', async () => {
       await connectForPublication();
       mockOctokit.rest.issues.createComment.mockResolvedValue({ data: {} });
@@ -2843,8 +2893,11 @@ describe('GithubChannel', () => {
       });
     });
 
-    it('ignores invalid pending final retry records', async () => {
-      writePending([pendingRecord(), { id: 123, bad: true }]);
+    it('preserves attribution while ignoring invalid pending retry records', async () => {
+      writePending([
+        pendingRecord({ sourceLabel: '[review_*]' }),
+        { id: 123, bad: true },
+      ]);
       mockOctokit.rest.issues.createComment.mockResolvedValue({
         data: {
           id: 2004,
@@ -2859,7 +2912,7 @@ describe('GithubChannel', () => {
         owner: 'owner',
         repo: 'repo',
         issue_number: 42,
-        body: 'Final reply',
+        body: '\\[review\\_\\*\\]\nFinal reply',
       });
     });
 
@@ -3544,8 +3597,9 @@ describe('GithubChannel', () => {
   });
 
   describe('error handling', () => {
-    it('posts error comment when handleInbound fails', async () => {
+    it('attributes the error comment when a named inbound turn fails', async () => {
       channel.handleInboundError = new Error('agent down');
+      channel.inboundErrorSourceLabel = '[review_*]';
       await initWithoutLoop();
       mockOctokit.paginate
         .mockResolvedValueOnce([makeNotification()])
@@ -3554,7 +3608,7 @@ describe('GithubChannel', () => {
 
       expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith(
         expect.objectContaining({
-          body: expect.stringContaining('Failed to process'),
+          body: '\\[review\\_\\*\\]\n⚠️ Failed to process this request. Please re-mention the bot to retry.',
         }),
       );
     });

@@ -6,7 +6,10 @@ import {
   useState,
   useSyncExternalStore,
 } from 'react';
-import { useSessions, useWorkspace } from '@qwen-code/webui/daemon-react-sdk';
+import {
+  useSessions,
+  useWorkspace,
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import type {
   DaemonClient,
   DaemonSessionArchiveState,

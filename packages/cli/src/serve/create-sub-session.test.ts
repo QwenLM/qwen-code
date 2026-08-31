@@ -199,7 +199,7 @@ function makeFakeBridge(opts?: {
       sessionId: string,
       req: { prompt: Array<{ type: string; text?: string }> },
       _signal: unknown,
-      ctx?: { promptId?: string },
+      ctx?: { promptId?: string; onPromptAdmitted?: () => void },
     ) => {
       capturedPromptId = ctx?.promptId ?? '';
       prompts.push({
@@ -210,6 +210,7 @@ function makeFakeBridge(opts?: {
       if (opts?.sendPromptRejects) {
         return Promise.reject(new Error(opts.sendPromptRejects));
       }
+      ctx?.onPromptAdmitted?.();
       // Never resolves — the first-turn result comes from the event stream.
       return new Promise(() => {});
     },
@@ -362,6 +363,50 @@ describe('sub-session launcher', () => {
     });
 
     expect(fake.spawns[0]!.parentSessionId).toBe('caller-42');
+  });
+
+  it('keeps scheduled-task run titles flat and persists their attribution', async () => {
+    const fake = makeFakeBridge();
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+    });
+
+    await launcher.launch({
+      prompt: 'run the task',
+      completion: 'sent',
+      name: 'Hourly review',
+      sourceType: 'default',
+      sourceId: 'scheduled_task_run:task-1',
+      callerSessionId: 'caller-1',
+    });
+
+    expect(fake.spawns[0]).toMatchObject({
+      sourceType: 'default',
+      sourceId: 'scheduled_task_run:task-1',
+    });
+    expect(fake.names[0]?.displayName).toBe('Hourly review');
+  });
+
+  it('rejects a scheduled-task run when prompt admission fails', async () => {
+    const fake = makeFakeBridge({
+      sendPromptRejects: 'child disappeared during init',
+    });
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+    });
+
+    await expect(
+      launcher.launch({
+        prompt: 'run the task',
+        completion: 'sent',
+        sourceType: 'default',
+        sourceId: 'scheduled_task_run:task-1',
+        callerSessionId: 'caller-1',
+      }),
+    ).rejects.toThrow(/dispatch failed.*child disappeared during init/i);
+    expect(fake.closes).toEqual(['sub-1']);
   });
 
   it('routes a standalone caller through the managed standalone child service', async () => {

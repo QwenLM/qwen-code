@@ -273,7 +273,7 @@ describe('workspace memory routes', () => {
       expect(res.body.code).toBe('content_too_large');
     });
 
-    it('returns 401 token_required when strict gate fires on no-token loopback', async () => {
+    it('returns token_required when the injected strict gate fails closed', async () => {
       const bridge = buildBridgeStub();
       const app = buildApp({
         bridge,

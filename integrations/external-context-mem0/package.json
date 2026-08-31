@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/external-context-mem0",
-  "version": "0.1.0",
+  "version": "0.22.3",
   "private": true,
   "description": "Configurable Mem0-compatible External Context Extension",
   "type": "module",

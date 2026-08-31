@@ -241,7 +241,7 @@ describe('release note classification', () => {
           "if (args[0] === 'api' && args[1] === '-X' && (args[2] === 'POST' || args[2] === 'DELETE') && /\\/issues\\/\\d+\\/labels/.test(args[3])) {",
           "  const action = args[2] === 'DELETE' ? 'remove' : 'add';",
           "  const number = args[3].match(/\\/issues\\/(\\d+)\\/labels/)[1];",
-          `  require('node:fs').appendFileSync(${JSON.stringify(updates)}, number + ' ' + action + '\\n');`,
+          `  process.getBuiltinModule('node:fs').appendFileSync(${JSON.stringify(updates)}, number + ' ' + action + '\\n');`,
           '  process.exit(0);',
           '}',
           'process.exit(1);',

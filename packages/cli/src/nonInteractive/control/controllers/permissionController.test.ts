@@ -541,6 +541,9 @@ describe('PermissionController', () => {
         name: 'ask_user_question',
         args: { questions: [] } as Record<string, unknown>,
       },
+      invocation: {
+        requiresUserInteraction: () => true,
+      },
       confirmationDetails: {
         type: 'ask_user_question',
         title: 'Please answer',

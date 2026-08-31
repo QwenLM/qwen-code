@@ -609,7 +609,7 @@ export function createSpawnChannelFactory(
  *
  * Note on `cwd`: CodeQL flags the `workspaceCwd` flow into `spawn({cwd})`
  * as an "uncontrolled data used in path expression" finding. That's the
- * Stage 1 trust model speaking — the caller (a token-authenticated HTTP
+ * Stage 1 trust model speaking — the caller (an operator-authorized HTTP
  * client) is treated as an extension of the operator. The agent already
  * runs as the same UID with shell-tool access, so restricting the spawn
  * cwd to a sandbox here would be theatre. Stage 4+ remote-sandbox swaps

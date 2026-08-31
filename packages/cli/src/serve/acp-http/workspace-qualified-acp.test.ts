@@ -80,6 +80,12 @@ function makeBridge(): HttpAcpBridge {
       filesTouched: [],
       touchedScopes: [],
     })),
+    runWorkspaceMemoryForget: vi.fn(async () => ({
+      summary: 'forgot',
+      removedEntries: [],
+      touchedTopics: [],
+      touchedScopes: [],
+    })),
     publishWorkspaceEvent: vi.fn(),
   } as unknown as HttpAcpBridge;
 }
@@ -293,6 +299,17 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
         HTTPS_PROXY: 'http://primary-proxy.example:8080',
       },
       workspaceRegistry,
+      extraWsRoutes: [
+        {
+          path: '/test-extra',
+          bypassPrimaryDrain: true,
+          onConnection: (ws) => {
+            ws.send('extra-ready');
+            ws.close(1000, 'done');
+          },
+        },
+        { path: '/test-primary-extra', onConnection: () => {} },
+      ],
       deviceFlowRegistry,
       cdpTunnelOverWs: true,
       cdpTunnelRegistry: cdpRegistry,
@@ -1745,6 +1762,41 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
     expect(response).toEqual({ status: 503, retryAfter: '5' });
   });
 
+  it('does not apply primary ACP drain to an extra WebSocket route', async () => {
+    handle!.beginWorkspaceDrain('primary-id');
+
+    const message = await new Promise<string>((resolve, reject) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${port}/test-extra`, {
+        handshakeTimeout: 2000,
+      });
+      ws.on('message', (data: WebSocket.RawData) => resolve(data.toString()));
+      ws.on('error', reject);
+    });
+
+    expect(message).toBe('extra-ready');
+  });
+
+  it('keeps primary-scoped extra routes behind the primary drain gate', async () => {
+    handle!.beginWorkspaceDrain('primary-id');
+
+    const status = await new Promise<number | undefined>((resolve, reject) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${port}/test-primary-extra`, {
+        handshakeTimeout: 2000,
+      });
+      ws.on('unexpected-response', (_req, res) => {
+        resolve(res.statusCode);
+        ws.terminate();
+      });
+      ws.on('open', () => {
+        ws.close();
+        reject(new Error('primary-scoped extra route should not open'));
+      });
+      ws.on('error', reject);
+    });
+
+    expect(status).toBe(503);
+  });
+
   it('rejects unowned and spoofed correlation frames during drain', async () => {
     const replies = await new Promise<Array<Record<string, unknown>>>(
       (resolve, reject) => {
@@ -1886,16 +1938,68 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
       jsonrpc: '2.0',
       id: 2,
       method: '_qwen/workspace/memory/remember',
-      params: { content: 'secondary-only memory' },
+      params: { content: 'shared memory', scope: 'user' },
     });
 
     await vi.waitFor(() => {
       expect(secondaryBridge.runWorkspaceMemoryRemember).toHaveBeenCalledWith({
-        content: 'secondary-only memory',
+        content: 'shared memory',
         contextMode: 'workspace',
+        scope: 'user',
       });
     });
     expect(primaryBridge.runWorkspaceMemoryRemember).not.toHaveBeenCalled();
+  });
+
+  it('rejects an unsupported workspace remember scope before the bridge', async () => {
+    const reply = await sendWsRequest('/workspaces/secondary-id/acp', {
+      jsonrpc: '2.0',
+      id: 3,
+      method: '_qwen/workspace/memory/remember',
+      params: { content: 'wrong scope', scope: 'global' },
+    });
+
+    expect(reply).toMatchObject({
+      error: {
+        code: -32602,
+        message: '`scope` must be "project", "user", or omitted',
+      },
+    });
+    expect(secondaryBridge.runWorkspaceMemoryRemember).not.toHaveBeenCalled();
+  });
+
+  it('runs secondary workspace forget tasks on the secondary bridge with scope', async () => {
+    await sendWsRequest('/workspaces/secondary-id/acp', {
+      jsonrpc: '2.0',
+      id: 2,
+      method: '_qwen/workspace/memory/forget',
+      params: { query: 'old preference', scope: 'user' },
+    });
+
+    await vi.waitFor(() => {
+      expect(secondaryBridge.runWorkspaceMemoryForget).toHaveBeenCalledWith({
+        query: 'old preference',
+        scope: 'user',
+      });
+    });
+    expect(primaryBridge.runWorkspaceMemoryForget).not.toHaveBeenCalled();
+  });
+
+  it('rejects an unsupported workspace forget scope before the bridge', async () => {
+    const reply = await sendWsRequest('/workspaces/secondary-id/acp', {
+      jsonrpc: '2.0',
+      id: 3,
+      method: '_qwen/workspace/memory/forget',
+      params: { query: 'wrong scope', scope: 'global' },
+    });
+
+    expect(reply).toMatchObject({
+      error: {
+        code: -32602,
+        message: '`scope` must be "project", "user", or omitted',
+      },
+    });
+    expect(secondaryBridge.runWorkspaceMemoryForget).not.toHaveBeenCalled();
   });
 
   it('rejects a WS upgrade to an unknown workspace selector', async () => {

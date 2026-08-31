@@ -36,6 +36,12 @@ export interface NamedSessionSelection extends NamedSessionView {
   sessionId: string;
 }
 
+export interface NamedSessionTaskReference {
+  taskName: string;
+  status: 'open' | 'closed';
+  target: SessionTarget;
+}
+
 export interface NamedSessionManagerOptions {
   channelName: string;
   cwd: string;
@@ -79,6 +85,7 @@ export class NamedSessionManager {
   private readonly isBusy: (sessionId: string) => boolean;
   private readonly now: () => number;
   private registry: StoredRegistry;
+  private taskBySessionId: Map<string, NamedSessionTaskReference>;
   private readonly ownerOperations = new Map<string, Promise<void>>();
 
   constructor(options: NamedSessionManagerOptions) {
@@ -90,6 +97,70 @@ export class NamedSessionManager {
     this.isBusy = options.isBusy;
     this.now = options.now ?? Date.now;
     this.registry = this.readRegistry();
+    this.taskBySessionId = this.buildTaskIndex(this.registry);
+  }
+
+  presentation(sessionId: string): NamedSessionTaskReference | undefined {
+    const reference = this.taskBySessionId.get(sessionId);
+    return reference ? this.cloneTaskReference(reference) : undefined;
+  }
+
+  async resolvePresentation(
+    sessionId: string,
+  ): Promise<NamedSessionTaskReference | undefined> {
+    const existing = this.presentation(sessionId);
+    if (existing) return existing;
+
+    const target = this.router.getTarget(sessionId);
+    if (
+      target?.channelName !== this.channelName ||
+      this.router.getSession(
+        this.channelName,
+        target.senderId,
+        target.chatId,
+      ) !== sessionId
+    ) {
+      return undefined;
+    }
+
+    return this.withOwnerLock(target, async () => {
+      const concurrent = this.presentation(sessionId);
+      if (concurrent) return concurrent;
+      if (this.getOwner(target)) return undefined;
+
+      const routedTarget = this.router.getTarget(sessionId);
+      if (
+        routedTarget?.channelName !== this.channelName ||
+        routedTarget.chatId !== target.chatId ||
+        routedTarget.senderId !== target.senderId ||
+        this.router.getSession(
+          this.channelName,
+          target.senderId,
+          target.chatId,
+        ) !== sessionId
+      ) {
+        return undefined;
+      }
+      const routedCwd = this.router.getSessionCwd(sessionId);
+      if (routedCwd !== undefined && !this.isCurrentCwd(routedCwd)) {
+        return undefined;
+      }
+
+      const timestamp = this.nextTimestamp();
+      const task: StoredTask = {
+        name: 'default',
+        sessionId,
+        cwd: routedCwd ?? this.cwd,
+        isolation: 'shared',
+        status: 'open',
+        target: routedTarget,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        lastSelectedAt: timestamp,
+      };
+      this.commitOwner(this.createOwner(routedTarget, task.name, [task]));
+      return this.presentation(sessionId);
+    });
   }
 
   resolve(
@@ -759,6 +830,28 @@ export class NamedSessionManager {
     };
   }
 
+  private cloneTaskReference(
+    reference: NamedSessionTaskReference,
+  ): NamedSessionTaskReference {
+    return { ...reference, target: { ...reference.target } };
+  }
+
+  private buildTaskIndex(
+    registry: StoredRegistry,
+  ): Map<string, NamedSessionTaskReference> {
+    const index = new Map<string, NamedSessionTaskReference>();
+    for (const owner of registry.owners) {
+      for (const task of owner.tasks) {
+        index.set(task.sessionId, {
+          taskName: task.name,
+          status: task.status,
+          target: { ...task.target },
+        });
+      }
+    }
+    return index;
+  }
+
   private commitOwner(owner: StoredOwner): void {
     const owners = this.registry.owners.map((candidate) =>
       candidate.channelName === owner.channelName &&
@@ -781,8 +874,10 @@ export class NamedSessionManager {
     if (!this.isRegistry(next)) {
       throw new Error('Invalid named-session registry update.');
     }
+    const nextTaskBySessionId = this.buildTaskIndex(next);
     this.writeRegistry(next);
     this.registry = next;
+    this.taskBySessionId = nextTaskBySessionId;
   }
 
   private readRegistry(): StoredRegistry {

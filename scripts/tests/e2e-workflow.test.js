@@ -86,4 +86,12 @@ describe('e2e workflow', () => {
       expect(retryStep.env.VERBOSE).toBe('true');
     });
   });
+
+  it('routes Linux E2E scratch files away from /tmp', () => {
+    const runStep = yml.jobs['e2e-test-linux'].steps.find(
+      (step) => step.name === 'Run E2E tests',
+    );
+    expect(runStep.run).toContain('mktemp -d /var/tmp/qwen-ci-XXXXXX');
+    expect(runStep.run).toContain('trap \'rm -rf "$TMPDIR"');
+  });
 });

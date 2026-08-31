@@ -345,7 +345,7 @@ describe('binding semantics through the real kernel', () => {
         name: 'demo-symlinked',
         version: '1.0.0',
         type: 'module',
-        exports: './index.mjs',
+        exports: { import: './index.mjs' },
       }),
     );
     fs.writeFileSync(

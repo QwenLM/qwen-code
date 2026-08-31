@@ -72,11 +72,17 @@ describe('workflow file size', () => {
     // forget.
     const workflowEnv = ciWorkflow.match(/^env:[\s\S]*?\njobs:/m)?.[0];
     // Anchored to the whole line: substring checks still pass a `||` → `&&`
-    // mutation (empty on both events — the #9904 red wall returns) and an
+    // mutation (empty on every event — the #9904 red wall returns) and an
     // appended `|| github.sha` fallback (workflow_dispatch resolves the base
     // to the checked-out commit, failing the ratchet open on that lane).
+    // `github.event.before` is the push lane's arm and is safe where
+    // `github.sha` is not: on a squash-merge push it is main's PREVIOUS tip,
+    // so the comparison is against a different tree the way a PR's base is,
+    // and an all-zeros `before` (branch creation, force push) still fails
+    // closed. Without it the push lane has no base at all and the ratchet
+    // fails closed on `main` while every PR stays green on leniency.
     expect(workflowEnv).toMatch(
-      /^\s*WORKFLOW_SIZE_BASE_SHA: '\$\{\{ github\.event\.pull_request\.base\.sha \|\| github\.event\.merge_group\.base_sha \}\}'$/m,
+      /^\s*WORKFLOW_SIZE_BASE_SHA: '\$\{\{ github\.event\.pull_request\.base\.sha \|\| github\.event\.merge_group\.base_sha \|\| github\.event\.before \}\}'$/m,
     );
   });
 });

@@ -1336,6 +1336,31 @@ describe('CronScheduler', () => {
       });
     });
 
+    it('attributes a per-run fire to its fresh session after dispatch', async () => {
+      await writeCronTasks(tmpDir, [
+        { ...diskTask('fresh1'), sessionMode: 'per_run' },
+      ]);
+      await scheduler.enableDurable('session-1');
+      const fired: CronJob[] = [];
+      scheduler.start((job) => fired.push(job));
+
+      scheduler.tick(new Date(2025, 0, 15, 10, 30, 59));
+      const minute = new Date(2025, 0, 15, 10, 30, 0).getTime();
+      await vi.waitFor(async () => {
+        expect((await readCronTasks(tmpDir))[0]?.runs).toEqual([
+          { at: minute, kind: 'scheduled' },
+        ]);
+      });
+      expect(fired[0]?.sessionMode).toBe('per_run');
+
+      await scheduler.annotateRunSession('fresh1', minute, {
+        sessionId: 'child-1',
+      });
+      expect((await readCronTasks(tmpDir))[0]?.runs).toEqual([
+        { at: minute, kind: 'scheduled', sessionId: 'child-1' },
+      ]);
+    });
+
     it('does not accrue run history for a one-shot (deleted on fire)', async () => {
       // A recurring:false durable task is removed from disk the moment it
       // fires, so there is no surviving entry to attach a run record to.

@@ -35,7 +35,8 @@ export type ReviewEffort = 'low' | 'medium' | 'high';
 /**
  * The posting floor for findings on a PR review: `critical` posts only
  * Critical findings (otherwise-postable high-confidence Suggestions are
- * recorded and deferred; low-confidence and Nice-to-have stay terminal-only
+ * recorded and deferred — and so is a Critical classified fails-closed on
+ * new surface, #10291; low-confidence and Nice-to-have stay terminal-only
  * as ever), `suggestion` posts Criticals and Suggestions — today's behaviour. The floor governs what
  * the review PUBLISHES, never what it finds or verifies.
  */

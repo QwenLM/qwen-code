@@ -1122,6 +1122,7 @@ export interface DaemonSettingsReloadedData {
   sessionsRefreshed?: string[];
   sessionsSkipped?: string[];
   childError?: string;
+  runtimeEnvironmentApplied?: boolean;
   [key: string]: unknown;
 }
 export type DaemonSettingsReloadedEvent = DaemonEventEnvelope<

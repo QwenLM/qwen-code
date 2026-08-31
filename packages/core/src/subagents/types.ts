@@ -174,6 +174,20 @@ export interface SubagentConfig {
 }
 
 /**
+ * Concrete model route a subagent definition's `model:` selector resolves
+ * to: the model ID plus the auth type a dedicated ContentGenerator must be
+ * created with. Returned by `SubagentManager.resolveSubagentModelRoute`
+ * for spawn paths that need the definition's provider route (e.g. Agent
+ * Team teammates, #10071).
+ */
+export interface SubagentModelRoute {
+  /** Concrete model ID the selector resolved to. */
+  modelId: string;
+  /** Auth type that hosts the model on this route. */
+  authType: string;
+}
+
+/**
  * Runtime configuration that converts file-based config to AgentHeadless.
  * This interface maps SubagentConfig to the existing runtime interfaces.
  */

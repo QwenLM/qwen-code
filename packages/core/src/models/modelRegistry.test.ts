@@ -800,6 +800,27 @@ describe('ModelRegistry', () => {
       expect(registry.getModel(AuthType.USE_OPENAI, 'gpt-3.5')).toBeDefined();
     });
 
+    it('keeps the previous registry when a replacement model is invalid', () => {
+      const registry = new ModelRegistry(
+        { idealab: [{ id: 'old-model' }] } as ModelProvidersConfig,
+        { idealab: 'openai' },
+      );
+
+      expect(() =>
+        registry.reloadModels(
+          {
+            idealab: [{ id: 'new-model' }, { id: '' }],
+          } as ModelProvidersConfig,
+          { idealab: 'gemini' },
+        ),
+      ).toThrow('missing required field: id');
+
+      expect(registry.getModel(AuthType.USE_OPENAI, 'old-model')).toBeDefined();
+      expect(
+        registry.getModel(AuthType.USE_GEMINI, 'new-model'),
+      ).toBeUndefined();
+    });
+
     it('should correctly reload same-id different-baseUrl models', () => {
       const registry = new ModelRegistry({
         openai: [

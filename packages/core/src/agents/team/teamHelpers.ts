@@ -374,16 +374,38 @@ export async function tryReclaimStaleTeam(teamName: string): Promise<boolean> {
 
 /**
  * Delete an entire team directory and its associated task
- * directory. Silently ignores missing directories.
+ * directory. Missing directories are silently ignored because
+ * fs.rm is called with { force: true }.
+ * Throws on real filesystem failures (EACCES, EIO, etc.).
+ * When both removals fail, throws an AggregateError covering both.
  */
 export async function deleteTeamDirs(teamName: string): Promise<void> {
   const teamDir = getTeamDir(teamName);
   const tasksDir = getTasksDir(teamName);
 
-  await Promise.allSettled([
+  const results = await Promise.allSettled([
     fs.rm(teamDir, { recursive: true, force: true }),
     fs.rm(tasksDir, { recursive: true, force: true }),
   ]);
+
+  const errors = results
+    .filter((r): r is PromiseRejectedResult => r.status === 'rejected')
+    .map((r) => r.reason);
+
+  if (errors.length === 1) {
+    throw errors[0];
+  }
+  if (errors.length > 1) {
+    // Fold member messages into the wrapper message: serializers that
+    // only read `.stack`/`.message` (e.g. debugLogger) would otherwise
+    // drop the per-directory errno/path detail of `.errors`.
+    throw new AggregateError(
+      errors,
+      `Failed to delete team directories for "${teamName}": ${errors
+        .map((e) => (e instanceof Error ? e.message : String(e)))
+        .join('; ')}`,
+    );
+  }
 }
 
 /**

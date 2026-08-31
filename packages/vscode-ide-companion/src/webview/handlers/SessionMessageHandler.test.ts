@@ -97,10 +97,6 @@ vi.mock('../../services/sessionExportService.js', () => ({
   exportSessionToFile: mockExportSessionToFile,
 }));
 
-vi.mock('@qwen-code/webui', () => ({
-  stripZeroWidthSpaces: (text: string) => text.replace(/\u200B/g, ''),
-}));
-
 import { SessionMessageHandler } from './SessionMessageHandler.js';
 import { MAX_IMAGE_SIZE } from '../../utils/imageSupport.js';
 
@@ -139,6 +135,115 @@ describe('SessionMessageHandler', () => {
     expect(mockExecuteCommand).toHaveBeenCalledWith('qwenCode.openNewChatTab', {
       initialModelId: 'glm-5',
     });
+  });
+
+  it('sends inline file contents to ACP without exposing them in the user display', async () => {
+    mockProcessImageAttachments.mockImplementation(
+      async (promptText: string) => ({
+        formattedText: promptText,
+        displayText: promptText,
+        savedImageCount: 0,
+        promptImages: [],
+      }),
+    );
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: 'session-1',
+      sendMessage: vi.fn().mockResolvedValue(undefined),
+    };
+    const conversationStore = {
+      createConversation: vi.fn().mockResolvedValue({ id: 'conversation-1' }),
+      getConversation: vi.fn().mockResolvedValue(null),
+      addMessage: vi.fn(),
+      renameConversationId: vi.fn().mockResolvedValue(true),
+    };
+    const sendToWebView = vi.fn();
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      null,
+      sendToWebView,
+    );
+
+    await handler.handle({
+      type: 'sendMessage',
+      data: {
+        text: 'Please inspect this file',
+        inlineFiles: [
+          {
+            name: 'notes&<.md',
+            mediaType: 'text/markdown',
+            text: '# private contents',
+          },
+        ],
+      },
+    });
+
+    expect(agentManager.sendMessage).toHaveBeenCalledWith([
+      {
+        type: 'text',
+        text: 'Please inspect this file\n\n<attached_file name="notes&amp;&lt;.md" media_type="text/markdown">\n# private contents\n</attached_file>',
+      },
+    ]);
+    expect(conversationStore.addMessage).toHaveBeenCalledWith(
+      'conversation-1',
+      expect.objectContaining({
+        role: 'user',
+        content: 'Please inspect this file',
+      }),
+    );
+    expect(sendToWebView).toHaveBeenCalledWith({
+      type: 'sessionTitleUpdated',
+      data: { sessionId: 'conversation-1', title: 'Please inspect this file' },
+    });
+  });
+
+  it('sends inline files when the user text is empty', async () => {
+    mockProcessImageAttachments.mockImplementation(
+      async (promptText: string) => ({
+        formattedText: promptText,
+        displayText: promptText,
+        savedImageCount: 0,
+        promptImages: [],
+      }),
+    );
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: 'session-1',
+      sendMessage: vi.fn().mockResolvedValue(undefined),
+    };
+    const conversationStore = {
+      createConversation: vi.fn().mockResolvedValue({ id: 'conversation-1' }),
+      getConversation: vi.fn().mockResolvedValue(null),
+      addMessage: vi.fn(),
+      renameConversationId: vi.fn().mockResolvedValue(true),
+    };
+
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      null,
+      vi.fn(),
+    );
+
+    await handler.handle({
+      type: 'sendMessage',
+      data: {
+        text: '',
+        inlineFiles: [{ name: 'empty.txt', mediaType: 'text/plain', text: '' }],
+      },
+    });
+
+    expect(agentManager.sendMessage).toHaveBeenCalledWith([
+      {
+        type: 'text',
+        text: '<attached_file name="empty.txt" media_type="text/plain">\n\n</attached_file>',
+      },
+    ]);
+    expect(conversationStore.addMessage).toHaveBeenCalledWith(
+      'conversation-1',
+      expect.objectContaining({ role: 'user', content: '' }),
+    );
   });
 
   it('does not create conversation state or send an empty prompt when all pasted images fail to materialize', async () => {

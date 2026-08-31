@@ -309,7 +309,6 @@ export function createExtensionsController(
         getWorkspaceTrustStatus(loadSettings(workspaceDir).merged, workspaceDir)
           .effective.state === 'trusted',
       requestConsent: () => Promise.resolve(),
-      networkPolicy: 'public',
       requestSetting:
         interactions?.requestSetting ??
         (async (setting: ExtensionSetting) => {

@@ -24,8 +24,8 @@ Run `qwen mcp list` to check whether the `node-repl` server is configured. If it
 is not configured, run both commands yourself:
 
 ```bash
-qwen mcp add --scope user node-repl npx -y @qwen-code/node-repl-mcp@0.1.0
-npm install --no-save --package-lock=false @qwen-code/cua-sdk@0.20.0
+qwen mcp add --scope user node-repl npx -y @qwen-code/node-repl-mcp@0.1.1
+npm install --no-save --package-lock=false @qwen-code/cua-sdk@0.20.2
 ```
 
 Tell the user to restart Qwen Code after adding the MCP server, then stop. Do
@@ -35,7 +35,7 @@ If `node_repl` is available but the SDK import fails, run the SDK installation
 command yourself from the current workspace, then retry the import:
 
 ```bash
-npm install --no-save --package-lock=false @qwen-code/cua-sdk@0.20.0
+npm install --no-save --package-lock=false @qwen-code/cua-sdk@0.20.2
 ```
 
 ## Bootstrap

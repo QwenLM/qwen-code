@@ -59,7 +59,7 @@ const {
   },
 }));
 
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   DaemonSessionProvider: (props: {
     children: ReactNode;
     [key: string]: unknown;

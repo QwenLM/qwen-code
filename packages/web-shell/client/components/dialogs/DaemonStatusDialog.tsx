@@ -12,7 +12,7 @@ import {
   type DaemonStatusReport,
   type DaemonStatusReportLevel,
   type DaemonStatusReportSection,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../../i18n';
 import { ErrorBoundary } from '../ErrorBoundary';
 import { SvgLineChart, type ChartSeries } from './SvgLineChart';

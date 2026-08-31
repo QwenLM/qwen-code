@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Message } from '../adapters/types';
-import type { DaemonSessionActions } from '@qwen-code/webui/daemon-react-sdk';
+import type { DaemonSessionActions } from '@qwen-code/web-shell/daemon-react-sdk';
 
 const MIN_PROMPT_LENGTH = 12;
 const MIN_BTW_MESSAGE_COUNT = 2;

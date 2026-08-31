@@ -108,9 +108,8 @@ $NightlyTagPrefix = "nightly-cua-driver-rs-v"
 $BinaryName = "qwen-cua-driver.exe"
 $ThemeBinaryName = "cua-cursor-theme.exe"
 
-# Baked-version constant — advanced by the Cua Driver CD workflow only after
-# the matching GitHub release and all staged assets are public. The sentinel
-# markers identify this line for the post-publication updater.
+# Baked-version constant — advanced in the same change as the Cua Driver
+# release. The release workflow validates this line before publishing.
 #
 # Precedence at resolve time: $env:CUA_DRIVER_RS_VERSION > -Release arg >
 # this baked value > GitHub Releases API. Baked means the `irm | iex`
@@ -118,8 +117,8 @@ $ThemeBinaryName = "cua-cursor-theme.exe"
 # only consulted as a fallback when this script is run from a branch
 # where the baked line hasn't been updated yet.
 #
-# ~~~ BAKED_VERSION: auto-updated after release publication — do not edit ~~~
-$Script:CuaDriverRsBakedVersion = "0.20.0"
+# ~~~ BAKED_VERSION: must match the release version in this change ~~~
+$Script:CuaDriverRsBakedVersion = "0.20.2"
 # ~~~ END_BAKED_VERSION ~~~
 $CursorThemeRequiredFrom = [version]"0.12.7"
 

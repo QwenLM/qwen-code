@@ -51,7 +51,7 @@ vi.mock('../adapters/transcriptToMessages', async (importOriginal) => {
   };
 });
 
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useConnection: () => hookState.connection,
   useTranscriptBlocks: () => hookState.blocks,
   useWorkspace: () => ({ client: hookState.client }),

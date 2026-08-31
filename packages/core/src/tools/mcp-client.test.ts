@@ -2949,6 +2949,115 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
         expect(await response.text()).toBe('');
       });
 
+      it('treats 404 from optional GET SSE stream as unsupported', async () => {
+        const fetchFn = vi.fn<typeof fetch>().mockResolvedValue(
+          // Streamable HTTP servers with no GET route at all reject the optional
+          // standalone GET/SSE notification stream with 404 — e.g. the official
+          // MCP SDK's documented stateless StreamableHTTPServerTransport pattern
+          // behind Express, where 404 is Express's own default fallthrough for
+          // the unhandled GET (#8784). (Note: context7 returns a raw 405, which
+          // the SDK tolerates natively — the earlier claim that it returned 404
+          // was retracted in the issue as a reporter-side misconfiguration.)
+          new Response('not found', { status: 404 }),
+        );
+        const fetchWithFallback = createStreamableHttpCompatibilityFetch(
+          'no-get-route',
+          fetchFn,
+        );
+
+        const response = await fetchWithFallback('http://test-server/mcp', {
+          method: 'GET',
+          headers: { Accept: 'text/event-stream' },
+        });
+
+        expect(fetchFn).toHaveBeenCalledTimes(1);
+        expect(response.status).toBe(405);
+        expect(response.statusText).toBe('Method Not Allowed');
+        expect(await response.text()).toBe('');
+      });
+
+      it('does not rewrite non-SSE GET 404 responses', async () => {
+        const fetchFn = vi
+          .fn<typeof fetch>()
+          .mockResolvedValue(new Response('not found', { status: 404 }));
+        const fetchWithFallback = createStreamableHttpCompatibilityFetch(
+          'plain-get-404',
+          fetchFn,
+        );
+
+        const response = await fetchWithFallback('http://test-server/mcp', {
+          method: 'GET',
+          headers: { Accept: 'application/json' },
+        });
+
+        expect(response.status).toBe(404);
+        expect(await response.text()).toBe('not found');
+      });
+
+      it('does not rewrite POST 404 responses', async () => {
+        const fetchFn = vi
+          .fn<typeof fetch>()
+          .mockResolvedValue(new Response('not found', { status: 404 }));
+        const fetchWithFallback = createStreamableHttpCompatibilityFetch(
+          'post-404',
+          fetchFn,
+        );
+
+        // The SDK's real POST requests set this exact Accept header
+        // (streamableHttp.ts's transport always sends
+        // 'application/json, text/event-stream'), so the method check is
+        // the only thing standing between a genuine tool-call 404 and being
+        // silently rewritten into a synthetic 405 — the Accept header alone
+        // does not disambiguate POST from the optional GET/SSE probe.
+        const response = await fetchWithFallback('http://test-server/mcp', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json, text/event-stream',
+          },
+        });
+
+        expect(response.status).toBe(404);
+        expect(await response.text()).toBe('not found');
+      });
+
+      it('bounds the fallback body excerpt read when the 404 body stalls', async () => {
+        // A server that answers the optional GET/SSE probe with 404 headers and
+        // then never sends a body chunk must not park the diagnostics read
+        // forever: the MCP dispatcher runs with `headersTimeout: 0,
+        // bodyTimeout: 0` and nothing above this wrapper bounds the body.
+        vi.useFakeTimers();
+        try {
+          const fetchFn = vi.fn<typeof fetch>().mockResolvedValue(
+            new Response(
+              new ReadableStream({
+                // Headers are already delivered; the body never yields.
+                pull: () => new Promise<void>(() => {}),
+              }),
+              { status: 404 },
+            ),
+          );
+          const fetchWithFallback = createStreamableHttpCompatibilityFetch(
+            'stalled-404-body',
+            fetchFn,
+          );
+
+          const pending = fetchWithFallback('http://test-server/mcp', {
+            method: 'GET',
+            headers: { Accept: 'text/event-stream' },
+          });
+          await vi.advanceTimersByTimeAsync(2_000);
+          const response = await pending;
+
+          expect(response.status).toBe(405);
+          expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+            expect.not.stringContaining('Response body:'),
+          );
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
       it('omits response body diagnostics when the fallback body is empty', async () => {
         const fetchFn = vi
           .fn<typeof fetch>()

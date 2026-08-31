@@ -51,6 +51,8 @@ const inlineDecodeCache = new Map<
   string,
   { png: Buffer; size: { width: number; height: number } }
 >();
+export const INLINE_DECODE_NEGATIVE_CACHE_LIMIT = 64;
+const invalidInlineImageCache = new Set<string>();
 
 // A Kitty terminal keeps a transmitted image and redraws it from the placeholder
 // cells alone. The live-row -> Static-row move and every resize remount
@@ -379,10 +381,23 @@ function getDecodedInlinePng(
     return cached;
   }
 
+  const negativeKey = crypto.createHash('sha256').update(data).digest('hex');
+  if (invalidInlineImageCache.has(negativeKey)) {
+    invalidInlineImageCache.delete(negativeKey);
+    invalidInlineImageCache.add(negativeKey);
+    return null;
+  }
+
   const png = decodeInlineImage(data);
-  if (!png) return null;
+  if (!png) {
+    cacheInvalidInlineImage(negativeKey);
+    return null;
+  }
   const size = readValidatedInlinePngSize(png);
-  if (!size) return null;
+  if (!size) {
+    cacheInvalidInlineImage(negativeKey);
+    return null;
+  }
 
   const decoded = { png, size };
   inlineDecodeCache.set(data, decoded);
@@ -392,6 +407,15 @@ function getDecodedInlinePng(
     inlineDecodeCache.delete(oldest);
   }
   return decoded;
+}
+
+function cacheInvalidInlineImage(key: string): void {
+  invalidInlineImageCache.add(key);
+  while (invalidInlineImageCache.size > INLINE_DECODE_NEGATIVE_CACHE_LIMIT) {
+    const oldest = invalidInlineImageCache.values().next().value;
+    if (oldest === undefined) break;
+    invalidInlineImageCache.delete(oldest);
+  }
 }
 
 function readValidatedInlinePngSize(

@@ -12,9 +12,14 @@ import { matches, nextFireTime, parseCron } from '../utils/cronParser.js';
 import { humanReadableCron } from '../utils/cronDisplay.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { ToolNames } from '../tools/tool-names.js';
-import type { CronTaskDelivery, DurableCronTask } from './cronTasksFile.js';
+import type {
+  CronRunSessionOutcome,
+  CronTaskDelivery,
+  DurableCronTask,
+} from './cronTasksFile.js';
 import {
   addCronTask,
+  annotateCronRunSession,
   CRON_TASKS_DISPLAY_PATH,
   appendCronRun,
   generateCronTaskId,
@@ -89,6 +94,11 @@ export interface CronJob {
    * absent, the task uses the shared model: only the lock owner fires it.
    */
   boundSessionId?: string;
+  /** Whether a daemon-backed consumer should execute this fire in the bound
+   * task session or dispatch it into a fresh child session. */
+  sessionMode?: 'persistent' | 'per_run';
+  /** Human-readable task label used to name a fresh per-run session. */
+  name?: string;
   delivery?: CronTaskDelivery;
   /** One-shot that was due while no owning session ran — fired late. */
   missed?: boolean;
@@ -1153,7 +1163,9 @@ export class CronScheduler {
             runs: appendCronRun(t.runs, {
               at: stamp,
               kind: 'catch-up',
-              ...(this.sessionId ? { sessionId: this.sessionId } : {}),
+              ...(t.sessionMode !== 'per_run' && this.sessionId
+                ? { sessionId: this.sessionId }
+                : {}),
             }),
           };
         });
@@ -1246,6 +1258,27 @@ export class CronScheduler {
     debugLogger.debug(`forceFireJob: firing ${id} (${job.cronExpr})`);
     this.onFire(job);
     return true;
+  }
+
+  /** Attributes an already-persisted per-run fire to the session it ran in,
+   * and/or marks its fresh-session creation as failed. */
+  async annotateRunSession(
+    taskId: string,
+    firedAt: number,
+    outcome: CronRunSessionOutcome,
+  ): Promise<void> {
+    if (!this.projectRoot) return;
+    // The onFire callback runs before tick() queues its run-history write.
+    // Yield once, then wait for that write so the entry exists before editing it.
+    await Promise.resolve();
+    await this.pendingPersist;
+    await updateCronTasks(this.projectRoot, (tasks) =>
+      tasks.map((task) =>
+        task.id === taskId
+          ? annotateCronRunSession(task, firedAt, outcome)
+          : task,
+      ),
+    );
   }
 
   /**
@@ -1473,7 +1506,9 @@ export class CronScheduler {
                   kind: 'scheduled',
                   // The owner session that ran this fire — links the run back
                   // to its transcript. Set whenever a durable fire persists.
-                  ...(this.sessionId ? { sessionId: this.sessionId } : {}),
+                  ...(t.sessionMode !== 'per_run' && this.sessionId
+                    ? { sessionId: this.sessionId }
+                    : {}),
                 }),
               };
             }),
@@ -1661,6 +1696,8 @@ function durableTaskToJob(
     jitterMs,
     durable: true,
     ...(task.sessionId ? { boundSessionId: task.sessionId } : {}),
+    ...(task.sessionMode ? { sessionMode: task.sessionMode } : {}),
+    ...(task.name ? { name: task.name } : {}),
     ...(task.delivery && task.sessionId ? { delivery: task.delivery } : {}),
   };
 }
@@ -1674,6 +1711,8 @@ function jobToDurableTask(job: CronJob): DurableCronTask {
     createdAt: job.createdAt,
     lastFiredAt: job.lastFiredAt ?? null,
     ...(job.boundSessionId ? { sessionId: job.boundSessionId } : {}),
+    ...(job.sessionMode ? { sessionMode: job.sessionMode } : {}),
+    ...(job.name ? { name: job.name } : {}),
     ...(job.delivery ? { delivery: job.delivery } : {}),
   };
 }

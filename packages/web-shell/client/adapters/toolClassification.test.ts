@@ -95,6 +95,24 @@ describe('isBackgroundSubAgentToolCall', () => {
       }),
     ).toBe(true);
   });
+
+  it('trusts the runtime background execution mode over foreground args', () => {
+    expect(
+      isBackgroundSubAgentToolCall({
+        ...agentTool({ run_in_background: false }),
+        executionMode: 'background',
+      }),
+    ).toBe(true);
+  });
+
+  it('trusts the runtime foreground execution mode over background args', () => {
+    expect(
+      isBackgroundSubAgentToolCall({
+        ...agentTool({ run_in_background: true }),
+        executionMode: 'foreground',
+      }),
+    ).toBe(false);
+  });
 });
 
 describe('backgroundShellTaskId', () => {

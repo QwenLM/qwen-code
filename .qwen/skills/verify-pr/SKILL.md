@@ -828,9 +828,8 @@ workflow globs). It must contain:
   fails, say so under _Not covered_ in one line and ship the text-only report;
   do not reconstruct the pipeline by hand.
 
-  The publish job hosts what you produce on a per-PR branch
-  (`pr-assets/<N>-verify`) and appends it below the report, capped at
-  **8 images, 2 MB each**; anything
+  The publish job hosts what you produce on Aliyun OSS and appends it below the
+  report, capped at **8 images, 2 MB each**; anything
   beyond stays in the run artifacts. Name each file as a kebab-case caption
   that binds image to claim (`01-bundle-ab-base-vs-head.png`,
   `02-repaint-after-sigcont.png`) — the filename becomes the published

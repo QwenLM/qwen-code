@@ -7,10 +7,11 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   containsCmdShellMetacharacters,
   getTerminalImageRenderSupport,
+  INLINE_DECODE_NEGATIVE_CACHE_LIMIT,
   MAX_INLINE_IMAGE_PIXELS,
   markKittyImageWritten,
   prepareInlineTerminalImage,
@@ -129,6 +130,40 @@ describe('terminalImageRenderer', () => {
           stdoutIsTTY: true,
         }),
       ).toEqual({ fallbackText: testCase.fallback, result: null });
+    }
+  });
+
+  it('caches repeated invalid inline payloads and evicts old entries', () => {
+    const invalidPayloads = Array.from(
+      { length: INLINE_DECODE_NEGATIVE_CACHE_LIMIT + 1 },
+      (_, index) => Buffer.from(`not a png ${index}`).toString('base64'),
+    );
+    const bufferFrom = vi.spyOn(Buffer, 'from');
+
+    try {
+      for (const data of invalidPayloads) {
+        prepareInlineTerminalImage({
+          data,
+          mimeType: 'image/png',
+          contentWidth: 24,
+          env: { TERM: 'xterm-kitty' },
+          stdoutIsTTY: true,
+        });
+      }
+
+      prepareInlineTerminalImage({
+        data: invalidPayloads[0],
+        mimeType: 'image/png',
+        contentWidth: 24,
+        env: { TERM: 'xterm-kitty' },
+        stdoutIsTTY: true,
+      });
+
+      expect(bufferFrom).toHaveBeenCalledTimes(
+        INLINE_DECODE_NEGATIVE_CACHE_LIMIT + 2,
+      );
+    } finally {
+      bufferFrom.mockRestore();
     }
   });
 

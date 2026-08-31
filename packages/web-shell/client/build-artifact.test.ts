@@ -1,12 +1,20 @@
 import { describe, expect, it } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import postcss, { type Rule } from 'postcss';
 
-const DIST_PATH = resolve(__dirname, '../dist/index.js');
+const DIST_DIR = resolve(__dirname, '../dist');
+const DIST_PATH = resolve(DIST_DIR, 'index.js');
 
 function readBundle(): string {
   return readFileSync(DIST_PATH, 'utf8');
+}
+
+function readPackageJavascript(): string {
+  return readdirSync(DIST_DIR)
+    .filter((fileName) => fileName.endsWith('.js'))
+    .map((fileName) => readFileSync(resolve(DIST_DIR, fileName), 'utf8'))
+    .join('\n');
 }
 
 function readInjectedCss(): string {
@@ -29,23 +37,16 @@ function enclosingLayer(rule: Rule): string | undefined {
 }
 
 describe('build artifact — package boundary', () => {
-  it('externalizes @qwen-code/webui/daemon-react-sdk', () => {
-    const bundle = readBundle();
-    expect(bundle).toContain('from "@qwen-code/webui/daemon-react-sdk"');
+  it('does not depend on @qwen-code/webui', () => {
+    const bundle = readPackageJavascript();
+    expect(bundle).not.toContain('@qwen-code/webui');
   });
 
-  it('does not inline DaemonSessionProvider source code', () => {
-    const bundle = readBundle();
-    expect(bundle).not.toMatch(/DaemonStoreContext\s*=\s*createContext/);
-  });
-
-  it('does not inline createContext from React for provider contexts', () => {
-    const bundle = readBundle();
-    const contextMatches = bundle.match(/createContext\(/g) ?? [];
-    // WebShell's own ThemeContext is fine; but there should be at most
-    // a small number of createContext calls (WebShell internal only).
-    // If webui Provider got bundled, we'd see many more.
-    expect(contextMatches.length).toBeLessThanOrEqual(3);
+  it('owns the DaemonSessionProvider source code', () => {
+    const bundle = readPackageJavascript();
+    expect(bundle).toContain(
+      'useDaemonSessionNotices must be used within DaemonSessionProvider',
+    );
   });
 
   it('externalizes react and react-dom', () => {
@@ -58,7 +59,7 @@ describe('build artifact — package boundary', () => {
   });
 
   it('externalizes @qwen-code/sdk subpaths', () => {
-    const bundle = readBundle();
+    const bundle = readPackageJavascript();
     // Should not contain raw SDK implementation
     expect(bundle).not.toMatch(/DaemonSessionClient\s*\{/);
   });

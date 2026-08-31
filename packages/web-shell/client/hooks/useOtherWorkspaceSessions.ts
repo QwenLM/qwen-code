@@ -5,7 +5,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef } from 'react';
-import { useWorkspace } from '@qwen-code/webui/daemon-react-sdk';
+import { useWorkspace } from '@qwen-code/web-shell/daemon-react-sdk';
 import type { DaemonSessionSummary } from '@qwen-code/sdk/daemon';
 import {
   SESSION_LIST_PAGE_SIZE,

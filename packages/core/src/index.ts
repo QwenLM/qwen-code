@@ -240,6 +240,8 @@ export {
   FINDING_CONFIDENCES,
   FINDING_OUTCOMES,
   FINDING_SOURCES,
+  FINDING_DIRECTIONS,
+  FINDING_BASELINES,
   REPORT_FINDINGS_LEVELS,
   compressFindingSummary,
 } from './tools/report-findings.js';
@@ -250,6 +252,8 @@ export type {
   FindingConfidence,
   FindingOutcome,
   FindingSource,
+  FindingDirection,
+  FindingBaseline,
   ReportFindingsLevel,
 } from './tools/report-findings.js';
 export { CreateSubSessionTool } from './tools/create-sub-session.js';
@@ -299,6 +303,7 @@ export type {
   CronTaskDelivery,
   DurableCronTask,
   CronTaskRun,
+  CronRunSessionOutcome,
 } from './services/cronTasksFile.js';
 export {
   readCronTasks,
@@ -307,6 +312,7 @@ export {
   getCronFilePath,
   generateCronTaskId,
   appendCronRun,
+  annotateCronRunSession,
   taskHasLegacyCondition,
   MAX_TASK_RUNS,
   MAX_CHANNEL_DELIVERY_NAME_LENGTH,
@@ -343,8 +349,11 @@ export * from './services/sessionRecap.js';
 export * from './services/session-artifact-persistence.js';
 export * from './services/session-reference-service.js';
 export * from './ipc/inbound-gate.js';
+export * from './ipc/peer-directory.js';
 export * from './ipc/peer-envelope.js';
 export * from './ipc/peer-frames.js';
+export * from './ipc/peer-routing.js';
+export * from './ipc/peer-send.js';
 export * from './ipc/socket-path.js';
 export * from './ipc/uds-client.js';
 export * from './ipc/uds-inbox.js';
@@ -425,6 +434,7 @@ export { escapeXml } from './utils/xml.js';
 export * from './services/shellExecutionService.js';
 export * from './services/monitorRegistry.js';
 export * from './services/backgroundShellRegistry.js';
+export * from './services/web-terminal-registry.js';
 export * from './agents/workflow-run-registry.js';
 export * from './agents/workflow-snapshot.js';
 export {

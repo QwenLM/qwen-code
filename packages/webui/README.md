@@ -170,66 +170,6 @@ function App() {
 }
 ```
 
-## Daemon React SDK (`@qwen-code/webui/daemon-react-sdk`)
-
-All daemon-related React bindings (Providers, hooks, types) are published under the `daemon-react-sdk` sub-path. The main entry (`@qwen-code/webui`) is purely UI components with zero daemon dependency.
-
-```tsx
-import {
-  DaemonSessionProvider,
-  DaemonWorkspaceProvider,
-  useTranscriptBlocks,
-  useConnection,
-  useActions,
-  useStreamingState,
-} from '@qwen-code/webui/daemon-react-sdk';
-```
-
-### Architecture
-
-Two providers, split by lifecycle axis:
-
-- **`DaemonSessionProvider`** — per-conversation: SSE connection, transcript store, prompt/cancel/model/approval-mode/permission actions.
-- **`DaemonWorkspaceProvider`** — per-workspace (outlives sessions): MCP, skills, tools, memory, agents, files.
-
-```
-<DaemonWorkspaceProvider>          ← owns DaemonClient + capabilities
-  useMcp / useAgents / useMemory / useTools / ...
-  ├── <DaemonSessionProvider>      ← owns session + SSE + transcript store
-  │     useTranscriptBlocks / useActions / useConnection / useStreamingState / ...
-  │     ├── <ChatPanel />
-  │     └── <TerminalPanel />
-```
-
-### Basic usage
-
-```tsx
-import {
-  DaemonSessionProvider,
-  DaemonWorkspaceProvider,
-  useTranscriptBlocks,
-  useActions,
-  useConnection,
-} from '@qwen-code/webui/daemon-react-sdk';
-
-function App() {
-  return (
-    <DaemonWorkspaceProvider baseUrl="http://127.0.0.1:4170" token={token}>
-      <DaemonSessionProvider autoReconnect>
-        <ChatView />
-      </DaemonSessionProvider>
-    </DaemonWorkspaceProvider>
-  );
-}
-
-function ChatView() {
-  const blocks = useTranscriptBlocks();
-  const { sendPrompt, cancel } = useActions();
-  const { status, sessionId, currentModel } = useConnection();
-  // render blocks, handle input...
-}
-```
-
 ### Dual-mode usage (chat + terminal share one session)
 
 Wrap both views with a **single** `<DaemonSessionProvider>`. Both panels share one SSE connection and one transcript store.

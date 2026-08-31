@@ -56,6 +56,11 @@ export class InProcessBackend implements Backend {
   private readonly runtimeContext: Config;
   private readonly agents = new Map<string, AgentInteractive>();
   private readonly agentContentGenerators = new Map<string, ContentGenerator>();
+  // Why a dedicated per-agent ContentGenerator could not be created,
+  // keyed by agentId. The creation failure is swallowed into a debug
+  // log (fallback to the parent generator); spawn callers verifying a
+  // requested route need the cause to fail with a useful message.
+  private readonly agentContentGeneratorErrors = new Map<string, string>();
   // Per-agent tool registries keyed by agentId so `stopAgent` can
   // dispose just that agent's registry (releasing tool listeners on
   // shared managers like SkillManager / SubagentManager) without
@@ -67,6 +72,13 @@ export class InProcessBackend implements Backend {
   // subagent no longer exists.
   private readonly agentRegistries: Map<string, ToolRegistry> = new Map();
   private readonly agentApprovalCleanups = new Map<string, () => void>();
+  // Ids whose agent was stopped via stopAgent. The handle stays in
+  // `agents` so post-stop readers keep working (ArenaManager resolves
+  // transcripts through getAgent after the arena timeout path stops
+  // its agents), but spawn, navigation and input treat these ids as
+  // gone. The mark is cleared when the id is respawned and in
+  // cleanup().
+  private readonly stoppedAgentIds = new Set<string>();
   private readonly agentOrder: string[] = [];
   private activeAgentId: string | null = null;
   private exitCallback: AgentExitCallback | null = null;
@@ -92,8 +104,21 @@ export class InProcessBackend implements Backend {
       );
     }
 
-    if (this.agents.has(config.agentId)) {
+    if (
+      this.agents.has(config.agentId) &&
+      !this.stoppedAgentIds.has(config.agentId)
+    ) {
       throw new Error(`Agent "${config.agentId}" already exists.`);
+    }
+    // Respawn of a stopped id: the retained handle and per-agent
+    // records belong to the dead agent. Drop the stale records before
+    // the conditional sets below repopulate them (or leave them clear
+    // when the respawn requests no dedicated generator); the stopped
+    // mark itself is cleared when the respawn commits below.
+    const isRespawnOfStoppedAgent = this.stoppedAgentIds.has(config.agentId);
+    if (isRespawnOfStoppedAgent) {
+      this.agentContentGenerators.delete(config.agentId);
+      this.agentContentGeneratorErrors.delete(config.agentId);
     }
 
     const { promptConfig, modelConfig, runConfig, toolConfig } =
@@ -128,6 +153,12 @@ export class InProcessBackend implements Backend {
         perAgent.contentGenerator,
       );
     }
+    if (perAgent.contentGeneratorError) {
+      this.agentContentGeneratorErrors.set(
+        config.agentId,
+        perAgent.contentGeneratorError,
+      );
+    }
 
     this.agentRegistries.set(config.agentId, agentContext.getToolRegistry());
     this.agentApprovalCleanups.set(config.agentId, perAgent.cleanup);
@@ -160,6 +191,9 @@ export class InProcessBackend implements Backend {
       core,
     );
 
+    if (isRespawnOfStoppedAgent) {
+      this.stoppedAgentIds.delete(config.agentId);
+    }
     this.agents.set(config.agentId, interactive);
     this.agentOrder.push(config.agentId);
 
@@ -215,13 +249,8 @@ export class InProcessBackend implements Backend {
       this.releaseAgentResources(config.agentId);
       this.agents.delete(config.agentId);
       this.agentContentGenerators.delete(config.agentId);
-      const index = this.agentOrder.indexOf(config.agentId);
-      if (index >= 0) {
-        this.agentOrder.splice(index, 1);
-      }
-      if (this.activeAgentId === config.agentId) {
-        this.activeAgentId = this.agentOrder[0] ?? null;
-      }
+      this.agentContentGeneratorErrors.delete(config.agentId);
+      this.removeFromNavigation(config.agentId);
       this.exitCallback?.(config.agentId, 1, null);
     }
   }
@@ -239,6 +268,21 @@ export class InProcessBackend implements Backend {
     // already logged inside.
     const registry = this.agentRegistries.get(agentId);
     this.releaseAgentResources(agentId, registry);
+    // Free the id for respawn — without the stopped mark the
+    // `agents.has` gate in spawnAgent would reject it for the life of
+    // the backend: a teammate rolled back by TeamManager (route
+    // verification failure) could never respawn under the same name,
+    // and every retry died with 'Agent "X" already exists.' masking
+    // the real cause. The handle itself stays in `this.agents`:
+    // ArenaManager still resolves stopped agents through getAgent on
+    // the timeout path (transcript, finalText fallback and approach
+    // summaries would otherwise degrade silently), and deleting it
+    // here dropped those reads. The exit callback is NOT fired here:
+    // abort() settles the agent to a terminal status, so the
+    // spawn-time completion watcher already reports the exit; firing
+    // it again would double-report.
+    this.stoppedAgentIds.add(agentId);
+    this.removeFromNavigation(agentId);
   }
 
   stopAll(): void {
@@ -284,6 +328,8 @@ export class InProcessBackend implements Backend {
 
     this.agents.clear();
     this.agentContentGenerators.clear();
+    this.agentContentGeneratorErrors.clear();
+    this.stoppedAgentIds.clear();
     this.agentOrder.length = 0;
     this.activeAgentId = null;
     debugLogger.info('InProcessBackend cleaned up');
@@ -322,7 +368,7 @@ export class InProcessBackend implements Backend {
   // ─── Navigation ────────────────────────────────────────────
 
   switchTo(agentId: string): void {
-    if (this.agents.has(agentId)) {
+    if (this.agents.has(agentId) && !this.stoppedAgentIds.has(agentId)) {
       this.activeAgentId = agentId;
     }
   }
@@ -365,7 +411,7 @@ export class InProcessBackend implements Backend {
 
   writeToAgent(agentId: string, data: string): boolean {
     const agent = this.agents.get(agentId);
-    if (!agent) return false;
+    if (!agent || this.stoppedAgentIds.has(agentId)) return false;
 
     agent.enqueueMessage(data);
     return true;
@@ -405,6 +451,16 @@ export class InProcessBackend implements Backend {
     return this.agentContentGenerators.get(agentId);
   }
 
+  /**
+   * Why the dedicated ContentGenerator could not be created for this
+   * agent, when creation failed and the agent fell back to the parent's
+   * generator. Undefined when a dedicated generator exists or none was
+   * requested.
+   */
+  getAgentContentGeneratorError(agentId: string): string | undefined {
+    return this.agentContentGeneratorErrors.get(agentId);
+  }
+
   // ─── Private ───────────────────────────────────────────────
 
   private navigate(direction: 1 | -1): string | null {
@@ -418,6 +474,21 @@ export class InProcessBackend implements Backend {
       (currentIndex + direction + this.agentOrder.length) %
       this.agentOrder.length;
     return this.agentOrder[nextIndex] ?? null;
+  }
+
+  /**
+   * Roster bookkeeping shared by every path that removes an agent —
+   * the spawn-start-failure rollback and stopAgent. Kept in one place
+   * so the two teardown paths cannot drift on navigation state.
+   */
+  private removeFromNavigation(agentId: string): void {
+    const index = this.agentOrder.indexOf(agentId);
+    if (index >= 0) {
+      this.agentOrder.splice(index, 1);
+    }
+    if (this.activeAgentId === agentId) {
+      this.activeAgentId = this.agentOrder[0] ?? null;
+    }
   }
 
   private releaseAgentResources(
@@ -501,6 +572,7 @@ async function createPerAgentConfig(
 ): Promise<{
   config: Config;
   contentGenerator?: ContentGenerator;
+  contentGeneratorError?: string;
   runtimeView?: RuntimeContentGeneratorView;
   cleanup: () => void;
 }> {
@@ -527,6 +599,7 @@ async function createPerAgentConfig(
   const override = handle.config;
   const cleanup = approvalHandle.cleanup;
   let dedicatedContentGenerator: ContentGenerator | undefined;
+  let contentGeneratorError: string | undefined;
   let runtimeView: RuntimeContentGeneratorView | undefined;
   let agentRegistry: ToolRegistry | undefined;
 
@@ -569,6 +642,12 @@ async function createPerAgentConfig(
           'Failed to create per-agent ContentGenerator, falling back to parent:',
           error,
         );
+        // The debug log above is a no-op unless QWEN_DEBUG_LOG_FILE is
+        // set; keep the cause so spawn callers verifying a requested
+        // route can report it (missing API key, bad base URL, ...)
+        // instead of a bare "route did not materialize" (#10071).
+        contentGeneratorError =
+          error instanceof Error ? error.message : String(error);
       }
     }
 
@@ -577,6 +656,7 @@ async function createPerAgentConfig(
       contentGenerator:
         dedicatedContentGenerator ??
         (authOverrides?.authType ? undefined : base.getContentGenerator()),
+      contentGeneratorError,
       runtimeView,
       cleanup,
     };

@@ -478,6 +478,12 @@
   cursor: default;
 }
 
+.iconAction svg {
+  width: 14px;
+  height: 14px;
+  stroke-width: 1.8;
+}
+
 /* Toggle switch */
 .toggle {
   appearance: none;
@@ -552,13 +558,38 @@
 }
 
 .clockIcon {
-  font-size: 12px;
+  display: inline-flex;
   color: var(--muted-foreground);
+}
+
+.clockIcon svg {
+  width: 13px;
+  height: 13px;
+  stroke-width: 1.8;
 }
 
 .recurringTag {
   font-size: 11px;
   color: var(--muted-foreground);
+}
+
+.sessionModeTag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border: 1px solid color-mix(in srgb, var(--primary) 20%, var(--border));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--primary) 7%, transparent);
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.sessionModeTag svg {
+  width: 12px;
+  height: 12px;
+  color: var(--primary);
+  stroke-width: 1.8;
 }
 
 /* Workspace tag on a card in the aggregated multi-workspace view. Bordered +
@@ -582,8 +613,14 @@
 }
 
 .workspaceIcon {
-  font-size: 11px;
+  display: inline-flex;
   opacity: 0.85;
+}
+
+.workspaceIcon svg {
+  width: 12px;
+  height: 12px;
+  stroke-width: 1.8;
 }
 
 .countdown {
@@ -598,8 +635,14 @@
 }
 
 .hourglassIcon {
-  font-size: 10px;
+  display: inline-flex;
   opacity: 0.85;
+}
+
+.hourglassIcon svg {
+  width: 11px;
+  height: 11px;
+  stroke-width: 1.8;
 }
 
 .lastFired {
@@ -646,4 +689,20 @@
   line-height: 1.4;
   color: var(--muted-foreground);
   font-variant-numeric: tabular-nums;
+}
+
+.runLink {
+  appearance: none;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.runLink:hover {
+  color: var(--foreground);
 }

@@ -5,6 +5,10 @@
  */
 
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import { rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { createHookOutput, HookEventName, HookType } from './types.js';
 import type {
   HookConfig,
@@ -51,6 +55,195 @@ const HOOK_PROCESS_GROUP_POLL_MS = 50;
 const HOOK_CHILD_CLOSE_WAIT_MS = 1000;
 const WINDOWS_TASKKILL_TIMEOUT_MS = 2000;
 const WINDOWS_TASKKILL = `${process.env['SystemRoot'] || 'C:\\Windows'}\\System32\\taskkill.exe`;
+const SURVIVING_HOOK_TIMEOUT_EXIT_CODE = 124;
+const SURVIVING_HOOK_SUPERVISOR_GRACE_MS =
+  HOOK_TERMINATE_GRACE_MS + HOOK_PROCESS_GROUP_POLL_MS * 2;
+
+// An eval source works in both TypeScript development and the single-file CLI
+// bundle without shipping a second executable asset beside the entry point.
+const SURVIVING_HOOK_SUPERVISOR_SOURCE = String.raw`
+'use strict';
+
+const { execFile, spawn } = require('node:child_process');
+const { closeSync, openSync, rmSync, writeSync } = require('node:fs');
+
+const [
+  inputPath,
+  timeoutValue,
+  graceValue,
+  executable,
+  argsValue,
+  nodeOptionsValue,
+] =
+  process.argv.slice(1);
+const timeout = Number(timeoutValue);
+const grace = Number(graceValue);
+const args = JSON.parse(argsValue);
+const originalNodeOptions = JSON.parse(nodeOptionsValue);
+const pollInterval = ${HOOK_PROCESS_GROUP_POLL_MS};
+const timeoutExitCode = ${SURVIVING_HOOK_TIMEOUT_EXIT_CODE};
+const signalExitCode = 143;
+const statusFd = 3;
+let hook;
+let rootClosed = false;
+let rootExitCode = 1;
+let finished = false;
+let terminationPromise;
+let terminationExitCode;
+let timeoutHandle;
+let pollHandle;
+
+const sendStatus = (status) => {
+  try {
+    writeSync(statusFd, status + '\n');
+  } catch {}
+};
+
+const removeInput = () => {
+  try {
+    rmSync(inputPath, { force: true });
+  } catch {}
+};
+
+const signalGroup = (signal) => {
+  if (!hook?.pid) return false;
+  try {
+    process.kill(-hook.pid, signal);
+    return true;
+  } catch (error) {
+    if (error?.code === 'ESRCH') return false;
+    try {
+      hook.kill(signal);
+    } catch {}
+    return true;
+  }
+};
+
+const groupAlive = () => {
+  if (!hook?.pid) return false;
+  if (process.platform === 'win32') return hook.exitCode === null;
+  try {
+    process.kill(-hook.pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code !== 'ESRCH';
+  }
+};
+
+const waitForGroupExit = async () => {
+  const deadline = Date.now() + grace;
+  while (groupAlive() && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, pollInterval));
+  }
+  return !groupAlive();
+};
+
+const terminateWindowsTree = () =>
+  new Promise((resolve) => {
+    if (!hook?.pid) {
+      resolve();
+      return;
+    }
+    const taskkill = ${JSON.stringify(WINDOWS_TASKKILL)};
+    execFile(
+      taskkill,
+      ['/f', '/t', '/pid', String(hook.pid)],
+      { windowsHide: true, timeout: ${WINDOWS_TASKKILL_TIMEOUT_MS} },
+      () => {
+        try {
+          hook.kill('SIGKILL');
+        } catch {}
+        resolve();
+      },
+    );
+  });
+
+const terminate = () => {
+  if (terminationPromise) return terminationPromise;
+  terminationPromise = (async () => {
+    if (process.platform === 'win32') {
+      await terminateWindowsTree();
+      return;
+    }
+    if (!signalGroup('SIGTERM')) return;
+    if (await waitForGroupExit()) return;
+    signalGroup('SIGKILL');
+  })();
+  return terminationPromise;
+};
+
+const exit = (code, outcome) => {
+  if (finished) return;
+  finished = true;
+  clearTimeout(timeoutHandle);
+  clearInterval(pollHandle);
+  removeInput();
+  sendStatus('outcome:' + outcome);
+  process.exit(code);
+};
+
+const handleTerminationSignal = () => {
+  terminationExitCode ??= signalExitCode;
+  void terminate().then(() => exit(terminationExitCode, 'terminated'));
+};
+
+for (const signal of ['SIGHUP', 'SIGINT', 'SIGQUIT', 'SIGTERM']) {
+  process.on(signal, handleTerminationSignal);
+}
+
+let inputFd;
+try {
+  inputFd = openSync(inputPath, 'r');
+  const hookEnv = { ...process.env };
+  if (originalNodeOptions === null) {
+    delete hookEnv.NODE_OPTIONS;
+  } else {
+    hookEnv.NODE_OPTIONS = originalNodeOptions;
+  }
+  hook = spawn(executable, args, {
+    cwd: process.cwd(),
+    env: hookEnv,
+    stdio: [inputFd, 'ignore', 'ignore'],
+    shell: false,
+    detached: process.platform !== 'win32',
+  });
+  sendStatus('pid:' + hook.pid);
+  closeSync(inputFd);
+  inputFd = undefined;
+  removeInput();
+} catch {
+  if (inputFd !== undefined) {
+    try {
+      closeSync(inputFd);
+    } catch {}
+  }
+  removeInput();
+  exit(1, 'failed');
+}
+
+process.on('exit', () => {
+  if (!finished && groupAlive()) signalGroup('SIGKILL');
+});
+
+hook.on('error', () => {
+  void terminate().then(() => exit(1, 'failed'));
+});
+hook.on('close', (code) => {
+  rootClosed = true;
+  rootExitCode = code ?? 1;
+});
+
+pollHandle = setInterval(() => {
+  if (terminationExitCode === undefined && rootClosed && !groupAlive()) {
+    exit(rootExitCode, 'completed');
+  }
+}, pollInterval);
+
+timeoutHandle = setTimeout(() => {
+  terminationExitCode = timeoutExitCode;
+  void terminate().then(() => exit(terminationExitCode, 'timed_out'));
+}, timeout);
+`;
 
 const activePosixHookProcesses = new Set<ChildProcess>();
 let parentExitCleanupRegistered = false;
@@ -171,8 +364,35 @@ function unregisterActivePosixHookProcess(child: ChildProcess): void {
   }
 }
 
+async function terminatePosixProcessGroup(
+  pid: number,
+  graceMs = HOOK_TERMINATE_GRACE_MS,
+  signalFallback?: (signal: NodeJS.Signals) => void,
+): Promise<void> {
+  const termResult = signalProcessGroup(pid, 'SIGTERM');
+  if (termResult === 'gone') {
+    return;
+  }
+  if (termResult === 'failed') {
+    signalFallback?.('SIGTERM');
+  }
+
+  if (await waitForProcessGroupExit(pid, graceMs)) {
+    return;
+  }
+
+  debugLogger.debug(
+    `Hook process group ${pid} did not exit within ${graceMs}ms after SIGTERM; escalating to SIGKILL`,
+  );
+  const killResult = signalProcessGroup(pid, 'SIGKILL');
+  if (killResult === 'failed') {
+    signalFallback?.('SIGKILL');
+  }
+}
+
 async function terminatePosixHookProcessTree(
   child: ChildProcess,
+  graceMs = HOOK_TERMINATE_GRACE_MS,
 ): Promise<void> {
   // executeCommandHook makes child.pid the process-group leader on POSIX.
   const pid = child.pid;
@@ -181,25 +401,9 @@ async function terminatePosixHookProcessTree(
     return;
   }
 
-  const termResult = signalProcessGroup(pid, 'SIGTERM');
-  if (termResult === 'gone') {
-    return;
-  }
-  if (termResult === 'failed') {
-    killDirectChild(child, 'SIGTERM');
-  }
-
-  if (await waitForProcessGroupExit(pid, HOOK_TERMINATE_GRACE_MS)) {
-    return;
-  }
-
-  debugLogger.debug(
-    `Hook process group ${pid} did not exit within ${HOOK_TERMINATE_GRACE_MS}ms after SIGTERM; escalating to SIGKILL`,
+  await terminatePosixProcessGroup(pid, graceMs, (signal) =>
+    killDirectChild(child, signal),
   );
-  const killResult = signalProcessGroup(pid, 'SIGKILL');
-  if (killResult === 'failed') {
-    killDirectChild(child, 'SIGKILL');
-  }
 }
 
 async function terminateWindowsHookProcessTree(
@@ -240,12 +444,45 @@ async function terminateWindowsHookProcessTree(
   });
 }
 
-async function terminateHookProcessTree(child: ChildProcess): Promise<void> {
+async function terminateHookProcessTree(
+  child: ChildProcess,
+  graceMs = HOOK_TERMINATE_GRACE_MS,
+): Promise<void> {
   if (process.platform === 'win32') {
     await terminateWindowsHookProcessTree(child);
     return;
   }
-  await terminatePosixHookProcessTree(child);
+  await terminatePosixHookProcessTree(child, graceMs);
+}
+
+async function terminateSurvivingHookProcessGroup(
+  pid: number,
+  graceMs = HOOK_TERMINATE_GRACE_MS,
+): Promise<void> {
+  if (process.platform === 'win32') {
+    return;
+  }
+
+  await terminatePosixProcessGroup(pid, graceMs, (signal) => {
+    try {
+      process.kill(pid, signal);
+    } catch {
+      // The process already exited.
+    }
+  });
+}
+
+function createSurvivingHookInputFile(input: HookInput): string {
+  const path = join(
+    tmpdir(),
+    `qwen-hook-input-${process.pid}-${randomUUID()}.json`,
+  );
+  writeFileSync(path, JSON.stringify(input), {
+    encoding: 'utf8',
+    flag: 'wx',
+    mode: 0o600,
+  });
+  return path;
 }
 
 /**
@@ -777,10 +1014,61 @@ export class HookRunner {
       let settled = false;
       let terminationPromise: Promise<void> | undefined;
       let childClosed = false;
+      let survivingHookPid: number | undefined;
+      let survivingHookOutcome:
+        | 'completed'
+        | 'timed_out'
+        | 'terminated'
+        | 'failed'
+        | undefined;
+      let supervisorStatusBuffer = '';
       let resolveChildClosed: () => void;
       const childClosedPromise = new Promise<void>((resolve) => {
         resolveChildClosed = resolve;
       });
+      let resolveSupervisorStarted = () => {};
+      const supervisorStartedPromise = new Promise<void>((resolve) => {
+        resolveSupervisorStarted = resolve;
+      });
+
+      const consumeSupervisorStatusLine = (line: string) => {
+        if (line.startsWith('pid:')) {
+          const pid = Number(line.slice('pid:'.length));
+          if (Number.isSafeInteger(pid) && pid > 0) {
+            survivingHookPid = pid;
+            resolveSupervisorStarted();
+          }
+          return;
+        }
+        if (!line.startsWith('outcome:')) {
+          return;
+        }
+        const outcome = line.slice('outcome:'.length);
+        switch (outcome) {
+          case 'completed':
+          case 'timed_out':
+          case 'terminated':
+          case 'failed':
+            survivingHookOutcome = outcome;
+            break;
+          default:
+            break;
+        }
+      };
+
+      const consumeSupervisorStatus = (data: Buffer) => {
+        supervisorStatusBuffer += data.toString();
+        let newlineIndex = supervisorStatusBuffer.indexOf('\n');
+        while (newlineIndex !== -1) {
+          consumeSupervisorStatusLine(
+            supervisorStatusBuffer.slice(0, newlineIndex),
+          );
+          supervisorStatusBuffer = supervisorStatusBuffer.slice(
+            newlineIndex + 1,
+          );
+          newlineIndex = supervisorStatusBuffer.indexOf('\n');
+        }
+      };
 
       // Use hook-specific shell configuration if specified
       const shellConfig = this.getShellConfigForHook(hookConfig);
@@ -790,7 +1078,7 @@ export class HookRunner {
         shellConfig.shell,
       );
 
-      const env = {
+      const env: NodeJS.ProcessEnv = {
         // Hook commands are child processes launched on the agent's behalf,
         // so they must not inherit Qwen-internal daemon secrets.
         ...sanitizeChildEnv(process.env),
@@ -801,29 +1089,84 @@ export class HookRunner {
         ...hookConfig.env,
       };
 
-      const child = spawn(
-        shellConfig.executable,
-        [...shellConfig.argsPrefix, command],
-        {
-          env,
-          cwd: input.cwd,
-          stdio: ['pipe', 'pipe', 'pipe'],
-          shell: false,
-          // Own a process group so cancellation can signal the entire tree.
-          detached: process.platform !== 'win32',
-        },
-      );
       const survivesParentExit =
         eventName === HookEventName.MessageDisplay ||
-        this.isAsyncHook(hookConfig);
+        eventName === HookEventName.StopFailure ||
+        eventName === HookEventName.SessionDelete;
+      let parentIndependentInputPath: string | undefined;
+      let child: ChildProcess;
+      if (survivesParentExit) {
+        parentIndependentInputPath = createSurvivingHookInputFile(input);
+        const supervisorEnv = { ...env };
+        delete supervisorEnv['NODE_OPTIONS'];
+        try {
+          child = spawn(
+            process.execPath,
+            [
+              '--input-type=commonjs',
+              '--eval',
+              SURVIVING_HOOK_SUPERVISOR_SOURCE,
+              parentIndependentInputPath,
+              String(timeout),
+              String(HOOK_TERMINATE_GRACE_MS),
+              shellConfig.executable,
+              JSON.stringify([...shellConfig.argsPrefix, command]),
+              JSON.stringify(env['NODE_OPTIONS'] ?? null),
+            ],
+            {
+              env: supervisorEnv,
+              cwd: input.cwd,
+              stdio: ['ignore', 'ignore', 'ignore', 'pipe'],
+              shell: false,
+              detached: true,
+            },
+          );
+          const statusStream = child.stdio?.[3] as
+            | (NodeJS.ReadableStream & { unref?: () => void })
+            | null
+            | undefined;
+          if (statusStream) {
+            statusStream.on('data', consumeSupervisorStatus);
+            statusStream.on('error', resolveSupervisorStarted);
+            statusStream.unref?.();
+          } else {
+            resolveSupervisorStarted();
+          }
+          child.unref();
+        } catch (error) {
+          rmSync(parentIndependentInputPath, { force: true });
+          throw error;
+        }
+      } else {
+        resolveSupervisorStarted();
+        child = spawn(
+          shellConfig.executable,
+          [...shellConfig.argsPrefix, command],
+          {
+            env,
+            cwd: input.cwd,
+            stdio: ['pipe', 'pipe', 'pipe'],
+            shell: false,
+            // Own a process group so cancellation can signal the entire tree.
+            detached: process.platform !== 'win32',
+          },
+        );
+      }
       if (!survivesParentExit) {
         registerActivePosixHookProcess(child);
       }
 
       let abortListenerAttached = false;
+      let timeoutHandle: NodeJS.Timeout | undefined;
 
       const cleanup = () => {
-        clearTimeout(timeoutHandle);
+        if (timeoutHandle) {
+          clearTimeout(timeoutHandle);
+        }
+        if (parentIndependentInputPath) {
+          rmSync(parentIndependentInputPath, { force: true });
+          parentIndependentInputPath = undefined;
+        }
         if (!survivesParentExit) {
           unregisterActivePosixHookProcess(child);
         }
@@ -891,21 +1234,40 @@ export class HookRunner {
 
       const startTermination = () => {
         if (!terminationPromise) {
-          terminationPromise = terminateHookProcessTree(child);
+          const childTermination = terminateHookProcessTree(
+            child,
+            survivesParentExit
+              ? SURVIVING_HOOK_SUPERVISOR_GRACE_MS
+              : HOOK_TERMINATE_GRACE_MS,
+          );
+          terminationPromise = survivesParentExit
+            ? Promise.all([
+                childTermination,
+                (async () => {
+                  await supervisorStartedPromise;
+                  if (survivingHookPid) {
+                    await terminateSurvivingHookProcessGroup(survivingHookPid);
+                  }
+                })(),
+              ]).then(() => undefined)
+            : childTermination;
           void finishCancellation();
         }
       };
 
-      // Set up timeout
-      const timeoutHandle = setTimeout(() => {
-        timedOut = true;
-        startTermination();
-      }, timeout);
+      if (!survivesParentExit) {
+        timeoutHandle = setTimeout(() => {
+          timedOut = true;
+          startTermination();
+        }, timeout);
+      }
 
       // Set up abort handler
       const abortHandler = () => {
         aborted = true;
-        clearTimeout(timeoutHandle);
+        if (timeoutHandle) {
+          clearTimeout(timeoutHandle);
+        }
         startTermination();
       };
 
@@ -970,10 +1332,25 @@ export class HookRunner {
       child.on('close', (exitCode) => {
         childClosed = true;
         resolveChildClosed();
+        resolveSupervisorStarted();
         if (aborted || timedOut) {
           return;
         }
         const duration = Date.now() - startTime;
+
+        if (survivesParentExit && survivingHookOutcome === 'timed_out') {
+          timedOut = true;
+          finish({
+            hookConfig,
+            eventName,
+            success: false,
+            error: new Error(`Hook timed out after ${timeout}ms`),
+            stdout,
+            stderr,
+            duration,
+          });
+          return;
+        }
 
         // Parse output
         // Exit code 2 is a blocking error - ignore stdout, use stderr only

@@ -77,6 +77,10 @@ class TestableFeishuChannel extends FeishuChannel {
   pushLoop(target: SessionTarget, text: string): Promise<void> {
     return this.pushProactive(target, text);
   }
+
+  sendAttributed(chatId: string, text: string, sourceLabel: string) {
+    return this.sendThreadMessage(chatId, undefined, text, sourceLabel);
+  }
 }
 
 function createTestableChannel(
@@ -1918,6 +1922,99 @@ describe('FeishuChannel', () => {
       extractCardText = getPrivateMethod<
         (card: Record<string, unknown>) => string | undefined
       >(channel, 'extractCardText').bind(channel);
+    });
+
+    it('strips named-task attribution from quoted cards', () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-feishu-card-text-'));
+      try {
+        channel = new FeishuChannel(
+          'test',
+          createConfig({ multiSession: true }),
+          createMockBridge(),
+          { stateDir },
+        );
+        extractCardText = getPrivateMethod<
+          (
+            card: Record<string, unknown>,
+            isFromBot?: boolean,
+          ) => string | undefined
+        >(channel, 'extractCardText').bind(channel);
+
+        expect(
+          extractCardText(
+            {
+              body: {
+                elements: [
+                  {
+                    tag: 'markdown',
+                    content: '\\[Alice · review\\]\n\nAnswer',
+                  },
+                ],
+              },
+            },
+            true,
+          ),
+        ).toBe('Answer');
+        expect(
+          extractCardText(
+            {
+              body: {
+                elements: [
+                  {
+                    tag: 'markdown',
+                    content:
+                      '好的，<at id=ou_user></at>\n\n\\[review\\_x\\]\n\nAnswer',
+                  },
+                ],
+              },
+            },
+            true,
+          ),
+        ).toBe('Answer');
+        expect(
+          extractCardText(
+            {
+              body: {
+                elements: [
+                  {
+                    tag: 'markdown',
+                    content: '\\[review\\]\n\n---\n*已停止生成*',
+                  },
+                ],
+              },
+            },
+            true,
+          ),
+        ).toBeUndefined();
+
+        expect(
+          extractCardText(
+            {
+              body: {
+                elements: [
+                  {
+                    tag: 'markdown',
+                    content: '\\[review\\]\n\nUser-authored content',
+                  },
+                ],
+              },
+            },
+            false,
+          ),
+        ).toBe('\\[review\\]\n\nUser-authored content');
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('preserves leading escaped brackets when named tasks are disabled', () => {
+      const card = {
+        body: {
+          elements: [{ tag: 'markdown', content: '\\[review\\]\n\nAnswer' }],
+        },
+      };
+
+      expect(extractCardText(card)).toBe('\\[review\\]\n\nAnswer');
     });
 
     it('extracts markdown from v2 card format (body.elements)', () => {
@@ -3965,6 +4062,30 @@ describe('FeishuChannel', () => {
       fetchSpy.mockRestore();
     });
 
+    it('neutralizes Feishu mention markup in attributed messages', async () => {
+      const channel = createTestableChannel();
+      (channel as unknown as Record<string, unknown>)['tokenCache'] = {
+        token: 'tenant-token',
+        expiresAt: Date.now() + 3600_000,
+      };
+      const fetchSpy = vi
+        .spyOn(global, 'fetch')
+        .mockResolvedValue(new Response('{}', { status: 200 }));
+
+      await channel.sendAttributed(
+        'oc_chat_id',
+        'done',
+        '[Alice <at id=ou_other></at> & review]',
+      );
+
+      const body = String(fetchSpy.mock.calls[0]?.[1]?.body);
+      expect(body).toContain('&lt;at');
+      expect(body).toContain('&lt;/at&gt;');
+      expect(body).toContain('&amp;');
+      expect(body).not.toContain('<at');
+      fetchSpy.mockRestore();
+    });
+
     it('maps typed chat and user deliveries to Feishu receive ID types', async () => {
       const channel = createTestableChannel();
       (channel as unknown as Record<string, unknown>)['tokenCache'] = {
@@ -5129,6 +5250,55 @@ describe('FeishuChannel', () => {
       const stoppedCard = updateCard.mock.calls[1]![1] as string;
       expect(stoppedCard).toContain('已停止生成');
       expect(stoppedCard).not.toContain('已完成');
+    });
+
+    it('keeps the sender mention before attribution in stopped-card fallback', async () => {
+      const channel = createChannel();
+      (channel as unknown as Record<string, unknown>)['tokenCache'] = {
+        token: 'tenant-token',
+        expiresAt: Date.now() + 3600_000,
+      };
+      const fetchSpy = vi
+        .spyOn(global, 'fetch')
+        .mockResolvedValue(new Response('{}', { status: 200 }));
+      const cardState = {
+        messageId: 'om_valid_message_id',
+        created: true,
+        creating: false,
+        stopped: true,
+        accumulatedText: 'partial answer',
+        atPrefix: '好的，<at id=ou_sender></at>',
+        sourceLabel: '[Alice · review_*]',
+        lastUpdateAt: Date.now(),
+      };
+      Object.assign(channel as unknown as Record<string, unknown>, {
+        updateCard: vi.fn().mockResolvedValue(false),
+        deleteCard: vi.fn().mockResolvedValue(true),
+      });
+
+      await getPrivateMethod<
+        (
+          inboundMsgId: string,
+          state: typeof cardState,
+          chatId: string,
+        ) => Promise<boolean>
+      >(channel, 'finalizeStoppedCardUpdate').call(
+        channel,
+        'inbound_1',
+        cardState,
+        'oc_chat_id',
+      );
+
+      expect(fetchSpy).toHaveBeenCalledOnce();
+      const body = JSON.parse(String(fetchSpy.mock.calls[0]?.[1]?.body));
+      const card = JSON.parse(body.content) as {
+        body: { elements: Array<{ content?: string }> };
+      };
+      const content = card.body.elements[0]?.content ?? '';
+      expect(content).toBe(
+        '好的，<at id=ou_sender></at>\n\n\\[Alice · review\\_\\*\\]\n\npartial answer\n\n---\n*已停止生成*',
+      );
+      expect(content.match(/<at id=ou_sender><\/at>/g)).toHaveLength(1);
     });
 
     it('keeps the card running when cancellation fails mid-finalization', async () => {
@@ -6607,6 +6777,50 @@ describe('FeishuChannel', () => {
       expect(finalText.length).toBeLessThanOrEqual(20_000);
       expect(finalText.startsWith('```\n')).toBe(true);
       expect(finalText).toContain('内容过长，已截断早期内容');
+    });
+
+    it('renders one truncation marker through the real card update path', async () => {
+      const channel = createChannel();
+      const patchInteractiveCard = vi.fn().mockResolvedValue(true);
+      Object.assign(channel as unknown as Record<string, unknown>, {
+        patchInteractiveCard,
+      });
+      const cardState = {
+        messageId: 'om_stream',
+        created: true,
+        creating: false,
+        stopped: false,
+        finalizing: false,
+        accumulatedText: `HEAD${'x'.repeat(21_000)}TAIL`,
+        sourceLabel: '[review_task]',
+        lastUpdateAt: Date.now(),
+      };
+      getPrivateMethod<Map<string, typeof cardState>>(
+        channel,
+        'cardSessions',
+      ).set('inbound_1', cardState);
+
+      await getPrivateMethod<
+        (inboundMsgId: string, state: typeof cardState) => Promise<void>
+      >(channel, 'runThrottledCardUpdate').call(
+        channel,
+        'inbound_1',
+        cardState,
+      );
+
+      expect(patchInteractiveCard).toHaveBeenCalledTimes(1);
+      const renderedCard = patchInteractiveCard.mock.calls[0]?.[1] as {
+        body: { elements: Array<{ tag: string; content?: string }> };
+      };
+      const markdown =
+        renderedCard.body.elements.find((element) => element.tag === 'markdown')
+          ?.content ?? '';
+      expect(markdown.length).toBeLessThanOrEqual(20_000);
+      expect(markdown.match(/内容过长，已截断早期内容/gu)).toHaveLength(1);
+      expect(markdown.match(/\\\[review\\_task\\\]/gu)).toHaveLength(1);
+      expect(markdown.match(/运行中\.\.\./gu)).toHaveLength(1);
+      expect(markdown).not.toContain('HEAD');
+      expect(markdown).toContain('TAIL');
     });
   });
 

@@ -46,7 +46,11 @@ export interface FeishuQuestionCardControllerOptions {
   timeoutMs: number;
   sendCard(chatId: string, card: Record<string, unknown>): Promise<string>;
   patchCard(messageId: string, card: Record<string, unknown>): Promise<boolean>;
-  sendFallback(chatId: string, text: string): Promise<void>;
+  sendFallback(
+    chatId: string,
+    text: string,
+    sourceLabel?: string,
+  ): Promise<void>;
   onError?(operation: string, error: unknown): void;
 }
 
@@ -118,9 +122,10 @@ export class FeishuQuestionCardController {
       this.options.onError?.('question card delivery', error);
       await this.finalize(record, 'cancelled');
       try {
-        await this.options.sendFallback(
+        await this.sendFallback(
           record.chatId,
           this.fallbackText(record.context),
+          record.context.sourceLabel,
         );
       } catch (fallbackError) {
         this.options.onError?.('question fallback delivery', fallbackError);
@@ -180,6 +185,7 @@ export class FeishuQuestionCardController {
               record.context.questions,
               'processing',
               answers,
+              record.context.sourceLabel,
             ),
           },
         },
@@ -197,6 +203,8 @@ export class FeishuQuestionCardController {
           data: buildQuestionTerminalCard(
             record.context.questions,
             'cancelled',
+            undefined,
+            record.context.sourceLabel,
           ),
         },
       },
@@ -317,6 +325,7 @@ export class FeishuQuestionCardController {
       record.context.questions,
       terminalState,
       answers,
+      record.context.sourceLabel,
     );
     const projection = (record.projection ?? Promise.resolve()).then(
       async () => {
@@ -340,9 +349,10 @@ export class FeishuQuestionCardController {
             })
             .join('\n');
           try {
-            await this.options.sendFallback(
+            await this.sendFallback(
               record.chatId,
               `${terminalLabels[terminalState]}\n${details}`,
+              record.context.sourceLabel,
             );
           } catch (fallbackError) {
             this.options.onError?.(
@@ -386,5 +396,15 @@ export class FeishuQuestionCardController {
       )
       .join('\n');
     return `互动问题卡片投递失败，该请求已取消，请重试。\n${questions}`;
+  }
+
+  private sendFallback(
+    chatId: string,
+    text: string,
+    sourceLabel?: string,
+  ): Promise<void> {
+    return sourceLabel
+      ? this.options.sendFallback(chatId, text, sourceLabel)
+      : this.options.sendFallback(chatId, text);
   }
 }

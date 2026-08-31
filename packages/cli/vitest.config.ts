@@ -151,7 +151,12 @@ export default defineConfig({
     // See packages/core/vitest.config.ts: raise the per-test ceiling above
     // vitest's 5s default so I/O-bound tests (e.g. the workspace registration
     // store's tempdir round-trip) don't blow it purely under CI contention.
-    testTimeout: 15000,
+    testTimeout: process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
+      ? 60_000
+      : 15_000,
+    hookTimeout: process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
+      ? 60_000
+      : undefined,
     // ECS hosts run several jobs at once; leave capacity for neighboring jobs.
     maxWorkers: process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
       ? '25%'

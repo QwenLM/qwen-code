@@ -1359,10 +1359,40 @@ const FfiConverterTypeCursorVisualOutput = (() => {
     return new FFIConverter();
 })();
 
+export enum DeliveryMode {
+    Background,
+    Foreground
+}
+
+const FfiConverterTypeDeliveryMode = (() => {
+    const ordinalConverter = FfiConverterInt32;
+    type TypeName = DeliveryMode;
+    class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
+        read(from: RustBuffer): TypeName {
+            switch (ordinalConverter.read(from)) {
+                case 1: return DeliveryMode.Background;
+                case 2: return DeliveryMode.Foreground;
+                default: throw new UniffiInternalError.UnexpectedEnumCase();
+            }
+        }
+        write(value: TypeName, into: RustBuffer): void {
+            switch (value) {
+                case DeliveryMode.Background: return ordinalConverter.write(1, into);
+                case DeliveryMode.Foreground: return ordinalConverter.write(2, into);
+            }
+        }
+        allocationSize(value: TypeName): number {
+            return ordinalConverter.allocationSize(0);
+        }
+    }
+    return new FFIConverter();
+})();
+
 export type DoubleClickInput = {
     pid: number,
     windowId?: bigint,
     elementToken?: string,
+    deliveryMode?: DeliveryMode,
     x?: number,
     y?: number
 }
@@ -1391,6 +1421,7 @@ const FfiConverterTypeDoubleClickInput = (() => {
                 pid: FfiConverterUInt32.read(from),
                 windowId: FfiConverterOptionalUInt64.read(from),
                 elementToken: FfiConverterOptionalString.read(from),
+                deliveryMode: FfiConverterOptionalTypeDeliveryMode.read(from),
                 x: FfiConverterOptionalFloat64.read(from),
                 y: FfiConverterOptionalFloat64.read(from)
             };
@@ -1399,6 +1430,7 @@ const FfiConverterTypeDoubleClickInput = (() => {
             FfiConverterUInt32.write(value.pid, into);
             FfiConverterOptionalUInt64.write(value.windowId, into);
             FfiConverterOptionalString.write(value.elementToken, into);
+            FfiConverterOptionalTypeDeliveryMode.write(value.deliveryMode, into);
             FfiConverterOptionalFloat64.write(value.x, into);
             FfiConverterOptionalFloat64.write(value.y, into);
         }
@@ -1406,6 +1438,7 @@ const FfiConverterTypeDoubleClickInput = (() => {
             return FfiConverterUInt32.allocationSize(value.pid) +
              FfiConverterOptionalUInt64.allocationSize(value.windowId) +
              FfiConverterOptionalString.allocationSize(value.elementToken) +
+             FfiConverterOptionalTypeDeliveryMode.allocationSize(value.deliveryMode) +
              FfiConverterOptionalFloat64.allocationSize(value.x) +
              FfiConverterOptionalFloat64.allocationSize(value.y);
 
@@ -3062,6 +3095,7 @@ export type RightClickInput = {
     pid: number,
     windowId?: bigint,
     elementToken?: string,
+    deliveryMode?: DeliveryMode,
     x?: number,
     y?: number,
     modifier?: Array<string>
@@ -3091,6 +3125,7 @@ const FfiConverterTypeRightClickInput = (() => {
                 pid: FfiConverterUInt32.read(from),
                 windowId: FfiConverterOptionalUInt64.read(from),
                 elementToken: FfiConverterOptionalString.read(from),
+                deliveryMode: FfiConverterOptionalTypeDeliveryMode.read(from),
                 x: FfiConverterOptionalFloat64.read(from),
                 y: FfiConverterOptionalFloat64.read(from),
                 modifier: FfiConverterOptionalSequenceString.read(from)
@@ -3100,6 +3135,7 @@ const FfiConverterTypeRightClickInput = (() => {
             FfiConverterUInt32.write(value.pid, into);
             FfiConverterOptionalUInt64.write(value.windowId, into);
             FfiConverterOptionalString.write(value.elementToken, into);
+            FfiConverterOptionalTypeDeliveryMode.write(value.deliveryMode, into);
             FfiConverterOptionalFloat64.write(value.x, into);
             FfiConverterOptionalFloat64.write(value.y, into);
             FfiConverterOptionalSequenceString.write(value.modifier, into);
@@ -3108,6 +3144,7 @@ const FfiConverterTypeRightClickInput = (() => {
             return FfiConverterUInt32.allocationSize(value.pid) +
              FfiConverterOptionalUInt64.allocationSize(value.windowId) +
              FfiConverterOptionalString.allocationSize(value.elementToken) +
+             FfiConverterOptionalTypeDeliveryMode.allocationSize(value.deliveryMode) +
              FfiConverterOptionalFloat64.allocationSize(value.x) +
              FfiConverterOptionalFloat64.allocationSize(value.y) +
              FfiConverterOptionalSequenceString.allocationSize(value.modifier);
@@ -4194,6 +4231,7 @@ export type WindowClickInput = {
     pid: number,
     windowId?: bigint,
     elementToken?: string,
+    deliveryMode?: DeliveryMode,
     x?: number,
     y?: number,
     button?: ClickButton,
@@ -4224,6 +4262,7 @@ const FfiConverterTypeWindowClickInput = (() => {
                 pid: FfiConverterUInt32.read(from),
                 windowId: FfiConverterOptionalUInt64.read(from),
                 elementToken: FfiConverterOptionalString.read(from),
+                deliveryMode: FfiConverterOptionalTypeDeliveryMode.read(from),
                 x: FfiConverterOptionalFloat64.read(from),
                 y: FfiConverterOptionalFloat64.read(from),
                 button: FfiConverterOptionalTypeClickButton.read(from),
@@ -4234,6 +4273,7 @@ const FfiConverterTypeWindowClickInput = (() => {
             FfiConverterUInt32.write(value.pid, into);
             FfiConverterOptionalUInt64.write(value.windowId, into);
             FfiConverterOptionalString.write(value.elementToken, into);
+            FfiConverterOptionalTypeDeliveryMode.write(value.deliveryMode, into);
             FfiConverterOptionalFloat64.write(value.x, into);
             FfiConverterOptionalFloat64.write(value.y, into);
             FfiConverterOptionalTypeClickButton.write(value.button, into);
@@ -4243,6 +4283,7 @@ const FfiConverterTypeWindowClickInput = (() => {
             return FfiConverterUInt32.allocationSize(value.pid) +
              FfiConverterOptionalUInt64.allocationSize(value.windowId) +
              FfiConverterOptionalString.allocationSize(value.elementToken) +
+             FfiConverterOptionalTypeDeliveryMode.allocationSize(value.deliveryMode) +
              FfiConverterOptionalFloat64.allocationSize(value.x) +
              FfiConverterOptionalFloat64.allocationSize(value.y) +
              FfiConverterOptionalTypeClickButton.allocationSize(value.button) +
@@ -4250,35 +4291,6 @@ const FfiConverterTypeWindowClickInput = (() => {
 
         }
     };
-    return new FFIConverter();
-})();
-
-export enum DeliveryMode {
-    Background,
-    Foreground
-}
-
-const FfiConverterTypeDeliveryMode = (() => {
-    const ordinalConverter = FfiConverterInt32;
-    type TypeName = DeliveryMode;
-    class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
-        read(from: RustBuffer): TypeName {
-            switch (ordinalConverter.read(from)) {
-                case 1: return DeliveryMode.Background;
-                case 2: return DeliveryMode.Foreground;
-                default: throw new UniffiInternalError.UnexpectedEnumCase();
-            }
-        }
-        write(value: TypeName, into: RustBuffer): void {
-            switch (value) {
-                case DeliveryMode.Background: return ordinalConverter.write(1, into);
-                case DeliveryMode.Foreground: return ordinalConverter.write(2, into);
-            }
-        }
-        allocationSize(value: TypeName): number {
-            return ordinalConverter.allocationSize(0);
-        }
-    }
     return new FFIConverter();
 })();
 
@@ -4369,6 +4381,7 @@ export type WindowHotkeyInput = {
     pid: number,
     windowId?: bigint,
     elementToken?: string,
+    deliveryMode?: DeliveryMode,
     keys: Array<string>
 }
 
@@ -4396,6 +4409,7 @@ const FfiConverterTypeWindowHotkeyInput = (() => {
                 pid: FfiConverterUInt32.read(from),
                 windowId: FfiConverterOptionalUInt64.read(from),
                 elementToken: FfiConverterOptionalString.read(from),
+                deliveryMode: FfiConverterOptionalTypeDeliveryMode.read(from),
                 keys: FfiConverterSequenceString.read(from)
             };
         }
@@ -4403,12 +4417,14 @@ const FfiConverterTypeWindowHotkeyInput = (() => {
             FfiConverterUInt32.write(value.pid, into);
             FfiConverterOptionalUInt64.write(value.windowId, into);
             FfiConverterOptionalString.write(value.elementToken, into);
+            FfiConverterOptionalTypeDeliveryMode.write(value.deliveryMode, into);
             FfiConverterSequenceString.write(value.keys, into);
         }
         allocationSize(value: TypeName): number {
             return FfiConverterUInt32.allocationSize(value.pid) +
              FfiConverterOptionalUInt64.allocationSize(value.windowId) +
              FfiConverterOptionalString.allocationSize(value.elementToken) +
+             FfiConverterOptionalTypeDeliveryMode.allocationSize(value.deliveryMode) +
              FfiConverterSequenceString.allocationSize(value.keys);
 
         }
@@ -4420,6 +4436,7 @@ export type WindowPressKeyInput = {
     pid: number,
     windowId?: bigint,
     elementToken?: string,
+    deliveryMode?: DeliveryMode,
     key: string,
     modifiers?: Array<string>
 }
@@ -4448,6 +4465,7 @@ const FfiConverterTypeWindowPressKeyInput = (() => {
                 pid: FfiConverterUInt32.read(from),
                 windowId: FfiConverterOptionalUInt64.read(from),
                 elementToken: FfiConverterOptionalString.read(from),
+                deliveryMode: FfiConverterOptionalTypeDeliveryMode.read(from),
                 key: FfiConverterString.read(from),
                 modifiers: FfiConverterOptionalSequenceString.read(from)
             };
@@ -4456,6 +4474,7 @@ const FfiConverterTypeWindowPressKeyInput = (() => {
             FfiConverterUInt32.write(value.pid, into);
             FfiConverterOptionalUInt64.write(value.windowId, into);
             FfiConverterOptionalString.write(value.elementToken, into);
+            FfiConverterOptionalTypeDeliveryMode.write(value.deliveryMode, into);
             FfiConverterString.write(value.key, into);
             FfiConverterOptionalSequenceString.write(value.modifiers, into);
         }
@@ -4463,6 +4482,7 @@ const FfiConverterTypeWindowPressKeyInput = (() => {
             return FfiConverterUInt32.allocationSize(value.pid) +
              FfiConverterOptionalUInt64.allocationSize(value.windowId) +
              FfiConverterOptionalString.allocationSize(value.elementToken) +
+             FfiConverterOptionalTypeDeliveryMode.allocationSize(value.deliveryMode) +
              FfiConverterString.allocationSize(value.key) +
              FfiConverterOptionalSequenceString.allocationSize(value.modifiers);
 
@@ -4475,6 +4495,7 @@ export type WindowScrollInput = {
     pid: number,
     windowId?: bigint,
     elementToken?: string,
+    deliveryMode?: DeliveryMode,
     x?: number,
     y?: number,
     direction: ScrollDirection,
@@ -4506,6 +4527,7 @@ const FfiConverterTypeWindowScrollInput = (() => {
                 pid: FfiConverterUInt32.read(from),
                 windowId: FfiConverterOptionalUInt64.read(from),
                 elementToken: FfiConverterOptionalString.read(from),
+                deliveryMode: FfiConverterOptionalTypeDeliveryMode.read(from),
                 x: FfiConverterOptionalFloat64.read(from),
                 y: FfiConverterOptionalFloat64.read(from),
                 direction: FfiConverterTypeScrollDirection.read(from),
@@ -4517,6 +4539,7 @@ const FfiConverterTypeWindowScrollInput = (() => {
             FfiConverterUInt32.write(value.pid, into);
             FfiConverterOptionalUInt64.write(value.windowId, into);
             FfiConverterOptionalString.write(value.elementToken, into);
+            FfiConverterOptionalTypeDeliveryMode.write(value.deliveryMode, into);
             FfiConverterOptionalFloat64.write(value.x, into);
             FfiConverterOptionalFloat64.write(value.y, into);
             FfiConverterTypeScrollDirection.write(value.direction, into);
@@ -4527,6 +4550,7 @@ const FfiConverterTypeWindowScrollInput = (() => {
             return FfiConverterUInt32.allocationSize(value.pid) +
              FfiConverterOptionalUInt64.allocationSize(value.windowId) +
              FfiConverterOptionalString.allocationSize(value.elementToken) +
+             FfiConverterOptionalTypeDeliveryMode.allocationSize(value.deliveryMode) +
              FfiConverterOptionalFloat64.allocationSize(value.x) +
              FfiConverterOptionalFloat64.allocationSize(value.y) +
              FfiConverterTypeScrollDirection.allocationSize(value.direction) +
@@ -4542,6 +4566,7 @@ export type WindowTypeTextInput = {
     pid: number,
     windowId?: bigint,
     elementToken?: string,
+    deliveryMode?: DeliveryMode,
     text: string,
     delayMs?: bigint
 }
@@ -4570,6 +4595,7 @@ const FfiConverterTypeWindowTypeTextInput = (() => {
                 pid: FfiConverterUInt32.read(from),
                 windowId: FfiConverterOptionalUInt64.read(from),
                 elementToken: FfiConverterOptionalString.read(from),
+                deliveryMode: FfiConverterOptionalTypeDeliveryMode.read(from),
                 text: FfiConverterString.read(from),
                 delayMs: FfiConverterOptionalUInt64.read(from)
             };
@@ -4578,6 +4604,7 @@ const FfiConverterTypeWindowTypeTextInput = (() => {
             FfiConverterUInt32.write(value.pid, into);
             FfiConverterOptionalUInt64.write(value.windowId, into);
             FfiConverterOptionalString.write(value.elementToken, into);
+            FfiConverterOptionalTypeDeliveryMode.write(value.deliveryMode, into);
             FfiConverterString.write(value.text, into);
             FfiConverterOptionalUInt64.write(value.delayMs, into);
         }
@@ -4585,6 +4612,7 @@ const FfiConverterTypeWindowTypeTextInput = (() => {
             return FfiConverterUInt32.allocationSize(value.pid) +
              FfiConverterOptionalUInt64.allocationSize(value.windowId) +
              FfiConverterOptionalString.allocationSize(value.elementToken) +
+             FfiConverterOptionalTypeDeliveryMode.allocationSize(value.deliveryMode) +
              FfiConverterString.allocationSize(value.text) +
              FfiConverterOptionalUInt64.allocationSize(value.delayMs);
 
@@ -4661,6 +4689,9 @@ const FfiConverterSequenceString = new FfiConverterArray(FfiConverterString);
 // FfiConverter for bigint | undefined
 const FfiConverterOptionalUInt64 = new FfiConverterOptional(FfiConverterUInt64);
 
+// FfiConverter for DeliveryMode | undefined
+const FfiConverterOptionalTypeDeliveryMode = new FfiConverterOptional(FfiConverterTypeDeliveryMode);
+
 // FfiConverter for Array<string> | undefined
 const FfiConverterOptionalSequenceString = new FfiConverterOptional(FfiConverterSequenceString);
 
@@ -4705,9 +4736,6 @@ const FfiConverterSequenceTypeStatePredicate = new FfiConverterArray(FfiConverte
 
 // FfiConverter for Array<PredicateOutcome>
 const FfiConverterSequenceTypePredicateOutcome = new FfiConverterArray(FfiConverterTypePredicateOutcome);
-
-// FfiConverter for DeliveryMode | undefined
-const FfiConverterOptionalTypeDeliveryMode = new FfiConverterOptional(FfiConverterTypeDeliveryMode);
 
 
 /**

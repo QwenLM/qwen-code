@@ -9,7 +9,7 @@ import {
   DaemonSessionProvider,
   useConnection,
   type DaemonSessionActions,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import type {
   DaemonSessionArtifact,
   DaemonSessionMonitorTaskStatus,

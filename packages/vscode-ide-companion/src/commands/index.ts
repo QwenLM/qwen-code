@@ -15,12 +15,29 @@ type Logger = (message: string) => void;
 
 export const runQwenCodeCommand = 'qwen-code.runQwenCode';
 export const showDiffCommand = 'qwenCode.showDiff';
+export const closeDiffCommand = 'qwenCode.closeDiff';
 export const openChatCommand = 'qwen-code.openChat';
 export const openNewChatTabCommand = 'qwenCode.openNewChatTab';
 export const authCommand = 'qwen-code.auth';
 export const focusChatCommand = 'qwen-code.focusChat';
 export const newConversationCommand = 'qwen-code.newConversation';
 export const showLogsCommand = 'qwen-code.showLogs';
+
+/**
+ * DiffManager keys entries by the normalized absolute path it received from
+ * showDiff, so a closeDiff that arrives with the same workspace-relative
+ * path the daemon sent would never match unless it is resolved the same way.
+ */
+function resolveWorkspaceRelativePath(filePath: string): string {
+  if (!shouldResolveAgainstWorkspace(filePath)) {
+    return filePath;
+  }
+  const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+  if (!workspaceFolder) {
+    return filePath;
+  }
+  return vscode.Uri.joinPath(workspaceFolder.uri, filePath).fsPath;
+}
 
 /**
  * Register all Qwen Code chat-related commands.
@@ -63,16 +80,7 @@ export function registerNewCommands(
       showDiffCommand,
       async (args: { path: string; oldText: string; newText: string }) => {
         try {
-          let absolutePath = args.path;
-          if (shouldResolveAgainstWorkspace(args.path)) {
-            const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-            if (workspaceFolder) {
-              absolutePath = vscode.Uri.joinPath(
-                workspaceFolder.uri,
-                args.path,
-              ).fsPath;
-            }
-          }
+          const absolutePath = resolveWorkspaceRelativePath(args.path);
           log(`[Command] Showing diff for ${absolutePath}`);
           await diffManager.showDiff(absolutePath, args.oldText, args.newText);
         } catch (error) {
@@ -81,6 +89,14 @@ export function registerNewCommands(
           vscode.window.showErrorMessage(`Failed to show diff: ${errorMsg}`);
         }
       },
+    ),
+  );
+
+  disposables.push(
+    vscode.commands.registerCommand(
+      closeDiffCommand,
+      async (filePath: string) =>
+        diffManager.closeDiff(resolveWorkspaceRelativePath(filePath), true),
     ),
   );
 

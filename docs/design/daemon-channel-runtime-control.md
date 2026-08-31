@@ -29,7 +29,7 @@ primary-workspace-only in multi-workspace mode.
 
 `DELETE /workspace/channel` idempotently disables the runtime selection.
 `POST /workspace/channel/reload` remains available and re-reads settings for
-the committed selection. Mutations use the strict bearer-token gate.
+the committed selection. Mutations use the strict operator-authority gate.
 
 The `channel_control` capability advertises the resource. `channel_reload`
 continues to advertise only while the manager has a committed, reloadable

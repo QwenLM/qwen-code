@@ -126,7 +126,20 @@ jobs:
           tar -xzf "${archive}" -C "${RUNNER_TEMP}"
           echo "${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}/bin" >> "${GITHUB_PATH}"
 
-      - name: 'Run Java SDK tests'
+      - name: 'Run Java SDK tests (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        working-directory: 'packages/sdk-java/qwencode'
+        run: |-
+          mkdir -p "${HOME}/.cache/qwen-code-ci"
+          exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"
+          if ! flock --wait 1200 9; then
+            echo "::error::sdk-java host lock not acquired within 20 minutes"
+            exit 1
+          fi
+          mvn --batch-mode --no-transfer-progress clean test
+
+      - name: 'Run Java SDK tests (hosted)'
+        if: "${{ runner.environment == 'github-hosted' }}"
         working-directory: 'packages/sdk-java/qwencode'
         run: 'mvn --batch-mode --no-transfer-progress clean test'
 

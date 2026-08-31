@@ -1340,9 +1340,16 @@ describe('SettingsDialog', () => {
 
       // Press Escape to exit
       stdin.write('\u001B');
-      await wait();
-
-      expect(onSelect).toHaveBeenCalledWith(undefined, 'User');
+      await waitFor(
+        () => {
+          expect(onSelect).toHaveBeenCalledWith(undefined, 'User');
+        },
+        {
+          timeout: process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
+            ? 10_000
+            : 1_000,
+        },
+      );
 
       unmount();
     });

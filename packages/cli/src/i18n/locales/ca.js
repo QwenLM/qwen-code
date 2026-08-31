@@ -1179,6 +1179,12 @@ export default {
     "La compressió de l'historial del xat no ha reduït la mida. Això pot indicar problemes amb el missatge de compressió.",
   'Could not compress chat history due to a token counting error.':
     "No s'ha pogut comprimir l'historial del xat per un error de recompte de tokens.",
+  'Could not compress chat history because the compression summary was empty.':
+    "No s'ha pogut comprimir l'historial del xat perquè el resum de compressió era buit.",
+  'Could not compress chat history because the compression summary was truncated.':
+    "No s'ha pogut comprimir l'historial del xat perquè el resum de compressió s'ha truncat.",
+  'Could not compress chat history due to an API error.':
+    "No s'ha pogut comprimir l'historial del xat per un error de l'API.",
   // ============================================================================
   // Ordres - Directori
   // ============================================================================

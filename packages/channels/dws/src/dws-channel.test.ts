@@ -281,8 +281,12 @@ class TestableDwsChannel extends DwsChannel {
     await this.pollOnce();
   }
 
-  async respond(chatId: string, text: string): Promise<void> {
-    await this.sendResponseMessage(chatId, text, 'session-1');
+  async respond(
+    chatId: string,
+    text: string,
+    sourceLabel?: string,
+  ): Promise<void> {
+    await this.sendResponseMessage(chatId, text, 'session-1', sourceLabel);
   }
 
   async sendThread(
@@ -4521,6 +4525,44 @@ describe('DwsChannel', () => {
       ),
     );
     expect(client.sendImMessage).not.toHaveBeenCalled();
+  });
+
+  it('attributes an IM reply after checking the raw no-reply sentinel', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    channel.responseMessageId = 'message-1';
+    channel.responseSenderId = 'open-alice';
+
+    await channel.respond('cid-1', '[NO_REPLY]', '[review_*]');
+    expect(client.replyToImMessage).not.toHaveBeenCalled();
+
+    await channel.respond('cid-1', 'final answer', '[review_*]');
+    expect(client.replyToImMessage).toHaveBeenCalledWith(
+      'cid-1',
+      'message-1',
+      'open-alice',
+      '[review_*] final answer',
+      expect.any(String),
+    );
+  });
+
+  it('keeps attributed todo Markdown fenced code line-leading', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    (
+      channel as unknown as { todoTargets: Map<string, string> }
+    ).todoTargets.set('todo:task-1', 'task-1');
+
+    await channel.respond(
+      'todo:task-1',
+      '```ts\nconst x = 1;\n```',
+      '[review_*]',
+    );
+
+    expect(client.addTodoComment).toHaveBeenCalledWith(
+      'task-1',
+      '\\[review\\_\\*\\]\n```ts\nconst x = 1;\n```',
+    );
   });
 
   // R1-7: the unknown-outcome swallow decides whether a finished task is

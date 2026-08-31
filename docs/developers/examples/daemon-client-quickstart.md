@@ -137,9 +137,8 @@ console.log(updated.hash);
 
 `expectedHash` is SHA-256 over the raw on-disk bytes. `mode: "replace"` and
 `editWorkspaceFile()` require it so stale clients do not overwrite a file they
-did not just read. Write/edit require bearer-token configuration even on
-loopback; start the daemon with `--token` or `QWEN_SERVER_TOKEN` before using
-them.
+did not just read. Write/edit accept the token-less trusted-loopback primary
+listener; non-trusted deployments require bearer or pairing credentials.
 
 ## Reconnect with `Last-Event-ID`
 

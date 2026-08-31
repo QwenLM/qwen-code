@@ -1060,7 +1060,7 @@ impl ToolRegistry {
         if let Err(error) =
             crate::authorization::authorize_tool_call_with_context(resolved_name, &args, context)
         {
-            return permission_denied_result(error.to_string());
+            return authorization_error_result(error);
         }
 
         let mut public_args = args.clone();
@@ -1415,6 +1415,9 @@ impl ToolRegistry {
         }
 
         if let Err(error) = context.commit_authorized_dispatch() {
+            if error.contains("expired") || error.contains("timeout exceeded") {
+                return protected_refusal("authorization_context_expired", &error);
+            }
             return permission_denied_result(error);
         }
 
@@ -4472,6 +4475,15 @@ fn permission_denied_result(message: String) -> ToolResult {
             "message": message,
         }
     }))
+}
+
+fn authorization_error_result(error: crate::policy::AuthorizationError) -> ToolResult {
+    let message = error.to_string();
+    if matches!(error, crate::policy::AuthorizationError::Expired(_)) {
+        protected_refusal("authorization_context_expired", &message)
+    } else {
+        permission_denied_result(message)
+    }
 }
 
 fn protected_consent_refusal(error: crate::consent::ConsentError) -> ToolResult {

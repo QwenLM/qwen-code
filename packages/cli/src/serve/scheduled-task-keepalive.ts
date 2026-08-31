@@ -115,14 +115,14 @@ const MAX_REVIVE_BACKOFF_MS = 30 * 60_000;
 
 /**
  * Bind unbound durable tasks to dedicated sessions, and rename bound
- * task-owned sessions that don't yet have the ⏰ prefix. The cron_create tool leaves
+ * task-owned sessions that have not yet been named. The cron_create tool leaves
  * durable tasks unbound so they stay pickable by any lock owner (CLI/ACP
  * /headless). In daemon mode this keepalive mints a dedicated session per
  * task and names it — binding is a daemon-only concern.
  *
- * For unbound tasks: mints a dedicated session, names it `⏰ prompt`,
+ * For unbound tasks: mints a dedicated session, names it after the prompt,
  * writes sessionId to disk.
- * For task-owned bound tasks without ⏰ name: renames the session to `⏰ prompt`.
+ * For task-owned bound tasks not yet named: renames the session after the prompt.
  *
  * A Set tracks renamed sessions so we don't call updateSessionMetadata
  * every tick. Best-effort — failures are logged and retried next tick.
@@ -305,7 +305,7 @@ export function startScheduledTaskKeepalive(
   // until the raw spawn settles.
   const binding = new Set<string>();
 
-  // Tracks sessions the keepalive has already named with ⏰ prefix,
+  // Tracks sessions the keepalive has already named,
   // so updateSessionMetadata isn't called every tick.
   const renamed = new Set<string>();
 

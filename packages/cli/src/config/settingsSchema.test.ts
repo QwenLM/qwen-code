@@ -103,6 +103,12 @@ describe('SettingsSchema', () => {
       });
     });
 
+    it('should not expose the removed dynamic command translation setting', () => {
+      expect(getSettingsSchema().general.properties).not.toHaveProperty(
+        'dynamicCommandTranslation',
+      );
+    });
+
     it('should have accessibility nested properties', () => {
       expect(
         getSettingsSchema().ui?.properties?.accessibility?.properties,

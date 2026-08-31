@@ -72,10 +72,10 @@ jobs:
     # other fork PRs stay on ephemeral hosted runners. Keep in sync with
     # ci.yml's classify_pr routing. Kill-switch: MAINTAINER_ECS_RUNNER_DISABLED.
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
-    # Two full checkouts, each npm-ci + build + drive: a healthy run lands
-    # near twenty minutes, and a slow runner pushed a run past the old
-    # 30-minute bound, cancelling it.
-    timeout-minutes: 45
+    # Two full checkouts, each npm-ci + build + drive. A contended shared ECS
+    # runner completed the PR-head cycle but hit the 45-minute ceiling near
+    # the end of the merge-base cycle, so keep a finite 60-minute budget.
+    timeout-minutes: 60
     steps:
       - name: 'Restore workspace ownership'
         if: "${{ runner.environment == 'self-hosted' }}"

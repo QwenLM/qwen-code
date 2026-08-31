@@ -22,7 +22,7 @@ const workspaceClient = {
   listWorkspaceSessionsPage: vi.fn(),
 };
 
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useSessions: () => ({
     sessions: primarySessions,
     loading: false,

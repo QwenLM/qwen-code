@@ -3,7 +3,7 @@ import {
   DaemonSessionProvider,
   useConnection,
   useWorkspace,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import type { ACPToolCall, Message } from '../../adapters/types';
 import { WEB_SHELL_MAX_TRANSCRIPT_BLOCKS } from '../../constants/sessions';

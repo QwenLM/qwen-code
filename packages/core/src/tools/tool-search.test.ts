@@ -230,7 +230,7 @@ describe('ToolSearchTool', () => {
     const content = String(result.llmContent);
     // The `<` from the embedded `</function>` MUST be unicode-escaped
     // so the wrapper stays intact.
-    expect(content).toContain('\\u003c/function>');
+    expect(content).toContain('\\u003c/function\\u003e');
     // Sanity: there's still exactly one closing wrapper tag, not two.
     const closeMatches = content.match(/<\/function>/g) ?? [];
     expect(closeMatches.length).toBe(1);

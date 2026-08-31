@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { isTaskExecutionMode } from '@qwen-code/sdk/daemon';
 import type {
   DaemonInputAnnotation,
   DaemonTranscriptBlock,
@@ -1056,6 +1057,7 @@ function mergeToolCall(
   target.endTime = source.endTime ?? target.endTime;
   target.rawOutput = source.rawOutput ?? target.rawOutput;
   target.args = source.args ?? target.args;
+  target.executionMode = source.executionMode ?? target.executionMode;
   target.locations = source.locations ?? target.locations;
 }
 
@@ -1106,6 +1108,7 @@ function daemonToolBlockToToolCall(
   block: DaemonToolTranscriptBlock,
 ): DaemonMessageToolCall {
   const rawOutput = getToolRawOutput(block);
+  const executionMode = getRecord(rawOutput)?.['executionMode'];
   const isBackgroundAgent = isBackgroundAgentBlock(block, rawOutput);
   const content = normalizeToolContent(block);
   const statusMap: Record<string, DaemonMessageToolCallStatus> = {
@@ -1136,6 +1139,9 @@ function daemonToolBlockToToolCall(
     kind: inferToolKind(block.toolName, block.toolKind),
     rawOutput,
     args: block.rawInput as Record<string, unknown> | undefined,
+    executionMode: isTaskExecutionMode(executionMode)
+      ? executionMode
+      : undefined,
     parentToolCallId: block.parentToolCallId,
     startTime: block.createdAt,
     endTime: isComplete && !isBackgroundAgent ? block.updatedAt : undefined,

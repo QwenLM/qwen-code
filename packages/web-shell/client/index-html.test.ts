@@ -1,17 +1,8 @@
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
+import { extractInlineScript, readIndexHtml } from './test/indexHtmlTestUtils';
 
 function extractMeasureScript(): string {
-  const html = readFileSync(resolve(__dirname, 'index.html'), 'utf8');
-  const script = Array.from(
-    html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g),
-  )
-    .map((match) => match[1] ?? '')
-    .find((source) => source.includes('performance.measure ='));
-
-  if (!script) throw new Error('Performance measure guard not found');
-  return script;
+  return extractInlineScript('performance.measure =');
 }
 
 function installMeasureGuard(
@@ -237,5 +228,33 @@ describe('React performance measure guard', () => {
 
     expect(() => install(undefined)).not.toThrow();
     expect(() => install({})).not.toThrow();
+  });
+});
+
+describe('boot watchdog document contract', () => {
+  // The watchdog detects a mount as "#root has a first element child that is
+  // not the fallback box". A static child shipped in the HTML — a boot
+  // spinner, say — reads as already-mounted, which disables the watchdog
+  // outright: no immediate fallback on a module failure, no timeout
+  // fallback, exactly the white screen this feature exists to replace. No
+  // boot-watchdog unit test can catch that, because they all build their own
+  // #root; pin it against the real document instead.
+  it('ships an empty #root', () => {
+    const root = /<div id="root"[^>]*>([\s\S]*?)<\/div>/.exec(readIndexHtml());
+
+    expect(root).not.toBeNull();
+    expect(root?.[1]).toMatch(/^\s*$/);
+  });
+
+  // The watchdog is deliberately installed before #root is parsed so it is
+  // already listening while the module graph loads. If a future edit moves
+  // it after #root the DOMContentLoaded deferral becomes dead code, so the
+  // boot-watchdog suite must keep exercising the install-before-#root order.
+  it('installs the watchdog before #root is parsed', () => {
+    const html = readIndexHtml();
+
+    expect(html.indexOf('data-boot-fallback')).toBeLessThan(
+      html.indexOf('<div id="root">'),
+    );
   });
 });

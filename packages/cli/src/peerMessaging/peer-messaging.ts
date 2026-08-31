@@ -27,21 +27,35 @@ import {
   MAX_HELD_MESSAGES,
   type HeldMessage,
   type InboundPolicy,
+  type PeerDeliveryStatus,
   type PeerFrame,
   type PeerInbox,
   type PeerUserFrame,
   sendDeliveryStatus,
+  type SettledPeerReceipt,
+  settleSentPeerMessage,
   startPeerInbox,
 } from '@qwen-code/qwen-code-core';
 
 const debugLogger = createDebugLogger('PEER_MESSAGING');
+
+/** Identity needed to re-check a queued frame's recipient at drain time. */
+export interface PeerQueuedDelivery {
+  msgId: string;
+  from?: string;
+  toSessionId?: string;
+}
 
 /**
  * Submit an already-formatted message into the session's input queue.
  * Returns false when the queue is too full to take it — the frame is then
  * refused with an honest receipt instead of accumulating unboundedly.
  */
-export type PeerSubmitFn = (modelText: string, displayText: string) => boolean;
+export type PeerSubmitFn = (
+  modelText: string,
+  displayText: string,
+  delivery?: PeerQueuedDelivery,
+) => boolean;
 
 /**
  * Cap on accepted messages waiting to be consumed.
@@ -53,10 +67,44 @@ export type PeerSubmitFn = (modelText: string, displayText: string) => boolean;
  */
 export const MAX_ACCEPTED_BACKLOG = MAX_HELD_MESSAGES;
 
+/**
+ * A delivery receipt for a message this session sent, as surfaced to
+ * the UI: which address it went to and what became of it there.
+ */
+export interface PeerReceipt {
+  status: PeerDeliveryStatus;
+  address: string;
+  origMsgId: string;
+  /** The state the message was in before this receipt. */
+  previous: PeerDeliveryStatus | 'pending';
+}
+
 export interface PeerMessagingOptions {
   getApprovalMode: () => ApprovalMode | null;
   getPolicySetting: () => InboundPolicy | undefined;
   updateSessionRegistryIpcPath: (ipcPath: string | undefined) => Promise<void>;
+  /**
+   * Apply a receipt to the send it answers, returning the send only when
+   * the receipt moved it to a new state. Defaults to the send-side
+   * ledger; injectable so the wiring can be tested without a real send.
+   */
+  settleSentMessage?: (
+    msgId: string,
+    status: PeerDeliveryStatus,
+  ) => SettledPeerReceipt | undefined;
+  /**
+   * Re-assert this session's registry record. Called when a frame arrives
+   * pinned to a session id this process does not hold, because the record
+   * — not only the sender's directory — may be the stale side.
+   */
+  reassertSessionRecord?: () => Promise<void>;
+  /**
+   * This session's current id. A getter, not a value: /clear and /resume
+   * swap the id under a running process, and a frame pinned to the id a
+   * sender read from the registry must be judged against the id this
+   * session holds now. Absent means frames are never checked against it.
+   */
+  getSessionId?: () => string;
   socketPath?: string;
 }
 
@@ -66,6 +114,13 @@ export class PeerMessaging {
   private updateSessionRegistryIpcPath: (
     ipcPath: string | undefined,
   ) => Promise<void> = async () => {};
+  private getSessionId: (() => string) | null = null;
+  private settleSentMessage: (
+    msgId: string,
+    status: PeerDeliveryStatus,
+  ) => SettledPeerReceipt | undefined = settleSentPeerMessage;
+  private reassertSessionRecord: (() => Promise<void>) | null = null;
+  private readonly receiptListeners = new Set<(receipt: PeerReceipt) => void>();
   private submitFn: PeerSubmitFn | null = null;
   private readonly buffered: PeerUserFrame[] = [];
   /**
@@ -100,6 +155,7 @@ export class PeerMessaging {
     const gate = new InboundGate({
       getApprovalMode: options.getApprovalMode,
       getPolicySetting: options.getPolicySetting,
+      getSessionId: options.getSessionId,
       deliver: (frame) => messaging.deliver(frame),
       reportStatus: (frame, status) => {
         if (!frame.from) return;
@@ -117,6 +173,13 @@ export class PeerMessaging {
     // already dispatched. A frame that reaches a null gate is dropped
     // without a receipt, and the sender has no way to tell.
     messaging.gate = gate;
+    // Same reason for these: a frame in that window is judged against the
+    // session id and the send ledger this process holds, not against the
+    // nulls a later assignment would leave in place.
+    messaging.getSessionId = options.getSessionId ?? null;
+    messaging.settleSentMessage =
+      options.settleSentMessage ?? settleSentPeerMessage;
+    messaging.reassertSessionRecord = options.reassertSessionRecord ?? null;
 
     const inbox = await startPeerInbox({
       ...(options.socketPath !== undefined
@@ -238,6 +301,26 @@ export class PeerMessaging {
     return () => this.heldListeners.delete(listener);
   }
 
+  /** Subscribe to receipts for messages this session sent. */
+  onReceipt(listener: (receipt: PeerReceipt) => void): () => void {
+    this.receiptListeners.add(listener);
+    return () => this.receiptListeners.delete(listener);
+  }
+
+  private emitReceipt(receipt: PeerReceipt): void {
+    for (const listener of this.receiptListeners) {
+      try {
+        listener(receipt);
+      } catch (error) {
+        debugLogger.debug(
+          `receipt listener threw: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    }
+  }
+
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
@@ -277,12 +360,59 @@ export class PeerMessaging {
 
   private onFrame(frame: PeerFrame): void {
     if (frame.type === 'control') {
-      // Receipts about messages *we* sent. Nothing consumes them until
-      // the sender lands, so log and move on rather than inventing a
-      // half-used delivery-tracking table now.
+      // A receipt for a message this session sent. Any process that can
+      // reach the socket can write one for any id, so only ids the
+      // send-side ledger knows are surfaced; the rest are logged and
+      // dropped.
+      const settled = this.settleSentMessage(frame.origMsgId, frame.status);
+      if (!settled) {
+        debugLogger.debug(
+          `ignoring delivery status ${frame.status} for ${frame.origMsgId}: unknown message or repeated receipt`,
+        );
+        return;
+      }
       debugLogger.debug(
-        `delivery status from peer: ${frame.status} for ${frame.origMsgId}`,
+        `delivery status from ${settled.address}: ${settled.previous} -> ${frame.status} for ${frame.origMsgId}`,
       );
+      this.emitReceipt({
+        status: frame.status,
+        address: settled.address,
+        origMsgId: frame.origMsgId,
+        previous: settled.previous,
+      });
+      return;
+    }
+    // The socket address is keyed by PID and PIDs get reused, so a frame
+    // can arrive here that was written for whoever held this address when
+    // the sender last looked. One pinned to a different session id is not
+    // ours to act on — refuse it with a receipt that says exactly that, so
+    // the sender learns its directory is stale instead of reading silence
+    // as delivery or a refusal as a human's decision. The registry record
+    // may be the stale side (a skipped /clear patch), so it is re-asserted
+    // too; otherwise every later send here would be refused the same way.
+    const ownSessionId = this.getSessionId?.();
+    if (
+      frame.toSessionId !== undefined &&
+      ownSessionId !== undefined &&
+      frame.toSessionId !== ownSessionId
+    ) {
+      debugLogger.debug(
+        `refusing peer message ${frame.msgId}: addressed to session ${frame.toSessionId}, this is ${ownSessionId}`,
+      );
+      if (frame.from) {
+        void sendDeliveryStatus(frame.from, {
+          status: 'misaddressed',
+          origMsgId: frame.msgId,
+          from: this.inbox?.socketPath,
+        });
+      }
+      void this.reassertSessionRecord?.().catch((error) => {
+        debugLogger.debug(
+          `re-asserting the session record failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      });
       return;
     }
     this.gate?.admit(frame);
@@ -335,8 +465,38 @@ export class PeerMessaging {
           ...(frame.fromName !== undefined ? { fromName: frame.fromName } : {}),
           content: frame.message.content,
         }),
+        {
+          msgId: frame.msgId,
+          ...(frame.from !== undefined ? { from: frame.from } : {}),
+          ...(frame.toSessionId !== undefined
+            ? { toSessionId: frame.toSessionId }
+            : {}),
+        },
       ) ?? false
     );
+  }
+
+  /** Drop a queued frame if an in-process session swap invalidated its pin. */
+  drainQueuedFrame(delivery: PeerQueuedDelivery | undefined): boolean {
+    const ownSessionId = this.getSessionId?.();
+    if (
+      delivery?.toSessionId === undefined ||
+      ownSessionId === undefined ||
+      delivery.toSessionId === ownSessionId
+    ) {
+      return true;
+    }
+    debugLogger.debug(
+      `dropping queued peer message ${delivery.msgId}: addressed to session ${delivery.toSessionId}, this is ${ownSessionId}`,
+    );
+    if (delivery.from) {
+      void sendDeliveryStatus(delivery.from, {
+        status: 'misaddressed',
+        origMsgId: delivery.msgId,
+        from: this.inbox?.socketPath,
+      });
+    }
+    return false;
   }
 
   private emitHeldChange(held: readonly HeldMessage[]): void {

@@ -22,6 +22,17 @@ import { execFileSync } from 'node:child_process';
 const require = createRequire(import.meta.url);
 const here = path.dirname(fileURLToPath(import.meta.url));
 const distRuntime = path.join(here, 'dist', 'runtime');
+const computerUseSkillSource = path.join(
+  here,
+  '..',
+  'core',
+  'src',
+  'skills',
+  'bundled',
+  'computer-use',
+  'SKILL.md',
+);
+const computerUseSkillOutput = path.join(here, 'dist', 'computer-use-skill.md');
 
 // 0. Clean dist AND the incremental build info together. Removing dist alone
 //    would leave tsc's buildinfo claiming everything is up to date, so
@@ -65,10 +76,23 @@ if (!grammarSource) {
 }
 cpSync(grammarSource, path.join(distRuntime, 'tree-sitter-javascript.wasm'));
 
-// 4. Sanity-check the emit. A stale buildinfo or a misconfigured tsconfig can
+// 4. Ship the canonical Computer Use skill byte-for-byte as MCP instructions.
+if (!existsSync(computerUseSkillSource)) {
+  throw new Error(
+    `Computer Use skill was not found at ${computerUseSkillSource}`,
+  );
+}
+cpSync(computerUseSkillSource, computerUseSkillOutput);
+
+// 5. Sanity-check the emit. A stale buildinfo or a misconfigured tsconfig can
 //    make `tsc --build` silently emit nothing, leaving a dist that only has the
 //    copied assets — which then fails at runtime instead of at build time.
-for (const required of ['index.js', 'kernel-manager.js', 'mcp-server.js']) {
+for (const required of [
+  'index.js',
+  'kernel-manager.js',
+  'mcp-server.js',
+  'computer-use-skill.md',
+]) {
   const emitted = path.join(here, 'dist', required);
   if (!existsSync(emitted)) {
     throw new Error(

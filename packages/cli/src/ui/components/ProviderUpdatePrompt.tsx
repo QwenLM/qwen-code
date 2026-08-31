@@ -97,8 +97,7 @@ export const ProviderUpdatePrompt = ({
         {affectedEntry && (
           <Text color={theme.status.warning}>
             {t(
-              'Note: Your selected model is being removed. It will switch to "{{model}}" after update.',
-              { model: affectedEntry.diff.fallbackModel ?? '' },
+              'Note: Your selected model is being removed. Please choose a new one with /model.',
             )}
           </Text>
         )}

@@ -24,8 +24,8 @@
 // degrades to the full capture, with the reason said out loud.
 
 import { createHash } from 'node:crypto';
-import { lstatSync, readFileSync, readlinkSync } from 'node:fs';
-import { join } from 'node:path';
+import { lstatSync, readFileSync, readlinkSync, statSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { gitOpt, gitRaw, gitWithInput, gitWithInputRaw } from './git.js';
 import { LITERAL_PATHSPECS } from './diff-flags.js';
 
@@ -39,6 +39,81 @@ import { LITERAL_PATHSPECS } from './diff-flags.js';
  * "unchanged" forever and silently left incremental scope.
  */
 export const UNHASHABLE = 'unhashable';
+
+/**
+ * Fail-closed absence probe: may return true ONLY for a path that is
+ * genuinely gone — every other shape (unreadable, unstatable, running
+ * through a regular-file component) is UNMEASURABLE and must re-enter scope.
+ *
+ * The leaf must fail lstat with ENOENT; any other errno refuses. On POSIX
+ * that suffices — a regular-file intermediate raises ENOTDIR. Windows
+ * reports ENOENT for that same shape (the R19-3 incident), so the nearest
+ * existing ancestor is probed: absence is provable only when that ancestor
+ * is a DIRECTORY; a regular-file ancestor keeps the path unmeasurable.
+ *
+ * The ancestor probe deliberately uses statSync, not lstatSync: a symlink
+ * resolving to a directory is traversable, so an ENOENT leaf below it is
+ * genuinely absent. lstatSync reads the link itself, reports "not a
+ * directory", and would turn every deleted path under a symlinked
+ * intermediate into permanent re-review. A symlink to a file still resolves
+ * to a non-directory (refused), and a broken link throws ENOENT, which
+ * continues the walk upward.
+ *
+ * One enumeration may share its ancestor probes: pass a Map keyed by absolute
+ * path and decided verdicts are reused across paths. See the walk below.
+ */
+export function isPathProvablyAbsent(
+  repoRoot: string,
+  relativePath: string,
+  ancestorProbes?: Map<string, boolean>,
+): boolean {
+  const candidate = join(repoRoot, relativePath);
+  try {
+    lstatSync(candidate);
+    return false;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return false;
+  }
+
+  // A sparse-checkout repo flags every out-of-cone path, all absent with
+  // unmaterialized ancestors: re-walking the same missing chain to the root
+  // once per path multiplied the metadata calls by depth+1, on Windows the
+  // slowest calls there are (R1-6). The optional memo — scoped by the caller
+  // to ONE enumeration — shares the decision: every stored entry is an
+  // actually-probed result, one statSync verdict plus that same verdict
+  // propagated down the chain this walk itself probed ENOENT, and a walk
+  // starting from any of those ancestors makes the identical probes and
+  // decides identically. The leaf lstat never enters the memo — it is
+  // per-path, and an existing path is never exempt. A non-ENOENT probe
+  // stores false: unmeasurable is not absent, and the memo must not launder
+  // it into an exemption.
+  let ancestor = dirname(candidate);
+  const walked: string[] = [];
+  const decide = (verdict: boolean): boolean => {
+    if (ancestorProbes) {
+      for (const w of walked) ancestorProbes.set(w, verdict);
+    }
+    return verdict;
+  };
+  for (;;) {
+    const memoized = ancestorProbes?.get(ancestor);
+    if (memoized !== undefined) return decide(memoized);
+    try {
+      const verdict = statSync(ancestor).isDirectory();
+      ancestorProbes?.set(ancestor, verdict);
+      return decide(verdict);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        ancestorProbes?.set(ancestor, false);
+        return decide(false);
+      }
+    }
+    walked.push(ancestor);
+    const parent = dirname(ancestor);
+    if (parent === ancestor) return false;
+    ancestor = parent;
+  }
+}
 
 export interface LocalCacheCandidate {
   v: 1;
@@ -636,6 +711,11 @@ export function invisibleTrackedPaths(repoRoot: string): string[] | null {
       'core.sparseCheckout',
     ) === 'true';
   if (!sparse) return tagged;
+  // One memo for this one enumeration: the flagged paths share long missing
+  // ancestor chains (the sparse shape), and sharing the probe results keeps
+  // the walk to one probe per ancestor instead of one per path times depth
+  // (R1-6; see the walk in isPathProvablyAbsent).
+  const ancestorProbes = new Map<string, boolean>();
   const absent = new Set(
     tagged.filter((p) => {
       // A name that did not survive the decode cannot be measured OR fed to
@@ -644,16 +724,9 @@ export function invisibleTrackedPaths(repoRoot: string): string[] | null {
       // `revisionIdentities` apply to undecodable paths. Never exempt it:
       // it stays flagged (R19-1).
       if (p.includes('\ufffd')) return false;
-      try {
-        lstatSync(join(repoRoot, p));
-        return false;
-      } catch (err) {
-        // Only ENOENT proves absence: an EACCES/ENOTDIR/ELOOP failure on a
-        // PRESENT flagged path folded into "absent" and the exemption then
-        // certified bytes `git diff` was blind to (R19-2). Unmeasurable is
-        // uncertifiable — it stays flagged.
-        return (err as NodeJS.ErrnoException).code === 'ENOENT';
-      }
+      // Only ENOENT-proven absence may exempt (R19-2): every unmeasurable
+      // shape the helper refuses stays flagged, never certified.
+      return isPathProvablyAbsent(repoRoot, p, ancestorProbes);
     }),
   );
   if (absent.size === 0) return tagged;

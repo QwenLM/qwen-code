@@ -872,7 +872,24 @@ export class ChatCompressionService {
 
     if (!summaryResult) {
       abortSignal.throwIfAborted();
-      summaryResult = await runColdCompression();
+      try {
+        summaryResult = await runColdCompression();
+      } catch (error) {
+        if (abortSignal.aborted) throw error;
+        config
+          .getDebugLogger()
+          .warn(
+            `[chat-compression] compression side-query failed: ${String(error)}`,
+          );
+        return {
+          newHistory: null,
+          info: {
+            originalTokenCount,
+            newTokenCount: originalTokenCount,
+            compressionStatus: CompressionStatus.COMPRESSION_FAILED_API_ERROR,
+          },
+        };
+      }
     }
     const summary = summaryResult.text;
     // Check the PROCESSED summary: postProcessSummary strips <analysis>

@@ -5,10 +5,11 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useWorkspace } from '@qwen-code/webui/daemon-react-sdk';
+import { useWorkspace } from '@qwen-code/web-shell/daemon-react-sdk';
 import type {
   DaemonGitBranchesResult,
   DaemonGitBranchInfo,
+  DaemonWorkspaceGitStatus,
 } from '@qwen-code/sdk/daemon';
 import {
   ArrowDownToLineIcon,
@@ -27,6 +28,7 @@ import {
 import { useI18n } from '../i18n';
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
 import { validateBranchName } from './GitModePopover';
+import { deriveStatus, hasComputedTreeSummary } from './GitBranchIndicator';
 import styles from './BranchPickerPopover.module.css';
 
 interface BranchPickerPopoverProps {
@@ -36,12 +38,190 @@ interface BranchPickerPopoverProps {
   gitCwd?: string;
   side?: 'top' | 'right' | 'bottom' | 'left';
   onBranchChanged?: () => void;
+  /**
+   * Working-tree summary from the trigger chip. Seeds the hints beside the
+   * Update / Commit / Push actions (dirty counts, in-progress operation) until
+   * the popover's own on-open fetch lands; whichever of the two carries the
+   * newer `computedAt` wins.
+   */
+  status?: DaemonWorkspaceGitStatus;
+  /**
+   * Receives the status the popover fetches for itself on open, so a caller
+   * that renders a chip from the same object can update it in step.
+   */
+  onStatusRefreshed?: (status: DaemonWorkspaceGitStatus) => void;
   onOpenDiff?: () => void;
   onOpenCommit?: () => void;
   children: React.ReactNode;
 }
 
 type SectionKey = 'recent' | 'local' | 'remote' | 'tags';
+
+type HintTone = 'muted' | 'info' | 'warning';
+
+interface ActionHint {
+  text: string;
+  tone: HintTone;
+}
+
+interface ActionHints {
+  pull?: ActionHint;
+  pullDisabled: boolean;
+  commit?: ActionHint;
+  push?: ActionHint;
+  pushDisabled: boolean;
+}
+
+type TranslateFn = ReturnType<typeof useI18n>['t'];
+
+/**
+ * Derive the per-action hints shown beside Update / Commit / Push so the user
+ * can judge before clicking.
+ *
+ * Disabling is reserved for what git itself refuses: `git pull` during a
+ * merge/rebase/cherry-pick, with unmerged entries, on a detached HEAD, or
+ * without a usable upstream; `git push --set-upstream` only on a detached
+ * HEAD (a push does not consult the index, so conflicts and in-progress
+ * operations are shown as warnings on an enabled row). Soft states (up to
+ * date, nothing to push, clean tree) only dim the row since the action is
+ * still harmless.
+ *
+ * The branch listing (fetched on open) provides ahead/behind/upstream; the
+ * status provides the tree counters and the in-progress operation. When the
+ * listing has no head entry the status fills in. Exported for tests.
+ */
+export function deriveActionHints(
+  t: TranslateFn,
+  data: DaemonGitBranchesResult | null,
+  status: DaemonWorkspaceGitStatus | undefined,
+): ActionHints {
+  const head = data?.local.find((b) => b.isHead);
+  const s = deriveStatus(status);
+  const detached = data?.detached ?? s.detached;
+  const ahead = head?.ahead ?? s.ahead;
+  const behind = head?.behind ?? s.behind;
+  const upstream = head?.upstream;
+  const upstreamGone = head?.upstreamGone === true;
+  const hasUpstream: boolean | undefined = head
+    ? Boolean(head.upstream) && !upstreamGone
+    : status?.hasUpstream;
+  // Entry-granularity counters (a partially staged file counts twice, an
+  // untracked directory once), so the copy says "changes", not "files".
+  const changed = s.staged + s.unstaged + s.untracked + s.conflicted;
+
+  const blocker: ActionHint | undefined = s.operation
+    ? { text: t(`git.operation.${s.operation}`), tone: 'warning' }
+    : s.conflicted > 0
+      ? { text: t('git.conflicted', { count: s.conflicted }), tone: 'warning' }
+      : detached
+        ? { text: t('git.detached'), tone: 'warning' }
+        : undefined;
+
+  let pull: ActionHint | undefined;
+  let pullDisabled = false;
+  if (blocker) {
+    pull = blocker;
+    pullDisabled = true;
+  } else if (hasUpstream === false) {
+    pull = {
+      text: t(
+        upstreamGone
+          ? 'branchPicker.hint.upstreamGone'
+          : 'branchPicker.hint.noUpstream',
+      ),
+      tone: 'muted',
+    };
+    pullDisabled = true;
+  } else if (behind > 0) {
+    pull =
+      changed > 0
+        ? {
+            text: t('branchPicker.hint.behindDirty', { count: behind }),
+            tone: 'warning',
+          }
+        : {
+            text: upstream ? `↓${behind} · ${upstream}` : `↓${behind}`,
+            tone: 'info',
+          };
+  } else if (hasUpstream) {
+    pull = { text: t('branchPicker.hint.upToDate'), tone: 'muted' };
+  }
+
+  let push: ActionHint | undefined;
+  // Only a detached HEAD makes the daemon's `git push --set-upstream` fail;
+  // an in-progress operation or conflicts are surfaced but left clickable.
+  const pushDisabled = detached;
+  if (blocker) {
+    push = blocker;
+  } else if (hasUpstream === false) {
+    push = { text: t('branchPicker.hint.setsUpstream'), tone: 'info' };
+  } else if (ahead > 0 && behind > 0) {
+    push = {
+      text: t('branchPicker.hint.aheadBehind', { ahead, behind }),
+      tone: 'warning',
+    };
+  } else if (ahead > 0) {
+    push = { text: `↑${ahead}`, tone: 'info' };
+  } else if (hasUpstream) {
+    push = { text: t('branchPicker.hint.nothingToPush'), tone: 'muted' };
+  }
+
+  let commit: ActionHint | undefined;
+  if (hasComputedTreeSummary(status)) {
+    commit =
+      changed > 0
+        ? {
+            text:
+              s.untracked > 0
+                ? t('branchPicker.hint.changesUntracked', {
+                    count: changed,
+                    untracked: s.untracked,
+                  })
+                : t('branchPicker.hint.changes', { count: changed }),
+            tone: 'info',
+          }
+        : { text: t('branchPicker.hint.noChanges'), tone: 'muted' };
+  }
+
+  return { pull, pullDisabled, commit, push, pushDisabled };
+}
+
+/** Of two statuses, the one the daemon computed later (a missing stamp loses). */
+function newerStatus(
+  a: DaemonWorkspaceGitStatus | undefined,
+  b: DaemonWorkspaceGitStatus | undefined,
+): DaemonWorkspaceGitStatus | undefined {
+  if (!a) return b;
+  if (!b) return a;
+  return (b.computedAt ?? -1) >= (a.computedAt ?? -1) ? b : a;
+}
+
+/**
+ * True when a status disagrees with the branch listing on a field the hints
+ * take from the listing — the signal that the listing is stale and should be
+ * re-fetched. Exported for tests.
+ */
+export function listingContradictsStatus(
+  data: DaemonGitBranchesResult,
+  status: DaemonWorkspaceGitStatus,
+): boolean {
+  if (status.detached !== undefined && status.detached !== data.detached) {
+    return true;
+  }
+  const head = data.local.find((b) => b.isHead);
+  if (!head) return false;
+  // The status cannot express a gone upstream (it reports the configured
+  // tracking as present), so the listing's `upstreamGone` is not a
+  // disagreement — only a genuinely set/unset upstream is.
+  const upstreamComparable = !head.upstreamGone;
+  return (
+    (upstreamComparable &&
+      status.hasUpstream !== undefined &&
+      status.hasUpstream !== Boolean(head.upstream)) ||
+    (status.ahead !== undefined && status.ahead !== head.ahead) ||
+    (status.behind !== undefined && status.behind !== head.behind)
+  );
+}
 
 export function BranchPickerPopover({
   open,
@@ -50,6 +230,8 @@ export function BranchPickerPopover({
   gitCwd,
   side = 'bottom',
   onBranchChanged,
+  status,
+  onStatusRefreshed,
   onOpenDiff,
   onOpenCommit,
   children,
@@ -82,6 +264,19 @@ export function BranchPickerPopover({
   const searchRef = useRef<HTMLInputElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const requestIdRef = useRef(0);
+  // Wall-clock time the current listing was received; lets a status the
+  // daemon computed later trigger a listing re-fetch (see the effect below).
+  const [listingFetchedAt, setListingFetchedAt] = useState<number>();
+  // The popover's own on-open status fetch, so every entry point (sidebar
+  // chip, composer chip, environment panel) sees fresh counters instead of
+  // whatever its caller last polled.
+  const [liveStatus, setLiveStatus] = useState<DaemonWorkspaceGitStatus>();
+  const statusRequestIdRef = useRef(0);
+  const reconciledAtRef = useRef<number | undefined>(undefined);
+  // Held in a ref so an inline callback from the parent doesn't re-arm the
+  // open effect on every render (callback → setState → render → refetch…).
+  const onStatusRefreshedRef = useRef(onStatusRefreshed);
+  onStatusRefreshedRef.current = onStatusRefreshed;
 
   const fetchBranches = useCallback(async () => {
     const requestId = ++requestIdRef.current;
@@ -91,6 +286,7 @@ export function BranchPickerPopover({
       const result = await ws.workspaceGitBranches(gitCwd);
       if (requestId !== requestIdRef.current) return;
       setData(result);
+      setListingFetchedAt(Date.now());
     } catch (err) {
       if (requestId !== requestIdRef.current) return;
       setError(err instanceof Error ? err.message : String(err));
@@ -101,9 +297,37 @@ export function BranchPickerPopover({
     }
   }, [ws, gitCwd]);
 
+  const fetchStatus = useCallback(async () => {
+    const requestId = ++statusRequestIdRef.current;
+    try {
+      // Mirrors the app-level poll: a worktree `?cwd=` read always computes
+      // directly, so `wait` only matters for the workspace root.
+      const fresh = await ws.workspaceGit(
+        gitCwd ? { cwd: gitCwd } : { wait: true },
+      );
+      if (requestId !== statusRequestIdRef.current) return;
+      setLiveStatus(fresh);
+      onStatusRefreshedRef.current?.(fresh);
+    } catch {
+      // Keep whatever the caller passed; the hints degrade to the listing.
+    }
+  }, [ws, gitCwd]);
+
+  // A status fetched for a previous workspace must not seed the next one.
+  useEffect(() => {
+    setLiveStatus(undefined);
+    statusRequestIdRef.current++;
+  }, [ws, gitCwd]);
+
+  const effectiveStatus = useMemo(
+    () => newerStatus(status, liveStatus),
+    [status, liveStatus],
+  );
+
   useEffect(() => {
     if (open) {
       void fetchBranches();
+      void fetchStatus();
       setSearch('');
       setNewBranchMode(false);
       setCheckoutRefMode(false);
@@ -112,7 +336,23 @@ export function BranchPickerPopover({
       setStatusMsg(null);
       setTimeout(() => searchRef.current?.focus(), 50);
     }
-  }, [open, fetchBranches]);
+  }, [open, fetchBranches, fetchStatus]);
+
+  // The listing is fetched once on open. If a status the daemon computed
+  // after that disagrees with it (upstream unset, HEAD detached, new commits
+  // from a terminal), re-fetch the listing so the rows follow the repo rather
+  // than the snapshot — once per status, so a persistent disagreement can't
+  // loop.
+  useEffect(() => {
+    if (!open || !data || !effectiveStatus || listingFetchedAt === undefined)
+      return;
+    const at = effectiveStatus.computedAt;
+    if (at === undefined || at <= listingFetchedAt) return;
+    if (reconciledAtRef.current === at) return;
+    if (!listingContradictsStatus(data, effectiveStatus)) return;
+    reconciledAtRef.current = at;
+    void fetchBranches();
+  }, [open, data, effectiveStatus, listingFetchedAt, fetchBranches]);
 
   const showStatus = useCallback(
     (msg: string, type: 'info' | 'error' | 'success' = 'info') => {
@@ -254,6 +494,11 @@ export function BranchPickerPopover({
     return groups;
   }, [filteredRemote]);
 
+  const hints = useMemo(
+    () => deriveActionHints(t, data, effectiveStatus),
+    [t, data, effectiveStatus],
+  );
+
   const actionsVisible =
     !q ||
     t('branchPicker.action.pull').toLowerCase().includes(q) ||
@@ -321,9 +566,10 @@ export function BranchPickerPopover({
                 <>
                   <button
                     type="button"
-                    className={styles.actionItem}
-                    disabled={!!busyAction}
+                    className={`${styles.actionItem} ${hints.pull?.tone === 'muted' ? styles.actionItemMuted : ''}`}
+                    disabled={!!busyAction || hints.pullDisabled}
                     onClick={() => void handlePull()}
+                    data-testid="branch-picker-pull"
                   >
                     {busyAction === 'pull' ? (
                       <Loader2Icon
@@ -339,28 +585,32 @@ export function BranchPickerPopover({
                     <span className={styles.actionLabel}>
                       {t('branchPicker.action.pull')}
                     </span>
+                    <ActionHintLabel hint={hints.pull} />
                   </button>
                   {onOpenCommit && (
                     <button
                       type="button"
-                      className={styles.actionItem}
+                      className={`${styles.actionItem} ${hints.commit?.tone === 'muted' ? styles.actionItemMuted : ''}`}
                       disabled={!!busyAction}
                       onClick={() => {
                         onOpenCommit();
                         onOpenChange(false);
                       }}
+                      data-testid="branch-picker-commit"
                     >
                       <GitCommitIcon size={14} className={styles.actionIcon} />
                       <span className={styles.actionLabel}>
                         {t('branchPicker.action.commit')}
                       </span>
+                      <ActionHintLabel hint={hints.commit} />
                     </button>
                   )}
                   <button
                     type="button"
-                    className={styles.actionItem}
-                    disabled={!!busyAction}
+                    className={`${styles.actionItem} ${hints.push?.tone === 'muted' ? styles.actionItemMuted : ''}`}
+                    disabled={!!busyAction || hints.pushDisabled}
                     onClick={() => void handlePush()}
+                    data-testid="branch-picker-push"
                   >
                     {busyAction === 'push' ? (
                       <Loader2Icon
@@ -376,6 +626,7 @@ export function BranchPickerPopover({
                     <span className={styles.actionLabel}>
                       {t('branchPicker.action.push')}
                     </span>
+                    <ActionHintLabel hint={hints.push} />
                   </button>
                   {onOpenDiff && (
                     <button
@@ -581,6 +832,19 @@ export function BranchPickerPopover({
         )}
       </PopoverContent>
     </Popover>
+  );
+}
+
+function ActionHintLabel({ hint }: { hint?: ActionHint }) {
+  if (!hint) return null;
+  return (
+    <span
+      className={styles.actionHint}
+      data-tone={hint.tone}
+      data-testid="branch-picker-action-hint"
+    >
+      {hint.text}
+    </span>
   );
 }
 

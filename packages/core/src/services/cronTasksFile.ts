@@ -44,6 +44,9 @@ export interface CronTaskRun {
    * owner id was known.
    */
   sessionId?: string;
+  /** The daemon could not create the fresh session requested for this run.
+   * Absent means the dispatch did not fail (or predates this field). */
+  sessionDispatchFailed?: boolean;
   /**
    * READ-ONLY backward-compatibility field. A pre-removal version stamped this
    * on a fire whose precondition withheld the prompt (it was booked as a run
@@ -109,6 +112,9 @@ export interface DurableCronTask {
   /** False when the caller, rather than the task, owns the bound session.
    * Absent means task-owned for backward compatibility. */
   sessionOwnedByTask?: boolean;
+  /** Where executions run. Absent defaults to the historical behavior:
+   * every fire reuses the task's bound session. */
+  sessionMode?: 'persistent' | 'per_run';
   delivery?: CronTaskDelivery;
   /**
    * Bounded, newest-last history of recent fires (capped at MAX_TASK_RUNS).
@@ -116,6 +122,35 @@ export interface DurableCronTask {
    * Appended at the scheduler's persist sites via {@link appendCronRun}.
    */
   runs?: CronTaskRun[];
+}
+
+/** How a per-run fire's fresh-session dispatch ended: the session the run
+ * actually executes in, and whether creating a fresh one failed first. */
+export interface CronRunSessionOutcome {
+  sessionId?: string;
+  dispatchFailed?: boolean;
+}
+
+/**
+ * Stamps a fresh-session dispatch outcome onto the run recorded at `firedAt`.
+ * Returns the task unchanged when no such run exists (one-shots are deleted on
+ * fire, and a run whose write has not landed yet has nothing to annotate).
+ */
+export function annotateCronRunSession(
+  task: DurableCronTask,
+  firedAt: number,
+  outcome: CronRunSessionOutcome,
+): DurableCronTask {
+  const index = task.runs?.findIndex((run) => run.at === firedAt) ?? -1;
+  if (index < 0 || !task.runs) return task;
+  const run: CronTaskRun = { ...task.runs[index]! };
+  delete run.sessionId;
+  delete run.sessionDispatchFailed;
+  if (outcome.sessionId) run.sessionId = outcome.sessionId;
+  if (outcome.dispatchFailed) run.sessionDispatchFailed = true;
+  const runs = [...task.runs];
+  runs[index] = run;
+  return { ...task, runs };
 }
 
 /**
@@ -429,6 +464,8 @@ function isValidRuns(value: unknown): value is CronTaskRun[] {
       (run['kind'] === undefined || typeof run['kind'] === 'string') &&
       (run['sessionId'] === undefined ||
         typeof run['sessionId'] === 'string') &&
+      (run['sessionDispatchFailed'] === undefined ||
+        typeof run['sessionDispatchFailed'] === 'boolean') &&
       // Read-only legacy compat: validate so a stored `withheld` marker isn't
       // rejected on read (it is never written anymore).
       (run['withheld'] === undefined || typeof run['withheld'] === 'boolean')
@@ -488,6 +525,9 @@ function isValidTask(value: unknown): value is DurableCronTask {
       (typeof obj['sessionId'] === 'string' && obj['sessionId'].length > 0)) &&
     (obj['sessionOwnedByTask'] === undefined ||
       typeof obj['sessionOwnedByTask'] === 'boolean') &&
+    (obj['sessionMode'] === undefined ||
+      obj['sessionMode'] === 'persistent' ||
+      obj['sessionMode'] === 'per_run') &&
     (obj['delivery'] === undefined || isValidDelivery(obj['delivery'])) &&
     (obj['runs'] === undefined || isValidRuns(obj['runs']))
   );

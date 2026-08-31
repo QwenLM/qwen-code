@@ -12,7 +12,7 @@ import {
   type ReactNode,
 } from 'react';
 import { CheckIcon, CopyIcon } from 'lucide-react';
-import { useWorkspace } from '@qwen-code/webui/daemon-react-sdk';
+import { useWorkspace } from '@qwen-code/web-shell/daemon-react-sdk';
 import type {
   DaemonGitLog,
   DaemonGitLogEntry,

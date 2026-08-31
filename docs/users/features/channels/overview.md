@@ -111,7 +111,9 @@ Daemon-managed Channels can retain several named conversations for the same user
 
 The catalog is private to the exact channel, chat, and sender. Task names use 1–32 ASCII letters, numbers, underscores, or hyphens, and are unique case-insensitively. Up to eight tasks may be open; closing a task detaches it without deleting its transcript, so selecting it later reopens the exact conversation. Session IDs are never accepted by or shown in chat commands.
 
-Part 2 uses one selected task at a time and a shared working directory. Creating a task or switching away from the selected task is rejected while that task is still running or waiting for permission, and a busy task cannot be closed. Concurrent running-task switching, named cancellation, and task labels are planned for Part 3; per-task worktrees are planned for Part 4. Channel memory remains scoped to the chat rather than to a named task.
+Named results identify their originating task: direct chats use `[task]`, while group chats use `[sender · task]`. Named text permission prompts also show the exact request ID and the corresponding `/approve <id>`, `/approve-always <id>`, and `/deny <id>` commands. The label is presentation-only and is not stored in the model transcript.
+
+This stage still uses one selected task at a time and a shared working directory. Creating a task or switching away from the selected task is rejected while that task is still running or waiting for permission, and a busy task cannot be closed. Concurrent running-task switching and named cancellation remain planned for the next Part 3 stage; per-task worktrees are planned for Part 4. Channel memory remains scoped to the chat rather than to a named task.
 
 This mode is unavailable in standalone `qwen channel start`, with webhooks, with non-zero channel or group `groupHistoryLimit`, or with Channel loops. If an enabled loop already exists for that channel, the daemon worker refuses to start until the loop is disabled.
 

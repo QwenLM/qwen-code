@@ -748,8 +748,15 @@ function setupAcpTest(
       })) as { sessionId: string };
       expect(newSession.sessionId).toBeTruthy();
 
-      // Wait for available_commands_update to be received
-      await delay(1000);
+      await rig.poll(
+        () =>
+          sessionUpdates.some(
+            (update) =>
+              update.update?.sessionUpdate === 'available_commands_update',
+          ),
+        5000,
+        100,
+      );
 
       // Verify available_commands_update is received
       const commandsUpdate = sessionUpdates.find(

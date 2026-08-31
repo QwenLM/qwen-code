@@ -1890,6 +1890,9 @@ describe('extension management v2 REST', () => {
             },
           }),
         );
+        expect(
+          prepareInstall.mock.calls.at(-1)?.[0].installMetadata,
+        ).not.toHaveProperty('networkPolicy');
         expect(JSON.stringify(operation)).not.toContain('fine-grained-token');
         expect(JSON.stringify(h.primary.bridge)).not.toContain(
           'fine-grained-token',

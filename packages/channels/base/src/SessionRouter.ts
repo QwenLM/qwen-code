@@ -135,15 +135,14 @@ export class SessionRouter {
 
   private sessionOptions(
     channelName: string,
-  ): ChannelAgentBridgeSessionOptions | undefined {
+  ): ChannelAgentBridgeSessionOptions {
     const approvalMode = this.channelApprovalModes.get(channelName);
     const loopsDisabled = this.channelsWithoutLoops.has(channelName);
-    return approvalMode || loopsDisabled
-      ? {
-          ...(approvalMode ? { approvalMode } : {}),
-          ...(loopsDisabled ? { enableChannelLoops: false } : {}),
-        }
-      : undefined;
+    return {
+      ...(approvalMode ? { approvalMode } : {}),
+      ...(loopsDisabled ? { enableChannelLoops: false } : {}),
+      sourceId: channelName,
+    };
   }
 
   async resolve(
@@ -261,7 +260,6 @@ export class SessionRouter {
         key,
         this.sessionOptions(input.channelName),
         operation,
-        input.channelName,
       );
       try {
         this.assertOperationCurrent(operation);
@@ -345,7 +343,6 @@ export class SessionRouter {
             key,
             this.sessionOptions(input.channelName),
             operation,
-            input.channelName,
           );
           try {
             this.assertOperationCurrent(operation);
@@ -384,6 +381,10 @@ export class SessionRouter {
 
   getTarget(sessionId: string): SessionTarget | undefined {
     return this.toTarget.get(sessionId);
+  }
+
+  isSessionLive(sessionId: string): boolean {
+    return this.toTarget.has(sessionId) && this.isLive(sessionId);
   }
 
   getSession(
@@ -979,18 +980,13 @@ export class SessionRouter {
     cwd: string,
     loadWindow: SessionLoadWindow,
     routingKey: string,
-    options: { approvalMode?: string } | undefined,
+    options: ChannelAgentBridgeSessionOptions,
     operation: SessionOperation,
-    sourceId: string,
   ): Promise<string> {
     const maxAttempts = 2;
     let lastDeadSessionId: string | undefined;
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      const sessionId = await this.bridge.newSession(
-        cwd,
-        { ...options, sourceId },
-        operation,
-      );
+      const sessionId = await this.bridge.newSession(cwd, options, operation);
       try {
         this.assertOperationCurrent(operation);
       } catch (error) {

@@ -70,9 +70,8 @@ vi.mock('./api.js', () => ({
 const { encryptAesEcb, computeMd5 } =
   await vi.importActual<typeof import('./media.js')>('./media.js');
 
-const { sendImage, detectImageMime, validateImagePath } = await import(
-  './send.js'
-);
+const { sendText, sendImage, detectImageMime, validateImagePath } =
+  await import('./send.js');
 
 describe('markdownToPlainText', () => {
   it('strips code blocks', () => {
@@ -149,6 +148,32 @@ describe('markdownToPlainText', () => {
     expect(result).not.toContain('#');
     expect(result).not.toContain('**');
     expect(result).not.toContain('`');
+  });
+});
+
+describe('sendText', () => {
+  it('sends already-projected text without rewriting the attribution label', async () => {
+    mockSendMessage.mockResolvedValue(undefined);
+
+    await sendText({
+      to: 'user-123',
+      text: '[fix_bug_2] Here is the result.',
+      baseUrl: 'https://api.example.com',
+      token: 'token-abc',
+      contextToken: 'ctx-456',
+    });
+
+    expect(mockSendMessage).toHaveBeenCalledWith(
+      'https://api.example.com',
+      'token-abc',
+      expect.objectContaining({
+        item_list: [
+          expect.objectContaining({
+            text_item: { text: '[fix_bug_2] Here is the result.' },
+          }),
+        ],
+      }),
+    );
   });
 });
 

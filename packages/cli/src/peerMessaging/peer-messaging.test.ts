@@ -16,15 +16,22 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import {
   ApprovalMode,
+  buildDeliveryStatusFrame,
   buildUserFrame,
   MAX_HELD_MESSAGES,
   MAX_SETTLED_IDS,
+  resetSentPeerMessagesForTest,
   sendPeerFrame,
   startPeerInbox,
+  trackSentPeerMessageForTest,
   type PeerFrame,
   type PeerInbox,
 } from '@qwen-code/qwen-code-core';
-import { MAX_ACCEPTED_BACKLOG, PeerMessaging } from './peer-messaging.js';
+import {
+  MAX_ACCEPTED_BACKLOG,
+  PeerMessaging,
+  type PeerQueuedDelivery,
+} from './peer-messaging.js';
 
 // Holds the inbox's post-listen socket chmod, keeping startPeerInbox
 // pending while the socket already accepts connections.
@@ -62,6 +69,8 @@ beforeEach(async () => {
   chmodControl.holdSocketChmod = false;
   chmodControl.calls = 0;
   chmodControl.release = null;
+  // The ledger is a module singleton shared by every test in this file.
+  resetSentPeerMessagesForTest();
 });
 
 afterEach(async () => {
@@ -88,6 +97,14 @@ async function startSenderInbox(): Promise<PeerInbox> {
 
 async function start(
   mode: ApprovalMode | null = ApprovalMode.DEFAULT,
+  extra: {
+    getSessionId?: () => string;
+    settleSentMessage?: (
+      msgId: string,
+      status: string,
+    ) => { address: string; previous: 'pending' | 'held' } | undefined;
+    reassertSessionRecord?: () => Promise<void>;
+  } = {},
 ): Promise<{
   messaging: PeerMessaging;
   submitted: Array<{ modelText: string; displayText: string }>;
@@ -98,6 +115,7 @@ async function start(
     getApprovalMode: () => mode,
     getPolicySetting: () => undefined,
     updateSessionRegistryIpcPath: async () => {},
+    ...extra,
   });
   if (!started) throw new Error('peer messaging failed to start');
   messaging = started;
@@ -128,6 +146,382 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     expect(submitted[0].modelText).toContain('check the tests over there');
     expect(submitted[0].modelText).toContain('permission laundering');
     expect(submitted[0].displayText).toContain('app-ab');
+  });
+
+  it('surfaces a receipt for a message this session sent', async () => {
+    const { messaging: m } = await start(ApprovalMode.DEFAULT, {
+      settleSentMessage: (msgId) =>
+        msgId === 'sent-0001'
+          ? {
+              address: 'docs-cd [ab12cd]',
+              previous: 'pending',
+            }
+          : undefined,
+    });
+    const seen: Array<{ status: string; address: string; origMsgId: string }> =
+      [];
+    m.onReceipt((receipt) => seen.push(receipt));
+
+    await sendPeerFrame(
+      m.socketPath!,
+      buildDeliveryStatusFrame({
+        status: 'held',
+        origMsgId: 'sent-0001',
+        from: '/tmp/peer.sock',
+      }),
+    );
+    await settle();
+
+    expect(seen).toEqual([
+      {
+        status: 'held',
+        address: 'docs-cd [ab12cd]',
+        origMsgId: 'sent-0001',
+        previous: 'pending',
+      },
+    ]);
+  });
+
+  it('drops a receipt the ledger does not settle (unknown id, or a repeat)', async () => {
+    const { messaging: m } = await start(ApprovalMode.DEFAULT, {
+      settleSentMessage: () => undefined,
+    });
+    const seen: unknown[] = [];
+    m.onReceipt((receipt) => seen.push(receipt));
+
+    await sendPeerFrame(
+      m.socketPath!,
+      buildDeliveryStatusFrame({
+        status: 'denied',
+        origMsgId: 'forged-0001',
+        from: '/tmp/peer.sock',
+      }),
+    );
+    await settle();
+
+    expect(seen).toEqual([]);
+  });
+
+  it('settles receipts through the real ledger when none is injected', async () => {
+    // Production passes no settleSentMessage, so the default
+    // settleSentPeerMessage runs — a path every other receipt test stubs
+    // out. The ledger's own outcomes are covered in peer-send.test.ts;
+    // what needs pinning here is that the default is wired at all, so an
+    // id this session never sent settles to nothing and the frame is
+    // dropped rather than announced or thrown on.
+    const { messaging: m } = await start(ApprovalMode.DEFAULT);
+    const seen: unknown[] = [];
+    m.onReceipt((receipt) => seen.push(receipt));
+
+    await sendPeerFrame(
+      m.socketPath!,
+      buildDeliveryStatusFrame({
+        status: 'denied',
+        origMsgId: 'never-sent-by-this-session',
+        from: '/tmp/peer.sock',
+      }),
+    );
+    await settle();
+
+    expect(seen).toEqual([]);
+  });
+
+  it('surfaces a real-ledger receipt with the address the send recorded', async () => {
+    // The case above only proves the default drops what it should. A
+    // default swapped for a no-op returning undefined passes it just as
+    // happily — and in production that silently loses every receipt, since
+    // `startInteractiveUI` injects no `settleSentMessage`. This drives the
+    // other direction through the same unstubbed default: an id the real
+    // ledger holds must come back out of `onReceipt` carrying the ledger's
+    // own `address` and `previous`, neither of which the frame supplies.
+    trackSentPeerMessageForTest('sent-real-0001', 'docs-cd [ab12cd]');
+    const { messaging: m } = await start(ApprovalMode.DEFAULT);
+    const seen: unknown[] = [];
+    m.onReceipt((receipt) => seen.push(receipt));
+
+    await sendPeerFrame(
+      m.socketPath!,
+      buildDeliveryStatusFrame({
+        status: 'held',
+        origMsgId: 'sent-real-0001',
+        from: '/tmp/peer.sock',
+      }),
+    );
+    await settle();
+
+    expect(seen).toEqual([
+      {
+        status: 'held',
+        address: 'docs-cd [ab12cd]',
+        origMsgId: 'sent-real-0001',
+        previous: 'pending',
+      },
+    ]);
+  });
+
+  it('keeps delivering receipts when one listener throws', async () => {
+    const { messaging: m } = await start(ApprovalMode.DEFAULT, {
+      settleSentMessage: () => ({
+        address: 'docs-cd',
+        previous: 'pending',
+      }),
+    });
+    const seen: unknown[] = [];
+    m.onReceipt(() => {
+      throw new Error('listener bug');
+    });
+    m.onReceipt((receipt) => seen.push(receipt));
+
+    await sendPeerFrame(
+      m.socketPath!,
+      buildDeliveryStatusFrame({ status: 'expired', origMsgId: 'sent-0002' }),
+    );
+    await settle();
+
+    expect(seen).toHaveLength(1);
+  });
+
+  it('refuses a message pinned to another session id, with a receipt', async () => {
+    const sender = await startSenderInbox();
+    const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT, {
+      getSessionId: () => 'session-now',
+    });
+    const frame = buildUserFrame({
+      content: 'meant for whoever had this pid before',
+      from: sender.socketPath,
+      toSessionId: 'session-before',
+    });
+    await sendPeerFrame(m.socketPath!, frame);
+    await settle();
+
+    expect(submitted).toHaveLength(0);
+    expect(m.getHeld()).toHaveLength(0);
+    expect(receipts).toHaveLength(1);
+    expect(receipts[0]).toMatchObject({
+      type: 'control',
+      status: 'misaddressed',
+      origMsgId: frame.msgId,
+      from: m.socketPath,
+    });
+  });
+
+  it('admits a pinned message when it has no session id to judge it against', async () => {
+    const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT);
+    await sendPeerFrame(
+      m.socketPath!,
+      buildUserFrame({
+        content: 'hello',
+        from: '/tmp/peer.sock',
+        toSessionId: 'some-session',
+      }),
+    );
+    await settle();
+    expect(submitted).toHaveLength(1);
+  });
+
+  it('re-asserts its registry record when a pinned frame misses', async () => {
+    const reassert = vi.fn().mockResolvedValue(undefined);
+    const { messaging: m } = await start(ApprovalMode.DEFAULT, {
+      getSessionId: () => 'session-now',
+      reassertSessionRecord: reassert,
+    });
+    await sendPeerFrame(
+      m.socketPath!,
+      buildUserFrame({
+        content: 'stale',
+        from: '/tmp/peer.sock',
+        toSessionId: 'session-before',
+      }),
+    );
+    await settle();
+    expect(reassert).toHaveBeenCalledTimes(1);
+  });
+
+  it('judges a frame that arrives before bind completes against the pin too', async () => {
+    // startPeerInbox resolves only after its post-listen chmod; frames
+    // dispatched in that window must already see the session id.
+    // The sender inbox first, so its own chmods do not race for the
+    // held slot; the hold engages on the inbox's post-listen chmod.
+    const sender = await startSenderInbox();
+    chmodControl.calls = 0;
+    chmodControl.holdSocketChmod = true;
+    const submitted: string[] = [];
+    const starting = PeerMessaging.start({
+      socketPath: path.join(tmpDir, 'socks', 'self.sock'),
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPolicySetting: () => undefined,
+      updateSessionRegistryIpcPath: async () => {},
+      getSessionId: () => 'session-now',
+    });
+    // Wait until the listener exists and its chmod is being held.
+    for (let i = 0; i < 100 && chmodControl.release === null; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    if (chmodControl.release === null) throw new Error('chmod hold missed');
+    const frame = buildUserFrame({
+      content: 'early and misaddressed',
+      from: sender.socketPath,
+      toSessionId: 'session-before',
+    });
+    await sendPeerFrame(path.join(tmpDir, 'socks', 'self.sock'), frame);
+    await settle();
+    chmodControl.release?.();
+    const started = await starting;
+    if (!started) throw new Error('peer messaging failed to start');
+    messaging = started;
+    started.setSubmitFn((modelText) => {
+      submitted.push(modelText);
+      return true;
+    });
+    await settle();
+
+    expect(submitted).toHaveLength(0);
+    expect(started.getHeld()).toHaveLength(0);
+    expect(receipts).toHaveLength(1);
+    expect(receipts[0]).toMatchObject({
+      type: 'control',
+      status: 'misaddressed',
+      origMsgId: frame.msgId,
+    });
+  });
+
+  it('admits a message pinned to its own session id', async () => {
+    const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT, {
+      getSessionId: () => 'session-now',
+    });
+    await sendPeerFrame(
+      m.socketPath!,
+      buildUserFrame({
+        content: 'hello',
+        from: '/tmp/peer.sock',
+        toSessionId: 'session-now',
+      }),
+    );
+    await settle();
+    expect(submitted).toHaveLength(1);
+  });
+
+  it('admits an unpinned message from an older sender', async () => {
+    const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT, {
+      getSessionId: () => 'session-now',
+    });
+    await sendPeerFrame(
+      m.socketPath!,
+      buildUserFrame({ content: 'hello', from: '/tmp/peer.sock' }),
+    );
+    await settle();
+    expect(submitted).toHaveLength(1);
+  });
+
+  it('judges the pin against the id this session holds now, not at start', async () => {
+    let current = 'session-a';
+    const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT, {
+      getSessionId: () => current,
+    });
+    current = 'session-b';
+    await sendPeerFrame(
+      m.socketPath!,
+      buildUserFrame({
+        content: 'after /clear',
+        from: '/tmp/peer.sock',
+        toSessionId: 'session-b',
+      }),
+    );
+    await settle();
+    expect(submitted).toHaveLength(1);
+  });
+
+  it('drops a held frame when the session id swaps before reevaluation', async () => {
+    const sender = await startSenderInbox();
+    let mode = ApprovalMode.YOLO;
+    let current = 'session-a';
+    const started = await PeerMessaging.start({
+      socketPath: path.join(tmpDir, 'socks', 'self.sock'),
+      getApprovalMode: () => mode,
+      getPolicySetting: () => undefined,
+      updateSessionRegistryIpcPath: async () => {},
+      getSessionId: () => current,
+    });
+    if (!started) throw new Error('peer messaging failed to start');
+    messaging = started;
+    const submitted: string[] = [];
+    started.setSubmitFn((modelText) => {
+      submitted.push(modelText);
+      return true;
+    });
+    const frame = buildUserFrame({
+      content: 'held before /clear',
+      from: sender.socketPath,
+      fromMode: 'prompting',
+      toSessionId: 'session-a',
+    });
+    await sendPeerFrame(started.socketPath!, frame);
+    await settle();
+    expect(started.getHeld()).toHaveLength(1);
+
+    current = 'session-b';
+    mode = ApprovalMode.DEFAULT;
+    expect(started.reevaluate('approval-mode-changed')).toBe(0);
+    expect(started.getHeld()).toHaveLength(0);
+    expect(submitted).toHaveLength(0);
+    await settle();
+    const statuses = receipts
+      .filter((receipt) => receipt.type === 'control')
+      .filter((receipt) => receipt.origMsgId === frame.msgId)
+      .map((receipt) => receipt.status);
+    expect(statuses).toEqual(['held', 'misaddressed']);
+  });
+
+  it('drops a queued envelope whose pin the session outgrew at drain', async () => {
+    const sender = await startSenderInbox();
+    let current = 'session-a';
+    const started = await PeerMessaging.start({
+      socketPath: path.join(tmpDir, 'socks', 'self.sock'),
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPolicySetting: () => undefined,
+      updateSessionRegistryIpcPath: async () => {},
+      getSessionId: () => current,
+    });
+    if (!started) throw new Error('peer messaging failed to start');
+    messaging = started;
+    const queued: PeerQueuedDelivery[] = [];
+    started.setSubmitFn((_modelText, _displayText, delivery) => {
+      if (delivery) queued.push(delivery);
+      return true;
+    });
+    const frame = buildUserFrame({
+      content: 'queued before /clear',
+      from: sender.socketPath,
+      toSessionId: 'session-a',
+    });
+    await sendPeerFrame(started.socketPath!, frame);
+    await settle();
+    expect(queued).toEqual([
+      {
+        msgId: frame.msgId,
+        from: sender.socketPath,
+        toSessionId: 'session-a',
+      },
+    ]);
+
+    current = 'session-b';
+    expect(started.drainQueuedFrame(queued[0])).toBe(false);
+    await settle();
+    const statuses = receipts
+      .filter((receipt) => receipt.type === 'control')
+      .map((receipt) => receipt.status);
+    expect(statuses).toEqual(['delivered', 'misaddressed']);
+  });
+
+  it('drains a matching or unpinned queued envelope', async () => {
+    const { messaging: m } = await start(ApprovalMode.DEFAULT, {
+      getSessionId: () => 'session-a',
+    });
+    expect(m.drainQueuedFrame({ msgId: 'm1', toSessionId: 'session-a' })).toBe(
+      true,
+    );
+    expect(m.drainQueuedFrame({ msgId: 'm2' })).toBe(true);
+    expect(m.drainQueuedFrame(undefined)).toBe(true);
   });
 
   it('holds a message when the receiver bypasses prompts and the sender says nothing', async () => {

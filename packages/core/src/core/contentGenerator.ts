@@ -87,9 +87,10 @@ export type ContentGeneratorConfig = {
   // Total-lifetime cap for one streaming response, NOT refreshed by chunk
   // arrival: a drip-fed stream resets the idle watchdog forever while never
   // completing the message (issue #8597), so that shape needs a bound the
-  // chunks cannot reset. `<= 0` disables it. Honored only by the
-  // OpenAI-compatible pipeline today — the Anthropic/Gemini generators do not
-  // implement it, so on those auth types the drip-fed shape stays unbounded.
+  // chunks cannot reset. `<= 0` disables it. Honored by the OpenAI-compatible
+  // pipeline and the Anthropic generator (shared `withStreamGuards`,
+  // issue #9005 finding 4); the Gemini generator does not implement it, so on
+  // that auth type the drip-fed shape stays unbounded.
   streamMaxLifetimeMs?: number;
   maxRetries?: number; // Maximum retries for rate-limit errors
   retryInitialDelayMs?: number; // Initial delay for stream rate-limit retries
