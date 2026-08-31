@@ -30,7 +30,8 @@ outcome>` arrow notation, the section-header voice** — is template
 - **Markers — the `**[Critical]**`/`**[Suggestion]**` prefixes and the
   footer** — are machine-readable signals, not prose style:
   `qwen-autofix.yml`'s Critical-only mode classifies every feedback body by
-  its leading rendered Critical prefix, so quoted marker text does not promote a
+  its source-leading Critical prefix after whitespace, HTML comments, or Unicode
+  format controls, so quoted marker text does not promote a
   Suggestion. The prefix lets a human triage blockers at a glance. They stay
   when attribution is on and
   are stripped when it is off — attribution already decides whether the
@@ -108,7 +109,7 @@ template at all — no new plumbing anywhere.
   marker's severity, so an unresolved Critical re-enters the re-check
   section every round even without the visible prefix.
 - `qwen-autofix`'s Critical-only mode (engaged after round 5, or earlier when a counting window's diff-growth budget trips) classifies posted bodies
-  by their leading rendered Critical prefix; attribution-off findings have no visible prefix and are
+  by their source-leading Critical prefix after whitespace, HTML comments, or Unicode format controls; attribution-off findings have no visible prefix and are
   deferred as non-Critical, as disclosed in the setting's description.
 
 ### Prompt layer (SKILL.md, dogfooded)

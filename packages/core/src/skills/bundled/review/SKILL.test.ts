@@ -1383,6 +1383,16 @@ describe('bundled review skill', () => {
     expect(referenceBody('aone.md')).toContain('# Aone Code paths');
   });
 
+  it('keeps posting severity instructions aligned with Critical-only classification', () => {
+    const posting = referenceBody('posting.md');
+    expect(posting).toContain('leading source marker');
+    expect(posting).toContain(
+      'quoted witness text, does not promote a Suggestion',
+    );
+    expect(posting).not.toContain('position-independent substring test');
+    expect(posting).not.toContain('occurs _anywhere_ in its body');
+  });
+
   it('gates every reference file on the verdict in the core body', () => {
     // A run must learn from the injected core alone WHICH file to read and
     // when; a gate that moved into the file it gates would be unreadable.

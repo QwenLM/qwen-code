@@ -7002,6 +7002,13 @@ exit 1
     // unclassified comments stay open instead of driving more code changes.
     expect(prepareBranchAndFeedbackStep).toContain('CRITICAL_ONLY');
     expect(prepareBranchAndFeedbackStep).toContain('**[Critical]**');
+    const leadingCriticalDefinitions = (
+      `${workflow}\n${reviewVerificationRunner}`.match(
+        /def leading_critical:\s*\n\s*gsub\([^\n]+\)\s*\n\s*\| startswith\([^\n]+\);/g,
+      ) ?? []
+    ).map((definition) => definition.replace(/\s+/g, ' ').trim());
+    expect(leadingCriticalDefinitions).toHaveLength(9);
+    expect(new Set(leadingCriticalDefinitions).size).toBe(1);
     const inlineFilter = prepareBranchAndFeedbackStep.match(
       /echo "## Inline comments"[\s\S]*?jq -rs --arg wm "\$\{WATERMARK\}"[\s\S]*?--slurpfile reviews "\$\{WORKDIR\}\/rv\.json" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/rc\.json"/,
     )?.[1];
@@ -7855,6 +7862,13 @@ exit 1
     // The deferral note names over-budget authors with the escapes.
     expect(prepareBranchAndFeedbackStep).toContain('is at this window');
     expect(prepareBranchAndFeedbackStep).toContain('regular-feedback budget');
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'start your comment with **[Critical]**',
+    );
+    expect(prepareBranchAndFeedbackStep).toContain(
+      '请以 **[Critical]** 开头评论',
+    );
+    expect(designDoc).toContain('starting a comment with **[Critical]**');
     expect(inlineFilter).toContain('pull_request_review_id');
 
     // Scan still selects fresh suggestions so a no-op report can advance the

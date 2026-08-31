@@ -4846,7 +4846,7 @@ jobs:
                 "${WORKDIR}/ic.json"
               if [[ "${OVER_BUDGET_AUTHORS}" != '[]' ]]; then
                 echo
-                jq -r '.[] | "- @" + . + " is at this window'"'"'s regular-feedback budget — to continue: tag **[Critical]**, submit a Request changes review, or comment `@qwen-code /retry` for a fresh window. / @" + . + " 本窗口常规反馈预算已用完——继续请标 **[Critical]**、提交 Request changes、或评论 `@qwen-code /retry` 开新窗口。"' <<< "${OVER_BUDGET_AUTHORS}"
+                jq -r '.[] | "- @" + . + " is at this window'"'"'s regular-feedback budget — to continue: start your comment with **[Critical]**, submit a Request changes review, or comment `@qwen-code /retry` for a fresh window. / @" + . + " 本窗口常规反馈预算已用完——继续请以 **[Critical]** 开头评论、提交 Request changes、或评论 `@qwen-code /retry` 开新窗口。"' <<< "${OVER_BUDGET_AUTHORS}"
               fi
               echo
               echo '<details>'
