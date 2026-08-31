@@ -939,18 +939,12 @@ for (const theme of THEMES) {
       // per-workspace fetch. Wait for the loaded session's row before capturing
       // so the async load has settled — otherwise the row list races the
       // screenshot and the capture differs between runs.
-      await expect(
-        sidebar.getByRole('button', {
-          name: primarySessionName,
-          exact: true,
-        }),
-      ).toHaveCount(1);
-      await expect(
-        sidebar.getByRole('button', {
-          name: secondarySessionName,
-          exact: true,
-        }),
-      ).toHaveCount(1);
+      const sessionRow = (name: string) =>
+        sidebar.locator('[data-web-shell-session-title]').filter({
+          hasText: name,
+        });
+      await expect(sessionRow(primarySessionName)).toHaveCount(1);
+      await expect(sessionRow(secondarySessionName)).toHaveCount(1);
       await captureScreenshot(page, `workspace-sidebar-${theme}`);
     });
 
