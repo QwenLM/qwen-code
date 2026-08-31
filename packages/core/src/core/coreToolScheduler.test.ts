@@ -12514,6 +12514,8 @@ describe('CoreToolScheduler plan mode with ask_user_question', () => {
   });
 
   it('should handle user cancellation of ask_user_question in plan mode', async () => {
+    const cancelMessage =
+      'Permission request timed out before the user answered.';
     const mockTool = createAskUserQuestionMockTool();
     const onAllToolCallsComplete = vi.fn();
     const onToolCallsUpdate = vi.fn();
