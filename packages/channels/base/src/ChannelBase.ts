@@ -2850,48 +2850,40 @@ export abstract class ChannelBase {
 
   private formatPermissionRequest(pending: PendingPermission): string {
     const { toolCall } = pending.request;
-    const title = this.permissionTitle(toolCall);
-    const toolName = this.permissionToolName(toolCall);
     const parameters = this.permissionParameterSummary(toolCall);
-    const approveOption = this.approvalOption(pending);
+    const approveLabel = this.permissionOptionLabel(
+      this.approvalOption(pending),
+      'allow once',
+    );
     const alwaysOption = this.approvalAlwaysOption(pending);
-    const denyOption = this.denialOption(pending);
-    if (pending.taskName) {
-      const replies = [
-        `/approve ${pending.requestId}          ${this.permissionOptionLabel(approveOption, 'allow once')}`,
-        ...(alwaysOption
-          ? [`/approve-always ${pending.requestId}   ${alwaysOption.label}`]
-          : []),
-        `/deny ${pending.requestId}             ${this.permissionOptionLabel(denyOption, 'deny')}`,
-      ];
-      return [
-        'Permission required to run a tool',
-        `Request: ${pending.requestId}`,
-        '',
-        `Tool: ${toolName}`,
-        `Action: ${title}`,
-        ...(parameters ? [`Parameters: ${parameters}`] : []),
-        '',
-        'Reply with:',
-        ...replies,
-      ].join('\n');
-    }
+    const denyLabel = this.permissionOptionLabel(
+      this.denialOption(pending),
+      'deny',
+    );
+    const requestSuffix = pending.taskName ? ` ${pending.requestId}` : '';
+    const replyPadding = pending.taskName
+      ? { approve: '          ', always: '   ', deny: '             ' }
+      : { approve: '        ', always: ' ', deny: '           ' };
     const replies = [
-      `/approve        ${this.permissionOptionLabel(approveOption, 'allow once')}`,
-      ...(alwaysOption ? [`/approve-always ${alwaysOption.label}`] : []),
-      `/deny           ${this.permissionOptionLabel(denyOption, 'deny')}`,
+      `/approve${requestSuffix}${replyPadding.approve}${approveLabel}`,
+      ...(alwaysOption
+        ? [
+            `/approve-always${requestSuffix}${replyPadding.always}${alwaysOption.label}`,
+          ]
+        : []),
+      `/deny${requestSuffix}${replyPadding.deny}${denyLabel}`,
     ];
-    const lines = [
+    return [
       'Permission required to run a tool',
+      ...(pending.taskName ? [`Request: ${pending.requestId}`] : []),
       '',
-      `Tool: ${toolName}`,
-      `Action: ${title}`,
+      `Tool: ${this.permissionToolName(toolCall)}`,
+      `Action: ${this.permissionTitle(toolCall)}`,
       ...(parameters ? [`Parameters: ${parameters}`] : []),
       '',
       'Reply with:',
       ...replies,
-    ];
-    return lines.join('\n');
+    ].join('\n');
   }
 
   private permissionTitle(

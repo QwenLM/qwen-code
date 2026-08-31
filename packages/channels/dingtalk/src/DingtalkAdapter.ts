@@ -607,7 +607,8 @@ function presentInboundError(error: unknown): InboundErrorPresentation {
 
   try {
     if (error instanceof Error) {
-      parts.push(error.name, error.message);
+      if (typeof error.name === 'string') parts.push(error.name);
+      if (typeof error.message === 'string') parts.push(error.message);
     } else if (typeof error === 'string') {
       parts.push(error);
     }
@@ -677,7 +678,7 @@ function presentInboundError(error: unknown): InboundErrorPresentation {
   if (
     status === 502 ||
     status === 503 ||
-    /unavailable|econn|enotfound|network|socket|fetch failed|connection|session[_ ](?:not found|closing)|workspace[_ ]draining|transport closed/.test(
+    /unavailable|econn|enotfound|etimedout|network|socket|fetch failed|connection|session[_ ](?:not[ _]found|closing)|workspace[_ ]draining|transport closed/.test(
       diagnostic,
     )
   ) {

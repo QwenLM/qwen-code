@@ -2190,6 +2190,48 @@ describe('ChannelBase', () => {
       expect(ch.sent.at(-1)?.text).toContain('- req-empty-labels: Tool use');
     });
 
+    it('summarizes permission parameters with shape markers and overflow', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      const emitParams = (requestId: string, rawInput: unknown): void => {
+        (bridge as unknown as EventEmitter).emit('permissionRequest', {
+          requestId,
+          sessionId,
+          request: {
+            toolCall: {
+              toolCallId: `tool-${requestId}`,
+              kind: 'shell',
+              title: `Run ${requestId}`,
+              rawInput,
+              _meta: { toolName: 'run_shell_command' },
+            },
+            options: [
+              { optionId: 'proceed_once', kind: 'allow_once', name: 'Allow' },
+              { optionId: 'cancel', kind: 'reject_once', name: 'Reject' },
+            ],
+          },
+        });
+      };
+
+      emitParams('req-params-mixed', {
+        config: { strict: true },
+        tags: ['alpha', 'beta'],
+        first: 1,
+        second: 2,
+        third: 3,
+      });
+      expect(ch.sent.at(-1)?.text).toContain(
+        'Parameters: config (object), tags (2 items), first, second, +1 more',
+      );
+
+      emitParams('req-params-short', { command: 'ls', timeout: 30 });
+      expect(ch.sent.at(-1)?.text).toContain('Parameters: command, timeout');
+      expect(ch.sent.at(-1)?.text).not.toContain('more');
+
+      emitParams('req-params-empty', {});
+      expect(ch.sent.at(-1)?.text).not.toContain('Parameters:');
+    });
+
     it('cancels bridge permissions when the target no longer belongs to the channel', async () => {
       const router = {
         getTarget: vi.fn(() => ({

@@ -2543,6 +2543,93 @@ describe('DingtalkChannel parsed-message logging', () => {
       nextStep:
         'Try again. If it keeps failing, contact the bot administrator.',
     },
+    {
+      name: 'authentication keyword failures',
+      error: new Error('authentication failed'),
+      rawDetail: 'authentication failed',
+      status: 'Bot configuration error',
+      nextStep: 'Contact the bot administrator.',
+    },
+    {
+      name: 'timeout keyword failures',
+      error: new Error('request timed out'),
+      rawDetail: 'request timed out',
+      status: 'Request timed out',
+      nextStep: 'Try again. For a large request, split it into smaller parts.',
+    },
+    {
+      name: 'connection refused failures',
+      error: new Error('connect ECONNREFUSED 127.0.0.1:443'),
+      rawDetail: '127.0.0.1',
+      status: 'Service is temporarily unavailable',
+      nextStep:
+        'Try again in a moment. If it keeps failing, contact the bot administrator.',
+    },
+    {
+      name: 'connection timeout failures',
+      error: new Error('connect ETIMEDOUT 10.0.0.1:443'),
+      rawDetail: '10.0.0.1',
+      status: 'Service is temporarily unavailable',
+      nextStep:
+        'Try again in a moment. If it keeps failing, contact the bot administrator.',
+    },
+    {
+      name: 'fetch failures',
+      error: new Error('fetch failed'),
+      rawDetail: 'fetch failed',
+      status: 'Service is temporarily unavailable',
+      nextStep:
+        'Try again in a moment. If it keeps failing, contact the bot administrator.',
+    },
+    {
+      name: 'busy keyword failures',
+      error: new Error('too many requests'),
+      rawDetail: 'too many requests',
+      status: 'Service is busy',
+      nextStep: 'Try again in a moment.',
+    },
+    {
+      name: 'string rejections',
+      error: 'rate limit exceeded',
+      rawDetail: 'rate limit exceeded',
+      status: 'Service is busy',
+      nextStep: 'Try again in a moment.',
+    },
+    {
+      name: 'vanished daemon sessions',
+      error: { status: 404, body: { code: 'session_not_found' } },
+      rawDetail: 'session_not_found',
+      status: 'Service is temporarily unavailable',
+      nextStep:
+        'Try again in a moment. If it keeps failing, contact the bot administrator.',
+    },
+    {
+      name: 'bridge session errors',
+      error: Object.assign(new Error('No session with id "sess-1"'), {
+        name: 'SessionNotFoundError',
+        code: 'session_not_found',
+      }),
+      rawDetail: 'sess-1',
+      status: 'Service is temporarily unavailable',
+      nextStep:
+        'Try again in a moment. If it keeps failing, contact the bot administrator.',
+    },
+    {
+      name: 'agent session errors',
+      error: new Error('Session not found: sess-2'),
+      rawDetail: 'sess-2',
+      status: 'Service is temporarily unavailable',
+      nextStep:
+        'Try again in a moment. If it keeps failing, contact the bot administrator.',
+    },
+    {
+      name: 'rejections with non-string messages',
+      error: Object.assign(new Error('x'), { message: Symbol('boom') }),
+      rawDetail: 'boom',
+      status: 'Processing failed',
+      nextStep:
+        'Try again. If it keeps failing, contact the bot administrator.',
+    },
   ])('presents $name without exposing raw details', async (testCase) => {
     const channel = createChannel();
     vi.mocked(channel.handleInbound).mockRejectedValueOnce(testCase.error);
