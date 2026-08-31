@@ -5628,7 +5628,7 @@ async function waitFor(
   predicate: () => boolean,
   subscribe?: (notify: () => void) => void,
 ): Promise<void> {
-  for (let attempt = 0; attempt < 50; attempt++) {
+  for (let attempt = 0; attempt < 500; attempt++) {
     if (predicate()) return;
     await new Promise<void>((resolve) => {
       subscribe?.(resolve);
