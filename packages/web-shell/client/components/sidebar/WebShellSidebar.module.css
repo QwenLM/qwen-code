@@ -1094,20 +1094,9 @@
 }
 
 .sessionMetaSlot:not(
-  :has(.sessionLoading, .sessionAttention, .sessionGitIcon, .sessionTime)
+  :has(.sessionLoading, .sessionAttention, .sessionGitIcon)
 ) {
   padding-right: 10px;
-}
-
-/* Relative timestamp at the row's right edge; yields to hover actions the
-   same way the git icon and attention pill do. */
-.sessionTime {
-  padding: 0 8px 0 4px;
-  color: var(--muted-foreground);
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-  line-height: 20px;
-  white-space: nowrap;
 }
 
 .sessionAttention {
@@ -1165,18 +1154,13 @@
 
 .sessionRow:hover:not(.runningSession) .sessionGitIcon,
 .sessionRow:focus-within:not(.runningSession) .sessionGitIcon,
-.sessionRow:hover:not(.runningSession) .sessionTime,
-.sessionRow:focus-within:not(.runningSession) .sessionTime,
 .sessionRow:hover:not(.runningSession) .sessionAttention,
 .sessionRow:focus-within:not(.runningSession) .sessionAttention,
 .sessionMetaSlot:hover .sessionGitIcon,
-.sessionMetaSlot:hover .sessionTime,
 .sessionMetaSlot:hover .sessionLoading,
 .sessionMetaSlot:hover .sessionAttention,
 .sessionMetaSlot:has(.sessionActionButton:focus-visible) .sessionGitIcon,
 .sessionMetaSlot:has([data-state='open']) .sessionGitIcon,
-.sessionMetaSlot:has(.sessionActionButton:focus-visible) .sessionTime,
-.sessionMetaSlot:has([data-state='open']) .sessionTime,
 .sessionMetaSlot:has(.sessionActionButton:focus-visible) .sessionLoading,
 .sessionMetaSlot:has([data-state='open']) .sessionLoading,
 .sessionMetaSlot:has(.sessionActionButton:focus-visible) .sessionAttention,

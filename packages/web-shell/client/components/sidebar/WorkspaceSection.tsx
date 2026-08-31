@@ -22,7 +22,7 @@ import { FolderClosedIcon, FolderOpenIcon } from 'lucide-react';
 import { GitBranchIndicator } from '../GitBranchIndicator';
 import { BranchPickerPopover } from '../BranchPickerPopover';
 import { useI18n } from '../../i18n';
-import { formatRelativeTime } from '../../utils/formatRelativeTime';
+import { formatDate } from '../../utils/formatDate';
 import {
   SESSION_LIST_PAGE_SIZE,
   SIDEBAR_SESSION_PREVIEW_LIMIT,
@@ -882,7 +882,7 @@ export function WorkspaceSection({
                       key={session.sessionId}
                       session={session}
                       label={label}
-                      time={stamp ? formatRelativeTime(stamp, t) : ''}
+                      time={stamp ? formatDate(stamp) : ''}
                       completedUnread={false}
                     >
                       {row}

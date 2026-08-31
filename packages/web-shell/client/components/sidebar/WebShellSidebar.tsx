@@ -83,7 +83,7 @@ import {
   DropdownMenuTrigger,
 } from '../ui/dropdown-menu';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
-import { formatRelativeTime } from '../../utils/formatRelativeTime';
+import { formatDate } from '../../utils/formatDate';
 import { DialogShell } from '../dialogs/DialogShell';
 import { WorkspaceSection, isAbsolutePath } from './WorkspaceSection';
 import { WorkspaceMenu, type WorkspaceMenuActions } from './WorkspaceMenu';
@@ -4077,7 +4077,8 @@ export function WebShellSidebar({
       const sessionIdentity = getIdentityForSession(session);
       const label = getSessionLabel(session);
       const stamp = session.updatedAt || session.createdAt;
-      const time = stamp ? formatRelativeTime(stamp, t) : '';
+      // Rows stay text-only; the precise date lives in the hover popover.
+      const time = stamp ? formatDate(stamp) : '';
       const busy = busySessionIds.has(sessionIdentity);
       const exporting = exportingSessionIds.has(sessionIdentity);
       const completedUnread =
@@ -4420,12 +4421,7 @@ export function WebShellSidebar({
                     className={styles.sessionLoading}
                     aria-label={t('sidebar.running')}
                   />
-                ) : !attention && time ? (
-                  <span className={styles.sessionTime} aria-hidden="true">
-                    {time}
-                  </span>
-                ) : null}
-                {!session.hasActivePrompt && !attention && gitIcon ? (
+                ) : !attention && gitIcon ? (
                   <span className={styles.sessionGitIcon}>{gitIcon}</span>
                 ) : null}
                 {(showPin ||
