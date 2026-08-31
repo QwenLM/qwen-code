@@ -650,7 +650,11 @@ describe('registerModelProvidersHotReload', () => {
       merged.modelProviders,
     );
     expect(refreshAuth).toHaveBeenCalledOnce();
-    expect(refreshAuth).toHaveBeenCalledWith(AuthType.USE_OPENAI);
+    // Watcher-triggered refresh must never start an interactive auth flow:
+    // the second argument makes QWEN_OAUTH require cached credentials, so
+    // unavailable credentials reject into the notice branch instead of
+    // prompting a device-auth mid-session.
+    expect(refreshAuth).toHaveBeenCalledWith(AuthType.USE_OPENAI, true);
   });
 
   it('skips the reload when an unrelated settings key changed', async () => {

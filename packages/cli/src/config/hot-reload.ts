@@ -357,7 +357,15 @@ export function registerModelProvidersHotReload(
       return;
     }
     try {
-      await config.refreshAuth(authType);
+      // `isInitialAuth=true` keeps a watcher-triggered refresh
+      // non-interactive: with it, a QWEN_OAUTH session whose cached
+      // credentials are unavailable (expired/rotated refresh token,
+      // transient network error) rejects with "credentials expired" into the
+      // catch below instead of falling through to `authWithQwenDeviceFlow` —
+      // an unrequested device-auth prompt mid-session that also stalls
+      // ACP/headless runs, where there is no terminal to answer it. Mirrors
+      // boot (`performInitialAuth`, packages/cli/src/core/auth.ts).
+      await config.refreshAuth(authType, true);
     } catch (err) {
       modelProvidersDebugLogger.error(
         `refreshAuth after modelProviders reload threw: ${
