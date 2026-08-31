@@ -1678,6 +1678,15 @@ export class DingtalkChannel extends ChannelBase {
         await this.drainReactionState(state);
       } finally {
         state.drainScheduled = false;
+        if (
+          this.reactionStates.get(state.key) === state &&
+          (state.finishing ||
+            (this.activeReactionKeys.has(state.key) &&
+              state.desiredStatusTag &&
+              state.desiredStatusTag.name !== state.statusTag?.name))
+        ) {
+          this.scheduleReactionDrain(state);
+        }
       }
     });
   }

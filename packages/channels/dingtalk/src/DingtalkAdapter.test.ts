@@ -1519,6 +1519,65 @@ describe('DingtalkChannel prompt reactions', () => {
     ]);
   });
 
+  it('drains a phase queued while a no-op drain clears its schedule flag', async () => {
+    const channel = createChannel();
+    const attachReaction = vi.fn().mockResolvedValue(true);
+    const recallReaction = vi.fn().mockResolvedValue(true);
+    (
+      channel as unknown as {
+        attachReaction: typeof attachReaction;
+        recallReaction: typeof recallReaction;
+      }
+    ).attachReaction = attachReaction;
+    (
+      channel as unknown as {
+        attachReaction: typeof attachReaction;
+        recallReaction: typeof recallReaction;
+      }
+    ).recallReaction = recallReaction;
+
+    const base = {
+      channelName: 'dingtalk',
+      chatId: 'cid-drain-handoff',
+      sessionId: 'session-drain-handoff',
+      messageId: 'message-drain-handoff',
+      identity: { id: 'channel:dingtalk', displayName: 'dingtalk' },
+      memoryScope: { namespace: 'channel:dingtalk', mode: 'metadata-only' },
+    } satisfies LifecycleBase;
+    const toolCall = (kind: string) => ({
+      ...base,
+      type: 'tool_call' as const,
+      toolCall: {
+        sessionId: base.sessionId,
+        toolCallId: `tool-${kind}`,
+        kind,
+        title: 'Tool activity',
+        status: 'in_progress' as const,
+      },
+    });
+
+    seedSeenMessage(channel, base.messageId);
+    const lifecycle = getLifecycleHook(channel);
+    lifecycle({ ...base, type: 'started' });
+    await vi.waitFor(() => expect(attachReaction).toHaveBeenCalledTimes(2));
+
+    lifecycle({
+      ...toolCall('read_file'),
+      toolCall: {
+        ...toolCall('read_file').toolCall,
+        status: 'completed',
+      },
+    });
+    queueMicrotask(() => lifecycle(toolCall('search')));
+
+    await vi.waitFor(() => expect(attachReaction).toHaveBeenCalledTimes(3));
+    expect(attachReaction.mock.calls.map(([, , tag]) => tag.name)).toEqual([
+      '👀',
+      '🤔 Thinking',
+      '🔎 Searching',
+    ]);
+  });
+
   it('lets a terminal event preempt phases pending behind the initial attach', async () => {
     const channel = createChannel();
     const pendingEye = deferredPromise<void>();

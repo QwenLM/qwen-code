@@ -103,12 +103,10 @@ export class DiffManager {
       const rightUri = rightDocUri.toString();
       for (const group of vscode.window.tabGroups.all) {
         const containsDiff = group.tabs.some((tab) => {
-          const input = tab.input as
-            | {
-                original?: vscode.Uri;
-                modified?: vscode.Uri;
-              }
-            | undefined;
+          const input = tab.input as {
+            original?: vscode.Uri;
+            modified?: vscode.Uri;
+          } | undefined;
           return (
             input?.original?.toString() === leftUri &&
             input?.modified?.toString() === rightUri
