@@ -398,13 +398,18 @@ function normalizeStreamedModelParts(parts: readonly Part[]): {
       isValidNonThoughtTextPart(lastPart) &&
       isValidNonThoughtTextPart(part)
     ) {
-      lastPart.text += part.text;
-      if (part.partMetadata) {
-        lastPart.partMetadata = {
-          ...lastPart.partMetadata,
-          ...part.partMetadata,
-        };
-      }
+      consolidatedHistoryParts[consolidatedHistoryParts.length - 1] = {
+        ...lastPart,
+        text: lastPart.text + part.text,
+        ...(part.partMetadata
+          ? {
+              partMetadata: {
+                ...lastPart.partMetadata,
+                ...part.partMetadata,
+              },
+            }
+          : {}),
+      };
     } else if (isValidContentPart(part)) {
       consolidatedHistoryParts.push(part);
     }
@@ -3653,6 +3658,7 @@ export class LlmChat {
         let acceptQuietToolResultCompletionOnNextAttempt = false;
         for (;;) {
           transportAttemptText = '';
+          let terminalMutationAborted = false;
           let streamYieldedChunk = false;
           let streamYieldedContentChunk = false;
           // A cut that already delivered a `functionCall` cannot be continued
@@ -3704,10 +3710,17 @@ export class LlmChat {
               acceptQuietToolResultCompletion,
               undefined,
               shouldEscalateMaxOutputTokens,
+              () => {
+                terminalMutationAborted = true;
+              },
             );
 
             lastFinishReason = undefined;
             for await (const chunk of stream) {
+              if (terminalMutationAborted) {
+                terminalMutationAborted = false;
+                yield { type: StreamEventType.RETRY };
+              }
               if (hasCandidateOutput(chunk)) {
                 streamYieldedChunk = true;
                 streamYieldedAnyChunk = true;
@@ -4354,6 +4367,12 @@ export class LlmChat {
         ) {
           lastFinishReason = FinishReason.STOP;
           self.settleDeferredMaxTokensRecords();
+          yield {
+            type: StreamEventType.RETRY,
+            ...(self.history.includes(maxTokensCommittedModelContent)
+              ? { isContinuation: true }
+              : {}),
+          };
           yield makeRecoveryStopEvent();
         }
         const streamWithInvalidStreamRetries = async function* (
@@ -4548,7 +4567,9 @@ export class LlmChat {
             const restoreTruncatedTurnOnAbort = () => {
               if (
                 truncatedModelContent?.role !== 'model' ||
-                self.history.includes(truncatedModelContent)
+                self.history.includes(truncatedModelContent) ||
+                (escalatedCommittedModelContent !== undefined &&
+                  self.history.includes(escalatedCommittedModelContent))
               ) {
                 self.settleDeferredMaxTokensRecords();
                 return;
@@ -4556,7 +4577,10 @@ export class LlmChat {
               const prefixSurvives = truncatedHistoryPrefix.every(
                 (entry, index) => self.history[index] === entry,
               );
-              if (prefixSurvives) {
+              if (
+                prefixSurvives &&
+                self.history[truncatedModelIndex]?.role !== 'model'
+              ) {
                 self.history.splice(
                   truncatedModelIndex,
                   0,
@@ -4727,15 +4751,19 @@ export class LlmChat {
             }
             escalatedAttemptCommitted = true;
             escalatedVisibleParts = [];
+            const escalatedCommittedTurnWasRevoked =
+              escalatedCommittedModelContent !== undefined &&
+              (self.historyMutationVersion !==
+                escalatedCommittedHistoryMutationVersion ||
+                self.history.at(-1) !== escalatedCommittedModelContent);
             if (
-              escalatedMaxTokensObserved &&
-              (escalatedCommittedModelContent === undefined ||
-                self.historyMutationVersion !==
-                  escalatedCommittedHistoryMutationVersion ||
-                self.history.at(-1) !== escalatedCommittedModelContent)
+              (escalatedMaxTokensObserved &&
+                escalatedCommittedModelContent === undefined) ||
+              escalatedCommittedTurnWasRevoked
             ) {
               recoveryFinishReason = FinishReason.STOP;
               self.settleDeferredMaxTokensRecords();
+              yield { type: StreamEventType.RETRY, isContinuation: true };
               yield makeRecoveryStopEvent();
             }
           } else {
@@ -4761,6 +4789,7 @@ export class LlmChat {
               recoverySessionHistoryMutationVersion
             ) {
               recoveryFinishReason = FinishReason.STOP;
+              yield { type: StreamEventType.RETRY, isContinuation: true };
               yield makeRecoveryStopEvent();
               break;
             }
@@ -4802,6 +4831,10 @@ export class LlmChat {
             let possibleRecoveryOverlapLengths =
               getPotentialRecoveryOverlapLengths(recoveryDeliveryBaseText);
             let recoveryDeliveryChunks: GenerateContentResponse[] = [];
+            const discardRecoveryDeliveryChunks = () => {
+              recoveryDeliveryChunks = [];
+              recoveryDeliveryResolved = true;
+            };
             const takeRecoveryDeliveryChunks = (
               chunk?: GenerateContentResponse,
               force = false,
@@ -4959,6 +4992,7 @@ export class LlmChat {
                     params: iterationParams,
                     rollback: rollbackActiveRecoveryAttempt!,
                     isCurrent: activeRecoveryAttemptIsCurrent,
+                    onMutationAbort: discardRecoveryDeliveryChunks,
                     // Always defer: even the final STOP continuation must be
                     // coalesced into the single merged record, not written
                     // separately.
@@ -5013,19 +5047,22 @@ export class LlmChat {
                 completeActiveRecoveryAttempt();
               }
             } catch (recoveryError) {
-              for (const chunk of takeRecoveryDeliveryChunks(undefined, true)) {
-                yield { type: StreamEventType.CHUNK, value: chunk };
-              }
               const exposedFunctionCall = activeRecoveryVisibleParts.some(
                 (part) => part.functionCall !== undefined,
               );
-              if (activeRecoveryVisibleParts.length > 0) {
+              if (!activeRecoveryAttemptIsCurrent()) {
+                discardRecoveryDeliveryChunks();
+                rollbackActiveRecoveryAttempt();
+              } else if (activeRecoveryVisibleParts.length > 0) {
                 activeRecoveryVisibleParts = activeRecoveryVisibleParts.filter(
                   (part) => part.functionCall === undefined,
                 );
                 abandonActiveRecoveryAttempt?.();
               } else {
                 rollbackActiveRecoveryAttempt();
+              }
+              for (const chunk of takeRecoveryDeliveryChunks(undefined, true)) {
+                yield { type: StreamEventType.CHUNK, value: chunk };
               }
               debugLogger.warn(
                 `Recovery attempt ${recoveryCount} failed: ${recoveryError}`,
@@ -5343,22 +5380,36 @@ export class LlmChat {
         streamDoneResolver!();
       }
     })();
-    const returnResponseStream = responseStream.return.bind(responseStream);
-    responseStream.return = async (value) => {
-      if (!streamStarted) {
-        if (userContentAdded && self.history.at(-1) === currentUserContent) {
-          self.history.pop();
+    let unstartedStreamCleanedUp = false;
+    const cleanupUnstartedResponseStream = () => {
+      if (streamStarted || unstartedStreamCleanedUp) return;
+      unstartedStreamCleanedUp = true;
+      if (userContentAdded) {
+        const currentUserContentIndex =
+          self.history.indexOf(currentUserContent);
+        if (currentUserContentIndex >= 0) {
+          self.history.splice(currentUserContentIndex, 1);
           self.userContentPushCount--;
           userContentAdded = false;
         }
-        if (manualPlanExitNoticeVersion !== undefined) {
-          self.config.restorePendingManualPlanExitNotice(
-            manualPlanExitNoticeVersion,
-          );
-        }
-        streamDoneResolver!();
       }
+      if (manualPlanExitNoticeVersion !== undefined) {
+        self.config.restorePendingManualPlanExitNotice(
+          manualPlanExitNoticeVersion,
+        );
+      }
+      self.flushDeferredMaxTokensRecords();
+      streamDoneResolver!();
+    };
+    const returnResponseStream = responseStream.return.bind(responseStream);
+    responseStream.return = async (value) => {
+      cleanupUnstartedResponseStream();
       return returnResponseStream(value);
+    };
+    const throwResponseStream = responseStream.throw.bind(responseStream);
+    responseStream.throw = async (error) => {
+      cleanupUnstartedResponseStream();
+      return throwResponseStream(error);
     };
     return responseStream;
   }
@@ -5389,6 +5440,7 @@ export class LlmChat {
     acceptQuietToolResultCompletion = false,
     onModelTurnCommitted?: (content: Content) => void,
     allowEmptyMaxTokensRecovery = false,
+    onTerminalMutationAbort?: () => void,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
     const generator =
       overrides?.contentGenerator ?? this.config.getContentGenerator();
@@ -5485,6 +5537,7 @@ export class LlmChat {
       onModelTurnCommitted,
       () => streamAbortController.abort(),
       allowEmptyMaxTokensRecovery,
+      onTerminalMutationAbort,
     );
   }
 
@@ -6259,6 +6312,7 @@ export class LlmChat {
     onModelTurnCommitted?: (content: Content) => void,
     abortStream?: () => void,
     allowEmptyMaxTokensRecovery = false,
+    onTerminalMutationAbort?: () => void,
   ): AsyncGenerator<GenerateContentResponse> {
     // Collect ALL parts from the model response (including thoughts for recording)
     const streamHistoryMutationVersion = this.historyMutationVersion;
@@ -6469,7 +6523,7 @@ export class LlmChat {
 
         // Collect token usage for consolidated recording
         if (chunk.usageMetadata) {
-          usageMetadata = chunk.usageMetadata;
+          usageMetadata = { ...usageMetadata, ...chunk.usageMetadata };
           // Context usage tracks prompt size; output isn't in history yet.
           // Coerce hostile-provider values (NaN / Infinity / negative) to 0
           // so the compaction gate arithmetic stays well-defined; see
@@ -6624,6 +6678,7 @@ export class LlmChat {
           recordedUsage,
         );
       }
+      onTerminalMutationAbort?.();
       yield {
         candidates: [
           {
@@ -7075,6 +7130,9 @@ export class LlmChat {
     }
     onModelTurnCommitted?.(modelContent);
     for (const terminalChunk of terminalChunks) {
+      if (firstCandidateFinishReason(terminalChunk) && recordedUsage) {
+        terminalChunk.usageMetadata = recordedUsage;
+      }
       yield terminalChunk;
     }
     if (deferredFinishReason) {
