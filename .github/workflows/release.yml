@@ -561,10 +561,7 @@ jobs:
       ${{ github.event.inputs.force_skip_tests != 'true' }}
     permissions:
       contents: 'read'
-    env:
-      OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
-      OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
-      OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
+    env: *release_test_env
 
     steps:
       - *restore_release_workspace
@@ -599,10 +596,7 @@ jobs:
       ${{ github.event.inputs.force_skip_tests != 'true' }}
     permissions:
       contents: 'read'
-    env:
-      OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
-      OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
-      OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
+    env: *release_test_env
 
     steps:
       # Shared ECS runners can retain root-owned files from an earlier
