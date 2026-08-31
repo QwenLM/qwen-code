@@ -1708,6 +1708,11 @@ describe('DaemonClient', () => {
         if (req.url.endsWith('/session/with%2Fslash/tasks')) {
           return jsonResponse(200, tasks);
         }
+        if (
+          req.url.endsWith('/session/with%2Fslash/tasks?includeWorkflows=true')
+        ) {
+          return jsonResponse(200, tasks);
+        }
         if (req.url.endsWith('/session/with%2Fslash/lsp')) {
           return jsonResponse(200, lsp);
         }
@@ -1725,15 +1730,23 @@ describe('DaemonClient', () => {
         client.sessionTasks('with/slash', 'client-1'),
       ).resolves.toEqual(tasks);
       await expect(
+        client.sessionWorkflowTasks('with/slash', 'client-1'),
+      ).resolves.toEqual(tasks);
+      await expect(
         client.sessionLspStatus('with/slash', 'client-1'),
       ).resolves.toEqual(lsp);
       expect(calls.map((c) => [c.method, c.url])).toEqual([
         ['GET', 'http://daemon/session/with%2Fslash/context'],
         ['GET', 'http://daemon/session/with%2Fslash/supported-commands'],
         ['GET', 'http://daemon/session/with%2Fslash/tasks'],
+        [
+          'GET',
+          'http://daemon/session/with%2Fslash/tasks?includeWorkflows=true',
+        ],
         ['GET', 'http://daemon/session/with%2Fslash/lsp'],
       ]);
       expect(calls.map((c) => c.headers['x-qwen-client-id'])).toEqual([
+        'client-1',
         'client-1',
         'client-1',
         'client-1',
@@ -4760,6 +4773,174 @@ describe('DaemonClient', () => {
       await expect(
         client.setSessionModel('s-1', 'qwen3-coder'),
       ).rejects.toMatchObject({ status: 404 });
+    });
+
+    it('surfaces JSON-RPC details for generic 5xx failures', async () => {
+      const body = {
+        error: 'Internal error',
+        code: -32603,
+        data: { details: 'Missing credentials' },
+      };
+      const { fetch } = recordingFetch(() => jsonResponse(500, body));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      const error = await client
+        .setSessionModel('s-1', 'qwen3-coder')
+        .catch((reason: unknown) => reason);
+
+      expect(error).toBeInstanceOf(DaemonHttpError);
+      expect(error).toMatchObject({
+        status: 500,
+        body,
+        message: 'POST /session/:id/model: Missing credentials',
+      });
+    });
+
+    it.each([
+      {
+        name: 'provider message',
+        status: 500,
+        body: {
+          error: 'Internal error',
+          code: -32603,
+          data: { message: 'Provider is throttled' },
+        },
+        expected: 'Provider is throttled',
+      },
+      {
+        name: 'details wins over message',
+        status: 500,
+        body: {
+          error: 'Internal error',
+          code: -32603,
+          data: {
+            details: 'Missing credentials',
+            message: 'Provider is throttled',
+          },
+        },
+        expected: 'Missing credentials',
+      },
+      {
+        name: 'string data',
+        status: 500,
+        body: {
+          error: 'Internal error',
+          code: -32603,
+          data: 'Agent stopped',
+        },
+        expected: 'Agent stopped',
+      },
+      {
+        name: 'empty string data',
+        status: 500,
+        body: {
+          error: 'Internal error',
+          code: -32603,
+          data: '',
+        },
+        expected: 'Internal error',
+      },
+      {
+        name: 'empty details',
+        status: 500,
+        body: {
+          error: 'Internal error',
+          code: -32603,
+          data: { details: '' },
+        },
+        expected: 'Internal error',
+      },
+      {
+        name: 'empty details falls back to message',
+        status: 500,
+        body: {
+          error: 'Internal error',
+          code: -32603,
+          data: { details: '', message: 'Provider is throttled' },
+        },
+        expected: 'Provider is throttled',
+      },
+      {
+        name: 'empty message field',
+        status: 500,
+        body: {
+          error: 'Internal error',
+          code: -32603,
+          data: { message: '' },
+        },
+        expected: 'Internal error',
+      },
+      {
+        name: 'non-string details',
+        status: 500,
+        body: {
+          error: 'Internal error',
+          code: -32603,
+          data: { details: { reason: 'private' } },
+        },
+        expected: 'Internal error',
+      },
+      {
+        name: 'specific top-level error',
+        status: 500,
+        body: {
+          error: 'Model is unavailable',
+          code: -32603,
+          data: { details: 'private provider response' },
+        },
+        expected: 'Model is unavailable',
+      },
+      {
+        name: 'non-JSON-RPC code',
+        status: 500,
+        body: {
+          error: 'Internal error',
+          code: 'internal_error',
+          data: { details: 'private provider response' },
+        },
+        expected: 'Internal error',
+      },
+      {
+        name: 'non-internal numeric code',
+        status: 500,
+        body: {
+          error: 'Internal error',
+          code: -32000,
+          data: { details: 'Server is draining' },
+        },
+        expected: 'Server is draining',
+      },
+      {
+        name: 'null data',
+        status: 500,
+        body: {
+          error: 'Internal error',
+          code: -32603,
+          data: null,
+        },
+        expected: 'Internal error',
+      },
+      {
+        name: 'client error',
+        status: 400,
+        body: {
+          error: 'Internal error',
+          code: -32603,
+          data: { details: 'private provider response' },
+        },
+        expected: 'Internal error',
+      },
+    ])('formats $name safely', async ({ status, body, expected }) => {
+      const { fetch } = recordingFetch(() => jsonResponse(status, body));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.setSessionModel('s-1', 'qwen3-coder'),
+      ).rejects.toMatchObject({
+        status,
+        body,
+        message: `POST /session/:id/model: ${expected}`,
+      });
     });
   });
 
