@@ -664,6 +664,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_display_name',
   'workspace_qualified_rest_core',
   'extension_management_v2',
+  'extension_state',
   'extension_git_credentials',
   'extension_local_path_install',
   'workspace_persisted_transcript',
@@ -733,6 +734,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_display_name' &&
       f !== 'workspace_qualified_rest_core' &&
       f !== 'extension_management_v2' &&
+      f !== 'extension_state' &&
       f !== 'extension_git_credentials' &&
       f !== 'extension_local_path_install' &&
       f !== 'workspace_persisted_transcript' &&
@@ -789,10 +791,12 @@ const EXPECTED_REGISTERED_FEATURES = [
   'scratch_workspace_registration',
   'workspace_runtime_removal',
   'native_directory_picker',
+  'workspace_runtime',
   'workspace_qualified_rest_core',
   'workspace_qualified_voice',
   'workspace_qualified_memory',
   'extension_management_v2',
+  'extension_state',
   'extension_git_credentials',
   'extension_local_path_install',
   'workspace_persisted_transcript',
@@ -3355,6 +3359,20 @@ describe('createServeApp', () => {
           );
           continue;
         }
+        if (feature === 'workspace_runtime') {
+          expect(predicate({ workspaceRuntimeAvailable: true })).toBe(true);
+          expect(predicate({ workspaceRuntimeAvailable: false })).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              workspaceRuntimeAvailable: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
         if (feature === 'workspace_trust_hot_reload') {
           expect(predicate({ workspaceTrustHotReloadAvailable: true })).toBe(
             true,
@@ -4377,6 +4395,7 @@ describe('createServeApp', () => {
             sessionArtifactsPersistenceAvailable: true,
             sessionGenerationAvailable: true,
             workspaceGenerationAvailable: true,
+            workspaceRuntimeAvailable: true,
             acpHttpEnabled: true,
             // Mirror the server.ts probe so the expectation matches on both
             // GUI and headless hosts.
@@ -5377,6 +5396,53 @@ describe('createServeApp', () => {
         resetHomeEnvBootstrapForTesting();
         await fsp.rm(tempHome, { recursive: true, force: true });
       }
+    });
+
+    it('mounts primary workspace runtime status and ensure routes', async () => {
+      let snapshot = {
+        state: 'cold' as const,
+        runtimeLive: false,
+        runtimeEpoch: 0,
+        activeWork: false,
+      };
+      const bridge = Object.assign(fakeBridge(), {
+        getWorkspaceRuntimeLifecycleSnapshot: () => snapshot,
+        preheat: vi.fn(async () => {
+          snapshot = {
+            state: 'idle' as const,
+            runtimeLive: true,
+            runtimeEpoch: 1,
+            activeWork: false,
+          };
+        }),
+      });
+      const workspaceRegistry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'primary-id',
+          workspaceCwd: WS_BOUND,
+          primary: true,
+          bridge,
+        }),
+      ]);
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, workspaceRegistry },
+      );
+
+      const before = await request(app)
+        .get('/workspace/runtime/status')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(before.status).toBe(200);
+      expect(before.body).toMatchObject({ state: 'cold', runtimeEpoch: 0 });
+
+      const ensured = await request(app)
+        .post('/workspace/runtime/ensure')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({});
+      expect(ensured.status).toBe(200);
+      expect(ensured.body).toMatchObject({ state: 'idle', runtimeEpoch: 1 });
+      expect(bridge.preheat).toHaveBeenCalledWith({ keepAliveMs: 600_000 });
     });
 
     it('rejects workspace ACP preheat timeouts above the route cap', async () => {

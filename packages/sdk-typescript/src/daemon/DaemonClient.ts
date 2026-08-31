@@ -112,6 +112,7 @@ import type {
   DaemonWorkspaceProvidersStatus,
   DaemonWorkspaceAcpStatusResult,
   DaemonWorkspaceAcpPreheatResult,
+  DaemonWorkspaceRuntimeStatus,
   DaemonWorkspaceSkillsStatus,
   DaemonWorkspaceToolsStatus,
   DaemonWriteMemoryRequest,
@@ -208,6 +209,8 @@ import type {
   ExtensionRefreshResponse,
   ExtensionUpdateCheckResponse,
   WorkspaceExtensionProjection,
+  WorkspaceExtensionState,
+  ExtensionStateUpdate,
   DaemonWorkspaceHooksStatus,
   DaemonPermissionRuleType,
   DaemonPermissionScope,
@@ -396,6 +399,13 @@ const SESSION_RESTORE_TIMEOUT_HEADROOM_MS = 10_000;
 const VOICE_TRANSCRIPTION_DEFAULT_TIMEOUT_MS = 65_000;
 const GITHUB_SETUP_DEFAULT_TIMEOUT_MS = 90_000;
 const CHANNEL_NOTIFY_DEFAULT_TIMEOUT_MS = 35_000;
+// Keep in sync with DEFAULT_ENSURE_TIMEOUT_MS in
+// packages/cli/src/serve/workspace-runtime-coordinator.ts.
+const WORKSPACE_RUNTIME_ENSURE_SERVER_DEADLINE_MS = 60_000;
+const WORKSPACE_RUNTIME_ENSURE_CLIENT_HEADROOM_MS = 2_000;
+const WORKSPACE_RUNTIME_ENSURE_TIMEOUT_MS =
+  WORKSPACE_RUNTIME_ENSURE_SERVER_DEADLINE_MS +
+  WORKSPACE_RUNTIME_ENSURE_CLIENT_HEADROOM_MS;
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 // Keep in sync with acp-bridge bridge.ts and CLI serve/server.ts.
 const DEFAULT_MAX_PENDING_PROMPTS_PER_SESSION = 5;
@@ -939,10 +949,35 @@ export class DaemonClient {
     } catch {
       /* body unreadable */
     }
-    const detail =
-      body && typeof body === 'object' && 'error' in body
-        ? String((body as { error: unknown }).error)
+    const errorBody =
+      body && typeof body === 'object' && !Array.isArray(body)
+        ? (body as Record<string, unknown>)
+        : undefined;
+    let detail =
+      errorBody && 'error' in errorBody
+        ? String(errorBody['error'])
         : `HTTP ${res.status}`;
+    // Only unwrap opaque JSON-RPC 5xx responses. Specific top-level errors may
+    // intentionally hide diagnostic data that should not become display text.
+    if (
+      res.status >= 500 &&
+      errorBody?.['error'] === 'Internal error' &&
+      typeof errorBody['code'] === 'number'
+    ) {
+      const data = errorBody['data'];
+      if (typeof data === 'string' && data.length > 0) {
+        detail = data;
+      } else if (data && typeof data === 'object' && !Array.isArray(data)) {
+        const record = data as Record<string, unknown>;
+        const details = record['details'];
+        const message = record['message'];
+        if (typeof details === 'string' && details.length > 0) {
+          detail = details;
+        } else if (typeof message === 'string' && message.length > 0) {
+          detail = message;
+        }
+      }
+    }
     if (sessionId && res.status === 503 && body && typeof body === 'object') {
       const data = body as {
         code?: unknown;
@@ -1434,6 +1469,26 @@ export class DaemonClient {
     return await this.jsonRequest<DaemonWorkspaceAcpStatusResult>(
       '/workspace/acp/status',
       'GET /workspace/acp/status',
+      { mode: 'rest' },
+    );
+  }
+
+  async ensureWorkspaceRuntime(): Promise<DaemonWorkspaceRuntimeStatus> {
+    return await this.jsonRequest<DaemonWorkspaceRuntimeStatus>(
+      '/workspace/runtime/ensure',
+      'POST /workspace/runtime/ensure',
+      {
+        method: 'POST',
+        timeoutMs: WORKSPACE_RUNTIME_ENSURE_TIMEOUT_MS,
+        mode: 'rest',
+      },
+    );
+  }
+
+  async workspaceRuntimeStatus(): Promise<DaemonWorkspaceRuntimeStatus> {
+    return await this.jsonRequest<DaemonWorkspaceRuntimeStatus>(
+      '/workspace/runtime/status',
+      'GET /workspace/runtime/status',
       { mode: 'rest' },
     );
   }
@@ -5819,6 +5874,28 @@ export class WorkspaceDaemonClient {
     return this.get('/mcp', 'GET /workspaces/:workspace/mcp');
   }
 
+  ensureRuntime(): Promise<DaemonWorkspaceRuntimeStatus> {
+    return this.client.workspaceJsonRequest<DaemonWorkspaceRuntimeStatus>(
+      this.workspaceSelector,
+      '/runtime/ensure',
+      'POST /workspaces/:workspace/runtime/ensure',
+      {
+        method: 'POST',
+        timeoutMs: WORKSPACE_RUNTIME_ENSURE_TIMEOUT_MS,
+        mode: 'rest',
+      },
+    );
+  }
+
+  runtimeStatus(): Promise<DaemonWorkspaceRuntimeStatus> {
+    return this.client.workspaceJsonRequest<DaemonWorkspaceRuntimeStatus>(
+      this.workspaceSelector,
+      '/runtime/status',
+      'GET /workspaces/:workspace/runtime/status',
+      { mode: 'rest' },
+    );
+  }
+
   /**
    * Send text directly through this exact workspace's channel worker.
    * A successful capability pre-flight does not guarantee worker liveness;
@@ -6965,6 +7042,28 @@ export class WorkspaceDaemonClient {
       '/extensions',
       'GET /workspaces/:workspace/extensions',
       { mode: 'rest' },
+    );
+  }
+
+  extensionState(extensionId: string): Promise<WorkspaceExtensionState> {
+    return this.client.workspaceJsonRequest<WorkspaceExtensionState>(
+      this.workspaceSelector,
+      `/extensions/${urlEncode(extensionId)}/state`,
+      'GET /workspaces/:workspace/extensions/:extensionId/state',
+      { mode: 'rest' },
+    );
+  }
+
+  setExtensionState(
+    extensionId: string,
+    update: ExtensionStateUpdate,
+    clientId?: string,
+  ): Promise<ExtensionMutationResponse> {
+    return this.client.workspaceJsonRequest<ExtensionMutationResponse>(
+      this.workspaceSelector,
+      `/extensions/${urlEncode(extensionId)}/state`,
+      'PUT /workspaces/:workspace/extensions/:extensionId/state',
+      { method: 'PUT', body: update, clientId, mode: 'rest' },
     );
   }
 

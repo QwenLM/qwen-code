@@ -559,6 +559,51 @@ describe('BackgroundShellRegistry', () => {
       expect(modelText).toContain('<output-tail error="unreadable"');
     });
 
+    const itNoSymlink = process.platform === 'win32' ? it.skip : it;
+
+    itNoSymlink(
+      'does not follow symlinked output files when O_NOFOLLOW is unavailable (Windows flag set)',
+      async () => {
+        // Cross-product the test above misses: Windows has no O_NOFOLLOW
+        // (the constant is `undefined` and `| (O_NOFOLLOW ?? 0)` collapses
+        // to a plain open), so stub the constant away and pin that the
+        // compensating check still refuses to read through the link (#8227).
+        const dir = makeTempDir();
+        const secretPath = join(dir, 'secret.txt');
+        const outputPath = join(dir, 'shell.output');
+        writeFileSync(secretPath, 'secret credentials');
+        symlinkSync(secretPath, outputPath);
+
+        vi.resetModules();
+        vi.doMock('node:fs', async (importOriginal) => {
+          const actual = await importOriginal<typeof import('node:fs')>();
+          const modified = {
+            ...actual,
+            constants: { ...actual.constants, O_NOFOLLOW: undefined },
+          };
+          return { ...modified, default: modified };
+        });
+
+        try {
+          const { BackgroundShellRegistry: RegistryWithoutNoFollow } =
+            await import('./backgroundShellRegistry.js');
+          const reg = new RegistryWithoutNoFollow();
+          const callback = vi.fn();
+          reg.setNotificationCallback(callback);
+          reg.register(makeEntry({ shellId: 'a', outputPath }));
+
+          reg.complete('a', 0, 2000);
+
+          const [, modelText] = callback.mock.calls[0];
+          expect(modelText).not.toContain('secret credentials');
+          expect(modelText).toContain('<output-tail error="unreadable"');
+        } finally {
+          vi.doUnmock('node:fs');
+          vi.resetModules();
+        }
+      },
+    );
+
     it('skips output-tail when the output file does not exist', () => {
       // Guards the catch branch in `readOutputTail`. If the try/catch
       // ever regresses to throwing, `complete()` would propagate the

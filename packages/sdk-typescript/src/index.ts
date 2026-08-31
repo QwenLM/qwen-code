@@ -315,6 +315,7 @@ export {
   type DaemonWorkspaceMcpInitializeResult,
   type DaemonWorkspaceAcpStatusResult,
   type DaemonWorkspaceAcpPreheatResult,
+  type DaemonWorkspaceRuntimeStatus,
   type DaemonWorkspaceProviderCurrent,
   type DaemonWorkspaceProviderModel,
   type DaemonWorkspaceProviderStatus,
