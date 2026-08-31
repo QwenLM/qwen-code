@@ -55,7 +55,10 @@ describe('setupStartupWorktree', () => {
   // Real git operations + fetch through a local bare remote can take
   // 10–15s on slower runners; bump the per-test ceiling so the PR-ref
   // happy-path test doesn't flake.
-  vi.setConfig({ testTimeout: 30000, hookTimeout: 30000 });
+  const timeoutMs = process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
+    ? 60_000
+    : 30_000;
+  vi.setConfig({ testTimeout: timeoutMs, hookTimeout: timeoutMs });
 
   let prevCwd: string;
   let tempRepo: string | null = null;
@@ -386,7 +389,10 @@ describe('setupStartupWorktree', () => {
 });
 
 describe('persistStartupWorktreeSidecar', () => {
-  vi.setConfig({ testTimeout: 30000, hookTimeout: 30000 });
+  const timeoutMs = process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
+    ? 60_000
+    : 30_000;
+  vi.setConfig({ testTimeout: timeoutMs, hookTimeout: timeoutMs });
 
   let prevCwd: string;
   let tempRepo: string | null = null;
