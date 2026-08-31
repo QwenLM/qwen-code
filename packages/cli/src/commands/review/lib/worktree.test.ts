@@ -1926,6 +1926,79 @@ describe('localFilterCommands', () => {
     expect(screen.unreadable).toBeNull();
   });
 
+  it('does NOT follow an include that points OUT of the repository', () => {
+    // The include graph is walked by LOCATION. A repo-local `include.path`
+    // naming the user's own global config is their contract, exactly as merged
+    // config is for any git command they run — and `git lfs install` writes
+    // `filter.lfs.clean` there, so following it would put every contributor
+    // with git-lfs into permanent refusal. That is the failure this whole
+    // screen is scoped to avoid.
+    const outside = mkdtempSync(join(tmpdir(), 'qwen-userconf-'));
+    try {
+      const userConfig = join(outside, 'gitconfig');
+      writeFileSync(
+        userConfig,
+        '[filter "lfs"]\n\tclean = git-lfs clean -- %f\n',
+      );
+      appendFileSync(
+        join(dir, '.git', 'config'),
+        `[include]\n\tpath = ${userConfig}\n`,
+      );
+
+      const screen = localFilterCommands(dir);
+
+      expect(screen.keys).toEqual([]);
+      expect(screen.stopped).toBeNull();
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('does not report the user\'s global keys through a `~` include', () => {
+    // The one-line write a probe can make: `[include] path = ~/.gitconfig` in
+    // the never-wiped common config. `sanitizedGitEnv()` keeps HOME, so the
+    // tilde expands to the reviewing user's real config — and for anyone with
+    // git-lfs installed that holds `filter.lfs.clean`. Reporting it would
+    // refuse every later review of the repo, naming a key the local config
+    // does not define and whose removal breaks git-lfs everywhere else.
+    const home = process.env['HOME'];
+    expect(home).toBeTruthy();
+    writeFileSync(
+      join(home as string, '.gitconfig'),
+      '[filter "lfs"]\n\tclean = git-lfs clean -- %f\n',
+    );
+    appendFileSync(
+      join(dir, '.git', 'config'),
+      '[include]\n\tpath = ~/.gitconfig\n',
+    );
+
+    const screen = localFilterCommands(dir);
+
+    expect(screen.keys).toEqual([]);
+    expect(screen.stopped).toBeNull();
+  });
+
+  it('follows a conditional include whose condition is false HERE', () => {
+    // `includeIf` conditions are evaluated against whichever tree git runs in,
+    // and the checkout this screen authorises runs in a DIFFERENT tree — so a
+    // condition false for the screen and true for the checkout would hide a
+    // filter that then executes. Asking git to evaluate (`--includes`) cannot
+    // be right for a cross-tree checkout; the walk follows every in-repo
+    // target regardless of its condition.
+    writeFileSync(
+      join(dir, '.git', 'evil.inc'),
+      '[filter "evil"]\n\tsmudge = cat\n',
+    );
+    appendFileSync(
+      join(dir, '.git', 'config'),
+      '[includeIf "gitdir:/nowhere/that/matches/"]\n\tpath = evil.inc\n',
+    );
+
+    const screen = localFilterCommands(dir);
+
+    expect(screen.keys).toEqual(['filter.evil.smudge']);
+  });
+
   it('caps the reported keys and keeps the pre-cap total', () => {
     // The keys come from an attacker-writable file that cleanup never wipes;
     // an unbounded list is its own denial-of-service in the refusal message.
@@ -2077,9 +2150,9 @@ describe('localFilterCommands', () => {
     // `git config --file` does NOT expand `include.path` / `includeIf` on its
     // own — git's documented default for a single-file read — while every
     // checkout this screen authorises reads MERGED config, which does. A filter
-    // one include-hop behind a screened candidate is invisible to a screen that
-    // omits `--includes` and executed by the checkout. The screen passes
-    // `--includes`, so it sees exactly what the checkout will.
+    // one include-hop behind a screened candidate would be invisible. The
+    // screen walks the include graph itself rather than passing `--includes`;
+    // the sibling cases below pin why.
     writeFileSync(
       join(dir, '.git', 'evil.inc'),
       '[filter "evil"]\n\tsmudge = cat\n',

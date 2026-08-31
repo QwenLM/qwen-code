@@ -1774,6 +1774,106 @@ process.stdout.write(JSON.stringify({
     expect(existsSync(canary)).toBe(false);
   });
 
+  it('refuses the REVERT when the baseline planted an unparseable config', async () => {
+    // The keys-found branch has a witness; the `stopped` branch did not. A
+    // plant that makes the screen STOP — here an unparseable `config.worktree`
+    // — must refuse the revert just as a found key does, because a screen that
+    // could not finish did not clear anything. The plant lands mid-run, after
+    // the restore's own screen has already passed.
+    const canary = join(repo, 'PWNED-revert-stopped');
+    writeFileSync(
+      vitestScript(),
+      `#!/usr/bin/env node
+import path from 'node:path';
+import fs from 'node:fs';
+import { execFileSync } from 'node:child_process';
+const g = (...a) => execFileSync('git', a, { encoding: 'utf8' }).trim();
+const common = g('rev-parse', '--git-common-dir');
+const stamp = path.join(common, 'PLANTED');
+if (!fs.existsSync(stamp)) {
+  fs.writeFileSync(stamp, '');
+  // The filter that would fire, plus the attributes selecting it...
+  execFileSync('git', ['config', 'filter.evil.smudge', 'sh -c "pwd >> ${canary}; cat"']);
+  const attrs = g('rev-parse', '--git-path', 'info/attributes');
+  fs.mkdirSync(path.dirname(attrs), { recursive: true });
+  fs.appendFileSync(attrs, '*.ts filter=evil\\n');
+  // ...and an unparseable candidate, so the screen STOPS before it can
+  // enumerate that filter. A stop must refuse exactly as a key would.
+  const gitDir = g('rev-parse', '--git-dir');
+  fs.writeFileSync(path.join(gitDir, 'config.worktree'), '[filter "x"\\n\\tsmudge = cat\\n');
+}
+const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
+const results = files.map((f) => ({
+  name: path.resolve(f),
+  assertionResults: [{ status: 'passed' }],
+}));
+process.stdout.write(JSON.stringify({
+  numPassedTests: results.length,
+  numFailedTests: 0,
+  testResults: results,
+}));
+`,
+    );
+    const { wt, base } = scaffoldModifiedPr();
+
+    await runHandler({
+      report: join(repo, 'report.json'),
+      worktree: wt,
+      base,
+      out: join(repo, 'out.json'),
+    });
+
+    expect(existsSync(canary)).toBe(false);
+  });
+
+  it('runs no planted post-checkout hook during the revert', async () => {
+    // `CHECKOUT_INERT` carries two neutralisations and only fsmonitor was
+    // pinned. A pathspec checkout DOES fire an executable `post-checkout`
+    // hook, and the hook needs no config of its own — so it is a surface the
+    // filter screen cannot see, closed only by the flag.
+    const canary = join(repo, 'PWNED-post-checkout');
+    writeFileSync(
+      vitestScript(),
+      `#!/usr/bin/env node
+import path from 'node:path';
+import fs from 'node:fs';
+import { execFileSync } from 'node:child_process';
+const g = (...a) => execFileSync('git', a, { encoding: 'utf8' }).trim();
+const common = g('rev-parse', '--git-common-dir');
+const stamp = path.join(common, 'PLANTED');
+if (!fs.existsSync(stamp)) {
+  fs.writeFileSync(stamp, '');
+  // The fixture redirects hooks to this directory, so the plant goes there.
+  const hooks = execFileSync('git', ['config', 'core.hooksPath'], { encoding: 'utf8' }).trim();
+  fs.mkdirSync(hooks, { recursive: true });
+  const hook = path.join(hooks, 'post-checkout');
+  fs.writeFileSync(hook, '#!/bin/sh\\necho fired >> ${canary}\\n');
+  fs.chmodSync(hook, 0o755);
+}
+const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
+const results = files.map((f) => ({
+  name: path.resolve(f),
+  assertionResults: [{ status: 'passed' }],
+}));
+process.stdout.write(JSON.stringify({
+  numPassedTests: results.length,
+  numFailedTests: 0,
+  testResults: results,
+}));
+`,
+    );
+    const { wt, base } = scaffoldModifiedPr();
+
+    await runHandler({
+      report: join(repo, 'report.json'),
+      worktree: wt,
+      base,
+      out: join(repo, 'out.json'),
+    });
+
+    expect(existsSync(canary)).toBe(false);
+  });
+
   it('never deletes a line that does not hold the selected statement', () => {
     // `runOneMutant`'s mismatch guard, pinned directly: selection and the
     // probe tree both derive from the same commit, so the command cannot reach

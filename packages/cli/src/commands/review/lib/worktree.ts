@@ -712,23 +712,137 @@ export function screenStopDetail(screen: LocalFilterScreen): string {
  * belongs to the path, so neither a split nor a trim is a parse here. Callers
  * that need absolute paths pass `--path-format=absolute` as a leading flag.
  */
+/**
+ * The screen's spawn budget.
+ *
+ * Every read below opens attacker-writable config, and git follows an
+ * `include.path` at startup — so a plant naming a FIFO (or a symlink to
+ * `/dev/zero`) blocks the very first `rev-parse`. `spawnSync` blocks the event
+ * loop, so no JS timer can interrupt it; the bound has to be on the spawn.
+ */
+const SCREEN_SPAWN_TIMEOUT_MS = 20_000;
+
+/**
+ * A rev-parse answer, or null when the screen could not get one.
+ *
+ * `encoding: 'utf8'` transcodes an invalid byte to U+FFFD, so a repository
+ * under a path carrying one yields an answer that names no real file. Callers
+ * must treat that as unmeasured rather than resolve candidates against it —
+ * the residue walker in this file fails the same shape closed for the same
+ * reason.
+ */
 function revParsePath(cwd: string, ...flags: string[]): string | null {
   const r = spawnSync('git', ['rev-parse', ...flags], {
     cwd,
     encoding: 'utf8',
+    timeout: SCREEN_SPAWN_TIMEOUT_MS,
+    killSignal: 'SIGKILL',
     env: sanitizedGitEnv(),
   });
   if (r.error || r.status !== 0 || typeof r.stdout !== 'string') return null;
   return r.stdout.endsWith('\n') ? r.stdout.slice(0, -1) : r.stdout;
 }
 
+/** True when a transcode replaced bytes this screen would otherwise resolve. */
+function carriesReplacementChar(value: string): boolean {
+  return value.includes('\uFFFD');
+}
+
+/**
+ * How many include hops the screen will follow before refusing.
+ *
+ * The graph is attacker-written and may be cyclic or merely deep; visited
+ * targets are tracked, so this bounds work rather than correctness.
+ */
+const MAX_INCLUDE_HOPS = 32;
+
+/**
+ * The `include.path` / `includeIf.*.path` targets a candidate names, resolved.
+ *
+ * Read WITHOUT `--includes`, so git reports the directives this file literally
+ * carries and evaluates no condition. Whether a conditional include would fire
+ * is not a question this screen can answer — the condition is evaluated
+ * against whichever tree git runs in, and the checkout runs in a different one
+ * — so every target is followed regardless of its condition, and the decision
+ * about which ones matter is made by LOCATION below, not by git.
+ */
+function includeTargetsOf(
+  worktree: string,
+  file: string,
+): { targets: string[]; unreadable: boolean } {
+  const r = spawnSync(
+    'git',
+    ['config', '--file', file, '--get-regexp', '^include(If\\..*)?\\.path$'],
+    {
+      cwd: worktree,
+      encoding: 'utf8',
+      timeout: SCREEN_SPAWN_TIMEOUT_MS,
+      killSignal: 'SIGKILL',
+      env: { ...sanitizedGitEnv(), LC_ALL: 'C' },
+    },
+  );
+  if (r.error || (r.status !== 0 && r.status !== 1)) {
+    return { targets: [], unreadable: true };
+  }
+  if (r.status === 1 || typeof r.stdout !== 'string') {
+    return { targets: [], unreadable: false };
+  }
+  const targets: string[] = [];
+  for (const line of r.stdout.split('\n')) {
+    if (line.length === 0) continue;
+    // `key value`, and only the FIRST space separates them — a path may hold
+    // the rest, including further spaces.
+    const sp = line.indexOf(' ');
+    if (sp < 0) continue;
+    const raw = line.slice(sp + 1);
+    if (raw.length === 0) continue;
+    // git expands a leading `~` against HOME and resolves anything else
+    // against the including file's directory. Expand it the same way rather
+    // than skipping: a repository commonly lives under HOME, so `~/...` can
+    // name a target INSIDE it, and the location test below is what decides.
+    if (raw === '~' || raw.startsWith('~/')) {
+      const home = process.env['HOME'];
+      if (home === undefined || home.length === 0) continue;
+      targets.push(resolve(home, raw.slice(raw === '~' ? 1 : 2)));
+      continue;
+    }
+    // `~user/` is not expanded here — resolving another account's home is not
+    // this screen's business, and an unexpanded path simply is not followed.
+    if (raw.startsWith('~')) continue;
+    targets.push(resolve(dirname(file), raw));
+  }
+  return { targets, unreadable: false };
+}
+
 export function localFilterCommands(worktree: string): LocalFilterScreen {
   const commonDir = revParsePath(worktree, '--git-common-dir');
   const gitDir = revParsePath(worktree, '--git-dir');
   if (commonDir === null || gitDir === null) {
-    // Not a usable repository from here: the checkout this screen guards has
-    // nothing to run in either, and its own failure is the caller's answer.
-    return { keys: [], total: 0, unreadable: null, stopped: null };
+    // Two very different reasons land here, and only one is benign. A plain
+    // "not a repository" answer is the caller's own problem — its checkout has
+    // nothing to run in either. But a discovery spawn KILLED at the timeout
+    // above reaches this line too, and that one happens precisely when a plant
+    // has made git block, so it must not read as clean. There is no way to
+    // tell them apart from the outside, so this fails closed: a screen that
+    // could not discover the repository did not screen it.
+    return {
+      keys: [],
+      total: 0,
+      unreadable: worktree,
+      stopped: 'unreadable',
+    };
+  }
+  if (carriesReplacementChar(commonDir) || carriesReplacementChar(gitDir)) {
+    // An invalid byte in the repository path came back as U+FFFD, so every
+    // candidate built from it names a file that does not exist, the admin
+    // readdir hits ENOENT — "the ordinary case" — and the screen would answer
+    // clean over whatever the real path holds. Unmeasured, not clean.
+    return {
+      keys: [],
+      total: 0,
+      unreadable: worktree,
+      stopped: 'unreadable',
+    };
   }
   const common = resolve(worktree, commonDir);
   const candidates = [
@@ -780,9 +894,42 @@ export function localFilterCommands(worktree: string): LocalFilterScreen {
   for (const entry of worktreeEntries ?? []) {
     candidates.push(join(common, 'worktrees', entry, 'config.worktree'));
   }
+  // Anything under these is the repository's own state, which a probe can
+  // write and cleanup never wipes. Anything outside them is the user's — their
+  // global config is their contract exactly as it is for any git command they
+  // run, and `git lfs install` puts `filter.lfs.clean` there. So an include
+  // whose target lands inside is followed and screened; one pointing out is
+  // left alone. That is the whole rule, and it is a rule about LOCATION, which
+  // is the same in every tree — unlike an `includeIf` condition, which is not.
+  const repoRoots = [common, resolve(worktree, gitDir), resolve(worktree)].map(
+    (d) => {
+      try {
+        return realpathSync(d);
+      } catch {
+        return d;
+      }
+    },
+  );
+  const insideRepo = (p: string): boolean => {
+    let real = p;
+    try {
+      real = realpathSync(dirname(p)) + sep + basename(p);
+    } catch {
+      // Not yet resolvable: judge the literal path rather than skipping it.
+    }
+    return repoRoots.some(
+      (root) => real === root || real.startsWith(root + sep),
+    );
+  };
+
   const found = new Set<string>();
   let unreadable: string | null = null;
-  for (const file of candidates) {
+  // Seeded with the candidates themselves, so an include pointing back at
+  // one of them is not walked twice.
+  const seen = new Set<string>(candidates);
+  const queue = [...candidates];
+  let hops = 0;
+  for (const file of queue) {
     if (!existsSync(file)) continue;
     // Existence is not readability, and git does not distinguish them for us:
     // an unreadable `--file` exits 1 with a warning on stderr — byte-identical
@@ -808,16 +955,14 @@ export function localFilterCommands(worktree: string): LocalFilterScreen {
         'config',
         '--file',
         file,
-        // `--file` alone does NOT expand `include.path` / `includeIf` — git's
-        // documented default for a single-file read — while every checkout this
-        // screen authorises reads MERGED config, which does. A probe appends
-        // `[include] path = evil.inc` to a screened candidate and writes the
-        // `filter.<name>.smudge` into the include target: without `--includes`
-        // the screen answers clean and the checkout runs it. With it, the screen
-        // reads the file exactly as the checkout will. A config this read cannot
-        // parse to the end — a malformed section, or an include it cannot follow
-        // — exits git non-zero, which the gate below turns into a refusal.
-        '--includes',
+        // NO `--includes`. It looks like the honest read — the checkout does
+        // expand includes — but it makes git EVALUATE `includeIf` conditions
+        // in this process's context, and the checkout this authorises runs in
+        // a different tree. A condition false here and true there hides a
+        // filter from the screen that the checkout then executes, and
+        // `includeIf.hasconfig:remote.*.url:` never fires under `--file` at
+        // all. There is no context that matches a cross-tree checkout, so the
+        // include graph is walked explicitly below instead of delegated.
         // BEFORE the pattern: `--name-only` after it silently prints nothing
         // and exits 1 even with live keys. With it, each line is the whole key
         // and nothing has to be parsed out of a `key value` pair — a config
@@ -836,14 +981,19 @@ export function localFilterCommands(worktree: string): LocalFilterScreen {
         cwd: worktree,
         encoding: 'utf8',
         // No raised `maxBuffer`: `--name-only` prints one KEY per matching line
-        // and never the value, so the padded-`smudge`-value overflow that a full
-        // print invited cannot reach stdout — output is bounded by key count,
-        // not by an attacker-chosen value length. The one residual overflow is a
-        // config carrying more filter keys than the default 1 MiB holds, and
-        // that path sets `r.error` (ENOBUFS), which the gate below turns into a
-        // refusal. Fail closed on the pathological count; do not carry a buffer
-        // whose stated reason no longer exists.
-        env: sanitizedGitEnv(),
+        // and never the value, so a padded `smudge` value cannot reach stdout —
+        // output is bounded by key count, not by an attacker-chosen length. A
+        // config carrying more keys than the default holds sets `r.error`
+        // (ENOBUFS), which the gate below turns into a refusal.
+        timeout: SCREEN_SPAWN_TIMEOUT_MS,
+        killSignal: 'SIGKILL',
+        // Byte-wise regex semantics. `--get-regexp` is POSIX matching and is
+        // locale-sensitive: under a UTF-8 locale a key whose subsection name
+        // carries an invalid byte never matches, so git exits 1 and the gate
+        // below reads that as the ordinary clean answer — while the checkout
+        // resolves filter keys by exact name, which no locale affects. The
+        // screen would certify clean over a filter the checkout runs.
+        env: { ...sanitizedGitEnv(), LC_ALL: 'C' },
       },
     );
     // Exit 1 is "no key matched" — the ordinary clean answer. Every other
@@ -852,6 +1002,24 @@ export function localFilterCommands(worktree: string): LocalFilterScreen {
     if (r.error || (r.status !== 0 && r.status !== 1)) {
       unreadable ??= file;
       continue;
+    }
+    // Follow this file's includes, but only where they land inside the
+    // repository. git expands them for the checkout regardless; the screen
+    // declines to chase one into the user's own configuration, which it must
+    // not refuse on.
+    if (hops < MAX_INCLUDE_HOPS) {
+      const inc = includeTargetsOf(worktree, file);
+      if (inc.unreadable) unreadable ??= file;
+      for (const target of inc.targets) {
+        if (!insideRepo(target) || seen.has(target)) continue;
+        seen.add(target);
+        hops += 1;
+        if (hops > MAX_INCLUDE_HOPS) {
+          unreadable ??= file;
+          break;
+        }
+        queue.push(target);
+      }
     }
     if (r.status === 1 || typeof r.stdout !== 'string') continue;
     for (const line of r.stdout.split('\n')) {

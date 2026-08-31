@@ -3011,6 +3011,28 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
         // A refused restore therefore reaches this line with the plant live.
         // The throw lands in this phase's existing catch and is recorded as a
         // probe that did not run, which is what it is.
+        // "Revert to base" is two operations, confined to the throwaway tree. A
+        // file the PR MODIFIED is checked out from base; a file the PR ADDED did
+        // not exist at base, so it is removed — through `safeRmWithin`, which
+        // still refuses to delete through a PR-controlled symlink even here.
+        // Removing an added file usually makes the probe fail to compile, which
+        // is `inconclusive` — a non-verdict, but an honest one.
+        const modified: string[] = [];
+        const added: string[] = [];
+        for (const p of revert) {
+          (existsAtBase(probeTree, base, p) ? modified : added).push(p);
+        }
+        // Screened HERE, immediately before the spawn, not above the loop.
+        // The classification above runs one synchronous `git cat-file -e` per
+        // revert path, and `revert` is the plan's full source-file list —
+        // attacker-controlled in count. A screen above it leaves a window
+        // measured in seconds between the last read and the checkout, and the
+        // probe's own test code can spawn a detached process that plants the
+        // filter inside it. Moving the screen below the loop leaves only the
+        // checkout spawn in the gap. The residual window is sub-millisecond
+        // and cannot be closed from here: there is no `-c` kill switch for
+        // attribute-selected filters, so a checkout either reads merged config
+        // or does not run.
         const revertFilters = localFilterCommands(probeTree);
         // Gate on `stopped`, matching the restore and scratch-tree — a screen
         // that stopped for any reason did not finish, so the checkout must not
@@ -3027,17 +3049,6 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
               `${screenKeyList(revertFilters)}, which this revert's checkout ` +
               'would EXECUTE',
           );
-        }
-        // "Revert to base" is two operations, confined to the throwaway tree. A
-        // file the PR MODIFIED is checked out from base; a file the PR ADDED did
-        // not exist at base, so it is removed — through `safeRmWithin`, which
-        // still refuses to delete through a PR-controlled symlink even here.
-        // Removing an added file usually makes the probe fail to compile, which
-        // is `inconclusive` — a non-verdict, but an honest one.
-        const modified: string[] = [];
-        const added: string[] = [];
-        for (const p of revert) {
-          (existsAtBase(probeTree, base, p) ? modified : added).push(p);
         }
         if (modified.length > 0) {
           // Same neutralisation the restore's checkout runs (CHECKOUT_INERT):
