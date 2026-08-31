@@ -671,6 +671,7 @@ export class SessionAttachmentStore {
               (entry) =>
                 entry.isFile() &&
                 !source.pendingNames.has(entry.name) &&
+                !source.removingNames.has(entry.name) &&
                 !copiedNames.has(entry.name),
             )
             .map(async (entry) => {

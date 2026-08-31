@@ -2013,6 +2013,56 @@ describe('SessionAttachmentStore', () => {
       }
     });
 
+    it('does not copy an attachment being removed', async () => {
+      const { main, fallback } = await createRoots();
+      const source = new SessionAttachmentStore(main, sessionId, fallback);
+      const targetRoot = await fs.mkdtemp(
+        path.join(tmpdir(), 'qwen-attachments-target-'),
+      );
+      const target = new SessionAttachmentStore(targetRoot, sessionId);
+      await source.putAttachment(
+        new TextEncoder().encode('doomed'),
+        'text/plain',
+        'notes.txt',
+      );
+      const realUnlink = fs.unlink.bind(fs);
+      let notifyUnlinkPaused = () => {};
+      const unlinkPaused = new Promise<void>((resolve) => {
+        notifyUnlinkPaused = resolve;
+      });
+      let resumeUnlink = () => {};
+      const unlinkResume = new Promise<void>((resolve) => {
+        resumeUnlink = resolve;
+      });
+      const sourcePath = path.join(main, sessionDir, 'notes.txt');
+      const unlink = vi
+        .spyOn(fs, 'unlink')
+        .mockImplementation(async (filePath) => {
+          if (String(filePath) === sourcePath) {
+            notifyUnlinkPaused();
+            await unlinkResume;
+          }
+          return realUnlink(filePath);
+        });
+      try {
+        const removing = source.remove('notes.txt');
+        await unlinkPaused;
+        await target.copyFrom(source);
+        resumeUnlink();
+
+        await expect(removing).resolves.toBe(true);
+        await expect(target.read('notes.txt')).resolves.toBeUndefined();
+      } finally {
+        unlink.mockRestore();
+        resumeUnlink();
+        await source.close();
+        await target.delete();
+        await fs.rm(main, { recursive: true, force: true });
+        await fs.rm(fallback, { recursive: true, force: true });
+        await fs.rm(targetRoot, { recursive: true, force: true });
+      }
+    });
+
     it('copies fallback attachments when the primary directory is degraded', async () => {
       const { main, fallback } = await createRoots();
       const source = new SessionAttachmentStore(main, sessionId, fallback);
