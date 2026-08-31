@@ -11690,11 +11690,12 @@ describe('createServeApp', () => {
       }
     });
 
-    it('does not map a non-initialize bridge timeout to the init_timeout contract', async () => {
+    it('maps the newSession dispatch timeout to its own retryable init_timeout contract', async () => {
       // `newSession` is the label on the dispatch that follows a successful
       // initialize: a timeout there leaves the session-creation outcome
-      // ambiguous. It must fall through to the generic 500, not the typed
-      // 504 with retry guidance.
+      // ambiguous, but the daemon still classifies it as `init_timeout`
+      // with a budget-derived Retry-After so fail-closed clients can back
+      // off without treating it as an unrecoverable server error.
       const bridge = fakeBridge({
         spawnImpl: async () => {
           throw new BridgeTimeoutError('newSession', 10_000);
@@ -11707,10 +11708,13 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .send({ cwd: WS_BOUND });
 
-      expect(res.status).toBe(500);
-      expect(res.headers['retry-after']).toBeUndefined();
-      expect(res.body.code).toBeUndefined();
-      expect(res.body.retryable).toBeUndefined();
+      expect(res.status).toBe(504);
+      expect(res.headers['retry-after']).toBe('10');
+      expect(res.body.code).toBe('init_timeout');
+      expect(res.body.errorKind).toBe('init_timeout');
+      expect(res.body.retryable).toBe(true);
+      expect(res.body.timeoutMs).toBe(10_000);
+      expect(res.body.phase).toBeUndefined();
       expect(res.body.sideEffectPossible).toBeUndefined();
     });
 

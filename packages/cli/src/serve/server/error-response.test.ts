@@ -89,15 +89,21 @@ describe('sendBridgeError session writer errors', () => {
     });
   });
 
-  it('leaves non-session-initialization bridge timeouts on the generic path', () => {
+  it('maps channel initialization timeouts without caller context to the reduced contract', () => {
     const { response, status, json, set } = responseMock();
     const error = new BridgeTimeoutError('initialize', 10_000);
 
     sendBridgeError(response, error);
 
     expect(set).not.toHaveBeenCalled();
-    expect(status).toHaveBeenCalledWith(500);
-    expect(json).toHaveBeenCalledWith({ error: error.message });
+    expect(status).toHaveBeenCalledWith(504);
+    expect(json).toHaveBeenCalledWith({
+      error: error.message,
+      code: 'init_timeout',
+      errorKind: 'init_timeout',
+      phase: 'channel.initialize',
+      timeoutMs: 10_000,
+    });
   });
 
   it.each([
