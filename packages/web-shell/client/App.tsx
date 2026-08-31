@@ -298,10 +298,7 @@ import type {
   Message,
   PermissionRequest,
 } from './adapters/types';
-import {
-  backgroundShellTaskId,
-  isBackgroundSubAgentToolCall,
-} from './adapters/toolClassification';
+import { isBackgroundSubAgentToolCall } from './adapters/toolClassification';
 import {
   computeTodoDetails,
   computeTodoTimeline,
