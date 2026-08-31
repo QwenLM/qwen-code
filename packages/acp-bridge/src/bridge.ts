@@ -7905,6 +7905,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       originatorClientId = resolveTrustedClientId(entry, context.clientId);
     }
     entry.closing = true;
+    // DAEMON-005: remember the deferred-close stamp before clearing it. If the
+    // child refuses the close, the session is still alive and may need the
+    // grace window again once the prompt settles and no subscriber remains.
+    const deferredCloseStamp = entry.promptSettledAt;
     clearPromptSettledClose(entry);
     const reason = closeOpts?.reason ?? 'client_close';
     writeStderrLine(
@@ -7964,6 +7968,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // cleanup removes every bridge entry it owned.
       if (isDefinitiveAcpRequestError(error)) {
         entry.closing = false;
+        // DAEMON-005: the child refused the close and the session remains live.
+        // Restore the prompt-settled grace stamp so the grace window continues
+        // to hold the session open and a reconnecting poll-based client can
+        // still cancel the deferred close. Do not re-arm the timer here: the
+        // deferred-close path would just call closeSessionImpl again and be
+        // refused again. The idle reaper closes the session once the grace
+        // window expires.
+        if (deferredCloseStamp !== null) {
+          entry.promptSettledAt = deferredCloseStamp;
+        }
       } else if (ci) {
         await killChannelWithLog(
           ci,
@@ -9599,12 +9613,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     subscribeEvents(sessionId, subOpts) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
+      const raw = entry.events.subscribe(subOpts);
       // DAEMON-005: a reconnecting poll-based client stops the deferred timer
       // but keeps the grace-hold stamp alive so the session survives the
       // subscribe → drain → detach cycle. `detachClient` re-arms the timer
-      // for the remaining window once the last subscriber drops.
+      // for the remaining window once the last subscriber drops. Only cancel
+      // after subscribe succeeds so a failed subscribe preserves the pending
+      // close.
       cancelPromptSettledTimer(entry);
-      const raw = entry.events.subscribe(subOpts);
       if (!subOpts?.snapshot) return raw;
 
       // A5: wrap the iterator to inject a synthetic `session_snapshot`
@@ -13062,6 +13078,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         return true;
       }
       entry.closing = true;
+      // DAEMON-005: remember the deferred-close stamp before clearing it. If the
+      // child refuses the kill, the session is still alive and may need the
+      // grace window again once the prompt settles and no subscriber remains.
+      const deferredCloseStamp = entry.promptSettledAt;
       clearPromptSettledClose(entry);
       const ci = channelInfoForEntry(entry);
       if (!ci) {
@@ -13089,6 +13109,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         // deferred tombstone completes it on the next settle event.
         if (isDefinitiveAcpRequestError(error)) {
           entry.closing = false;
+          // DAEMON-005: the child refused the kill and the session remains live.
+          // Restore the prompt-settled grace stamp so the grace window continues
+          // to hold the session open and a reconnecting poll-based client can
+          // still cancel the deferred close. Do not re-arm the timer here: the
+          // deferred-close path would just call killSession again and be
+          // refused again. The idle reaper closes the session once the grace
+          // window expires.
+          if (deferredCloseStamp !== null) {
+            entry.promptSettledAt = deferredCloseStamp;
+          }
           return false;
         }
         if (ci) {

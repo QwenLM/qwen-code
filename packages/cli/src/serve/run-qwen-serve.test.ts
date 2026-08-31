@@ -110,7 +110,7 @@ const BASE_BRIDGE_SNAPSHOT: BridgeDaemonStatusSnapshot = {
   limits: {
     maxSessions: 20,
     maxPendingPromptsPerSession: 5,
-    eventRingSize: 32_000,
+    eventRingSize: 8_000,
     compactedReplayMaxBytes: 4 * 1024 * 1024,
     maxJournalEvents: 10_000,
     maxJournalBytes: 8 * 1024 * 1024,
@@ -4186,6 +4186,7 @@ describe('runQwenServe telemetry validation', () => {
         eventRingSize: 1234,
         compactedReplayMaxBytes: 1024,
         sessionRestoreTimeoutMs: 90_000,
+        sessionPromptSettledCloseGraceMs: 5_000,
         serveWebShell: false,
       },
       {
@@ -4209,6 +4210,7 @@ describe('runQwenServe telemetry validation', () => {
         compactedReplayMaxBytes: 1024,
         eventRingSize: 1234,
         sessionRestoreTimeoutMs: 90_000,
+        sessionPromptSettledCloseGraceMs: 5_000,
         permissionPolicy: 'local-only',
         onChannelDelivery: expect.any(Function),
       });
@@ -4216,6 +4218,7 @@ describe('runQwenServe telemetry validation', () => {
         compactedReplayMaxBytes: 1024,
         eventRingSize: 1234,
         sessionRestoreTimeoutMs: 90_000,
+        sessionPromptSettledCloseGraceMs: 5_000,
         permissionPolicy: 'local-only',
         onChannelDelivery: expect.any(Function),
       });
@@ -10132,7 +10135,7 @@ describe('runQwenServe runtime startup failures', () => {
           maxSessions: 1,
           maxPendingPromptsPerSession: 5,
           listenerMaxConnections: 256,
-          eventRingSize: 32_000,
+          eventRingSize: 8_000,
           compactedReplayMaxBytes: 4 * 1024 * 1024,
           maxJournalEvents: 10_000,
           maxJournalBytes: 8 * 1024 * 1024,

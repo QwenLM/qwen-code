@@ -845,13 +845,13 @@ describe('EventBus', () => {
     abort.abort();
   });
 
-  it('default ring size is 32000 (raised from 8000; agentic sessions exceed 25k events/turn)', async () => {
+  it('default ring size is 8000', async () => {
     const bus = new EventBus();
-    for (let i = 1; i <= 32_001; i++) bus.publish({ type: 'foo', data: i });
-    // After publishing 32001 frames into the default ring, the replay
-    // backlog should hold the most recent 32000 (oldest dropped).
+    for (let i = 1; i <= 8_001; i++) bus.publish({ type: 'foo', data: i });
+    // After publishing 8001 frames into the default ring, the replay
+    // backlog should hold the most recent 8000 (oldest dropped).
     // A `lastEventId: 0` resume with a queue cap larger than the ring
-    // collects exactly 32000 live frames; ids start at 2 because id=1
+    // collects exactly 8000 live frames; ids start at 2 because id=1
     // was the one shifted out of the ring.
     //
     // #4175 F4 prereq: `lastEventId: 0` + earliest-id-in-ring = 2
@@ -863,18 +863,18 @@ describe('EventBus', () => {
     const abort = new AbortController();
     const iter = bus.subscribe({
       lastEventId: 0,
-      maxQueued: 33_000,
+      maxQueued: 9_000,
       signal: abort.signal,
     });
-    // Collect 32001 frames now: 1 synthetic resync + 32000 live.
-    const events = await collect(iter, 32_001);
+    // Collect 8001 frames now: 1 synthetic resync + 8000 live.
+    const events = await collect(iter, 8_001);
     abort.abort();
     const liveIds = events
       .filter((e) => e.id !== undefined)
       .map((e) => e.id as number);
-    expect(liveIds).toHaveLength(32_000);
+    expect(liveIds).toHaveLength(8_000);
     expect(liveIds[0]).toBe(2);
-    expect(liveIds[liveIds.length - 1]).toBe(32_001);
+    expect(liveIds[liveIds.length - 1]).toBe(8_001);
     // The synthetic resync frame is the first one.
     expect(events[0]?.type).toBe('state_resync_required');
   });

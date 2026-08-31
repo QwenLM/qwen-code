@@ -538,7 +538,7 @@ function makeBridge(
         limits: {
           maxSessions: 20,
           maxPendingPromptsPerSession: 5,
-          eventRingSize: 32_000,
+          eventRingSize: 8_000,
           compactedReplayMaxBytes: 4 * 1024 * 1024,
           maxJournalEvents: 10_000,
           maxJournalBytes: 8 * 1024 * 1024,
