@@ -172,6 +172,13 @@ describe('runScriptLint — graceful degradation and scoping', () => {
     expect(r.deferred).toHaveLength(1);
     expect(r.deferred[0].tool).toBe('actionlint');
     expect(r.deferred[0].reason).toContain('not yet supported');
+    // The reason must not restate "not linted" — the body renders it under a
+    // wrapper that already opens with "Not linted:", and a tail here posted
+    // the phrase twice in one sentence (#10567's posted body).
+    expect(r.deferred[0].reason).not.toContain('not linted');
+    // The Chinese half of that wrapper sentence renders `reasonZh` — without
+    // it the 中文说明 block carried the English reason verbatim.
+    expect(r.deferred[0].reasonZh).toContain('actionlint');
     expect(r.ok).toBe(true);
   });
 

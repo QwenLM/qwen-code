@@ -1537,7 +1537,8 @@ describe('composeReview — event caps (round-7 Critical #2: caps must reach eve
     // prefix filter must not let it swallow a DIFFERENT reverse-audit scope
     // reported with its own reason — a whiffed chunk from the rounds that
     // DID run is exactly what a partially-run audit still owes the author.
-    const plan = coveredPlan();
+    // han: the caller-prose zh assertion below needs the Chinese half rendered.
+    const plan = coveredPlan(['verify', 'reverse-audit'], { han: true });
     writeBudgetStop(
       plan,
       {
@@ -1547,19 +1548,30 @@ describe('composeReview — event caps (round-7 Critical #2: caps must reach eve
       },
       3,
     );
-    const r = composeReview(
-      base({
-        planPath: plan,
-        unreviewedDimensions: [
-          "reverse audit — chunk 2's auditor returned nothing substantive twice",
-        ],
-      }),
-    );
+    // Not base(): its planPath default runs coveredPlan() again on the same
+    // path and would overwrite the han-stamped plan.
+    const r = composeReview({
+      planPath: plan,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      unreviewedDimensions: [
+        "reverse audit — chunk 2's auditor returned nothing substantive twice",
+      ],
+    });
     expect(r.body).toContain(
       'Not reviewed: reverse audit — stopped before round 3 by the review time budget.',
     );
     expect(r.body).toContain(
       "Not reviewed: reverse audit — chunk 2's auditor returned nothing substantive twice.",
+    );
+    // Caller prose is untranslatable by construction, and the Chinese half
+    // SAYS so — an unmarked all-English sentence under 中文说明 read as a
+    // broken translation (#10567's posted body). The payload keeps its own
+    // English full stop.
+    expect(r.body).toContain(
+      "未审查（原文为英文）：reverse audit — chunk 2's auditor returned nothing substantive twice.",
     );
     // The marker's own disclosure still renders exactly once.
     expect(r.body.split('review time budget').length - 1).toBe(1);
@@ -6819,8 +6831,38 @@ describe('scriptLintGate — the deterministic gate reads the report', () => {
     expect(g.criticals).toEqual([]);
     expect(g.unreviewed).toEqual([]);
     expect(g.disclosed).toHaveLength(1);
-    expect(g.disclosed[0]).toContain('.github/workflows/ci.yml');
-    expect(g.disclosed[0]).toContain('source mapping not yet supported');
+    expect(g.disclosed[0].en).toContain('.github/workflows/ci.yml');
+    expect(g.disclosed[0].en).toContain('source mapping not yet supported');
+    // No "the executable-script lint" prefix: the body wraps this in a
+    // sentence that already opens "Not linted:", and the prefix rendered as
+    // "Not linted: the executable-script lint" — a lint not linted.
+    expect(g.disclosed[0].en).not.toContain('executable-script lint');
+    // No `reasonZh` in this report — the Chinese half falls back to the
+    // English reason rather than dropping the sentence.
+    expect(g.disclosed[0].zh).toContain('source mapping not yet supported');
+  });
+
+  it('a deferred entry with a reasonZh renders it in the Chinese half', () => {
+    const p = writePlan({
+      files: [{ path: '.github/workflows/ci.yml', kind: 'source' }],
+    });
+    writeReport({
+      deferred: [
+        {
+          path: '.github/workflows/ci.yml',
+          tool: 'actionlint',
+          reason: 'source mapping not yet supported',
+          reasonZh: '尚未支持源映射',
+        },
+      ],
+    });
+    const g = scriptLintGate(p);
+    expect(g.disclosed).toHaveLength(1);
+    expect(g.disclosed[0].en).toContain('source mapping not yet supported');
+    expect(g.disclosed[0].zh).toContain('尚未支持源映射');
+    expect(g.disclosed[0].zh).not.toContain('source mapping not yet supported');
+    // Both halves still carry the code-span path.
+    expect(g.disclosed[0].zh).toContain('.github/workflows/ci.yml');
   });
 
   it('ignores a cosmetic (style) or pre-existing (inDiff:false) finding', () => {
@@ -6873,12 +6915,14 @@ describe('scriptLintGate — the deterministic gate reads the report', () => {
     });
     const g = scriptLintGate(p);
     expect(g.disclosed).toHaveLength(1);
-    const d = g.disclosed[0];
-    expect(d).not.toContain('\n'); // newline stripped — cannot forge a body line
-    expect(d).not.toContain('`pwn`'); // the PR's own backticks stripped — cannot break out
-    // `@acme-team` sits INSIDE a code span (backtick … no backtick … backtick), so
-    // it is inert as a GitHub mention — the whole path rendered as one code span.
-    expect(d).toMatch(/`[^`\n]*@acme-team[^`\n]*`/);
+    // BOTH halves post — the Chinese one is not exempt from neutralisation.
+    for (const d of [g.disclosed[0].en, g.disclosed[0].zh]) {
+      expect(d).not.toContain('\n'); // newline stripped — cannot forge a body line
+      expect(d).not.toContain('`pwn`'); // the PR's own backticks stripped — cannot break out
+      // `@acme-team` sits INSIDE a code span (backtick … no backtick … backtick), so
+      // it is inert as a GitHub mention — the whole path rendered as one code span.
+      expect(d).toMatch(/`[^`\n]*@acme-team[^`\n]*`/);
+    }
   });
 
   it('report prose cannot smuggle live comment grammar into a disclosure', () => {
@@ -6903,12 +6947,13 @@ describe('scriptLintGate — the deterministic gate reads the report', () => {
       errored: [{ path: 'deploy.sh', tool: 'shell<!-- z -->check' }],
     });
     const g = scriptLintGate(p);
-    for (const line of [...g.disclosed, ...g.unreviewed]) {
+    const disclosedHalves = g.disclosed.flatMap((d) => [d.en, d.zh]);
+    for (const line of [...disclosedHalves, ...g.unreviewed]) {
       expect(line).not.toContain('<!--');
       expect(line).not.toContain('-->');
     }
-    expect(g.disclosed[0]).toContain('qwen-review-deferred');
-    expect(g.disclosed[0]).toContain('mapping unsupported');
+    expect(g.disclosed[0].en).toContain('qwen-review-deferred');
+    expect(g.disclosed[0].en).toContain('mapping unsupported');
   });
 
   it.each([
@@ -6965,7 +7010,7 @@ describe('scriptLintGate — the deterministic gate reads the report', () => {
     expect(g.disclosed).toHaveLength(1);
     expect(g.unreviewed[0]).toContain('42');
     expect(g.unreviewed[1]).toContain('undefined errored');
-    expect(g.disclosed[0]).toContain('[object Object]');
+    expect(g.disclosed[0].en).toContain('[object Object]');
   });
 
   it('reports an errored checker as unreviewed (fail closed)', () => {
@@ -7053,8 +7098,9 @@ describe('composeReview — the script-lint gate wired to the verdict', () => {
   // verifier (['reverse-audit']) to prove a finding stands with none.
   function gateReadyPlan(
     step45Keys: string[] = ['verify', 'reverse-audit'],
+    planOpts: Parameters<typeof coveredPlan>[1] = {},
   ): string {
-    const p = coveredPlan(step45Keys);
+    const p = coveredPlan(step45Keys, planOpts);
     const planObj = JSON.parse(readFileSync(p, 'utf8'));
     planObj.worktreePath = '.qwen/tmp/review-pr-1';
     writeFileSync(p, JSON.stringify(planObj));
@@ -7206,7 +7252,9 @@ describe('composeReview — the script-lint gate wired to the verdict', () => {
     // but MUST be surfaced in the body so the reader knows that shell went unlinted.
     // The gate reads the report as the sole authority, so the deferral is disclosed
     // from the report itself; the plan stays fully covered so the Approve stands.
-    const p = gateReadyPlan();
+    // han: the Chinese half only renders for a han-audience PR, and this test
+    // pins that half's sentence too.
+    const p = gateReadyPlan(['verify', 'reverse-audit'], { han: true });
     writeGateReport({
       deferred: [
         {
@@ -7224,8 +7272,16 @@ describe('composeReview — the script-lint gate wired to the verdict', () => {
       modelId: MODEL,
     });
     expect(r.event).toBe('APPROVE');
-    expect(r.body).toContain('.github/workflows/ci.yml');
-    expect(r.body).toContain('source mapping not yet supported');
+    // The whole composed sentence, both halves — pinned against the stutter
+    // #10567's posted body carried ("Not linted: the executable-script lint —
+    // … — not linted"): the wrapper says "Not linted" once, then path and
+    // reason, nothing else.
+    expect(r.body).toContain(
+      'Not linted (tool limitation, not a blocker): `.github/workflows/ci.yml` — source mapping not yet supported.',
+    );
+    expect(r.body).toContain(
+      '未检查（工具限制，非阻断）：`.github/workflows/ci.yml`——source mapping not yet supported。',
+    );
     // the clean-approve copy is still there — the disclosure augments, it doesn't replace
     expect(r.body).toContain('No issues found. LGTM! ✅');
   });
