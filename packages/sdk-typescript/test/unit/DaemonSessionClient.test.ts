@@ -471,6 +471,100 @@ describe('DaemonSessionClient', () => {
     ]);
   });
 
+  it('forwards source metadata through resume requests', async () => {
+    const { fetch, calls } = recordingFetch((req) => {
+      if (req.url.endsWith('/capabilities')) {
+        return jsonResponse(200, { features: ['session_source_metadata'] });
+      }
+      if (req.url.endsWith('/session/s-1/resume')) {
+        return jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: true,
+          clientId: 'client-1',
+          state: {},
+        });
+      }
+      return jsonResponse(500, { error: `unexpected ${req.url}` });
+    });
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+    await DaemonSessionClient.resume(client, 's-1', {
+      workspaceCwd: '/work/a',
+      sourceType: 'channel',
+      sourceId: 'dingtalk-main',
+    });
+
+    expect(calls[1]?.url).toBe('http://daemon/session/s-1/resume');
+    expect(JSON.parse(calls[1]!.body!)).toEqual({
+      cwd: '/work/a',
+      sourceType: 'channel',
+      sourceId: 'dingtalk-main',
+    });
+  });
+
+  it('omits source metadata before resuming against an old daemon', async () => {
+    const { fetch, calls } = recordingFetch((req) => {
+      if (req.url.endsWith('/capabilities')) {
+        return jsonResponse(200, { features: [] });
+      }
+      if (req.url.endsWith('/session/s-1/resume')) {
+        return jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: true,
+          clientId: 'client-1',
+          state: {},
+        });
+      }
+      return jsonResponse(500, { error: `unexpected ${req.url}` });
+    });
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+    await DaemonSessionClient.resume(client, 's-1', {
+      workspaceCwd: '/work/a',
+      sourceType: 'channel',
+      sourceId: 'dingtalk-main',
+    });
+
+    expect(calls.map((c) => c.url)).toEqual([
+      'http://daemon/capabilities',
+      'http://daemon/session/s-1/resume',
+    ]);
+    expect(JSON.parse(calls[1]!.body!)).toEqual({
+      cwd: '/work/a',
+    });
+  });
+
+  it('rejects source metadata resume when capability lookup fails', async () => {
+    const { fetch, calls } = recordingFetch((req) => {
+      if (req.url.endsWith('/capabilities')) {
+        return jsonResponse(500, { error: 'capability probe failed' });
+      }
+      if (req.url.endsWith('/session/s-1/resume')) {
+        return jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: true,
+          clientId: 'client-1',
+          state: {},
+        });
+      }
+      return jsonResponse(500, { error: `unexpected ${req.url}` });
+    });
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+    await expect(
+      DaemonSessionClient.resume(client, 's-1', {
+        workspaceCwd: '/work/a',
+        sourceType: 'channel',
+        sourceId: 'dingtalk-main',
+      }),
+    ).rejects.toThrow('capability probe failed');
+
+    expect(calls.map((c) => c.url)).toEqual(['http://daemon/capabilities']);
+  });
+
   it('replays attach-time model switch events on first subscription', async () => {
     const { fetch, calls } = recordingFetch((req) => {
       if (req.url.endsWith('/session')) {
@@ -1749,7 +1843,10 @@ describe('DaemonSessionClient', () => {
           availableSkills: ['review'],
         });
       }
-      if (req.url.endsWith('/session/s-1/tasks')) {
+      if (
+        req.url.endsWith('/session/s-1/tasks') ||
+        req.url.endsWith('/session/s-1/tasks?includeWorkflows=true')
+      ) {
         return jsonResponse(200, {
           v: 1,
           sessionId: 's-1',
@@ -1836,6 +1933,12 @@ describe('DaemonSessionClient', () => {
       now: 1_700_000_000_000,
       tasks: [],
     });
+    await expect(session.workflowTasks()).resolves.toEqual({
+      v: 1,
+      sessionId: 's-1',
+      now: 1_700_000_000_000,
+      tasks: [],
+    });
     await expect(session.lspStatus()).resolves.toEqual({
       v: 1,
       sessionId: 's-1',
@@ -1870,6 +1973,7 @@ describe('DaemonSessionClient', () => {
       'http://daemon/session/s-1/context',
       'http://daemon/session/s-1/supported-commands',
       'http://daemon/session/s-1/tasks',
+      'http://daemon/session/s-1/tasks?includeWorkflows=true',
       'http://daemon/session/s-1/lsp',
       'http://daemon/session/s-1/cancel',
       'http://daemon/permission/req-1',
@@ -1879,6 +1983,7 @@ describe('DaemonSessionClient', () => {
     ]);
     expect(calls[0]?.signal).toBe(controller.signal);
     expect(calls.map((c) => c.headers['x-qwen-client-id'])).toEqual([
+      'client-1',
       'client-1',
       'client-1',
       'client-1',

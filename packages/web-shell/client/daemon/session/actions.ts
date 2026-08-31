@@ -20,7 +20,7 @@ import type {
   DaemonRewindResult,
   DaemonSessionRecapResult,
   DaemonRewindSnapshotInfo,
-  DaemonSessionTaskStatus,
+  DaemonSessionTaskWithWorkflowStatus,
   DaemonSessionArtifactsEnvelope,
   DaemonTranscriptStore,
   DaemonCapabilities,
@@ -2193,7 +2193,43 @@ export function createDaemonSessionActions({
       }
     },
 
-    async cancelTask(taskId: string, kind: DaemonSessionTaskStatus['kind']) {
+    async getWorkflowTasks(opts) {
+      const session = sessionRef.current;
+      if (!session) throw new Error('Daemon session is not connected');
+      try {
+        return await withActionTimeout(
+          session.workflowTasks(),
+          'Get tasks timed out',
+        );
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          error.message === 'Daemon session is not connected'
+        ) {
+          throw error;
+        }
+        if (opts?.silent && isTransientActionError(error)) {
+          throw error;
+        }
+        throw dispatchActionError(
+          addNotice,
+          'Get tasks failed',
+          error,
+          'load_tasks',
+          opts?.silent
+            ? {
+                dispatchedNoticeKeys: silentHardFailureNoticeKeys,
+                noticeOnceKey: getActionErrorNoticeKey('load_tasks', error),
+              }
+            : undefined,
+        );
+      }
+    },
+
+    async cancelTask(
+      taskId: string,
+      kind: DaemonSessionTaskWithWorkflowStatus['kind'],
+    ) {
       const session = requireSessionForAction(
         addNotice,
         sessionRef.current,
@@ -2211,6 +2247,59 @@ export function createDaemonSessionActions({
           'Cancel task failed',
           error,
           'cancel_task',
+        );
+      }
+    },
+
+    async controlWorkflowTask(
+      taskId: string,
+      action: 'pause' | 'resume' | 'retry' | 'rerun' | 'delete-history',
+    ) {
+      const session = requireSessionForAction(
+        addNotice,
+        sessionRef.current,
+        'Control workflow failed',
+        'control_workflow',
+      );
+      try {
+        return await withActionTimeout(
+          session.controlWorkflowTask(taskId, action),
+          'Control workflow timed out',
+        );
+      } catch (error) {
+        throw dispatchActionError(
+          noticeForSession(session),
+          'Control workflow failed',
+          error,
+          'control_workflow',
+        );
+      }
+    },
+
+    async runSavedWorkflow(name: string) {
+      const session = requireSessionForAction(
+        addNotice,
+        sessionRef.current,
+        'Run saved workflow failed',
+        'run_saved_workflow',
+      );
+      try {
+        const { changed, ...result } = await withActionTimeout(
+          session.client.sessionWorkflowTaskAction(
+            session.sessionId,
+            name,
+            'run-saved',
+            session.clientId,
+          ),
+          'Run saved workflow timed out',
+        );
+        return { started: changed, ...result };
+      } catch (error) {
+        throw dispatchActionError(
+          noticeForSession(session),
+          'Run saved workflow failed',
+          error,
+          'run_saved_workflow',
         );
       }
     },

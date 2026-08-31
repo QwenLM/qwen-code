@@ -46,6 +46,7 @@ import type {
   ServeSessionLspStatus,
   ServeSessionSupportedCommandsStatus,
   ServeSessionTasksStatus,
+  ServeSessionWorkflowTaskStatus,
   ServeWorkspaceExtensionsStatus,
   ServeWorkspaceHooksStatus,
   ServeWorkspaceMcpToolsStatus,
@@ -316,11 +317,15 @@ export const ACTIVE_WORK_MAX_SESSION_HOLDS = 1024;
 export const WORKTREE_MCP_DEFER_META_KEY = 'qwen.session.deferMcpDiscovery';
 
 /**
- * Work categories a child reports holds for. Monitors, workflows, and cron
- * remain outside `activeWork`'s declared scope. The category travels on every
+ * Work categories a child reports holds for. Monitors and cron remain outside
+ * `activeWork`'s declared scope. The category travels on every
  * hold so peers can negotiate coverage explicitly when the scope widens.
  */
-export type ActiveWorkHoldCategory = 'agent' | 'notification' | 'shell';
+export type ActiveWorkHoldCategory =
+  | 'agent'
+  | 'notification'
+  | 'shell'
+  | 'workflow';
 
 /** Categories understood by active-work v1 before category negotiation was
  * added to the daemon's initialize request. */
@@ -331,6 +336,7 @@ export const ACTIVE_WORK_HOLD_CATEGORIES: readonly ActiveWorkHoldCategory[] = [
   'agent',
   'notification',
   'shell',
+  'workflow',
 ];
 
 export interface ActiveWorkHeartbeatCapabilityV1 {
@@ -685,6 +691,13 @@ export interface BridgePendingUserQuestionInteraction {
   title?: string;
   questions: BridgePendingUserQuestion[];
   options: BridgePendingInteractionOption[];
+}
+
+export interface BridgeWorkspaceRuntimeLifecycleSnapshot {
+  state: 'cold' | 'starting' | 'active' | 'idle' | 'stopping';
+  runtimeLive: boolean;
+  runtimeEpoch: number;
+  activeWork: boolean;
 }
 
 export type BridgePendingInteraction =
@@ -1166,6 +1179,7 @@ export interface BridgeDaemonStatusLimits {
   } | null;
   channelIdleTimeoutMs: number;
   sessionIdleTimeoutMs: number;
+  sessionPromptSettledCloseGraceMs: number;
 }
 
 export interface BridgeDaemonSessionDiagnostic {
@@ -1784,7 +1798,10 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   ): Promise<ServeSessionSupportedCommandsStatus>;
 
   /** Read the live background task snapshot for a live session. */
-  getSessionTasksStatus(sessionId: string): Promise<ServeSessionTasksStatus>;
+  getSessionTasksStatus(
+    sessionId: string,
+    opts?: { includeWorkflows?: boolean },
+  ): Promise<ServeSessionTasksStatus>;
 
   /** Read sanitized LSP server status for a live session. */
   getSessionLspStatus(sessionId: string): Promise<ServeSessionLspStatus>;
@@ -1802,8 +1819,27 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   cancelSessionTask(
     sessionId: string,
     taskId: string,
-    taskKind: 'agent' | 'shell' | 'monitor',
+    taskKind: 'agent' | 'shell' | 'monitor' | 'workflow',
+    context?: BridgeClientRequestContext,
   ): Promise<{ cancelled: boolean }>;
+
+  /** Control a run, delete history, or start a saved workflow definition. */
+  controlSessionWorkflowTask(
+    sessionId: string,
+    taskId: string,
+    action:
+      | 'pause'
+      | 'resume'
+      | 'retry'
+      | 'rerun'
+      | 'delete-history'
+      | 'run-saved',
+    context?: BridgeClientRequestContext,
+  ): Promise<{
+    changed: boolean;
+    status?: ServeSessionWorkflowTaskStatus['status'];
+    taskId?: string;
+  }>;
 
   /** Clear an active goal in a live session without cancelling the running prompt. */
   clearSessionGoal(
@@ -1873,6 +1909,7 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
    */
   refreshExtensionsForAllSessions(
     data?: Omit<BridgeExtensionsChangedData, 'refreshed' | 'failed'>,
+    options?: { skillsOnly?: boolean },
   ): Promise<{
     refreshed: number;
     failed: number;
@@ -2233,6 +2270,13 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
    */
   isChannelLive(): boolean;
 
+  /**
+   * Atomic physical lifecycle snapshot. Optional only for compatibility with
+   * older injected/embedded Bridge implementations; hosts must not advertise
+   * workspace runtime control when it is absent.
+   */
+  getWorkspaceRuntimeLifecycleSnapshot?(): BridgeWorkspaceRuntimeLifecycleSnapshot;
+
   /** Number of sessions with an active prompt. */
   readonly activePromptCount: number;
 
@@ -2349,7 +2393,7 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
    * cold-start latency. Fire-and-forget; failures are logged and the
    * first session falls back to lazy spawn.
    */
-  preheat(): Promise<void>;
+  preheat(options?: { keepAliveMs?: number }): Promise<void>;
 }
 
 export interface BridgeShutdownOptions {
