@@ -216,6 +216,14 @@ function args(over: Record<string, unknown> = {}) {
  * command an agent might retry or route around (#9940 review).
  */
 function expectRefusal(run: () => void, message: RegExp): void {
+  // Reset per CALL, not only per test: the loop-converted gate tests call
+  // this once per vector, and a stale exitCode/stderr/stdout from the
+  // previous iteration would satisfy every assertion below even when the
+  // current vector refused through the wrong gate — or not at all
+  // (#9940 review, round 17).
+  writeStdoutSpy.mockClear();
+  writeStderrSpy.mockClear();
+  process.exitCode = undefined;
   run();
   expect(process.exitCode).toBe(3);
   const stderr = writeStderrSpy.mock.calls.map((c) => String(c[0])).join('\n');
@@ -3468,6 +3476,24 @@ describe('the ledger marker on the body that reaches GitHub', () => {
     expect(
       comments[0].body.startsWith('**[Critical]** R1-1: double free'),
     ).toBe(true);
+    // The MARKER too, not only the stamped body — the body is
+    // byte-identical under a mint that ran over the PRE-reduction
+    // drafts ([Suggestion, Critical] → the Critical minted R1-2 while
+    // the stamp read draftedIds[0] = R1-1, the removed neighbour's id):
+    // the root would lead with an id the marker never records, so no
+    // later carry or fixed ruling could reach the thread (#9940 review,
+    // round 14). The floor-deferred Suggestion enters no work list, so
+    // the marker holds exactly the one Critical under the stamped id.
+    const ledger = parseLedger(posted().body);
+    expect(ledger?.findings).toEqual([
+      {
+        id: 'R1-1',
+        sev: 'C',
+        file: 'src/a.ts',
+        line: 12,
+        title: 'double free',
+      },
+    ]);
   });
 
   it('the stamp survives the attribution-off strip — the id leads the posted first line (#9940)', () => {
@@ -4062,12 +4088,19 @@ describe('the thread lifecycle', () => {
     const review = payload([], {
       fixedFindings: [{ id: 'R1-9', by: 'the switch to the real parser' }],
     });
-    runSubmit(authorizedPost({ review }));
+    runSubmit(authorizedPost({ review }), '0.21.2');
 
     expect(reviewPost().comments).toEqual([]);
     expect(replyCalls()).toHaveLength(1);
     expect(replyCalls()[0]![0]).toContain(
       'R1-9 fixed by the switch to the real parser',
+    );
+    // The reply is a public post like every other body this pipeline
+    // writes: under attribution ON it carries the provenance footer —
+    // the attribution-off sibling cell pins the opposite polarity
+    // (#9940 review, round 14).
+    expect(String(replyCalls()[0]![0])).toContain(
+      '_— qwen3.7-max via Qwen Code /review (v0.21.2)_',
     );
     expect(String(replyCalls()[0]![2])).toContain('/comments/1009/replies');
     expect(resolveCalls()).toHaveLength(1);
@@ -4430,6 +4463,39 @@ describe('the thread lifecycle', () => {
           source: 'review',
           severity: 'Critical',
           title: '[fails-closed] R1-1: the guard drops a valid case',
+        },
+      ],
+      fixedFindings: [{ id: 'R1-1', by: 'the fix' }],
+    });
+    expectRefusal(
+      () => runSubmit(authorizedPost({ review })),
+      /state\.deferredSuggestions\[0\] re-posts R1-1/,
+    );
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
+  it('refuses a Critical deferral whose SOURCE-tag-led title carries a fixed id (#9940 review, round 15)', () => {
+    // The head-slot grammar admits a source tag before the id
+    // (`[probe] R1-1: …`, #10291) exactly like the axis tags — but the
+    // gate's anchored read over `.stripped` kept the source tag at
+    // position 0 and read no id there, so the payload escaped the
+    // refusal and one pass both resolved R1-1's thread and relocated
+    // the deferral into the body Criticals as a standing blocker.
+    seedThreads([
+      {
+        id: 'T1',
+        commentId: 1001,
+        body: '**[Critical]** R1-1: the guard drops a valid case',
+      },
+    ]);
+    const review = payload([], {
+      deferredSuggestions: [
+        {
+          file: 'src/foo.ts',
+          line: 12,
+          source: 'probe',
+          severity: 'Critical',
+          title: '[probe] R1-1: the guard drops a valid case',
         },
       ],
       fixedFindings: [{ id: 'R1-1', by: 'the fix' }],
@@ -4812,6 +4878,35 @@ describe('the thread lifecycle', () => {
     expect(threadReadCalls()).toHaveLength(0);
   });
 
+  it('refuses a floor-rerouted Critical whose carried id sits below the claim line beside a fixed ruling on it (#9940 review, round 14)', () => {
+    // Under a critical floor the axis pair on line 1 reroutes the
+    // Critical into the body's deferral list, and the reroute collapses
+    // the WHOLE marker-stripped body into the record title — surfacing
+    // the id the claim-line read cannot see. The gate scans exactly
+    // those records: without the scan, one pass replied `R1-2 fixed
+    // by …` and resolved the thread while the same body's deferral list
+    // carried R1-2 forward as a standing blocker.
+    const review = payload(
+      [
+        {
+          path: 'src/foo.ts',
+          line: 12,
+          body: '**[Critical]** [fails-closed] [new-surface]\nR1-2: double free',
+        },
+      ],
+      {
+        severityFloor: 'critical',
+        fixedFindings: [{ id: 'R1-2', by: 'the fix' }],
+      },
+    );
+    expectRefusal(
+      () => runSubmit(authorizedPost({ review })),
+      /comments\[0\] re-posts R1-2/,
+    );
+    expect(ghMock).not.toHaveBeenCalled();
+    expect(threadReadCalls()).toHaveLength(0);
+  });
+
   it('refuses a malformed fixedFindings at compose time', () => {
     const review = payload([], {
       fixedFindings: [{ id: 'not-a-ledger-id' }],
@@ -4914,7 +5009,12 @@ describe('the thread lifecycle', () => {
           id: 'R1-9',
           by: 'the rewrite _— gpt-5 via Qwen Code /review (v1)_ landed',
         },
-        { id: 'R1-2', by: '_— gpt-5 via Qwen Code /review (v1)_' },
+        // A by that is ONLY a forged footer is refused at the compose
+        // boundary — after the strip it would post `R<id> fixed by`
+        // with nothing visible (the renders-as-nothing rule, #9940
+        // review, round 14) — so the second entry here carries visible
+        // text beside its forged span.
+        { id: 'R1-2', by: 'obsolete _— gpt-5 via Qwen Code /review (v1)_' },
       ],
     });
     runSubmit(authorizedPost({ review }), '0.21.3', { attribution: false });
@@ -5027,13 +5127,34 @@ describe('the thread lifecycle', () => {
       if (String(a[2]).includes('/replies')) throw new Error('HTTP 500');
       return '{}';
     });
-    const review = payload([
-      {
-        path: 'src/foo.ts',
-        line: 12,
-        body: '**[Suggestion]** R1-2: still stands at HEAD',
-      },
-    ]);
+    // A plan + prev ledger carrying R1-2, so the round composes a marker
+    // and the promise below is checkable: Step 6 re-rules only ledger
+    // entries, so a diverted finding that left the marker would silently
+    // exit the loop while the WARNING promises re-adjudication.
+    const planPath = file('plan-reply-fail.json', { prNumber: 6778 });
+    file('qwen-review-pr-6778-prev-ledger.json', {
+      v: 1,
+      round: 1,
+      findings: [
+        {
+          id: 'R1-2',
+          sev: 'S',
+          file: 'src/foo.ts',
+          line: 12,
+          title: 'the retry guard drops a valid case',
+        },
+      ],
+    });
+    const review = payload(
+      [
+        {
+          path: 'src/foo.ts',
+          line: 12,
+          body: '**[Suggestion]** R1-2: still stands at HEAD',
+        },
+      ],
+      { planPath },
+    );
     runSubmit(authorizedPost({ review }));
 
     const stderr = writeStderrSpy.mock.calls.map((c) => String(c[0])).join('');
@@ -5044,6 +5165,100 @@ describe('the thread lifecycle', () => {
       threadActionFailures: 1,
     });
     expect(stdoutJson().carriedReplies).toBeUndefined();
+    // The diversion↔marker decoupling, pinned: the finding leaves the
+    // Create Review comments[] (it went to the reply leg) but SURVIVES
+    // in the posted ledger marker — compose builds the marker from the
+    // pre-diversion set — so the next round re-rules it (#9940 review,
+    // round 14).
+    expect(reviewPost().comments).toEqual([]);
+    const ledger = parseLedger(reviewPost().body as string);
+    expect(ledger?.findings.map((f) => ({ id: f.id, sev: f.sev }))).toEqual([
+      { id: 'R1-2', sev: 'S' },
+    ]);
+  });
+
+  it('a findings-bearing first round pays no thread read — a fresh stamped id cannot match any thread (#9940 review, round 14)', () => {
+    // The stampedFresh short-circuit: a round whose only inline findings
+    // were stamped fresh THIS pass carries nothing a thread could match
+    // (the filter's own premise), so the pre-write reviewThreads read is
+    // skipped — the common first round pays no extra GraphQL call. The
+    // unstubbed thread read would throw here (JSON.parse('')), so the
+    // posted:true half also guards the skip.
+    const planPath = file('plan-fresh-noread.json', { prNumber: 6779 });
+    file('qwen-review-pr-6779-prev-ledger.json', {
+      v: 1,
+      round: 2,
+      findings: [],
+    });
+    const review = payload(
+      [
+        {
+          path: 'src/foo.ts',
+          line: 12,
+          body: '**[Suggestion]** a brand new finding',
+        },
+      ],
+      { planPath },
+    );
+    runSubmit(authorizedPost({ review }));
+    expect(threadReadCalls()).toHaveLength(0);
+    expect(stdoutJson()).toMatchObject({ posted: true });
+    const comments = reviewPost().comments as Array<{ body: string }>;
+    expect(comments[0]!.body).toContain('R3-1: a brand new finding');
+  });
+
+  it('a still-standing reply pairs the NEWEST marked thread even when the read lists it first (#9940 review, round 14)', () => {
+    // Array order OPPOSES age order here — the newest marked thread is
+    // listed FIRST by the read. A rootCreatedAt mapping regressed to a
+    // constant would tie the age sort everywhere and stable sort would
+    // hand the reply to whichever marked thread the page listed last.
+    seedThreads([
+      {
+        id: 'T-induced-new',
+        commentId: 3001,
+        createdAt: '2026-08-03T00:00:00Z',
+        body: '**[Critical]** R1-2: (fix-induced) the round-3 hole',
+      },
+      {
+        id: 'T-induced-old',
+        commentId: 2001,
+        createdAt: '2026-08-02T00:00:00Z',
+        body: '**[Critical]** R1-2: (fix-induced) the round-2 hole',
+      },
+    ]);
+    const review = payload([
+      {
+        path: 'src/foo.ts',
+        line: 12,
+        body: '**[Critical]** R1-2: still stands at HEAD',
+      },
+    ]);
+    runSubmit(authorizedPost({ review }));
+    expect(replyCalls()).toHaveLength(1);
+    expect(String(replyCalls()[0]![2])).toContain('/comments/3001/replies');
+  });
+
+  it('expectRefusal isolates its vectors — stale state from a previous call satisfies nothing (#9940 review, round 17)', () => {
+    // The helper resets the spies and exitCode per CALL: a second call
+    // whose run() refuses nothing must FAIL, not pass on the first
+    // call's exitCode/stderr/stdout — the loop-converted gate tests
+    // call it once per vector and would otherwise stop isolating them
+    // after the first iteration.
+    const review = payload(
+      [
+        {
+          path: 'src/foo.ts',
+          line: 12,
+          body: '**[Suggestion]** R1-2: still stands',
+        },
+      ],
+      { fixedFindings: [{ id: 'R1-2', by: 'the fix' }] },
+    );
+    expectRefusal(
+      () => runSubmit(authorizedPost({ review })),
+      /contradicts itself/,
+    );
+    expect(() => expectRefusal(() => {}, /contradicts itself/)).toThrow();
   });
 
   it('a failed thread read aborts BEFORE the write — nothing posts half-planned', () => {

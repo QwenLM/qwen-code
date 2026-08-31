@@ -315,9 +315,17 @@ export function stampCarriedId(body: string, id: string): string {
   // documented safe degradation (#9940 review).
   const residue = LEADING_INVISIBLE_RE.exec(rest)?.[0] ?? '';
   const fromResidue = rest.slice(residue.length);
+  // Same-line residue is stripped again AFTER the unquote: a quoted
+  // opener led by an HTML comment (`> <!-- x -->` + fence) renders the
+  // comment as nothing, so the fence still opens the quoted line — and
+  // the `^`-anchored opener tests missed it (#9940 review, round 17).
+  // Confined to the already-split single line, the strip cannot cross a
+  // rendered line; on an unquoted line it is a no-op — the leading
+  // residue run above already consumed the maximal residue.
   const unquoted = fromResidue
     .split(/\r\n?|\n/)[0]
-    .replace(QUOTE_PREFIX_RE, '');
+    .replace(QUOTE_PREFIX_RE, '')
+    .replace(LEADING_INVISIBLE_RE, '');
   const opensFence = ENTRY_FENCE_DELIMITER_RE.test(unquoted);
   const opensHtmlBlock = HTML_BLOCK_OPEN_RE.test(unquoted.trimStart());
   if (

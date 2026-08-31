@@ -895,6 +895,31 @@ describe('presubmitCommand', () => {
       expect(result.blockOnExistingComments).toBe(false);
     });
 
+    it('does not admit a FOOTER-carrying reply — the fixed-ruling reply is a reply, not a finding (#9940 review, round 16)', async () => {
+      // The thread lifecycle's own fixed-ruling reply carries the visible
+      // footer and inherits its thread's commit_id, so on a same-SHA
+      // re-run it is not stale. Ungated, the footer disjunct bucketed it
+      // into overlap and the deterministic drop discarded a genuinely
+      // NEW finding at the location, citing the fixed note. Replies stay
+      // excluded on the footer disjunct too.
+      const result = await presubmitWithComments(
+        [
+          {
+            id: 5,
+            body: 'R3-2 fixed by the guard rewrite\n\n_— qwen3-max via Qwen Code /review (v0.21.3)_',
+            path: 'a.ts',
+            line: 12,
+            commit_id: 'abc123',
+            in_reply_to_id: 1,
+            user: { login: 'qwen-code-ci-bot' },
+          },
+        ],
+        FINDINGS,
+      );
+      expect(result.existingComments.total).toBe(0);
+      expect(result.blockOnExistingComments).toBe(false);
+    });
+
     it('ignores a footer-less, marker-less comment from another account', async () => {
       // No footer, no comment marker, and not the reviewing account's:
       // nothing presubmit can attribute — it stays outside the dedup set.

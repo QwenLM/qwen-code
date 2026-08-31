@@ -2919,6 +2919,15 @@ describe('the Aone anchor gate — the validation the platform does not perform'
       body: 'One confirmed blocker blocks the merge.',
       cappedBy: [],
       floorEnforced: [0],
+      floorEnforcedEntries: [
+        {
+          file: 'src/foo.ts',
+          line: 12,
+          source: 'review',
+          severity: 'Suggestion',
+          title: 'B — floor enforcement drops me.',
+        },
+      ],
       fixedFindings: [],
     });
     const renumbered = {

@@ -39,7 +39,14 @@ export interface DraftedComment {
 // and the loop converges with a bare machine marker intact. Stated once:
 // the leading strip, the marker-only test, and the ledger's title read all
 // project this same shape.
-const INVISIBLE_RESIDUE = String.raw`(?:\s|<!--[\s\S]*?(?:-->|$)|\p{Cf})`;
+//
+// The comment alternative admits exactly ONE parse per comment — the inner
+// loop cannot cross a `-->` — so a `RESIDUE*[:：]` quantification stays
+// linear when the colon is absent. The lazy `[\s\S]*?(?:-->|$)` form let
+// one token stretch across the comments after it, giving a residue run 2^N
+// decompositions and hanging `stripSeverityPrefix` on residue-led drafts
+// with no colon (#9940 review R14-1).
+const INVISIBLE_RESIDUE = String.raw`(?:\s|<!--(?:(?!-->)[\s\S])*(?:-->|$)|\p{Cf})`;
 
 /** Leading residue — stripped before classifying and re-stripping. */
 export const LEADING_INVISIBLE_RE = new RegExp(`^${INVISIBLE_RESIDUE}+`, 'u');

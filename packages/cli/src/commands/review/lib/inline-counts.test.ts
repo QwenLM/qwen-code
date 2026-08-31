@@ -97,6 +97,22 @@ describe('stripSeverityPrefix — the attribution-off posted shape', () => {
     );
   });
 
+  it('a residue-led draft with NO colon strips in bounded time — the separator regex stays linear (#9940 review, round 14)', () => {
+    // The separator's residue-before-colon arm used a lazy comment token
+    // that could stretch across the comments after it, giving a run of N
+    // comments 2^N decompositions; with no colon to find, the engine
+    // explored them all — ~30 leading comments hung a submit for minutes
+    // (this runs on EVERY GitHub submit via stampCarriedId and every
+    // attribution-off post). The unambiguous comment token keeps the
+    // whole match linear; residue before plain content is still model
+    // text the post keeps.
+    const body = '**[Critical]** ' + '<!-- x -->'.repeat(64) + ' claim';
+    const t0 = performance.now();
+    const stripped = stripSeverityPrefix(body);
+    expect(performance.now() - t0).toBeLessThan(1000);
+    expect(stripped).toBe('<!-- x -->'.repeat(64) + ' claim');
+  });
+
   it('a marker-only body strips to the empty string — the submit gate refuses it first', () => {
     expect(stripSeverityPrefix('**[Critical]**')).toBe('');
     expect(stripSeverityPrefix('**[Suggestion]**\n')).toBe('');

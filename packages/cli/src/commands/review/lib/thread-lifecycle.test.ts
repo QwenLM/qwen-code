@@ -346,6 +346,36 @@ describe('planThreadActions — matching threads to findings', () => {
     expect(plan.replies).toEqual([{ index: 0, id: 'R1-2', commentId: 1002 }]);
   });
 
+  it('prefers an OLDER (fix-induced) root over a NEWER unmarked thread — marked wins regardless of age (#9940 review, round 14)', () => {
+    // The reachable arrangement: a duplicate-re-post round replies one
+    // draft into the live marked thread and leaves the second inline
+    // with its carried id kept, opening an unmarked thread NEWER than
+    // the marked one. The marked tier must still lead — an
+    // age-conditional comparator would pair every later still-standing
+    // reply with the newer unmarked thread and the marked one would
+    // never be answered again.
+    const plan = planThreadActions(
+      [
+        thread({
+          threadId: 'T-induced-old',
+          rootCommentId: 2001,
+          rootCreatedAt: '2026-08-02T00:00:00Z',
+          rootBody:
+            '**[Critical]** R1-2: (fix-induced) the fix opened a new hole',
+        }),
+        thread({
+          threadId: 'T-unmarked-new',
+          rootCommentId: 1001,
+          rootCreatedAt: '2026-08-05T00:00:00Z',
+        }),
+      ],
+      'qwen-bot',
+      [{ index: 0, id: 'R1-2' }],
+      [],
+    );
+    expect(plan.replies).toEqual([{ index: 0, id: 'R1-2', commentId: 2001 }]);
+  });
+
   it('among TWO marked threads, a still-standing reply pairs the newest (#9940 review)', () => {
     // Consecutive fix-induced rounds each open a fresh marked thread
     // under the id; the standing claim under it is the LATEST
@@ -488,6 +518,12 @@ describe('stampCarriedId — the write side of the readback', () => {
       '**[Critical]** > ```js\n> leaked()\n> ```\nthe claim',
       '**[Suggestion]** > ```diff\n> -old\n> +new\n> ```\n\nthe pin moved',
       '**[Critical]** > > ```js\n> > leaked()\n> > ```\nthe claim',
+      // Render-nothing residue AFTER the quote prefix is invisible on
+      // the quoted line, so the fence (or block opener) still opens it —
+      // the ^-anchored opener tests read the raw comment bytes and
+      // missed exactly this shape (#9940 review, round 17).
+      '**[Critical]** > <!-- x -->```js\n> leaked()\n> ```\nthe claim',
+      '**[Critical]** > <!-- x --><div>\n> foo\n\nthe claim',
     ]) {
       expect(stampCarriedId(draft, 'R3-1')).toBe(draft);
     }
@@ -714,10 +750,19 @@ describe('fetchReviewThreads — the read the whole lifecycle plans from', () =>
   });
 
   it('reads the thread list through CLICOLOR_FORCE colour wrappers (#9940 review)', () => {
-    // `gh` wraps its pretty-printed JSON in SGR escapes when the
-    // operator's environment forces colour; the read parses the JSON,
-    // not the terminal rendering.
-    ghMock.mockReturnValue(`\u001b[1;37m${page([node({})])}\u001b[0m`);
+    // Real gh does not wrap the document once — it interleaves an SGR
+    // pair around EVERY token of its pretty-printed JSON
+    // (`ESC[1;38m{ESC[m ESC[1;34m"data"ESC[mESC[1;38m:ESC[m ...`), so
+    // the fixture interleaves too: an anchored or wrapper-only strip
+    // parses a wrapped document and still dies on the real shape
+    // (#9940 review, round 14). Only the one global SGR sweep survives
+    // this cell.
+    const plain = page([node({})]);
+    const coloured = plain.replace(
+      /"(?:[^"\\]|\\.)*"|[{}[\],:]/g,
+      (tok) => `\u001b[1;38m${tok}\u001b[m`,
+    );
+    ghMock.mockReturnValue(coloured);
     const threads = fetchReviewThreads('o/r', 1);
     expect(threads.map((t) => t.threadId)).toEqual(['T1']);
   });
@@ -748,6 +793,10 @@ describe('fetchReviewThreads — the read the whole lifecycle plans from', () =>
       rootCommentId: 1001,
       rootAuthor: 'qwen-bot',
       isResolved: false,
+      // The age sort's ONLY input — a mapping regressed to '' ties every
+      // comparator and the newest-marked preference degenerates to array
+      // order (#9940 review, round 14).
+      rootCreatedAt: '2026-08-01T00:00:00Z',
     });
   });
 

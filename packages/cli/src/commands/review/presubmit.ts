@@ -912,12 +912,17 @@ async function runPresubmit(args: PresubmitArgs): Promise<void> {
   // whitespace must still be recognized here) — while a hand-written comment
   // by the same account is not a posted finding: admitting one lets a
   // same-line hand comment trip the overlap gate into silently dropping a
-  // genuinely new finding. Replies stay excluded either way. Attribution-off
+  // genuinely new finding. Replies stay excluded either way — the footer
+  // disjunct included: the thread lifecycle's fixed-ruling REPLY carries
+  // the same footer (`R<id> fixed by …`), inherits its thread's commit_id,
+  // and an ungated footer match bucketed it into `overlap`, where the drop
+  // rule discarded a genuinely NEW finding at the location citing the fixed
+  // note (#9940 review, round 16). Attribution-off
   // posts from OTHER accounts still escape detection — no footer, no
   // authorship signal — and the setting's description says so.
   const qwenComments = allComments.filter(
     (c) =>
-      /via Qwen Code \/review/.test(c.body ?? '') ||
+      (!c.in_reply_to_id && /via Qwen Code \/review/.test(c.body ?? '')) ||
       (!c.in_reply_to_id &&
         me !== '' &&
         (c.user?.login ?? '').toLowerCase() === me.toLowerCase() &&
@@ -1189,14 +1194,16 @@ async function runPresubmitAone(args: PresubmitArgs): Promise<void> {
   // comments; the mapping and recognition signals are the GitHub ones (the
   // footer is qwen's own provenance string and matches regardless of
   // account; the short marker/severity shapes match only the reviewing
-  // account's own top-level comments).
+  // account's own top-level comments; replies stay excluded on every
+  // disjunct, the footer one included — the fixed-ruling reply carries the
+  // footer too, #9940 review, round 16).
   const allRaw = listMrComments(mrId, ownerRepo);
   const allComments = allRaw.map((c) =>
     aoneCommentToPresubmitComment(c, commitSha),
   );
   const qwenComments = allComments.filter(
     (c) =>
-      /via Qwen Code \/review/.test(c.body ?? '') ||
+      (!c.in_reply_to_id && /via Qwen Code \/review/.test(c.body ?? '')) ||
       (!c.in_reply_to_id &&
         me !== '' &&
         (c.user?.login ?? '').toLowerCase() === me.toLowerCase() &&

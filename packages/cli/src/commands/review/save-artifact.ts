@@ -58,6 +58,10 @@ interface PersistedVerdict
     // artifact contains (the `prevPostedInline` precedent).
     | 'draftedIds'
     | 'mintedIds'
+    // Submit-time gate input, live-only for the same reason: the
+    // contradiction gate consumes the reroute entries in the same pass
+    // that composed them, and the indices already persist.
+    | 'floorEnforcedEntries'
   > {
   verdictLine: string;
   /**

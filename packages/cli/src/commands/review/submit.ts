@@ -58,7 +58,6 @@ import {
   resolveGhHost,
   setGhHost,
 } from './lib/gh.js';
-import { LEDGER_ID_READBACK } from './lib/ledger.js';
 import { REVIEW_TMP_DIR, tmpFile } from './lib/paths.js';
 import {
   parseReceiptCommentIds,
@@ -74,6 +73,7 @@ import {
   toDeferredEntries,
   bodyCriticalClaim,
   type ComposeReviewInput,
+  type DeferredEntry,
   type FixedFinding,
 } from './compose-review.js';
 import {
@@ -402,6 +402,14 @@ function compose(
    */
   floorEnforced: number[];
   /**
+   * The deferral entries the floor enforcement constructed, index-aligned
+   * with `floorEnforced` — the retitled record where a rerouted Critical's
+   * carried id surfaces (the title collapses the whole marker-stripped
+   * body). The contradiction gate scans these against the `fixed` rulings
+   * (#9940 review, round 14).
+   */
+  floorEnforcedEntries: DeferredEntry[];
+  /**
    * Step 6's `fixed` rulings, validated by the compose — the thread
    * lifecycle's resolve list. Rides the composed result rather than being
    * re-read from the raw state, so the validation and the consumption are
@@ -472,6 +480,7 @@ function compose(
     body: r.body,
     cappedBy: r.cappedBy,
     floorEnforced: r.floorEnforced,
+    floorEnforcedEntries: r.floorEnforcedEntries ?? [],
     fixedFindings: r.fixedFindings,
     draftedIds: r.draftedIds,
     mintedIds: r.mintedIds,
@@ -695,6 +704,16 @@ function inconsistencies(
    * a minted id is the round-off-by-one this gate polices (#9940 review).
    */
   mintedIds: readonly string[] = [],
+  /**
+   * The floor enforcement's rerouted entries, each beside the authored
+   * index of the drafted comment it records. The RETITLED record is
+   * scanned, not the drafted body: the reroute collapses the whole
+   * marker-stripped body into the title, so a carried id the claim line
+   * hid on a later line (`**[Critical]** [fails-closed] [new-surface]\n
+   * R1-2: …`) leads the record — the shape the comment leg's claim-line
+   * read cannot see (#9940 review, round 14).
+   */
+  floorRerouted: ReadonlyArray<{ entry: DeferredEntry; at: number }> = [],
 ): string[] {
   const problems: string[] = [];
   const comments = payload.comments ?? [];
@@ -757,21 +776,38 @@ function inconsistencies(
     // RELOCATED into the composed body's Criticals, and the relocation's
     // `path:line — [source]` prefix strips the carried id from position
     // 0 — buildLedger carries the claim renumbered, and no scan above
-    // sees the id. The closure mint already reads these titles through
-    // LEDGER_ID_READBACK as its re-post signal; the gate reads them the
-    // same way, keyed on the split's own predicate so the scan covers
-    // exactly the entries the relocation carries (#9940 review).
+    // sees the id. The closure mint already reads these titles as its
+    // re-post signal; the gate reads them the same way, keyed on the
+    // split's own predicate so the scan covers exactly the entries the
+    // relocation carries (#9940 review).
     toDeferredEntries(payload.state?.deferredSuggestions).forEach((e, i) => {
       if (e.severity !== 'Critical') return;
-      // Through the same head-slot strip the closure mint applies: a
-      // title leading with its axis tags still names the claim it
-      // re-posts (#10291); the anchored raw-title read missed exactly
-      // that shape (#9940 review, round 12).
-      const id = LEDGER_ID_READBACK.exec(readClaimHead(e.title).stripped)?.[1];
+      // Through the head-slot tokeniser's own id read — the same read the
+      // closure mint applies: a title leading with its axis tags still
+      // names the claim it re-posts (#10291), and so does one leading
+      // with a SOURCE tag (`[probe] R1-1: …`) — the anchored read over
+      // `.stripped` kept the source tag at position 0 and missed exactly
+      // that shape (#9940 review, rounds 12 and 15).
+      const id = readClaimHead(e.title).id;
       if (id !== undefined && fixedIds.has(id)) {
         problems.push(contradiction(`state.deferredSuggestions[${i}]`, id));
       }
     });
+    // The floor reroute's Critical leg — the CLI's own deferrals, beside
+    // the model-written channel above. A rerouted blocker leaves the
+    // posting set but still lands in the body's deferral list as a
+    // standing assertion the closure mint reads as a re-post; its record
+    // title is where a below-the-claim-line carried id surfaces. Same
+    // head-slot id read as the two legs above, refusing with the
+    // authored comment index the comment leg cites (#9940 review,
+    // round 14).
+    for (const { entry, at } of floorRerouted) {
+      if (entry?.severity !== 'Critical') continue;
+      const id = readClaimHead(entry.title).id;
+      if (id !== undefined && fixedIds.has(id)) {
+        problems.push(contradiction(`comments[${at}]`, id));
+      }
+    }
   }
 
   if (!EVENTS.has(event)) {
@@ -1419,6 +1455,7 @@ function submit(
   let body: string;
   let cappedBy: string[];
   let floorEnforced: number[];
+  let floorEnforcedEntries: DeferredEntry[];
   let fixedFindings: FixedFinding[];
   let draftedIds: Array<string | undefined> | undefined;
   let mintedIds: string[] | undefined;
@@ -1428,6 +1465,7 @@ function submit(
       body,
       cappedBy,
       floorEnforced,
+      floorEnforcedEntries,
       fixedFindings,
       draftedIds,
       mintedIds,
@@ -1458,10 +1496,19 @@ function submit(
   // gate: a rerouted comment is no longer posting, so it is no longer the
   // gate's business (an unmarked comment is never rerouted and still
   // refuses below).
+  // The rerouted entries, each beside the AUTHORED index of the comment it
+  // records — mapped through the same base the removal below keeps, so the
+  // contradiction gate's refusal cites the position the model authored,
+  // exactly as the comment leg does (#9940 review, round 14).
+  let floorRerouted: Array<{ entry: DeferredEntry; at: number }> = [];
   if (floorEnforced.length > 0) {
     const drop = new Set(floorEnforced);
     const comments = payload.comments ?? [];
     const base = authoredIndices ?? comments.map((_, i) => i);
+    floorRerouted = floorEnforced.map((i, k) => ({
+      entry: floorEnforcedEntries[k],
+      at: base[i] ?? i,
+    }));
     payload = {
       ...payload,
       comments: comments.filter((_, i) => !drop.has(i)),
@@ -1497,6 +1544,7 @@ function submit(
     fixedFindings,
     authored,
     mintedIds ?? [],
+    floorRerouted,
   );
   if (problems.length > 0) {
     refuse(

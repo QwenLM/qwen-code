@@ -6034,6 +6034,7 @@ describe('verdictLine — the terminal verdict, and its dangling colon', () => {
       cappedBy: [],
       downgraded: false,
       floorEnforced: [],
+      floorEnforcedEntries: [],
       postedInline: 0,
       postedFresh: 0,
       downgradedFrom: null,
@@ -6217,6 +6218,14 @@ describe('composeReview — fixedFindings', () => {
       '',
       42,
       undefined,
+      // The serializer's bounds beside its shape (#9940 review, round
+      // 14): an over-long id is one the normalizer would cut (a cut id
+      // is a different id), a round of 0 or past LEDGER_MAX_ROUND names
+      // an entry no ledger can hold — `isLedgerFinding` refuses all of
+      // them, so a ruling naming one could never retire a real entry.
+      'R1-' + '9'.repeat(30),
+      'R0-1',
+      'R999999-1',
     ] as const) {
       expect(() =>
         composeReview(base({ fixedFindings: [{ id } as never] })),
@@ -6236,6 +6245,33 @@ describe('composeReview — fixedFindings', () => {
     expect(() =>
       composeReview(base({ fixedFindings: [{ id: 'R1-2', by: 7 as never }] })),
     ).toThrow(/ONE non-empty line/);
+  });
+
+  it('refuses a `by` that renders as nothing — the reply must say what fixed it (#9940 review, round 14)', () => {
+    // A comment-only clause, and a Cf run `.trim()` keeps: either posts
+    // `R<id> fixed by` with no visible account, on the thread the same
+    // pass resolves — the body-Criticals boundary already refuses the
+    // identical texts through the same renders-as-nothing rule.
+    expect(() =>
+      composeReview(
+        base({
+          fixedFindings: [{ id: 'R1-2', by: '<!-- the guard rewrite -->' }],
+        }),
+      ),
+    ).toThrow(/ONE non-empty line/);
+    expect(() =>
+      composeReview(
+        base({ fixedFindings: [{ id: 'R1-2', by: '\u200b'.repeat(3) }] }),
+      ),
+    ).toThrow(/ONE non-empty line/);
+    // Residue AHEAD of visible text stays admitted, like everywhere else.
+    expect(
+      composeReview(
+        base({
+          fixedFindings: [{ id: 'R1-2', by: '<!-- x --> the guard rewrite' }],
+        }),
+      ).fixedFindings,
+    ).toEqual([{ id: 'R1-2', by: '<!-- x --> the guard rewrite' }]);
   });
 
   it('refuses a non-object entry', () => {

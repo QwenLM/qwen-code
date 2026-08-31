@@ -77,7 +77,6 @@ import { ledgerDedupFacts } from './dedup-candidates.js';
 import type { TestPlanReport } from './test-plan.js';
 import {
   LEDGER_BODY_FILE,
-  LEDGER_ID_READBACK,
   LEDGER_ID_SHAPE,
   LEDGER_MAX_CLOSED,
   LEDGER_MAX_ID,
@@ -1119,6 +1118,20 @@ export interface ComposeReviewResult {
    */
   floorEnforced: number[];
   /**
+   * The deferral entries the floor enforcement constructed for exactly
+   * those comments — index-aligned with `floorEnforced` (entry k records
+   * the comment at `floorEnforced[k]`). The retitled record is where a
+   * rerouted Critical's carried id SURFACES: the title collapses the
+   * whole marker-stripped body, so an id the claim line hid on a later
+   * line leads the record. `submit`'s contradiction gate scans the
+   * Critical entries against the `fixed` rulings — a rerouted blocker
+   * still lands in the body's deferral list as a standing assertion, and
+   * the closure mint reads its title as a re-post, so ruling its id
+   * fixed in the same pass is the two-way ruling the gate refuses
+   * (#9940 review, round 14).
+   */
+  floorEnforcedEntries: DeferredEntry[];
+  /**
    * How many findings this round posts as comments — the posting set after
    * floor enforcement, i.e. what `submit` sends to the PR, whether a
    * comment opens a new thread or (a carried re-report) lands as a reply
@@ -2099,12 +2112,14 @@ export function composeReview(
   const repostedIds = new Set<string>();
   let repostUnidentified = false;
   for (const e of repostEntries) {
-    // Through the same head-slot strip the ledger builder applies: an
-    // entry whose title leads with the axis tags before its id still
-    // names the claim it re-posts (#10291).
-    const carried = LEDGER_ID_READBACK.exec(
-      readClaimHead(e.title).stripped,
-    )?.[1];
+    // Through the head-slot tokeniser's own id read — the same read the
+    // contradiction gate applies to this channel: an entry whose title
+    // leads with the axis tags before its id still names the claim it
+    // re-posts (#10291), and so does one leading with a SOURCE tag
+    // (`[probe] R1-1: …`) — the anchored read over `.stripped` kept the
+    // source tag at position 0 and read no id there (#9940 review,
+    // round 15).
+    const carried = readClaimHead(e.title).id;
     // The same membership test `isCarry` applies in the build: an id the
     // complete previous list never held is a stray — a renumbered or
     // re-minted token, not a carry — and reading it as one would shield a
@@ -3218,9 +3233,38 @@ export function ingestFixedFindings(value: unknown): FixedFinding[] {
           `${JSON.stringify(id)}.`,
       );
     }
+    // The serializer's bounds beside its shape — `isLedgerFinding` also
+    // caps the id's length and its round, so an id past either names an
+    // entry no ledger ever held: the ruling would resolve nothing while
+    // the unbounded token rides the receipt, the artifact, and (when a
+    // forged thread matches) the reply body verbatim. A refusal, not a
+    // slice — a cut id is a different id (#9940 review, round 14).
+    const idRound = Number(id.slice(1).split('-')[0]);
+    if (
+      id.length > LEDGER_MAX_ID ||
+      !Number.isSafeInteger(idRound) ||
+      idRound < 1 ||
+      idRound > LEDGER_MAX_ROUND
+    ) {
+      throw new Error(
+        `compose-review: ${at} carries no ledger id — an id is at most ` +
+          `${LEDGER_MAX_ID} characters and its round sits in ` +
+          `1..${LEDGER_MAX_ROUND}; got ${JSON.stringify(id)}, which no ` +
+          `ledger entry can carry.`,
+      );
+    }
+    // `by` becomes the visible half of the reply — a clause that renders
+    // as nothing (a bare HTML comment, a Cf run `trim` keeps) posts
+    // `R<id> fixed by` with no account of what fixed it, on the thread
+    // this same pass resolves; the body-Criticals boundary already
+    // refuses the identical texts (#9940 review, round 14). Residue
+    // AHEAD of visible text stays admitted, like everywhere else.
     if (
       by !== undefined &&
-      (typeof by !== 'string' || by.trim() === '' || /[\r\n]/.test(by))
+      (typeof by !== 'string' ||
+        by.trim() === '' ||
+        /[\r\n]/.test(by) ||
+        rendersAsNothing(by))
     ) {
       throw new Error(
         `compose-review: ${at}.by must be ONE non-empty line — it ` +
@@ -5783,6 +5827,7 @@ function composeReviewBody(
       remediation,
       deferredCount: deferredSuggestions.length,
       floorEnforced: reroute.indices,
+      floorEnforcedEntries: reroute.entries,
       postedInline,
       postedFresh,
       fixedFindings,
@@ -5878,6 +5923,7 @@ function composeReviewBody(
       remediation,
       deferredCount: deferredSuggestions.length,
       floorEnforced: reroute.indices,
+      floorEnforcedEntries: reroute.entries,
       postedInline,
       postedFresh,
       fixedFindings,
@@ -6135,6 +6181,7 @@ function composeReviewBody(
     remediation,
     deferredCount: deferredSuggestions.length,
     floorEnforced: reroute.indices,
+    floorEnforcedEntries: reroute.entries,
     postedInline,
     postedFresh,
     fixedFindings,
