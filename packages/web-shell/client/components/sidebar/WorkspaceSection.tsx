@@ -136,11 +136,10 @@ interface WorkspaceSectionProps {
     context: WorkspaceHeaderActionsContext,
   ) => ReactNode;
   /**
-   * Show session counts in the header and, on hover, a details popover with
-   * the full path, git branch and facet counts (MCP, skills, …). Off by
-   * default so embedders that render their own header keep today's layout.
-   * Facets are fetched only while the section is expanded and the workspace
-   * is trusted.
+   * Show a details popover on hover with the full path, git branch, session
+   * counts and facet counts (MCP, skills, …). Off by default so embedders
+   * that render their own header keep today's layout. Facets are fetched
+   * only while the section is expanded and the workspace is trusted.
    */
   overviewEnabled?: boolean;
   overviewItems?: readonly WorkspaceOverviewItem[];

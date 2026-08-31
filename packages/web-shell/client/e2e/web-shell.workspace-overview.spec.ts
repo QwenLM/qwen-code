@@ -187,6 +187,9 @@ test('shows workspace details on hover and no counts in the header', async ({
   });
   await expect(primaryHeader).toHaveAttribute('aria-expanded', 'true');
 
+  // The header itself carries no counts; they moved into the popover.
+  await expect(primaryHeader.getByLabel('2 sessions')).toHaveCount(0);
+
   // Hovering the workspace header opens the details popover: full path,
   // branch, session counts, and every known facet, zeros included.
   await primaryHeader.hover();
@@ -420,8 +423,10 @@ test('opens the workspace folder and terminal locally when the daemon is loopbac
   await expect.poll(() => openRequests()).toHaveLength(2);
   expect(openRequests()[1]?.body).toEqual({ target: 'terminal' });
 
-  // The workspace menu offers the same actions.
-  await page.mouse.move(0, 0);
+  // The workspace menu offers the same actions. The button clicks focused
+  // the popover content, which now holds the popover open (keyboard parity),
+  // so dismiss it explicitly.
+  await page.keyboard.press('Escape');
   await expect(details).toBeHidden();
   await header.hover();
   await header

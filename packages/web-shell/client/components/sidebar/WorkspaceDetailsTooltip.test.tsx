@@ -90,6 +90,9 @@ describe('WorkspaceDetailsTooltip', () => {
     expect(facetRow(details, 'mcp')?.getAttribute('title')).toBe(
       'MCP: 1 of 3 connected, 1 failed, 1 disabled',
     );
+    expect(facetRow(details, 'mcp')?.getAttribute('aria-label')).toBe(
+      'MCP: 1 of 3 connected, 1 failed, 1 disabled',
+    );
     expect(facetRow(details, 'skills')?.textContent).toBe('Skills1');
     // The popover takes no persistent space, so known zeros show too.
     expect(facetRow(details, 'extensions')?.textContent).toBe('Extensions0');
@@ -318,5 +321,174 @@ describe('WorkspaceDetailsTooltip', () => {
     const details = document.querySelector<HTMLElement>('[role="dialog"]');
     expect(details).not.toBeNull();
     expect(details?.textContent).toContain('/work/qwen-code');
+  });
+
+  it('announces a successful open through a live region', async () => {
+    const onOpenPathLocally = vi.fn().mockResolvedValue(undefined);
+    const details = await openDetails(
+      <WorkspaceDetailsTooltip
+        label="qwen-code"
+        cwd="/work/qwen-code"
+        overview={undefined}
+        items={[]}
+        onOpenPathLocally={onOpenPathLocally}
+      >
+        <button type="button">qwen-code</button>
+      </WorkspaceDetailsTooltip>,
+    );
+    const openButton = details.querySelector<HTMLButtonElement>(
+      '[data-web-shell-open-workspace-folder]',
+    );
+    await act(async () => {
+      openButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await Promise.resolve();
+    });
+    expect(details.querySelector('[aria-live="polite"]')?.textContent).toBe(
+      'Opened the workspace folder',
+    );
+  });
+
+  it('ignores clicks while an open request is in flight', async () => {
+    let resolveOpen: () => void = () => {};
+    const onOpenPathLocally = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveOpen = resolve;
+        }),
+    );
+    const details = await openDetails(
+      <WorkspaceDetailsTooltip
+        label="qwen-code"
+        cwd="/work/qwen-code"
+        overview={undefined}
+        items={[]}
+        onOpenPathLocally={onOpenPathLocally}
+      >
+        <button type="button">qwen-code</button>
+      </WorkspaceDetailsTooltip>,
+    );
+    const openButton = details.querySelector<HTMLButtonElement>(
+      '[data-web-shell-open-workspace-folder]',
+    );
+    await act(async () => {
+      openButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await Promise.resolve();
+    });
+    await act(async () => {
+      openButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await Promise.resolve();
+    });
+    expect(onOpenPathLocally).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      resolveOpen();
+      await Promise.resolve();
+    });
+    // Released after the request settles: a follow-up click fires again.
+    await act(async () => {
+      openButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await Promise.resolve();
+    });
+    expect(onOpenPathLocally).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not open when the pointer leaves before the open delay elapses', async () => {
+    vi.useFakeTimers();
+    await act(async () => {
+      root.render(
+        <I18nProvider language="en">
+          <WorkspaceDetailsTooltip
+            label="qwen-code"
+            cwd="/work/qwen-code"
+            overview={undefined}
+            items={[]}
+          >
+            <button type="button">qwen-code</button>
+          </WorkspaceDetailsTooltip>
+        </I18nProvider>,
+      );
+    });
+    const trigger = container.querySelector('button');
+    await act(async () => {
+      trigger!.dispatchEvent(new Event('pointerover', { bubbles: true }));
+      vi.advanceTimersByTime(200);
+      await Promise.resolve();
+    });
+    await act(async () => {
+      trigger!.dispatchEvent(new Event('pointerout', { bubbles: true }));
+      vi.advanceTimersByTime(200);
+      await Promise.resolve();
+    });
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+  });
+
+  it('does not open before the 300ms hover delay', async () => {
+    vi.useFakeTimers();
+    await act(async () => {
+      root.render(
+        <I18nProvider language="en">
+          <WorkspaceDetailsTooltip
+            label="qwen-code"
+            cwd="/work/qwen-code"
+            overview={undefined}
+            items={[]}
+          >
+            <button type="button">qwen-code</button>
+          </WorkspaceDetailsTooltip>
+        </I18nProvider>,
+      );
+    });
+    const trigger = container.querySelector('button');
+    await act(async () => {
+      trigger!.dispatchEvent(new Event('pointerover', { bubbles: true }));
+      vi.advanceTimersByTime(299);
+      await Promise.resolve();
+    });
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+  });
+
+  it('keeps focus on the anchor when the popover opens', async () => {
+    const details = await openDetails(
+      <WorkspaceDetailsTooltip
+        label="qwen-code"
+        cwd="/work/qwen-code"
+        overview={undefined}
+        items={[]}
+      >
+        <button type="button">qwen-code</button>
+      </WorkspaceDetailsTooltip>,
+    );
+    expect(details).not.toBeNull();
+    // onOpenAutoFocus is prevented: opening must not steal focus.
+    expect(document.activeElement).not.toBe(details);
+  });
+
+  it('resets the check icon two seconds after a successful open', async () => {
+    const onOpenPathLocally = vi.fn().mockResolvedValue(undefined);
+    const details = await openDetails(
+      <WorkspaceDetailsTooltip
+        label="qwen-code"
+        cwd="/work/qwen-code"
+        overview={undefined}
+        items={[]}
+        onOpenPathLocally={onOpenPathLocally}
+      >
+        <button type="button">qwen-code</button>
+      </WorkspaceDetailsTooltip>,
+    );
+    const openButton = details.querySelector<HTMLButtonElement>(
+      '[data-web-shell-open-workspace-folder]',
+    );
+    await act(async () => {
+      openButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await Promise.resolve();
+    });
+    expect(openButton!.querySelector('svg.lucide-check')).not.toBeNull();
+    await act(async () => {
+      vi.advanceTimersByTime(2_000);
+      await Promise.resolve();
+    });
+    expect(openButton!.querySelector('svg.lucide-check')).toBeNull();
+    expect(openButton!.querySelector('svg.lucide-folder-open')).not.toBeNull();
+    expect(details.querySelector('[aria-live="polite"]')?.textContent).toBe('');
   });
 });

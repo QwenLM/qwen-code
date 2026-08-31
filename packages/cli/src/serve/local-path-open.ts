@@ -18,6 +18,17 @@ const OPEN_TIMEOUT_MS = 10_000;
 // Linux terminal emulators tried in order; the first executable on PATH wins.
 const LINUX_TERMINAL_NAMES = ['gnome-terminal', 'konsole', 'xterm'] as const;
 
+// xterm is X11-only (Xt/Xaw, no Wayland backend): on a pure-Wayland session
+// (no DISPLAY / Xwayland) it can only exit with "cannot open display", so
+// probe and spawner must consider the same reduced candidate set.
+function linuxTerminalCandidates(
+  env: Readonly<Record<string, string | undefined>>,
+): readonly string[] {
+  return env['DISPLAY']
+    ? LINUX_TERMINAL_NAMES
+    : LINUX_TERMINAL_NAMES.filter((name) => name !== 'xterm');
+}
+
 export class LocalPathOpenUnavailableError extends Error {}
 
 interface MacOsSessionUids {
@@ -92,7 +103,7 @@ export function isLocalTerminalAvailable(
   if (guiSession !== undefined) return guiSession;
   if (process.platform !== 'linux') return false;
   if (!env['DISPLAY'] && !env['WAYLAND_DISPLAY']) return false;
-  return findExecutableOnPath(env, LINUX_TERMINAL_NAMES) !== undefined;
+  return findExecutableOnPath(env, linuxTerminalCandidates(env)) !== undefined;
 }
 
 function readMacOsSessionUids(): MacOsSessionUids {
@@ -176,6 +187,8 @@ export async function openTerminalLocally(path: string): Promise<void> {
     }
 
     if (process.platform === 'linux') {
+      // win32 parity: a deleted directory must not report a successful open.
+      assertPathExists(path);
       await spawnLinuxTerminal(path);
       return;
     }
@@ -197,17 +210,19 @@ async function spawnWindowsTerminal(path: string): Promise<void> {
   try {
     await spawnAndIgnoreExitCode('wt.exe', ['-d', path]);
   } catch {
-    // cmd.exe `start` re-parses its command line and disagrees with Node's
-    // CreateProcess quoting — even space-containing paths mis-parse there.
-    // PowerShell expands the directory from the environment instead, so the
-    // path never travels through a re-parsed command line.
+    // The directory travels as the child's working directory, never through
+    // a parsed command line: cmd.exe `start` disagrees with CreateProcess
+    // quoting, and any `cd /d "<path>"` form re-exposes cmd's %VAR%
+    // expansion. PowerShell expands the env var into a parameter value, and
+    // the assertPathExists pre-check keeps a missing directory a clean 501
+    // instead of a raw Start-Process error.
     await spawnAndIgnoreExitCode(
       'powershell.exe',
       [
         '-NoProfile',
         '-STA',
         '-Command',
-        'Start-Process cmd.exe -ArgumentList "/k cd /d `"$env:QWEN_LOCAL_OPEN_DIR`""',
+        'Start-Process cmd.exe -WorkingDirectory "$env:QWEN_LOCAL_OPEN_DIR"',
       ],
       { QWEN_LOCAL_OPEN_DIR: path },
     );
@@ -215,7 +230,13 @@ async function spawnWindowsTerminal(path: string): Promise<void> {
 }
 
 async function spawnLinuxTerminal(path: string): Promise<void> {
-  const terminal = findExecutableOnPath(process.env, LINUX_TERMINAL_NAMES);
+  const env = process.env;
+  // The capability probe runs once at boot; a display that went away since
+  // must not report a successful open now.
+  if (!env['DISPLAY'] && !env['WAYLAND_DISPLAY']) {
+    throw new LocalPathOpenUnavailableError('No display server available');
+  }
+  const terminal = findExecutableOnPath(env, linuxTerminalCandidates(env));
   if (terminal === undefined) {
     throw new LocalPathOpenUnavailableError(
       'No terminal emulator found on PATH',

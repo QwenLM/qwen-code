@@ -537,4 +537,35 @@ describe('formatOverviewValue', () => {
       ),
     ).toBe('2/4');
   });
+
+  it('formats the opt-in hooks facet, including its disabled state', () => {
+    expect(
+      formatOverviewValue(
+        {
+          hooks: { initialized: true, count: 3, disabled: true },
+          fetchedAt: 1,
+        },
+        'hooks',
+      ),
+    ).toBe('3');
+    expect(
+      formatOverviewValue(
+        {
+          hooks: { initialized: true, count: 1, disabled: false },
+          fetchedAt: 1,
+        },
+        'hooks',
+      ),
+    ).toBe('1');
+    // Hooks are opt-in: uninitialized is unknown, never zero.
+    expect(
+      formatOverviewValue(
+        {
+          hooks: { initialized: false, count: 0, disabled: false },
+          fetchedAt: 1,
+        },
+        'hooks',
+      ),
+    ).toBeUndefined();
+  });
 });

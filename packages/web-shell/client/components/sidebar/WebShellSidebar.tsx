@@ -5854,11 +5854,12 @@ export function WebShellSidebar({
                                   };
                                   // The section caps the folder name so the
                                   // git chip never slides under this overlay;
-                                  // the count drives the cap's width.
+                                  // the count drives the cap's width. The menu
+                                  // trigger is absent under a workspace lock.
                                   const headerActionCount =
                                     (ws.trusted
                                       ? 1 + Number(canOrganizeWorkspace(ws.cwd))
-                                      : 0) + 1;
+                                      : 0) + (lockedWorkspaceCwd ? 0 : 1);
                                   return (
                                     <div
                                       className={styles.workspaceHeaderActions}

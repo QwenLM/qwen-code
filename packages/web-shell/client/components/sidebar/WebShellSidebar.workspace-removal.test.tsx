@@ -3560,13 +3560,13 @@ describe('WebShellSidebar workspace removal', () => {
   it('keeps plain folder headers when the overview is switched off', () => {
     renderSidebar({ workspaceOverview: false });
     expect(
-      container.querySelector('[data-web-shell-workspace-path]'),
+      document.querySelector('[data-web-shell-workspace-path]'),
     ).toBeNull();
     expect(
-      container.querySelector('[data-web-shell-workspace-overview]'),
+      document.querySelector('[data-web-shell-workspace-overview]'),
     ).toBeNull();
     expect(
-      container.querySelector('[data-web-shell-workspace-sessions]'),
+      document.querySelector('[data-web-shell-workspace-sessions]'),
     ).toBeNull();
     expect(
       container.querySelector('[class*="projectsHeaderCount"]'),

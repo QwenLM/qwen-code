@@ -147,6 +147,8 @@ function renderSection(
     excludePinned: boolean;
     searchQuery: string;
     gitBranchWanted: boolean;
+    onOpenPathLocally: (cwd: string) => Promise<void>;
+    onOpenTerminalLocally: (cwd: string) => Promise<void>;
   }> = {},
 ): void {
   act(() => {
@@ -183,6 +185,8 @@ function renderSection(
           sessionStats={overrides.sessionStats}
           renderSessions={overrides.renderSessions}
           gitBranchWanted={overrides.gitBranchWanted}
+          onOpenPathLocally={overrides.onOpenPathLocally}
+          onOpenTerminalLocally={overrides.onOpenTerminalLocally}
         />
       </I18nProvider>,
     );
@@ -1244,10 +1248,10 @@ describe('WorkspaceSection overview', () => {
     await flush();
     expect(client.workspaceMcp).not.toHaveBeenCalled();
     expect(
-      container.querySelector('[data-web-shell-workspace-path]'),
+      document.querySelector('[data-web-shell-workspace-path]'),
     ).toBeNull();
     expect(
-      container.querySelector('[data-web-shell-workspace-overview]'),
+      document.querySelector('[data-web-shell-workspace-overview]'),
     ).toBeNull();
 
     // Control arm: the default header consumes the snapshot and fetches.
@@ -1267,10 +1271,10 @@ describe('WorkspaceSection overview', () => {
     await flush();
     expect(client.workspaceMcp).not.toHaveBeenCalled();
     expect(
-      container.querySelector('[data-web-shell-workspace-path]'),
+      document.querySelector('[data-web-shell-workspace-path]'),
     ).toBeNull();
     expect(
-      container.querySelector('[data-web-shell-workspace-overview]'),
+      document.querySelector('[data-web-shell-workspace-overview]'),
     ).toBeNull();
   });
 
@@ -1315,7 +1319,7 @@ describe('WorkspaceSection overview', () => {
     expect(client.workspaceMcp).not.toHaveBeenCalled();
     expect(sessionCounts()).toBeNull();
     expect(
-      container.querySelector('[data-web-shell-workspace-path]'),
+      document.querySelector('[data-web-shell-workspace-path]'),
     ).toBeNull();
   });
 });
@@ -1395,6 +1399,52 @@ describe('WorkspaceSection counts across a source switch', () => {
   });
 });
 
+describe('WorkspaceSection local-open gates', () => {
+  it('shows the open-locally buttons only for a trusted workspace with a real path', async () => {
+    const onOpenPathLocally = vi.fn().mockResolvedValue(undefined);
+    const onOpenTerminalLocally = vi.fn().mockResolvedValue(undefined);
+    renderSection({
+      client: makeOverviewClient(),
+      expanded: true,
+      overviewEnabled: true,
+      onOpenPathLocally,
+      onOpenTerminalLocally,
+    });
+    await flush();
+    const details = await openDetailsDialog();
+    const folderButton = details.querySelector(
+      '[data-web-shell-open-workspace-folder]',
+    );
+    expect(folderButton).not.toBeNull();
+    expect(
+      details.querySelector('[data-web-shell-open-workspace-terminal]'),
+    ).not.toBeNull();
+    await act(async () => {
+      folderButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await Promise.resolve();
+    });
+    expect(onOpenPathLocally).toHaveBeenCalledWith('/tmp/project');
+
+    // Untrusted rows get no local-open surface.
+    renderSection({
+      client: makeOverviewClient(),
+      workspace: untrustedWorkspace,
+      expanded: true,
+      overviewEnabled: true,
+      onOpenPathLocally,
+      onOpenTerminalLocally,
+    });
+    await flush();
+    const lockedDetails = await openDetailsDialog();
+    expect(
+      lockedDetails.querySelector('[data-web-shell-open-workspace-folder]'),
+    ).toBeNull();
+    expect(
+      lockedDetails.querySelector('[data-web-shell-open-workspace-terminal]'),
+    ).toBeNull();
+  });
+});
+
 describe('WorkspaceSection overview gates', () => {
   it('never asks an untrusted workspace for facets', async () => {
     const client = makeOverviewClient();
@@ -1407,7 +1457,7 @@ describe('WorkspaceSection overview gates', () => {
     await flush();
     expect(client.workspaceMcp).not.toHaveBeenCalled();
     expect(
-      container.querySelector('[data-web-shell-workspace-overview]'),
+      document.querySelector('[data-web-shell-workspace-overview]'),
     ).toBeNull();
   });
 
@@ -1760,7 +1810,7 @@ describe('WorkspaceSection overview plumbing', () => {
     ).toBe(true);
     // The path and chips stay hidden under a custom header.
     expect(
-      container.querySelector('[data-web-shell-workspace-overview]'),
+      document.querySelector('[data-web-shell-workspace-overview]'),
     ).toBeNull();
   });
 

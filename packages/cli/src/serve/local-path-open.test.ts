@@ -52,8 +52,8 @@ writeFileSync(join(xtermDir, 'xterm'), '#!/bin/sh\nexit 0\n');
 chmodSync(join(xtermDir, 'xterm'), 0o755);
 // win32 launchers refuse a missing directory before spawning, so their tests
 // must open a real one.
-const win32ExistingDir = mkdtempSync(join(tmpdir(), 'open-win32-'));
-const win32MissingDir = join(tmpdir(), 'open-win32-missing');
+const existingDir = mkdtempSync(join(tmpdir(), 'open-existing-'));
+const missingDir = join(tmpdir(), 'open-win32-missing');
 
 function setPlatform(platform: NodeJS.Platform) {
   vi.spyOn(process, 'platform', 'get').mockReturnValue(platform);
@@ -112,9 +112,9 @@ describe('openPathLocally', () => {
     setPlatform('win32');
     spawnMock.mockReturnValue(fakeChild('close'));
 
-    await openPathLocally(win32ExistingDir);
+    await openPathLocally(existingDir);
 
-    expect(spawnMock).toHaveBeenCalledWith('explorer.exe', [win32ExistingDir], {
+    expect(spawnMock).toHaveBeenCalledWith('explorer.exe', [existingDir], {
       stdio: 'ignore',
     });
   });
@@ -123,7 +123,7 @@ describe('openPathLocally', () => {
     setPlatform('win32');
     spawnMock.mockReturnValue(fakeChild('error'));
 
-    await expect(openPathLocally(win32ExistingDir)).rejects.toBeInstanceOf(
+    await expect(openPathLocally(existingDir)).rejects.toBeInstanceOf(
       LocalPathOpenUnavailableError,
     );
   });
@@ -131,10 +131,10 @@ describe('openPathLocally', () => {
   it('rejects a deleted directory on Windows without spawning', async () => {
     setPlatform('win32');
 
-    await expect(openPathLocally(win32MissingDir)).rejects.toBeInstanceOf(
+    await expect(openPathLocally(missingDir)).rejects.toBeInstanceOf(
       LocalPathOpenUnavailableError,
     );
-    await expect(openTerminalLocally(win32MissingDir)).rejects.toBeInstanceOf(
+    await expect(openTerminalLocally(missingDir)).rejects.toBeInstanceOf(
       LocalPathOpenUnavailableError,
     );
     expect(spawnMock).not.toHaveBeenCalled();
@@ -265,10 +265,10 @@ describe('openTerminalLocally', () => {
     setPlatform('win32');
     spawnMock.mockReturnValue(fakeChild('close'));
 
-    await openTerminalLocally(win32ExistingDir);
+    await openTerminalLocally(existingDir);
 
     expect(spawnMock).toHaveBeenCalledTimes(1);
-    expect(spawnMock).toHaveBeenCalledWith('wt.exe', ['-d', win32ExistingDir], {
+    expect(spawnMock).toHaveBeenCalledWith('wt.exe', ['-d', existingDir], {
       stdio: 'ignore',
     });
   });
@@ -279,17 +279,17 @@ describe('openTerminalLocally', () => {
       .mockReturnValueOnce(fakeChild('error'))
       .mockReturnValueOnce(fakeChild('close'));
 
-    await openTerminalLocally(win32ExistingDir);
+    await openTerminalLocally(existingDir);
 
     expect(spawnMock).toHaveBeenCalledTimes(2);
     expect(spawnMock).toHaveBeenNthCalledWith(
       1,
       'wt.exe',
-      ['-d', win32ExistingDir],
+      ['-d', existingDir],
       { stdio: 'ignore' },
     );
-    // The directory travels through the environment, never through a
-    // re-parsed cmd.exe command line.
+    // The directory travels as the child's working directory, never
+    // embedded in a re-parsed command line.
     expect(spawnMock).toHaveBeenNthCalledWith(
       2,
       'powershell.exe',
@@ -297,12 +297,12 @@ describe('openTerminalLocally', () => {
         '-NoProfile',
         '-STA',
         '-Command',
-        expect.stringContaining('$env:QWEN_LOCAL_OPEN_DIR'),
+        'Start-Process cmd.exe -WorkingDirectory "$env:QWEN_LOCAL_OPEN_DIR"',
       ],
       expect.objectContaining({
         stdio: 'ignore',
         env: expect.objectContaining({
-          QWEN_LOCAL_OPEN_DIR: win32ExistingDir,
+          QWEN_LOCAL_OPEN_DIR: existingDir,
         }),
       }),
     );
@@ -312,7 +312,7 @@ describe('openTerminalLocally', () => {
     setPlatform('win32');
     spawnMock.mockReturnValue(fakeChild('error'));
 
-    await expect(openTerminalLocally(win32ExistingDir)).rejects.toBeInstanceOf(
+    await expect(openTerminalLocally(existingDir)).rejects.toBeInstanceOf(
       LocalPathOpenUnavailableError,
     );
   });
@@ -320,13 +320,14 @@ describe('openTerminalLocally', () => {
   it('spawns gnome-terminal with --working-directory on Linux', async () => {
     setPlatform('linux');
     vi.stubEnv('PATH', gnomeTerminalDir);
+    vi.stubEnv('DISPLAY', ':0');
     spawnMock.mockReturnValue(fakeChild('spawn'));
 
-    await openTerminalLocally('/home/me/code');
+    await openTerminalLocally(existingDir);
 
     expect(spawnMock).toHaveBeenCalledWith(
       join(gnomeTerminalDir, 'gnome-terminal'),
-      ['--working-directory=/home/me/code'],
+      [`--working-directory=${existingDir}`],
       { stdio: 'ignore', detached: true },
     );
   });
@@ -334,13 +335,14 @@ describe('openTerminalLocally', () => {
   it('spawns konsole with --workdir when gnome-terminal is absent on Linux', async () => {
     setPlatform('linux');
     vi.stubEnv('PATH', konsoleDir);
+    vi.stubEnv('DISPLAY', ':0');
     spawnMock.mockReturnValue(fakeChild('spawn'));
 
-    await openTerminalLocally('/home/me/code');
+    await openTerminalLocally(existingDir);
 
     expect(spawnMock).toHaveBeenCalledWith(
       join(konsoleDir, 'konsole'),
-      ['--workdir', '/home/me/code'],
+      ['--workdir', existingDir],
       { stdio: 'ignore', detached: true },
     );
   });
@@ -348,9 +350,10 @@ describe('openTerminalLocally', () => {
   it('spawns xterm with a cd-and-exec shell line when it is the only terminal on Linux', async () => {
     setPlatform('linux');
     vi.stubEnv('PATH', xtermDir);
+    vi.stubEnv('DISPLAY', ':0');
     spawnMock.mockReturnValue(fakeChild('spawn'));
 
-    await openTerminalLocally('/home/me/code');
+    await openTerminalLocally(existingDir);
 
     expect(spawnMock).toHaveBeenCalledWith(
       join(xtermDir, 'xterm'),
@@ -360,10 +363,47 @@ describe('openTerminalLocally', () => {
         '-c',
         'cd "$1" && exec "${SHELL:-/bin/sh}"',
         'sh',
-        '/home/me/code',
+        existingDir,
       ],
       { stdio: 'ignore', detached: true },
     );
+  });
+
+  it('skips xterm on a pure-Wayland session on Linux', async () => {
+    setPlatform('linux');
+    vi.stubEnv('PATH', xtermDir);
+    vi.stubEnv('WAYLAND_DISPLAY', 'wayland-0');
+    vi.stubEnv('DISPLAY', '');
+
+    // xterm is X11-only: with no DISPLAY there is no usable candidate even
+    // though WAYLAND_DISPLAY is set.
+    await expect(openTerminalLocally(existingDir)).rejects.toBeInstanceOf(
+      LocalPathOpenUnavailableError,
+    );
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it('rejects a deleted directory on Linux without spawning', async () => {
+    setPlatform('linux');
+    vi.stubEnv('PATH', gnomeTerminalDir);
+    vi.stubEnv('DISPLAY', ':0');
+
+    await expect(openTerminalLocally(missingDir)).rejects.toBeInstanceOf(
+      LocalPathOpenUnavailableError,
+    );
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it('rejects when the display went away after the boot-time probe on Linux', async () => {
+    setPlatform('linux');
+    vi.stubEnv('PATH', gnomeTerminalDir);
+    vi.stubEnv('DISPLAY', '');
+    vi.stubEnv('WAYLAND_DISPLAY', '');
+
+    await expect(openTerminalLocally(existingDir)).rejects.toBeInstanceOf(
+      LocalPathOpenUnavailableError,
+    );
+    expect(spawnMock).not.toHaveBeenCalled();
   });
 
   it('prefers gnome-terminal over konsole and xterm on Linux', async () => {
@@ -372,13 +412,14 @@ describe('openTerminalLocally', () => {
       'PATH',
       [xtermDir, gnomeTerminalDir, konsoleDir].join(delimiter),
     );
+    vi.stubEnv('DISPLAY', ':0');
     spawnMock.mockReturnValue(fakeChild('spawn'));
 
-    await openTerminalLocally('/home/me/code');
+    await openTerminalLocally(existingDir);
 
     expect(spawnMock).toHaveBeenCalledWith(
       join(gnomeTerminalDir, 'gnome-terminal'),
-      ['--working-directory=/home/me/code'],
+      [`--working-directory=${existingDir}`],
       { stdio: 'ignore', detached: true },
     );
   });
@@ -386,6 +427,7 @@ describe('openTerminalLocally', () => {
   it('throws unavailable when no terminal emulator is on PATH on Linux', async () => {
     setPlatform('linux');
     vi.stubEnv('PATH', emptyDir);
+    vi.stubEnv('DISPLAY', ':0');
 
     await expect(openTerminalLocally('/tmp')).rejects.toBeInstanceOf(
       LocalPathOpenUnavailableError,
@@ -396,6 +438,7 @@ describe('openTerminalLocally', () => {
   it('wraps a spawn-level terminal failure on Linux', async () => {
     setPlatform('linux');
     vi.stubEnv('PATH', gnomeTerminalDir);
+    vi.stubEnv('DISPLAY', ':0');
     spawnMock.mockReturnValue(fakeChild('error'));
 
     await expect(openTerminalLocally('/tmp')).rejects.toBeInstanceOf(
@@ -458,12 +501,16 @@ describe('isLocalTerminalAvailable', () => {
     expect(isLocalTerminalAvailable({ DISPLAY: ':0', PATH: konsoleDir })).toBe(
       true,
     );
+    // xterm is X11-only: a pure-Wayland session must not count it.
     expect(
       isLocalTerminalAvailable({
         WAYLAND_DISPLAY: 'wayland-0',
         PATH: xtermDir,
       }),
-    ).toBe(true);
+    ).toBe(false);
+    expect(isLocalTerminalAvailable({ DISPLAY: ':0', PATH: xtermDir })).toBe(
+      true,
+    );
   });
 
   it('ignores xdg-open for the terminal probe on Linux', () => {
@@ -476,5 +523,114 @@ describe('isLocalTerminalAvailable', () => {
   it('requires PATH to be set on Linux', () => {
     setPlatform('linux');
     expect(isLocalTerminalAvailable({ DISPLAY: ':0' })).toBe(false);
+  });
+});
+
+describe('spawn helper contracts', () => {
+  it('detaches the long-lived terminal window from the daemon event loop', async () => {
+    setPlatform('linux');
+    vi.stubEnv('PATH', gnomeTerminalDir);
+    vi.stubEnv('DISPLAY', ':0');
+    spawnMock.mockReturnValue(fakeChild('spawn'));
+
+    await openTerminalLocally(existingDir);
+
+    const child = spawnMock.mock.results[0]?.value as {
+      unref: ReturnType<typeof vi.fn>;
+    };
+    expect(child.unref).toHaveBeenCalled();
+  });
+
+  it('resolves even when explorer.exe exits non-zero on Windows', async () => {
+    setPlatform('win32');
+    spawnMock.mockReturnValue({
+      once: (event: string, cb: (code?: number) => void) => {
+        if (event === 'close') queueMicrotask(() => cb(1));
+      },
+      kill: vi.fn(),
+      unref: vi.fn(),
+    });
+
+    // explorer.exe commonly exits 1 on a successful open; that is the whole
+    // reason the exit code is ignored.
+    await expect(openPathLocally(existingDir)).resolves.toBeUndefined();
+  });
+
+  it('kills and rejects a hung GUI launcher after 10s', async () => {
+    vi.useFakeTimers();
+    try {
+      setPlatform('win32');
+      const child = { once: vi.fn(), kill: vi.fn(), unref: vi.fn() };
+      spawnMock.mockReturnValue(child);
+
+      const pending = openPathLocally(existingDir);
+      const expectation = await expect(pending).rejects.toBeInstanceOf(
+        LocalPathOpenUnavailableError,
+      );
+      await vi.advanceTimersByTimeAsync(10_000);
+      await expectation;
+      expect(child.kill).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('kills and rejects a hung terminal spawn after 10s', async () => {
+    vi.useFakeTimers();
+    try {
+      setPlatform('linux');
+      vi.stubEnv('PATH', gnomeTerminalDir);
+      vi.stubEnv('DISPLAY', ':0');
+      const child = { once: vi.fn(), kill: vi.fn(), unref: vi.fn() };
+      spawnMock.mockReturnValue(child);
+
+      const pending = openTerminalLocally(existingDir);
+      const expectation = await expect(pending).rejects.toBeInstanceOf(
+        LocalPathOpenUnavailableError,
+      );
+      await vi.advanceTimersByTimeAsync(10_000);
+      await expectation;
+      expect(child.kill).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('inherits the daemon environment alongside the injected directory', async () => {
+    setPlatform('win32');
+    vi.stubEnv('QWEN_TEST_INHERITED_MARKER', 'present');
+    spawnMock
+      .mockReturnValueOnce(fakeChild('error'))
+      .mockReturnValueOnce(fakeChild('close'));
+
+    await openTerminalLocally(existingDir);
+
+    expect(spawnMock).toHaveBeenNthCalledWith(
+      2,
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-STA',
+        '-Command',
+        'Start-Process cmd.exe -WorkingDirectory "$env:QWEN_LOCAL_OPEN_DIR"',
+      ],
+      expect.objectContaining({
+        stdio: 'ignore',
+        env: expect.objectContaining({
+          QWEN_LOCAL_OPEN_DIR: existingDir,
+          QWEN_TEST_INHERITED_MARKER: 'present',
+        }),
+      }),
+    );
+  });
+
+  it('rejects a darwin session over an SSH tty, not just SSH_CONNECTION', () => {
+    setPlatform('darwin');
+    expect(
+      isLocalTerminalAvailable(
+        { SSH_TTY: '/dev/ttys001' },
+        { processUid: 501, consoleUid: 501 },
+      ),
+    ).toBe(false);
   });
 });

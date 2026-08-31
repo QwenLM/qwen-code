@@ -72,43 +72,63 @@ interface WorkspaceDetailsTooltipProps {
 /** Icon button with a 2 s check confirmation, for the local-open actions. */
 function OpenLocallyButton({
   label,
+  announcement,
   icon: Icon,
   onOpen,
   testId,
 }: {
   label: string;
+  /** Spoken via the live region on success; failures toast via onError. */
+  announcement: string;
   icon: ComponentType<{ size?: number }>;
   onOpen: () => Promise<void>;
   testId: string;
 }) {
   const [opened, setOpened] = useState(false);
+  const [pending, setPending] = useState(false);
+  const [announced, setAnnounced] = useState(false);
   const resetTimerRef = useRef<number | undefined>(undefined);
   useEffect(() => () => window.clearTimeout(resetTimerRef.current), []);
   return (
-    <button
-      type="button"
-      className={sidebarStyles.sessionDetailsCopyButton}
-      aria-label={label}
-      title={label}
-      {...{ [`data-web-shell-open-workspace-${testId}`]: true }}
-      onClick={(event) => {
-        event.stopPropagation();
-        void onOpen()
-          .then(() => {
-            setOpened(true);
-            window.clearTimeout(resetTimerRef.current);
-            resetTimerRef.current = window.setTimeout(
-              () => setOpened(false),
-              2000,
-            );
-          })
-          // The sidebar already surfaces the failure via onError; the
-          // button simply keeps its idle icon.
-          .catch(() => undefined);
-      }}
-    >
-      {opened ? <CheckIcon aria-hidden="true" /> : <Icon aria-hidden="true" />}
-    </button>
+    <>
+      <button
+        type="button"
+        className={sidebarStyles.sessionDetailsCopyButton}
+        aria-label={label}
+        title={label}
+        disabled={pending}
+        {...{ [`data-web-shell-open-workspace-${testId}`]: true }}
+        onClick={(event) => {
+          event.stopPropagation();
+          // One window per click: the daemon spawns unconditionally per call.
+          if (pending) return;
+          setPending(true);
+          void onOpen()
+            .then(() => {
+              setOpened(true);
+              setAnnounced(true);
+              window.clearTimeout(resetTimerRef.current);
+              resetTimerRef.current = window.setTimeout(() => {
+                setOpened(false);
+                setAnnounced(false);
+              }, 2000);
+            })
+            // The sidebar already surfaces the failure via onError; the
+            // button simply keeps its idle icon.
+            .catch(() => undefined)
+            .finally(() => setPending(false));
+        }}
+      >
+        {opened ? (
+          <CheckIcon aria-hidden="true" />
+        ) : (
+          <Icon aria-hidden="true" />
+        )}
+      </button>
+      <span className="sr-only" aria-live="polite">
+        {announced ? announcement : ''}
+      </span>
+    </>
   );
 }
 
@@ -203,7 +223,11 @@ export function WorkspaceDetailsTooltip({
             openAfterDelay();
           }
         }}
-        onPointerLeave={closeAfterDelay}
+        onPointerLeave={() => {
+          if (!containsFocusTarget(document.activeElement)) {
+            closeAfterDelay();
+          }
+        }}
         // Keyboard parity with hover: focusing the header button opens the
         // details after the same delay; moving focus out closes them.
         onFocus={(event) => {
@@ -234,7 +258,13 @@ export function WorkspaceDetailsTooltip({
         aria-label={label}
         onOpenAutoFocus={(event) => event.preventDefault()}
         onPointerEnter={cancelClose}
-        onPointerLeave={closeAfterDelay}
+        onPointerLeave={() => {
+          // Keyboard parity: while focus lives inside the content the
+          // pointer leaving is not a dismiss signal.
+          if (!containsFocusTarget(document.activeElement)) {
+            closeAfterDelay();
+          }
+        }}
         onFocus={cancelClose}
         onBlur={(event) => {
           if (!containsFocusTarget(event.relatedTarget)) {
@@ -263,6 +293,7 @@ export function WorkspaceDetailsTooltip({
                 {onOpenPathLocally && (
                   <OpenLocallyButton
                     label={t('sidebar.openWorkspaceFolder')}
+                    announcement={t('sidebar.openWorkspaceFolderOpened')}
                     icon={FolderOpenIcon}
                     onOpen={onOpenPathLocally}
                     testId="folder"
@@ -271,6 +302,7 @@ export function WorkspaceDetailsTooltip({
                 {onOpenTerminalLocally && (
                   <OpenLocallyButton
                     label={t('sidebar.openWorkspaceTerminal')}
+                    announcement={t('sidebar.openWorkspaceTerminalOpened')}
                     icon={TerminalIcon}
                     onOpen={onOpenTerminalLocally}
                     testId="terminal"
