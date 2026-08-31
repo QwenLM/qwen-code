@@ -201,6 +201,11 @@ const projection = projectChatRecordsToDaemonTranscript(records);
 宿主应显示 `projection.diagnostics`，并在 `complete=false` 或 `truncated=true` 时提示
 历史可能不完整。组件需要一个可用高度；自定义 renderer 的副作用仍由宿主负责。
 
+## 消息操作
+
+- 已完成的 assistant 消息支持复制；具备持久化 checkpoint 时还支持分支。
+- 终态 turn error 支持复制显示的错误文本。重试入口保持独立，错误轮次不支持分支。
+
 ## Props
 
 ### WebShellWithProviders

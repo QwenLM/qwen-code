@@ -10,6 +10,7 @@ import { parse } from 'yaml';
 
 describe('e2e workflow', () => {
   const workflow = readFileSync('.github/workflows/e2e.yml', 'utf8');
+  const buildSandboxScript = readFileSync('scripts/build_sandbox.js', 'utf8');
   const yml = parse(workflow);
 
   it('never cancels in-progress runs on main', () => {
@@ -33,57 +34,69 @@ describe('e2e workflow', () => {
     expect(group).toContain('github.head_ref || github.ref_name');
   });
 
-  describe('sandbox image build retry', () => {
-    // Run 33139344576 (issue #10355) died at 'Build the sandbox image' on one
-    // pool runner while the identical build passed on two sibling runners of
-    // the same run, and the re-run passed on another runner. The bounded retry
-    // keeps one transient environment failure from exiting the shard red.
+  describe('sandbox image preparation', () => {
     const steps = yml.jobs['e2e-test-linux'].steps;
-    const buildStep = steps.find(
-      (step) => step.name === 'Build the sandbox image',
-    );
-    const retryStep = steps.find(
-      (step) => step.name === 'Build the sandbox image (retry)',
-    );
+    const setupStep = steps.find((step) => step.name === 'Set up Docker');
+    const runStep = steps.find((step) => step.name === 'Run E2E tests');
 
-    it('keeps a failed first attempt from pre-failing the job', () => {
-      // Without continue-on-error a successful retry would leave the shard red
-      // (GitHub computes the job conclusion from every step conclusion).
-      expect(buildStep['continue-on-error']).toBe(true);
+    it('does not create one Buildx builder per self-hosted shard', () => {
+      expect(setupStep.if).toContain("runner.environment == 'github-hosted'");
     });
 
-    it('pins the first build step id the retry gate references', () => {
-      // steps.build-sandbox.outcome only resolves when this exact id exists;
-      // renaming the step would silently disable the retry.
-      expect(buildStep.id).toBe('build-sandbox');
-    });
-
-    it('gates the retry on the first attempt outcome only', () => {
-      expect(retryStep.if).toContain(
-        "steps.build-sandbox.outcome == 'failure'",
+    it('serializes image preparation on the shared Docker host', () => {
+      expect(runStep.run).toContain(
+        'docker-sandbox-build-e2e-${GITHUB_SHA}.lock',
       );
-      // failure() would be false once continue-on-error absorbs the first
-      // attempt, silently skipping the retry.
-      expect(retryStep.if).not.toContain('failure()');
+      expect(runStep.run).toContain('flock --wait 1800 8');
+      expect(runStep.run).toContain(
+        'exec 9>"${HOME}/.cache/qwen-code-ci/docker-sandbox-daemon.lock"',
+      );
+      expect(runStep.run).toContain('flock --shared --wait 1800 9');
+      expect(runStep.run).toContain(
+        'if [ "$RUNNER_ENVIRONMENT" = \'self-hosted\' ]',
+      );
     });
 
-    it('lets a failed retry fail the job', () => {
-      // continue-on-error on the retry would absorb a genuine build failure
-      // and hand the test step a sandbox image that was never built.
-      expect(retryStep['continue-on-error']).toBeUndefined();
+    it('reuses a commit-qualified image', () => {
+      expect(runStep.env.BUILD_SANDBOX_FLAGS).toContain(
+        'org.qwen-code.ci.sandbox=true',
+      );
+      expect(runStep.run).toContain('sandboxImageUri")-e2e-${GITHUB_SHA}"');
+      expect(runStep.run).toContain('docker image inspect "$sandbox_image"');
     });
 
-    it('rebuilds with the same script and the same skip flag', () => {
-      expect(buildStep.run).toContain('npm run build:sandbox -- -s');
-      expect(retryStep.run).toContain('npm run build:sandbox -- -s');
+    it('pins each shard to the prepared image ID', () => {
+      expect(runStep.run).toContain("docker image inspect --format '{{.Id}}'");
+      expect(runStep.run).toContain(
+        'export QWEN_SANDBOX_IMAGE="$sandbox_image_id"',
+      );
     });
 
-    it('keeps the docker leg env on the retry', () => {
-      // Without QWEN_SANDBOX, build_sandbox.js cannot resolve the container
-      // command on Linux; without VERBOSE the retry's build log goes to
-      // /dev/null and a second failure is undiagnosable.
-      expect(retryStep.env.QWEN_SANDBOX).toBe('docker');
-      expect(retryStep.env.VERBOSE).toBe('true');
+    it('keeps one bounded retry without pruning the shared daemon', () => {
+      expect(runStep.run.match(/build_image/g)).toHaveLength(3);
+      expect(runStep.run).toContain(
+        'npm run build:sandbox -- -s --no-prune -i "$sandbox_image"',
+      );
+      expect(buildSandboxScript).toContain(".option('prune'");
+      expect(buildSandboxScript).toContain('if (argv.prune)');
+    });
+
+    it('keeps the Docker build environment', () => {
+      expect(runStep.env.QWEN_SANDBOX).toContain("'docker'");
+      expect(runStep.env.VERBOSE).toBe('true');
+    });
+
+    it('keeps the shared lock continuously through concurrent tests', () => {
+      const imageIdIndex = runStep.run.indexOf('sandbox_image_id=');
+      const downgradeIndex = runStep.run.indexOf('flock --shared 9');
+      const testIndex = runStep.run.indexOf('vitest run');
+      expect(imageIdIndex).toBeGreaterThanOrEqual(0);
+      expect(downgradeIndex).toBeGreaterThan(imageIdIndex);
+      expect(testIndex).toBeGreaterThan(downgradeIndex);
+      expect(runStep.run).toContain('until flock --nonblock 9');
+      expect(
+        yml.jobs['e2e-test-linux'].strategy['max-parallel'],
+      ).toBeUndefined();
     });
   });
 

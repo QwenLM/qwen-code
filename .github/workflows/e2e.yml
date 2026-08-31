@@ -163,7 +163,7 @@ jobs:
 
       - name: 'Set up Docker'
         if: |-
-          ${{ matrix.sandbox == 'sandbox:docker' }}
+          ${{ matrix.sandbox == 'sandbox:docker' && runner.environment == 'github-hosted' }}
         uses: 'docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5' # ratchet:docker/setup-buildx-action@v4
 
       - name: 'Set up Podman'
@@ -174,44 +174,6 @@ jobs:
           registry: 'docker.io'
           username: '${{ secrets.DOCKERHUB_USERNAME }}'
           password: '${{ secrets.DOCKERHUB_TOKEN }}'
-
-      # The sandbox test script builds this image itself, but without `-s` it
-      # first re-runs install + build + bundle + pack on the host — all of which
-      # the steps above already did, and none of which the image consumes (the
-      # Dockerfile rebuilds and packs inside its own builder stage).
-      # continue-on-error is load-bearing: a failed first attempt must not
-      # pre-fail the job, or a successful retry below would still leave the
-      # shard red. The job only fails when the retry fails too.
-      - name: 'Build the sandbox image'
-        id: 'build-sandbox'
-        continue-on-error: true
-        if: |-
-          ${{ matrix.sandbox == 'sandbox:docker' }}
-        env:
-          # build_sandbox.js resolves the container command through
-          # sandbox_command.js, which exits non-zero on Linux when this is unset
-          # — the test script used to supply it.
-          QWEN_SANDBOX: 'docker'
-          # Without this, build_sandbox.js pipes docker build output to
-          # /dev/null — the longest step in the docker leg becomes undiagnosable.
-          VERBOSE: 'true'
-        run: |-
-          npm run build:sandbox -- -s
-
-      # One bounded retry: pool-runner docker builds hit transient
-      # environment failures — run 33139344576 died at this step on one
-      # runner (issue #10355) while the identical build passed on two
-      # sibling runners of the same run, and the re-run passed on another
-      # runner. A retry reuses the docker build cache and almost always
-      # passes; a genuine failure fails this step and with it the job.
-      - name: 'Build the sandbox image (retry)'
-        if: |-
-          ${{ steps.build-sandbox.outcome == 'failure' }}
-        env:
-          QWEN_SANDBOX: 'docker'
-          VERBOSE: 'true'
-        run: |-
-          npm run build:sandbox -- -s
 
       - name: 'Run E2E tests'
         env:
@@ -224,7 +186,65 @@ jobs:
           # shared-pool shard at one fork and exempts pressure-flake unhandled
           # errors.
           RUNNER_ENVIRONMENT: '${{ runner.environment }}'
+          QWEN_SANDBOX: "${{ matrix.sandbox == 'sandbox:docker' && 'docker' || 'false' }}"
+          BUILD_SANDBOX_FLAGS: '--label org.qwen-code.ci.sandbox=true'
         run: |-
+          set -euo pipefail
+
+          if [ '${{ matrix.sandbox }}' = 'sandbox:docker' ]; then
+            sandbox_image="$(node -p "require('./packages/cli/package.json').config.sandboxImageUri")-e2e-${GITHUB_SHA}"
+
+            build_image() {
+              npm run build:sandbox -- -s --no-prune -i "$sandbox_image"
+            }
+
+            acquire_daemon_write_lock() {
+              lock_deadline=$((SECONDS + 1800))
+              until flock --nonblock 9; do
+                if (( SECONDS >= lock_deadline )); then
+                  echo "::error::docker daemon write lock not acquired within 30 minutes"
+                  exit 1
+                fi
+                sleep 1
+              done
+            }
+
+            if [ "$RUNNER_ENVIRONMENT" = 'self-hosted' ]; then
+              mkdir -p "${HOME}/.cache/qwen-code-ci"
+              exec 8>"${HOME}/.cache/qwen-code-ci/docker-sandbox-build-e2e-${GITHUB_SHA}.lock"
+              if ! flock --wait 1800 8; then
+                echo "::error::docker build coordinator lock not acquired within 30 minutes"
+                exit 1
+              fi
+              exec 9>"${HOME}/.cache/qwen-code-ci/docker-sandbox-daemon.lock"
+              if ! flock --shared --wait 1800 9; then
+                echo "::error::docker daemon read lock not acquired within 30 minutes"
+                exit 1
+              fi
+            fi
+
+            if ! docker image inspect "$sandbox_image" > /dev/null 2>&1; then
+              if [ "$RUNNER_ENVIRONMENT" = 'self-hosted' ]; then
+                flock --unlock 9
+                acquire_daemon_write_lock
+              fi
+              docker image prune --all --force --filter 'label=org.qwen-code.ci.sandbox=true' --filter 'until=24h' || echo "::warning::old CI sandbox image cleanup failed on ${RUNNER_NAME:-this runner}"
+              if ! build_image; then
+                echo "::warning::sandbox image build failed; retrying once"
+                build_image
+              fi
+            else
+              echo "Reusing sandbox image for ${GITHUB_SHA}"
+            fi
+
+            sandbox_image_id="$(docker image inspect --format '{{.Id}}' "$sandbox_image")"
+            export QWEN_SANDBOX_IMAGE="$sandbox_image_id"
+            if [ "$RUNNER_ENVIRONMENT" = 'self-hosted' ]; then
+              flock --shared 9
+              flock --unlock 8
+            fi
+          fi
+
           export TMPDIR="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
           if [ "${RUNNER_OS:-}" = "Linux" ]; then
             QWEN_CI_TMPDIR="$(mktemp -d /var/tmp/qwen-ci-XXXXXX 2>/dev/null || true)"
@@ -243,17 +263,21 @@ jobs:
             npm run test:integration:sandbox:none -- --exclude '**/interactive/cron-interactive.test.ts' --exclude '**/channel-plugin.test.ts' --shard='${{ matrix.shard }}'
           fi
 
-      # The sandbox build retags the same image name every run, so on a
-      # persistent runner the superseded layers go dangling and would
-      # accumulate. Dangling-only prune with an age floor: never touches
-      # tagged images other jobs on this machine may still use, and keeps
-      # the last day of layers as build cache for the next run. Hosted
-      # runners are ephemeral and skip this.
+      # Commit-qualified CI images are pruned under the exclusive daemon lock
+      # once they are older than a day. The cleanup is non-blocking so a shard
+      # finishing early cannot queue a writer ahead of another shard's reader.
       - name: 'Prune dangling docker images'
         if: |-
           ${{ always() && matrix.sandbox == 'sandbox:docker' && runner.environment == 'self-hosted' }}
         run: |-
-          docker image prune --force --filter 'until=24h' || echo "::warning::docker image prune failed on ${RUNNER_NAME:-this runner}; dangling images may accumulate"
+          mkdir -p "${HOME}/.cache/qwen-code-ci"
+          exec 9>"${HOME}/.cache/qwen-code-ci/docker-sandbox-daemon.lock"
+          if flock --nonblock 9; then
+            docker image prune --all --force --filter 'label=org.qwen-code.ci.sandbox=true' --filter 'until=24h' || echo "::warning::old CI sandbox image cleanup failed on ${RUNNER_NAME:-this runner}"
+            docker image prune --force --filter 'until=24h' || echo "::warning::docker image prune failed on ${RUNNER_NAME:-this runner}; dangling images may accumulate"
+          else
+            echo "Docker cleanup skipped because the shared daemon is active"
+          fi
 
   e2e-test-macos:
     name: 'E2E Test - macOS - shard ${{ matrix.shard }}'
