@@ -106,6 +106,16 @@ describe.sequential('repository-local Git execution hooks', () => {
       config(cwd, 'core.pager', value);
       expect(getLocalGitConfigRisk(cwd).pager).toBe(false);
     }
+
+    const commandSpecificCwd = createRepo();
+    config(commandSpecificCwd, 'pager.status', 'false');
+    expect(getLocalGitConfigRisk(commandSpecificCwd).pager).toBe(false);
+    expect(
+      await isShellCommandReadOnlyASTInDirectory(
+        'git status',
+        commandSpecificCwd,
+      ),
+    ).toBe(true);
   });
 
   it('uses Git boolean semantics for signature and promisor switches', async () => {
