@@ -26,19 +26,26 @@ const workflowsDir = join(
   'workflows',
 );
 
-// Lane labels the ECS fleet registers. Each of the five Linux hosts carries
-// 25 runner registrations, and a host is dedicated to one lane so the pool
-// stays assignable at a glance:
+// Lane labels the ECS fleet registers. The convention — the shape, not a
+// host inventory, because hosts rotate and the runners API is the only
+// source of truth for which machines exist:
 //
-//   hk-…6t, hk-…6u    all 25   ecs-agent   review / autofix (6–8h budgets)
-//   64c, sg, hk-j6cdq      1   ecs-light   seconds-long jobs
-//                       2–25   ecs-qwen    CI (90 minute budget)
+//   ecs-agent   review / autofix (6–8 hour budgets). Agent hosts carry it
+//               on every registration.
+//   ecs-qwen    CI (90 minute budget). CI hosts carry it on every
+//               registration except runner 1.
+//   ecs-light   seconds-long jobs (authorize, label, finalize-style):
+//               runner 1 on each CI host, so the lane spans hosts and one
+//               dead machine cannot silence it.
 //
-// Separating light from qwen is about head-of-line blocking, not capacity:
-// the seconds-long jobs are ~71% of the queue and ~13% of the machine time,
-// so they starve behind the long lanes while costing almost nothing to move.
-// Three light slots drain a 89-job peak in about seven minutes at their
-// ~15-second median.
+// A host is dedicated to one lane. Separating light from qwen is about
+// head-of-line blocking, not capacity: the seconds-long jobs measured at
+// ~71% of the queue and ~13% of the machine time, so they starve behind
+// 90-minute Test jobs while costing almost nothing to move — a handful of
+// light slots drains an 89-job peak in minutes at their ~15-second median.
+// When a host is added or released, apply the shape above BEFORE any
+// workflow change that assumes it, and never let a lane's slot count reach
+// zero while a workflow still asks for it.
 //
 // Adding an entry here is NOT what makes a label exist. Register it on the
 // runners first (`POST /repos/{owner}/{repo}/actions/runners/{id}/labels`),
