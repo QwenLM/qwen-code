@@ -18,6 +18,13 @@ export interface ScheduledTaskSessionSection {
   sessions: DaemonSessionSummary[];
 }
 
+function hasGeneratedRunName(session: DaemonSessionSummary): boolean {
+  const displayName = session.displayName?.trim();
+  return Boolean(
+    displayName && SCHEDULED_TASK_RUN_TIME_SUFFIX.test(displayName),
+  );
+}
+
 export function getScheduledTaskSessionGroup(
   session: DaemonSessionSummary,
 ): ScheduledTaskSessionGroupIdentity | undefined {
@@ -48,6 +55,16 @@ export function collectScheduledTaskSession(
   if (!group) return false;
   const section = sections.get(group.id);
   if (section) {
+    // Prefer the task title carried by a generated display name over a user
+    // rename: runs are renameable, so first-wins would let the header flip
+    // between the title and a rename whenever the catalog order shifts
+    // (pinned rows sort first, the org-disabled path re-sorts by creation).
+    if (
+      hasGeneratedRunName(session) &&
+      !section.sessions.some(hasGeneratedRunName)
+    ) {
+      section.label = group.label;
+    }
     section.sessions.push(session);
   } else {
     sections.set(group.id, { ...group, sessions: [session] });

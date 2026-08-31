@@ -961,10 +961,11 @@ export function WebShellSidebar({
       ? sessionSource
       : 'default'
     : undefined;
-  const channelGroupingEnabled = Boolean(
-    selectedSessionSource === 'channel' &&
-      workspace.capabilities?.features.includes('channel_management'),
+  const channelManagementEnabled = Boolean(
+    workspace.capabilities?.features.includes('channel_management'),
   );
+  const channelGroupingEnabled =
+    selectedSessionSource === 'channel' && channelManagementEnabled;
   const {
     data: channelCatalogData,
     catalog: channelTypeCatalog,
@@ -1274,10 +1275,27 @@ export function WebShellSidebar({
     setPrevOrganizationEnabled(organizationEnabled);
     setGroupsCatalogReady(!organizationEnabled);
     if (organizationEnabled) {
-      // An org-disabled settle may already have consumed the latch against
-      // scheduled-task sections alone; restore it so the first organized
-      // settle registers manual groups as initial instead of collapsing them.
-      awaitingInitialSessionCatalogBySourceRef.current[sessionSource] = true;
+      // An org-disabled settle may already have consumed the Tasks latch
+      // against scheduled-task sections alone — possibly while the Channels
+      // tab was selected. Re-arm the source whose catalog gains manual
+      // groups so the first organized settle registers them as initial
+      // instead of collapsing them.
+      awaitingInitialSessionCatalogBySourceRef.current.default = true;
+    }
+  }
+  // The channel-grouping branch clears `groups` while the Channels tab is
+  // selected; when switching back to Tasks, close the gate during that same
+  // render so the settle cannot consume the first-sync latch against the
+  // empty catalog before the organized groups reload lands.
+  const [prevSessionSource, setPrevSessionSource] = useState(sessionSource);
+  if (prevSessionSource !== sessionSource) {
+    setPrevSessionSource(sessionSource);
+    if (
+      organizationEnabled &&
+      sessionSource === 'default' &&
+      channelManagementEnabled
+    ) {
+      setGroupsCatalogReady(false);
     }
   }
   const [sidebarWidth, setSidebarWidth] = useState(readSidebarWidth);

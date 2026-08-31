@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import type { DaemonSessionSummary } from '@qwen-code/sdk/daemon';
-import { getScheduledTaskSessionGroup } from './scheduled-task-session-groups';
+import {
+  collectScheduledTaskSession,
+  getScheduledTaskSessionGroup,
+} from './scheduled-task-session-groups';
 
 describe('getScheduledTaskSessionGroup', () => {
   it('uses the task id and removes the generated run-time suffix', () => {
@@ -53,5 +56,61 @@ describe('getScheduledTaskSessionGroup', () => {
         sourceId: 'scheduled_task_run:task-1',
       } as DaemonSessionSummary),
     ).toBeUndefined();
+  });
+});
+
+describe('collectScheduledTaskSession', () => {
+  const run = (sessionId: string, displayName: string) =>
+    ({
+      sessionId,
+      sourceType: 'default',
+      sourceId: 'scheduled_task_run:task-1',
+      displayName,
+    }) as DaemonSessionSummary;
+
+  it('prefers the generated task title over a rename regardless of collection order', () => {
+    const renamedFirst = new Map();
+    collectScheduledTaskSession(
+      renamedFirst,
+      run('run-1', 'Investigate flake'),
+    );
+    collectScheduledTaskSession(
+      renamedFirst,
+      run('run-2', 'Hourly review · 08-31 09:30'),
+    );
+    expect(renamedFirst.get('scheduled-task:task-1')?.label).toBe(
+      'Hourly review',
+    );
+    expect(
+      renamedFirst
+        .get('scheduled-task:task-1')
+        ?.sessions.map((s) => s.sessionId),
+    ).toEqual(['run-1', 'run-2']);
+
+    const generatedFirst = new Map();
+    collectScheduledTaskSession(
+      generatedFirst,
+      run('run-2', 'Hourly review · 08-31 09:30'),
+    );
+    collectScheduledTaskSession(
+      generatedFirst,
+      run('run-1', 'Investigate flake'),
+    );
+    expect(generatedFirst.get('scheduled-task:task-1')?.label).toBe(
+      'Hourly review',
+    );
+    expect(
+      generatedFirst
+        .get('scheduled-task:task-1')
+        ?.sessions.map((s) => s.sessionId),
+    ).toEqual(['run-2', 'run-1']);
+  });
+
+  it('keeps the first rename as the label when no run carries the generated shape', () => {
+    const sections = new Map();
+    collectScheduledTaskSession(sections, run('run-1', 'First rename'));
+    collectScheduledTaskSession(sections, run('run-2', 'Second rename'));
+    expect(sections.get('scheduled-task:task-1')?.label).toBe('First rename');
+    expect(sections.get('scheduled-task:task-1')?.sessions).toHaveLength(2);
   });
 });

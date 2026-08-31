@@ -876,6 +876,48 @@ describe('WorkspaceSection session loading', () => {
     ).not.toContain('Review PRs ·');
   });
 
+  it('forms the scheduled-task section while organization is enabled', async () => {
+    const sessions = [
+      {
+        sessionId: 'run-1',
+        displayName: 'Review PRs · 08-31 09:30',
+        sourceType: 'default',
+        sourceId: 'scheduled_task_run:task-1',
+      },
+      {
+        sessionId: 'ordinary',
+        displayName: 'Ordinary session',
+        sourceType: 'default',
+      },
+    ] as DaemonSessionSummary[];
+    const client = {
+      workspaceByCwd: vi.fn(() => ({
+        workspaceGit,
+        listWorkspaceSessionsPage: vi.fn().mockResolvedValue({ sessions }),
+        listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+      })),
+    } as unknown as DaemonClient;
+
+    renderSection({
+      client,
+      expanded: true,
+      sourceType: 'default',
+      organizationEnabled: true,
+    });
+    await flush();
+
+    const taskGroup = container.querySelector(
+      'section[aria-label="Review PRs"]',
+    );
+    expect(taskGroup).not.toBeNull();
+    expect(
+      taskGroup?.querySelector('[data-web-shell-scheduled-task-group]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('section[aria-label="Ungrouped"]')?.textContent,
+    ).toContain('Ordinary session');
+  });
+
   it('keeps a manually grouped scheduled-task run under its manual group', async () => {
     const sessions = [
       {
