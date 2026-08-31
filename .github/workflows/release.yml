@@ -523,8 +523,13 @@ jobs:
       - 'quality_typecheck'
       - 'workspace_tests'
       - 'quality_scripts'
+    # !cancelled() rather than always(): a cancelled run must leave this
+    # aggregate skipped, not turn component 'cancelled' results into a
+    # quality 'failure' that opens notify_failure's "Release Failed" issue
+    # for a run the operator stopped on purpose. Failed components still
+    # run this job and fail it closed.
     if: |-
-      ${{ always() && github.event.inputs.force_skip_tests != 'true' }}
+      ${{ !cancelled() && github.event.inputs.force_skip_tests != 'true' }}
     permissions: {}
     steps:
       - name: 'Verify quality results'

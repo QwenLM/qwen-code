@@ -493,11 +493,18 @@ describe('release workflow', () => {
       'workspace_tests',
       'quality_scripts',
     ]);
+    // !cancelled(), not always(): a cancelled run leaves the aggregate
+    // skipped, so notify_failure's needs.quality.result == 'failure' gate
+    // stays closed for runs an operator stopped on purpose. Failed
+    // components still run the aggregate and fail it.
     expect(quality.if).toBe(
-      "${{ always() && github.event.inputs.force_skip_tests != 'true' }}",
+      "${{ !cancelled() && github.event.inputs.force_skip_tests != 'true' }}",
     );
     expect(quality.steps[0].run).toContain(
       'if [[ "${result}" != \'success\' ]]',
+    );
+    expect(releaseYaml.jobs.notify_failure.if).toContain(
+      "needs.quality.result == 'failure'",
     );
     expect(releaseYaml.jobs.publish.needs).toContain('quality');
     expect(releaseYaml.jobs.publish.needs).not.toContain('workspace_tests');
