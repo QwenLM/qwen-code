@@ -945,6 +945,9 @@ for (const theme of THEMES) {
         });
       await expect(sessionRow(primarySessionName)).toHaveCount(1);
       await expect(sessionRow(secondarySessionName)).toHaveCount(1);
+      await expect(
+        sessionRow(primarySessionName).locator('..'),
+      ).toHaveAttribute('aria-current', 'page');
       await captureScreenshot(page, `workspace-sidebar-${theme}`);
     });
 
