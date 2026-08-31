@@ -54,6 +54,18 @@ describe('parsePeerFrame — user frames', () => {
     });
   });
 
+  it('carries the recipient session id through', () => {
+    expect(
+      parsePeerFrame(line({ ...validUser, toSessionId: 'sess-9' })),
+    ).toMatchObject({ toSessionId: 'sess-9' });
+  });
+
+  it('treats a non-string toSessionId as unaddressed', () => {
+    const frame = parsePeerFrame(line({ ...validUser, toSessionId: 7 }));
+    expect(frame).not.toBeNull();
+    expect(frame && 'toSessionId' in frame).toBe(false);
+  });
+
   it('drops an unrecognized fromMode rather than trusting it', () => {
     const frame = parsePeerFrame(line({ ...validUser, fromMode: 'root' }));
     expect(frame).not.toBeNull();
@@ -174,6 +186,20 @@ describe('parsePeerFrame — control frames', () => {
     origMsgId: 'abc',
   };
 
+  it('parses every delivery status, including misaddressed', () => {
+    for (const status of [
+      'held',
+      'denied',
+      'expired',
+      'delivered',
+      'misaddressed',
+    ]) {
+      expect(parsePeerFrame(line({ ...validControl, status }))).toMatchObject({
+        status,
+      });
+    }
+  });
+
   it('parses a delivery status', () => {
     expect(parsePeerFrame(line(validControl))).toMatchObject({
       type: 'control',
@@ -209,6 +235,16 @@ describe('round trip', () => {
     expect(parsePeerFrame(encoded.trimEnd())).toEqual(frame);
   });
 
+  it('round-trips the recipient session id', () => {
+    const frame = buildUserFrame({ content: 'hi', toSessionId: 'sess-9' });
+    expect(frame.toSessionId).toBe('sess-9');
+    expect(parsePeerFrame(encodePeerFrame(frame).trimEnd())).toEqual(frame);
+  });
+
+  it('omits the recipient key rather than writing undefined', () => {
+    expect('toSessionId' in buildUserFrame({ content: 'hi' })).toBe(false);
+  });
+
   it('survives content containing newlines', () => {
     const frame = buildUserFrame({ content: 'line one\nline two' });
     const encoded = encodePeerFrame(frame);
@@ -230,6 +266,10 @@ describe('delivery status frames', () => {
     expect(describeDeliveryStatus('denied')).toContain('declined');
     expect(describeDeliveryStatus('expired')).toContain('expired');
     expect(describeDeliveryStatus('delivered')).toContain('released');
+    expect(describeDeliveryStatus('misaddressed')).toContain(
+      'different session',
+    );
+    expect(describeDeliveryStatus('misaddressed')).not.toContain('declined');
   });
 
   it('carries the reason on the frame so the sender need not map it', () => {

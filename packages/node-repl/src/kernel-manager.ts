@@ -514,7 +514,12 @@ export class NodeReplKernelManager {
 
     const child = spawn(
       process.execPath,
-      ['--no-warnings', '--experimental-vm-modules', resolveKernelPath()],
+      [
+        '--no-warnings',
+        '--experimental-vm-modules',
+        '--experimental-import-meta-resolve',
+        resolveKernelPath(),
+      ],
       {
         cwd: this.options.cwd,
         detached: !IS_WINDOWS,

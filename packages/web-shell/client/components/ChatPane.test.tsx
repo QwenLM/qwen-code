@@ -68,6 +68,7 @@ const getTasks = vi.fn();
 const getGoal = vi.fn();
 const controlGoal = vi.fn();
 const readAttachment = vi.fn();
+const getContextUsage = vi.fn();
 const daemonActions = {
   sendPrompt,
   submitPermission,
@@ -79,6 +80,7 @@ const daemonActions = {
   getGoal,
   controlGoal,
   readAttachment,
+  getContextUsage,
 };
 const enqueuePrompt = vi.fn(() => true);
 const removeQueuedPrompt = vi.fn();
@@ -93,7 +95,7 @@ const latestComposerCoreOptions = vi.hoisted(() => ({
   current: null as Record<string, unknown> | null,
 }));
 
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   DAEMON_APPROVAL_MODES: ['default', 'plan', 'auto-edit', 'auto', 'yolo'],
   useActions: () => daemonActions,
   useConnection: () => connectionState,
@@ -432,6 +434,10 @@ beforeEach(() => {
   readAttachment.mockResolvedValue({
     data: 'eyJoaSI6IuS9oOWlvSJ9',
     mimeType: 'application/json',
+  });
+  getContextUsage.mockReset();
+  getContextUsage.mockResolvedValue({
+    usage: { totalTokens: 1200, contextWindowSize: 8192 },
   });
   sendPrompt.mockImplementation(async (_text: string, options?: any) => {
     sendPromptAdmit = options?.onAdmitted;
@@ -1347,6 +1353,7 @@ describe('ChatPane', () => {
 
   it('adds no workspace toolbar chip on a single-workspace daemon', () => {
     render({ title: 'Refactor core', workspaceCwd: '/w' });
+    expect(latestChatEditorProps.visibleToolbarActions).toContain('addMenu');
     expect(latestChatEditorProps.visibleToolbarActions).not.toContain(
       'workspace',
     );
@@ -2623,11 +2630,42 @@ describe('ChatPane', () => {
     );
   });
 
-  it('enables the interactive composer controls (approval mode, model, voice)', () => {
+  it('enables the interactive composer controls', () => {
+    connectionState.tokenCount = 1200;
+    connectionState.contextWindow = 8192;
     render();
     expect(testid('pane-toolbar')?.textContent).toBe(
-      JSON.stringify(['approvalMode', 'model', 'voice']),
+      JSON.stringify([
+        'addMenu',
+        'approvalMode',
+        'contextUsage',
+        'model',
+        'voice',
+      ]),
     );
+    expect(latestChatEditorProps.tokenCount).toBe(1200);
+    expect(latestChatEditorProps.contextWindow).toBe(8192);
+    expect(latestChatEditorProps.onShowContextUsage).toEqual(
+      expect.any(Function),
+    );
+  });
+
+  it('shows context usage for this pane session', async () => {
+    render();
+
+    await act(async () => {
+      latestChatEditorProps.onShowContextUsage();
+    });
+
+    expect(appendLocalUserMessage).toHaveBeenCalledWith('/context');
+    expect(getContextUsage).toHaveBeenCalledWith({ detail: false });
+    expect(transcriptDispatch).toHaveBeenCalledWith([
+      expect.objectContaining({
+        type: 'status',
+        clearActiveText: false,
+        text: expect.stringContaining('web-shell:context-usage:v1:'),
+      }),
+    ]);
   });
 
   it("lists the pane session's own commands in the slash menu", () => {
@@ -2640,6 +2678,27 @@ describe('ChatPane', () => {
     // 'compress' is daemon-only — so the count is localCount + 1.
     const count = Number(testid('pane-commands')?.textContent);
     expect(count).toBeGreaterThan(30);
+  });
+
+  it("passes the pane session's skills to the add menu", () => {
+    connectionState.skills = ['review'];
+    connectionState.commands = [
+      {
+        name: 'review',
+        description: 'Review code',
+        argumentHint: '[path]',
+        source: 'skill',
+      },
+    ];
+    render();
+
+    expect(latestChatEditorProps.skills).toEqual([
+      {
+        name: 'review',
+        description: 'Review changed code for bugs, security, and quality',
+        argumentHint: '[path]',
+      },
+    ]);
   });
 
   it('hides internal composer models and labels the rest', () => {
