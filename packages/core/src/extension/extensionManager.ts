@@ -9,7 +9,7 @@ import type {
   ExtensionInstallMetadata,
 } from '../config/config.js';
 import { Config } from '../config/config.js';
-import type { SkillConfig } from '../skills/types.js';
+import { validateSkillName, type SkillConfig } from '../skills/types.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import type { ClaudeMarketplaceConfig } from './claude-converter.js';
 import type { HookEventName, HookDefinition } from '../hooks/types.js';
@@ -197,6 +197,7 @@ export interface ExtensionConfig {
   contextFileName?: string | string[];
   commands?: string | string[];
   skills?: string | string[];
+  skillStates?: Record<string, boolean>;
   agents?: string | string[];
   settings?: ExtensionSetting[];
   hooks?: { [K in HookEventName]?: HookDefinition[] };
@@ -478,6 +479,7 @@ async function loadCommandsFromDir(dir: string): Promise<string[]> {
 
 export class ExtensionManager {
   private extensionCache: Map<string, Extension> | null = null;
+  private storeSnapshot: ExtensionStoreSnapshot | undefined;
   private readonly mutationListeners = new Set<ExtensionMutationListener>();
   private nextMutationId = 0;
 
@@ -769,6 +771,102 @@ export class ExtensionManager {
     return await this.extensionStore.readSnapshot();
   }
 
+  getExtensionSkillState(
+    extensionId: string,
+    skillName: string,
+    workspacePath: string = this.workspaceDir,
+    snapshot: ExtensionStoreSnapshot | undefined = this.storeSnapshot,
+  ): { defaultEnabled: boolean; workspaceEnabled: boolean | null } {
+    const extension = this.findExtensionById(extensionId);
+    const name = skillName.trim().toLowerCase();
+    if (
+      !extension.skills?.some(
+        (skill) => skill.name.trim().toLowerCase() === name,
+      )
+    ) {
+      throw new Error(
+        `Skill "${skillName}" does not belong to extension "${extension.name}".`,
+      );
+    }
+    const defaults = extension.config.skillStates;
+    return {
+      defaultEnabled:
+        defaults && Object.hasOwn(defaults, name) ? defaults[name]! : true,
+      workspaceEnabled: snapshot
+        ? this.extensionStore.getSkillWorkspaceOverride(
+            snapshot,
+            extensionId,
+            workspacePath,
+            name,
+          )
+        : null,
+    };
+  }
+
+  async setExtensionSkillStates(
+    extensionId: string,
+    workspacePath: string,
+    updates: ReadonlyArray<{ name: string; state: ExtensionActivation }>,
+    onCommitted?: ExtensionCommitCallback,
+    beforeCommit?: () => void,
+  ): Promise<ExtensionStoreMutationResult> {
+    if (!Array.isArray(updates) || updates.length < 1 || updates.length > 100) {
+      throw new Error('Expected between 1 and 100 skill states.');
+    }
+    const states = new Map<string, boolean>();
+    for (const update of updates) {
+      if (
+        !update ||
+        typeof update.name !== 'string' ||
+        (update.state !== 'enabled' && update.state !== 'disabled')
+      ) {
+        throw new Error('Invalid skill state.');
+      }
+      const name = update.name.trim().toLowerCase();
+      validateSkillName(name);
+      if (states.has(name)) {
+        throw new Error(`Duplicate skill name "${update.name}".`);
+      }
+      states.set(name, update.state === 'enabled');
+    }
+
+    const endMutation = this.beginMutation('setExtensionSkillStates');
+    try {
+      const previous = await this.refreshCacheWithSnapshot();
+      const extension = this.findExtensionById(extensionId);
+      for (const name of states.keys()) {
+        this.getExtensionSkillState(extensionId, name, workspacePath, previous);
+      }
+      const snapshot = await this.extensionStore.setSkillWorkspaceOverrides(
+        { id: extension.id, name: extension.name },
+        workspacePath,
+        Object.fromEntries(states),
+        previous.extensions[extensionId]?.artifactGeneration ?? 0,
+        beforeCommit,
+      );
+      onCommitted?.(snapshot.generation);
+      this.applyStoreActivation(snapshot);
+      try {
+        await this.config
+          ?.getSkillManager()
+          ?.refreshCache({ throwOnError: true });
+      } catch (error) {
+        return {
+          ...snapshot,
+          warnings: [
+            {
+              code: 'extension_runtime_refresh_failed',
+              error: getErrorMessage(error),
+            },
+          ],
+        };
+      }
+      return snapshot;
+    } finally {
+      endMutation();
+    }
+  }
+
   async getExtensionActivation(
     extensionId: string,
     workspacePath: string = this.workspaceDir,
@@ -1020,6 +1118,7 @@ export class ExtensionManager {
   }
 
   private applyStoreActivation(snapshot: ExtensionStoreSnapshot): void {
+    this.storeSnapshot = snapshot;
     for (const extension of this.getLoadedExtensions()) {
       if (this.enabledExtensionNamesOverride.length > 0) {
         extension.isActive = this.isEnabled(extension.name);
@@ -1742,7 +1841,9 @@ export class ExtensionManager {
     }
     try {
       const configContent = fs.readFileSync(configFilePath, 'utf-8');
-      const rawConfig = recursivelyHydrateStrings(JSON.parse(configContent), {
+      const parsedConfig = JSON.parse(configContent);
+      const skillStates = parseSkillStates(parsedConfig?.skillStates);
+      const rawConfig = recursivelyHydrateStrings(parsedConfig, {
         extensionPath: extensionDir,
         CLAUDE_PLUGIN_ROOT: extensionDir,
         workspacePath: workspaceDir,
@@ -1751,6 +1852,7 @@ export class ExtensionManager {
       }) as unknown as RawExtensionConfig;
 
       const config = resolveExtensionConfigLocale(rawConfig, this.locale);
+      if (skillStates !== undefined) config.skillStates = skillStates;
 
       if (!config.name) {
         throw new Error(
@@ -3241,6 +3343,23 @@ export function getExtensionId(
     idValue += `:${installMetadata.pluginName}`;
   }
   return hashValue(idValue);
+}
+
+function parseSkillStates(value: unknown): Record<string, boolean> | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('"skillStates" must be an object of boolean values.');
+  }
+  return Object.fromEntries(
+    Object.entries(value).map(([name, enabled]) => {
+      const normalizedName = name.trim().toLowerCase();
+      validateSkillName(normalizedName);
+      if (typeof enabled !== 'boolean') {
+        throw new Error('"skillStates" must be an object of boolean values.');
+      }
+      return [normalizedName, enabled];
+    }),
+  );
 }
 
 export function hashValue(value: string): string {

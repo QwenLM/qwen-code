@@ -287,6 +287,7 @@ vi.mock('../config/settings-cache.js', async () => {
 vi.mock('../config/config.js', () => ({
   loadCliConfig: vi.fn(),
   buildDisabledSkillNamesProvider: vi.fn(() => () => new Set<string>()),
+  buildEnabledSkillNamesProvider: vi.fn(() => () => new Set<string>()),
   // newSessionConfig's catch narrows on this class; without the export an
   // unrelated error in the try block surfaces as a confusing mock error.
   SessionIdConflictError: class SessionIdConflictError extends Error {},
