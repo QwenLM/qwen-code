@@ -201,6 +201,7 @@ describe('BackgroundAgentResumeService', () => {
           : undefined,
       getSkillManager: () => options.skillManager,
       getDisabledSkillNames: () => new Set<string>(),
+      isSkillEnabled: () => true,
       getModelInvocableCommandsProvider: () => undefined,
       getSkipStartupContext: () => true,
       getTranscriptPath: () => path.join(tempDir, 'session.jsonl'),

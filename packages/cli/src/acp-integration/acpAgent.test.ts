@@ -894,6 +894,7 @@ vi.mock('../config/config.js', async () => {
   return {
     loadCliConfig: vi.fn(),
     buildDisabledSkillNamesProvider: vi.fn(() => () => new Set<string>()),
+    buildEnabledSkillNamesProvider: vi.fn(() => () => new Set<string>()),
     // Mirror the real boot parser (trim, lowercase, legacy aliases, lookup
     // against the live APPROVAL_MODES array) so the reload fold's
     // boot-equivalence sees the same spelling rules — and the same array a
@@ -7047,6 +7048,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getDisabledSkillNames: vi
         .fn()
         .mockReturnValue(new Set(['disabled-skill'])),
+      isSkillEnabled: vi.fn(
+        (skill: { name: string }) => skill.name !== 'disabled-skill',
+      ),
       getSkillManager: vi.fn().mockReturnValue({
         refreshCache: skillRefreshCache,
         getCachedSkills,
@@ -11908,6 +11912,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       expect.objectContaining({
         toolInvocationGuard: expect.any(Function),
       }),
+      expect.any(Function),
     );
 
     mockConnectionState.resolve();
@@ -27673,6 +27678,124 @@ describe('sessionLanguage multi-session propagation', () => {
 
     mockConnectionState.resolve();
     await agentPromise;
+  });
+
+  it('isolates skill-only bootstrap refresh and surfaces cache and command failures', async () => {
+    const skillError = new Error('skill cache failed');
+    const bootstrapError = new Error('bootstrap skill cache failed');
+    const commandError = new Error('command delivery failed');
+    let releaseBootstrap!: () => void;
+    const bootstrapGate = new Promise<void>((resolve) => {
+      releaseBootstrap = resolve;
+    });
+    const extensionManager = {
+      refreshCache: vi.fn().mockResolvedValue(undefined),
+      refreshTools: vi.fn().mockResolvedValue(undefined),
+    };
+    const skillRefresh = vi.fn().mockRejectedValue(skillError);
+    const bootstrapExtensionManager = {
+      refreshCache: vi
+        .fn()
+        .mockReturnValueOnce(bootstrapGate)
+        .mockResolvedValue(undefined),
+    };
+    const bootstrapSkillRefresh = vi.fn(
+      async (options?: { throwOnError?: boolean }) => {
+        if (options?.throwOnError) throw bootstrapError;
+      },
+    );
+    const bootstrapConfig = makeConfig({
+      getExtensionManager: vi.fn().mockReturnValue(bootstrapExtensionManager),
+      getSkillManager: vi
+        .fn()
+        .mockReturnValue({ refreshCache: bootstrapSkillRefresh }),
+    });
+    const cfg = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('s-state'),
+      getExtensionManager: vi.fn().mockReturnValue(extensionManager),
+      getSkillManager: vi.fn().mockReturnValue({ refreshCache: skillRefresh }),
+    });
+    const sendAvailableCommandsUpdate = vi.fn().mockResolvedValue(undefined);
+    const refreshSkillsFromSettings = vi.fn().mockRejectedValue(commandError);
+    const reloadSkillSettings = vi.fn();
+    const bootstrapSettings = {
+      merged: { mcpServers: {} },
+      reloadScopeFromDisk: vi.fn(),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+    vi.mocked(loadSettings).mockReturnValue(bootstrapSettings);
+    vi.mocked(loadCliConfig).mockResolvedValue(cfg as unknown as Config);
+    vi.mocked(Session).mockImplementation(
+      () =>
+        ({
+          getId: vi.fn().mockReturnValue('s-state'),
+          shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
+          getConfig: vi.fn().mockReturnValue(cfg),
+          sendAvailableCommandsUpdate,
+          refreshSkillsFromSettings,
+          reloadSkillSettings,
+          installRewriter: vi.fn(),
+          startCronScheduler: vi.fn(),
+          dispose: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+    const agentPromise = runAcpAgent(
+      bootstrapConfig as unknown as Config,
+      bootstrapSettings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+    try {
+      await agent.newSession({ cwd: '/ext', mcpServers: [] });
+      await vi.waitFor(() =>
+        expect(sendAvailableCommandsUpdate).toHaveBeenCalledOnce(),
+      );
+      sendAvailableCommandsUpdate.mockClear();
+      const full = agent.extMethod(
+        SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh,
+        { sessionId: 's-state' },
+      );
+      await vi.waitFor(() =>
+        expect(bootstrapExtensionManager.refreshCache).toHaveBeenCalledOnce(),
+      );
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh, {
+          sessionId: 's-state',
+          skillsOnly: true,
+        }),
+      ).rejects.toMatchObject({
+        errors: [skillError, bootstrapError, commandError],
+      });
+      expect(extensionManager.refreshTools).toHaveBeenCalledOnce();
+      expect(skillRefresh).toHaveBeenCalledExactlyOnceWith({
+        throwOnError: true,
+      });
+      expect(reloadSkillSettings).toHaveBeenCalledOnce();
+      expect(refreshSkillsFromSettings).toHaveBeenCalledExactlyOnceWith({
+        reloadSettings: false,
+        notifyConfigChanged: false,
+      });
+      expect(bootstrapExtensionManager.refreshCache).toHaveBeenCalledTimes(2);
+      expect(bootstrapSkillRefresh).toHaveBeenCalledExactlyOnceWith({
+        throwOnError: true,
+      });
+      expect(sendAvailableCommandsUpdate).not.toHaveBeenCalled();
+      releaseBootstrap();
+      await expect(full).resolves.toEqual({ ok: true });
+      expect(sendAvailableCommandsUpdate).toHaveBeenCalledOnce();
+      expect(bootstrapSkillRefresh).toHaveBeenCalledTimes(2);
+      expect(cfg.refreshHierarchicalMemory).not.toHaveBeenCalled();
+    } finally {
+      releaseBootstrap();
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
   });
 
   it('coalesces bootstrap extension refreshes without directly refreshing the session skills', async () => {

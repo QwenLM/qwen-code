@@ -905,6 +905,7 @@ export interface ConfigParameters {
    * Names returned must be lower-cased; consumers compare case-insensitively.
    */
   disabledSkillNamesProvider?: () => ReadonlySet<string>;
+  enabledSkillNamesProvider?: () => ReadonlySet<string>;
   terminalImageRenderSupportProvider?: () => Promise<TerminalImageRenderSupport>;
   /**
    * Skill discovery levels that should not be loaded. Sourced from
@@ -2113,6 +2114,9 @@ export class Config {
   private readonly disabledSkillNamesProvider:
     | (() => ReadonlySet<string>)
     | null;
+  private readonly enabledSkillNamesProvider:
+    | (() => ReadonlySet<string>)
+    | null;
   private readonly terminalImageRenderSupportProvider:
     | (() => Promise<TerminalImageRenderSupport>)
     | null;
@@ -2468,6 +2472,7 @@ export class Config {
       ...(params.disabledSlashCommands ?? []),
     ]);
     this.disabledSkillNamesProvider = params.disabledSkillNamesProvider ?? null;
+    this.enabledSkillNamesProvider = params.enabledSkillNamesProvider ?? null;
     this.terminalImageRenderSupportProvider =
       params.terminalImageRenderSupportProvider ?? null;
     this.disabledSkillLevels = new Set(params.disabledSkillLevels ?? []);
@@ -6077,6 +6082,35 @@ export class Config {
    */
   getDisabledSkillNames(): ReadonlySet<string> {
     return this.disabledSkillNamesProvider?.() ?? EMPTY_DISABLED_SKILL_NAMES;
+  }
+
+  isSkillEnabled(skill: {
+    name: string;
+    level?: string;
+    filePath?: string;
+    extensionName?: string;
+  }): boolean {
+    const name = skill.name.trim().toLowerCase();
+    const extension =
+      skill.level === 'extension'
+        ? this.getExtensions().find(
+            (candidate) =>
+              candidate.name === skill.extensionName &&
+              candidate.skills?.some(
+                (owned) =>
+                  owned.name.trim().toLowerCase() === name &&
+                  owned.filePath === skill.filePath,
+              ),
+          )
+        : undefined;
+    if (skill.level === 'extension' && !extension?.isActive) return false;
+    if (this.getDisabledSkillNames().has(name)) return false;
+    if (!extension || this.enabledSkillNamesProvider?.().has(name)) return true;
+    const state = this.extensionManager.getExtensionSkillState(
+      extension.id,
+      skill.name,
+    );
+    return state.workspaceEnabled ?? state.defaultEnabled;
   }
 
   /**

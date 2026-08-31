@@ -96,8 +96,12 @@ import { syncTeamMemory } from '../memory/team-memory-sync.js';
 import { getTeamMemoryShareabilityWarning } from '../memory/team-memory-git-status.js';
 import * as runtimeStatus from '../utils/runtimeStatus.js';
 import * as sessionRegistry from '../services/session-registry.js';
-import { ExtensionManager } from '../extension/extensionManager.js';
+import {
+  ExtensionManager,
+  type Extension,
+} from '../extension/extensionManager.js';
 import { SkillManager } from '../skills/skill-manager.js';
+import type { SkillConfig } from '../skills/types.js';
 import { createSkillScopedAgentConfig } from '../memory/skillReviewAgentPlanner.js';
 import { maybeRunAutoSkillCurator } from '../skills/skill-curator.js';
 import { HookSystem } from '../hooks/index.js';
@@ -581,6 +585,75 @@ describe('Server Config (config.ts)', () => {
         sources: {},
       }),
     );
+  });
+
+  it('resolves live skill settings without reviving an inactive or removed owner', () => {
+    const disabled = new Set<string>();
+    const enabled = new Set<string>();
+    const config = new Config({
+      ...baseParams,
+      disabledSkillNamesProvider: () => disabled,
+      enabledSkillNamesProvider: () => enabled,
+      overrideExtensions: undefined,
+    });
+    const skill: SkillConfig = {
+      name: 'Review',
+      description: 'Review changes',
+      level: 'extension',
+      filePath: '/extensions/suite/skills/review/SKILL.md',
+      body: 'Review instructions',
+      extensionName: 'suite',
+    };
+    const extension: Extension = {
+      id: 'a'.repeat(64),
+      name: 'suite',
+      version: '1.0.0',
+      isActive: true,
+      path: '/extensions/suite',
+      config: { name: 'suite', version: '1.0.0' },
+      contextFiles: [],
+      skills: [skill],
+    };
+    const manager = config.getExtensionManager();
+    vi.spyOn(manager, 'getLoadedExtensions').mockReturnValue([extension]);
+    const state = {
+      defaultEnabled: true,
+      workspaceEnabled: null as boolean | null,
+    };
+    vi.spyOn(manager, 'getExtensionSkillState').mockReturnValue(state);
+
+    for (const [declared, workspace, blocked, optedIn, expected] of [
+      [true, null, false, false, true],
+      [false, null, false, false, false],
+      [true, false, false, false, false],
+      [false, true, false, false, true],
+      [true, true, true, false, false],
+      [false, false, false, true, true],
+      [true, true, true, true, false],
+    ] as const) {
+      state.defaultEnabled = declared;
+      state.workspaceEnabled = workspace;
+      blocked ? disabled.add('review') : disabled.clear();
+      optedIn ? enabled.add('review') : enabled.clear();
+      expect(config.isSkillEnabled(skill)).toBe(expected);
+    }
+
+    disabled.clear();
+    enabled.add('review');
+    extension.isActive = false;
+    expect(config.isSkillEnabled(skill)).toBe(false);
+    extension.isActive = true;
+    extension.skills = [];
+    expect(config.isSkillEnabled(skill)).toBe(false);
+    extension.skills = [skill];
+    expect(config.isSkillEnabled({ ...skill, extensionName: 'other' })).toBe(
+      false,
+    );
+    expect(
+      config.isSkillEnabled({ ...skill, filePath: '/unowned/SKILL.md' }),
+    ).toBe(false);
+    expect(config.isSkillEnabled({ ...skill, level: 'project' })).toBe(true);
+    expect(config.getDisabledSkillNames()).toEqual(new Set());
   });
 
   describe('project-dir registry lifecycle', () => {

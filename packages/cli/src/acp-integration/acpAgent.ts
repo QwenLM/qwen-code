@@ -245,6 +245,7 @@ import { z } from 'zod';
 import type { CliArgs } from '../config/config.js';
 import {
   buildDisabledSkillNamesProvider,
+  buildEnabledSkillNamesProvider,
   loadCliConfig,
   parseApprovalModeValue,
   SessionIdConflictError,
@@ -3453,7 +3454,10 @@ class QwenAgent implements Agent {
   private workspaceMcpDiscoveryConfig: Config | undefined;
   private workspaceMcpDiscoveryPromise: Promise<void> | undefined;
   private workspaceMcpDiscoveryError: string | undefined;
-  private workspaceExtensionStatusRefreshPromise: Promise<void> | undefined;
+  private readonly workspaceExtensionStatusRefreshes = new Map<
+    boolean,
+    Promise<void>
+  >();
   private readonly pendingMcpAuthentications = new Map<
     string,
     PendingMcpAuthentication
@@ -3735,20 +3739,28 @@ class QwenAgent implements Agent {
     return this.workspaceMcpDiscoveryConfig ?? this.config;
   }
 
-  private refreshBootstrapExtensionStatus(): Promise<void> {
-    if (this.workspaceExtensionStatusRefreshPromise) {
-      return this.workspaceExtensionStatusRefreshPromise;
-    }
+  private refreshBootstrapExtensionStatus(skillsOnly = false): Promise<void> {
+    const inFlight = this.workspaceExtensionStatusRefreshes.get(skillsOnly);
+    if (inFlight) return inFlight;
 
     const promise = (async () => {
       const errors: unknown[] = [];
+      if (skillsOnly) {
+        try {
+          this.settings.reloadScopeFromDisk(SettingScope.Workspace);
+        } catch (error) {
+          errors.push(error);
+        }
+      }
       try {
         await this.config.getExtensionManager().refreshCache();
       } catch (error) {
         errors.push(error);
       }
       try {
-        await this.config.getSkillManager()?.refreshCache();
+        await this.config
+          .getSkillManager()
+          ?.refreshCache(skillsOnly ? { throwOnError: true } : undefined);
       } catch (error) {
         errors.push(error);
       }
@@ -3760,10 +3772,10 @@ class QwenAgent implements Agent {
         );
       }
     })();
-    this.workspaceExtensionStatusRefreshPromise = promise;
+    this.workspaceExtensionStatusRefreshes.set(skillsOnly, promise);
     const clear = () => {
-      if (this.workspaceExtensionStatusRefreshPromise === promise) {
-        this.workspaceExtensionStatusRefreshPromise = undefined;
+      if (this.workspaceExtensionStatusRefreshes.get(skillsOnly) === promise) {
+        this.workspaceExtensionStatusRefreshes.delete(skillsOnly);
       }
     };
     void promise.then(clear, clear);
@@ -3876,6 +3888,11 @@ class QwenAgent implements Agent {
             projectHooks: settings.getProjectHooks(),
           },
           buildDisabledSkillNamesProvider(settings),
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          buildEnabledSkillNamesProvider(settings),
         ),
       );
       config.setMcpTransportPool(this.mcpPool);
@@ -7037,6 +7054,7 @@ class QwenAgent implements Agent {
           `${skill.level}:${skill.extensionName ?? ''}:${skill.name}`,
           mapSkillConfigToStatus(skill, disablements, {
             disabled: isInactiveExtensionSkill(skill, inactiveSkillRefs),
+            enabled: config.isSkillEnabled(skill),
           }),
         ]),
       );
@@ -11667,6 +11685,14 @@ class QwenAgent implements Agent {
       case SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh: {
         const sessionId = params['sessionId'] as string;
         const rawRefreshBootstrap = params['refreshBootstrap'];
+        const rawSkillsOnly = params['skillsOnly'];
+        if (rawSkillsOnly !== undefined && typeof rawSkillsOnly !== 'boolean') {
+          throw RequestError.invalidParams(
+            undefined,
+            'skillsOnly must be a boolean',
+          );
+        }
+        const skillsOnly = rawSkillsOnly === true;
         if (
           rawRefreshBootstrap !== undefined &&
           typeof rawRefreshBootstrap !== 'boolean'
@@ -11687,16 +11713,28 @@ class QwenAgent implements Agent {
             errors.push(error);
           }
         };
+        if (skillsOnly) {
+          await runRefresh(async () => session.reloadSkillSettings());
+        }
         await runRefresh(async () => await extensionManager.refreshCache());
-        await runRefresh(async () => await extensionManager.refreshTools());
+        if (skillsOnly) {
+          await runRefresh(
+            async () =>
+              await config
+                .getSkillManager()
+                ?.refreshCache({ throwOnError: true }),
+          );
+        } else {
+          await runRefresh(async () => await extensionManager.refreshTools());
+        }
         const bootstrapConfig = this.config;
         if (rawRefreshBootstrap !== false && bootstrapConfig !== config) {
           await runRefresh(
-            async () => await this.refreshBootstrapExtensionStatus(),
+            async () => await this.refreshBootstrapExtensionStatus(skillsOnly),
           );
         }
         const discoveryConfig = this.workspaceMcpDiscoveryConfig;
-        if (discoveryConfig && discoveryConfig !== config) {
+        if (!skillsOnly && discoveryConfig && discoveryConfig !== config) {
           const discoveryExtensionManager =
             discoveryConfig.getExtensionManager();
           await runRefresh(
@@ -11709,8 +11747,13 @@ class QwenAgent implements Agent {
         await runRefresh(
           async () => await config.getLlmClient()?.refreshSystemInstruction(),
         );
-        await runRefresh(
-          async () => await session.sendAvailableCommandsUpdate(),
+        await runRefresh(async () =>
+          skillsOnly
+            ? await session.refreshSkillsFromSettings({
+                reloadSettings: false,
+                notifyConfigChanged: false,
+              })
+            : await session.sendAvailableCommandsUpdate(),
         );
         if (errors.length > 0) {
           const details = errors
@@ -13215,6 +13258,7 @@ class QwenAgent implements Agent {
               : {}),
           }
         : undefined,
+      buildEnabledSkillNamesProvider(settings),
     );
     if (sessionSource) {
       config.setSessionSource(sessionSource.sourceType, sessionSource.sourceId);
