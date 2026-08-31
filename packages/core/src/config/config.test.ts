@@ -11228,7 +11228,9 @@ describe('setApprovalMode with folder trust', () => {
     });
 
     it('honors explicitly eager dedicated search tools', async () => {
-      vi.mocked(resolveBashSearchAvailability).mockResolvedValue(true);
+      vi.mocked(resolveBashSearchAvailability).mockImplementation(
+        async (_config, canHostSearch = true) => canHostSearch,
+      );
       const config = new Config({
         ...baseParams,
         eagerTools: [ToolNames.SHELL, ToolNames.GREP, ToolNames.GLOB],
@@ -11239,11 +11241,13 @@ describe('setApprovalMode with folder trust', () => {
         .calls;
       expect(registered.some((call) => call[0] === ToolNames.GREP)).toBe(true);
       expect(registered.some((call) => call[0] === ToolNames.GLOB)).toBe(true);
-      expect(resolveBashSearchAvailability).not.toHaveBeenCalled();
+      expect(resolveBashSearchAvailability).toHaveBeenCalledWith(config, false);
     });
 
     it('keeps dedicated search tools when Shell is not registered', async () => {
-      vi.mocked(resolveBashSearchAvailability).mockResolvedValue(true);
+      vi.mocked(resolveBashSearchAvailability).mockImplementation(
+        async (_config, canHostSearch = true) => canHostSearch,
+      );
       const config = new Config({
         ...baseParams,
         coreTools: [ToolNames.GREP, ToolNames.GLOB],
@@ -11253,12 +11257,35 @@ describe('setApprovalMode with folder trust', () => {
       const calls = (ToolRegistry.prototype.registerFactory as Mock).mock.calls;
       expect(calls.some((call) => call[0] === ToolNames.GREP)).toBe(true);
       expect(calls.some((call) => call[0] === ToolNames.GLOB)).toBe(true);
-      expect(calls.some((call) => call[0] === ToolNames.SHELL)).toBe(false);
-      expect(resolveBashSearchAvailability).not.toHaveBeenCalled();
+      expect(config.getToolRegistry().getAllToolNames()).not.toContain(
+        ToolNames.SHELL,
+      );
+      expect(resolveBashSearchAvailability).toHaveBeenCalledWith(config, false);
+    });
+
+    it('keeps dedicated search tools when Shell is disabled', async () => {
+      vi.mocked(resolveBashSearchAvailability).mockImplementation(
+        async (_config, canHostSearch = true) => canHostSearch,
+      );
+      const config = new Config({
+        ...baseParams,
+        disabledTools: [ToolNames.SHELL],
+      });
+      await config.initialize();
+
+      const calls = (ToolRegistry.prototype.registerFactory as Mock).mock.calls;
+      expect(calls.some((call) => call[0] === ToolNames.GREP)).toBe(true);
+      expect(calls.some((call) => call[0] === ToolNames.GLOB)).toBe(true);
+      expect(config.getToolRegistry().getAllToolNames()).not.toContain(
+        ToolNames.SHELL,
+      );
+      expect(resolveBashSearchAvailability).toHaveBeenCalledWith(config, false);
     });
 
     it('keeps eager search tools when Shell is deferred', async () => {
-      vi.mocked(resolveBashSearchAvailability).mockResolvedValue(true);
+      vi.mocked(resolveBashSearchAvailability).mockImplementation(
+        async (_config, canHostSearch = true) => canHostSearch,
+      );
       const config = new Config({
         ...baseParams,
         eagerTools: [ToolNames.GREP, ToolNames.GLOB],
@@ -11269,7 +11296,7 @@ describe('setApprovalMode with folder trust', () => {
         .calls;
       expect(registered.some((call) => call[0] === ToolNames.GREP)).toBe(true);
       expect(registered.some((call) => call[0] === ToolNames.GLOB)).toBe(true);
-      expect(resolveBashSearchAvailability).not.toHaveBeenCalled();
+      expect(resolveBashSearchAvailability).toHaveBeenCalledWith(config, false);
     });
 
     it('keeps grep and glob in a subagent registry when Bash hosts search', async () => {

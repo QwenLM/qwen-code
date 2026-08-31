@@ -25,7 +25,8 @@ interface BundledSearchBinaries {
 // spawns a process. Synchronous readers use this cached answer and fall back to
 // the dedicated search surface until resolution completes.
 let bundled: BundledSearchBinaries | null | undefined;
-let bashSearchEnabled = false;
+let bundledResolution: Promise<BundledSearchBinaries | null> | undefined;
+let availabilityByConfig = new WeakMap<object, boolean>();
 
 function getBundledSearchBinary(ripgrep: string, binary: SearchBinary): string {
   const platformDirectory = path.basename(path.dirname(ripgrep));
@@ -65,27 +66,34 @@ async function resolveBundledSearchBinaries(): Promise<BundledSearchBinaries | n
  */
 export async function resolveBashSearchAvailability(
   config: Config,
+  canHostSearch = true,
 ): Promise<boolean> {
   // A user who opted out of ripgrep must keep the dedicated search tools
   // rather than have `rg` injected into Bash behind their back. Do not cache
   // this per-config decision as a missing binary: another Config in the same
   // process may use the bundled search surface.
-  if (!config.getUseRipgrep() || !config.getUseBuiltinRipgrep()) {
-    bashSearchEnabled = false;
+  if (
+    !canHostSearch ||
+    !config.getUseRipgrep() ||
+    !config.getUseBuiltinRipgrep()
+  ) {
+    availabilityByConfig.set(config, false);
     return false;
   }
   // One function prelude cannot attach each root's ignore files only to
   // searches within that root. Keep the dedicated tools for multi-root
   // workspaces instead of leaking one root's patterns into another.
   if (!hasSingleWorkspaceRoot(config)) {
-    bashSearchEnabled = false;
+    availabilityByConfig.set(config, false);
     return false;
   }
   if (bundled === undefined) {
-    bundled = await resolveBundledSearchBinaries();
+    bundledResolution ??= resolveBundledSearchBinaries();
+    bundled = await bundledResolution;
   }
-  bashSearchEnabled = bundled !== null;
-  return bashSearchEnabled;
+  const available = bundled !== null;
+  availabilityByConfig.set(config, available);
+  return available;
 }
 
 /**
@@ -93,13 +101,22 @@ export async function resolveBashSearchAvailability(
  * Reports `false` until {@link resolveBashSearchAvailability} has run, so the
  * dedicated tools stay in play for anything that runs before tool registration.
  */
-export function isBashSearchAvailable(): boolean {
-  return bashSearchEnabled && bundled !== undefined && bundled !== null;
+export function isBashSearchAvailable(config?: object): boolean {
+  let current: object | null | undefined = config;
+  while (current) {
+    const available = availabilityByConfig.get(current);
+    if (available !== undefined) {
+      return available && bundled !== undefined && bundled !== null;
+    }
+    current = Object.getPrototypeOf(current) as object | null;
+  }
+  return false;
 }
 
 export function _resetBashSearchToolsForTest(): void {
   bundled = undefined;
-  bashSearchEnabled = false;
+  bundledResolution = undefined;
+  availabilityByConfig = new WeakMap();
 }
 
 function getIgnoreFiles(
@@ -108,13 +125,17 @@ function getIgnoreFiles(
   customIgnoreFiles: string[] | undefined,
 ): string[] {
   const workspaceRoot = config.getWorkspaceContext?.().getDirectories()[0];
-  const relative = workspaceRoot ? path.relative(workspaceRoot, cwd) : '';
-  const root =
-    workspaceRoot &&
-    (relative === '' ||
-      (!relative.startsWith('..') && !path.isAbsolute(relative)))
-      ? workspaceRoot
-      : cwd;
+  if (!workspaceRoot) {
+    return [];
+  }
+  const relative = path.relative(workspaceRoot, cwd);
+  if (
+    relative === '..' ||
+    relative.startsWith(`..${path.sep}`) ||
+    (relative !== '' && path.isAbsolute(relative))
+  ) {
+    return [];
+  }
   const names = getQwenIgnoreFileNames(customIgnoreFiles);
   // `.qwenignore` goes last so its rules win the native last-match-wins pass.
   const ordered = [
@@ -122,7 +143,7 @@ function getIgnoreFiles(
     ...names.filter((name) => name === '.qwenignore'),
   ];
   return ordered
-    .map((name) => path.join(root, name))
+    .map((name) => path.join(workspaceRoot, name))
     .filter((file) => fs.existsSync(file));
 }
 
@@ -134,13 +155,29 @@ function shellFunction(name: string, command: string, args: string[]): string {
 function grepFunction(command: string, args: string[]): string {
   const defaults = args.length > 0 ? ` ${args.join(' ')}` : '';
   return `grep() {
-  local qwen_grep_arg
+  local qwen_grep_arg qwen_grep_option qwen_grep_short
   for qwen_grep_arg in "$@"; do
     case "$qwen_grep_arg" in
       --) break ;;
-      --config|--config=*|---*|--filter|--filter=*|--pager|--pager=*|--save-config|--save-config=*|--view|--view=*|-Q*|-[^-]*Q*|--query|--query=*)
+      --config|--config=*|---*|--filter|--filter=*|--pager|--pager=*|--save-config|--save-config=*|--view|--view=*|--query|--query=*)
         printf '%s\\n' 'grep: this option is disabled by Qwen Code' >&2
         return 2
+        ;;
+    esac
+    case "$qwen_grep_arg" in
+      -?*)
+        qwen_grep_short=\${qwen_grep_arg#-}
+        while [[ -n "$qwen_grep_short" ]]; do
+          qwen_grep_option=\${qwen_grep_short:0:1}
+          qwen_grep_short=\${qwen_grep_short:1}
+          case "$qwen_grep_option" in
+            Q)
+              printf '%s\\n' 'grep: this option is disabled by Qwen Code' >&2
+              return 2
+              ;;
+            A|B|C|D|d|e|f|g|J|K|M|m|N|O|t|Z|'?') break ;;
+          esac
+        done
         ;;
     esac
   done
@@ -156,6 +193,7 @@ export function wrapWithBashSearchTools(
   const binaries = bundled;
   if (
     !binaries ||
+    !isBashSearchAvailable(config) ||
     config.getUseRipgrep?.() === false ||
     config.getUseBuiltinRipgrep?.() === false ||
     !hasSingleWorkspaceRoot(config)

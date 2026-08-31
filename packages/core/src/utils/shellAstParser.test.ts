@@ -534,6 +534,7 @@ describe('classifyShellCommandSafety', () => {
     'sort -- -o output',
     'tree -- -o output',
     'rg -- -z file',
+    'grep -eQ file',
     'sort -- -roout input',
     'sort -- --output=out',
     "sed -- 's/a/b/' input",

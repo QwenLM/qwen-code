@@ -48,9 +48,11 @@ is a separable behavior change with its own risk surface, so on Windows the
 dedicated Glob and Grep tools stay registered and the Shell prompt is unchanged.
 
 The health probe spawns a process, so it runs at most once, asynchronously,
-while the tool registry is built, and its result is cached. Synchronous readers
-consume that cached result and report `false` before resolution. Nothing probes
-the filesystem at module load time.
+while the tool registry is built, and its binary result is cached. Whether the
+surface is enabled is stored per `Config`, with derived agent configs inheriting
+their parent's answer, so concurrent daemon sessions cannot overwrite one
+another's prompt and tool-description state. Synchronous readers report `false`
+before their Config resolves. Nothing probes the filesystem at module load time.
 
 ## Registration
 

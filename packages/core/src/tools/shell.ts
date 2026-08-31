@@ -4980,11 +4980,11 @@ function getShellCommandSequencingGuidance({
   }
 }
 
-function getShellToolDescription(): string {
+function getShellToolDescription(config: Config): string {
   const shellConfiguration = getShellConfiguration();
   const executionWrapper = getShellExecutionWrapper(shellConfiguration);
   const isWindows = os.platform() === 'win32';
-  const hasBashSearch = isBashSearchAvailable();
+  const hasBashSearch = isBashSearchAvailable(config);
   const processGroupNote = isWindows
     ? ''
     : '\n  - Command is executed as a subprocess that leads its own process group. Command process group can be terminated as `kill -- -PGID` or signaled as `kill -s SIGNAL -- -PGID`.';
@@ -5085,7 +5085,7 @@ export class ShellTool extends BaseDeclarativeTool<
     super(
       ShellTool.Name,
       ToolDisplayNames.SHELL,
-      getShellToolDescription(),
+      getShellToolDescription(config),
       Kind.Execute,
       {
         type: 'object',

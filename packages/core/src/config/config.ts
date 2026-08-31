@@ -9331,9 +9331,12 @@ export class Config {
     }
     const bashHostsSearch =
       !options?.forSubAgent &&
-      shellRegistrationStatus === 'registered' &&
-      !dedicatedSearchIsEager &&
-      (await resolveBashSearchAvailability(this));
+      (await resolveBashSearchAvailability(
+        this,
+        shellRegistrationStatus === 'registered' &&
+          !this.getDisabledTools().has(ToolNames.SHELL) &&
+          !dedicatedSearchIsEager,
+      ));
 
     if (bashHostsSearch) {
       const registerDeferredSearch = async (

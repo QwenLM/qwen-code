@@ -402,18 +402,18 @@ export class BuiltinAgentRegistry {
   // search tools is only known after tool registration probes the bundled
   // binaries, so reading it at import time permanently captures the
   // pre-registration fallback.
-  private static get BUILTIN_AGENTS(): Array<
-    Omit<SubagentConfig, 'level' | 'filePath'>
-  > {
-    return buildBuiltinAgents(isBashSearchAvailable());
+  private static buildAgents(
+    searchConfig?: object,
+  ): Array<Omit<SubagentConfig, 'level' | 'filePath'>> {
+    return buildBuiltinAgents(isBashSearchAvailable(searchConfig));
   }
 
   /**
    * Gets all built-in agent configurations.
    * @returns Array of built-in subagent configurations
    */
-  static getBuiltinAgents(): SubagentConfig[] {
-    return this.BUILTIN_AGENTS.map((agent) => ({
+  static getBuiltinAgents(searchConfig?: object): SubagentConfig[] {
+    return this.buildAgents(searchConfig).map((agent) => ({
       ...agent,
       level: 'builtin' as const,
       filePath: `<builtin:${agent.name}>`,
@@ -426,9 +426,12 @@ export class BuiltinAgentRegistry {
    * @param name - Name of the built-in agent
    * @returns Built-in agent configuration or null if not found
    */
-  static getBuiltinAgent(name: string): SubagentConfig | null {
+  static getBuiltinAgent(
+    name: string,
+    searchConfig?: object,
+  ): SubagentConfig | null {
     const lowerName = name.toLowerCase();
-    const agent = this.BUILTIN_AGENTS.find(
+    const agent = this.buildAgents(searchConfig).find(
       (a) => a.name.toLowerCase() === lowerName,
     );
     if (!agent) {
@@ -450,7 +453,7 @@ export class BuiltinAgentRegistry {
    */
   static isBuiltinAgent(name: string): boolean {
     const lowerName = name.toLowerCase();
-    return this.BUILTIN_AGENTS.some(
+    return this.buildAgents().some(
       (agent) => agent.name.toLowerCase() === lowerName,
     );
   }
@@ -460,6 +463,6 @@ export class BuiltinAgentRegistry {
    * @returns Array of built-in agent names
    */
   static getBuiltinAgentNames(): string[] {
-    return this.BUILTIN_AGENTS.map((agent) => agent.name);
+    return this.buildAgents().map((agent) => agent.name);
   }
 }

@@ -795,10 +795,36 @@ function evaluateGrepSafety(args: string[]): ShellCommandSafety {
   }
   if (
     options.some((arg) =>
-      /^(?:---|--(?:config|filter|pager|query|view)(?:=|$)|-[^-]*Q)/.test(arg),
+      /^(?:---|--(?:config|filter|pager|query|view)(?:=|$))/.test(arg),
     )
   ) {
     return 'unknown';
+  }
+  const shortOptionsWithValues = new Set([
+    'A',
+    'B',
+    'C',
+    'D',
+    'd',
+    'e',
+    'f',
+    'g',
+    'J',
+    'K',
+    'M',
+    'm',
+    'N',
+    'O',
+    't',
+    'Z',
+    '?',
+  ]);
+  for (const arg of options) {
+    if (!arg.startsWith('-') || arg.startsWith('--')) continue;
+    for (const option of arg.slice(1)) {
+      if (option === 'Q') return 'unknown';
+      if (shortOptionsWithValues.has(option)) break;
+    }
   }
   return 'read-only';
 }

@@ -256,7 +256,7 @@ export async function runAutoMemoryExtractionByAgent(
   config: Config,
   projectRoot: string,
 ): Promise<AutoMemoryExtractionExecutionResult> {
-  const hasBashSearch = isBashSearchAvailable();
+  const hasBashSearch = isBashSearchAvailable(config);
   const cacheSafe = getCacheSafeParams(config.getSessionId());
   if (!cacheSafe) {
     throw new Error(

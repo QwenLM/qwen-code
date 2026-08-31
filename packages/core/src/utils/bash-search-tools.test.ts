@@ -114,7 +114,7 @@ describe('Bash search tools', () => {
     const config = createConfig();
 
     expect(await resolveBashSearchAvailability(config)).toBe(true);
-    expect(isBashSearchAvailable()).toBe(true);
+    expect(isBashSearchAvailable(config)).toBe(true);
     const command = wrapWithBashSearchTools('rg needle .', config, projectRoot);
 
     expect(command).toContain('rg()');
@@ -140,7 +140,7 @@ describe('Bash search tools', () => {
     const config = createConfig();
 
     expect(await resolveBashSearchAvailability(config)).toBe(false);
-    expect(isBashSearchAvailable()).toBe(false);
+    expect(isBashSearchAvailable(config)).toBe(false);
     expect(wrapWithBashSearchTools('rg needle .', config, projectRoot)).toBe(
       'rg needle .',
     );
@@ -178,6 +178,50 @@ describe('Bash search tools', () => {
     expect(await resolveBashSearchAvailability(createConfig())).toBe(true);
   });
 
+  it('shares the binary health probe across concurrent resolutions', async () => {
+    const config = createConfig();
+
+    await Promise.all([
+      resolveBashSearchAvailability(config),
+      resolveBashSearchAvailability(config),
+    ]);
+
+    expect(resolveHealthyBuiltinRipgrep).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps availability isolated between configs', async () => {
+    const enabled = createConfig();
+    const disabled = createConfig({ useRipgrep: false });
+
+    expect(await resolveBashSearchAvailability(enabled)).toBe(true);
+    expect(await resolveBashSearchAvailability(disabled)).toBe(false);
+
+    expect(isBashSearchAvailable(enabled)).toBe(true);
+    expect(isBashSearchAvailable(disabled)).toBe(false);
+    expect(
+      wrapWithBashSearchTools('rg needle .', enabled, projectRoot),
+    ).toContain('rg()');
+    expect(wrapWithBashSearchTools('rg needle .', disabled, projectRoot)).toBe(
+      'rg needle .',
+    );
+  });
+
+  it('inherits availability through derived configs', async () => {
+    const config = createConfig();
+    const derived = Object.create(config) as Config;
+
+    expect(await resolveBashSearchAvailability(config)).toBe(true);
+    expect(isBashSearchAvailable(derived)).toBe(true);
+  });
+
+  it('disables the surface when Shell cannot host it', async () => {
+    const config = createConfig();
+
+    expect(await resolveBashSearchAvailability(config, false)).toBe(false);
+    expect(isBashSearchAvailable(config)).toBe(false);
+    expect(resolveHealthyBuiltinRipgrep).not.toHaveBeenCalled();
+  });
+
   it('declines when the bundled ripgrep does not run', async () => {
     vi.mocked(resolveHealthyBuiltinRipgrep).mockResolvedValue(null);
 
@@ -207,5 +251,19 @@ describe('Bash search tools', () => {
     expect(command).toContain('--no-ignore-vcs');
     expect(command).not.toContain('--ignore-file ');
     expect(command).not.toContain('--ignore-files');
+  });
+
+  it('does not load Qwen ignore files outside the workspace', async () => {
+    await Promise.all([
+      writeFile(path.join(projectRoot, '.agentignore'), 'agent-only.txt\n'),
+      writeFile(path.join(projectRoot, '.qwenignore'), 'private.txt\n'),
+    ]);
+    const config = createConfig();
+
+    expect(await resolveBashSearchAvailability(config)).toBe(true);
+    const command = wrapWithBashSearchTools('rg needle .', config, secondRoot);
+
+    expect(command).not.toContain('.agentignore');
+    expect(command).not.toContain('.qwenignore');
   });
 });

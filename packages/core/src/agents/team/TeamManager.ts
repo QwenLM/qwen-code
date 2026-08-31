@@ -311,16 +311,20 @@ export class TeamManager {
   /** Maximum number of teammates this team will accept. */
   private readonly maxTeammates: number;
 
+  /** Config whose search surface teammates should describe. */
+  private readonly searchConfig?: object;
+
   constructor(
     backend: Backend,
     teamFile: TeamFile,
     subagentManager?: SubagentManager | null,
-    options?: { maxTeammates?: number },
+    options?: { maxTeammates?: number; searchConfig?: object },
   ) {
     this.backend = backend;
     this.teamFile = teamFile;
     this.subagentManager = subagentManager ?? null;
     this.maxTeammates = options?.maxTeammates ?? MAX_TEAMMATES;
+    this.searchConfig = options?.searchConfig;
 
     // Subscribe to task updates so we can auto-claim for
     // idle agents when new tasks appear.
@@ -547,6 +551,7 @@ export class TeamManager {
           planModeRequired: config.planModeRequired,
           readOnly: config.readOnly,
         },
+        this.searchConfig,
       );
       const basePrompt = subagentPrompt ?? config.prompt;
       const systemPrompt = basePrompt

@@ -46,6 +46,7 @@ describe.skipIf(!bashSearchAvailable)('bundled Bash search tools', () => {
         customIgnoreFiles: ['.agentignore'],
       }),
     } as unknown as Config;
+    await resolveBashSearchAvailability(config);
 
     await mkdir(path.join(projectRoot, '.git'));
     await mkdir(path.join(projectRoot, '.github'));
@@ -72,7 +73,7 @@ describe.skipIf(!bashSearchAvailable)('bundled Bash search tools', () => {
       writeFile(path.join(projectRoot, '.hidden.txt'), 'needle\n'),
       writeFile(path.join(projectRoot, '.github', 'ci.yml'), 'needle\n'),
       writeFile(path.join(projectRoot, '.git', 'config'), 'needle\n'),
-      writeFile(path.join(projectRoot, 'visible.txt'), 'needle\n'),
+      writeFile(path.join(projectRoot, 'visible.txt'), 'needle\nQ\n'),
     ]);
   });
 
@@ -115,6 +116,10 @@ describe.skipIf(!bashSearchAvailable)('bundled Bash search tools', () => {
     expect(await execute("find . -type f -name 'visible.txt'")).toContain(
       'visible.txt',
     );
+  });
+
+  it('allows Q in an attached grep pattern value', async () => {
+    expect(await execute('grep -eQ visible.txt')).toContain('Q');
   });
 
   it.each([

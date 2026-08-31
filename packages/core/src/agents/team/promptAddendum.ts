@@ -32,8 +32,9 @@ export function buildTeammatePromptAddendum(
   teamName: string,
   leaderName: string,
   options: { planModeRequired?: boolean; readOnly?: boolean } = {},
+  searchConfig?: object,
 ): string {
-  const hasBashSearch = isBashSearchAvailable();
+  const hasBashSearch = isBashSearchAvailable(searchConfig);
   const planSearchTools = hasBashSearch
     ? 'read_file, task_list, and other available read-only investigation tools'
     : 'read_file, grep_search, glob, task_list, and other read-only investigation tools';

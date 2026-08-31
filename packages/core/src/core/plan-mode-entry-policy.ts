@@ -19,10 +19,10 @@ export function getPlanModeLifecyclePrefix(
   // Built here rather than once at module load: the reminder names the search
   // tools, which depends on whether Bash hosts them — a fact resolved during
   // tool registration, long after this module is first imported.
-  const reminders = [
-    getPlanModeSystemReminder(false),
-    getPlanModeSystemReminder(true),
-  ];
+  const reminders = [false, true].flatMap((hasBashSearch) => [
+    getPlanModeSystemReminder(false, hasBashSearch),
+    getPlanModeSystemReminder(true, hasBashSearch),
+  ]);
   for (const reminder of reminders) {
     if (output === reminder) return reminder;
     const prefix = `${reminder}\n\n`;

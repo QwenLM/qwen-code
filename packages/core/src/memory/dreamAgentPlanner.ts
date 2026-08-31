@@ -106,7 +106,7 @@ export async function planManagedAutoMemoryDreamByAgent(
   abortSignal?: AbortSignal,
   options: { suppressChatRecording?: boolean } = {},
 ): Promise<ForkedAgentResult> {
-  const hasBashSearch = isBashSearchAvailable();
+  const hasBashSearch = isBashSearchAvailable(config);
   const memoryRoot = getAutoMemoryRoot(projectRoot);
   const transcriptDir = getTranscriptDir(projectRoot);
   const scopedConfig = createMemoryScopedAgentConfig(config, projectRoot, {

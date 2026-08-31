@@ -294,6 +294,7 @@ function buildDefaultBasePrompt(
   interaction: { role: string; questions: string },
   model: string | undefined,
   outputStyle?: OutputStyleDefinition | null,
+  searchConfig?: object,
 ): string {
   // A style with `keepCodingInstructions: false` drops exactly the
   // software-engineering workflow section; every other section, including the
@@ -309,7 +310,7 @@ function buildDefaultBasePrompt(
   const coreIdentity =
     resolveCoreIdentityOverride() ??
     getDefaultCoreIdentitySentence(interaction.role, Boolean(outputStyle));
-  const hasBashSearch = isBashSearchAvailable();
+  const hasBashSearch = isBashSearchAvailable(searchConfig);
   const searchToolGuidance = hasBashSearch
     ? `  - To search for files, use '${ToolNames.SHELL}' with \`rg --files\`, then pipe the list to another \`rg\` when you need to filter filenames. Do not use positive \`-g\`/\`--glob\` or \`-t\`/\`--type\` filters when ignore behavior matters because they override ignore rules. Use \`find\` only for metadata predicates where ignore behavior is not required.
   - To search file contents, use '${ToolNames.SHELL}' with \`rg\`. The injected command respects configured Git and Qwen ignore files by default.`
@@ -454,7 +455,7 @@ ${(function () {
   return '';
 })()}
 
-${getToolCallExamples(model || '')}
+${getToolCallExamples(model || '', hasBashSearch)}
 
 # Final Reminder
 Your core function is efficient and safe assistance. Balance conciseness with the crucial need for clarity, especially regarding safety and potential system modifications. Always prioritize user control and project conventions. Never make assumptions about the contents of files; instead use '${ToolNames.READ_FILE}' to ensure you aren't making broad assumptions. Finally, you are an agent - please keep going until the user's query is completely resolved.
@@ -503,6 +504,8 @@ export function resolveMainSessionOutputStyle(config: {
  * @param interactionMode - Interactive vs. headless prompt variant.
  * @param outputStyle - Active output style, layered onto the base prompt.
  *   Ignored when `QWEN_SYSTEM_MD` replaces the base prompt (see below).
+ * @param searchConfig - Config whose resolved search surface the prompt should
+ *   describe.
  */
 export function getCoreSystemPrompt(
   userMemory?: string,
@@ -510,6 +513,7 @@ export function getCoreSystemPrompt(
   appendInstruction?: string,
   interactionMode: SystemPromptInteractionMode = 'interactive',
   outputStyle?: OutputStyleDefinition | null,
+  searchConfig?: object,
 ): string {
   const effectiveOutputStyle = resolveEffectiveOutputStyle(
     outputStyle,
@@ -550,7 +554,12 @@ export function getCoreSystemPrompt(
   // effect (including empty-file clear).
   const basePrompt = systemMdEnabled
     ? fs.readFileSync(systemMdPath, 'utf8')
-    : buildDefaultBasePrompt(interaction, model, effectiveOutputStyle);
+    : buildDefaultBasePrompt(
+        interaction,
+        model,
+        effectiveOutputStyle,
+        searchConfig,
+      );
 
   // if QWEN_WRITE_SYSTEM_MD is set (and not 0|false), write base system prompt to file
   const writeSystemMdResolution = resolvePathFromEnv(
@@ -572,7 +581,7 @@ export function getCoreSystemPrompt(
       writePath,
       systemMdEnabled
         ? basePrompt
-        : buildDefaultBasePrompt(interaction, model, undefined),
+        : buildDefaultBasePrompt(interaction, model, undefined, searchConfig),
     );
   }
 
@@ -1179,8 +1188,11 @@ To help you check their settings, I can read their contents. Which one would you
 </example>
 `.trim();
 
-function adaptSearchToolExamples(examples: string): string {
-  if (!isBashSearchAvailable()) {
+function adaptSearchToolExamples(
+  examples: string,
+  hasBashSearch: boolean,
+): string {
+  if (!hasBashSearch) {
     return examples;
   }
 
@@ -1228,19 +1240,25 @@ function adaptSearchToolExamples(examples: string): string {
     .replaceAll('Assuming GlobTool returns', 'Assuming rg --files returns');
 }
 
-function getToolCallExamples(model?: string): string {
+function getToolCallExamples(
+  model: string | undefined,
+  hasBashSearch: boolean,
+): string {
   // Check for environment variable override first
   const toolCallStyle = process.env['QWEN_CODE_TOOL_CALL_STYLE'];
   if (toolCallStyle) {
     switch (toolCallStyle.toLowerCase()) {
       case 'qwen-coder':
-        return adaptSearchToolExamples(qwenCoderToolCallExamples);
+        return adaptSearchToolExamples(
+          qwenCoderToolCallExamples,
+          hasBashSearch,
+        );
       case 'qwen-vl':
-        return adaptSearchToolExamples(qwenVlToolCallExamples);
+        return adaptSearchToolExamples(qwenVlToolCallExamples, hasBashSearch);
       case 'gemma4':
-        return adaptSearchToolExamples(gemma4ToolCallExamples);
+        return adaptSearchToolExamples(gemma4ToolCallExamples, hasBashSearch);
       case 'general':
-        return adaptSearchToolExamples(generalToolCallExamples);
+        return adaptSearchToolExamples(generalToolCallExamples, hasBashSearch);
       default:
         debugLogger.warn(
           `Unknown QWEN_CODE_TOOL_CALL_STYLE value: ${toolCallStyle}. Using model-based detection.`,
@@ -1253,22 +1271,22 @@ function getToolCallExamples(model?: string): string {
   if (model && model.length < 100) {
     // Match qwen*-coder patterns (e.g., qwen3-coder, qwen2.5-coder, qwen-coder)
     if (/qwen[^-]*-coder/i.test(model)) {
-      return adaptSearchToolExamples(qwenCoderToolCallExamples);
+      return adaptSearchToolExamples(qwenCoderToolCallExamples, hasBashSearch);
     }
     // Match qwen*-vl patterns (e.g., qwen-vl, qwen2-vl, qwen3-vl)
     if (/qwen[^-]*-vl/i.test(model)) {
-      return adaptSearchToolExamples(qwenVlToolCallExamples);
+      return adaptSearchToolExamples(qwenVlToolCallExamples, hasBashSearch);
     }
     // Match coder-model pattern (same as qwen3-coder)
     if (/coder-model/i.test(model)) {
-      return adaptSearchToolExamples(qwenCoderToolCallExamples);
+      return adaptSearchToolExamples(qwenCoderToolCallExamples, hasBashSearch);
     }
     if (/gemma[-_]?4/i.test(model)) {
-      return adaptSearchToolExamples(gemma4ToolCallExamples);
+      return adaptSearchToolExamples(gemma4ToolCallExamples, hasBashSearch);
     }
   }
 
-  return adaptSearchToolExamples(generalToolCallExamples);
+  return adaptSearchToolExamples(generalToolCallExamples, hasBashSearch);
 }
 
 /**
@@ -1278,6 +1296,8 @@ function getToolCallExamples(model?: string): string {
  * preventing the AI from making any modifications to the system until the user confirms
  * the proposed plan. It overrides other instructions to ensure read-only behavior.
  *
+ * @param searchConfig - Config whose resolved search surface the reminder
+ *   should describe, or an explicit surface value for lifecycle matching.
  * @returns A formatted system reminder string that enforces plan mode restrictions
  *
  * @example
@@ -1293,8 +1313,15 @@ function getToolCallExamples(model?: string): string {
  * - Wait for user confirmation before making any changes
  * - Override any other instructions that would modify system state
  */
-export function getPlanModeSystemReminder(planOnly = false): string {
-  const exploreTools = isBashSearchAvailable()
+export function getPlanModeSystemReminder(
+  planOnly = false,
+  searchConfig?: object | boolean,
+): string {
+  const hasBashSearch =
+    typeof searchConfig === 'boolean'
+      ? searchConfig
+      : isBashSearchAvailable(searchConfig);
+  const exploreTools = hasBashSearch
     ? `${ToolNames.READ_FILE} and ${ToolNames.SHELL} with \`rg\`/\`rg --files\``
     : `${ToolNames.READ_FILE}, ${ToolNames.GREP}, ${ToolNames.GLOB}`;
   return `<system-reminder>
