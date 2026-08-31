@@ -1728,4 +1728,18 @@ describe('bundled review skill — the decided-stop composed verdict (#9908)', (
     );
     expect(body).toContain('composes a Comment, never an Approve');
   });
+
+  it('keys the unchanged bullet’s nothing-open branch on open CRITICALS, like its siblings', () => {
+    // "No open findings" left a Suggestions-only ledger in NEITHER branch:
+    // the model stopped without composing, run.ts read a decided stop with
+    // no composed artifact, and the round exited 1 ("Review did not
+    // complete") on every unchanged re-run — a standing wedge with nothing
+    // open to fix. The scope-emptied and clean-tree bullets already key
+    // this branch on "no open Criticals".
+    const body = skillBody();
+    expect(body).toContain(
+      'When the cached ledger holds no open Criticals — open Suggestions alone block nothing',
+    );
+    expect(body).not.toContain('When the cached ledger has no open findings');
+  });
 });
