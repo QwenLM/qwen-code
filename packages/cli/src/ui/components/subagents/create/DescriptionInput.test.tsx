@@ -49,6 +49,31 @@ const baseState: CreationWizardState = {
 };
 
 describe('DescriptionInput', () => {
+  it('unmounts cleanly when no generation is in flight', () => {
+    vi.clearAllMocks();
+    const dispatch = vi.fn<(action: WizardAction) => void>();
+    const onNext = vi.fn();
+    let app!: ReturnType<typeof renderWithProviders>;
+
+    act(() => {
+      app = renderWithProviders(
+        <DescriptionInput
+          state={baseState}
+          dispatch={dispatch}
+          onNext={onNext}
+          onPrevious={vi.fn()}
+          onCancel={vi.fn()}
+          config={{} as Config}
+        />,
+      );
+    });
+
+    expect(() => act(() => app.unmount())).not.toThrow();
+    expect(subagentGenerator).not.toHaveBeenCalled();
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(onNext).not.toHaveBeenCalled();
+  });
+
   it('aborts in-flight generation when unmounted', async () => {
     let capturedSignal: AbortSignal | undefined;
     vi.mocked(subagentGenerator).mockImplementation(
