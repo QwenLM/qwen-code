@@ -370,6 +370,12 @@ function mapActionResult(
         messageType: 'info',
         content: `Goal controls are not yet available in the OpenTUI renderer.`,
       };
+    case 'agent_view_detach':
+      return {
+        kind: 'message',
+        messageType: 'info',
+        content: `Agent View detach is not yet available in the OpenTUI renderer.`,
+      };
     case 'confirm_shell_commands':
     case 'confirm_action':
       return {

@@ -152,6 +152,24 @@ describe('executeSlashCommand (result mapping)', () => {
     });
   });
 
+  it('reports Agent View detach as unavailable', async () => {
+    const commands = [
+      stub({
+        name: 'background',
+        action: () => ({ type: 'agent_view_detach' as const }),
+      }),
+    ];
+
+    await expect(
+      executeSlashCommand('/background', commands, env),
+    ).resolves.toEqual({
+      kind: 'message',
+      messageType: 'info',
+      content:
+        'Agent View detach is not yet available in the OpenTUI renderer.',
+    });
+  });
+
   it('dialog results map to dialog effects (non-help)', async () => {
     const effect = await executeSlashCommand('/theme', registry, env);
     expect(effect).toEqual({
