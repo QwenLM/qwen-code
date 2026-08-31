@@ -11177,6 +11177,75 @@ describe('createServeApp', () => {
       });
     });
 
+    it('does not promise sideEffectPossible:false when a branch body mutated git first', async () => {
+      // The safe-retry contract is scoped to plain creation: a `branch`
+      // body runs createBranch (moving the shared HEAD) BEFORE the channel
+      // initialize handshake, and the rollback on failure is best-effort.
+      // The init-timeout response must not tell a contract-trusting client
+      // that no side effect is possible.
+      const bridge = fakeBridge({
+        spawnImpl: async () => {
+          throw new BridgeTimeoutError('initialize', 10_000);
+        },
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      mockWt.impl = () => ({
+        isGitRepository: () => Promise.resolve(true),
+        getCurrentBranch: () => Promise.resolve('main'),
+      });
+      mockBranchOps.branchExists = () => Promise.resolve(false);
+      mockBranchOps.isDirtyTree = () => Promise.resolve(false);
+      mockBranchOps.getHeadCommit = () => Promise.resolve('a'.repeat(40));
+
+      try {
+        const res = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ cwd: WS_BOUND, branch: { name: 'feat/x' } });
+
+        expect(res.status).toBe(504);
+        expect(res.headers['retry-after']).toBeUndefined();
+        expect(res.body.code).toBe('init_timeout');
+        expect(res.body.phase).toBe('channel.initialize');
+        expect(res.body.timeoutMs).toBe(10_000);
+        expect(res.body.retryable).toBeUndefined();
+        expect(res.body.sideEffectPossible).toBeUndefined();
+      } finally {
+        mockWt.impl = undefined;
+        mockBranchOps.branchExists = undefined;
+        mockBranchOps.isDirtyTree = undefined;
+        mockBranchOps.getHeadCommit = undefined;
+      }
+    });
+
+    it('does not map a non-initialize bridge timeout to the init_timeout contract', async () => {
+      // `newSession` is the label on the dispatch that follows a successful
+      // initialize: a timeout there leaves the session-creation outcome
+      // ambiguous. It must fall through to the generic 500, not the typed
+      // 504 with retry guidance.
+      const bridge = fakeBridge({
+        spawnImpl: async () => {
+          throw new BridgeTimeoutError('newSession', 10_000);
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+
+      const res = await request(app)
+        .post('/session')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ cwd: WS_BOUND });
+
+      expect(res.status).toBe(500);
+      expect(res.headers['retry-after']).toBeUndefined();
+      expect(res.body.code).toBeUndefined();
+      expect(res.body.retryable).toBeUndefined();
+      expect(res.body.sideEffectPossible).toBeUndefined();
+    });
+
     it('200 when cwd is omitted (falls back to bound workspace, #3803 §02)', async () => {
       // Legacy primary compatibility: clients may omit `cwd`, in which case
       // the route falls back to `opts.workspace ?? process.cwd()`.

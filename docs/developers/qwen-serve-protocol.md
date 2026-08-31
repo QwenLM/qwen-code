@@ -120,7 +120,9 @@ If the ACP channel initialization budget expires before `newSession` is dispatch
 }
 ```
 
-The `sideEffectPossible: false` field is authoritative because channel initialization precedes the ACP `newSession` request. A client that understands this structured contract may retry after the advertised delay without risking a duplicate Session. Clients that classify all 5xx mutation responses as ambiguous remain conservatively fail-closed. Other timeouts do not inherit this contract.
+`timeoutMs` — and the numeric suffix of `error` — reflect the daemon's configured `--initialize-timeout-ms` budget (the values above are the default). The full safe-retry shape above is emitted only for plain session creation, where channel initialization strictly precedes every durable mutation: on that path the `sideEffectPossible: false` field is authoritative because initialization precedes the ACP `newSession` request, and a client that understands this structured contract may retry after the advertised delay without risking a duplicate Session.
+
+Requests carrying `branch` or `worktree`, and initialize timeouts surfaced by any other route (for example `POST /session/:id/branch` and `POST /session/:id/side-task`, where a committed fork can outlive the failed handshake), return the same `504` with `code: "init_timeout"`, `phase`, and `timeoutMs` — but WITHOUT `Retry-After`, `retryable`, or `sideEffectPossible`. For those the mutation outcome is unknown: branch and worktree preparation mutates git before the channel initializes, and the rollback attempted on failure is best-effort (a failed checkout rollback leaves the workspace on the new branch, and a retry may surface a branch-already-exists conflict). Clients that classify all 5xx mutation responses as ambiguous remain conservatively fail-closed, and should apply the same policy to the reduced shape. Other timeouts do not inherit this contract.
 
 `RestoreInProgressError` — emitted by `POST /session/:id/load`, `POST /session/:id/resume`, or a caller-supplied-id `POST /session` when another registration already owns that id — returns `409` and:
 

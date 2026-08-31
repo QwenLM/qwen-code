@@ -65,6 +65,15 @@ import { ConversationRuntimeOwnershipError } from '../conversations/conversation
 export type BridgeErrorContext = {
   route?: string;
   sessionId?: string;
+  /**
+   * The caller asserts that, on this request path, the channel-initialize
+   * handshake strictly precedes every durable mutation (git branch/worktree
+   * prep, committed forks, dispatched ACP requests). Only then may the
+   * `init_timeout` response promise `sideEffectPossible: false`. Routes
+   * that mutate before or around initialization must leave it unset so the
+   * response reports an unknown outcome instead.
+   */
+  initPrecedesMutations?: boolean;
   [key: string]: string | number | boolean | undefined;
 };
 
@@ -88,7 +97,12 @@ function bridgeErrorExtraContext(
 ): Record<string, string | number | boolean> {
   const extra: Record<string, string | number | boolean> = {};
   for (const [key, value] of Object.entries(ctx ?? {})) {
-    if (key === 'route' || key === 'sessionId' || value === undefined) {
+    if (
+      key === 'route' ||
+      key === 'sessionId' ||
+      key === 'initPrecedesMutations' ||
+      value === undefined
+    ) {
       continue;
     }
     extra[key] = value;
@@ -199,16 +213,34 @@ export function sendBridgeError(
 ): void {
   if (err instanceof BridgeTimeoutError && err.label === 'initialize') {
     recordExpectedBridgeError(err, ctx, daemonLog);
-    res.set('Retry-After', '5');
-    // Initialization is attempted before newSession is dispatched, so clients
-    // that understand the structured body can safely distinguish this timeout
-    // from an ambiguous mutation outcome.
+    if (ctx?.initPrecedesMutations === true) {
+      res.set('Retry-After', '5');
+      // The caller asserted initialization strictly precedes every durable
+      // mutation on this path (plain session creation: the initialize
+      // handshake runs before the ACP newSession request is dispatched), so
+      // clients that understand the structured body can safely distinguish
+      // this timeout from an ambiguous mutation outcome.
+      res.status(504).json({
+        error: err.message,
+        code: 'init_timeout',
+        errorKind: 'init_timeout',
+        retryable: true,
+        sideEffectPossible: false,
+        phase: 'channel.initialize',
+        timeoutMs: err.timeoutMs,
+      });
+      return;
+    }
+    // Mutations may precede or interleave with initialization on this path
+    // (branch/worktree preparation on POST /session, committed forks on the
+    // branch and side-task restore flows). Report the timeout WITHOUT the
+    // safe-retry contract: no Retry-After, no retryable, and no
+    // sideEffectPossible claim — the mutation outcome is unknown, and a
+    // contract-trusting client must not auto-retry.
     res.status(504).json({
       error: err.message,
       code: 'init_timeout',
       errorKind: 'init_timeout',
-      retryable: true,
-      sideEffectPossible: false,
       phase: 'channel.initialize',
       timeoutMs: err.timeoutMs,
     });
