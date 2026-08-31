@@ -148,6 +148,7 @@ export function isReasoningSelectionSupported(
 export function applyReasoningSelection(
   config: Config,
   selection: ReasoningSelection,
+  defaultReasoning?: ContentGeneratorConfig['reasoning'],
 ): void {
   const apply = (
     generation: Partial<ContentGeneratorConfig> | undefined,
@@ -158,6 +159,12 @@ export function applyReasoningSelection(
       return;
     }
     if (selection === REASONING_EFFORT_DEFAULT) {
+      if (defaultReasoning !== undefined) {
+        generation.reasoning = defaultReasoning
+          ? { ...defaultReasoning }
+          : false;
+        return;
+      }
       if (!generation.reasoning) {
         generation.reasoning = undefined;
         return;
@@ -168,7 +175,7 @@ export function applyReasoningSelection(
       return;
     }
     generation.reasoning = {
-      ...(generation.reasoning || {}),
+      ...(generation.reasoning || defaultReasoning || {}),
       effort: selection,
     };
   };

@@ -1139,11 +1139,13 @@ export function ChatPane({
   const handleSelectReasoningEffort = useCallback(
     (value: ReasoningSelection) =>
       actions
-        .setReasoningEffort(value, { persist: true })
+        .setReasoningEffort(value, {
+          persist: connection.sessionContext?.kind !== 'standalone',
+        })
         .catch((error: unknown) =>
           reportError(error, t('reasoning.updateFailed')),
         ),
-    [actions, reportError, t],
+    [actions, connection.sessionContext?.kind, reportError, t],
   );
 
   const headerLabel =

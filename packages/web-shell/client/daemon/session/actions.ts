@@ -1248,7 +1248,7 @@ export function createDaemonSessionActions({
           value === 'none'
             ? nextReasoning?.enabled === false
             : value === 'default'
-              ? nextReasoning?.enabled === true
+              ? nextReasoning !== undefined
               : nextReasoning?.enabled === true &&
                 nextReasoning.effort === value;
         if (!confirmed || (opts?.persist && result.persisted !== true)) {
@@ -1710,11 +1710,13 @@ export function createDaemonSessionActions({
       if (pendingPersistedReasoningAction) {
         await pendingPersistedReasoningAction.catch(() => undefined);
       }
-      clearActiveSessionState();
-      sessionRef.current = undefined;
-      setConnection((current) =>
-        getConnectionAfterSessionClear(current, session?.sessionId),
-      );
+      if (sessionRef.current === session) {
+        clearActiveSessionState();
+        sessionRef.current = undefined;
+        setConnection((current) =>
+          getConnectionAfterSessionClear(current, session?.sessionId),
+        );
+      }
       if (session) {
         try {
           await withActionTimeout(session.detach(), 'Clear session timed out');

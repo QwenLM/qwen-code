@@ -3269,7 +3269,14 @@ describe('createDaemonSessionActions', () => {
       persisted: boolean;
     }>();
     session.setConfigOption.mockReturnValueOnce(persisted.promise);
-    const { actions, getConnection, sessionRef } = createActionsHarness({
+    const {
+      actions,
+      activePromptsRef,
+      getConnection,
+      replaceConnection,
+      sessionRef,
+      store,
+    } = createActionsHarness({
       connection: {
         status: 'connected',
         sessionId: 'session-a',
@@ -3287,6 +3294,15 @@ describe('createDaemonSessionActions', () => {
     expect(manualSessionClearRef.current).toBe(true);
     expect(session.detach).not.toHaveBeenCalled();
     sessionRef.current = replacement as unknown as DaemonSessionClient;
+    const replacementConnection: DaemonConnectionState = {
+      status: 'connected',
+      sessionId: replacement.sessionId,
+      clientId: replacement.clientId,
+      currentModel: 'qwen3.8-max',
+    };
+    replaceConnection(replacementConnection);
+    const controller = new AbortController();
+    activePromptsRef.current.set('replacement-prompt', { controller });
     persisted.resolve({
       configOptions: reasoningConfigOptions('medium'),
       persisted: true,
@@ -3296,45 +3312,50 @@ describe('createDaemonSessionActions', () => {
 
     expect(session.detach).toHaveBeenCalledOnce();
     expect(replacement.detach).not.toHaveBeenCalled();
-    expect(getConnection().sessionId).toBeUndefined();
-    expect(getConnection().models?.[0]?.reasoningPreview).toMatchObject({
-      enabled: true,
-      effort: 'low',
-    });
+    expect(sessionRef.current).toBe(replacement);
+    expect(getConnection()).toBe(replacementConnection);
+    expect(store.reset).not.toHaveBeenCalled();
+    expect(controller.signal.aborted).toBe(false);
+    expect(activePromptsRef.current.size).toBe(1);
   });
 
-  it('accepts a confirmed default reset without inventing a Default option', async () => {
-    const session = createMockSession('session-a');
-    session.setConfigOption.mockResolvedValueOnce({
-      configOptions: reasoningConfigOptions('xhigh'),
-      persisted: true,
-    });
-    const { actions, getConnection } = createActionsHarness({
-      connection: {
-        status: 'connected',
-        sessionId: 'session-a',
-        currentModel: 'qwen3.8-max',
-        providers: workspaceProvidersStatus('none'),
-      },
-      session,
-    });
+  it.each(['xhigh', 'none'])(
+    'accepts a confirmed default reset to %s without inventing a Default option',
+    async (defaultValue) => {
+      const session = createMockSession('session-a');
+      session.setConfigOption.mockResolvedValueOnce({
+        configOptions: reasoningConfigOptions(defaultValue),
+        persisted: true,
+      });
+      const { actions, getConnection } = createActionsHarness({
+        connection: {
+          status: 'connected',
+          sessionId: 'session-a',
+          currentModel: 'qwen3.8-max',
+          providers: workspaceProvidersStatus('none'),
+        },
+        session,
+      });
 
-    await expect(
-      actions.setReasoningEffort('default', { persist: true }),
-    ).resolves.toBeUndefined();
+      await expect(
+        actions.setReasoningEffort('default', { persist: true }),
+      ).resolves.toBeUndefined();
 
-    expect(session.setConfigOption).toHaveBeenCalledWith(
-      'reasoning_effort',
-      'default',
-      { persist: true },
-    );
-    expect(getConnection().reasoning).toMatchObject({
-      enabled: true,
-      effort: 'xhigh',
-    });
-    await actions.clearSession();
-    expect(getConnection().models?.[0]?.reasoningPreview?.effort).toBe('xhigh');
-  });
+      expect(session.setConfigOption).toHaveBeenCalledWith(
+        'reasoning_effort',
+        'default',
+        { persist: true },
+      );
+      expect(getConnection().reasoning).toMatchObject({
+        enabled: defaultValue !== 'none',
+        effort: defaultValue === 'none' ? 'default' : defaultValue,
+      });
+      await actions.clearSession();
+      expect(getConnection().models?.[0]?.reasoningPreview?.enabled).toBe(
+        defaultValue !== 'none',
+      );
+    },
+  );
 
   it('rejects a reasoning effort when live config options do not confirm it', async () => {
     const session = createMockSession('session-a');

@@ -31,6 +31,7 @@ import type {
 import type {
   ChatRecord,
   Config,
+  ContentGeneratorConfig,
   Extension,
   LlmChat,
 } from '@qwen-code/qwen-code-core';
@@ -4819,7 +4820,11 @@ describe('Session', () => {
   describe('setModel', () => {
     function installReasoningPreference(
       selection: 'none' | 'low' | 'max',
-      options: { trusted?: boolean; thinkingMandatory?: boolean } = {},
+      options: {
+        trusted?: boolean;
+        thinkingMandatory?: boolean;
+        defaultReasoning?: ContentGeneratorConfig['reasoning'];
+      } = {},
     ) {
       type ReasoningSettingsLayer = {
         settings: { model: { reasoningEffort?: typeof selection } };
@@ -4833,16 +4838,12 @@ describe('Session', () => {
         settings: { model: { reasoningEffort: selection } },
         originalSettings: { model: { reasoningEffort: selection } },
       };
-      const live: {
-        model: string;
-        thinkingMandatory?: boolean;
-        reasoning?: false | { effort?: 'low' | 'max' };
-      } = {
+      const live: Partial<ContentGeneratorConfig> & { model: string } = {
         model: currentModel,
         ...(options.thinkingMandatory ? { thinkingMandatory: true } : {}),
         reasoning: selection === 'none' ? false : { effort: selection },
       };
-      const rebuildable = {
+      const rebuildable: Partial<ContentGeneratorConfig> = {
         ...live,
         reasoning: selection === 'none' ? false : { effort: selection },
       };
@@ -4883,6 +4884,9 @@ describe('Session', () => {
         getModelsConfig: vi.fn(() => ({
           getGenerationConfig: () => rebuildable,
         })),
+        getResolvedModelConfig: vi.fn(() => ({
+          generationConfig: { reasoning: options.defaultReasoning },
+        })),
       });
       switchModelSpy.mockImplementation(
         async (authType: AuthType, modelId: string) => {
@@ -4890,6 +4894,8 @@ describe('Session', () => {
           currentModel = modelId;
           live.model = modelId;
           rebuildable.model = modelId;
+          live.reasoning = options.defaultReasoning;
+          rebuildable.reasoning = options.defaultReasoning;
         },
       );
       return { user, workspace, live, rebuildable };
@@ -5157,7 +5163,7 @@ describe('Session', () => {
       });
     });
 
-    it('still deletes an incompatible reasoning preference when the model default is not persisted', async () => {
+    it('clears only the live override for a non-persisting ACP model switch', async () => {
       const state = installReasoningPreference('max');
 
       await session.setModel(
@@ -5168,13 +5174,10 @@ describe('Session', () => {
         { persistDefault: false },
       );
 
-      expect(state.user.settings.model).not.toHaveProperty('reasoningEffort');
+      expect(state.user.settings.model.reasoningEffort).toBe('max');
       expect(state.live.reasoning).toBeUndefined();
-      expect(mockSettings.setValue).not.toHaveBeenCalledWith(
-        expect.anything(),
-        'model.name',
-        expect.anything(),
-      );
+      expect(state.rebuildable.reasoning).toBeUndefined();
+      expect(mockSettings.setValue).not.toHaveBeenCalled();
     });
 
     it('deletes an incompatible max preference from both writable scopes without downgrading it', async () => {
@@ -5230,6 +5233,7 @@ describe('Session', () => {
 
       expect(state.user.settings.model.reasoningEffort).toBe('low');
       expect(state.live.reasoning).toEqual({ effort: 'low' });
+      expect(state.rebuildable.reasoning).toEqual({ effort: 'low' });
       expect(mockSettings.setValue).not.toHaveBeenCalledWith(
         expect.anything(),
         'model.reasoningEffort',
@@ -5237,6 +5241,150 @@ describe('Session', () => {
         expect.anything(),
         expect.anything(),
       );
+    });
+
+    it('keeps a compatible thinking disable after a model rebuild', async () => {
+      const state = installReasoningPreference('none');
+      await session.setModel({
+        sessionId: 'test-session-id',
+        modelId: `qwen3.7-plus(${AuthType.USE_OPENAI})`,
+      });
+      expect(state.user.settings.model.reasoningEffort).toBe('none');
+      expect(state.live.reasoning).toBe(false);
+      expect(state.rebuildable.reasoning).toBe(false);
+    });
+
+    it('treats a compatible persisted tier as an explicit thinking enable', async () => {
+      const state = installReasoningPreference('low', {
+        defaultReasoning: false,
+      });
+      await session.setModel({
+        sessionId: 'test-session-id',
+        modelId: `qwen3.8-max(${AuthType.USE_OPENAI})`,
+      });
+      expect(state.user.settings.model.reasoningEffort).toBe('low');
+      expect(state.live.reasoning).toEqual({ effort: 'low' });
+      expect(state.rebuildable.reasoning).toEqual({ effort: 'low' });
+    });
+
+    it('retains a compatible preference when switching to a runtime snapshot', async () => {
+      const state = installReasoningPreference('low');
+      const snapshotId = `$runtime|${AuthType.USE_OPENAI}|qwen3.8-max`;
+      Object.assign(mockConfig, {
+        getActiveRuntimeModelSnapshot: vi.fn(() => ({
+          id: snapshotId,
+          modelId: 'qwen3.8-max',
+          authType: AuthType.USE_OPENAI,
+        })),
+      });
+      switchModelSpy.mockImplementationOnce(async () => {
+        currentModel = 'qwen3.8-max';
+        state.live.model = currentModel;
+        state.live.reasoning = undefined;
+        state.rebuildable.reasoning = undefined;
+      });
+      await session.setModel({
+        sessionId: 'test-session-id',
+        modelId: `${snapshotId}(${AuthType.USE_OPENAI})`,
+      });
+      expect(state.user.settings.model.reasoningEffort).toBe('low');
+      expect(state.live.reasoning).toEqual({ effort: 'low' });
+      expect(state.rebuildable.reasoning).toEqual({ effort: 'low' });
+    });
+
+    it.each(['low', 'none'] as const)(
+      'retains compatible %s on an opaque route using the resolved base model',
+      async (selection) => {
+        const state = installReasoningPreference(selection);
+        const models = ['one', 'two'].map((name) => ({
+          id: 'qwen3.8-max',
+          label: name,
+          authType: AuthType.USE_OPENAI,
+          baseUrl: `https://${name}.example/v1`,
+          registryBaseUrl: `https://${name}.example/v1`,
+        }));
+        vi.mocked(mockConfig.getAllConfiguredModels).mockReturnValue(models);
+        await session.setModel({
+          sessionId: 'test-session-id',
+          modelId: buildAcpModelOptions(models)[1]!.modelId,
+        });
+        expect(mockConfig.switchModel).toHaveBeenCalledWith(
+          AuthType.USE_OPENAI,
+          'qwen3.8-max',
+          { baseUrl: 'https://two.example/v1' },
+        );
+        expect(state.user.settings.model.reasoningEffort).toBe(selection);
+        expect(state.live.reasoning).toEqual(
+          selection === 'none' ? false : { effort: selection },
+        );
+      },
+    );
+
+    it('restores a configured thinking disable when an incompatible tier is cleared', async () => {
+      const state = installReasoningPreference('max', {
+        defaultReasoning: false,
+      });
+      await session.setModel({
+        sessionId: 'test-session-id',
+        modelId: `qwen3.7-plus(${AuthType.USE_OPENAI})`,
+      });
+      expect(state.user.settings.model).not.toHaveProperty('reasoningEffort');
+      expect(state.live.reasoning).toBe(false);
+      expect(state.rebuildable.reasoning).toBe(false);
+    });
+
+    it('preserves configured reasoning siblings while reapplying a compatible tier', async () => {
+      const state = installReasoningPreference('low', {
+        defaultReasoning: { budget_tokens: 42000 },
+      });
+      state.live.reasoning = false;
+      state.rebuildable.reasoning = false;
+      await session.setModel({
+        sessionId: 'test-session-id',
+        modelId: `qwen3.8-max(${AuthType.USE_OPENAI})`,
+      });
+      expect(state.live.reasoning).toEqual({
+        effort: 'low',
+        budget_tokens: 42000,
+      });
+      expect(session.getDefaultReasoningConfig()).toEqual({
+        budget_tokens: 42000,
+      });
+    });
+
+    it('does not treat a runtime snapshot of a previous selection as the model default', () => {
+      installReasoningPreference('none');
+      Object.assign(mockConfig, {
+        getActiveRuntimeModelSnapshot: vi.fn(() => ({
+          generationConfig: { reasoning: { effort: 'max' } },
+        })),
+      });
+      Object.assign(mockSettings.merged.model!, {
+        generationConfig: { reasoning: { budget_tokens: 42000 } },
+      });
+      expect(session.getDefaultReasoningConfig()).toEqual({
+        budget_tokens: 42000,
+      });
+    });
+
+    it('reloads the persisted selection before reconciling a workspace model rebuild', () => {
+      const state = installReasoningPreference('low');
+      currentModel = 'qwen3.7-plus';
+      state.live.reasoning = undefined;
+      state.rebuildable.reasoning = undefined;
+      vi.mocked(mockSettings.reloadScopeFromDisk).mockImplementation(() => {
+        state.user.settings.model.reasoningEffort = 'none';
+        mockSettings.recomputeMerged();
+      });
+      session.reloadReasoningSelection();
+      expect(mockSettings.reloadScopeFromDisk).toHaveBeenCalledWith(
+        SettingScope.User,
+      );
+      expect(mockSettings.reloadScopeFromDisk).toHaveBeenCalledWith(
+        SettingScope.Workspace,
+      );
+      expect(state.live.reasoning).toBe(false);
+      expect(state.rebuildable.reasoning).toBe(false);
     });
 
     it('keeps a model switch live when incompatible preference cleanup fails', async () => {

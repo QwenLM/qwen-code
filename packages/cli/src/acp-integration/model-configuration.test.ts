@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Config } from '@qwen-code/qwen-code-core';
+import type { Config, ContentGeneratorConfig } from '@qwen-code/qwen-code-core';
 import { describe, expect, it } from 'vitest';
 import {
   applyReasoningSelection,
@@ -185,5 +185,37 @@ describe('model configuration manifest', () => {
 
     expect(live.reasoning).toEqual({ budget_tokens: 42_000 });
     expect(rebuildable.reasoning).toEqual({ budget_tokens: 42_000 });
+  });
+
+  it('restores configured reasoning siblings after thinking is turned off', () => {
+    const live: Partial<ContentGeneratorConfig> = {
+      reasoning: { effort: 'max', budget_tokens: 42_000 },
+    };
+    const rebuildable = { ...live };
+    const config = {
+      getContentGeneratorConfig: () => live,
+      getModelsConfig: () => ({
+        getGenerationConfig: () => rebuildable,
+      }),
+    } as unknown as Config;
+
+    applyReasoningSelection(config, 'none');
+    applyReasoningSelection(config, 'default', { budget_tokens: 42_000 });
+
+    expect(live.reasoning).toEqual({ budget_tokens: 42_000 });
+    expect(rebuildable.reasoning).toEqual({ budget_tokens: 42_000 });
+  });
+
+  it('resets to a configured default-off state instead of enabling thinking', () => {
+    const live: Partial<ContentGeneratorConfig> = {
+      reasoning: { effort: 'max' },
+    };
+    const config = {
+      getContentGeneratorConfig: () => live,
+    } as unknown as Config;
+
+    applyReasoningSelection(config, 'default', false);
+
+    expect(live.reasoning).toBe(false);
   });
 });

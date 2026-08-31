@@ -5751,51 +5751,71 @@ class QwenAgent implements Agent {
           const tierSelected =
             selected !== REASONING_EFFORT_NONE &&
             selected !== REASONING_EFFORT_DEFAULT;
-          if (modelReasoning && !modelReasoning.toggleOnly) {
-            for (const source of ['extra_body', 'samplingParams'] as const) {
-              const layer = generation[source];
-              if (!layer) continue;
-              const next = { ...layer };
-              delete next['enable_thinking'];
-              delete next['reasoning_effort'];
-              delete next['thinking_budget'];
-              generation[source] = next;
+          const defaultReasoning = session.getDefaultReasoningConfig();
+          const previous = {
+            reasoning: generation.reasoning,
+            extra_body: generation.extra_body,
+            samplingParams: generation.samplingParams,
+          };
+          const rebuildable = config
+            .getModelsConfig?.()
+            ?.getGenerationConfig?.();
+          const previousRebuildableReasoning = rebuildable?.reasoning;
+          try {
+            if (modelReasoning && !modelReasoning.toggleOnly) {
+              for (const source of ['extra_body', 'samplingParams'] as const) {
+                const layer = generation[source];
+                if (!layer) continue;
+                const next = { ...layer };
+                delete next['enable_thinking'];
+                delete next['reasoning_effort'];
+                delete next['thinking_budget'];
+                generation[source] = next;
+              }
             }
-          }
-          if (
-            !modelReasoning &&
-            tierSelected &&
-            generation.reasoning === false
-          ) {
-            config.setReasoningEffort?.(selected);
-          } else {
-            applyReasoningSelection(config, selected);
-            if (!modelReasoning && selected !== REASONING_EFFORT_NONE) {
-              config.setReasoningEffort?.(
-                selected === REASONING_EFFORT_DEFAULT ? undefined : selected,
+            if (
+              !modelReasoning &&
+              tierSelected &&
+              generation.reasoning === false
+            ) {
+              config.setReasoningEffort?.(selected);
+            } else {
+              applyReasoningSelection(config, selected, defaultReasoning);
+              if (!modelReasoning && selected !== REASONING_EFFORT_NONE) {
+                config.setReasoningEffort?.(
+                  selected === REASONING_EFFORT_DEFAULT
+                    ? defaultReasoning
+                      ? defaultReasoning.effort
+                      : undefined
+                    : selected,
+                );
+              }
+            }
+            const confirmedOption = this.buildConfigOptions(config).find(
+              (candidate) => candidate.id === 'reasoning_effort',
+            );
+            const confirmedValue = confirmedOption?.currentValue;
+            const confirmed =
+              selected === REASONING_EFFORT_DEFAULT
+                ? confirmedValue !== undefined
+                : confirmedValue === selected;
+            if (!confirmed) {
+              throw RequestError.invalidParams(
+                undefined,
+                modelReasoning
+                  ? `Reasoning selection was not applied: ${selected}`
+                  : 'Reasoning effort cannot be applied while thinking is disabled',
               );
             }
-          }
-          const confirmedOption = this.buildConfigOptions(config).find(
-            (candidate) => candidate.id === 'reasoning_effort',
-          );
-          const confirmedValue = confirmedOption?.currentValue;
-          const confirmed =
-            selected === REASONING_EFFORT_DEFAULT
-              ? confirmedValue !== undefined &&
-                confirmedValue !== REASONING_EFFORT_NONE
-              : confirmedValue === selected;
-          if (!confirmed) {
-            throw RequestError.invalidParams(
-              undefined,
-              modelReasoning
-                ? `Reasoning selection was not applied: ${selected}`
-                : 'Reasoning effort cannot be applied while thinking is disabled',
-            );
-          }
-          if (persist) {
-            reasoningSelectionPersisted =
-              session.persistReasoningSelection(selected);
+            if (persist) {
+              reasoningSelectionPersisted =
+                session.persistReasoningSelection(selected);
+            }
+          } catch (error) {
+            Object.assign(generation, previous);
+            if (rebuildable)
+              rebuildable.reasoning = previousRebuildableReasoning;
+            throw error;
           }
           break;
         }
@@ -12199,6 +12219,7 @@ class QwenAgent implements Agent {
             ) {
               try {
                 await config.switchModel(authType, newModelName);
+                session.reloadReasoningSelection();
               } catch (err) {
                 debugLogger.warn(
                   `reload: switchModel failed for session ${id}: ${err}`,

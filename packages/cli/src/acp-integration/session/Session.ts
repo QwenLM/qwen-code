@@ -17,6 +17,7 @@ import type {
 } from '@google/genai';
 import type {
   Config,
+  ContentGeneratorConfig,
   LlmChat,
   ToolCallConfirmationDetails,
   ToolConfirmationPayload,
@@ -9840,8 +9841,7 @@ export class Session implements SessionContext {
       !this.requiresManagedConversationBinding &&
       (options.persistDefault ?? true);
     this.reconcileReasoningSelection(effectiveModelId, {
-      persist: !this.requiresManagedConversationBinding,
-      allowReasoning: !isRuntime && !rawModelId.startsWith(ACP_ROUTE_ID_PREFIX),
+      persist: persistDefault,
     });
     void recordDaemonSessionModel(this.config, {
       modelId: isRuntime
@@ -9922,6 +9922,33 @@ export class Session implements SessionContext {
     };
   }
 
+  getDefaultReasoningConfig(): ContentGeneratorConfig['reasoning'] {
+    // Runtime snapshots already include the persisted selection, not its defaults.
+    const authType = this.config.getAuthType?.();
+    const model =
+      authType && !this.config.getActiveRuntimeModelSnapshot?.()
+        ? this.config.getResolvedModelConfig?.(
+            authType,
+            this.config.getModel(),
+            this.config.getCurrentModelRegistryBaseUrl?.() ?? undefined,
+          )
+        : undefined;
+    if (model) return model.generationConfig.reasoning;
+    return (
+      this.settings.merged.model?.generationConfig as
+        | Partial<ContentGeneratorConfig>
+        | undefined
+    )?.reasoning;
+  }
+
+  reloadReasoningSelection(): void {
+    this.settings.reloadScopeFromDisk(SettingScope.User);
+    this.settings.reloadScopeFromDisk(SettingScope.Workspace);
+    this.reconcileReasoningSelection(this.config.getModel(), {
+      persist: !this.requiresManagedConversationBinding,
+    });
+  }
+
   persistReasoningSelection(selection: ReasoningSelection): boolean {
     if (this.requiresManagedConversationBinding) {
       throw RequestError.invalidParams(
@@ -9944,7 +9971,7 @@ export class Session implements SessionContext {
 
   private reconcileReasoningSelection(
     modelId: string,
-    options: { persist: boolean; allowReasoning: boolean },
+    options: { persist: boolean },
   ): void {
     const rawSelection = this.settings.merged.model?.reasoningEffort;
     if (rawSelection === undefined) return;
@@ -9954,7 +9981,6 @@ export class Session implements SessionContext {
       this.config.getContentGeneratorConfig?.()?.thinkingMandatory === true;
     const supported =
       selection !== undefined &&
-      options.allowReasoning &&
       isReasoningSelectionSupported(modelId, selection, thinkingMandatory);
     const mustClear =
       selection === undefined ||
@@ -9973,10 +9999,18 @@ export class Session implements SessionContext {
           );
         }
       }
-      applyReasoningSelection(this.config, REASONING_EFFORT_DEFAULT);
+      applyReasoningSelection(
+        this.config,
+        REASONING_EFFORT_DEFAULT,
+        this.getDefaultReasoningConfig(),
+      );
       return;
     }
-    applyReasoningSelection(this.config, selection);
+    applyReasoningSelection(
+      this.config,
+      selection,
+      this.getDefaultReasoningConfig(),
+    );
   }
 
   private clearPersistedReasoningSelection(except?: SettingScope): void {

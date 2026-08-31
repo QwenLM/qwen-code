@@ -6009,6 +6009,40 @@ export function App({
   );
   const connectionRef = useRef(connection);
   connectionRef.current = connection;
+  const selectWelcomeModel = useCallback(
+    (modelId: string) => {
+      const models = connectionRef.current.models;
+      const reasoningIntent = pendingReasoningIntentRef.current;
+      const sourceReasoningIntent =
+        reasoningIntent?.modelId === currentModelRef.current
+          ? reasoningIntent
+          : undefined;
+      const sourceReasoningPreview = models?.find(
+        (model) => model.id === currentModelRef.current,
+      )?.reasoningPreview;
+      const sourceReasoningSelection =
+        sourceReasoningIntent?.value ??
+        (sourceReasoningPreview
+          ? getReasoningSelection(sourceReasoningPreview)
+          : undefined);
+      const reasoningPreview = models?.find(
+        (model) => model.id === modelId,
+      )?.reasoningPreview;
+      const keepReasoningIntent =
+        sourceReasoningSelection &&
+        reasoningPreview &&
+        reasoningPreviewSupports(reasoningPreview, sourceReasoningSelection);
+      setPendingReasoningIntent(
+        sourceReasoningIntent && keepReasoningIntent
+          ? { modelId, value: sourceReasoningIntent.value }
+          : sourceReasoningSelection && !keepReasoningIntent
+            ? { modelId, value: 'default' }
+            : undefined,
+      );
+      setPendingModel(modelId);
+    },
+    [setPendingModel, setPendingReasoningIntent],
+  );
   /**
    * Whether a local action must be held back because a Goal owns the session.
    * Reads the latest connection through the ref so callers get the gate as of
@@ -10202,7 +10236,7 @@ export function App({
             }
             if (modelArg) {
               if (!connectionRef.current.sessionId) {
-                setPendingModel(modelArg);
+                selectWelcomeModel(modelArg);
                 return true;
               }
               const owner = sessionOwnerGuard.capture();
@@ -10898,6 +10932,7 @@ export function App({
       resumeChatBottomFollow,
       selectedLanguage,
       setPendingModel,
+      selectWelcomeModel,
       setPendingMode,
       setWorkspaceSetting,
       openVoiceModelPicker,
@@ -11460,35 +11495,7 @@ export function App({
     (modelId: string) => {
       if (sessionWriteBlocked) return;
       if (!connectionRef.current.sessionId) {
-        const models = connectionRef.current.models;
-        const reasoningIntent = pendingReasoningIntentRef.current;
-        const sourceReasoningIntent =
-          reasoningIntent?.modelId === currentModelRef.current
-            ? reasoningIntent
-            : undefined;
-        const sourceReasoningPreview = models?.find(
-          (model) => model.id === currentModelRef.current,
-        )?.reasoningPreview;
-        const sourceReasoningSelection =
-          sourceReasoningIntent?.value ??
-          (sourceReasoningPreview
-            ? getReasoningSelection(sourceReasoningPreview)
-            : undefined);
-        const reasoningPreview = models?.find(
-          (model) => model.id === modelId,
-        )?.reasoningPreview;
-        const keepReasoningIntent =
-          sourceReasoningSelection &&
-          reasoningPreview &&
-          reasoningPreviewSupports(reasoningPreview, sourceReasoningSelection);
-        setPendingReasoningIntent(
-          sourceReasoningIntent && keepReasoningIntent
-            ? { modelId, value: sourceReasoningIntent.value }
-            : sourceReasoningSelection && !keepReasoningIntent
-              ? { modelId, value: 'default' }
-              : undefined,
-        );
-        setPendingModel(modelId);
+        selectWelcomeModel(modelId);
         return;
       }
       // Drive the shared busy flag so the model-management rows disable while a
@@ -11529,7 +11536,7 @@ export function App({
       sessionActions,
       sessionOwnerGuard,
       setPendingModel,
-      setPendingReasoningIntent,
+      selectWelcomeModel,
       store,
       t,
     ],
@@ -11541,7 +11548,9 @@ export function App({
         return Promise.resolve();
       }
       return sessionActions
-        .setReasoningEffort(value, { persist: true })
+        .setReasoningEffort(value, {
+          persist: connectionRef.current.sessionContext?.kind !== 'standalone',
+        })
         .catch((error: unknown) =>
           reportError(error, t('reasoning.updateFailed')),
         );
