@@ -21225,7 +21225,9 @@ describe('createAcpSessionBridge', () => {
       // with no way to recover.
       const { bridge } = setup({
         setModelImpl: async () => {
-          throw new Error('unknown model');
+          throw new RequestError(-32603, 'Internal error', {
+            details: 'unknown model detail',
+          });
         },
       });
       const session = await bridge.spawnOrAttach({
@@ -21247,6 +21249,7 @@ describe('createAcpSessionBridge', () => {
       expect(first.value?.data).toMatchObject({
         sessionId: session.sessionId,
         requestedModelId: 'definitely-not-a-real-model',
+        error: 'unknown model detail',
       });
       abort.abort();
       await bridge.shutdown();
@@ -30837,7 +30840,9 @@ describe('createHttpAcpBridge — side-channel state layer (#4511)', () => {
           get(target, prop) {
             if (prop === 'unstable_setSessionModel') {
               return async () => {
-                throw new Error('agent refused model switch');
+                throw new RequestError(-32603, 'Internal error', {
+                  message: 'agent refused model switch',
+                });
               };
             }
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -30873,6 +30878,9 @@ describe('createHttpAcpBridge — side-channel state layer (#4511)', () => {
       const it2 = iter[Symbol.asyncIterator]();
       const next = await it2.next();
       expect(next.value?.type).toBe('model_switch_failed');
+      expect(next.value?.data).toMatchObject({
+        error: 'agent refused model switch',
+      });
       // Give any (incorrectly) scheduled reconcile a tick to fire.
       await new Promise((r) => setTimeout(r, 10));
       expect(statusReads).toBe(0);
