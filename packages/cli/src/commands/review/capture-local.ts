@@ -61,7 +61,8 @@ import {
   movedSince,
   hashWorktreeFiles,
   isPathProvablyAbsent,
-  readLocalCache,
+  type readLocalCache,
+  readLocalCacheFromBytes,
   revisionIdentities,
   stateIdOf,
   UNHASHABLE,
@@ -736,8 +737,24 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     args.cache !== undefined
       ? resolveCachePath(args.cache, target, sourcePath)
       : null;
+  // ONE read of the ledger's bytes: the stop DECISION below parses this
+  // buffer and the stop stamp hashes the SAME buffer — a second disk read
+  // at stamp time let a concurrent round's ledger rewrite land in the
+  // decision→stamp window and be baked into the stamp, invisible to the
+  // compose fence (which then verified a baseline the decision never
+  // consulted). Raw bytes are kept beside the parse because the stamp is
+  // sha256 of the FILE's bytes, malformed JSON included — the parse
+  // fail-quiets, the hash must not.
+  let cacheEarlyBytes: Buffer | null = null;
+  if (cachePathEarly !== null) {
+    try {
+      cacheEarlyBytes = readFileSync(cachePathEarly);
+    } catch {
+      // No cache file — the decision sees no anchor and the stamp is null.
+    }
+  }
   const cacheEarly =
-    cachePathEarly === null ? null : readLocalCache(cachePathEarly);
+    cacheEarlyBytes === null ? null : readLocalCacheFromBytes(cacheEarlyBytes);
   const vanishedPresent: readonly string[] =
     cacheEarly === null
       ? []
@@ -1162,14 +1179,26 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     // a ledger edited between capture and compose fails closed like a
     // foreign stamp. Null is a stampable value — no cache existed at this
     // stop, so no findings were seen, and the fence fails closed on a file
-    // appearing since.
+    // appearing since. The hash is of the DECISION-time bytes when a
+    // `--cache` scoped this round — stamp and decision are projections of
+    // the one read above, so an edit landing in the decision→stamp window
+    // cannot be baked into the stamp. Only the no-`--cache` canonical
+    // path still reads the disk here: that decision consulted no ledger,
+    // so there is no decision-time buffer to prefer.
     let findingsHash: string | null = null;
-    try {
-      findingsHash = createHash('sha256')
-        .update(readFileSync(cachePath))
-        .digest('hex');
-    } catch {
-      // No cache file at this stop.
+    if (cachePathEarly !== null) {
+      findingsHash =
+        cacheEarlyBytes === null
+          ? null
+          : createHash('sha256').update(cacheEarlyBytes).digest('hex');
+    } else {
+      try {
+        findingsHash = createHash('sha256')
+          .update(readFileSync(cachePath))
+          .digest('hex');
+      } catch {
+        // No cache file at this stop.
+      }
     }
     writeFileSync(
       tmpFile(target, 'stop.json'),
@@ -1189,6 +1218,15 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
           // read, and the hash its content must still carry.
           cachePath,
           findingsHash,
+          // The scope-emptied split, capture-certified: the `superseded`
+          // deduction's input must be THIS list, and the plan it also
+          // rides in is model-editable after this write — a split edited
+          // between capture and compose could blanket-supersede a live
+          // blocker past a fence that binds only reason/cache/hash.
+          // Stamped in the interactive (no-run-id) shape too.
+          ...(nothingToReview.reason === 'scope-emptied'
+            ? { supersededPaths: incremental?.scope?.supersededPaths ?? [] }
+            : {}),
         },
         null,
         2,

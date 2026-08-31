@@ -551,6 +551,83 @@ describe('capture-local — round-2 regressions from the stop work', () => {
     );
   });
 
+  it('hashes the DECISION-time ledger bytes, not a second read at stamp time', async () => {
+    // A ledger edit landing in the decision→stamp window (a concurrent
+    // round's Step-8 rewrite of the shared file) must not be baked into
+    // the stamp: the stamp and the decision are projections of ONE read.
+    // The spy makes every cache read AFTER the first return bytes with the
+    // blocker dropped — with the fix the stamp still hashes the
+    // decision-time bytes; without it the stamp followed the second read.
+    const { readFileSync: realRead } =
+      await vi.importActual<typeof import('node:fs')>('node:fs');
+    seedDirtyTree();
+    const cachePath = promoteCandidate(
+      capture({ model: 'model-a' }),
+      'model-a',
+    );
+    recordOpenCritical(cachePath);
+    const original = realRead(cachePath) as Buffer;
+    const expected = createHash('sha256').update(original).digest('hex');
+    const mutatedCache = JSON.parse(original.toString('utf8')) as Record<
+      string,
+      unknown
+    >;
+    mutatedCache['findings'] = [];
+    const mutated = Buffer.from(JSON.stringify(mutatedCache));
+    let cacheReads = 0;
+    vi.mocked(readFileSync).mockImplementation(((
+      path: unknown,
+      opts: unknown,
+    ) => {
+      if (path === cachePath) {
+        cacheReads++;
+        if (cacheReads > 1) {
+          return typeof opts === 'string' ? mutated.toString('utf8') : mutated;
+        }
+      }
+      return realRead(
+        path as Parameters<typeof realRead>[0],
+        opts as Parameters<typeof realRead>[1],
+      );
+    }) as typeof readFileSync);
+    try {
+      const second = capture({ cache: cachePath, model: 'model-a' });
+      expect(second['nothingToReview']).toEqual({
+        reason: 'unchanged-since-last-round',
+      });
+    } finally {
+      vi.mocked(readFileSync).mockRestore();
+    }
+    const sidecar = JSON.parse(
+      readFileSync(join(repo, '.qwen/tmp/qwen-review-local-stop.json'), 'utf8'),
+    ) as Record<string, unknown>;
+    expect(sidecar['findingsHash']).toBe(expected);
+  });
+
+  it('stamps the scope-emptied split into the sidecar beside the hash', () => {
+    // The `superseded` deduction reads membership off `supersededPaths`,
+    // and the plan copy is model-editable after this write — only the
+    // capture-stamped copy certifies the split, and the compose fence
+    // refuses a plan whose split departs from it.
+    seedDirtyTree();
+    const cachePath = promoteCandidate(
+      capture({ model: 'model-a' }),
+      'model-a',
+    );
+    recordOpenCritical(cachePath);
+    git('checkout', '--', '.');
+    const plan = capture({ cache: cachePath, model: 'model-a' });
+    expect(plan['nothingToReview']).toEqual({ reason: 'scope-emptied' });
+    const scope = (
+      plan['incremental'] as { scope: { supersededPaths?: string[] } }
+    ).scope;
+    const sidecar = JSON.parse(
+      readFileSync(join(repo, '.qwen/tmp/qwen-review-local-stop.json'), 'utf8'),
+    ) as Record<string, unknown>;
+    expect(sidecar['supersededPaths']).toEqual(scope.supersededPaths);
+    expect((sidecar['supersededPaths'] as string[]).length).toBeGreaterThan(0);
+  });
+
   it('unlinks a stale stop sidecar when a later capture proves the tree moved', () => {
     // An earlier round's sidecar at this stable name stays fence-valid
     // (same reason, same cache, same hash) after the tree moves on — a

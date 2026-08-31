@@ -22,7 +22,7 @@
 
 import type { CommandModule } from 'yargs';
 import { certifierMatchesRound, roundModelIdFrom } from './lib/round-model.js';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { tmpFile } from './lib/paths.js';
 import { dirname, join } from 'node:path';
@@ -377,6 +377,7 @@ function stopSidecarFenceRefusal(
     reason?: unknown;
     cachePath?: unknown;
     findingsHash?: unknown;
+    supersededPaths?: unknown;
   };
   try {
     const parsed: unknown = JSON.parse(
@@ -410,6 +411,26 @@ function stopSidecarFenceRefusal(
       'the cache findings are not the ones the capture stamped — the ' +
       'ledger moved between capture and compose.'
     );
+  }
+  // The scope-emptied split binds too: the `superseded` deduction reads
+  // membership off the plan's `supersededPaths`, and the plan is
+  // model-editable after the capture wrote it — a split edited between
+  // capture and compose could blanket-supersede a live blocker past a
+  // fence that bound only reason/cache/hash. Only the capture-stamped
+  // copy certifies the split; a sidecar without one (older, or
+  // hand-written) fails closed for this reason.
+  if (planStopReason === 'scope-emptied') {
+    const stamped = stop.supersededPaths;
+    if (
+      !Array.isArray(stamped) ||
+      JSON.stringify(stamped) !== JSON.stringify(snap.supersededPaths)
+    ) {
+      return (
+        "the plan's supersededPaths depart from the split the capture " +
+        'stamped — a superseded deduction reads only the ' +
+        'capture-certified split.'
+      );
+    }
   }
   return null;
 }
@@ -3818,6 +3839,10 @@ function composeReviewBody(
   let unvouchedReAssertions = 0;
   let unvouchedTaggedReAssertions = 0;
   let unvouchedRelocatedDeterministic = 0;
+  // The granted plan's own target, kept for the post-bind sidecar consume —
+  // re-reading the plan there would be the second read the snapshot
+  // doctrine exists to avoid.
+  let grantedStopTarget: string | null = null;
   const stopReRuleGranted = (() => {
     // Model-written state: the declared type promises an object, the file
     // on disk can hand anything — a `null` here must be the designed
@@ -3982,6 +4007,7 @@ function composeReviewBody(
         }
       }
     }
+    grantedStopTarget = snap.target;
     // The body↔disposition cross-check is NOT here: it runs below, over the
     // final local body set. Relocation pushes entries after this point and
     // ingest transforms them, so a check over the raw input missed both.
@@ -4124,6 +4150,26 @@ function composeReviewBody(
           `over ${stillStands.size} still-stands rulings — every ` +
           'still-stands ruling re-asserts exactly one body Critical.',
       );
+    }
+    // Interim hardening for the write-surface class (#10654): an
+    // interactive (no-run-id) sidecar is CONSUMED once every bind above
+    // passed — nothing else ever reads it (no parent is polling), and
+    // left on disk it re-licences this same plan on a later, moved tree
+    // (a replay clears a blocker no round re-verified). Consumed only
+    // AFTER the full grant, so a refusal above leaves the sidecar for the
+    // orchestrator's corrected retry. The gated sidecar stays: the parent
+    // still reads it for completion, and its runId fence already refuses
+    // replays across runs.
+    const grantRunId = (input.env ?? process.env)['QWEN_REVIEW_RUN_ID'];
+    if (
+      (typeof grantRunId !== 'string' || grantRunId === '') &&
+      grantedStopTarget !== null
+    ) {
+      try {
+        unlinkSync(tmpFile(grantedStopTarget, 'stop.json'));
+      } catch {
+        // already gone
+      }
     }
   } else if (input.planPath) {
     // The gate ran above, where its claims were needed to dedup the model's
@@ -6498,27 +6544,39 @@ function composeReviewBody(
     // untagged, a merge of only these defaulted to the weakest, and the tail
     // cut spent "Review incomplete — unverified findings disclosed." before
     // it spent a single blocker.
+    // The granted stop takes its own opener AHEAD of the whole certifying
+    // chain: no review ran, so neither 'Reviewed — no blockers.' nor the
+    // bare 'Reviewed.' fallback may open the body — a cleared stop's
+    // COMMENT opened exactly that way, two paragraphs above its own 'no
+    // review agents ran this round' disclosure. The wording matches
+    // `stopRoundBlock`'s frame: this round re-ruled standing findings.
     clauses.push(
-      coverageOpener ??
-        (canCertify
-          ? {
-              keep: 1,
-              en: 'Reviewed — no blockers.',
-              zh: '已审查——无阻断问题。',
-            }
-          : findingsFileUnreadable
-            ? {
-                keep: 1,
-                en: 'Review incomplete — findings unavailable.',
-                zh: '审查未完成——发现不可用。',
-              }
-            : findingsUnverifiedAtCompose
+      stopReRuleGranted
+        ? {
+            keep: 1,
+            en: 'Re-rule of standing findings — no new review ran.',
+            zh: '对既有发现的重裁——本轮未运行新的审查。',
+          }
+        : (coverageOpener ??
+            (canCertify
               ? {
                   keep: 1,
-                  en: 'Review incomplete — unverified findings disclosed.',
-                  zh: '审查未完成——未验证的发现已披露。',
+                  en: 'Reviewed — no blockers.',
+                  zh: '已审查——无阻断问题。',
                 }
-              : { keep: 1, en: 'Reviewed.', zh: '已审查。' }),
+              : findingsFileUnreadable
+                ? {
+                    keep: 1,
+                    en: 'Review incomplete — findings unavailable.',
+                    zh: '审查未完成——发现不可用。',
+                  }
+                : findingsUnverifiedAtCompose
+                  ? {
+                      keep: 1,
+                      en: 'Review incomplete — unverified findings disclosed.',
+                      zh: '审查未完成——未验证的发现已披露。',
+                    }
+                  : { keep: 1, en: 'Reviewed.', zh: '已审查。' })),
     );
   }
 

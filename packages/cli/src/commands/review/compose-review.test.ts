@@ -15804,6 +15804,7 @@ describe('composeReview — the decided-stop re-rule', () => {
         name: opts.name,
         reason: opts.reason,
         cacheFile: opts.cacheFile,
+        supersededPaths: opts.supersededPaths,
       });
     }
     return p;
@@ -15835,6 +15836,7 @@ describe('composeReview — the decided-stop re-rule', () => {
       runId?: string;
       target?: string;
       cacheFile?: string;
+      supersededPaths?: string[];
     } = {},
   ): string {
     const cachePath =
@@ -15857,13 +15859,19 @@ describe('composeReview — the decided-stop re-rule', () => {
       dir,
       `.qwen/tmp/qwen-review-${opts.target ?? 'local'}-stop.json`,
     );
+    const reason = opts.reason ?? 'unchanged-since-last-round';
     writeFileSync(
       sidecarPath,
       JSON.stringify({
-        reason: opts.reason ?? 'unchanged-since-last-round',
+        reason,
         ...(opts.runId !== undefined ? { runId: opts.runId } : {}),
         cachePath,
         findingsHash,
+        // The capture stamps the split on every scope-emptied stop — the
+        // fence fails closed on its absence for that reason.
+        ...(reason === 'scope-emptied'
+          ? { supersededPaths: opts.supersededPaths ?? [] }
+          : {}),
       }),
     );
     return sidecarPath;
@@ -15886,6 +15894,14 @@ describe('composeReview — the decided-stop re-rule', () => {
       bodyCriticals: [],
     });
     expect(r.event).toBe('COMMENT');
+    // The opener may not certify a review that never ran: the cleared
+    // stop's COMMENT once opened 'Reviewed — no blockers.' two paragraphs
+    // above its own 'no review agents ran this round' disclosure.
+    expect(r.body).not.toContain('Reviewed — no blockers.');
+    expect(r.body).not.toMatch(/^Reviewed\./);
+    expect(r.body).toContain(
+      'Re-rule of standing findings — no new review ran.',
+    );
   });
 
   it('refuses a full-round plan wearing the flag', () => {
@@ -16386,6 +16402,93 @@ describe('composeReview — the decided-stop re-rule', () => {
         ],
       }),
     ).toThrow(/carries the \(fix-induced\) marking/);
+  });
+
+  it('refuses a plan whose supersededPaths depart from the stamped split', () => {
+    // The fence bound reason/cache/hash but not the split — a plan edited
+    // AFTER the capture stamped could blanket-supersede a live blocker
+    // through the one ruling channel the fence did not bind.
+    const planPath = stopPlan({
+      name: 'forged-split',
+      reason: 'scope-emptied',
+      ledger: [
+        {
+          id: 'R1-1',
+          severity: 'Critical',
+          status: 'open',
+          file: 'src/live.ts',
+          title: 'the mechanism still fires — re-read at HEAD',
+        },
+      ],
+      supersededPaths: [],
+    });
+    // The model edits the PLAN's split after the stamp; the sidecar still
+    // certifies the empty one.
+    const plan = JSON.parse(readFileSync(planPath, 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    plan['incremental'] = { scope: { supersededPaths: ['src/live.ts'] } };
+    writeFileSync(planPath, JSON.stringify(plan));
+    expect(() =>
+      reRule({
+        planPath,
+        stopReRule: { dispositions: [{ id: 'R1-1', ruling: 'superseded' }] },
+        bodyCriticals: [],
+      }),
+    ).toThrow(/depart from the split the capture stamped/);
+  });
+
+  it('consumes an interactive sidecar on grant — a replay is refused', () => {
+    // #10654's interim hardening: nothing else ever reads a no-run-id
+    // sidecar, and left on disk it re-licences the same plan on a later,
+    // moved tree. Consumed only after the FULL grant — a refusal leaves it
+    // for the corrected retry — and never under a published run id, where
+    // the parent still reads it for completion.
+    const planPath = stopPlan({ name: 'consume' });
+    expect(reRule({ planPath }).event).toBe('REQUEST_CHANGES');
+    expect(() => reRule({ planPath })).toThrow(/no stop sidecar/);
+    // A refused grant leaves the sidecar in place for the retry.
+    const planPath2 = stopPlan({ name: 'consume-retry' });
+    expect(() =>
+      reRule({
+        planPath: planPath2,
+        stopReRule: { dispositions: [] },
+        bodyCriticals: [],
+      }),
+    ).toThrow(/has no disposition/);
+    expect(reRule({ planPath: planPath2 }).event).toBe('REQUEST_CHANGES');
+    // Under a published run id the sidecar stays for the parent.
+    const env = { ...ENV, QWEN_REVIEW_RUN_ID: 'run-X' };
+    const planPath3 = stopPlan({ name: 'consume-gated', sidecar: false });
+    stampStopSidecar({ name: 'consume-gated', runId: 'run-X' });
+    expect(reRule({ planPath: planPath3, env }).event).toBe('REQUEST_CHANGES');
+    expect(reRule({ planPath: planPath3, env }).event).toBe('REQUEST_CHANGES');
+  });
+
+  it('refuses a sidecar that parses to null with the designed refusal', () => {
+    const planPath = stopPlan({ name: 'null-sidecar', sidecar: false });
+    mkdirSync(join(dir, '.qwen/tmp'), { recursive: true });
+    writeFileSync(join(dir, '.qwen/tmp/qwen-review-local-stop.json'), 'null');
+    expect(() => reRule({ planPath })).toThrow(/no stop sidecar/);
+  });
+
+  it('refuses a cache file that APPEARED after a null-hash stamp', () => {
+    // Null is a stampable value — no cache existed at the stop — and the
+    // fence must fail closed on a file appearing since, not read it as an
+    // admitted empty baseline.
+    const missing = join(dir, 'appearing-cache.json');
+    rmSync(missing, { force: true });
+    const planPath = stopPlan({ name: 'appearing', cacheFile: missing });
+    writeFileSync(
+      missing,
+      JSON.stringify({
+        findings: [{ id: 'R9-9', severity: 'Critical', status: 'open' }],
+      }),
+    );
+    expect(() =>
+      reRule({ planPath, stopReRule: { dispositions: [] }, bodyCriticals: [] }),
+    ).toThrow(/not the ones the capture stamped/);
   });
 
   it('refuses a sidecar stamped by a different run', () => {
