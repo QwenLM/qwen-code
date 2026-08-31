@@ -12416,6 +12416,26 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       };
     },
 
+    async setUserLanguage(params) {
+      // Sessionless: runs on whatever channel is already live. A runtime
+      // without one has no sessions to refresh and re-reads the persisted
+      // files when its channel next spawns, so the daemon route treats the
+      // SessionNotFoundError as "skipped", not failed.
+      const info = liveChannelInfo();
+      if (!info) throw new SessionNotFoundError('user-language');
+      return (await withTimeout(
+        Promise.race([
+          info.connection.extMethod(SERVE_CONTROL_EXT_METHODS.userLanguage, {
+            language: params.language,
+            syncOutputLanguage: params.syncOutputLanguage,
+          }),
+          getChannelClosedReject(info),
+        ]),
+        initTimeoutMs,
+        SERVE_CONTROL_EXT_METHODS.userLanguage,
+      )) as { language: string; sessions: number; failed: number };
+    },
+
     async setSessionLiveConversationActive(sessionId, active) {
       await requestSessionStatus<Record<string, unknown>>(
         sessionId,
