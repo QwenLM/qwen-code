@@ -21,7 +21,7 @@ import {
   isSubpath,
   resolveBundleDir,
 } from '@qwen-code/qwen-code-core';
-import { createHash, randomBytes } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { parseSandboxImageName } from '../utils/sandboxImageName.js';
 import { isContainerPathWithinWorkdir } from '../utils/sandbox-path.js';
@@ -654,20 +654,10 @@ export async function start_sandbox(
     containerName = `${imageName}-${randomBytes(4).toString('hex')}`;
     writeStderrLine(`ContainerName (regular): ${containerName}`);
   }
-  // Linux HOST_NAME_MAX is 64. A regular container name derived from an image
-  // ID (`sha256-<64hex>` + `-<8hex>` suffix = 80 chars) exceeds it, and
-  // `docker run` then fails with `sethostname: invalid argument` (exit 125).
-  // --name keeps the full name; --hostname falls back to a short hash when
-  // the container name is too long (integration-test names are already short
-  // and keep using the container name). See #10605 (F1).
-  const hostname =
-    containerName.length <= 64
-      ? containerName
-      : `qwen-sandbox-${createHash('sha256')
-          .update(containerName)
-          .digest('hex')
-          .slice(0, 12)}`;
-  args.push('--name', containerName, '--hostname', hostname);
+  args.push('--name', containerName);
+  if (containerName.length <= 64) {
+    args.push('--hostname', containerName);
+  }
 
   // copy QWEN_CODE_TEST_VAR for integration tests
   if (process.env['QWEN_CODE_TEST_VAR']) {

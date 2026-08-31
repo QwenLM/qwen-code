@@ -84,6 +84,9 @@ describe('start_sandbox', () => {
     await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(2));
     const args = spawnMock.mock.calls[1]?.[1] as string[];
     const options = spawnMock.mock.calls[1]?.[2];
+    expect(args[args.indexOf('--hostname') + 1]).toBe(
+      args[args.indexOf('--name') + 1],
+    );
     const envFlagIndex = args.indexOf(PRIVATE_ACP_CAPABILITY_ENV);
     expect(args.slice(envFlagIndex - 1, envFlagIndex + 1)).toEqual([
       '--env',
@@ -108,7 +111,7 @@ describe('start_sandbox', () => {
     await expect(result).resolves.toBe(0);
   });
 
-  it('shortens --hostname when the image-ID container name exceeds HOST_NAME_MAX', async () => {
+  it('lets the runtime choose a hostname for image-ID containers', async () => {
     vi.stubEnv('SANDBOX_SET_UID_GID', 'false');
     vi.stubEnv('QWEN_CODE_WARNINGS_FILE', '');
     vi.spyOn(fs, 'existsSync').mockReturnValue(true);
@@ -131,10 +134,6 @@ describe('start_sandbox', () => {
       })
       .mockReturnValueOnce(child);
 
-    // An image ID (`sha256:` + 64 hex) yields an 80-char container name,
-    // above HOST_NAME_MAX (64); --hostname must be shortened while --name
-    // keeps the full name (#10605 F1, exit 125 `sethostname: invalid
-    // argument`).
     const result = start_sandbox(
       { command: 'docker', image: `sha256:${'a'.repeat(64)}` },
       [],
@@ -145,10 +144,8 @@ describe('start_sandbox', () => {
     await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(2));
     const args = spawnMock.mock.calls[1]?.[1] as string[];
     const containerName = args[args.indexOf('--name') + 1];
-    const hostname = args[args.indexOf('--hostname') + 1];
     expect(containerName.length).toBeGreaterThan(64);
-    expect(hostname.length).toBeLessThanOrEqual(64);
-    expect(hostname).not.toBe(containerName);
+    expect(args).not.toContain('--hostname');
 
     child.emit('close', 0);
     await expect(result).resolves.toBe(0);
