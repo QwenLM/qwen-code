@@ -888,22 +888,39 @@ describe('qwen-autofix.yml design-record pointers', () => {
   // renders as code inside its predecessor. Track fence parity line by
   // line, matching GitHub's CommonMark: an opener is a column-0..3
   // backtick run whose info string carries NO backtick (a backtick in
-  // the info string renders a paragraph, not a fence); a closer needs at
-  // least the opener's length and nothing but SPACES after it — a
-  // tab-suffixed line is fence CONTENT on GitHub. Fence shapes this
-  // parity model does not prove — tilde fences and fences nested in
-  // blockquotes or indented four columns — fail closed: the design doc
-  // is gate-authored and must contain none. Every anchor AND every
-  // entry heading must sit outside.
+  // the info string renders a paragraph, not a fence); a closer needs
+  // at least the opener's length and nothing but SPACES OR TABS after
+  // it — CommonMark 4.5 ignores both, so a tab-suffixed closer CLOSES
+  // the block on GitHub (cmark-gfm, markdown-it, and micromark agree).
+  // An anchor minted inside an opener's info string never renders and
+  // is flagged at the opener. Fence shapes this parity model does not
+  // prove — tilde fences and fences nested in blockquotes or indented
+  // four columns — fail closed: the design doc is gate-authored and
+  // must contain none. Every anchor AND every entry heading must sit
+  // outside. The net's polarity is inverted in the entry region:
+  // OUTSIDE an open fence, a line matching none of the doc's closed
+  // entry grammar fails closed — a tracker desynced from GitHub then
+  // flags the fenced content it misreads as outside, whatever shape
+  // that content takes, instead of each bad shape being enumerated.
+  const ENTRY_GRAMMAR = [
+    /^\s*$/,
+    /^<a id="af-\d+"><\/a>$/,
+    /^### \d+\./,
+    /^In `/,
+    /^Duplicated verbatim in \d+ places?: /,
+  ];
   const scanFenceParity = (text) => {
     let openLen = 0;
+    let inEntries = false;
     const fencedAnchors = [];
     const fencedHeadings = [];
     const unmodeledFences = [];
+    const grammarViolations = [];
     for (const line of text.split('\n')) {
       if (openLen === 0) {
         const m = /^ {0,3}(`{3,})([^`]*)$/.exec(line);
         if (m) {
+          if (m[2].includes('<a id="af-')) fencedAnchors.push(line);
           openLen = m[1].length;
           continue;
         }
@@ -912,8 +929,14 @@ describe('qwen-autofix.yml design-record pointers', () => {
         ) {
           unmodeledFences.push(line);
         }
+        if (!inEntries && /^<a id="af-\d+"><\/a>$/.test(line)) {
+          inEntries = true;
+        }
+        if (inEntries && !ENTRY_GRAMMAR.some((re) => re.test(line))) {
+          grammarViolations.push(line);
+        }
       } else {
-        const c = /^ {0,3}(`{3,}) *$/.exec(line);
+        const c = /^ {0,3}(`{3,})[ \t]*$/.exec(line);
         if (c && c[1].length >= openLen) {
           openLen = 0;
           continue;
@@ -922,13 +945,28 @@ describe('qwen-autofix.yml design-record pointers', () => {
         if (/^### \d+\./.test(line)) fencedHeadings.push(line);
       }
     }
-    return { openLen, fencedAnchors, fencedHeadings, unmodeledFences };
+    return {
+      openLen,
+      fencedAnchors,
+      fencedHeadings,
+      unmodeledFences,
+      grammarViolations,
+    };
   };
 
   it('keeps every section anchor outside any fenced code block', () => {
     const parity = scanFenceParity(doc);
     expect(parity.fencedAnchors).toEqual([]);
     expect(parity.openLen).toBe(0);
+  });
+
+  it('keeps the entry region inside the closed entry grammar', () => {
+    // Inverted polarity: outside an open fence, a line matching none of
+    // the entry shapes fails closed — a tracker desynced from GitHub
+    // flags the fenced content it misreads as outside, whatever shape
+    // that content takes.
+    const parity = scanFenceParity(doc);
+    expect(parity.grammarViolations).toEqual([]);
   });
 
   it('keeps every entry heading outside any fenced code block', () => {
@@ -950,13 +988,12 @@ describe('qwen-autofix.yml design-record pointers', () => {
     expect(
       scanFenceParity('```text\n<a id="af-1"></a>').fencedAnchors.length,
     ).toBeGreaterThan(0);
-    // A tab-suffixed closer is fence CONTENT on GitHub: the anchor after
-    // it is still inside the block while a trim()-based closer would
-    // free it.
+    // A tab-suffixed closer CLOSES the fence on GitHub (CommonMark 4.5
+    // ignores spaces and tabs after the closer): the anchor after it is
+    // outside, and a model refusing the tab desyncs from the rendering.
     expect(
-      scanFenceParity('```text\nfoo\n```\t\n<a id="af-2"></a>').fencedAnchors
-        .length,
-    ).toBeGreaterThan(0);
+      scanFenceParity('```text\nfoo\n```\t\n<a id="af-2"></a>').fencedAnchors,
+    ).toEqual([]);
     // A fence wrapping an entry's heading and body, anchor outside.
     expect(
       scanFenceParity('<a id="af-3"></a>\n```text\n### 3. title\n```')
@@ -973,12 +1010,39 @@ describe('qwen-autofix.yml design-record pointers', () => {
       '```note `see` rationale\n```\n<a id="af-5"></a>',
     );
     expect(phantom.fencedAnchors.length).toBeGreaterThan(0);
+    // The tab-closer desync: the tab-suffixed closer closes the first
+    // fence, so the second fence swallows the anchor — the model must
+    // track with the spec-conformant renderers and flag it.
+    const desync = scanFenceParity(
+      '```text\nfoo\n```\t\n```\n<a id="af-99"></a>\n```',
+    );
+    expect(desync.fencedAnchors.length).toBeGreaterThan(0);
+    expect(desync.openLen).toBe(0);
+    // A tab- or space-indented anchor line OUTSIDE a fence renders as
+    // literal code on GitHub (CommonMark 4.3): the inverted net fails
+    // closed on the shape instead of trusting the tracker's silence.
+    expect(
+      scanFenceParity('<a id="af-7"></a>\n\t<a id="af-70"></a>')
+        .grammarViolations.length,
+    ).toBeGreaterThan(0);
+    // A fence opened ON a list-marker line matches neither the opener
+    // regex nor any net arm — the inverted net fails closed on it.
+    expect(
+      scanFenceParity('<a id="af-8"></a>\n- ```text').grammarViolations.length,
+    ).toBeGreaterThan(0);
+    // An anchor minted inside an opener's info string never renders on
+    // GitHub — the opener flags it before opening the block.
+    expect(
+      scanFenceParity('```text <a id="af-9"></a>\nfoo\n```').fencedAnchors
+        .length,
+    ).toBeGreaterThan(0);
     // Control: a balanced backtick fence around plain text — the model's
     // comparator is alive, nothing flagged.
     const control = scanFenceParity('```text\nplain\n```\n<a id="af-6"></a>');
     expect(control.fencedAnchors).toEqual([]);
     expect(control.fencedHeadings).toEqual([]);
     expect(control.unmodeledFences).toEqual([]);
+    expect(control.grammarViolations).toEqual([]);
     expect(control.openLen).toBe(0);
   });
 });

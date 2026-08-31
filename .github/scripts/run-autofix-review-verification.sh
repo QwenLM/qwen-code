@@ -1119,21 +1119,27 @@ WEAKEN_ASSERT_RE='(^|[^A-Za-z0-9_$.])assert(\(|\.[A-Za-z_$][A-Za-z0-9_$]*\()|(^|
 # and a matcher that is only property-accessed, never called
 # (expect(x).toBe;) throws nothing — the maximal relaxation of an
 # assertion. The tail therefore demands the member identifier plus a
-# call opener ('(' or an optional-chaining '?'), through any further
-# dotted members (expect(x).not.toBe(...)). The del side stays bare on
-# purpose: a multi-line-formatted expect(...) then measures as a
-# removal — the fail-closed direction, one ack entry answers it. The
-# member form .expect( IS its own assertion, but it carries the same
-# matcher-tail requirement here on purpose: a bare-added member call
-# then measures as removal-only — the fail-closed direction. The
-# throwing members need no tail: the CALL itself fails the test, so an
-# added expect.unreachable( earns addition credit as written.
+# CALL opener — '(' or the optional-chaining call '?.' — through any
+# further dotted members (expect(x).not.toBe(...)). A bare '?' is the
+# head of a ternary or nullish (expect(x).toBe ? 1 : 2 reads the
+# matcher as a value and throws nothing), so it earns no credit. The
+# del side stays bare on purpose: a multi-line-formatted expect(...)
+# then measures as a removal — the fail-closed direction, one ack entry
+# answers it. The member form .expect( IS its own assertion, but it
+# carries the same matcher-tail requirement here on purpose: a
+# bare-added member call then measures as removal-only — the
+# fail-closed direction. expect.soft( pins only through its RECORDED
+# matcher calls (a bare expect.soft( passes recording zero assertions),
+# so it rides the called-matcher arm and earns credit only with a
+# called matcher; hasAssertions( and unreachable( need no tail — the
+# CALL itself fails the test, so an added expect.unreachable( earns
+# addition credit as written.
 # expect.assertions( is NOT whitelisted here: assertions(0) passes
 # exactly when ZERO assertions run — the count-mismatch throw is
 # unreachable precisely when the test pins nothing, so its add-side
 # credit would certify that shape. The del/blob RE above keeps it:
 # REMOVING such a line still counts — the fail-closed asymmetry.
-WEAKEN_ASSERT_ADD_RE='(^|[^A-Za-z0-9_$.])assert(\(|\.[A-Za-z_$][A-Za-z0-9_$]*\()|(^|[^A-Za-z0-9_$.])expect(\.poll)?\(.*\)[[:space:]]*\.[A-Za-z_$][A-Za-z0-9_$]*([[:space:]]*\.[[:space:]]*[A-Za-z_$][A-Za-z0-9_$]*)*[[:space:]]*[(?]|(^|[^A-Za-z0-9_$.])expect\.(soft|hasAssertions|unreachable)\(|\.expect(\.poll)?\(.*\)[[:space:]]*\.[A-Za-z_$][A-Za-z0-9_$]*([[:space:]]*\.[[:space:]]*[A-Za-z_$][A-Za-z0-9_$]*)*[[:space:]]*[(?]'
+WEAKEN_ASSERT_ADD_RE='(^|[^A-Za-z0-9_$.])assert(\(|\.[A-Za-z_$][A-Za-z0-9_$]*\()|(^|[^A-Za-z0-9_$.])expect(\.(poll|soft))?\(.*\)[[:space:]]*\.[A-Za-z_$][A-Za-z0-9_$]*([[:space:]]*\.[[:space:]]*[A-Za-z_$][A-Za-z0-9_$]*)*[[:space:]]*([?][.])?[(]|(^|[^A-Za-z0-9_$.])expect\.(hasAssertions|unreachable)\(|\.expect(\.poll)?\(.*\)[[:space:]]*\.[A-Za-z_$][A-Za-z0-9_$]*([[:space:]]*\.[[:space:]]*[A-Za-z_$][A-Za-z0-9_$]*)*[[:space:]]*([?][.])?[(]'
 # Marker shapes beyond the dotted one-line form: a concurrent/
 # sequential/shuffle chain ahead of the modifier (test.concurrent.skip(),
 # describe.concurrent.skip()) or BEHIND it (it.skip.concurrent( — vitest
@@ -1148,11 +1154,14 @@ WEAKEN_ASSERT_ADD_RE='(^|[^A-Za-z0-9_$.])assert(\(|\.[A-Za-z_$][A-Za-z0-9_$]*\()
 # options-object form test('x', { skip: true }, fn), which carries no
 # collector modifier (the value must be the true LITERAL: a
 # condition-valued skip is this repo's skipIf environment-guard idiom
-# and stays exempt like .skipIf); and the runtime body call skip( —
-# ctx.skip() disables a pre-existing test with no collector edit. The
-# body arm demands ( immediately after skip so .skipIf( stays exempt.
+# and stays exempt like .skipIf), with the registering paren tolerant
+# of an each/for parameterizer between the root and the paren
+# (it.each(table)('x', { skip: true }, fn) disables the parameterized
+# test the same way); and the runtime body call skip( — ctx.skip()
+# disables a pre-existing test with no collector edit. The body arm
+# demands ( immediately after skip so .skipIf( stays exempt.
 # shellcheck disable=SC2016  # the $ bytes are regex character-class literals, not shell expansions
-WEAKEN_SKIP_RE='(^|[^A-Za-z0-9_$.])(it|test|describe|suite)[[:space:]]*([?]?[.][[:space:]]*(concurrent|sequential|shuffle)[[:space:]]*)*[?]?[.][[:space:]]*(skip|todo|fails|failing)([[:space:]]*[?]?[.][[:space:]]*(each|for|concurrent|sequential|shuffle)[[:space:]]*)*[[:space:]]*([?][.])?[(<`]|(^|[^A-Za-z0-9_$.])(it|test|describe|suite)[[:space:]]*\[[[:space:]]*('\''|"|`)(skip|todo|fails|failing)('\''|"|`)[[:space:]]*\][[:space:]]*([?][.])?[(<`]|(^|[^A-Za-z0-9_$.])x(it|describe)([[:space:]]*\.[[:space:]]*each)?[[:space:]]*\(|(^|[^A-Za-z0-9_$.])(it|test|describe|suite)[[:space:]]*\(.+[{,][[:space:]]*(skip|todo)[[:space:]]*:[[:space:]]*true|(^|[^A-Za-z0-9_$])skip\('
+WEAKEN_SKIP_RE='(^|[^A-Za-z0-9_$.])(it|test|describe|suite)[[:space:]]*([?]?[.][[:space:]]*(concurrent|sequential|shuffle)[[:space:]]*)*[?]?[.][[:space:]]*(skip|todo|fails|failing)([[:space:]]*[?]?[.][[:space:]]*(each|for|concurrent|sequential|shuffle)[[:space:]]*)*[[:space:]]*([?][.])?[(<`]|(^|[^A-Za-z0-9_$.])(it|test|describe|suite)[[:space:]]*\[[[:space:]]*('\''|"|`)(skip|todo|fails|failing)('\''|"|`)[[:space:]]*\][[:space:]]*([?][.])?[(<`]|(^|[^A-Za-z0-9_$.])x(it|describe)([[:space:]]*\.[[:space:]]*each)?[[:space:]]*\(|(^|[^A-Za-z0-9_$.])(it|test|describe|suite)[[:space:]]*([?]?[.][[:space:]]*(each|for)[[:space:]]*[(][^)]*[)][[:space:]]*)*[[:space:]]*\(.+[{,][[:space:]]*(skip|todo)[[:space:]]*:[[:space:]]*true|(^|[^A-Za-z0-9_$])skip\('
 # Measured weakenings travel as parallel indexed arrays, never a
 # newline/tab-joined string: filenames are branch-controlled bytes, and a
 # name carrying a newline or tab splits a delimited record into fragments
@@ -1181,6 +1190,14 @@ WEAKEN_MERGE_INTRODUCED=()
 # netting may not drop their charges, because for an --ours resolution
 # the damage IS the identity with the pre-round bytes.
 WEAKEN_MERGE_TOUCHED=()
+# Per-file old side of the verdict-time recount: the introducing merge's
+# RESULT blob for files a main-derived merge touched or introduced.
+# Merge result to tip is exactly the round's post-merge authorship, so
+# the recount nets cross-commit decoys there too while main's own delta
+# crossing the merge neither charges nor shields. The oldest-first walk
+# overwrites earlier entries: the LAST such merge bounds the range.
+WEAKEN_RECOUNT_BASE_FILES=()
+WEAKEN_RECOUNT_BASE_REFS=()
 # Oldest-first: a merge's WEAKEN_MERGE_INTRODUCED seed must land before
 # the post-merge commits that consult it, and a pre-round-baseline re-add
 # measurement reads the accumulators the earlier commits filled.
@@ -1202,6 +1219,30 @@ weaken_member() {
   shift
   for weaken_e in "$@"; do
     if [[ "${weaken_e}" == "${f}" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+# Record ${2} as the recount base ref for file ${1}; a later merge
+# overwrites the earlier entry (the walk is oldest-first).
+weaken_recount_base_set() {
+  local f="${1}" ref="${2}" weaken_bi
+  for (( weaken_bi = 0; weaken_bi < ${#WEAKEN_RECOUNT_BASE_FILES[@]}; weaken_bi++ )); do
+    if [[ "${WEAKEN_RECOUNT_BASE_FILES[weaken_bi]}" == "${f}" ]]; then
+      WEAKEN_RECOUNT_BASE_REFS[weaken_bi]="${ref}"
+      return 0
+    fi
+  done
+  WEAKEN_RECOUNT_BASE_FILES+=("${f}")
+  WEAKEN_RECOUNT_BASE_REFS+=("${ref}")
+}
+# Print the recount base ref recorded for ${1}; failure on no entry.
+weaken_recount_base_get() {
+  local f="${1}" weaken_bi
+  for (( weaken_bi = 0; weaken_bi < ${#WEAKEN_RECOUNT_BASE_FILES[@]}; weaken_bi++ )); do
+    if [[ "${WEAKEN_RECOUNT_BASE_FILES[weaken_bi]}" == "${f}" ]]; then
+      printf '%s\n' "${WEAKEN_RECOUNT_BASE_REFS[weaken_bi]}"
       return 0
     fi
   done
@@ -1348,13 +1389,14 @@ weaken_strip_code() {
 # Join newline-split member chains so a marker written across lines
 # measures like the one-line form: carry a one-line buffer, appending the
 # current line while the joined line still ends in a marker-chain head
-# (it/test/describe, an optional modifier chain, a trailing dot).
+# (it/test/describe/suite — every root the skip RE measures — an
+# optional modifier chain, a trailing dot).
 weaken_join_markers() {
   awk '
     {
       if (buf == "") buf = $0
       else buf = buf $0
-      if (buf ~ /(^|[^A-Za-z0-9_$.])(it|test|describe)([[:space:]]*\.[[:space:]]*(concurrent|sequential|shuffle|skip|todo|fails|failing|each|for))*[[:space:]]*\.?[[:space:]]*$/) next
+      if (buf ~ /(^|[^A-Za-z0-9_$.])(it|test|describe|suite)([[:space:]]*\.[[:space:]]*(concurrent|sequential|shuffle|skip|todo|fails|failing|each|for))*[[:space:]]*\.?[[:space:]]*$/) next
       print buf; buf = ""
     }
     END { if (buf != "") print buf }'
@@ -1583,6 +1625,7 @@ while IFS= read -r c; do
     while IFS= read -r -d '' weaken_mf; do
       [[ -n "${weaken_mf}" ]] || continue
       WEAKEN_MERGE_INTRODUCED+=("${weaken_mf}")
+      weaken_recount_base_set "${weaken_mf}" "${c}"
     done < <(git diff --name-only -z --no-renames --diff-filter=A "${c}^" "${c}" \
       -- "${WEAKEN_PATHSPEC[@]}" 2> /dev/null)
     # A merge that wholesale DISCARDS a test main added during the round
@@ -1598,6 +1641,7 @@ while IFS= read -r c; do
       if ! weaken_member "${weaken_mf}" "${WEAKEN_MERGE_INTRODUCED[@]}"; then
         WEAKEN_MERGE_INTRODUCED+=("${weaken_mf}")
       fi
+      weaken_recount_base_set "${weaken_mf}" "${c}"
     done < <(git diff --name-only -z --no-renames --diff-filter=A "${c}^" "${c}^2" \
       -- "${WEAKEN_PATHSPEC[@]}" 2> /dev/null)
   fi
@@ -1637,6 +1681,7 @@ while IFS= read -r c; do
     fi
     if [[ -n "${is_merge}" ]]; then
       WEAKEN_MERGE_TOUCHED+=("${f}")
+      weaken_recount_base_set "${f}" "${c}"
     fi
     if ! weaken_count_commit_file "${c}" "${f}" "${is_merge}"; then
       WEAKEN_MEASURED='false'
@@ -1693,15 +1738,22 @@ if [[ "${WEAKEN_MEASURED}" == 'true' ]]; then
     # the accumulators net credits across ALL round commits: a decoy
     # credit committed as a SIBLING commit to the weakening it cancels
     # escapes both. Recount the whole round at verdict time — stripped
-    # pre-round and tip densities per arm, the larger signal wins, the
-    # same rule the per-commit arms apply within one commit. Files a
-    # main-derived merge touched are exempt: their per-commit result
-    # carries the freight attribution, and a pre->tip recount would
-    # charge main's own delta that crossed the merge.
-    if ! weaken_member "${f}" "${WEAKEN_MERGE_TOUCHED[@]}" &&
-      git cat-file -e "origin/${BRANCH}:${f}" 2> /dev/null &&
+    # base and tip densities per arm, the larger signal wins, the same
+    # rule the per-commit arms apply within one commit. The base is the
+    # pre-round ref, except for files a main-derived merge touched or
+    # introduced: they recount from that merge's RESULT blob, because
+    # merge result to tip is exactly the round's post-merge authorship —
+    # main's own delta that crossed the merge neither charges nor
+    # shields, and a pre->tip recount would charge it.
+    weaken_round_ref="origin/${BRANCH}"
+    if weaken_member "${f}" "${WEAKEN_MERGE_TOUCHED[@]}" ||
+      weaken_member "${f}" "${WEAKEN_MERGE_INTRODUCED[@]}"; then
+      weaken_round_ref="$(weaken_recount_base_get "${f}")" || weaken_round_ref=''
+    fi
+    if [[ -n "${weaken_round_ref}" ]] &&
+      git cat-file -e "${weaken_round_ref}:${f}" 2> /dev/null &&
       git cat-file -e "${BRANCH}:${f}" 2> /dev/null; then
-      weaken_round_old="$(git show "origin/${BRANCH}:${f}" 2> /dev/null)" || weaken_round_old=''
+      weaken_round_old="$(git show "${weaken_round_ref}:${f}" 2> /dev/null)" || weaken_round_old=''
       weaken_round_new="$(git show "${BRANCH}:${f}" 2> /dev/null)" || weaken_round_new=''
       weaken_round_old_stripped="$(weaken_strip_code <<< "${weaken_round_old}")"
       weaken_round_new_stripped="$(weaken_strip_code <<< "${weaken_round_new}")"

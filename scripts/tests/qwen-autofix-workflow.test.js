@@ -24560,6 +24560,35 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
         AGENT_COMMIT,
       ],
     },
+    // The newline-split suite.skip call tail: the join collector must
+    // buffer suite like the other collector roots, or the split form
+    // measures zero while WEAKEN_SKIP_RE measures the one-line form.
+    'skip-suite-split-call': {
+      files: {
+        'pkg/a.test.ts': [
+          "import { suite, it, expect } from 'vitest';",
+          "suite('group', () => {",
+          "  it('a', () => {",
+          '    expect(one()).toBe(1);',
+          '  });',
+          '});',
+        ],
+      },
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            "import { suite, it, expect } from 'vitest';",
+            'suite.skip',
+            "('group', () => {",
+            "  it('a', () => {",
+            '    expect(one()).toBe(1);',
+            '  });',
+            '});',
+          ],
+        }),
+        AGENT_COMMIT,
+      ],
+    },
     // The options-object disable: the runner sets the task mode straight
     // from the options object — no collector modifier anywhere on the
     // line. The value is the true literal; a condition-valued skip is the
@@ -24573,6 +24602,77 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
             "it('a', { skip: true }, () => {",
             '  expect(one()).toBe(1);',
             '  expect(two()).toBe(2);',
+            '});',
+          ],
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    // The each/for indirection of the options-object disable: the
+    // registering paren sits behind the parameterizing call, and the
+    // runner disables the parameterized test from the options object
+    // the same way.
+    'skip-options-object-each': {
+      files: {
+        'pkg/a.test.ts': [
+          WT_IMPORT,
+          "it.each([1, 2])('a %s', (n) => {",
+          '  expect(one()).toBe(1);',
+          '});',
+        ],
+      },
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "it.each([1, 2])('a %s', { skip: true }, (n) => {",
+            '  expect(one()).toBe(1);',
+            '});',
+          ],
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    'skip-options-object-for': {
+      files: {
+        'pkg/a.test.ts': [
+          WT_IMPORT,
+          "it.for([1, 2])('a %s', (n) => {",
+          '  expect(one()).toBe(1);',
+          '});',
+        ],
+      },
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "it.for([1, 2])('a %s', { skip: true }, (n) => {",
+            '  expect(one()).toBe(1);',
+            '});',
+          ],
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    'skip-options-object-describe-each': {
+      files: {
+        'pkg/a.test.ts': [
+          "import { describe, it, expect } from 'vitest';",
+          "describe.each([1, 2])('g %s', (n) => {",
+          "  it('a', () => {",
+          '    expect(one()).toBe(1);',
+          '  });',
+          '});',
+        ],
+      },
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            "import { describe, it, expect } from 'vitest';",
+            "describe.each([1, 2])('g %s', { skip: true }, (n) => {",
+            "  it('a', () => {",
+            '    expect(one()).toBe(1);',
+            '  });',
             '});',
           ],
         }),
@@ -24641,6 +24741,92 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
         AGENT_COMMIT,
       ],
     },
+    // A matcher read as a VALUE through a ternary or nullish head
+    // throws nothing: the bare '?' after the matcher is not a call
+    // opener, so the swapped line earns no addition credit.
+    'matcher-ternary': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "it('a', () => {",
+            '  expect(one()).toBe(1);',
+            '  expect(two()).toBe ? 1 : 2;',
+            '});',
+          ],
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    'matcher-nullish': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "it('a', () => {",
+            '  expect(one()).toBe(1);',
+            '  expect(two()).toBe ?? null;',
+            '});',
+          ],
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    // expect.soft pins only through its RECORDED matcher calls: a bare
+    // expect.soft( passes recording zero assertions, so the swap must
+    // measure as a removal.
+    'expect-soft-bare': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "it('a', () => {",
+            '  expect(one()).toBe(1);',
+            '  expect.soft(two());',
+            '});',
+          ],
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    // The credit the soft routing keeps: expect.soft WITH a called
+    // matcher throws at test end exactly like expect(), so the swap
+    // nets zero.
+    'expect-soft-called': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "it('a', () => {",
+            '  expect(one()).toBe(1);',
+            '  expect.soft(two()).toBe(2);',
+            '});',
+          ],
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    // The optional-chaining call IS a call: expect(x).toBe?.(y) throws
+    // on mismatch, so the swapped line keeps its addition credit.
+    'matcher-optional-call': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "it('a', () => {",
+            '  expect(one()).toBe(1);',
+            '  expect(two()).toBe?.(2);',
+            '});',
+          ],
+        }),
+        AGENT_COMMIT,
+      ],
+    },
     // The string decoy as a SIBLING commit: c1 removes the assertion,
     // c2 adds the decoy string line. Each single-commit blob backstop
     // adjudicates its own commit clean, and the per-commit accumulators
@@ -24660,6 +24846,85 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
         'git add pkg/a.test.ts && git commit -qm remove-assertion',
         ...fixtureWrite({
           'pkg/a.test.ts': [
+            WT_IMPORT,
+            "it('a', () => {",
+            '  expect(one()).toBe(1);',
+            "  const note = 'expect(two()).toBe(2)';",
+            '});',
+          ],
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    // The cross-commit decoy folded across a main-derived merge that
+    // TOUCHES the file: the accumulators net the sibling decoy to zero,
+    // and the verdict-time recount must net it too — recounting from
+    // the merge's RESULT blob, which keeps main's own delta out of the
+    // measurement while seeing the round's post-merge authorship.
+    'merge-string-decoy-cross-commit': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: { 'pkg/a.test.ts': WT_BASE },
+      mainMoves: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "it('a', () => {",
+            '  expect(one()).toBe(1);',
+            '  expect(two()).toBe(2);',
+            '  expect(five()).toBe(5);',
+            '});',
+          ],
+        }),
+        'git add pkg/a.test.ts && git commit -qm main-touches',
+      ],
+      round: [
+        'git merge -q --no-edit origin/main',
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "it('a', () => {",
+            '  expect(one()).toBe(1);',
+            '  expect(five()).toBe(5);',
+            '});',
+          ],
+        }),
+        'git add pkg/a.test.ts && git commit -qm remove-assertion',
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "it('a', () => {",
+            '  expect(one()).toBe(1);',
+            '  expect(five()).toBe(5);',
+            "  const note = 'expect(two()).toBe(2)';",
+            '});',
+          ],
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    // The merge-introduced twin: main's newly landed test is weakened in
+    // one post-merge commit while a sibling decoy string line nets the
+    // accumulators — the recount from the introducing merge's result
+    // blob is the arm that sees the removal.
+    'merge-introduced-string-decoy-cross-commit': {
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/b.test.ts': WT_BASE }),
+        'git add pkg/b.test.ts && git commit -qm main-adds-test',
+      ],
+      round: [
+        'git merge -q --no-edit origin/main',
+        ...fixtureWrite({
+          'pkg/b.test.ts': [
+            WT_IMPORT,
+            "it('a', () => {",
+            '  expect(one()).toBe(1);',
+            '});',
+          ],
+        }),
+        'git add pkg/b.test.ts && git commit -qm remove-assertion',
+        ...fixtureWrite({
+          'pkg/b.test.ts': [
             WT_IMPORT,
             "it('a', () => {",
             '  expect(one()).toBe(1);',
@@ -25373,6 +25638,8 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       'accepts an honest ack for a newline-named test file',
       'accepts an honest ack for a tab-named test file',
       'does not charge a delete restored byte-identically in the same round',
+      'accepts an expect.soft swap that keeps a called matcher',
+      'accepts an optional-chaining matcher call',
     ]) {
       expect(self).toMatch(
         new RegExp(`it\\.skipIf\\(!hasBashMapfile\\)\\(\\s*'${title}'`),
@@ -26898,6 +27165,38 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     expect(r.rejection).toContain('skip/todo marker(s) added');
   });
 
+  it('rejects an options-object skip behind an each parameterizer', () => {
+    // it.each(table)('x', { skip: true }, fn) disables the parameterized
+    // test while the registering paren sits behind the each call.
+    const r = runGate({ weaken: 'skip-options-object-each' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('skip/todo marker(s) added');
+  });
+
+  it('rejects an options-object skip behind a for parameterizer', () => {
+    const r = runGate({ weaken: 'skip-options-object-for' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('skip/todo marker(s) added');
+  });
+
+  it('rejects an options-object skip behind a describe.each parameterizer', () => {
+    const r = runGate({ weaken: 'skip-options-object-describe-each' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('skip/todo marker(s) added');
+  });
+
+  it('rejects a newline-split suite.skip call', () => {
+    // The call tail split across lines measures like the one-line form
+    // only when the join collector buffers suite with the other roots.
+    const r = runGate({ weaken: 'skip-suite-split-call' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('skip/todo marker(s) added');
+  });
+
   it('rejects a runtime ctx.skip() injected into a test body', () => {
     // A body-only edit disabling a pre-existing test measures zero on
     // every collector arm and leaves the blob assertion counts intact.
@@ -26925,6 +27224,53 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     expect(r.rejection).toContain('assertion line(s) removed');
   });
 
+  it('rejects swapping an assertion for a ternary-headed matcher', () => {
+    // expect(two()).toBe ? 1 : 2 reads the matcher as a value and never
+    // calls it — the bare '?' may earn no addition credit.
+    const r = runGate({ weaken: 'matcher-ternary' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('assertion line(s) removed');
+  });
+
+  it('rejects swapping an assertion for a nullish-headed matcher', () => {
+    const r = runGate({ weaken: 'matcher-nullish' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('assertion line(s) removed');
+  });
+
+  it('rejects swapping an assertion for a bare expect.soft', () => {
+    // expect.soft pins only through its recorded matcher calls: a bare
+    // expect.soft( passes recording zero assertions.
+    const r = runGate({ weaken: 'expect-soft-bare' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('assertion line(s) removed');
+  });
+
+  it.skipIf(!hasBashMapfile)(
+    'accepts an expect.soft swap that keeps a called matcher',
+    () => {
+      // With a called matcher the soft expectation throws at test end
+      // like expect(): the swap keeps the pin and nets zero.
+      const r = runGate({ weaken: 'expect-soft-called' });
+      expect(r.status).toBe(0);
+      expect(r.advisories).not.toContain('weakened or removed pre-existing');
+    },
+  );
+
+  it.skipIf(!hasBashMapfile)(
+    'accepts an optional-chaining matcher call',
+    () => {
+      // '?.' IS a call opener: the swapped assertion still throws on
+      // mismatch and keeps its addition credit.
+      const r = runGate({ weaken: 'matcher-optional-call' });
+      expect(r.status).toBe(0);
+      expect(r.advisories).not.toContain('weakened or removed pre-existing');
+    },
+  );
+
   it('rejects a string decoy committed as a sibling to the removal', () => {
     // c1 removes the assertion, c2 adds the decoy string line: each
     // single-commit blob backstop adjudicates its own commit clean, and
@@ -26933,6 +27279,30 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     const r = runGate({ weaken: 'string-decoy-cross-commit' });
     expect(r.status).toBe(1);
     expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('assertion line(s) removed');
+    expect(r.stdout).not.toContain('measurement UNAVAILABLE');
+  });
+
+  it('rejects a sibling decoy netting a weakening of a merge-touched file', () => {
+    // The recount is the ONLY arm that nets cross-commit decoy credits;
+    // exempting merge-touched files let the decoy zero a genuine
+    // weakening of exactly those files. Recounting from the merge's
+    // RESULT blob nets the decoy while keeping main's own delta that
+    // crossed the merge out of the measurement.
+    const r = runGate({ weaken: 'merge-string-decoy-cross-commit' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('assertion line(s) removed');
+    expect(r.stdout).not.toContain('measurement UNAVAILABLE');
+  });
+
+  it('rejects a sibling decoy netting a weakening of a merge-introduced file', () => {
+    // The introducing merge's result blob is the recount base: the file
+    // never exists at the pre-round ref, so a recount keyed there could
+    // never see the post-merge removal.
+    const r = runGate({ weaken: 'merge-introduced-string-decoy-cross-commit' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/b.test.ts');
     expect(r.rejection).toContain('assertion line(s) removed');
     expect(r.stdout).not.toContain('measurement UNAVAILABLE');
   });
