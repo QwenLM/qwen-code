@@ -45,9 +45,9 @@ const SESSION_LIST_TOOL: RealtimeToolDefinition = {
     name: SESSION_LIST_TOOL_NAME,
     description:
       'List the coding sessions you can dispatch work to, with their short ' +
-      'handles, working directories, and whether each is idle or busy. Call ' +
-      'this before referring to any session you have not listed yet in this ' +
-      'call.',
+      'handles, working directories, whether each is idle or busy, and the ' +
+      'backend (coding agent) each runs on. Call this before referring to ' +
+      'any session you have not listed yet in this call.',
     parameters: { type: 'object', properties: {}, additionalProperties: false },
   },
 };
@@ -70,6 +70,12 @@ const SESSION_CREATE_TOOL: RealtimeToolDefinition = {
         cwd: {
           type: 'string',
           description: 'Optional working directory for the session.',
+        },
+        backend: {
+          type: 'string',
+          description:
+            'Optional backend name (a row field of session_list) to run ' +
+            'this session on a specific coding agent. Omit for the default.',
         },
       },
       additionalProperties: false,

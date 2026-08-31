@@ -23,6 +23,7 @@ import type {
   BackendHandle,
   ContentBlock,
 } from '../adaptor/types.js';
+import type { BackendRegistry } from '../adaptor/registry.js';
 import type { LiveScreenContextCapture } from '../host/live-host-coordinator.js';
 import type { LiveState } from '../host/types.js';
 import { buildLiveInstructions } from '../realtime/instructions.js';
@@ -93,7 +94,7 @@ export interface LiveRealtimeConfig {
 
 export interface LiveSessionOptions {
   host: LiveHostControl;
-  adaptor: BackendAdaptor;
+  registry: BackendRegistry;
   realtime: LiveRealtimeConfig;
   log: SessionLog;
   openRealtime?: typeof openQwenRealtimeSession;
@@ -185,7 +186,7 @@ function formatVoiceContext(
 
 export class LiveSession {
   private readonly host: LiveHostControl;
-  private readonly adaptor: BackendAdaptor;
+  private readonly registry: BackendRegistry;
   private readonly log: SessionLog;
   private readonly openRealtime: typeof openQwenRealtimeSession;
   private readonly gracefulStopDrainMs: number;
@@ -194,24 +195,16 @@ export class LiveSession {
 
   constructor(private readonly options: LiveSessionOptions) {
     this.host = options.host;
-    this.adaptor = options.adaptor;
+    this.registry = options.registry;
     this.log = options.log;
     this.openRealtime = options.openRealtime ?? openQwenRealtimeSession;
     this.gracefulStopDrainMs =
       options.gracefulStopDrainMs ?? DEFAULT_GRACEFUL_STOP_DRAIN_MS;
   }
 
-  /**
-   * The adaptor that owns a backend handle. Single-adaptor today; becomes
-   * registry routing when multiple backends coexist (M4).
-   */
+  /** The adaptor that owns a backend handle (registry routing). */
   private adaptorFor(handle: BackendHandle): BackendAdaptor {
-    if (handle.adaptor !== this.adaptor.name) {
-      throw new Error(
-        `unknown backend '${handle.adaptor}' (this session runs '${this.adaptor.name}')`,
-      );
-    }
-    return this.adaptor;
+    return this.registry.adaptorFor(handle);
   }
 
   /** LiveCallHandlers.onStart */
@@ -252,7 +245,7 @@ export class LiveSession {
       callId: call.callId,
       epoch: call.epoch,
       mode: call.mode,
-      adaptor: this.adaptor.name,
+      backends: this.registry.names().join(','),
       model: this.options.realtime.model,
       voice: this.options.realtime.voice,
     });
@@ -617,10 +610,21 @@ export class LiveSession {
     });
 
     handlers.set(SESSION_LIST_TOOL_NAME, async () => {
-      const sessions = await this.adaptor.listSessions();
-      return {
-        status: 'ok',
-        sessions: sessions.map((summary) => {
+      const rows: Array<Record<string, unknown>> = [];
+      for (const entry of this.registry.all()) {
+        // One dead backend must not empty the whole list.
+        let summaries;
+        try {
+          summaries = await entry.adaptor.listSessions();
+        } catch (error) {
+          this.log.write('error', {
+            source: 'session_list',
+            backend: entry.adaptor.name,
+            message: error instanceof Error ? error.message : String(error),
+          });
+          continue;
+        }
+        for (const summary of summaries) {
           const handle = this.handles.session(summary.handle);
           // Reconcile stale non-terminal jobs: a turn_complete emitted
           // while no pump was subscribed (pumps are per-call and aborted
@@ -634,19 +638,40 @@ export class LiveSession {
             this.handles.reconcileIdleSession(handle);
           }
           const activeJob = this.handles.activeJobForSession(handle);
-          return {
+          rows.push({
             handle,
+            backend: entry.adaptor.name,
             ...(summary.label ? { label: summary.label } : {}),
             ...(summary.cwd ? { cwd: summary.cwd } : {}),
-            state: this.adaptor.isBusy(summary.handle) ? 'busy' : summary.state,
+            state: entry.adaptor.isBusy(summary.handle)
+              ? 'busy'
+              : summary.state,
             ...(activeJob ? { active_job: activeJob.jobHandle } : {}),
-          };
-        }),
-      };
+          });
+        }
+      }
+      return { status: 'ok', sessions: rows };
     });
 
     handlers.set(SESSION_CREATE_TOOL_NAME, async (args) => {
-      const backend = await this.adaptor.createSession({
+      let adaptor = this.registry.defaultAdaptor;
+      if (typeof args['backend'] === 'string' && args['backend'].trim()) {
+        const named = this.registry.byAdaptorName(args['backend'].trim());
+        if (!named) {
+          return {
+            status: 'error',
+            note: `unknown backend '${args['backend']}'; configured backends: ${this.registry.names().join(', ')}.`,
+          };
+        }
+        if (named.status !== 'ready') {
+          return {
+            status: 'error',
+            note: `backend '${named.adaptor.name}' is unavailable: ${named.lastError ?? 'preflight failed'}.`,
+          };
+        }
+        adaptor = named.adaptor;
+      }
+      const backend = await adaptor.createSession({
         ...(typeof args['cwd'] === 'string' ? { cwd: args['cwd'] } : {}),
         ...(typeof args['label'] === 'string' ? { label: args['label'] } : {}),
       });
@@ -669,9 +694,20 @@ export class LiveSession {
         ctx.activeTranscript,
         args['input_refs'],
       );
-      const busy = this.adaptor.isBusy(backend);
-      const receipt = await this.adaptor.prompt(backend, blocks, {
-        steer: busy,
+      const adaptor = this.adaptorFor(backend);
+      const caps = adaptor.capabilities();
+      const busy = adaptor.isBusy(backend);
+      // Image-capable backends only: strip image blocks the backend cannot
+      // take and say so in the receipt — silently dropping them would let
+      // the model claim the screenshot was delivered.
+      let sentBlocks = blocks;
+      let imageNote: string | undefined;
+      if (!caps.imageInput && blocks.some((b) => b.type === 'image')) {
+        sentBlocks = blocks.filter((b) => b.type !== 'image');
+        imageNote = 'this session cannot take images; sent the text only';
+      }
+      const receipt = await adaptor.prompt(backend, sentBlocks, {
+        steer: busy && caps.steering !== 'none',
       });
       if (receipt.status === 'rejected') {
         return {
@@ -697,11 +733,12 @@ export class LiveSession {
           task,
         });
       this.ensurePump(context, handle, backend);
+      const notes = [receipt.note, imageNote].filter(Boolean).join('. ');
       return {
         status: receipt.status,
         job: job.jobHandle,
         session: handle,
-        ...(receipt.note ? { note: receipt.note } : {}),
+        ...(notes ? { note: notes } : {}),
       };
     });
 
@@ -727,7 +764,7 @@ export class LiveSession {
       return {
         status: 'ok',
         session: sessionHandle,
-        state: this.adaptor.isBusy(backend) ? 'busy' : 'idle',
+        state: this.adaptorFor(backend).isBusy(backend) ? 'busy' : 'idle',
         ...(activeJob
           ? {
               job: activeJob.jobHandle,
@@ -754,7 +791,7 @@ export class LiveSession {
           note: 'unknown session or job; call session_list first.',
         };
       }
-      await this.adaptor.cancel(backend);
+      await this.adaptorFor(backend).cancel(backend);
       if (job) job.state = 'cancelled';
       return { status: 'cancelling', session: sessionHandle };
     });
@@ -794,7 +831,7 @@ export class LiveSession {
       // the same backend session through the existing prompt/steer path.
       if (note && pending && outcome === 'delivered') {
         try {
-          await this.adaptor.prompt(
+          await this.adaptorFor(pending.backend).prompt(
             pending.backend,
             [
               {
@@ -805,7 +842,7 @@ export class LiveSession {
                   `follow: ${note}`,
               },
             ],
-            { steer: this.adaptor.isBusy(pending.backend) },
+            { steer: this.adaptorFor(pending.backend).isBusy(pending.backend) },
           );
         } catch (error) {
           this.log.write('error', {
@@ -843,7 +880,9 @@ export class LiveSession {
         return { handle: context.defaultSessionHandle, backend };
       }
     }
-    const backend = await this.adaptor.createSession({ label: 'Voice chat' });
+    const backend = await this.registry.defaultAdaptor.createSession({
+      label: 'Voice chat',
+    });
     const handle = this.handles.session(backend);
     context.defaultSessionHandle = handle;
     return { handle, backend };
@@ -891,6 +930,18 @@ export class LiveSession {
     backend: BackendHandle,
   ): void {
     if (context.pumps.has(sessionHandle)) return;
+    const caps = this.adaptorFor(backend).capabilities();
+    if (caps.eventDelivery !== 'stream') {
+      // A per-turn/poll backend has no long-lived stream to pump; its
+      // completions arrive another way. Guard so such an adaptor never
+      // spins a broken resubscribe loop.
+      this.log.write('error', {
+        source: 'pump',
+        session: sessionHandle,
+        message: `backend '${backend.adaptor}' does not stream events (${caps.eventDelivery}); not observed`,
+      });
+      return;
+    }
     const abort = new AbortController();
     context.pumps.set(sessionHandle, abort);
     void this.pump(context, sessionHandle, backend, abort.signal).catch(
@@ -917,7 +968,9 @@ export class LiveSession {
     while (this.active === context && !signal.aborted) {
       let sawEvent = false;
       try {
-        for await (const event of this.adaptor.events(backend, { signal })) {
+        for await (const event of this.adaptorFor(backend).events(backend, {
+          signal,
+        })) {
           if (this.active !== context) return;
           sawEvent = true;
           backoffMs = 1_000;
