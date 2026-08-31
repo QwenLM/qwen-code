@@ -30,6 +30,7 @@ public class ThreadPoolConfig {
                 @Override
                 public Thread newThread(Runnable r) {
                     Thread t = new Thread(r, "acp-client-pool-" + threadNumber.getAndIncrement());
+                    // Keep short-lived JVMs from hanging; unfinished tasks are dropped at JVM exit.
                     t.setDaemon(true);
                     return t;
                 }

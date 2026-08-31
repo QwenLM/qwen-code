@@ -22,7 +22,11 @@ public class ThreadPoolConfigurationExample {
      */
     public static void runCustomSupplierExample() {
         // Set a custom thread pool supplier
-        ThreadPoolConfig.setExecutorSupplier(() -> (ThreadPoolExecutor) Executors.newFixedThreadPool(20));
+        ThreadPoolConfig.setExecutorSupplier(() -> (ThreadPoolExecutor) Executors.newFixedThreadPool(20, runnable -> {
+            Thread thread = Executors.defaultThreadFactory().newThread(runnable);
+            thread.setDaemon(true);
+            return thread;
+        }));
         logger.info("Custom thread pool supplier set");
     }
 
