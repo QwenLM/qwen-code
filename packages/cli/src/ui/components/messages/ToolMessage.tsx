@@ -1147,10 +1147,17 @@ export function formatInlineToolArgs(
   }
 
   if (!uncapped && json.length > TOOL_ARGS_INLINE_MAX_CHARS) {
-    const hidden = json.length - TOOL_ARGS_INLINE_MAX_CHARS;
-    return sanitizeTerminalText(
-      `${json.slice(0, TOOL_ARGS_INLINE_MAX_CHARS)}… +${hidden} chars (${toggleKeyHint})`,
-    );
+    let head = json.slice(0, TOOL_ARGS_INLINE_MAX_CHARS);
+    // `slice` counts UTF-16 code units, so the cut can land between the two
+    // halves of a surrogate pair (an emoji or a supplementary-plane CJK char
+    // in an argument) and leave a lone high surrogate the terminal draws as a
+    // replacement glyph. Drop the orphan and count it as hidden.
+    const lastUnit = head.charCodeAt(head.length - 1);
+    if (lastUnit >= 0xd800 && lastUnit <= 0xdbff) {
+      head = head.slice(0, -1);
+    }
+    const hidden = json.length - head.length;
+    return sanitizeTerminalText(`${head}… +${hidden} chars (${toggleKeyHint})`);
   }
   return sanitizeTerminalText(json);
 }

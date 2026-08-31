@@ -2069,6 +2069,25 @@ describe('ToolMessage inline tool-call arguments (ui.showToolCallArgs)', () => {
       );
     });
 
+    it('never cuts a surrogate pair in half at the cap boundary', () => {
+      // 993 x's put the 1000th UTF-16 code unit inside the emoji's surrogate
+      // pair, which a raw slice would leave as a lone high surrogate — drawn
+      // as a replacement glyph in the terminal.
+      const args = { a: 'x'.repeat(993) + '\u{1F600}' };
+      const json = JSON.stringify(args);
+      const out = formatInlineToolArgs(args, 'summary', false);
+
+      expect(out).toBeDefined();
+      // No unpaired surrogate anywhere in the rendered row.
+      expect(out).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
+      expect(out).not.toMatch(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/);
+      // The dropped orphan is accounted for in the hidden count.
+      const head = json.slice(0, 999);
+      expect(out).toBe(
+        `${head}… +${json.length - head.length} chars (${toggleKeyHint})`,
+      );
+    });
+
     it('lifts the cap in full-detail mode', () => {
       const args = { content: 'x'.repeat(5000) };
       expect(formatInlineToolArgs(args, 'file.txt', true)).toBe(

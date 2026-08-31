@@ -278,6 +278,49 @@ describe('<ToolGroupMessage />', () => {
       expect(lastFrame() ?? '').toContain('Wrote 1 memory');
     });
 
+    it('keeps the dense panel for a pure parallel-agent group', () => {
+      // The deliberate carve-out: ToolGroupMessage documents that rendering
+      // running agents inline while LiveAgentPanel also lists them overflows
+      // the viewport and triggers ink's clear-screen scroll-snap loop (#5798).
+      // The setting must not reach that gate — this pins the exemption so a
+      // later "make it consistent" edit cannot silently reintroduce the bug.
+      const agent = (name: string): AgentResultDisplay => ({
+        type: 'task_execution',
+        subagentName: name,
+        taskDescription: `${name} task`,
+        taskPrompt: `Run ${name}`,
+        status: 'completed',
+        toolCalls: [],
+      });
+      const agents = [
+        createToolCall({
+          callId: 'agent-1',
+          name: 'agent',
+          status: ToolCallStatus.Success,
+          args: { prompt: 'review the diff' },
+          resultDisplay: agent('reviewer'),
+        }),
+        createToolCall({
+          callId: 'agent-2',
+          name: 'agent',
+          status: ToolCallStatus.Success,
+          args: { prompt: 'plan the work' },
+          resultDisplay: agent('planner'),
+        }),
+      ];
+      const { lastFrame } = renderWithToolCallArgs(
+        <ToolGroupMessage
+          {...baseProps}
+          contentWidth={120}
+          toolCalls={agents}
+          isPending={false}
+        />,
+      );
+      // Still the panel, not per-agent ToolMessages. Ctrl+O (fullDetail) is
+      // the documented way to expand these — covered by its own test above.
+      expect(lastFrame() ?? '').not.toContain('MockSubagent[agent-1]');
+    });
+
     it('renders without a SettingsProvider (defaults to off)', () => {
       const { lastFrame } = renderWithProviders(
         <ToolGroupMessage {...baseProps} toolCalls={readBatch} />,
