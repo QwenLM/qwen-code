@@ -111,6 +111,8 @@ export interface DaemonWorkspaceCapability {
   displayName?: string;
   primary: boolean;
   trusted: boolean;
+  /** Whether new sessions in this workspace can use Workflow. */
+  workflowsEnabled?: boolean;
   /** Whether this runtime can be removed without restarting the daemon. */
   removable?: boolean;
   /** Daemon-owned Live conversation runtime. */
@@ -129,6 +131,7 @@ export interface DaemonWorkspaceRemovalActivity {
   memoryTasks: number;
   channelWorkers: number;
   voiceSessions?: number;
+  workspaceRuntime?: number;
 }
 
 export interface DaemonWorkspaceRemovalResult {
@@ -1913,6 +1916,14 @@ export interface DaemonWorkspaceAcpPreheatResult {
   error?: string;
 }
 
+export interface DaemonWorkspaceRuntimeStatus {
+  v: 1;
+  workspaceCwd: string;
+  state: 'cold' | 'starting' | 'active' | 'idle' | 'stopping';
+  runtimeLive: boolean;
+  runtimeEpoch: number;
+}
+
 export interface DaemonWorkspaceProviderCurrent {
   authType?: string;
   modelId?: string;
@@ -2519,6 +2530,13 @@ export interface DaemonSessionSupportedCommandsStatus {
   sessionId: string;
   availableCommands: DaemonAvailableCommand[];
   availableSkills: string[];
+  /** Whether Workflow is available for this session. */
+  workflowsEnabled?: boolean;
+  /** Reusable workflow definitions visible to this session. */
+  savedWorkflows?: Array<{
+    name: string;
+    source: 'project' | 'user';
+  }>;
 }
 
 export type DaemonSessionTaskLifecycleStatus =
@@ -2607,10 +2625,127 @@ export interface DaemonSessionMonitorTaskStatus {
   toolUseId?: string;
 }
 
+export interface DaemonWorkflowPhaseVisit {
+  id: string;
+  index: number;
+  title: string;
+  startedAt: number;
+  endedAt?: number;
+}
+
+export type DaemonWorkflowDispatchStatus =
+  | 'queued'
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+  | 'cached';
+
+export interface DaemonWorkflowDispatchStatusEntry {
+  id: string;
+  phaseVisitId: string | null;
+  label: string;
+  prompt: string;
+  subagentId?: string;
+  status: DaemonWorkflowDispatchStatus;
+  dependsOn: string[];
+  queuedAt: number;
+  startedAt?: number;
+  endedAt?: number;
+  error?: string;
+}
+
+export interface DaemonWorkflowApprovalStatusEntry {
+  approvalId: string;
+  subagentId: string;
+  name: string;
+  description: string;
+  at: number;
+}
+
+interface DaemonWorkflowEventBase {
+  id: string;
+  at: number;
+}
+
+export type DaemonWorkflowEvent =
+  | (DaemonWorkflowEventBase & {
+      type: 'phase-started';
+      phaseVisitId: string;
+      title: string;
+    })
+  | (DaemonWorkflowEventBase & {
+      type: 'phase-completed';
+      phaseVisitId: string;
+    })
+  | (DaemonWorkflowEventBase & {
+      type:
+        | 'dispatch-queued'
+        | 'dispatch-started'
+        | 'dispatch-completed'
+        | 'dispatch-cancelled'
+        | 'dispatch-cached';
+      dispatchId: string;
+    })
+  | (DaemonWorkflowEventBase & {
+      type: 'dispatch-failed';
+      dispatchId: string;
+      error: string;
+    })
+  | (DaemonWorkflowEventBase & { type: 'log'; message: string })
+  | (DaemonWorkflowEventBase & {
+      type: 'approval-requested' | 'approval-settled';
+      name: string;
+      dispatchId?: string;
+    })
+  | (DaemonWorkflowEventBase & {
+      type: 'workflow-completed' | 'workflow-cancelled';
+    })
+  | (DaemonWorkflowEventBase & {
+      type: 'workflow-failed';
+      error: string;
+    });
+
+export interface DaemonSessionWorkflowTaskStatus {
+  kind: 'workflow';
+  id: string;
+  /** Tool call in the parent session that launched this workflow. */
+  toolUseId?: string;
+  /** Restored from the project snapshot store; controls are read-only. */
+  isHistorical?: boolean;
+  sourceRunId?: string;
+  startMode?: 'retry' | 'rerun';
+  label: string;
+  description: string;
+  status: DaemonSessionTaskLifecycleStatus | 'pausing';
+  startTime: number;
+  endTime?: number;
+  runtimeMs: number;
+  outputFile?: string;
+  isBackgrounded: boolean;
+  currentPhase: string | null;
+  phaseVisits: DaemonWorkflowPhaseVisit[];
+  dispatches: DaemonWorkflowDispatchStatusEntry[];
+  agentsDispatched: number;
+  agentsCompleted: number;
+  tokensSpent: number;
+  tokenBudgetTotal: number | null;
+  recentLogs: string[];
+  /** Ordered runtime facts; absent for snapshots created before event tracing. */
+  events?: DaemonWorkflowEvent[];
+  pendingApprovalCount: number;
+  pendingApprovals?: DaemonWorkflowApprovalStatusEntry[];
+  error?: string;
+}
+
 export type DaemonSessionTaskStatus =
   | DaemonSessionAgentTaskStatus
   | DaemonSessionShellTaskStatus
   | DaemonSessionMonitorTaskStatus;
+
+export type DaemonSessionTaskWithWorkflowStatus =
+  | DaemonSessionTaskStatus
+  | DaemonSessionWorkflowTaskStatus;
 
 export interface DaemonSessionTasksStatus {
   v: 1;
@@ -2648,6 +2783,13 @@ export interface DaemonAgentTrace {
   nodes: DaemonAgentTraceNode[];
   rootAgentIds: string[];
   warnings: string[];
+}
+
+export interface DaemonSessionWorkflowTasksStatus {
+  v: 1;
+  sessionId: string;
+  now: number;
+  tasks: DaemonSessionTaskWithWorkflowStatus[];
 }
 
 export interface DaemonLspServerStatus {
@@ -4451,6 +4593,28 @@ export interface WorkspaceExtensionProjection {
   extensions: WorkspaceExtensionProjectionEntry[];
 }
 
+export interface WorkspaceExtensionSkillState {
+  name: string;
+  defaultEnabled: boolean;
+  workspaceEnabled: boolean | null;
+  effectiveEnabled: boolean;
+  disabledReason?: 'hard' | 'default' | 'inactive_extension';
+  lockedScope?: 'system' | 'user' | 'systemDefaults';
+}
+
+export interface WorkspaceExtensionState {
+  v: 1;
+  workspaceId: string;
+  workspaceCwd: string;
+  extensionId: string;
+  name: string;
+  skills: WorkspaceExtensionSkillState[];
+}
+
+export interface ExtensionStateUpdate {
+  skills: Array<{ name: string; state: ExtensionActivationState }>;
+}
+
 export interface ExtensionInstallResponse {
   accepted: true;
   operationId: string;
@@ -4487,6 +4651,7 @@ export interface ExtensionOperationResult {
   updated?: boolean;
   reason?: string;
   states?: Record<string, DaemonExtensionUpdateState>;
+  resourceStates?: { skills: WorkspaceExtensionSkillState[] };
   results?: Array<
     ExtensionDefaultActivationBatchItem | ExtensionWorkspaceActivationBatchItem
   >;

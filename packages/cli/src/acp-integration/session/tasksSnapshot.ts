@@ -15,6 +15,8 @@ import {
   type Config,
   type MonitorTask,
   type ShellTask,
+  type WorkflowSnapshot,
+  type WorkflowTask,
 } from '@qwen-code/qwen-code-core';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -27,6 +29,7 @@ import {
   type ServeSessionShellTaskStatus,
   type ServeSessionTaskStatus,
   type ServeSessionTasksStatus,
+  type ServeSessionWorkflowTaskStatus,
 } from '@qwen-code/acp-bridge/status';
 
 const MAX_AGENT_SIDECAR_CACHE_ENTRIES = 20;
@@ -183,11 +186,99 @@ function serializeMonitorTask(
   };
 }
 
+function serializeWorkflowTask(
+  entry: WorkflowTask,
+  now: number,
+): ServeSessionWorkflowTaskStatus {
+  return {
+    kind: 'workflow',
+    id: entry.runId,
+    ...optionalField('toolUseId', entry.toolUseId),
+    ...optionalField('sourceRunId', entry.sourceRunId),
+    ...optionalField('startMode', entry.startMode),
+    label: entry.meta?.name ?? entry.description ?? entry.runId,
+    description: entry.meta?.description ?? entry.description,
+    status: entry.status,
+    startTime: entry.startTime,
+    runtimeMs: runtimeMs(entry, now),
+    outputFile: entry.outputFile,
+    ...optionalField('endTime', entry.endTime),
+    isBackgrounded: entry.isBackgrounded === true,
+    currentPhase: entry.currentPhase,
+    phaseVisits: entry.phaseVisits.map((visit) => ({ ...visit })),
+    dispatches: entry.dispatches.map((dispatch) => ({
+      ...dispatch,
+      dependsOn: [...dispatch.dependsOn],
+    })),
+    agentsDispatched: entry.agentsDispatched,
+    agentsCompleted: entry.agentsCompleted,
+    tokensSpent: entry.tokensSpent,
+    tokenBudgetTotal: entry.tokenBudgetTotal,
+    recentLogs: [...entry.recentLogs],
+    events: entry.events.map((event) => ({ ...event })),
+    pendingApprovalCount: entry.pendingApprovals.length,
+    pendingApprovals: entry.pendingApprovals.map((approval) => ({
+      approvalId: approval.approvalId,
+      subagentId: approval.subagentId,
+      name: approval.name,
+      description: approval.description,
+      at: approval.at,
+    })),
+    ...optionalField('error', entry.error),
+  };
+}
+
+function serializeWorkflowSnapshot(
+  snapshot: WorkflowSnapshot,
+): ServeSessionWorkflowTaskStatus {
+  return {
+    kind: 'workflow',
+    id: snapshot.runId,
+    isHistorical: true,
+    ...optionalField('sourceRunId', snapshot.sourceRunId),
+    ...optionalField('startMode', snapshot.startMode),
+    label: snapshot.meta?.name ?? snapshot.description ?? snapshot.runId,
+    description:
+      snapshot.meta?.description ?? snapshot.description ?? snapshot.runId,
+    status: snapshot.status,
+    startTime: snapshot.startTime,
+    ...optionalField('endTime', snapshot.endTime),
+    runtimeMs: runtimeMs(snapshot, snapshot.endTime ?? snapshot.startTime),
+    isBackgrounded: false,
+    currentPhase: snapshot.phases.at(-1) ?? null,
+    phaseVisits: (snapshot.phaseVisits ?? []).map((visit) => ({ ...visit })),
+    dispatches: (snapshot.dispatches ?? []).map((dispatch) => ({
+      ...dispatch,
+      dependsOn: [...dispatch.dependsOn],
+    })),
+    agentsDispatched: snapshot.agentsDispatched,
+    agentsCompleted: snapshot.agentsCompleted,
+    tokensSpent: snapshot.tokensSpent,
+    tokenBudgetTotal: snapshot.tokenBudgetTotal,
+    recentLogs: [...snapshot.recentLogs],
+    ...optionalField(
+      'events',
+      snapshot.events?.map((event) => ({ ...event })),
+    ),
+    pendingApprovalCount: 0,
+    ...optionalField('error', snapshot.error),
+  };
+}
+
 export function buildSessionTasksStatus(
   sessionId: string,
   config: Config,
   now = Date.now(),
+  workflowHistory: readonly WorkflowSnapshot[] = [],
+  options: { includeWorkflows?: boolean } = {},
 ): ServeSessionTasksStatus {
+  const includeWorkflows = options.includeWorkflows === true;
+  const workflowTasks = includeWorkflows
+    ? config.getWorkflowRunRegistry().list()
+    : [];
+  const inMemoryWorkflowIds = new Set(
+    workflowTasks.map((entry) => entry.runId),
+  );
   const tasks: ServeSessionTaskStatus[] = [
     ...config
       .getBackgroundTaskRegistry()
@@ -201,6 +292,14 @@ export function buildSessionTasksStatus(
       .getMonitorRegistry()
       .getAll()
       .map((entry) => serializeMonitorTask(entry, now)),
+    ...(includeWorkflows
+      ? workflowTasks.map((entry) => serializeWorkflowTask(entry, now))
+      : []),
+    ...(includeWorkflows
+      ? workflowHistory
+          .filter((snapshot) => !inMemoryWorkflowIds.has(snapshot.runId))
+          .map(serializeWorkflowSnapshot)
+      : []),
   ].sort((a, b) => a.startTime - b.startTime);
 
   return {

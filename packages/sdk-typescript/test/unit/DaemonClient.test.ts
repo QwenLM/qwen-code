@@ -1080,6 +1080,13 @@ describe('DaemonClient', () => {
         durationMs: 12,
       };
       const acpStatus = { channelLive: true };
+      const runtimeStatus = {
+        v: 1 as const,
+        workspaceCwd: '/work/a',
+        state: 'idle' as const,
+        runtimeLive: true,
+        runtimeEpoch: 1,
+      };
       const { fetch, calls } = recordingFetch((req) => {
         if (req.url.endsWith('/workspace/mcp')) return jsonResponse(200, mcp);
         if (req.url.endsWith('/workspace/skills')) {
@@ -1090,6 +1097,12 @@ describe('DaemonClient', () => {
         }
         if (req.url.endsWith('/workspace/acp/status')) {
           return jsonResponse(200, acpStatus);
+        }
+        if (
+          req.url.endsWith('/workspace/runtime/ensure') ||
+          req.url.endsWith('/workspace/runtime/status')
+        ) {
+          return jsonResponse(200, runtimeStatus);
         }
         if (req.url.endsWith('/workspace/providers')) {
           return jsonResponse(200, providers);
@@ -1102,12 +1115,20 @@ describe('DaemonClient', () => {
       await expect(client.workspaceSkills()).resolves.toEqual(skills);
       await expect(client.workspaceAcpPreheat(1234)).resolves.toEqual(preheat);
       await expect(client.workspaceAcpStatus()).resolves.toEqual(acpStatus);
+      await expect(client.ensureWorkspaceRuntime()).resolves.toEqual(
+        runtimeStatus,
+      );
+      await expect(client.workspaceRuntimeStatus()).resolves.toEqual(
+        runtimeStatus,
+      );
       await expect(client.workspaceProviders()).resolves.toEqual(providers);
       expect(calls.map((c) => [c.method, c.url])).toEqual([
         ['GET', 'http://daemon/workspace/mcp'],
         ['GET', 'http://daemon/workspace/skills'],
         ['POST', 'http://daemon/workspace/acp/preheat?timeoutMs=1234'],
         ['GET', 'http://daemon/workspace/acp/status'],
+        ['POST', 'http://daemon/workspace/runtime/ensure'],
+        ['GET', 'http://daemon/workspace/runtime/status'],
         ['GET', 'http://daemon/workspace/providers'],
       ]);
     });
@@ -1151,6 +1172,68 @@ describe('DaemonClient', () => {
         expect(calls.map((call) => [call.method, call.url])).toEqual([
           ['POST', 'http://daemon/workspace/acp/preheat?timeoutMs=1234'],
           ['GET', 'http://daemon/workspace/acp/status'],
+        ]);
+        expect(
+          calls.every(
+            (call) => call.headers['authorization'] === 'Bearer secret',
+          ),
+        ).toBe(true);
+        expect(transportFetch).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(['acp-http', 'acp-ws'] as const)(
+      'uses REST for primary and qualified runtime routes with %s',
+      async (transportType) => {
+        const runtimeStatus = {
+          v: 1 as const,
+          workspaceCwd: '/work/secondary',
+          state: 'idle' as const,
+          runtimeLive: true,
+          runtimeEpoch: 2,
+        };
+        const { fetch: restFetch, calls } = recordingFetch(() =>
+          jsonResponse(200, runtimeStatus),
+        );
+        const transportFetch = vi.fn(async () =>
+          jsonResponse(404, { error: 'ACP transport route not found' }),
+        );
+        const transport: DaemonTransport = {
+          type: transportType,
+          supportsReplay: transportType === 'acp-http',
+          connected: true,
+          restFetch,
+          fetch: transportFetch,
+          async *subscribeEvents() {},
+          dispose() {},
+        };
+        const client = new DaemonClient({
+          baseUrl: 'http://daemon',
+          token: 'secret',
+          transport,
+        });
+        const workspace = client.workspaceByCwd('/work/secondary');
+
+        await expect(client.ensureWorkspaceRuntime()).resolves.toEqual(
+          runtimeStatus,
+        );
+        await expect(client.workspaceRuntimeStatus()).resolves.toEqual(
+          runtimeStatus,
+        );
+        await expect(workspace.ensureRuntime()).resolves.toEqual(runtimeStatus);
+        await expect(workspace.runtimeStatus()).resolves.toEqual(runtimeStatus);
+
+        expect(calls.map((call) => [call.method, call.url])).toEqual([
+          ['POST', 'http://daemon/workspace/runtime/ensure'],
+          ['GET', 'http://daemon/workspace/runtime/status'],
+          [
+            'POST',
+            'http://daemon/workspaces/%2Fwork%2Fsecondary/runtime/ensure',
+          ],
+          [
+            'GET',
+            'http://daemon/workspaces/%2Fwork%2Fsecondary/runtime/status',
+          ],
         ]);
         expect(
           calls.every(
@@ -1500,6 +1583,53 @@ describe('DaemonClient', () => {
       });
     });
 
+    it.each([
+      ['primary', (client: DaemonClient) => client.ensureWorkspaceRuntime()],
+      [
+        'qualified',
+        (client: DaemonClient) =>
+          client.workspaceByCwd('/work/secondary').ensureRuntime(),
+      ],
+    ] as const)(
+      'gives %s runtime ensure the server deadline plus client headroom',
+      async (_label, ensureRuntime) => {
+        vi.useFakeTimers();
+        try {
+          let requestSignal: AbortSignal | null | undefined;
+          const slowFetch = vi.fn(
+            (
+              _input: RequestInfo | URL,
+              init?: { signal?: AbortSignal | null },
+            ) =>
+              new Promise<Response>((_resolve, reject) => {
+                requestSignal = init?.signal;
+                init?.signal?.addEventListener('abort', () => {
+                  reject(
+                    init.signal!.reason ??
+                      new DOMException('aborted', 'AbortError'),
+                  );
+                });
+              }),
+          );
+          const client = new DaemonClient({
+            baseUrl: 'http://daemon',
+            fetch: slowFetch as unknown as typeof globalThis.fetch,
+            fetchTimeoutMs: 1,
+          });
+
+          const outcome = ensureRuntime(client).catch(
+            (error: unknown) => error,
+          );
+          await vi.advanceTimersByTimeAsync(61_999);
+          expect(requestSignal?.aborted).toBe(false);
+          await vi.advanceTimersByTimeAsync(1);
+          expect(await outcome).toMatchObject({ name: 'TimeoutError' });
+        } finally {
+          vi.useRealTimers();
+        }
+      },
+    );
+
     it('GETs /workspace/preflight and returns the preflight envelope unchanged', async () => {
       const preflight: DaemonWorkspacePreflightStatus = {
         v: 1,
@@ -1669,6 +1799,11 @@ describe('DaemonClient', () => {
         if (req.url.endsWith('/session/with%2Fslash/tasks')) {
           return jsonResponse(200, tasks);
         }
+        if (
+          req.url.endsWith('/session/with%2Fslash/tasks?includeWorkflows=true')
+        ) {
+          return jsonResponse(200, tasks);
+        }
         if (req.url.endsWith('/session/with%2Fslash/lsp')) {
           return jsonResponse(200, lsp);
         }
@@ -1686,15 +1821,23 @@ describe('DaemonClient', () => {
         client.sessionTasks('with/slash', 'client-1'),
       ).resolves.toEqual(tasks);
       await expect(
+        client.sessionWorkflowTasks('with/slash', 'client-1'),
+      ).resolves.toEqual(tasks);
+      await expect(
         client.sessionLspStatus('with/slash', 'client-1'),
       ).resolves.toEqual(lsp);
       expect(calls.map((c) => [c.method, c.url])).toEqual([
         ['GET', 'http://daemon/session/with%2Fslash/context'],
         ['GET', 'http://daemon/session/with%2Fslash/supported-commands'],
         ['GET', 'http://daemon/session/with%2Fslash/tasks'],
+        [
+          'GET',
+          'http://daemon/session/with%2Fslash/tasks?includeWorkflows=true',
+        ],
         ['GET', 'http://daemon/session/with%2Fslash/lsp'],
       ]);
       expect(calls.map((c) => c.headers['x-qwen-client-id'])).toEqual([
+        'client-1',
         'client-1',
         'client-1',
         'client-1',
@@ -4797,6 +4940,174 @@ describe('DaemonClient', () => {
         client.setSessionModel('s-1', 'qwen3-coder'),
       ).rejects.toMatchObject({ status: 404 });
     });
+
+    it('surfaces JSON-RPC details for generic 5xx failures', async () => {
+      const body = {
+        error: 'Internal error',
+        code: -32603,
+        data: { details: 'Missing credentials' },
+      };
+      const { fetch } = recordingFetch(() => jsonResponse(500, body));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      const error = await client
+        .setSessionModel('s-1', 'qwen3-coder')
+        .catch((reason: unknown) => reason);
+
+      expect(error).toBeInstanceOf(DaemonHttpError);
+      expect(error).toMatchObject({
+        status: 500,
+        body,
+        message: 'POST /session/:id/model: Missing credentials',
+      });
+    });
+
+    it.each([
+      {
+        name: 'provider message',
+        status: 500,
+        body: {
+          error: 'Internal error',
+          code: -32603,
+          data: { message: 'Provider is throttled' },
+        },
+        expected: 'Provider is throttled',
+      },
+      {
+        name: 'details wins over message',
+        status: 500,
+        body: {
+          error: 'Internal error',
+          code: -32603,
+          data: {
+            details: 'Missing credentials',
+            message: 'Provider is throttled',
+          },
+        },
+        expected: 'Missing credentials',
+      },
+      {
+        name: 'string data',
+        status: 500,
+        body: {
+          error: 'Internal error',
+          code: -32603,
+          data: 'Agent stopped',
+        },
+        expected: 'Agent stopped',
+      },
+      {
+        name: 'empty string data',
+        status: 500,
+        body: {
+          error: 'Internal error',
+          code: -32603,
+          data: '',
+        },
+        expected: 'Internal error',
+      },
+      {
+        name: 'empty details',
+        status: 500,
+        body: {
+          error: 'Internal error',
+          code: -32603,
+          data: { details: '' },
+        },
+        expected: 'Internal error',
+      },
+      {
+        name: 'empty details falls back to message',
+        status: 500,
+        body: {
+          error: 'Internal error',
+          code: -32603,
+          data: { details: '', message: 'Provider is throttled' },
+        },
+        expected: 'Provider is throttled',
+      },
+      {
+        name: 'empty message field',
+        status: 500,
+        body: {
+          error: 'Internal error',
+          code: -32603,
+          data: { message: '' },
+        },
+        expected: 'Internal error',
+      },
+      {
+        name: 'non-string details',
+        status: 500,
+        body: {
+          error: 'Internal error',
+          code: -32603,
+          data: { details: { reason: 'private' } },
+        },
+        expected: 'Internal error',
+      },
+      {
+        name: 'specific top-level error',
+        status: 500,
+        body: {
+          error: 'Model is unavailable',
+          code: -32603,
+          data: { details: 'private provider response' },
+        },
+        expected: 'Model is unavailable',
+      },
+      {
+        name: 'non-JSON-RPC code',
+        status: 500,
+        body: {
+          error: 'Internal error',
+          code: 'internal_error',
+          data: { details: 'private provider response' },
+        },
+        expected: 'Internal error',
+      },
+      {
+        name: 'non-internal numeric code',
+        status: 500,
+        body: {
+          error: 'Internal error',
+          code: -32000,
+          data: { details: 'Server is draining' },
+        },
+        expected: 'Server is draining',
+      },
+      {
+        name: 'null data',
+        status: 500,
+        body: {
+          error: 'Internal error',
+          code: -32603,
+          data: null,
+        },
+        expected: 'Internal error',
+      },
+      {
+        name: 'client error',
+        status: 400,
+        body: {
+          error: 'Internal error',
+          code: -32603,
+          data: { details: 'private provider response' },
+        },
+        expected: 'Internal error',
+      },
+    ])('formats $name safely', async ({ status, body, expected }) => {
+      const { fetch } = recordingFetch(() => jsonResponse(status, body));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.setSessionModel('s-1', 'qwen3-coder'),
+      ).rejects.toMatchObject({
+        status,
+        body,
+        message: `POST /session/:id/model: ${expected}`,
+      });
+    });
   });
 
   describe('setSessionApprovalMode (#4175 Wave 4 PR 17)', () => {
@@ -6833,7 +7144,7 @@ describe('DaemonClient', () => {
       ).resolves.toBeUndefined();
     });
 
-    it('routes only projection and activation methods through a workspace', async () => {
+    it('routes workspace extension state and activation over REST', async () => {
       const status = {
         v: 1,
         workspaceId: 'ws-a',
@@ -6843,8 +7154,19 @@ describe('DaemonClient', () => {
         appliedGeneration: 1,
         extensions: [],
       };
+      const resourceState = {
+        v: 1,
+        workspaceId: 'ws-a',
+        workspaceCwd: '/work/a',
+        extensionId: 'a'.repeat(64),
+        name: 'demo-a',
+        skills: [],
+      };
       const { fetch, calls } = recordingFetch((req) => {
         if (req.url.endsWith('/extensions')) return jsonResponse(200, status);
+        if (req.method === 'GET' && req.url.endsWith('/state')) {
+          return jsonResponse(200, resourceState);
+        }
         return jsonResponse(202, { accepted: true, operationId: 'op-2' });
       });
       const transportFetch = vi.fn(async () =>
@@ -6874,6 +7196,21 @@ describe('DaemonClient', () => {
       );
       await ws.clearExtensionActivation('a'.repeat(64), 'client-1');
       await ws.refreshExtensionRuntime('client-1');
+      await expect(ws.extensionState('a'.repeat(64))).resolves.toEqual(
+        resourceState,
+      );
+      const update = {
+        skills: [
+          { name: 'review', state: 'disabled' as const },
+          { name: 'plan', state: 'enabled' as const },
+        ],
+      };
+      await expect(
+        ws.setExtensionState('a'.repeat(64), update, 'client-1'),
+      ).resolves.toEqual({
+        accepted: true,
+        operationId: 'op-2',
+      });
 
       expect(calls.map((c) => [c.method, c.url])).toEqual([
         ['GET', 'http://daemon/workspaces/%2Fwork%2Fa/extensions'],
@@ -6887,6 +7224,14 @@ describe('DaemonClient', () => {
           `http://daemon/workspaces/%2Fwork%2Fa/extensions/${'a'.repeat(64)}/activation`,
         ],
         ['POST', 'http://daemon/workspaces/%2Fwork%2Fa/extensions/refresh'],
+        [
+          'GET',
+          `http://daemon/workspaces/%2Fwork%2Fa/extensions/${'a'.repeat(64)}/state`,
+        ],
+        [
+          'PUT',
+          `http://daemon/workspaces/%2Fwork%2Fa/extensions/${'a'.repeat(64)}/state`,
+        ],
       ]);
       expect(calls[2]?.body).toBe(
         JSON.stringify({
@@ -6895,6 +7240,7 @@ describe('DaemonClient', () => {
         }),
       );
       expect(transportFetch).not.toHaveBeenCalled();
+      expect(calls[6]?.body).toBe(JSON.stringify(update));
     });
   });
 
