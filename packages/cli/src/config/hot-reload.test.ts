@@ -769,6 +769,57 @@ describe('registerModelProvidersHotReload', () => {
     }
   });
 
+  it('retries only refreshAuth on later unchanged events after it failed once', async () => {
+    registerModelProvidersHotReload(watcher, settings, config);
+    refreshAuth
+      .mockRejectedValueOnce(new Error('transient token blip'))
+      .mockRejectedValueOnce(new Error('still flaky'));
+
+    const logErrorSpy = vi.fn();
+    const openDebugConsoleSpy = vi.fn();
+    appEvents.on(AppEvent.LogError, logErrorSpy);
+    appEvents.on(AppEvent.OpenDebugConsole, openDebugConsoleSpy);
+    try {
+      merged.modelProviders = {
+        openai: [{ id: 'gpt-x', baseUrl: 'https://x' }],
+      } as ModelProvidersConfig;
+      await listener([]);
+
+      // Registry reload applied, auth refresh failed and was surfaced.
+      expect(reloadModelProvidersConfig).toHaveBeenCalledOnce();
+      expect(refreshAuth).toHaveBeenCalledOnce();
+      expect(logErrorSpy).toHaveBeenCalledOnce();
+
+      // Same snapshot again: the providers gate says "unchanged", but the
+      // pending retry must re-attempt ONLY refreshAuth — never the registry
+      // reload, so out-of-band registry rewrites are not clobbered. A
+      // failed retry stays flagged and surfaces again.
+      await listener([]);
+      expect(reloadModelProvidersConfig).toHaveBeenCalledOnce();
+      expect(refreshAuth).toHaveBeenCalledTimes(2);
+      expect(logErrorSpy).toHaveBeenCalledTimes(2);
+
+      // Third unchanged event: the retry succeeds this time and clears the
+      // flag, and a success emits no notice.
+      await listener([]);
+      expect(reloadModelProvidersConfig).toHaveBeenCalledOnce();
+      expect(refreshAuth).toHaveBeenCalledTimes(3);
+      expect(logErrorSpy).toHaveBeenCalledTimes(2);
+      expect(openDebugConsoleSpy).toHaveBeenCalledTimes(2);
+
+      // Flag cleared: a fourth unchanged event is a no-op again (coexists
+      // with the repeat-snapshot gate).
+      await listener([]);
+      expect(reloadModelProvidersConfig).toHaveBeenCalledOnce();
+      expect(refreshAuth).toHaveBeenCalledTimes(3);
+      expect(logErrorSpy).toHaveBeenCalledTimes(2);
+      expect(openDebugConsoleSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      appEvents.off(AppEvent.LogError, logErrorSpy);
+      appEvents.off(AppEvent.OpenDebugConsole, openDebugConsoleSpy);
+    }
+  });
+
   it('reloads after an out-of-band registry rewrite desynced applied state', async () => {
     const bootProviders = {
       openai: [{ id: 'gpt-a', baseUrl: 'https://a' }],
