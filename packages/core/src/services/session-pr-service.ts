@@ -336,9 +336,29 @@ export function mergeSessionPrLists(
   const byNumber = new Map<number, SessionPr>();
   for (const entry of [...base, ...incoming]) {
     const known = byNumber.get(entry.number);
-    if (!known || entry.createdAt >= known.createdAt) {
+    if (!known) {
       byNumber.set(entry.number, entry);
+      continue;
     }
+    // The freshest entry survives (the badge renders binding recency), but
+    // a same-PR dedup must not DOWNGRADE provenance: the live shell binder
+    // stamps `create` on one half of a split pair, and a later `/review`
+    // backfill of the other half re-binds the number as `review` — keeping
+    // the newer entry wholesale would hand the authority cap a rank-0
+    // create binding to evict. Same rule as upsertSessionPr; a different
+    // canonical url is another PR and carries nothing across.
+    const [newer, older] =
+      entry.createdAt >= known.createdAt ? [entry, known] : [known, entry];
+    const source =
+      canonicalSessionPrUrl(newer.url) === canonicalSessionPrUrl(older.url) &&
+      sessionPrSourceAuthority(older.source) >
+        sessionPrSourceAuthority(newer.source)
+        ? older.source
+        : newer.source;
+    byNumber.set(
+      entry.number,
+      source === newer.source ? newer : { ...newer, source },
+    );
   }
   return capSessionPrListByAuthority(
     [...byNumber.values()].sort((left, right) =>

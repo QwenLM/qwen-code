@@ -1002,6 +1002,69 @@ describe('replaceSessionPrs', () => {
 });
 
 describe('mergeSessionPrLists', () => {
+  it('keeps the stronger source across a same-PR split-pair merge', () => {
+    // The live shell binder stamped `create` on one half of a split pair;
+    // a later `/review` backfill of the other half re-bound the number as
+    // `review` with a fresh createdAt. The freshest entry survives (the
+    // badge renders recency) but the provenance must not downgrade — the
+    // authority cap would evict the session's own created binding first.
+    const created: SessionPr = {
+      number: 5,
+      url: 'https://github.com/o/r/pull/5',
+      createdAt: '2026-08-01T00:00:00.000Z',
+      source: 'create',
+    };
+    const reviewed: SessionPr = {
+      number: 5,
+      url: 'https://github.com/o/r/pull/5',
+      createdAt: '2026-08-02T00:00:00.000Z',
+      source: 'review',
+    };
+    for (const [base, incoming] of [
+      [[created], [reviewed]],
+      [[reviewed], [created]],
+    ] as const) {
+      const merged = mergeSessionPrLists([...base], [...incoming]);
+      expect(merged).toEqual([{ ...reviewed, source: 'create' }]);
+    }
+    // A same-numbered PR of another repository is another PR: nothing
+    // carries across the URL change.
+    const foreign: SessionPr = {
+      ...reviewed,
+      url: 'https://github.com/other/r/pull/5',
+    };
+    expect(mergeSessionPrLists([created], [foreign])).toEqual([foreign]);
+  });
+
+  it('keeps a split-pair created binding through the authority cap', () => {
+    const created: SessionPr = {
+      number: 100,
+      url: 'https://github.com/o/r/pull/100',
+      createdAt: '2026-08-01T00:00:00.000Z',
+      source: 'create',
+    };
+    const reviews: SessionPr[] = Array.from(
+      { length: SESSION_PR_LIST_LIMIT },
+      (_, i) => ({
+        number: i + 1,
+        url: `https://github.com/o/r/pull/${i + 1}`,
+        createdAt: `2026-08-03T00:00:0${i}.000Z`.slice(0, 24),
+        source: 'review' as const,
+      }),
+    );
+    const rebound: SessionPr = {
+      ...created,
+      createdAt: '2026-08-02T00:00:00.000Z',
+      source: 'review',
+    };
+    const merged = mergeSessionPrLists([created, ...reviews], [rebound]);
+    expect(merged).toHaveLength(SESSION_PR_LIST_LIMIT);
+    expect(merged.find((p) => p.number === 100)).toMatchObject({
+      source: 'create',
+      createdAt: rebound.createdAt,
+    });
+  });
+
   const at = (number: number, createdAt: string, url?: string): SessionPr => ({
     number,
     url: url ?? `https://github.com/owner/repo/pull/${number}`,
