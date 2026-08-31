@@ -17665,9 +17665,16 @@ describe('LlmChat', async () => {
         parts: [{ text: 'interloper' }],
       };
       recordingChat.addHistory(interloper);
+      let continuationRetryAfterAppend = false;
       for (;;) {
         const result = await iterator.next();
         if (result.done) break;
+        if (
+          result.value?.type === StreamEventType.RETRY &&
+          result.value.isContinuation
+        ) {
+          continuationRetryAfterAppend = true;
+        }
       }
 
       expect(recordingChat.getHistory().map((entry) => entry.role)).toEqual([
@@ -17680,6 +17687,7 @@ describe('LlmChat', async () => {
       ]);
       expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
       expect(recordedText(recordAssistantTurn)).toBe('complete');
+      expect(continuationRetryAfterAppend).toBe(true);
     });
 
     it.each([FinishReason.STOP, FinishReason.MAX_TOKENS])(
@@ -17734,16 +17742,19 @@ describe('LlmChat', async () => {
         ]);
 
         let retryAfterFunctionCall = false;
+        let retryRetainsOutput = false;
         for (;;) {
           const result = await iterator.next();
           if (result.done) break;
           if (result.value?.type === StreamEventType.RETRY) {
             retryAfterFunctionCall = true;
+            retryRetainsOutput ||= result.value.isContinuation === true;
           }
         }
 
         expect(functionCallSeen).toBe(true);
         expect(retryAfterFunctionCall).toBe(true);
+        expect(retryRetainsOutput).toBe(false);
         expect(recordingChat.getHistory()).toEqual([
           { role: 'user', parts: [{ text: 'replacement' }] },
         ]);
@@ -18514,11 +18525,13 @@ describe('LlmChat', async () => {
       };
       recordingChat.addHistory(appended);
       let retryAfterMutation = false;
+      let retryRetainsOutput = false;
       for (;;) {
         const result = await iterator.next();
         if (result.done) break;
         if (result.value?.type === StreamEventType.RETRY) {
           retryAfterMutation = true;
+          retryRetainsOutput ||= result.value.isContinuation === true;
         }
       }
 
@@ -18527,6 +18540,7 @@ describe('LlmChat', async () => {
       );
       expect(recordingChat.getHistory().at(-1)).toEqual(appended);
       expect(retryAfterMutation).toBe(true);
+      expect(retryRetainsOutput).toBe(true);
       expect(
         recordingChat
           .getHistory()
@@ -18538,6 +18552,62 @@ describe('LlmChat', async () => {
       ).toBe(false);
       expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
       expect(recordedText(recordAssistantTurn)).toBe('Hello one');
+    });
+
+    it('discards recovery output cleared between continuation attempts', async () => {
+      const recordAssistantTurn = vi.fn();
+      const recordingChat = chatWithRecorder(recordAssistantTurn);
+      const streams = [
+        makeStream([makeChunk([{ text: 'Hello' }], 'MAX_TOKENS')]),
+        makeStream([makeChunk([{ text: ' one' }], 'MAX_TOKENS')]),
+        makeStream([makeChunk([{ text: ' stale' }], 'STOP')]),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await recordingChat.sendMessageStream(
+        'gemini-3-pro',
+        { message: 'write a long essay' },
+        'prompt-recovery-between-attempt-clear',
+      );
+      const iterator = stream[Symbol.asyncIterator]();
+      let continuationStarted = false;
+      for (;;) {
+        const result = await iterator.next();
+        expect(result.done).toBe(false);
+        const event = result.value!;
+        if (event.type === StreamEventType.RETRY && event.isContinuation) {
+          continuationStarted = true;
+        } else if (
+          continuationStarted &&
+          event.type === StreamEventType.CHUNK &&
+          event.value.candidates?.[0]?.finishReason === FinishReason.MAX_TOKENS
+        ) {
+          break;
+        }
+      }
+
+      recordingChat.clearHistory();
+      let retryAfterClear:
+        | Extract<StreamEvent, { type: StreamEventType.RETRY }>
+        | undefined;
+      for (;;) {
+        const result = await iterator.next();
+        if (result.done) break;
+        if (result.value?.type === StreamEventType.RETRY) {
+          retryAfterClear = result.value;
+        }
+      }
+
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        2,
+      );
+      expect(retryAfterClear).toBeDefined();
+      expect(retryAfterClear?.isContinuation).not.toBe(true);
+      expect(recordingChat.getHistory()).toEqual([]);
+      expect(recordAssistantTurn).not.toHaveBeenCalled();
     });
 
     it('keeps recovery current when orphan repair is a no-op', async () => {

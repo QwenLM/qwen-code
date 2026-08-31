@@ -4214,6 +4214,7 @@ export class LlmChat {
         let recoveryAttemptInFlight = false;
         let activeRecoveryDeferredRecordCount: number | undefined;
         let activeRecoveryHistoryMutationVersion: number | undefined;
+        let recoverySessionModelContent: Content | undefined;
         let activeRecoveryVisibleParts: Part[] = [];
         let activeRecoveryVisibleTokens:
           | GenerateContentResponseUsageMetadata
@@ -4337,6 +4338,7 @@ export class LlmChat {
               'Failed to coalesce a completed output-recovery continuation.',
             );
           }
+          recoverySessionModelContent = self.history.at(-1);
           recoveryAttemptInFlight = false;
           self.activeRecoveryUserContent = undefined;
           self.activeRecoveryModelContent = undefined;
@@ -4763,7 +4765,13 @@ export class LlmChat {
             ) {
               recoveryFinishReason = FinishReason.STOP;
               self.settleDeferredMaxTokensRecords();
-              yield { type: StreamEventType.RETRY, isContinuation: true };
+              yield {
+                type: StreamEventType.RETRY,
+                ...(escalatedCommittedModelContent !== undefined &&
+                self.history.includes(escalatedCommittedModelContent)
+                  ? { isContinuation: true }
+                  : {}),
+              };
               yield makeRecoveryStopEvent();
             }
           } else {
@@ -4780,6 +4788,7 @@ export class LlmChat {
           let recoveryCount = 0;
           const recoverySessionHistoryMutationVersion =
             self.historyMutationVersion;
+          recoverySessionModelContent = self.history.at(-1);
           while (
             recoveryFinishReason === FinishReason.MAX_TOKENS &&
             recoveryCount < MAX_OUTPUT_RECOVERY_ATTEMPTS
@@ -4789,7 +4798,13 @@ export class LlmChat {
               recoverySessionHistoryMutationVersion
             ) {
               recoveryFinishReason = FinishReason.STOP;
-              yield { type: StreamEventType.RETRY, isContinuation: true };
+              yield {
+                type: StreamEventType.RETRY,
+                ...(recoverySessionModelContent !== undefined &&
+                self.history.includes(recoverySessionModelContent)
+                  ? { isContinuation: true }
+                  : {}),
+              };
               yield makeRecoveryStopEvent();
               break;
             }
