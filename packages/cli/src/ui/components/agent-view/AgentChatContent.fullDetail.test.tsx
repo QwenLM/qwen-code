@@ -59,6 +59,22 @@ function makeCore(): AgentCore {
         content: 'hello from the subagent',
         timestamp: 0,
       },
+      // An unmatched tool_call maps to a tool_group whose tool is still
+      // Executing. `splitIndex` keeps such a group (and everything after it)
+      // in the live area, so this fixture is what makes the second,
+      // `isPending` render site run at all — without it the live-area
+      // forwarding is unpinned.
+      {
+        role: 'tool_call',
+        content: 'Tool call: replace',
+        timestamp: 0,
+        metadata: {
+          callId: 'c1',
+          toolName: 'replace',
+          description: 'src/a.ts',
+          args: { file_path: 'src/a.ts' },
+        },
+      },
     ],
     getPendingApprovals: () => new Map(),
     getLiveOutputs: () => new Map(),
@@ -85,15 +101,21 @@ const renderAt = (allExpanded: boolean) => {
 };
 
 describe('AgentChatContent — Ctrl+O full detail', () => {
-  it('forwards the expanded state to transcript items', () => {
+  // Both render sites must be covered: the committed <Static> tree and the
+  // live area that holds executing/confirming tool groups. Pinning only the
+  // former let a mutation dropping the live-area prop survive, which would
+  // leave a running tool group advertising `(ctrl+o)` for a dead key.
+  const COMMITTED_AND_LIVE = 2;
+
+  it('forwards the expanded state to both committed and live items', () => {
     const seen = renderAt(true);
-    expect(seen.length).toBeGreaterThan(0);
-    expect(seen.every((v) => v === true)).toBe(true);
+    expect(seen.length).toBe(COMMITTED_AND_LIVE);
+    expect(seen).toEqual([true, true]);
   });
 
-  it('leaves items collapsed when the toggle is off', () => {
+  it('leaves both sites collapsed when the toggle is off', () => {
     const seen = renderAt(false);
-    expect(seen.length).toBeGreaterThan(0);
-    expect(seen.every((v) => v === false)).toBe(true);
+    expect(seen.length).toBe(COMMITTED_AND_LIVE);
+    expect(seen).toEqual([false, false]);
   });
 });
