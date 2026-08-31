@@ -215,8 +215,8 @@ jobs:
     # scoped to the pool that shows the contention: fork PRs from untrusted
     # authors and MAINTAINER_ECS_RUNNER_DISABLED=true fall back to
     # GitHub-hosted runners (see classify_pr), which keep the pre-contention
-    # ceiling so a genuine hang there does not burn the extra 30 minutes.
-    timeout-minutes: '${{ fromJSON(contains(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'', ''ecs-qwen'') && ''90'' || ''60'') }}'
+    # ceiling so a genuine hang there does not burn the extra 60 minutes.
+    timeout-minutes: '${{ fromJSON(contains(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'', ''ecs-qwen'') && ''120'' || ''60'') }}'
     outputs:
       ci_profile: '${{ steps.ci_profile.outputs.ci_profile }}'
     permissions:
@@ -598,7 +598,7 @@ jobs:
       - name: 'Install tmux and zip tooling'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.os == 'Linux' }}"
         # Bounded AND advisory: a stalled mirror or dpkg lock must neither
-        # hang the job toward its 60-minute cap nor red the required check —
+        # hang the job toward its 120-minute cap nor red the required check —
         # continue-on-error absorbs the step-level timeout. The apt calls
         # carry their OWN shorter bound (140 s + 140 s = 280 s < the 300 s
         # step cap) so the guard below still runs: when the step-level

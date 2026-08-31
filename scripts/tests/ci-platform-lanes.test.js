@@ -72,7 +72,7 @@ const timeoutMinutesOn = (job, ubuntuRunner) => {
 };
 
 it('keeps the shared Linux test lane above its contention budget on ECS', () => {
-  expect(timeoutMinutesOn('test', ECS_RUNNER)).toBe(90);
+  expect(timeoutMinutesOn('test', ECS_RUNNER)).toBe(120);
 });
 
 it('keeps the shared Linux test lane on its pre-contention ceiling when hosted', () => {
