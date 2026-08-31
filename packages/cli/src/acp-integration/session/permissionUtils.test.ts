@@ -283,45 +283,51 @@ describe('permissionUtils', () => {
     ).toThrow('unoffered option');
   });
 
-  it('maps daemon cancel reason metadata and ignores empty reasons', () => {
-    const cancelledResponse: RequestPermissionResponse = {
-      outcome: { outcome: 'cancelled' },
-      _meta: {
-        'qwen.daemon.permissionCancelReason': 'agent_cancelled',
-      },
-    } as RequestPermissionResponse;
-    const emptyReasonResponse: RequestPermissionResponse = {
-      outcome: { outcome: 'cancelled' },
-      _meta: {
-        'qwen.daemon.permissionCancelReason': '',
-      },
-    } as RequestPermissionResponse;
-    const unknownReasonResponse: RequestPermissionResponse = {
-      outcome: { outcome: 'cancelled' },
-      _meta: {
-        'qwen.daemon.permissionCancelReason': 'approval_ui_unavailable',
-      },
-    } as RequestPermissionResponse;
-
-    expect(permissionCancelReasonFromResponse(cancelledResponse)).toBe(
+  it.each([
+    ['timeout', 'Permission request timed out before the user answered.'],
+    [
+      'session_closed',
+      'Permission request was cancelled because the session closed before the user answered.',
+    ],
+    [
       'agent_cancelled',
-    );
-    expect(permissionCancelMessageFromResponse(cancelledResponse)).toBe(
       'Permission request was cancelled before the user answered.',
-    );
-    expect(permissionCancelReasonFromResponse(emptyReasonResponse)).toBe(
-      undefined,
-    );
-    expect(permissionCancelMessageFromResponse(emptyReasonResponse)).toBe(
-      undefined,
-    );
-    expect(permissionCancelReasonFromResponse(unknownReasonResponse)).toBe(
-      undefined,
-    );
-    expect(permissionCancelMessageFromResponse(unknownReasonResponse)).toBe(
-      undefined,
-    );
-  });
+    ],
+  ] as const)(
+    'maps daemon cancel reason %s to model-facing prose',
+    (reason, expectedMessage) => {
+      const response = {
+        outcome: { outcome: 'cancelled' },
+        _meta: {
+          'qwen.daemon.permissionCancelReason': reason,
+        },
+      } as RequestPermissionResponse;
+
+      expect(permissionCancelReasonFromResponse(response)).toBe(reason);
+      expect(permissionCancelMessageFromResponse(response)).toBe(
+        expectedMessage,
+      );
+    },
+  );
+
+  it.each([undefined, '', 42, 'approval_ui_unavailable'])(
+    'ignores invalid daemon cancel reason metadata: %s',
+    (reason) => {
+      const response = {
+        outcome: { outcome: 'cancelled' },
+        ...(reason === undefined
+          ? {}
+          : {
+              _meta: {
+                'qwen.daemon.permissionCancelReason': reason,
+              },
+            }),
+      } as RequestPermissionResponse;
+
+      expect(permissionCancelReasonFromResponse(response)).toBeUndefined();
+      expect(permissionCancelMessageFromResponse(response)).toBeUndefined();
+    },
+  );
 
   it('aborts permission requests and ignores late settlement', async () => {
     let resolveRequest: ((value: never) => void) | undefined;

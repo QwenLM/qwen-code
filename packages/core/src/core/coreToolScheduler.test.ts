@@ -10426,6 +10426,8 @@ describe('CoreToolScheduler plan mode with ask_user_question', () => {
   });
 
   it('should handle user cancellation of ask_user_question in plan mode', async () => {
+    const cancelMessage =
+      'Permission request timed out before the user answered.';
     const mockTool = createAskUserQuestionMockTool();
     const onAllToolCallsComplete = vi.fn();
     const onToolCallsUpdate = vi.fn();
@@ -10466,6 +10468,7 @@ describe('CoreToolScheduler plan mode with ask_user_question', () => {
     // Simulate user cancelling
     await awaitingCall.confirmationDetails.onConfirm(
       ToolConfirmationOutcome.Cancel,
+      { cancelMessage },
     );
 
     await vi.waitFor(() => {
@@ -10475,6 +10478,12 @@ describe('CoreToolScheduler plan mode with ask_user_question', () => {
     const completedCalls = onAllToolCallsComplete.mock
       .calls[0][0] as ToolCall[];
     expect(completedCalls[0].status).toBe('cancelled');
+    expect(
+      (completedCalls[0] as CompletedToolCall).response.responseParts[0]
+        ?.functionResponse?.response,
+    ).toEqual({
+      error: `[Operation Cancelled] Reason: ${cancelMessage}`,
+    });
   });
 });
 

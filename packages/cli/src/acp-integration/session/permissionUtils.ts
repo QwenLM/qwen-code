@@ -21,15 +21,12 @@ type DaemonPermissionCancelReason = Extract<
   { kind: 'cancelled' }
 >['reason'];
 
-function isDaemonPermissionCancelReason(
-  reason: string,
-): reason is DaemonPermissionCancelReason {
-  return (
-    reason === 'timeout' ||
-    reason === 'session_closed' ||
-    reason === 'agent_cancelled'
-  );
-}
+const daemonPermissionCancelMessages = {
+  timeout: 'Permission request timed out before the user answered.',
+  session_closed:
+    'Permission request was cancelled because the session closed before the user answered.',
+  agent_cancelled: 'Permission request was cancelled before the user answered.',
+} satisfies Record<DaemonPermissionCancelReason, string>;
 
 const basicPermissionOptions = [
   {
@@ -148,8 +145,9 @@ export function permissionCancelReasonFromResponse(
   response: RequestPermissionResponse,
 ): DaemonPermissionCancelReason | undefined {
   const reason = response._meta?.[DAEMON_PERMISSION_CANCEL_REASON_META_KEY];
-  return typeof reason === 'string' && isDaemonPermissionCancelReason(reason)
-    ? reason
+  return typeof reason === 'string' &&
+    Object.hasOwn(daemonPermissionCancelMessages, reason)
+    ? (reason as DaemonPermissionCancelReason)
     : undefined;
 }
 
@@ -157,16 +155,9 @@ export function permissionCancelMessageFromResponse(
   response: RequestPermissionResponse,
 ): string | undefined {
   const reason = permissionCancelReasonFromResponse(response);
-  switch (reason) {
-    case 'timeout':
-      return 'Permission request timed out before the user answered.';
-    case 'session_closed':
-      return 'Permission request was cancelled because the session closed before the user answered.';
-    case 'agent_cancelled':
-      return 'Permission request was cancelled before the user answered.';
-    default:
-      return reason;
-  }
+  return reason === undefined
+    ? undefined
+    : daemonPermissionCancelMessages[reason];
 }
 
 export function buildPermissionRequestContent(

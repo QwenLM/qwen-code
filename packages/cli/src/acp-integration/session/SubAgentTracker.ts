@@ -18,6 +18,7 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import {
   AgentEventType,
+  AUTO_REJECT_APPROVAL_PAYLOAD,
   ToolConfirmationOutcome,
   createDebugLogger,
 } from '@qwen-code/qwen-code-core';
@@ -299,7 +300,10 @@ export class SubAgentTracker {
           this.onPermissionCancel?.();
         }
         try {
-          await event.respond(ToolConfirmationOutcome.Cancel);
+          await event.respond(
+            ToolConfirmationOutcome.Cancel,
+            AUTO_REJECT_APPROVAL_PAYLOAD,
+          );
         } catch (respondError) {
           debugLogger.error(
             `Failed to cancel subagent tool ${event.name} after permission request failure:`,

@@ -14,6 +14,7 @@ import {
 } from './runtime/agent-events.js';
 import type { WorkflowRunHandle } from './runtime/workflow-runner.js';
 import {
+  AUTO_REJECT_APPROVAL_PAYLOAD,
   WorkflowRunRegistry,
   MAX_PENDING_WORKFLOW_APPROVALS,
   MAX_WORKFLOW_APPROVAL_DISPLAY_CHARS,
@@ -26,10 +27,6 @@ import {
   type WorkflowTaskRegistration,
   type WorkflowStatus,
 } from './workflow-run-registry.js';
-
-const AUTO_REJECT_APPROVAL_PAYLOAD = {
-  cancelMessage: 'Workflow approval was cancelled before it could be answered.',
-};
 
 const debugWarn = vi.hoisted(() => vi.fn());
 vi.mock('../utils/debugLogger.js', () => ({

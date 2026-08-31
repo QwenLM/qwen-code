@@ -32285,6 +32285,7 @@ describe('Session', () => {
         await vi.waitFor(() => {
           expect(respond).toHaveBeenCalledWith(
             core.ToolConfirmationOutcome.Cancel,
+            core.AUTO_REJECT_APPROVAL_PAYLOAD,
           );
         });
         expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(

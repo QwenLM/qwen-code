@@ -21,6 +21,7 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import {
   AgentEventType,
+  AUTO_REJECT_APPROVAL_PAYLOAD,
   ToolConfirmationOutcome,
   ToolNames,
 } from '@qwen-code/qwen-code-core';
@@ -544,7 +545,10 @@ describe('SubAgentTracker', () => {
       eventEmitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, event);
 
       await vi.waitFor(() => {
-        expect(respondSpy).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
+        expect(respondSpy).toHaveBeenCalledWith(
+          ToolConfirmationOutcome.Cancel,
+          AUTO_REJECT_APPROVAL_PAYLOAD,
+        );
       });
     });
 
@@ -632,7 +636,10 @@ describe('SubAgentTracker', () => {
       );
 
       await vi.waitFor(() => {
-        expect(respondSpy).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
+        expect(respondSpy).toHaveBeenCalledWith(
+          ToolConfirmationOutcome.Cancel,
+          AUTO_REJECT_APPROVAL_PAYLOAD,
+        );
       });
     });
 
@@ -675,7 +682,10 @@ describe('SubAgentTracker', () => {
       );
 
       await vi.waitFor(() => {
-        expect(respondSpy).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
+        expect(respondSpy).toHaveBeenCalledWith(
+          ToolConfirmationOutcome.Cancel,
+          AUTO_REJECT_APPROVAL_PAYLOAD,
+        );
       });
       const request = requestPermissionSpy.mock.calls[0]?.[0] as {
         options: Array<{ optionId: string }>;
@@ -795,7 +805,10 @@ describe('SubAgentTracker', () => {
       eventEmitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, event);
 
       await vi.waitFor(() => {
-        expect(respondSpy).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
+        expect(respondSpy).toHaveBeenCalledWith(
+          ToolConfirmationOutcome.Cancel,
+          AUTO_REJECT_APPROVAL_PAYLOAD,
+        );
       });
       expect(onPermissionCancel).toHaveBeenCalledOnce();
       expect(onPermissionCancel.mock.invocationCallOrder[0]).toBeLessThan(
@@ -831,7 +844,10 @@ describe('SubAgentTracker', () => {
       });
       abortController.abort();
       await vi.waitFor(() => {
-        expect(respondSpy).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
+        expect(respondSpy).toHaveBeenCalledWith(
+          ToolConfirmationOutcome.Cancel,
+          AUTO_REJECT_APPROVAL_PAYLOAD,
+        );
       });
 
       expect(onPermissionCancel).not.toHaveBeenCalled();
@@ -862,7 +878,10 @@ describe('SubAgentTracker', () => {
       await vi.waitFor(() => {
         expect(onPermissionCancel).toHaveBeenCalledOnce();
       });
-      expect(respondSpy).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
+      expect(respondSpy).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.Cancel,
+        AUTO_REJECT_APPROVAL_PAYLOAD,
+      );
     });
 
     it('should forward answers payload from ACP permission responses', async () => {
