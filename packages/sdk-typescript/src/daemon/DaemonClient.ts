@@ -5742,6 +5742,36 @@ export class WorkspaceDaemonClient {
   }
 
   /**
+   * Ask the daemon host to open this workspace's directory in the host's OS
+   * file manager (Finder/Explorer/xdg-open). Only advertised via the
+   * `workspace_local_open` capability; on a headless host the daemon answers
+   * 501 `local_path_open_unavailable`.
+   */
+  async openLocally(): Promise<void> {
+    await this.client.workspaceJsonRequest(
+      this.workspaceSelector,
+      '/open',
+      'POST /workspaces/:workspace/open',
+      { method: 'POST', body: {}, mode: 'rest' },
+    );
+  }
+
+  /**
+   * Ask the daemon host to open a terminal window in this workspace's
+   * directory (Terminal.app/wt.exe/a Linux terminal emulator). Only
+   * advertised via the `workspace_local_terminal` capability; on a headless
+   * host the daemon answers 501 `local_path_open_unavailable`.
+   */
+  async openTerminalLocally(): Promise<void> {
+    await this.client.workspaceJsonRequest(
+      this.workspaceSelector,
+      '/open',
+      'POST /workspaces/:workspace/open',
+      { method: 'POST', body: { target: 'terminal' }, mode: 'rest' },
+    );
+  }
+
+  /**
    * Send text directly through this exact workspace's channel worker.
    * A successful capability pre-flight does not guarantee worker liveness;
    * callers must treat 503 `channel_worker_unavailable` as an expected outcome.

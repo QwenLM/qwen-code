@@ -95,6 +95,7 @@ import {
   type WorkspaceOverviewItem,
 } from './workspaceOverviewModel';
 import { writeClipboardText } from '../../utils/clipboard';
+import { isLocalDaemon } from '../../config/daemon';
 import { sessionMatchesGitQuery } from './sessionSearch';
 import { SessionPrBadge } from '../SessionPrBadge';
 import {
@@ -1395,6 +1396,16 @@ export function WebShellSidebar({
       'dynamic_workspace_registration',
     ),
   );
+  // Host-local affordance: the daemon opens the folder on ITS host, so the
+  // button is only honest when the browser sits on that same machine.
+  const localOpenEnabled =
+    Boolean(
+      connection.capabilities?.features?.includes('workspace_local_open'),
+    ) && isLocalDaemon();
+  const localTerminalEnabled =
+    Boolean(
+      connection.capabilities?.features?.includes('workspace_local_terminal'),
+    ) && isLocalDaemon();
   const workspaceOverviewEnabled = workspaceOverview !== false;
   const workspaceOverviewItems =
     workspaceOverview === false
@@ -2481,6 +2492,32 @@ export function WebShellSidebar({
       });
     },
     [onError, t],
+  );
+
+  const openWorkspaceFolderLocally = useCallback(
+    async (cwd: string): Promise<void> => {
+      try {
+        await workspace.client.workspaceByCwd(cwd).openLocally();
+      } catch (error) {
+        onError(error, t('sidebar.openWorkspaceFolderFailed'));
+        // Rethrow so the hover popover keeps its idle icon on a failure the
+        // toast already reported.
+        throw error;
+      }
+    },
+    [onError, t, workspace.client],
+  );
+
+  const openWorkspaceTerminalLocally = useCallback(
+    async (cwd: string): Promise<void> => {
+      try {
+        await workspace.client.workspaceByCwd(cwd).openTerminalLocally();
+      } catch (error) {
+        onError(error, t('sidebar.openWorkspaceTerminalFailed'));
+        throw error;
+      }
+    },
+    [onError, t, workspace.client],
   );
 
   const reloadWorkspaceRuntime = useCallback(
@@ -4311,6 +4348,18 @@ export function WebShellSidebar({
                 aria-hidden="true"
               />
             ) : null}
+            {session.hasActivePrompt &&
+            !scheduledTaskIcon &&
+            !completedUnread ? (
+              <span
+                className={cx(
+                  styles.sessionStatusDot,
+                  styles.sessionStatusDotRunning,
+                )}
+                data-web-shell-session-running
+                aria-hidden="true"
+              />
+            ) : null}
           </span>
           {isEditing && canRenameSession(session) ? (
             <form
@@ -4371,7 +4420,12 @@ export function WebShellSidebar({
                     className={styles.sessionLoading}
                     aria-label={t('sidebar.running')}
                   />
-                ) : !attention && gitIcon ? (
+                ) : !attention && time ? (
+                  <span className={styles.sessionTime} aria-hidden="true">
+                    {time}
+                  </span>
+                ) : null}
+                {!session.hasActivePrompt && !attention && gitIcon ? (
                   <span className={styles.sessionGitIcon}>{gitIcon}</span>
                 ) : null}
                 {(showPin ||
@@ -5677,7 +5731,16 @@ export function WebShellSidebar({
                           showSessionDetails={sessionActionItems.has('details')}
                           overviewEnabled={workspaceOverviewEnabled}
                           overviewItems={workspaceOverviewItems}
-                          compact={footerTight}
+                          onOpenPathLocally={
+                            localOpenEnabled
+                              ? openWorkspaceFolderLocally
+                              : undefined
+                          }
+                          onOpenTerminalLocally={
+                            localTerminalEnabled
+                              ? openWorkspaceTerminalLocally
+                              : undefined
+                          }
                           gitBranchWanted={
                             Boolean(onNewWorktreeSession) && !lockedWorkspaceCwd
                           }
@@ -5730,6 +5793,28 @@ export function WebShellSidebar({
                                           copyPath: () => copyWorkspacePath(ws),
                                         }
                                       : {}),
+                                    ...(localOpenEnabled &&
+                                    ws.trusted &&
+                                    realPath
+                                      ? {
+                                          openFolder: () => {
+                                            void openWorkspaceFolderLocally(
+                                              ws.cwd,
+                                            ).catch(() => undefined);
+                                          },
+                                        }
+                                      : {}),
+                                    ...(localTerminalEnabled &&
+                                    ws.trusted &&
+                                    realPath
+                                      ? {
+                                          openTerminal: () => {
+                                            void openWorkspaceTerminalLocally(
+                                              ws.cwd,
+                                            ).catch(() => undefined);
+                                          },
+                                        }
+                                      : {}),
                                     ...(ws.trusted
                                       ? {
                                           newSession: () =>
@@ -5771,9 +5856,19 @@ export function WebShellSidebar({
                                         }
                                       : {}),
                                   };
+                                  // The section caps the folder name so the
+                                  // git chip never slides under this overlay;
+                                  // the count drives the cap's width.
+                                  const headerActionCount =
+                                    (ws.trusted
+                                      ? 1 + Number(canOrganizeWorkspace(ws.cwd))
+                                      : 0) + 1;
                                   return (
                                     <div
                                       className={styles.workspaceHeaderActions}
+                                      data-workspace-action-count={
+                                        headerActionCount
+                                      }
                                       style={{
                                         visibility:
                                           visible ||

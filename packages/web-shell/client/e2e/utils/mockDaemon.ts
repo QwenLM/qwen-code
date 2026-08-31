@@ -702,6 +702,7 @@ function isDaemonPath(path: string): boolean {
     /^\/workspaces\/[^/]+\/(voice|providers|settings)\/?$/.test(path) ||
     /^\/workspaces\/[^/]+\/skills\/?$/.test(path) ||
     /^\/workspaces\/[^/]+\/(mcp|extensions|memory|hooks)\/?$/.test(path) ||
+    /^\/workspaces\/[^/]+\/open\/?$/.test(path) ||
     /^\/workspace\/mcp\/[^/]+\/tools\/?$/.test(path) ||
     /^\/workspace\/mcp\/[^/]+\/resources\/?$/.test(path) ||
     /^\/workspaces\/[^/]+\/channel-types\/?$/.test(path) ||
@@ -789,6 +790,9 @@ function isDaemonRoute(method: string, path: string): boolean {
     method === 'GET' &&
     /^\/workspaces\/[^/]+\/(mcp|extensions|memory|hooks)\/?$/.test(path)
   ) {
+    return true;
+  }
+  if (method === 'POST' && /^\/workspaces\/[^/]+\/open\/?$/.test(path)) {
     return true;
   }
   if (method === 'GET' && /^\/workspace\/mcp\/[^/]+\/tools\/?$/.test(path)) {
@@ -1329,6 +1333,10 @@ async function handleDaemonRoute(
         branch: null,
       },
     );
+    return;
+  }
+  if (method === 'POST' && /^\/workspaces\/[^/]+\/open\/?$/.test(path)) {
+    await json(route, { kind: 'workspace-local-open', opened: true });
     return;
   }
   if (method === 'GET' && /^\/workspaces\/.+\/github\/prs\/?$/.test(path)) {

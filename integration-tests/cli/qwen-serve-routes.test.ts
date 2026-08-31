@@ -41,6 +41,10 @@ import {
   type ChatRecord,
 } from '@qwen-code/qwen-code-core';
 import { isNativeDirectoryPickerAvailable } from '../../packages/cli/src/serve/native-directory-picker.js';
+import {
+  isLocalPathOpenAvailable,
+  isLocalTerminalAvailable,
+} from '../../packages/cli/src/serve/local-path-open.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // Match the rest of the integration suite: prefer the bundled CLI
@@ -67,6 +71,10 @@ let client: DaemonClient;
 // assertion time minutes later diverged when the host's GUI session state
 // drifted mid-run (red macOS E2E runs after #9406, tracked in #10453).
 let nativeDirectoryPickerAtBoot = false;
+// Same boot-time probe pinning as above, for the workspace_local_open tag.
+let localPathOpenAtBoot = false;
+// Same boot-time probe pinning as above, for the workspace_local_terminal tag.
+let localTerminalOpenAtBoot = false;
 
 function writePersistedTranscript(
   sessionId: string,
@@ -119,6 +127,8 @@ function chatRecord(
 beforeAll(async () => {
   homeDir = mkdtempSync(path.join(tmpdir(), 'qwen-serve-routes-home-'));
   nativeDirectoryPickerAtBoot = isNativeDirectoryPickerAvailable();
+  localPathOpenAtBoot = isLocalPathOpenAvailable();
+  localTerminalOpenAtBoot = isLocalTerminalAvailable();
   daemon = spawn(
     process.execPath,
     [
@@ -426,6 +436,8 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_display_name',
       'workspace_runtime_removal',
       ...(nativeDirectoryPickerAtBoot ? ['native_directory_picker'] : []),
+      ...(localPathOpenAtBoot ? ['workspace_local_open'] : []),
+      ...(localTerminalOpenAtBoot ? ['workspace_local_terminal'] : []),
       'workspace_qualified_rest_core',
       'extension_management_v2',
       'extension_git_credentials',

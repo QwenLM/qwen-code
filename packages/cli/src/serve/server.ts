@@ -250,6 +250,10 @@ import {
   type WorkspaceRuntimeRemovalController,
 } from './routes/workspace-management.js';
 import { isNativeDirectoryPickerAvailable } from './native-directory-picker.js';
+import {
+  isLocalPathOpenAvailable,
+  isLocalTerminalAvailable,
+} from './local-path-open.js';
 import type { WorkspaceRegistrationStore } from './workspace-registration-store.js';
 import {
   registerWorkspaceGitRoutes,
@@ -268,6 +272,7 @@ import {
   registerWorkspaceQualifiedGitBranchRoutes,
 } from './routes/workspace-git-branches.js';
 import { registerWorkspaceQualifiedGitHubPrsRoutes } from './routes/workspace-github-prs.js';
+import { registerWorkspaceLocalOpenRoutes } from './routes/workspace-local-open.js';
 import { WorkspaceGitState } from './workspace-git-state.js';
 import {
   registerWorkspaceMcpControlRoutes,
@@ -601,6 +606,18 @@ export interface ServeAppDeps {
    * capability wiring is assertable on headless hosts too.
    */
   nativeDirectoryPickerAvailable?: boolean;
+  /**
+   * Test/embed override for the local path open probe. Production evaluates
+   * `isLocalPathOpenAvailable()`; tests pin this so the capability wiring is
+   * assertable on headless hosts too.
+   */
+  localPathOpenAvailable?: boolean;
+  /**
+   * Test/embed override for the local terminal open probe. Production
+   * evaluates `isLocalTerminalAvailable()`; tests pin this so the capability
+   * wiring is assertable on headless hosts too.
+   */
+  localTerminalOpenAvailable?: boolean;
   /**
    * Reverse tool channel (issue #5626, Phase 2). Shared sender registry that
    * bridges the daemon WS (per-connection `ClientMcpRegistrar`) and the ACP
@@ -1042,6 +1059,10 @@ export function createServeApp(
       nativeDirectoryPickerAvailable:
         deps.nativeDirectoryPickerAvailable ??
         isNativeDirectoryPickerAvailable(),
+      localPathOpenAvailable:
+        deps.localPathOpenAvailable ?? isLocalPathOpenAvailable(),
+      localTerminalOpenAvailable:
+        deps.localTerminalOpenAvailable ?? isLocalTerminalAvailable(),
       workspaceTrustHotReloadAvailable:
         deps.workspaceTrustHotReloadAvailable === true,
       isPrimaryWorkspaceTrusted: () => isPrimaryWorkspaceTrusted(),
@@ -2267,6 +2288,10 @@ export function createServeApp(
     workspaceRegistry,
     gitState: workspaceGitState,
     sendBridgeError,
+  });
+  registerWorkspaceLocalOpenRoutes(app, {
+    workspaceRegistry,
+    mutate,
   });
   registerWorkspaceGitDiffRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,

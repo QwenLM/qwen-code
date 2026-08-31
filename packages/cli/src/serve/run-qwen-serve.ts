@@ -118,6 +118,10 @@ import {
 } from './capabilities.js';
 import { isNativeDirectoryPickerAvailable } from './native-directory-picker.js';
 import {
+  isLocalPathOpenAvailable,
+  isLocalTerminalAvailable,
+} from './local-path-open.js';
+import {
   EXTERNAL_TOOL_GUARD_PROVIDER_ATTACHED_VALUE,
   EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
   EXTERNAL_TOOL_GUARD_TOKEN_ENV,
@@ -2311,6 +2315,8 @@ function currentServeFeaturesForRunQwenServe(
   currentSessionSchedulingAvailable: boolean,
   env: Readonly<Record<string, string | undefined>>,
   nativeDirectoryPickerAvailable: boolean,
+  localPathOpenAvailable: boolean,
+  localTerminalOpenAvailable: boolean,
 ): string[] {
   return getAdvertisedServeFeatures(undefined, {
     requireAuth: opts.requireAuth === true,
@@ -2341,6 +2347,8 @@ function currentServeFeaturesForRunQwenServe(
     // path (serve-features.ts) so the bootstrap `/capabilities` window doesn't
     // briefly under-report them.
     nativeDirectoryPickerAvailable,
+    localPathOpenAvailable,
+    localTerminalOpenAvailable,
     clientMcpOverWsEnabled: opts.clientMcpOverWs === true,
     cdpTunnelOverWsEnabled: opts.cdpTunnelOverWs === true,
     browserAutomationMcpAvailable: isBrowserAutomationMcpAvailable(opts, env),
@@ -2357,6 +2365,8 @@ function createBootstrapCapabilities(input: {
   permissionPolicy: PermissionPolicy | undefined;
   env: Readonly<Record<string, string | undefined>>;
   nativeDirectoryPickerAvailable: boolean;
+  localPathOpenAvailable: boolean;
+  localTerminalOpenAvailable: boolean;
 }): CapabilitiesEnvelope {
   return {
     v: CAPABILITIES_SCHEMA_VERSION,
@@ -2372,6 +2382,8 @@ function createBootstrapCapabilities(input: {
       input.currentSessionSchedulingAvailable,
       input.env,
       input.nativeDirectoryPickerAvailable,
+      input.localPathOpenAvailable,
+      input.localTerminalOpenAvailable,
     ),
     modelServices: [],
     workspaceCwd: input.boundWorkspace,
@@ -2547,6 +2559,8 @@ function createBootstrapServeApp(input: {
   // request, so evaluate it once here — the runtime path likewise probes once,
   // at `createApp` time (server.ts).
   const nativeDirectoryPickerAvailable = isNativeDirectoryPickerAvailable();
+  const localPathOpenAvailable = isLocalPathOpenAvailable();
+  const localTerminalOpenAvailable = isLocalTerminalAvailable();
 
   installSelfOriginStripMiddleware(app, getPort, opts.hostname);
   if (opts.allowOrigins && opts.allowOrigins.length > 0) {
@@ -2608,6 +2622,8 @@ function createBootstrapServeApp(input: {
         permissionPolicy,
         env: process.env,
         nativeDirectoryPickerAvailable,
+        localPathOpenAvailable,
+        localTerminalOpenAvailable,
       }),
     );
   });
@@ -2748,6 +2764,8 @@ function createBootstrapServeApp(input: {
           currentSessionSchedulingAvailable,
           process.env,
           nativeDirectoryPickerAvailable,
+          localPathOpenAvailable,
+          localTerminalOpenAvailable,
         ),
       },
       runtime: {
