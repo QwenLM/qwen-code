@@ -292,6 +292,18 @@ function runScenario(
       'date',
       [
         '#!/bin/bash',
+        // R19-1 replays a run whose attempt 1 burned 6480s (60%) of the
+        // default 180-minute budget: from attempt 1 on (the qwen stub owns
+        // the attempt counter), the truthful clock reports the advanced
+        // time, so the retry gate, the reset rewrite, and the watcher's
+        // eligibility all measure the simulated run depth.
+        'if [ "${1:-}" = "+%s" ] && [ "${SCENARIO:-}" = "retry_planted_attempt_start" ]; then',
+        '  att="$(cat "$ATT" 2>/dev/null || echo 0)"',
+        '  if [ "${att:-0}" -ge 1 ]; then',
+        '    echo $(( $(/bin/date +%s) + 6480 ))',
+        '    exit 0',
+        '  fi',
+        'fi',
         'if [ "${1:-}" = "-d" ] && [ "$#" -eq 3 ] && [ "${3:-}" = "+%s" ]; then',
         '  node -e \'const t=Date.parse(process.argv[1]);if(Number.isNaN(t))process.exit(1);console.log(Math.floor(t/1000))\' "$2"',
         'else',
@@ -361,14 +373,26 @@ function runScenario(
         '  supersede_mid_attempt) r success false "[API Error: 503 upstream overloaded]"; printf "head-b\\n::error::injected forged annotation" > "$SUPERSEDE_FILE" ;;',
         // Hostile salvage-state shapes during a retryable attempt 1 (the
         // reviewed agent derives every path from its exported environment):
-        // planted DIRECTORIES at the signal names (rm -f would abort the
-        // reset under errexit) and a deleted SALVAGE_DIR (the attempt-start
-        // rewrite must not abort it either). Attempt 2 must run and win.
-        '  retry_planted_dirs) if [ "$n" -eq 1 ]; then mkdir -p "$SALVAGE_DIR/compose-seen" "$SALVAGE_DIR/moved-to" "$SALVAGE_DIR/salvage-ok" "$COMPOSED_ARTIFACT"; [ -z "${SUPERSEDE_FILE:-}" ] || mkdir -p "$SUPERSEDE_FILE"; r success false "[API Error: 503 upstream overloaded]"; else r success false "ok after hostile reset"; fi ;;',
+        // planted DIRECTORIES at the signal names, attempt-start included
+        // (a surviving directory swallows the rewrite's mv -f, R19-1) —
+        // rm -f would abort the reset under errexit — and a deleted
+        // SALVAGE_DIR (the rewrite must not abort it either). Attempt 2
+        // must run and win.
+        '  retry_planted_dirs) if [ "$n" -eq 1 ]; then rm -rf "$SALVAGE_DIR/attempt-start"; mkdir -p "$SALVAGE_DIR/attempt-start" "$SALVAGE_DIR/compose-seen" "$SALVAGE_DIR/moved-to" "$SALVAGE_DIR/salvage-ok" "$COMPOSED_ARTIFACT"; [ -z "${SUPERSEDE_FILE:-}" ] || mkdir -p "$SUPERSEDE_FILE"; r success false "[API Error: 503 upstream overloaded]"; else r success false "ok after hostile reset"; fi ;;',
+        // R19-1: the reset's missing operand — attempt 1 replaces
+        // attempt-start with a DIRECTORY (the rewrite's mv -f renames the
+        // fresh temp INTO the directory: exit 0, silent) and dies
+        // retryable past the salvage threshold (the date stub advances the
+        // truthful clock with the attempt counter); the head moves early
+        // in attempt 2, which waits for the watcher's CEDE. A reset that
+        // never removes the plant keeps the watcher on the START_TS
+        // fallback — run-level elapsed — and arms KEEP instead.
+        '  retry_planted_attempt_start) if [ "$n" -eq 1 ]; then rm -rf "$SALVAGE_DIR/attempt-start"; mkdir -p "$SALVAGE_DIR/attempt-start"; r success false "[API Error: 503 upstream overloaded]"; else i=0; until [ -f "$SUPERSEDE_FILE" ] || [ "$i" -ge 200 ]; do /bin/sleep 0.05; i=$((i+1)); done; r success false "[API Error: 503 upstream overloaded]"; fi ;;',
         '  retry_deleted_salvage_dir) if [ "$n" -eq 1 ]; then rm -rf "$SALVAGE_DIR"; r success false "[API Error: 503 upstream overloaded]"; else r success false "ok after salvage dir vanished"; fi ;;',
         // The watcher arms the salvage marker mid-attempt (simulated here by
-        // the stub, since the replayed watcher can only CEDE without an
-        // injected salvage_eligible) and the attempt still dies retryable.
+        // the stub: the replay keeps the honest clock, so a below-threshold
+        // watcher never arms on its own) and the attempt still dies
+        // retryable.
         '  salvage_armed_then_die) printf "head-a" > "$QWEN_CI_REVIEW_SALVAGE_OK_FILE"; r success false "[API Error: 503 upstream overloaded]" ;;',
         '  supersede_forge_mid_attempt) printf "head-b" > "$SUPERSEDE_FILE"; r success false "Reviewed." ;;',
         '  supersede_during_backoff) if [ "$n" -eq 1 ]; then r success false "[API Error: 503 upstream overloaded]"; else r success false "attempt 2 must not run"; fi ;;',
@@ -407,6 +431,10 @@ function runScenario(
       `SALVAGE_DIR="${join(dir, 'salvage')}"; mkdir -p "$SALVAGE_DIR"; export SALVAGE_DIR`,
       `COMPOSED_ARTIFACT="${join(dir, 'composed.json')}"; export COMPOSED_ARTIFACT`,
       'fail(){ echo "FAIL kind=[${3:-}] reason=[$1]"; exit "${2:-1}"; }',
+      // The extraction window starts at OUTCOME='', past the eligibility
+      // function's definition; a replayed watcher that can only CEDE could
+      // never witness a plant that arms KEEP (R19-1).
+      runReviewStep().match(/salvage_eligible\(\) \{[\s\S]*?\n\}/)?.[0] ?? '',
       retryLoopSource(),
       'echo "OK outcome=$OUTCOME"',
     ].join('\n');
@@ -429,6 +457,11 @@ function runScenario(
           // loop's conversions must read (R16-1, R16-3).
           QWEN_CI_REAL_GH: '',
           QWEN_CI_REAL_DATE: join(bin, 'date'),
+          // Same for the R18-4 rm/tee pins: production captures absolute
+          // paths before the $proxy_bin prepend; the replay pins the real
+          // utilities so proxyPlants shadow bare-command resolution only.
+          QWEN_CI_REAL_RM: '/bin/rm',
+          QWEN_CI_REAL_TEE: '/bin/tee',
           PATH: `${proxyBin}:${bin}:${process.env.PATH}`,
           SCENARIO: scenario,
           ATT: attemptFile,
@@ -4393,8 +4426,14 @@ describe('review supersede salvage (#10110)', () => {
         return false;
       }
     };
-    // Compose done → always keep, however early.
-    expect(eligible(60, 21600, 'true', 50)).toBe(true);
+    // Compose done keeps past the 25% elapsed floor — a real compose is
+    // the review's final step and clears it easily...
+    expect(eligible(5400, 21600, 'true', 50)).toBe(true);
+    // ...but the artifact path is agent-derivable, so a first-minute
+    // plant must not short-circuit KEEP: below the floor the compose
+    // branch falls through to the pct test (R18-3).
+    expect(eligible(5399, 21600, 'true', 50)).toBe(false);
+    expect(eligible(60, 21600, 'true', 50)).toBe(false);
     // The motivating incident: PR #9729's 4h06m (14760s) review on a
     // 360-minute (21600s) budget crosses the default 50% threshold.
     expect(eligible(14760, 21600, 'false', 50)).toBe(true);
@@ -4439,6 +4478,7 @@ describe('review supersede salvage (#10110)', () => {
     removeSalvageDir = false,
     realGhHead = null,
     sleepFailAfter = null,
+    forgeDateOffset = null,
   } = {}) {
     const dir = mkdtempSync(join(tmpdir(), 'review-watcher-'));
     // Stubs and logs live OUTSIDE SALVAGE_DIR: the delete variant removes it
@@ -4522,6 +4562,28 @@ describe('review supersede salvage (#10110)', () => {
         writeFileSync(realGhPath, `#!/bin/bash\necho "${realGhHead}"\n`);
         chmodSync(realGhPath, 0o755);
       }
+      // R18-1 dual: a forged date planted where $proxy_bin sits in
+      // production (first in PATH) answers +%s with a future epoch; the
+      // clock sites must read the truthful capture instead.
+      let realDatePath = null;
+      if (forgeDateOffset !== null) {
+        write(
+          'date',
+          [
+            '#!/bin/bash',
+            'if [ "${1:-}" = "+%s" ]; then',
+            `  echo $(( $(/bin/date +%s) + ${forgeDateOffset} ))`,
+            '  exit 0',
+            'fi',
+            'exec /bin/date "$@"',
+          ].join('\n') + '\n',
+        );
+        const realBin = join(side, 'realbin');
+        mkdirSync(realBin, { recursive: true });
+        realDatePath = join(realBin, 'date');
+        writeFileSync(realDatePath, '#!/bin/bash\nexec /bin/date "$@"\n');
+        chmodSync(realDatePath, 0o755);
+      }
       write('pkill', `#!/bin/bash\necho "$*" >> "${pkillLog}"\n`);
       // The watcher's bounded reads (timeout 5 node/head ...) need a
       // timeout(1) on every lane: macOS ships none, and a missing binary
@@ -4584,6 +4646,9 @@ describe('review supersede salvage (#10110)', () => {
             QWEN_CI_REAL_GH: '',
             PATH: `${bin}:${process.env.PATH}`,
             ...(realGhPath !== null ? { QWEN_CI_REAL_GH: realGhPath } : {}),
+            ...(realDatePath !== null
+              ? { QWEN_CI_REAL_DATE: realDatePath }
+              : {}),
           },
         });
       } catch {
@@ -4624,10 +4689,31 @@ describe('review supersede salvage (#10110)', () => {
     expect(keep.superseded).toBeNull();
     expect(keep.pkilled).toBe(false);
 
-    // Compose seen: KEEP however early — posting is minutes out.
-    const composed = runWatcher({ composeSeen: true });
+    // Compose seen past the elapsed floor: KEEP — posting is minutes out
+    // (the floor is R18-3's plant bound, not a limit on a real compose —
+    // compose is the review's final step).
+    const composed = runWatcher({ composeSeen: true, runElapsed: 6000 });
     expect(composed.marker).toBe('head-a');
     expect(composed.superseded).toBeNull();
+  });
+
+  it('decides on the captured date, not a forged PATH date (replayed watcher)', () => {
+    // R18-1: bare `date` at the clock sites resolves through the
+    // agent-writable $proxy_bin PATH prepend. A planted date answering +%s
+    // with a large future epoch inflates run_elapsed past the self-bound
+    // and the watcher exits silently — every supersede protection off for
+    // the rest of the run; a smaller forge inflates the attempt elapsed
+    // and arms KEEP on a seconds-old attempt. The clock must read
+    // QWEN_CI_REAL_DATE — captured before the prepend, :-date fallback
+    // for the replays — and the honest clock cedes the moved head.
+    const large = runWatcher({ forgeDateOffset: 300000 });
+    expect(large.superseded).toBe('head-b');
+    expect(large.pkilled).toBe(true);
+    expect(large.marker).toBeNull();
+    const small = runWatcher({ forgeDateOffset: 11000 });
+    expect(small.superseded).toBe('head-b');
+    expect(small.pkilled).toBe(true);
+    expect(small.marker).toBeNull();
   });
 
   it('cedes a moved head on a fresh retry attempt (replayed watcher)', () => {
@@ -4679,7 +4765,8 @@ describe('review supersede salvage (#10110)', () => {
       // must still latch (KEEP) — the write renames over the plant.
       const latch = runWatcher({
         composedArtifact: '{"downgraded":false}',
-        attemptElapsed: 30,
+        runElapsed: 6000,
+        attemptElapsed: 6000,
         plant: { 'compose-seen': 'fifo' },
       });
       expect(latch.marker).toBe('head-a');
@@ -4688,12 +4775,14 @@ describe('review supersede salvage (#10110)', () => {
   );
 
   it('latches the compose signal only from a real composed artifact (replayed watcher)', () => {
-    // A genuinely composed verdict below the elapsed threshold: KEEP —
-    // posting is minutes out, and discarding it is the #9729 shape. This is
-    // the only case exercising artifact -> latch -> KEEP end-to-end.
+    // A genuinely composed verdict below the pct threshold but past the
+    // compose floor: KEEP — posting is minutes out, and discarding it is
+    // the #9729 shape. This is the only case exercising artifact -> latch
+    // -> KEEP end-to-end.
     const valid = runWatcher({
       composedArtifact: '{"downgraded":false,"downgradedFrom":null}',
-      attemptElapsed: 30,
+      runElapsed: 6000,
+      attemptElapsed: 6000,
     });
     expect(valid.marker).toBe('head-a');
     expect(valid.superseded).toBeNull();
@@ -4704,6 +4793,17 @@ describe('review supersede salvage (#10110)', () => {
       expect(r.marker, JSON.stringify(forged)).toBeNull();
       expect(r.superseded, JSON.stringify(forged)).toBe('head-b');
     }
+  });
+
+  it('refuses a first-minute plant of the composed artifact (replayed watcher)', () => {
+    // R18-3: the artifact path is derivable from cwd + PR number and the
+    // latch accepts any parseable JSON object — `{}` latches within one
+    // poll. The compose branch carries an elapsed floor, so the forged
+    // latch falls through to the threshold and the fresh attempt cedes
+    // the moved head instead of KEEP-ing on its first minute.
+    const r = runWatcher({ composedArtifact: '{}', attemptElapsed: 30 });
+    expect(r.marker).toBeNull();
+    expect(r.superseded).toBe('head-b');
   });
 
   it.skipIf(!hasMkfifo)(
@@ -4738,7 +4838,8 @@ describe('review supersede salvage (#10110)', () => {
     const underCap = `{"downgraded":false}${' '.repeat(64 * 1024)}`;
     const kept = runWatcher({
       composedArtifact: underCap,
-      attemptElapsed: 30,
+      runElapsed: 6000,
+      attemptElapsed: 6000,
     });
     expect(kept.marker).toBe('head-a');
     expect(kept.superseded).toBeNull();
@@ -4806,6 +4907,26 @@ describe('review supersede salvage (#10110)', () => {
     expect(r.superseded).toBe('head-b');
     expect(r.pkilled).toBe(true);
     expect(r.marker).toBeNull();
+  });
+
+  it('bounds a shape-valid attempt-start plant to the run window (replayed watcher)', () => {
+    // R18-2: attempt-start is agent-writable and the shape guard rejects
+    // only empty/leading-zero/non-digit values — any past 10-digit epoch
+    // passes it and sets the eligibility clock ("1" makes elapsed ≈ now,
+    // arming KEEP on a seconds-old attempt), and a >19-digit plant wraps
+    // bash's 64-bit arithmetic (2^64+1 ≡ 1, the same flip through the
+    // wrap). Outside [START_TS, 10 digits] the value must fall back to
+    // the run start, and the watcher must still decide — a fallback, not
+    // a death, as the octal arm pins.
+    for (const plant of ['1', '18446744073709551617']) {
+      const r = runWatcher({
+        runElapsed: 60,
+        attemptElapsed: 30,
+        attemptStartRaw: plant,
+      });
+      expect(r.superseded, plant).toBe('head-b');
+      expect(r.marker, plant).toBeNull();
+    }
   });
 
   it('keeps a late retry attempt salvage-eligible against its own budget (replayed watcher)', () => {
@@ -5256,6 +5377,27 @@ describe('review supersede salvage (#10110)', () => {
     }
   });
 
+  it('resets the compose latch through the captured rm pin (replayed loop)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'review-salvage-'));
+    try {
+      const obs = join(dir, 'latch-observed');
+      // R18-4: a hijacked agent plants a no-op rm in the agent-writable
+      // $proxy_bin prepend; attempt 1 reaches compose and dies retryable.
+      // The reset must remove the latch through QWEN_CI_REAL_RM — captured
+      // before the prepend like gh/git/date — or the bare PATH resolution
+      // no-ops it and the fresh attempt reads salvage-eligible from its
+      // first second.
+      const r = runScenario('compose_latch_reset', {
+        proxyPlants: { rm: '#!/bin/bash\nexit 0\n' },
+        extraEnv: { OBS: obs },
+      });
+      expect(r.attempts).toBe(2);
+      expect(readFileSync(obs, 'utf8').trim()).toBe('absent');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('deletes a stale composed artifact in the per-attempt reset (replayed loop)', () => {
     const dir = mkdtempSync(join(tmpdir(), 'review-salvage-'));
     try {
@@ -5689,6 +5831,43 @@ describe('review supersede salvage (#10110)', () => {
       expect(r.status).toBe(0);
       expect(r.line).toBe('OK outcome=success');
       expect(r.raw).not.toContain('FAIL ');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('cedes a moved head when attempt-start was planted as a directory (replayed loop)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'review-salvage-'));
+    try {
+      const supersedeFile = join(dir, 'superseded');
+      // R19-1: attempt-start was the only salvage path no reset removed —
+      // a DIRECTORY planted there survives every reset, because the
+      // rewrite's mv -f renames the fresh temp INTO the directory (exit 0,
+      // silent). The watcher's read then falls back to START_TS on every
+      // poll: attempt 1 burned past the salvage threshold (the date stub
+      // advances the truthful clock with the attempt counter) and the head
+      // moves early in attempt 2, so run-level elapsed arms KEEP on the
+      // seconds-old attempt instead of the mandated CEDE. The reset must
+      // remove the plant before rewriting.
+      const r = runScenario('retry_planted_attempt_start', {
+        armWatcher: true,
+        extraEnv: {
+          SUPERSEDE_FILE: supersedeFile,
+          // Production exports the marker path (SALVAGE_DIR derives from
+          // it); the watcher's KEEP arming writes it, and the salvage-cede
+          // check below the supersede check reads it.
+          QWEN_CI_REVIEW_SALVAGE_OK_FILE: join(dir, 'salvage-ok'),
+          EXPECTED_HEAD_SHA: 'head-a',
+          STUB_LIVE_HEAD: 'head-a',
+          STUB_LIVE_HEAD_A2: 'head-b',
+        },
+      });
+      expect(r.attempts).toBe(2);
+      expect(r.status).toBe(0);
+      expect(r.raw).toContain('Superseded early:');
+      expect(r.raw).not.toContain(
+        'Salvage-armed review attempt did not complete',
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

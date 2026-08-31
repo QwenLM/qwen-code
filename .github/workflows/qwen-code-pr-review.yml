@@ -1101,7 +1101,7 @@ jobs:
           # rm -rf exit 1 (-f does not suppress EACCES) and would silently
           # skip the cleanups after it. The kill itself tolerates an
           # already-reaped watcher (salvage arming exits it on the spot).
-          trap '[ -z "${WATCHER_PID:-}" ] || kill "${WATCHER_PID}" 2>/dev/null || true; rm -rf "$LOG_PATH" 2>/dev/null || true; [ -z "$PROXY_BIN" ] || rm -rf "$PROXY_BIN" 2>/dev/null || true; [ -z "${SALVAGE_DIR:-}" ] || rm -rf "${SALVAGE_DIR}" 2>/dev/null || true; [ -z "${SUPERSEDE_KILL_DIR:-}" ] || rm -rf "${SUPERSEDE_KILL_DIR}" 2>/dev/null || true' EXIT
+          trap '[ -z "${WATCHER_PID:-}" ] || kill "${WATCHER_PID}" 2>/dev/null || true; "${QWEN_CI_REAL_RM:-rm}" -rf "$LOG_PATH" 2>/dev/null || true; [ -z "$PROXY_BIN" ] || "${QWEN_CI_REAL_RM:-rm}" -rf "$PROXY_BIN" 2>/dev/null || true; [ -z "${SALVAGE_DIR:-}" ] || "${QWEN_CI_REAL_RM:-rm}" -rf "${SALVAGE_DIR}" 2>/dev/null || true; [ -z "${SUPERSEDE_KILL_DIR:-}" ] || "${QWEN_CI_REAL_RM:-rm}" -rf "${SUPERSEDE_KILL_DIR}" 2>/dev/null || true' EXIT
 
           if [ -z "${GH_TOKEN:-}" ]; then
             fail "CI_BOT_PAT secret is required for Qwen PR review."
@@ -1296,6 +1296,16 @@ jobs:
             local real_date
             real_date="$(command -v date || echo date)"
             export QWEN_CI_REAL_DATE="$real_date"
+
+            # The salvage reset/cede paths below also resolve bare rm/tee
+            # through the agent-writable prepend — pin them like gh/git/date
+            # (R18-4).
+            local real_rm
+            real_rm="$(command -v rm || echo rm)"
+            export QWEN_CI_REAL_RM="$real_rm"
+            local real_tee
+            real_tee="$(command -v tee || echo tee)"
+            export QWEN_CI_REAL_TEE="$real_tee"
 
             export PATH="$proxy_bin:$PATH"
             unset HTTPS_PROXY https_proxy HTTP_PROXY http_proxy
@@ -1495,8 +1505,11 @@ jobs:
             SALVAGE_ELAPSED_PERCENT=100
           fi
           # KEEP vs CEDE for a superseded in-flight review, extracted for the
-          # workflow tests. KEEP (salvage) when compose already completed —
-          # posting is minutes out regardless of elapsed time — or when the
+          # workflow tests. KEEP (salvage) when compose already completed and
+          # the attempt is past a 25% elapsed floor — compose is the review's
+          # final step, so a real one clears any floor, but the artifact path
+          # is agent-derivable and the floor stops a first-minute plant from
+          # short-circuiting KEEP at any elapsed (R18-3) — or when the
           # current attempt spent at least SALVAGE_ELAPSED_PERCENT of its
           # size-aware budget. The default 50% approximates the issue's "80% of typical
           # wall time": measured reviews land around 55-70% of their budget
@@ -1506,7 +1519,8 @@ jobs:
           # same budget restarts cheaply on the new head.
           salvage_eligible() {
             local elapsed="$1" budget="$2" compose_seen="$3" pct="$4"
-            if [ "$compose_seen" = "true" ]; then
+            if [ "$compose_seen" = "true" ] \
+              && [ "$(( elapsed * 100 ))" -ge "$(( budget * 25 ))" ]; then
               return 0
             fi
             [ "$(( elapsed * 100 ))" -ge "$(( budget * pct ))" ]
@@ -1754,12 +1768,19 @@ jobs:
           reset_attempt_salvage_state() {
             # rm -rf, not rm -f: every operand is agent-writable, and a
             # planted DIRECTORY makes rm -f exit 1 and abort the step under
-            # errexit instead of resetting. The rewrite is best-effort for
-            # the same reason the watcher's writes are: a vanished
-            # SALVAGE_DIR must degrade to the START_TS fallback, not a red
-            # abort of the retry.
-            rm -rf "${SALVAGE_DIR}/compose-seen" "${COMPOSED_ARTIFACT:-}"
-            write_signal "${SALVAGE_DIR}/attempt-start" "$(date +%s)" || true
+            # errexit instead of resetting. attempt-start goes with the
+            # latch and the artifact: a planted directory there swallows
+            # the rewrite's mv -f (rename INTO a dir exits 0, silent) and
+            # pins the watcher to the run-start fallback on every retry
+            # (R19-1). The utilities and the clock resolve through the
+            # captures taken before the $proxy_bin prepend (R18-4/R18-1).
+            # The rewrite is best-effort for the same reason the watcher's
+            # writes are: a vanished SALVAGE_DIR must degrade to the
+            # START_TS fallback, not a red abort of the retry.
+            "${QWEN_CI_REAL_RM:-rm}" -rf "${SALVAGE_DIR}/compose-seen" \
+              "${COMPOSED_ARTIFACT:-}" "${SALVAGE_DIR}/attempt-start"
+            write_signal "${SALVAGE_DIR}/attempt-start" \
+              "$("${QWEN_CI_REAL_DATE:-date}" +%s)" || true
           }
           # Salvage eligibility measures the CURRENT attempt (the reset
           # rewrites this before each attempt): a retry restarts the review
@@ -1793,7 +1814,7 @@ jobs:
             while sleep "$SALVAGE_POLL_SECONDS"; do
               # Self-bound stays per RUN: the watcher must stop acting past
               # the whole budget even though eligibility is per attempt.
-              run_elapsed=$(( $(date +%s) - START_TS ))
+              run_elapsed=$(( $("${QWEN_CI_REAL_DATE:-date}" +%s) - START_TS ))
               if [ "$run_elapsed" -gt "$(( BUDGET_SECONDS + 1800 ))" ]; then
                 return 0
               fi
@@ -1804,7 +1825,10 @@ jobs:
               # object; a torn mid-write fails the parse and latches on the
               # next poll instead. Residual risk, documented like the marker
               # escape: an agent can write valid JSON too, but it already
-              # authors the review this signal describes. The reopen is
+              # authors the review this signal describes — and the KEEP the
+              # latch can force is bounded by salvage_eligible's elapsed
+              # floor, so a first-minute plant cannot flip a fresh attempt
+              # (R18-3). The reopen is
               # timeout-bounded: [ -f ] refuses a statically planted FIFO,
               # but one rename-swapped in during the check-then-open window
               # would otherwise block readFileSync forever (no writer) and
@@ -1841,7 +1865,17 @@ jobs:
               case "$attempt_start" in
                 ''|0*|*[!0-9]*) attempt_start="$START_TS" ;;
               esac
-              elapsed=$(( $(date +%s) - attempt_start ))
+              # Shape alone is not a bound: the file is agent-writable, so
+              # any past/future 10-digit epoch passes the guard and sets
+              # this clock, and a >19-digit plant wraps the 64-bit
+              # arithmetic to an attacker-chosen value. Outside [START_TS,
+              # 10 digits] fall back to the run start — a fallback, not a
+              # death: the watcher keeps deciding (R18-2).
+              if [ "${#attempt_start}" -gt 10 ] \
+                || [ "$attempt_start" -lt "$START_TS" ]; then
+                attempt_start="$START_TS"
+              fi
+              elapsed=$(( $("${QWEN_CI_REAL_DATE:-date}" +%s) - attempt_start ))
               # Denominator is the attempt's OWN budget — the share of the
               # run budget still left when it started — not the whole run's:
               # a retry that starts with less than the threshold remaining
@@ -1920,7 +1954,7 @@ jobs:
             echo "$content"
           }
           cede_superseded() {
-            echo "Superseded early: PR #${PR_NUMBER:-} moved from ${EXPECTED_HEAD_SHA:-} to $(read_head_signal "${SUPERSEDE_FILE:-}") before the salvage threshold; ceding to the replacement run (#10110)." | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "Superseded early: PR #${PR_NUMBER:-} moved from ${EXPECTED_HEAD_SHA:-} to $(read_head_signal "${SUPERSEDE_FILE:-}") before the salvage threshold; ceding to the replacement run (#10110)." | "${QWEN_CI_REAL_TEE:-tee}" -a "$GITHUB_STEP_SUMMARY"
             exit 0
           }
           # SUPERSEDE_FILE's premise against an unforgeable witness. The
@@ -2056,7 +2090,7 @@ jobs:
               # explicit run has no watcher that could legitimately arm the
               # marker and no queued replacement to cede to, so there the
               # forgeable marker must fail loudly, not exit green.
-              echo "Salvage-armed review attempt did not complete (${REASON:-unknown}); PR #${PR_NUMBER:-} head already moved — ceding to the replacement run (#10110)." | tee -a "$GITHUB_STEP_SUMMARY"
+              echo "Salvage-armed review attempt did not complete (${REASON:-unknown}); PR #${PR_NUMBER:-} head already moved — ceding to the replacement run (#10110)." | "${QWEN_CI_REAL_TEE:-tee}" -a "$GITHUB_STEP_SUMMARY"
               exit 0
             fi
             if [ "$OUTCOME" = "success" ]; then
@@ -2079,7 +2113,7 @@ jobs:
               # so a probe-gated relaunch skips and attempt 2 runs
               # unwatched. The wait reaps the zombie and bounds a draining
               # watcher well inside the backoff.
-              rm -rf "${SALVAGE_DIR}/moved-to" "${QWEN_CI_REVIEW_SALVAGE_OK_FILE:-}" "${SUPERSEDE_FILE:-}" \
+              "${QWEN_CI_REAL_RM:-rm}" -rf "${SALVAGE_DIR}/moved-to" "${QWEN_CI_REVIEW_SALVAGE_OK_FILE:-}" "${SUPERSEDE_FILE:-}" \
                 "${SUPERSEDE_KILL_DIR:+${SUPERSEDE_KILL_DIR}/killed}"
               if [ -n "${WATCHER_PID:-}" ]; then
                 kill "${WATCHER_PID}" 2>/dev/null || true
