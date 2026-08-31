@@ -31,8 +31,10 @@ Before a session exists, WebShell keeps the selected model and reasoning value
 in component state. Sending the first prompt performs these operations in
 order: create, attach, set model, persist reasoning, then submit the prompt.
 
-For a live session, WebShell sends reasoning changes immediately with
-`persist: true`. It updates its state only from the daemon's confirmed
+For a regular live session, WebShell sends reasoning changes immediately with
+`persist: true`. Managed standalone conversations keep their existing
+session-only settings boundary and use `persist: false`. WebShell updates its
+state only from the daemon's confirmed
 `configOptions` response. The daemon writes the setting and live state before
 returning success.
 
@@ -51,6 +53,10 @@ Every model switch reconciles the stored selection against the target model:
 
 There is no fallback or tier clamping at this layer. Once an incompatible
 selection is removed, switching back does not restore it.
+
+Session-only ACP model changes clear incompatible live overrides without
+changing the shared stored preference. Only a persistent model selection may
+remove it from writable settings scopes.
 
 Welcome uses model-specific workspace previews. Once a session exists,
 WebShell renders reasoning controls only from that session's authoritative
