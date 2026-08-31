@@ -28,6 +28,17 @@ export interface ParsedChannel {
   config: ParsedChannelConfig;
 }
 
+export function resolveChannelLocale(value: unknown): 'en' | 'zh' {
+  if (typeof value !== 'string') return 'en';
+  const language = value.trim().replaceAll('_', '-').toLowerCase();
+  return language === 'zh' ||
+    language.startsWith('zh-') ||
+    language === 'chinese' ||
+    language === '中文'
+    ? 'zh'
+    : 'en';
+}
+
 export function sessionsPath(): string {
   return path.join(Storage.getGlobalQwenDir(), 'channels', 'sessions.json');
 }

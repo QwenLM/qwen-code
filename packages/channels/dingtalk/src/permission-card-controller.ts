@@ -36,6 +36,7 @@ interface PermissionCardRecord {
 export interface PermissionCardControllerOptions {
   client: DingtalkInteractiveCardClient;
   timeoutMs: number;
+  locale?: 'en' | 'zh';
   reserveRunProjection?(
     runId: string,
   ): ((operation: () => Promise<void>) => Promise<void>) | undefined;
@@ -43,6 +44,33 @@ export interface PermissionCardControllerOptions {
 }
 
 const DECISION_FIELD = 'permission_decision';
+
+const PERMISSION_CARD_COPY = {
+  en: {
+    title: 'Permission required',
+    submit: 'Submit',
+    choose: 'Choose how to continue',
+    approved: { description: 'Permission approved.', button: 'Approved' },
+    denied: { description: 'Permission denied.', button: 'Denied' },
+    expired: {
+      description: 'This permission request is no longer available.',
+      button: 'Expired',
+    },
+    cancelled: {
+      description: 'Permission request cancelled.',
+      button: 'Cancelled',
+    },
+  },
+  zh: {
+    title: '需要授权',
+    submit: '提交',
+    choose: '请选择后续操作',
+    approved: { description: '已授权。', button: '已授权' },
+    denied: { description: '已拒绝授权。', button: '已拒绝' },
+    expired: { description: '此授权请求已失效。', button: '已失效' },
+    cancelled: { description: '授权请求已取消。', button: '已取消' },
+  },
+} as const;
 
 export class PermissionCardController {
   private readonly byRequest = new Map<string, PermissionCardRecord>();
@@ -241,29 +269,30 @@ export class PermissionCardController {
 
   private async projectTerminal(record: PermissionCardRecord): Promise<void> {
     if (!record.terminalState) return;
+    const copy = PERMISSION_CARD_COPY[this.options.locale ?? 'en'];
     const cardParamMap: Record<
       PermissionCardTerminalState,
       Record<string, string>
     > = {
       approved: {
         card_status: 'approved',
-        question_desc: 'Permission approved.',
-        form_btn_text: 'Approved',
+        question_desc: copy.approved.description,
+        form_btn_text: copy.approved.button,
       },
       denied: {
         card_status: 'denied',
-        question_desc: 'Permission denied.',
-        form_btn_text: 'Denied',
+        question_desc: copy.denied.description,
+        form_btn_text: copy.denied.button,
       },
       expired: {
         card_status: 'expired',
-        question_desc: 'This permission request is no longer available.',
-        form_btn_text: 'Expired',
+        question_desc: copy.expired.description,
+        form_btn_text: copy.expired.button,
       },
       cancelled: {
         card_status: 'cancelled',
-        question_desc: 'Permission request cancelled.',
-        form_btn_text: 'Cancelled',
+        question_desc: copy.cancelled.description,
+        form_btn_text: copy.cancelled.button,
       },
     };
     try {
@@ -313,19 +342,20 @@ export class PermissionCardController {
   private cardData(
     context: ChannelPermissionRequestContext,
   ): Record<string, unknown> {
+    const copy = PERMISSION_CARD_COPY[this.options.locale ?? 'en'];
     return {
       question_id: context.requestId,
-      question_title: 'Permission required',
+      question_title: copy.title,
       question_desc: context.title,
       card_status: 'pending',
-      form_btn_text: 'Submit',
+      form_btn_text: copy.submit,
       selected_text: '',
       selected_values: '[]',
       form: {
         fields: [
           {
             name: DECISION_FIELD,
-            label: 'Choose how to continue',
+            label: copy.choose,
             type: 'CHECKBOX_GROUP',
             required: true,
             options: context.decisions.map((decision) => ({

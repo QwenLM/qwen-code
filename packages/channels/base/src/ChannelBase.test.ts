@@ -1218,6 +1218,7 @@ describe('ChannelBase', () => {
         { optionId: 'proceed_once', kind: 'allow_once', name: 'Allow once' },
         { optionId: 'cancel', kind: 'reject_once', name: 'Deny' },
       ],
+      title = `Run ${requestId}`,
     ): void {
       (bridge as unknown as EventEmitter).emit('permissionRequest', {
         requestId,
@@ -1226,7 +1227,7 @@ describe('ChannelBase', () => {
           toolCall: {
             toolCallId: `tool-${requestId}`,
             kind: 'shell',
-            title: `Run ${requestId}`,
+            title,
             rawInput: { command: 'echo secret-token' },
           },
           options,
@@ -1871,6 +1872,33 @@ describe('ChannelBase', () => {
       await active.finish();
     });
 
+    it('localizes stock permission decisions for Chinese channels', async () => {
+      const ch = createChannel({}, { locale: 'zh' });
+      ch.permissionPresentationResult = { kind: 'presented' };
+      const active = await startActiveSession(ch);
+
+      emitPermission(
+        active.sessionId,
+        'req-native-permission-zh',
+        undefined,
+        '',
+      );
+
+      await vi.waitFor(() =>
+        expect(ch.permissionPresentations).toHaveLength(1),
+      );
+      expect(ch.permissionPresentations[0]).toMatchObject({
+        title: '工具调用',
+        decisions: [
+          { kind: 'allow_once', label: '仅允许本次' },
+          { kind: 'allow_always', label: '始终允许此项目' },
+          { kind: 'deny', label: '拒绝' },
+        ],
+      });
+
+      await active.finish();
+    });
+
     it('omits persistent permission decisions that were not advertised', async () => {
       const ch = createChannel();
       ch.permissionPresentationResult = { kind: 'presented' };
@@ -1903,6 +1931,23 @@ describe('ChannelBase', () => {
       expect(ch.sent[0]!.text).toContain('/approve        allow once');
       expect(ch.sent[0]!.text).toContain('/approve-always');
       expect(ch.sent[0]!.text).toContain('/deny           deny');
+
+      await active.finish();
+    });
+
+    it('uses Chinese text when native permission presentation is unsupported', async () => {
+      const ch = createChannel({}, { locale: 'zh' });
+      const active = await startActiveSession(ch);
+
+      emitPermission(active.sessionId, 'req-native-fallback-zh');
+
+      await vi.waitFor(() => expect(ch.sent).toHaveLength(1));
+      expect(ch.sent[0]!.text).toContain('运行工具需要授权');
+      expect(ch.sent[0]!.text).toContain('操作：');
+      expect(ch.sent[0]!.text).toContain('回复以下命令：');
+      expect(ch.sent[0]!.text).toContain('/approve        仅允许本次');
+      expect(ch.sent[0]!.text).toContain('/approve-always 始终允许此项目');
+      expect(ch.sent[0]!.text).toContain('/deny           拒绝');
 
       await active.finish();
     });

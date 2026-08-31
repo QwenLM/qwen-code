@@ -213,6 +213,20 @@ describe('workspace Channel management routes', () => {
             },
           ],
         },
+        {
+          key: 'permissionCard',
+          label: 'Permission Card',
+          kind: 'object',
+          properties: [
+            { key: 'enabled', label: 'Enabled', kind: 'boolean' },
+            {
+              key: 'timeoutMs',
+              label: 'Timeout (ms)',
+              kind: 'number',
+              exclusiveMinimum: 0,
+            },
+          ],
+        },
       ],
     });
   });

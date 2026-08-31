@@ -14,10 +14,10 @@ The DingTalk channel already presents running status and `ask_user_question` int
 
 ## Non-goals
 
-- No permission-policy, approval-mode, daemon, ACP, or core changes.
+- No permission-policy, approval-mode, ACP, or session-language API changes.
 - No new DingTalk card template. The existing question form template is reused with one required, single-choice permission field.
 - No cross-client or group-wide voting. Only the user who started the attended Channel run may operate the card.
-- No change to permission cards in CLI, Web, IDE, or other IM adapters.
+- No native permission-card implementation in CLI, Web, IDE, or other IM adapters.
 
 ## Channel presentation contract
 
@@ -60,7 +60,7 @@ A callback is accepted only when all of the following hold:
 - The callback contains the expected submit or cancel action and business payload.
 - For submit actions, the form contains exactly one advertised decision and no unknown fields.
 
-The accepted callback claims the record synchronously before asynchronous permission settlement. Duplicate, malformed, stale, and terminal callbacks are acknowledged but ignored. A foreign actor receives the existing generic owner-only feedback and cannot mutate the permission or card.
+The accepted callback claims the record synchronously before asynchronous permission settlement. Duplicate, malformed, stale, and terminal callbacks are acknowledged but ignored. A foreign actor receives generic owner-only feedback in the Channel locale and cannot mutate the permission or card.
 
 ## Terminal states
 
@@ -93,7 +93,13 @@ Card updates are best-effort projections. A failed update does not reopen or ret
 }
 ```
 
-When `interactiveCards` is configured, permission cards default to enabled with the same bounded positive timeout behavior as question cards. The root `enabled` flag and the nested permission flag can disable them independently. Existing configurations and other channels retain their current behavior.
+When `interactiveCards` is configured, permission cards default to enabled with the same bounded positive timeout behavior as question cards. The root `enabled` flag and the nested permission flag can disable them independently. Existing configuration shapes remain valid, and other channels do not gain a native permission-card implementation.
+
+## Language behavior
+
+Channel startup reads the existing default `general.language` setting once. Underscores are normalized to hyphens, then Chinese values (`zh`, `zh-*`, `Chinese`, or `中文`) select Chinese permission copy; missing, automatic, and all other values use English. The daemon worker follows the same rule. No IM request calls `/daemon/session/:sessionId/language`, and language is not resolved per session.
+
+The selected locale is passed through the existing Channel creation options. `ChannelBase` localizes only its stock permission decision labels and command fallback while preserving tool titles, custom option labels, option IDs, and slash commands. DingTalk applies the same locale to the permission-card title, field label, submit button, terminal descriptions, and owner-only interaction feedback. Protocol card states such as `pending`, `approved`, and `expired` remain unchanged.
 
 ## Validation
 

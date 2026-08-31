@@ -124,6 +124,7 @@ vi.mock('@qwen-code/channel-base', async () => {
     ChannelBase: class {
       protected config: Record<string, unknown>;
       protected name: string;
+      protected locale: 'en' | 'zh';
       handleInbound = vi.fn().mockResolvedValue(undefined);
       protected preflightInbound = vi.fn().mockResolvedValue(true);
       protected processInbound = vi.fn().mockResolvedValue(undefined);
@@ -208,9 +209,11 @@ vi.mock('@qwen-code/channel-base', async () => {
         name: string,
         config: Record<string, unknown>,
         _bridge: unknown,
+        options?: { locale?: 'en' | 'zh' },
       ) {
         this.name = name;
         this.config = config;
+        this.locale = options?.locale ?? 'en';
       }
     },
     sanitizeLogText: real.sanitizeLogText,
@@ -367,6 +370,7 @@ it('does not initialize or subscribe to cards when configuration is omitted', ()
 
 function createCallbackResultChannel(
   result: DingtalkCardCallbackResult,
+  options?: { locale?: 'en' | 'zh' },
 ): DingtalkChannelInstance {
   class CallbackResultChannel extends DingtalkChannel {
     protected override routeCardCallback(): DingtalkCardCallbackResult {
@@ -390,6 +394,7 @@ function createCallbackResultChannel(
       interactiveCards: {},
     } as never,
     {} as never,
+    options,
   );
 }
 
@@ -496,7 +501,7 @@ it('ACKs a parsed card callback before starting asynchronous handling', async ()
   });
 });
 
-it('ACKs before sending forbidden feedback to the original group', async () => {
+it('sends default-English forbidden feedback to the original group', async () => {
   createCallbackResultChannel({
     kind: 'forbidden',
     actorId: 'other-user',
@@ -525,6 +530,40 @@ it('ACKs before sending forbidden feedback to the original group', async () => {
     );
     expect(requestBody.openConversationId).toBe('group-1');
     expect(requestBody.userIds).toBeUndefined();
+    expect(JSON.parse(requestBody.msgParam).text).toContain(
+      'Only the task initiator',
+    );
+    expect(JSON.parse(requestBody.msgParam).text).toContain('had no effect');
+  } finally {
+    spy.mockRestore();
+  }
+});
+
+it('keeps Chinese forbidden feedback for Chinese channels', async () => {
+  createCallbackResultChannel(
+    {
+      kind: 'forbidden',
+      actorId: 'other-user',
+      target: { chatId: 'group-1', isGroup: true },
+    },
+    { locale: 'zh' },
+  );
+  const client = mockClientAt(dingtalkSdkMock.instances.length - 1);
+  const { spy, groupSendCalls } = stubCardFeedbackFetch();
+
+  try {
+    dispatchCardCallback(client, {
+      userId: 'other-user',
+      value: JSON.stringify({
+        outTrackId: 'question-1',
+        actionValue: 'submit',
+      }),
+    });
+
+    await vi.waitFor(() => expect(groupSendCalls()).toHaveLength(1));
+    const requestBody = JSON.parse(
+      String((groupSendCalls()[0]![1] as RequestInit).body),
+    );
     expect(JSON.parse(requestBody.msgParam).text).toContain('任务发起人');
     expect(JSON.parse(requestBody.msgParam).text).toContain('未生效');
   } finally {

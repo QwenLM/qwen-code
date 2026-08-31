@@ -61,13 +61,17 @@ function createContext(requestId = 'permission-1', includeAlways = true) {
   };
 }
 
-function createHarness(timeoutMs = 300_000) {
+function createHarness(timeoutMs = 300_000, locale: 'en' | 'zh' = 'en') {
   const client = {
     createAndDeliver: vi.fn().mockResolvedValue(undefined),
     openOrUpdateStream: vi.fn().mockResolvedValue(undefined),
     updateInstance: vi.fn().mockResolvedValue(undefined),
   } as unknown as DingtalkInteractiveCardClient;
-  const controller = new PermissionCardController({ client, timeoutMs });
+  const controller = new PermissionCardController({
+    client,
+    timeoutMs,
+    locale,
+  });
   return { client, controller };
 }
 
@@ -139,6 +143,64 @@ describe('PermissionCardController', () => {
       }),
     });
   });
+
+  it('renders permission cards in Chinese', async () => {
+    const { client, controller } = createHarness(300_000, 'zh');
+    const { context } = createContext('permission-zh', false);
+    context.decisions = [
+      { kind: 'allow_once', label: '仅允许本次' },
+      { kind: 'deny', label: '拒绝' },
+    ];
+
+    await controller.present(context, { chatId: 'cid-1', isGroup: true });
+    expect(client.createAndDeliver).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cardParamMap: expect.objectContaining({
+          question_title: '需要授权',
+          form_btn_text: '提交',
+          form: {
+            fields: [expect.objectContaining({ label: '请选择后续操作' })],
+          },
+        }),
+      }),
+    );
+  });
+
+  it.each([
+    ['approved', 'allow_once', '已授权。', '已授权'],
+    ['denied', 'deny', '已拒绝授权。', '已拒绝'],
+    ['expired', undefined, '此授权请求已失效。', '已失效'],
+    ['cancelled', undefined, '授权请求已取消。', '已取消'],
+  ] as const)(
+    'projects the %s terminal state in Chinese',
+    async (cardStatus, decision, description, button) => {
+      const { client, controller } = createHarness(300_000, 'zh');
+      const { context, settle } = createContext(`permission-zh-${cardStatus}`);
+      await controller.present(context, { chatId: 'cid-1', isGroup: true });
+      const outTrackId = deliveredOutTrackId(client);
+
+      if (decision) {
+        await acceptedExecution(
+          controller.claim(callback(outTrackId, decision)),
+        )();
+      } else if (cardStatus === 'expired') {
+        settle('resolved_outside_presenter');
+      } else {
+        controller.cancelRun('run-1');
+      }
+
+      await vi.waitFor(() =>
+        expect(client.updateInstance).toHaveBeenCalledWith({
+          outTrackId,
+          cardParamMap: {
+            card_status: cardStatus,
+            question_desc: description,
+            form_btn_text: button,
+          },
+        }),
+      );
+    },
+  );
 
   it.each([
     ['allow_once', 'approved'],

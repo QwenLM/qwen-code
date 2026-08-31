@@ -223,6 +223,7 @@ interface ChannelMemoryRecallSelection {
 }
 
 export interface ChannelBaseOptions {
+  locale?: 'en' | 'zh';
   router?: SessionRouter;
   proxy?: string;
   /** Adapter-owned persistent state directory. */
@@ -250,6 +251,31 @@ export interface ChannelBaseOptions {
     list?(): ObservedChannelContactGraph;
   };
 }
+
+const PERMISSION_COPY = {
+  en: {
+    toolUse: 'Tool use',
+    allowOnce: 'Allow once',
+    allowAlwaysProject: 'always allow for this project',
+    allowAlwaysUser: 'always allow for this user',
+    allowAlways: 'always allow',
+    deny: 'Deny',
+    required: 'Permission required to run a tool',
+    command: 'Command:',
+    replyWith: 'Reply with:',
+  },
+  zh: {
+    toolUse: '工具调用',
+    allowOnce: '仅允许本次',
+    allowAlwaysProject: '始终允许此项目',
+    allowAlwaysUser: '始终允许此用户',
+    allowAlways: '始终允许',
+    deny: '拒绝',
+    required: '运行工具需要授权',
+    command: '操作：',
+    replyWith: '回复以下命令：',
+  },
+} as const;
 
 export interface ChannelLoopController {
   create(input: ChannelLoopInput): Promise<ChannelLoop>;
@@ -403,6 +429,7 @@ export abstract class ChannelBase {
   protected proxy?: string;
   /** Adapter-owned persistent state directory, when supplied by the runtime. */
   protected readonly stateDir?: string;
+  protected readonly locale: 'en' | 'zh';
   private readonly channelMemory?: ChannelMemoryCallbacks;
   private readonly memoryIntentClassifier?: ChannelMemoryIntentClassifier;
   private readonly channelMemoryRecallObserver?: (
@@ -853,7 +880,7 @@ export abstract class ChannelBase {
         ? { precedingSegmentId: precedingSegment.segmentId }
         : {}),
       title: sanitizeQuotedText(
-        pending.request.toolCall.title || 'Tool use',
+        pending.request.toolCall.title || PERMISSION_COPY[this.locale].toolUse,
         160,
       ),
       decisions,
@@ -932,7 +959,10 @@ export abstract class ChannelBase {
     return [
       {
         kind: 'allow_once',
-        label: sanitizeQuotedText(allowOnce?.name || 'Allow once', 80),
+        label: sanitizeQuotedText(
+          this.permissionOptionLabel(allowOnce?.name, 'allow_once'),
+          80,
+        ),
       },
       ...(allowAlways
         ? [
@@ -944,9 +974,30 @@ export abstract class ChannelBase {
         : []),
       {
         kind: 'deny',
-        label: sanitizeQuotedText(deny?.name || 'Deny', 80),
+        label: sanitizeQuotedText(
+          this.permissionOptionLabel(deny?.name, 'deny'),
+          80,
+        ),
       },
     ];
+  }
+
+  private permissionOptionLabel(
+    name: string | undefined,
+    kind: 'allow_once' | 'deny',
+  ): string {
+    const copy = PERMISSION_COPY[this.locale];
+    if (!name) return kind === 'allow_once' ? copy.allowOnce : copy.deny;
+    if (this.locale === 'zh') {
+      if (
+        kind === 'allow_once' &&
+        (name === 'Allow' || name === 'Allow once')
+      ) {
+        return copy.allowOnce;
+      }
+      if (kind === 'deny' && name === 'Deny') return copy.deny;
+    }
+    return name;
   }
 
   private permissionPresentationResponse(
@@ -1118,6 +1169,7 @@ export abstract class ChannelBase {
     this.name = name;
     this.config = config;
     this.bridge = bridge;
+    this.locale = options?.locale ?? 'en';
     this.proxy = options?.proxy;
     this.stateDir = options?.stateDir;
     this.identity = Object.freeze(this.resolveIdentity(name, config));
@@ -3017,7 +3069,8 @@ export abstract class ChannelBase {
 
   private formatPermissionRequest(pending: PendingPermission): string {
     const { toolCall } = pending.request;
-    const title = sanitizeQuotedText(toolCall.title || 'Tool use', 160);
+    const copy = PERMISSION_COPY[this.locale];
+    const title = sanitizeQuotedText(toolCall.title || copy.toolUse, 160);
     const alwaysOption = this.approvalAlwaysOption(pending);
     if (pending.taskName) {
       const replies = [
@@ -3039,17 +3092,17 @@ export abstract class ChannelBase {
       ].join('\n');
     }
     const replies = [
-      '/approve        allow once',
+      `/approve        ${copy.allowOnce.toLocaleLowerCase(this.locale)}`,
       ...(alwaysOption ? [`/approve-always ${alwaysOption.label}`] : []),
-      '/deny           deny',
+      `/deny           ${copy.deny.toLocaleLowerCase(this.locale)}`,
     ];
     const lines = [
-      'Permission required to run a tool',
+      copy.required,
       '',
-      'Command:',
+      copy.command,
       title,
       '',
-      'Reply with:',
+      copy.replyWith,
       ...replies,
     ];
     return lines.join('\n');
@@ -3096,13 +3149,14 @@ export abstract class ChannelBase {
   }
 
   private approvalAlwaysLabel(option: PermissionOption): string {
+    const copy = PERMISSION_COPY[this.locale];
     if (option.optionId === 'proceed_always_project') {
-      return 'always allow for this project';
+      return copy.allowAlwaysProject;
     }
     if (option.optionId === 'proceed_always_user') {
-      return 'always allow for this user';
+      return copy.allowAlwaysUser;
     }
-    return 'always allow';
+    return copy.allowAlways;
   }
 
   private denialResponse(pending: PendingPermission): {

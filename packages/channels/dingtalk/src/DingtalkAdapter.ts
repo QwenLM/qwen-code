@@ -817,6 +817,7 @@ export class DingtalkChannel extends ChannelBase {
         this.permissionCardController = new PermissionCardController({
           client: this.interactiveCardClient,
           timeoutMs: this.interactiveCardConfig.permissionCard.timeoutMs,
+          locale: this.locale,
           reserveRunProjection: (runId) =>
             this.interactionPresenter?.reserveProjection(runId),
           onError: (operation, error) => {
@@ -1394,6 +1395,20 @@ export class DingtalkChannel extends ChannelBase {
     actorId: string,
     target?: { chatId: string; isGroup: boolean },
   ): Promise<void> {
+    const copy =
+      this.locale === 'zh'
+        ? {
+            title: '卡片操作',
+            group: '仅任务发起人可以操作这张卡片，本次操作未生效。',
+            direct: '你无权操作这张卡片，仅任务发起人可以提交或停止。',
+          }
+        : {
+            title: 'Card interaction',
+            group:
+              'Only the task initiator can operate this card. This action had no effect.',
+            direct:
+              'You cannot operate this card. Only the task initiator can submit or stop it.',
+          };
     if (target?.isGroup) {
       return this.sendProactiveChunk(
         {
@@ -1402,8 +1417,8 @@ export class DingtalkChannel extends ChannelBase {
           chatId: target.chatId,
           isGroup: true,
         },
-        '卡片操作',
-        '仅任务发起人可以操作这张卡片，本次操作未生效。',
+        copy.title,
+        copy.group,
         'card interaction feedback',
       );
     }
@@ -1414,8 +1429,8 @@ export class DingtalkChannel extends ChannelBase {
         chatId: actorId,
         isGroup: false,
       },
-      '卡片操作',
-      '你无权操作这张卡片，仅任务发起人可以提交或停止。',
+      copy.title,
+      copy.direct,
       'card interaction feedback',
     );
   }

@@ -40,6 +40,7 @@ import {
   registerPermissionRelay,
   registerSessionCleanup,
   registerToolCallDispatch,
+  resolveChannelLocale,
   selectFirstModel,
   sessionsPath,
 } from './runtime.js';
@@ -315,6 +316,7 @@ async function startSingle(
   name: string,
   proxy: string | undefined,
   cronEnabled: boolean,
+  locale: 'en' | 'zh',
 ): Promise<void> {
   checkDuplicateInstance();
   const channelsConfig = loadChannelsConfig();
@@ -372,6 +374,7 @@ async function startSingle(
   const channels: Map<string, ChannelBase> = new Map();
 
   const channel = await createChannel(name, config, bridge, {
+    locale,
     router,
     proxy,
     ...channelMemoryOptions(() => bridge, config.cwd),
@@ -441,6 +444,7 @@ async function startSingle(
 async function startAll(
   proxy: string | undefined,
   cronEnabled: boolean,
+  locale: 'en' | 'zh',
 ): Promise<void> {
   checkDuplicateInstance();
   const channelsConfig = loadChannelsConfig();
@@ -506,6 +510,7 @@ async function startAll(
     channels.set(
       name,
       await createChannel(name, config, bridge, {
+        locale,
         router,
         proxy,
         ...channelMemoryOptions(() => bridge, config.cwd),
@@ -609,10 +614,11 @@ export const startCommand: CommandModule<object, { name?: string }> = {
       settings.merged.proxy as string | undefined,
     );
     const cronEnabled = isChannelCronEnabled(settings);
+    const locale = resolveChannelLocale(settings.merged.general?.language);
     if (argv.name) {
-      await startSingle(argv.name, proxy, cronEnabled);
+      await startSingle(argv.name, proxy, cronEnabled, locale);
     } else {
-      await startAll(proxy, cronEnabled);
+      await startAll(proxy, cronEnabled, locale);
     }
   },
 };
