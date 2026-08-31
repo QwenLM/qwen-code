@@ -957,6 +957,80 @@ describe('Model-specific tool call formats', () => {
   });
 });
 
+describe('CodeModeOnly tool guidance', () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    vi.stubEnv('QWEN_SYSTEM_MD', undefined);
+    vi.stubEnv('QWEN_SYSTEM_IDENTITY_MD', undefined);
+    vi.stubEnv('QWEN_WRITE_SYSTEM_MD', undefined);
+    vi.stubEnv('QWEN_CODE_TOOL_CALL_STYLE', undefined);
+    vi.stubEnv('SANDBOX', undefined);
+    vi.mocked(isGitRepository).mockReturnValue(false);
+  });
+
+  const codeModePrompt = (model = 'gpt-4') =>
+    getCoreSystemPrompt(
+      undefined,
+      model,
+      undefined,
+      'interactive',
+      undefined,
+      true,
+    );
+
+  it('points the dedicated-tool guidance at tools.<name>', () => {
+    const prompt = codeModePrompt();
+
+    expect(prompt).toContain('as `tools.<name>(args)`');
+    expect(prompt).toContain('To read files use `tools.read_file`');
+    expect(prompt).not.toContain("To read files use 'read_file'");
+  });
+
+  it('replaces multi-tool parallelism with batching inside one exec program', () => {
+    const prompt = codeModePrompt();
+
+    expect(prompt).toContain('**Batch Into One Program:**');
+    expect(prompt).toContain('await them together with `Promise.all`');
+    expect(prompt).not.toContain(
+      'You can call multiple tools in a single response',
+    );
+  });
+
+  it('says the direct controls are not reachable through tools', () => {
+    const prompt = codeModePrompt();
+
+    expect(prompt).toContain(
+      'is called directly and is not reachable through `tools`',
+    );
+  });
+
+  it('uses the same exec examples for every model family', () => {
+    const execExample =
+      "[tool_call: exec with source: await tools.run_shell_command({ command: 'node server.js', is_background: true });]";
+
+    expect(codeModePrompt()).toContain(execExample);
+    expect(codeModePrompt('qwen3-coder-14b')).toContain(execExample);
+    expect(codeModePrompt('qwen3-coder-14b')).not.toContain(
+      '<function=run_shell_command>',
+    );
+    expect(codeModePrompt('qwen-vl-plus')).not.toContain(
+      '{"name": "run_shell_command"',
+    );
+  });
+
+  it('leaves Direct mode guidance and examples untouched', () => {
+    const prompt = getCoreSystemPrompt(undefined, 'gpt-4');
+
+    expect(prompt).toContain("To read files use 'read_file'");
+    expect(prompt).toContain(
+      'You can call multiple tools in a single response',
+    );
+    expect(prompt).toContain('[tool_call: run_shell_command for');
+    expect(prompt).not.toContain('tools.<name>(args)');
+    expect(prompt).not.toContain('**Batch Into One Program:**');
+  });
+});
+
 describe('getCustomSystemPrompt', () => {
   it('should handle string custom instruction without user memory', () => {
     const customInstruction =

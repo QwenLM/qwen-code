@@ -74,6 +74,7 @@ const createMockConfig = (
   getSessionId: () => 'test-session',
   getUserMemory: () => '',
   getOutputStyle: (): ReturnType<typeof getBuiltInOutputStyle> => undefined,
+  getCodeModeOnly: () => false,
   getAutoMemoryPrompt: () => '',
   getToolRegistry: () => ({
     getFunctionDeclarations: () => [],

@@ -356,6 +356,7 @@ type MainSessionPromptConfig = Pick<
   | 'getSystemPrompt'
   | 'getModel'
   | 'getOutputStyle'
+  | 'getCodeModeOnly'
   | 'getExperimentalZedIntegration'
   | 'getInputFormat'
   | 'isInteractive'
@@ -373,6 +374,7 @@ export function getMainSessionBaseSystemPrompt(
         undefined,
         resolveInteractionMode(config),
         config.getOutputStyle(),
+        config.getCodeModeOnly(),
       );
 }
 
