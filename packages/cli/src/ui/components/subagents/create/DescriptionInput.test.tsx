@@ -111,4 +111,51 @@ describe('DescriptionInput', () => {
 
     expect(capturedSignal?.aborted).toBe(true);
   });
+
+  it('does not advance when generation resolves after unmount', async () => {
+    let resolveGeneration!: (
+      value: Awaited<ReturnType<typeof subagentGenerator>>,
+    ) => void;
+    vi.mocked(subagentGenerator).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveGeneration = resolve;
+        }),
+    );
+    const dispatch = vi.fn<(action: WizardAction) => void>();
+    const onNext = vi.fn();
+
+    let app!: ReturnType<typeof renderWithProviders>;
+    act(() => {
+      app = renderWithProviders(
+        <DescriptionInput
+          state={baseState}
+          dispatch={dispatch}
+          onNext={onNext}
+          onPrevious={vi.fn()}
+          onCancel={vi.fn()}
+          config={{} as Config}
+        />,
+      );
+    });
+
+    act(() => {
+      void textInputMock.props?.onSubmit?.('Review code changes');
+    });
+    act(() => {
+      app.unmount();
+    });
+    await act(async () => {
+      resolveGeneration({
+        name: 'reviewer',
+        description: 'Reviews code changes',
+        systemPrompt: 'Review the code.',
+      });
+    });
+
+    expect(dispatch).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'SET_GENERATED_CONTENT' }),
+    );
+    expect(onNext).not.toHaveBeenCalled();
+  });
 });
