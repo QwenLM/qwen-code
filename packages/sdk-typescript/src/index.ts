@@ -312,6 +312,7 @@ export {
   type DaemonWorkspaceMcpInitializeResult,
   type DaemonWorkspaceAcpStatusResult,
   type DaemonWorkspaceAcpPreheatResult,
+  type DaemonWorkspaceRuntimeStatus,
   type DaemonWorkspaceProviderCurrent,
   type DaemonWorkspaceProviderModel,
   type DaemonWorkspaceProviderStatus,
@@ -370,6 +371,7 @@ export {
   type RestoreSessionRequest,
   type SetModelResult,
   type SetSessionLanguageResult,
+  type SetUserLanguageResult,
   type SessionMetadataResult,
   type SubscribeOptions,
 } from './daemon/index.js';

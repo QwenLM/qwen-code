@@ -96,6 +96,23 @@ describe('resolveToolName', () => {
     expect(resolveToolName('mcp__server__tool')).toBe('mcp__server__tool');
     expect(resolveToolName('constructor')).toBe('constructor');
   });
+
+  it('returns Object.prototype-keyed names unchanged (#10400)', async () => {
+    // Keys inherited from Object.prototype must never resolve to the
+    // prototype value (e.g. the `constructor` function): only own
+    // properties of the alias table are aliases (#10400).
+    for (const name of [
+      'toString',
+      'valueOf',
+      'hasOwnProperty',
+      'isPrototypeOf',
+      'propertyIsEnumerable',
+      'toLocaleString',
+      '__proto__',
+    ]) {
+      expect(resolveToolName(name)).toBe(name);
+    }
+  });
 });
 
 // ─── resolveToolName exhaustiveness (#9827) ─────────────────────────────────
@@ -2867,6 +2884,45 @@ describe('PermissionManager', () => {
       expect(await pm.getToolRegistrationStatus('send_message')).toBe(
         'deferred',
       );
+    });
+
+    it('tolerates Object.prototype-keyed entries without crashing (#10400)', async () => {
+      // Entries named after Object.prototype keys used to read the inherited
+      // prototype value through the plain-object alias table and surface a
+      // non-string toolName, crashing initialize() with
+      // `rule.toolName.startsWith is not a function` (CLI startup crash).
+      // They must behave like any other unknown canonical name: resolve to
+      // themselves as strings, match no registered tool, and never abort
+      // initialization (#10400).
+      pm = new PermissionManager(
+        makeConfig({
+          eagerTools: [
+            'constructor',
+            'toString',
+            'valueOf',
+            'hasOwnProperty',
+            'isPrototypeOf',
+            'propertyIsEnumerable',
+            'toLocaleString',
+            '__proto__',
+            'ReadFile',
+          ],
+        }),
+      );
+      expect(() => pm.initialize()).not.toThrow();
+      expect(pm.isEagerToolAllowListActive()).toBe(true);
+      // The valid entry still works and the prototype-keyed entries do not
+      // disturb the rest of the allowlist.
+      expect(await pm.getToolRegistrationStatus('read_file')).toBe(
+        'registered',
+      );
+      expect(await pm.getToolRegistrationStatus('send_message')).toBe(
+        'deferred',
+      );
+      // The lookup itself must survive a prototype-keyed tool name too.
+      await expect(
+        pm.getToolRegistrationStatus('constructor'),
+      ).resolves.toBeDefined();
     });
 
     it('malformed entries drop out but still leave the list active', async () => {
