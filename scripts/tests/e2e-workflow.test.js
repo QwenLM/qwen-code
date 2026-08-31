@@ -185,14 +185,15 @@ describe('e2e workflow', () => {
     it('keeps the default step shell the execution harness assumes', () => {
       // e2e-shard-retry.test.js executes this step's script under `bash -e`,
       // GitHub's default Linux step shell only while the step carries no
-      // `shell:` override and the workflow no `defaults:` block. Either one
-      // switches the lane's shell semantics — explicit `bash` expands to
-      // `bash --noprofile --norc -e -o pipefail {0}` — while the harness
-      // keeps executing the old shell, so every execution witness stays
-      // green for a contract the lane no longer runs. Absence only: this
-      // pins e2e.yml, not workflows that deliberately set a shell.
+      // `shell:` override and neither the workflow nor the job a `defaults:`
+      // block. Any of those switches the lane's shell semantics — explicit
+      // `bash` expands to `bash --noprofile --norc -e -o pipefail {0}` —
+      // while the harness keeps executing the old shell, so every execution
+      // witness stays green for a contract the lane no longer runs. Absence
+      // only: this pins e2e.yml, not workflows that deliberately set a shell.
       expect(runStep.shell).toBeUndefined();
       expect(yml.defaults).toBeUndefined();
+      expect(yml.jobs['e2e-test-linux'].defaults).toBeUndefined();
     });
 
     it('does not retry the docker leg', () => {
@@ -202,11 +203,19 @@ describe('e2e workflow', () => {
       );
       // Structure, not just count: wrapping the docker command in a
       // function and calling it twice keeps the literal count at one. The
-      // match spans inner braces so a body with its own `}` (a preflight
-      // brace group folded into the wrapper) cannot hide the wrapping.
-      expect(runStep.run).not.toMatch(
-        /[A-Za-z_]+\(\)\s*\{.*?QWEN_SANDBOX=docker/s,
+      // docker leg defines its own helper functions, so match by brace
+      // depth rather than any earlier definition: every `${...}` brace in
+      // the script is balanced, leaving the command at depth zero unless
+      // something wraps it.
+      const commandIndex = runStep.run.indexOf(
+        'QWEN_SANDBOX=docker vitest run',
       );
+      let depth = 0;
+      for (const ch of runStep.run.slice(0, commandIndex)) {
+        if (ch === '{') depth += 1;
+        if (ch === '}') depth -= 1;
+      }
+      expect(depth).toBe(0);
     });
   });
 
