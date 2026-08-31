@@ -30,6 +30,7 @@ import {
   getLastPeerInboxFailure,
   describePeerInboxFailure,
   startPeerInbox,
+  SWEEP_BATCH_SIZE,
   sweepOrphanSocketDirs,
   sweepOrphanSockets,
   type PeerInbox,
@@ -616,7 +617,9 @@ describe.skipIf(isWindows)('orphan socket sweeps', () => {
   it('sweeps every batch when more than one batch of dead sockets accumulates', async () => {
     const dir = path.join(tmpDir, 'qwen-socks');
     await fs.mkdir(dir);
-    const sockets = Array.from({ length: 20 }, (_, index) =>
+    // Sized from the constant so the fixture spans two batches however
+    // the fd-pressure knob is tuned.
+    const sockets = Array.from({ length: SWEEP_BATCH_SIZE + 4 }, (_, index) =>
       path.join(dir, `${2_147_483_600 + index}.sock`),
     );
     await Promise.all(sockets.map((socket) => fs.writeFile(socket, '')));
@@ -625,6 +628,29 @@ describe.skipIf(isWindows)('orphan socket sweeps', () => {
       await sweepOrphanSockets(dir, path.join(dir, '2147483647.sock')),
     ).toBe(sockets.length);
     expect(await fs.readdir(dir)).toEqual([]);
+  });
+
+  it('sweeps every batch when more than one batch of fallback directories accumulates', async () => {
+    // One nonce directory per crashed session: 17+ of them span two
+    // batches, and only a loop that visits every batch clears them all.
+    const parent = path.join(tmpDir, 'tmp');
+    const ownDir = path.join(parent, `qwen-socks-${'f'.repeat(16)}`);
+    await fs.mkdir(ownDir, { recursive: true });
+    const dirs = Array.from({ length: SWEEP_BATCH_SIZE + 4 }, (_, index) =>
+      path.join(parent, `qwen-socks-${index.toString(16).padStart(16, '0')}`),
+    );
+    await Promise.all(
+      dirs.map(async (dir, index) => {
+        await fs.mkdir(dir);
+        await fs.writeFile(path.join(dir, `${2_147_483_600 + index}.sock`), '');
+      }),
+    );
+
+    expect(await sweepOrphanSocketDirs(parent, ownDir)).toBe(dirs.length);
+    const left = await fs.readdir(parent);
+    expect(
+      left.filter((name) => /^qwen-socks-[0-9a-f]{16}$/.test(name)),
+    ).toEqual([path.basename(ownDir)]);
   });
 
   it('keeps a listening socket even when its filename PID is absent', async () => {

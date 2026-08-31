@@ -47,8 +47,14 @@ const SOCKET_MODE = 0o600;
 // while still letting later sessions collect directories left by a crash.
 const EMPTY_FALLBACK_DIR_GRACE_MS = 60_000;
 
-// Each probe holds a file descriptor until it connects or times out.
-const SWEEP_BATCH_SIZE = 16;
+/**
+ * How many sweep probes run at once. Each one holds a file descriptor
+ * until it connects or times out, so this is an fd-pressure knob, not a
+ * correctness bound: every batch runs, however many there are. Exported
+ * so tests can size their fixtures to span more than one batch whatever
+ * this is tuned to.
+ */
+export const SWEEP_BATCH_SIZE = 16;
 
 /**
  * Most peers connected at once.
