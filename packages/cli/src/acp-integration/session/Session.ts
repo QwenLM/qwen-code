@@ -181,7 +181,6 @@ import {
   todoWorkChainContext,
   runWithoutToolCallRuntime,
   runWithToolCallRuntime,
-  getToolExposure,
   isCodeModeToolCallAllowed,
   ToolMode,
   dedupeToolCallsById,
@@ -12581,7 +12580,7 @@ export class Session implements SessionContext {
                   nestedSignal: AbortSignal,
                 ): Promise<CodeModeToolResult> => {
                   const next = dispatchTail.then(async () => {
-                    if (getToolExposure(nestedName) !== 'code-mode-callable') {
+                    if (!isCodeModeToolCallAllowed(nestedName, 'code_mode')) {
                       throw new Error(
                         `Tool "${nestedName}" is not callable from exec.`,
                       );

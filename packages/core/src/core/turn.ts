@@ -151,6 +151,8 @@ export interface ToolCallRequestInfo {
   /** Parent model tool call for a programmatically dispatched child call. */
   parentCallId?: string;
   source?: 'model' | 'code_mode';
+  /** Exact tools an exec call may dispatch for a restricted agent. */
+  codeModeAllowedToolNames?: readonly string[];
 }
 
 export type ToolExecutionStatus =

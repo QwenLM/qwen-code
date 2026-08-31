@@ -101,9 +101,12 @@ The guest has no Node globals, `require`, `process`, filesystem, sockets,
 module loader, `console`, timers, `Atomics`, `SharedArrayBuffer`, or
 `WebAssembly`. Dynamic and static imports fail because no module loader is
 installed. Runtime memory and stack limits are fixed. QuickJS's interrupt hook
-enforces a CPU deadline, while the parent owns a second wall-clock deadline and
-kills a non-responsive child. Source, protocol frames, helper output, and the
-final result are bounded.
+enforces a guest CPU budget. That budget and the parent's fallback watchdog
+pause while the guest is suspended on registered host tools, whose own
+scheduler/ACP timeouts remain authoritative, and resume before guest jobs run
+again. This lets long builds keep their declared tool timeout without allowing
+guest CPU loops to escape the fixed budget. Source, protocol frames, helper
+output, and the final result are bounded.
 
 Cancellation aborts every nested call and terminates the child. Settling the
 top-level promise also cancels unawaited nested calls before teardown. No child,
@@ -149,9 +152,15 @@ In CodeModeOnly it is the exposure-policy view, so Gemini/Qwen,
 OpenAI-compatible, and Anthropic adapters all receive the structured `exec`
 declaration without provider-specific prompting.
 
-Filtered subagent declarations apply the same policy. An explicit subagent tool
-allowlist can narrow code-mode-callable nested tools but cannot expose a hidden
-bridge or make `exec` recursive.
+Filtered subagent declarations apply the same policy. For a read-only teammate
+or a fork with an execution allowlist, `exec` is the audited gateway while the
+exact allowed nested names are carried in its invocation context. The same set
+generates the description and is checked again before Core dispatch, so an
+explicit allowlist can narrow code-mode-callable nested tools without becoming
+prompt-only policy, exposing a hidden bridge, or making `exec` recursive.
+For cache-compatible forks, an inherited `exec` declaration represents its
+ordinary bindings: an omitted `fork_tools` inherits them, while an explicit
+list replaces them with the requested subset.
 
 ## Failure and rollback
 

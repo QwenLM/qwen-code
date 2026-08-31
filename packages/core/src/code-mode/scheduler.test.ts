@@ -243,17 +243,20 @@ describe('CodeModeOnly scheduler dispatch', () => {
       },
       controller.signal,
     );
-    await vi.waitFor(() => {
-      expect(
-        updates
-          .flat()
-          .some(
-            (call) =>
-              call.request.name === 'approval_probe' &&
-              call.status === 'awaiting_approval',
-          ),
-      ).toBe(true);
-    });
+    await vi.waitFor(
+      () => {
+        expect(
+          updates
+            .flat()
+            .some(
+              (call) =>
+                call.request.name === 'approval_probe' &&
+                call.status === 'awaiting_approval',
+            ),
+        ).toBe(true);
+      },
+      { timeout: 4000 },
+    );
     const waiting = updates
       .flat()
       .find(
@@ -485,4 +488,93 @@ describe('CodeModeOnly scheduler dispatch', () => {
       'unavailable on this CodeModeOnly call surface',
     );
   });
+
+  it('enforces a restricted agent allowlist inside exec', async () => {
+    const config = makeFakeConfig({
+      codeModeOnly: true,
+      approvalMode: ApprovalMode.DEFAULT,
+      targetDir: '/tmp',
+      cwd: '/tmp',
+    });
+    const registry = new ToolRegistry(config);
+    vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+    registry.registerTool(new ExecTool(config));
+    const read = vi.fn().mockResolvedValue({
+      llmContent: 'read ok',
+      returnDisplay: 'read ok',
+    });
+    const write = vi.fn();
+    registry.registerTool(
+      new MockTool({ name: 'read_probe', kind: Kind.Read, execute: read }),
+    );
+    registry.registerTool(
+      new MockTool({ name: 'write_probe', kind: Kind.Edit, execute: write }),
+    );
+    const completed = vi.fn();
+    const scheduler = new CoreToolScheduler({
+      config,
+      onAllToolCallsComplete: async (calls) => completed(calls),
+      onToolCallsUpdate: vi.fn(),
+      getPreferredEditor: () => undefined,
+      onEditorClose: vi.fn(),
+    });
+
+    await expect(
+      (
+        scheduler as unknown as {
+          dispatchCodeModeTool: (
+            name: string,
+            args: Record<string, unknown>,
+            parent: {
+              callId: string;
+              name: string;
+              args: Record<string, unknown>;
+              isClientInitiated: boolean;
+              prompt_id: string;
+              codeModeAllowedToolNames: readonly string[];
+            },
+            signal: AbortSignal,
+          ) => Promise<unknown>;
+        }
+      ).dispatchCodeModeTool(
+        'write_probe',
+        {},
+        {
+          callId: 'exec-restricted-dispatch',
+          name: 'exec',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-restricted',
+          codeModeAllowedToolNames: ['read_probe'],
+        },
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow('not callable from exec');
+
+    await scheduler.schedule(
+      {
+        callId: 'exec-restricted',
+        name: 'exec',
+        args: {
+          source: `
+            try { await tools.write_probe({}); }
+            catch (error) { text(error.message); }
+            return (await tools.read_probe({})).output;
+          `,
+        },
+        isClientInitiated: false,
+        prompt_id: 'prompt-restricted',
+        codeModeAllowedToolNames: ['read_probe'],
+      },
+      new AbortController().signal,
+    );
+
+    expect(read).toHaveBeenCalledOnce();
+    expect(write).not.toHaveBeenCalled();
+    expect(completed.mock.calls[0]?.[0][0].status).toBe('success');
+    expect(
+      completed.mock.calls[0]?.[0][0].response.responseParts[0].functionResponse
+        ?.response?.['output'],
+    ).toContain('Unknown or unavailable code mode tool: write_probe');
+  }, 10_000);
 });

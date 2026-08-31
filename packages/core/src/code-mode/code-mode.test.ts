@@ -200,6 +200,46 @@ describe('isolated code mode host', () => {
     expect(dispatch).toHaveBeenCalledTimes(2);
   });
 
+  it('does not charge nested tool wait time against the guest CPU budget', async () => {
+    const result = await executeCodeMode(
+      'return (await tools.wait({})).output',
+      plan('wait'),
+      runtime(async (name) => {
+        await new Promise((resolve) => setTimeout(resolve, 6_000));
+        return {
+          callId: 'wait',
+          name,
+          status: 'success',
+          output: 'finished',
+        };
+      }),
+      new AbortController().signal,
+      { timeoutMs: 50 },
+    );
+
+    expect(result.value).toBe('finished');
+  });
+
+  it('resumes the guest CPU budget after a nested tool settles', async () => {
+    await expect(
+      executeCodeMode(
+        'await tools.wait({}); while (true) {}',
+        plan('wait'),
+        runtime(async (name) => {
+          await new Promise((resolve) => setTimeout(resolve, 100));
+          return {
+            callId: 'wait',
+            name,
+            status: 'success',
+            output: 'finished',
+          };
+        }),
+        new AbortController().signal,
+        { timeoutMs: 50 },
+      ),
+    ).rejects.toThrow(/interrupted|timed out/);
+  });
+
   it('calls a deferred MCP-style tool through its normalized JavaScript name', async () => {
     const dispatch = vi.fn(async (name: string) => ({
       callId: 'mcp-call',
@@ -256,6 +296,19 @@ describe('isolated code mode host', () => {
         new AbortController().signal,
       ),
     ).rejects.toThrow('guest failure');
+    await expect(
+      executeCodeMode(
+        'await tools.echo({}).then(() => { throw new Error("job failure"); })',
+        plan('echo'),
+        runtime(async (name) => ({
+          callId: 'echo',
+          name,
+          status: 'success',
+          output: 'ok',
+        })),
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow('job failure');
   });
 
   it('interrupts CPU loops and bounds helper output', async () => {

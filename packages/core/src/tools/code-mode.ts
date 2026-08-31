@@ -71,10 +71,12 @@ export function getToolExposure(name: string): ToolExposure {
 export function isCodeModeToolCallAllowed(
   name: string,
   source: 'model' | 'code_mode',
+  allowedNames?: ReadonlySet<string>,
 ): boolean {
   const exposure = getToolExposure(name);
   return source === 'code_mode'
-    ? exposure === 'code-mode-callable'
+    ? exposure === 'code-mode-callable' &&
+        (!allowedNames || allowedNames.has(name))
     : exposure === 'exec' || exposure === 'direct-only';
 }
 

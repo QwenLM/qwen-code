@@ -137,6 +137,10 @@ export async function executeCodeMode(
   let stderr = '';
   let completed: CompleteMessage | undefined;
   let protocolError: Error | undefined;
+  let wallTimer: ReturnType<typeof setTimeout> | undefined;
+  let wallRemainingMs = timeoutMs + CODE_MODE_HOST_STARTUP_GRACE_MS;
+  let wallDeadline = Date.now() + wallRemainingMs;
+  let wallPaused = false;
 
   const send = (message: ParentMessage): void => {
     if (!child.stdin.destroyed && !child.stdin.writableEnded) {
@@ -151,6 +155,29 @@ export async function executeCodeMode(
   const onAbort = () => {
     cancelNested(abortReason(signal));
     terminate(child);
+  };
+  const onWallTimeout = () => {
+    protocolError = new Error(
+      `JavaScript execution timed out after ${timeoutMs}ms.`,
+    );
+    cancelNested(protocolError);
+    terminate(child);
+  };
+  const startWallTimer = (): void => {
+    wallDeadline = Date.now() + wallRemainingMs;
+    wallTimer = setTimeout(onWallTimeout, wallRemainingMs);
+  };
+  const pauseWallTimer = (): void => {
+    if (wallPaused) return;
+    wallRemainingMs = Math.max(1, wallDeadline - Date.now());
+    if (wallTimer) clearTimeout(wallTimer);
+    wallTimer = undefined;
+    wallPaused = true;
+  };
+  const resumeWallTimer = (): void => {
+    if (!wallPaused || completed || protocolError) return;
+    wallPaused = false;
+    startWallTimer();
   };
   signal.addEventListener('abort', onAbort, { once: true });
 
@@ -190,6 +217,7 @@ export async function executeCodeMode(
           continue;
         }
         const controller = new AbortController();
+        if (nestedControllers.size === 0) pauseWallTimer();
         nestedControllers.set(message.id, controller);
         void runtime
           .dispatch(actualName, message.args, controller.signal)
@@ -212,7 +240,10 @@ export async function executeCodeMode(
               ).slice(0, CODE_MODE_MAX_OUTPUT_CHARS),
             }),
           )
-          .finally(() => nestedControllers.delete(message.id));
+          .finally(() => {
+            nestedControllers.delete(message.id);
+            if (nestedControllers.size === 0) resumeWallTimer();
+          });
       }
     } catch (error) {
       protocolError = error instanceof Error ? error : new Error(String(error));
@@ -220,13 +251,7 @@ export async function executeCodeMode(
     }
   });
 
-  const wallTimer = setTimeout(() => {
-    protocolError = new Error(
-      `JavaScript execution timed out after ${timeoutMs}ms.`,
-    );
-    cancelNested(protocolError);
-    terminate(child);
-  }, timeoutMs + CODE_MODE_HOST_STARTUP_GRACE_MS);
+  startWallTimer();
 
   try {
     send({
@@ -246,7 +271,7 @@ export async function executeCodeMode(
       child.once('close', () => resolve());
     });
   } finally {
-    clearTimeout(wallTimer);
+    if (wallTimer) clearTimeout(wallTimer);
     signal.removeEventListener('abort', onAbort);
     cancelNested(new Error('Code mode runtime stopped.'));
     terminate(child);

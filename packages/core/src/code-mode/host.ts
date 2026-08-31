@@ -7,7 +7,6 @@
 import variant from '@jitl/quickjs-singlefile-mjs-release-sync';
 import {
   newQuickJSWASMModuleFromVariant,
-  shouldInterruptAfterDeadline,
   type QuickJSContext,
   type QuickJSDeferredPromise,
   type QuickJSHandle,
@@ -111,9 +110,10 @@ async function execute(message: ExecuteMessage): Promise<void> {
   const runtime = quickjs.newRuntime();
   runtime.setMemoryLimit(MEMORY_LIMIT_BYTES);
   runtime.setMaxStackSize(STACK_LIMIT_BYTES);
-  runtime.setInterruptHandler(
-    shouldInterruptAfterDeadline(Date.now() + timeoutMs),
-  );
+  let remainingCpuMs = timeoutMs;
+  let cpuDeadline = Date.now() + remainingCpuMs;
+  let cpuPaused = false;
+  runtime.setInterruptHandler(() => !cpuPaused && Date.now() >= cpuDeadline);
   const vm = runtime.newContext();
   const pending = new Map<string, QuickJSDeferredPromise>();
   let output = '';
@@ -121,29 +121,70 @@ async function execute(message: ExecuteMessage): Promise<void> {
   const toolNames = message.tools.map((tool) => tool.jsName);
   let nextId = 0;
 
+  const pauseCpuBudget = (): void => {
+    if (cpuPaused) return;
+    remainingCpuMs = Math.max(0, cpuDeadline - Date.now());
+    cpuPaused = true;
+  };
+  const resumeCpuBudget = (): void => {
+    if (!cpuPaused) return;
+    cpuDeadline = Date.now() + remainingCpuMs;
+    cpuPaused = false;
+  };
+  const executePendingJobs = (): void => {
+    resumeCpuBudget();
+    const jobs = runtime.executePendingJobs();
+    if (pending.size > 0) pauseCpuBudget();
+    if (jobs.error) {
+      const dumped = jobs.error.context.dump(jobs.error);
+      jobs.error.dispose();
+      throw new Error(errorMessage(dumped));
+    }
+  };
+
+  let rejectHostFailure!: (reason: Error) => void;
+  const hostFailure = new Promise<never>((_resolve, reject) => {
+    rejectHostFailure = reject;
+  });
+  let hostFailed = false;
+  const failHost = (error: unknown): void => {
+    if (hostFailed) return;
+    hostFailed = true;
+    rejectHostFailure(
+      error instanceof Error ? error : new Error(errorMessage(error)),
+    );
+  };
+
   const settleTool = (toolResult: ToolResultMessage): void => {
     const deferred = pending.get(toolResult.id);
     if (!deferred) return;
     pending.delete(toolResult.id);
-    if (toolResult.ok && toolResult.result) {
-      const handle = jsonHandle(vm, toolResult.result);
-      deferred.resolve(handle);
-      handle.dispose();
-    } else {
-      const handle = vm.newError(
-        toolResult.error ?? 'Nested tool call failed.',
-      );
-      deferred.reject(handle);
-      handle.dispose();
+    try {
+      if (toolResult.ok && toolResult.result) {
+        const handle = jsonHandle(vm, toolResult.result);
+        deferred.resolve(handle);
+        handle.dispose();
+      } else {
+        const handle = vm.newError(
+          toolResult.error ?? 'Nested tool call failed.',
+        );
+        deferred.reject(handle);
+        handle.dispose();
+      }
+      executePendingJobs();
+    } finally {
+      deferred.dispose();
     }
-    runtime.executePendingJobs();
-    deferred.dispose();
   };
 
   const decoder = new FrameDecoder<ParentMessage>();
   const onData = (chunk: Buffer) => {
-    for (const item of decoder.push(chunk)) {
-      if (item.type === 'tool_result') settleTool(item);
+    try {
+      for (const item of decoder.push(chunk)) {
+        if (item.type === 'tool_result') settleTool(item);
+      }
+    } catch (error) {
+      failHost(error);
     }
   };
   process.stdin.on('data', onData);
@@ -264,13 +305,8 @@ async function execute(message: ExecuteMessage): Promise<void> {
     const promiseHandle = evaluated.value;
     const nativePromise = vm.resolvePromise(promiseHandle);
     promiseHandle.dispose();
-    const jobs = runtime.executePendingJobs();
-    if (jobs.error) {
-      const dumped = jobs.error.context.dump(jobs.error);
-      jobs.error.dispose();
-      throw new Error(errorMessage(dumped));
-    }
-    const settled = await nativePromise;
+    executePendingJobs();
+    const settled = await Promise.race([nativePromise, hostFailure]);
     if (settled.error) {
       const dumped = vm.dump(settled.error);
       settled.error.dispose();

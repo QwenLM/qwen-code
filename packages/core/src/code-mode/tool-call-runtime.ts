@@ -16,6 +16,7 @@ export interface CodeModeToolResult {
 
 export interface ToolCallRuntimeContext {
   parentCallId: string;
+  allowedToolNames?: readonly string[];
   dispatch(
     name: string,
     args: Record<string, unknown>,

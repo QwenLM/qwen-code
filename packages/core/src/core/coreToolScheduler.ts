@@ -211,11 +211,7 @@ import {
   runWithToolCallRuntime,
   type CodeModeToolResult,
 } from '../code-mode/tool-call-runtime.js';
-import {
-  getToolExposure,
-  isCodeModeToolCallAllowed,
-  ToolMode,
-} from '../tools/code-mode.js';
+import { isCodeModeToolCallAllowed, ToolMode } from '../tools/code-mode.js';
 
 const debugLogger = createDebugLogger('TOOL_SCHEDULER');
 
@@ -1576,7 +1572,10 @@ export class CoreToolScheduler {
     parent: ToolCallRequestInfo,
     signal: AbortSignal,
   ): Promise<CodeModeToolResult> {
-    if (getToolExposure(name) !== 'code-mode-callable') {
+    const allowedNames = parent.codeModeAllowedToolNames
+      ? new Set(parent.codeModeAllowedToolNames)
+      : undefined;
+    if (!isCodeModeToolCallAllowed(name, 'code_mode', allowedNames)) {
       return Promise.reject(
         new Error(`Tool "${name}" is not callable from exec.`),
       );
@@ -5062,6 +5061,8 @@ export class CoreToolScheduler {
               ? runWithToolCallRuntime(
                   {
                     parentCallId: callId,
+                    allowedToolNames:
+                      scheduledCall.request.codeModeAllowedToolNames,
                     dispatch: (name, args, nestedSignal) =>
                       this.dispatchCodeModeTool(
                         name,
@@ -5097,6 +5098,8 @@ export class CoreToolScheduler {
               ? runWithToolCallRuntime(
                   {
                     parentCallId: callId,
+                    allowedToolNames:
+                      scheduledCall.request.codeModeAllowedToolNames,
                     dispatch: (name, args, nestedSignal) =>
                       this.dispatchCodeModeTool(
                         name,

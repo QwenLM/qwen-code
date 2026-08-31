@@ -34,7 +34,13 @@ class ExecInvocation extends BaseToolInvocation<ExecParams, ToolResult> {
         'exec is unavailable outside the audited tool-call runtime.',
       );
     }
-    const plan = this.config.getToolRegistry().getCodeModeBindingPlan();
+    const plan = this.config
+      .getToolRegistry()
+      .getCodeModeBindingPlan(
+        runtime.allowedToolNames
+          ? new Set(runtime.allowedToolNames)
+          : undefined,
+      );
     const result = await executeCodeMode(
       this.params.source,
       plan,
