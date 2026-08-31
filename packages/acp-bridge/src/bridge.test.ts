@@ -29342,6 +29342,12 @@ describe('createAcpSessionBridge', () => {
         ]);
 
         bridge.seedSessionPrs?.(session.sessionId, seeded);
+        const events: BridgeEvent[] = [];
+        const sub = bridge.subscribeEvents(session.sessionId);
+        const drain = (async () => {
+          for await (const ev of sub) events.push(ev);
+        })();
+        await new Promise((r) => setImmediate(r));
         bridge.updateSessionMetadata(session.sessionId, {
           pr: { number: 11, url: 'https://github.com/o/r/pull/11' },
         });
@@ -29358,12 +29364,44 @@ describe('createAcpSessionBridge', () => {
         expect(bridge.getSessionSummary(session.sessionId).prs).not.toEqual(
           reconciled,
         );
+        const revisionBeforeSet = bridge.getSessionCatalogVersion().revision;
         bridge.setSessionPrs?.(session.sessionId, persisted);
         expect(bridge.getSessionSummary(session.sessionId).prs).toEqual(
           reconciled,
         );
+        // The mutation's own event went out with the diverged list; the
+        // reconcile must publish a corrective event carrying the
+        // authoritative list and advance the catalog so revision-gated
+        // refetchers re-trigger — silence here left event consumers on
+        // the wrong list until unrelated churn.
+        await new Promise((r) => setImmediate(r));
+        const prEvents = events.filter(
+          (e) =>
+            e.type === 'session_metadata_updated' &&
+            (e.data as { prs?: unknown }).prs !== undefined,
+        );
+        expect(
+          (
+            prEvents[prEvents.length - 1]?.data as {
+              prs?: Array<{ number: number }>;
+            }
+          ).prs?.map((p) => p.number),
+        ).toEqual([1, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+        expect(bridge.getSessionCatalogVersion().revision).toBe(
+          revisionBeforeSet + 1,
+        );
+        // Reconciling to a list the live entry already matches is a no-op:
+        // no event, no revision bump.
+        const eventCount = events.length;
+        bridge.setSessionPrs?.(session.sessionId, persisted);
+        await new Promise((r) => setImmediate(r));
+        expect(events.length).toBe(eventCount);
+        expect(bridge.getSessionCatalogVersion().revision).toBe(
+          revisionBeforeSet + 1,
+        );
 
         await bridge.closeSession(session.sessionId);
+        await drain;
         await bridge.shutdown();
       } finally {
         await fsp.rm(dir, { recursive: true, force: true });
