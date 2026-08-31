@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { ChevronRightIcon } from 'lucide-react';
 import type { ACPToolCall, PermissionRequest } from '../../../adapters/types';
 import { hasActiveAgents } from '../../../adapters/toolClassification';
+import { useWebShellCustomization } from '../../../customization';
 import { useI18n } from '../../../i18n';
 import { useSubagentDetails } from '../../../subagentDetailsContext';
 import { useTranscriptRenderMode } from '../../../transcriptRenderMode';
@@ -119,6 +120,7 @@ export function ParallelAgentsGroup({
   const transcriptRenderMode = useTranscriptRenderMode();
   const documentMode = transcriptRenderMode === 'document';
   const subagentDetails = useSubagentDetails();
+  const { hostOwnsEditDiffPreview } = useWebShellCustomization();
   const [groupExpanded, setGroupExpanded] = useState(false);
   const [automaticCollapseAnimating, setAutomaticCollapseAnimating] =
     useState(false);
@@ -571,6 +573,12 @@ export function ParallelAgentsGroup({
                           <div className={styles.detail}>
                             <SubAgentPanel
                               tool={agent}
+                              approval={
+                                hostOwnsEditDiffPreview &&
+                                approvalAgent?.callId === agent.callId
+                                  ? pendingApproval
+                                  : undefined
+                              }
                               hideHeader
                               defaultExpanded={documentMode}
                             />

@@ -28,14 +28,17 @@ import type {
 } from '../adapters/types';
 import type { PermissionRequest } from '../adapters/types';
 import {
-  groupParallelAgents,
+  groupParallelAgents as groupParallelAgentsBase,
   isAgentOnlyToolGroup,
   type ParallelAgentDisplayItem,
 } from '../adapters/parallelAgentGrouping';
 import {
   backgroundShellTaskId,
   isBackgroundSubAgentToolCall,
+  isTerminalBackgroundAgentStatus,
   isSubAgentToolCall,
+  projectTerminalBackgroundAgentTool,
+  type TerminalBackgroundAgentStatus,
 } from '../adapters/toolClassification';
 import { CompactModeContext } from '../WebShellContexts';
 import {
@@ -473,7 +476,11 @@ function updateCompactStreamingThinkingTail(
   return result;
 }
 
-export { groupParallelAgents };
+export function groupParallelAgents(sourceMessages: Message[]): DisplayItem[] {
+  return groupParallelAgentsBase(
+    normalizeTerminalBackgroundAgentTools(sourceMessages),
+  );
+}
 
 export function getDisplayItemVirtualKey(item: DisplayItem): string {
   if (item.type === 'parallel_agents') return `group:${item.key}`;
@@ -1608,9 +1615,11 @@ function backgroundAgentCallIds(item: DisplayItem): string[] {
   return [];
 }
 
-function backgroundAgentCompletionForMessage(
-  message: Message,
-): { callId?: string } | null {
+function backgroundAgentCompletionForMessage(message: Message): {
+  callId?: string;
+  status: TerminalBackgroundAgentStatus;
+  endTime?: number;
+} | null {
   if (
     message.role !== 'system' ||
     message.source !== 'background_notification'
@@ -1624,22 +1633,81 @@ function backgroundAgentCompletionForMessage(
       .startsWith('background agent ') === true;
   const data = message.data;
   if (typeof data !== 'object' || data === null || Array.isArray(data)) {
-    return identifiesAgent ? {} : null;
+    return identifiesAgent
+      ? {
+          status: 'completed',
+          ...(message.timestamp !== undefined
+            ? { endTime: message.timestamp }
+            : {}),
+        }
+      : null;
   }
-  const { kind, toolUseId } = data as {
+  const { kind, toolUseId, status } = data as {
     kind?: unknown;
     toolUseId?: unknown;
+    status?: unknown;
   };
   if (kind !== 'agent' && !(kind === undefined && identifiesAgent)) return null;
-  return typeof toolUseId === 'string' ? { callId: toolUseId } : {};
+  const terminalStatus =
+    status === undefined
+      ? 'completed'
+      : isTerminalBackgroundAgentStatus(status)
+        ? status
+        : undefined;
+  if (!terminalStatus) return null;
+  return {
+    ...(typeof toolUseId === 'string' ? { callId: toolUseId } : {}),
+    status: terminalStatus,
+    ...(message.timestamp !== undefined ? { endTime: message.timestamp } : {}),
+  };
 }
 
 function backgroundAgentCompletion(
   item: DisplayItem,
-): { callId?: string } | null {
+): ReturnType<typeof backgroundAgentCompletionForMessage> {
   return item.type === 'message'
     ? backgroundAgentCompletionForMessage(item.message)
     : null;
+}
+
+function normalizeTerminalBackgroundAgentTools(messages: Message[]): Message[] {
+  const updates = new Map<
+    string,
+    NonNullable<ReturnType<typeof backgroundAgentCompletionForMessage>>
+  >();
+  for (const message of messages) {
+    const completion = backgroundAgentCompletionForMessage(message);
+    if (completion?.callId) updates.set(completion.callId, completion);
+  }
+  if (updates.size === 0) return messages;
+
+  let changed = false;
+  const normalized = messages.map((message) => {
+    if (message.role !== 'tool_group') return message;
+    let toolsChanged = false;
+    const tools = message.tools.map((tool) => {
+      const update = updates.get(tool.callId);
+      if (
+        !update ||
+        !isBackgroundSubAgentToolCall(tool) ||
+        !isActiveToolStatus(tool.status)
+      ) {
+        return tool;
+      }
+      const normalizedTool = projectTerminalBackgroundAgentTool(
+        tool,
+        update.status,
+        update.endTime,
+      );
+      if (normalizedTool === tool) return tool;
+      toolsChanged = true;
+      return normalizedTool;
+    });
+    if (!toolsChanged) return message;
+    changed = true;
+    return { ...message, tools };
+  });
+  return changed ? normalized : messages;
 }
 
 interface BackgroundAgentSummaryState {

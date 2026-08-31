@@ -6,7 +6,7 @@ import {
   useMemo,
   type ReactNode,
 } from 'react';
-import type { ACPToolCall } from '../../../adapters/types';
+import type { ACPToolCall, PermissionRequest } from '../../../adapters/types';
 import { useWebShellCustomization } from '../../../customization';
 import { useI18n } from '../../../i18n';
 import { useTranscriptRenderMode } from '../../../transcriptRenderMode';
@@ -35,6 +35,7 @@ import styles from './SubAgentPanel.module.css';
 
 interface SubAgentPanelProps {
   tool: ACPToolCall;
+  approval?: PermissionRequest | null;
   defaultExpanded?: boolean;
   hideHeader?: boolean;
   inline?: boolean;
@@ -100,14 +101,29 @@ function SubToolTime({
   );
 }
 
-const SubToolLine = memo(function SubToolLine({ tool }: { tool: ACPToolCall }) {
+const SubToolLine = memo(function SubToolLine({
+  tool,
+  approval,
+}: {
+  tool: ACPToolCall;
+  approval?: PermissionRequest | null;
+}) {
   const documentMode = useTranscriptRenderMode() === 'document';
   // Same expandable row as the main transcript.
   const body =
     tool.subTools || tool.subContent ? (
-      <SubAgentPanel tool={tool} defaultExpanded={documentMode} />
+      <SubAgentPanel
+        tool={tool}
+        approval={approval}
+        defaultExpanded={documentMode}
+      />
     ) : (
-      <ToolLine tool={tool} forceExpanded={documentMode} hideCollapsedOutput />
+      <ToolLine
+        tool={tool}
+        approval={approval}
+        forceExpanded={documentMode}
+        hideCollapsedOutput
+      />
     );
   return <SubToolTime timestamp={tool.startTime}>{body}</SubToolTime>;
 });
@@ -272,6 +288,7 @@ function SubAgentTools({
 
 export function SubAgentPanel({
   tool,
+  approval,
   defaultExpanded,
   hideHeader,
   inline,
@@ -374,7 +391,7 @@ export function SubAgentPanel({
                   className={styles.step}
                   data-status={sub.status}
                 >
-                  <SubToolLine tool={sub} />
+                  <SubToolLine tool={sub} approval={approval} />
                 </div>
               ))}
             </SubAgentTools>

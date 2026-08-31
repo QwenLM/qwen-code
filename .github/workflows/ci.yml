@@ -79,7 +79,7 @@ env:
   # BOTH the github_ci_only helper step and the full-profile Test step, so a
   # new helper test can't be added to one path and silently dropped from the
   # other.
-  HELPER_TESTS: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/classify-release-notes.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/resolve-sandbox-image.test.mjs .github/scripts/web-shell-visuals-publish.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/qwen-triage-workflow.test.mjs .github/scripts/assign-issue-owner.test.mjs .github/scripts/auto-minimize-spam.test.mjs .github/scripts/ci-runner-routing.test.mjs .github/scripts/autofix-status-heartbeat.test.mjs .github/scripts/assign-pr-owner.test.mjs .github/scripts/check-disk-floor.test.mjs'
+  HELPER_TESTS: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/classify-release-notes.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/resolve-sandbox-image.test.mjs .github/scripts/web-shell-visuals-publish.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/qwen-triage-workflow.test.mjs .github/scripts/assign-issue-owner.test.mjs .github/scripts/auto-minimize-spam.test.mjs .github/scripts/ci-runner-routing.test.mjs .github/scripts/autofix-status-heartbeat.test.mjs .github/scripts/assign-pr-owner.test.mjs .github/scripts/check-disk-floor.test.mjs .github/scripts/ci-disk-pressure.test.mjs'
   # The growth ratchet and its vitest mirror compare each workflow against
   # the PR's base commit to tell "this PR grew the file" apart from "the
   # baseline went stale on main" (#9904). Wired once here so every lane
@@ -215,8 +215,8 @@ jobs:
     # scoped to the pool that shows the contention: fork PRs from untrusted
     # authors and MAINTAINER_ECS_RUNNER_DISABLED=true fall back to
     # GitHub-hosted runners (see classify_pr), which keep the pre-contention
-    # ceiling so a genuine hang there does not burn the extra 30 minutes.
-    timeout-minutes: '${{ fromJSON(contains(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'', ''ecs-qwen'') && ''90'' || ''60'') }}'
+    # ceiling so a genuine hang there does not burn the extra 60 minutes.
+    timeout-minutes: '${{ fromJSON(contains(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'', ''ecs-qwen'') && ''120'' || ''60'') }}'
     outputs:
       ci_profile: '${{ steps.ci_profile.outputs.ci_profile }}'
     permissions:
@@ -479,6 +479,17 @@ jobs:
       - name: 'Install dependencies'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         run: |-
+          DISK_SAMPLES="${RUNNER_TEMP}/disk-pressure-samples.log"
+          echo "DISKCONTEXT $(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) runner[${RUNNER_NAME:-unknown}] run[${GITHUB_RUN_ID:-local}/${GITHUB_RUN_ATTEMPT:-1}] job[${GITHUB_JOB:-test}]" > "$DISK_SAMPLES" 2>/dev/null || true
+          sample_disk() {
+            sample="DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) tmpdir[${RUNNER_TEMP:-/tmp}] space[$(df -h "${RUNNER_TEMP:-/tmp}" 2>/dev/null | tail -1)] inodes[$(df -i "${RUNNER_TEMP:-/tmp}" 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]" || true
+            echo "$sample"
+            echo "$sample" >> "$DISK_SAMPLES" 2>/dev/null || true
+          }
+          sample_disk
+          ( while sleep 10; do sample_disk; done ) &
+          SAMPLER_PID=$!
+          trap 'pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true; kill "$SAMPLER_PID" 2>/dev/null || true' EXIT
           npm ci --prefer-offline --no-audit --progress=false
 
       - name: 'Report npm cache usage (self-hosted)'
@@ -598,7 +609,7 @@ jobs:
       - name: 'Install tmux and zip tooling'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.os == 'Linux' }}"
         # Bounded AND advisory: a stalled mirror or dpkg lock must neither
-        # hang the job toward its 60-minute cap nor red the required check —
+        # hang the job toward its 120-minute cap nor red the required check —
         # continue-on-error absorbs the step-level timeout. The apt calls
         # carry their OWN shorter bound (140 s + 140 s = 280 s < the 300 s
         # step cap) so the guard below still runs: when the step-level
@@ -659,7 +670,9 @@ jobs:
           # the test/test_macos/test_windows legs; each DFSAMPLE line already
           # carries the routed tmpdir, so the header only needs job/runner ids.
           DISK_SAMPLES="${RUNNER_TEMP}/disk-pressure-samples.log"
-          echo "DISKCONTEXT $(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) runner[${RUNNER_NAME:-unknown}] run[${GITHUB_RUN_ID:-local}/${GITHUB_RUN_ATTEMPT:-1}] job[${GITHUB_JOB:-test}]" > "$DISK_SAMPLES" 2>/dev/null || true
+          if [ ! -s "$DISK_SAMPLES" ]; then
+            echo "DISKCONTEXT $(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) runner[${RUNNER_NAME:-unknown}] run[${GITHUB_RUN_ID:-local}/${GITHUB_RUN_ATTEMPT:-1}] job[${GITHUB_JOB:-test}]" > "$DISK_SAMPLES" 2>/dev/null || true
+          fi
           export TMPDIR="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
           if [ "${RUNNER_OS:-}" = "Linux" ]; then
             QWEN_CI_TMPDIR="$(mktemp -d /var/tmp/qwen-ci-XXXXXX 2>/dev/null || true)"
@@ -1491,6 +1504,10 @@ jobs:
           echo "NPM_CONFIG_CACHE=${cache_dir}" >> "${GITHUB_ENV}"
           echo "Using persistent npm cache at ${cache_dir}"
           du -sh "${cache_dir}" 2>/dev/null || true
+
+      - name: 'Disk floor gate (self-hosted)'
+        if: "${{ steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
+        run: 'bash .github/scripts/check-disk-floor.sh "${GITHUB_WORKSPACE}" "${RUNNER_TEMP:-/tmp}"'
 
       - name: 'Install Dependencies'
         if: "${{ steps.ci_profile.outputs.ci_profile == 'full' }}"
