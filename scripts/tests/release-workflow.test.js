@@ -440,7 +440,14 @@ describe('release workflow', () => {
 
     expect(workspacePackages.length).toBeGreaterThan(0);
     for (const [path, packageJson] of workspacePackages) {
-      expect(packageJson.scripts['test:ci'], path).toContain('vitest run');
+      // test:release:workspaces appends --shard/--passWithNoTests to the
+      // script body, so the flags only reach vitest when the vitest
+      // invocation is the LAST command in the chain; commands before it
+      // (e.g. sdk-typescript's typecheck:public-surface) stay accepted.
+      expect(
+        packageJson.scripts['test:ci'].split('&&').pop()?.trim(),
+        path,
+      ).toMatch(/^vitest run(?:\s|$)/);
     }
   });
 
