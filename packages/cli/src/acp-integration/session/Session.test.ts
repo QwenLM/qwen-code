@@ -16776,6 +16776,8 @@ describe('Session', () => {
           'vision-agent\0https://vision.example.com/v1\0',
           expect.any(Object),
           expect.any(String),
+          undefined,
+          expect.objectContaining({ promptId: expect.any(String) }),
         );
 
         // Second same-override send: compression throws, so the gate falls
@@ -16890,6 +16892,8 @@ describe('Session', () => {
           'vision-agent\0https://vision.example.com/v1\0',
           expect.any(Object),
           expect.any(String),
+          undefined,
+          expect.objectContaining({ promptId: expect.any(String) }),
         );
         expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
 
@@ -17258,10 +17262,12 @@ describe('Session', () => {
         // The send never went out; the cancelled user turn was restored to
         // history and no token-limit diagnostic was emitted.
         expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
-        expect(mockChat.addHistory).toHaveBeenCalledWith({
-          role: 'user',
-          parts: expect.any(Array),
-        });
+        expect(mockChat.addHistory).toHaveBeenCalledWith(
+          expect.objectContaining({
+            role: 'user',
+            parts: expect.any(Array),
+          }),
+        );
         expect(mockClient.sessionUpdate).not.toHaveBeenCalledWith({
           sessionId: 'test-session-id',
           update: {
