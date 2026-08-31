@@ -297,9 +297,11 @@ const turnWithToolOutput = (toolName: string, output: string) => [
   { id: 3, type: 'gemini', text: 'Done.' } as HistoryItem,
 ];
 
-// Overflow registration lands in a post-mount effect; let ink flush the
-// resulting re-render before asserting on the frame.
-const settle = () => new Promise((resolve) => setTimeout(resolve, 30));
+// Overflow registration lands in a post-mount effect, and ink flushes the
+// resulting re-render on its own throttle, which can take longer than any
+// fixed sleep under load. Poll for the expected frame with a bounded
+// timeout instead (repo convention; see AuthDialog.test.tsx).
+const WAIT_FOR_OPTIONS = { timeout: 2000, interval: 10 };
 
 describe('ctrl+s hint honesty for capped shell output (#10640)', () => {
   it('does not show the hint when the only hidden lines come from the ui.shellOutputMaxLines cap', async () => {
@@ -311,7 +313,23 @@ describe('ctrl+s hint honesty for capped shell output (#10640)', () => {
     const { lastFrame } = renderMainContent(
       createUIState({ history: turnWithToolOutput('Shell', output) }),
     );
-    await settle();
+    await vi.waitFor(() => {
+      const current = lastFrame() ?? '';
+      expect(current).toContain('... first 5 lines hidden ...');
+      expect(current).toContain('line 10');
+    }, WAIT_FOR_OPTIONS);
+    // Negative assertion: the hint must never appear for shell-capped
+    // lines, and waitFor-toContain cannot prove an absence (it passes
+    // trivially while the content stays missing). Poll a bounded window
+    // instead, failing fast if the hint surfaces, then assert it stayed
+    // absent.
+    const deadline = Date.now() + 300;
+    while (Date.now() < deadline) {
+      expect(lastFrame() ?? '').not.toContain(HINT);
+      await new Promise((resolve) =>
+        setTimeout(resolve, WAIT_FOR_OPTIONS.interval),
+      );
+    }
     const frame = lastFrame() ?? '';
     // The cap itself is unchanged: marker plus the last five lines.
     expect(frame).toContain('... first 5 lines hidden ...');
@@ -333,10 +351,14 @@ describe('ctrl+s hint honesty for capped shell output (#10640)', () => {
         staticAreaMaxItemHeight: 30,
       }),
     );
-    await settle();
-    const frame = lastFrame() ?? '';
-    expect(frame).toContain('hidden ...');
-    expect(frame).toContain(HINT);
+    await vi.waitFor(() => {
+      expect(lastFrame()).toContain('hidden ...');
+    }, WAIT_FOR_OPTIONS);
+    // The hint is driven by the post-mount overflow registration, which
+    // ink flushes one tick after the truncation marker itself.
+    await vi.waitFor(() => {
+      expect(lastFrame()).toContain(HINT);
+    }, WAIT_FOR_OPTIONS);
   });
 
   it('reveals height-budget-capped lines when constrainHeight is lifted', async () => {
@@ -347,8 +369,12 @@ describe('ctrl+s hint honesty for capped shell output (#10640)', () => {
     const { lastFrame, rerender } = renderMainContent(
       createUIState({ history, staticAreaMaxItemHeight: 30 }),
     );
-    await settle();
-    expect(lastFrame()).toContain(HINT);
+    await vi.waitFor(() => {
+      expect(lastFrame()).toContain('hidden ...');
+    }, WAIT_FOR_OPTIONS);
+    await vi.waitFor(() => {
+      expect(lastFrame()).toContain(HINT);
+    }, WAIT_FOR_OPTIONS);
     expect(lastFrame()).not.toContain('row 1\n');
 
     // ctrl+s: constrainHeight off -> static items get no height budget.
@@ -361,7 +387,16 @@ describe('ctrl+s hint honesty for capped shell output (#10640)', () => {
         }),
       ),
     );
-    await settle();
+    await vi.waitFor(() => {
+      expect(lastFrame()).toContain('row 1');
+    }, WAIT_FOR_OPTIONS);
+    // The overflow unregistration lands in a post-commit effect, so the
+    // hint can survive one more ink flush than the expanded content; poll
+    // for its disappearance instead of asserting on the first expanded
+    // frame.
+    await vi.waitFor(() => {
+      expect(lastFrame() ?? '').not.toContain(HINT);
+    }, WAIT_FOR_OPTIONS);
     const frame = lastFrame() ?? '';
     expect(frame).toContain('row 1');
     expect(frame).not.toContain('hidden ...');
