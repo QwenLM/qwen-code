@@ -482,7 +482,9 @@ describe('registerMcpHotReload', () => {
     registerMcpHotReload(watcher, settings, fc.config, undefined);
 
     const spy = vi.fn();
+    const openDebugConsoleSpy = vi.fn();
     appEvents.on(AppEvent.LogError, spy);
+    appEvents.on(AppEvent.OpenDebugConsole, openDebugConsoleSpy);
     try {
       merged.mcpServers = { a: { command: 'a' } };
       // The listener swallows the reconcile error (one bad reload must not crash
@@ -495,8 +497,12 @@ describe('registerMcpHotReload', () => {
       expect(String(spy.mock.calls[0][0])).toMatch(
         /Failed to reload MCP server settings/,
       );
+      // The failure also opens the debug console via emitHotReloadNotice —
+      // reverting the catch to a bare LogError emit must fail here.
+      expect(openDebugConsoleSpy).toHaveBeenCalledOnce();
     } finally {
       appEvents.off(AppEvent.LogError, spy);
+      appEvents.off(AppEvent.OpenDebugConsole, openDebugConsoleSpy);
     }
   });
 
@@ -725,6 +731,38 @@ describe('registerModelProvidersHotReload', () => {
       );
       expect(refreshAuth).toHaveBeenCalledOnce();
       expect(logErrorSpy).toHaveBeenCalledOnce();
+    } finally {
+      appEvents.off(AppEvent.LogError, logErrorSpy);
+      appEvents.off(AppEvent.OpenDebugConsole, openDebugConsoleSpy);
+    }
+  });
+
+  it('surfaces a failing refreshAuth as a visible notice while the registry reload stays applied', async () => {
+    registerModelProvidersHotReload(watcher, settings, config);
+    refreshAuth.mockRejectedValueOnce(new Error('auth boom'));
+
+    const logErrorSpy = vi.fn();
+    const openDebugConsoleSpy = vi.fn();
+    appEvents.on(AppEvent.LogError, logErrorSpy);
+    appEvents.on(AppEvent.OpenDebugConsole, openDebugConsoleSpy);
+    try {
+      merged.modelProviders = {
+        openai: [{ id: 'gpt-x', baseUrl: 'https://x' }],
+      } as ModelProvidersConfig;
+      await listener([]);
+
+      // The registry reload applied even though the auth refresh failed…
+      expect(reloadModelProvidersConfig).toHaveBeenCalledOnce();
+      expect(reloadModelProvidersConfig).toHaveBeenCalledWith(
+        merged.modelProviders,
+      );
+      // …and the failure is user-visible instead of being swallowed by the
+      // watcher's Promise.allSettled with a debug-only warn.
+      expect(openDebugConsoleSpy).toHaveBeenCalledOnce();
+      expect(logErrorSpy).toHaveBeenCalledOnce();
+      expect(String(logErrorSpy.mock.calls[0][0])).toContain(
+        'Failed to refresh the active model provider',
+      );
     } finally {
       appEvents.off(AppEvent.LogError, logErrorSpy);
       appEvents.off(AppEvent.OpenDebugConsole, openDebugConsoleSpy);
