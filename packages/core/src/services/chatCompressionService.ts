@@ -1168,7 +1168,7 @@ export class ChatCompressionService {
         config
           .getDebugLogger()
           .warn(
-            `[chat-compression] dedicated summarizer failed: ${String(error)}`,
+            `[chat-compression] compression side-query failed: ${String(error)}`,
           );
         logChatCompression(
           config,
