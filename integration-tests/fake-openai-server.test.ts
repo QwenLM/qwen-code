@@ -89,6 +89,43 @@ describe('fake OpenAI server', () => {
     expect(server.requests).toHaveLength(2);
   });
 
+  it('streams errorContent as a single error_finish chunk', async () => {
+    server = await startFakeOpenAIServer(() => ({
+      errorContent: '{"error":{"message":"overloaded"}}',
+    }));
+
+    const response = await fetch(`${server.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'fake-model',
+        stream: true,
+        messages: [{ role: 'user', content: 'hi' }],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    const streamText = await response.text();
+    expect(streamText).toContain('"finish_reason":"error_finish"');
+    expect(streamText).toContain('overloaded');
+    expect(streamText).toContain('data: [DONE]');
+    // The error body and finish reason must ride the SAME chunk: the CLI
+    // pipeline reads delta.content off the chunk that carries
+    // finish_reason === 'error_finish'.
+    const errorFrame = streamText
+      .split('\n\n')
+      .find((frame) => frame.includes('error_finish'));
+    expect(errorFrame).toBeDefined();
+    const payload = JSON.parse(
+      errorFrame!.replace(/^data: /, ''),
+    ) as unknown as {
+      choices: Array<{ delta: { content?: string } }>;
+    };
+    expect(payload.choices[0]?.delta.content).toBe(
+      '{"error":{"message":"overloaded"}}',
+    );
+  });
+
   it('can close response connections for isolated latency measurements', async () => {
     server = await startFakeOpenAIServer(
       () => ({ content: 'no connection reuse' }),
