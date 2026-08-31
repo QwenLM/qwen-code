@@ -106,12 +106,63 @@ function getStrictValidator(schema: AnySchema): Ajv {
 }
 
 /**
- * Evicts a stale `$id` registration from a shared Ajv instance before
- * compiling, so that a DISTINCT schema object reusing the same top-level
+ * Ajv meta-schema registrations must never be evicted: `_addSchema`
+ * registers a schema under its `$id` BEFORE meta-validation runs, so a
+ * vended schema whose `$id` equals a meta-schema URI would otherwise
+ * replace the shared meta-schema and every later compile in the process
+ * would meta-validate against the attacker body. The alias is what Ajv's
+ * draft classes keep in `refs` for the default meta-schema.
+ */
+const WELL_KNOWN_META_SCHEMA_IDS: ReadonlySet<string> = new Set([
+  'http://json-schema.org/draft-06/schema',
+  'http://json-schema.org/draft-07/schema',
+  'https://json-schema.org/draft/2019-09/schema',
+  'https://json-schema.org/draft/2020-12/schema',
+  'http://json-schema.org/schema',
+]);
+
+/** Mirrors Ajv's `normalizeId` (strips a trailing `#` or `#/`). */
+function normalizeSchemaId(id: string): string {
+  return id.replace(/#\/?$/, '');
+}
+
+function isMetaSchemaRegistration(
+  validator: Ajv,
+  normalizedId: string,
+): boolean {
+  const defaultMeta = validator.defaultMeta();
+  if (
+    typeof defaultMeta === 'string' &&
+    normalizeSchemaId(defaultMeta) === normalizedId
+  ) {
+    return true;
+  }
+  return WELL_KNOWN_META_SCHEMA_IDS.has(normalizedId);
+}
+
+function isDuplicateSchemaIdError(error: unknown): boolean {
+  return error instanceof Error && error.message.includes('already exists');
+}
+
+/**
+ * Evicts a stale `$id` registration from a shared Ajv instance, but ONLY
+ * when compile() has actually reported the duplicate-`$id` collision (see
+ * {@link compileWithEviction}) — evicting ahead of compile would remove a
+ * shared registration that a subsequent compile failure then leaves
+ * replaced by the broken schema.
+ *
+ * Returns the displaced schema object (when a DIFFERENT, previously
+ * compiled schema was registered under the `$id`) so the caller can
+ * restore it if the post-eviction compile fails, plus whether anything
+ * was actually evicted — when nothing was (meta-schema guard), a retry
+ * would bypass `_checkUnique` through the failed attempt's identity-cache
+ * entry and must not happen.
+ *
+ * Eviction exists so a DISTINCT schema object reusing the same top-level
  * `$id` (two MCP tools generated from one template, or a registry rebuilt
- * after an MCP reconnect/refresh) cannot make compile() throw
- * "schema with key or id ... already exists" — which the bare catch in
- * validate() would turn into silently-skipped validation.
+ * after an MCP reconnect/refresh) cannot make compile() throw "schema
+ * with key or id ... already exists" — which the bare catch in validate()
+ * would turn into silently-skipped validation.
  *
  * `$id` registration itself must stay enabled (Ajv's default
  * `addUsedSchema: true`): `$ref`s that resolve through an absolute `$id`
@@ -124,17 +175,81 @@ function getStrictValidator(schema: AnySchema): Ajv {
  * one being compiled, the registration is left untouched and compile()
  * returns the cached validator.
  */
-function evictStaleSchemaId(validator: Ajv, schema: AnySchema): void {
+function evictStaleSchemaId(
+  validator: Ajv,
+  schema: AnySchema,
+): { evicted: boolean; displaced?: AnySchema } {
   if (typeof schema !== 'object' || schema === null) {
-    return;
+    return { evicted: false };
   }
   const id = (schema as { $id?: unknown }).$id;
   if (typeof id !== 'string') {
-    return;
+    return { evicted: false };
   }
-  const registered = validator.getSchema(id);
+  const key = normalizeSchemaId(id);
+  if (isMetaSchemaRegistration(validator, key)) {
+    return { evicted: false };
+  }
+  let registered: ReturnType<Ajv['getSchema']> | undefined;
+  try {
+    registered = validator.getSchema(key);
+  } catch {
+    // A registered schema that cannot compile is stale by definition.
+    // Remove it by the normalized key: string-form removeSchema deletes
+    // the raw key, so the unnormalized `$id` would be a silent no-op for
+    // ids ending in `#` or `#/`.
+    validator.removeSchema(key);
+    return { evicted: true };
+  }
   if (registered && registered.schema !== schema) {
-    validator.removeSchema(id);
+    // Object-form removeSchema normalizes the schema's `$id` itself;
+    // passing the raw `$id` would miss ids ending in `#` or `#/`.
+    validator.removeSchema(registered.schema);
+    return { evicted: true, displaced: registered.schema };
+  }
+  return { evicted: false };
+}
+
+/**
+ * Compiles `schema`, evicting a stale same-`$id` registration only when
+ * Ajv reports the actual duplicate-`$id` collision, and restoring the
+ * displaced registration when the post-eviction compile fails (Ajv's
+ * `_addSchema` registers the schema under its `$id` before the compile
+ * error surfaces, so a failed compile would otherwise poison the shared
+ * instance for every `$ref` resolving through that `$id`).
+ */
+function compileWithEviction(
+  validator: Ajv,
+  schema: AnySchema,
+): ReturnType<Ajv['compile']> {
+  try {
+    return validator.compile(schema);
+  } catch (error) {
+    if (!isDuplicateSchemaIdError(error)) {
+      throw error;
+    }
+    const { evicted, displaced } = evictStaleSchemaId(validator, schema);
+    if (!evicted) {
+      // Nothing was removed (e.g. the `$id` is a meta-schema URI): the
+      // duplicate collision stands.
+      throw error;
+    }
+    // The failed attempt left an identity-cache entry that would let the
+    // retry bypass both `_checkUnique` and the `$id` re-registration.
+    validator.removeSchema(schema);
+    try {
+      return validator.compile(schema);
+    } catch (retryError) {
+      if (displaced !== undefined) {
+        try {
+          validator.removeSchema(schema);
+          validator.compile(displaced);
+        } catch {
+          // Best effort: keep surfacing the original compile error.
+        }
+      }
+      throw retryError;
+    }
   }
 }
 
@@ -159,12 +274,8 @@ export class SchemaValidator {
 
     try {
       const anySchema = schema as AnySchema;
-      const strictValidator = getStrictValidator(anySchema);
-      evictStaleSchemaId(strictValidator, anySchema);
-      strictValidator.compile(anySchema);
-      const runtimeValidator = getValidator(anySchema);
-      evictStaleSchemaId(runtimeValidator, anySchema);
-      runtimeValidator.compile(anySchema);
+      compileWithEviction(getStrictValidator(anySchema), anySchema);
+      compileWithEviction(getValidator(anySchema), anySchema);
       return true;
     } catch {
       return false;
@@ -234,8 +345,7 @@ export class SchemaValidator {
     // This matches LenientJsonSchemaValidator behavior in mcp-client.ts.
     let validate;
     try {
-      evictStaleSchemaId(validator, anySchema);
-      validate = validator.compile(anySchema);
+      validate = compileWithEviction(validator, anySchema);
     } catch (error) {
       // Schema compilation failed (unsupported version, invalid $ref, etc.)
       // Skip validation rather than blocking tool usage.

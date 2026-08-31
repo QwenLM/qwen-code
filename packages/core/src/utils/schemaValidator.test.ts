@@ -993,6 +993,134 @@ describe('SchemaValidator', () => {
     });
   });
 
+  describe('shared-$id eviction safety', () => {
+    it('evicts stale registrations whose $id ends in # or #/', () => {
+      for (const suffix of ['#', '#/']) {
+        const sharedId = `https://qwen-code.test/schemaValidator/dup-hash${suffix}`;
+        const first = {
+          $id: sharedId,
+          type: 'object',
+          properties: { value: { type: 'string', maxLength: 3 } },
+        };
+        // A distinct object reusing the same trailing-# $id: Ajv registers
+        // under the normalized id (trailing `#`/`#/` stripped), so eviction
+        // must remove the normalized registration rather than the raw key.
+        const second = {
+          $id: sharedId,
+          type: 'object',
+          properties: { value: { type: 'string', maxLength: 3 } },
+        };
+        expect(SchemaValidator.canEnforce(first)).toBe(true);
+        expect(SchemaValidator.canEnforce(second)).toBe(true);
+        expect(
+          SchemaValidator.validate(second, { value: 'a'.repeat(50) }),
+        ).not.toBeNull();
+        expect(SchemaValidator.validate(second, { value: 'ok' })).toBeNull();
+      }
+    });
+
+    it('does not poison a shared $id when the colliding schema fails to compile', () => {
+      const sharedId =
+        'https://qwen-code.test/schemaValidator/collision-poison';
+      const good = {
+        $id: sharedId,
+        type: 'object',
+        properties: { v: { type: 'string' } },
+      };
+      expect(SchemaValidator.canEnforce(good)).toBe(true);
+
+      // An uncompilable body reusing the registered $id: its failed compile
+      // must not leave the shared instances registered to it, or every
+      // $ref resolving through sharedId would fail forever.
+      const broken = {
+        $id: sharedId,
+        $ref: 'https://qwen-code.test/schemaValidator/collision-poison-missing',
+      };
+      expect(SchemaValidator.canEnforce(broken)).toBe(false);
+
+      const referrer = {
+        type: 'object',
+        properties: { leaf: { $ref: sharedId } },
+      };
+      expect(SchemaValidator.canEnforce(referrer)).toBe(true);
+      expect(
+        SchemaValidator.validate(referrer, { leaf: { v: [1] } }),
+      ).not.toBeNull();
+      expect(
+        SchemaValidator.validate(referrer, { leaf: { v: 'ok' } }),
+      ).toBeNull();
+    });
+
+    it('evicts a poison registration without re-throwing through the probe', () => {
+      const sharedId = 'https://qwen-code.test/schemaValidator/poison-probe';
+      const poison = {
+        $id: sharedId,
+        $ref: 'https://qwen-code.test/schemaValidator/poison-probe-missing',
+      };
+      // Registers `poison` under sharedId, then fails to compile it; the
+      // registration stays behind and its compile error must not abort
+      // eviction for the valid sibling below.
+      expect(SchemaValidator.validate(poison, {})).toBeNull();
+
+      const sibling = {
+        $id: sharedId,
+        type: 'object',
+        properties: { value: { type: 'string', maxLength: 2 } },
+      };
+      expect(SchemaValidator.canEnforce(sibling)).toBe(true);
+      expect(
+        SchemaValidator.validate(sibling, { value: 'abc' }),
+      ).not.toBeNull();
+      expect(SchemaValidator.validate(sibling, { value: 'ab' })).toBeNull();
+    });
+
+    it('never evicts Ajv meta-schema registrations', () => {
+      // Each attacker body must be valid against ITSELF: Ajv meta-validates
+      // a schema against whatever is registered under the meta URI, so an
+      // attacker that replaced the meta-schema but failed its own check
+      // would be evicted again and the poisoning would not stick. A
+      // self-consistent attacker that demands a marker property rejects
+      // every normal schema afterwards.
+      const marker = '__schemaValidatorMetaPoison';
+      const legs = [
+        {
+          attacker: {
+            $id: 'http://json-schema.org/draft-07/schema',
+            type: 'object',
+            required: [marker],
+            [marker]: true,
+          },
+          probe: {
+            type: 'object',
+            properties: { v: { type: 'string', maxLength: 3 } },
+          },
+        },
+        {
+          attacker: {
+            $schema: 'https://json-schema.org/draft/2020-12/schema',
+            $id: 'https://json-schema.org/draft/2020-12/schema',
+            type: 'object',
+            required: [marker],
+            [marker]: true,
+          },
+          probe: {
+            $schema: 'https://json-schema.org/draft/2020-12/schema',
+            type: 'object',
+            properties: { v: { type: 'string', maxLength: 3 } },
+          },
+        },
+      ];
+      for (const { attacker, probe } of legs) {
+        expect(SchemaValidator.canEnforce(attacker)).toBe(false);
+        expect(SchemaValidator.validate(attacker, {})).toBeNull();
+        // The shared meta-schema must survive the attacker: a fresh schema
+        // still compiles and still enforces.
+        expect(SchemaValidator.canEnforce(probe)).toBe(true);
+        expect(SchemaValidator.validate(probe, { v: 'aaaa' })).not.toBeNull();
+      }
+    });
+  });
+
   describe('non-string to string coercion', () => {
     const schema = {
       type: 'object',
