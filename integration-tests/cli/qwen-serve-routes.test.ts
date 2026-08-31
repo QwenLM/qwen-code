@@ -428,6 +428,7 @@ describe('qwen serve — capabilities envelope', () => {
       ...(nativeDirectoryPickerAtBoot ? ['native_directory_picker'] : []),
       'workspace_qualified_rest_core',
       'extension_management_v2',
+      'extension_state',
       'extension_git_credentials',
       'extension_local_path_install',
       'workspace_persisted_transcript',
