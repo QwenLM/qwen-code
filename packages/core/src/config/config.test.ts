@@ -2163,12 +2163,21 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('shutdown() runtime sidecar cleanup', () => {
+    function mockCurrentProcessAsRunning(): void {
+      (fs.readFileSync as Mock).mockImplementation((filePath) =>
+        filePath.toString() === `/proc/${process.pid}/stat`
+          ? `${process.pid} (qwen) S`
+          : undefined,
+      );
+    }
+
     it('demotes the sidecar so a closed session stops claiming a live pid', async () => {
       // In multi-session processes (the `qwen serve` ACP child) the pid
       // outlives the session; a leftover live claim would shield the
       // closed session's entry from the sweep forever. Keep a dead
       // claim so worktree ownership checks can distinguish clean exit
       // from missing evidence.
+      mockCurrentProcessAsRunning();
       const config = new Config(baseParams);
       const sessionId = config.getSessionId();
       const statusPath = config.storage.getRuntimeStatusPath(sessionId);
@@ -2308,6 +2317,7 @@ describe('Server Config (config.ts)', () => {
     );
 
     it('leaves sibling same-session sidecars intact when shutting down', async () => {
+      mockCurrentProcessAsRunning();
       const config = new Config(baseParams);
       const sessionId = config.getSessionId();
       const ownStatusPath = config.storage.getRuntimeStatusPath(sessionId);
@@ -7790,6 +7800,11 @@ describe('Server Config (config.ts)', () => {
   });
 
   it('drains a pending session sidecar write before demoting it at shutdown', async () => {
+    (fs.readFileSync as Mock).mockImplementation((filePath) =>
+      filePath.toString() === `/proc/${process.pid}/stat`
+        ? `${process.pid} (qwen) S`
+        : undefined,
+    );
     const config = new Config(baseParams);
     config.markRuntimeStatusEnabled();
     let finishWrite!: () => void;
