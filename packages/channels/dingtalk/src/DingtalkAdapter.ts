@@ -595,6 +595,107 @@ const PROACTIVE_MSG_KEY = 'sampleMarkdown'; // DingTalk's built-in {title, text}
 const TOKEN_API = 'https://oapi.dingtalk.com/gettoken';
 const PROACTIVE_FETCH_TIMEOUT_MS = 15_000;
 const REPLY_FETCH_TIMEOUT_MS = 15_000;
+
+interface InboundErrorPresentation {
+  status: string;
+  nextStep: string;
+}
+
+function presentInboundError(error: unknown): InboundErrorPresentation {
+  const parts: string[] = [];
+  let status: number | undefined;
+
+  if (error instanceof Error) {
+    parts.push(error.name, error.message);
+  } else if (typeof error === 'string') {
+    parts.push(error);
+  }
+
+  if (typeof error === 'object' && error !== null) {
+    const record = error as Record<string, unknown>;
+    if (typeof record['code'] === 'string') parts.push(record['code']);
+    if (typeof record['status'] === 'number') status = record['status'];
+    const body = record['body'];
+    if (typeof body === 'string') {
+      parts.push(body);
+    } else if (typeof body === 'object' && body !== null) {
+      const bodyRecord = body as Record<string, unknown>;
+      for (const key of ['code', 'errorKind', 'message']) {
+        if (typeof bodyRecord[key] === 'string') parts.push(bodyRecord[key]);
+      }
+    }
+  }
+
+  const diagnostic = parts.join(' ').slice(0, 2000).toLowerCase();
+  if (
+    status === 401 ||
+    status === 403 ||
+    /unauthor|forbidden|authentication|credential|invalid.?token/.test(
+      diagnostic,
+    )
+  ) {
+    return {
+      status: 'Bot configuration error',
+      nextStep: 'Contact the bot administrator.',
+    };
+  }
+  if (
+    status === 408 ||
+    status === 504 ||
+    /timeout|timed?\s+out|deadline/.test(diagnostic)
+  ) {
+    return {
+      status: 'Request timed out',
+      nextStep: 'Try again. For a large request, split it into smaller parts.',
+    };
+  }
+  if (/cancel|abort/.test(diagnostic)) {
+    return {
+      status: 'Request was cancelled',
+      nextStep: 'Send the request again if you still need it.',
+    };
+  }
+  if (
+    status === 429 ||
+    /overload|rate.?limit|queue.?full|too many|busy|pending prompts full/.test(
+      diagnostic,
+    )
+  ) {
+    return {
+      status: 'Agent is busy',
+      nextStep: 'Try again in a moment.',
+    };
+  }
+  if (
+    status === 502 ||
+    status === 503 ||
+    /unavailable|econn|enotfound|network|socket|fetch failed|connection|session[_ ](?:not found|closing)|workspace[_ ]draining|transport closed/.test(
+      diagnostic,
+    )
+  ) {
+    return {
+      status: 'Agent is temporarily unavailable',
+      nextStep:
+        'Try again in a moment. If it keeps failing, contact the bot administrator.',
+    };
+  }
+  return {
+    status: 'Processing failed',
+    nextStep: 'Try again. If it keeps failing, contact the bot administrator.',
+  };
+}
+
+function formatInboundErrorMessage(error: unknown, reference: string): string {
+  const presentation = presentInboundError(error);
+  return [
+    '**Unable to process this message**',
+    '',
+    `**Status:** ${presentation.status}`,
+    `**Next step:** ${presentation.nextStep}`,
+    `**Reference:** \`${reference}\``,
+  ].join('\n');
+}
+
 // Extensions for generated media store names, keyed by the download's mime
 // type. The agent reads stored media via `read_file`, whose type detection is
 // extension-first: an extensionless name falls through to the binary content
@@ -2597,21 +2698,23 @@ export class DingtalkChannel extends ChannelBase {
           : this.handleInbound(envelope);
       processMessage.catch((err) => {
         // Don't await — stream callback should return quickly
+        const reference = randomUUID().slice(0, 8);
         process.stderr.write(
-          `[DingTalk:${this.name}] Error handling message: ${err}\n`,
+          `[DingTalk:${this.name}] Error handling message ref=${reference}: ${sanitizeLogText(
+            err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+            300,
+          )}\n`,
         );
+        const fallbackMessage = formatInboundErrorMessage(err, reference);
         const sourceLabel = this.getInboundErrorSourceLabel(envelope);
         const delivery = sourceLabel
           ? this.sendThreadMessage(
               chatId,
               envelope.threadId,
-              'Sorry, something went wrong processing your message.',
+              fallbackMessage,
               sourceLabel,
             )
-          : this.sendMessage(
-              chatId,
-              'Sorry, something went wrong processing your message.',
-            );
+          : this.sendMessage(chatId, fallbackMessage);
         delivery.catch(() => {});
       });
     } catch (err) {
