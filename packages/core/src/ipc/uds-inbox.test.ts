@@ -613,6 +613,20 @@ describe.skipIf(isWindows)('orphan socket sweeps', () => {
     await expect(fs.stat(dead)).rejects.toThrow();
   });
 
+  it('sweeps every batch when more than one batch of dead sockets accumulates', async () => {
+    const dir = path.join(tmpDir, 'qwen-socks');
+    await fs.mkdir(dir);
+    const sockets = Array.from({ length: 20 }, (_, index) =>
+      path.join(dir, `${2_147_483_600 + index}.sock`),
+    );
+    await Promise.all(sockets.map((socket) => fs.writeFile(socket, '')));
+
+    expect(
+      await sweepOrphanSockets(dir, path.join(dir, '2147483647.sock')),
+    ).toBe(sockets.length);
+    expect(await fs.readdir(dir)).toEqual([]);
+  });
+
   it('keeps a listening socket even when its filename PID is absent', async () => {
     const dir = path.join(tmpDir, 'qwen-socks');
     const live = path.join(dir, '4194303.sock');
