@@ -250,10 +250,9 @@ after the bridge response awaits. Interactive question contexts receive the
 same source label so adapters can render it in the card header and fallback
 text.
 
-After Part 3B lands, the named-mode text fallback can distinguish bare
-selected-task commands from exact inactive-task commands. Part 3A first ships
-only the exact request-ID form; it must not advertise selected-task-only bare
-semantics before that filter exists:
+The named-mode text fallback distinguishes bare selected-task commands from
+exact inactive-task commands. The explicit request-ID form remains the stable
+way to answer a request after selecting another task:
 
 ```text
 [feature-a] Permission required to run a tool
@@ -385,14 +384,15 @@ session addressing or worktree support.
 
 ## Delivery stages
 
-Part 3 should land as two PRs so the safety prerequisites merge before the
+Part 3 lands as two PRs so the safety prerequisites merge before the
 running-switch guard is removed.
 
 ### Part 3A: Correlation and presentation
 
-Part 3A keeps Part 2's idle-only selection policy. It adds exact task lookup,
-the derived presentation index, source labels, explicit request IDs in named
-permission prompts, and presentation coverage for every in-repository adapter.
+Part 3A is merged. It keeps Part 2's idle-only selection policy and adds exact
+task lookup, the derived presentation index, source labels, explicit request
+IDs in named permission prompts, and presentation coverage for every
+in-repository adapter.
 The detailed design is in
 [`channel-named-sessions-part3a.md`](./channel-named-sessions-part3a.md). These
 changes are independently useful and can be reviewed while concurrency remains
@@ -405,11 +405,12 @@ WeCom splitting.
 
 ### Part 3B: Concurrent control
 
-Part 3B removes only the selection-related busy checks, makes bare permission
-commands selected-task-only, adds named cancellation through the existing state
-machine, updates the affected Part 2 guard tests, and runs the three-task
-daemon-backed E2E plan. It does not revisit adapter presentation or introduce
-another runtime abstraction.
+Part 3B removes only the selection-related busy checks, keeps an already
+reserved turn on its exact task without rebinding the selected compatibility
+route, makes bare permission commands selected-task-only, adds named
+cancellation through the existing state machine, updates the affected Part 2
+guard tests, and runs the three-task daemon-backed E2E plan. It does not revisit
+adapter presentation or introduce another runtime abstraction.
 
 Expected diff: 80–160 production lines, 300–500 test lines, and 20–50
 documentation lines.
