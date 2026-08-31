@@ -1146,7 +1146,16 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
   // so a parent polling `qwen-review-<target>-plan.json` found nothing for
   // every file review and reported "Review did not complete" over a decided
   // round. This name is derived from the same `target` the parent derives.
-  const cachePath = cachePathFor(target, sourcePath);
+  // ONE resolved value for every consumer: the stop DECISION above read the
+  // `--cache`-resolved ledger (`cachePathEarly` — a file-form `--cache` is
+  // returned unchanged, directory form resolves the canonical basename), so
+  // the stamp below and the plan's published `cachePath` must name that
+  // same file. Stamping the canonical `.qwen/review-cache/…` path while the
+  // decision consulted a caller-named file had the fence faithfully verify
+  // a baseline the stop never saw — an ENOENT hash over a nonexistent
+  // canonical file, an empty grant baseline, and an exit 0 over the open
+  // Critical the stop had just consumed.
+  const cachePath = cachePathEarly ?? cachePathFor(target, sourcePath);
   if (nothingToReview) {
     // The baseline's content bound into the stamp: the compose grant
     // re-hashes the cache the plan names and refuses on any departure, so
@@ -1186,6 +1195,18 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
       )}\n`,
       'utf8',
     );
+  } else {
+    // This capture proves the tree MOVED past whatever an earlier stop
+    // certified, so an earlier round's sidecar at this stable name is now
+    // a stale stamp: left in place, it stays fence-valid (same reason,
+    // same cache path, same hash if the ledger did not change) and a
+    // later hand-written stop plan could ride it. Absent IS the truthful
+    // state — this round decided no stop.
+    try {
+      unlinkSync(tmpFile(target, 'stop.json'));
+    } catch {
+      // nothing to remove
+    }
   }
 
   const diffPath = tmpFile(target, 'diff.txt');
