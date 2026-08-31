@@ -121,6 +121,8 @@ export function StandaloneRecents({
   const [archived, setArchived] = useState<DaemonStandaloneSessionSummary[]>(
     [],
   );
+  const archivedRef = useRef(archived);
+  archivedRef.current = archived;
   const [activeCursor, setActiveCursor] = useState<string>();
   const [archivedCursor, setArchivedCursor] = useState<string>();
   const [archivedExpanded, setArchivedExpanded] = useState(false);
@@ -171,29 +173,41 @@ export function StandaloneRecents({
     [onError, supported, t, workspace.client],
   );
 
-  const loadArchived = useCallback(async () => {
-    if (!supported) return;
-    const generation = archivedLoadGenerationRef.current + 1;
-    archivedLoadGenerationRef.current = generation;
-    setLoadingMore((current) => (current === 'archived' ? undefined : current));
-    setLoadingArchived(true);
-    try {
-      const page = await workspace.client.listStandaloneSessionsPage({
-        archiveState: 'archived',
-        pageSize: PAGE_SIZE,
-      });
-      if (archivedLoadGenerationRef.current !== generation) return;
-      setArchived(withoutChildren(page.sessions));
-      setArchivedCursor(page.nextCursor);
-    } catch (error) {
-      if (archivedLoadGenerationRef.current !== generation) return;
-      onError(error, t('sidebar.standaloneLoadFailed'));
-    } finally {
-      if (archivedLoadGenerationRef.current === generation) {
-        setLoadingArchived(false);
+  const loadArchived = useCallback(
+    async (preserveArchivedPages = false) => {
+      if (!supported) return;
+      const generation = archivedLoadGenerationRef.current + 1;
+      archivedLoadGenerationRef.current = generation;
+      setLoadingMore((current) =>
+        current === 'archived' ? undefined : current,
+      );
+      setLoadingArchived(true);
+      try {
+        const page = await workspace.client.listStandaloneSessionsPage({
+          archiveState: 'archived',
+          pageSize: PAGE_SIZE,
+        });
+        if (archivedLoadGenerationRef.current !== generation) return;
+        const archivedSessions = withoutChildren(page.sessions);
+        const preserveLoadedPages =
+          preserveArchivedPages && archivedRef.current.length > 0;
+        setArchived((current) =>
+          preserveLoadedPages
+            ? mergeRefreshedPage(current, archivedSessions)
+            : archivedSessions,
+        );
+        if (!preserveLoadedPages) setArchivedCursor(page.nextCursor);
+      } catch (error) {
+        if (archivedLoadGenerationRef.current !== generation) return;
+        onError(error, t('sidebar.standaloneLoadFailed'));
+      } finally {
+        if (archivedLoadGenerationRef.current === generation) {
+          setLoadingArchived(false);
+        }
       }
-    }
-  }, [onError, supported, t, workspace.client]);
+    },
+    [onError, supported, t, workspace.client],
+  );
 
   const loadMore = useCallback(
     async (archiveState: DaemonSessionArchiveState, cursor: string) => {
@@ -251,7 +265,7 @@ export function StandaloneRecents({
   }, [currentSessionId, load]);
 
   useEffect(() => {
-    if (archivedExpanded) void loadArchived();
+    if (archivedExpanded) void loadArchived(true);
   }, [archivedExpanded, loadArchived]);
 
   useEffect(() => {

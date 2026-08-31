@@ -20798,6 +20798,70 @@ describe('App session callbacks', () => {
     expect(loadSplitSessions()).toEqual([]);
   });
 
+  it('does not let stale split classification replace a sidebar session load', async () => {
+    const classification = deferred<never>();
+    mockWorkspace.capabilities = {
+      features: ['standalone_sessions_v1'],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    mockWorkspace.client.getStandaloneSession.mockReturnValueOnce(
+      classification.promise,
+    );
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-sessions-overview"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      testState.latestSessionOverviewProps?.onOpenSplit?.(['older-session']);
+      await vi.waitFor(() => {
+        expect(mockWorkspace.client.getStandaloneSession).toHaveBeenCalledWith(
+          'older-session',
+        );
+      });
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="load-session"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    await act(async () => {
+      classification.reject(
+        new DaemonHttpError(
+          404,
+          { code: 'standalone_session_not_found' },
+          'not found',
+        ),
+      );
+      await Promise.resolve();
+    });
+
+    expect(mockSessionActions.loadSession).toHaveBeenCalledWith(
+      'session-2',
+      expect.any(Object),
+    );
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).toBeNull();
+    expect(loadSplitSessions()).toEqual([]);
+  });
+
   it('requests controlled split ids from the external shell ref', async () => {
     const onSplitSessionIdsChange = vi.fn();
     const shellRef = createRef<WebShellApi>();

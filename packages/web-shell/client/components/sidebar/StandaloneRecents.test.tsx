@@ -227,6 +227,62 @@ describe('StandaloneRecents', () => {
     ).toHaveLength(1);
   });
 
+  it('preserves appended archived pages across collapse and reopen', async () => {
+    mocks.list.mockImplementation(
+      async ({
+        archiveState,
+        cursor,
+      }: {
+        archiveState: string;
+        cursor?: string;
+      }) => {
+        if (archiveState === 'active') {
+          return { sessions: [summary('active', 'Active chat')] };
+        }
+        return cursor === 'archived-page-2'
+          ? {
+              sessions: [
+                summary('archived-2', 'Archived page two', {
+                  isArchived: true,
+                }),
+              ],
+            }
+          : {
+              sessions: [
+                summary('archived-1', 'Archived page one', {
+                  isArchived: true,
+                }),
+              ],
+              nextCursor: 'archived-page-2',
+            };
+      },
+    );
+    await render();
+    const archivedToggle = Array.from(
+      container.querySelectorAll('button'),
+    ).find((button) => button.textContent?.includes('sidebar.archivedTitle'));
+
+    await act(async () => archivedToggle?.click());
+    const showAll = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'sidebar.showAllSessions',
+    );
+    await act(async () => showAll?.click());
+    expect(container.textContent).toContain('Archived page two');
+
+    await act(async () => archivedToggle?.click());
+    await act(async () => archivedToggle?.click());
+
+    expect(container.textContent).toContain('Archived page two');
+    expect(container.textContent).not.toContain('sidebar.showAllSessions');
+    expect(
+      mocks.list.mock.calls.filter(
+        ([options]) =>
+          options.archiveState === 'archived' &&
+          options.cursor === 'archived-page-2',
+      ),
+    ).toHaveLength(1);
+  });
+
   it('reports a failed standalone session open', async () => {
     const error = new Error('load failed');
     const { onError } = await render({
