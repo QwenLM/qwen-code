@@ -18,6 +18,7 @@
  * that it needed to wait.
  */
 
+import { randomBytes } from 'node:crypto';
 import {
   type ApprovalMode,
   createDebugLogger,
@@ -43,8 +44,17 @@ const debugLogger = createDebugLogger('PEER_MESSAGING');
 export interface PeerQueuedDelivery {
   msgId: string;
   from?: string;
+  replyToken?: string;
   toSessionId?: string;
 }
+
+/**
+ * Where child processes of this session find its inbox, so a script or
+ * hook it runs can inject a message back into it (through the same
+ * inbound gate as any peer). Cleared when the inbox closes.
+ */
+export const MESSAGING_SOCKET_ENV = 'QWEN_CODE_MESSAGING_SOCKET';
+export const MESSAGING_TOKEN_ENV = 'QWEN_CODE_MESSAGING_TOKEN';
 
 /**
  * Submit an already-formatted message into the session's input queue.
@@ -82,7 +92,10 @@ export interface PeerReceipt {
 export interface PeerMessagingOptions {
   getApprovalMode: () => ApprovalMode | null;
   getPolicySetting: () => InboundPolicy | undefined;
-  updateSessionRegistryIpcPath: (ipcPath: string | undefined) => Promise<void>;
+  updateSessionRegistryIpcPath: (
+    ipcPath: string | undefined,
+    ipcToken?: string,
+  ) => Promise<void>;
   /**
    * Apply a receipt to the send it answers, returning the send only when
    * the receipt moved it to a new state. Defaults to the send-side
@@ -106,6 +119,12 @@ export interface PeerMessagingOptions {
    */
   getSessionId?: () => string;
   socketPath?: string;
+  /**
+   * Overrides the generated inbox token. A test seam like `socketPath`:
+   * a frame staged before `start` resolves must already authenticate,
+   * and the generated token is not observable until after.
+   */
+  ipcToken?: string;
 }
 
 export class PeerMessaging {
@@ -113,6 +132,7 @@ export class PeerMessaging {
   private gate: InboundGate | null = null;
   private updateSessionRegistryIpcPath: (
     ipcPath: string | undefined,
+    ipcToken?: string,
   ) => Promise<void> = async () => {};
   private getSessionId: (() => string) | null = null;
   private settleSentMessage: (
@@ -159,11 +179,15 @@ export class PeerMessaging {
       deliver: (frame) => messaging.deliver(frame),
       reportStatus: (frame, status) => {
         if (!frame.from) return;
-        return sendDeliveryStatus(frame.from, {
-          status,
-          origMsgId: frame.msgId,
-          from: messaging.inbox?.socketPath,
-        });
+        return sendDeliveryStatus(
+          frame.from,
+          {
+            status,
+            origMsgId: frame.msgId,
+            from: messaging.inbox?.socketPath,
+          },
+          frame.replyToken,
+        );
       },
       onHeldChange: (held) => messaging.emitHeldChange(held),
     });
@@ -181,10 +205,12 @@ export class PeerMessaging {
       options.settleSentMessage ?? settleSentPeerMessage;
     messaging.reassertSessionRecord = options.reassertSessionRecord ?? null;
 
+    const ipcToken = options.ipcToken ?? randomBytes(32).toString('hex');
     const inbox = await startPeerInbox({
       ...(options.socketPath !== undefined
         ? { socketPath: options.socketPath }
         : {}),
+      requiredToken: ipcToken,
       onFrame: (frame) => messaging.onFrame(frame),
     });
     if (!inbox) return null;
@@ -196,7 +222,15 @@ export class PeerMessaging {
     // Advertise the address only once the socket is actually accepting.
     // Publishing it earlier would hand peers an address that refuses
     // connections, which reads to them as "the session just exited".
-    await messaging.updateSessionRegistryIpcPath(inbox.socketPath);
+    // The token travels in the same record: discovering the address and
+    // being able to authenticate to it are one capability.
+    await messaging.updateSessionRegistryIpcPath(inbox.socketPath, ipcToken);
+
+    // Exported even if the registry publish above failed: children inherit
+    // the environment, not the record, and the inbox is accepting either
+    // way.
+    process.env[MESSAGING_SOCKET_ENV] = inbox.socketPath;
+    process.env[MESSAGING_TOKEN_ENV] = ipcToken;
 
     return messaging;
   }
@@ -331,6 +365,8 @@ export class PeerMessaging {
     await this.gate?.shutdown();
     await this.settleUnconsumed();
     await this.inbox?.close();
+    delete process.env[MESSAGING_SOCKET_ENV];
+    delete process.env[MESSAGING_TOKEN_ENV];
     await this.updateSessionRegistryIpcPath(undefined);
   }
 
@@ -349,11 +385,15 @@ export class PeerMessaging {
     const receipts = dropped
       .filter((frame) => frame.from !== undefined)
       .map((frame) =>
-        sendDeliveryStatus(frame.from!, {
-          status: 'expired',
-          origMsgId: frame.msgId,
-          from: this.inbox?.socketPath,
-        }),
+        sendDeliveryStatus(
+          frame.from!,
+          {
+            status: 'expired',
+            origMsgId: frame.msgId,
+            from: this.inbox?.socketPath,
+          },
+          frame.replyToken,
+        ),
       );
     await Promise.allSettled(receipts);
   }
@@ -400,11 +440,15 @@ export class PeerMessaging {
         `refusing peer message ${frame.msgId}: addressed to session ${frame.toSessionId}, this is ${ownSessionId}`,
       );
       if (frame.from) {
-        void sendDeliveryStatus(frame.from, {
-          status: 'misaddressed',
-          origMsgId: frame.msgId,
-          from: this.inbox?.socketPath,
-        });
+        void sendDeliveryStatus(
+          frame.from,
+          {
+            status: 'misaddressed',
+            origMsgId: frame.msgId,
+            from: this.inbox?.socketPath,
+          },
+          frame.replyToken,
+        );
       }
       void this.reassertSessionRecord?.().catch((error) => {
         debugLogger.debug(
@@ -468,6 +512,9 @@ export class PeerMessaging {
         {
           msgId: frame.msgId,
           ...(frame.from !== undefined ? { from: frame.from } : {}),
+          ...(frame.replyToken !== undefined
+            ? { replyToken: frame.replyToken }
+            : {}),
           ...(frame.toSessionId !== undefined
             ? { toSessionId: frame.toSessionId }
             : {}),
@@ -490,11 +537,15 @@ export class PeerMessaging {
       `dropping queued peer message ${delivery.msgId}: addressed to session ${delivery.toSessionId}, this is ${ownSessionId}`,
     );
     if (delivery.from) {
-      void sendDeliveryStatus(delivery.from, {
-        status: 'misaddressed',
-        origMsgId: delivery.msgId,
-        from: this.inbox?.socketPath,
-      });
+      void sendDeliveryStatus(
+        delivery.from,
+        {
+          status: 'misaddressed',
+          origMsgId: delivery.msgId,
+          from: this.inbox?.socketPath,
+        },
+        delivery.replyToken,
+      );
     }
     return false;
   }

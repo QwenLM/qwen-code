@@ -142,6 +142,15 @@ export interface SessionRegistryRecord {
    * fine.
    */
   ipcPath?: string;
+  /**
+   * Token a connection to `ipcPath` must present on its first line before
+   * any frame is read. Published here because the record is 0600: being
+   * able to read the token is the same capability as being able to
+   * discover the socket at all, so senders get both in one read. Absent
+   * on records written before the field existed — such an inbox cannot
+   * be authenticated to and refuses frames.
+   */
+  ipcToken?: string;
 }
 
 export interface RegisterSessionFields {
@@ -716,6 +725,7 @@ async function readRecord(filePath: string): Promise<ReadRecordResult> {
   const pidNs = value['pidNs'];
   const qwenVersion = value['qwenVersion'];
   const ipcPath = value['ipcPath'];
+  const ipcToken = value['ipcToken'];
 
   return {
     status: 'ok',
@@ -733,6 +743,9 @@ async function readRecord(filePath: string): Promise<ReadRecordResult> {
       // messageable", and a record written before this field existed must
       // read back identically to one written after it.
       ...(typeof ipcPath === 'string' && ipcPath.length > 0 ? { ipcPath } : {}),
+      ...(typeof ipcToken === 'string' && ipcToken.length > 0
+        ? { ipcToken }
+        : {}),
     },
   };
 }

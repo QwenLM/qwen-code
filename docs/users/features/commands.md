@@ -836,3 +836,27 @@ agents again) — or released after a hold — a notice appears in the
 sending session's transcript (`Message to <name>: …`). The model that
 sent it is not told; if the other session replies, the reply arrives as a
 cross-session message.
+
+### Inbox authentication and scripted injection
+
+Each session's inbox requires a per-session token: a connection must
+present it on its first line before any message is read, and sessions
+exchange tokens automatically through the same registry records they
+discover each other by. Sessions from a build without token support can
+receive from a newer one, but their sends to it are dropped.
+
+A session exports its own inbox address and token to child processes as
+`QWEN_CODE_MESSAGING_SOCKET` and `QWEN_CODE_MESSAGING_TOKEN`, so a script
+or hook the session runs can send a message back into it:
+
+```bash
+{ printf '%s\n' \
+    '{"msgV":1,"type":"auth","token":"'"$QWEN_CODE_MESSAGING_TOKEN"'"}' \
+    '{"msgV":1,"msgId":"note-1","type":"user","priority":"next","message":{"role":"user","content":"build finished"}}'; \
+} | socat - UNIX-CONNECT:"$QWEN_CODE_MESSAGING_SOCKET"
+```
+
+An injected message goes through the same inbound gate as one from
+another session: it is marked as not coming from the user, and
+`agents.crossSessionInbound` (or the mode-parity default) decides whether
+it is delivered or held for review.
