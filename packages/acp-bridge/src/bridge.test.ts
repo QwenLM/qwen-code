@@ -3203,7 +3203,9 @@ describe('createAcpSessionBridge', () => {
       availableSkills: [],
     });
     await expect(
-      bridge.getSessionTasksStatus(session.sessionId),
+      bridge.getSessionTasksStatus(session.sessionId, {
+        includeWorkflows: true,
+      }),
     ).resolves.toMatchObject({
       sessionId: session.sessionId,
       tasks: [],
@@ -3227,6 +3229,10 @@ describe('createAcpSessionBridge', () => {
       'qwen/status/session/tasks',
       'qwen/status/session/lsp',
     ]);
+    expect(handles[0]?.agent.extMethodCalls[2]?.params).toMatchObject({
+      sessionId: session.sessionId,
+      includeWorkflows: true,
+    });
 
     await bridge.shutdown();
   });
@@ -4190,6 +4196,57 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('separates concurrent skill-only and full refreshes for every session', async () => {
+    const skillsGate = deferred<Record<string, unknown>>();
+    const fullGate = deferred<Record<string, unknown>>();
+    const handle = makeChannel({
+      extMethodImpl: async (method, params) =>
+        method === SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh
+          ? await (params['skillsOnly'] ? skillsGate.promise : fullGate.promise)
+          : {},
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    try {
+      const first = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      const second = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      const skills = bridge.refreshExtensionsForAllSessions(undefined, {
+        skillsOnly: true,
+      });
+      const duplicate = bridge.refreshExtensionsForAllSessions(undefined, {
+        skillsOnly: true,
+      });
+      const full = bridge.refreshExtensionsForAllSessions();
+      await vi.waitFor(() =>
+        expect(handle.agent.extMethodCalls).toHaveLength(4),
+      );
+      expect(handle.agent.extMethodCalls.map(({ params }) => params)).toEqual([
+        { sessionId: first.sessionId, skillsOnly: true },
+        {
+          sessionId: second.sessionId,
+          refreshBootstrap: false,
+          skillsOnly: true,
+        },
+        { sessionId: first.sessionId },
+        { sessionId: second.sessionId, refreshBootstrap: false },
+      ]);
+      skillsGate.resolve({});
+      await expect(skills).resolves.toEqual({ refreshed: 2, failed: 0 });
+      await expect(duplicate).resolves.toEqual({ refreshed: 2, failed: 0 });
+      fullGate.reject(new Error('full refresh failed'));
+      await expect(full).resolves.toEqual({ refreshed: 0, failed: 2 });
+    } finally {
+      skillsGate.resolve({});
+      fullGate.resolve({});
+      await bridge.shutdown();
+    }
+  });
+
   it('bounds a hung session extension refresh', async () => {
     vi.useFakeTimers();
     const refreshGate = deferred<Record<string, unknown>>();
@@ -4208,18 +4265,18 @@ describe('createAcpSessionBridge', () => {
       channelFactory,
     });
     try {
-      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
       const refresh = bridge.refreshExtensionsForAllSessions();
+      const overlappingRefresh = bridge.refreshExtensionsForAllSessions();
 
       await vi.advanceTimersByTimeAsync(30_000);
 
       await expect(refresh).resolves.toEqual({ refreshed: 0, failed: 1 });
-      expect(stalledHandle.killed).toBe(true);
-
-      await expect(bridge.refreshExtensionsForAllSessions()).resolves.toEqual({
+      await expect(overlappingRefresh).resolves.toEqual({
         refreshed: 0,
-        failed: 0,
+        failed: 1,
       });
+      expect(stalledHandle.killed).toBe(false);
       expect(
         stalledHandle.agent.extMethodCalls.filter(
           (call) =>
@@ -4228,6 +4285,8 @@ describe('createAcpSessionBridge', () => {
         ),
       ).toHaveLength(1);
 
+      await bridge.closeSession(session.sessionId);
+      expect(stalledHandle.killed).toBe(true);
       await bridge.spawnOrAttach({ workspaceCwd: WS_A });
       await expect(bridge.refreshExtensionsForAllSessions()).resolves.toEqual({
         refreshed: 1,
@@ -24116,6 +24175,19 @@ describe('createAcpSessionBridge', () => {
           { clientId: 'client-not-issued' },
         ),
       ).rejects.toBeInstanceOf(InvalidClientIdError);
+      await expect(
+        bridge.cancelSessionTask(session.sessionId, 'task-1', 'workflow', {
+          clientId: 'client-not-issued',
+        }),
+      ).rejects.toBeInstanceOf(InvalidClientIdError);
+      await expect(
+        bridge.controlSessionWorkflowTask(
+          session.sessionId,
+          'task-1',
+          'rerun',
+          { clientId: 'client-not-issued' },
+        ),
+      ).rejects.toBeInstanceOf(InvalidClientIdError);
       await bridge.shutdown();
     });
 
@@ -29677,6 +29749,80 @@ describe('extractErrorMessage', () => {
     ).toBe('<503> model serving is throttled');
   });
 
+  it('extracts nested provider messages from data.error.message', () => {
+    // Shape the ACP SDK produces when the agent throws an error whose
+    // message is a JSON string: internalError(JSON.parse(message)).
+    expect(
+      extractErrorMessage(
+        new RequestError(-32603, 'Internal error', {
+          error: {
+            message:
+              'The engine is currently overloaded, please try again later',
+            type: 'engine_overloaded_error',
+          },
+        }),
+      ),
+    ).toBe('The engine is currently overloaded, please try again later');
+  });
+
+  it('extracts string data.error from JSON-RPC error data', () => {
+    expect(
+      extractErrorMessage({
+        code: -32603,
+        message: 'Internal error',
+        data: { error: 'plain string detail' },
+      }),
+    ).toBe('plain string detail');
+  });
+
+  it('prefers top-level data.details over nested data.error.message', () => {
+    expect(
+      extractErrorMessage({
+        code: -32603,
+        message: 'Internal error',
+        data: { details: 'top', error: { message: 'nested' } },
+      }),
+    ).toBe('top');
+  });
+
+  it('prefers top-level data.message over nested data.error.message', () => {
+    expect(
+      extractErrorMessage({
+        code: -32603,
+        message: 'Internal error',
+        data: { message: 'top', error: { message: 'nested' } },
+      }),
+    ).toBe('top');
+  });
+
+  it('falls back to message when data.error has no usable string', () => {
+    expect(
+      extractErrorMessage(
+        new RequestError(-32603, 'Internal error', {
+          error: { type: 'engine_overloaded_error' },
+        }),
+      ),
+    ).toBe('Internal error');
+  });
+
+  it('falls back to message when data.error is an empty string', () => {
+    expect(
+      extractErrorMessage(
+        new RequestError(-32603, 'Internal error', { error: '' }),
+      ),
+    ).toBe('Internal error');
+  });
+
+  it('falls back to message when data.error.message is an empty string', () => {
+    expect(
+      extractErrorMessage(
+        new RequestError(-32603, 'Internal error', {
+          error: { message: '' },
+        }),
+      ),
+    ).toBe('Internal error');
+  });
+
   it('extracts details from Error subclasses with JSON-RPC data', () => {
     expect(
       extractErrorMessage(
@@ -31654,13 +31800,11 @@ describe('preheat', () => {
 
     statusResult.resolve({ ready: true });
     await expect(status).resolves.toEqual({ ready: true });
-    expect(handle.killed).toBe(true);
-    await vi.waitFor(() => {
-      expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toMatchObject({
-        state: 'cold',
-        runtimeLive: false,
-        activeWork: false,
-      });
+    expect(handle.killed).toBe(false);
+    expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toMatchObject({
+      state: 'idle',
+      runtimeLive: true,
+      activeWork: false,
     });
 
     await bridge.shutdown();
@@ -31935,6 +32079,105 @@ describe('preheat', () => {
     }
   });
 
+  it('defers MCP detail timeout retirement until active sessions drain', async () => {
+    vi.useFakeTimers();
+    const detailResult = deferred<Record<string, unknown>>();
+    const handle = makeChannel({
+      extMethodImpl: async (method) => {
+        if (method === SERVE_STATUS_EXT_METHODS.workspaceMcp) {
+          return {
+            v: 1,
+            workspaceCwd: WS_A,
+            initialized: true,
+            discoveryState: 'completed',
+            servers: [{ name: 'aone', mcpStatus: 'connected' }],
+          };
+        }
+        if (
+          method === SERVE_STATUS_EXT_METHODS.workspaceMcpTools ||
+          method === SERVE_STATUS_EXT_METHODS.workspaceMcpResources
+        ) {
+          return await detailResult.promise;
+        }
+        return {};
+      },
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      initializeTimeoutMs: 50,
+    });
+
+    try {
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const status = bridge.queryWorkspaceStatus(
+        SERVE_STATUS_EXT_METHODS.workspaceMcp,
+        () => ({ discoveryState: 'not_started', servers: [] }),
+      );
+      await vi.advanceTimersByTimeAsync(50);
+
+      await expect(status).resolves.toMatchObject({
+        discoveryState: 'completed',
+      });
+      expect(handle.killed).toBe(false);
+      await expect(
+        bridge.sendPrompt(session.sessionId, {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'still alive' }],
+        }),
+      ).resolves.toMatchObject({ stopReason: 'end_turn' });
+
+      await bridge.closeSession(session.sessionId);
+      expect(handle.killed).toBe(true);
+    } finally {
+      detailResult.resolve({});
+      await bridge.shutdown();
+      vi.useRealTimers();
+    }
+  });
+
+  it('defers a workspace status timeout until active sessions drain', async () => {
+    vi.useFakeTimers();
+    const stalledStatus = deferred<Record<string, unknown>>();
+    const handle = makeChannel({
+      extMethodImpl: async (method) =>
+        method === SERVE_STATUS_EXT_METHODS.workspaceMcp
+          ? await stalledStatus.promise
+          : {},
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      initializeTimeoutMs: 50,
+      channelIdleTimeoutMs: 600_000,
+    });
+
+    try {
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const status = bridge.queryWorkspaceStatus(
+        SERVE_STATUS_EXT_METHODS.workspaceMcp,
+        () => ({ discoveryState: 'not_started', servers: [] }),
+      );
+      void status.catch(() => undefined);
+
+      await vi.advanceTimersByTimeAsync(50);
+      await expect(status).rejects.toBeInstanceOf(BridgeTimeoutError);
+      expect(handle.killed).toBe(false);
+      expect(bridge.sessionCount).toBe(1);
+      await expect(
+        bridge.sendPrompt(session.sessionId, {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'still alive' }],
+        }),
+      ).resolves.toMatchObject({ stopReason: 'end_turn' });
+
+      await bridge.closeSession(session.sessionId);
+      expect(handle.killed).toBe(true);
+    } finally {
+      stalledStatus.resolve({});
+      await bridge.shutdown();
+      vi.useRealTimers();
+    }
+  });
+
   it('keeps a shared channel while a timed-out new session RPC settles', async () => {
     vi.useFakeTimers();
     const stalledStarted = deferred<void>();
@@ -32085,7 +32328,36 @@ describe('preheat', () => {
     }
   });
 
-  it('drains missing MCP auth through its owning channel with an active session', async () => {
+  it('defers an MCP discovery timeout until active sessions drain', async () => {
+    vi.useFakeTimers();
+    try {
+      const handle = makeChannel({
+        extMethodImpl: async (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.workspaceMcpInitialize
+            ? { accepted: true }
+            : {},
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        channelIdleTimeoutMs: 600_000,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await bridge.initializeWorkspaceMcp();
+      await vi.advanceTimersByTimeAsync(300_000);
+
+      expect(handle.killed).toBe(false);
+      expect(bridge.sessionCount).toBe(1);
+
+      await bridge.closeSession(session.sessionId);
+      expect(handle.killed).toBe(true);
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('defers missing MCP auth retirement until active sessions drain', async () => {
     vi.useFakeTimers();
     try {
       const handle = makeChannel({
@@ -32112,8 +32384,9 @@ describe('preheat', () => {
       });
       const bridge = makeBridge({
         channelFactory: async () => handle.channel,
+        channelIdleTimeoutMs: 600_000,
       });
-      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
 
       await expect(
         bridge.manageMcpServer('aone', 'authenticate', undefined),
@@ -32129,14 +32402,11 @@ describe('preheat', () => {
       });
 
       await vi.advanceTimersByTimeAsync(600_000);
+      expect(handle.killed).toBe(false);
+      expect(bridge.sessionCount).toBe(1);
+
+      await bridge.closeSession(session.sessionId);
       expect(handle.killed).toBe(true);
-      await vi.waitFor(() =>
-        expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toMatchObject({
-          state: 'cold',
-          runtimeLive: false,
-          activeWork: false,
-        }),
-      );
       expect(bridge.sessionCount).toBe(0);
 
       await bridge.shutdown();
@@ -32359,6 +32629,45 @@ describe('preheat', () => {
     }
   });
 
+  it('keeps the longer explicit keep-alive over a configured idle timeout', async () => {
+    vi.useFakeTimers();
+    try {
+      const handle = makeChannel();
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        channelIdleTimeoutMs: 30_000,
+      });
+
+      await bridge.preheat({ keepAliveMs: 600_000 });
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(handle.killed).toBe(false);
+      await vi.advanceTimersByTimeAsync(570_000);
+      expect(handle.killed).toBe(true);
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('clamps explicit keep-alive to the setTimeout maximum', async () => {
+    vi.useFakeTimers();
+    try {
+      const handle = makeChannel();
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+
+      await bridge.preheat({ keepAliveMs: 2_147_483_648 });
+      await vi.advanceTimersByTimeAsync(2_147_483_646);
+      expect(handle.killed).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(handle.killed).toBe(true);
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it.each([
     ['an omitted timeout', undefined],
     ['an explicit zero timeout', 0],
@@ -32478,6 +32787,7 @@ describe('session idle reaper', () => {
       // reaper can catch this.
       await vi.advanceTimersByTimeAsync(6_000);
       expect(bridge.sessionCount).toBe(0);
+      expect(handle.killed).toBe(true);
 
       await bridge.shutdown();
     } finally {

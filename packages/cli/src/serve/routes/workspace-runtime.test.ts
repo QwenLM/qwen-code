@@ -21,6 +21,7 @@ import {
   registerWorkspaceQualifiedRuntimeRoutes,
   registerWorkspaceRuntimeRoutes,
 } from './workspace-runtime.js';
+import { WorkspaceRuntimeStillStartingError } from '../workspace-runtime-coordinator.js';
 
 function createRuntime(workspaceCwd = '/workspace') {
   let snapshot: BridgeWorkspaceRuntimeLifecycleSnapshot = {
@@ -150,6 +151,24 @@ describe('workspace runtime routes', () => {
     expect(response.body).toEqual({
       error: 'Workspace runtime failed to initialize',
       code: 'runtime_initialization_failed',
+    });
+  });
+
+  it('maps observer timeouts to a retryable 503 response', async () => {
+    const runtime = createRuntime();
+    vi.mocked(runtime.bridge.preheat).mockRejectedValue(
+      new WorkspaceRuntimeStillStartingError(),
+    );
+
+    const response = await request(createApp(runtime)).post(
+      '/workspace/runtime/ensure',
+    );
+
+    expect(response.status).toBe(503);
+    expect(response.headers['retry-after']).toBe('5');
+    expect(response.body).toEqual({
+      error: 'Workspace runtime is still starting',
+      code: 'runtime_still_starting',
     });
   });
 

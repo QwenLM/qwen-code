@@ -268,6 +268,16 @@ export function createDaemonWorkspaceService(
     });
   };
   const assertActiveGeneration = () => assertGenerationOpen?.();
+  const loggedPreheatFailures = new WeakSet<object>();
+  const logPreheatFailure = (err: unknown) => {
+    if (typeof err === 'object' && err !== null) {
+      if (loggedPreheatFailures.has(err)) return;
+      loggedPreheatFailures.add(err);
+    }
+    writeStderrLineSafe(
+      `qwen serve: ACP preheat failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  };
 
   // Last skills status answered by a live ACP child, retained so
   // skill-backed slash commands (e.g. `/review`) keep autocompleting after
@@ -473,16 +483,13 @@ export function createDaemonWorkspaceService(
       }
 
       const preheat = Promise.resolve().then(() => preheatAcpChildOnBridge());
+      void preheat.catch(logPreheatFailure);
       try {
         await withTimeout(preheat, opts?.timeoutMs ?? 5_000, 'ACP preheat');
       } catch (err) {
         if (err instanceof TimeoutError) {
           writeStderrLineSafe(
             `qwen serve: ACP preheat timed out after ${opts?.timeoutMs ?? 5_000}ms`,
-          );
-        } else {
-          writeStderrLineSafe(
-            `qwen serve: ACP preheat failed: ${err instanceof Error ? err.message : String(err)}`,
           );
         }
         const live = channelLive();

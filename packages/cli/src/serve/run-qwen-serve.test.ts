@@ -87,6 +87,7 @@ import type { WorkspaceRegistry } from './workspace-registry.js';
 import { getDeferredRuntimeRequestTiming } from './server/request-helpers.js';
 import type { WorkspaceFileSystemFactory } from './fs/workspace-file-system.js';
 import { ConversationWorkspace } from './conversations/conversation-workspace.js';
+import type { WorkspaceRuntimeProvenance } from './managed-scratch-workspace.js';
 import * as scheduledTaskKeepalive from './scheduled-task-keepalive.js';
 
 const originalTestRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
@@ -801,8 +802,9 @@ describe('workspace skill settings persistence', () => {
     await expect(
       persistDisabledSkills!(workspace, 'inherited-opt-in', true),
     ).resolves.toEqual({
-      changed: false,
+      changed: true,
       disabled: ['orphan', ' ReViEw ', 'review'],
+      settingsChanges: [{ key: 'skills.enabled', value: ['inherited-opt-in'] }],
     });
 
     await expect(
@@ -833,14 +835,23 @@ describe('workspace skill settings persistence', () => {
     ).resolves.toEqual({
       changed: true,
       disabled: ['orphan', 'alpha', 'beta'],
-      settingsChanges: [{ key: 'skills.enabled', value: ['opt-in-skill'] }],
+      settingsChanges: [
+        {
+          key: 'skills.enabled',
+          value: ['inherited-opt-in', 'review', 'opt-in-skill'],
+        },
+      ],
     });
 
     const saved = JSON.parse(
       fs.readFileSync(path.join(workspace, '.qwen', 'settings.json'), 'utf8'),
     ) as { skills: { disabled: string[]; enabled: string[] } };
     expect(saved.skills.disabled).toEqual(['orphan', 'alpha', 'beta']);
-    expect(saved.skills.enabled).toEqual(['opt-in-skill']);
+    expect(saved.skills.enabled).toEqual([
+      'inherited-opt-in',
+      'review',
+      'opt-in-skill',
+    ]);
     await expect(
       persistDisabledSkills!(workspace, 'locked-skill', false),
     ).resolves.toEqual({
@@ -862,6 +873,10 @@ describe('workspace skill settings persistence', () => {
         {
           key: 'skills.disabled',
           value: ['orphan', 'alpha', 'beta'],
+        },
+        {
+          key: 'skills.enabled',
+          value: ['inherited-opt-in', 'review', 'opt-in-skill', 'locked-skill'],
         },
       ],
     });
@@ -1068,16 +1083,18 @@ describe('workspace skill settings persistence', () => {
     expect(savedUser.skills.disabled).toEqual(['locked-skill']);
     expect(savedUser.skills.enabled).toBeUndefined();
 
-    const preinstallNoop = await persistDisabledSkillsBatch!(
+    const preinstallOptIn = await persistDisabledSkillsBatch!(
       workspace,
       ['future-skill'],
       true,
     );
-    expect(preinstallNoop.outcomes).toEqual([
-      { skillName: 'future-skill', changed: false },
+    expect(preinstallOptIn.outcomes).toEqual([
+      { skillName: 'future-skill', changed: true },
     ]);
-    expect(preinstallNoop.settingsChanges).toEqual([]);
-    expect(setValues).toHaveBeenCalledOnce();
+    expect(preinstallOptIn.settingsChanges).toEqual([
+      { key: 'skills.enabled', value: ['future-skill'] },
+    ]);
+    expect(setValues).toHaveBeenCalledTimes(2);
 
     const preinstallEnable = await persistDisabledSkillsBatch!(
       workspace,
@@ -1092,8 +1109,9 @@ describe('workspace skill settings persistence', () => {
         key: 'skills.disabled',
         value: ['review', 'alpha', 'locked-skill'],
       },
+      { key: 'skills.enabled', value: ['future-skill', 'orphan'] },
     ]);
-    expect(setValues).toHaveBeenCalledTimes(2);
+    expect(setValues).toHaveBeenCalledTimes(3);
 
     const enableResult = await persistDisabledSkillsBatch!(
       workspace,
@@ -1107,10 +1125,10 @@ describe('workspace skill settings persistence', () => {
     expect(enableResult.settingsChanges).toEqual([
       {
         key: 'skills.enabled',
-        value: ['opt-in'],
+        value: ['future-skill', 'orphan', 'opt-in'],
       },
     ]);
-    expect(setValues).toHaveBeenCalledTimes(3);
+    expect(setValues).toHaveBeenCalledTimes(4);
 
     const savedAfterEnable = JSON.parse(
       fs.readFileSync(path.join(workspace, '.qwen', 'settings.json'), 'utf8'),
@@ -1120,7 +1138,11 @@ describe('workspace skill settings persistence', () => {
       'alpha',
       'locked-skill',
     ]);
-    expect(savedAfterEnable.skills.enabled).toEqual(['opt-in']);
+    expect(savedAfterEnable.skills.enabled).toEqual([
+      'future-skill',
+      'orphan',
+      'opt-in',
+    ]);
 
     const guard = vi.fn();
     await persistDisabledSkillsBatch!(workspace, ['guarded'], false, guard);
@@ -4515,6 +4537,9 @@ describe('runQwenServe telemetry validation', () => {
       expect(createBridge.mock.calls[1]?.[0]).not.toHaveProperty(
         'permissionConsensusQuorum',
       );
+      const firstDynamicEpochSource =
+        createBridge.mock.calls[1]?.[0].runtimeEpochSource;
+      expect(firstDynamicEpochSource?.allocate()).toBe(1);
       const firstDynamicFileSystem = createBridge.mock.calls[1]?.[0].fileSystem;
       const firstDynamicTarget = path.join(
         tmpDir,
@@ -4608,6 +4633,10 @@ describe('runQwenServe telemetry validation', () => {
       });
       expect(readded.status).toBe(201);
       expect(createBridge).toHaveBeenCalledTimes(3);
+      expect(createBridge.mock.calls[2]?.[0].runtimeEpochSource).toBe(
+        firstDynamicEpochSource,
+      );
+      expect(firstDynamicEpochSource?.allocate()).toBe(2);
       const secondDynamicTarget = path.join(
         tmpDir,
         'dynamic-runtime-readded.txt',
@@ -7470,6 +7499,7 @@ describe('runQwenServe runtime startup failures', () => {
       () =>
         ({
           merged: {
+            tools: { workflowsEnabled: !runtimeMounted },
             advanced: {
               runtimeOutputDir: runtimeMounted
                 ? '.runtime-reloaded'
@@ -7556,6 +7586,7 @@ describe('runQwenServe runtime startup failures', () => {
       const pinnedRuntimeBaseDir = path.join(tmpDir, '.runtime-boot');
       expect(primaryRuntime?.sessionRuntimeBaseDir).toBe(pinnedRuntimeBaseDir);
       expect(capturedRuntimeEnv['QWEN_RUNTIME_DIR']).toBe(pinnedRuntimeBaseDir);
+      expect(primaryRuntime?.env.workflowsEnabledBySettings).toBe(true);
 
       await workspace!.reload({
         route: 'POST /workspace/reload',
@@ -7572,6 +7603,7 @@ describe('runQwenServe runtime startup failures', () => {
       expect(capturedRuntimeEnv['QWEN_TEST_RELOAD_LEAK']).toBeUndefined();
       expect(primaryRuntime?.sessionRuntimeBaseDir).toBe(pinnedRuntimeBaseDir);
       expect(capturedRuntimeEnv['QWEN_RUNTIME_DIR']).toBe(pinnedRuntimeBaseDir);
+      expect(primaryRuntime?.env.workflowsEnabledBySettings).toBe(false);
 
       reloadedRuntimeValue = 'hot-synced';
       await expect(
@@ -7831,15 +7863,18 @@ describe('runQwenServe runtime startup failures', () => {
     );
     const primary = path.join(tmpDir, 'primary');
     const secondary = path.join(tmpDir, 'secondary');
+    const dynamic = path.join(tmpDir, 'dynamic');
     const originalRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
     delete process.env['QWEN_RUNTIME_DIR'];
     fs.mkdirSync(primary);
     fs.mkdirSync(secondary);
+    fs.mkdirSync(dynamic);
     vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
       enabled: false,
       sensitiveSpanAttributeMaxLength: 1024 * 1024,
     });
     let runtimeMounted = false;
+    let dynamicReloaded = false;
     let providerRuntimeMutation = false;
     let failEnvFileRead = false;
     vi.spyOn(settingsRuntime, 'loadSettings').mockImplementation(
@@ -7848,6 +7883,10 @@ describe('runQwenServe runtime startup failures', () => {
         const isSecondary = workspace === secondary;
         return {
           merged: {
+            tools: {
+              workflowsEnabled:
+                workspace === dynamic ? !dynamicReloaded : !runtimeMounted,
+            },
             advanced: {
               runtimeOutputDir: isSecondary
                 ? runtimeMounted
@@ -7911,10 +7950,17 @@ describe('runQwenServe runtime startup failures', () => {
     let workspaceRegistry:
       | import('./workspace-registry.js').WorkspaceRegistry
       | undefined;
+    let createWorkspaceRuntime:
+      | ((
+          cwd: string,
+          options: { provenance: WorkspaceRuntimeProvenance },
+        ) => Promise<import('./workspace-registry.js').WorkspaceRuntime>)
+      | undefined;
     vi.spyOn(serverModule, 'createServeApp').mockImplementation(
       (_opts, _getPort, deps) => {
         runtimeMounted = true;
         workspaceRegistry = deps?.workspaceRegistry;
+        createWorkspaceRuntime = deps?.createWorkspaceRuntime;
         return express();
       },
     );
@@ -7950,6 +7996,7 @@ describe('runQwenServe runtime startup failures', () => {
         pinnedRuntimeBaseDir,
       );
       expect(env.effectiveEnv?.['QWEN_RUNTIME_DIR']).toBe(pinnedRuntimeBaseDir);
+      expect(env.workflowsEnabledBySettings).toBe(true);
 
       await expect(
         secondaryRuntime!.workspaceService.reload({
@@ -7967,6 +8014,18 @@ describe('runQwenServe runtime startup failures', () => {
         pinnedRuntimeBaseDir,
       );
       expect(env.effectiveEnv?.['QWEN_RUNTIME_DIR']).toBe(pinnedRuntimeBaseDir);
+      expect(env.workflowsEnabledBySettings).toBe(false);
+
+      const dynamicRuntime = await createWorkspaceRuntime!(dynamic, {
+        provenance: 'existing',
+      });
+      expect(dynamicRuntime.env.workflowsEnabledBySettings).toBe(true);
+      dynamicReloaded = true;
+      await dynamicRuntime.workspaceService.reload({
+        route: 'POST /workspace/reload',
+        workspaceCwd: dynamic,
+      });
+      expect(dynamicRuntime.env.workflowsEnabledBySettings).toBe(false);
 
       providerRuntimeMutation = true;
       await expect(
@@ -7975,7 +8034,7 @@ describe('runQwenServe runtime startup failures', () => {
           workspaceCwd: secondary,
         }),
       ).resolves.toEqual({ status: 'applied' });
-      expect(reloadEnvironment).toHaveBeenCalledOnce();
+      expect(reloadEnvironment).toHaveBeenCalledTimes(2);
       expect(env.effectiveEnv?.['QWEN_TEST_SECONDARY_ENV']).toBe(
         'provider-reloaded',
       );
@@ -7987,7 +8046,7 @@ describe('runQwenServe runtime startup failures', () => {
           workspaceCwd: secondary,
         }),
       ).resolves.toMatchObject({ runtimeEnvironmentApplied: false });
-      expect(reloadEnvironment).toHaveBeenCalledOnce();
+      expect(reloadEnvironment).toHaveBeenCalledTimes(2);
       expect(env.effectiveEnv?.['QWEN_TEST_SECONDARY_ENV']).toBe(
         'provider-reloaded',
       );

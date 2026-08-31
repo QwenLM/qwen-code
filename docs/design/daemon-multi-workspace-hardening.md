@@ -43,8 +43,8 @@ fallback when resolution fails.
   boundary. Production may preheat the trusted primary child for compatibility;
   trusted secondaries start on first runtime-backed use. When
   `mcp_workspace_pool` is enabled, each started child owns its pool; an untrusted
-  workspace must not start either. Primary compatibility routing does not bypass
-  route trust gates. A
+  secondary must not start either. Existing primary routes retain their current
+  trust behavior; compatibility routing does not bypass a route's trust gate. A
   process-global Voice coordinator enforces the shared admission cap while
   tracking leases by owning runtime. Same-named environment keys must not cross
   runtimes, and a workspace overlay must not mutate the parent process

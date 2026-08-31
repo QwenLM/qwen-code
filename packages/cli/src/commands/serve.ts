@@ -583,7 +583,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         type: 'number',
         description:
           'Compatibility auto-reap delay for an idle workspace ACP child. ' +
-          '0 or unset = immediate kill (default).',
+          '0 or unset = reap after work drains; keepalive windows may extend it (default).',
       })
       .option('initialize-timeout-ms', {
         type: 'number',

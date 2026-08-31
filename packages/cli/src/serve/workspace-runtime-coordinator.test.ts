@@ -178,6 +178,29 @@ describe('WorkspaceRuntimeCoordinator', () => {
     ).rejects.toBeInstanceOf(WorkspaceRuntimeInitializationError);
   });
 
+  it('preserves a preheat failure when draining wins the response race', async () => {
+    const harness = makeRuntime();
+    let rejectPreheat!: (error: Error) => void;
+    harness.preheat.mockImplementation(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectPreheat = reject;
+        }),
+    );
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+    const failure = new Error('preheat failed');
+
+    const ensure = coordinator.ensure();
+    await vi.waitFor(() => expect(harness.preheat).toHaveBeenCalledOnce());
+    coordinator.beginDrain();
+    rejectPreheat(failure);
+
+    await expect(ensure).rejects.toMatchObject({
+      code: 'workspace_draining',
+      cause: failure,
+    });
+  });
+
   it('rejects when preheat resolves without a live runtime', async () => {
     const harness = makeRuntime();
     harness.preheat.mockResolvedValue(undefined);

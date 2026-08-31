@@ -411,6 +411,7 @@ export function sendBridgeError(
     return;
   }
   if (err instanceof WorkspaceDrainingError) {
+    if (err.cause !== undefined) reportBridgeError(err.cause, ctx, daemonLog);
     res.set('Retry-After', '5');
     res.status(503).json({
       error: err.message,

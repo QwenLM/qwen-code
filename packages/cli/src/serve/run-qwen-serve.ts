@@ -4799,6 +4799,7 @@ async function runQwenServeImpl(
       overlayKeys: string[];
       envFilePaths: string[];
       effectiveEnv: NodeJS.ProcessEnv;
+      workflowsEnabledBySettings: boolean;
       envFileReadFailed: boolean;
       envFileReadFailures: Array<{ path: string; error: string }>;
       fallbackReason?: string;
@@ -4806,6 +4807,8 @@ async function runQwenServeImpl(
       mode: 'runtime-overlay' as const,
       overlayKeys: [...runtimeEnvSnapshot.overlayKeys],
       effectiveEnv: runtimeEffectiveEnv,
+      workflowsEnabledBySettings:
+        runtimeBootSettings?.merged.tools?.workflowsEnabled === true,
       envFilePaths: [...runtimeEnvSnapshot.envFilePaths],
       envFileReadFailed: runtimeEnvSnapshot.envFileReadFailed,
       envFileReadFailures: [...runtimeEnvSnapshot.envFileReadFailures],
@@ -5163,14 +5166,9 @@ async function runQwenServeImpl(
     ) =>
       withSettingsLock(workspace, async () => {
         assertGenerationOpen?.();
-        const {
-          resolveSkillSettings,
-          skillSettingStrings,
-          updateWorkspaceSkillSettingLists,
-        } = await import('../config/skill-settings.js');
+        const { skillSettingStrings, updateWorkspaceSkillSettingLists } =
+          await import('../config/skill-settings.js');
         const fresh = loadSettingsForPersistence(workspace);
-        const normalizedName = skillName.trim().toLowerCase();
-        const resolved = resolveSkillSettings(fresh);
         const workspaceDisabled = skillSettingStrings(
           fresh,
           WORKSPACE_SETTING_SCOPE,
@@ -5185,8 +5183,6 @@ async function runQwenServeImpl(
           { disabled: workspaceDisabled, enabled: workspaceEnabled },
           skillName,
           enabled,
-          resolved.defaultDisabledNames.has(normalizedName) &&
-            !resolved.enabledNames.has(normalizedName),
         );
         const settingsChanges: Array<{
           key: 'skills.disabled' | 'skills.enabled';
@@ -5233,13 +5229,9 @@ async function runQwenServeImpl(
     ): Promise<PersistDisabledSkillsBatchResult> =>
       withSettingsLock(workspace, async () => {
         assertGenerationOpen?.();
-        const {
-          resolveSkillSettings,
-          skillSettingStrings,
-          updateWorkspaceSkillSettingLists,
-        } = await import('../config/skill-settings.js');
+        const { skillSettingStrings, updateWorkspaceSkillSettingLists } =
+          await import('../config/skill-settings.js');
         const fresh = loadSettingsForPersistence(workspace);
-        const resolved = resolveSkillSettings(fresh);
         const initialDisabled = skillSettingStrings(
           fresh,
           WORKSPACE_SETTING_SCOPE,
@@ -5254,13 +5246,10 @@ async function runQwenServeImpl(
         const outcomes: PersistDisabledSkillsBatchResult['outcomes'] = [];
 
         for (const skillName of skillNames) {
-          const normalizedName = skillName.trim().toLowerCase();
           const updated = updateWorkspaceSkillSettingLists(
             next,
             skillName,
             enabled,
-            resolved.defaultDisabledNames.has(normalizedName) &&
-              !resolved.enabledNames.has(normalizedName),
           );
           const changed =
             JSON.stringify(updated.disabled) !==
@@ -5607,6 +5596,8 @@ async function runQwenServeImpl(
           };
         }
         replaceRuntimeEffectiveEnv(refreshedRuntimeEnv.effectiveEnv);
+        primaryRuntimeEnv.workflowsEnabledBySettings =
+          fresh.merged.tools?.workflowsEnabled === true;
         delete primaryRuntimeEnv.fallbackReason;
         primaryRuntimeEnv.envFileReadFailed =
           refreshedRuntimeEnv.envFileReadFailed;
@@ -5697,6 +5688,7 @@ async function runQwenServeImpl(
         overlayKeys: string[];
         envFilePaths: string[];
         effectiveEnv: NodeJS.ProcessEnv;
+        workflowsEnabledBySettings: boolean;
         envFileReadFailed: boolean;
         envFileReadFailures: Array<{ path: string; error: string }>;
         fallbackReason?: string;
@@ -5734,6 +5726,7 @@ async function runQwenServeImpl(
         overlayKeys: string[];
         envFilePaths: string[];
         effectiveEnv: NodeJS.ProcessEnv;
+        workflowsEnabledBySettings: boolean;
         envFileReadFailed: boolean;
         envFileReadFailures: Array<{ path: string; error: string }>;
         fallbackReason?: string;
@@ -5741,6 +5734,8 @@ async function runQwenServeImpl(
         mode: 'runtime-overlay',
         overlayKeys: [...snapshot.overlayKeys],
         effectiveEnv,
+        workflowsEnabledBySettings:
+          settings?.merged.tools?.workflowsEnabled === true,
         envFilePaths: [...snapshot.envFilePaths],
         envFileReadFailed: snapshot.envFileReadFailed,
         envFileReadFailures: [...snapshot.envFileReadFailures],
@@ -6184,6 +6179,8 @@ async function runQwenServeImpl(
             }
             try {
               secondaryEnv.replace(refreshedRuntimeEnv.effectiveEnv);
+              secondaryEnv.metadata.workflowsEnabledBySettings =
+                fresh.merged.tools?.workflowsEnabled === true;
               secondaryEnv.metadata.envFileReadFailed =
                 refreshedRuntimeEnv.envFileReadFailed;
               secondaryEnv.metadata.envFileReadFailures.splice(
@@ -6866,6 +6863,8 @@ async function runQwenServeImpl(
               }
               try {
                 wsEnv.replace(refreshedRuntimeEnv.effectiveEnv);
+                wsEnv.metadata.workflowsEnabledBySettings =
+                  fresh.merged.tools?.workflowsEnabled === true;
                 wsEnv.metadata.envFileReadFailed =
                   refreshedRuntimeEnv.envFileReadFailed;
                 wsEnv.metadata.envFileReadFailures.splice(

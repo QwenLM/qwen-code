@@ -253,12 +253,15 @@ async function withIsolatedWorkspace<T>(
 function deferred<T>(): {
   promise: Promise<T>;
   resolve: (value: T | PromiseLike<T>) => void;
+  reject: (reason?: unknown) => void;
 } {
   let resolve!: (value: T | PromiseLike<T>) => void;
-  const promise = new Promise<T>((resolvePromise) => {
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
     resolve = resolvePromise;
+    reject = rejectPromise;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 describe('createDaemonWorkspaceService', () => {
@@ -3261,6 +3264,44 @@ describe('createDaemonWorkspaceService', () => {
       expect(result.durationMs).toBeGreaterThanOrEqual(0);
       expect(mockWriteStderrLine).toHaveBeenCalledWith(
         'qwen serve: ACP preheat failed: preheat failed',
+      );
+    });
+
+    it('logs a preheat failure that arrives after the observer times out', async () => {
+      const pending = deferred<void>();
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          isChannelLive: () => false,
+          preheatAcpChild: vi.fn(() => pending.promise),
+        }),
+      );
+
+      await svc.preheatAcpChild(makeCtx(), { timeoutMs: 1 });
+      pending.reject(new Error('late preheat failure'));
+      await pending.promise.catch(() => undefined);
+
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        'qwen serve: ACP preheat failed: late preheat failure',
+      );
+    });
+
+    it('logs a shared preheat failure once for concurrent observers', async () => {
+      const pending = deferred<void>();
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          isChannelLive: () => false,
+          preheatAcpChild: vi.fn(() => pending.promise),
+        }),
+      );
+      const first = svc.preheatAcpChild(makeCtx(), { timeoutMs: 1000 });
+      const second = svc.preheatAcpChild(makeCtx(), { timeoutMs: 1000 });
+
+      pending.reject(new Error('shared preheat failure'));
+      await Promise.all([first, second]);
+
+      expect(mockWriteStderrLine).toHaveBeenCalledTimes(1);
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        'qwen serve: ACP preheat failed: shared preheat failure',
       );
     });
 

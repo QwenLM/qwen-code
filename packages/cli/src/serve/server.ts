@@ -2186,6 +2186,7 @@ export function createServeApp(
     maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession,
     sessionRestoreTimeoutMs,
     languageCodes,
+    daemonEnv: daemonEnvAtBoot,
   });
 
   if (liveVoiceSurfaceAvailable) {
@@ -2753,6 +2754,7 @@ export function createServeApp(
       service: standaloneSessionService,
       mutate,
       sendBridgeError,
+      isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
     });
     standaloneSessionsAvailable = true;
   }
