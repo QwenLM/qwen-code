@@ -95,7 +95,11 @@ import {
   type WorkspaceOverviewItem,
 } from './workspaceOverviewModel';
 import { writeClipboardText } from '../../utils/clipboard';
-import { sessionMatchesGitQuery } from './sessionSearch';
+import {
+  mergeSessionContentHits,
+  sessionMatchesGitQuery,
+  sessionMatchesSource as matchesSessionSource,
+} from './sessionSearch';
 import { useSessionContentSearch } from './useSessionContentSearch';
 import { SessionPrBadge } from '../SessionPrBadge';
 import {
@@ -156,17 +160,6 @@ const DEFAULT_CUSTOM_GROUP_COLOR: DaemonSessionGroupHexColor = '#416ef5';
 const SCHEDULED_TASK_RUN_SOURCE_ID_PREFIX = 'scheduled_task_run:';
 
 type SidebarSessionSource = 'default' | 'channel';
-
-function matchesSessionSource(
-  session: DaemonSessionSummary,
-  source: SidebarSessionSource | undefined,
-): boolean {
-  if (source === 'channel') return session.sourceType === 'channel';
-  if (source === 'default') {
-    return session.sourceType === undefined || session.sourceType === 'default';
-  }
-  return true;
-}
 
 function isScheduledTaskSession(session: DaemonSessionSummary): boolean {
   return (
@@ -3715,28 +3708,15 @@ export function WebShellSidebar({
         sessionMatchesGitQuery(session, query)
       );
     });
-    // Content hits from the daemon's transcript scan: merge in matching
-    // sessions the local fast path didn't match (server order is recency).
-    // Hits the loaded catalog carries keep their catalog entry, which holds
-    // the live state the persisted-only search summary lacks.
-    if (contentSearchHits.size === 0) return localMatches;
-    const catalogById = new Map(
-      sourceScopedSessions.map((session) => [session.sessionId, session]),
+    // Merge daemon transcript-content hits into the local fast-path
+    // matches (shared with WorkspaceSection's copy — see sessionSearch).
+    return mergeSessionContentHits(
+      sourceScopedSessions,
+      localMatches,
+      contentSearchHits,
+      selectedSessionSource,
+      applyOptimisticPin,
     );
-    const seen = new Set(localMatches.map((session) => session.sessionId));
-    const merged = [...localMatches];
-    for (const [sessionId, hit] of contentSearchHits) {
-      if (seen.has(sessionId)) continue;
-      const catalogEntry = catalogById.get(sessionId);
-      if (
-        !catalogEntry &&
-        !matchesSessionSource(hit.session, selectedSessionSource)
-      ) {
-        continue;
-      }
-      merged.push(catalogEntry ?? hit.session);
-    }
-    return merged;
   }, [
     applyOptimisticPin,
     contentSearchHits,

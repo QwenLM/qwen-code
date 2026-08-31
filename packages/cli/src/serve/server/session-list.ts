@@ -1512,10 +1512,23 @@ export async function searchWorkspaceSessionsForResponse(
       ...(readOptions.signal ? { signal: readOptions.signal } : {}),
     });
     const bySessionId = new Map<string, BridgeSessionSummary>();
+    // Ghost hits (sessions the client's loaded catalog page doesn't carry)
+    // must render with the same organization state as catalog entries —
+    // pin/group/color — or they break the pin/group invariants downstream.
+    const organizationSnapshot =
+      await createSessionOrganizationService(workspaceCwd).readSnapshot();
+    readOptions.signal?.throwIfAborted();
     for (const hit of hits) {
       readOptions.signal?.throwIfAborted();
       const item = await sessionService.getSessionListItem(hit.sessionId);
-      if (item) bySessionId.set(hit.sessionId, toSummary(item));
+      if (item)
+        bySessionId.set(
+          hit.sessionId,
+          applyOrganization(
+            toSummary(item),
+            organizationSnapshot.sessions.get(hit.sessionId),
+          ),
+        );
     }
     await enrichWorktreeSidecars(
       bySessionId,

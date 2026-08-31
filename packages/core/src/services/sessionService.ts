@@ -20,6 +20,7 @@ import type { Content, Part } from '@google/genai';
 import * as jsonl from '../utils/jsonl-utils.js';
 import type { HistoryGap } from '../utils/conversation-chain.js';
 import { prepareTranscriptRecords } from '../utils/transcript-records.js';
+import { projectUserTranscriptForDisplay } from '../utils/transcript-records.js';
 import type {
   ChatRecord,
   FileHistorySnapshotRecordPayload,
@@ -423,23 +424,67 @@ export interface SessionContentSearchHit {
 const SEARCH_SNIPPET_CONTEXT = 40;
 
 /**
- * Builds a single-line excerpt of `text` around the first occurrence of
- * `lowerQuery` (must already be lowercased).
+ * Case-insensitive indexOf returning the match position in the ORIGINAL
+ * string's UTF-16 index space. Lowercasing can change string length (e.g.
+ * U+0130 folds to two code units), so an index found in the lowercased
+ * string cannot be used to slice the original directly.
  */
-function buildSearchSnippet(text: string, lowerQuery: string): string {
-  const collapsed = text.replace(/\s+/g, ' ').trim();
-  const index = collapsed.toLowerCase().indexOf(lowerQuery);
-  if (index === -1) return collapsed;
-  const start = Math.max(0, index - SEARCH_SNIPPET_CONTEXT);
-  const end = Math.min(
+function indexOfCaseInsensitive(text: string, lowerQuery: string): number {
+  let folded = '';
+  const indexMap: number[] = [];
+  for (let i = 0; i < text.length; i++) {
+    const foldedChar = text[i]!.toLowerCase();
+    folded += foldedChar;
+    for (let j = 0; j < foldedChar.length; j++) indexMap.push(i);
+  }
+  const index = folded.indexOf(lowerQuery);
+  return index === -1 ? -1 : (indexMap[index] ?? -1);
+}
+
+/**
+ * Builds a single-line excerpt around the first occurrence of `lowerQuery`.
+ * `collapsed` must already be whitespace-collapsed; `matchIndex` must come
+ * from {@link indexOfCaseInsensitive}. Window boundaries are clamped off
+ * surrogate-pair splits so no lone surrogate lands at a snippet edge.
+ */
+function buildSearchSnippet(
+  collapsed: string,
+  lowerQuery: string,
+  matchIndex: number,
+): string {
+  let start = Math.max(0, matchIndex - SEARCH_SNIPPET_CONTEXT);
+  let end = Math.min(
     collapsed.length,
-    index + lowerQuery.length + SEARCH_SNIPPET_CONTEXT * 2,
+    matchIndex + lowerQuery.length + SEARCH_SNIPPET_CONTEXT * 2,
   );
+  if (start > 0) {
+    const code = collapsed.charCodeAt(start);
+    if (code >= 0xdc00 && code <= 0xdfff) start -= 1;
+  }
+  if (end > start && end < collapsed.length) {
+    const code = collapsed.charCodeAt(end - 1);
+    if (code >= 0xd800 && code <= 0xdbff) end -= 1;
+  }
   let snippet = collapsed.slice(start, end);
   if (start > 0) snippet = `...${snippet}`;
   if (end < collapsed.length) snippet = `${snippet}...`;
   return snippet;
 }
+function joinTextParts(parts: readonly unknown[]): string {
+  const texts: string[] = [];
+  for (const part of parts) {
+    if (
+      typeof part === 'object' &&
+      part !== null &&
+      'text' in part &&
+      typeof (part as { text: unknown }).text === 'string'
+    ) {
+      texts.push((part as { text: string }).text);
+    }
+  }
+  return texts.join('\n');
+}
+
 /**
  * Maximum bytes to read from head/tail of a session file.
  * Used by readLastRecordUuid which still does its own tail read.
@@ -2170,25 +2215,38 @@ export class SessionService {
     options: SessionContentSearchOptions = {},
   ): Promise<SessionContentSearchHit[]> {
     const { maxFiles = 200, maxResults = 20, signal } = options;
-    const lowerQuery = query.trim().toLowerCase();
+    // Normalize whitespace the same way snippets collapse it, so matching
+    // and excerpting see the same text (`a  b` matches "a b" and the query
+    // `a  b` matches both).
+    const lowerQuery = query.trim().replace(/\s+/g, ' ').toLowerCase();
     if (!lowerQuery) return [];
     signal?.throwIfAborted();
 
     const chatsDir = this.getChatsDirForState('active');
     let files: Array<{ name: string; mtime: number }> = [];
     try {
-      for (const name of fs.readdirSync(chatsDir)) {
-        if (!SESSION_FILE_PATTERN.test(name)) continue;
-        try {
-          files.push({
-            name,
-            mtime: fs.statSync(path.join(chatsDir, name)).mtimeMs,
-          });
-        } catch {
-          // Skip files we can't stat
+      const fileNames = fs.readdirSync(chatsDir);
+      for (const [index, name] of fileNames.entries()) {
+        if (SESSION_FILE_PATTERN.test(name)) {
+          try {
+            files.push({
+              name,
+              mtime: fs.statSync(path.join(chatsDir, name)).mtimeMs,
+            });
+          } catch {
+            // Skip files we can't stat
+          }
+        }
+        // Mirror listSessions: the chats dir can hold thousands of sessions
+        // shared across projects, so yield and honor aborts mid-loop.
+        if (signal && (index + 1) % SESSION_LIST_CANCEL_YIELD_INTERVAL === 0) {
+          signal.throwIfAborted();
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          signal.throwIfAborted();
         }
       }
     } catch (error) {
+      signal?.throwIfAborted();
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
       throw error;
     }
@@ -2249,11 +2307,16 @@ export class SessionService {
               return undefined;
             }
           }
-          const text = this.extractRecordSearchText(record);
-          if (!text.toLowerCase().includes(lowerQuery)) continue;
+          const collapsed = this.extractRecordSearchText(record)
+            .replace(/\s+/g, ' ')
+            .trim();
+          const matchIndex = collapsed
+            ? indexOfCaseInsensitive(collapsed, lowerQuery)
+            : -1;
+          if (matchIndex === -1) continue;
           return {
             sessionId: record.sessionId,
-            snippet: buildSearchSnippet(text, lowerQuery),
+            snippet: buildSearchSnippet(collapsed, lowerQuery, matchIndex),
           };
         }
       }
@@ -2268,28 +2331,22 @@ export class SessionService {
   }
 
   /**
-   * Text a session-content search matches against for one record: the
-   * prompt display text for user records, otherwise the concatenated text
-   * parts. Subtype records (slash commands, telemetry, ...) are skipped
-   * like they are for first-prompt extraction.
+   * Text a session-content search matches against for one record, mirroring
+   * the user-visible display projection: the authoritative prompt display
+   * text when present (an empty string is meaningful), otherwise the text
+   * parts with any trailing hook-submit-context part stripped. Subtype
+   * records (slash commands, telemetry, ...) are skipped like they are for
+   * first-prompt extraction.
    */
   private extractRecordSearchText(record: ChatRecord): string {
     if (record.type !== 'user' && record.type !== 'assistant') return '';
     if (record.subtype !== undefined) return '';
     if (record.type === 'user') {
-      const payload = record.systemPayload as
-        | UserPromptRecordPayload
-        | undefined;
-      if (payload?.displayText) return payload.displayText;
+      const projection = projectUserTranscriptForDisplay(record);
+      if (projection.displayText !== undefined) return projection.displayText;
+      return joinTextParts(projection.parts);
     }
-    if (!record.message?.parts) return '';
-    const texts: string[] = [];
-    for (const part of record.message.parts as Part[]) {
-      if ('text' in part && typeof part.text === 'string') {
-        texts.push(part.text);
-      }
-    }
-    return texts.join('\n');
+    return joinTextParts(record.message?.parts ?? []);
   }
 
   private async countSessionMessagesFromPath(

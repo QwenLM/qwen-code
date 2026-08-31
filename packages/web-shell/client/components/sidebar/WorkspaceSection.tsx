@@ -39,7 +39,10 @@ import {
 import { workspaceLabel } from '../../utils/workspace';
 import { SessionGroupSection } from './SessionGroupSection';
 import { SessionDetailsTooltip } from './SessionDetailsTooltip';
-import { sessionMatchesGitQuery } from './sessionSearch';
+import {
+  mergeSessionContentHits,
+  sessionMatchesGitQuery,
+} from './sessionSearch';
 import { useSessionContentSearch } from './useSessionContentSearch';
 import { measureSessionTitleScroll } from './sessionTitleScroll';
 import { groupSessionsByChannelType } from './channelSessionGroups';
@@ -576,21 +579,16 @@ export function WorkspaceSection({
         sessionMatchesGitQuery(session, query)
       );
     });
-    // Merge transcript-content hits the local fast path didn't match
-    // (server order is recency); hits the loaded catalog carries keep
-    // their catalog entry — see WebShellSidebar's searchedSessions.
-    if (contentSearchHits.size === 0) return localMatches;
-    const catalogById = new Map(
-      scoped.map((session) => [session.sessionId, session]),
+    // Merge daemon transcript-content hits into the local fast-path
+    // matches (shared with WebShellSidebar's copy — see sessionSearch).
+    return mergeSessionContentHits(
+      scoped,
+      localMatches,
+      contentSearchHits,
+      sourceType,
+      mapSession,
     );
-    const seen = new Set(localMatches.map((session) => session.sessionId));
-    const merged = [...localMatches];
-    for (const [sessionId, hit] of contentSearchHits) {
-      if (seen.has(sessionId)) continue;
-      merged.push(catalogById.get(sessionId) ?? hit.session);
-    }
-    return merged;
-  }, [contentSearchHits, mapSession, searchQuery, sessions]);
+  }, [contentSearchHits, mapSession, searchQuery, sessions, sourceType]);
   const renderSessionWithSnippet = (session: DaemonSessionSummary) =>
     renderSession(session, {
       searchSnippet: contentSearchHits.get(session.sessionId)?.snippet,

@@ -18,6 +18,7 @@ import {
   readSessionPrs,
   resetDebugLoggingState,
   setDebugLogSession,
+  writeSessionPrs,
 } from '@qwen-code/qwen-code-core';
 import {
   InvalidRewindTargetError,
@@ -4083,6 +4084,148 @@ describe('multi-workspace session dispatch', () => {
     });
   });
 
+  it('searches session content via the plural workspace route spelling', async () => {
+    await withRuntimeDir(async () => {
+      const hitId = '550e8400-e29b-41d4-a716-446655440131';
+      await writeStoredSession({
+        sessionId: hitId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'qdrant plural spelling hit',
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+      });
+      const { app } = makeHarness();
+
+      const res = await request(app)
+        .get('/workspaces/secondary-id/sessions/search?q=qdrant')
+        .set('Host', host());
+
+      expect(res.status).toBe(200);
+      expect(res.body.results).toHaveLength(1);
+      expect(res.body.results[0].session.sessionId).toBe(hitId);
+      expect(res.body.results[0].snippet).toContain('qdrant');
+    });
+  });
+
+  it('returns organization state and PR sidecar badges on search hits', async () => {
+    await withRuntimeDir(async () => {
+      const hitId = '550e8400-e29b-41d4-a716-446655440132';
+      await writeStoredSession({
+        sessionId: hitId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'qdrant pinned sidecar hit',
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+      });
+      await createSessionOrganizationService(
+        SECONDARY_CWD,
+      ).updateSessionOrganization(hitId, { isPinned: true });
+      const sidecarPath = new SessionService(
+        SECONDARY_CWD,
+      ).getPrSessionPathForArchiveState(hitId, 'active');
+      await writeSessionPrs(sidecarPath, [
+        {
+          number: 9517,
+          url: 'https://github.com/o/r/pull/9517',
+          createdAt: '2026-07-08T00:00:00.000Z',
+        },
+      ]);
+      const { app } = makeHarness();
+
+      const res = await request(app)
+        .get('/workspace/secondary-id/sessions/search?q=qdrant')
+        .set('Host', host());
+
+      expect(res.status).toBe(200);
+      expect(res.body.results).toHaveLength(1);
+      expect(res.body.results[0].session.isPinned).toBe(true);
+      expect(res.body.results[0].session.prs).toEqual([
+        { number: 9517, url: 'https://github.com/o/r/pull/9517' },
+      ]);
+    });
+  });
+
+  it('caps the search query after trimming, like the matcher', async () => {
+    await withRuntimeDir(async () => {
+      const hitId = '550e8400-e29b-41d4-a716-446655440133';
+      await writeStoredSession({
+        sessionId: hitId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'a'.repeat(195),
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+      });
+      const { app } = makeHarness();
+
+      // 195 meaningful chars + 6 spaces of padding: raw 201 (over the raw
+      // cap) but trimmed 195 — the scan trims too, so this must match.
+      const res = await request(app)
+        .get(
+          `/workspace/secondary-id/sessions/search?q=${'a'.repeat(195)}%20%20%20%20%20%20`,
+        )
+        .set('Host', host());
+
+      expect(res.status).toBe(200);
+      expect(res.body.results).toHaveLength(1);
+    });
+  });
+
+  it('cancels the session content scan when the HTTP client disconnects', async () => {
+    await withRuntimeDir(async () => {
+      await writeStoredSession({
+        sessionId: '550e8400-e29b-41d4-a716-446655440134',
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'qdrant disconnect target',
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+      });
+      let markScanStarted: (() => void) | undefined;
+      const scanStarted = new Promise<void>((resolve) => {
+        markScanStarted = resolve;
+      });
+      let markScanAborted: (() => void) | undefined;
+      const scanAborted = new Promise<void>((resolve) => {
+        markScanAborted = resolve;
+      });
+      let capturedSignal: AbortSignal | undefined;
+      const spy = vi
+        .spyOn(SessionService.prototype, 'searchSessionContent')
+        .mockImplementation(async (_query, options) => {
+          capturedSignal = options?.signal;
+          markScanStarted?.();
+          await new Promise<void>((resolve) => {
+            options?.signal?.addEventListener(
+              'abort',
+              () => {
+                markScanAborted?.();
+                resolve();
+              },
+              { once: true },
+            );
+          });
+          return [];
+        });
+      try {
+        const { app } = makeHarness();
+        const pending = request(app)
+          .get('/workspace/secondary-id/sessions/search?q=qdrant')
+          .set('Host', host());
+        const response = pending.then(
+          () => undefined,
+          () => undefined,
+        );
+
+        await scanStarted;
+        pending.abort();
+        await Promise.all([response, scanAborted]);
+
+        expect(capturedSignal?.aborted).toBe(true);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+  });
+
   it('lists archived non-primary workspace sessions for trusted workspaces', async () => {
     await withRuntimeDir(async () => {
       const archivedId = '550e8400-e29b-41d4-a716-446655440130';
@@ -4336,6 +4479,7 @@ describe('multi-workspace session dispatch', () => {
       for (const route of [
         `/workspace/${encodeURIComponent(selector)}/sessions`,
         `/workspace/${encodeURIComponent(selector)}/session-groups`,
+        `/workspace/${encodeURIComponent(selector)}/sessions/search?q=x`,
       ]) {
         const unknown = await request(app).get(route).set('Host', host());
         expect(unknown.status).toBe(400);
@@ -4348,6 +4492,7 @@ describe('multi-workspace session dispatch', () => {
       for (const route of [
         `/workspaces/${encodeURIComponent(selector)}/sessions`,
         `/workspaces/${encodeURIComponent(selector)}/session-groups`,
+        `/workspaces/${encodeURIComponent(selector)}/sessions/search?q=x`,
       ]) {
         const unknown = await request(app).get(route).set('Host', host());
         expect(unknown.status).toBe(400);

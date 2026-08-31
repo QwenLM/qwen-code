@@ -6767,10 +6767,14 @@ export function registerSessionRoutes(
       const key = runtime.workspaceCwd;
       try {
         const rawQuery = req.query['q'];
+        // Cap the trimmed query, consistent with the emptiness check and
+        // the matcher — whitespace padding the scan would discard must not
+        // count against the limit.
+        const trimmedQuery =
+          typeof rawQuery === 'string' ? rawQuery.trim() : '';
         if (
-          typeof rawQuery !== 'string' ||
-          rawQuery.trim().length === 0 ||
-          rawQuery.length > SESSION_SEARCH_QUERY_MAX_LENGTH
+          trimmedQuery.length === 0 ||
+          trimmedQuery.length > SESSION_SEARCH_QUERY_MAX_LENGTH
         ) {
           res.status(400).json({
             error: `\`q\` must be a non-empty string of at most ${SESSION_SEARCH_QUERY_MAX_LENGTH} characters`,
@@ -6815,7 +6819,7 @@ export function registerSessionRoutes(
             runWorkspaceInspectionWithLogPolicy(runtime, () =>
               searchWorkspaceSessionsForResponse(
                 key,
-                rawQuery,
+                trimmedQuery,
                 { ...(maxResults !== undefined ? { maxResults } : {}) },
                 {
                   runtimeBaseDir: runtime.sessionRuntimeBaseDir,

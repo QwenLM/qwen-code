@@ -1439,7 +1439,10 @@ export interface DaemonSessionSearchResult {
 }
 
 export interface DaemonSessionSearchOptions {
-  /** Maximum matching sessions to return (server clamps to 1–50). */
+  /**
+   * Maximum matching sessions to return; the server rejects values outside
+   * 1–50 with 400 `invalid_search_max_results`.
+   */
   maxResults?: number;
   signal?: AbortSignal;
 }

@@ -16,6 +16,8 @@ const EMPTY_HITS: ReadonlyMap<string, SessionContentSearchHit> = new Map();
 
 const DEBOUNCE_MS = 300;
 const MIN_QUERY_LENGTH = 2;
+/** Matches the daemon route's `q` limit; over-long pastes search their prefix. */
+const MAX_QUERY_LENGTH = 200;
 
 /**
  * Debounced conversation-content search behind the sidebar session search
@@ -35,7 +37,7 @@ export function useSessionContentSearch(
     useState<ReadonlyMap<string, SessionContentSearchHit>>(EMPTY_HITS);
 
   useEffect(() => {
-    const trimmed = query.trim();
+    const trimmed = query.trim().slice(0, MAX_QUERY_LENGTH);
     if (
       !client ||
       !workspaceCwd ||
@@ -45,6 +47,10 @@ export function useSessionContentSearch(
       setHits(EMPTY_HITS);
       return;
     }
+    // A query change invalidates the settled hits: until the new response
+    // resolves, degrade to the local fast path rather than rendering the
+    // previous query's hits (and their stale snippets) under the new one.
+    setHits(EMPTY_HITS);
     const controller = new AbortController();
     const timer = setTimeout(() => {
       client

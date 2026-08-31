@@ -134,6 +134,120 @@ describe('useSessionContentSearch', () => {
     expect(captured?.size).toBe(0);
   });
 
+  it('clears established hits when a later request fails', async () => {
+    searchWorkspaceSessions.mockResolvedValueOnce({
+      results: [
+        {
+          session: { sessionId: 's1', workspaceCwd: '/work/a' },
+          snippet: 'hit',
+        },
+      ],
+    });
+    await renderHost('qdrant');
+    await advanceDebounce();
+    expect(captured?.size).toBe(1);
+
+    searchWorkspaceSessions.mockRejectedValueOnce(new Error('500'));
+    await renderHost('other');
+    await advanceDebounce();
+
+    expect(captured?.size).toBe(0);
+  });
+
+  it('resets settled hits as soon as the query changes', async () => {
+    searchWorkspaceSessions.mockResolvedValue({
+      results: [
+        {
+          session: { sessionId: 's1', workspaceCwd: '/work/a' },
+          snippet: 'hit',
+        },
+      ],
+    });
+    await renderHost('qd');
+    await advanceDebounce();
+    expect(captured?.size).toBe(1);
+
+    // Before the new debounce fires, the previous query's hits must not
+    // render under the new query.
+    const changed = await renderHost('qdrant');
+    expect(changed.size).toBe(0);
+  });
+
+  it('ignores a superseded request resolving after the newer one', async () => {
+    let resolveFirst: ((result: DaemonSessionSearchResult) => void) | undefined;
+    let resolveSecond:
+      | ((result: DaemonSessionSearchResult) => void)
+      | undefined;
+    searchWorkspaceSessions
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveFirst = resolve;
+          }),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveSecond = resolve;
+          }),
+      );
+
+    await renderHost('qd');
+    await advanceDebounce();
+    expect(searchWorkspaceSessions).toHaveBeenCalledTimes(1);
+
+    await renderHost('qdrant');
+    await advanceDebounce();
+    expect(searchWorkspaceSessions).toHaveBeenCalledTimes(2);
+
+    // The newer request resolves first, then the superseded one — its late
+    // response must not overwrite the fresh hits.
+    await act(async () => {
+      resolveSecond?.({
+        results: [
+          {
+            session: { sessionId: 'fresh', workspaceCwd: '/work/a' },
+            snippet: 'fresh',
+          },
+        ],
+      });
+    });
+    await act(async () => {
+      resolveFirst?.({
+        results: [
+          {
+            session: { sessionId: 'stale', workspaceCwd: '/work/a' },
+            snippet: 'stale',
+          },
+        ],
+      });
+    });
+
+    expect(captured?.has('fresh')).toBe(true);
+    expect(captured?.has('stale')).toBe(false);
+  });
+
+  it('caps over-long queries at the daemon route limit', async () => {
+    searchWorkspaceSessions.mockResolvedValue({
+      results: [
+        {
+          session: { sessionId: 's1', workspaceCwd: '/work/a' },
+          snippet: 'hit',
+        },
+      ],
+    });
+
+    await renderHost(` ${'a'.repeat(250)} `);
+    await advanceDebounce();
+
+    expect(searchWorkspaceSessions).toHaveBeenCalledWith(
+      '/work/a',
+      'a'.repeat(200),
+      expect.anything(),
+    );
+    expect(captured?.size).toBe(1);
+  });
+
   it('clears hits when the query is cleared', async () => {
     searchWorkspaceSessions.mockResolvedValue({
       results: [
