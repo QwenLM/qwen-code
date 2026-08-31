@@ -15,7 +15,8 @@
  *     following the `_daemon-harness.spawnDaemon` pattern.
  *   - `FakeHost` speaks Host protocol v6 against the daemon's `/live/host`
  *     WebSocket: discovery-file lookup, Bearer token + `x-qwen-live-nonce`
- *     headers, `host.hello`, auto `host.pong`, `host.action`, binary input
+ *     headers, `host.hello`, auto `host.pong`, auto success replies to
+ *     `host.capture_screen_context`, `host.action`, binary input
  *     audio frames (8-byte BigUInt64BE epoch prefix + PCM16), and records
  *     `host.welcome`/`host.state` plus raw output PCM frames.
  *   - `bootLiveStack` assembles the full fixture: tmp workspace + HOME, a
@@ -228,7 +229,9 @@ export async function spawnQwenLive(
   });
 
   const dispose = async () => {
-    if (proc.exitCode !== null) return;
+    // Signal death leaves exitCode null and sets signalCode instead — both
+    // mean the child is already gone and the 'exit' event already fired.
+    if (proc.exitCode !== null || proc.signalCode !== null) return;
     proc.kill('SIGTERM');
     await new Promise<void>((resolve) => {
       const timer = setTimeout(() => {
@@ -281,6 +284,7 @@ export class FakeHost {
   private socket: WebSocket | undefined;
   private readonly emitter = new EventEmitter();
   private readonly hostInstanceNonce = randomUUID();
+  private screenshotPath: string | undefined;
 
   constructor(private readonly discoveryDir: string) {
     this.emitter.setMaxListeners(0);
@@ -321,6 +325,19 @@ export class FakeHost {
       this.messages.push(message);
       if (message['type'] === 'host.ping') {
         this.send({ type: 'host.pong', pingId: message['pingId'] });
+      } else if (message['type'] === 'host.capture_screen_context') {
+        // The hello advertises `appshot: true`, so the daemon may request a
+        // capture; settle it immediately (a real Host replies with a
+        // screenshot it wrote to disk plus the accessibility dump).
+        this.send({
+          type: 'host.screen_context_result',
+          requestId: message['requestId'],
+          success: true,
+          appName: 'FakeApp',
+          windowTitle: 'Fake Window',
+          accessibilityText: 'fake accessibility text',
+          screenshotPath: this.fakeScreenshotPath(),
+        });
       } else if (
         message['type'] === 'host.welcome' ||
         message['type'] === 'host.state'
@@ -461,6 +478,27 @@ export class FakeHost {
     this.socketOrThrow().send(JSON.stringify(message));
   }
 
+  /**
+   * Lazily materialize a real (1x1) PNG for `host.screen_context_result`:
+   * the daemon registers the path as an asset, so it should exist on disk.
+   * Written into the discovery dir, which the fixture already tears down.
+   */
+  private fakeScreenshotPath(): string {
+    if (!this.screenshotPath) {
+      const file = path.join(this.discoveryDir, 'fake-appshot.png');
+      writeFileSync(
+        file,
+        Buffer.from(
+          'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8' +
+            'z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+          'base64',
+        ),
+      );
+      this.screenshotPath = file;
+    }
+    return this.screenshotPath;
+  }
+
   private socketOrThrow(): WebSocket {
     if (!this.socket) throw new Error('FakeHost is not connected');
     return this.socket;
@@ -591,8 +629,13 @@ export async function bootLiveStack(
       }
     }
     // Debug escape hatch: keep the temp dirs (session JSONL logs live in
-    // `<dataDir>/sessions`) for post-mortem inspection.
-    if (!process.env['QWEN_LIVE_E2E_KEEP']) {
+    // `<dataDir>/sessions`) for post-mortem inspection. KEEP_OUTPUT=true is
+    // the repo-wide convention (test-helper.ts, globalSetup.ts) and is set
+    // by the e2e lanes; QWEN_LIVE_E2E_KEEP keeps only these fixtures.
+    if (
+      !process.env['QWEN_LIVE_E2E_KEEP'] &&
+      process.env['KEEP_OUTPUT'] !== 'true'
+    ) {
       for (const dir of [workspaceDir, homeDir, dataDir, discoveryDir]) {
         rmSync(dir, { recursive: true, force: true });
       }

@@ -10,6 +10,8 @@
  * SIGINT/SIGTERM.
  */
 
+import { realpathSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
 import { loadConfig } from './config.js';
 import { LiveDaemon } from './daemon.js';
 import { LiveLogger } from './logger.js';
@@ -79,10 +81,20 @@ async function main(): Promise<void> {
   }
 }
 
-// Only run as a daemon when invoked as the bin, not when imported.
-const invokedDirectly =
-  process.argv[1] !== undefined &&
-  import.meta.url === new URL(`file://${process.argv[1]}`).href;
+// Only run as a daemon when invoked as the bin, not when imported. npm
+// installs bins as symlinks and Node resolves import.meta.url through them,
+// so compare against the realpath (same pattern as packages/cli/src/cli.ts);
+// pathToFileURL also percent-encodes metacharacters (# ? %) the way Node did
+// when it formed import.meta.url.
+let invokedDirectly = false;
+if (process.argv[1] !== undefined) {
+  try {
+    invokedDirectly =
+      import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href;
+  } catch {
+    invokedDirectly = import.meta.url === pathToFileURL(process.argv[1]).href;
+  }
+}
 if (invokedDirectly) {
   void main();
 }

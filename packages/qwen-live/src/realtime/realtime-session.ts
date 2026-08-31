@@ -44,6 +44,7 @@ const CONNECT_TIMEOUT_MS = 8000;
 const MAX_ERROR_MESSAGE_CHARS = 300;
 const MAX_RECENT_EVENT_IDS = 512;
 const MAX_TRACKED_INPUT_ITEMS = 32;
+const MAX_RETAINED_TRANSCRIPT_ENTRIES = 512;
 export const REMAIN_SILENT_TOOL_NAME = 'remain_silent';
 const REALTIME_BACKEND_TEXT_PREFIX = '[BACKEND] ';
 const REALTIME_SPEAK_TO_USER_PREFIX = '[SPEAK_TO_USER] ';
@@ -848,6 +849,17 @@ export function openQwenRealtimeSession(
       return itemId;
     };
 
+    const pushTranscriptEntry = (entry: RealtimeTranscriptEntry): void => {
+      transcriptEntries.push(entry);
+      // Long stretches without a capturing handoff must not grow the
+      // retained transcript without bound: evict the oldest entries past a
+      // fixed cap, keeping the handoff cursor aligned with the survivors.
+      while (transcriptEntries.length > MAX_RETAINED_TRANSCRIPT_ENTRIES) {
+        transcriptEntries.shift();
+        if (lastHandoffEntryCount > 0) lastHandoffEntryCount -= 1;
+      }
+    };
+
     const appendTranscriptDelta = (
       role: RealtimeTranscriptEntry['role'],
       delta: string,
@@ -859,7 +871,7 @@ export function openQwenRealtimeSession(
         last.text += delta;
         return;
       }
-      transcriptEntries.push({ role, text: delta });
+      pushTranscriptEntry({ role, text: delta });
     };
 
     const applyTranscriptDone = (
@@ -873,7 +885,7 @@ export function openQwenRealtimeSession(
         last.text = text;
         return;
       }
-      transcriptEntries.push({ role, text });
+      pushTranscriptEntry({ role, text });
     };
 
     const deliverDirectTranscript = (
@@ -954,7 +966,12 @@ export function openQwenRealtimeSession(
         const tail = transcriptEntries
           .slice(lastHandoffEntryCount)
           .map((entry) => ({ ...entry }));
-        lastHandoffEntryCount = transcriptEntries.length;
+        // Everything up to here has now been handed off and is never read
+        // again; drop the consumed entries (instead of only advancing a
+        // cursor) so retention and the dedup scan in takeHandoffTranscript
+        // stay bounded by one capture window, not the whole call history.
+        transcriptEntries.length = 0;
+        lastHandoffEntryCount = 0;
         return tail;
       };
 
@@ -983,7 +1000,7 @@ export function openQwenRealtimeSession(
           (entry) => entry.role === 'user' && entry.text.trim() === trimmed,
         )
       ) {
-        transcriptEntries.push({ role: 'user', text: trimmed });
+        pushTranscriptEntry({ role: 'user', text: trimmed });
       }
       const transcript = takeHandoffTranscriptTail();
       newInputEntry = true;
@@ -1556,6 +1573,13 @@ export function openQwenRealtimeSession(
         }
         case 'conversation.item.input_audio_transcription.completed': {
           const itemId = optionalString(message['item_id']);
+          if (itemId && consumedInputItemIds.has(itemId)) {
+            // A benign late final: barge-in or response.done already consumed
+            // this input before the ASR stream delivered its transcript. Drop
+            // it instead of treating a healthy call as a protocol violation.
+            ignoreEvent(message, type, 'stale_input');
+            break;
+          }
           if (!itemId || !committedInputItemIds.has(itemId)) {
             protocolError(
               'Realtime final transcript had no committed input item.',

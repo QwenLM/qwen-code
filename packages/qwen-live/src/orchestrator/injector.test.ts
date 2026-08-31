@@ -227,6 +227,61 @@ describe('Injector progress throttling', () => {
 
     expect(sink.contextCalls).toEqual(['fresh']);
   });
+
+  it('keys jobless progress on the full context, not a shared prefix', () => {
+    injector.noteResponseCreated();
+    // Identical first 32 chars, diverging afterwards — the shape of two
+    // permission-retraction notices for one session.
+    const shared = '[BACKEND session_1] The permission request ';
+    injector.enqueue({ kind: 'progress', context: `${shared}(req_1) done.` });
+    injector.enqueue({ kind: 'progress', context: `${shared}(req_2) done.` });
+    expect(injector.pendingCount).toBe(2);
+
+    injector.noteResponseDone();
+
+    expect(sink.contextCalls).toEqual([
+      `${shared}(req_1) done.\n${shared}(req_2) done.`,
+    ]);
+  });
+
+  it('dedups true jobless duplicates to a single queued item', () => {
+    makeInjector({ progressThrottleMs: 0 });
+    injector.noteResponseCreated();
+    injector.enqueue({ kind: 'progress', context: 'same jobless notice' });
+    injector.enqueue({ kind: 'progress', context: 'same jobless notice' });
+
+    expect(injector.pendingCount).toBe(1);
+  });
+
+  it('clears the throttle stamp when speech start drops queued progress', () => {
+    injector.noteResponseCreated();
+    injector.enqueue({ kind: 'progress', context: 'p1', jobHandle: 'job_1' });
+    expect(injector.pendingCount).toBe(1);
+
+    // Barge-in drops the undelivered progress; the throttle window must not
+    // survive it, or the job goes silent for the whole window.
+    injector.noteSpeechStarted();
+    expect(injector.pendingCount).toBe(0);
+    injector.noteSpeechStopped();
+    injector.noteResponseDone();
+
+    vi.advanceTimersByTime(1_000);
+    injector.enqueue({ kind: 'progress', context: 'p2', jobHandle: 'job_1' });
+
+    expect(sink.contextCalls).toEqual(['p2']);
+  });
+
+  it('keeps the throttle stamp for progress that was actually delivered', () => {
+    injector.enqueue({ kind: 'progress', context: 'p1', jobHandle: 'job_1' });
+    expect(sink.contextCalls).toEqual(['p1']);
+
+    injector.noteSpeechStarted();
+    injector.noteSpeechStopped();
+    vi.advanceTimersByTime(1_000);
+    injector.enqueue({ kind: 'progress', context: 'p2', jobHandle: 'job_1' });
+
+    expect(sink.contextCalls).toEqual(['p1']);
+  });
 });
 
 describe('Injector queue maintenance', () => {
@@ -270,7 +325,7 @@ describe('Injector queue maintenance', () => {
     expect(sink.contextCalls).toEqual(['ask two']);
   });
 
-  it('clears the whole queue when the realtime generation changes', () => {
+  it('dispose clears the queue and nothing is delivered afterwards', () => {
     injector.noteResponseCreated();
     injector.enqueue(complete('stale one'));
     injector.enqueue({
@@ -280,9 +335,10 @@ describe('Injector queue maintenance', () => {
     });
     expect(injector.pendingCount).toBe(2);
 
-    injector.noteGenerationChanged();
+    injector.dispose();
 
     expect(injector.pendingCount).toBe(0);
+    injector.noteResponseDone();
     vi.advanceTimersByTime(60_000);
     expect(sink.contextCalls).toEqual([]);
     expect(sink.speechCalls).toEqual([]);

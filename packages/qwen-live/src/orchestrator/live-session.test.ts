@@ -160,6 +160,27 @@ class FakeAdaptor implements BackendAdaptor {
   }
 }
 
+/**
+ * FakeAdaptor whose events() hands out one stream per subscription: the
+ * first can be ended (without session_closed) to simulate a dropped SSE
+ * stream; the pump must resubscribe and land on the second.
+ */
+class ResubscribeAdaptor extends FakeAdaptor {
+  readonly streams = [
+    new AsyncQueue<BackendEvent>(),
+    new AsyncQueue<BackendEvent>(),
+  ];
+  eventsCalls = 0;
+
+  override events(): AsyncIterable<BackendEvent> {
+    const stream = this.streams[
+      Math.min(this.eventsCalls, this.streams.length - 1)
+    ] as AsyncQueue<BackendEvent>;
+    this.eventsCalls += 1;
+    return stream;
+  }
+}
+
 function createFakeHost(capture: LiveScreenContextCapture) {
   const states: Array<Exclude<LiveState, 'unavailable' | 'idle'>> = [];
   return {
@@ -246,8 +267,8 @@ interface Rig {
   callbacks: QwenRealtimeCallbacks;
 }
 
-async function startSession(): Promise<Rig> {
-  const adaptor = new FakeAdaptor();
+async function startSession(adaptorArg?: FakeAdaptor): Promise<Rig> {
+  const adaptor = adaptorArg ?? new FakeAdaptor();
   const host = createFakeHost({
     appName: 'Safari',
     windowTitle: 'Docs',
@@ -356,6 +377,45 @@ describe('LiveSession', () => {
     await awaitReceipts(realtime, 1);
 
     expect(adaptor.prompt.mock.calls[0]?.[2]).toEqual({ steer: true });
+  });
+
+  it('a steer that joined the running turn reuses that job instead of orphaning it', async () => {
+    const { adaptor, callbacks, realtime } = await startSession();
+
+    callTool(callbacks, 'handoff', { task: 'run the tests' });
+    const [first] = await awaitReceipts(realtime, 1);
+    expect(first).toMatchObject({ job: 'job_1', session: 'session_1' });
+    adaptor.queue('s1').push({ type: 'turn_started', jobRef: 'p1' });
+
+    // The backend joins the steer to the running turn: same jobRef back.
+    adaptor.busy = true;
+    adaptor.promptReceipt = {
+      status: 'accepted',
+      jobRef: 'p1',
+      joinedActiveTurn: true,
+      note: 'joined the currently running task',
+    };
+    callTool(callbacks, 'handoff', { task: 'also run lint' });
+    const [, second] = await awaitReceipts(realtime, 2);
+    expect(second).toMatchObject({ job: 'job_1', session: 'session_1' });
+
+    // One job only — and the turn's completion retires it.
+    adaptor.queue('s1').push({
+      type: 'turn_complete',
+      jobRef: 'p1',
+      summary: 'all done.',
+    });
+    await vi.waitFor(() => {
+      expect(realtime.sendBackendContext).toHaveBeenCalledTimes(1);
+    });
+    adaptor.busy = false;
+    callTool(callbacks, 'session_monitor', { session: 'session_1' });
+    const [, , monitor] = await awaitReceipts(realtime, 3);
+    expect(monitor).toEqual({
+      status: 'ok',
+      session: 'session_1',
+      state: 'idle',
+    });
   });
 
   it('handoff attaches appshot-registered assets as image blocks', async () => {
@@ -495,6 +555,73 @@ describe('LiveSession', () => {
     expect(respondReceipt).toEqual({ status: 'delivered' });
   });
 
+  it('relays a respond_permission note to the backend session after the vote', async () => {
+    const { adaptor, callbacks, realtime } = await startSession();
+
+    callTool(callbacks, 'handoff', { task: 'clean tmp' });
+    await awaitReceipts(realtime, 1);
+    adaptor.queue('s1').push({
+      type: 'permission_request',
+      requestId: 'r1',
+      title: 'Bash: rm -rf /tmp',
+      options: PERMISSION_OPTIONS,
+    });
+    await vi.waitFor(() => {
+      expect(realtime.sendBackendContext).toHaveBeenCalledTimes(1);
+    });
+
+    adaptor.busy = true;
+    callTool(callbacks, 'respond_permission', {
+      request_id: 'req_1',
+      decision: 'allow',
+      note: 'only the cache subfolder',
+    });
+    const [, respondReceipt] = await awaitReceipts(realtime, 2);
+
+    expect(respondReceipt).toEqual({ status: 'delivered' });
+    expect(adaptor.respondPermission).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 's1' }),
+      'r1',
+      'allow',
+    );
+    // The vote channel has no note field: the constraint rides the prompt
+    // path to the same session, steered into the running turn.
+    expect(adaptor.prompt).toHaveBeenCalledTimes(2);
+    const [handle, blocks, opts] = adaptor.prompt.mock.calls[1] ?? [];
+    expect(handle).toEqual(expect.objectContaining({ id: 's1' }));
+    const text = blocks?.[0];
+    if (text?.type !== 'text') throw new Error('expected a text block');
+    expect(text.text).toContain('only the cache subfolder');
+    expect(text.text).toContain('Bash: rm -rf /tmp');
+    expect(opts).toEqual({ steer: true });
+  });
+
+  it('delivers a note-less respond_permission without a follow-up prompt', async () => {
+    const { adaptor, callbacks, realtime } = await startSession();
+
+    callTool(callbacks, 'handoff', { task: 'clean tmp' });
+    await awaitReceipts(realtime, 1);
+    adaptor.queue('s1').push({
+      type: 'permission_request',
+      requestId: 'r1',
+      title: 'Bash: rm -rf /tmp',
+      options: PERMISSION_OPTIONS,
+    });
+    await vi.waitFor(() => {
+      expect(realtime.sendBackendContext).toHaveBeenCalledTimes(1);
+    });
+
+    callTool(callbacks, 'respond_permission', {
+      request_id: 'req_1',
+      decision: 'deny',
+    });
+    const [, respondReceipt] = await awaitReceipts(realtime, 2);
+
+    expect(respondReceipt).toEqual({ status: 'delivered' });
+    // Only the handoff prompt — no constraint relay was needed.
+    expect(adaptor.prompt).toHaveBeenCalledTimes(1);
+  });
+
   it('retracts a queued permission ask resolved elsewhere before injection', async () => {
     const { adaptor, callbacks, realtime } = await startSession();
 
@@ -575,6 +702,165 @@ describe('LiveSession', () => {
     expect(await pending).toBeUndefined();
     expect(realtime.close).toHaveBeenCalledTimes(1);
   });
+
+  it('stop drain settles on the input-commit ack instead of burning the budget', async () => {
+    // Default drain budget: 30 s. The commit ack must settle the stop in
+    // milliseconds — resolving only at the deadline is the bug.
+    const { callbacks, realtime, session } = await startSession();
+
+    callbacks.onSpeechStarted?.({ callEpoch: 1 });
+
+    let settled = false;
+    const pending = session
+      .stop({ epoch: 1, callId: 'call-1' })
+      .then((outcome) => {
+        settled = true;
+        return outcome;
+      });
+    expect(realtime.commitInputAudio).toHaveBeenCalledTimes(1);
+    await delay(150);
+    expect(settled).toBe(false);
+
+    callbacks.onInputCommitted?.({ callEpoch: 1 });
+    await vi.waitFor(
+      () => {
+        expect(settled).toBe(true);
+      },
+      { timeout: 2_000, interval: 50 },
+    );
+    expect(await pending).toBeUndefined();
+    expect(realtime.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('stop fails fast when the trailing speech cannot be committed', async () => {
+    const { callbacks, realtime, session } = await startSession();
+    realtime.commitInputAudio.mockReturnValue(false);
+
+    callbacks.onSpeechStarted?.({ callEpoch: 1 });
+    const outcome = await session.stop({ epoch: 1, callId: 'call-1' });
+
+    expect(outcome).toEqual({
+      error: 'Live Voice could not commit the final spoken input.',
+    });
+  });
+
+  it('keeps the call state at stopping when response.created arrives during the drain', async () => {
+    const { callbacks, host, session } = await startSession();
+
+    callbacks.onSpeechStarted?.({ callEpoch: 1 });
+    let settled = false;
+    const pending = session
+      .stop({ epoch: 1, callId: 'call-1' })
+      .then((outcome) => {
+        settled = true;
+        return outcome;
+      });
+    callbacks.onInputCommitted?.({ callEpoch: 1 });
+
+    // semantic_vad create_response: the committed trailing speech spawns a
+    // response mid-drain. It must hold the drain open, but never flip the
+    // coordinator back to 'speaking' — that would strand the stopping call.
+    callbacks.onResponseCreated?.({
+      callEpoch: 1,
+      responseId: 'resp_tail',
+      authority: 'direct',
+    });
+    expect(host.states[host.states.length - 1]).toBe('stopping');
+    await delay(150);
+    expect(settled).toBe(false);
+
+    callbacks.onResponseDone?.({ callEpoch: 1, responseId: 'resp_tail' });
+    await vi.waitFor(
+      () => {
+        expect(settled).toBe(true);
+      },
+      { timeout: 2_000, interval: 50 },
+    );
+    expect(await pending).toBeUndefined();
+    expect(host.states).not.toContain('speaking');
+  });
+
+  it('speaks error strings with mid-token periods untruncated', async () => {
+    const { adaptor, callbacks, realtime } = await startSession();
+
+    callTool(callbacks, 'handoff', { task: 'read config' });
+    await awaitReceipts(realtime, 1);
+    const queue = adaptor.queue('s1');
+
+    queue.push({
+      type: 'turn_error',
+      jobRef: 'p1',
+      error: 'ENOENT: open /home/user/.qwen-live/config.json',
+    });
+    await vi.waitFor(() => {
+      expect(realtime.speakToUser).toHaveBeenCalledTimes(1);
+    });
+    expect(realtime.speakToUser.mock.calls[0]?.[0]).toContain(
+      '/home/user/.qwen-live/config.json',
+    );
+
+    queue.push({
+      type: 'turn_error',
+      jobRef: 'p1',
+      error: 'Connection refused: 10.0.0.1:4170',
+    });
+    await vi.waitFor(() => {
+      expect(realtime.speakToUser).toHaveBeenCalledTimes(2);
+    });
+    expect(realtime.speakToUser.mock.calls[1]?.[0]).toContain('10.0.0.1:4170');
+  });
+
+  it('speaks the closing sentence of a long CJK summary', async () => {
+    const { adaptor, callbacks, realtime } = await startSession();
+
+    callTool(callbacks, 'handoff', { task: '跑测试' });
+    await awaitReceipts(realtime, 1);
+
+    // >200 chars, multiple sentences, no whitespace after 。 (standard CJK
+    // typography): the spoken line must be the LAST sentence, complete.
+    const body = `${'任务进行中'.repeat(50)}。`;
+    const closing = '所有测试都通过了。';
+    adaptor.queue('s1').push({
+      type: 'turn_complete',
+      jobRef: 'p1',
+      summary: `${body}${closing}`,
+    });
+    await vi.waitFor(() => {
+      expect(realtime.speakToUser).toHaveBeenCalledTimes(1);
+    });
+    expect(realtime.speakToUser.mock.calls[0]?.[0]).toBe(
+      `Task job_1 finished. ${closing}`,
+    );
+  });
+
+  it('resubscribes after the event stream ends without session_closed', async () => {
+    const adaptor = new ResubscribeAdaptor();
+    const { callbacks, realtime } = await startSession(adaptor);
+
+    callTool(callbacks, 'handoff', { task: 'long task' });
+    await awaitReceipts(realtime, 1);
+    expect(adaptor.eventsCalls).toBe(1);
+
+    // The stream drops without a session_closed (daemon restart, broken
+    // SSE connection) — the session must not go permanently unobserved.
+    adaptor.streams[0]?.end();
+    adaptor.streams[1]?.push({
+      type: 'turn_complete',
+      jobRef: 'p1',
+      summary: 'all tests pass.',
+    });
+
+    await vi.waitFor(
+      () => {
+        expect(realtime.sendBackendContext).toHaveBeenCalledTimes(1);
+      },
+      { timeout: 5_000, interval: 100 },
+    );
+    expect(realtime.sendBackendContext.mock.calls[0]?.[0]).toMatch(
+      /^\[COMPLETE job_1\]/,
+    );
+    expect(adaptor.eventsCalls).toBe(2);
+  }, 10_000);
 
   it('pushAudio forwards frames to realtime but not while stopping', async () => {
     const { callbacks, realtime, session } = await startSession();

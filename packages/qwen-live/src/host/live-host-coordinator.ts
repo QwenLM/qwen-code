@@ -30,7 +30,12 @@ const DEFAULT_HELLO_TIMEOUT_MS = 5_000;
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 5_000;
 const DEFAULT_HEARTBEAT_TIMEOUT_MS = 15_000;
 const DEFAULT_SHORTCUT_TIMEOUT_MS = 5_000;
-const MAX_HOST_TEXT_BYTES = 64 * 1024;
+// The frame cap must admit every message the per-field caps below allow. The
+// worst conformant case is a host.screen_context_result: requestId (128) +
+// appName (512) + windowTitle (2,048) + accessibilityText (32,000) +
+// screenshotPath (4,096) ≈ 38,784 UTF-16 units, each up to 6 UTF-8 bytes once
+// JSON-escaped (≈ 227 KiB), plus JSON syntax overhead — 256 KiB covers it.
+const MAX_HOST_TEXT_BYTES = 256 * 1024;
 const MAX_HOST_AUDIO_BYTES = 64 * 1024;
 const MAX_HOST_AUDIO_WIRE_BYTES =
   LIVE_INPUT_AUDIO_EPOCH_BYTES + MAX_HOST_AUDIO_BYTES;
@@ -350,6 +355,7 @@ export class LiveHostCoordinator {
   };
   private call?: LiveCall;
   private pendingStartMode?: 'new';
+  private deactivating = false;
   private nextEpoch = 0;
   private inputMuted = false;
   private outputMuted = false;
@@ -391,6 +397,10 @@ export class LiveHostCoordinator {
   }
 
   async deactivate(): Promise<void> {
+    // Host-initiated starts must not re-arm a call while the stop drains:
+    // state broadcasts during 'stopping' still carry the stopping call's
+    // epoch, so a host.action would otherwise pass the epoch gate.
+    this.deactivating = true;
     this.pendingStartMode = undefined;
     if (this.call) {
       const stopped = new Promise<void>((resolve) => {
@@ -423,6 +433,9 @@ export class LiveHostCoordinator {
     }
     if (this.host) this.disconnectHost(this.host, 4008, 'Host lease expired.');
 
+    // Only an accepted lease revives Live Voice: a fresh host connection is
+    // the re-activation signal that ends the deactivating window.
+    this.deactivating = false;
     const lease: HostLease = {
       socket,
       lastPongAt: this.now(),
@@ -1108,6 +1121,7 @@ export class LiveHostCoordinator {
   }
 
   private startFromHost(mode: 'resume' | 'new'): void {
+    if (this.deactivating) return;
     try {
       this.start(mode);
     } catch (error) {

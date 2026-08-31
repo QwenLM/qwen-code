@@ -1055,4 +1055,143 @@ describe('LiveHostCoordinator', () => {
     const value = coordinator();
     expect(value.setConfiguredShortcut('Command+K').shortcut).toBe('Command+K');
   });
+
+  it('accepts a maximum-length CJK accessibility dump without closing the socket', async () => {
+    const value = coordinator();
+    const socket = connectReady(value);
+    const call = value.start('resume');
+    value.setCoordinator(call.epoch, {
+      workspaceCwd: '/conversations/live-1',
+      sessionId: 'coordinator-1',
+    });
+
+    const capture = value.captureScreenContext('coordinator-1');
+    const request = socket
+      .messages()
+      .find((message) => message.type === 'host.capture_screen_context');
+    if (!request || request.type !== 'host.capture_screen_context') {
+      throw new Error('Missing Appshot request');
+    }
+    // 32,000 CJK chars are conformant per MAX_APPSHOT_TEXT_LENGTH but weigh
+    // ~96 KiB in UTF-8: the frame cap must admit them.
+    const accessibilityText = '中'.repeat(32_000);
+    socket.receive({
+      type: 'host.screen_context_result',
+      requestId: request.requestId,
+      success: true,
+      appName: '微信',
+      accessibilityText,
+      screenshotPath: '/private/tmp/qwen-live-appshot/test.png',
+    });
+
+    await expect(capture).resolves.toMatchObject({ accessibilityText });
+    expect(socket.closeCode).toBeUndefined();
+    expect(pendingAppshotCount(value)).toBe(0);
+  });
+
+  it('ignores host-initiated starts while deactivating', async () => {
+    let finishStop: (() => void) | undefined;
+    const onStart = vi.fn();
+    const value = coordinator({
+      handlers: {
+        onStart,
+        onStop: () =>
+          new Promise<void>((resolve) => {
+            finishStop = resolve;
+          }),
+      },
+    });
+    const socket = connectReady(value);
+    const call = value.start('resume');
+    expect(onStart).toHaveBeenCalledTimes(1);
+
+    const deactivating = value.deactivate();
+    // The stopping call's epoch still passes the epoch gate, but the start
+    // must be ignored during the deactivation drain.
+    socket.receive({ type: 'host.action', action: 'new', epoch: call.epoch });
+    finishStop?.();
+    await deactivating;
+
+    expect(value.getStatus().callId).toBeUndefined();
+    expect(onStart).toHaveBeenCalledTimes(1);
+  });
+
+  it('lets a host-initiated start work again after the Host reattaches', async () => {
+    const onStart = vi.fn();
+    const value = coordinator({ handlers: { onStart } });
+    connectReady(value);
+    await value.deactivate();
+
+    const socket = connectReady(value);
+    socket.receive({ type: 'host.action', action: 'new' });
+    expect(onStart).toHaveBeenCalledTimes(1);
+  });
+
+  it('removes a timed-out Appshot from the pending map', async () => {
+    vi.useFakeTimers();
+    const value = coordinator({ appshotTimeoutMs: 50 });
+    connectReady(value);
+    const call = value.start('resume');
+    value.setCoordinator(call.epoch, {
+      workspaceCwd: '/conversations/live-1',
+      sessionId: 'coordinator-1',
+    });
+
+    const capture = value.captureScreenContext('coordinator-1');
+    expect(pendingAppshotCount(value)).toBe(1);
+    await vi.advanceTimersByTimeAsync(51);
+
+    await expect(capture).rejects.toThrow('timed out');
+    expect(pendingAppshotCount(value)).toBe(0);
+  });
+
+  it('drops a rejected Appshot from the pending map when the call stops', async () => {
+    const value = coordinator();
+    connectReady(value);
+    const call = value.start('resume');
+    value.setCoordinator(call.epoch, {
+      workspaceCwd: '/conversations/live-1',
+      sessionId: 'coordinator-1',
+    });
+
+    const capture = value.captureScreenContext('coordinator-1');
+    expect(pendingAppshotCount(value)).toBe(1);
+    value.stop();
+
+    await expect(capture).rejects.toThrow('ended before Appshot completed');
+    expect(pendingAppshotCount(value)).toBe(0);
+  });
+
+  it('clears resolved inactive waiters instead of retaining them', async () => {
+    let finishStop: (() => void) | undefined;
+    const value = coordinator({
+      handlers: {
+        onStop: () =>
+          new Promise<void>((resolve) => {
+            finishStop = resolve;
+          }),
+      },
+    });
+    connectReady(value);
+    value.start('resume');
+
+    const deactivating = value.deactivate();
+    expect(inactiveWaiterCount(value)).toBe(1);
+    finishStop?.();
+    await deactivating;
+
+    expect(inactiveWaiterCount(value)).toBe(0);
+  });
 });
+
+/** Reach into the private pending-Appshot map to pin its cleanup paths. */
+function pendingAppshotCount(value: LiveHostCoordinator): number {
+  return (value as unknown as { pendingAppshots: Map<string, unknown> })
+    .pendingAppshots.size;
+}
+
+/** Reach into the private inactive-waiter set to pin notifyInactive. */
+function inactiveWaiterCount(value: LiveHostCoordinator): number {
+  return (value as unknown as { inactiveWaiters: Set<() => void> })
+    .inactiveWaiters.size;
+}

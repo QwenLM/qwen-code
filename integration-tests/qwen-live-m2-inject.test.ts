@@ -51,7 +51,10 @@ const isTurnComplete = (event: {
   event.type === 'backend.event' && event.payload['type'] === 'turn_complete';
 
 describeE2E('qwen-live M2 — injection window', () => {
+  /** Consumed by the fake model: a gate is deleted the moment it matches. */
   const gates = new Map<string, Deferred>();
+  /** Stable test-side resolve handles (the fake model never touches these). */
+  const gateHandles = new Map<string, Deferred>();
   let stack: LiveStack;
   let conn: FakeDashScopeConnection;
   let callSeq = 0;
@@ -60,7 +63,9 @@ describeE2E('qwen-live M2 — injection window', () => {
     task: string,
     extraArgs: Record<string, unknown> = {},
   ): Promise<Record<string, unknown>> => {
-    gates.set(task, deferred());
+    const gate = deferred();
+    gates.set(task, gate);
+    gateHandles.set(task, gate);
     const callId = `call-h${++callSeq}`;
     conn.functionCall({
       name: 'handoff',
@@ -95,9 +100,17 @@ describeE2E('qwen-live M2 — injection window', () => {
       makeOpenAIHandler:
         () =>
         async ({ body }) => {
-          const messages = JSON.stringify(body['messages'] ?? []);
+          // qwen serve sends the WHOLE conversation history with every model
+          // request, and both tests share one backend session — so match
+          // markers only against the current turn's LAST message (earlier
+          // turns' markers stay in the history forever) and consume the gate
+          // on match so a settled gate can never vacuously match a later
+          // turn.
+          const messages = (body['messages'] ?? []) as unknown[];
+          const lastMessage = JSON.stringify(messages.at(-1) ?? '');
           for (const [marker, gate] of gates) {
-            if (messages.includes(marker)) {
+            if (lastMessage.includes(marker)) {
+              gates.delete(marker);
               await gate.promise;
               return { content: `finished ${marker}` };
             }
@@ -109,7 +122,7 @@ describeE2E('qwen-live M2 — injection window', () => {
   }, 180_000);
 
   afterAll(async () => {
-    for (const gate of gates.values()) gate.resolve(); // never leave serve hung
+    for (const gate of gateHandles.values()) gate.resolve(); // never leave serve hung
     await stack?.dispose();
   }, 60_000);
 
@@ -123,7 +136,7 @@ describeE2E('qwen-live M2 — injection window', () => {
 
     // Let the backend turn finish and wait until the daemon's orchestrator
     // has consumed the turn_complete event (session-log sync point).
-    gates.get('inject-window-task')!.resolve();
+    gateHandles.get('inject-window-task')!.resolve();
     await waitForLiveLogEvents(stack.dataDir, isTurnComplete, {
       minCount: 1,
       timeoutMs: 30_000,
@@ -185,8 +198,8 @@ describeE2E('qwen-live M2 — injection window', () => {
     const inboxIndex = stack.fakeDash.inbox.length;
     const holdId = await holdResponse();
 
-    gates.get('batch-task-a')!.resolve();
-    gates.get('batch-task-b')!.resolve();
+    gateHandles.get('batch-task-a')!.resolve();
+    gateHandles.get('batch-task-b')!.resolve();
     // 1 turn_complete from the previous test + 2 here.
     await waitForLiveLogEvents(stack.dataDir, isTurnComplete, {
       minCount: 3,

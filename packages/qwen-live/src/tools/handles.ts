@@ -58,16 +58,22 @@ export class HandleRegistry {
     return this.sessions.get(handle.trim());
   }
 
-  listSessions(): ReadonlyMap<string, BackendHandle> {
-    return this.sessions;
-  }
-
+  /**
+   * Register a new job. Idempotent by jobRef: a jobRef already registered
+   * means the backend attributed the prompt to that existing turn (e.g. a
+   * steer that joined it), so the existing record is returned instead of
+   * minting a second job that would orphan the first in 'running'.
+   */
   createJob(fields: {
     sessionHandle: string;
     backend: BackendHandle;
     jobRef?: string;
     task: string;
   }): JobRecord {
+    if (fields.jobRef !== undefined) {
+      const existing = this.jobByRef(fields.jobRef);
+      if (existing) return existing;
+    }
     const record: JobRecord = {
       jobHandle: `job_${++this.jobSeq}`,
       sessionHandle: fields.sessionHandle,

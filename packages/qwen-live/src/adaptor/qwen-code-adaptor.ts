@@ -22,7 +22,9 @@
  *   answered" from "someone answered in WebShell". The issued id comes back
  *   on the create/attach response; self-made ids are rejected by the
  *   daemon's client registration guard, so every per-session call echoes
- *   the issued one.
+ *   the issued one. Sessions adopted via `session_list` never receive an
+ *   issued id, so the adaptor also records every requestId it voted on and
+ *   attributes a resolution for one of those to itself.
  */
 
 import { DaemonClient } from '@qwen-code/sdk';
@@ -113,7 +115,11 @@ export interface DaemonClientLike {
     mimeType: string,
     opts?: Record<string, unknown>,
   ): Promise<Record<string, unknown>>;
-  closeSession(sessionId: string, clientId?: string): Promise<void>;
+  updateSessionMetadata(
+    sessionId: string,
+    metadata: { displayName?: string },
+    clientId?: string,
+  ): Promise<{ displayName?: string }>;
 }
 
 export interface QwenCodeAdaptorOptions {
@@ -126,7 +132,6 @@ export interface QwenCodeAdaptorOptions {
   clientId?: string;
   /** Injection seam for unit tests. */
   client?: DaemonClientLike;
-  logger?: (line: string) => void;
 }
 
 interface SessionState {
@@ -138,6 +143,13 @@ interface SessionState {
   turnBuffer: string;
   /** Options captured per pending permission request, for decision mapping. */
   permissionOptions: Map<string, readonly PermissionOption[]>;
+  /**
+   * Permission requestIds this adaptor voted on. Sessions adopted via
+   * session_list carry no daemon-issued clientId, so originator comparison
+   * alone can never attribute our own vote — this set is the fallback.
+   * Entries are removed when the request resolves.
+   */
+  ownVotes: Set<string>;
   closed: boolean;
 }
 
@@ -145,22 +157,76 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+/**
+ * Map one wire permission option to the adaptor's kind + escalation.
+ *
+ * qwen serve stamps every option with the ACP structured `kind`
+ * (`allow_once` | `allow_always` | `reject_once` | `reject_always` — see
+ * `toPermissionOptions` in packages/cli acp-integration/permissionUtils.ts);
+ * that is authoritative when present. An unknown structured kind fails
+ * closed to 'other'. The word heuristics run only when the backend omitted
+ * the field entirely.
+ */
 function classifyOption(
   optionId: string,
-  label: string | undefined,
-): PermissionOptionKind {
-  // Snake/kebab ids ("proceed_once") must split into words — `\b` treats
-  // an underscore as a word character and would never match inside them.
-  const haystack = `${optionId} ${label ?? ''}`
+  name: string | undefined,
+  wireKind: string | undefined,
+): { kind: PermissionOptionKind; escalation?: 'once' | 'always' } {
+  switch (wireKind) {
+    case 'allow_once':
+      return { kind: 'proceed', escalation: 'once' };
+    case 'allow_always':
+      return { kind: 'proceed', escalation: 'always' };
+    case 'reject_once':
+      return { kind: 'reject', escalation: 'once' };
+    case 'reject_always':
+      return { kind: 'reject', escalation: 'always' };
+    default:
+      break;
+  }
+  // Fail closed: a structured kind we do not understand must not be votable
+  // through a bare "allow"/"deny".
+  if (wireKind !== undefined) return { kind: 'other' };
+  // Fallback for backends that omit the structured kind. Snake/kebab ids
+  // ("proceed_once") must split into words — `\b` treats an underscore as a
+  // word character and would never match inside them.
+  const haystack = `${optionId} ${name ?? ''}`
     .toLowerCase()
     .replace(/[_-]/g, ' ');
+  const escalation = /\balways\b/.test(haystack)
+    ? ('always' as const)
+    : /\bonce\b/.test(haystack)
+      ? ('once' as const)
+      : undefined;
   // Word boundaries matter: a bare /no/ would match inside "notify" and
   // misroute an allow vote to a reject option.
   if (/\b(allow|proceed|approve|yes|accept)\b/.test(haystack)) {
-    return 'proceed';
+    return { kind: 'proceed', ...(escalation ? { escalation } : {}) };
   }
-  if (/\b(deny|reject|refuse|no|cancel)\b/.test(haystack)) return 'reject';
-  return 'other';
+  if (/\b(deny|reject|refuse|no|cancel)\b/.test(haystack)) {
+    return { kind: 'reject', ...(escalation ? { escalation } : {}) };
+  }
+  return { kind: 'other' };
+}
+
+/**
+ * The narrowest option of the wanted kind. A bare voice "allow" must take
+ * the one-shot grant, never persist an always-allow rule (serve offers
+ * [proceed_always_project, proceed_always_user, proceed_once, cancel] —
+ * first-match would pick the project-wide rule).
+ */
+function pickLeastEscalating(
+  options: readonly PermissionOption[],
+  wanted: PermissionOptionKind,
+): PermissionOption | undefined {
+  const rank = (option: PermissionOption): number =>
+    option.escalation === 'once' ? 0 : option.escalation === undefined ? 1 : 2;
+  let best: PermissionOption | undefined;
+  for (const candidate of options) {
+    if (candidate.kind !== wanted) continue;
+    if (best === undefined || rank(candidate) < rank(best)) best = candidate;
+  }
+  return best;
 }
 
 function describeToolCall(toolCall: unknown): string {
@@ -174,10 +240,50 @@ function describeToolCall(toolCall: unknown): string {
   return name || detail || 'a tool call';
 }
 
+/**
+ * Slice the last `max` UTF-16 units, snapping the cut off a split surrogate
+ * pair: a cut landing between the halves would lead with a lone low
+ * surrogate that renders/speaks as U+FFFD.
+ */
+function tailSlice(text: string, max: number): string {
+  let start = text.length - max;
+  const unit = text.charCodeAt(start);
+  if (unit >= 0xdc00 && unit <= 0xdfff) start += 1;
+  return text.slice(start);
+}
+
 function clampTail(text: string, max: number): string {
   const trimmed = text.trim();
   if (trimmed.length <= max) return trimmed;
-  return `…${trimmed.slice(trimmed.length - max)}`;
+  return `…${tailSlice(trimmed, max)}`;
+}
+
+/**
+ * One clean line for a tool-call title: first line only, terminal control
+ * sequences stripped. Minimal inline of core's stripTerminalControlSequences
+ * (packages/core utils/terminalSafe.ts) — the monolith's voice consumer
+ * applied the same guard before titles reached the realtime model
+ * (live-session-coordinator.ts), and neither acp-bridge nor the daemon
+ * sanitizes upstream.
+ */
+function sanitizeTitleLine(title: string): string {
+  const firstLine = title.split(/\r?\n/, 1)[0] ?? '';
+  return (
+    firstLine
+      // OSC: ESC ] ... (BEL | ST)
+      // eslint-disable-next-line no-control-regex
+      .replace(/\x1b\][\s\S]*?(?:\x07|\x1b\\)/g, '')
+      // CSI: ESC [ params intermediates final
+      // eslint-disable-next-line no-control-regex
+      .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
+      // SS2/SS3/DCS leaders
+      // eslint-disable-next-line no-control-regex
+      .replace(/\x1b[NOP]/g, '')
+      // Remaining C0 controls + DEL + C1 controls
+      // eslint-disable-next-line no-control-regex
+      .replace(/[\x00-\x1f\x7f-\x9f]/g, ' ')
+      .trim()
+  );
 }
 
 export class QwenCodeAdaptor implements BackendAdaptor {
@@ -186,6 +292,8 @@ export class QwenCodeAdaptor implements BackendAdaptor {
   private readonly client: DaemonClientLike;
   private readonly options: QwenCodeAdaptorOptions;
   private readonly sessions = new Map<string, SessionState>();
+  /** Every cwd sessions were created in; listSessions unions across them. */
+  private readonly sessionCwds = new Set<string>();
   private workspaceCwd: string | undefined;
 
   constructor(options: QwenCodeAdaptorOptions) {
@@ -215,9 +323,24 @@ export class QwenCodeAdaptor implements BackendAdaptor {
     try {
       caps = await this.client.capabilities();
     } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      const status =
+        isRecord(error) && typeof error['status'] === 'number'
+          ? error['status']
+          : undefined;
+      if (status !== undefined) {
+        // The daemon answered — it is running but refused the request.
+        // A "start it" hint would send the operator hunting for a daemon
+        // that already exists.
+        throw new Error(
+          `qwen serve at ${this.options.baseUrl} responded with HTTP ` +
+            `${status} and refused the request: ${detail}. ` +
+            'Check the auth token and base URL.',
+        );
+      }
       throw new Error(
         `qwen serve is not reachable at ${this.options.baseUrl}: ` +
-          `${error instanceof Error ? error.message : String(error)}. ` +
+          `${detail}. ` +
           'Start it with `qwen serve` before launching qwen-live.',
       );
     }
@@ -245,7 +368,8 @@ export class QwenCodeAdaptor implements BackendAdaptor {
       },
       this.options.clientId,
     );
-    this.trackSession(session.sessionId, {
+    if (cwd !== undefined) this.sessionCwds.add(cwd);
+    const state = this.trackSession(session.sessionId, {
       busy: session.hasActivePrompt === true,
       // The daemon issues the authoritative per-client id on create/attach;
       // every later call for this session must echo it (a self-made id is
@@ -255,20 +379,40 @@ export class QwenCodeAdaptor implements BackendAdaptor {
         ? { clientId: session.clientId }
         : {}),
     });
+    if (opts?.label !== undefined) {
+      // The daemon session's displayName is what listSessions (here and in
+      // every other client) reports back — the requested label is useless
+      // unless it is applied to the daemon session itself.
+      await this.client.updateSessionMetadata(
+        session.sessionId,
+        { displayName: opts.label },
+        state.clientId,
+      );
+    }
     return { id: session.sessionId, adaptor: ADAPTOR_NAME };
   }
 
   async listSessions(): Promise<SessionSummary[]> {
-    const cwd = this.options.defaultCwd ?? this.workspaceCwd;
-    if (cwd === undefined) return [];
-    const sessions = await this.client.listWorkspaceSessions(cwd, {});
-    return sessions.flatMap((raw) => {
-      const sessionId = raw['sessionId'];
-      if (typeof sessionId !== 'string') return [];
-      const tracked = this.sessions.get(sessionId);
-      const label = raw['displayName'];
-      return [
-        {
+    const defaultCwd = this.options.defaultCwd ?? this.workspaceCwd;
+    const cwds = new Set<string>();
+    if (defaultCwd !== undefined) cwds.add(defaultCwd);
+    for (const cwd of this.sessionCwds) cwds.add(cwd);
+    const summaries = new Map<string, SessionSummary>();
+    for (const cwd of cwds) {
+      // The daemon catalog accumulates sessions from every client and the
+      // SDK defaults to a 20-row first page; 1000 is the server-side clamp.
+      const sessions = await this.client.listWorkspaceSessions(cwd, {
+        pageSize: 1000,
+      });
+      for (const raw of sessions) {
+        const sessionId = raw['sessionId'];
+        if (typeof sessionId !== 'string' || summaries.has(sessionId)) {
+          continue;
+        }
+        const tracked = this.sessions.get(sessionId);
+        const label = raw['displayName'];
+        const hasActivePrompt = raw['hasActivePrompt'];
+        summaries.set(sessionId, {
           handle: { id: sessionId, adaptor: ADAPTOR_NAME },
           ...(typeof label === 'string' ? { label } : {}),
           cwd,
@@ -278,10 +422,17 @@ export class QwenCodeAdaptor implements BackendAdaptor {
               : tracked.busy
                 ? ('busy' as const)
                 : ('idle' as const)
-            : ('unknown' as const),
-        },
-      ];
-    });
+            : // Untracked (e.g. after a qwen-live restart): the wire record
+              // itself says whether a prompt is running.
+              typeof hasActivePrompt === 'boolean'
+              ? hasActivePrompt
+                ? ('busy' as const)
+                : ('idle' as const)
+              : ('unknown' as const),
+        });
+      }
+    }
+    return [...summaries.values()];
   }
 
   async prompt(
@@ -305,12 +456,20 @@ export class QwenCodeAdaptor implements BackendAdaptor {
           )
           .map((block) => block.text)
           .join('\n\n');
-        const steered = await this.client.enqueueMidTurnMessage(
-          handle.id,
-          message,
-          state.clientId !== undefined ? { clientId: state.clientId } : {},
-        );
-        if (steered.accepted) {
+        let steered: { accepted: boolean; messageId?: string } | undefined;
+        try {
+          steered = await this.client.enqueueMidTurnMessage(
+            handle.id,
+            message,
+            state.clientId !== undefined ? { clientId: state.clientId } : {},
+          );
+        } catch (error) {
+          // The mid-turn route 400s on over-long messages; the identical
+          // payload is admissible as a queued full prompt, so fall through
+          // instead of failing the handoff. Anything else is a real error.
+          if (!(isRecord(error) && error['status'] === 400)) throw error;
+        }
+        if (steered?.accepted) {
           return {
             status: 'accepted',
             joinedActiveTurn: true,
@@ -403,18 +562,34 @@ export class QwenCodeAdaptor implements BackendAdaptor {
     } else {
       const wanted: PermissionOptionKind =
         decision === 'allow' ? 'proceed' : 'reject';
-      const option = options.find((candidate) => candidate.kind === wanted);
+      const option = pickLeastEscalating(options, wanted);
       response = option
         ? { outcome: { outcome: 'selected', optionId: option.optionId } }
         : { outcome: { outcome: 'cancelled' } };
     }
-    const delivered = await this.client.respondToSessionPermission(
-      handle.id,
-      requestId,
-      response,
-      state.clientId,
-    );
-    if (delivered) state.permissionOptions.delete(requestId);
+    // Record the vote BEFORE the HTTP round-trip: the daemon publishes the
+    // SSE permission_resolved before the vote response returns, so waiting
+    // for `delivered` can lose the race against our own event pump — and on
+    // adopted sessions the own-vote record is the only byUs signal.
+    state.ownVotes.add(requestId);
+    let delivered: boolean;
+    try {
+      delivered = await this.client.respondToSessionPermission(
+        handle.id,
+        requestId,
+        response,
+        state.clientId,
+      );
+    } catch (error) {
+      state.ownVotes.delete(requestId);
+      throw error;
+    }
+    if (delivered) {
+      state.permissionOptions.delete(requestId);
+    } else {
+      // Someone else settled it first; our vote did not count.
+      state.ownVotes.delete(requestId);
+    }
     return delivered ? 'delivered' : 'already_resolved';
   }
 
@@ -434,6 +609,7 @@ export class QwenCodeAdaptor implements BackendAdaptor {
         busy: seed?.busy ?? false,
         turnBuffer: '',
         permissionOptions: new Map(),
+        ownVotes: new Set(),
         closed: false,
       };
       this.sessions.set(sessionId, state);
@@ -499,20 +675,22 @@ export class QwenCodeAdaptor implements BackendAdaptor {
           if (typeof text === 'string') {
             state.turnBuffer = `${state.turnBuffer}${text}`;
             if (state.turnBuffer.length > MAX_DETAIL_CHARS) {
-              state.turnBuffer = state.turnBuffer.slice(-MAX_DETAIL_CHARS);
+              state.turnBuffer = tailSlice(state.turnBuffer, MAX_DETAIL_CHARS);
             }
           }
           return [];
         }
         if (kind === 'tool_call') {
           const title = update['title'];
+          const summary =
+            typeof title === 'string' ? sanitizeTitleLine(title) : '';
           return [
             {
               type: 'progress',
               ...(envelope.promptId !== undefined
                 ? { jobRef: envelope.promptId }
                 : {}),
-              summary: typeof title === 'string' ? title : 'running a tool',
+              summary: summary || 'running a tool',
             },
           ];
         }
@@ -561,13 +739,20 @@ export class QwenCodeAdaptor implements BackendAdaptor {
           : [];
         const options: PermissionOption[] = rawOptions.flatMap((raw) => {
           if (!isRecord(raw) || typeof raw['optionId'] !== 'string') return [];
-          const label =
-            typeof raw['label'] === 'string' ? raw['label'] : undefined;
+          // Wire shape (ACP PermissionOption): optionId + name + kind.
+          const name =
+            typeof raw['name'] === 'string' ? raw['name'] : undefined;
+          const wireKind =
+            typeof raw['kind'] === 'string' ? raw['kind'] : undefined;
+          const classified = classifyOption(raw['optionId'], name, wireKind);
           return [
             {
               optionId: raw['optionId'],
-              ...(label !== undefined ? { label } : {}),
-              kind: classifyOption(raw['optionId'], label),
+              ...(name !== undefined ? { label: name } : {}),
+              kind: classified.kind,
+              ...(classified.escalation !== undefined
+                ? { escalation: classified.escalation }
+                : {}),
             },
           ];
         });
@@ -587,13 +772,17 @@ export class QwenCodeAdaptor implements BackendAdaptor {
         const requestId = data['requestId'];
         if (typeof requestId !== 'string') return [];
         state.permissionOptions.delete(requestId);
+        // Own-vote record first: adopted sessions have no issued clientId,
+        // and the daemon stamps no originator on anonymous votes.
+        const votedByUs = state.ownVotes.delete(requestId);
         return [
           {
             type: 'permission_resolved',
             requestId,
             byUs:
-              state.clientId !== undefined &&
-              envelope.originatorClientId === state.clientId,
+              votedByUs ||
+              (state.clientId !== undefined &&
+                envelope.originatorClientId === state.clientId),
           },
         ];
       }

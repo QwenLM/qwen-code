@@ -89,8 +89,6 @@ export interface LiveRealtimeConfig {
   apiKey?: string;
   model: string;
   voice?: string;
-  /** Extra startup context appended to the instructions. */
-  startupContext?: string;
 }
 
 export interface LiveSessionOptions {
@@ -100,7 +98,6 @@ export interface LiveSessionOptions {
   log: SessionLog;
   openRealtime?: typeof openQwenRealtimeSession;
   gracefulStopDrainMs?: number;
-  now?: () => number;
 }
 
 interface CallContext {
@@ -119,11 +116,25 @@ interface CallContext {
   stopResolve?: (outcome: void | { error: string }) => void;
 }
 
+/**
+ * Sentence boundaries for spoken clamps. ASCII terminators count only when
+ * followed by whitespace or end-of-string (a period inside a file path, IP,
+ * or version must not end a "sentence"); CJK terminators (。！？) count
+ * unconditionally — standard CJK typography puts no space after them.
+ */
+const SENTENCE_BOUNDARY = /(?<=[.!?])\s+|(?<=[。！？])\s*/;
+
+function splitSentences(text: string): string[] {
+  return text
+    .split(SENTENCE_BOUNDARY)
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
 function firstSentence(text: string, max: number): string {
   const trimmed = text.trim().replace(/\s+/g, ' ');
   if (!trimmed) return '';
-  const stop = trimmed.search(/[.!?。！？]/);
-  const sentence = stop >= 0 ? trimmed.slice(0, stop + 1) : trimmed;
+  const sentence = splitSentences(trimmed)[0] ?? trimmed;
   return sentence.length > max ? `${sentence.slice(0, max)}…` : sentence;
 }
 
@@ -135,10 +146,7 @@ function firstSentence(text: string, max: number): string {
 function lastSentence(text: string, max: number): string {
   const trimmed = text.trim().replace(/\s+/g, ' ');
   if (!trimmed) return '';
-  const parts = trimmed
-    .split(/(?<=[.!?。！？])\s+/)
-    .map((part) => part.trim())
-    .filter(Boolean);
+  const parts = splitSentences(trimmed);
   const sentence = parts[parts.length - 1] ?? trimmed;
   return sentence.length > max ? `${sentence.slice(0, max)}…` : sentence;
 }
@@ -239,9 +247,7 @@ export class LiveSession {
           ...(this.options.realtime.voice
             ? { voice: this.options.realtime.voice }
             : {}),
-          instructions: buildLiveInstructions(
-            this.options.realtime.startupContext,
-          ),
+          instructions: buildLiveInstructions(),
           tools: LIVE_SESSION_TOOLS,
         },
         this.callbacksFor(context),
@@ -292,11 +298,20 @@ export class LiveSession {
       };
       // Commit any trailing speech so the provider transcribes it, then wait
       // for the in-flight response to settle — bounded by the drain budget.
+      // The commit ack (onInputCommitted) clears speechInProgress, so the
+      // drain settles deterministically instead of burning the full budget.
       if (context.speechInProgress) {
+        let committed = false;
         try {
-          context.realtime?.commitInputAudio();
+          committed = context.realtime?.commitInputAudio() ?? false;
         } catch {
-          /* commit is best effort during stop */
+          committed = false;
+        }
+        if (!committed) {
+          finish({
+            error: 'Live Voice could not commit the final spoken input.',
+          });
+          return;
         }
       }
       if (!context.responseInFlight && !context.speechInProgress) {
@@ -372,8 +387,18 @@ export class LiveSession {
         context.injector.noteSpeechStopped();
         this.log.write('vad.speech_stopped', {});
       },
+      // The provider's input-commit ack: the utterance is out of the buffer,
+      // so speech is no longer "in progress" for the stop drain / injector.
+      // Once stopping, pushAudio drops frames, so this ack (or the transcript
+      // final below) is the only remaining clearer.
+      onInputCommitted: () => {
+        if (!current()) return;
+        context.speechInProgress = false;
+        this.log.write('vad.speech_stopped', { phase: 'input_committed' });
+      },
       onInputTranscriptDone: (event: { text: string }) => {
         if (!current()) return;
+        context.speechInProgress = false;
         this.host.setTranscript?.(context.epoch, event.text);
         this.log.write('transcript.user', { text: event.text });
       },
@@ -396,7 +421,12 @@ export class LiveSession {
         if (!current()) return;
         context.responseInFlight = true;
         context.injector.noteResponseCreated();
-        this.host.setCallState(context.epoch, 'speaking');
+        // During the stop drain the call state must stay 'stopping' — a
+        // 'speaking' flip here would strand the coordinator (its finish/fail
+        // paths early-return unless the call is still 'stopping').
+        if (!context.stopping) {
+          this.host.setCallState(context.epoch, 'speaking');
+        }
         this.log.write('response.created', {
           responseId: event.responseId,
           authority: event.authority,
@@ -596,12 +626,22 @@ export class LiveSession {
           note: receipt.note ?? 'the session refused the task',
         };
       }
-      const job = this.handles.createJob({
-        sessionHandle: handle,
-        backend,
-        ...(receipt.jobRef !== undefined ? { jobRef: receipt.jobRef } : {}),
-        task,
-      });
+      // A steer that joined the running turn comes back with that turn's
+      // jobRef: the instruction became part of the EXISTING job. Creating a
+      // second record would orphan the first in 'running' forever (nothing
+      // would ever transition it out).
+      const existing =
+        receipt.jobRef !== undefined
+          ? this.handles.jobByRef(receipt.jobRef)
+          : undefined;
+      const job =
+        existing ??
+        this.handles.createJob({
+          sessionHandle: handle,
+          backend,
+          ...(receipt.jobRef !== undefined ? { jobRef: receipt.jobRef } : {}),
+          task,
+        });
       this.ensurePump(context, handle, backend);
       return {
         status: receipt.status,
@@ -676,12 +716,52 @@ export class LiveSession {
           note: 'decision must be allow, allow_always, or deny.',
         };
       }
-      const outcome = await context.broker.respond(requestHandle, decision);
+      const note = typeof args['note'] === 'string' ? args['note'].trim() : '';
+      // Resolve before respond(): a delivered vote clears the pending entry,
+      // and the backend handle is needed to relay the user's constraint.
+      const pending = context.broker.resolveHandle(requestHandle);
+      const outcome = await context.broker.respond(
+        requestHandle,
+        decision,
+        note || undefined,
+      );
       if (outcome === 'not_found') {
         return {
           status: 'error',
           note: `no pending request ${requestHandle}.`,
         };
+      }
+      // The vote channel carries no free text; a user constraint ("only this
+      // file") would otherwise be silently discarded — the grant would be
+      // broader than the user believes. Relay it as a user instruction to
+      // the same backend session through the existing prompt/steer path.
+      if (note && pending && outcome === 'delivered') {
+        try {
+          await this.adaptor.prompt(
+            pending.backend,
+            [
+              {
+                type: 'text',
+                text:
+                  `The user answered the permission request "${pending.title}" ` +
+                  `with "${decision}" and added this constraint, which you must ` +
+                  `follow: ${note}`,
+              },
+            ],
+            { steer: this.adaptor.isBusy(pending.backend) },
+          );
+        } catch (error) {
+          this.log.write('error', {
+            source: 'permission',
+            message: error instanceof Error ? error.message : String(error),
+          });
+          return {
+            status: outcome,
+            note:
+              'The vote was delivered, but the added constraint could not ' +
+              'be relayed to the session; tell the user to check it on screen.',
+          };
+        }
       }
       return { status: outcome };
     });

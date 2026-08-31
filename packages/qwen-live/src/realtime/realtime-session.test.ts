@@ -1174,6 +1174,179 @@ describe('realtime-session', () => {
     expect(onError).toHaveBeenCalledOnce();
   });
 
+  it('rejects realtime endpoints carrying credentials', () => {
+    expect(() =>
+      deriveQwenOmniRealtimeUrl(
+        'https://user:pass@dashscope.example/compatible-mode/v1',
+        'qwen3.5-omni-plus-realtime',
+      ),
+    ).toThrow('must not contain credentials');
+    expect(() =>
+      deriveQwenOmniRealtimeUrl(
+        'https://dashscope.example/compatible-mode/v1?api_key=sk-secret',
+        'qwen3.5-omni-plus-realtime',
+      ),
+    ).toThrow('must not contain credentials');
+    expect(() =>
+      deriveQwenOmniRealtimeUrl(
+        'wss://dashscope.example/api-ws/v1/realtime?token=abc',
+        'qwen3.5-omni-plus-realtime',
+      ),
+    ).toThrow('must not contain credentials');
+  });
+
+  it('ignores a late final transcript for an already-consumed input', async () => {
+    const socket = new FakeSocket();
+    const callbacks = {
+      onError: vi.fn(),
+      onIgnoredEvent: vi.fn(),
+      onInputTranscriptDone: vi.fn(),
+    } satisfies QwenRealtimeCallbacks;
+    await connect(socket, callbacks);
+
+    // The turn completes before the ASR stream delivers its final.
+    socket.message({
+      type: 'input_audio_buffer.committed',
+      event_id: 'late-committed',
+      item_id: 'input-late',
+    });
+    responseCreated(socket, 'response-late');
+    responseDone(socket, 'response-late');
+    socket.message({
+      type: 'conversation.item.input_audio_transcription.completed',
+      event_id: 'late-final',
+      item_id: 'input-late',
+      transcript: '迟到的转写',
+    });
+
+    expect(callbacks.onError).not.toHaveBeenCalled();
+    expect(callbacks.onInputTranscriptDone).not.toHaveBeenCalled();
+    expect(callbacks.onIgnoredEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'conversation.item.input_audio_transcription.completed',
+        reason: 'stale_input',
+      }),
+    );
+    // The session survives and the next turn proceeds normally.
+    expect(socket.readyState).toBe(socket.OPEN);
+    commitFinalInput(socket, 'input-next', '下一个问题');
+    expect(callbacks.onInputTranscriptDone).toHaveBeenCalledWith(
+      expect.objectContaining({ itemId: 'input-next', text: '下一个问题' }),
+    );
+    expect(callbacks.onError).not.toHaveBeenCalled();
+  });
+
+  it('still fails a final transcript for a never-committed input', async () => {
+    const socket = new FakeSocket();
+    const callbacks = { onError: vi.fn() } satisfies QwenRealtimeCallbacks;
+    const session = await connect(socket, callbacks);
+
+    socket.message({
+      type: 'conversation.item.input_audio_transcription.completed',
+      event_id: 'orphan-final',
+      item_id: 'input-unknown',
+      transcript: '幽灵转写',
+    });
+
+    expect(callbacks.onError).toHaveBeenCalledWith(
+      expect.objectContaining({ code: 'unattributed_final_transcript' }),
+    );
+    await expect(session.closed).resolves.toMatchObject({ reason: 'error' });
+  });
+
+  it('re-captures repeated user input once handed-off entries are trimmed', async () => {
+    const socket = new FakeSocket();
+    const callbacks = { onFunctionCall: vi.fn() };
+    const session = await connect(socket, callbacks);
+
+    commitFinalInput(socket, 'input-repeat-1', '重复的任务');
+    responseCreated(socket, 'response-repeat-1');
+    functionCall(
+      socket,
+      'response-repeat-1',
+      'call-repeat-1',
+      'handoff',
+      JSON.stringify({ task: '重复的任务' }),
+    );
+    expect(callbacks.onFunctionCall).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        activeTranscript: [{ role: 'user', text: '重复的任务' }],
+      }),
+    );
+    responseDone(socket, 'response-repeat-1');
+    expect(
+      session.submitFunctionOutput(
+        { callEpoch: 7, callId: 'call-repeat-1' },
+        '完成',
+      ),
+    ).toBe(true);
+
+    // Second turn: the model calls the tool before any ASR events land, and
+    // the task text repeats the previous (already handed-off) user entry.
+    // The consumed entries were trimmed, so the repeat is captured again
+    // instead of being deduplicated against dead history.
+    socket.message({
+      type: 'input_audio_buffer.committed',
+      event_id: 'repeat-2-committed',
+      item_id: 'input-repeat-2',
+    });
+    responseCreated(socket, 'response-repeat-2');
+    functionCall(
+      socket,
+      'response-repeat-2',
+      'call-repeat-2',
+      'handoff',
+      JSON.stringify({ task: '重复的任务' }),
+    );
+    expect(callbacks.onFunctionCall).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        activeTranscript: [{ role: 'user', text: '重复的任务' }],
+      }),
+    );
+  });
+
+  it('caps the retained handoff transcript instead of growing unboundedly', async () => {
+    const socket = new FakeSocket();
+    const callbacks = { onFunctionCall: vi.fn() };
+    await connect(socket, callbacks);
+
+    // 300 direct turns append 600 transcript entries with no handoff to
+    // consume them.
+    for (let i = 0; i < 300; i += 1) {
+      commitFinalInput(socket, `input-${i}`, `问题 ${i}`);
+      responseCreated(socket, `response-${i}`);
+      socket.message({
+        type: 'response.audio_transcript.done',
+        event_id: `response-${i}-transcript`,
+        response_id: `response-${i}`,
+        transcript: `回答 ${i}`,
+      });
+      responseDone(socket, `response-${i}`);
+    }
+
+    commitFinalInput(socket, 'input-handoff', '最后的任务');
+    responseCreated(socket, 'response-handoff');
+    functionCall(
+      socket,
+      'response-handoff',
+      'call-handoff',
+      'handoff',
+      JSON.stringify({ task: '最后的任务' }),
+    );
+
+    const event = callbacks.onFunctionCall.mock.calls[0]![0] as {
+      activeTranscript: ReadonlyArray<{ role: string; text: string }>;
+    };
+    // 601 entries were appended; only the newest 512 are retained.
+    expect(event.activeTranscript.length).toBe(512);
+    expect(event.activeTranscript.at(-1)).toEqual({
+      role: 'user',
+      text: '最后的任务',
+    });
+  });
+
   it('distinguishes client and remote closure', async () => {
     const clientSocket = new FakeSocket();
     const client = await connect(clientSocket);
