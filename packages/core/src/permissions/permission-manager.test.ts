@@ -819,6 +819,17 @@ describe('splitCompoundCommandSegments', () => {
       splitCompoundCommandSegments("python - <<'PY'\nprint('ok')\nPY"),
     ).toEqual([{ command: "python - <<'PY'", terminator: '' }]);
   });
+
+  it('keeps the body visible when the receiver carries arguments', async () => {
+    // python -c runs its argument and may route stdin anywhere, so the body
+    // is not provably inert data and must stay in rule evaluation.
+    const segments = splitCompoundCommandSegments(
+      "python -c 'import sys' <<PY\nprint('body')\nPY",
+    );
+    expect(segments.some((s) => s.command.includes("print('body')"))).toBe(
+      true,
+    );
+  });
 });
 
 // Witnesses from the round-5 bot review of #9417: every one of these shipped
@@ -979,11 +990,37 @@ describe('state-tracking heredoc projection', () => {
     expect(projectHeredocBodiesForStateTracking(odd)).toBe(odd);
   });
 
-  it('keeps non-identifier delimiters visible', () => {
+  it('fails closed on non-identifier delimiters', () => {
     // <<123 is legal shell but beyond what this scanner can prove, so the
-    // body stays visible rather than being stripped.
+    // whole command is unmodelled and the guard denies rather than tracking a
+    // body it cannot bound.
     const command = 'cat <<123\nbody\n123';
-    expect(projectHeredocBodiesForStateTracking(command)).toBe(command);
+    expect(projectHeredocBodiesForStateTracking(command)).toBeNull();
+  });
+
+  it('fails closed on a substitution in the opener', () => {
+    // cat << $(X) is a heredoc whose delimiter is computed at runtime; the
+    // body cannot be bounded, so the command is unmodelled.
+    expect(
+      projectHeredocBodiesForStateTracking('cat << $(X)\nbody\nX'),
+    ).toBeNull();
+  });
+
+  it('fails closed when the receiver is redefined in the command', () => {
+    // A POSIX function definition shadows the receiver, so the body's fate is
+    // unprovable even though the opener itself looks ordinary.
+    const command = 'cat() { :; }\ncat <<EOF\nbody\nEOF';
+    expect(projectHeredocBodiesForStateTracking(command)).toBeNull();
+  });
+
+  it('reads a backslash inside single quotes as literal on the opener line', () => {
+    // In bash a backslash inside single quotes is literal, so 'a\\' is a
+    // CLOSED string: the heredoc opener after it is real and the body strips
+    // as data. The two quote trackers used to disagree on this and drop it.
+    const command = "echo 'a\\' && cat <<EOF\nbody\nEOF";
+    expect(projectHeredocBodiesForStateTracking(command)).toBe(
+      "echo 'a\\' && cat <<EOF",
+    );
   });
 });
 

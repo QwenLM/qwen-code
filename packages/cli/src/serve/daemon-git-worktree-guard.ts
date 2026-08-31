@@ -292,6 +292,8 @@ const CMD_REWRITE_SYNTAX_DENIAL =
   'Daemon shell guard denied a shell command containing cmd.exe rewrite syntax it cannot evaluate before execution.';
 const WINDOWS_UNMODELLED_SYNTAX_DENIAL =
   'Daemon shell guard denied a shell command containing Windows shell syntax it cannot evaluate before execution.';
+const UNMODELLED_HEREDOC_DENIAL =
+  'Daemon shell guard denied a shell command whose heredoc structure it cannot evaluate before execution.';
 const UNRESOLVED_TARGET_DENIAL_PREFIX =
   'Daemon shell guard denied a mutating Git command with an unresolvable repository location: ';
 const OUTSIDE_TARGET_DENIAL_PREFIX =
@@ -2500,6 +2502,12 @@ async function evaluateCommandWithCwd(
   const strippedCommand = windowsNative
     ? command
     : projectHeredocBodiesForStateTracking(command);
+  if (strippedCommand === null) {
+    return {
+      denial: { allowed: false, reason: UNMODELLED_HEREDOC_DENIAL },
+      cwdAfter: trackedCwd,
+    };
+  }
   if (containsCmdRewriteSyntax(strippedCommand, platformNow, shellNow)) {
     return {
       denial: { allowed: false, reason: CMD_REWRITE_SYNTAX_DENIAL },

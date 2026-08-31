@@ -820,7 +820,11 @@ function parseSimpleHeredocLine(
     const ch = line[i]!;
     if (quote !== undefined) {
       if (ch === quote) quote = undefined;
-      if (ch === '\\' || ch === '$' || ch === '`') return null;
+      // `\` is literal inside single quotes (bash agrees, and so does
+      // quoteStateAtLineEnd); elsewhere it can hide structure we cannot
+      // model, so the body stays visible.
+      if (ch === '\\' && quote === '"') return null;
+      if (ch === '$' || ch === '`') return null;
       continue;
     }
     if (ch === "'" || ch === '"') {
@@ -878,11 +882,25 @@ function parseSimpleHeredocLine(
     return null;
   }
   if (words.some((word) => typeof word !== 'string')) return null;
-  const receiver = words.find(
+  const commandWords = words.filter(
     (word) =>
       typeof word === 'string' && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(word),
   );
+  const receiver = commandWords[0];
   if (typeof receiver !== 'string') return null;
+  // An interpreter with an inline program (python -c, node -e, a script
+  // path) can route stdin anywhere that program wants, so the body's fate is
+  // unprovable. The bare `-` idiom (read the script from stdin) is the same
+  // execution as no argument at all, and a non-interpreter receiver is left
+  // to the caller's usual receiver rules untouched.
+  const receiverIsInterpreter = /^(python\d*(?:\.\d+)*|node|ruby|perl)$/.test(
+    receiver,
+  );
+  const isStdinScriptIdiom =
+    commandWords.length === 2 && commandWords[1] === '-';
+  if (receiverIsInterpreter && commandWords.length > 1 && !isStdinScriptIdiom) {
+    return null;
+  }
   // A path-qualified receiver (./cat, /usr/bin/cat) bypasses name-based trust:
   // an attacker-placed binary at that path receives the body, so only a bare
   // name from the allowlist may strip.
@@ -1044,6 +1062,8 @@ interface StateTrackingHeredocScan {
   unsafe: boolean;
   inSingle: boolean;
   inDouble: boolean;
+  /** A `<<` was read as a heredoc opener but its delimiter is unprovable. */
+  unprovableHeredoc?: boolean;
 }
 
 function findStateTrackingHeredocDelimiters(
@@ -1117,7 +1137,13 @@ function findStateTrackingHeredocDelimiters(
       // Only identifier-shaped delimiters are provably a plain heredoc; a
       // digit-leading or punctuated word could be arithmetic or worse, so the
       // body stays visible.
-      return { delimiters, unsafe: true, inSingle, inDouble };
+      return {
+        delimiters,
+        unsafe: true,
+        inSingle,
+        inDouble,
+        unprovableHeredoc: true,
+      };
     }
     let wordEnd = wordStart;
     while (wordEnd < line.length) {
@@ -1133,13 +1159,20 @@ function findStateTrackingHeredocDelimiters(
         unsafe: true,
         inSingle,
         inDouble,
+        unprovableHeredoc: true,
       };
     }
     const delimiter = line.slice(wordStart, wordEnd);
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(delimiter)) {
       // Same bar as the permission arm: only identifier-shaped delimiters are
       // provably plain heredocs, anything else keeps its lines visible.
-      return { delimiters, unsafe: true, inSingle, inDouble };
+      return {
+        delimiters,
+        unsafe: true,
+        inSingle,
+        inDouble,
+        unprovableHeredoc: true,
+      };
     }
     if (wordEnd > wordStart) {
       delimiters.push({
@@ -1167,15 +1200,18 @@ function findStateTrackingHeredocDelimiters(
   };
 }
 
-function projectCompoundHeredocsForStateTracking(command: string): string {
+function projectCompoundHeredocsForStateTracking(
+  command: string,
+): string | null {
   const kept: string[] = [];
   const pending: HeredocDelimiter[] = [];
   let quoteState = { inSingle: false, inDouble: false };
 
-  if (UNPROVABLE_RESOLUTION.test(command)) {
-    // Resolution-changing tokens or a PATH assignment mean the receiver
-    // identity is unprovable, so every line stays visible to the guard.
-    return command;
+  // Resolution-changing tokens or a PATH assignment make the receiver
+  // identity unprovable, but that only matters when a heredoc is actually at
+  // stake; a command with no `<<` anywhere has no body to worry about.
+  if (command.includes('<<') && UNPROVABLE_RESOLUTION.test(command)) {
+    return null;
   }
 
   for (const line of command.split('\n')) {
@@ -1192,6 +1228,14 @@ function projectCompoundHeredocsForStateTracking(command: string): string {
     kept.push(line);
     const scan = findStateTrackingHeredocDelimiters(comparableLine, quoteState);
     quoteState = { inSingle: scan.inSingle, inDouble: scan.inDouble };
+    // A heredoc opener whose delimiter cannot be proven leaves body lines
+    // indistinguishable from executed code; feeding them to the state
+    // trackers would let a body `cd` launder the tracked cwd, so the whole
+    // command is unmodelled. Generic unsafe lines (arithmetic, substitutions)
+    // stay visible as before.
+    if (scan.unprovableHeredoc) {
+      return null;
+    }
     if (!scan.unsafe) pending.push(...scan.delimiters);
   }
 
@@ -1203,11 +1247,20 @@ function projectCompoundHeredocsForStateTracking(command: string): string {
  * it. The strict permission projection rejects compound openers, but these
  * consumers accepted them before the shared parser was introduced.
  */
-export function projectHeredocBodiesForStateTracking(command: string): string {
+export function projectHeredocBodiesForStateTracking(
+  command: string,
+): string | null {
   const projected = projectHeredocBodies(command, true);
-  return projected.ambiguous
-    ? projectCompoundHeredocsForStateTracking(command)
-    : projected.command;
+  if (projected.ambiguous) {
+    return projectCompoundHeredocsForStateTracking(command);
+  }
+  // Placeholders only appear when the receiver is redefined in the command,
+  // which makes the body's fate unprovable; for state tracking that is
+  // fail-closed, never a guess at which lines are data.
+  if (projected.bodyPlaceholders.length > 0) {
+    return null;
+  }
+  return projected.command;
 }
 
 /**
@@ -1404,7 +1457,9 @@ export function splitCompoundCommandSegmentsForStateTracking(
   command: string,
 ): CompoundCommandSegment[] {
   const projected = projectHeredocBodiesForStateTracking(command);
-  return splitCompoundCommandSegmentsRaw(projected);
+  // A null projection is an unmodelled heredoc structure: hand evaluation the
+  // whole command instead of trusting a guessed split.
+  return splitCompoundCommandSegmentsRaw(projected ?? command);
 }
 
 /**
