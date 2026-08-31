@@ -53,6 +53,8 @@ import type {
   ChatRecordingService,
   TurnResultRecordPayload,
   WorkflowApproval,
+  WorkflowSnapshot,
+  WorkflowTask,
   BranchPoint,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -108,6 +110,9 @@ import {
   MessageDisplayDispatcher,
   getPlanModeSystemReminder,
   getArenaSystemReminder,
+  getOutputStyleTurnReminder,
+  resolveMainSessionOutputStyle,
+  wrapSystemReminder,
   getStartupContextLength,
   isSystemReminderContent,
   buildSessionRecoveryPlanFromApiHistory,
@@ -202,6 +207,13 @@ import {
   toolResultPartDiagnosticValues,
   getInvocationContext,
   runWithInvocationContext,
+  getWorkflowTaskMutationKey,
+  isTerminalWorkflowStatus,
+  tryWithWorkflowTaskMutation,
+  MAX_RETAINED_SNAPSHOTS,
+  toSnapshot,
+  deleteWorkflowSnapshot,
+  listWorkflowSnapshots,
   truncateNotificationLabel,
   buildBackgroundEntryLabel,
   collectSessionTurnState,
@@ -382,6 +394,7 @@ const permissionRequestTails = new WeakMap<
   AgentSideConnection,
   Promise<void>
 >();
+const MAX_RETAINED_SESSION_ROUTE_COUNTS = 8;
 const USER_CANCEL_ABORT_REASON = 'qwen:user-cancel';
 const NEW_PROMPT_ABORT_REASON = 'qwen:new-prompt';
 const SESSION_DISPOSE_ABORT_REASON = 'qwen:session-dispose';
@@ -483,7 +496,11 @@ function maskApiKeyForDisplay(apiKey: string | undefined): string {
 }
 
 type AutoCompressionSendResult =
-  | { responseStream: AsyncGenerator<StreamEvent>; stopReason?: never }
+  | {
+      responseStream: AsyncGenerator<StreamEvent>;
+      requestRouteKey: string;
+      stopReason?: never;
+    }
   | { responseStream: null; stopReason: PromptResponse['stopReason'] };
 
 function getAbortAwareEndTurnStopReason(
@@ -523,6 +540,7 @@ type TodoStopGuardBackgroundBaseline = {
   agents: Set<string>;
   shells: Set<string>;
   monitors: Set<string>;
+  workflows: Set<WorkflowTask>;
   wakeups: Set<string>;
 };
 
@@ -1384,7 +1402,7 @@ export interface BackgroundNotificationQueueItem {
   modelText: string;
   taskId: string;
   status: string;
-  kind: 'agent' | 'monitor' | 'shell';
+  kind: 'agent' | 'monitor' | 'shell' | 'workflow';
   toolUseId?: string;
   todoWorkChainId?: string;
   /** Structured fields for i18n rendering on the frontend. */
@@ -1768,12 +1786,10 @@ export async function buildAvailableCommandsSnapshot(
     settings,
     executionPolicy,
   );
-  const disabledSkillNames = config.getDisabledSkillNames();
   const inactiveSkillRefs = inactiveExtensionSkillRefs(config);
 
   const visibleSlashCommands = slashCommands.filter((cmd) => {
     if (cmd.kind !== CommandKind.SKILL || !cmd.skillDetail) return true;
-    const skillName = cmd.skillDetail.name.toLowerCase();
     const isInactiveExtensionCommand =
       cmd.skillDetail.level === 'extension' &&
       isInactiveExtensionSkill(
@@ -1788,7 +1804,9 @@ export async function buildAvailableCommandsSnapshot(
         },
         inactiveSkillRefs,
       );
-    return !disabledSkillNames.has(skillName) && !isInactiveExtensionCommand;
+    return (
+      config.isSkillEnabled(cmd.skillDetail) && !isInactiveExtensionCommand
+    );
   });
 
   const availableCommands: AvailableCommand[] = visibleSlashCommands.map(
@@ -1832,7 +1850,7 @@ export async function buildAvailableCommandsSnapshot(
     if (skillManager) {
       const skills = (await skillManager.listSkills()).filter(
         (skill) =>
-          !disabledSkillNames.has(skill.name.toLowerCase()) &&
+          config.isSkillEnabled(skill) &&
           !isInactiveExtensionSkill(skill, inactiveSkillRefs),
       );
       availableSkills = skills.map((skill) => skill.name);
@@ -1939,6 +1957,14 @@ export class Session implements SessionContext {
   private cronDisabledByTokenLimit = false;
   private lastPromptTokenCount = 0;
   private lastPromptTokenCountChat: LlmChat | null = null;
+  // Private ACP fallback cache, bounded like LlmChat without exposing a
+  // cross-package route resolver just for this closeout.
+  private readonly lastPromptTokenCountsByRouteKey = new Map<string, number>();
+  // The model route that produced `lastPromptTokenCount` (Config
+  // .getModelRouteIdentity). ACP model switches keep the same LlmChat, so
+  // the chat-instance check alone never invalidates the count on a route
+  // change (#9529, follow-up to #9454/#9506).
+  private lastPromptTokenCountRouteKey: string | undefined = undefined;
   private midTurnDrainUnavailable = false;
   private midTurnDrainTimeoutStrikes = 0;
   // ACP can continue one logical conversation through prompt, cron, and
@@ -1968,13 +1994,14 @@ export class Session implements SessionContext {
   private notificationAbortController: AbortController | null = null;
   private notificationCompletion: Promise<void> | null = null;
   private currentAgentNotificationTaskId: string | null = null;
+  private currentWorkflowNotificationTaskId: string | null = null;
   private currentShellNotificationActive = false;
   private readonly persistedBackgroundNotificationTaskIds = new Set<string>();
   private readonly backgroundNotificationAcceptances = new Map<
     string,
     Promise<boolean>
   >();
-  private readonly activeAgentNotificationAcceptances = new Set<string>();
+  private readonly activeNotificationAcceptances = new Set<string>();
 
   private readonly goalQueue: AcpGoalTurn[] = [];
   private goalProcessing = false;
@@ -2002,6 +2029,36 @@ export class Session implements SessionContext {
   /** The exact status-change callback this Session installed, so dispose can
    *  retract its own and nobody else's. */
   #statusChangeCallback: (() => void) | undefined;
+  #workflowStatusChangeCallback: ((entry?: WorkflowTask) => void) | undefined;
+  private workflowHistory: WorkflowSnapshot[];
+  /**
+   * R7-5: runIds whose snapshot write this session has observed. Latches
+   * `#rememberWorkflowHistory` off so a post-persistence status emission
+   * cannot resurrect a sibling-deleted run. See that method.
+   */
+  private readonly persistedWorkflowRunIds = new Set<string>();
+  /**
+   * R7-4: every runId the last `refreshWorkflowHistory` merged, BEFORE the
+   * MAX_RETAINED_SNAPSHOTS cap. `workflowHistory` is the display window;
+   * this is what deletion tests membership against.
+   */
+  private mergedWorkflowRunIds = new Set<string>();
+  private readonly unpersistedWorkflowHistory = new Map<
+    string,
+    WorkflowSnapshot
+  >();
+  /**
+   * Deletion order, so a refresh can tell which runs were deleted AFTER
+   * its disk read began. `refreshWorkflowHistory` reads the directory
+   * and then merges without holding a claim, while deletion holds one —
+   * a delete that lands between the read and the merge would otherwise
+   * be overwritten by the stale listing and the run would reappear
+   * until the next refresh. Keyed by runId so a later re-run of the same
+   * id (a retry reuses it) is not suppressed: its sequence predates that
+   * refresh's mark.
+   */
+  private workflowDeletionSeq = 0;
+  private readonly workflowDeletionSeqByRunId = new Map<string, number>();
   #shellStatusChangeCallback: (() => void) | undefined;
   private readonly workflowApprovalAbortController = new AbortController();
   private activeTodoPlanRevision?: {
@@ -2074,8 +2131,19 @@ export class Session implements SessionContext {
      * a full snapshot; the Session itself keeps no reporting state.
      */
     private readonly onActiveWorkChanged?: () => void,
+    workflowHistory: readonly WorkflowSnapshot[] = [],
+    /**
+     * Reports whether another session in this process owns a live or
+     * still-settling registry entry for the run. Every session here shares
+     * one on-disk workflow store but keeps a private registry, so history
+     * deletion must consult all of them, not just this session's.
+     */
+    private readonly isWorkflowRunLiveInSiblingSession: (
+      runId: string,
+    ) => boolean = () => false,
   ) {
     this.sessionId = id;
+    this.workflowHistory = [...workflowHistory];
     this.requiresManagedConversationBinding =
       isReservedStandaloneSessionSourceType(
         this.config.getSessionSourceType?.(),
@@ -2929,6 +2997,7 @@ export class Session implements SessionContext {
     const agents = this.config.getBackgroundTaskRegistry?.()?.getAll?.() ?? [];
     const shells = this.config.getBackgroundShellRegistry?.()?.getAll?.() ?? [];
     const monitors = this.config.getMonitorRegistry?.()?.getAll?.() ?? [];
+    const workflows = this.config.getWorkflowRunRegistry?.()?.list?.() ?? [];
     const wakeups = this.config.isCronEnabled?.()
       ? (this.config.getCronScheduler?.()?.list?.() ?? []).filter(
           (job) => job.cronExpr === '@wakeup',
@@ -2954,6 +3023,7 @@ export class Session implements SessionContext {
           .filter((item) => item.kind === 'monitor')
           .map((item) => item.taskId),
       ]),
+      workflows: new Set(workflows),
       wakeups: new Set([
         ...wakeups.map((job) => job.id),
         ...this.cronQueue.flatMap((item) =>
@@ -3051,6 +3121,17 @@ export class Session implements SessionContext {
             task.id,
             task.ownerAgentId,
           ) && task.status === 'running',
+      )
+    ) {
+      return true;
+    }
+
+    const workflows = this.config.getWorkflowRunRegistry?.()?.list?.() ?? [];
+    if (
+      workflows.some(
+        (task) =>
+          !baseline.workflows.has(task) &&
+          !isTerminalWorkflowStatus(task.status),
       )
     ) {
       return true;
@@ -3371,6 +3452,192 @@ export class Session implements SessionContext {
     return this.config;
   }
 
+  getWorkflowHistory(): readonly WorkflowSnapshot[] {
+    return this.workflowHistory;
+  }
+
+  async refreshWorkflowHistory(): Promise<readonly WorkflowSnapshot[]> {
+    const deletionMark = this.workflowDeletionSeq;
+    const persisted = await listWorkflowSnapshots(this.config);
+    const byRunId = new Map(
+      persisted.map((snapshot) => [snapshot.runId, snapshot]),
+    );
+    for (const [runId, seq] of this.workflowDeletionSeqByRunId) {
+      if (seq > deletionMark) byRunId.delete(runId);
+    }
+    for (const [runId, snapshot] of this.unpersistedWorkflowHistory) {
+      const stored = byRunId.get(runId);
+      if (stored === undefined) {
+        // Never persisted (write pending or failed): keep the cached
+        // projection visible. Once persistence is observed the entry is
+        // retired via the snapshot-persisted callback, so absence here
+        // afterwards means the run was deleted and must stay gone.
+        byRunId.set(runId, snapshot);
+      } else {
+        // A persisted copy is the newer authoritative projection: the
+        // runId settled (possibly re-run in another session), so a stale
+        // cache must not shadow it.
+        this.unpersistedWorkflowHistory.delete(runId);
+      }
+    }
+    // R7-4: the returned/stored history is the capped display window, but
+    // deletion must reason about the whole merged set — keep it before the
+    // slice rather than making callers re-derive it.
+    this.mergedWorkflowRunIds = new Set(byRunId.keys());
+    this.workflowHistory = [...byRunId.values()]
+      .sort((a, b) => b.startTime - a.startTime)
+      .slice(0, MAX_RETAINED_SNAPSHOTS);
+    this.#pruneUnpersistedWorkflowHistory();
+    return this.workflowHistory;
+  }
+
+  async deleteWorkflowHistory(runId: string): Promise<boolean> {
+    const attempt = await tryWithWorkflowTaskMutation(
+      getWorkflowTaskMutationKey(this.config, runId),
+      () => this.#deleteWorkflowHistoryClaimed(runId),
+    );
+    return attempt.acquired ? attempt.value : false;
+  }
+
+  async #deleteWorkflowHistoryClaimed(runId: string): Promise<boolean> {
+    const registry = this.config.getWorkflowRunRegistry();
+    const isDeletable = (): boolean => {
+      if (this.isWorkflowRunLiveInSiblingSession(runId)) return false;
+      if (registry.isStarting?.(runId)) return false;
+      const current = registry.get(runId);
+      return !current || isTerminalWorkflowStatus(current.status);
+    };
+    if (!isDeletable()) return false;
+    const handle = registry.getHandle(runId);
+    if (handle) {
+      await handle.completion;
+      if (!isDeletable()) return false;
+    }
+    await this.refreshWorkflowHistory();
+    if (!isDeletable()) return false;
+    // R7-4: membership must be tested against everything the client can
+    // SEE, not against the capped window. `buildSessionTasksStatus`
+    // serializes every registry entry unconditionally, while
+    // `refreshWorkflowHistory` truncates to MAX_RETAINED_SNAPSHOTS by
+    // startTime — so a long run that settles after ~30 newer ones started
+    // stays listed via the registry but falls out of the window, and the
+    // capped check answered `{changed: false}` forever. It was terminal,
+    // handle-free and live in no sibling: nothing but the window kept it
+    // undeletable. `deleteWorkflowSnapshot` already tolerates an absent
+    // target, so widening the gate cannot delete something that is not
+    // there.
+    if (
+      !this.mergedWorkflowRunIds.has(runId) &&
+      registry.get(runId) === undefined &&
+      !this.unpersistedWorkflowHistory.has(runId)
+    ) {
+      return false;
+    }
+    // Retire the registry entry before touching the store. `removeTerminal`
+    // refuses a live or handle-held entry — the registry's own last word
+    // on whether the run is still active here — so `false` for an entry
+    // that exists means the run re-registered and must not be reported
+    // deleted; a persisted-only run has no entry to retire.
+    if (registry.get(runId) !== undefined && !registry.removeTerminal(runId)) {
+      return false;
+    }
+    if (!(await deleteWorkflowSnapshot(this.config, runId))) return false;
+    this.workflowDeletionSeqByRunId.set(runId, ++this.workflowDeletionSeq);
+    this.unpersistedWorkflowHistory.delete(runId);
+    this.mergedWorkflowRunIds.delete(runId);
+    this.persistedWorkflowRunIds.delete(runId);
+    this.workflowHistory = this.workflowHistory.filter(
+      (item) => item.runId !== runId,
+    );
+    this.#activeWorkChanged();
+    return true;
+  }
+
+  /**
+   * A sibling session deleted `runId` from the shared store. The
+   * deletion-sequence marker is per-Session — it records deletions THIS
+   * session issued — while the store and the delete entrance are
+   * process-wide, so without this a refresh of ours that began reading
+   * the directory before the sibling's delete landed would merge the
+   * stale listing and republish the run the sibling's client was just
+   * told was gone. Called under the sibling's task-mutation claim,
+   * symmetric to the registry `removeTerminal` sweep.
+   *
+   * The R7-5 persisted latch is deliberately kept: a late terminal
+   * emission for the deleted run must still not re-insert it.
+   */
+  noteExternalWorkflowDeletion(runId: string): void {
+    this.workflowDeletionSeqByRunId.set(runId, ++this.workflowDeletionSeq);
+    this.unpersistedWorkflowHistory.delete(runId);
+    this.mergedWorkflowRunIds.delete(runId);
+    const retained = this.workflowHistory.filter(
+      (item) => item.runId !== runId,
+    );
+    if (retained.length === this.workflowHistory.length) return;
+    this.workflowHistory = retained;
+    this.#activeWorkChanged();
+  }
+
+  #rememberWorkflowHistory(entry: WorkflowTask): void {
+    if (!isTerminalWorkflowStatus(entry.status)) {
+      // Back in an active state means this runId was registered afresh
+      // (a retry/resume reuses it), so its next settlement must be
+      // remembered again — release the R7-5 latch here rather than
+      // wiring a second registry callback for it.
+      this.persistedWorkflowRunIds.delete(entry.runId);
+      return;
+    }
+    // R7-5: retirement is a latch, not a one-shot. The registry's
+    // dispatch-drain callbacks (onAgentCompleted / onBudgetUpdated /
+    // onDispatchSettled) emit status changes on TERMINAL entries with no
+    // status gate, and in-flight dispatches keep draining across the
+    // snapshot write — so a terminal emission routinely lands AFTER
+    // `notifySnapshotPersisted` retired the cache entry. Without this
+    // guard each late emission re-inserted the run as "never persisted",
+    // and a sibling session's deletion was then undone by the next
+    // refresh: absent on disk but present in the stale cache reads as a
+    // pending write, so the deleted run was republished and stayed for
+    // the life of the session. Released at the top of this method when
+    // the runId comes back non-terminal (a retry/resume re-registers it)
+    // so a genuine re-run of the same runId is remembered again.
+    if (this.persistedWorkflowRunIds.has(entry.runId)) return;
+    const snapshot = toSnapshot(entry);
+    this.unpersistedWorkflowHistory.set(snapshot.runId, snapshot);
+    this.workflowHistory = [
+      snapshot,
+      ...this.workflowHistory.filter((item) => item.runId !== entry.runId),
+    ]
+      .sort((a, b) => b.startTime - a.startTime)
+      .slice(0, MAX_RETAINED_SNAPSHOTS);
+    this.#pruneUnpersistedWorkflowHistory();
+  }
+
+  #pruneUnpersistedWorkflowHistory(): void {
+    const retainedRunIds = new Set(
+      this.workflowHistory.map((item) => item.runId),
+    );
+    for (const runId of this.unpersistedWorkflowHistory.keys()) {
+      if (!retainedRunIds.has(runId)) {
+        this.unpersistedWorkflowHistory.delete(runId);
+      }
+    }
+  }
+
+  reloadModelProvidersFromDisk(): void {
+    if (
+      !this.settings.reloadScopesFromDiskAtomically([
+        SettingScope.User,
+        SettingScope.Workspace,
+      ])
+    ) {
+      throw new Error('Unable to reload model-provider settings from disk.');
+    }
+    this.config.reloadModelProvidersConfig(
+      this.settings.merged.modelProviders,
+      this.settings.merged.providerProtocol ?? {},
+    );
+  }
+
   installPendingManagedConversationBinding(
     expectation: BridgeConversationDirectoryExpectation,
     assertIdentity: () => Promise<void>,
@@ -3612,13 +3879,18 @@ export class Session implements SessionContext {
     }
     const notificationIds = new Set<string>();
     for (const item of this.notificationQueue) {
-      if (item.kind === 'agent') notificationIds.add(item.taskId);
+      if (item.kind === 'agent' || item.kind === 'workflow') {
+        notificationIds.add(item.taskId);
+      }
     }
-    for (const taskId of this.activeAgentNotificationAcceptances) {
+    for (const taskId of this.activeNotificationAcceptances) {
       notificationIds.add(taskId);
     }
     if (this.currentAgentNotificationTaskId !== null) {
       notificationIds.add(this.currentAgentNotificationTaskId);
+    }
+    if (this.currentWorkflowNotificationTaskId !== null) {
+      notificationIds.add(this.currentWorkflowNotificationTaskId);
     }
     for (const taskId of notificationIds) {
       holds.push({ category: 'notification', id: taskId });
@@ -3629,6 +3901,26 @@ export class Session implements SessionContext {
       this.currentShellNotificationActive;
     if (shellActive) {
       holds.push({ category: 'shell', id: 'background-shells' });
+    }
+    const workflowRegistry = this.config.getWorkflowRunRegistry();
+    // A reserved-but-unregistered run (script loading, journal replay)
+    // has no `list()` entry yet, but the registry's hasRunningEntries()
+    // and the delete/cancel liveness gates already count it as live. A
+    // daemon-initiated conditional close that read no hold here would
+    // dispose the session and abort the start under the client that just
+    // asked for it. The hold releases itself: registration takes over
+    // with the entry's running hold, and a failed or cancelled start
+    // drops the reservation via `releaseStart`.
+    for (const runId of workflowRegistry.listStartingRunIds?.() ?? []) {
+      holds.push({ category: 'workflow', id: runId });
+    }
+    for (const task of workflowRegistry.list()) {
+      // Mirror the registry's hasRunningEntries(): a paused run executes
+      // nothing and no backstop would ever release the hold, so it must
+      // not pin the session the way executing work does.
+      if (task.status === 'running' || task.status === 'pausing') {
+        holds.push({ category: 'workflow', id: task.runId });
+      }
     }
     return holds;
   }
@@ -3822,6 +4114,24 @@ export class Session implements SessionContext {
     if (this.#shellStatusChangeCallback) {
       shellRegistry.clearStatusChangeCallback(this.#shellStatusChangeCallback);
       this.#shellStatusChangeCallback = undefined;
+    }
+    // R7-10: mirror the agent registry's treatment above. Without this a
+    // workflow outlives its session's removal — close/kill/shutdown use
+    // force semantics and a background run owns a detached controller —
+    // and an orphan that nothing can see keeps writing its snapshot,
+    // recreating history a sibling session just deleted. Abort BEFORE the
+    // callbacks are cleared so the cancellation still reaches this
+    // session's own bookkeeping.
+    this.config.getWorkflowRunRegistry().abortAll();
+    this.config.getWorkflowRunRegistry().setCompletionCallback(undefined);
+    this.config
+      .getWorkflowRunRegistry()
+      .setSnapshotPersistedCallback(undefined);
+    if (this.#workflowStatusChangeCallback) {
+      this.config
+        .getWorkflowRunRegistry()
+        .clearStatusChangeCallback(this.#workflowStatusChangeCallback);
+      this.#workflowStatusChangeCallback = undefined;
     }
     this.config.getChatRecordingService()?.setTitleRecordedCallback(undefined);
     this.unsubscribeChatRecordingFailure?.();
@@ -5506,6 +5816,10 @@ export class Session implements SessionContext {
                   | ChannelDeliveryResponseBlock
                   | undefined;
                 let channelDeliveryCheckpoint = 0;
+                // The send result assigns this before any read; null-stream
+                // paths return before the record site, so a pre-send route
+                // computation here would only be discarded.
+                let requestRouteKey = '';
 
                 try {
                   // Set where the model request is actually issued, not at
@@ -5556,6 +5870,7 @@ export class Session implements SessionContext {
                   if (restorePostAnswerNoticesAttached) {
                     this.#clearPendingRestoreNotices();
                   }
+                  requestRouteKey = sendResult.requestRouteKey;
                   const responseStream = sendResult.responseStream;
                   nextMessage = null;
                   channelDeliveryResponseBlock =
@@ -5638,6 +5953,15 @@ export class Session implements SessionContext {
                           `main prompt ${resp.type}`,
                         );
                         functionCalls.length = 0;
+                      }
+                      if (resp.type === StreamEventType.COMPRESSED) {
+                        // In-send compression rewrote the shared history;
+                        // invalidate every retained route count (the
+                        // pre-send hook never sees this path).
+                        this.#recordCompressionTokenCount(
+                          resp.info,
+                          requestRouteKey,
+                        );
                       }
                     }
                   } catch (error) {
@@ -5731,7 +6055,7 @@ export class Session implements SessionContext {
                 );
 
                 if (usageMetadata) {
-                  this.#recordPromptTokenCount(usageMetadata);
+                  this.#recordPromptTokenCount(usageMetadata, requestRouteKey);
                   // Kick off rewrite in background (non-blocking, runs parallel to tools)
                   if (this.messageRewriter) {
                     this.messageRewriter.flushTurn(pendingSend.signal);
@@ -6315,6 +6639,10 @@ export class Session implements SessionContext {
       let channelDeliveryCheckpoint = 0;
       let providerSendChat: LlmChat | undefined;
       let userContentPushCountBeforeSend = 0;
+      // The send result assigns this before any read; null-stream paths
+      // return before the record site, so a pre-send route computation here
+      // would only be discarded.
+      let requestRouteKey = '';
 
       try {
         const sendResult = await this.#sendMessageStreamWithAutoCompression(
@@ -6608,6 +6936,7 @@ export class Session implements SessionContext {
           };
         }
 
+        requestRouteKey = sendResult.requestRouteKey;
         const responseStream = sendResult.responseStream;
         nextMessage = null;
         channelDeliveryResponseBlock = beginChannelDeliveryResponseBlock(
@@ -6704,6 +7033,12 @@ export class Session implements SessionContext {
             );
             functionCalls.length = 0;
           }
+          if (response.type === StreamEventType.COMPRESSED) {
+            // In-send compression rewrote the shared history; invalidate
+            // every retained route count (the pre-send hook never sees
+            // this path).
+            this.#recordCompressionTokenCount(response.info, requestRouteKey);
+          }
         }
       } catch (error) {
         streamFailed = true;
@@ -6778,7 +7113,7 @@ export class Session implements SessionContext {
       );
 
       if (usageMetadata) {
-        this.#recordPromptTokenCount(usageMetadata);
+        this.#recordPromptTokenCount(usageMetadata, requestRouteKey);
         const durationMs = Date.now() - streamStartTime;
         await this.messageEmitter.emitUsageMetadata(
           usageMetadata,
@@ -7185,7 +7520,6 @@ export class Session implements SessionContext {
           abortSignal,
         );
         compressionInfo = compressed;
-        this.#recordCompressionTokenCount(compressed);
         compressionFailed = isCompressionFailureStatus(
           compressed.compressionStatus,
         );
@@ -7238,18 +7572,38 @@ export class Session implements SessionContext {
       return { responseStream: null, stopReason: 'cancelled' };
     }
 
-    if (!compressionInfo) {
-      this.#syncPromptTokenCountWithCurrentChat();
+    const model =
+      options.getModelOverride?.() ??
+      options.modelOverride ??
+      this.config.getModel();
+    const requestRouteKey = await this.#requestRouteKeyForModel(model);
+    if (abortSignal.aborted) {
+      debugLogger.debug(
+        `Send aborted after request route key resolution for prompt ${promptId}`,
+      );
+      return { responseStream: null, stopReason: 'cancelled' };
+    }
+    // Recorded with the resolved request route key: a COMPRESSED result
+    // must invalidate every retained route count, not just the active
+    // route's (see #invalidateRouteTokenCountsForCompression).
+    if (compressionInfo) {
+      this.#recordCompressionTokenCount(compressionInfo, requestRouteKey);
+    } else {
+      this.#syncPromptTokenCountWithCurrentChat(requestRouteKey);
     }
 
     const sessionTokenLimit = this.config.getSessionTokenLimit();
     if (sessionTokenLimit > 0) {
-      const lastPromptTokenCount =
-        this.#getPostCompressionTokenCount(compressionInfo);
+      const lastPromptTokenCount = this.#getPostCompressionTokenCount(
+        compressionInfo,
+        requestRouteKey,
+      );
       if (lastPromptTokenCount > sessionTokenLimit) {
         debugLogger.warn(
           `Session token limit exceeded for prompt ${promptId}: ` +
-            `${lastPromptTokenCount} > ${sessionTokenLimit}. Send dropped.`,
+            `${lastPromptTokenCount} > ${sessionTokenLimit}. ` +
+            `requestRoute=${requestRouteKey}, activeModel=${this.config.getModel()}. ` +
+            'Send dropped.',
         );
         await this.#emitAgentDiagnosticMessageSafely(
           `Session token limit exceeded: ${lastPromptTokenCount} tokens > ${sessionTokenLimit} limit. ` +
@@ -7300,10 +7654,6 @@ export class Session implements SessionContext {
     }
 
     const chat = this.#getCurrentChat();
-    const model =
-      options.getModelOverride?.() ??
-      options.modelOverride ??
-      this.config.getModel();
     const request = {
       message,
       config: {
@@ -7314,7 +7664,7 @@ export class Session implements SessionContext {
     const responseStream = goalPermit
       ? await chat.sendMessageStream(model, request, promptId, goalPermit)
       : await chat.sendMessageStream(model, request, promptId);
-    return { responseStream };
+    return { responseStream, requestRouteKey };
   }
 
   #clearPendingRestoreNotices(): void {
@@ -7514,31 +7864,75 @@ export class Session implements SessionContext {
     };
   }
 
-  #recordCompressionTokenCount(info: ChatCompressionInfo): void {
-    this.#syncPromptTokenCountWithCurrentChat();
+  #recordCompressionTokenCount(
+    info: ChatCompressionInfo,
+    requestRouteKey: string,
+  ): void {
+    if (info.compressionStatus === CompressionStatus.COMPRESSED) {
+      this.#invalidateRouteTokenCountsForCompression(info, requestRouteKey);
+      return;
+    }
+    this.#syncPromptTokenCountWithCurrentChat(requestRouteKey);
     const tokenCount = this.#extractCompressionTokenCount(info);
     if (tokenCount !== null && tokenCount > 0) {
-      this.lastPromptTokenCount = tokenCount;
+      this.#setLastPromptTokenCount(requestRouteKey, tokenCount);
     }
+  }
+
+  /**
+   * Compression rewrote the shared history, so EVERY retained route-keyed
+   * count is stale — not just the request route's. Drop them all and
+   * re-record the fresh post-compression count under the request route,
+   * retaining it under the active route too when the two differ (the
+   * compressed history is shared, so the count anchors both routes' next
+   * gate reads). Mirrors LlmChat clearing its keyed counts in the
+   * COMPRESSED branch of tryCompress; without this, in-send compressions
+   * (LlmChat.sendMessageStream's hard-tier rescue and reactive-overflow
+   * paths, surfaced as StreamEventType.COMPRESSED) would leave this cache
+   * holding pre-compression sizes and the gate would drop a returning
+   * route's send that fits the compressed history (#9529).
+   */
+  #invalidateRouteTokenCountsForCompression(
+    info: ChatCompressionInfo,
+    requestRouteKey: string,
+  ): void {
+    this.lastPromptTokenCountsByRouteKey.clear();
+    const tokenCount = this.#extractCompressionTokenCount(info);
+    if (tokenCount !== null && tokenCount > 0) {
+      this.#setLastPromptTokenCount(requestRouteKey, tokenCount);
+      const activeRouteKey = this.#currentRouteKey();
+      if (activeRouteKey !== requestRouteKey) {
+        this.lastPromptTokenCountsByRouteKey.set(activeRouteKey, tokenCount);
+      }
+    } else {
+      this.lastPromptTokenCount = 0;
+      this.lastPromptTokenCountRouteKey = requestRouteKey;
+    }
+    this.lastPromptTokenCountChat = this.#getCurrentChat();
   }
 
   #recordPromptTokenCount(
     usageMetadata: GenerateContentResponseUsageMetadata,
+    routeKey = this.#currentRouteKey(),
   ): void {
-    this.#syncPromptTokenCountWithCurrentChat();
+    this.#syncPromptTokenCountWithCurrentChat(routeKey);
     const tokenCount =
       usageMetadata.promptTokenCount ?? usageMetadata.totalTokenCount;
     if (tokenCount !== undefined && tokenCount > 0) {
-      this.lastPromptTokenCount = tokenCount;
+      this.#setLastPromptTokenCount(routeKey, tokenCount);
     }
   }
 
-  #getPostCompressionTokenCount(info: ChatCompressionInfo | null): number {
+  #getPostCompressionTokenCount(
+    info: ChatCompressionInfo | null,
+    routeKey = this.#currentRouteKey(),
+  ): number {
     const tokenCount = this.#extractCompressionTokenCount(info);
     if (tokenCount !== null) {
       return tokenCount;
     }
 
+    this.#syncPromptTokenCountWithCurrentChat(routeKey);
     return this.lastPromptTokenCount;
   }
 
@@ -7558,15 +7952,71 @@ export class Session implements SessionContext {
     return tokenCount;
   }
 
-  #syncPromptTokenCountWithCurrentChat(): void {
-    const chat = this.#getCurrentChat();
+  #currentRouteKey(): string {
+    // Optional chaining keeps partial Config test mocks from throwing; a
+    // missing identity degrades to one stable key, i.e. no route-change
+    // invalidation (mirrors LlmChat.currentRouteKey, #9454).
+    return this.config.getModelRouteIdentity?.() ?? '';
+  }
+
+  async #requestRouteKeyForModel(model: string): Promise<string> {
+    if (!this.config.getModelRouteIdentity) {
+      return '';
+    }
+    if (!model.endsWith('\0')) {
+      return this.config.getModelRouteIdentity(model);
+    }
+    const runtimeView = await this.config
+      .getBaseLlmClient()
+      .resolveForModel(model.slice(0, -1), { failClosed: true });
+    return this.config.getModelRouteIdentity(
+      runtimeView.model,
+      runtimeView.contentGeneratorConfig,
+    );
+  }
+
+  #setLastPromptTokenCount(routeKey: string, tokenCount: number): void {
+    this.lastPromptTokenCount = tokenCount;
+    this.lastPromptTokenCountRouteKey = routeKey;
     if (
-      this.lastPromptTokenCountChat &&
-      this.lastPromptTokenCountChat !== chat
+      !this.lastPromptTokenCountsByRouteKey.has(routeKey) &&
+      this.lastPromptTokenCountsByRouteKey.size >=
+        MAX_RETAINED_SESSION_ROUTE_COUNTS
     ) {
+      const oldestKey = this.lastPromptTokenCountsByRouteKey
+        .keys()
+        .next().value;
+      if (oldestKey !== undefined) {
+        this.lastPromptTokenCountsByRouteKey.delete(oldestKey);
+      }
+    }
+    this.lastPromptTokenCountsByRouteKey.set(routeKey, tokenCount);
+  }
+
+  #syncPromptTokenCountWithCurrentChat(
+    routeKey = this.#currentRouteKey(),
+  ): void {
+    const chat = this.#getCurrentChat();
+    const chatChanged =
+      this.lastPromptTokenCountChat && this.lastPromptTokenCountChat !== chat;
+    if (chatChanged) {
+      this.lastPromptTokenCountsByRouteKey.clear();
       this.lastPromptTokenCount = 0;
+    } else if (this.lastPromptTokenCountRouteKey !== routeKey) {
+      if (
+        this.lastPromptTokenCountRouteKey !== undefined &&
+        this.lastPromptTokenCount > 0
+      ) {
+        this.lastPromptTokenCountsByRouteKey.set(
+          this.lastPromptTokenCountRouteKey,
+          this.lastPromptTokenCount,
+        );
+      }
+      this.lastPromptTokenCount =
+        this.lastPromptTokenCountsByRouteKey.get(routeKey) ?? 0;
     }
     this.lastPromptTokenCountChat = chat;
+    this.lastPromptTokenCountRouteKey = routeKey;
   }
 
   #isAbortError(error: unknown): boolean {
@@ -8456,6 +8906,7 @@ export class Session implements SessionContext {
                     ?.recordCronPrompt([{ text: modelText }], echoText);
                 }
                 if (!responseStream) return;
+                const requestRouteKey = sendResult.requestRouteKey;
                 const channelDeliveryResponseBlock:
                   | ChannelDeliveryResponseBlock
                   | undefined =
@@ -8547,6 +8998,15 @@ export class Session implements SessionContext {
                       );
                       functionCalls.length = 0;
                     }
+                    if (resp.type === StreamEventType.COMPRESSED) {
+                      // In-send compression rewrote the shared history;
+                      // invalidate every retained route count (the
+                      // pre-send hook never sees this path).
+                      this.#recordCompressionTokenCount(
+                        resp.info,
+                        requestRouteKey,
+                      );
+                    }
                   }
                 } catch (error) {
                   streamFailed = true;
@@ -8572,7 +9032,7 @@ export class Session implements SessionContext {
                 );
 
                 if (usageMetadata) {
-                  this.#recordPromptTokenCount(usageMetadata);
+                  this.#recordPromptTokenCount(usageMetadata, requestRouteKey);
                   if (this.messageRewriter) {
                     this.messageRewriter.flushTurn(ac.signal);
                   }
@@ -8789,6 +9249,36 @@ export class Session implements SessionContext {
       });
     });
 
+    const workflowRegistry = this.config.getWorkflowRunRegistry();
+    this.#workflowStatusChangeCallback = (entry) => {
+      this.#activeWorkChanged();
+      if (entry) this.#rememberWorkflowHistory(entry);
+    };
+    workflowRegistry.setStatusChangeCallback(
+      this.#workflowStatusChangeCallback,
+    );
+    workflowRegistry.setSnapshotPersistedCallback((runId) => {
+      // The run is safely on disk now; drop the unpersisted copy so a
+      // deletion by another session cannot resurrect it on refresh. The
+      // latch makes that retirement stick against the late terminal
+      // emissions draining dispatches still produce (R7-5).
+      this.persistedWorkflowRunIds.add(runId);
+      this.unpersistedWorkflowHistory.delete(runId);
+    });
+    workflowRegistry.setCompletionCallback((displayText, modelText, meta) => {
+      const entry = workflowRegistry.get(meta.runId);
+      this.#enqueueBackgroundNotification({
+        displayText,
+        modelText,
+        taskId: meta.runId,
+        status: meta.status,
+        kind: 'workflow',
+        continuesTodoStopGuardWorkChain:
+          !entry || !this.todoStopGuardBackgroundBaseline.workflows.has(entry),
+        todoWorkChainId: meta.todoWorkChainId,
+      });
+    });
+
     // Session title recorded (auto-generated after a turn, or an in-process
     // /rename) → notify attached clients. A title update is NOT an ACP
     // `SessionUpdate` variant (the external @agentclientprotocol/sdk union
@@ -8876,8 +9366,8 @@ export class Session implements SessionContext {
 
     const acceptance = this.#persistDaemonBackgroundNotification(item);
     this.backgroundNotificationAcceptances.set(item.taskId, acceptance);
-    if (item.kind === 'agent') {
-      this.activeAgentNotificationAcceptances.add(item.taskId);
+    if (item.kind === 'agent' || item.kind === 'workflow') {
+      this.activeNotificationAcceptances.add(item.taskId);
       this.#activeWorkChanged();
     }
     try {
@@ -8887,8 +9377,8 @@ export class Session implements SessionContext {
         this.backgroundNotificationAcceptances.get(item.taskId) === acceptance
       ) {
         this.backgroundNotificationAcceptances.delete(item.taskId);
-        if (item.kind === 'agent') {
-          this.activeAgentNotificationAcceptances.delete(item.taskId);
+        if (item.kind === 'agent' || item.kind === 'workflow') {
+          this.activeNotificationAcceptances.delete(item.taskId);
           this.#activeWorkChanged();
         }
       }
@@ -9012,6 +9502,8 @@ export class Session implements SessionContext {
         if (!item) break;
         this.currentAgentNotificationTaskId =
           item.kind === 'agent' ? item.taskId : null;
+        this.currentWorkflowNotificationTaskId =
+          item.kind === 'workflow' ? item.taskId : null;
         this.currentShellNotificationActive = item.kind === 'shell';
         this.#activeWorkChanged();
         try {
@@ -9030,6 +9522,7 @@ export class Session implements SessionContext {
           );
         } finally {
           this.currentAgentNotificationTaskId = null;
+          this.currentWorkflowNotificationTaskId = null;
           this.currentShellNotificationActive = false;
           this.#activeWorkChanged();
         }
@@ -9150,6 +9643,7 @@ export class Session implements SessionContext {
             }
 
             const responseStream = sendResult.responseStream;
+            const requestRouteKey = sendResult.requestRouteKey;
             nextMessage = null;
             const messageDisplay = this.#createMessageDisplayDispatcher(
               ac.signal,
@@ -9210,6 +9704,12 @@ export class Session implements SessionContext {
                   );
                   functionCalls.length = 0;
                 }
+                if (resp.type === StreamEventType.COMPRESSED) {
+                  // In-send compression rewrote the shared history;
+                  // invalidate every retained route count (the pre-send
+                  // hook never sees this path).
+                  this.#recordCompressionTokenCount(resp.info, requestRouteKey);
+                }
               }
             } catch (error) {
               streamFailed = true;
@@ -9241,7 +9741,7 @@ export class Session implements SessionContext {
             }
 
             if (usageMetadata) {
-              this.#recordPromptTokenCount(usageMetadata);
+              this.#recordPromptTokenCount(usageMetadata, requestRouteKey);
               const durationMs = Date.now() - streamStartTime;
               await this.messageEmitter.emitUsageMetadata(
                 usageMetadata,
@@ -10494,6 +10994,18 @@ export class Session implements SessionContext {
         reminders.push({ text: getArenaSystemReminder(configPath) });
       } catch {
         // Arena config not yet initialized — skip (matches client.ts).
+      }
+    }
+
+    // The output-style reminder, exactly as `LlmClient.sendMessageStream`
+    // sends it: the ACP prompt carries the style section, so it needs the
+    // same per-turn nudge or the style fades over a long session.
+    if (this.config.getOutputStyle?.()) {
+      const outputStyle = resolveMainSessionOutputStyle(this.config);
+      if (outputStyle) {
+        reminders.push({
+          text: wrapSystemReminder(getOutputStyleTurnReminder(outputStyle)),
+        });
       }
     }
 

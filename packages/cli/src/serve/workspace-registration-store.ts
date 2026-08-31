@@ -5,11 +5,14 @@
  */
 
 import { createHash } from 'node:crypto';
-import { constants } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
+import {
+  isUnverifiableIdentityError,
+  openNoFollow,
+} from '@qwen-code/qwen-code-core/noFollowOpen';
 import { MAX_WORKSPACE_PATH_LENGTH } from '@qwen-code/acp-bridge/workspacePaths';
 import { getGlobalQwenDirLite } from '../config/storage-paths-lite.js';
 import { MAX_REGISTERED_WORKSPACES } from './workspace-inputs.js';
@@ -355,13 +358,22 @@ export class WorkspaceRegistrationStore {
     }
     let file: Awaited<ReturnType<typeof fs.open>>;
     try {
-      file = await fs.open(
-        this.filePath,
-        (constants.O_RDONLY ?? 0) | (constants.O_NOFOLLOW ?? 0),
-      );
+      // Where O_NOFOLLOW does not exist (Windows) the helper compensates
+      // with an lstat/open/fstat identity check instead of collapsing to a
+      // plain open that follows symlinks (#8227).
+      file = await openNoFollow(this.filePath);
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
         return emptySnapshot(this.primaryWorkspace);
+      }
+      if (isUnverifiableIdentityError(err)) {
+        // inode-0 volume: the store could not be proven identical to the
+        // file the pre-open check saw. Fail closed, but do not claim it
+        // "must be a regular file" — the lstat gate above already proved
+        // it is one (#8227 follow-up).
+        throw new WorkspaceRegistrationStoreError(
+          'Workspace registration store identity could not be verified',
+        );
       }
       if ((err as NodeJS.ErrnoException).code === 'ELOOP') {
         throw new WorkspaceRegistrationStoreError(
