@@ -4996,7 +4996,7 @@ describe('issue #9455: compression request admission', () => {
       getLastPromptTokenCount: vi.fn().mockReturnValue(0),
       isLastPromptTokenCountEstimated: vi.fn().mockReturnValue(false),
       getLastOutputTokenCount: vi.fn().mockReturnValue(0),
-    } as unknown as GeminiChat;
+    } as unknown as LlmChat;
     const config = {
       getChatCompression: vi.fn(),
       getAutoCompactThreshold: vi.fn(),
