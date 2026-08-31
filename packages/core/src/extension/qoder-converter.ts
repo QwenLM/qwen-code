@@ -84,6 +84,10 @@ function explicitMcpFailureMessage(
       return `Invalid Qoder MCP configuration at ${safePath}: absolute path is outside the extension directory`;
     case 'confinement-threw':
       return `Invalid Qoder MCP configuration at ${safePath}: ${stripAnsiAndControl(cause instanceof Error ? cause.message : String(cause))}`;
+    default: {
+      const exhaustive: never = reason;
+      return exhaustive;
+    }
   }
 }
 

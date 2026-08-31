@@ -128,37 +128,50 @@ export class LspConfigLoader {
     configs: LspServerConfig[],
     trustSymlinks: boolean,
   ): void {
-    const data = readExtraJsonFile(extension.path, lspServers, trustSymlinks, (reason) => {
-      const lspConfigPath = path.isAbsolute(lspServers)
-        ? lspServers
-        : path.join(extension.path, lspServers);
-      const safePath = stripAnsiAndControl(lspConfigPath);
-      let detail: string;
-      switch (reason) {
-        case 'missing':
-          detail = 'not found';
-          break;
-        case 'parse-error':
-          detail = 'failed to parse';
-          break;
-        case 'directory':
-          detail = 'is a directory, not a regular file';
-          break;
-        case 'non-object-body':
-          detail = 'is not a JSON object';
-          break;
-        case 'absolute-symlink-escape':
-        case 'absolute-outside':
-        case 'confinement-threw':
-          detail = 'rejected: path escapes the extension directory';
-          break;
-        default:
-          detail = 'rejected';
-      }
-      debugLogger.warn(
-        `LSP config ${detail} for ${originBase}: ${safePath}`,
-      );
-    });
+    const data = readExtraJsonFile(
+      extension.path,
+      lspServers,
+      trustSymlinks,
+      (reason, ctx) => {
+        const lspConfigPath = path.isAbsolute(lspServers)
+          ? lspServers
+          : path.join(extension.path, lspServers);
+        const safePath = stripAnsiAndControl(lspConfigPath);
+        let detail: string;
+        switch (reason) {
+          case 'missing':
+            detail = 'not found';
+            break;
+          case 'parse-error':
+            detail = 'failed to parse';
+            break;
+          case 'directory':
+            detail = 'is a directory, not a regular file';
+            break;
+          case 'non-object-body':
+            detail = 'is not a JSON object';
+            break;
+          case 'absolute-symlink-escape':
+          case 'absolute-outside':
+          case 'confinement-threw':
+            detail = 'rejected: path escapes the extension directory';
+            break;
+          default:
+            detail = 'rejected';
+        }
+        const causeDetail =
+          reason === 'parse-error' && ctx.cause !== undefined
+            ? ` (${stripAnsiAndControl(
+                ctx.cause instanceof Error
+                  ? ctx.cause.message
+                  : String(ctx.cause),
+              )})`
+            : '';
+        debugLogger.warn(
+          `LSP config ${detail} for ${stripAnsiAndControl(originBase)}: ${safePath}${causeDetail}`,
+        );
+      },
+    );
     if (!data) {
       return;
     }

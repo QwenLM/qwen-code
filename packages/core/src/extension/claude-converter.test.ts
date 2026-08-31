@@ -229,9 +229,6 @@ describe('normalizeMcpServers', () => {
     expect(() => normalizeMcpServers({ bad: [] }, 'cfg\x1b[31m-red')).toThrow(
       'Invalid MCP configuration at cfg-red: server entries must be JSON objects',
     );
-    expect(() =>
-      normalizeMcpServers({ bad: [] }, 'cfg\x1b[31m-red'),
-    ).not.toThrow(/\x1b/);
   });
 });
 
@@ -1801,9 +1798,9 @@ describe('plugin package routing and variable replacement', () => {
       }),
       'utf-8',
     );
-    await expect(
-      convertClaudePluginPackage(extDir, 'x'),
-    ).resolves.toBeDefined();
+    const result = await convertClaudePluginPackage(extDir, 'x');
+    expect(result.convertedDir).toBeDefined();
+    fs.rmSync(result.convertedDir, { recursive: true, force: true });
   });
 
   it('throws a precise error when marketplace plugins is not an array', async () => {
@@ -1844,6 +1841,7 @@ describe('plugin package routing and variable replacement', () => {
       expect(fs.existsSync(path.join(result.convertedDir, 'self-link'))).toBe(
         false,
       );
+      fs.rmSync(result.convertedDir, { recursive: true, force: true });
     },
   );
 
@@ -1886,6 +1884,29 @@ describe('plugin package routing and variable replacement', () => {
         expect(
           fs.existsSync(path.join(dest, 'b', 'link2', 'link')),
         ).toBe(false);
+
+        // A densely interlinked mesh stays legal under a stack-scoped guard
+        // (~e*k! entries), so the copy must abort on the shared budget.
+        const meshRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-mesh-'));
+        try {
+          const mesh = path.join(meshRoot, 'a');
+          const dirs: string[] = [];
+          for (let i = 0; i < 6; i++) {
+            const d = path.join(mesh, `d${i}`);
+            fs.mkdirSync(d, { recursive: true });
+            dirs.push(d);
+          }
+          dirs.forEach((from, i) => {
+            dirs.forEach((to, j) => {
+              if (i !== j) fs.symlinkSync(to, path.join(from, `l${j}`));
+            });
+          });
+          await expect(
+            copyDirectory(mesh, path.join(meshRoot, 'dest')),
+          ).rejects.toThrow(/too complex to convert/);
+        } finally {
+          fs.rmSync(meshRoot, { recursive: true, force: true });
+        }
       } finally {
         fs.rmSync(root, { recursive: true, force: true });
       }

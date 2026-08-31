@@ -3,7 +3,8 @@
  * Copyright 2026 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -16,6 +17,18 @@ import {
   resolvePluginRelativeFile,
   type ExtraJsonNullReason,
 } from './path-confinement.js';
+
+const { mockWarn } = vi.hoisted(() => ({ mockWarn: vi.fn() }));
+
+vi.mock('../utils/debugLogger.js', () => ({
+  createDebugLogger: () => ({
+    isEnabled: () => true,
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: mockWarn,
+    error: vi.fn(),
+  }),
+}));
 
 describe('isPathWithin', () => {
   it('accepts equality and nested paths', () => {
@@ -187,9 +200,11 @@ describe('readExtensionManifest', () => {
     () => {
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));
       try {
-        (fs as unknown as { mkfifoSync: (p: string) => void }).mkfifoSync(
-          path.join(dir, 'plugin.json'),
-        );
+        try {
+          execFileSync('mkfifo', [path.join(dir, 'plugin.json')]);
+        } catch {
+          return;
+        }
         expect(() => readExtensionManifest(dir, 'plugin.json')).toThrow(
           /not a regular file/,
         );
@@ -310,9 +325,17 @@ describe('readExtraJsonFile', () => {
 
   it('returns null for an unparseable file', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));
+    mockWarn.mockClear();
     try {
-      fs.writeFileSync(path.join(dir, 'hooks.json'), '{invalid', 'utf-8');
+      fs.writeFileSync(
+        path.join(dir, 'hooks.json'),
+        '\u001b[31m{invalid',
+        'utf-8',
+      );
       expect(readExtraJsonFile(dir, 'hooks.json')).toBeNull();
+      const text = mockWarn.mock.calls.map((call) => String(call[0])).join(' ');
+      expect(text).toContain('Failed to parse hooks.json:');
+      expect(text).not.toContain('\u001b');
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
@@ -352,9 +375,11 @@ describe('readExtraJsonFile', () => {
     () => {
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));
       try {
-        (fs as unknown as { mkfifoSync: (p: string) => void }).mkfifoSync(
-          path.join(dir, 'hooks.json'),
-        );
+        try {
+          execFileSync('mkfifo', [path.join(dir, 'hooks.json')]);
+        } catch {
+          return;
+        }
         let observed: ExtraJsonNullReason | null = null;
         const result = readExtraJsonFile(dir, 'hooks.json', false, (reason) => {
           observed = reason;

@@ -173,9 +173,8 @@ export type ExtraJsonNullReason =
   /** File does not exist at the resolved path. */
   | 'missing'
   /** Resolved path is a directory, not a regular file. Without this
-   * classification the EISDIR from `readFileSync` surfaces as a
-   * misleading `parse-error`; the hooks path already guards the same
-   * slip with `isRegularFile` (R6-23). */
+   * classification the EISDIR from `readFileSync` surfaces as a misleading
+   * `parse-error`; `isRegularFile` rejects the same slip for hooks. */
   | 'directory'
   /** `JSON.parse` threw on the file body. */
   | 'parse-error'
@@ -299,5 +298,9 @@ function defaultNullMessage(
       return `Failed to parse ${safeFileRef}: ${stripAnsiAndControl(cause instanceof Error ? cause.message : String(cause))}`;
     case 'non-object-body':
       return `Invalid ${safeFileRef}: expected a JSON object`;
+    default: {
+      const exhaustive: never = reason;
+      return exhaustive;
+    }
   }
 }

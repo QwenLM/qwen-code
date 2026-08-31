@@ -754,6 +754,7 @@ export class ExtensionStore {
           delete policy.artifactDirectory;
           policy.name = input.identity.name;
           policy.artifactGeneration = targetSnapshot.generation + 1;
+          delete policy.linkedSource;
           if (input.linkedSource !== undefined) {
             policy.linkedSource = input.linkedSource;
           }
@@ -800,6 +801,7 @@ export class ExtensionStore {
           .preserveActivationOnNextInstall;
         targetSnapshot.extensions[input.identity.id]!.artifactGeneration =
           targetSnapshot.generation + 1;
+        delete targetSnapshot.extensions[input.identity.id]!.linkedSource;
         if (input.linkedSource !== undefined) {
           targetSnapshot.extensions[input.identity.id]!.linkedSource =
             input.linkedSource;
@@ -1158,6 +1160,7 @@ export class ExtensionStore {
         ) {
           delete policy.artifactGeneration;
           delete policy.preserveActivationOnNextInstall;
+          delete policy.linkedSource;
           policy.declarationOnly = true;
         }
         if (policy.name.toLowerCase() !== identity.name.toLowerCase()) {

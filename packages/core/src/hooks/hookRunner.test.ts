@@ -1976,6 +1976,10 @@ describe('HookRunner', () => {
       ],
       ['bare-quoted .bat after comment line', '# my hook\n"foo.bat"'],
       ['single-quoted .exe', "'C:\\foo.exe'"],
+      [
+        'bare-quoted path carrying terminal escapes',
+        '"C:\\foo\u001b[2Jbar.cmd"',
+      ],
     ])('rejects a PowerShell command that is %s', async (_label, command) => {
       const result = await hookRunner.executeHook(
         {
@@ -1989,6 +1993,7 @@ describe('HookRunner', () => {
       );
       expect(result.success).toBe(false);
       expect(result.error?.message).toMatch(/prefix with the call operator/);
+      expect(result.error?.message).not.toContain('\u001b');
     });
 
     it.each([

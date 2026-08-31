@@ -533,6 +533,21 @@ describe('extension tests', () => {
       expect(fs.readdirSync(installedPath)).toEqual([
         INSTALL_METADATA_FILENAME,
       ]);
+
+      fs.writeFileSync(
+        path.join(installedPath, INSTALL_METADATA_FILENAME),
+        JSON.stringify({ type: 'link' }),
+      );
+      await manager.refreshCache();
+      const edited = JSON.parse(
+        fs.readFileSync(path.join(sourcePath, 'plugin.json'), 'utf8'),
+      ) as Record<string, unknown>;
+      fs.writeFileSync(
+        path.join(sourcePath, 'plugin.json'),
+        JSON.stringify({ ...edited, version: '2.0.0' }),
+      );
+      expect(await manager.refreshCacheIfSourcesChanged()).toBe(true);
+      expect(manager.getLoadedExtensions()[0]?.version).toBe('2.0.0');
     });
 
     // Link trust is out-of-band. A hand-placed extension shipping

@@ -1277,7 +1277,9 @@ export class ExtensionManager {
     // leave the committed fingerprint stale so the next check still sees it.
     // Stamping post-load would mask that change until something else moved.
     const dirFingerprintBeforeLoad =
-      requestedNames.length === 0 ? this.extensionDirFingerprint() : undefined;
+      requestedNames.length === 0
+        ? await this.extensionDirFingerprint()
+        : undefined;
     const { value: extensions, snapshot } =
       await this.extensionStore.readConsistent(async () => {
         let loaded: Extension[];
@@ -1350,23 +1352,21 @@ export class ExtensionManager {
    * out-of-band safety net — mutations made through the daemon invalidate
    * explicitly and never rely on it.
    */
-  private extensionDirFingerprint(): string {
+  private async extensionDirFingerprint(): Promise<string> {
     let entries: string[];
     try {
       entries = fs.readdirSync(this.configDir);
     } catch {
       return 'dir:-';
     }
+    // Match loadExtension: use the store grant, not in-band installMetadata.
+    const linkedSources = this.linkedSourcesByDirectory(
+      await this.extensionStore.peekSnapshot(),
+    );
     const parts: string[] = [];
     for (const entry of entries) {
       const extensionRoot = path.join(this.configDir, entry);
-      const installMetadata = this.loadInstallMetadata(extensionRoot);
-      const effectiveRoot =
-        installMetadata?.type === 'link' &&
-        typeof installMetadata.source === 'string' &&
-        installMetadata.source.length > 0
-          ? installMetadata.source
-          : extensionRoot;
+      const effectiveRoot = linkedSources.get(entry) ?? extensionRoot;
       const manifestName =
         getAgentPluginSchemaStatus(effectiveRoot) === 'unrelated'
           ? EXTENSIONS_CONFIG_FILENAME
@@ -1438,9 +1438,12 @@ export class ExtensionManager {
   async refreshCacheIfSourcesChanged(): Promise<boolean> {
     const inFlight = this.inFlightSourceRevalidation;
     if (inFlight) return await inFlight;
-    const current = this.sourceFingerprint(this.extensionDirFingerprint());
-    if (this.lastSourceFingerprint === current) return false;
+    // Build revalidation synchronously to set inFlight before fingerprint suspension.
     const revalidation = (async () => {
+      const current = this.sourceFingerprint(
+        await this.extensionDirFingerprint(),
+      );
+      if (this.lastSourceFingerprint === current) return false;
       // `refreshCache` commits the new baseline itself, from its pre-load
       // fingerprint. A throw leaves the old baseline in place so the next call
       // retries rather than assuming the refresh landed.

@@ -135,9 +135,7 @@ export async function convertGeminiExtensionPackage(
     await copyDirectory(extensionDir, tmpDir);
 
     // If the source ships a root Agent-Plugins manifest, drop it so the
-    // loader does not shadow qwen-extension.json with a plugin.json that
-    // belongs to a sibling format. Mirrors the cleanup applied in the
-    // Claude converter (marketplace + standalone branches).
+    // loader cannot prefer it over the converted qwen-extension.json.
     if (getAgentPluginSchemaStatus(tmpDir) !== 'unrelated') {
       await fs.promises.rm(path.join(tmpDir, AGENT_PLUGIN_MANIFEST), {
         force: true,
@@ -205,8 +203,15 @@ export async function copyDirectory(
   } catch {
     realSource = path.resolve(source);
   }
-  await copyDirectoryRecursive(realSource, destination, root, new Set());
+  await copyDirectoryRecursive(realSource, destination, root, new Set(), {
+    createdDirs: 0,
+  });
 }
+
+// The stack-scoped cycle guard leaves mutually-interlinked directories legal
+// (~e*k! copy entries for k of them), so bound the total instead of letting the
+// conversion fill the disk.
+const MAX_CONVERT_DIRS = 1000;
 
 /**
  * Internal copy recursion. `stack` holds the real paths on the CURRENT
@@ -220,8 +225,12 @@ async function copyDirectoryRecursive(
   destination: string,
   root: string,
   stack: Set<string>,
+  budget: { createdDirs: number },
 ): Promise<void> {
   if (stack.has(source)) return;
+  if (++budget.createdDirs > MAX_CONVERT_DIRS) {
+    throw new Error('Extension package is too complex to convert');
+  }
   stack.add(source);
   try {
     // Create destination directory if it doesn't exist
@@ -236,7 +245,7 @@ async function copyDirectoryRecursive(
       const destPath = path.join(destination, entry.name);
 
       if (entry.isDirectory()) {
-        await copyDirectoryRecursive(sourcePath, destPath, root, stack);
+        await copyDirectoryRecursive(sourcePath, destPath, root, stack, budget);
       } else if (entry.isSymbolicLink()) {
         // Resolve symlink and copy the target content, but only when the target
         // stays inside the package root.
@@ -258,7 +267,13 @@ async function copyDirectoryRecursive(
           }
           const targetStat = fs.statSync(realPath);
           if (targetStat.isDirectory()) {
-            await copyDirectoryRecursive(realPath, destPath, root, stack);
+            await copyDirectoryRecursive(
+              realPath,
+              destPath,
+              root,
+              stack,
+              budget,
+            );
           } else if (targetStat.isFile()) {
             fs.copyFileSync(realPath, destPath);
           }
@@ -308,8 +323,12 @@ async function convertCommandsDirectory(commandsDir: string): Promise<void> {
       // Delete original TOML file
       fs.unlinkSync(tomlPath);
     } catch (error) {
+      const safeFile = stripAnsiAndControl(relativeFile);
+      const reason = stripAnsiAndControl(
+        error instanceof Error ? error.message : String(error),
+      );
       debugLogger.warn(
-        `Warning: Failed to convert command file ${stripAnsiAndControl(relativeFile)}: ${error instanceof Error ? error.message : String(error)}`,
+        `Warning: Failed to convert command file ${safeFile}: ${reason}`,
       );
       // Continue with other files even if one fails
     }

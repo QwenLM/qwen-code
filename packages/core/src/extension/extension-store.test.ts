@@ -1838,6 +1838,7 @@ describe('ExtensionStore', () => {
     const store = makeStore();
     const identity = { id: '92'.repeat(32), name: 'demo' };
     const destination = path.join(extensionsDir, 'demo');
+    const devTree = path.join(extensionsDir, '..', 'demo-dev-tree');
     const install = await store.createStagingDirectory();
     await fsp.writeFile(path.join(install, 'version'), 'one');
     const installed = await store.commitArtifact({
@@ -1846,16 +1847,19 @@ describe('ExtensionStore', () => {
       stagingDirectory: install,
       destinationDirectory: destination,
       initialActivation: { scope: 'user' },
+      linkedSource: devTree,
     });
+    expect(installed.extensions[identity.id]?.linkedSource).toBe(devTree);
     const firstUpdate = await store.createStagingDirectory();
     await fsp.writeFile(path.join(firstUpdate, 'version'), 'two');
-    await store.commitArtifact({
+    const updated = await store.commitArtifact({
       operation: 'update',
       identity,
       stagingDirectory: firstUpdate,
       destinationDirectory: destination,
       expectedArtifactGeneration: installed.generation,
     });
+    expect(updated.extensions[identity.id]?.linkedSource).toBeUndefined();
     const staleUpdate = await store.createStagingDirectory();
     await fsp.writeFile(path.join(staleUpdate, 'version'), 'stale');
 
@@ -1961,15 +1965,18 @@ describe('ExtensionStore', () => {
     const store = makeStore();
     const identity = { id: '9b'.repeat(32), name: 'retained-policy' };
     const destination = path.join(extensionsDir, identity.name);
+    const devTree = path.join(extensionsDir, '..', 'retained-dev-tree');
     const initialStaging = await store.createStagingDirectory();
     await fsp.writeFile(path.join(initialStaging, 'version'), 'old artifact');
-    await store.commitArtifact({
+    const committed = await store.commitArtifact({
       operation: 'install',
       identity,
       stagingDirectory: initialStaging,
       destinationDirectory: destination,
       initialActivation: { scope: 'user' },
+      linkedSource: devTree,
     });
+    expect(committed.extensions[identity.id]?.linkedSource).toBe(devTree);
     await fsp.rm(destination, { recursive: true });
     const provisional = { id: '9c'.repeat(32), name: identity.name };
 
@@ -1991,6 +1998,7 @@ describe('ExtensionStore', () => {
     expect(
       declared.extensions[identity.id]?.artifactGeneration,
     ).toBeUndefined();
+    expect(declared.extensions[identity.id]?.linkedSource).toBeUndefined();
 
     const staging = await store.createStagingDirectory();
     await fsp.writeFile(path.join(staging, 'version'), 'new artifact');

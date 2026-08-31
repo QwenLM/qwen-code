@@ -34,6 +34,7 @@ import { AsyncHookRegistry, generateHookId } from './asyncHookRegistry.js';
 import type { Config } from '../config/config.js';
 import { getShellContextEnvVars } from '../services/shellContextEnv.js';
 import { sanitizeChildEnv } from '../utils/sanitize-child-env.js';
+import { stripAnsiAndControl } from '../utils/textUtils.js';
 import { resolveCommandPath } from '../utils/shell-utils.js';
 
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
@@ -1128,7 +1129,7 @@ export class HookRunner {
         throw new Error(
           `PowerShell command contains a bare-quoted Windows executable path; ` +
             `if you intend to invoke it, prefix with the call operator '& '. ` +
-            `Example: & ${hookConfig.command}`,
+            `Example: & ${stripAnsiAndControl(hookConfig.command)}`,
         );
       }
       const command =

@@ -391,11 +391,11 @@ describe('LspConfigLoader extension configs', () => {
     expect(configs).toHaveLength(0);
   });
 
-  // Hand-placed link: installMetadata says type:'link' but no out-of-band
-  // grant. The trust signal must come from trustedLinkSource, not the
-  // extension's own payload. Mutation: revert LspConfigLoader.ts:91 to
-  // read `extension.installMetadata?.type === 'link'` → trustSymlinks=true
-  // → evil-server loaded.
+  // Hand-placed link: installMetadata says type:'link' but there is no
+  // out-of-band grant. Trust must come from trustedLinkSource, not from the
+  // extension's own payload. Mutation: derive trust from
+  // `extension.installMetadata?.type === 'link'` instead and the outside
+  // server loads again.
   it('does not honor lspServers outside the extension when link trust is not granted', async () => {
     mock({
       '/outside/host-lsp.json': JSON.stringify({
@@ -422,10 +422,9 @@ describe('LspConfigLoader extension configs', () => {
     expect(configs).toHaveLength(0);
   });
 
-  // Pin control-byte sanitization at LspConfigLoader.ts:148. Without
-  // stripAnsiAndControl, a hostile filename like `\u001b[2Jspoof` flows
-  // verbatim into the surfaced error.
-  it('strips control bytes from the lspServers path in surfaced errors', async () => {
+  // Surfaced errors must sanitize every untrusted value they interpolate --
+  // path, extension name, and parse cause -- without dropping the cause.
+  it('strips control bytes from surfaced errors and keeps the parse cause', async () => {
     mock({
       '/extensions/ts-plugin/.lsp.json': 'not-json-but-path-is-clean',
       [extensionPath + '/\u001b[2Jspoof.json']: 'control-byte-filename',
@@ -433,7 +432,7 @@ describe('LspConfigLoader extension configs', () => {
     const loader = new LspConfigLoader(workspaceRoot);
     const extension = {
       id: 'ts-plugin',
-      name: 'ts-plugin',
+      name: 'ts-plugin\u001b[2Jevil',
       version: '1.0.0',
       isActive: true,
       path: extensionPath,
@@ -460,6 +459,7 @@ describe('LspConfigLoader extension configs', () => {
     );
     expect(sanitized).toBeDefined();
     expect(sanitized).not.toContain('\u001b');
+    expect(sanitized).toMatch(/\(.+\)$/);
   });
 
   it('loads an out-of-tree lspServers path for a link-mode extension', async () => {

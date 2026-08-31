@@ -44,9 +44,6 @@ const debugLogger = createDebugLogger('CLAUDE_CONVERTER');
 /** Alias for `stripAnsiAndControl` so call sites read as error-context. */
 const sanitizeForError = stripAnsiAndControl;
 
-/** Public-API re-export from path-confinement (historical compat; no in-core consumers). */
-export { isRegularFile };
-
 export interface ClaudePluginConfig {
   name: string;
   version: string;
@@ -575,8 +572,11 @@ export async function convertClaudePluginPackage(
     '.claude-plugin',
     'plugin.json',
   );
+  const safePluginJsonPath = sanitizeForError(pluginJsonPath);
   if (strict && !fs.existsSync(pluginJsonPath)) {
-    throw new Error(`Strict mode requires plugin.json at ${pluginJsonPath}`);
+    throw new Error(
+      `Strict mode requires plugin.json at ${safePluginJsonPath}`,
+    );
   }
   // Treat a symlinked plugin.json (pointing outside the source) as absent
   // rather than reading an arbitrary host file into the merged config.
@@ -601,10 +601,11 @@ export async function convertClaudePluginPackage(
       if (strict) {
         throw err;
       }
+      const reason = sanitizeForError(
+        err instanceof Error ? err.message : String(err),
+      );
       debugLogger.warn(
-        `Falling back to marketplace entry for ${pluginJsonPath}: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
+        `Falling back to marketplace entry for ${safePluginJsonPath}: ${reason}`,
       );
     }
     if (pluginConfig) {
@@ -623,12 +624,12 @@ export async function convertClaudePluginPackage(
     // entry.
     if (strict) {
       throw new Error(
-        `Strict mode requires a trusted plugin.json at ${pluginJsonPath}`,
+        `Strict mode requires a trusted plugin.json at ${safePluginJsonPath}`,
       );
     }
     if (fs.existsSync(pluginJsonPath)) {
       debugLogger.warn(
-        `Ignoring plugin.json at ${pluginJsonPath}; it resolves through a symlink outside the plugin.`,
+        `Ignoring plugin.json at ${safePluginJsonPath}; it resolves through a symlink outside the plugin.`,
       );
     }
     mergedConfig = marketplacePlugin as ClaudePluginConfig;
