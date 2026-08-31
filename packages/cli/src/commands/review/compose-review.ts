@@ -5092,10 +5092,16 @@ function composeReviewBody(
   // overflow item names what the cap cut.
   const duplicatesShown = suggestionsDroppedAsDuplicates
     .slice(0, MAX_DEFERRED_SUGGESTION_LINES)
-    // Strip AFTER the fold — the collapsed line is the shape that posts,
-    // for the reason toDeferredEntries states.
+    // Fold, strip, THEN cap: the strip must see the collapsed line (the
+    // shape that posts, for the reason toDeferredEntries states) and run
+    // BEFORE the cap — the cap's `…` breaks the `$`-anchored match when
+    // its cut lands inside the footer. `boundDeferredLine` re-collapses
+    // internally, idempotent on the folded shape.
     .map((entry) =>
-      asListLine(stripReviewFooterLine(boundDeferredLine(entry)), pr),
+      asListLine(
+        boundDeferredLine(stripReviewFooterLine(collapseToLine(entry))),
+        pr,
+      ),
     );
   const duplicatesMore =
     suggestionsDroppedAsDuplicates.length - duplicatesShown.length;

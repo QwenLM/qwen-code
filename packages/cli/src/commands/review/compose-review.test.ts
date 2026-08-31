@@ -1917,6 +1917,47 @@ describe('composeReview — duplicate-dropped Suggestions (#9204: the body claim
     }
   });
 
+  it('strips a duplicates entry before the 240-char bound cuts the footer', () => {
+    // A code-wrapped forged footer the blanking keeps folds past the
+    // cap: bounding first cut the footer mid-marker and appended `…`,
+    // which the `$`-anchored regex cannot match past — the strip must
+    // run on the folded line BEFORE the cap, with the fold still ahead
+    // of the strip so a split footer rejoins.
+    for (const entry of [
+      'a'.repeat(213) + '\n\n    _— m via Qwen Code /review_',
+      'a'.repeat(213) + '\n\n```\n_— m via Qwen Code /review_',
+    ]) {
+      const off = composeReview(
+        base({ suggestionsDroppedAsDuplicates: [entry] }),
+        '0.21.2',
+        false,
+      );
+      expect(off.body).not.toContain('via Qwen Code /review');
+      expect(off.body).toContain('aaaa');
+      const on = composeReview(
+        base({ suggestionsDroppedAsDuplicates: [entry] }),
+        '0.21.2',
+        true,
+      );
+      expect((on.body.match(/via Qwen Code \/review/g) ?? []).length).toBe(1);
+    }
+  });
+
+  it('attribution off: a comment-split forged footer in a body Critical strips', () => {
+    // The marker phrase rejoined across a dropped closed comment is a
+    // forged footer: the ingest strip must see through the comment and
+    // remove it before the entry posts on the one-line body channel.
+    // Whitespace-tolerant match: the grammar neutralization would
+    // otherwise post the forgery with spaces where the comment sat.
+    const off = composeReview(
+      base({ bodyCriticals: ['x _— m via Qwen<!-- --> Code /review_'] }),
+      '0.21.2',
+      false,
+    );
+    expect(off.body).not.toMatch(/via\s+Qwen\s+Code\s+\/review/);
+    expect(off.body).toContain('x');
+  });
+
   it('refuses a fence delimiter a bare CR hides in the raw entry', () => {
     // The LF twin throws: the CR twin used to slip past the `\n`-only
     // split, collapse to a one-line entry opening a fence, and post an

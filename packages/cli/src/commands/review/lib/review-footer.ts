@@ -64,13 +64,16 @@ export function commentMarkerSeverity(
 
 /**
  * Whether the invisible marker `submit` appends to an attribution-off post
- * would land INSIDE a code fence (or an HTML block) still open at the
- * body's end — rendered as visible code instead of nothing, with the
+ * would land INSIDE a code fence (or a tag-based HTML block) still open at
+ * the body's end — rendered as visible code instead of nothing, with the
  * claim vanished into the fence's info string when the delimiter carries
- * one. The attribution-off prefix strip can move a fence delimiter to
- * line-leading position, creating the exposure on a draft whose delimiter
- * sat mid-line, so the check runs on the POST-strip shape, mirroring the
- * fence refusal `ingestEntryList` applies to the body lists.
+ * one. A comment/PI/declaration/CDATA block swallows the marker to
+ * NOTHING, which is exactly what attribution-off wants — those carry the
+ * scan's raw kind and do not count. The attribution-off prefix strip can
+ * move a fence delimiter to line-leading position, creating the exposure
+ * on a draft whose delimiter sat mid-line, so the check runs on the
+ * POST-strip shape, mirroring the fence refusal `ingestEntryList` applies
+ * to the body lists.
  */
 export function swallowsAppendedMarker(body: string): boolean {
   const lines = scanLines(`${body}\n\n${COMMENT_MARKER}`);
@@ -208,12 +211,30 @@ function projectInvisibles(input: string): Projection {
     if (ch === '<' && input.startsWith('<!--', i)) {
       const close = input.indexOf('-->', i + 4);
       // A closer past blanked code cannot close this opener — a code
-      // block between them ends the opener's paragraph on GitHub — and
-      // an unclosed opener renders as escaped literal prose (`&lt;!--`),
-      // not a comment running to the end of the input: swallowing the
-      // tail there hid a forged footer the render shows.
+      // block between them ends the opener's paragraph on GitHub.
       const nul = input.indexOf('\u0000', i);
       if (close === -1 || (nul !== -1 && nul < close + 3)) {
+        // Unclosable. With VISIBLE content still riding the line the
+        // opener renders as escaped literal prose (`&lt;!--`) and the
+        // projection keeps it — swallowing the tail there hid a forged
+        // footer the render shows. With nothing but whitespace after
+        // it to the line end it is the truncation twin — a looping
+        // model cut off mid-comment — and blanking it lets the
+        // trailing anchor reach a forged footer BEFORE it (and lets
+        // the anywhere strips match a footer line carrying one).
+        let j = i + 4;
+        while (
+          j < n &&
+          input[j] !== '\n' &&
+          input[j] !== '\r' &&
+          (input[j] === ' ' || input[j] === '\t')
+        ) {
+          j += 1;
+        }
+        if (j >= n || input[j] === '\n' || input[j] === '\r') {
+          i = j;
+          continue;
+        }
         push(input.slice(i, i + 4), i, i + 4);
         i += 4;
         continue;
@@ -477,18 +498,45 @@ function canProjectFooterMarker(s: string): boolean {
  * blanking of `stripReviewFooter` keeps: a fence delimiter leading the
  * line is posted text, not a code edge, and must not blind the strip.
  *
- * Comment grammar goes inert SAME-LENGTH before the scan: an
- * unterminated `<!--` ahead of a forged footer is escaped literal prose
- * in the render, so the cut must see the footer through it, and a
- * dangling opener surviving the cut would blind the raw-body readers
- * the posted line joins. The replacements stay length-equal to the
- * line, or the cut arithmetic would map into the wrong bytes.
+ * The match runs on the comment-DROPPING display projection, so a closed
+ * span cannot split the marker phrase, trail a complete footer, or stand
+ * before one: all three render nothing. An UNCLOSED opener is the one
+ * comment shape the projection keeps: it renders as escaped literal
+ * prose on GitHub, so the footer after it strips — and its delimiter is
+ * neutralized same-length first, or the opener's bytes would survive
+ * the cut and blind the raw-body readers the posted line joins. The
+ * neutralization stays length-equal to the line, or the cut arithmetic
+ * would map into the wrong bytes.
  */
 export function stripReviewFooterLine(line: string): string {
-  return stripTrailingFooter(
-    line,
-    line.replace(/<!--/g, '    ').replace(/-->/g, '   '),
-  );
+  return stripTrailingFooter(line, neutralizeUnclosedOpeners(line));
+}
+
+/**
+ * Every UNCLOSED `<!--` replaced with same-length spaces; closed spans
+ * keep their delimiters so the projection drops them whole. Paired like
+ * the projection pairs — left to right, each opener closing on the next
+ * `-->` — so a span between two openers closes on the one closer.
+ */
+function neutralizeUnclosedOpeners(line: string): string {
+  if (!line.includes('<!--')) return line;
+  let out = '';
+  let i = 0;
+  for (;;) {
+    const open = line.indexOf('<!--', i);
+    if (open === -1) {
+      out += line.slice(i);
+      return out;
+    }
+    const close = line.indexOf('-->', open + 4);
+    if (close === -1) {
+      out += line.slice(i, open) + '    ';
+      i = open + 4;
+    } else {
+      out += line.slice(i, close + 3);
+      i = close + 3;
+    }
+  }
 }
 
 function stripTrailingFooter(body: string, scanned: string): string {
@@ -576,74 +624,21 @@ export const LINE_ENDING_RE = /\r\n?|\n/g;
 /** The blockquote prefix a line can carry, at any nesting depth. */
 const QUOTE_PREFIX_RE = /^[ \t]{0,3}(?:>[ \t]*)+/;
 
-/** Fence delimiter runs (``` or ~~~), openers and closers alike. */
-const FENCE_RUN_RE = /^[ \t]{0,3}(`{3,}|~{3,})/;
-
-/** A fence CLOSER: same shape, nothing but trailing whitespace after it. */
-const FENCE_CLOSE_RE = /^[ \t]{0,3}(`{3,}|~{3,})[ \t]*\r?$/;
-
-// The CommonMark type-6 block-level tag names, opening or closing.
-const HTML_BLOCK_TAG_NAMES =
-  '(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|section|source|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)';
-
 /**
- * The simple HTML-block opener the line-map tracks (see `scanLines`): an
- * opening tag, or a CLOSING block-level tag — `</div>` alone on a line
- * starts a blank-line-terminated HTML block exactly as `<div>` does.
+ * The CommonMark type-2-5 raw-HTML block openers — comment, processing
+ * instruction, declaration, CDATA. An `html_block` token opening with one
+ * renders NOTHING on GitHub (the sanitizer drops all four classes), unlike
+ * the tag-based blocks whose content renders visibly — the kind split the
+ * marker-exposure gate reads.
  */
-const HTML_BLOCK_OPEN_RE = new RegExp(
-  `^(?:<[A-Za-z][^>]*>?|</${HTML_BLOCK_TAG_NAMES}[ \\t]*>)[ \\t]*\\r?$`,
-  'i',
-);
+const RAW_HTML_BLOCK_OPEN_RE = /^ {0,3}(?:<!--|<\?|<!\[CDATA\[|<![A-Z])/;
 
-/** The type-1 openers: their blocks end at the closing tag, not a blank line. */
-const HTML_TYPE1_OPEN_RE = /^<(pre|script|style|textarea)\b/i;
-
-/**
- * The CommonMark raw-HTML blocks `scanLines` models beyond the tag-based
- * ones — types 2-5: comment, processing instruction, declaration, CDATA.
- * Their content is raw text until the terminating string rides a line — a
- * fence delimiter inside never opens fence state, exactly how GitHub reads
- * it — and a block whose terminator sits on its opener line is one line:
- * it leaves no state and the line stays `text`, the shape of the one-line
- * invisible markers. At most three spaces of indent: a leading tab already
- * lands on the 4-column stop that makes the line code.
- */
-const RAW_HTML_BLOCK_OPENERS: ReadonlyArray<readonly [RegExp, RegExp]> = [
-  [/^ {0,3}<!--/, /-->/],
-  [/^ {0,3}<\?/, /\?>/],
-  [/^ {0,3}<![A-Za-z]/, />/],
-  [/^ {0,3}<!\[CDATA\[/, /\]\]>/],
-];
-
-/** A thematic break: three or more of ONE of `*`, `-`, `_`, spaced out. */
-const THEMATIC_BREAK_RE = /^ {0,3}([*_-])[ \t]*(?:\1[ \t]*){2,}$/;
-
-/** A heading opener: up to six `#` at a space or end of line. */
-const HEADING_OPEN_RE = /^ {0,3}#{1,6}(?:[ \t]|$)/;
-
-/** A list-item opener: a bullet or ordered marker, spaced out or alone. */
-const LIST_ITEM_OPEN_RE = /^ *([-*+]|\d{1,9}[.)])(?:[ \t].*)?$/;
-
-/** Leading-whitespace width, tabs expanded to the 4-column stop. */
-function indentColumns(s: string): number {
-  let col = 0;
-  for (const ch of s) {
-    if (ch === ' ') col += 1;
-    else if (ch === '\t') col += 4 - (col % 4);
-    else break;
-  }
-  return col;
-}
-
-/** Structural classes a line falls into, in scan order. */
+/** Structural classes a line falls into. */
 type LineKind =
   | 'text' // ordinary line — a strip's map applies
-  | 'htmlOpen' // opens a simple HTML block — kept verbatim
-  | 'html' // HTML-block content — mapped: renders VISIBLY on GitHub
-  | 'htmlEnd' // the blank line closing an HTML block — kept
-  | 'fenceEdge' // a fence opener or closer — kept
-  | 'fence' // fenced-code content — kept (a quotation)
+  | 'html' // tag-based HTML-block content — mapped: renders VISIBLY on GitHub
+  | 'rawHtml' // type 2-5 HTML-block content — renders nothing on GitHub
+  | 'fence' // fenced-code line, delimiters included — kept (a quotation)
   | 'code'; // indented-code content — kept (a quotation)
 
 interface ScannedLine {
@@ -658,226 +653,65 @@ interface ScannedLine {
 
 /**
  * One structural pass over the body, shared by every line-aware strip:
- * markdown constructs under which a footer/marker-shaped line is a
- * QUOTATION, not attribution, classified identically everywhere.
+ * which lines GitHub renders as code or raw HTML (the quotations the maps
+ * keep or drop as a unit) and which are ordinary content the maps apply
+ * to, classified identically everywhere.
  *
- * Blockquote-wrapped lines classify on their CONTENT, after the `>` prefix
- * — `quoteBlock` in pr-context quotes every earlier comment containing code
- * as `> ``` …`, and a scanner that never sees past the `>` reaches inside
- * quoted code and corrupts it. Fences track their quote depth for the same
- * reason: a shallower depth ends the quoted block carrying the fence. A
- * DEEPER depth inside an open fence does not — a `>`-prefixed line inside a
- * fenced code block is literal code content on GitHub, and the fence stays
- * open past it; the closer must carry the opener's own depth for the same
- * reason.
+ * The classification delegates to the same CommonMark parser the blanking
+ * reads: the token map is the authority on paragraph interruption, list
+ * content indents, setext underlines, and fence bounds inside list items
+ * — every point where the hand-built scan this replaced disagreed with
+ * the renderers kept or deleted a footer line the render showed the other
+ * way, a new entrance every time the model was patched. A fence token's
+ * map covers its delimiters too, and an `html_block`'s map its opener and
+ * closer — both quotation edges stay kept with their content.
  *
- * The fence state is the opener's delimiter character and run length:
- * CommonMark closes a fence only on the same character, at least the
- * opener's length, with no info string — a bare boolean inverts parity on
- * nested/mixed quotes, exactly the 'quoting an earlier round' shape these
- * strips exist for. It also never OPENS a backtick fence whose info string
- * carries a backtick — CommonMark forbids that spelling, so the line is
- * ordinary paragraph text (tilde fences may carry one). Lines inside a
- * simple HTML block (`<div>`, `</div>`, … until the next blank line;
- * `<pre>`/`<script>`/`<style>`/`<textarea>` until their closing tag) render
- * VISIBLY on GitHub, so the state only stops a fence-shaped line inside one
- * from toggling fence state — and a `>`-only line is not the blank line
- * that ends such a block.
+ * Tag-based HTML blocks (types 1, 6, 7) render their content visibly, so
+ * it maps like text — the one droppable quotation kind. The type 2-5 raw
+ * blocks open on their first line's grammar (the opener regex) and carry
+ * their own kind: a marker a DANGLING one swallows renders as nothing,
+ * not the visible exposure `swallowsAppendedMarker` refuses.
+ *
+ * Blockquote-wrapped lines keep their prefix on `line`, their content on
+ * `content`, and their prefix depth on `depth`: the maps match quoted
+ * shapes at any depth, and a paragraph run ends where the depth changes.
  *
  * Splits on every CommonMark line ending — `\n`, `\r\n`, and a bare
- * `\r`: GitHub renders all three as a line break, and a `\n`-only scan
- * read the CR twins of these bodies as one line, leaving a forged footer
- * or a hollow fence the LF twin strips or refuses.
- *
- * Indented code is classified where GitHub RENDERS it: a code block cannot
- * interrupt a paragraph, so an indented line a paragraph lazily continues
- * is prose at any indent; inside a list item the code threshold rises by
- * the item's content indent — item prose below it stays visible; a leading
- * tab counts at the 4-column stop; and raw-HTML blocks of types 2-5
- * (comment, processing instruction, declaration, CDATA) consume their
- * lines to the terminating string — a fence delimiter inside one never
- * toggles fence state, and neither does the block outlive a terminator
- * riding its own opener line.
+ * `\r`: the parser normalizes all three to the same line count, so the
+ * token map and this split stay aligned, and a `\n`-only segmentation
+ * does not read the CR twins of these bodies as one line.
  */
 function scanLines(body: string): ScannedLine[] {
-  let fence: { char: string; len: number; depth: number } | null = null;
-  let html: { endRe: RegExp | null } | null = null;
-  // Open list items, outermost first, each carrying its content-indent
-  // column: inside an item, indented code needs the item's content indent
-  // plus four, so item prose below that is never read as a quotation.
-  const lists: number[] = [];
-  // Whether the previous line leaves a paragraph open that the next line
-  // lazily continues: a code block cannot interrupt a paragraph, so an
-  // indented line the paragraph continues is prose at any indent.
-  let paraOpen = false;
-  let codeOpen = false;
-  let prevDepth = 0;
-  const out: ScannedLine[] = [];
-  for (const line of body.split(LINE_ENDING_RE)) {
+  const lines = body.split(LINE_ENDING_RE);
+  const kinds: LineKind[] = new Array<LineKind>(lines.length).fill('text');
+  for (const token of BLOCK_PARSER.parse(body, {})) {
+    if (token.map === null) continue;
+    let kind: LineKind;
+    if (token.type === 'fence') kind = 'fence';
+    else if (token.type === 'code_block') kind = 'code';
+    else if (token.type === 'html_block') {
+      const first = lines[token.map[0]] ?? '';
+      const quote = QUOTE_PREFIX_RE.exec(first);
+      const opener = quote === null ? first : first.slice(quote[0].length);
+      kind = RAW_HTML_BLOCK_OPEN_RE.test(opener) ? 'rawHtml' : 'html';
+    } else continue;
+    for (let l = token.map[0]; l < token.map[1]; l += 1) kinds[l] = kind;
+  }
+  return lines.map((line, i) => {
     const quote = QUOTE_PREFIX_RE.exec(line);
     const depth = quote === null ? 0 : quote[0].split('>').length - 1;
     const content = quote === null ? line : line.slice(quote[0].length);
-    const trimmed = content.trimStart();
-    if (html !== null) {
-      const closes =
-        html.endRe === null ? line.trim() === '' : html.endRe.test(line);
-      if (closes && html.endRe === null) {
-        html = null;
-        out.push({ line, kind: 'htmlEnd', depth, content });
-      } else {
-        out.push({ line, kind: 'html', depth, content });
-        if (closes) html = null;
-      }
-      paraOpen = false;
-      codeOpen = false;
-      prevDepth = depth;
-      continue;
-    }
-    if (fence !== null && depth < fence.depth) {
-      // The quoted block carrying the fence ended; reclassify outside it.
-      fence = null;
-    }
-    if (fence !== null) {
-      const close = FENCE_CLOSE_RE.exec(content);
-      if (
-        close !== null &&
-        depth === fence.depth &&
-        close[1]![0] === fence.char &&
-        close[1]!.length >= fence.len
-      ) {
-        fence = null;
-        out.push({ line, kind: 'fenceEdge', depth, content });
-      } else {
-        out.push({ line, kind: 'fence', depth, content });
-      }
-      paraOpen = false;
-      codeOpen = false;
-      prevDepth = depth;
-      continue;
-    }
-    const indent = indentColumns(content);
-    if (trimmed === '') {
-      // A blank closes a paragraph; open code and list items survive it.
-      out.push({ line, kind: 'text', depth, content });
-      paraOpen = false;
-      prevDepth = depth;
-      continue;
-    }
-    if (codeOpen) {
-      if (indent >= 4 + (lists.length > 0 ? lists[lists.length - 1]! : 0)) {
-        out.push({ line, kind: 'code', depth, content });
-        prevDepth = depth;
-        continue;
-      }
-      codeOpen = false;
-    }
-    // A non-blank line no paragraph lazily continues closes every list
-    // item it does not reach — it is a new block at its own indent.
-    if (!(paraOpen && depth === prevDepth)) {
-      while (lists.length > 0 && lists[lists.length - 1]! > indent) {
-        lists.pop();
-      }
-    }
-    if (HTML_BLOCK_OPEN_RE.test(trimmed)) {
-      const t1 = HTML_TYPE1_OPEN_RE.exec(trimmed);
-      html =
-        t1 === null
-          ? { endRe: null }
-          : { endRe: new RegExp(`</${t1[1]}\\s*>`, 'i') };
-      out.push({ line, kind: 'htmlOpen', depth, content });
-      paraOpen = false;
-      prevDepth = depth;
-      continue;
-    }
-    const raw = RAW_HTML_BLOCK_OPENERS.find(([open]) => open.test(content));
-    if (raw !== undefined) {
-      if (raw[1].test(line)) {
-        // The terminator rides the opener line: the block fits one line,
-        // leaves no state, and the line stays `text` — the one-line
-        // invisible-marker shape stays a mappable line.
-        out.push({ line, kind: 'text', depth, content });
-      } else {
-        html = { endRe: raw[1] };
-        out.push({ line, kind: 'htmlOpen', depth, content });
-      }
-      paraOpen = false;
-      prevDepth = depth;
-      continue;
-    }
-    // Fences, thematic breaks, and headings CAN interrupt an open
-    // paragraph, so they are checked before the lazy continuation below.
-    if (indent < 4) {
-      const open = FENCE_RUN_RE.exec(content);
-      if (open !== null) {
-        // A backtick in a BACKTICK fence's info string is no fence at all
-        // — the line is ordinary text; tilde fences may carry one.
-        if (
-          !(open[1]![0] === '`' && content.slice(open[0].length).includes('`'))
-        ) {
-          fence = { char: open[1]![0]!, len: open[1]!.length, depth };
-          out.push({ line, kind: 'fenceEdge', depth, content });
-          paraOpen = false;
-          prevDepth = depth;
-          continue;
-        }
-      }
-    }
-    if (THEMATIC_BREAK_RE.test(content) || HEADING_OPEN_RE.test(content)) {
-      out.push({ line, kind: 'text', depth, content });
-      paraOpen = false;
-      prevDepth = depth;
-      continue;
-    }
-    const item = LIST_ITEM_OPEN_RE.exec(content);
-    if (item !== null) {
-      // A list cannot interrupt a top-level paragraph, but inside an open
-      // item a sibling or nested item ends the item's paragraph. A nested
-      // opener past the code threshold is indented code quoting a marker.
-      const opens =
-        (lists.length > 0 &&
-          indent < 4 + (lists.length > 0 ? lists[lists.length - 1]! : 0)) ||
-        (!(paraOpen && depth === prevDepth) && indent <= 3);
-      if (opens) {
-        // A sibling or outer item closes; a nested one stacks inside.
-        const contentIndent = indent + item[1]!.length + 1;
-        while (lists.length > 0 && lists[lists.length - 1]! >= contentIndent) {
-          lists.pop();
-        }
-        lists.push(contentIndent);
-        out.push({ line, kind: 'text', depth, content });
-        paraOpen = true;
-        prevDepth = depth;
-        continue;
-      }
-    }
-    // An open paragraph lazily continues on any remaining line: indented
-    // code and a new list cannot interrupt one, so the line is prose
-    // whatever its indent.
-    if (paraOpen && depth === prevDepth) {
-      out.push({ line, kind: 'text', depth, content });
-      prevDepth = depth;
-      continue;
-    }
-    if (indent >= 4 + (lists.length > 0 ? lists[lists.length - 1]! : 0)) {
-      out.push({ line, kind: 'code', depth, content });
-      codeOpen = true;
-      paraOpen = false;
-      prevDepth = depth;
-      continue;
-    }
-    out.push({ line, kind: 'text', depth, content });
-    paraOpen = true;
-    prevDepth = depth;
-  }
-  return out;
+    return { line, kind: kinds[i]!, depth, content };
+  });
 }
 
 /**
  * Line-map shared by the anywhere-strips: `map` returns the replacement
- * line, or null to drop it. Fenced code, indented code, fence edges, and
- * HTML-block openers/closers are quotations — kept verbatim; HTML-block
- * CONTENT renders visibly, so it maps like text. A body where nothing
- * changed is returned byte-identical.
+ * line, or null to drop it. Fenced and indented code are quotations —
+ * kept verbatim, delimiters included; HTML-block CONTENT maps like text —
+ * the tag-based kind renders visibly, the type 2-5 raw kind as nothing,
+ * and a drop of either lands inside a quotation the scan keeps. A body
+ * where nothing changed is returned byte-identical.
  */
 function mapLinesAware(
   body: string,
@@ -894,7 +728,7 @@ function mapLinesAware(
   // them — those blanks belong to the quotation and render.
   const quotedDrops = new Set<number>();
   for (const { line, kind } of scanLines(body)) {
-    if (kind !== 'text' && kind !== 'html') {
+    if (kind !== 'text' && kind !== 'html' && kind !== 'rawHtml') {
       out.push(line);
       continue;
     }
@@ -902,6 +736,9 @@ function mapLinesAware(
     if (mapped === null) {
       changed = true;
       drops.add(out.length);
+      // The type 2-5 raw kind renders nothing — its blanks do not render
+      // either, so its drop collapses like a text drop. Only the visible
+      // tag-based HTML quotation protects the blank runs around a drop.
       if (kind === 'html') quotedDrops.add(out.length);
       continue;
     }
@@ -1069,10 +906,21 @@ export function rendersAsNothing(text: string): boolean {
 const FORGED_FOOTER_LINE_RE =
   /^[ \t]{0,3}(?:>[ \t]*)?_— [^\n]{0,400} via Qwen Code \/review(?: \(v[^\n)]{0,200}\)?)?_?[ \t]*\r?$/;
 
+// The anywhere strip's twin: its map only reaches lines the scan
+// classifies visible (code-classified lines never map), so a line with a
+// deeper indent is a list-item or HTML-block paragraph GitHub renders —
+// the leading-whitespace allowance is wider than the render-nothing
+// projection's, which reads UNCLASSIFIED lines and must keep a top-level
+// four-space line as visible code.
+const FORGED_FOOTER_LINE_ANYWHERE_RE =
+  /^[ \t]*(?:>[ \t]*)?_— [^\n]{0,400} via Qwen Code \/review(?: \(v[^\n)]{0,200}\)?)?_?[ \t]*\r?$/;
+
 export function stripForgedFooterLines(body: string): string {
   if (!body.includes('/review') && !body.includes('&')) return body;
   return mapLinesAware(body, (line) =>
-    FORGED_FOOTER_LINE_RE.test(projectInvisibles(line).text) ? null : line,
+    FORGED_FOOTER_LINE_ANYWHERE_RE.test(projectInvisibles(line).text)
+      ? null
+      : line,
   );
 }
 
