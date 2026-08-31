@@ -416,6 +416,7 @@ function renderSidebar(
     onOpenGitDiff?: (cwd: string) => void;
     onNewWorktreeSession?: (cwd?: string) => void;
     onOpenAddWorkspace?: () => void;
+    onOpenWorkspacesOverview?: () => void;
     onNewSession?: (workspaceCwd?: string) => boolean;
     onLoadSession?: (sessionId: string, workspaceCwd?: string) => void;
     workspaces?: DaemonWorkspaceCapability[];
@@ -456,6 +457,7 @@ function renderSidebar(
           selectedWorkspaceCwd={overrides.selectedWorkspaceCwd}
           onSelectWorkspace={overrides.onSelectWorkspace}
           onOpenAddWorkspace={overrides.onOpenAddWorkspace}
+          onOpenWorkspacesOverview={overrides.onOpenWorkspacesOverview}
           onOpenWorkspaceManagement={overrides.onOpenWorkspaceManagement}
           workspaceOverview={overrides.workspaceOverview}
           onOpenGitDiff={overrides.onOpenGitDiff}
@@ -5786,5 +5788,44 @@ describe('WebShellSidebar session toolbar archive action dedupe', () => {
       ),
     ).toHaveLength(1);
     expect(await countArchiveMenuItemsInRow('Pinned secondary')).toBe(1);
+  });
+});
+
+describe('WebShellSidebar manage workspaces entry', () => {
+  it('opens the Workspaces overview from the end of the Projects section', async () => {
+    const onOpenWorkspacesOverview = vi.fn();
+    renderSidebar({ onOpenWorkspacesOverview });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const entry = container.querySelector<HTMLButtonElement>(
+      '[data-testid="manage-workspaces"]',
+    );
+    expect(entry).not.toBeNull();
+    expect(entry!.textContent).toContain('Manage workspaces');
+    await act(async () => {
+      entry!.click();
+    });
+    expect(onOpenWorkspacesOverview).toHaveBeenCalledTimes(1);
+  });
+
+  it('hides the entry when unwired or when the sidebar is locked to one workspace', async () => {
+    renderSidebar({});
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="manage-workspaces"]'),
+    ).toBeNull();
+    renderSidebar({
+      onOpenWorkspacesOverview: vi.fn(),
+      lockedWorkspaceCwd: '/tmp/other',
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="manage-workspaces"]'),
+    ).toBeNull();
   });
 });

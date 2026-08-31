@@ -137,6 +137,7 @@ import { GitDialog, type GitDialogView } from './components/dialogs/GitDialog';
 import { SkillsManagerPage } from './components/skills/SkillsManagerPage';
 import { DaemonStatusDialog } from './components/dialogs/DaemonStatusDialog';
 import { SessionOverviewPanel } from './components/SessionOverviewPanel';
+import { WorkspacesOverviewPanel } from './components/workspaces/WorkspacesOverviewPanel';
 import { SplitView } from './components/SplitView';
 import { GaugeIcon } from 'lucide-react';
 import type { PaneHeaderActionsRenderer } from './components/ChatPane';
@@ -5437,6 +5438,7 @@ export function App({
     | 'plugins'
     | 'agents'
     | 'channels'
+    | 'workspaces'
     | null
   >(null);
   const activePanelRef = useRef(activePanel);
@@ -5480,7 +5482,8 @@ export function App({
         | 'skills'
         | 'plugins'
         | 'agents'
-        | 'channels',
+        | 'channels'
+        | 'workspaces',
     ) => {
       setMainView('chat');
       setActivePanel(panel);
@@ -12715,6 +12718,10 @@ export function App({
                     closeMobileDrawer();
                     openPanel(target);
                   }}
+                  onOpenWorkspacesOverview={() => {
+                    closeMobileDrawer();
+                    openPanel('workspaces');
+                  }}
                   onNewWorktreeSession={(workspaceCwd) =>
                     // The intent travels with the draft it belongs to: set
                     // inside createNewSession's synchronous step, it is what
@@ -12930,7 +12937,8 @@ export function App({
                     activePanel !== 'skills' &&
                     activePanel !== 'agents' &&
                     activePanel !== 'plugins' &&
-                    activePanel !== 'channels' && (
+                    activePanel !== 'channels' &&
+                    activePanel !== 'workspaces' && (
                     <div className={styles.panelHeader}>
                     <button
                       ref={panelBackRef}
@@ -13020,7 +13028,8 @@ export function App({
                         activePanel === 'plugins'
                           ? pluginTabRef
                           : activePanel === 'extensions' ||
-                              activePanel === 'channels'
+                              activePanel === 'channels' ||
+                              activePanel === 'workspaces'
                             ? panelHeadingRef
                             : undefined
                       }
@@ -13113,6 +13122,22 @@ export function App({
                     ) : activePanel === 'channels' ? (
                       <ChannelsManagerPage
                         onClose={closePanel}
+                        initialFocusRef={panelHeadingRef}
+                      />
+                    ) : activePanel === 'workspaces' ? (
+                      <WorkspacesOverviewPanel
+                        onClose={closePanel}
+                        // A new draft replaces the panel with the chat view;
+                        // createNewSession's default (no keepPanel) does that.
+                        onNewSession={(workspaceCwd) =>
+                          createNewSession(workspaceCwd)
+                        }
+                        onAddWorkspace={
+                          dynamicWorkspaceRegistrationSupported
+                            ? () => setShowAddWorkspaceDialog(true)
+                            : undefined
+                        }
+                        onError={reportError}
                         initialFocusRef={panelHeadingRef}
                       />
                     ) : (

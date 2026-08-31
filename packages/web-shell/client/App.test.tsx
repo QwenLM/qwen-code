@@ -1097,6 +1097,7 @@ vi.mock('./components/sidebar/WebShellSidebar', async () => {
         workspaceCwd?: string,
       ) => Promise<boolean> | boolean | void;
       onSelectWorkspace?: (workspaceCwd: string | undefined) => void;
+      onOpenWorkspacesOverview?: () => void;
       onLoadSession?: (sessionId: string) => Promise<void> | void;
       onSelectCurrentSession?: () => void;
       onSessionsDeleted?: (sessionIds: string[]) => void;
@@ -1149,6 +1150,15 @@ vi.mock('./components/sidebar/WebShellSidebar', async () => {
             onClick: () => void props.onNewWorktreeSession?.('/other'),
           },
           'new worktree session in other',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'open-workspaces-overview',
+            type: 'button',
+            onClick: () => props.onOpenWorkspacesOverview?.(),
+          },
+          'open workspaces overview',
         ),
         React.createElement(
           'button',
@@ -1310,6 +1320,15 @@ vi.mock('./session-catalog/session-catalog-store', async (importOriginal) => {
 vi.mock('./session-catalog/session-catalog-hooks', () => ({
   useSessionCatalogController: () => sessionCatalogController,
   useSessionHasActivePrompt: () => testState.sessionHasActivePrompt,
+  // The Workspaces overview panel's per-row session counts; inert here.
+  useSessionCatalogQuery: () => ({
+    page: undefined,
+    sessions: [],
+    truncated: false,
+    loading: false,
+    stale: false,
+    reload: vi.fn(),
+  }),
 }));
 
 vi.mock('./components/dialogs/AddWorkspaceDialog', async () => {
@@ -11463,6 +11482,26 @@ describe('App session callbacks', () => {
     expect(mockSessionActions.createSession).toHaveBeenCalledWith(
       expect.not.objectContaining({ worktree: expect.anything() }),
     );
+  });
+
+  it('opens the Workspaces overview panel from the sidebar entry', async () => {
+    const { container } = renderApp();
+    await flush();
+    expect(
+      container.querySelector('[data-testid="workspaces-overview-panel"]'),
+    ).toBeNull();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-workspaces-overview"]',
+        )!
+        .click();
+      await Promise.resolve();
+    });
+    await flush();
+    expect(
+      container.querySelector('[data-testid="workspaces-overview-panel"]'),
+    ).not.toBeNull();
   });
 
   it('reloads skills from the target workspace when starting a new session', async () => {

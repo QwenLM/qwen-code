@@ -18,7 +18,6 @@ import {
   useWorkspace,
   useWorkspaceActions,
 } from '@qwen-code/web-shell/daemon-react-sdk';
-import { DaemonHttpError } from '@qwen-code/sdk/daemon';
 import type {
   DaemonSessionGroup,
   DaemonSessionGroupColor,
@@ -26,10 +25,10 @@ import type {
   DaemonSessionGroupPresetColor,
   DaemonSessionSummary,
   DaemonWorkspaceCapability,
-  DaemonWorkspaceRemovalActivity,
   SessionMetadataResult,
 } from '@qwen-code/sdk/daemon';
 import {
+  FolderKanbanIcon,
   ActivityIcon,
   BlocksIcon,
   CalendarClockIcon,
@@ -85,6 +84,8 @@ import {
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { formatRelativeTime } from '../../utils/formatRelativeTime';
 import { DialogShell } from '../dialogs/DialogShell';
+import { useWorkspaceRemoval } from '../workspaces/useWorkspaceRemoval';
+import { WorkspaceRemovalDialog } from '../workspaces/WorkspaceRemovalDialog';
 import { WorkspaceSection, isAbsolutePath } from './WorkspaceSection';
 import { WorkspaceMenu, type WorkspaceMenuActions } from './WorkspaceMenu';
 import { WorkspaceRenameDialog } from './WorkspaceRenameDialog';
@@ -218,6 +219,7 @@ export type WebShellSidebarFooterItem =
   | 'version'
   | 'theme'
   | 'sessionsOverview'
+  | 'workspacesOverview'
   | 'splitView'
   | 'daemonStatus'
   | 'collapse';
@@ -386,6 +388,8 @@ interface WebShellSidebarProps {
    * narrow widths, so the entry point can be offered at every viewport size.
    */
   canOpenSessionsOverview?: boolean;
+  /** Opens the Workspaces overview panel (table of registered workspaces). */
+  onOpenWorkspacesOverview?: () => void;
   onOpenSplitView: () => void;
   /** Whether to offer the in-window split view (large screens only). */
   canOpenSplitView?: boolean;
@@ -879,6 +883,7 @@ export function WebShellSidebar({
   onOpenGoals,
   onOpenSessions,
   canOpenSessionsOverview,
+  onOpenWorkspacesOverview,
   onOpenSplitView,
   canOpenSplitView,
   onNewSession,
@@ -1287,22 +1292,11 @@ export function WebShellSidebar({
   const [collapsedSessionsOpen, setCollapsedSessionsOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [bodyScrolled, setBodyScrolled] = useState(false);
-  const [workspaceRemovalCandidate, setWorkspaceRemovalCandidate] =
-    useState<DaemonWorkspaceCapability | null>(null);
-  const [workspaceRemovalActivity, setWorkspaceRemovalActivity] =
-    useState<DaemonWorkspaceRemovalActivity | null>(null);
-  const [workspaceRemovalSubmitting, setWorkspaceRemovalSubmitting] =
-    useState(false);
   const [workspaceRenameCandidate, setWorkspaceRenameCandidate] =
     useState<DaemonWorkspaceCapability | null>(null);
   const [workspaceRenameSubmitting, setWorkspaceRenameSubmitting] =
     useState(false);
-  const workspaceRemovalMountedRef = useRef(false);
-  const workspaceRemovalDismissedRef = useRef(false);
-  const [
-    workspaceRemovalRemoteInProgress,
-    setWorkspaceRemovalRemoteInProgress,
-  ] = useState(false);
+  const sidebarMountedRef = useRef(false);
   const [workspaceSessionsReloadToken, setWorkspaceSessionsReloadToken] =
     useState(0);
   const [autoExpandWorkspace, setAutoExpandWorkspace] = useState<{
@@ -1335,10 +1329,9 @@ export function WebShellSidebar({
   }, [primaryWorkspaceExpansionId]);
 
   useEffect(() => {
-    workspaceRemovalMountedRef.current = true;
+    sidebarMountedRef.current = true;
     return () => {
-      workspaceRemovalMountedRef.current = false;
-      workspaceRemovalDismissedRef.current = true;
+      sidebarMountedRef.current = false;
     };
   }, []);
   const [searchQuery, setSearchQuery] = useState('');
@@ -2393,7 +2386,7 @@ export function WebShellSidebar({
 
   const reconcileRemovedWorkspace = useCallback(
     async (removed: DaemonWorkspaceCapability) => {
-      if (!workspaceRemovalMountedRef.current) return;
+      if (!sidebarMountedRef.current) return;
       if (selectedWorkspaceCwd === removed.cwd) {
         onSelectWorkspace?.(undefined);
       }
@@ -2404,10 +2397,7 @@ export function WebShellSidebar({
       } catch {
         // The mutation already converged; a later refresh will reconcile.
       }
-      if (!workspaceRemovalMountedRef.current) return;
-      setWorkspaceRemovalCandidate(null);
-      setWorkspaceRemovalActivity(null);
-      setWorkspaceRemovalRemoteInProgress(false);
+      if (!sidebarMountedRef.current) return;
       void reload().catch(() => undefined);
       void reloadArchived().catch(() => undefined);
     },
@@ -2421,16 +2411,19 @@ export function WebShellSidebar({
     ],
   );
 
-  const requestWorkspaceRemoval = useCallback(
-    (candidate: DaemonWorkspaceCapability) => {
-      if (workspaceRemovalSubmitting) return;
-      workspaceRemovalDismissedRef.current = false;
-      setWorkspaceRemovalActivity(null);
-      setWorkspaceRemovalRemoteInProgress(false);
-      setWorkspaceRemovalCandidate(candidate);
-    },
-    [workspaceRemovalSubmitting],
-  );
+  const workspaceRemoval = useWorkspaceRemoval({
+    removeWorkspace: (workspaceId, options) =>
+      workspaceActions.removeWorkspace(workspaceId, options),
+    onRemoved: reconcileRemovedWorkspace,
+    onError,
+    errorMessage: t('sidebar.removeWorkspaceError'),
+    // The forced retry cannot target the workspace the active session lives
+    // in; the dialog explains and disables it, the hook enforces it against
+    // a stale click.
+    blockForce: (candidate) =>
+      Boolean(connection.sessionId) &&
+      connection.workspaceCwd === candidate.cwd,
+  });
 
   const requestWorkspaceRename = useCallback(
     (candidate: DaemonWorkspaceCapability) => {
@@ -2500,142 +2493,6 @@ export function WebShellSidebar({
     },
     [onError, t, workspace.client],
   );
-
-  const confirmWorkspaceRemoval = useCallback(async () => {
-    const candidate = workspaceRemovalCandidate;
-    if (!candidate || workspaceRemovalSubmitting) return;
-    const force = workspaceRemovalActivity !== null;
-    if (
-      force &&
-      connection.sessionId &&
-      connection.workspaceCwd === candidate.cwd
-    ) {
-      return;
-    }
-    setWorkspaceRemovalSubmitting(true);
-    try {
-      await workspaceActions.removeWorkspace(candidate.id, { force });
-      await reconcileRemovedWorkspace(candidate);
-    } catch (error) {
-      if (!workspaceRemovalMountedRef.current) return;
-      if (error instanceof DaemonHttpError) {
-        const body = error.body as
-          | {
-              code?: unknown;
-              activity?: DaemonWorkspaceRemovalActivity;
-            }
-          | undefined;
-        if (
-          error.status === 409 &&
-          body?.code === 'workspace_busy' &&
-          body.activity
-        ) {
-          setWorkspaceRemovalActivity(body.activity);
-          return;
-        }
-        if (error.status === 400 && body?.code === 'workspace_mismatch') {
-          await reconcileRemovedWorkspace(candidate);
-          return;
-        }
-        if (
-          error.status === 409 &&
-          (body?.code === 'workspace_removal_in_progress' ||
-            body?.code === 'workspace_registration_in_progress')
-        ) {
-          setWorkspaceRemovalRemoteInProgress(true);
-          let lastError: unknown = error;
-          let exhaustedTransientRetries = true;
-          for (let attempt = 0; attempt < 20; attempt++) {
-            if (
-              !workspaceRemovalMountedRef.current ||
-              workspaceRemovalDismissedRef.current
-            ) {
-              return;
-            }
-            await new Promise((resolve) => window.setTimeout(resolve, 250));
-            if (
-              !workspaceRemovalMountedRef.current ||
-              workspaceRemovalDismissedRef.current
-            ) {
-              return;
-            }
-            try {
-              await workspaceActions.removeWorkspace(candidate.id, { force });
-              await reconcileRemovedWorkspace(candidate);
-              return;
-            } catch (retryError) {
-              if (!workspaceRemovalMountedRef.current) return;
-              lastError = retryError;
-              if (retryError instanceof DaemonHttpError) {
-                const retryBody = retryError.body as
-                  | {
-                      code?: unknown;
-                      activity?: DaemonWorkspaceRemovalActivity;
-                    }
-                  | undefined;
-                if (
-                  retryError.status === 400 &&
-                  retryBody?.code === 'workspace_mismatch'
-                ) {
-                  await reconcileRemovedWorkspace(candidate);
-                  return;
-                }
-                if (
-                  retryError.status === 409 &&
-                  retryBody?.code === 'workspace_busy' &&
-                  retryBody.activity
-                ) {
-                  setWorkspaceRemovalRemoteInProgress(false);
-                  setWorkspaceRemovalActivity(retryBody.activity);
-                  return;
-                }
-                if (
-                  retryError.status === 409 &&
-                  (retryBody?.code === 'workspace_removal_in_progress' ||
-                    retryBody?.code === 'workspace_registration_in_progress')
-                ) {
-                  continue;
-                }
-              }
-              exhaustedTransientRetries = false;
-              break;
-            }
-          }
-          if (
-            !workspaceRemovalMountedRef.current ||
-            workspaceRemovalDismissedRef.current
-          ) {
-            return;
-          }
-          setWorkspaceRemovalRemoteInProgress(false);
-          onError(
-            exhaustedTransientRetries
-              ? new Error(
-                  'Workspace removal remained in progress after retries.',
-                )
-              : lastError,
-            t('sidebar.removeWorkspaceError'),
-          );
-          return;
-        }
-      }
-      onError(error, t('sidebar.removeWorkspaceError'));
-    } finally {
-      if (workspaceRemovalMountedRef.current) {
-        setWorkspaceRemovalSubmitting(false);
-      }
-    }
-  }, [
-    connection.sessionId,
-    connection.workspaceCwd,
-    onError,
-    reconcileRemovedWorkspace,
-    t,
-    workspaceActions,
-    workspaceRemovalActivity,
-    workspaceRemovalCandidate,
-    workspaceRemovalSubmitting,
-  ]);
 
   const handleNewSession = useCallback(
     (workspaceCwd?: string) => {
@@ -4994,120 +4851,13 @@ export function WebShellSidebar({
             }}
           />
         )}
-        {workspaceRemovalCandidate && (
-          <DialogShell
-            title={t('sidebar.removeWorkspaceTitle')}
-            size="sm"
-            onClose={() => {
-              if (
-                !workspaceRemovalSubmitting ||
-                workspaceRemovalRemoteInProgress
-              ) {
-                workspaceRemovalDismissedRef.current = true;
-                setWorkspaceRemovalCandidate(null);
-                setWorkspaceRemovalActivity(null);
-                setWorkspaceRemovalRemoteInProgress(false);
-              }
-            }}
-          >
-            <div className={styles.confirmContent}>
-              <p className={styles.confirmDescription}>
-                {workspaceRemovalActivity
-                  ? t('sidebar.removeWorkspaceBusy', {
-                      name: workspaceRemovalCandidate.cwd,
-                    })
-                  : t('sidebar.removeWorkspaceConfirm', {
-                      name: workspaceRemovalCandidate.cwd,
-                    })}
-              </p>
-              {workspaceRemovalActivity && (
-                <ul className={styles.workspaceRemovalActivityList}>
-                  <li>
-                    {t('sidebar.removeWorkspaceSessions', {
-                      count: workspaceRemovalActivity.sessions,
-                    })}
-                  </li>
-                  <li>
-                    {t('sidebar.removeWorkspacePrompts', {
-                      count: workspaceRemovalActivity.activePrompts,
-                    })}
-                  </li>
-                  <li>
-                    {t('sidebar.removeWorkspaceStarts', {
-                      count: workspaceRemovalActivity.pendingSessionStarts,
-                    })}
-                  </li>
-                  <li>
-                    {t('sidebar.removeWorkspaceConnections', {
-                      count: workspaceRemovalActivity.acpConnections,
-                    })}
-                  </li>
-                  <li>
-                    {t('sidebar.removeWorkspaceMemoryTasks', {
-                      count: workspaceRemovalActivity.memoryTasks,
-                    })}
-                  </li>
-                  <li>
-                    {t('sidebar.removeWorkspaceWorkers', {
-                      count: workspaceRemovalActivity.channelWorkers,
-                    })}
-                  </li>
-                  <li>
-                    {t('sidebar.removeWorkspaceVoiceSessions', {
-                      count: workspaceRemovalActivity.voiceSessions ?? 0,
-                    })}
-                  </li>
-                </ul>
-              )}
-              {workspaceRemovalActivity &&
-                connection.sessionId &&
-                connection.workspaceCwd === workspaceRemovalCandidate.cwd && (
-                  <p className={styles.confirmDescription}>
-                    {t('sidebar.removeWorkspaceCurrentSession')}
-                  </p>
-                )}
-              {workspaceRemovalRemoteInProgress && (
-                <p className={styles.confirmDescription}>
-                  {t('sidebar.removeWorkspaceInProgress')}
-                </p>
-              )}
-              <div className={styles.confirmActions}>
-                <button
-                  className={styles.secondaryButton}
-                  type="button"
-                  disabled={
-                    workspaceRemovalSubmitting &&
-                    !workspaceRemovalRemoteInProgress
-                  }
-                  onClick={() => {
-                    workspaceRemovalDismissedRef.current = true;
-                    setWorkspaceRemovalCandidate(null);
-                    setWorkspaceRemovalActivity(null);
-                    setWorkspaceRemovalRemoteInProgress(false);
-                  }}
-                >
-                  {t('common.cancel')}
-                </button>
-                <button
-                  className={styles.dangerButton}
-                  type="button"
-                  disabled={
-                    workspaceRemovalSubmitting ||
-                    workspaceRemovalRemoteInProgress ||
-                    (workspaceRemovalActivity !== null &&
-                      Boolean(connection.sessionId) &&
-                      connection.workspaceCwd === workspaceRemovalCandidate.cwd)
-                  }
-                  onClick={() => void confirmWorkspaceRemoval()}
-                >
-                  {workspaceRemovalActivity
-                    ? t('sidebar.forceRemoveWorkspace')
-                    : t('sidebar.removeWorkspace')}
-                </button>
-              </div>
-            </div>
-          </DialogShell>
-        )}
+        <WorkspaceRemovalDialog
+          removal={workspaceRemoval}
+          currentSessionInCandidate={
+            Boolean(connection.sessionId) &&
+            connection.workspaceCwd === workspaceRemoval.candidate?.cwd
+          }
+        />
         {groupEditor && (
           <DialogShell
             title={groupEditorTitle}
@@ -5767,7 +5517,7 @@ export function WebShellSidebar({
                                     ...(canRemove
                                       ? {
                                           remove: () =>
-                                            requestWorkspaceRemoval(ws),
+                                            workspaceRemoval.request(ws),
                                         }
                                       : {}),
                                   };
@@ -5841,8 +5591,8 @@ export function WebShellSidebar({
                                           actions={menuActions}
                                           overview={overview}
                                           disabled={
-                                            (workspaceRemovalSubmitting &&
-                                              workspaceRemovalCandidate?.id ===
+                                            (workspaceRemoval.submitting &&
+                                              workspaceRemoval.candidate?.id ===
                                                 ws.id) ||
                                             (workspaceRenameSubmitting &&
                                               workspaceRenameCandidate?.id ===
@@ -5885,6 +5635,17 @@ export function WebShellSidebar({
                         ) : null}
                       </Fragment>
                     ))}
+                    {onOpenWorkspacesOverview && !lockedWorkspaceCwd && (
+                      <button
+                        className={styles.manageWorkspacesRow}
+                        type="button"
+                        data-testid="manage-workspaces"
+                        onClick={onOpenWorkspacesOverview}
+                      >
+                        <FolderKanbanIcon aria-hidden="true" />
+                        <span>{t('sidebar.manageWorkspaces')}</span>
+                      </button>
+                    )}
                   </div>
                 </div>
               </>
@@ -5973,6 +5734,18 @@ export function WebShellSidebar({
                     onClick={onOpenSessions}
                   >
                     <LayoutGridIcon size={16} strokeWidth={1.2} />
+                  </button>
+                )}
+              {onOpenWorkspacesOverview &&
+                footerItems.has('workspacesOverview') && (
+                  <button
+                    className={styles.collapseButton}
+                    type="button"
+                    title={t('sidebar.manageWorkspaces')}
+                    aria-label={t('sidebar.manageWorkspaces')}
+                    onClick={onOpenWorkspacesOverview}
+                  >
+                    <FolderKanbanIcon size={16} strokeWidth={1.2} />
                   </button>
                 )}
               {canOpenSplitView && footerItems.has('splitView') && (
