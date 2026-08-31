@@ -42,11 +42,16 @@ import {
   deliveredVerbatimLines,
   flattenPrompt,
   promptLines,
-  briefPath,
   findingsPointerOf,
 } from './lib/prompt-record.js';
 import { priorSessionIds } from './lib/run-ledger.js';
 import { assignedChunk, pointedAt } from './lib/coverage.js';
+import {
+  chunkOfKey,
+  declaresOwnUncoverable,
+  openedBrief,
+  readFindingsPointer,
+} from './lib/certification.js';
 import { readBudgetStop, type BudgetStop } from './lib/deadline.js';
 
 interface RecoverFindingsArgs {
@@ -97,39 +102,17 @@ export interface RecoverFindingsResult {
 const ROUND_IN_KEY_RE = /--round-(\d+)(?:--|$)/;
 
 /**
- * Certify one transcript against one built prompt — the same bar coverage
- * holds a live launch to: the CLI-built prompt arrived verbatim, and the
- * agent demonstrably opened its brief or the diff. Prose proves nothing.
- */
-const UNCOVERABLE_RE = /^\s*Uncoverable:\s*chunk\s+(\d+)\b/im;
-
-/**
  * Certify one transcript against one built prompt — the SAME bar the live
  * pipeline holds a launch to, branch for branch.
  *
  * It used to be a re-implementation, and re-implementing a bar means drifting
- * from it. `openedBrief || diffToolCalls > 0` certified three things the
- * pipeline refuses: a chunk agent that opened its brief and never the diff
- * (coverage requires the diff read for a chunk-assigned record), a
- * verify/reverse-audit agent that opened the diff and never its brief (the
- * brief carries the method and the cumulative findings list), and a verifier
- * that skipped the findings-list read the compose-time gate requires of the
- * same key. Each handed the resumed orchestrator uncertified prose labelled
- * as certified.
+ * from it: five review rounds found five branches where the copy was weaker
+ * than the original. The atoms now come from `lib/certification.ts` — the
+ * one definition each of the chunk-scoped uncoverable veto, the
+ * brief-opened floor, and the findings-pointer read — so what remains here
+ * is only the composition recovery needs (the `returned` field read among
+ * them).
  */
-/**
- * The chunk a KEY assigns: `chunk-13` → 13, and the per-chunk audit shapes —
- * `reverse-audit--chunk-13--round-2--<digest>` — carry theirs in a `--chunk-N`
- * segment. Parsing only the bare form left those keys chunk-less, and with
- * the production launch prompt carrying no `chunk N of M` line either, the
- * bar's diff-read requirement silently vanished for exactly the auditors
- * whose territory is a chunk.
- */
-function chunkOfKey(key: string): number | null {
-  const m = /^chunk-(\d+)$/.exec(key) ?? /--chunk-(\d+)(?:--|$)/.exec(key);
-  return m ? Number(m[1]) : null;
-}
-
 function meetsBar(
   rec: AgentRecord,
   planPath: string,
@@ -156,19 +139,12 @@ function meetsBar(
   // two authorities of one pipeline answering oppositely about one
   // transcript. `latestReverseAuditRound` regressed with the drop and the
   // resumed run restarted a round the dead attempt had completed.
-  const own = assignedChunk(rec);
-  const declared = UNCOVERABLE_RE.exec(rec.finalText);
-  if (declared !== null && own !== null && Number(declared[1]) === own) {
-    return false;
-  }
+  if (declaresOwnUncoverable(rec, assignedChunk(rec))) return false;
   // EVERY role opens its brief — the live walk gates `ok` on `unreadBriefs`
   // for chunk agents too: the brief carries the severity bar, the finding
   // format and the project's own rules, and a chunk agent that skipped it
   // reviewed against rules it never saw.
-  const openedBrief = rec.successfulCallArgs.some((a) =>
-    a.includes(JSON.stringify(briefPath(planPath, key))),
-  );
-  if (!openedBrief) return false;
+  if (!openedBrief(rec, planPath, key)) return false;
   if (/^chunk-\d+$/.test(key)) {
     // The chunk ROLE only — its proof of territory is the diff it opened,
     // and its prompt names no findings list. Keyed on the exact bare form:
@@ -192,13 +168,7 @@ function meetsBar(
   // Deriving from the key made the floor silently vanish for exactly those
   // auditors, and compose-time then ruled the same key `findings-unread`.
   const pointer = findingsPointerOf(builtPrompt);
-  if (pointer === null) {
-    return chunk !== null ? rec.diffToolCalls > 0 : chunklessFloor;
-  }
-  const readList = rec.successfulReadFileArgs.some((a) =>
-    a.includes(JSON.stringify(pointer)),
-  );
-  if (!readList) return false;
+  if (!readFindingsPointer(rec, pointer)) return false;
   return chunk !== null ? rec.diffToolCalls > 0 : chunklessFloor;
 }
 

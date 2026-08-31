@@ -20,6 +20,25 @@ import {
 // gap that two-layer SDK re-exports are easy to drift on.
 import type {
   DaemonClient,
+  CreateStandaloneSessionOptions,
+  DaemonArchiveStandaloneSessionsResult,
+  DaemonDeleteStandaloneSessionsResult,
+  DaemonRestoredStandaloneSession,
+  DaemonSessionRestoreStrategy,
+  DaemonStandaloneBatchError,
+  DaemonStandaloneCreationRecovery,
+  DaemonStandaloneDirectoryResult,
+  DaemonStandaloneFields,
+  DaemonStandaloneMetadataResult,
+  DaemonStandaloneSession,
+  DaemonStandaloneSessionCreating,
+  DaemonStandaloneSessionListOptions,
+  DaemonStandaloneSessionListPage,
+  DaemonStandaloneSessionLookup,
+  DaemonStandaloneSessionSummary,
+  DaemonStandaloneWorkingDirectory,
+  DaemonUnarchiveStandaloneSessionsResult,
+  RestoreStandaloneSessionRequest,
   WorkspaceDaemonClient,
   DaemonClientEvictedData,
   DaemonClientEvictedEvent,
@@ -142,12 +161,20 @@ import type {
   DaemonWorkspaceVoiceUpdate,
   KnownDaemonEvent,
 } from '../../src/index.js';
-import { DAEMON_UI_DEBUG_REASONS } from '../../src/daemon/index.js';
+import {
+  DAEMON_UI_DEBUG_REASONS,
+  DAEMON_UI_UNRECOGNIZED_DIAGNOSTIC_REASONS,
+  isTaskExecutionMode,
+  selectUnrecognizedDiagnostics,
+  UNRECOGNIZED_DIAGNOSTICS_LIMIT,
+} from '../../src/daemon/index.js';
 import type {
   DaemonChannelStartupAttemptFailure as DaemonEntryChannelStartupAttemptFailure,
   DaemonChannelStartupFailure as DaemonEntryChannelStartupFailure,
   DaemonChannelWorkerStartErrorResponse as DaemonEntryChannelWorkerStartErrorResponse,
   DaemonUiDebugReason as DaemonEntryUiDebugReason,
+  DaemonUnrecognizedDiagnostic as DaemonEntryUnrecognizedDiagnostic,
+  DaemonUnrecognizedDiagnosticReason as DaemonEntryUnrecognizedDiagnosticReason,
 } from '../../src/daemon/index.js';
 
 describe('public SDK entry — typed daemon event surface (#4217)', () => {
@@ -173,6 +200,37 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     // failure mode caught for PR-21 auth surface).
     expect(typeof Public.isWorkspaceScopedBudgetEvent).toBe('function');
     expect('projectChatRecordsToDaemonTranscript' in Public).toBe(false);
+    expect(Public.STANDALONE_SESSIONS_CAPABILITY).toBe(
+      'standalone_sessions_v1',
+    );
+    expect(typeof Public.isStandaloneSessionNotFoundError).toBe('function');
+    expect(typeof Public.isStandaloneCreationOutcomeUnknown).toBe('function');
+    expect(typeof Public.DaemonStandaloneProtocolError).toBe('function');
+    expect(typeof Public.DaemonStandaloneCreationOutcomeUnknownError).toBe(
+      'function',
+    );
+  });
+
+  it('exports standalone session SDK types from the package entry', () => {
+    expectTypeOf<CreateStandaloneSessionOptions>().not.toBeNever();
+    expectTypeOf<RestoreStandaloneSessionRequest>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneSession>().not.toBeNever();
+    expectTypeOf<DaemonRestoredStandaloneSession>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneSessionSummary>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneSessionLookup>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneSessionListOptions>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneSessionListPage>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneDirectoryResult>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneMetadataResult>().not.toBeNever();
+    expectTypeOf<DaemonArchiveStandaloneSessionsResult>().not.toBeNever();
+    expectTypeOf<DaemonUnarchiveStandaloneSessionsResult>().not.toBeNever();
+    expectTypeOf<DaemonDeleteStandaloneSessionsResult>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneBatchError>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneFields>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneSessionCreating>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneWorkingDirectory>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneCreationRecovery>().not.toBeNever();
+    expectTypeOf<DaemonSessionRestoreStrategy>().not.toBeNever();
   });
 
   it('round-trips a raw DaemonEvent through the public narrow helper', () => {
@@ -653,5 +711,67 @@ describe('daemon UI debug-reason public surface', () => {
     expectTypeOf<DaemonEntryUiDebugReason>().toEqualTypeOf<
       'unrecognized_event' | 'unrecognized_session_update' | 'malformed_payload'
     >();
+  });
+});
+
+describe('unrecognized-diagnostic sidechannel public surface (#8823)', () => {
+  it('pins the routed reason subset as a runtime value', () => {
+    // Same esbuild-erasure hazard as DAEMON_UI_DEBUG_REASONS: the router
+    // keys on this array at runtime, so it must ship as a value, and the
+    // subset must stay inside the parent union.
+    expect(DAEMON_UI_UNRECOGNIZED_DIAGNOSTIC_REASONS).toEqual([
+      'unrecognized_event',
+      'unrecognized_session_update',
+    ]);
+    for (const reason of DAEMON_UI_UNRECOGNIZED_DIAGNOSTIC_REASONS) {
+      expect(DAEMON_UI_DEBUG_REASONS).toContain(reason);
+    }
+    expectTypeOf<DaemonEntryUnrecognizedDiagnosticReason>().toEqualTypeOf<
+      'unrecognized_event' | 'unrecognized_session_update'
+    >();
+  });
+
+  it('routes every unrecognized_*-prefixed debug reason (#8823)', () => {
+    // Membership is what the router tests, but Web Shell hides debug blocks
+    // by the `unrecognized_` prefix — so any reason added to
+    // DAEMON_UI_DEBUG_REASONS under that prefix must join the routed
+    // subset, otherwise those frames fall through to `appendStatusBlock`
+    // (finalizing the streaming block, consuming the maxBlocks budget)
+    // while renderers hide the resulting block: the #8823 symptoms,
+    // invisible until usage-loss reports arrive.
+    for (const reason of DAEMON_UI_DEBUG_REASONS) {
+      if (!reason.startsWith('unrecognized_')) continue;
+      expect(DAEMON_UI_UNRECOGNIZED_DIAGNOSTIC_REASONS).toContain(reason);
+    }
+  });
+
+  it('reaches the selector and the cap through the daemon entry', () => {
+    // The PR's Risk & Scope points adapters at `@qwen-code/sdk/daemon`; an
+    // export missing from the barrel is a compile error for every consumer,
+    // so pin reachability the way DAEMON_UI_DEBUG_REASONS is pinned.
+    expect(typeof selectUnrecognizedDiagnostics).toBe('function');
+    expect(UNRECOGNIZED_DIAGNOSTICS_LIMIT).toBe(50);
+    expectTypeOf<DaemonEntryUnrecognizedDiagnostic>().toHaveProperty(
+      'debugReason',
+    );
+  });
+});
+
+describe('task executionMode guard public surface', () => {
+  it('pins the fail-closed literal whitelist at the daemon entry', () => {
+    // webui's projection (`projectSubagentToolUpdate`) and the web-shell
+    // adapter (`daemonToolBlockToToolCall`) both import this guard from
+    // @qwen-code/sdk/daemon; a dropped re-export is a compile error for
+    // them, and a widened or narrowed literal set silently re-routes live
+    // vs recorded classification. Pin the runtime behavior here the way
+    // DAEMON_UI_DEBUG_REASONS pins its closed union.
+    expect(typeof isTaskExecutionMode).toBe('function');
+    expect(isTaskExecutionMode('foreground')).toBe(true);
+    expect(isTaskExecutionMode('background')).toBe(true);
+    expect(isTaskExecutionMode('detached')).toBe(false);
+    expect(isTaskExecutionMode('')).toBe(false);
+    expect(isTaskExecutionMode(undefined)).toBe(false);
+    expect(isTaskExecutionMode(42)).toBe(false);
+    expect(isTaskExecutionMode({})).toBe(false);
   });
 });

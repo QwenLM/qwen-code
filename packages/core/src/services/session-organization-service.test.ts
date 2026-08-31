@@ -595,6 +595,20 @@ describe('SessionOrganizationService', () => {
     expect(snapshot.sessions.has(sessionIdA)).toBe(false);
   });
 
+  it('checks the runtime generation before removing an organization entry', async () => {
+    await service.updateSessionOrganization(sessionIdA, { isPinned: true });
+    const generationClosed = new Error('generation closed');
+
+    await expect(
+      service.removeSession(sessionIdA, {
+        assertCanCommit: () => {
+          throw generationClosed;
+        },
+      }),
+    ).rejects.toBe(generationClosed);
+    expect((await service.readSnapshot()).sessions.has(sessionIdA)).toBe(true);
+  });
+
   it('removes multiple session organization entries in one call', async () => {
     const group = await service.createGroup({
       name: 'Cleanup',

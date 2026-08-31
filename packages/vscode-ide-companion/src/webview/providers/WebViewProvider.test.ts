@@ -29,6 +29,7 @@ const {
   slashCommandNotificationCallbackRef,
   endTurnCallbackRef,
   streamChunkCallbackRef,
+  transcriptUpdateCallbackRef,
   toolCallCallbackRef,
   permissionRequestCallbackRef,
   askUserQuestionCallbackRef,
@@ -104,6 +105,11 @@ const {
   streamChunkCallbackRef: {
     current: undefined as ((chunk: string) => void) | undefined,
   },
+  transcriptUpdateCallbackRef: {
+    current: undefined as
+      | ((notification: Record<string, unknown>) => void)
+      | undefined,
+  },
   toolCallCallbackRef: {
     current: undefined as
       | ((update: Record<string, unknown>) => void)
@@ -140,6 +146,64 @@ vi.mock('@qwen-code/qwen-code-core', async () => {
     },
   };
 });
+
+const daemonMocks = vi.hoisted(() => {
+  // Contract-faithful stand-in for QwenDaemonProcess: workspace switches
+  // notify superseded listeners, exits notify exit listeners, and a disposed
+  // subscription stops receiving either.
+  class FakeQwenDaemonProcess {
+    boundCwd: string | null = null;
+    runtimeCount = 0;
+    exitListeners = new Set<() => void>();
+    supersededListeners = new Set<() => void>();
+
+    async start(_cliEntryPath: string, workspaceCwd: string) {
+      if (this.boundCwd !== null && this.boundCwd !== workspaceCwd) {
+        for (const listener of [...this.supersededListeners]) listener();
+      }
+      this.boundCwd = workspaceCwd;
+      this.runtimeCount += 1;
+      return {
+        baseUrl: `http://127.0.0.1:${4100 + this.runtimeCount}`,
+        token: `token-${this.runtimeCount}`,
+      };
+    }
+
+    addExitListener(listener: () => void) {
+      this.exitListeners.add(listener);
+      return {
+        dispose: () => {
+          this.exitListeners.delete(listener);
+        },
+      };
+    }
+
+    addSupersededListener(listener: () => void) {
+      this.supersededListeners.add(listener);
+      return {
+        dispose: () => {
+          this.supersededListeners.delete(listener);
+        },
+      };
+    }
+
+    dispose(): void {}
+  }
+
+  return {
+    FakeQwenDaemonProcess,
+    instances: [] as FakeQwenDaemonProcess[],
+  };
+});
+
+vi.mock('../../services/qwenDaemonProcess.js', () => ({
+  QwenDaemonProcess: class extends daemonMocks.FakeQwenDaemonProcess {
+    constructor() {
+      super();
+      daemonMocks.instances.push(this);
+    }
+  },
+}));
 
 vi.mock('vscode', () => ({
   ExtensionMode: {
@@ -252,6 +316,11 @@ vi.mock('../../services/qwenAgentManager.js', () => ({
         askUserQuestionCallbackRef.current = callback;
       },
     );
+    onTranscriptUpdate = vi.fn(
+      (callback: (notification: Record<string, unknown>) => void) => {
+        transcriptUpdateCallbackRef.current = callback;
+      },
+    );
     onDisconnected = vi.fn();
     permissionRequestCallback?: (request: unknown) => Promise<string>;
     cancelCurrentPrompt = vi.fn();
@@ -285,6 +354,7 @@ vi.mock('./PanelManager.js', async (importOriginal) => {
         return mockGetPanel();
       }
       setPanel = vi.fn();
+      dispose = vi.fn();
     },
   };
 });
@@ -360,6 +430,7 @@ vi.mock('../../utils/errorMessage.js', () => ({
   getErrorMessage: vi.fn((error: unknown) => String(error)),
 }));
 
+import * as vscode from 'vscode';
 import { WebViewProvider, resolveQwenCliEntryPath } from './WebViewProvider.js';
 import {
   truncatePanelTitle,
@@ -418,6 +489,7 @@ describe('resolveQwenCliEntryPath', () => {
  */
 async function setupAttachedProvider(options?: {
   captureMessageHandler?: boolean;
+  context?: unknown;
 }) {
   let messageHandler: WebViewMessageHandler | undefined;
 
@@ -440,7 +512,7 @@ async function setupAttachedProvider(options?: {
   };
 
   const provider = new WebViewProvider(
-    { subscriptions: [] } as never,
+    (options?.context ?? { subscriptions: [] }) as never,
     { fsPath: '/extension-root' } as never,
   );
 
@@ -461,6 +533,7 @@ beforeEach(() => {
   mockConfigChangeHandlers.length = 0;
   endTurnCallbackRef.current = undefined;
   streamChunkCallbackRef.current = undefined;
+  transcriptUpdateCallbackRef.current = undefined;
   toolCallCallbackRef.current = undefined;
   permissionRequestCallbackRef.current = undefined;
   askUserQuestionCallbackRef.current = undefined;
@@ -1121,6 +1194,39 @@ describe('WebViewProvider.attachToView', () => {
   });
 });
 
+describe('WebViewProvider transcript forwarding', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockMessageHandlerInstances.length = 0;
+    mockQwenAgentManagerInstances.length = 0;
+    mockGetPanel.mockReturnValue(null);
+  });
+
+  it('forwards agent transcriptUpdate notifications to the webview', async () => {
+    const { postMessage } = await setupAttachedProvider();
+
+    // The subscription is registered in the provider constructor; without it
+    // the webview never receives timeline frames and renders an empty
+    // transcript while every other message flow keeps working.
+    expect(transcriptUpdateCallbackRef.current).toBeDefined();
+
+    const notification = {
+      sessionId: 'session-1',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'hello transcript' },
+      },
+    };
+
+    transcriptUpdateCallbackRef.current?.(notification);
+
+    expect(postMessage).toHaveBeenCalledWith({
+      type: 'transcriptUpdate',
+      data: notification,
+    });
+  });
+});
+
 describe('WebViewProvider settings sync', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -1458,6 +1564,74 @@ describe('WebViewProvider initial model inheritance', () => {
       { autoAuthenticate: true },
     );
     expect(agentManager.setModelFromUi).toHaveBeenCalledWith('glm-5');
+  });
+
+  it('does not apply a discontinued initial model to the new session', async () => {
+    const provider = new WebViewProvider(
+      { subscriptions: [] } as never,
+      { fsPath: '/extension-root' } as never,
+    );
+    provider.setInitialModelId('qwen3-coder-plus(qwen-oauth)');
+
+    const agentManager = (
+      provider as unknown as {
+        agentManager: {
+          createNewSession: ReturnType<typeof vi.fn>;
+          setModelFromUi: ReturnType<typeof vi.fn>;
+        };
+      }
+    ).agentManager;
+    agentManager.createNewSession.mockResolvedValue('session-1');
+    agentManager.setModelFromUi.mockResolvedValue({
+      modelId: 'qwen3-coder-plus(qwen-oauth)',
+      name: 'Qwen3 Coder Plus',
+    });
+
+    await (
+      provider as unknown as {
+        loadCurrentSessionMessages: (options?: {
+          autoAuthenticate?: boolean;
+        }) => Promise<boolean>;
+      }
+    ).loadCurrentSessionMessages();
+
+    expect(agentManager.setModelFromUi).not.toHaveBeenCalled();
+  });
+
+  it('still applies a runtime snapshot id that wraps a discontinued model', async () => {
+    const provider = new WebViewProvider(
+      { subscriptions: [] } as never,
+      { fsPath: '/extension-root' } as never,
+    );
+    provider.setInitialModelId(
+      '$runtime|qwen-oauth|qwen3-coder-plus(qwen-oauth)',
+    );
+
+    const agentManager = (
+      provider as unknown as {
+        agentManager: {
+          createNewSession: ReturnType<typeof vi.fn>;
+          setModelFromUi: ReturnType<typeof vi.fn>;
+        };
+      }
+    ).agentManager;
+    agentManager.createNewSession.mockResolvedValue('session-1');
+    agentManager.setModelFromUi.mockResolvedValue({
+      modelId: '$runtime|qwen-oauth|qwen3-coder-plus(qwen-oauth)',
+      name: 'Qwen3 Coder Plus',
+    });
+
+    await (
+      provider as unknown as {
+        loadCurrentSessionMessages: (options?: {
+          autoAuthenticate?: boolean;
+        }) => Promise<boolean>;
+      }
+    ).loadCurrentSessionMessages();
+
+    expect(agentManager.setModelFromUi).toHaveBeenCalledWith(
+      '$runtime|qwen-oauth|qwen3-coder-plus(qwen-oauth)',
+    );
   });
 });
 
@@ -2078,5 +2252,152 @@ describe('WebViewProvider.handleAuthInteractive credential rollback', () => {
         }),
       }),
     );
+  });
+});
+
+describe('WebViewProvider web-shell daemon bootstrap', () => {
+  function setWorkspaceFolders(folders: string[]): void {
+    (
+      vscode.workspace as unknown as {
+        workspaceFolders: Array<{ uri: { fsPath: string } }>;
+      }
+    ).workspaceFolders = folders.map((fsPath) => ({ uri: { fsPath } }));
+  }
+
+  function createSharedContext(): unknown {
+    return {
+      subscriptions: [],
+      workspaceState: {
+        get: vi.fn(() => undefined),
+        update: vi.fn(() => Promise.resolve()),
+      },
+    };
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockMessageHandlerInstances.length = 0;
+    mockQwenAgentManagerInstances.length = 0;
+    mockGetPanel.mockReturnValue(null);
+    mockConfigGet.mockImplementation(
+      (_key: string, defaultValue: unknown) => defaultValue,
+    );
+    daemonMocks.instances.length = 0;
+    setWorkspaceFolders(['/workspace-a']);
+    vi.spyOn(
+      WebViewProvider.prototype as unknown as {
+        initializeAgentConnection: () => Promise<void>;
+      },
+      'initializeAgentConnection',
+    ).mockResolvedValue(undefined);
+  });
+
+  it('surfaces the failure to an attached webview when another host switches the shared daemon workspace', async () => {
+    const context = createSharedContext();
+    const first = await setupAttachedProvider({
+      captureMessageHandler: true,
+      context,
+    });
+    const second = await setupAttachedProvider({
+      captureMessageHandler: true,
+      context,
+    });
+
+    setWorkspaceFolders(['/workspace-a']);
+    await first.messageHandler?.({ type: 'webShellReady' });
+    expect(first.postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'webShellBootstrap',
+        data: expect.objectContaining({ workspaceCwd: '/workspace-a' }),
+      }),
+    );
+
+    // A second host bootstrapping against another folder replaces the
+    // daemon the first webview is streaming against.
+    setWorkspaceFolders(['/workspace-b']);
+    await second.messageHandler?.({ type: 'webShellReady' });
+
+    expect(second.postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'webShellBootstrap',
+        data: expect.objectContaining({ workspaceCwd: '/workspace-b' }),
+      }),
+    );
+    // The first webview must hear about the replacement — its baseUrl and
+    // token are dead and nothing else tells it.
+    expect(first.postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'webShellBootstrapError' }),
+    );
+    // The host that triggered the switch must not be told its own daemon died.
+    const secondErrors = second.postMessage.mock.calls.filter(
+      ([message]) =>
+        (message as { type?: string }).type === 'webShellBootstrapError',
+    );
+    expect(secondErrors).toHaveLength(0);
+  });
+
+  it('does not notify a host about a workspace switch it triggers itself', async () => {
+    const context = createSharedContext();
+    const host = await setupAttachedProvider({
+      captureMessageHandler: true,
+      context,
+    });
+
+    setWorkspaceFolders(['/workspace-a']);
+    await host.messageHandler?.({ type: 'webShellReady' });
+    expect(host.postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'webShellBootstrap',
+        data: expect.objectContaining({ workspaceCwd: '/workspace-a' }),
+      }),
+    );
+
+    // The same host re-bootstrapping against another folder (a webview
+    // reload with a different active editor) replaces the daemon itself —
+    // it must not be told its own daemon died.
+    setWorkspaceFolders(['/workspace-b']);
+    await host.messageHandler?.({ type: 'webShellReady' });
+
+    expect(host.postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'webShellBootstrap',
+        data: expect.objectContaining({ workspaceCwd: '/workspace-b' }),
+      }),
+    );
+    const errors = host.postMessage.mock.calls.filter(
+      ([message]) =>
+        (message as { type?: string }).type === 'webShellBootstrapError',
+    );
+    expect(errors).toHaveLength(0);
+  });
+
+  it('keeps notifying live hosts after another host disposes', async () => {
+    const context = createSharedContext();
+    const first = await setupAttachedProvider({
+      captureMessageHandler: true,
+      context,
+    });
+    const second = await setupAttachedProvider({
+      captureMessageHandler: true,
+      context,
+    });
+
+    await first.messageHandler?.({ type: 'webShellReady' });
+    await second.messageHandler?.({ type: 'webShellReady' });
+
+    // A disposed host's subscription must not swallow the crash notice for
+    // the hosts still alive.
+    first.provider.dispose();
+    const daemon = daemonMocks.instances[0];
+    for (const listener of [...daemon.exitListeners]) listener();
+
+    expect(second.postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'webShellBootstrapError' }),
+    );
+    const firstErrors = first.postMessage.mock.calls.filter(
+      ([message]) =>
+        (message as { type?: string }).type === 'webShellBootstrapError',
+    );
+    expect(firstErrors).toHaveLength(0);
   });
 });

@@ -16,6 +16,7 @@ import { mapDomainErrorToErrorKind } from '@qwen-code/acp-bridge';
 import type { Application } from 'express';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
+import type { ConversationRuntimeActivityGate } from '../conversations/conversation-runtime-activity.js';
 import type { DaemonLogger } from '../daemon-logger.js';
 import {
   SubscriberLimitExceededError,
@@ -34,7 +35,9 @@ import {
 } from '../server/request-helpers.js';
 import { parseEventEpochHeader } from '../sse-last-event-id.js';
 import { omitSkillDetailsForSdkSurface } from '../skill-details-redaction.js';
+import { redactWorkflowsFromAvailableCommandsEvent } from '../workflow-session-gate.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
+import { isInternalWorkspaceRuntime } from '../workspace-runtime-visibility.js';
 import { requireSessionRuntime } from './session-runtime.js';
 import {
   parseVirtualSubagentSessionId,
@@ -121,12 +124,18 @@ interface RegisterSseEventsRoutesDeps {
   writerIdleTimeoutMs?: number;
   sendBridgeError: SendBridgeError;
   virtualSubagentSessions?: VirtualSubagentSessions;
+  conversationRuntimeActivity?: ConversationRuntimeActivityGate;
 }
 
 type OmitId<T> = Omit<T, 'id'>;
 
-function formatSseFrame(event: BridgeEvent | OmitId<BridgeEvent>): string {
-  const shaped = omitSkillDetailsForSdkSurface(event);
+function formatSseFrame(
+  event: BridgeEvent | OmitId<BridgeEvent>,
+  workspaceTrusted = false,
+): string {
+  const shaped = omitSkillDetailsForSdkSurface(
+    workspaceTrusted ? event : redactWorkflowsFromAvailableCommandsEvent(event),
+  );
   // SSE format: id (optional), event (optional), data, blank line.
   // The `id:` line is intentionally omitted when `event.id` is absent —
   // terminal/synthetic frames (e.g. daemon-side `stream_error`) must not
@@ -330,6 +339,7 @@ export function registerSseEventsRoutes(
 
     let iter: AsyncIterator<BridgeEvent> | undefined;
     let busEpoch: string | undefined;
+    let workspaceTrusted = false;
     const abort = new AbortController();
     try {
       const virtualKey = parseVirtualSubagentSessionId(sessionId);
@@ -341,23 +351,49 @@ export function registerSseEventsRoutes(
         daemonLog,
       });
       if (!runtime) return;
+      workspaceTrusted = runtime.trusted;
       const snapshot = req.query['snapshot'] === '1';
-      const iterable = virtualKey
-        ? await deps.virtualSubagentSessions?.subscribe(runtime, sessionId, {
-            signal: abort.signal,
-            lastEventId,
-            ...(maxQueued !== undefined ? { maxQueued } : {}),
-            onSubscriberDiagnostic,
-          })
-        : runtime.bridge.subscribeEvents(sessionId, {
-            signal: abort.signal,
-            lastEventId,
-            ...(eventEpoch !== undefined ? { epoch: eventEpoch } : {}),
-            ...(maxQueued !== undefined ? { maxQueued } : {}),
-            ...(snapshot ? { snapshot: true } : {}),
-            onSubscriberDiagnostic,
-          });
-      if (!iterable) {
+      const openSubscription = async (): Promise<
+        { iter: AsyncIterator<BridgeEvent>; busEpoch?: string } | undefined
+      > => {
+        const iterable = virtualKey
+          ? await deps.virtualSubagentSessions?.subscribe(runtime, sessionId, {
+              signal: abort.signal,
+              lastEventId,
+              ...(maxQueued !== undefined ? { maxQueued } : {}),
+              onSubscriberDiagnostic,
+            })
+          : runtime.bridge.subscribeEvents(sessionId, {
+              signal: abort.signal,
+              lastEventId,
+              ...(eventEpoch !== undefined ? { epoch: eventEpoch } : {}),
+              ...(maxQueued !== undefined ? { maxQueued } : {}),
+              ...(snapshot ? { snapshot: true } : {}),
+              onSubscriberDiagnostic,
+            });
+        if (!iterable) return undefined;
+        const opened = { iter: iterable[Symbol.asyncIterator]() };
+        if (!virtualKey) {
+          try {
+            return {
+              ...opened,
+              busEpoch: runtime.bridge.getSessionEventEpoch(sessionId),
+            };
+          } catch {
+            // A session torn down after subscription degrades to a headerless
+            // stream; the iterator itself will surface the terminal event.
+          }
+        }
+        return opened;
+      };
+      const internalRuntime = isInternalWorkspaceRuntime(runtime);
+      if (internalRuntime && !deps.conversationRuntimeActivity) {
+        throw new Error('Conversations runtime activity gate is unavailable.');
+      }
+      const opened = internalRuntime
+        ? await deps.conversationRuntimeActivity!.run(openSubscription)
+        : await openSubscription();
+      if (!opened) {
         res.status(404).json({
           error: 'Subagent session not found',
           code: 'session_not_found',
@@ -365,7 +401,7 @@ export function registerSseEventsRoutes(
         });
         return;
       }
-      iter = iterable[Symbol.asyncIterator]();
+      iter = opened.iter;
       // Captured while the session entry is known to exist so the header
       // block below can advertise the current epoch without a throwing
       // lookup after the stream is already committed. Virtual subagent
@@ -375,13 +411,7 @@ export function registerSseEventsRoutes(
       // lookup would throw and abort the subscription. A real session torn
       // down between subscribeEvents and this lookup degrades to a
       // headerless stream rather than an error (mirrors the /acp route).
-      if (!virtualKey) {
-        try {
-          busEpoch = runtime.bridge.getSessionEventEpoch(sessionId);
-        } catch {
-          busEpoch = undefined;
-        }
-      }
+      busEpoch = opened.busEpoch;
     } catch (err) {
       // `EventBus` throws `SubscriberLimitExceededError` when the
       // per-session subscriber cap (default 64) is reached.
@@ -959,7 +989,7 @@ export function registerSseEventsRoutes(
           const liveEvent = liveTimingEnabled;
           const serverTimestamp = next.value._meta?.['serverTimestamp'];
           const outcome = await writeWithBackpressure(
-            formatSseFrame(next.value),
+            formatSseFrame(next.value, workspaceTrusted),
           );
           if (outcome === 'closed') break;
           eventFramesWriteSettled += 1;

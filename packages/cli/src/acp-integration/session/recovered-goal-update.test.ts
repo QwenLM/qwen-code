@@ -23,6 +23,7 @@ const hiddenSnapshot: GoalSnapshotV2 = {
     evidenceCursor: { recordId: 'hidden-record' },
     turnCount: 1,
     activeTimeMs: 10,
+    tokensUsed: 0,
     createdAt: 1,
     updatedAt: 2,
   },

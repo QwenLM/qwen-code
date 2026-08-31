@@ -53,6 +53,39 @@ function event(payload: SessionArtifactEventRecordPayload): {
 }
 
 describe('session artifact persistence records', () => {
+  it('roundtrips persisted document artifacts', () => {
+    const document = artifact('s1', 'https://example.com/unused', {
+      kind: 'document',
+      storage: 'workspace',
+      workspacePath: 'reports/q3.xlsx',
+      url: undefined,
+    });
+
+    const snapshot = rebuildSessionArtifactSnapshot([
+      {
+        type: 'system',
+        subtype: 'session_artifact_snapshot',
+        systemPayload: {
+          v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+          sessionId: 's1',
+          sequence: 1,
+          recordedAt: '2026-07-04T00:00:00.000Z',
+          artifacts: [document],
+          tombstonedIds: [],
+          stickyEphemeralIds: [],
+        },
+      },
+    ]);
+
+    expect(snapshot?.artifacts).toEqual([
+      expect.objectContaining({
+        kind: 'document',
+        storage: 'workspace',
+        workspacePath: 'reports/q3.xlsx',
+      }),
+    ]);
+  });
+
   it('rebuilds durable artifacts and explicit tombstones from event records', () => {
     const first = artifact('s1', 'https://example.com/first');
     const second = artifact('s1', 'https://example.com/second');
@@ -1060,6 +1093,8 @@ describe('session artifact persistence records', () => {
             metadata: {
               'qwen.workspace.sha256': 'not-a-sha',
               'qwen.workspace.mtimeMs': '123',
+              'qwen.workspace.sizeBytes': -1,
+              'qwen.published.sha256': 'not-a-sha',
               keep: true,
             },
           },

@@ -586,10 +586,10 @@ describe('projectChatRecordsToDaemonTranscript', () => {
         message: { role: 'user', parts: [{ text: 'look at this' }] },
         systemPayload: {
           displayText: 'look at this',
-          mediaReferences: [
+          attachmentReferences: [
             {
               type: 'image',
-              mediaId: 'media-1',
+              attachmentId: 'media-1',
               mimeType: 'image/png',
               size: 3,
             },
@@ -604,10 +604,10 @@ describe('projectChatRecordsToDaemonTranscript', () => {
         },
         systemPayload: {
           displayText: '',
-          mediaReferences: [
+          attachmentReferences: [
             {
               type: 'image',
-              mediaId: 'media-2',
+              attachmentId: 'media-2',
               mimeType: 'image/png',
               size: 3,
             },
@@ -621,8 +621,8 @@ describe('projectChatRecordsToDaemonTranscript', () => {
     );
     expect(userBlocks.map((block) => block.text)).toEqual([
       'look at this',
-      '[Attached media is no longer available]',
-      '[Attached media is no longer available]',
+      '[Attachment is no longer available]',
+      '[Attachment is no longer available]',
     ]);
     expect(userBlocks.map((block) => block.sourceRecordIds)).toEqual([
       ['mid-text-plus-image'],

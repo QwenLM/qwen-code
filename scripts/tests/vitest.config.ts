@@ -37,11 +37,12 @@ export default defineConfig({
       provider: 'v8',
       reporter: ['text', 'lcov'],
     },
-    poolOptions: {
-      threads: {
-        minThreads: 8,
-        maxThreads: 16,
-      },
-    },
+    // No poolOptions override: the fixed 8-16 worker floor it used to carry
+    // oversubscribes the 3-core macOS runners. Vitest's default scales with
+    // the host cores, which is what every other suite in this repository
+    // uses.
+    //
+    // RPC-timeout exemption; see scripts/tests/unit-vitest-configs.test.ts.
+    dangerouslyIgnoreUnhandledErrors: process.platform !== 'linux',
   },
 });

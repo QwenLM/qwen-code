@@ -7,32 +7,42 @@
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
+import { X509Certificate } from 'node:crypto';
 import { createServer } from 'node:http';
 import * as https from 'node:https';
+import * as net from 'node:net';
 import type { AddressInfo } from 'node:net';
+import * as tls from 'node:tls';
 import { describe, it, expect, vi, afterEach, afterAll } from 'vitest';
 import express from 'express';
 import {
   createLazyBridgeProxy,
   extractContextFilename,
+  assertChannelWorkerDaemonUrlIsLocal,
   formatChannelWorkerDaemonUrl,
+  describeWorkerTlsTrustGaps,
   InvalidPolicyConfigError,
   createDisabledChannelWorkerSupervisor,
   createBoundChannelDeliveryHandler,
   resolveRuntimeStartupTimeoutMs,
   runQwenServe,
   type RunHandle,
+  type RunQwenServeDeps,
   subSessionConcurrencyCapsFromSettings,
   validatePolicyConfig,
+  verifyWorkerTlsTrust,
   waitForRuntimeStartingForShutdown,
 } from './run-qwen-serve.js';
 import { isBrowserAutomationMcpAvailable } from './cdp-mcp-command.js';
+import * as nativeDirectoryPicker from './native-directory-picker.js';
 import { loadServeFastPathEnvironment } from './fast-path-settings.js';
 import { loadEnvironment } from '../config/environment.js';
 import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
 import { isLoopbackBind } from './loopback-binds.js';
+import { isOwnInterfaceAddress } from './local-bind-addresses.js';
 import { ChannelDeliveryAuthorizationStore } from './channel-delivery-authorization.js';
 import * as acpBridge from '@qwen-code/acp-bridge/bridge';
+import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
 import {
   journalGrowthPoolMb,
   resolveDaemonMemoryBudget,
@@ -49,8 +59,10 @@ import type {
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import * as qwenCore from '@qwen-code/qwen-code-core';
 import * as serverModule from './server.js';
+import * as pemCertificateBlocks from './pem-certificate-blocks.js';
 import * as webShellResolver from './web-shell-resolver.js';
 import * as webShellStatic from './web-shell-static.js';
+import { applyOpenWithAuth } from './open-with-auth.js';
 import * as settingsRuntime from '../config/settings.js';
 import * as environmentRuntime from '../config/environment.js';
 import * as trustedFoldersRuntime from '../config/trustedFolders.js';
@@ -71,9 +83,12 @@ import {
   workspaceRegistrationId,
   type WorkspaceRegistrationStore,
 } from './workspace-registration-store.js';
+import type { WorkspaceRegistry } from './workspace-registry.js';
 import { getDeferredRuntimeRequestTiming } from './server/request-helpers.js';
 import type { WorkspaceFileSystemFactory } from './fs/workspace-file-system.js';
 import { ConversationWorkspace } from './conversations/conversation-workspace.js';
+import type { WorkspaceRuntimeProvenance } from './managed-scratch-workspace.js';
+import * as scheduledTaskKeepalive from './scheduled-task-keepalive.js';
 
 const originalTestRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
 const isolatedTestRuntimeDir = fs.realpathSync(
@@ -87,6 +102,7 @@ afterEach(() => {
   // try/finally cleanup would otherwise leak the figure into later
   // memory-budget tests.
   mockTotalMemBytes.value = undefined;
+  mockNetworkInterfaces.value = undefined;
 });
 
 afterAll(() => {
@@ -473,6 +489,7 @@ function makeRuntimeBridge(): HttpAcpBridge {
     getEventRing: vi.fn().mockReturnValue({ getAll: () => [] }),
     resume: vi.fn(),
     preheat: vi.fn().mockResolvedValue(undefined),
+    invokeWorkspaceCommand: vi.fn().mockResolvedValue({ configsFailed: 0 }),
     sessionCount: 0,
     pendingPermissionCount: 0,
     activePromptCount: 0,
@@ -488,6 +505,111 @@ function makeRuntimeBridge(): HttpAcpBridge {
     isChannelLive: vi.fn().mockReturnValue(true),
   } as unknown as HttpAcpBridge;
 }
+
+function makeLifecycleRuntimeBridge(): HttpAcpBridge {
+  return {
+    ...makeRuntimeBridge(),
+    getWorkspaceRuntimeLifecycleSnapshot: vi.fn().mockReturnValue({
+      state: 'idle',
+      runtimeLive: true,
+      runtimeEpoch: 1,
+      activeWork: false,
+    }),
+  } as unknown as HttpAcpBridge;
+}
+
+it('restores the Conversations runtime for a persisted scheduled task', async () => {
+  delete process.env['QWEN_RUNTIME_DIR'];
+  const tempRoot = fs.realpathSync(
+    fs.mkdtempSync(path.join(os.tmpdir(), 'qws-live-task-keepalive-')),
+  );
+  const workspace = path.join(tempRoot, 'workspace');
+  const physicalHome = path.join(tempRoot, 'home');
+  const linkedHome = path.join(tempRoot, 'home-link');
+  const runtimeDir = path.join(tempRoot, 'runtime');
+  fs.mkdirSync(workspace);
+  fs.mkdirSync(physicalHome);
+  fs.symlinkSync(
+    physicalHome,
+    linkedHome,
+    process.platform === 'win32' ? 'junction' : 'dir',
+  );
+  const liveConversationWorkspace = new ConversationWorkspace({
+    homeDir: linkedHome,
+  });
+  const { canonicalRoot } = await liveConversationWorkspace.getRoot();
+  fs.mkdirSync(path.join(canonicalRoot, '.qwen'));
+  fs.writeFileSync(
+    path.join(canonicalRoot, '.qwen', 'settings.json'),
+    JSON.stringify({ advanced: { runtimeOutputDir: runtimeDir } }),
+  );
+  await qwenCore.Storage.runWithResolvedRuntimeBaseDir(runtimeDir, () =>
+    qwenCore.updateCronTasks(canonicalRoot, () => [
+      {
+        id: 'live-task',
+        cron: '0 9 * * *',
+        prompt: 'p',
+        recurring: true,
+        createdAt: 1_700_000_000_000,
+        lastFiredAt: null,
+        sessionId: 'live-session',
+        sessionOwnedByTask: false,
+      },
+    ]),
+  );
+  const startKeepalive = vi
+    .spyOn(scheduledTaskKeepalive, 'startScheduledTaskKeepalive')
+    .mockReturnValue({
+      stop: vi.fn(),
+      tick: vi.fn().mockResolvedValue(undefined),
+    });
+  vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(
+    () =>
+      ({
+        ...makeRuntimeBridge(),
+        recordHeartbeat: vi.fn(),
+        resumeSession: vi.fn().mockResolvedValue({}),
+        setLiveScreenContextCaptureHandler: vi.fn(),
+        setLiveTaskToolRequestHandler: vi.fn(),
+        setLiveSpeakToUserHandler: vi.fn(),
+      }) as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+  );
+  let handle: RunHandle | undefined;
+
+  try {
+    handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        bridge: makeRuntimeBridge(),
+        liveConversationWorkspace,
+        // Isolate the Conversations-runtime ownership record from the
+        // machine-global ~/.qwen path: a concurrent live owner there
+        // (another worker / a developer's qwen serve) would fail this boot.
+        liveDiscoveryStableBaseDir: path.join(tempRoot, 'stable'),
+        resolveOnListen: true,
+      },
+    );
+    await handle.runtimeReady;
+    await vi.waitFor(() => {
+      expect(startKeepalive).toHaveBeenCalledWith(
+        expect.objectContaining({
+          boundWorkspace: canonicalRoot,
+        }),
+      );
+    });
+  } finally {
+    await handle?.close();
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+    vi.restoreAllMocks();
+  }
+});
 
 function writeWebShellFixture(workspaceDir: string): string {
   const shellDir = path.join(workspaceDir, 'web-shell');
@@ -543,16 +665,22 @@ const mockChannelWorkerEnabledState = vi.hoisted(() => ({
 const mockTotalMemBytes = vi.hoisted(() => ({
   value: undefined as number | undefined,
 }));
+const mockNetworkInterfaces = vi.hoisted(() => ({
+  value: undefined as NodeJS.Dict<os.NetworkInterfaceInfo[]> | undefined,
+}));
 
 vi.mock('node:os', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:os')>();
   // Mock both the named and the default export: consumers do
   // `import os from 'node:os'`, which a bare spread would leave unmocked.
   const totalmem = () => mockTotalMemBytes.value ?? actual.totalmem();
+  const networkInterfaces = () =>
+    mockNetworkInterfaces.value ?? actual.networkInterfaces();
   return {
     ...actual,
     totalmem,
-    default: { ...actual, totalmem },
+    networkInterfaces,
+    default: { ...actual, totalmem, networkInterfaces },
   };
 });
 
@@ -621,7 +749,7 @@ describe('workspace skill settings persistence', () => {
     vi.restoreAllMocks();
   });
 
-  it('canonicalizes, deduplicates, preserves orphans, serializes updates, and enforces user locks', async () => {
+  it('canonicalizes, deduplicates, preserves orphans, and serializes updates across settings scopes', async () => {
     workspace = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-skill-settings-')),
     );
@@ -674,8 +802,9 @@ describe('workspace skill settings persistence', () => {
     await expect(
       persistDisabledSkills!(workspace, 'inherited-opt-in', true),
     ).resolves.toEqual({
-      changed: false,
+      changed: true,
       disabled: ['orphan', ' ReViEw ', 'review'],
+      settingsChanges: [{ key: 'skills.enabled', value: ['inherited-opt-in'] }],
     });
 
     await expect(
@@ -706,17 +835,55 @@ describe('workspace skill settings persistence', () => {
     ).resolves.toEqual({
       changed: true,
       disabled: ['orphan', 'alpha', 'beta'],
-      settingsChanges: [{ key: 'skills.enabled', value: ['opt-in-skill'] }],
+      settingsChanges: [
+        {
+          key: 'skills.enabled',
+          value: ['inherited-opt-in', 'review', 'opt-in-skill'],
+        },
+      ],
     });
 
     const saved = JSON.parse(
       fs.readFileSync(path.join(workspace, '.qwen', 'settings.json'), 'utf8'),
     ) as { skills: { disabled: string[]; enabled: string[] } };
     expect(saved.skills.disabled).toEqual(['orphan', 'alpha', 'beta']);
-    expect(saved.skills.enabled).toEqual(['opt-in-skill']);
+    expect(saved.skills.enabled).toEqual([
+      'inherited-opt-in',
+      'review',
+      'opt-in-skill',
+    ]);
+    await expect(
+      persistDisabledSkills!(workspace, 'locked-skill', false),
+    ).resolves.toEqual({
+      changed: true,
+      disabled: ['orphan', 'alpha', 'beta', 'locked-skill'],
+      settingsChanges: [
+        {
+          key: 'skills.disabled',
+          value: ['orphan', 'alpha', 'beta', 'locked-skill'],
+        },
+      ],
+    });
     await expect(
       persistDisabledSkills!(workspace, 'locked-skill', true),
-    ).rejects.toMatchObject({ reason: 'locked', lockedScope: 'user' });
+    ).resolves.toEqual({
+      changed: true,
+      disabled: ['orphan', 'alpha', 'beta'],
+      settingsChanges: [
+        {
+          key: 'skills.disabled',
+          value: ['orphan', 'alpha', 'beta'],
+        },
+        {
+          key: 'skills.enabled',
+          value: ['inherited-opt-in', 'review', 'opt-in-skill', 'locked-skill'],
+        },
+      ],
+    });
+    const savedUser = JSON.parse(
+      fs.readFileSync(path.join(qwenHome, 'settings.json'), 'utf8'),
+    ) as { skills: { disabled: string[] } };
+    expect(savedUser.skills.disabled).toEqual(['locked-skill']);
   });
 
   it('produces both skills.disabled and skills.enabled changes when enabling a workspace-hard-disabled default-disabled skill', async () => {
@@ -810,7 +977,7 @@ describe('workspace skill settings persistence', () => {
     expect(setValue.mock.calls[0]?.[3]).toBe(toolGuard);
   });
 
-  it('persists a Skill batch with one settings write and per-target lock outcomes', async () => {
+  it('persists a Skill batch with one settings write across settings scopes', async () => {
     workspace = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-skill-batch-')),
     );
@@ -877,14 +1044,14 @@ describe('workspace skill settings persistence', () => {
       skillName: 'alpha',
       changed: true,
     });
-    expect(result.outcomes[2]).toMatchObject({
+    expect(result.outcomes[2]).toEqual({
       skillName: 'locked-skill',
-      error: { reason: 'locked', lockedScope: 'user' },
+      changed: true,
     });
     expect(result.settingsChanges).toEqual([
       {
         key: 'skills.disabled',
-        value: ['orphan', 'review', 'alpha'],
+        value: ['orphan', 'review', 'alpha', 'locked-skill'],
       },
     ]);
     expect(setValues).toHaveBeenCalledOnce();
@@ -907,6 +1074,7 @@ describe('workspace skill settings persistence', () => {
       'orphan',
       'review',
       'alpha',
+      'locked-skill',
     ]);
     expect(savedAfterDisable.skills.enabled).toBeUndefined();
     const savedUser = JSON.parse(
@@ -915,16 +1083,18 @@ describe('workspace skill settings persistence', () => {
     expect(savedUser.skills.disabled).toEqual(['locked-skill']);
     expect(savedUser.skills.enabled).toBeUndefined();
 
-    const preinstallNoop = await persistDisabledSkillsBatch!(
+    const preinstallOptIn = await persistDisabledSkillsBatch!(
       workspace,
       ['future-skill'],
       true,
     );
-    expect(preinstallNoop.outcomes).toEqual([
-      { skillName: 'future-skill', changed: false },
+    expect(preinstallOptIn.outcomes).toEqual([
+      { skillName: 'future-skill', changed: true },
     ]);
-    expect(preinstallNoop.settingsChanges).toEqual([]);
-    expect(setValues).toHaveBeenCalledOnce();
+    expect(preinstallOptIn.settingsChanges).toEqual([
+      { key: 'skills.enabled', value: ['future-skill'] },
+    ]);
+    expect(setValues).toHaveBeenCalledTimes(2);
 
     const preinstallEnable = await persistDisabledSkillsBatch!(
       workspace,
@@ -935,9 +1105,13 @@ describe('workspace skill settings persistence', () => {
       { skillName: 'orphan', changed: true },
     ]);
     expect(preinstallEnable.settingsChanges).toEqual([
-      { key: 'skills.disabled', value: ['review', 'alpha'] },
+      {
+        key: 'skills.disabled',
+        value: ['review', 'alpha', 'locked-skill'],
+      },
+      { key: 'skills.enabled', value: ['future-skill', 'orphan'] },
     ]);
-    expect(setValues).toHaveBeenCalledTimes(2);
+    expect(setValues).toHaveBeenCalledTimes(3);
 
     const enableResult = await persistDisabledSkillsBatch!(
       workspace,
@@ -951,16 +1125,24 @@ describe('workspace skill settings persistence', () => {
     expect(enableResult.settingsChanges).toEqual([
       {
         key: 'skills.enabled',
-        value: ['opt-in'],
+        value: ['future-skill', 'orphan', 'opt-in'],
       },
     ]);
-    expect(setValues).toHaveBeenCalledTimes(3);
+    expect(setValues).toHaveBeenCalledTimes(4);
 
     const savedAfterEnable = JSON.parse(
       fs.readFileSync(path.join(workspace, '.qwen', 'settings.json'), 'utf8'),
     ) as { skills: { disabled: string[]; enabled: string[] } };
-    expect(savedAfterEnable.skills.disabled).toEqual(['review', 'alpha']);
-    expect(savedAfterEnable.skills.enabled).toEqual(['opt-in']);
+    expect(savedAfterEnable.skills.disabled).toEqual([
+      'review',
+      'alpha',
+      'locked-skill',
+    ]);
+    expect(savedAfterEnable.skills.enabled).toEqual([
+      'future-skill',
+      'orphan',
+      'opt-in',
+    ]);
 
     const guard = vi.fn();
     await persistDisabledSkillsBatch!(workspace, ['guarded'], false, guard);
@@ -1113,15 +1295,200 @@ describe('subSessionConcurrencyCapsFromSettings', () => {
   });
 });
 
+const dialLoopback = (
+  host: string,
+  port: number,
+): Promise<{ ok: boolean; code?: string }> =>
+  new Promise((resolve) => {
+    const socket = net.connect({ host, port, autoSelectFamily: false }, () => {
+      socket.destroy();
+      resolve({ ok: true });
+    });
+    socket.on('error', (err: NodeJS.ErrnoException) => {
+      socket.destroy();
+      resolve({ ok: false, code: err.code });
+    });
+    socket.setTimeout(2000, () => {
+      socket.destroy();
+      resolve({ ok: false, code: 'ETIMEDOUT' });
+    });
+  });
+
+const listenOn = (options: net.ListenOptions): Promise<net.Server> =>
+  new Promise((resolve, reject) => {
+    const server = net.createServer((connection) => connection.end());
+    server.once('error', reject);
+    server.listen(options, () => resolve(server));
+  });
+
 describe('formatChannelWorkerDaemonUrl', () => {
-  it.each(['', '0.0.0.0', '::', '[::]'])(
-    'uses loopback when the daemon binds wildcard host %j',
+  it('uses IPv4 loopback for the IPv4 wildcard bind', () => {
+    expect(formatChannelWorkerDaemonUrl('0.0.0.0', 4170)).toBe(
+      'http://127.0.0.1:4170',
+    );
+  });
+
+  it.each(['0', '0.0'])(
+    'canonicalizes IPv4 wildcard spelling %j before choosing loopback',
     (host) => {
       expect(formatChannelWorkerDaemonUrl(host, 4170)).toBe(
         'http://127.0.0.1:4170',
       );
     },
   );
+
+  // R7-7: the IPv6 wildcard's dial-back loopback follows what the host
+  // ASSIGNS — `[::1]` when the host carries it (an IPv4-less host has no
+  // other loopback). Node keeps the bound socket dual-stack (libuv pins
+  // IPV6_V6ONLY=0), so the `net.ipv6.bindv6only` sysctl never changes this.
+  it.each(['::', '[::]'])(
+    'uses IPv6 loopback for the IPv6 wildcard host %j when the host assigns ::1',
+    (host) => {
+      expect(
+        formatChannelWorkerDaemonUrl(host, 4170, false, undefined, true),
+      ).toBe('http://[::1]:4170');
+    },
+  );
+
+  // The other half of R7-7 (#9406): a host that binds `::` while its
+  // loopback carries no `::1` (e.g. `net.ipv6.conf.lo.disable_ipv6=1`)
+  // reaches the dual-stack socket only through `127.0.0.1` — the old
+  // spelling-based `[::1]` dialled an address nothing owned there, and the
+  // first worker's `fetch failed` exited the daemon.
+  it.each(['::', '[::]'])(
+    'falls back to IPv4 loopback for the IPv6 wildcard host %j when the host carries no ::1',
+    (host) => {
+      expect(
+        formatChannelWorkerDaemonUrl(host, 4170, false, undefined, false),
+      ).toBe('http://127.0.0.1:4170');
+    },
+  );
+
+  // R10-1: `listen(port, '')` tries the IPv6 unspecified address first and
+  // falls back to binding `0.0.0.0` when IPv6 is unavailable, so an empty
+  // --hostname decides by the socket that actually bound, not by spelling —
+  // on the fallback host the old spelling-based rule handed workers `[::1]`,
+  // which nothing listened on, and the first worker's failure exited the
+  // daemon. Explicit `::`/`0.0.0.0` keep their spelling-based mapping: those
+  // binds fail loud when their family is unavailable.
+  it('uses IPv6 loopback for an empty hostname on an IPv6 socket when the host assigns ::1', () => {
+    expect(formatChannelWorkerDaemonUrl('', 4170, false, undefined, true)).toBe(
+      'http://[::1]:4170',
+    );
+    expect(formatChannelWorkerDaemonUrl('', 4170, false, 'IPv6', true)).toBe(
+      'http://[::1]:4170',
+    );
+  });
+
+  it('falls back to IPv4 loopback for an empty hostname on an IPv6 socket when the host carries no ::1', () => {
+    expect(
+      formatChannelWorkerDaemonUrl('', 4170, false, undefined, false),
+    ).toBe('http://127.0.0.1:4170');
+    expect(formatChannelWorkerDaemonUrl('', 4170, false, 'IPv6', false)).toBe(
+      'http://127.0.0.1:4170',
+    );
+  });
+
+  it('falls back to IPv4 loopback for an empty hostname on an IPv4-bound socket', () => {
+    expect(formatChannelWorkerDaemonUrl('', 4170, false, 'IPv4')).toBe(
+      'http://127.0.0.1:4170',
+    );
+    expect(formatChannelWorkerDaemonUrl('', 4170, true, 'IPv4')).toBe(
+      'https://127.0.0.1:4170',
+    );
+  });
+
+  it.each(['::0', '0::0', '[::0]', '0:0:0:0:0:0:0:0'])(
+    'canonicalizes IPv6 wildcard spelling %j before choosing loopback',
+    (host) => {
+      expect(
+        formatChannelWorkerDaemonUrl(host, 4170, false, undefined, true),
+      ).toBe('http://[::1]:4170');
+    },
+  );
+
+  // R14-2: the v4 wildcard's IPv4-mapped spelling canonicalizes to
+  // `::ffff:0:0` (WHATWG URL serializes `[::ffff:0.0.0.0]` by dropping the
+  // dotted quad), so it matches NEITHER wildcard branch above and used to
+  // fall through to the raw literal — which `assertChannelWorkerDaemonUrlIsLocal`
+  // then refused, even though Node binds it as a working wildcard. The
+  // mapping is v4 loopback, NOT `[::1]`: measured against such a bind,
+  // `dial 127.0.0.1` -> ok while `dial ::1` -> ECONNREFUSED even though
+  // the socket reports family IPv6.
+  it.each([
+    '::ffff:0.0.0.0',
+    '::ffff:0:0',
+    '[::ffff:0.0.0.0]',
+    '[::ffff:0:0]',
+    '::FFFF:0.0.0.0',
+  ])('uses IPv4 loopback for the v4-mapped wildcard spelling %j', (host) => {
+    expect(formatChannelWorkerDaemonUrl(host, 4170)).toBe(
+      'http://127.0.0.1:4170',
+    );
+    expect(formatChannelWorkerDaemonUrl(host, 4170, true)).toBe(
+      'https://127.0.0.1:4170',
+    );
+  });
+
+  // The oracle for the mappings above: a real socket per bind shape, dialled
+  // at the address the worker is actually handed. The certification reads
+  // the host's interface table, so whichever loopback it picks IS assigned
+  // and the dial must succeed on every host where the bind itself succeeds —
+  // including runners that bind `::` yet carry no `::1`, the one state where
+  // the old spelling-based mapping was wrong (#9406). There is no v6-only
+  // arm: the daemon listens via `server.listen(port, host)`, and libuv pins
+  // IPV6_V6ONLY=0 unless `ipv6Only` is requested, so the product never binds
+  // a v6-only wildcard socket (`net.ipv6.bindv6only` cannot change that).
+  it('hands workers a loopback address the bound socket really answers', async () => {
+    for (const [bind, listenOptions] of [
+      ['::', { host: '::', port: 0 }],
+      ['0.0.0.0', { host: '0.0.0.0', port: 0 }],
+      // R14-2: the v4-mapped wildcard binds a WORKING wildcard that serves
+      // v4 loopback only — measured here through the same dial the workers
+      // use; mutating the mapping to `[::1]` reddens this arm.
+      ['::ffff:0.0.0.0', { host: '::ffff:0.0.0.0', port: 0 }],
+      // R10-1: the daemon's real bind shape for an empty --hostname. The
+      // loopback family is read from the socket that actually bound, so on a
+      // host without IPv6 this same arm binds 0.0.0.0 and exercises the
+      // IPv4 fallback instead.
+      ['', { host: '', port: 0 }],
+    ] as const) {
+      let server: net.Server;
+      try {
+        server = await listenOn(listenOptions);
+      } catch {
+        // No AF_INET6 (or no AF_INET) on this runner: nothing to measure.
+        continue;
+      }
+      try {
+        const addr = server.address() as AddressInfo;
+        const certified = new URL(
+          formatChannelWorkerDaemonUrl(
+            bind,
+            addr.port,
+            false,
+            bind === '' && (addr.family === 'IPv4' || addr.family === 'IPv6')
+              ? addr.family
+              : undefined,
+          ),
+        );
+        // URL keeps IPv6 literals bracketed; net.connect wants them bare.
+        const dialHost = certified.hostname.replace(/^\[|\]$/g, '');
+        const dial = await dialLoopback(dialHost, addr.port);
+        expect({
+          bind: listenOptions,
+          certified: certified.host,
+          dial,
+        }).toEqual({
+          bind: listenOptions,
+          certified: certified.host,
+          dial: { ok: true },
+        });
+      } finally {
+        await new Promise((resolve) => server.close(resolve));
+      }
+    }
+  });
 
   it('formats concrete IPv6 hosts for URLs', () => {
     expect(formatChannelWorkerDaemonUrl('::1', 4170)).toBe('http://[::1]:4170');
@@ -1132,6 +1499,2298 @@ describe('formatChannelWorkerDaemonUrl', () => {
       'http://127.0.0.2:4170',
     );
     expect(isLoopbackBind('127.0.0.2')).toBe(true);
+  });
+
+  it('uses https when the daemon serves TLS', () => {
+    expect(formatChannelWorkerDaemonUrl('0.0.0.0', 4170, true)).toBe(
+      'https://127.0.0.1:4170',
+    );
+    expect(formatChannelWorkerDaemonUrl('::1', 4170, true)).toBe(
+      'https://[::1]:4170',
+    );
+  });
+});
+
+describe('assertChannelWorkerDaemonUrlIsLocal', () => {
+  it('accepts loopback and wildcard-rewritten worker URLs', () => {
+    for (const host of [
+      '',
+      '0',
+      '0.0',
+      '0.0.0.0',
+      '::',
+      '::0',
+      '0::0',
+      '[::]',
+      '[::0]',
+      '0:0:0:0:0:0:0:0',
+      '127.0.0.1',
+      '::1',
+      '::ffff:0.0.0.0',
+      '::ffff:0:0',
+    ]) {
+      expect(() =>
+        assertChannelWorkerDaemonUrlIsLocal(
+          formatChannelWorkerDaemonUrl(host, 4170, true),
+          host,
+        ),
+      ).not.toThrow();
+    }
+  });
+
+  it("accepts a concrete bind on one of this host's own interfaces", () => {
+    const ownAddress = Object.values(os.networkInterfaces())
+      .flatMap((entries) => entries ?? [])
+      .find((entry) => entry.family === 'IPv4' && !entry.internal)?.address;
+    // A machine with no non-loopback IPv4 interface cannot exercise this.
+    if (!ownAddress) return;
+    expect(() =>
+      assertChannelWorkerDaemonUrlIsLocal(
+        formatChannelWorkerDaemonUrl(ownAddress, 4170, true),
+        ownAddress,
+      ),
+    ).not.toThrow();
+  });
+
+  it('refuses a bind this host cannot answer, naming the hostname', () => {
+    expect(() =>
+      assertChannelWorkerDaemonUrlIsLocal(
+        formatChannelWorkerDaemonUrl('203.0.113.7', 4170, true),
+        '203.0.113.7',
+      ),
+    ).toThrow(/Channels cannot start: --hostname "203\.0\.113\.7"/);
+  });
+
+  it('refuses a DNS-name bind — resolving it is not on the worker startup path', () => {
+    expect(() =>
+      assertChannelWorkerDaemonUrlIsLocal(
+        formatChannelWorkerDaemonUrl('daemon.internal', 4170, true),
+        'daemon.internal',
+      ),
+    ).toThrow(/does not name an address on this host/);
+  });
+
+  it('accepts all IPv4 loopback spellings the Host gate can answer', () => {
+    for (const host of ['127.0.0.2', '127.0.1.1', '127.255.255.254']) {
+      expect(() =>
+        assertChannelWorkerDaemonUrlIsLocal(
+          formatChannelWorkerDaemonUrl(host, 4170, true),
+          host,
+        ),
+      ).not.toThrow();
+    }
+  });
+
+  it('accepts an assigned wide loopback', () => {
+    mockNetworkInterfaces.value = {
+      lo: [
+        {
+          address: '127.0.0.1',
+          netmask: '255.0.0.0',
+          family: 'IPv4',
+          mac: '00:00:00:00:00:00',
+          internal: true,
+          cidr: '127.0.0.1/8',
+        },
+        {
+          address: '127.0.0.2',
+          netmask: '255.0.0.0',
+          family: 'IPv4',
+          mac: '00:00:00:00:00:00',
+          internal: true,
+          cidr: '127.0.0.2/8',
+        },
+        {
+          address: '::1',
+          netmask: 'ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff',
+          family: 'IPv6',
+          mac: '00:00:00:00:00:00',
+          internal: true,
+          cidr: '::1/128',
+          scopeid: 0,
+        },
+      ],
+    };
+    expect(isOwnInterfaceAddress('127.0.0.2')).toBe(true);
+    expect(() =>
+      assertChannelWorkerDaemonUrlIsLocal('http://127.0.0.2:8080', '127.0.0.2'),
+    ).not.toThrow();
+  });
+
+  it('accepts the canonical loopback spellings', () => {
+    for (const host of ['localhost', 'LOCALHOST', '127.0.0.1', '[::1]']) {
+      expect(() =>
+        assertChannelWorkerDaemonUrlIsLocal(
+          formatChannelWorkerDaemonUrl(host, 4170, true),
+          host,
+        ),
+      ).not.toThrow();
+    }
+  });
+
+  // A zone-scoped link-local bind (`fe80::…%eth0`) is an address this host
+  // answers on, but `formatHostForUrl` percent-encodes the zone into the
+  // worker URL and WHATWG URL rejects zone IDs outright — so the parse
+  // inside the guard used to throw a raw `ERR_INVALID_URL` instead of the
+  // named boot diagnostic. Refuse it with an actionable message: the worker
+  // pipeline cannot carry a zone.
+  it('refuses a zone-scoped bind with the named diagnostic, not a raw URL error', () => {
+    const hostname = 'fe80::1%eth0';
+    expect(() =>
+      assertChannelWorkerDaemonUrlIsLocal(
+        formatChannelWorkerDaemonUrl(hostname, 4170, true),
+        hostname,
+      ),
+    ).toThrow(/Channels cannot start: --hostname "fe80::1%eth0"/);
+  });
+});
+
+// A CA-issued leaf, the shape the documented `mkcert` flow produces: usable
+// as a serving cert, useless as a trust anchor. Not a real secret.
+const TEST_TLS_CERT_CA_ISSUED = `-----BEGIN CERTIFICATE-----
+MIIDHjCCAgagAwIBAgIUMfJwZrF6DjLX1ypLgu2A4v/SwKEwDQYJKoZIhvcNAQEL
+BQAwHDEaMBgGA1UEAwwRcXdlbiB0ZXN0IHJvb3QgQ0EwIBcNMjYwODE4MDk0NzE4
+WhgPMjEyNjA3MjUwOTQ3MThaMBQxEjAQBgNVBAMMCWxvY2FsaG9zdDCCASIwDQYJ
+KoZIhvcNAQEBBQADggEPADCCAQoCggEBAOff38zsoMq+oe2koKyZJ7aoGJC8CuAc
+oYoLcJaWdp6yJaj5BpYeHAnQt8QCQZB86Fj1f3yuK6KwmGm3p49NrVJMl/T39CnK
+ZAcIWATBw8mCWLFWlWhRgqrIQ5ka935m+z63gVhSQiCq2mNkAzm9I4UcbeAucSXn
+Plk0Bc/CBUh5knrjxPEebicbCUaKteWnG3SBe5PjgP6DKZojd0VakmbrDhTW+yD4
+9LRqURfzvQZghA7stqErp+WJREKAaJbNNUEhGvRSwucIsah6u7OAbYP1IRaYBGDm
+nlxaYBETRg0/3Kzx4SnPUuyx3uR6YP9MNuSzK5udCf39+iWSFCC+AnMCAwEAAaNe
+MFwwGgYDVR0RBBMwEYcEfwAAAYIJbG9jYWxob3N0MB0GA1UdDgQWBBSItY/bpVFx
+QRATvUzvo+JRFVpuyjAfBgNVHSMEGDAWgBRfCBabaBn4orvntHRiDcBU8W3vEzAN
+BgkqhkiG9w0BAQsFAAOCAQEAjIiKztoj9JtpKfP2qSYsTe+4nvCZ1ZT4PtmXQMVp
+lyHI02iH+NSSY92/ZdvGn2jBMzAFpVgJFlI6aZOne/qHI5qMf1RW7BfHBXza7wF6
+mdILIKRUYzm96o6IEuObE+QkSjRuA5OpLkObzGZLWfem0+fxnz0djbzeEBhHpP+b
+VUUcl7r2wFb3+ClobIYS24Y+tWCl53XF+2YFNebECkA+19TivHPYgyywljyFNmzk
+jCELOKOvOESV6kWBGUcrj8rcXoaF3BABInxZURGMRqWuivfYSjkGj65Trf2sVCXS
+9mkiDfB/mYPvq3ODVYLvOjcxqPFsKaRA0Gw5Nm7WKGiOhg==
+-----END CERTIFICATE-----
+`;
+
+// Self-signed, but its only SAN is a name the worker never dials — the
+// classic `openssl req -x509 -subj "/CN=localhost"` cert. Not a real secret.
+const TEST_TLS_CERT_NO_LOOPBACK_SAN = `-----BEGIN CERTIFICATE-----
+MIIDJzCCAg+gAwIBAgIUAVVYUcnN8DryJZGEaaVCTk+wO8EwDQYJKoZIhvcNAQEL
+BQAwFDESMBAGA1UEAwwJbG9jYWxob3N0MCAXDTI2MDgxODA5NDcxOFoYDzIxMjYw
+NzI1MDk0NzE4WjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwggEiMA0GCSqGSIb3DQEB
+AQUAA4IBDwAwggEKAoIBAQC/B3++tHrPbzLk0vSJrIbqxM1PYAIlEnxc/Jz/PAkX
+TH2ChYAqdAIUnUK18/WecgDAVUMNbuOh8+JjS2O/+eOwa9McMFBD9KLzwClkFQXY
+i9w0EQ+SI8haXYQhHo931KW/dP6JaNLhAxmGuTsypbvxRmJ3PKnOwcDZZYZ4uHgj
+DOVROEVTMrm+QUh1gfPZRStPFePUFLggcjmaWzF0Zyi5DX9KKMvTMrgaSKm5nHev
+WYMK/tEDTh7ofJqt1a9RRscixQlhp/8GkP39uXB2xfQjzHuybK0lvTYHLK4WMjw2
+tjU3ClZSaZ2kgxN6/cPn6dPMZeZWEyaH11wa0DDmzOWZAgMBAAGjbzBtMB0GA1Ud
+DgQWBBQ36jRlglSAhVatEXwAqTfbvDaT0zAfBgNVHSMEGDAWgBQ36jRlglSAhVat
+EXwAqTfbvDaT0zAPBgNVHRMBAf8EBTADAQH/MBoGA1UdEQQTMBGCD2V4YW1wbGUu
+aW52YWxpZDANBgkqhkiG9w0BAQsFAAOCAQEAYSXyw7t8KeTir/G94izDvKIvkOZW
+DxmdDDFDDEeeyKIo0MRttJoHbcmYkSTLz2UcOKn1bnAgx3ZQWjAm3NdeKF7XSiwH
+NQTyGw0OxvTtzCX72xtBhS8md+dstcQ20YGN8rIEEgkUUOZlwJkhfe9URLNsSbBX
+dcAfcNrfExtg49r1kpwhKL6lXmAi3lNKBgHz6+oyhJpCVehCEtoE4pvwRFW9oyrB
+gI/irGYXddbzWJQla/KPV53wn5nK6Ho4dY1Z76slnwMoufrLM1oUt1QKUeyOKsOD
+8rRyH3UVlQkkJUGlQHPaJ+OU65xrNMkTLS7MdSQfJ1Eti4GyiR2P0vySrg==
+-----END CERTIFICATE-----
+`;
+
+// Self-signed and covering `::1` via an iPAddress SAN — the shape a daemon
+// bound to IPv6 loopback needs. Not a real secret.
+const TEST_TLS_CERT_IPV6_SAN = `-----BEGIN CERTIFICATE-----
+MIIDOjCCAiKgAwIBAgIUYLTXyX2vAhC+OaM3JD4xKLtyfV8wDQYJKoZIhvcNAQEL
+BQAwFDESMBAGA1UEAwwJbG9jYWxob3N0MCAXDTI2MDgxODEyMjEzMFoYDzIxMjYw
+NzI1MTIyMTMwWjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwggEiMA0GCSqGSIb3DQEB
+AQUAA4IBDwAwggEKAoIBAQCY6GprczPMvANzG1zLli+HDkEyyUk9lnk3Lsgu8yQJ
+TqpBNBR+dTN7sYPccZpNbZ/N3G6vETbtvQ5VtKXI8izvliZMNGm2WNhr+OpMnWVb
+RQ03qiwxzISFArGwYPF9mDTDpS+fwvkIN7B0N88rdmlaPez5Oy3egHQfwSrzrzId
+dnd29tvGq9EnUps1xBgspFD8buK9fK1na4iypzSzYy9ub2tZ5ZliiqIGdmLxtE8j
+FdyIiASOCujAxjovrDcJ+Xnr3ANRgyzHS3tQdbemLlEmu9zRk/ic7FFK2acNji/O
+s5e8pJUKPmZnyyqIFlhFl8iIKvuZZev81p7Hnvmc0SHDAgMBAAGjgYEwfzAdBgNV
+HQ4EFgQUzZj7sxpXzyOiet7XS0oRiV8TQtIwHwYDVR0jBBgwFoAUzZj7sxpXzyOi
+et7XS0oRiV8TQtIwDwYDVR0TAQH/BAUwAwEB/zAsBgNVHREEJTAjhxAAAAAAAAAA
+AAAAAAAAAAABhwR/AAABgglsb2NhbGhvc3QwDQYJKoZIhvcNAQELBQADggEBAFEK
+M3+ggPGi6bFk3z9AjBWBLkJ2JsuHC1IwJ2ReXCBzwlzlHfJq8TyVTHeH+oHChVyK
+KZlWn2GDXZMrDzLxZLwH52iKq3seYw/bZZ/TpugO6OHj1WmGXyl0sajMFye3VQAT
++M+irxpT/2eQqGV73lNbuNFvcwu4FaO3n8Ux6eG1BusQCx1vc6wvoK42kb9wSJN8
+qpqn1pNDH9P3Ub/1GbhWEytVsB8B3EewG/SE11cGhXSup1K4IiPcLMJX9SYGq+uM
+GcrrZsPYuLm5eL6J3QjkFzMqyS6/4L881mihR/HKLdEnDyMzayGZ44O+DmZilUKv
+w3Chmx7wNIzXjtZRcUk=
+-----END CERTIFICATE-----
+`;
+
+// A CA-issued leaf shipped together with its issuing root in one file, the
+// standard `fullchain.pem` a real CA hands out. Not a real secret.
+const TEST_TLS_CERT_FULLCHAIN = `-----BEGIN CERTIFICATE-----
+MIIDMzCCAhugAwIBAgIUfMQ0J1fG/BhJQuzOilTasy8quOMwDQYJKoZIhvcNAQEL
+BQAwJjEkMCIGA1UEAwwbcXdlbiBmdWxsY2hhaW4gdGVzdCByb290IENBMCAXDTI2
+MDgxODEyMjEzN1oYDzIxMjYwNzI1MTIyMTM3WjAUMRIwEAYDVQQDDAlsb2NhbGhv
+c3QwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQCE4sZa+FxusjUk7TzX
+9FV/x7KAIy+lu7G20F2TjSeQ6mHhwkFb/rsADoi+9RU4MF+m/Mx+Lilccu2pVk+b
+Ri+GksxX4xAC8L7XIhRwDdYWHHOMr1WnERKMqdRcEbzCAuQhR32Z0vFdg+T3o+TH
+MkQ3AXQkQc0uu5r40e3VWuRweWnOfJqojH4VQfjk/44cLZBBRAS3owOWC9fAciJI
+C5IgBnuYC7TOoZ1A69Lo+2C5UhIm6QEBzPtzVI87gzbDwqM7x8e3mMhLDQmNS3uD
++EVd05spuBq/KXMTSqHK7OIUPMFr3wXgVRm8i+68/4C2TnZANS6WSD5QZYivB4r7
+MUTtAgMBAAGjaTBnMBoGA1UdEQQTMBGHBH8AAAGCCWxvY2FsaG9zdDAJBgNVHRME
+AjAAMB0GA1UdDgQWBBQr5x1h5l442pqfn0GFyn77KiWz0TAfBgNVHSMEGDAWgBSA
+9DApi3O49l8S/UWWA91PrZWtQDANBgkqhkiG9w0BAQsFAAOCAQEAaxo+Y/u1iCNt
+Vz4bmiRlqfhjVVe9yxa0Q8rzC/V9V7qrWpHjONXLErEKZ59oi8a80ndjugdXyw0g
+gUKCmeykUtSbRLUTsZ741VKADjt87YceLrxsSVrtwMJjX2GoDNXIggRzmzdEjz3d
+nRzDXFIEEn/g90kaNCYJSkPld2wk4M0IbEGpc8V7sO09I3T0igwfduVMO31X+mV4
+7A/J5QSE/oAF3PbuUvfzI9Hl1vdzgDUal3v8Sqh4oDgucc+YVZeCUuthq8zVT4Z5
+V6y0UOsNXHRE41EN7hK3zOKWJFwoS+ga2ACg+K4yuOnlhU+2MHa4XENVyaTsQaPo
+B6U6dT+UdA==
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIDLzCCAhegAwIBAgIUFRsEYHgjJUpGISLDoybs5vSsCmEwDQYJKoZIhvcNAQEL
+BQAwJjEkMCIGA1UEAwwbcXdlbiBmdWxsY2hhaW4gdGVzdCByb290IENBMCAXDTI2
+MDgxODEyMjEzN1oYDzIxMjYwNzI1MTIyMTM3WjAmMSQwIgYDVQQDDBtxd2VuIGZ1
+bGxjaGFpbiB0ZXN0IHJvb3QgQ0EwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEK
+AoIBAQDuh/DLVFUTeOwksyGdtViAHe9TNBFWUdeq5zGlcxvX5c7Qbjkclyajclb3
+yY0pJ6zgD+uSw6zAE5jID4rtsmSyciakqgHMpPmBMn7GE0I5JCrBnxsN3g7P7EUE
+qKzgj8rbUIyNQQt1E43wx4dJy4qN2hlKTusBvnUTtPB2ocRmC6+nXX/+nZWPahzI
+MALyl17Nq5w/pzODEtSaC18jscN/bs8CkcDB0kjnKUV8UlbPtMy//n/WjXfDiQV4
+KUbQQ832Xl6xwuQTHEGq01Gb/NZO5CE/zdu86/82Jnn2Mv2uBDL+1CBL7kOxgZ0Y
+axxW/a55BNpMElTbZxkgTSYivBwLAgMBAAGjUzBRMB0GA1UdDgQWBBSA9DApi3O4
+9l8S/UWWA91PrZWtQDAfBgNVHSMEGDAWgBSA9DApi3O49l8S/UWWA91PrZWtQDAP
+BgNVHRMBAf8EBTADAQH/MA0GCSqGSIb3DQEBCwUAA4IBAQBfH7T/zM7pVxh4Qv+m
+InAyvXPPDdBXmVfoBwHKEMyRts7rbxBHa7BV+qVyBkgXyfjXUL6QQmSXNfG/aHIx
+rW9yVN1nM9sUwO5mTO3v07Hjqg00OJQYrqFMI8ba0nxpuIgr8Joj296/25/zwpxW
+BjkdDp6EK2LHD4JU73jEMWDMDhQ3VMf8eb6bL3SxujhhhD1T7omTJkPKcUt4BCsn
+boUKNFYlbk0HHXZmoXxTIoBxv8aOTWIIJ++sASqH7+9QY2iYtoW7kmdWLcM95nGb
+Ptz8eWt0AkYE+GuX4GgOQxWJi0IuHzM7ke3fqjOw/tu01V1inWvVx2eg4Gv+vq2I
+x2ZE
+-----END CERTIFICATE-----
+`;
+
+// The same leaf on its own — the chain does not terminate anywhere in the
+// file, so the workers really would fail to verify it. Not a real secret.
+const TEST_TLS_CERT_FULLCHAIN_LEAF_ONLY = `-----BEGIN CERTIFICATE-----
+MIIDMzCCAhugAwIBAgIUfMQ0J1fG/BhJQuzOilTasy8quOMwDQYJKoZIhvcNAQEL
+BQAwJjEkMCIGA1UEAwwbcXdlbiBmdWxsY2hhaW4gdGVzdCByb290IENBMCAXDTI2
+MDgxODEyMjEzN1oYDzIxMjYwNzI1MTIyMTM3WjAUMRIwEAYDVQQDDAlsb2NhbGhv
+c3QwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQCE4sZa+FxusjUk7TzX
+9FV/x7KAIy+lu7G20F2TjSeQ6mHhwkFb/rsADoi+9RU4MF+m/Mx+Lilccu2pVk+b
+Ri+GksxX4xAC8L7XIhRwDdYWHHOMr1WnERKMqdRcEbzCAuQhR32Z0vFdg+T3o+TH
+MkQ3AXQkQc0uu5r40e3VWuRweWnOfJqojH4VQfjk/44cLZBBRAS3owOWC9fAciJI
+C5IgBnuYC7TOoZ1A69Lo+2C5UhIm6QEBzPtzVI87gzbDwqM7x8e3mMhLDQmNS3uD
++EVd05spuBq/KXMTSqHK7OIUPMFr3wXgVRm8i+68/4C2TnZANS6WSD5QZYivB4r7
+MUTtAgMBAAGjaTBnMBoGA1UdEQQTMBGHBH8AAAGCCWxvY2FsaG9zdDAJBgNVHRME
+AjAAMB0GA1UdDgQWBBQr5x1h5l442pqfn0GFyn77KiWz0TAfBgNVHSMEGDAWgBSA
+9DApi3O49l8S/UWWA91PrZWtQDANBgkqhkiG9w0BAQsFAAOCAQEAaxo+Y/u1iCNt
+Vz4bmiRlqfhjVVe9yxa0Q8rzC/V9V7qrWpHjONXLErEKZ59oi8a80ndjugdXyw0g
+gUKCmeykUtSbRLUTsZ741VKADjt87YceLrxsSVrtwMJjX2GoDNXIggRzmzdEjz3d
+nRzDXFIEEn/g90kaNCYJSkPld2wk4M0IbEGpc8V7sO09I3T0igwfduVMO31X+mV4
+7A/J5QSE/oAF3PbuUvfzI9Hl1vdzgDUal3v8Sqh4oDgucc+YVZeCUuthq8zVT4Z5
+V6y0UOsNXHRE41EN7hK3zOKWJFwoS+ga2ACg+K4yuOnlhU+2MHa4XENVyaTsQaPo
+B6U6dT+UdA==
+-----END CERTIFICATE-----
+`;
+
+/**
+ * A leaf signed by a SELF-SIGNED issuer carrying `basicConstraints CA:FALSE`.
+ * Chain geometry alone calls this anchored; OpenSSL refuses the issuer the
+ * purpose of signing and every handshake fails INVALID_PURPOSE.
+ */
+const TEST_TLS_CERT_FULLCHAIN_NON_CA_ROOT = `-----BEGIN CERTIFICATE-----
+MIIDLzCCAhegAwIBAgIUZ0Gvb+9679AdH7Z3UTSH3bpFClUwDQYJKoZIhvcNAQEL
+BQAwIjEgMB4GA1UEAwwXcXdlbiBub24tQ0EgdGVzdCBpc3N1ZXIwIBcNMjYwODE4
+MTkzNzUxWhgPMjEyNjA3MjUxOTM3NTFaMBQxEjAQBgNVBAMMCWxvY2FsaG9zdDCC
+ASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAPV+RuIkLGY4UssJmrTVgT2N
++6NC/Z5zFOscBbe06uFIr+Afe4663XDykVKRBpsW99lGi4MHhuF7+an3RLpNE6NW
+cr8IFMcPWJs6PlvG72CGiO84cbjSWSu9HuZc9usQpryqaENB672xD80eIpazwfsQ
+rR0lgqhf8jACcOmGjbkmXZ7V5GOLFESmOT2W6Pyph0dRWRyDJ9hONYUURCWhKsDq
+KrUqEzR7hAYbAqp4MIY9pptAnZsWlTjClaynG9xh4OQckT+0kKXeA375AyMojb12
+y9yCqTHgIedkgMS9kJkzcuJCFaN8fl04XCEhK9YZFNteDD2UuNFWSljKSLFR588C
+AwEAAaNpMGcwCQYDVR0TBAIwADAaBgNVHREEEzARgglsb2NhbGhvc3SHBH8AAAEw
+HQYDVR0OBBYEFMDmmEJGwv7U1oNopBAgez9nxWjbMB8GA1UdIwQYMBaAFPMJzoYw
+2Kpic33Wk1grw6CvY51dMA0GCSqGSIb3DQEBCwUAA4IBAQAV+WxQ3pMUOPQUT92t
+3VzRD4k679a5NDB47MaXh0HMPqVbph0UQRg4+BAg8pSpf7tF0Ba84eUgLHUxNrEB
+sLRew6Sm5HQn6hRnYj9PQaeWmKvCLRZmKmeF93z5QyNCLtHsqb5ttJKbt+yM7ESH
+KiQcEC1LnZjFMgR9ItEuK8Xtjb6IVkN05V54DkF6cq/MVAX6dvRGCjo1jkRqFpNJ
++sil11vK3aAjD7BP3iw/v/1iYU2qLwcpXbqNXuM7ucVTvsxP5C1Ae4WTYvoZ2fid
+r/EUKFMwxP7u9kLyOXi9EzKkb0zpVhfAcd8+yOyTZ4bs8Cc7kIEBYvcXhNL/BrVi
+6wO7
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIDNDCCAhygAwIBAgIUVsyE+9hGRXVXW98Yxi5WgUsuAsAwDQYJKoZIhvcNAQEL
+BQAwIjEgMB4GA1UEAwwXcXdlbiBub24tQ0EgdGVzdCBpc3N1ZXIwIBcNMjYwODE4
+MTkzNzUxWhgPMjEyNjA3MjUxOTM3NTFaMCIxIDAeBgNVBAMMF3F3ZW4gbm9uLUNB
+IHRlc3QgaXNzdWVyMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAmS4z
+ZtAqYZ+SnMeyaHlTkV6+601FGfgglpa3th/4ZO7fSILfsDZIN7X3aAaz3u8lOhm4
+IIE5OuqNTX0Nn5CIEoxaDBjP81/pw0vgIqIjmjRacTzLU7Pe1Jl4TtbXKLTOP1At
+nfnGuiHS+shw4vkqo47/C9OT18gJLvXuB/aIDYyI6DwCpUfljagrAHdmCvzfhKMj
+EuYw3E+OIErLYb3THAvShVcrpsnuW1Csj8WRnWsmB+S6FttEKFM6C5GnALOuGnmZ
+p9x39qbDtYZoKRHMGxt8V2LWVnnWbEAyFbGnkItI+dA2xjoCFKkUoIrtr1Z4A+jF
+f9gqDd3c0UNRaQvQ1QIDAQABo2AwXjAdBgNVHQ4EFgQU8wnOhjDYqmJzfdaTWCvD
+oK9jnV0wHwYDVR0jBBgwFoAU8wnOhjDYqmJzfdaTWCvDoK9jnV0wDAYDVR0TAQH/
+BAIwADAOBgNVHQ8BAf8EBAMCAoQwDQYJKoZIhvcNAQELBQADggEBAFvpSYNXbtl6
+RHE9Dt+GjRfBWAb73n7CVi+Ep7KBB4M/G7eHY9646T+Rzp0y/+mxEn2JDJP5yUhE
+FLEOzQvXUrc0bdwWUYPbsKhG0p0KhK4+B34GogORcv3+6AiXBvGdqjyMT5zwj9OJ
+sVV/Nswkn2dfkZr+JXj8sikllPjEn+LXto8nXNPbjZRe3MzIU32bYyOcJl+wQc4t
+TJEPPVrdusShzahl0xEBAfuctVmmVvdv9st1DsoFiaEQ+vGZkJzTbhm6ggXyKpNE
+1u3aBtPdxWWjuaF3Oy6jb+HG5BrQMemzExU1izkIg+cb9VJTZyP+cm0NjOp1Oo+E
+c9BNon/M6I0=
+-----END CERTIFICATE-----
+`;
+
+/**
+ * A self-signed leaf with `basicConstraints CA:FALSE` covering the loopback
+ * host — the shape `openssl req -x509` produces without an explicit CA
+ * extension. Measured on Node 22: trusted as its own anchor at depth 0, it
+ * handshakes fine, so the CA constraint must not be applied here.
+ */
+const TEST_TLS_CERT_SELF_SIGNED_NON_CA = `-----BEGIN CERTIFICATE-----
+MIIDJDCCAgygAwIBAgIUDFbAwso3M9+z+ZUt6pZ8vk1wS+QwDQYJKoZIhvcNAQEL
+BQAwFDESMBAGA1UEAwwJbG9jYWxob3N0MCAXDTI2MDgxODE5MzgxM1oYDzIxMjYw
+NzI1MTkzODEzWjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwggEiMA0GCSqGSIb3DQEB
+AQUAA4IBDwAwggEKAoIBAQCyGf9lrTPBEDjZE91Mhw+0yISrs5UdR8ZF6UBntzIt
+xjnqOmv4SSNo9Uj+Nr2Fm3YZ2SRnyFgGVyfHICHdPddbMEo9YnFyq9PQeDy1CU2X
+l2YspCdcsgMzlUWwjqj2uaGdzW5a3kPP17VwoxMOFRJ0dMOnu/OLJQWK/2ouSR/2
+vDcGvVYV8oLwB60G6sgiWmxaBAoymfscU+ljFa9Q+FV8ma0Grtw6MU5g70Eo8hUT
+vdmhh3QdXEqPphN8Ehj1jnLkzgheLj6WUtSj0mXNgx9WiW82Eql+caQ65wyL66Lx
+kb23+Bp9jXFO4EQqcExx0del6sWA04aD4zPNzzeGaz6zAgMBAAGjbDBqMB0GA1Ud
+DgQWBBQAKIylvj34CVhT0ywSlIHBUdQtcTAfBgNVHSMEGDAWgBQAKIylvj34CVhT
+0ywSlIHBUdQtcTAMBgNVHRMBAf8EAjAAMBoGA1UdEQQTMBGCCWxvY2FsaG9zdIcE
+fwAAATANBgkqhkiG9w0BAQsFAAOCAQEAc9QfHZfvh5+tFWOa+7zZeXtH6EazImKu
+50iVfu4sI9noV+k+pA2WokMnShT3dDhp2DP0n2VRXet9CMhACz7KAEpgtpG7JTr6
+EIHFgT42V+/WVte/uxw2Uj5hfMoycvRCy8J8JFuGzdPKc2z7bn2angtXoQxZfOAk
+VNRXkOxi5lPsuJ3bW8of2DI1/q1EJkR/Ha1gdzuk/h0W6JpO2epuzOkuwckPMuu2
+FWlN+yXXWHUsIHCosHSqesOhS4qlxDoYihsggPJ2rWnibwMr7t6GC0Bo5xsMRWFS
+6gw2hOfWIeMnoRQ0ZkCB5t5z+RYPMBuCOMJoR8HxUOKm1EMHjVhoaQ==
+-----END CERTIFICATE-----
+`;
+
+/**
+ * A leaf signed by an X.509 **v1** self-signed root — no extensions at all, so
+ * no `basicConstraints` either. `X509Certificate.ca` reads `false` for it
+ * exactly as it does for an explicit `CA:FALSE`, but OpenSSL accepts a v1 cert
+ * as an issuer (`X509_check_ca` returns 3, not 2). Measured on Node 22 /
+ * OpenSSL 3 with this very pair: serving the leaf with this root as the trust
+ * store handshakes `authorized: true, status 200`.
+ */
+const TEST_TLS_CERT_FULLCHAIN_V1_ROOT = `-----BEGIN CERTIFICATE-----
+MIIDTTCCAjWgAwIBAgIUFRagk0s8Vw5T5dtWVS4OF+GJC2YwDQYJKoZIhvcNAQEL
+BQAwHDEaMBgGA1UEAwwRcXdlbiB2MSB0ZXN0IHJvb3QwIBcNMjYwODE4MjIyOTM5
+WhgPMjEyNjA3MjUyMjI5MzlaMBQxEjAQBgNVBAMMCWxvY2FsaG9zdDCCASIwDQYJ
+KoZIhvcNAQEBBQADggEPADCCAQoCggEBALB1h9AB5sJAdQaa0FRmK0EfDaVpaftc
+OgsNYp7jkjBdvE/DKcINxoOOTUyO2Qs0/Q0lyWaZNjb5jTjzSqya+XBM9hYJdzHC
+AJaNAPE86v/tS3sAsrCT1nKLjlPsHQsDcpyiQR3mJNjlAKOclrey2o44xBkhdiu4
+qBW1p1MEJe3tfu4rpH3//cDj6//T44ic9oNhIKH3hW+3QRunhqc/RCllAz82P37M
+bI2/nQzWuBMhuGj4RHZN6njkhIlAqdyIt9Qgv2v7NPtCde5r0UiR6bLaSHpx4m9o
+YmY7F7A9UOdUuRB+FY97/kzF7I9JmLH+/U9gyVcR0x+ML0SvXVN1Ph0CAwEAAaOB
+jDCBiTAaBgNVHREEEzARgglsb2NhbGhvc3SHBH8AAAEwCQYDVR0TBAIwADAdBgNV
+HQ4EFgQURZaMk15Cc6OZB/hbGR13/X/tAe8wQQYDVR0jBDowOKEgpB4wHDEaMBgG
+A1UEAwwRcXdlbiB2MSB0ZXN0IHJvb3SCFHH+EHqV3xnb3Gh9bPdocEReVG0hMA0G
+CSqGSIb3DQEBCwUAA4IBAQBhYyi5FHhgQ78b5kgFHGDrhZS313H+9IEGJgH6W/08
+9INcdz4MGlTgNoHAFRVmXOIz3hV7bgR6gQdQ7SSsL8fJ0suVG4Wh2tDhtRqzEMwK
+JTUVD8fGOM/CG8t6LPMjLpnfHyTkbLjQfRhpQI1nCVMBP+KecOU/7kjUIBBKBcAA
+T8MRH1zQvV0YeZitPPrmDQ/LK7pxEfQGcmrsN7ZbqEQ4lnlXPx4xP3RBdEy7ks7t
+P23W8Ez2eO9E86lqXTbxnpk9W2eYxU7/SlaT07BdY3RbcABcCMLrQUvlAiLXS7NV
+hFnvenEMXip5w/oNnaIdojARaUGdX8KjIt4u+dV7JzH4
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIICwTCCAakCFHH+EHqV3xnb3Gh9bPdocEReVG0hMA0GCSqGSIb3DQEBCwUAMBwx
+GjAYBgNVBAMMEXF3ZW4gdjEgdGVzdCByb290MCAXDTI2MDgxODIyMjkzOVoYDzIx
+MjYwNzI1MjIyOTM5WjAcMRowGAYDVQQDDBFxd2VuIHYxIHRlc3Qgcm9vdDCCASIw
+DQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBALfC+t0FBQURbzAdroq3P4BPP3Kl
+ZB23rI9ZK2Qb7hHvC0hbeWLCjnt+CTtQALe8yFxVa9f0VI6+4mUinQ425C29tC7Z
+5gPbzxukOurD+zFOGArW9uYg6DtQFqxaXmttuEv/cP+lOTsDbarEH42yrlVRg72v
+OJmAGFoy/eXwXgVvsEM54SdU5uF0sPKuGJMZ4KPp3v8KKaTFfs/Ru8UPCOUlQ7nY
+o7WemUlbMKIcpEfah/ZOo9f02br9K2P/+R8K1SHUpTq3kmW43vemh03sGsPZ5u1t
+B7WT/0BRI6larvSHHQD9Hw331VbenxqRK5LWLiwpx0hu7QUmUn76L+2FPXcCAwEA
+ATANBgkqhkiG9w0BAQsFAAOCAQEAEMnzsmDeOzmbSyKHuH3zzUTi8mWU1DgUtyLf
+oFxDNDxGBef4o8ufTotKmkxhj6he6O2Mx4et5aYZgNu+KMyZpRIzgAh0+pC8ezEe
+b29oLD570mOcEx8MpOOnjuJfYxnBzZigkhZq6VLh27A64hgxQhKAoySGxGDjN+C1
+Zw3xJnGWe7k7KvOPWMsbVYH1D0QCeUlzqWSmAl3L+e42OynIvOnKj6Vuh4/SxVdX
+kBv3KlcMXmaGVC8AEo/M5Zzfkq/a+IC3aVYvhQPOkv1ByeObs5+Sjy2mKb2sNqU8
+sxyEYG5sNF7HPXac1j3PqROJ8O1X1lpXWyd2MChHhhCnFCteAQ==
+-----END CERTIFICATE-----
+`;
+
+/**
+ * leaf <- intermediate with an explicit `basicConstraints CA:FALSE` <- CA:TRUE
+ * self-signed root. Chain geometry is complete and the terminator IS a CA, so
+ * every check short of issuer capability blesses it. Measured on Node 22 /
+ * OpenSSL 3 with a real `tls.createServer`/`tls.connect` handshake using this
+ * exact file as both the served chain and the trust store:
+ * `authorized=false code=INVALID_PURPOSE`.
+ */
+const TEST_TLS_CERT_FULLCHAIN_NON_CA_INTERMEDIATE = `-----BEGIN CERTIFICATE-----
+MIIDNjCCAh6gAwIBAgIUefcAWISh+F6Emetu1Y++2m4bKd8wDQYJKoZIhvcNAQEL
+BQAwKDEmMCQGA1UEAwwdcXdlbiBub24tQ0EgdGVzdCBpbnRlcm1lZGlhdGUwHhcN
+MjYwODE5MDIyNzIzWhcNNDYwODE0MDIyNzIzWjAUMRIwEAYDVQQDDAlsb2NhbGhv
+c3QwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQCk3+570b8ulBlD9+nk
+AEuH5T4ptxIpEF1ICep6Lr6E+4a3e36Xw8Dj3pWLcbTzE2cWatxeBOfsxzAPTjPA
+ijHfn/7l4uEdj2VO2wdaCx+KnTY3dBDfcugsQJD1x3sRYaI2lEbql9dzlUQsoBFS
+vfOJvKAAf8ld2prnEgwK4iL8SXQxGpiRHRZxZSX5BD3hY9qNHPUg5UbxF/3bqeFd
+WRlw5clo+KmrIXZT/jpEaCUsJV4AsvzBa4T1lgfi1bXfJc13UcVuKSAdZwVBg86I
+ULLK/Tm6GxuCE5tz0mAIdVlHgLg0nZRRBqT+uCSpfYyM3ZjBntExCJVLtnpomHIL
+8YWRAgMBAAGjbDBqMBoGA1UdEQQTMBGCCWxvY2FsaG9zdIcEfwAAATAMBgNVHRMB
+Af8EAjAAMB0GA1UdDgQWBBRXeK7yvKdpEUq/SBpScRyrdPU91TAfBgNVHSMEGDAW
+gBSs7k1wDaAA+5+e9J7OaevGnakJ7TANBgkqhkiG9w0BAQsFAAOCAQEApurke98w
+xA8lUbXQUiqJ+7e5p2OeBmBklQ5ugac78ChVB60BQA4/eVQGKGU66FcbE4I9o0+6
+fbSwa8tZBF4VxDB++jF/m4v4UgldmxFSOq+zLuBdCcdvE4QDK32R+6B31qiNbaqw
+rDeT3cyugIHWz+gMt+X40HRoIHYHwvdEMgYh6xudQxycsqQNklkUsAMlEAMBGEp4
+TkiudWy9u1JbAAfrJ4SlR9BL7IlsgFK/xFntyDK4eFxC2cYPx/gayFBod/4W/msB
+KeYjaUsUyzO/D883ox2WMIFtYDIMLySoEcBro3y92MR8ncLRKk7wByZAhNXtYKCb
+g+/g99FTckehrQ==
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIDMzCCAhugAwIBAgIUIqd02dCREIdTnnN3wt3E0a9Zcb8wDQYJKoZIhvcNAQEL
+BQAwLTErMCkGA1UEAwwicXdlbiBub24tQ0EgaW50ZXJtZWRpYXRlIHRlc3Qgcm9v
+dDAeFw0yNjA4MTkwMjI3MjNaFw00NjA4MTQwMjI3MjNaMCgxJjAkBgNVBAMMHXF3
+ZW4gbm9uLUNBIHRlc3QgaW50ZXJtZWRpYXRlMIIBIjANBgkqhkiG9w0BAQEFAAOC
+AQ8AMIIBCgKCAQEAslKbC3Lox1Zs6ikaKk7IgD/HzDdcqOpXtO+AIxJy2O7aZg6L
+im1qolayFT+88/arTIOxaq1KGGh3dexWBBCo6h363BYrx4OGAQjI+1GKs98DQO5Q
+1nnnadZRyU25D3ra0v78Bm+lJjCA3xsor7jfh7GUxBbxbPKfTI3OJ5QQH91OreCK
+Ctk9ONMNVz4nt1NvFnnUKSbPfm7HdMvquB16nXuyAB/Uqgj997w2EGfeNXRO2/7x
+64EbDtYgMjuraAiM8eD2cMluY74lb3sGRcCR/xMHBlpZeTpkXgjtc5VR14RygGv4
+1QTNNsNl34jsq9nfOTzUAUspkEqKmFf+nF46qQIDAQABo1AwTjAMBgNVHRMBAf8E
+AjAAMB0GA1UdDgQWBBSs7k1wDaAA+5+e9J7OaevGnakJ7TAfBgNVHSMEGDAWgBSK
+0a9cMx46PmKxxogtlcPWrbiyrzANBgkqhkiG9w0BAQsFAAOCAQEAOSUiVqnkGec6
+uRs4nXM0fR+ouwC0lxqc8E4BGdnv8crJYKjGWxIib1W/NES/zsnwasu5sglMY0Kh
+IkeHhiAYFNVir++alT5YPdUAXU8ckohhbzixPMgOSFvnyZ2xCO64fsDwb7tNe3/c
+7dtknvkngkGHJHKtKPKkZ0/jQu6LjsfcIIz5bruEfTeETY6joYjrwZL26NpYslgg
+OmOMAitXmMnbbUMEEIzIW7mXFPRBMu+Q5qp4KlD5gfJeu7upRn+NqvXu+Ne2Z0fZ
+Si8ev1QSbEku6WmNG9EFzwTC9Y8dQalrAgVegDBHsfTJWdEwfwVs2iApHB3Z+8YE
+98DkVAtPXg==
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIDOzCCAiOgAwIBAgIUZ+xVhIOhGz7UzQUUPwJYZueIk/kwDQYJKoZIhvcNAQEL
+BQAwLTErMCkGA1UEAwwicXdlbiBub24tQ0EgaW50ZXJtZWRpYXRlIHRlc3Qgcm9v
+dDAeFw0yNjA4MTkwMjI3MjNaFw00NjA4MTQwMjI3MjNaMC0xKzApBgNVBAMMInF3
+ZW4gbm9uLUNBIGludGVybWVkaWF0ZSB0ZXN0IHJvb3QwggEiMA0GCSqGSIb3DQEB
+AQUAA4IBDwAwggEKAoIBAQCs+QZ+ov2ClU5axpK1Q7sWUS1f2+7s/2bClYk8L56d
+/jByGWD4HCsDNa39nn0Vgq98+4AO9WlpZQUcJlmd16yXusY078ZhNq382fJJ7cn3
+FZZBHBmESZMeHNx8HX9MslQjL29vmpHLTRWNSMO66VeTpkRpAnMY0KVrXvQV2nRp
+pulRVPagZ0DNgO6puxkJZpInyt/ieIwJ1ZU1gwF3wyX7FcSgN0UwrwBnVsCvXr62
+w3WsuXAllLf+YTys9NS7ZLqAFFyhez8lXhplx8dtNQi0iHLOF4jN5jAyCn19tVT5
+deQ6qtPVOd/7I9r5Ye6s8HaHa5peYTKn0zBocaiXcumnAgMBAAGjUzBRMB0GA1Ud
+DgQWBBSK0a9cMx46PmKxxogtlcPWrbiyrzAfBgNVHSMEGDAWgBSK0a9cMx46PmKx
+xogtlcPWrbiyrzAPBgNVHRMBAf8EBTADAQH/MA0GCSqGSIb3DQEBCwUAA4IBAQA/
+q1Eu2qiT3/6c8A5o9La2dSwj15/MIgD7C5OauBTKtfhDoVqBVTCeYG/2I+wPm8PX
+6EXC7AC7S2Jy97g7F6q+2PgyNpGrk2iuwjfTLJxgpjGbDkej7qUpn1NqbnUQrQh6
+yurBZVQi9x6na4HX7pfLVPF76IYLKqdoRdqMtl2EZD1mol0tZGIimQoYqhInSwZ0
+3zXzQ+KDMBG1qC1TKQo/8WSiUncdGRzzGKStW+Fp/q1foZsp8bZ4/XNdoJV/ESkk
+RjOhHLQYLkulVXNP/fK0cm5haD9yiS11LoFqmscwb+NXdFanLn07ibbHx/DCyyOL
+E6mwm4nEjVj2B5cT62Pv
+-----END CERTIFICATE-----
+`;
+
+/**
+ * A leaf signed by a SELF-SIGNED v3 root that carries other extensions but NO
+ * `basicConstraints` and no `keyCertSign` — a minimal `openssl req -x509`
+ * config. `.ca` is false and the basicConstraints OID is absent, so reading
+ * the extension's presence alone called this anchored. Measured on Node
+ * v22.23.0 / OpenSSL 3.0.13 with this exact file as the served chain and the
+ * trust store: `authorized=false code=INVALID_PURPOSE`.
+ */
+const TEST_TLS_CERT_FULLCHAIN_V3_NO_CONSTRAINTS_ROOT = `-----BEGIN CERTIFICATE-----
+MIIDYjCCAkqgAwIBAgIUL+Czws2mkPECmIm4mHcilV9XdJQwDQYJKoZIhvcNAQEL
+BQAwKzEpMCcGA1UEAwwgcXdlbiB2MyBuby1jb25zdHJhaW50cyB0ZXN0IHJvb3Qw
+IBcNMjYwODE5MDgzMTM3WhgPMjEyNjA3MjYwODMxMzdaMBQxEjAQBgNVBAMMCWxv
+Y2FsaG9zdDCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBALfG3fzKWPFd
+wBpo2iK6tnEFehEsBIW0S6zrtGgceEZhRhk2SzKaOLvNOjGAbbFHfqF4G07jNC8Y
+saW9jc6wx2laTMD1nbKkBou5J30eAyY3ftsQC59Uz/QUT0MT4RUgaUfrC1HAfkmT
+JeMfAOVM1fgFVFVoAarzvBveFP3/cb4Uxi6aU861CDdzDFxE7gNnDNLUPNm1ebI0
+Sb7nTBFwlxIovjl1xLHy8+CRXpLHlUYvv1ymchU9bZ0fsQWa3XXLThR5pk8mFRCq
+fTX+/f+rNipRF21iakVTj4kgWHLnFD6BW96fOBHte5WlRHt6npYTlIdh6vor8ITy
+Y0+F9Sz46p0CAwEAAaOBkjCBjzAaBgNVHREEEzARgglsb2NhbGhvc3SHBH8AAAEw
+DAYDVR0TAQH/BAIwADAOBgNVHQ8BAf8EBAMCBaAwEwYDVR0lBAwwCgYIKwYBBQUH
+AwEwHQYDVR0OBBYEFDPwXdZ1QK0zSZhOHji0XB3eIL8EMB8GA1UdIwQYMBaAFH4p
+oiFHk2vPmA0ABIa0Ho3YCG+MMA0GCSqGSIb3DQEBCwUAA4IBAQBxFGLgmPg8ZmBw
+wFpTt9i/6TWQQvZPjCyhxGctlDpGfSc58sTUnI2wx2yNkKUWgN5KsMGG9wn4BH5D
+cT70/qXWLy4W28xT4fgDyrEXe2ATsJW3h0HG2aAgkRAcSkPaOB5E2eKRvMS+ZvR3
+FqH5XeC1RV6hnASOMUUODfXwZghoUuuDZft8Z1oz1gvMCB69RMJpOYWIOmp33NGK
+I3y/x0GVCHWpEXWTA9YSzfc0MqLK6COY670kUMSmld40oEEgvfLnd7VOjy/zhzj6
+sAxazcSeR4ryrgjNJa757inhMJKhZ5bf4dM47NPPwO72wsrqS1HrVFxJ5BjwDsmQ
+8V3Glu9E
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIDBzCCAe+gAwIBAgIUJfbInAk7zaTBwG+qu3ibJYtKYKAwDQYJKoZIhvcNAQEL
+BQAwKzEpMCcGA1UEAwwgcXdlbiB2MyBuby1jb25zdHJhaW50cyB0ZXN0IHJvb3Qw
+IBcNMjYwODE5MDgzMTM2WhgPMjEyNjA3MjYwODMxMzZaMCsxKTAnBgNVBAMMIHF3
+ZW4gdjMgbm8tY29uc3RyYWludHMgdGVzdCByb290MIIBIjANBgkqhkiG9w0BAQEF
+AAOCAQ8AMIIBCgKCAQEAuIzZKOMbeKpu7j815yc9RHBbzRWJmDxRTrEmorrjZpUM
+NRh3BT3lLUY4Ur5zgOqpDNT5vj/rSY/ExBOBM4RfgInCipu3vv7jis94hXbTfr0P
+IC8nC+hKS+V8HO6xy1VGoXYLzpQm78r1obgd7PBZuQajZue+La46dbKJmnWx8NOC
+nZSDW5auOtDhniOn19FiCumn96OSVR+Nk9j/bWrE9AFzhj0GFcx6xQKqadD8AS0Z
+NP30bQkFE6wEnE05p1l6SS3AtX8L21JBeAAL0SVLgNgjlry4geIS7HzufxNUBI6L
+GASFissx1eOtuqJTf6aKM4TDVOzjJdw4l3ROsB5nJwIDAQABoyEwHzAdBgNVHQ4E
+FgQUfimiIUeTa8+YDQAEhrQejdgIb4wwDQYJKoZIhvcNAQELBQADggEBABpU1Vlo
+cO3G91gr6a3cwm4/wmL3EIWH6sl4cj/AmkEvG+eQl4ESxhLpq4pqwtIKEHFuFLmu
+3STHsLsqbKpnHBwLfqXwsAtJOccm+MixHfN6pTe236LaNAdfA9Ds8q6LWdJFL6v0
+cj8q1Y3++uZ0W3DwrKXwvc/VEam4k2/c0eEyaMllx/2pQofvTrYt3F7uh9j42UdF
+u3ygoQgmsOrLAc3RIipdSZbqvOA2yXkod3IiZ8cmnHK+juKocHzqChFAqrfD45qI
+nGT2/DL35St8Giv/BW9xCta5LRpMcvEWoGi+NVW4l6ysWkqMtFU2BKwCEYYn/+NL
+mptrWqez+gyVuWc=
+-----END CERTIFICATE-----
+`;
+
+/**
+ * The control for the shape above: the same geometry, but the root carries
+ * `keyUsage keyCertSign` instead of `basicConstraints`. OpenSSL accepts it
+ * (`X509_check_ca` returns 4) and the same measurement returns
+ * `authorized=true`, so warning on it would send an operator to reissue a CA
+ * that already works.
+ */
+const TEST_TLS_CERT_FULLCHAIN_KEY_CERT_SIGN_ROOT = `-----BEGIN CERTIFICATE-----
+MIIDYTCCAkmgAwIBAgIUA2xZ/OKAOVYnn87IuQxZFcpIQncwDQYJKoZIhvcNAQEL
+BQAwKjEoMCYGA1UEAwwfcXdlbiBrZXlDZXJ0U2lnbi1vbmx5IHRlc3Qgcm9vdDAg
+Fw0yNjA4MTkwODMxMzdaGA8yMTI2MDcyNjA4MzEzN1owFDESMBAGA1UEAwwJbG9j
+YWxob3N0MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnd71W3Um3fL7
+t/t92+aUI7XmGojNx55LY2xRVWgjdZ9Ay+sYPuyFmXZOghBIJiZwa1BEaLnekwFV
+XTlmcVJyyQCnBLfv/daRNK045MMYwvnDvWK8VqjlJ0m6dEwhiBwSxlywVfdJqRFf
+nFRuDVx8AD5Au9DxLPsGCF/uPc2igYZsX6aawOAFd13xy9Edqvh1e8abbur/R3V5
+hvPj9XwaXNZ9f57oCOIqYsZzj+HRcstB11osi2nUFBY3xqjrWfXf9a6lvAEgRiKg
+F38qKSFIPKtzugj+BSr2thcaaPfxrMdQNo/fD7x3NLCqqpATe7Q3/W071cfaMd5V
+mTEUzJRuowIDAQABo4GSMIGPMBoGA1UdEQQTMBGCCWxvY2FsaG9zdIcEfwAAATAM
+BgNVHRMBAf8EAjAAMA4GA1UdDwEB/wQEAwIFoDATBgNVHSUEDDAKBggrBgEFBQcD
+ATAdBgNVHQ4EFgQUUkOyIDrbksN2PTnBmpFoOE99GRIwHwYDVR0jBBgwFoAUOI7p
+nDt+WfQ5OYGwOrbxgX1MC5wwDQYJKoZIhvcNAQELBQADggEBAErDgA8Ur3CJXFGx
+Qr1tnWfkMxJTiLNH5aupSSNFP77l7C8mro/IJNfUcnVCvSWnEl51cS6YLxszsmIZ
+GTBqu64KhNVdt6WLhySFbBuHUpa9VBwrdJ8UIbMNcYcm0Ujl6lZyTrT3+edzWqw+
+yTGUJPaWo//V66BIpgCvJ3iu0Hv3sK4Rdf4LsXnIsmLdvSunKxlucQkyGJZzjEnh
+9pPNOhnP3X5+L2fZEFBwcXfHMaACXt6wf6GmVFr7X9HeU7Jh6ESTNwzSHyDHAe3g
+IgVFua1W4jSzQKNjBY/Atdfq4RivA6UcWYR3isa9xI0gnXxBeXl0+PmaFI8QfgER
+KKuNYiw=
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIDFTCCAf2gAwIBAgIUGXmj0/4osqrN2l0rhucDv3hJda8wDQYJKoZIhvcNAQEL
+BQAwKjEoMCYGA1UEAwwfcXdlbiBrZXlDZXJ0U2lnbi1vbmx5IHRlc3Qgcm9vdDAg
+Fw0yNjA4MTkwODMxMzZaGA8yMTI2MDcyNjA4MzEzNlowKjEoMCYGA1UEAwwfcXdl
+biBrZXlDZXJ0U2lnbi1vbmx5IHRlc3Qgcm9vdDCCASIwDQYJKoZIhvcNAQEBBQAD
+ggEPADCCAQoCggEBAKiH7Sh0cuJGLD+Jm8I48v2EOBTaISptGXW+JrJtIHcJ6xS1
+Lz275QZXQvVm5n82ENut35Vr014yOpVl0nWjTXifcpgJlz3DXxXJZJunJ2SafZ/p
+lcOa2zy71DkD1CAE0YYXHcIXqKR5AQhi1YVEuLqAPyWwHzo2NY6pLLKL/f9e6kSP
+jEOdU3x2QZax//3wEBKCgut+Y4D/BWSXQZexRqxdiuIvaWomS6koAdvAfHZI/p46
+QZr8dTdHs0PHLhUKfBE6X/HNA2sOFdA+4N/KCohVSKtaX3xr7ixkvJ9E9+IBUSlx
+mh0yTr9Gc1mKU9/fGgtsgGo8D76VdF/o1WXY3n8CAwEAAaMxMC8wHQYDVR0OBBYE
+FDiO6Zw7fln0OTmBsDq28YF9TAucMA4GA1UdDwEB/wQEAwIBBjANBgkqhkiG9w0B
+AQsFAAOCAQEAoTlR5omIlNcaMz80KdFRf/JSQIfS3ROaaCcY8RiuO9GVGe4dsTXs
+iHn8RM1j+WH7bGPR5ycs7akWCruCGexcawu5xX26/e7iLIu4QQzqVOVwkGw/SxWU
+LgLXo4AvoewCQoBh0ooi+6DhTPaTwSeYf0FmtnQ4+1cBpXaPKcvD5frvb7mI8iop
+f8TBZEgy5uAaBvnhh5ljW/mGtzhVQJL2kNI56F89+jLNFayKOr/NAH+Wq6/y4XH/
+JW5ZVSTzUm/5lVinhjJlzI1qgTKKLnyPC9y/lwsV1pgg4QSqp5NcZe+tPGwVawcu
+lL9BpPKvalzsE/s0y64+00JmSW6oWzLfMg==
+-----END CERTIFICATE-----
+`;
+
+/**
+ * A leaf signed by an X.509 v1 INTERMEDIATE (`openssl x509 -req` with no
+ * `-extfile`, the legacy flow) under a real CA:TRUE root. The v1 exemption
+ * that keeps a v1 ROOT trusted does not reach an intermediate: OpenSSL
+ * refuses it. Measured on Node v22.23.0 / OpenSSL 3.0.13 with this file as
+ * the served chain and the trust store: `authorized=false
+ * code=INVALID_PURPOSE`.
+ */
+const TEST_TLS_CERT_FULLCHAIN_V1_INTERMEDIATE = `-----BEGIN CERTIFICATE-----
+MIIDijCCAnKgAwIBAgIUO1NXDZn7sUcLyXoOb6Zrn/5CuFEwDQYJKoZIhvcNAQEL
+BQAwJDEiMCAGA1UEAwwZcXdlbiB2MSB0ZXN0IGludGVybWVkaWF0ZTAgFw0yNjA4
+MTkwODMxMzdaGA8yMTI2MDcyNjA4MzEzN1owFDESMBAGA1UEAwwJbG9jYWxob3N0
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAxlNIMiQni4GBg2hccTRg
+EvxF1UGCVsfjljhGhT5CbSbRrZ9rtvKoGBIixR6e+2EPxHmd50jF2SdS5HzHCPQf
+n2+k59BbE0W7KJrpVHQspYE2OtpxR6Wu9y+C31q1Bs8ZxPWkXbQNBbeRTlgUlM18
+GTXw6wVuRH4PF5425ovrMlJZ1hT4k/PROSQbU3cvjbl2mFVOEWqVgDXt/+h9AOvY
+zqeiIEWJrjh3Rn8bZZm5ssBG2JzRzCS6PQUA/O8CFiFeWVnmJstYV+cXfYnFf4RJ
+5y9aOG7WO3oQANUg+5dfhEwKJR4AvE/1+kGFzxLdpQrRo8e7zZ9bDUs513oISk66
+tQIDAQABo4HBMIG+MBoGA1UdEQQTMBGCCWxvY2FsaG9zdIcEfwAAATAMBgNVHRMB
+Af8EAjAAMA4GA1UdDwEB/wQEAwIFoDATBgNVHSUEDDAKBggrBgEFBQcDATAdBgNV
+HQ4EFgQU5Eg1xUApem+UABc1aALOYRPsnqQwTgYDVR0jBEcwRaEtpCswKTEnMCUG
+A1UEAwwecXdlbiB2MS1pbnRlcm1lZGlhdGUgdGVzdCByb290ghRvrElfAutwhBeV
+dilnIiiZ0S/nRzANBgkqhkiG9w0BAQsFAAOCAQEAgQkUeanJNofoponB3Q7ekhl4
+nFI8yPWogFBQDBh+6Iz7i0FMUBMG6iJ0RjKMBjz7JhK9VnxCf9VB14wF634pfLE2
+dnWhsme8ZNOQFd3TACT76air+8RGm19RBVgxe3NTc1POtCZ68UE/8L4EMZtOIQNm
+eWadm3gw+w6qzJ+c8dnUmOLjBMD6J3k9Asma+uauYGdwiJPbgrOXSRqVa8HDyXj4
+9gVxremJRza+BdWtiATgKiO/jIc7aiBOIW2PhX8Idg97FirK5dRNQY0pxvAAWp6f
+gvmOMpY5YCDoZjjApzRLMQBeBsDqQU2XBIjnidcbGYrNh2F4A2AUfFEQHOPt6w==
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIC1jCCAb4CFG+sSV8C63CEF5V2KWciKJnRL+dHMA0GCSqGSIb3DQEBCwUAMCkx
+JzAlBgNVBAMMHnF3ZW4gdjEtaW50ZXJtZWRpYXRlIHRlc3Qgcm9vdDAgFw0yNjA4
+MTkwODMxMzdaGA8yMTI2MDcyNjA4MzEzN1owJDEiMCAGA1UEAwwZcXdlbiB2MSB0
+ZXN0IGludGVybWVkaWF0ZTCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEB
+AJ5qNPjDicSDvYlPa9OLT0cXhxdwn4E/zWOcBCrqX2gjxKSjsY2zQJt2dqfCAM4W
+JOujxvSJdqOMDiAm5L1cT6Zgx1AJZMsG5834Kr8cDdxhxh67fb4xFe3xRUI6dKJd
+GgtNHRsGjK4z2pbTtkqcxIWrbd8Ndn9djzYzNezxvP3PGVaJnL6b6wLTHS2t97FO
+etATd34rekL1a5AmIMBA/7+LTxTRzh7CqJa5twQGwFlBzXUv8xVKqLfxTX5exigf
+SmseMGuDey/x67nlmxV2w8uw/bmRiSdeohaJIvhteoMjl2we9wJsNTb4EedPvD4X
+jhfsnAugn/XnR7KRI6OU7IMCAwEAATANBgkqhkiG9w0BAQsFAAOCAQEAeyzQQaOc
+3Q7qeQuk/7YTE6xfZzIH32Dt2px6+WyiK6/bKnYHtc8zdCB808IWI+rLUnX6EPTE
+uzReIBNV7AtmMZJ0tgrlR8E4qJ/+b555erOIJ/Eh4ZBVNIvIkuNEUpm1jQ3f620R
+BnWgvtD1X8eC62r8EH8Dp47ZbLr8EPOtb+cxFiM2XuNHptgweoA3ppwejxygZRhn
+cKowxl7QdSBmU3oGHA+j6QD9pEr5z+9GilQJkla6RnVwLLLjYI5I6/g+1bynMEoK
+3ertff8Ors1iSqoY7BE06S4ceR5fLgsRbUmDKu1oPCpTWcyoCgkXu5jvLVxqI7EF
+t1VyeqQyWL/vrA==
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIDJDCCAgygAwIBAgIUZT8tp1esTrrlMkdlYKFtxGQsYS0wDQYJKoZIhvcNAQEL
+BQAwKTEnMCUGA1UEAwwecXdlbiB2MS1pbnRlcm1lZGlhdGUgdGVzdCByb290MCAX
+DTI2MDgxOTA4MzEzN1oYDzIxMjYwNzI2MDgzMTM3WjApMScwJQYDVQQDDB5xd2Vu
+IHYxLWludGVybWVkaWF0ZSB0ZXN0IHJvb3QwggEiMA0GCSqGSIb3DQEBAQUAA4IB
+DwAwggEKAoIBAQDdCK44mQgKprzHTRn8YrJzivRO0jGPr3+RM6iVlKorBK+dcL4b
+vHX+Pp8huIELMxqH07izfWVKjGZmJRWBpZQYOX8Ss+LXejKEtg7ssXoQw5gx37Io
+4atPQ5lI33E9PK4XN79h8oMZl3vhBByA5GduhIiwXJKlxvYFi6TYp9O5jnzqb/hh
+1fkcG1nX9Np6Hfr+Pi6MC0UsAFoCyTm7XPhXfEXs98EHdZkQSy8apIz1zm/nTDrq
+2lpcuvSh3HA8Gr2cSk5aBb2h39G9s2SFneKE/bQZU2ZzuhJmRvcWxiL4307DrW7d
+Glp443R0WEfRMy0J3PE61ukfkgDFViSdn2ohAgMBAAGjQjBAMB0GA1UdDgQWBBSq
+bE6kxv3+Oz9pjqZM8pxJ4GQ+sDAPBgNVHRMBAf8EBTADAQH/MA4GA1UdDwEB/wQE
+AwIBBjANBgkqhkiG9w0BAQsFAAOCAQEACM90IqAYKt7dA/Mkv5nzHFx8tebR7lla
++p08sSNYnht6/xd3n8s/zmO1twXRwibsnXjBdTIcWCBgTp8XSYGtuA3TZHldjDTj
+C3/ZpHBNxyKv8QXJvEfF6U9CH0dQpReZeknvd1oDOQm6Qf8lRbQ3VAFnrHKaBq3V
+78cN9L48r4XJXmiAolcd3n0OtOxUqr1d/t0Jw6cF2M8p0jeH5qlLIlWZy/P5d2sk
+mWMSI6CNSQ2o03oMXHbSXqNV8cnPq9U84Wg0y+Hm6YcNKdC6gxSUDUqMc3YvmRpS
+XfHP3tzFMIHT/tvv1dVrWFnYMgOQ30vUE0ddHXIpk0cFVAlQW4+BJw==
+-----END CERTIFICATE-----
+`;
+
+/**
+ * A `pathlen:0` root over one intermediate over the daemon leaf — the shape
+ * every certificate in verifies while the chain as a whole does not. Measured
+ * on Node v22.23.0 / OpenSSL 3.0.13 in the exact worker shape (serve
+ * leaf+intermediate, `NODE_EXTRA_CA_CERTS` = the root):
+ * `{"clientError":"PATH_LENGTH_EXCEEDED"}`, and `openssl verify` reports
+ * `error 25 … path length constraint exceeded`.
+ */
+const TEST_TLS_CERT_FULLCHAIN_PATHLEN_0 = `-----BEGIN CERTIFICATE-----
+MIIDKzCCAhOgAwIBAgIUKPEX/In/CWkx9CPAPZY4rT6UCHQwDQYJKoZIhvcNAQEL
+BQAwIDEeMBwGA1UEAwwVUGF0aExlbjAgSW50ZXJtZWRpYXRlMB4XDTI2MDgxOTE0
+MzQyN1oXDTI4MTEyMTE0MzQyN1owFDESMBAGA1UEAwwJbG9jYWxob3N0MIIBIjAN
+BgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAmQmp9NEsuVlZEJ+T0cCCF28faD4I
+GVbX657CAsJYgTVC2kgGqGZAuk/N95urWB+1x296+PdNZHMtxJWXNQxCJISUKwKU
+xqdSNIX/BM2Bw/SHJ2dUC923pe5ddEn+pTtx5qxDNUbBcxAPljtlO3mSNxfgAFPV
+roUUvI1fsqss+mfRek+zMY1fwJb3RiVxfThu1Go4drQKNhT9xXuJwPqvDBR4IC4z
+Xp+6ctUCJpoS/icsKUmOIcWHobTSNZ3bcjZoVLr55YOYJxdtBdT4x031xsQPnjNc
+/YZAbQJj/w43WkF43+wT5nvAtJydMrkEDoMYupcBzDVSEVRxYv8ck65SqwIDAQAB
+o2kwZzAJBgNVHRMEAjAAMBoGA1UdEQQTMBGCCWxvY2FsaG9zdIcEfwAAATAdBgNV
+HQ4EFgQUmePr78NC5ICqJj5Vt7GIrT5KNMswHwYDVR0jBBgwFoAUBRtTi7BDp7xZ
+oJz88pc6Tw7D438wDQYJKoZIhvcNAQELBQADggEBABt3Cmom/XV1XaPFo7eT30PT
+an68hPC5q0/pYK2373mQ4xVLTDn2ChTbTCqluO4NURF5acCQ+V/3RPlCYiMHkNDK
+zgmpd806EFXguZ9+7DSzE3rxK1xF1CryExH7Ru2+5qWYn0d+Ij0fOwjJkzTIWw8W
+3r19lFIaIzkxs55tQRK4GK18Cfsa9h07SJKaEJjXcRRQVtwKkaEo4h9CLivRO8sz
+JcwbIt00DnYaEKd8WiD+n4K/Sb0mg5q+GiYrj+aOdWYtoqLFQ+kkbchFsLnFWohk
+TQ9jqYZXM6WvkZPQ53jnKvzEug5/egOSVEeeFKwJf7D+WVM37nF+6P0VH3o5ieE=
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIDKTCCAhGgAwIBAgIUZQIIOfcMuP83bsNDsqpUM+xjTsQwDQYJKoZIhvcNAQEL
+BQAwGDEWMBQGA1UEAwwNUGF0aExlbjAgUm9vdDAeFw0yNjA4MTkxNDM0MjZaFw0z
+NDExMDUxNDM0MjZaMCAxHjAcBgNVBAMMFVBhdGhMZW4wIEludGVybWVkaWF0ZTCC
+ASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAOh4aqVYOmdtfI1XF7ZTl6Ur
+dE/0lM6zzdW4kNWyFii24snW0FyuYgSkiH2RElZq9En5MYrTRNNx9V8MDuncVE2V
+QVjnzVEFJ9jLrIf1rNCYGGCxg7Jv5hEjnPfaiiryKNXWQbDOaZrX9QQTl5Qm6S3d
+k0siDNuKaHkdo9HY7JFECn2yHyGAHsDAQsCGv/ljuE+AY0W4tNC/KeNFGhL6zM30
+W3p+pxcKTPWd0Uww504ICU27tpkokbd5o/QstrL/C6yfNqBJ59tQ+zzKYoOvIfCB
+3fz0ykLmAQoFRqJv9gb6lXTQht6jpynjcZh8UMtmu2cyxjLnXesmGEUs78vu4vUC
+AwEAAaNjMGEwDwYDVR0TAQH/BAUwAwEB/zAOBgNVHQ8BAf8EBAMCAQYwHQYDVR0O
+BBYEFAUbU4uwQ6e8WaCc/PKXOk8Ow+N/MB8GA1UdIwQYMBaAFKBHB2UoNLqlrtA1
+habAVNvODRfnMA0GCSqGSIb3DQEBCwUAA4IBAQBDtqkUCdRx8hMoERKNCv1b/mSV
+WmvvjqLRlU/npuSQYlunhkK15kKZImn0FCtIWhOQCRUMXYlIwU8lmcFsJLxSBFwy
+MBPVXTI9Hbapb8Wnyjt3spHV4SG8VlQaQYd2g+w7iJTZvb07TC7fcwFmilJoIVIb
+sdsKHedv8dLxuVX8QDbBk59Q0K9Iw38CkgjvTbqTpG3Edo3MNTUOxln4s5EpEysf
+5wIZkZ5Tq5bRyrwavoMomN3+cEJb1OHnx0U/m1v4KvOGPUTJJ2o7IGPVYPUOKa5b
+W3/N6aVXs6jGCGfGYtJE3jr+OlszBPRodNE8fPu6l5rLS2D2Sz7iKwdVK9Ym
+-----END CERTIFICATE-----
+`;
+
+/** The `pathlen:0` root of TEST_TLS_CERT_FULLCHAIN_PATHLEN_0, on its own. */
+const TEST_TLS_CERT_PATHLEN_0_ROOT = `-----BEGIN CERTIFICATE-----
+MIIDJDCCAgygAwIBAgIUF8LRjezZ3wMtc85KljUsisa21y8wDQYJKoZIhvcNAQEL
+BQAwGDEWMBQGA1UEAwwNUGF0aExlbjAgUm9vdDAeFw0yNjA4MTkxNDM0MjZaFw0z
+NjA4MTYxNDM0MjZaMBgxFjAUBgNVBAMMDVBhdGhMZW4wIFJvb3QwggEiMA0GCSqG
+SIb3DQEBAQUAA4IBDwAwggEKAoIBAQC2bqZOeahGQmYlznllex5VZUKc7vDx4FYT
+n5iEGeopOIG/J0RRrZSEbh5ZeIh+SQ32rUYgKcR3Dt5lPgFtagzoeh4MwbpIhhM4
+ed5bDMIMwXVo14cthRRF1O2lvcDwvNQggB5vJy5QveCZRU8kRJbmsy6wnWrsdv+N
+MGxAxSPRBP336wjmaKgXyBKas/nzvWuz/xWerJP9+3xAdQLwOCP4qgr7XUOD0QxR
+lDgRQ3loX61yX6b5so4piylOq8elEMuuA8qyenfYjWU5ExkixKKWLuh4RA+HIyWd
+fE71JbcXSebJuTsma8EpuqDQ6hyR/SqFK8o8EFByDJaPbXnIWrBFAgMBAAGjZjBk
+MB0GA1UdDgQWBBSgRwdlKDS6pa7QNYWmwFTbzg0X5zAfBgNVHSMEGDAWgBSgRwdl
+KDS6pa7QNYWmwFTbzg0X5zASBgNVHRMBAf8ECDAGAQH/AgEAMA4GA1UdDwEB/wQE
+AwIBBjANBgkqhkiG9w0BAQsFAAOCAQEADr2EiW5TTsgzXZqMh5zzZoeIvmd8w8PR
+rYLKgoZKVgccqhJg5zZmKjah6FZW6YpEocnFQI0IHiB3bm2vSoMBg/YKDbz0UoKU
+gWIEeGuwr2LVv7Vyfn4mrflTCLe5lxcTCcoxWvyYbRP9lwiXLwq/6v1E1MoWCBpx
+5MRNo1Ez7o9f672WnI8hIR3vIsLk/ShJDsJU0PKnwq5ryWh88u2qMqJeXo3zqu5w
+1QakZCZv+ySS3FAk9db5FimFCZV8tvbMxu8I1x7zScsbC21N8Ko2Bi21God9KtC5
+z8EF1AJ+8689DK5PojVAsyu8QZDPpluZOR9/nkygdWkgj3J9RtMg3Q==
+-----END CERTIFICATE-----
+`;
+
+/**
+ * An intermediate carrying `basicConstraints critical CA:TRUE` but a keyUsage
+ * WITHOUT `keyCertSign`. Measured on the same host: `leaf.checkIssued(int)` is
+ * false while `leaf.verify(int.publicKey)` is true — so an issuer search keyed
+ * on `checkIssued` never finds it — `int.ca` is false, `openssl verify`
+ * reports `error 79 … invalid CA certificate`, and the worker-shape handshake
+ * is refused.
+ */
+const TEST_TLS_CERT_FULLCHAIN_NO_KEY_CERT_SIGN_INTERMEDIATE = `-----BEGIN CERTIFICATE-----
+MIIDLTCCAhWgAwIBAgIUC3zUptfYAXjsPB1f9xdG9OJzT8EwDQYJKoZIhvcNAQEL
+BQAwIjEgMB4GA1UEAwwXTm9DZXJ0U2lnbiBJbnRlcm1lZGlhdGUwHhcNMjYwODE5
+MTQzNDUwWhcNMjgxMTIxMTQzNDUwWjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwggEi
+MA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQC8p0QBgKVyD3AmjuJC/TkFIl8g
+AnuxybIlzXDqMgiPlTaj/hjLESO3SUZr9nnKQ5gDd8yNWQGCibls1Y/JO8H4n10U
+oPhlu5dnaAdoqLpLDvrPKBEpJCGKhVS67mDdsQfgVxgClXfmipdboeFPwxiHxNx0
+pMvTCmCyQnlDV98oKMEfuNBBUFnViv6pUI0oQe65MvRqnHEc9HnnH0GByWqak//b
+MWWS7LdFZcxNejXzyM2JxTY2XdM0xyzNrqaZEICJwNMp7XzS6S+W+Nbh3ih/rb9H
+tVOB6vcOEuwn/qvGd+pxHcZtOtMH4nVXf4LPzS/YIXBtCmTchXdDI0RP1BAHAgMB
+AAGjaTBnMAkGA1UdEwQCMAAwGgYDVR0RBBMwEYIJbG9jYWxob3N0hwR/AAABMB0G
+A1UdDgQWBBSS8LxKf6par1jdsWc9rHDxPLT6TjAfBgNVHSMEGDAWgBQn8pEbETuO
+TCJxuhlxAgCdR3XT2TANBgkqhkiG9w0BAQsFAAOCAQEAm+kHRcepxj3ymLvqNE0m
+rb/Uvi4cE1m481hy9ND5kY3qE754vXaKOTAfSAQtlYC8N9XUTf90c1VuAoA3cJ36
+MzbfH1QYNoj2+rJwzxxQ7Ii4wTXOETDv75u0OFkInOi/bREnF8x2lKYbO8DOZgb1
+3FRo7CMsoXceh3D/5QJgpVIE6GcPIHFoxNdovv7MGeg8aCGOV8AdfmKJdgNnN0h4
+TbvUDioDqs6Ii7BGoQIF+2CAtOujFIm1bX5RWVLzAev4bAhczWzA8xtVyaXdPcb0
+6Uz+uzalrGWux2Vs8SI/GEW+bGvLWZdEGlLQ/9yPl9juKI4TrczLHehjnCMt8Icg
+Bg==
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIDLTCCAhWgAwIBAgIURUs4+qymFjpqVh8gVRkFQ3BMU14wDQYJKoZIhvcNAQEL
+BQAwGjEYMBYGA1UEAwwPTm9DZXJ0U2lnbiBSb290MB4XDTI2MDgxOTE0MzQ0OVoX
+DTM0MTEwNTE0MzQ0OVowIjEgMB4GA1UEAwwXTm9DZXJ0U2lnbiBJbnRlcm1lZGlh
+dGUwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQChSUT9K9bjB5RN3Th9
+iym1f67YpVXsE/UalhlaygJxu2I8E4L/Fqr0Ime8oc6/8GucTYn0ARh35vhtL6LP
+QdbjbIZSxphJsfG+QY9pia3IGMfTbSL8bVilrYMitjPZqCdvpMtYJQKI2e64nyMr
+refO8bVZtcsX0SFUA8riXOVo7wjo+UPPOTlGuu1qP+9rsonobTKucs9khrcLa+QM
+Itt7QonZTz8qUCf/pvsKdnQA9oBYIqcica3YoDDblGkx7HNz9grLujXno0mSSfno
+GWv/fkCzQWlZWH8b3/lUOU+bfl+u0xvmb1tDfJdaqliemJ5+4nZGWvD7yCT5b6aV
+DBVVAgMBAAGjYzBhMA8GA1UdEwEB/wQFMAMBAf8wDgYDVR0PAQH/BAQDAgeAMB0G
+A1UdDgQWBBQn8pEbETuOTCJxuhlxAgCdR3XT2TAfBgNVHSMEGDAWgBQ+7/MPc/s0
+VJw5u4GlQbaQd6bqzjANBgkqhkiG9w0BAQsFAAOCAQEAEg9MJO8JsIqVMma54Kzs
+j52bso1KgdpnV/KQ2IEsFwlg4C+wD24xLzEAyYNEYAhwRoO1YrfmxjUSAz5ugYd3
+nPxFXJ/c/GSwWOPDuew5tjV6CsTgFBUF07Zz+/scE9ETuczlWRyYyWyDE3pWSlWw
+QuI1ML9PDPGNyjZADILdQRE0Y3kavKVLs84Ct0UcikZkFngmmU/lv/sO3JzqmA0x
+Duwy5TlXjKMS5uqXyqpuW+DMZtmQXQt2zuvXKles3L3n81ZEbHYug29BOMsbzXFQ
+CjDc/j+/t/mzW3HyYqBjkmd782O/j3D+1/PCRFe5f85ZF+BkvQyXMduapQB5159H
+BA==
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIDJTCCAg2gAwIBAgIUYGGfWrUT80IZMy6CC45wikRv6jUwDQYJKoZIhvcNAQEL
+BQAwGjEYMBYGA1UEAwwPTm9DZXJ0U2lnbiBSb290MB4XDTI2MDgxOTE0MzQ0OVoX
+DTM2MDgxNjE0MzQ0OVowGjEYMBYGA1UEAwwPTm9DZXJ0U2lnbiBSb290MIIBIjAN
+BgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA7bE5/gWLjTxrvncJwyYeoAaRe2Gs
+8AJUazOa/TFgSJr3aVFpq6JiF1D3PwxAO+jzEwECtzbDvx+kfZIPb1DD8+yqNab1
+U799wctKokr7xxAH4evIbmDHmEWYjqziEU5vnwhJkOjYsNOJHiawtgvoXRWVin27
+0ebEYS9AkH4trgy6wJrSl0DVrOuHFc1QH8KEotIoT4IkMdFwDj8WJed6/WtQYLzS
+jmQFmose82jeJy7UZGuMqLoK0rvzErWZjpXcgbongpY4wMM64j1mdGp1OqWxnTh/
+4KhCYPbtojNX2/hiUzV26b2CRzEnLDzgsCJupKezoKw69hFUjvIhwjRWcwIDAQAB
+o2MwYTAdBgNVHQ4EFgQUPu/zD3P7NFScObuBpUG2kHem6s4wHwYDVR0jBBgwFoAU
+Pu/zD3P7NFScObuBpUG2kHem6s4wDwYDVR0TAQH/BAUwAwEB/zAOBgNVHQ8BAf8E
+BAMCAQYwDQYJKoZIhvcNAQELBQADggEBAJ+RswWBRUHQItyyOCCKL9gNe5ivaR+T
+6phwcGIKmV54rac9mvkeNSTIvYGx2GUNMMoBpyPHpi8F0m058ibhfGhipXK6G9LT
+cd5X4EcBdduJc9x500TjcMGtiyfkphVYM938pOG4tLLNFb/vWQrSIPJZ0pepJMaC
+Erpq8v4dPDTqgiihMP59h/fsoiZ8KUQh3QrJAsl4Zw52bGqD6rofHYyCNaD2/1s4
+h75jMHg9zFcEPPYec44/FXIRAbFgTCqe357jvq03r1Dp8zkpUAb61uHE5SObuC0a
+uuMybpJUFN/3vvC2k9oJw7hlWQ/QRDzpWrWXQNUi0VtYoFkEefm81T0=
+-----END CERTIFICATE-----
+`;
+
+/**
+ * The same `pathlen:0` root issuing the daemon leaf DIRECTLY — zero
+ * intermediates below it, so the constraint is satisfied exactly at its limit.
+ * Measured in the worker shape: `authorized: true`, and `openssl verify` says
+ * OK. This is the arm an off-by-one in the constraint check cries wolf on.
+ */
+const TEST_TLS_CERT_PATHLEN_0_DIRECT_LEAF = `-----BEGIN CERTIFICATE-----
+MIIDIzCCAgugAwIBAgIUZQIIOfcMuP83bsNDsqpUM+xjTsUwDQYJKoZIhvcNAQEL
+BQAwGDEWMBQGA1UEAwwNUGF0aExlbjAgUm9vdDAeFw0yNjA4MTkxNDUwMjNaFw0y
+ODExMjExNDUwMjNaMBQxEjAQBgNVBAMMCWxvY2FsaG9zdDCCASIwDQYJKoZIhvcN
+AQEBBQADggEPADCCAQoCggEBAOR5+X6ahkMBJMG0dw8ncWuPj8znI3sV50dcnA/R
+uBpGg3oeaesRfgw5LmDNfTJ1QBOT2476+IEsn+i3kyZsSOk1/NjeAZ2NtMSpzHT9
+nUUIy4XUj/YAG+TvXxdzxlOBMSOyBOGVeGszPuRsIkUWYJKHUuJFRtyWnvOmdeu2
+L+p6E2xHZam0Zs++tJLZMztbe/gJb1GEU4Kk963ikpe1J/9BkRXarzRPWbY2i5ZP
+M3bsOeU/epwD6LV8X2jlYknMkwhU6KFUHzu7l1L+5FMa4ofqWOVdZLN3dM6ncU5u
+Vj2pCHdHkOK3cD3jEujeXdZ10Zh/xyrrxKwXwvyuRrUryl8CAwEAAaNpMGcwCQYD
+VR0TBAIwADAaBgNVHREEEzARgglsb2NhbGhvc3SHBH8AAAEwHQYDVR0OBBYEFMj9
+HVSSrB0pRJ9pGHmU21o5gPW7MB8GA1UdIwQYMBaAFKBHB2UoNLqlrtA1habAVNvO
+DRfnMA0GCSqGSIb3DQEBCwUAA4IBAQCaFiRyjHFsiNsrnB7ZYm7po9mbgilDynj3
+3qpRbX0XJHyMHPzJMoAWHOiietEJdo4XvsBxWJgGZ4IKCoox+ApWR4ZO8de9dawc
+wt56H29Y0jqNZWqyUesC5q+Y3po4oZtHdC72Ml/52bNRRMllE3FdJItMKUkLTonv
+LgEqXJoDsVnVPXK5CQdt6KVUgiAnyf1f0pK3g8sUHPD6OI/U+Ut3UI7hFngRhweM
+HVr9fDVzYBMysDqcBmD/p0vkVolkkgrxk1RaPHYWzh4CU6S3QHazTqU+wxFcC+HJ
+3sOcf3nym2zfq9OYE1vM3381tdTzdee7HhkMJIdnsqu2au3ZPB0o
+-----END CERTIFICATE-----
+`;
+
+/**
+ * A leaf signed by a SELF-SIGNED root carrying `basicConstraints critical
+ * CA:TRUE` but a keyUsage WITHOUT `keyCertSign` — the shape `openssl req -x509`
+ * produces from an extfile that spells keyUsage out and forgets certificate
+ * signing. Measured on Node v22.23.0 / OpenSSL 3.0.13: `openssl verify` reports
+ * `error 32 … key usage does not include certificate signing`, and the real
+ * worker-shape handshake (fullchain as the trust store) fails with that same
+ * text — NOT `INVALID_PURPOSE`, and not for the reason `CA:FALSE` would give.
+ */
+const TEST_TLS_CERT_FULLCHAIN_NO_KEY_CERT_SIGN_ROOT = `-----BEGIN CERTIFICATE-----
+MIIDODCCAiCgAwIBAgIUURD6Vxv0AXXGN/xK0YcSGqmSSQcwDQYJKoZIhvcNAQEL
+BQAwKzEpMCcGA1UEAwwgcXdlbiBDQS1UUlVFIG5vLWtleUNlcnRTaWduIHJvb3Qw
+IBcNMjYwODE5MjAyMDAwWhgPMjEyNjA3MjYyMDIwMDBaMBQxEjAQBgNVBAMMCWxv
+Y2FsaG9zdDCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAK7Zz4XfTUnj
+0Y5+DeP6Ei05GByWGZ331oBxdj/b0GrqQCZoAMMPQJqpugMNieCwYAsZ0Urb5cMG
+oC46lGti7LYgor63xEzkgdIUkzeAQbJtpBKsjWTrSD641qMaRrBfbNBju97eiuuk
+A66mW/onq4CK9IlajvA9m/wALTaJ/ESWtyb4VuLShLZeE02EynqcwLvr0cYvK4cW
+TzOtBeGwFpOfEjutuq73VKiZkBD28n1y10Iv7WroAZflZQpa/iPStHQMMM/FB3O2
+saZnS7zPn8woxK8ujW/EIDL84iP9GCWmg+3GKgJw+GaSoFLW4l716JGjR7yzoRx7
+bsb6k5ezoiMCAwEAAaNpMGcwCQYDVR0TBAIwADAaBgNVHREEEzARgglsb2NhbGhv
+c3SHBH8AAAEwHQYDVR0OBBYEFE+SZE5YcAJmUXqBL+m+6azUZhAPMB8GA1UdIwQY
+MBaAFGNjCta1mZzWt3LqXzvok+D0KdjAMA0GCSqGSIb3DQEBCwUAA4IBAQClqJU/
+Gjp14Ifu5lBy+ofBYDqKLpVB0osatui2JDj2ZS5pAcUBnws8Jc+3duygkh9erFlG
+ri1hTEh/xIiNMVOmAKZR04ynUfp1Po5jlz2/gAWl15VZtBIv4mNzufSQFaJNP/Li
+UXDKlsxWYzEPY7FOZDBn6PlzcF0wKUphBOXi08xfKsL84Qqd86K+LrM/1ljX6eKt
+i2SJktti2CrgcDJqZb91dyruvUiJQL14IiSttgHSipoIkwOlW+a/KbBPRnLvA3ch
+JZjfQ6wBBevbkaoKKTXzFV+sw9F9IItfJPrXrnMiqulqR7018gtuSovpBPodAjSg
+2fQmkJojRd/oyj6B
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIDSTCCAjGgAwIBAgIUMsdEego3MpTS9isA461wuboYW+QwDQYJKoZIhvcNAQEL
+BQAwKzEpMCcGA1UEAwwgcXdlbiBDQS1UUlVFIG5vLWtleUNlcnRTaWduIHJvb3Qw
+IBcNMjYwODE5MjAyMDAwWhgPMjEyNjA3MjYyMDIwMDBaMCsxKTAnBgNVBAMMIHF3
+ZW4gQ0EtVFJVRSBuby1rZXlDZXJ0U2lnbiByb290MIIBIjANBgkqhkiG9w0BAQEF
+AAOCAQ8AMIIBCgKCAQEA2o7Q2xfnXyMgNzlG//yCNbTV+eJ2lZk34M+1iOIiH31z
+UDzt2ZJ3jgMLrijMrQAlWNO4daK9JMk3oyxs50pHlN6T46LHq2sQPSEyxOOOnRuZ
+8WvxWfFJ7SLUPrepvJ5o5Pg0oQDXR/mYq+BJCJY33RzE73yErPzGSyIKebRn3okb
+W3IbwQWMfM5Piza+VSRTWMKIr8JS5Fwk7cthd//1DntMg7sljrBfobdg2hrKOPL+
+o5KHR+SIxFfKfWb7iGiuh/RG7erulnS5e7n3Ua/rU+Yy1jpHuSvjzA8XZMbym22g
+XusuwHka7bmHmkMjH00apDgafQze/dikKv/QusF4KQIDAQABo2MwYTAdBgNVHQ4E
+FgQUY2MK1rWZnNa3cupfO+iT4PQp2MAwHwYDVR0jBBgwFoAUY2MK1rWZnNa3cupf
+O+iT4PQp2MAwDwYDVR0TAQH/BAUwAwEB/zAOBgNVHQ8BAf8EBAMCBaAwDQYJKoZI
+hvcNAQELBQADggEBAHYW0QOJ7OHjjav34scDKgF6LTeuPKdFr4hmYs9NFhmgz4ch
+sPnDu/D4mMF0FnMl5t6XrdaG8ZIdDJs2OFjCx+N4S31FMmSBA9nIOIbyuNwKXdkU
+mCAHQ66+9OGfwHPFNA2DgnQ/juQ9m47dclYFLRg01yKOgieLnBuXWE4hDOQrM1gs
+vUt+YTM9mOBn0Sxr4LTqfu/MOtsTDFnysLi5IWApa96cOfl3KoCvti5Gmx5crFTw
+DBgH1Rq+scl7kyyxeucobVMtUWK6eJRwZ5gfsrpeMH0nqCJLj7s80WMNL9BLojPm
+rv3eIL/tayAWGZDmOpAiQdZn5pxv2jCLmv06Ae4=
+-----END CERTIFICATE-----
+`;
+// A renewed root — two self-signed certificates sharing a
+// subject AND a key, so both verify the leaf — with the SHORT-lived copy
+// first in the bundle. The greedy first-match walk picked the expired copy
+// and claimed every handshake fails CERT_HAS_EXPIRED while the merged bundle
+// authorizes through the renewed one.
+const TEST_TLS_CERT_FULLCHAIN_RENEWED_ROOT = `-----BEGIN CERTIFICATE-----
+MIIDNDCCAhygAwIBAgIUO1dPcT+RFrKO9eAvR7RprjWBRZswDQYJKoZIhvcNAQEL
+BQAwJDEiMCAGA1UEAwwZcXdlbiByZW5ld2VkIHRlc3Qgcm9vdCBDQTAgFw0yNjA4
+MTkxMjEyMjBaGA8yMTI2MDcyNjEyMTIyMFowFDESMBAGA1UEAwwJbG9jYWxob3N0
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvXioBNIbk+BxfkQYG51E
+4VpH2dEvI7CSVtDb9hCr6ejdrsOmIMuHgQoFNrj33WGVovXwqoUsy74j666mXwIU
+E4uXM2kObg5rgmdT010CtqVk10NQ2zVP8HfocwvhfsGc+pXxIG3llLsEfEE4Sz6H
+opapxI0J0KVngEiJtQ1pQ7ETmowE1ox9pHXg+uWNiWOfdSOffoEBdlbckl/LpPHq
+JMzB7bDvKKl7Oj1/0mQjO/vVkPeFsyO0wUSzbo7RrEYfCq9ehZIHHkhTCDLZyy5x
+DtPrvyq31LqQYdfFpM2r9hjIrAn4y9SjbrudLY7/mLAQ90gIO8/++CYfEUR7OOTY
+gQIDAQABo2wwajAaBgNVHREEEzARhwR/AAABgglsb2NhbGhvc3QwDAYDVR0TAQH/
+BAIwADAdBgNVHQ4EFgQUkteOCy+vH/p/7mLACkjh+sYr+YswHwYDVR0jBBgwFoAU
+dNjaHx6CZDrwtW6UMTPqfrILgpAwDQYJKoZIhvcNAQELBQADggEBAGPSIBGUmoNm
+ofVSh+2KNJhc5RzePoGUCBJa9wKa8RIpNGhIlKyD5UqvDXuQIK5GxpQ2B/B2T1zq
+oyQFT1cvAedW4FbgvdF45IUAsuQmtArTduL7vawgAOW3NAZl8Ib6D8UM/bMZuMZl
+78Nu8Amzuti1e4hIYceAFfs8HxgHPOhjA9O4TMr/A6hwHKsnR8CQTGE06lDkRa6p
+R3EjMxkYWwzZm+3jaJlpkmxc4u2ouW5Ve7BAyCRb5afl9HD7TA/gLnPk6Z+EKbS9
+avt2q89TDSohaR3fNGbSxWmyq6+gl/8c12kQZABY6FvvUAgfxMURCIoNhgTqJCNk
+SJzaW9y9p4M=
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIDOTCCAiGgAwIBAgIUFK4nnxLsa266COSbMQBio3y2to0wDQYJKoZIhvcNAQEL
+BQAwJDEiMCAGA1UEAwwZcXdlbiByZW5ld2VkIHRlc3Qgcm9vdCBDQTAeFw0yNjA4
+MTkxMjEyMjBaFw0yNjA4MjIxMjEyMjBaMCQxIjAgBgNVBAMMGXF3ZW4gcmVuZXdl
+ZCB0ZXN0IHJvb3QgQ0EwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQC1
+WejFH2aVeBrJU/U9sMpdNxYDKB267SM7NckZwvukM/yw8uNTBnFTFmK0MMb18TVA
+uxp12+gN1EYxgSHLQQbTHy6sGk8g8XOhbJmL5CM0OSSQ3o7lVI14hbMSLa4IoTpw
+snTU/xH6FbT4F7MZc3rtKLLheymaZGaNvGGwZ6hQYSdjQxge1RLtUHqwsKR9utwF
+FNxm7EmRrDRHuoxJofQGZORyUHwLZ4X0gLjO1BHNp3qcLfMXh3NM5zmgwwi0rO/u
+7M3dv5MPz+EokG1ZdMywdOjYeMZMHKO8id75mmH7sKtePbsMyKbyNK+WtYqdsCSe
+mhmwKLUwLPsXprwngzRTAgMBAAGjYzBhMB0GA1UdDgQWBBR02NofHoJkOvC1bpQx
+M+p+sguCkDAfBgNVHSMEGDAWgBR02NofHoJkOvC1bpQxM+p+sguCkDAPBgNVHRMB
+Af8EBTADAQH/MA4GA1UdDwEB/wQEAwIBBjANBgkqhkiG9w0BAQsFAAOCAQEAryag
+ROvm/WygCrsuMoeZvzGM+hIwYpq1nuOGput0zQUAqFQhyUistLCNBQ3zGxdRFEV9
+FWIjBO3XdJArzc/34OWH28OOrf5OD24aXg3aK97NHk8RWCkx9AEU6mP3IAjgGnGy
+Qnj3CXnEAXRkDG7iCgM0jrW6gjgXvt4Ytb5WqxuqkUUOjboa5Ib01mI1QUobSqA5
+q3YiuRtwWCjJN5AyTHQnczRQU9GMcCaBd6d1Hs5DHx1dqYj5Vd6SDoUJojkydPiB
+gux1cYPewfQh1p2SX6YLKRHheooVp1mgXju1x81nPl80cXsErrlFYLo7rVhjabNR
+uhzf6T5xCyhBjj2XWA==
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIDOzCCAiOgAwIBAgIURuDBy7kKe3JAEkySJTgKilHa8ecwDQYJKoZIhvcNAQEL
+BQAwJDEiMCAGA1UEAwwZcXdlbiByZW5ld2VkIHRlc3Qgcm9vdCBDQTAgFw0yNjA4
+MTkxMjEyMjBaGA8yMTI2MDcyNjEyMTIyMFowJDEiMCAGA1UEAwwZcXdlbiByZW5l
+d2VkIHRlc3Qgcm9vdCBDQTCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEB
+ALVZ6MUfZpV4GslT9T2wyl03FgMoHbrtIzs1yRnC+6Qz/LDy41MGcVMWYrQwxvXx
+NUC7GnXb6A3URjGBIctBBtMfLqwaTyDxc6FsmYvkIzQ5JJDejuVUjXiFsxItrgih
+OnCydNT/EfoVtPgXsxlzeu0osuF7KZpkZo28YbBnqFBhJ2NDGB7VEu1QerCwpH26
+3AUU3GbsSZGsNEe6jEmh9AZk5HJQfAtnhfSAuM7UEc2nepwt8xeHc0znOaDDCLSs
+7+7szd2/kw/P4SiQbVl0zLB06Nh4xkwco7yJ3vmaYfuwq149uwzIpvI0r5a1ip2w
+JJ6aGbAotTAs+xemvCeDNFMCAwEAAaNjMGEwHQYDVR0OBBYEFHTY2h8egmQ68LVu
+lDEz6n6yC4KQMB8GA1UdIwQYMBaAFHTY2h8egmQ68LVulDEz6n6yC4KQMA8GA1Ud
+EwEB/wQFMAMBAf8wDgYDVR0PAQH/BAQDAgEGMA0GCSqGSIb3DQEBCwUAA4IBAQCj
+1C2V2wPvByLc9hmmx247jZs+kKiNmVW6HIEieTbRAgEr2X+sE3DGDdvxs9N7cBKW
+hrrxW0DKfi86M3cqM3Z4+hpOyPukRpGF6MSuK+Z09gN/Mr8fHcpGqY37GdcREEbt
+eSR8whZQy7mxoNBgPgDUa5dusMsemhkvQtT0kJNBo3mrVdxMrbT/iMqPHDnfUB5P
+JuqlSTd6kmII8MLMkOPnlrBLE/IiMnpeq5bPbNqWJ3jSOWB0Y5urevXlhLvhhkZi
+mfaYUhXXxhzIHbSGiqWkLbZH0m1OB7jZXhlee02W/9i/vmdFNBIAxTAfshB0X9d+
+CLo3gjYAPFzEeGqHNP3E
+-----END CERTIFICATE-----
+`;
+
+const CROSS_ROOT_1 = `-----BEGIN CERTIFICATE-----
+MIIBkTCCATagAwIBAgIUeT/d3GHNmHzQitzyLZ3Yru0BnuIwCgYIKoZIzj0EAwIw
+DTELMAkGA1UEAwwCUjEwHhcNMjYwODIwMTQwNjQ0WhcNMzYwODE3MTQwNjQ0WjAN
+MQswCQYDVQQDDAJSMTBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABAO2G4/eUMb5
+8sSm9P6av/SB26kYM1spOgOtSbWFIB8i31RjDHnCUrktWQCix8gFk+KKOdSUIFfP
+qjf1Z33RJbCjdDByMB0GA1UdDgQWBBSFh7tzjEtRhcFOt//KweX/vwzpUjAfBgNV
+HSMEGDAWgBSFh7tzjEtRhcFOt//KweX/vwzpUjAPBgNVHRMBAf8EBTADAQH/MA4G
+A1UdDwEB/wQEAwIBBjAPBgNVHREECDAGhwR/AAABMAoGCCqGSM49BAMCA0kAMEYC
+IQDA9od9PwSd/dOFOnLq5gpCCzKWVBSzyXcn0KENGdgB/wIhAPU4TQLwx7xjPCHP
+etkwf72rPOGL7sfG64FP0nna+Evz
+-----END CERTIFICATE-----
+`;
+
+const CROSS_ROOT_2 = `-----BEGIN CERTIFICATE-----
+MIIBgDCCASWgAwIBAgIUZ4f0aFowpdYuwYYw+VrJYpVolGowCgYIKoZIzj0EAwIw
+DTELMAkGA1UEAwwCUjIwHhcNMjYwODIwMTQwNjQ0WhcNMzYwODE3MTQwNjQ0WjAN
+MQswCQYDVQQDDAJSMjBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABEIEy3tDcQbR
+wQ7jxHWCrZtXpB4HLkaYXbYxDgwhKRTvZ/2gch/GmBtvwIn0e7pv9wfjOP664xs2
+iceOOosxacijYzBhMB0GA1UdDgQWBBSto4jb+M6nxv9BX7SwDXS9iFC88zAfBgNV
+HSMEGDAWgBSto4jb+M6nxv9BX7SwDXS9iFC88zAPBgNVHRMBAf8EBTADAQH/MA4G
+A1UdDwEB/wQEAwIBBjAKBggqhkjOPQQDAgNJADBGAiEAn2HbavxSri2nlXM/maDG
+25rLQnEkgM+eDwje7dQco4UCIQC3uxTxRSH3mDJEcL2Uo/1/d7x8mq577XKnA/Q5
+/1GhFQ==
+-----END CERTIFICATE-----
+`;
+
+const CROSS_INTERMEDIATE_1 = `-----BEGIN CERTIFICATE-----
+MIIBkDCCATWgAwIBAgIUK4jn+paxEGMFTbTURWtEGiEug6IwCgYIKoZIzj0EAwIw
+DTELMAkGA1UEAwwCUjEwHhcNMjYwODIwMTQwNjQ1WhcNMzYwODE3MTQwNjQ1WjAd
+MRswGQYDVQQDDBJDcm9zcyBJbnRlcm1lZGlhdGUwWTATBgcqhkjOPQIBBggqhkjO
+PQMBBwNCAAS7j4pX2nl4Nj+cUad0IFUnoLALZJ8DQQAlNUkBQ1wq+DfxBPWTXEpt
+lbqJzIZhjku881LM0M9OdTdJyqRtvuEPo2MwYTAPBgNVHRMBAf8EBTADAQH/MA4G
+A1UdDwEB/wQEAwIBBjAdBgNVHQ4EFgQUyRN9LR6Pyjy6DW3xV6A+yujizkswHwYD
+VR0jBBgwFoAUhYe7c4xLUYXBTrf/ysHl/78M6VIwCgYIKoZIzj0EAwIDSQAwRgIh
+APBoGvl6f01SX3+SMMG1J+LbDRfe9cQVOTT2bG0IatGsAiEA+OqcZxyoWYxpnrNT
+frAoKCmMH+K14TpboJ8W680Xq90=
+-----END CERTIFICATE-----
+`;
+
+const CROSS_INTERMEDIATE_2 = `-----BEGIN CERTIFICATE-----
+MIIBjjCCATWgAwIBAgIUDpfNzEOZOiy6xbvKRtBLuvadA84wCgYIKoZIzj0EAwIw
+DTELMAkGA1UEAwwCUjIwHhcNMjYwODIwMTQwNjQ1WhcNMzYwODE3MTQwNjQ1WjAd
+MRswGQYDVQQDDBJDcm9zcyBJbnRlcm1lZGlhdGUwWTATBgcqhkjOPQIBBggqhkjO
+PQMBBwNCAAS7j4pX2nl4Nj+cUad0IFUnoLALZJ8DQQAlNUkBQ1wq+DfxBPWTXEpt
+lbqJzIZhjku881LM0M9OdTdJyqRtvuEPo2MwYTAPBgNVHRMBAf8EBTADAQH/MA4G
+A1UdDwEB/wQEAwIBBjAdBgNVHQ4EFgQUyRN9LR6Pyjy6DW3xV6A+yujizkswHwYD
+VR0jBBgwFoAUraOI2/jOp8b/QV+0sA10vYhQvPMwCgYIKoZIzj0EAwIDRwAwRAIg
+H9eYW8/Dvngv6kAY3bWUoqgulhWbNunKBzPTnxWmN2ICIH/quYOD05mxIzoeZGPS
+gdrf8FnFYppVQzO5Z9ttA1v6
+-----END CERTIFICATE-----
+`;
+
+const CROSS_LEAF = `-----BEGIN CERTIFICATE-----
+MIIBuzCCAWGgAwIBAgIUMWkYua7nDRsl373Bt63skU//Qe8wCgYIKoZIzj0EAwIw
+HTEbMBkGA1UEAwwSQ3Jvc3MgSW50ZXJtZWRpYXRlMB4XDTI2MDgyMDE0MDY0NVoX
+DTM2MDgxNzE0MDY0NVowFDESMBAGA1UEAwwJMTI3LjAuMC4xMFkwEwYHKoZIzj0C
+AQYIKoZIzj0DAQcDQgAEDPZB0DN12lMCkk+2ICRewMXJKIUpc03YBQJqd3UOQW1F
+yvxCCbT808DwKmLxHeJbg+kZ8yc3e/rNUz1cR4aZL6OBhzCBhDAMBgNVHRMBAf8E
+AjAAMA4GA1UdDwEB/wQEAwIDiDATBgNVHSUEDDAKBggrBgEFBQcDATAPBgNVHREE
+CDAGhwR/AAABMB0GA1UdDgQWBBTLt1u4Gt5B6g9xlFx75giiYQ+kfTAfBgNVHSME
+GDAWgBTJE30tHo/KPLoNbfFXoD7K6OLOSzAKBggqhkjOPQQDAgNIADBFAiAgcRAh
+6tcSyldzNpEgrNxX2xlAYRBDpkOkO9g8dEUDrwIhAPXeii8IRPw33QcetCJqyWvD
+rTP2mq30SnHQaRt+IxuQ
+-----END CERTIFICATE-----
+`;
+
+const CLIENT_ONLY_LEAF = `-----BEGIN CERTIFICATE-----
+MIIBtTCCAVugAwIBAgIUOtV9BLAFWjW8r6Ni6yfEwPfbJ8kwCgYIKoZIzj0EAwIw
+FDESMBAGA1UEAwwJMTI3LjAuMC4xMB4XDTI2MDgyMDE0MDY0NVoXDTM2MDgxNzE0
+MDY0NVowFDESMBAGA1UEAwwJMTI3LjAuMC4xMFkwEwYHKoZIzj0CAQYIKoZIzj0D
+AQcDQgAElLheYBUvnTKq5Ad/ZG+C9Q7EfYALIb0a4aQMRNCqn7X7MsXfq4VcWNup
+DMXeYcmB9QCJ54NphWGXUdOdE1wGF6OBijCBhzAdBgNVHQ4EFgQUyALXrNmNOYTk
+UeRJhl9YWnALHRYwHwYDVR0jBBgwFoAUyALXrNmNOYTkUeRJhl9YWnALHRYwDAYD
+VR0TAQH/BAIwADAPBgNVHREECDAGhwR/AAABMA4GA1UdDwEB/wQEAwIHgDAWBgNV
+HSUBAf8EDDAKBggrBgEFBQcDAjAKBggqhkjOPQQDAgNIADBFAiA1nG4YiUF1/hL3
+OKfHPHH6pdZMNDN4drC88D4Kd97nFwIhAKz2Al1IEEy8mJhMPFIrXRWPGFOllP3k
+Xb+fBUufjago
+-----END CERTIFICATE-----
+`;
+
+const KEY_CERT_SIGN_ONLY_LEAF = `-----BEGIN CERTIFICATE-----
+MIIBlDCCATqgAwIBAgIUDpfNzEOZOiy6xbvKRtBLuvadA9AwCgYIKoZIzj0EAwIw
+DTELMAkGA1UEAwwCUjIwHhcNMjYwODIwMTQxMDA3WhcNMzYwODE3MTQxMDA3WjAU
+MRIwEAYDVQQDDAkxMjcuMC4wLjEwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAARc
+EdR+oRz1xXNo5GY8XXMeLhv04CuM9RZBG1klDnGko30IOiOftFfK6931KKXp9psB
+23hJWQ1d11KZZJ7H3qQJo3EwbzAMBgNVHRMBAf8EAjAAMA4GA1UdDwEB/wQEAwIC
+BDAPBgNVHREECDAGhwR/AAABMB0GA1UdDgQWBBSrIj1Jon0+oUBfQK4PIpr1/7Iz
+BzAfBgNVHSMEGDAWgBT8Y4nn1d43yR1R5Flb/R0BLjPPtzAKBggqhkjOPQQDAgNI
+ADBFAiEAjz6JE5DEV0isXW3WGwPcxGgf3Hu1P+Qu4sdfJRlBY2gCIHoPr/7C+ZAw
+rMHucyDXcw48wg3WmDIbBZ5iUHkVWntx
+-----END CERTIFICATE-----
+`;
+
+const KEY_CERT_SIGN_ONLY_ISSUER = `-----BEGIN CERTIFICATE-----
+MIIBfzCCASWgAwIBAgIURbqYh3ZfxfmU94nX3KroO2oztdcwCgYIKoZIzj0EAwIw
+DTELMAkGA1UEAwwCUjIwHhcNMjYwODIwMTQxMDA3WhcNMzYwODE3MTQxMDA3WjAN
+MQswCQYDVQQDDAJSMjBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABN/Gq3++mu9H
+gxLRv9XJUIutKUQgKKQA+7FNfnECjfASpzq3w/kXIbNFasMEOh3N3jhe8sfMtLjW
+LhjljS+orCWjYzBhMB0GA1UdDgQWBBT8Y4nn1d43yR1R5Flb/R0BLjPPtzAfBgNV
+HSMEGDAWgBT8Y4nn1d43yR1R5Flb/R0BLjPPtzAPBgNVHRMBAf8EBTADAQH/MA4G
+A1UdDwEB/wQEAwIBBjAKBggqhkjOPQQDAgNIADBFAiEAwp1eqjarkry11QpWoXDh
+m6GdkDDlkgDVlo9xFthOW2gCIC4BOgSFQsZn1b6QrBbM3KeAogt0JbU/GganNV29
+YTto
+-----END CERTIFICATE-----
+`;
+
+const FAKE_SELF_VERIFIED_INTERMEDIATE = `-----BEGIN CERTIFICATE-----
+MIIBkjCCATigAwIBAgIUcjMKrW8GdL4SWy0sjN6Ftta56IowCgYIKoZIzj0EAwIw
+ETEPMA0GA1UEAwwGUm9vdCBBMB4XDTI2MDgyMDE0MDY0NVoXDTI2MDkxOTE0MDY0
+NVowHDEaMBgGA1UEAwwRRmFrZSBJbnRlcm1lZGlhdGUwWTATBgcqhkjOPQIBBggq
+hkjOPQMBBwNCAAQca5R8kwHIhxeEXFQZTyqtHGpSBjDkC3EpkcYWPbKGQseXR/J0
+BZ8tKjrRisGrdn+FljIjl8VHAp2+vuzciqIPo2MwYTAdBgNVHQ4EFgQUAILGac/S
+nAmumOqamezMPQlXOU0wHwYDVR0jBBgwFoAUAILGac/SnAmumOqamezMPQlXOU0w
+DwYDVR0TAQH/BAUwAwEB/zAOBgNVHQ8BAf8EBAMCAQYwCgYIKoZIzj0EAwIDSAAw
+RQIgNd8m2NjLmo5lXx1zVGqNjVRK0DlwyLUVeUa3TN5VPa8CIQDLiUSxhpBdH/yI
+konRu2+KHtLecnXRC/BaXvGWF3WoUQ==
+-----END CERTIFICATE-----
+`;
+
+const FAKE_SELF_VERIFIED_LEAF = `-----BEGIN CERTIFICATE-----
+MIIBuTCCAWCgAwIBAgIUWYfH7FMqwt08txV68JBoFkCKvGQwCgYIKoZIzj0EAwIw
+HDEaMBgGA1UEAwwRRmFrZSBJbnRlcm1lZGlhdGUwHhcNMjYwODIwMTQwNjQ1WhcN
+MzYwODE3MTQwNjQ1WjAUMRIwEAYDVQQDDAkxMjcuMC4wLjEwWTATBgcqhkjOPQIB
+BggqhkjOPQMBBwNCAASBsAu8zOfr23TGC8avbWa29a6wkt8FPglHKw3G/Ab2+Cx0
+NIiITXjWKwjopnHbBOfDfmjNFlCuCDp3/OhqdpWoo4GHMIGEMAwGA1UdEwEB/wQC
+MAAwDgYDVR0PAQH/BAQDAgOIMBMGA1UdJQQMMAoGCCsGAQUFBwMBMA8GA1UdEQQI
+MAaHBH8AAAEwHQYDVR0OBBYEFPtHA766j4WTqf5fWgMwmnsKTQxLMB8GA1UdIwQY
+MBaAFACCxmnP0pwJrpjqmpnszD0JVzlNMAoGCCqGSM49BAMCA0cAMEQCIGpSpLfj
+2SUSnRFfxP1w0tVF3hwUouurjlFgydBsNz81AiAQWZklgKzmnxLSR4W1CE5m5srR
+FD7Sc2l6Dh2GBS56ZA==
+-----END CERTIFICATE-----
+`;
+
+/**
+ * A leaf signed by an intermediate that IS a CA (basicConstraints CA:TRUE,
+ * keyCertSign) but carries `extendedKeyUsage=clientAuth` — the shape a
+ * multi-purpose internal CA reissued with a wrong purpose template produces.
+ * OpenSSL applies the server-purpose EKU test to EVERY chain member, not just
+ * the leaf: measured on Node v22.23.2 / OpenSSL 3.0.20 with this exact file
+ * as the served chain and the root as the trust store, a worker-shape
+ * `tls.connect` fails `{"code":"INVALID_PURPOSE","message":"unsuitable
+ * certificate purpose"}` and `openssl verify -purpose sslserver` reports
+ * "error 26 at 1 depth lookup: unsuitable certificate purpose". The file
+ * includes the root so the chain anchors — only the purpose fails. Not a
+ * real secret.
+ */
+const TEST_TLS_CERT_CLIENT_EKU_CHAIN = `-----BEGIN CERTIFICATE-----
+MIIDWTCCAkGgAwIBAgIUXgiovCRxbm0joqkwaCbrlJAg5VUwDQYJKoZIhvcNAQEL
+BQAwJzElMCMGA1UEAwwccXdlbiBjbGllbnQtZWt1IGludGVybWVkaWF0ZTAeFw0y
+NjA4MjMxMjM1NTZaFw0zNjA4MjAxMjM1NTZaMBQxEjAQBgNVBAMMCWxvY2FsaG9z
+dDCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAJmLMHPtMZw+1/DcCFeW
+xVNsJwQyECgfARs1rxOgVInGlqsePZBFOadECFVP1Wj2EQiZUjBNe6PHWdWnu3/Z
+WKbDxfOWR5DQn2h0EkhUJTrU929RwqnHuRaIgzaai54XWxezXakVD2vpoh3RlGRN
+6FDZdLTmnrESX+618EPwKQI8w2iBjkTqLvOf4jpQJwNPLSQ/+AM/X1lgAgppA672
+flHHtCwpMGJmKAKSivYolDHmdKXdbS8Uddc8aiTqTeaQB+8ExgMYidZ5R5OLYKOc
+c5rg73dlk0tJOl5/YUb+iuKcY5MGTRlIcOOKcMoMzqpwxujbbvpNO4295n2ZXPSE
+EMECAwEAAaOBjzCBjDAJBgNVHRMEAjAAMA4GA1UdDwEB/wQEAwIFoDATBgNVHSUE
+DDAKBggrBgEFBQcDATAaBgNVHREEEzARgglsb2NhbGhvc3SHBH8AAAEwHQYDVR0O
+BBYEFDzACaM+l1+De7ME7pcOKxJrQeylMB8GA1UdIwQYMBaAFLVfKnl9aiiN1eu9
+UXsquyEzyolmMA0GCSqGSIb3DQEBCwUAA4IBAQCAOWCYES6p29FS09NEMiKEJPIZ
+cElWVxVbmV0rr+8lzTUPP2N41TH3W7Kns5DYK1SQH90eFz+4POcInaLwAisKEUk2
+WLn1MBq9n2v6o/E3eQ/9z901F0i25JYtF2JdWqzZwwHgDtcx7rWKyOe/g8JrgyO1
+1qHMK83lNuTdX2nmM6LLR5fM+7HvH/B6A5t0SMy7jkRFBg/k5cxrcTb6mEpjSWs4
+MT+9wic3NKX13RW7dMtstJRpaSUY2bK9J8eUJc1owYi7g6CzKdGYFzHormJi9oKr
+vAmNnDnFLKjZecTjbNoiK04a41uhNQ16WVoviK3jrNHaOoCES1w951H9Q1ol
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIDSjCCAjKgAwIBAgIUNyW6Y5XGTAL740qXa3847G6GyeYwDQYJKoZIhvcNAQEL
+BQAwHTEbMBkGA1UEAwwScXdlbiBla3UgdGVzdCByb290MB4XDTI2MDgyMzEyMzU1
+NloXDTM2MDgyMDEyMzU1NlowJzElMCMGA1UEAwwccXdlbiBjbGllbnQtZWt1IGlu
+dGVybWVkaWF0ZTCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAKcIGZnE
+dIr9ea1NCD8VckHdQD6OJl8UUPneZWAfWcth7w1O7MGpbBSZDqMWr0XI6+hEgFeD
+abZxQGRlPuAbC9Wc2B6QDg9BURafaD1ma6HKAkZtVTwfnK7i775aOyervcyKG6m8
+SlNwU++Flc7C8M3S/pvZW/B5UsDPlQc7zSb4//tu4Oc61S/HDy4RldkziEBFGXik
+uu1s37Fk5QvVEq6f3v1N3IaxdJpItPmYWbd8iqBJ3kOWU4yro7ZjAca2PKRuNzAb
+J2opLxm+1V5B7/ny0OTL/0oGFgTEegBIWE92EJFN5tsdAfIQhRJYIeHIhEhs2v1t
+JCpL3YKKeaG5t10CAwEAAaN4MHYwDwYDVR0TAQH/BAUwAwEB/zAOBgNVHQ8BAf8E
+BAMCAQYwEwYDVR0lBAwwCgYIKwYBBQUHAwIwHQYDVR0OBBYEFLVfKnl9aiiN1eu9
+UXsquyEzyolmMB8GA1UdIwQYMBaAFPNu3I4kv7G16WSFypNL4OpviRREMA0GCSqG
+SIb3DQEBCwUAA4IBAQCZ5SScQb496KHb+OMHB/wqJO59zX2XFfLhOqEPWHpIXT/g
+NMJenwlr/r9aB9I4yLFQpJcAMtnDXa2qfB91hOcKpoVyernnNqaD5lpEDBffrmJl
+dKvebpHwdMNlfIbFelsEtb/ZU9F6SLGWuNK+QrnUkOvWTXy0GUBcmdOPiR6b90NP
+r2IRn+UX3u+92/0OAKquhS34EM+T+cIwHqBWJuE3Acp4CELvDgVlJmAfCq/i1wnB
+/UIlnEYhlHZ2pk/tIh5mujr+rFyANe8KzifDmvjC0o98CHLghYkcntcU01gsrYy8
+bPH1/S0f5dB2rp7Ne0ZPLMStzjD87Pm2WKFk102l
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIDKzCCAhOgAwIBAgIUOWUnEy0fcOcnsRZaSQ6B5JnUZzgwDQYJKoZIhvcNAQEL
+BQAwHTEbMBkGA1UEAwwScXdlbiBla3UgdGVzdCByb290MB4XDTI2MDgyMzEyMzU1
+NloXDTM2MDgyMDEyMzU1NlowHTEbMBkGA1UEAwwScXdlbiBla3UgdGVzdCByb290
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnzmx++Qvu1xQezLzRJUM
+IiWo84LyLhAjj9z9cSQWV0gV6DVZjZh2NGiegKcTyj9a2hTG6vMNAa2eLyNpB4J3
+a2RBPDE+A0t8f0aJDBJh8s2IG19gdJj2TCecx3BEk/nRtbjGYRQIqHkQuJcT5EhC
+2igIkONRQ/fNKbXt1enTL/uc9TyAEOcDVzyvE+Y/4J10I6ZhrSAhZ5MvoZvK7SY0
+agscsyH8ocKehD/FZJ+7lWNrZmNtwWJCyVRjvIK6E+9HkZYi8Lzn8SeuaMCeIKqt
+TvYLgvp0Y21jumS3TeXKdcwwrJd5cPF8jSfVeTdA9Owi+u3Vx5H6xVl4r5oRmfa5
+nQIDAQABo2MwYTAdBgNVHQ4EFgQU827cjiS/sbXpZIXKk0vg6m+JFEQwHwYDVR0j
+BBgwFoAU827cjiS/sbXpZIXKk0vg6m+JFEQwDwYDVR0TAQH/BAUwAwEB/zAOBgNV
+HQ8BAf8EBAMCAQYwDQYJKoZIhvcNAQELBQADggEBAAjscSpURTsy4xP2uC9UlsCn
+Lmb2bTWO+ejlcP2y5vsdP+cNaO8FtANbBPTkPV5+Kizu7a7L5QlDSuQxDEDWg54l
+3+1Ize0KPILPA1SC5SEkh4JpvG+wN1udm0ykFiQyCyET/wfoWe3O74nKyZTVgtq0
+09uLEVXaWBl3gZJ5NKOD73kM2StVyXsFkGEPz4FwVGMrQaFpPHHrzJOW3iU0xo3v
+aa+iyqy+FppmCRJZKyqP1n3Bzk7m9tzSfYNb8vdFsLA5DlkV1lAhtBoSbkLAsYPN
+gupdQ6qWEKa1z147s84N7ASbhYZhnluZs9t4gpYZ8PavMSggcPhYPxLDFshHkqo=
+-----END CERTIFICATE-----
+`;
+
+/**
+ * The same chain with a serverAuth-EKU intermediate — the control that
+ * authorizes (measured on Node v22.23.2: `authorized: true`) and keeps the
+ * chain-wide EKU rule from crying wolf. Not a real secret.
+ */
+const TEST_TLS_CERT_SERVER_EKU_CHAIN = `-----BEGIN CERTIFICATE-----
+MIIDWTCCAkGgAwIBAgIUIFGbo8TlS1PT3vk6OaFo7I7i2XAwDQYJKoZIhvcNAQEL
+BQAwJzElMCMGA1UEAwwccXdlbiBzZXJ2ZXItZWt1IGludGVybWVkaWF0ZTAeFw0y
+NjA4MjMxMjM2MTJaFw0zNjA4MjAxMjM2MTJaMBQxEjAQBgNVBAMMCWxvY2FsaG9z
+dDCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAJmLMHPtMZw+1/DcCFeW
+xVNsJwQyECgfARs1rxOgVInGlqsePZBFOadECFVP1Wj2EQiZUjBNe6PHWdWnu3/Z
+WKbDxfOWR5DQn2h0EkhUJTrU929RwqnHuRaIgzaai54XWxezXakVD2vpoh3RlGRN
+6FDZdLTmnrESX+618EPwKQI8w2iBjkTqLvOf4jpQJwNPLSQ/+AM/X1lgAgppA672
+flHHtCwpMGJmKAKSivYolDHmdKXdbS8Uddc8aiTqTeaQB+8ExgMYidZ5R5OLYKOc
+c5rg73dlk0tJOl5/YUb+iuKcY5MGTRlIcOOKcMoMzqpwxujbbvpNO4295n2ZXPSE
+EMECAwEAAaOBjzCBjDAJBgNVHRMEAjAAMA4GA1UdDwEB/wQEAwIFoDATBgNVHSUE
+DDAKBggrBgEFBQcDATAaBgNVHREEEzARgglsb2NhbGhvc3SHBH8AAAEwHQYDVR0O
+BBYEFDzACaM+l1+De7ME7pcOKxJrQeylMB8GA1UdIwQYMBaAFB8Uo17wlkWbW8LR
+gK2N72eca5TuMA0GCSqGSIb3DQEBCwUAA4IBAQBh+UhSnSp+rULQ/NwBFd81kYeW
+ZWcWq+rDoGQoB2WoLKD7tfSgkdyKHoVJfgjR8VvS4oByGrsnuPQ5UihUEtLbvrZY
+HHE3kcixwe0/xFyLrOMY7mXAcnCu9xps11hMk0yEgSrICGg5CSt1kK5mkIqf5sYx
+2Em10IdH0436G+xLnlMzXJqEwwR2W/RA3a0R27Hp5+38L/UoSrTvmICa3BJ+oq4u
+BAoMkvm2dmNR/FlxZ7MeArHOgyYC0aHwZi0fvFjKVATyuFEWIOYBCj/aJr5C/CVR
+ZF6V0QbD+Yj0cvR7Uko/4BnPb/ig9gamQ/Un7Bpo0C+EHi3hOQH5hsjFpvrp
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIDSjCCAjKgAwIBAgIUNyW6Y5XGTAL740qXa3847G6GyecwDQYJKoZIhvcNAQEL
+BQAwHTEbMBkGA1UEAwwScXdlbiBla3UgdGVzdCByb290MB4XDTI2MDgyMzEyMzYx
+MloXDTM2MDgyMDEyMzYxMlowJzElMCMGA1UEAwwccXdlbiBzZXJ2ZXItZWt1IGlu
+dGVybWVkaWF0ZTCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAPFGRLTl
+0ZOQr8Em/a8Xkm6Zq6gYQCmAcwnQa+XFkTFJpDImYPakibECxIKzU0kJ2pFX4CfW
+fdkDzssjVy7pLBGqqrqncQy4F6llbLAFYC+2/VNs7pmO3A1Ews52wMyZShqkItid
+FmZcfeX+FiqwL9bdCJj47soA9PJ5vBnJlxECBM74B4aBVaWYespUGJFkjgq9+gMb
+PWo/m8Nvb3T2ukqqzD0m6xuOqggrHHA34vrjl7xHyqcA92K70cTT1ObMWeDW2REQ
+we3W0liWVRZtRfYozO8wQ/sotEW5O0cq0nbwVPtzXVEGtSir4QXV02cYua58Fue3
+myFyUT+mqYpsyosCAwEAAaN4MHYwDwYDVR0TAQH/BAUwAwEB/zAOBgNVHQ8BAf8E
+BAMCAQYwEwYDVR0lBAwwCgYIKwYBBQUHAwEwHQYDVR0OBBYEFB8Uo17wlkWbW8LR
+gK2N72eca5TuMB8GA1UdIwQYMBaAFPNu3I4kv7G16WSFypNL4OpviRREMA0GCSqG
+SIb3DQEBCwUAA4IBAQBXSGmK9T0d9wz8KEnsUOtWS3dY3oxjLU84i/zkwJwRwwzf
+7f7XH/zyfr3teTG+bdFsgX1tUiOFzIWTzUZCCW7NV+cUbv5QD7/nIT/lYuqzcdIB
+47FtghDEnyfm4CfiSomLKgmUbcXa+MXc0Z/u2G5uuSpBPwfBJnMQ8YrJwDlrXsnb
+FTNESjvLkErHA2XUfKVimp9GiWSbqo60FjNmKam8sOTNpqzdfqtrj2qOty07TvQY
+eLiRyfmLSJUSh3liAxHSgYRC46lMnM0NPgYY/0XssJZQb+rfNyCSuok2L74rNpEd
+ybXgO+LWfjCIByNZOmzvPUEbpDbptYQlWwQBK4TB
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIDKzCCAhOgAwIBAgIUOWUnEy0fcOcnsRZaSQ6B5JnUZzgwDQYJKoZIhvcNAQEL
+BQAwHTEbMBkGA1UEAwwScXdlbiBla3UgdGVzdCByb290MB4XDTI2MDgyMzEyMzU1
+NloXDTM2MDgyMDEyMzU1NlowHTEbMBkGA1UEAwwScXdlbiBla3UgdGVzdCByb290
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnzmx++Qvu1xQezLzRJUM
+IiWo84LyLhAjj9z9cSQWV0gV6DVZjZh2NGiegKcTyj9a2hTG6vMNAa2eLyNpB4J3
+a2RBPDE+A0t8f0aJDBJh8s2IG19gdJj2TCecx3BEk/nRtbjGYRQIqHkQuJcT5EhC
+2igIkONRQ/fNKbXt1enTL/uc9TyAEOcDVzyvE+Y/4J10I6ZhrSAhZ5MvoZvK7SY0
+agscsyH8ocKehD/FZJ+7lWNrZmNtwWJCyVRjvIK6E+9HkZYi8Lzn8SeuaMCeIKqt
+TvYLgvp0Y21jumS3TeXKdcwwrJd5cPF8jSfVeTdA9Owi+u3Vx5H6xVl4r5oRmfa5
+nQIDAQABo2MwYTAdBgNVHQ4EFgQU827cjiS/sbXpZIXKk0vg6m+JFEQwHwYDVR0j
+BBgwFoAU827cjiS/sbXpZIXKk0vg6m+JFEQwDwYDVR0TAQH/BAUwAwEB/zAOBgNV
+HQ8BAf8EBAMCAQYwDQYJKoZIhvcNAQELBQADggEBAAjscSpURTsy4xP2uC9UlsCn
+Lmb2bTWO+ejlcP2y5vsdP+cNaO8FtANbBPTkPV5+Kizu7a7L5QlDSuQxDEDWg54l
+3+1Ize0KPILPA1SC5SEkh4JpvG+wN1udm0ykFiQyCyET/wfoWe3O74nKyZTVgtq0
+09uLEVXaWBl3gZJ5NKOD73kM2StVyXsFkGEPz4FwVGMrQaFpPHHrzJOW3iU0xo3v
+aa+iyqy+FppmCRJZKyqP1n3Bzk7m9tzSfYNb8vdFsLA5DlkV1lAhtBoSbkLAsYPN
+gupdQ6qWEKa1z147s84N7ASbhYZhnluZs9t4gpYZ8PavMSggcPhYPxLDFshHkqo=
+-----END CERTIFICATE-----
+`;
+
+// `tls.getCACertificates` arrives in Node 22.15, while engines still allow
+// 22.0: there the loader oracle answers `legacy` and the inspection throws,
+// so tests that drive the real oracle skip instead of failing.
+const loaderOracleAvailable = typeof tls.getCACertificates === 'function';
+const loaderOracleTest = it.skipIf(typeof tls.getCACertificates !== 'function');
+
+describe.skipIf(!loaderOracleAvailable)('describeWorkerTlsTrustGaps', () => {
+  const daemonUrl = 'https://127.0.0.1:4170';
+
+  /** The issuing root of TEST_TLS_CERT_FULLCHAIN, on its own. */
+  const fullchainRootPem = (): string => {
+    const blocks = TEST_TLS_CERT_FULLCHAIN.match(
+      /-----BEGIN CERTIFICATE-----[^-]*-----END CERTIFICATE-----/g,
+    );
+    return `${blocks!.at(-1)}\n`;
+  };
+
+  /** The renewed-root bundle minus its long-lived twin. */
+  const leafPlusShortTwinOnlyPem = (): string => {
+    const blocks = TEST_TLS_CERT_FULLCHAIN_RENEWED_ROOT.match(
+      /-----BEGIN CERTIFICATE-----[^-]*-----END CERTIFICATE-----/g,
+    );
+    // Index 1 must hold the short-lived twin the boundary clock sits on;
+    // a reordered fixture would silently un-pin the notAfter edge below.
+    const shortTwin = new X509Certificate(blocks![1]);
+    if (
+      new Date(shortTwin.validTo).getTime() !==
+      new Date('2026-08-22T12:12:20Z').getTime()
+    ) {
+      throw new Error('renewed-root fixture order changed');
+    }
+    return `${blocks![0]}\n${blocks![1]}\n`;
+  };
+
+  it('reports nothing for a self-signed cert covering the dialled host', () => {
+    expect(
+      describeWorkerTlsTrustGaps({
+        cert: Buffer.from(TEST_TLS_CERT),
+        certPath: '/certs/daemon.pem',
+        daemonUrl,
+      }),
+    ).toEqual([]);
+  });
+
+  it('reports a leaf whose keyUsage only permits certificate signing', () => {
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(CROSS_ROOT_1),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('INVALID_PURPOSE');
+    expect(gaps[0]).toContain('keyUsage permits none');
+  });
+
+  it('reports an issued leaf whose keyUsage only permits certificate signing', () => {
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(
+        `${KEY_CERT_SIGN_ONLY_LEAF}${KEY_CERT_SIGN_ONLY_ISSUER}`,
+      ),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('INVALID_PURPOSE');
+    expect(gaps[0]).toContain('keyUsage permits none');
+  });
+
+  it('reports a leaf whose extendedKeyUsage only permits client auth', () => {
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(CLIENT_ONLY_LEAF),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('INVALID_PURPOSE');
+    expect(gaps[0]).toContain('extendedKeyUsage does not include serverAuth');
+  });
+
+  it('requires matching subject and issuer names for a self-signed anchor', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-21T00:00:00Z'));
+    try {
+      const gaps = describeWorkerTlsTrustGaps({
+        cert: Buffer.from(
+          `${FAKE_SELF_VERIFIED_LEAF}${FAKE_SELF_VERIFIED_INTERMEDIATE}`,
+        ),
+        certPath: '/certs/daemon.pem',
+        daemonUrl,
+      });
+      expect(gaps).toHaveLength(1);
+      expect(gaps[0]).toContain('UNABLE_TO_VERIFY_LEAF_SIGNATURE');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('models operator certificates before serving certificates', () => {
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(`${CROSS_LEAF}${CROSS_INTERMEDIATE_2}${CROSS_ROOT_2}`),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+      operatorCaCertPath: '/certs/operator.pem',
+      operatorCaCert: Buffer.from(CROSS_INTERMEDIATE_1),
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('UNABLE_TO_VERIFY_LEAF_SIGNATURE');
+  });
+
+  it('uses an operator-first cross-signed path when it is anchored', () => {
+    expect(
+      describeWorkerTlsTrustGaps({
+        cert: Buffer.from(`${CROSS_LEAF}${CROSS_INTERMEDIATE_1}`),
+        certPath: '/certs/daemon.pem',
+        daemonUrl,
+        operatorCaCertPath: '/certs/operator.pem',
+        operatorCaCert: Buffer.from(`${CROSS_INTERMEDIATE_2}${CROSS_ROOT_2}`),
+      }),
+    ).toEqual([]);
+  });
+
+  it('names the leaf-as-trust-anchor gap for a CA-issued cert', () => {
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_CA_ISSUED),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('UNABLE_TO_VERIFY_LEAF_SIGNATURE');
+    expect(gaps[0]).toContain('qwen test root CA');
+  });
+
+  it('stays quiet when the operator CA actually anchors the chain', () => {
+    // R2-3: BEHAVIOUR FLIP. A set `operatorCaCertPath` used to suppress this
+    // gap on its own. A typo'd, unrelated or unloadable NODE_EXTRA_CA_CERTS
+    // anchors exactly as little as no CA at all, so coverage is now judged on
+    // the file's contents — the certificates the workers really receive.
+    expect(
+      describeWorkerTlsTrustGaps({
+        cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_LEAF_ONLY),
+        certPath: '/certs/daemon.pem',
+        daemonUrl,
+        operatorCaCertPath: '/certs/rootCA.pem',
+        operatorCaCert: Buffer.from(fullchainRootPem()),
+      }),
+    ).toEqual([]);
+  });
+
+  it('still names the gap when the operator CA does not anchor the chain', () => {
+    // R2-3(a): the merge in resolveWorkerCaCertPath cannot make an unrelated
+    // CA anchor this leaf, so the operator lands in exactly the boot-green /
+    // workers-looping mode this warning exists to name.
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_CA_ISSUED),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+      operatorCaCertPath: '/certs/unrelated.pem',
+      operatorCaCert: Buffer.from(fullchainRootPem()),
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('UNABLE_TO_VERIFY_LEAF_SIGNATURE');
+    expect(gaps[0]).toContain('/certs/unrelated.pem');
+  });
+
+  it('still names the gap when the operator CA path is unreadable', () => {
+    // R2-3(a): a set-but-unreadable path reaches the check with no contents.
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_CA_ISSUED),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+      operatorCaCertPath: '/certs/typo.pem',
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('UNABLE_TO_VERIFY_LEAF_SIGNATURE');
+    expect(gaps[0]).toContain('/certs/typo.pem');
+  });
+
+  it('softens the leaf-anchor gap for a CA already in the default trust store', () => {
+    // R2-3(c): the static model cannot see the workers' default trust store,
+    // so an issuer already anchored there makes this warning cry wolf. Say
+    // what the check actually knows instead of asserting a certain failure.
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_CA_ISSUED),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+    });
+    expect(gaps[0]).toContain(
+      "unless the issuing CA is already in the workers' default trust store",
+    );
+  });
+
+  // The false-alarm direction: the walk took whichever copy
+  // of a renewed CA came first and reported the expired one as the path the
+  // handshake relies on. OpenSSL may use either; preferring the usable one
+  // keeps the diagnostic from sending operators to renew a CA they already
+  // renewed. The clock is moved past the short-lived copy only.
+  it('prefers a usable issuer over an expired same-subject twin', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2030-01-01T00:00:00Z'));
+    try {
+      expect(
+        describeWorkerTlsTrustGaps({
+          cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_RENEWED_ROOT),
+          certPath: '/certs/fullchain.pem',
+          daemonUrl,
+        }),
+      ).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // One-clock witnesses: the walk's issuer preference and the per-member
+  // validity flags must judge the SAME instant the report samples. The
+  // straddle test hands that one sample an instant inside the short-lived
+  // twin's window and poisons any second sample with an instant past it —
+  // two clocks would anchor through the short root AND tell the operator
+  // to renew it, the false CERT_HAS_EXPIRED this PR removes. Sample order
+  // routes the clocks, not a stack-name match on the module-private walk,
+  // so a rename cannot silently no-op the guard. The boundary tests freeze
+  // the clock on each edge of that window, where the expired/not-yet-valid
+  // flags flip, so a one-sided edit to either predicate fails instead of
+  // passing silently years away from any boundary.
+  it('judges the walk and the report at one sampled instant', () => {
+    const insideWindow = new Date('2026-08-20T00:00:00Z').getTime();
+    const pastWindow = new Date('2026-08-25T00:00:00Z').getTime();
+    // Production passes the serving file as certSourcePath; mirror that.
+    // The temp-file fallback spends a Date.now sample of its own
+    // (graceful-fs retry timing), which would shift the poison below.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-one-clock-'));
+    const certSourcePath = path.join(dir, 'fullchain.pem');
+    fs.writeFileSync(certSourcePath, TEST_TLS_CERT_FULLCHAIN_RENEWED_ROOT, {
+      mode: 0o600,
+    });
+    let samples = 0;
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => {
+      samples += 1;
+      return samples === 1 ? insideWindow : pastWindow;
+    });
+    try {
+      expect(
+        describeWorkerTlsTrustGaps({
+          cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_RENEWED_ROOT),
+          certPath: '/certs/fullchain.pem',
+          certSourcePath,
+          daemonUrl,
+        }),
+      ).toEqual([]);
+      // A second sample IS the regression: the walk and the report judging
+      // different instants. Fail on it even when the gap happens not to.
+      expect(samples).toBe(1);
+    } finally {
+      clock.mockRestore();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('agrees on the exact instant the short-lived twin expires', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-22T12:12:20Z'));
+    try {
+      expect(
+        describeWorkerTlsTrustGaps({
+          cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_RENEWED_ROOT),
+          certPath: '/certs/fullchain.pem',
+          daemonUrl,
+        }),
+      ).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // The notAfter edge is pinned only when the expiring twin is the walk's
+  // ONLY issuer: with the long-lived twin in the bundle, a strict `>` in
+  // certValidAt re-anchors through it and still reports no gaps one
+  // instant early — the same false CERT_HAS_EXPIRED class this PR removes.
+  it('still anchors at the exact notAfter when the short twin is the only issuer', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-22T12:12:20Z'));
+    try {
+      expect(
+        describeWorkerTlsTrustGaps({
+          cert: Buffer.from(leafPlusShortTwinOnlyPem()),
+          certPath: '/certs/fullchain.pem',
+          daemonUrl,
+        }),
+      ).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('agrees on the exact instant the short-lived twin becomes valid', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-19T12:12:20Z'));
+    try {
+      expect(
+        describeWorkerTlsTrustGaps({
+          cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_RENEWED_ROOT),
+          certPath: '/certs/fullchain.pem',
+          daemonUrl,
+        }),
+      ).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('names an expired chain member the signature-only walk accepts', () => {
+    // R2-3(b): `x509.verify` checks signatures and never consults dates, so an
+    // expired root anchors a fullchain "fine" here while every worker
+    // handshake fails CERT_HAS_EXPIRED. Boot validation covers the leaf alone,
+    // so nothing else would ever name it. The fixture root outlives its leaf
+    // by design, so the clock — not a second fullchain — is what moves.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2130-01-01T00:00:00Z'));
+    try {
+      const gaps = describeWorkerTlsTrustGaps({
+        cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN),
+        certPath: '/certs/fullchain.pem',
+        daemonUrl,
+      });
+      expect(gaps).toHaveLength(1);
+      expect(gaps[0]).toContain('CERT_HAS_EXPIRED');
+      expect(gaps[0]).toContain('qwen fullchain test root CA');
+      // The leaf's own dates are boot validation's job, not this warning's.
+      expect(gaps[0]).not.toContain('CN=localhost,');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('names a chain member whose validity window has not started', () => {
+    // Symmetric to the expiry branch: clock skew or a freshly minted root
+    // fails every handshake CERT_NOT_YET_VALID with the same silent boot.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2020-01-01T00:00:00Z'));
+    try {
+      const gaps = describeWorkerTlsTrustGaps({
+        cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN),
+        certPath: '/certs/fullchain.pem',
+        daemonUrl,
+      });
+      expect(gaps).toHaveLength(1);
+      expect(gaps[0]).toContain('CERT_NOT_YET_VALID');
+      expect(gaps[0]).toContain('qwen fullchain test root CA');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('says nothing about certificates outside the anchor path', () => {
+    // The bundle may carry unrelated CAs; only the members the leaf's walk
+    // leans on are members whose validity the handshake enforces.
+    expect(
+      describeWorkerTlsTrustGaps({
+        cert: Buffer.from(`${TEST_TLS_CERT}${TEST_TLS_CERT_EXPIRED}`),
+        certPath: '/certs/daemon.pem',
+        daemonUrl,
+      }),
+    ).toEqual([]);
+  });
+
+  it('names the SAN gap when the cert does not cover the dialled host', () => {
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_NO_LOOPBACK_SAN),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('ERR_TLS_CERT_ALTNAME_INVALID');
+    expect(gaps[0]).toContain('127.0.0.1');
+  });
+
+  it('checks the host actually dialled, not a fixed loopback literal', () => {
+    expect(
+      describeWorkerTlsTrustGaps({
+        cert: Buffer.from(TEST_TLS_CERT_NO_LOOPBACK_SAN),
+        certPath: '/certs/daemon.pem',
+        daemonUrl: 'https://example.invalid:4170',
+      }),
+    ).toEqual([]);
+  });
+
+  it('anchors a fullchain serving file on the issuing CA it carries', () => {
+    // R2-2: `X509Certificate` reads only the first PEM block, so a fullchain
+    // used to be judged on its leaf alone and reported as unanchorable — even
+    // though the supervisor injects the whole file, root included, as the
+    // workers' trust store.
+    expect(
+      describeWorkerTlsTrustGaps({
+        cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN),
+        certPath: '/certs/fullchain.pem',
+        daemonUrl,
+      }),
+    ).toEqual([]);
+  });
+
+  it('still names the gap when the bundle stops short of a root', () => {
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_LEAF_ONLY),
+      certPath: '/certs/fullchain.pem',
+      daemonUrl,
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('UNABLE_TO_VERIFY_LEAF_SIGNATURE');
+    expect(gaps[0]).toContain('qwen fullchain test root CA');
+  });
+
+  it('checks an IPv6 dial host against the iPAddress SAN, brackets stripped', () => {
+    // R2-1: `URL.hostname` yields `[::1]`, which `isIP` rejects, so the check
+    // used to take the DNS-name branch and false-positive on every correct
+    // IPv6 serving cert.
+    expect(
+      describeWorkerTlsTrustGaps({
+        cert: Buffer.from(TEST_TLS_CERT_IPV6_SAN),
+        certPath: '/certs/daemon.pem',
+        daemonUrl: 'https://[::1]:4170',
+      }),
+    ).toEqual([]);
+  });
+
+  it('names the SAN gap for an IPv6 host the certificate does not cover', () => {
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_IPV6_SAN),
+      certPath: '/certs/daemon.pem',
+      daemonUrl: 'https://[fd00::1]:4170',
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('ERR_TLS_CERT_ALTNAME_INVALID');
+    expect(gaps[0]).toContain('fd00::1');
+    expect(gaps[0]).not.toContain('[fd00::1]');
+  });
+
+  it('reports both gaps when a CA-issued cert also misses the dialled host', () => {
+    // R2-7: every other case produces 0 or 1 gap, so an inserted `return gaps`
+    // after the first push — or turning the SAN `if` into an `else if` —
+    // survived the whole suite. Under that mutant an operator fixes the trust
+    // anchor, restarts, and only then discovers the SAN failure.
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_CA_ISSUED),
+      certPath: '/certs/daemon.pem',
+      daemonUrl: 'https://example.invalid:4170',
+    });
+    expect(gaps).toHaveLength(2);
+    expect(gaps.join('\n')).toContain('UNABLE_TO_VERIFY_LEAF_SIGNATURE');
+    expect(gaps.join('\n')).toContain('ERR_TLS_CERT_ALTNAME_INVALID');
+  });
+
+  it('names a self-signed chain terminator that is not a CA', () => {
+    // R2-10: chain geometry alone blesses this file as anchored, but OpenSSL
+    // also requires a signing certificate to carry CA:TRUE. Measured on Node
+    // 22: leaf + CA:FALSE self-signed issuer as the trust store fails
+    // INVALID_PURPOSE, while boot stays green and warning-free.
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_NON_CA_ROOT),
+      certPath: '/certs/fullchain.pem',
+      daemonUrl,
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('INVALID_PURPOSE');
+    expect(gaps[0]).toContain('qwen non-CA test issuer');
+  });
+
+  it('names a chain that passes THROUGH an issuer that is not a CA', () => {
+    // R4-4: the CA-suitability check only covered the self-signed terminator,
+    // so a chain whose INTERMEDIATE carries basicConstraints CA:FALSE walked
+    // all the way to a real CA root and was reported anchored. Measured on
+    // Node 22 / OpenSSL 3 with this exact file as the served chain and the
+    // trust store: authorized=false, code=INVALID_PURPOSE — daemon green,
+    // /health green, every channel worker restart-looping with no boot hint.
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_NON_CA_INTERMEDIATE),
+      certPath: '/certs/fullchain.pem',
+      daemonUrl,
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('INVALID_PURPOSE');
+    expect(gaps[0]).toContain('qwen non-CA test intermediate');
+  });
+
+  it('names a v3 chain terminator with no basicConstraints at all', () => {
+    // R5-1: the terminator check read basicConstraints' PRESENCE, so a v3 root
+    // carrying only a subjectKeyIdentifier — `.ca === false`, no
+    // basicConstraints OID, no keyCertSign — walked straight past it and boot
+    // reported zero gaps. OpenSSL refuses that root as an issuer. Measured on
+    // Node v22.23.0 / OpenSSL 3.0.13 with this exact file as the served chain
+    // and the trust store: authorized=false, code=INVALID_PURPOSE, while the
+    // daemon, /health and the boot log all stay green.
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_V3_NO_CONSTRAINTS_ROOT),
+      certPath: '/certs/fullchain.pem',
+      daemonUrl,
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('INVALID_PURPOSE');
+    expect(gaps[0]).toContain('qwen v3 no-constraints test root');
+  });
+
+  it('keeps trusting a root whose keyUsage alone allows certificate signing', () => {
+    // The control for R5-1, and what stops the widened check from crying wolf:
+    // the same geometry with `keyUsage keyCertSign` and still no
+    // basicConstraints. `X509_check_ca` returns 4 for it and the same
+    // measurement handshakes authorized=true.
+    expect(
+      describeWorkerTlsTrustGaps({
+        cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_KEY_CERT_SIGN_ROOT),
+        certPath: '/certs/fullchain.pem',
+        daemonUrl,
+      }),
+    ).toEqual([]);
+  });
+
+  it('names a chain that passes through a v1 intermediate', () => {
+    // R5-26: the intermediate check is the broad `!issuer.ca`, and the only
+    // fixture pinning it was an explicit CA:FALSE one — so narrowing it to the
+    // terminator's basicConstraints-presence test shipped green while a v1
+    // intermediate (an internal PKI signed without `-extfile`) climbed past it
+    // and reported anchored. The v1 exemption belongs to a self-signed ROOT
+    // only. Measured on Node v22.23.0 / OpenSSL 3.0.13 with this file as the
+    // served chain and the trust store: authorized=false,
+    // code=INVALID_PURPOSE.
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_V1_INTERMEDIATE),
+      certPath: '/certs/fullchain.pem',
+      daemonUrl,
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('INVALID_PURPOSE');
+    expect(gaps[0]).toContain('qwen v1 test intermediate');
+  });
+
+  it('reports the discarded operator CA when the serving file is unloadable', () => {
+    // R4-3: the model merged the operator CA into the serving chain
+    // unconditionally, but `resolveWorkerCaCertPath` does the opposite when
+    // the SERVING file yields no loadable block — `daemonBlocks === undefined`
+    // discards the operator CA and hands workers the serving file alone. Boot
+    // therefore reported no gap while every worker handshake failed.
+    const der = new X509Certificate(TEST_TLS_CERT_FULLCHAIN_LEAF_ONLY).raw;
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: der,
+      certPath: '/certs/daemon.der',
+      daemonUrl,
+      operatorCaCertPath: '/certs/rootCA.pem',
+      operatorCaCert: Buffer.from(fullchainRootPem()),
+    });
+    expect(gaps).toHaveLength(2);
+    expect(
+      gaps.some(
+        (gap) =>
+          gap.includes('/certs/daemon.der') &&
+          gap.includes('/certs/rootCA.pem') &&
+          gap.includes('is discarded'),
+      ),
+    ).toBe(true);
+    // The operator CA no longer anchors a chain the workers never receive.
+    expect(
+      gaps.some((gap) => gap.includes('UNABLE_TO_VERIFY_LEAF_SIGNATURE')),
+    ).toBe(true);
+  });
+
+  it('names the unloadable serving file with no operator CA set', () => {
+    // R6-1: the no-operator twin of R4-3. The workers receive the serving file
+    // as their whole bundle and their loader takes NOTHING from it, so gating
+    // this gap on `operatorChain` reported zero gaps at boot while every
+    // worker restart-looped UNABLE_TO_VERIFY_LEAF_SIGNATURE — the precise
+    // failure mode this function exists to name.
+    const der = new X509Certificate(TEST_TLS_CERT_FULLCHAIN_LEAF_ONLY).raw;
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: der,
+      certPath: '/certs/daemon.der',
+      daemonUrl,
+    });
+    expect(
+      gaps.some(
+        (gap) =>
+          gap.includes('/certs/daemon.der') &&
+          gap.includes('takes nothing from'),
+      ),
+    ).toBe(true);
+    // Without an operator CA there is nothing to call discarded.
+    expect(gaps.some((gap) => gap.includes('is discarded'))).toBe(false);
+  });
+
+  it('does not blame the operator CA it discarded along with the serving file', () => {
+    // R6-3: in the discard scenario the operator file failed to anchor only
+    // because it was thrown away with the unloadable serving file — the gap
+    // above already says so and carries the working remedy. Claiming its
+    // contents "do not carry a certificate that anchors it" and sending the
+    // operator to re-point NODE_EXTRA_CA_CERTS is false and a no-op here: the
+    // variable already points at the issuing CA.
+    const der = new X509Certificate(TEST_TLS_CERT_FULLCHAIN_LEAF_ONLY).raw;
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: der,
+      certPath: '/certs/daemon.der',
+      daemonUrl,
+      operatorCaCertPath: '/certs/rootCA.pem',
+      operatorCaCert: Buffer.from(fullchainRootPem()),
+    });
+    // The discard gap names the same error code, so select the ANCHOR gap by
+    // the claim under test.
+    const anchorGap = gaps.find((gap) =>
+      gap.includes('is issued by another CA'),
+    );
+    expect(anchorGap).toBeDefined();
+    expect(anchorGap).not.toContain(
+      'does not carry a certificate that anchors',
+    );
+    expect(anchorGap).toContain('discarded together with');
+    expect(anchorGap).toContain(
+      'NODE_EXTRA_CA_CERTS is not the file to change',
+    );
+    // Control: the very same operator file anchors whenever it is not
+    // discarded, which is what makes the claim above false rather than unlucky.
+    expect(
+      describeWorkerTlsTrustGaps({
+        cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_LEAF_ONLY),
+        certPath: '/certs/daemon.pem',
+        daemonUrl,
+        operatorCaCertPath: '/certs/rootCA.pem',
+        operatorCaCert: Buffer.from(fullchainRootPem()),
+      }),
+    ).toEqual([]);
+  });
+
+  it('names an unreadable operator CA as unreadable, not as empty', () => {
+    // R6-4: a root-owned mode-600 CA file (certbot/mkcert defaults) holding
+    // exactly the issuing CA used to be downgraded to "no contents", so the
+    // operator was told the file "does not carry a certificate that anchors
+    // it" and to point NODE_EXTRA_CA_CERTS at the issuing CA — an unknowable
+    // content claim plus an action they had already taken. The real fix is
+    // permissions.
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_LEAF_ONLY),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+      operatorCaCertPath: '/root/ca/rootCA.pem',
+      operatorCaCertReadError: 'EACCES',
+    });
+    expect(
+      gaps.some(
+        (gap) =>
+          gap.includes('could not be read by the daemon (EACCES)') &&
+          gap.includes("Fix that file's permissions or path"),
+      ),
+    ).toBe(true);
+    for (const gap of gaps) {
+      expect(gap).not.toContain('does not carry a certificate that anchors');
+      expect(gap).not.toContain('Point NODE_EXTRA_CA_CERTS at the issuing CA');
+    }
+  });
+
+  it('does not predict an outage when a read error leaves the serving file anchoring itself', () => {
+    // R7-2: `resolveWorkerCaCertPath`'s catch hands the workers the SERVING
+    // file as their extra-CA store, so a fullchain (certbot/mkcert's normal
+    // shape) anchors itself through it — the anchor walk in this very function
+    // returns `anchored: true` — while this gap still announced a certain
+    // "Every worker handshake ... will fail UNABLE_TO_VERIFY_LEAF_SIGNATURE".
+    // The one test that set `operatorCaCertReadError` used a leaf-only serving
+    // file, where the claim happens to hold.
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+      operatorCaCertPath: '/root/ca/rootCA.pem',
+      operatorCaCertReadError: 'EACCES',
+    });
+    // Control: the same serving file with no read error reports no gap at all,
+    // which is what makes the outage claim false rather than merely unproven.
+    expect(
+      describeWorkerTlsTrustGaps({
+        cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN),
+        certPath: '/certs/daemon.pem',
+        daemonUrl,
+      }),
+    ).toEqual([]);
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('could not be read by the daemon (EACCES)');
+    expect(gaps[0]).toContain('carries an anchor of its own');
+    expect(gaps[0]).toContain("Fix that file's permissions or path");
+    expect(gaps[0]).not.toContain('UNABLE_TO_VERIFY_LEAF_SIGNATURE');
+    // The leaf-only serving file DOES lose its anchor with the same read
+    // error, so the outage sentence has to survive there — this is a scoping
+    // fix, not a deletion.
+    expect(
+      describeWorkerTlsTrustGaps({
+        cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_LEAF_ONLY),
+        certPath: '/certs/daemon.pem',
+        daemonUrl,
+        operatorCaCertPath: '/root/ca/rootCA.pem',
+        operatorCaCertReadError: 'EACCES',
+      }).some((gap) =>
+        gap.includes(
+          'Every worker handshake to the daemon will fail ' +
+            'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+        ),
+      ),
+    ).toBe(true);
+  });
+
+  it('does not promise an anchor the serving file cannot hand the workers', () => {
+    // R23-9: when `--tls-cert` holds no block the workers' loader reads — a
+    // self-signed leaf exported by `openssl x509 -trustout` — the
+    // `servingBlocks === undefined` fallback forces the walk to treat the
+    // leaf as held, so it returns `anchored: true` for a certificate the
+    // workers never receive, and this branch told the operator the serving
+    // file "carries an anchor of its own" and to fix the CA file's
+    // permissions. Both claims are false in that state:
+    // `resolveWorkerCaCertPath`'s read-error fallback hands workers that
+    // unloadable file verbatim and their loader extracts nothing from it, so
+    // every handshake fails (measured on Node v22.23.2, worker shape:
+    // DEPTH_ZERO_SELF_SIGNED_CERT) and fixing the CA file changes nothing.
+    const trustLabelled = TEST_TLS_CERT_SELF_SIGNED_NON_CA.replace(
+      /^-----BEGIN CERTIFICATE-----([\s\S]*?)-----END CERTIFICATE-----/,
+      '-----BEGIN TRUSTED CERTIFICATE-----$1-----END TRUSTED CERTIFICATE-----',
+    );
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(trustLabelled),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+      operatorCaCertPath: '/root/ca/rootCA.pem',
+      operatorCaCertReadError: 'EACCES',
+    });
+    const readErrorGap = gaps.find((gap) =>
+      gap.includes('could not be read by the daemon (EACCES)'),
+    );
+    expect(readErrorGap).toBeDefined();
+    expect(readErrorGap).not.toContain('carries an anchor of its own');
+    expect(readErrorGap).not.toContain("Fix that file's permissions or path");
+    expect(readErrorGap).toContain('changes nothing');
+    // The outage itself keeps being named by the sibling gap.
+    expect(
+      gaps.some(
+        (gap) =>
+          gap.includes('holds no PEM certificate block') &&
+          gap.includes('Re-export --tls-cert as PEM'),
+      ),
+    ).toBe(true);
+  });
+
+  it('names a self-signed terminator refused for keyUsage, not for CA:FALSE', () => {
+    // R7-1: `cannotIssueCertificates` refuses a terminator for three
+    // independent reasons and this branch described only one. A CA:TRUE root
+    // whose keyUsage omits keyCertSign was told it "carries basicConstraints
+    // CA:FALSE" (false), that handshakes fail INVALID_PURPOSE (measured on
+    // Node v22.23.0 / OpenSSL 3.0.13: "key usage does not include certificate
+    // signing"), and to reissue with CA:TRUE — which it already is. Both
+    // remedies were no-ops, so the operator loops reissue/restart.
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_NO_KEY_CERT_SIGN_ROOT),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('CN=qwen CA-TRUE no-keyCertSign root');
+    expect(gaps[0]).toContain('keyUsage does not include keyCertSign');
+    expect(gaps[0]).toContain('key usage does not include certificate signing');
+    expect(gaps[0]).toContain('keyCertSign in its keyUsage');
+    // The three claims the old wording made about this certificate, each
+    // false: it is CA:TRUE, the code is not INVALID_PURPOSE, and reissuing it
+    // "with CA:TRUE" changes nothing.
+    expect(gaps[0]).not.toContain('basicConstraints CA:FALSE');
+    expect(gaps[0]).not.toContain('INVALID_PURPOSE');
+    expect(gaps[0]).not.toContain('Reissue that certificate with CA:TRUE');
+    // The CA:FALSE terminator keeps its own wording — the split must not
+    // collapse both causes onto the keyUsage branch.
+    const caFalseGaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_NON_CA_ROOT),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+    });
+    expect(
+      caFalseGaps.some(
+        (gap) =>
+          gap.includes('INVALID_PURPOSE') &&
+          gap.includes('is not a CA') &&
+          !gap.includes('keyCertSign'),
+      ),
+    ).toBe(true);
+  });
+
+  it('anchors the walk at the served leaf when its label hides it from the loader', () => {
+    // R8-1: `servingBlocks[0]` was assumed to be the served leaf, but the
+    // loader takes nothing from a `-----BEGIN TRUSTED CERTIFICATE-----` block
+    // (what `openssl x509 -trustout` writes), so a `trusted leaf + plain root`
+    // serving file yields `servingBlocks = [root]`. The walk then started at
+    // the ROOT, at depth 0, where the leaf-depth exemption waives the
+    // CA-capability check — so an incapable root was reported anchored with
+    // zero gaps while every worker handshake failed. Boot stays green either
+    // way: `X509Certificate` reads the trusted label and `createSecureContext`
+    // serves the file.
+    //
+    // Measured on Node v22.23.0 / OpenSSL 3.0.13, worker shape (the serving
+    // file as both the served chain and NODE_EXTRA_CA_CERTS): CA:FALSE root
+    // fails INVALID_PURPOSE, CA:TRUE-without-keyCertSign root fails
+    // "key usage does not include certificate signing", capable root
+    // authorizes — and before the fix the diagnostic returned `[]` for all
+    // three.
+    const trustLabelLeaf = (pem: string): string =>
+      pem.replace(
+        /^-----BEGIN CERTIFICATE-----([\s\S]*?)-----END CERTIFICATE-----/,
+        '-----BEGIN TRUSTED CERTIFICATE-----$1-----END TRUSTED CERTIFICATE-----',
+      );
+    const caFalseGaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(trustLabelLeaf(TEST_TLS_CERT_FULLCHAIN_NON_CA_ROOT)),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+    });
+    expect(caFalseGaps).toHaveLength(1);
+    expect(caFalseGaps[0]).toContain('INVALID_PURPOSE');
+    expect(caFalseGaps[0]).toContain('qwen non-CA test issuer');
+
+    const keyUsageGaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(
+        trustLabelLeaf(TEST_TLS_CERT_FULLCHAIN_NO_KEY_CERT_SIGN_ROOT),
+      ),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+    });
+    expect(keyUsageGaps).toHaveLength(1);
+    expect(keyUsageGaps[0]).toContain('CN=qwen CA-TRUE no-keyCertSign root');
+    expect(keyUsageGaps[0]).toContain('key usage does not include certificate');
+
+    // The control that stops the widened walk from crying wolf: the same
+    // label-hidden leaf over a CAPABLE root authorizes, so it must stay quiet.
+    expect(
+      describeWorkerTlsTrustGaps({
+        cert: Buffer.from(trustLabelLeaf(TEST_TLS_CERT_FULLCHAIN)),
+        certPath: '/certs/daemon.pem',
+        daemonUrl,
+      }),
+    ).toEqual([]);
+  });
+
+  it('judges the leaf boot parsed, not the one a loose split matched first', () => {
+    // R6-2: `parseCertChain`'s regex is unanchored, so an INDENTED leading
+    // block — prose to `new X509Certificate` and to the workers' loader — was
+    // picked as the leaf, and every leaf-dependent check judged a certificate
+    // the daemon never serves. Measured: boot parses the clean block, the
+    // daemon serves it, and the worker handshake fails
+    // ERR_TLS_CERT_ALTNAME_INVALID while this reported no gap at all.
+    // Only the BEGIN line is indented: that is what makes the block prose to
+    // the column-0 readers while leaving the loose regex a parseable match.
+    // Verified on this buffer — `new X509Certificate` returns the SECOND
+    // certificate while the regex's first match is the decoy.
+    const indentedDecoy = TEST_TLS_CERT.trim()
+      .split('\n')
+      .map((line, at) => (at === 0 ? `  ${line}` : line))
+      .join('\n');
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(`${indentedDecoy}\n${TEST_TLS_CERT_NO_LOOPBACK_SAN}`),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+    });
+    expect(
+      gaps.some((gap) => gap.includes('ERR_TLS_CERT_ALTNAME_INVALID')),
+    ).toBe(true);
+  });
+
+  it('names an intermediate whose keyUsage omits keyCertSign', () => {
+    // R6-5: `checkIssued` enforces the ISSUER's keyUsage, so keying the issuer
+    // SEARCH on it meant such an intermediate was never found and the walk
+    // fell through to the generic unanchored gap — whose cause ("nothing in
+    // the bundle anchors their trust"), predicted code and remedy are all
+    // wrong here: the issuing chain IS in the bundle and no
+    // NODE_EXTRA_CA_CERTS change can fix it.
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_NO_KEY_CERT_SIGN_INTERMEDIATE),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('NoCertSign Intermediate');
+    expect(gaps[0]).toContain('keyCertSign');
+    expect(gaps[0]).not.toContain('UNABLE_TO_VERIFY_LEAF_SIGNATURE');
+    expect(gaps[0]).not.toContain(
+      'Point NODE_EXTRA_CA_CERTS at the issuing CA',
+    );
+  });
+
+  it('names an intermediate whose extendedKeyUsage omits serverAuth', () => {
+    // R23-29: `tlsServerPurposeDefect` judged the LEAF alone, but OpenSSL's
+    // `check_purpose_ssl_server` applies the EKU test to every certificate
+    // in the chain — a CA:TRUE keyCertSign intermediate carrying only
+    // clientAuth walked to `anchored: true` and reported zero gaps while
+    // every worker handshake failed INVALID_PURPOSE (see the fixture's
+    // measurement note; `anyExtendedKeyUsage` does not rescue the chain
+    // either).
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_CLIENT_EKU_CHAIN),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('qwen client-eku intermediate');
+    expect(gaps[0]).toContain('extendedKeyUsage does not include serverAuth');
+    expect(gaps[0]).toContain('INVALID_PURPOSE');
+    // The control: the same chain with a serverAuth-EKU intermediate
+    // authorizes and must stay quiet.
+    expect(
+      describeWorkerTlsTrustGaps({
+        cert: Buffer.from(TEST_TLS_CERT_SERVER_EKU_CHAIN),
+        certPath: '/certs/daemon.pem',
+        daemonUrl,
+      }),
+    ).toEqual([]);
+  });
+
+  it('names a chain that exceeds a CA pathLenConstraint', () => {
+    // R6-6: the constraint sits unread inside the same basicConstraints value
+    // the capability checks already extract, so this chain walked to
+    // `anchored: true` with ZERO gaps while every worker handshake failed
+    // PATH_LENGTH_EXCEEDED and restart-looped against a silent daemon log.
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_PATHLEN_0),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+      operatorCaCertPath: '/certs/rootCA.pem',
+      operatorCaCert: Buffer.from(TEST_TLS_CERT_PATHLEN_0_ROOT),
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('PATH_LENGTH_EXCEEDED');
+    expect(gaps[0]).toContain('pathlen:0');
+    expect(gaps[0]).toContain('PathLen0 Root');
+  });
+
+  it('stays quiet for a chain sitting exactly at its CA pathLenConstraint', () => {
+    // The control that keeps the constraint from crying wolf, and the one that
+    // catches an off-by-one: the SAME `pathlen:0` root directly over the leaf
+    // is a valid path — 0 intermediates below it, measured `authorized: true`.
+    // A `>=` comparison reports this healthy chain as PATH_LENGTH_EXCEEDED.
+    expect(
+      describeWorkerTlsTrustGaps({
+        cert: Buffer.from(TEST_TLS_CERT_PATHLEN_0_DIRECT_LEAF),
+        certPath: '/certs/daemon.pem',
+        daemonUrl,
+        operatorCaCertPath: '/certs/rootCA.pem',
+        operatorCaCert: Buffer.from(TEST_TLS_CERT_PATHLEN_0_ROOT),
+      }),
+    ).toEqual([]);
+  });
+
+  it('reports the self-signed leaf the workers never receive', () => {
+    // R8-1: the fingerprint check upstream only decides whether to PREPEND
+    // the boot-parsed leaf to the modeled worker store. Once prepended, a
+    // SELF-SIGNED leaf self-anchored the walk at path length 1 — anchored
+    // unconditionally, because the CA constraint is waived at leaf depth —
+    // and boot reported zero gaps for a certificate the workers do not hold.
+    //
+    // A self-signed certificate verifies only when it is ITSELF in the trust
+    // store, so this is the silent-green outage the diagnostic exists to
+    // catch. Measured on Node v22.23.0 for exactly this shape (a self-signed
+    // loopback leaf under `openssl x509 -trustout`'s TRUSTED CERTIFICATE
+    // label, plus an unrelated plain root): `new X509Certificate` parses it
+    // and `tls.createSecureContext` serves it, while a worker handshake with
+    // the same file as NODE_EXTRA_CA_CERTS fails DEPTH_ZERO_SELF_SIGNED_CERT
+    // with an EMPTY stderr — no warning anywhere.
+    const trustLabelled = TEST_TLS_CERT_SELF_SIGNED_NON_CA.replace(
+      /^-----BEGIN CERTIFICATE-----([\s\S]*?)-----END CERTIFICATE-----/,
+      '-----BEGIN TRUSTED CERTIFICATE-----$1-----END TRUSTED CERTIFICATE-----',
+    );
+    const unrelatedRoot = TEST_TLS_CERT_FULLCHAIN.slice(
+      TEST_TLS_CERT_FULLCHAIN.indexOf('-----END CERTIFICATE-----\n') +
+        '-----END CERTIFICATE-----\n'.length,
+    );
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(`${trustLabelled}${unrelatedRoot}`),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('DEPTH_ZERO_SELF_SIGNED_CERT');
+    expect(gaps[0]).toContain('TRUSTED CERTIFICATE');
+    // Not the wrong diagnosis: this leaf is self-signed, so the generic
+    // unanchored message ("is issued by another CA") would send the operator
+    // after a CA that does not exist.
+    expect(gaps[0]).not.toContain('issued by another CA');
+  });
+
+  it('keeps trusting a self-signed leaf that carries CA:FALSE', () => {
+    // The constraint binds only past the leaf: a CA:FALSE self-signed cert in
+    // its OWN trust store is verified at depth 0 and handshakes fine
+    // (measured on Node 22), so requiring CA:TRUE here would cry wolf on the
+    // ordinary `openssl req -x509` daemon cert.
+    expect(
+      describeWorkerTlsTrustGaps({
+        cert: Buffer.from(TEST_TLS_CERT_SELF_SIGNED_NON_CA),
+        certPath: '/certs/self-signed.pem',
+        daemonUrl,
+      }),
+    ).toEqual([]);
+  });
+
+  it('defers to the boot parse guard on an unreadable certificate', () => {
+    expect(
+      describeWorkerTlsTrustGaps({
+        cert: Buffer.from('not a certificate'),
+        certPath: '/certs/daemon.pem',
+        daemonUrl,
+      }),
+    ).toEqual([]);
+  });
+
+  it('keeps trusting a v1 root that carries no basicConstraints at all', () => {
+    // R3-8: `X509Certificate.ca` is false both for an explicit CA:FALSE and
+    // for a v1/no-extension root, but OpenSSL accepts the second as an issuer.
+    // Measured on Node 22 / OpenSSL 3 with this exact pair: serving the leaf
+    // with the v1 root as the trust store handshakes authorized=true, so the
+    // INVALID_PURPOSE warning here would send the operator to reissue a CA
+    // that already works.
+    expect(
+      describeWorkerTlsTrustGaps({
+        cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_V1_ROOT),
+        certPath: '/certs/daemon.pem',
+        daemonUrl,
+      }),
+    ).toEqual([]);
+  });
+
+  it("names an operator CA file Node's loader cannot read", () => {
+    // R3-2: the boot diagnostic used a looser parser than the spawn-time
+    // merge. `cat a.pem b.pem` with no trailing newline in a.pem fuses the
+    // markers onto one line: the loose regex still sees a CA and judged the
+    // chain anchored, while the merge discarded the file and handed workers
+    // the daemon cert alone — daemon log clean, every worker handshake failing
+    // UNABLE_TO_VERIFY_LEAF_SIGNATURE.
+    const root = fullchainRootPem();
+    const fused = `${root.trimEnd()}${root}`;
+    expect(fused).toContain(
+      '-----END CERTIFICATE----------BEGIN CERTIFICATE-----',
+    );
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_LEAF_ONLY),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+      operatorCaCertPath: '/certs/fused.pem',
+      operatorCaCert: Buffer.from(fused),
+    });
+    // R4-7: `.some()` alone lets a mutant that pushes the unanchored gap twice
+    // through, duplicating warnings in the log this diagnostic exists to keep
+    // readable. Every single-gap sibling here pins the count; so do these.
+    expect(gaps).toHaveLength(2);
+    expect(gaps.some((gap) => gap.includes('/certs/fused.pem'))).toBe(true);
+    expect(
+      gaps.some((gap) =>
+        gap.includes("holds no PEM certificate block Node's loader can read"),
+      ),
+    ).toBe(true);
+    // And it no longer counts as an anchor.
+    expect(
+      gaps.some((gap) => gap.includes('UNABLE_TO_VERIFY_LEAF_SIGNATURE')),
+    ).toBe(true);
+  });
+
+  it('does not count a DER operator CA file as an anchor', () => {
+    // R3-2(b): NODE_EXTRA_CA_CERTS is PEM-only — Node never loads a DER file
+    // and says nothing about it — but the boot side used to fall back to a DER
+    // parse and count it as an anchoring CA.
+    const der = new X509Certificate(fullchainRootPem()).raw;
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_LEAF_ONLY),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+      operatorCaCertPath: '/certs/root.der',
+      operatorCaCert: der,
+    });
+    // R4-7: gating the unreadable-file message on a `-----BEGIN` marker being
+    // present drops the DER diagnosis (DER has no markers) while the generic
+    // anchor gap still satisfies a bare `.some()` — the operator is then told
+    // the file 'does not carry a certificate that anchors it' instead of being
+    // told to re-export it as PEM. Pin the count and the DER-specific text.
+    expect(gaps).toHaveLength(2);
+    expect(gaps.some((gap) => gap.includes('/certs/root.der'))).toBe(true);
+    expect(
+      gaps.some((gap) => gap.includes('a DER file is never read at all')),
+    ).toBe(true);
+    expect(
+      gaps.some((gap) => gap.includes('UNABLE_TO_VERIFY_LEAF_SIGNATURE')),
+    ).toBe(true);
+  });
+
+  it('still anchors on a CRLF-terminated operator CA file', () => {
+    // R3-1(strict arm): Node's loader accepts CRLF PEM (measured), so a
+    // vendor-exported CRLF bundle must not be reported as unreadable.
+    expect(
+      describeWorkerTlsTrustGaps({
+        cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_LEAF_ONLY),
+        certPath: '/certs/daemon.pem',
+        daemonUrl,
+        operatorCaCertPath: '/certs/rootCA.pem',
+        operatorCaCert: Buffer.from(fullchainRootPem().replace(/\n/g, '\r\n')),
+      }),
+    ).toEqual([]);
   });
 });
 
@@ -1450,6 +4109,7 @@ describe('runQwenServe telemetry validation', () => {
       expect(body.workspaceCwd).toBe(canonicalizeWorkspace(primary));
       expect(body.features).toContain('multi_workspace_sessions');
       expect(body.features).toContain('workspace_runtime_removal');
+      expect(body.features).toContain('scheduled_task_session_reuse');
       expect(body.limits.maxTotalSessions).toBe(2);
       expect(body.limits.sessionRestoreTimeoutMs).toBe(90_000);
       expect(body.workspaces).toEqual([
@@ -1469,6 +4129,9 @@ describe('runQwenServe telemetry validation', () => {
         index,
         [bridgeOptions],
       ] of createBridge.mock.calls.entries()) {
+        expect(bridgeOptions.onCreateCurrentSessionScheduledTask).toBeTypeOf(
+          'function',
+        );
         const target = path.join(
           tmpDir,
           `static-runtime-external-${index}.txt`,
@@ -1496,6 +4159,16 @@ describe('runQwenServe telemetry validation', () => {
       await closing;
     }
     expect(createBridge).toHaveBeenCalledTimes(2);
+    const primaryEpochSource = createBridge.mock.calls.find(
+      ([options]) => options.boundWorkspace === canonicalizeWorkspace(primary),
+    )?.[0].runtimeEpochSource;
+    const secondaryEpochSource = createBridge.mock.calls.find(
+      ([options]) =>
+        options.boundWorkspace === canonicalizeWorkspace(secondary),
+    )?.[0].runtimeEpochSource;
+    expect(primaryEpochSource).toBeDefined();
+    expect(secondaryEpochSource).toBeDefined();
+    expect(primaryEpochSource).not.toBe(secondaryEpochSource);
     for (const [options] of createBridge.mock.calls) {
       expect(options).toMatchObject({
         delegateReadTextFileToClient: false,
@@ -1506,6 +4179,77 @@ describe('runQwenServe telemetry validation', () => {
       expect(result.value.shutdown).toHaveBeenCalledWith({
         reason: 'daemon_shutdown',
       });
+    }
+  });
+
+  it('drains every lifecycle runtime before close yields', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-drain-')),
+    );
+    const primary = path.join(tmpDir, 'primary');
+    const secondary = path.join(tmpDir, 'secondary');
+    fs.mkdirSync(primary);
+    fs.mkdirSync(secondary);
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    const primaryBridge = makeLifecycleRuntimeBridge();
+    const secondaryBridge = makeLifecycleRuntimeBridge();
+    vi.spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockReturnValueOnce(
+        primaryBridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+      )
+      .mockReturnValueOnce(
+        secondaryBridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+      );
+    let workspaceRegistry: WorkspaceRegistry | undefined;
+    const originalCreateServeApp = serverModule.createServeApp;
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation((...args) => {
+      workspaceRegistry = args[2]?.workspaceRegistry;
+      return originalCreateServeApp(...args);
+    });
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: [primary, secondary],
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        preheatBridge: false,
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+      },
+    );
+    let closing: Promise<void> | undefined;
+    try {
+      expect(workspaceRegistry?.list()).toHaveLength(2);
+
+      closing = handle.close();
+
+      const runtimes = workspaceRegistry!.list();
+      expect(runtimes.map((runtime) => runtime.runtimeCoordinator)).toEqual([
+        expect.anything(),
+        expect.anything(),
+      ]);
+      const ensureAttempts = runtimes.map((runtime) =>
+        runtime.runtimeCoordinator!.ensure(),
+      );
+      expect(primaryBridge.preheat).not.toHaveBeenCalled();
+      expect(secondaryBridge.preheat).not.toHaveBeenCalled();
+      await Promise.all(
+        ensureAttempts.map((attempt) =>
+          expect(attempt).rejects.toMatchObject({
+            code: 'workspace_draining',
+          }),
+        ),
+      );
+      await closing;
+    } finally {
+      await (closing ?? handle.close());
     }
   });
 
@@ -1752,6 +4496,12 @@ describe('runQwenServe telemetry validation', () => {
       expect(createBridge.mock.calls[1]?.[0].onChannelDelivery).toBeTypeOf(
         'function',
       );
+      expect(
+        createBridge.mock.calls[0]?.[0].onCreateCurrentSessionScheduledTask,
+      ).toBeTypeOf('function');
+      expect(
+        createBridge.mock.calls[1]?.[0].onCreateCurrentSessionScheduledTask,
+      ).toBeTypeOf('function');
       expect(createBridge.mock.calls[1]?.[0]).toMatchObject({
         permissionPolicy: 'local-only',
         sessionRestoreTimeoutMs: 90_000,
@@ -1787,6 +4537,9 @@ describe('runQwenServe telemetry validation', () => {
       expect(createBridge.mock.calls[1]?.[0]).not.toHaveProperty(
         'permissionConsensusQuorum',
       );
+      const firstDynamicEpochSource =
+        createBridge.mock.calls[1]?.[0].runtimeEpochSource;
+      expect(firstDynamicEpochSource?.allocate()).toBe(1);
       const firstDynamicFileSystem = createBridge.mock.calls[1]?.[0].fileSystem;
       const firstDynamicTarget = path.join(
         tmpDir,
@@ -1880,6 +4633,10 @@ describe('runQwenServe telemetry validation', () => {
       });
       expect(readded.status).toBe(201);
       expect(createBridge).toHaveBeenCalledTimes(3);
+      expect(createBridge.mock.calls[2]?.[0].runtimeEpochSource).toBe(
+        firstDynamicEpochSource,
+      );
+      expect(firstDynamicEpochSource?.allocate()).toBe(2);
       const secondDynamicTarget = path.join(
         tmpDir,
         'dynamic-runtime-readded.txt',
@@ -2084,6 +4841,7 @@ describe('runQwenServe telemetry validation', () => {
         maxSessions: 1,
         eventRingSize: 1234,
         compactedReplayMaxBytes: 1024,
+        channelIdleTimeoutMs: 60_000,
         sessionRestoreTimeoutMs: 90_000,
         serveWebShell: false,
       },
@@ -2105,6 +4863,7 @@ describe('runQwenServe telemetry validation', () => {
         });
       }
       expect(createBridge.mock.calls[0]?.[0]).toMatchObject({
+        channelIdleTimeoutMs: 60_000,
         compactedReplayMaxBytes: 1024,
         eventRingSize: 1234,
         sessionRestoreTimeoutMs: 90_000,
@@ -2112,6 +4871,7 @@ describe('runQwenServe telemetry validation', () => {
         onChannelDelivery: expect.any(Function),
       });
       expect(createBridge.mock.calls[1]?.[0]).toMatchObject({
+        channelIdleTimeoutMs: 60_000,
         compactedReplayMaxBytes: 1024,
         eventRingSize: 1234,
         sessionRestoreTimeoutMs: 90_000,
@@ -2133,6 +4893,44 @@ describe('runQwenServe telemetry validation', () => {
           ([input]) => input.boundWorkspace === secondaryCwd,
         )?.[0],
       ).toMatchObject({ contextFilename: 'SECONDARY.md' });
+      // bootSettings above carries no `context.fileName`, so the primary
+      // workspace must land on the hard-coded `QWEN.md` init default
+      // (`contextFilenameForInit ?? 'QWEN.md'`). Without this assertion the
+      // fallback literal could be swapped without any test noticing.
+      expect(
+        createWorkspaceService.mock.calls.find(
+          ([input]) => input.boundWorkspace === canonicalizeWorkspace(primary),
+        )?.[0],
+      ).toMatchObject({ contextFilename: 'QWEN.md' });
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('accepts an explicit zero channel idle timeout', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-idle-timeout-')),
+    );
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+
+    const createBridge = vi.spyOn(acpBridge, 'createAcpSessionBridge');
+    const handle = await runQwenServe({
+      port: 0,
+      hostname: '127.0.0.1',
+      mode: 'http-bridge',
+      workspace: tmpDir,
+      channelIdleTimeoutMs: 0,
+      serveWebShell: false,
+    });
+    try {
+      await handle.runtimeReady;
+      expect(createBridge).toHaveBeenCalled();
+      expect(createBridge.mock.calls[0]?.[0]).toMatchObject({
+        channelIdleTimeoutMs: 0,
+      });
     } finally {
       await handle.close();
     }
@@ -3277,6 +6075,87 @@ ARaOwZHpfsTw4Aq74yAWUKXumVGFXQpZMRj/QWgQEItTYF7rJVARIssv5miDbHvW
 // A self-signed localhost cert/key whose validity window is entirely in the
 // past (notAfter = 2020-01-02). Not a real secret — and doubly worthless
 // since it's already expired. Used to exercise the boot-time expiry guard.
+/**
+ * A CA-issued serving cert (leaf alone) with the key it pairs with, plus the
+ * root that signs it — the shape the documented `mkcert` flow produces. The
+ * leaf covers 127.0.0.1 and localhost and boots, but anchors nothing by
+ * itself: only an operator `NODE_EXTRA_CA_CERTS` pointing at the root closes
+ * the gap, which is what makes it able to tell the env wiring apart from a
+ * hard-coded `undefined`.
+ */
+const TEST_TLS_CERT_ISSUED_LEAF = `-----BEGIN CERTIFICATE-----
+MIIDMDCCAhigAwIBAgIUSUiporSz6CoX5xzIrRzMJUWh23owDQYJKoZIhvcNAQEL
+BQAwIzEhMB8GA1UEAwwYcXdlbiB3aXJpbmcgdGVzdCByb290IENBMCAXDTI2MDgx
+ODIyMzI1OFoYDzIxMjYwNzI1MjIzMjU4WjAUMRIwEAYDVQQDDAlsb2NhbGhvc3Qw
+ggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQCyATi7Mip/VT+YWLvMdqpa
+IrgUpR5xLaZ9HGOI6kavvCvtveN/SEu9CT1XKQDRMT+NrJeTi97JV56GXZStGAES
+68wVnJDwV7EE5/VpRrmEZamn0lxOHeBMdu34F22aQ1xhw9bdRw+00kA5kE2rHEN1
+ZVaE0orqBtj/tnfhWET11b/99W4V+91WJQn+P+HrJGbMUW58qGsoW9C6fa0Pj365
+UymzgAWCLzf5DBziIqsevbcRzLwFUVw5bogjxmFIrd8k/R/xrjqNQJrRJX5SbS9O
+uI4tHmUeUmtjsAql53skJ2j2qpVvldZ0QFUS09O+vUkuSoZQ52s/b4/6SFwqdIXZ
+AgMBAAGjaTBnMBoGA1UdEQQTMBGCCWxvY2FsaG9zdIcEfwAAATAJBgNVHRMEAjAA
+MB0GA1UdDgQWBBQuqaRKepsHMIxA1OlXRfS9ZcyY+TAfBgNVHSMEGDAWgBSa5IYk
+ecO4EMlhojegvuVPj9xRTDANBgkqhkiG9w0BAQsFAAOCAQEASjn63nPtLzzDVWvq
+h7tITuKvE4CeWGATghhJGYYn9FOsyJxnbvVgQN0zmuzpPoTtxVdiGYob5qMEAjZB
+UsCGfWDNsJ6znUc1De0/sjvkq/uHdMgzaOldIgjdT+FO5cbtnDJx+fUe3QANW9or
+uX4mMvMI6ikw2LWPk8yavW1f0JyORa76gl0IoGyTmgBf9v9T4OIqskiR5xB1vE31
+nN5x4BuL5YnYN8x9GBDMOAGNn+HerAB8HSyygoB0A97eOGtxj5+DQh3EpirYx4bM
+4uRnAzkc2poDlbMNG1lLO5MdXjvy4Hy5pu+tSOXkRokV7V3wJWm7TFNBRYjjogip
+mt7FIw==
+-----END CERTIFICATE-----
+`;
+
+const TEST_TLS_KEY_ISSUED_LEAF = `-----BEGIN PRIVATE KEY-----
+MIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQCyATi7Mip/VT+Y
+WLvMdqpaIrgUpR5xLaZ9HGOI6kavvCvtveN/SEu9CT1XKQDRMT+NrJeTi97JV56G
+XZStGAES68wVnJDwV7EE5/VpRrmEZamn0lxOHeBMdu34F22aQ1xhw9bdRw+00kA5
+kE2rHEN1ZVaE0orqBtj/tnfhWET11b/99W4V+91WJQn+P+HrJGbMUW58qGsoW9C6
+fa0Pj365UymzgAWCLzf5DBziIqsevbcRzLwFUVw5bogjxmFIrd8k/R/xrjqNQJrR
+JX5SbS9OuI4tHmUeUmtjsAql53skJ2j2qpVvldZ0QFUS09O+vUkuSoZQ52s/b4/6
+SFwqdIXZAgMBAAECggEAP8YgRTEb+LLaLgLchcyeC90UhpEB7xqj438gShVlbeDE
+/FBkCV4lhHyi9W9DU6+JTYDgbYRXNVum+AzfD4TiHZ1NaRDG/NTuHwvb6PPl04F4
+3x+G4pXhnoOdjp0WL4aiuoQnnu+uuOH7EKSarwtZP94muT+VdXMum68MFDhDvK9X
+HPK8nS7LKYq4RMbkl6iY4HtudL7xFncrBM1rFW5tjJSemvoILmNzFNNndUO06qi5
+39RJWnWjOavlH3KGE0eBRxld+6OVJ1u14uI4ZIJ20nnaBlXPedbPMVoU0d3VGzBk
+MQZXnEIzEn5gKHu0WOH5rFjxSsBJ/LCuoXfkWzR34QKBgQDeFltt8chUENX7fpjH
+IAdSqhPU6IXeeK5bHlebmnEoHk9HmXVOvVRvoy3rfMaFuTUqr1xKrSff4BNrayRs
+TZjRc6Uhp6OL1UqEV3Wj4oIRARnl+X/7THP4c9D37i73h7wIPASRsybw+kQjPHDp
++Cy7EsMR9MtuWCuLvuuhk6ExMwKBgQDNL6CzH82RjaPRXFYliaO+0VZ4WD2zF7tm
+IM908rQRZ534yL4vTopYxiQDErmgIy6oudtdjvL/GqbsGfpA+eMzChuqrMLjoYkW
+wJkjt+8B0IjNW06gxjMhpKvOSqmyhqQUZLS/lh9bLTaEn+rBFGLSgj/eu1b8gA00
+RLYRsPvEwwKBgCcB+EckW5JgbqVAxCbdekvLsbYIrVK5Ea7RcoPTKaLpR/WEf7U3
+zffZynv9K4VbVXpM2MIJDeLloaORaxFWw8uuK0fxAOnTqcX68p+5biz8a4cYPqFt
++USfWwnhHQC/J4iuugK5W9KhsowZ1p9RxtGI5xhlTcHw3J0sCIkVvA8/AoGAHONm
+wbFplOOXO+O/MTvGtRfuD7WEwlFGDiPycWm2Vnj7Mcq5lBl/uu3ypggd4GDzscex
+DeQRbD9JXxZtOHa2OTpkGMyIB9p3XZ+yL+g2m0/L4vXHBTXCfysbEUlLyRnRwhlH
+pW2ybnjYIyYMvDBtlWvHKEnB/nzc3w4JgEYlvFcCgYBoYs7vAT44eu1LSanMeD7m
+317U0Rp+8CzVLg7Jx6cdyoY/aw797tayqNePn28pQiv8sPcsi07tfuwyP7+fuDIP
+HpK7Y2PYdLHDw2uvpM3U5uO/EeHdbcJsyPGsOH7hl2PrbRxWI3o1uH2a2TyVj4o3
+ZNK0I9xeA/IvxH54ZqElqA==
+-----END PRIVATE KEY-----
+`;
+
+const TEST_TLS_CERT_ISSUING_ROOT = `-----BEGIN CERTIFICATE-----
+MIIDKTCCAhGgAwIBAgIUPcGOSM9P9TbZ6hP5evWMiwSygd0wDQYJKoZIhvcNAQEL
+BQAwIzEhMB8GA1UEAwwYcXdlbiB3aXJpbmcgdGVzdCByb290IENBMCAXDTI2MDgx
+ODIyMzI1OFoYDzIxMjYwNzI1MjIzMjU4WjAjMSEwHwYDVQQDDBhxd2VuIHdpcmlu
+ZyB0ZXN0IHJvb3QgQ0EwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQCf
+LOHXauGBhN4HTDHi+R+91uInim+k8vumqw6dbdbj6FcKZWF8iIIs2NsKRuLRaaOo
+/HLV3y4rTGWBAVYF3FcYSybqCeMoMa4JJX2FTqzgVdIAog+fNQeQdqOrsAtNXf+W
+weB1c751qJwqunKCyk02i0zbBRqLqd/PJ6lnGDA/Fv6MNvtpjN5ScC018j+RBXwF
+ZHQ0Dm8LkHShBteOr3r8ychU3Q5AMao7MnJK1fa2lixUKKimtaEeH0/SFyHMfHNt
+io9/GxQluEFrunsLcC+6USpdp9sk/N6dxG1IqKPJlpjv5D5tM5qRbDlCZD+QWS9m
+q0vXHbkd/yppytewSfYVAgMBAAGjUzBRMB0GA1UdDgQWBBSa5IYkecO4EMlhojeg
+vuVPj9xRTDAfBgNVHSMEGDAWgBSa5IYkecO4EMlhojegvuVPj9xRTDAPBgNVHRMB
+Af8EBTADAQH/MA0GCSqGSIb3DQEBCwUAA4IBAQAdypPZaHSwv1ptjv+l6hUIBM+O
+5qNUV0Gk4jmt6UZD7lzIweurap8k2dQdYBF1BjHgo+2dCW7m4W4NHczgUzHwECCG
+4jPNZhc3T0PyGQjqi/pQ1dwSfZn75H9qSq09GHbLq0Vqzp5zDav6Hv8OzSIy2Cm1
+1SDbgTndiZzHiShBJrUhJymLTcaVM2EDad3poKsVoZ7ArFPWViMlJi5fFd8sWjii
+tsVzO5eP6Ln9kRVz9DhyN5a8ky1ceVOX/KsB0fS10e9Ortldm8lbFmcNDbpaVJy1
+35gz6UVTrBB7X/4E/XvBAo9rIiiL4PheAzLjHdDvhJuotdmHIzCfQ0LjQxIU
+-----END CERTIFICATE-----
+`;
+
 const TEST_TLS_CERT_EXPIRED = `-----BEGIN CERTIFICATE-----
 MIIDCTCCAfGgAwIBAgIUW7rZvmhryKZI3pojRCfl3liQSEMwDQYJKoZIhvcNAQEL
 BQAwFDESMBAGA1UEAwwJbG9jYWxob3N0MB4XDTIwMDEwMTAwMDAwMFoXDTIwMDEw
@@ -4021,7 +6900,8 @@ describe('runQwenServe runtime startup failures', () => {
     const loadSettings = vi.spyOn(settingsRuntime, 'loadSettings');
     const bootBridge = makeRuntimeBridge();
     const reconciledBridge = makeRuntimeBridge();
-    vi.spyOn(acpBridge, 'createAcpSessionBridge')
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
       .mockReturnValueOnce(
         bootBridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
       )
@@ -4053,6 +6933,14 @@ describe('runQwenServe runtime startup failures', () => {
       expect(loadSettings).toHaveBeenCalledWith(
         tmpDir,
         expect.objectContaining({ workspaceTrusted: true }),
+      );
+      expect(createBridge).toHaveBeenCalledTimes(2);
+      expect(
+        createBridge.mock.calls.map(([options]) => options.boundWorkspace),
+      ).toEqual([canonicalizeWorkspace(tmpDir), canonicalizeWorkspace(tmpDir)]);
+      expect(createBridge.mock.calls[0]?.[0].runtimeEpochSource).toBeDefined();
+      expect(createBridge.mock.calls[1]?.[0].runtimeEpochSource).toBe(
+        createBridge.mock.calls[0]?.[0].runtimeEpochSource,
       );
     } finally {
       await handle.close();
@@ -4297,7 +7185,7 @@ describe('runQwenServe runtime startup failures', () => {
   it('does not advertise browser automation MCP without an active CDP tunnel', async () => {
     const features = await readBrowserMcpFeatureFlagsForEnv(
       undefined,
-      'https://example.com',
+      'http://localhost:5173',
       '/opt/qwen-cdp-mcp-adapter',
     );
 
@@ -4606,17 +7494,21 @@ describe('runQwenServe runtime startup failures', () => {
       sensitiveSpanAttributeMaxLength: 1024 * 1024,
     });
     let runtimeMounted = false;
+    let reloadedRuntimeValue = 'reloaded';
     vi.spyOn(settingsRuntime, 'loadSettings').mockImplementation(
       () =>
         ({
           merged: {
+            tools: { workflowsEnabled: !runtimeMounted },
             advanced: {
               runtimeOutputDir: runtimeMounted
                 ? '.runtime-reloaded'
                 : '.runtime-boot',
             },
             env: {
-              QWEN_TEST_RUNTIME_VALUE: runtimeMounted ? 'reloaded' : 'boot',
+              QWEN_TEST_RUNTIME_VALUE: runtimeMounted
+                ? reloadedRuntimeValue
+                : 'boot',
             },
           },
         }) as unknown as ReturnType<typeof settingsRuntime.loadSettings>,
@@ -4642,6 +7534,10 @@ describe('runQwenServe runtime startup failures', () => {
             route: string;
             workspaceCwd: string;
           }): Promise<unknown>;
+          reloadModelProviders(ctx: {
+            route: string;
+            workspaceCwd: string;
+          }): Promise<unknown>;
         }
       | undefined;
     let primaryRuntimeEnv:
@@ -4662,6 +7558,8 @@ describe('runQwenServe runtime startup failures', () => {
       },
     );
 
+    const bridge = makeRuntimeBridge();
+
     const handle = await runQwenServe(
       {
         port: 0,
@@ -4672,7 +7570,7 @@ describe('runQwenServe runtime startup failures', () => {
         serveWebShell: false,
       },
       {
-        bridge: makeRuntimeBridge(),
+        bridge,
         bootSettings: {},
         daemonLogBaseDir: path.join(tmpDir, 'debug'),
         resolveOnListen: true,
@@ -4688,6 +7586,7 @@ describe('runQwenServe runtime startup failures', () => {
       const pinnedRuntimeBaseDir = path.join(tmpDir, '.runtime-boot');
       expect(primaryRuntime?.sessionRuntimeBaseDir).toBe(pinnedRuntimeBaseDir);
       expect(capturedRuntimeEnv['QWEN_RUNTIME_DIR']).toBe(pinnedRuntimeBaseDir);
+      expect(primaryRuntime?.env.workflowsEnabledBySettings).toBe(true);
 
       await workspace!.reload({
         route: 'POST /workspace/reload',
@@ -4704,6 +7603,51 @@ describe('runQwenServe runtime startup failures', () => {
       expect(capturedRuntimeEnv['QWEN_TEST_RELOAD_LEAK']).toBeUndefined();
       expect(primaryRuntime?.sessionRuntimeBaseDir).toBe(pinnedRuntimeBaseDir);
       expect(capturedRuntimeEnv['QWEN_RUNTIME_DIR']).toBe(pinnedRuntimeBaseDir);
+      expect(primaryRuntime?.env.workflowsEnabledBySettings).toBe(false);
+
+      reloadedRuntimeValue = 'hot-synced';
+      await expect(
+        workspace!.reloadModelProviders({
+          route: 'POST /workspace/auth/provider',
+          workspaceCwd: tmpDir,
+        }),
+      ).resolves.toEqual({ status: 'applied' });
+      expect(capturedRuntimeEnv['QWEN_TEST_RUNTIME_VALUE']).toBe('hot-synced');
+      expect(bridge.invokeWorkspaceCommand).toHaveBeenCalledWith(
+        'qwen/control/workspace/model-providers/reload',
+        { cwd: tmpDir },
+        { timeoutMs: 30_000 },
+      );
+      expect(primaryRuntime?.sessionRuntimeBaseDir).toBe(pinnedRuntimeBaseDir);
+      expect(capturedRuntimeEnv['QWEN_RUNTIME_DIR']).toBe(pinnedRuntimeBaseDir);
+
+      vi.mocked(bridge.invokeWorkspaceCommand).mockRejectedValueOnce(
+        new SessionNotFoundError(tmpDir),
+      );
+      await expect(
+        workspace!.reloadModelProviders({
+          route: 'POST /workspace/auth/provider',
+          workspaceCwd: tmpDir,
+        }),
+      ).resolves.toEqual({ status: 'deferred' });
+      vi.mocked(bridge.invokeWorkspaceCommand).mockResolvedValueOnce({
+        configsFailed: 1,
+      });
+      await expect(
+        workspace!.reloadModelProviders({
+          route: 'POST /workspace/auth/provider',
+          workspaceCwd: tmpDir,
+        }),
+      ).resolves.toEqual({ status: 'failed' });
+      vi.mocked(bridge.invokeWorkspaceCommand).mockRejectedValueOnce(
+        new Error('child reload failed'),
+      );
+      await expect(
+        workspace!.reloadModelProviders({
+          route: 'POST /workspace/auth/provider',
+          workspaceCwd: tmpDir,
+        }),
+      ).resolves.toEqual({ status: 'failed' });
     } finally {
       if (originalBase === undefined) {
         delete process.env['QWEN_TEST_BOOT_BASE'];
@@ -4748,16 +7692,21 @@ describe('runQwenServe runtime startup failures', () => {
           },
         }) as unknown as ReturnType<typeof settingsRuntime.loadSettings>,
     );
-    vi.spyOn(settingsRuntime, 'reloadEnvironment').mockReturnValue({
-      updatedKeys: [],
-      removedKeys: [],
-    });
+    let failReloadRead = false;
+    const reloadEnvironment = vi
+      .spyOn(settingsRuntime, 'reloadEnvironment')
+      .mockImplementation(() => ({
+        updatedKeys: [],
+        removedKeys: [],
+        ...(failReloadRead ? { envFileReadFailed: true } : {}),
+      }));
     vi.spyOn(trustedFoldersRuntime, 'getWorkspaceTrustStatus').mockReturnValue({
       effective: { state: 'trusted' },
     } as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>);
     const buildRuntimeEnvironmentActual =
       environmentRuntime.buildRuntimeEnvironment;
     let failReloadBuild = false;
+    let failEnvFileRead = false;
     vi.spyOn(environmentRuntime, 'buildRuntimeEnvironment').mockImplementation(
       (
         ...args: Parameters<typeof environmentRuntime.buildRuntimeEnvironment>
@@ -4765,12 +7714,25 @@ describe('runQwenServe runtime startup failures', () => {
         if (failReloadBuild) {
           throw new Error('runtime env rebuild failed');
         }
-        return buildRuntimeEnvironmentActual(...args);
+        const result = buildRuntimeEnvironmentActual(...args);
+        return failEnvFileRead
+          ? {
+              ...result,
+              envFileReadFailed: true,
+              envFileReadFailures: [
+                { path: path.join(tmpDir, '.env'), error: 'read failed' },
+              ],
+            }
+          : result;
       },
     );
     let workspace:
       | {
           reload(ctx: {
+            route: string;
+            workspaceCwd: string;
+          }): Promise<unknown>;
+          reloadModelProviders(ctx: {
             route: string;
             workspaceCwd: string;
           }): Promise<unknown>;
@@ -4792,6 +7754,7 @@ describe('runQwenServe runtime startup failures', () => {
     );
 
     const logBaseDir = path.join(tmpDir, 'debug');
+    const bridge = makeRuntimeBridge();
     const handle = await runQwenServe(
       {
         port: 0,
@@ -4802,7 +7765,7 @@ describe('runQwenServe runtime startup failures', () => {
         serveWebShell: false,
       },
       {
-        bridge: makeRuntimeBridge(),
+        bridge,
         bootSettings: {},
         daemonLogBaseDir: logBaseDir,
         resolveOnListen: true,
@@ -4818,10 +7781,20 @@ describe('runQwenServe runtime startup failures', () => {
       expect(capturedRuntimeEnv['QWEN_TEST_RUNTIME_VALUE']).toBe('boot');
 
       failReloadBuild = true;
-      await workspace!.reload({
-        route: 'POST /workspace/reload',
-        workspaceCwd: tmpDir,
-      });
+      await expect(
+        workspace!.reloadModelProviders({
+          route: 'POST /workspace/auth/provider',
+          workspaceCwd: tmpDir,
+        }),
+      ).resolves.toEqual({ status: 'failed' });
+      expect(reloadEnvironment).not.toHaveBeenCalled();
+      await expect(
+        workspace!.reload({
+          route: 'POST /workspace/reload',
+          workspaceCwd: tmpDir,
+        }),
+      ).resolves.toMatchObject({ runtimeEnvironmentApplied: false });
+      expect(reloadEnvironment).not.toHaveBeenCalled();
 
       expect(primaryRuntimeEnv!.effectiveEnv).toBe(capturedRuntimeEnv);
       expect(capturedRuntimeEnv['QWEN_TEST_RUNTIME_VALUE']).toBe('boot');
@@ -4830,10 +7803,42 @@ describe('runQwenServe runtime startup failures', () => {
       );
 
       failReloadBuild = false;
-      await workspace!.reload({
-        route: 'POST /workspace/reload',
-        workspaceCwd: tmpDir,
-      });
+      await expect(
+        workspace!.reload({
+          route: 'POST /workspace/reload',
+          workspaceCwd: tmpDir,
+        }),
+      ).resolves.toMatchObject({ runtimeEnvironmentApplied: true });
+      expect(reloadEnvironment).toHaveBeenCalledOnce();
+      expect(primaryRuntimeEnv!.effectiveEnv).toBe(capturedRuntimeEnv);
+      expect(capturedRuntimeEnv['QWEN_TEST_RUNTIME_VALUE']).toBe('reloaded');
+      expect(primaryRuntimeEnv!.fallbackReason).toBeUndefined();
+
+      failReloadRead = true;
+      await expect(
+        workspace!.reloadModelProviders({
+          route: 'POST /workspace/auth/provider',
+          workspaceCwd: tmpDir,
+        }),
+      ).resolves.toEqual({ status: 'failed' });
+      expect(reloadEnvironment).toHaveBeenCalledTimes(2);
+      expect(reloadEnvironment).toHaveBeenLastCalledWith(
+        expect.any(Object),
+        tmpDir,
+        true,
+        { failClosedOnEnvFileReadError: true },
+      );
+      expect(capturedRuntimeEnv['QWEN_TEST_RUNTIME_VALUE']).toBe('reloaded');
+
+      failReloadRead = false;
+      failEnvFileRead = true;
+      await expect(
+        workspace!.reloadModelProviders({
+          route: 'POST /workspace/auth/provider',
+          workspaceCwd: tmpDir,
+        }),
+      ).resolves.toEqual({ status: 'failed' });
+      expect(reloadEnvironment).toHaveBeenCalledTimes(2);
       expect(primaryRuntimeEnv!.effectiveEnv).toBe(capturedRuntimeEnv);
       expect(capturedRuntimeEnv['QWEN_TEST_RUNTIME_VALUE']).toBe('reloaded');
       expect(primaryRuntimeEnv!.fallbackReason).toBeUndefined();
@@ -4843,7 +7848,7 @@ describe('runQwenServe runtime startup failures', () => {
       const logPath = path.join(logBaseDir, 'daemon', 'daemon.log');
       const log = fs.readFileSync(logPath, 'utf8');
       expect(log).toContain(
-        'failed to rebuild runtime env snapshot after daemon env reload; preserving previous runtime env',
+        'failed to rebuild runtime env snapshot before daemon env reload; preserving previous runtime env',
       );
     } finally {
       if (!closed) {
@@ -4858,21 +7863,30 @@ describe('runQwenServe runtime startup failures', () => {
     );
     const primary = path.join(tmpDir, 'primary');
     const secondary = path.join(tmpDir, 'secondary');
+    const dynamic = path.join(tmpDir, 'dynamic');
     const originalRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
     delete process.env['QWEN_RUNTIME_DIR'];
     fs.mkdirSync(primary);
     fs.mkdirSync(secondary);
+    fs.mkdirSync(dynamic);
     vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
       enabled: false,
       sensitiveSpanAttributeMaxLength: 1024 * 1024,
     });
     let runtimeMounted = false;
+    let dynamicReloaded = false;
+    let providerRuntimeMutation = false;
+    let failEnvFileRead = false;
     vi.spyOn(settingsRuntime, 'loadSettings').mockImplementation(
       (...args: Parameters<typeof settingsRuntime.loadSettings>) => {
         const workspace = args[0];
         const isSecondary = workspace === secondary;
         return {
           merged: {
+            tools: {
+              workflowsEnabled:
+                workspace === dynamic ? !dynamicReloaded : !runtimeMounted,
+            },
             advanced: {
               runtimeOutputDir: isSecondary
                 ? runtimeMounted
@@ -4884,20 +7898,44 @@ describe('runQwenServe runtime startup failures', () => {
               [isSecondary
                 ? 'QWEN_TEST_SECONDARY_ENV'
                 : 'QWEN_TEST_PRIMARY_ENV']: runtimeMounted
-                ? 'reloaded'
+                ? failEnvFileRead
+                  ? 'partial'
+                  : providerRuntimeMutation
+                    ? 'provider-reloaded'
+                    : 'reloaded'
                 : 'boot',
             },
           },
         } as unknown as ReturnType<typeof settingsRuntime.loadSettings>;
       },
     );
-    vi.spyOn(settingsRuntime, 'reloadEnvironment').mockReturnValue({
-      updatedKeys: ['QWEN_TEST_SECONDARY_ENV'],
-      removedKeys: [],
-    });
+    const reloadEnvironment = vi
+      .spyOn(settingsRuntime, 'reloadEnvironment')
+      .mockReturnValue({
+        updatedKeys: ['QWEN_TEST_SECONDARY_ENV'],
+        removedKeys: [],
+      });
     vi.spyOn(trustedFoldersRuntime, 'getWorkspaceTrustStatus').mockReturnValue({
       effective: { state: 'trusted' },
     } as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>);
+    const buildRuntimeEnvironmentActual =
+      environmentRuntime.buildRuntimeEnvironment;
+    vi.spyOn(environmentRuntime, 'buildRuntimeEnvironment').mockImplementation(
+      (
+        ...args: Parameters<typeof environmentRuntime.buildRuntimeEnvironment>
+      ) => {
+        const result = buildRuntimeEnvironmentActual(...args);
+        return failEnvFileRead
+          ? {
+              ...result,
+              envFileReadFailed: true,
+              envFileReadFailures: [
+                { path: path.join(secondary, '.env'), error: 'read failed' },
+              ],
+            }
+          : result;
+      },
+    );
     vi.spyOn(acpBridge, 'createAcpSessionBridge')
       .mockReturnValueOnce(
         makeRuntimeBridge() as ReturnType<
@@ -4912,10 +7950,17 @@ describe('runQwenServe runtime startup failures', () => {
     let workspaceRegistry:
       | import('./workspace-registry.js').WorkspaceRegistry
       | undefined;
+    let createWorkspaceRuntime:
+      | ((
+          cwd: string,
+          options: { provenance: WorkspaceRuntimeProvenance },
+        ) => Promise<import('./workspace-registry.js').WorkspaceRuntime>)
+      | undefined;
     vi.spyOn(serverModule, 'createServeApp').mockImplementation(
       (_opts, _getPort, deps) => {
         runtimeMounted = true;
         workspaceRegistry = deps?.workspaceRegistry;
+        createWorkspaceRuntime = deps?.createWorkspaceRuntime;
         return express();
       },
     );
@@ -4951,11 +7996,15 @@ describe('runQwenServe runtime startup failures', () => {
         pinnedRuntimeBaseDir,
       );
       expect(env.effectiveEnv?.['QWEN_RUNTIME_DIR']).toBe(pinnedRuntimeBaseDir);
+      expect(env.workflowsEnabledBySettings).toBe(true);
 
-      await secondaryRuntime!.workspaceService.reload({
-        route: 'POST /workspace/reload',
-        workspaceCwd: secondary,
-      });
+      await expect(
+        secondaryRuntime!.workspaceService.reload({
+          route: 'POST /workspace/reload',
+          workspaceCwd: secondary,
+        }),
+      ).resolves.toMatchObject({ runtimeEnvironmentApplied: true });
+      expect(reloadEnvironment).toHaveBeenCalledOnce();
 
       expect(env.overlayKeys).toBe(overlayKeys);
       expect(env.envFilePaths).toBe(envFilePaths);
@@ -4965,6 +8014,44 @@ describe('runQwenServe runtime startup failures', () => {
         pinnedRuntimeBaseDir,
       );
       expect(env.effectiveEnv?.['QWEN_RUNTIME_DIR']).toBe(pinnedRuntimeBaseDir);
+      expect(env.workflowsEnabledBySettings).toBe(false);
+
+      const dynamicRuntime = await createWorkspaceRuntime!(dynamic, {
+        provenance: 'existing',
+      });
+      expect(dynamicRuntime.env.workflowsEnabledBySettings).toBe(true);
+      dynamicReloaded = true;
+      await dynamicRuntime.workspaceService.reload({
+        route: 'POST /workspace/reload',
+        workspaceCwd: dynamic,
+      });
+      expect(dynamicRuntime.env.workflowsEnabledBySettings).toBe(false);
+
+      providerRuntimeMutation = true;
+      await expect(
+        secondaryRuntime!.workspaceService.reloadModelProviders({
+          route: 'POST /workspace/auth/provider',
+          workspaceCwd: secondary,
+        }),
+      ).resolves.toEqual({ status: 'applied' });
+      expect(reloadEnvironment).toHaveBeenCalledTimes(2);
+      expect(env.effectiveEnv?.['QWEN_TEST_SECONDARY_ENV']).toBe(
+        'provider-reloaded',
+      );
+
+      failEnvFileRead = true;
+      await expect(
+        secondaryRuntime!.workspaceService.reload({
+          route: 'POST /workspace/reload',
+          workspaceCwd: secondary,
+        }),
+      ).resolves.toMatchObject({ runtimeEnvironmentApplied: false });
+      expect(reloadEnvironment).toHaveBeenCalledTimes(2);
+      expect(env.effectiveEnv?.['QWEN_TEST_SECONDARY_ENV']).toBe(
+        'provider-reloaded',
+      );
+      expect(env.envFileReadFailed).toBe(false);
+      expect(env.envFileReadFailures).toEqual([]);
     } finally {
       await handle.close();
       if (originalRuntimeDir === undefined) {
@@ -5605,7 +8692,7 @@ describe('runQwenServe runtime startup failures', () => {
   it('keeps browser MCP features disabled for non-extension origins when the env flag is unset', async () => {
     const features = await readBrowserMcpFeatureFlagsForEnv(
       undefined,
-      'https://example.com',
+      'http://localhost:5173',
     );
 
     expect(features).not.toContain('client_mcp_over_ws');
@@ -5851,6 +8938,13 @@ describe('runQwenServe runtime startup failures', () => {
       await new Promise((resolve) => setTimeout(resolve, 250));
       expect(resolveTelemetrySettings).not.toHaveBeenCalled();
       expect(createBridge).not.toHaveBeenCalled();
+      const bootstrapCapabilities = (await (
+        await fetch(`${handle.url}/capabilities`)
+      ).json()) as { features: string[] };
+      expect(bootstrapCapabilities.features).not.toContain(
+        'scheduled_task_session_reuse',
+      );
+      expect(createBridge).not.toHaveBeenCalled();
       const healthRes = await fetch(`${handle.url}/health`);
       expect(healthRes.status).toBe(200);
       expect(await healthRes.json()).toEqual({ status: 'ok' });
@@ -5860,6 +8954,12 @@ describe('runQwenServe runtime startup failures', () => {
       });
       expect(resolveTelemetrySettings).toHaveBeenCalledTimes(1);
       await expect(handle.runtimeReady).resolves.toBeUndefined();
+      const runtimeCapabilities = (await (
+        await fetch(`${handle.url}/capabilities`)
+      ).json()) as { features: string[] };
+      expect(runtimeCapabilities.features).toContain(
+        'scheduled_task_session_reuse',
+      );
       await handle.close();
       closed = true;
 
@@ -7825,6 +10925,7 @@ describe('runQwenServe runtime startup failures', () => {
           'workspace_acp_status',
           'persistent_workspace_registration',
           'workspace_runtime_removal',
+          'workspace_runtime',
         ]),
         modelServices: [],
         workspaceCwd: boundWorkspace,
@@ -7837,6 +10938,9 @@ describe('runQwenServe runtime startup failures', () => {
       });
       expect(capabilitiesBody.features).not.toContain('client_mcp_over_ws');
       expect(capabilitiesBody.features).not.toContain('cdp_tunnel_over_ws');
+      expect(capabilitiesBody.features).not.toContain(
+        'scheduled_task_session_reuse',
+      );
 
       const port = new URL(handle.url).port;
       for (const origin of [
@@ -8062,6 +11166,61 @@ describe('runQwenServe runtime startup failures', () => {
     }
   });
 
+  it.each([true, false])(
+    'mirrors the native directory picker probe on the bootstrap envelopes (available: %s)',
+    async (available) => {
+      tmpDir = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qws-bootstrap-picker-')),
+      );
+      // Keep the runtime from mounting so the bootstrap `/capabilities` and
+      // `/daemon/status` envelopes stay the ones being served.
+      vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(() => {
+        throw new Error('runtime boom');
+      });
+      const probe = vi
+        .spyOn(nativeDirectoryPicker, 'isNativeDirectoryPickerAvailable')
+        .mockReturnValue(available);
+      const handle = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          maxSessions: 1,
+          serveWebShell: false,
+        },
+        { resolveOnListen: true },
+      );
+      try {
+        await expect(handle.runtimeReady).rejects.toThrow('runtime boom');
+        const probeCallsAfterBoot = probe.mock.calls.length;
+        const capabilities = (await (
+          await fetch(`${handle.url}/capabilities`)
+        ).json()) as { features: string[] };
+        const status = (await (
+          await fetch(`${handle.url}/daemon/status`)
+        ).json()) as { capabilities: { features: string[] } };
+        if (available) {
+          expect(capabilities.features).toContain('native_directory_picker');
+          expect(status.capabilities.features).toContain(
+            'native_directory_picker',
+          );
+        } else {
+          expect(capabilities.features).not.toContain(
+            'native_directory_picker',
+          );
+          expect(status.capabilities.features).not.toContain(
+            'native_directory_picker',
+          );
+        }
+        // Probed once while the bootstrap app was built, not per request.
+        expect(probe.mock.calls.length).toBe(probeCallsAfterBoot);
+      } finally {
+        await handle.close();
+      }
+    },
+  );
+
   it('shuts down a bridge when runtime mounting fails after bridge creation', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-partial-fail-')),
@@ -8258,6 +11417,58 @@ describe('runQwenServe runtime startup failures', () => {
   });
 });
 
+// Simulate the refresh chunk vanishing under a running daemon (an in-place
+// upgrade replacing dist/): the module factory throws, so the first
+// health-triggered runtime build's dynamic import rejects.
+vi.mock('./server/session-pr-refresh.js', () => {
+  throw new Error(
+    'Cannot find module session-pr-refresh (simulated chunk replacement)',
+  );
+});
+
+describe('session-pr-refresh degraded load on the serve fast path', () => {
+  let tmpDir: string;
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    if (tmpDir) {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('degrades to no PR-state sweep instead of leaking an unhandled rejection', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-pr-refresh-degrade-')),
+    );
+    // The serve fast path installs no process-level unhandledRejection
+    // handler before the runtime builds, so record them here: without the
+    // import's .catch the rejection escapes and Node's default is to exit.
+    const rejections: unknown[] = [];
+    const recordRejection = (reason: unknown): void => {
+      rejections.push(reason);
+    };
+    process.on('unhandledRejection', recordRejection);
+    let handle: RunHandle | undefined;
+    try {
+      ({ handle } = await startDeferredDaemon(tmpDir));
+      const health = await fetch(`${handle.url}/health`);
+      expect(health.status).toBe(200);
+      // The first health schedules the runtime build; the refresh module
+      // import fires inside it and rejects on the next turns.
+      await expect(handle.runtimeReady).resolves.toBeUndefined();
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      expect(rejections).toEqual([]);
+      // The intended degradation is "no PR-state sweep" — the daemon keeps
+      // serving everything else.
+      const healthAfter = await fetch(`${handle.url}/health`);
+      expect(healthAfter.status).toBe(200);
+    } finally {
+      process.off('unhandledRejection', recordRejection);
+      await handle?.close();
+    }
+  });
+});
+
 describe('runQwenServe Web Shell signals on RunHandle', () => {
   let tmpDir: string;
 
@@ -8287,6 +11498,7 @@ describe('runQwenServe Web Shell signals on RunHandle', () => {
     serveWebShell?: boolean;
     token?: string;
     experimentalLsp?: boolean;
+    restoreAskUserQuestion?: boolean;
   }) {
     tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-ws-')));
     return runQwenServe(
@@ -8309,6 +11521,35 @@ describe('runQwenServe Web Shell signals on RunHandle', () => {
     } finally {
       await handle.close();
     }
+  });
+
+  it('rejects before creating a listener when required Web Shell assets disappear after pre-check', async () => {
+    tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-ws-')));
+    const resolveWebShellDir = vi
+      .spyOn(webShellResolver, 'resolveWebShellDir')
+      .mockReturnValueOnce('/tmp/web-shell')
+      .mockReturnValueOnce(undefined);
+    const httpServerFactory = vi.fn(() => {
+      throw new Error('listener created');
+    });
+    const serveOptions = {
+      port: 0,
+      hostname: '127.0.0.1',
+      mode: 'http-bridge' as const,
+      workspace: tmpDir,
+      maxSessions: 1,
+    };
+
+    applyOpenWithAuth(serveOptions);
+
+    await expect(
+      runQwenServe(serveOptions, {
+        bridge: makeFakeBridge(),
+        httpServerFactory,
+      }),
+    ).rejects.toThrow('--open-with-auth requires built Web Shell assets.');
+    expect(resolveWebShellDir).toHaveBeenCalledTimes(2);
+    expect(httpServerFactory).not.toHaveBeenCalled();
   });
 
   it('exposes the trimmed bearer token as resolvedToken', async () => {
@@ -8345,6 +11586,20 @@ describe('runQwenServe Web Shell signals on RunHandle', () => {
     await lspHandle.close();
     expect(mockCreateSpawnChannelFactoryOptions.at(-1)).toMatchObject({
       extraArgs: ['--experimental-lsp'],
+    });
+  });
+
+  it('merges --restore-ask-user-question with --experimental-lsp on ACP children', async () => {
+    mockCreateSpawnChannelFactoryOptions.length = 0;
+
+    const handle = await bootHandle({
+      serveWebShell: false,
+      experimentalLsp: true,
+      restoreAskUserQuestion: true,
+    });
+    await handle.close();
+    expect(mockCreateSpawnChannelFactoryOptions.at(-1)).toMatchObject({
+      extraArgs: ['--experimental-lsp', '--restore-ask-user-question'],
     });
   });
 
@@ -8817,6 +12072,14 @@ describe('runQwenServe Web Shell signals on RunHandle', () => {
 
 describe('runQwenServe channel worker supervisor', () => {
   let tmpDir: string | undefined;
+  // Some CI containers disable IPv6 entirely; binding ::1 then fails with
+  // EADDRNOTAVAIL.
+  const hasIpv6Loopback = Object.values(os.networkInterfaces()).some(
+    (addresses) =>
+      addresses?.some(
+        (info) => info.family === 'IPv6' && info.address === '::1',
+      ),
+  );
 
   afterEach(() => {
     mockChannelWorkerEnabledState.value = undefined;
@@ -8897,6 +12160,688 @@ describe('runQwenServe channel worker supervisor', () => {
       message: 'Channel worker is not running.',
     } satisfies Partial<ChannelWebhookEnqueueError>);
   });
+
+  it('hands workers an absolute --tls-cert path and an https daemon url', async () => {
+    // Workers are forked with `cwd: opts.workspace`, so a relative
+    // --tls-cert would resolve against the worker's cwd, load nothing, and
+    // fail every handshake with DEPTH_ZERO_SELF_SIGNED_CERT.
+    // `path.relative` returns the ABSOLUTE target across Windows drives, and
+    // the merge-queue `Test (windows-latest, Node 22.x)` job runs from
+    // `D:\a\qwen-code\qwen-code` while `os.tmpdir()` sits on C: — where the
+    // precondition below fails and takes a required gate red. `TMPDIR` cannot
+    // move it: win32 `os.tmpdir()` reads TMP/TEMP/USERPROFILE, never TMPDIR.
+    // So fall back to a directory under the vitest cwd, which is reachable
+    // relatively on every platform.
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-tls-')),
+    );
+    if (path.isAbsolute(path.relative(process.cwd(), tmpDir))) {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+      tmpDir = fs.realpathSync(
+        fs.mkdtempSync(path.join(process.cwd(), 'qws-channel-tls-')),
+      );
+    }
+    const certPath = path.join(tmpDir, 'cert.pem');
+    const keyPath = path.join(tmpDir, 'key.pem');
+    fs.writeFileSync(certPath, TEST_TLS_CERT);
+    fs.writeFileSync(keyPath, TEST_TLS_KEY);
+    const relativeCert = path.relative(process.cwd(), certPath);
+    expect(path.isAbsolute(relativeCert)).toBe(false);
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+    });
+    const factory = makeReadyWorkerFactory(worker);
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        tlsCert: relativeCert,
+        tlsKey: path.relative(process.cwd(), keyPath),
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        bridge: makeFakeBridge(),
+        channelWorkerSupervisorFactory: factory,
+        channelServicePidfile: makePidfileDeps(),
+      },
+    );
+
+    try {
+      await handle.runtimeReady;
+      const opts = factory.mock.calls[0]![0];
+      expect(opts.tlsCaCertPath).toBe(certPath);
+      expect(opts.daemonUrl).toMatch(/^https:\/\//);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('certifies the channel worker daemon URL at boot before workers start', async () => {
+    // Deleting the assertChannelWorkerDaemonUrlIsLocal call site in
+    // ensureChannelWorkerManager leaves this uncalled (mutation M3 in the
+    // #9406 review): the direct-call suite above never observes the boot
+    // path, so pin the boot wiring itself.
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-url-certify-')),
+    );
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+    });
+    const factory = makeReadyWorkerFactory(worker);
+    const channelWorkerUrlCertifier = vi.fn();
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        bridge: makeFakeBridge(),
+        channelWorkerSupervisorFactory: factory,
+        channelServicePidfile: makePidfileDeps(),
+        channelWorkerUrlCertifier,
+      },
+    );
+
+    try {
+      await handle.runtimeReady;
+      expect(channelWorkerUrlCertifier).toHaveBeenCalledTimes(1);
+      const [daemonUrl, hostname] = channelWorkerUrlCertifier.mock.calls[0]!;
+      expect(hostname).toBe('127.0.0.1');
+      expect(daemonUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+      expect(factory).toHaveBeenCalled();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('preserves localhost in the TLS channel worker daemon URL after resolving the bind', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-localhost-tls-')),
+    );
+    const certPath = path.join(tmpDir, 'cert.pem');
+    const keyPath = path.join(tmpDir, 'key.pem');
+    fs.writeFileSync(certPath, TEST_TLS_CERT);
+    fs.writeFileSync(keyPath, TEST_TLS_KEY);
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+    });
+    const factory = makeReadyWorkerFactory(worker);
+    const channelWorkerUrlCertifier = vi.fn();
+    const bindHostnameLookup = vi.fn(async () => ({
+      address: '127.0.0.1',
+      family: 4,
+    }));
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: 'localhost',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        tlsCert: certPath,
+        tlsKey: keyPath,
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        bridge: makeFakeBridge(),
+        bindHostnameLookup,
+        channelWorkerSupervisorFactory: factory,
+        channelServicePidfile: makePidfileDeps(),
+        channelWorkerUrlCertifier,
+      },
+    );
+
+    try {
+      await handle.runtimeReady;
+      expect(bindHostnameLookup).toHaveBeenCalledWith('localhost');
+      expect(channelWorkerUrlCertifier).toHaveBeenCalledTimes(1);
+      const [daemonUrl, hostname] = channelWorkerUrlCertifier.mock.calls[0]!;
+      expect(hostname).toBe('localhost');
+      expect(daemonUrl).toMatch(/^https:\/\/localhost:\d+$/);
+      expect(factory.mock.calls[0]![0].daemonUrl).toBe(daemonUrl);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('keeps the resolved address in a non-TLS channel worker daemon URL', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-localhost-http-')),
+    );
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+    });
+    const factory = makeReadyWorkerFactory(worker);
+    const channelWorkerUrlCertifier = vi.fn();
+    const bindHostnameLookup = vi.fn(async () => ({
+      address: '127.0.0.1',
+      family: 4,
+    }));
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: 'localhost',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        bridge: makeFakeBridge(),
+        bindHostnameLookup,
+        channelWorkerSupervisorFactory: factory,
+        channelServicePidfile: makePidfileDeps(),
+        channelWorkerUrlCertifier,
+      },
+    );
+
+    try {
+      await handle.runtimeReady;
+      expect(bindHostnameLookup).toHaveBeenCalledWith('localhost');
+      expect(channelWorkerUrlCertifier).toHaveBeenCalledTimes(1);
+      const [daemonUrl, hostname] = channelWorkerUrlCertifier.mock.calls[0]!;
+      expect(hostname).toBe('127.0.0.1');
+      expect(daemonUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+      expect(factory.mock.calls[0]![0].daemonUrl).toBe(daemonUrl);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('fails the channel boot when the worker URL certification refuses the bind', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-url-refuse-')),
+    );
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+    });
+    const factory = makeReadyWorkerFactory(worker);
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        bridge: makeFakeBridge(),
+        channelWorkerSupervisorFactory: factory,
+        channelServicePidfile: makePidfileDeps(),
+        resolveOnListen: true,
+        channelWorkerUrlCertifier: () => {
+          throw new Error(
+            'Channels cannot start: --hostname "127.0.0.1" is not a ' +
+              'loopback bind',
+          );
+        },
+      },
+    );
+
+    try {
+      await expect(handle.runtimeReady).rejects.toThrow(
+        /Channels cannot start/,
+      );
+      expect(factory).not.toHaveBeenCalled();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  async function bootTlsDaemonForTrustGapLog(
+    hostname: string,
+    serving: { cert: string; key: string } = {
+      cert: TEST_TLS_CERT,
+      key: TEST_TLS_KEY,
+    },
+    workerTlsTrustVerifier?: RunQwenServeDeps['workerTlsTrustVerifier'],
+  ): Promise<string> {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-gap-')),
+    );
+    const certPath = path.join(tmpDir, 'cert.pem');
+    const keyPath = path.join(tmpDir, 'key.pem');
+    fs.writeFileSync(certPath, serving.cert);
+    fs.writeFileSync(keyPath, serving.key);
+    const logBaseDir = path.join(tmpDir, 'debug');
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+    });
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname,
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        tlsCert: certPath,
+        tlsKey: keyPath,
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        bridge: makeFakeBridge(),
+        channelWorkerSupervisorFactory: makeReadyWorkerFactory(worker),
+        channelServicePidfile: makePidfileDeps(),
+        daemonLogBaseDir: logBaseDir,
+        ...(workerTlsTrustVerifier ? { workerTlsTrustVerifier } : {}),
+      },
+    );
+    try {
+      await handle.runtimeReady;
+    } finally {
+      await handle.close();
+    }
+    return fs.readFileSync(
+      path.join(logBaseDir, 'daemon', 'daemon.log'),
+      'utf8',
+    );
+  }
+
+  it.skipIf(!hasIpv6Loopback)(
+    'writes a worker TLS trust gap to the daemon log at boot',
+    async () => {
+      // R2-6: only the pure describeWorkerTlsTrustGaps was covered, so
+      // deleting this loop, inverting its `tlsOptions && tlsCertPath` guard
+      // or feeding it unresolved values all shipped green — and operators
+      // were back in the silent mode this diagnostic exists to end: daemon
+      // boots, /health green, every channel worker restart-looping with no
+      // log line saying why. The fixture cert covers 127.0.0.1 and
+      // localhost, so a ::1 bind is a real SAN gap on a cert that still
+      // pairs with its key and boots.
+      const log = await bootTlsDaemonForTrustGapLog('::1');
+
+      expect(log).toContain('ERR_TLS_CERT_ALTNAME_INVALID');
+      expect(log).toContain('::1');
+    },
+  );
+
+  it('keeps the daemon log quiet when the serving cert covers the dialled host', async () => {
+    // The other half of the wiring: a guard stuck on would bury real boot
+    // warnings under a gap every TLS daemon reports.
+    const log = await bootTlsDaemonForTrustGapLog('127.0.0.1');
+
+    expect(log).not.toContain('ERR_TLS_CERT_ALTNAME_INVALID');
+    expect(log).not.toContain('UNABLE_TO_VERIFY_LEAF_SIGNATURE');
+  });
+
+  it('reports a real verifier failure the static explanation does not model', async () => {
+    const log = await bootTlsDaemonForTrustGapLog(
+      '127.0.0.1',
+      { cert: TEST_TLS_CERT, key: TEST_TLS_KEY },
+      async () => ({
+        code: 'INVALID_PURPOSE',
+        message: 'unsuitable certificate purpose',
+      }),
+    );
+
+    expect(log).toContain('exact CA bundle workers receive');
+    expect(log).toContain('INVALID_PURPOSE');
+    expect(log).toContain('unsuitable certificate purpose');
+  });
+
+  it('skips the worker TLS trust check when NODE_TLS_REJECT_UNAUTHORIZED disables verification', async () => {
+    // R23-10: workers inherit NODE_TLS_REJECT_UNAUTHORIZED unscrubbed
+    // (createWorkerEnv copies the env wholesale) and dial via fetch, which
+    // honors it — a first-class mode in this project (`--insecure` sets
+    // it). The probe hardcodes `rejectUnauthorized: true`, so under ='0' it
+    // fails while every worker connects fine, and boot logged a certain
+    // outage for an outage that never happens. Measured on Node v22.23.2:
+    // probe UNABLE_TO_VERIFY_LEAF_SIGNATURE, worker fetch 200.
+    const workerTlsTrustVerifier = vi.fn().mockResolvedValue({
+      code: 'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+      message: 'unable to verify the first certificate',
+    });
+    process.env['NODE_TLS_REJECT_UNAUTHORIZED'] = '0';
+    try {
+      const log = await bootTlsDaemonForTrustGapLog(
+        '127.0.0.1',
+        { cert: TEST_TLS_CERT, key: TEST_TLS_KEY },
+        workerTlsTrustVerifier,
+      );
+      expect(workerTlsTrustVerifier).not.toHaveBeenCalled();
+      expect(log).toContain('NODE_TLS_REJECT_UNAUTHORIZED=0');
+      expect(log).not.toContain('exact CA bundle workers receive');
+    } finally {
+      delete process.env['NODE_TLS_REJECT_UNAUTHORIZED'];
+    }
+  });
+
+  it('normalizes a TLS trust probe process exit code before logging it', async () => {
+    const failure = await verifyWorkerTlsTrust({
+      daemonUrl: 'not a URL',
+      caCertPath: path.join(os.tmpdir(), 'qwen-missing-ca.pem'),
+      timeoutMs: 250,
+    });
+
+    expect(failure?.code).toEqual(expect.any(String));
+  });
+
+  it('normalizes a killed TLS trust probe to the generic failure code', async () => {
+    // R29-1: execFile reports error.code === null (not undefined) when its
+    // timeout budget kills the child, so a null-blind check coerced the kill
+    // to the literal code 'null' — a definitive CA-misconfiguration alarm for
+    // an inconclusive probe. Block the child in a required module so the
+    // parent's timeoutMs + 1_000 budget fires before the probe writes its
+    // JSON verdict; the probe script's own handler already null-coalesces.
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-tls-kill-')),
+    );
+    const blocker = path.join(tmpDir, 'block.cjs');
+    fs.writeFileSync(blocker, 'for (;;) {}');
+    const previousNodeOptions = process.env['NODE_OPTIONS'];
+    process.env['NODE_OPTIONS'] = `--require ${blocker}`;
+    try {
+      const failure = await verifyWorkerTlsTrust({
+        daemonUrl: 'https://127.0.0.1:1',
+        caCertPath: path.join(tmpDir, 'ca.pem'),
+        timeoutMs: 250,
+      });
+      expect(failure?.code).toBe('WORKER_TLS_VERIFY_FAILED');
+    } finally {
+      if (previousNodeOptions === undefined) {
+        delete process.env['NODE_OPTIONS'];
+      } else {
+        process.env['NODE_OPTIONS'] = previousNodeOptions;
+      }
+    }
+  });
+
+  it('boots TLS channels and logs once when loader inspection cannot run', async () => {
+    // R22-1: on Node 22.0-22.14 (and on any oracle infrastructure failure)
+    // the loader inspection throws instead of answering. Before the guard the
+    // throw escaped ensureChannelWorkerManager and turned TLS + channels into
+    // a runtime-startup failure — the exact outage this PR exists to fix. The
+    // guard keeps the daemon booting: one log line, and the live probe and
+    // the workers still run.
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-inspect-')),
+    );
+    const certPath = path.join(tmpDir, 'cert.pem');
+    const keyPath = path.join(tmpDir, 'key.pem');
+    fs.writeFileSync(certPath, TEST_TLS_CERT);
+    fs.writeFileSync(keyPath, TEST_TLS_KEY);
+    const logBaseDir = path.join(tmpDir, 'debug');
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+    });
+    const factory = makeReadyWorkerFactory(worker);
+    const workerTlsTrustVerifier = vi.fn().mockResolvedValue(undefined);
+    const inspection = vi
+      .spyOn(pemCertificateBlocks, 'loadableCertificates')
+      .mockImplementation(() => {
+        throw new pemCertificateBlocks.ExtraCaInspectionError(
+          'Inspecting NODE_EXTRA_CA_CERTS requires Node.js 22.15.0 or newer.',
+        );
+      });
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        tlsCert: certPath,
+        tlsKey: keyPath,
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        bridge: makeFakeBridge(),
+        channelWorkerSupervisorFactory: factory,
+        channelServicePidfile: makePidfileDeps(),
+        daemonLogBaseDir: logBaseDir,
+        workerTlsTrustVerifier,
+      },
+    );
+    try {
+      await handle.runtimeReady;
+      expect(workerTlsTrustVerifier).toHaveBeenCalledTimes(1);
+      expect(factory).toHaveBeenCalledTimes(1);
+    } finally {
+      inspection.mockRestore();
+      await handle.close();
+    }
+    // The daemon log flushes on close, so read it last, the way
+    // bootTlsDaemonForTrustGapLog does.
+    const log = fs.readFileSync(
+      path.join(logBaseDir, 'daemon', 'daemon.log'),
+      'utf8',
+    );
+    expect(log).toContain('trust-gap inspection could not run');
+    expect(log).toContain('Node.js 22.15.0 or newer');
+    // One inspection failure is one log line, not one per re-entry.
+    expect(log.split('trust-gap inspection could not run').length).toBe(2);
+  });
+
+  it('does not start channel workers after close begins during TLS verification', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-tls-close-')),
+    );
+    const certPath = path.join(tmpDir, 'cert.pem');
+    const keyPath = path.join(tmpDir, 'key.pem');
+    fs.writeFileSync(certPath, TEST_TLS_CERT);
+    fs.writeFileSync(keyPath, TEST_TLS_KEY);
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+    });
+    const factory = makeReadyWorkerFactory(worker);
+    let finishVerification!: () => void;
+    const verification = new Promise<undefined>((resolve) => {
+      finishVerification = () => resolve(undefined);
+    });
+    const workerTlsTrustVerifier = vi.fn(() => verification);
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        tlsCert: certPath,
+        tlsKey: keyPath,
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        bridge: makeFakeBridge(),
+        channelWorkerSupervisorFactory: factory,
+        channelServicePidfile: makePidfileDeps(),
+        resolveOnListen: true,
+        workerTlsTrustVerifier,
+      },
+    );
+
+    const runtimeReady = handle.runtimeReady.catch(() => undefined);
+    try {
+      await vi.waitFor(() => {
+        expect(workerTlsTrustVerifier).toHaveBeenCalledTimes(1);
+      });
+      const closing = handle.close();
+      finishVerification();
+      await closing;
+      await runtimeReady;
+
+      expect(factory).not.toHaveBeenCalled();
+      expect(worker.start).not.toHaveBeenCalled();
+    } finally {
+      finishVerification();
+      await handle.close();
+    }
+  });
+
+  it('starts a TLS channel worker after the daemon runtime is ready', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-tls-lazy-')),
+    );
+    fs.mkdirSync(path.join(tmpDir, '.qwen'));
+    fs.writeFileSync(
+      path.join(tmpDir, '.qwen', 'settings.json'),
+      JSON.stringify({ channels: { telegram: { type: 'telegram' } } }),
+    );
+    const certPath = path.join(tmpDir, 'cert.pem');
+    const keyPath = path.join(tmpDir, 'key.pem');
+    fs.writeFileSync(certPath, TEST_TLS_CERT);
+    fs.writeFileSync(keyPath, TEST_TLS_KEY);
+    let capturedDeps:
+      | Parameters<typeof serverModule.createServeApp>[2]
+      | undefined;
+    const originalCreateServeApp = serverModule.createServeApp;
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation((...args) => {
+      capturedDeps = args[2];
+      return originalCreateServeApp(...args);
+    });
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+      requestedChannels: ['telegram'],
+    });
+    const factory = makeReadyWorkerFactory(worker);
+    const workerTlsTrustVerifier = vi.fn().mockResolvedValue(undefined);
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        tlsCert: certPath,
+        tlsKey: keyPath,
+      },
+      {
+        bridge: makeFakeBridge(),
+        channelWorkerSupervisorFactory: factory,
+        channelServicePidfile: makePidfileDeps(),
+        workerTlsTrustVerifier,
+      },
+    );
+
+    try {
+      await handle.runtimeReady;
+      await expect(
+        capturedDeps!.setChannelWorkerSelection!({
+          mode: 'names',
+          names: ['telegram'],
+        }),
+      ).resolves.toMatchObject({ changed: true });
+      await expect(
+        capturedDeps!.setChannelWorkerSelection!({
+          mode: 'names',
+          names: ['telegram'],
+        }),
+      ).resolves.toMatchObject({ changed: false });
+      expect(workerTlsTrustVerifier).toHaveBeenCalledTimes(1);
+      expect(factory).toHaveBeenCalledTimes(1);
+      expect(worker.start).toHaveBeenCalledTimes(1);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  const issuedLeafServing = {
+    cert: TEST_TLS_CERT_ISSUED_LEAF,
+    key: TEST_TLS_KEY_ISSUED_LEAF,
+  };
+
+  it('names the anchor gap for a CA-issued cert with no operator CA set', async () => {
+    // The control for the two wiring tests below: with NODE_EXTRA_CA_CERTS
+    // unset this serving cert really is unanchored, so a quiet log in the
+    // next test can only come from the operator CA being read.
+    vi.stubEnv('NODE_EXTRA_CA_CERTS', '');
+    try {
+      const log = await bootTlsDaemonForTrustGapLog(
+        '127.0.0.1',
+        issuedLeafServing,
+      );
+      expect(log).toContain('UNABLE_TO_VERIFY_LEAF_SIGNATURE');
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  loaderOracleTest(
+    'reads NODE_EXTRA_CA_CERTS from the environment when judging the gap',
+    async () => {
+      // R3-7: nothing drove the wiring that reads the env, resolves it and
+      // hands the contents to describeWorkerTlsTrustGaps — replacing that read
+      // with `undefined` shipped green. Then an operator whose CA genuinely
+      // anchors the chain gets a false UNABLE_TO_VERIFY_LEAF_SIGNATURE warning
+      // on every startup, and the content-based fix becomes dead code.
+      const caDir = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qws-operator-ca-')),
+      );
+      const operatorCaPath = path.join(caDir, 'rootCA.pem');
+      fs.writeFileSync(operatorCaPath, TEST_TLS_CERT_ISSUING_ROOT);
+      vi.stubEnv('NODE_EXTRA_CA_CERTS', operatorCaPath);
+      try {
+        const log = await bootTlsDaemonForTrustGapLog(
+          '127.0.0.1',
+          issuedLeafServing,
+        );
+        expect(log).not.toContain('UNABLE_TO_VERIFY_LEAF_SIGNATURE');
+      } finally {
+        vi.unstubAllEnvs();
+        fs.rmSync(caDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  loaderOracleTest(
+    'still boots and still names the gap when NODE_EXTRA_CA_CERTS is unreadable',
+    async () => {
+      // R3-7(b): the try/catch around the read is what lets a typo'd path
+      // degrade to "it anchors nothing". Without it the throw lands inside the
+      // channel-manager starting closure and channel startup fails on exactly
+      // the case the code says must degrade.
+      vi.stubEnv(
+        'NODE_EXTRA_CA_CERTS',
+        path.join(os.tmpdir(), 'qws-no-such-ca-file.pem'),
+      );
+      try {
+        const log = await bootTlsDaemonForTrustGapLog(
+          '127.0.0.1',
+          issuedLeafServing,
+        );
+        expect(log).toContain('UNABLE_TO_VERIFY_LEAF_SIGNATURE');
+        expect(log).toContain('qws-no-such-ca-file.pem');
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
 
   it('forwards webhook tasks through the channel worker group', async () => {
     tmpDir = fs.realpathSync(
@@ -10283,6 +14228,7 @@ describe('runQwenServe channel worker supervisor', () => {
       .spyOn(process, 'exit')
       .mockImplementation((() => undefined) as never);
     const existingSigtermListeners = new Set(process.rawListeners('SIGTERM'));
+    const existingSighupListeners = new Set(process.rawListeners('SIGHUP'));
 
     const handle = await runQwenServe(
       {
@@ -10308,11 +14254,19 @@ describe('runQwenServe channel worker supervisor', () => {
             !existingSigtermListeners.has(listener) &&
             listener.name === 'onSignal',
         ) as ((signal: NodeJS.Signals) => Promise<void>) | undefined;
+      const sighupListener = process
+        .rawListeners('SIGHUP')
+        .find(
+          (listener) =>
+            !existingSighupListeners.has(listener) &&
+            listener.name === 'onSignal',
+        ) as ((signal: NodeJS.Signals) => Promise<void>) | undefined;
       expect(signalListener).toBeDefined();
+      expect(sighupListener).toBe(signalListener);
 
       const firstSignal = signalListener!('SIGTERM');
       await Promise.resolve();
-      const secondSignal = signalListener!('SIGTERM');
+      const secondSignal = sighupListener!('SIGHUP');
       await secondSignal;
 
       expect(worker.killAllSync).toHaveBeenCalled();
@@ -10329,11 +14283,69 @@ describe('runQwenServe channel worker supervisor', () => {
     }
   });
 
+  it('routes SIGHUP through graceful shutdown and removes its listener', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-sighup-shutdown-')),
+    );
+    const bridge = makeFakeBridge();
+    const exitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((() => undefined) as never);
+    const existingSighupListeners = new Set(process.rawListeners('SIGHUP'));
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+      },
+      { bridge },
+    );
+    const processRegistry = mockCreateSpawnChannelFactoryOptions.at(-1)?.[
+      'processRegistry'
+    ] as { shutdown: () => Promise<void> };
+    const shutdownSpy = vi.spyOn(processRegistry, 'shutdown');
+
+    try {
+      const signalListener = process
+        .rawListeners('SIGHUP')
+        .find(
+          (listener) =>
+            !existingSighupListeners.has(listener) &&
+            listener.name === 'onSignal',
+        ) as ((signal: NodeJS.Signals) => Promise<void>) | undefined;
+      expect(signalListener).toBeDefined();
+
+      await signalListener!('SIGHUP');
+
+      expect(shutdownSpy).toHaveBeenCalledOnce();
+      expect(bridge.shutdown).toHaveBeenCalledOnce();
+      expect(exitSpy).toHaveBeenCalledWith(0);
+      expect(
+        process
+          .rawListeners('SIGHUP')
+          .some((listener) => !existingSighupListeners.has(listener)),
+      ).toBe(false);
+    } finally {
+      await handle.close();
+      exitSpy.mockRestore();
+    }
+  });
+
   it('retries graceful shutdown after an unconfirmed channel worker exit', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-worker-stuck-')),
     );
     const bridge = makeFakeBridge();
+    Object.assign(bridge, {
+      getWorkspaceRuntimeLifecycleSnapshot: vi.fn().mockReturnValue({
+        state: 'idle',
+        runtimeLive: true,
+        runtimeEpoch: 1,
+        activeWork: false,
+      }),
+    });
     const worker = makeWorker({
       enabled: true,
       state: 'failed',
@@ -10352,6 +14364,13 @@ describe('runQwenServe channel worker supervisor', () => {
       .mockImplementation((() => undefined) as never);
     const existingSigintListeners = new Set(process.rawListeners('SIGINT'));
     const existingSigtermListeners = new Set(process.rawListeners('SIGTERM'));
+    const existingSighupListeners = new Set(process.rawListeners('SIGHUP'));
+    let workspaceRegistry: WorkspaceRegistry | undefined;
+    const originalCreateServeApp = serverModule.createServeApp;
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation((...args) => {
+      workspaceRegistry = args[2]?.workspaceRegistry;
+      return originalCreateServeApp(...args);
+    });
 
     await runQwenServe(
       {
@@ -10369,6 +14388,10 @@ describe('runQwenServe channel worker supervisor', () => {
         daemonLogBaseDir: path.join(tmpDir, 'debug'),
       },
     );
+    const processRegistry = mockCreateSpawnChannelFactoryOptions.at(-1)?.[
+      'processRegistry'
+    ] as { shutdown: () => Promise<void> };
+    const processRegistryShutdown = vi.spyOn(processRegistry, 'shutdown');
 
     const signalListener = process
       .rawListeners('SIGTERM')
@@ -10384,11 +14407,20 @@ describe('runQwenServe channel worker supervisor', () => {
       expect(exitSpy).not.toHaveBeenCalled();
       expect(worker.killAllSync).not.toHaveBeenCalled();
       expect(pidfile.removeServeServiceInfo).not.toHaveBeenCalled();
+      expect(processRegistryShutdown).toHaveBeenCalledOnce();
       const logPath = path.join(tmpDir, 'debug', 'daemon', 'daemon.log');
       expect(fs.readFileSync(logPath, 'utf8')).not.toContain('daemon stopped');
+      const runtimeCoordinator = workspaceRegistry?.primary.runtimeCoordinator;
+      expect(runtimeCoordinator).toBeDefined();
+      vi.mocked(bridge.preheat).mockClear();
+      await expect(runtimeCoordinator!.ensure()).rejects.toMatchObject({
+        code: 'workspace_draining',
+      });
+      expect(bridge.preheat).not.toHaveBeenCalled();
 
       await signalListener!('SIGTERM');
       expect(worker.stop).toHaveBeenCalledTimes(2);
+      expect(processRegistryShutdown).toHaveBeenCalledTimes(2);
       expect(worker.killAllSync).not.toHaveBeenCalled();
       expect(bridge.killAllSync).not.toHaveBeenCalled();
       expect(pidfile.removeServeServiceInfo).toHaveBeenCalledWith(process.pid);
@@ -10403,6 +14435,11 @@ describe('runQwenServe channel worker supervisor', () => {
       for (const listener of process.rawListeners('SIGTERM')) {
         if (!existingSigtermListeners.has(listener)) {
           process.removeListener('SIGTERM', listener as never);
+        }
+      }
+      for (const listener of process.rawListeners('SIGHUP')) {
+        if (!existingSighupListeners.has(listener)) {
+          process.removeListener('SIGHUP', listener as never);
         }
       }
       exitSpy.mockRestore();
@@ -10425,6 +14462,7 @@ describe('runQwenServe channel worker supervisor', () => {
       .mockImplementation((() => undefined) as never);
     const existingSigintListeners = new Set(process.rawListeners('SIGINT'));
     const existingSigtermListeners = new Set(process.rawListeners('SIGTERM'));
+    const existingSighupListeners = new Set(process.rawListeners('SIGHUP'));
 
     await runQwenServe(
       {
@@ -10473,6 +14511,11 @@ describe('runQwenServe channel worker supervisor', () => {
           process.removeListener('SIGTERM', listener as never);
         }
       }
+      for (const listener of process.rawListeners('SIGHUP')) {
+        if (!existingSighupListeners.has(listener)) {
+          process.removeListener('SIGHUP', listener as never);
+        }
+      }
       exitSpy.mockRestore();
     }
   });
@@ -10499,6 +14542,7 @@ describe('runQwenServe channel worker supervisor', () => {
       .mockImplementation((() => undefined) as never);
     const existingSigintListeners = new Set(process.rawListeners('SIGINT'));
     const existingSigtermListeners = new Set(process.rawListeners('SIGTERM'));
+    const existingSighupListeners = new Set(process.rawListeners('SIGHUP'));
 
     await runQwenServe(
       {
@@ -10534,9 +14578,11 @@ describe('runQwenServe channel worker supervisor', () => {
       expect(signalListener).toBeDefined();
       await signalListener!('SIGTERM');
       expect(exitSpy).not.toHaveBeenCalled();
+      expect(processRegistry.shutdown).toHaveBeenCalledOnce();
 
       await signalListener!('SIGTERM');
       expect(worker.stop).toHaveBeenCalledTimes(2);
+      expect(processRegistry.shutdown).toHaveBeenCalledTimes(2);
       expect(exitSpy).toHaveBeenCalledWith(1);
     } finally {
       for (const listener of process.rawListeners('SIGINT')) {
@@ -10547,6 +14593,11 @@ describe('runQwenServe channel worker supervisor', () => {
       for (const listener of process.rawListeners('SIGTERM')) {
         if (!existingSigtermListeners.has(listener)) {
           process.removeListener('SIGTERM', listener as never);
+        }
+      }
+      for (const listener of process.rawListeners('SIGHUP')) {
+        if (!existingSighupListeners.has(listener)) {
+          process.removeListener('SIGHUP', listener as never);
         }
       }
       exitSpy.mockRestore();
@@ -10574,6 +14625,7 @@ describe('runQwenServe channel worker supervisor', () => {
       .mockImplementation((() => undefined) as never);
     const existingSigintListeners = new Set(process.rawListeners('SIGINT'));
     const existingSigtermListeners = new Set(process.rawListeners('SIGTERM'));
+    const existingSighupListeners = new Set(process.rawListeners('SIGHUP'));
 
     const handle = await runQwenServe(
       {
@@ -10621,6 +14673,11 @@ describe('runQwenServe channel worker supervisor', () => {
       for (const listener of process.rawListeners('SIGTERM')) {
         if (!existingSigtermListeners.has(listener)) {
           process.removeListener('SIGTERM', listener as never);
+        }
+      }
+      for (const listener of process.rawListeners('SIGHUP')) {
+        if (!existingSighupListeners.has(listener)) {
+          process.removeListener('SIGHUP', listener as never);
         }
       }
       exitSpy.mockRestore();
@@ -11331,6 +15388,7 @@ describe('runQwenServe channel worker supervisor', () => {
       .mockImplementation((() => undefined) as never);
     const existingSigintListeners = new Set(process.rawListeners('SIGINT'));
     const existingSigtermListeners = new Set(process.rawListeners('SIGTERM'));
+    const existingSighupListeners = new Set(process.rawListeners('SIGHUP'));
     let settled = false;
 
     const running = runQwenServe(
@@ -11389,6 +15447,11 @@ describe('runQwenServe channel worker supervisor', () => {
       for (const listener of process.rawListeners('SIGTERM')) {
         if (!existingSigtermListeners.has(listener)) {
           process.removeListener('SIGTERM', listener as never);
+        }
+      }
+      for (const listener of process.rawListeners('SIGHUP')) {
+        if (!existingSighupListeners.has(listener)) {
+          process.removeListener('SIGHUP', listener as never);
         }
       }
       exitSpy.mockRestore();
@@ -12176,6 +16239,67 @@ describe('runQwenServe startup observability', () => {
       expect(await waitForPreheatStatus(handle, 'succeeded')).toMatchObject({
         status: 'succeeded',
         durationMs: expect.any(Number),
+      });
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('preheats the primary workspace runtime by default in production', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-startup-default-preheat-')),
+    );
+    const bridge = installInternalBridge(() => Promise.resolve());
+    const workerId = process.env['VITEST_WORKER_ID'];
+    delete process.env['VITEST_WORKER_ID'];
+
+    let handle: RunHandle | undefined;
+    try {
+      handle = await runQwenServe({
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      });
+      expect(await waitForPreheatStatus(handle, 'succeeded')).toMatchObject({
+        status: 'succeeded',
+      });
+      expect(bridge.preheat).toHaveBeenCalledOnce();
+    } finally {
+      await handle?.close();
+      if (workerId === undefined) {
+        delete process.env['VITEST_WORKER_ID'];
+      } else {
+        process.env['VITEST_WORKER_ID'] = workerId;
+      }
+    }
+  });
+
+  it('does not preheat an untrusted primary workspace', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-startup-untrusted-')),
+    );
+    const bridge = installInternalBridge(() => Promise.resolve());
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      { preheatBridge: true, trustedWorkspace: false },
+    );
+
+    try {
+      await handle.runtimeReady;
+      expect(bridge.preheat).not.toHaveBeenCalled();
+      expect(await readStartup(handle)).toMatchObject({
+        preheat: { status: 'not_scheduled' },
       });
     } finally {
       await handle.close();

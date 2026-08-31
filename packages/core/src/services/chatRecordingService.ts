@@ -23,8 +23,9 @@ import {
   observeToolResultBoundary,
   toolResultBoundaryArtifact,
   toolResultPartDiagnosticValues,
-} from '../utils/tool-result-boundary-diagnostics.js';
+} from '../tools/tool-result-boundary-diagnostics.js';
 import { compactToolResultDisplayForRecording } from '../utils/toolResultDisplayCompaction.js';
+import { stripRuntimeSnapshotPrefix } from '../utils/runtimeModelPrefix.js';
 import type { AttributionSnapshot } from './commitAttribution.js';
 import { tryGenerateSessionTitle } from './sessionTitle.js';
 import type {
@@ -77,15 +78,11 @@ const SESSION_FILE_DIFF_CHAR_LIMIT = 50_000;
 const SESSION_FILE_CONTENT_CHAR_LIMIT = 16_000;
 
 /**
- * Re-append a fresh `custom_title` record to EOF once this many bytes
- * of other JSONL content have been written since the last title
- * anchor. Half of the picker's 64KB tail-read window so that even an
- * oversized record landing right at the threshold keeps the title
- * within scan range. Lifting this above 64KB would let the title
- * fall out of the tail window between re-anchors; lowering it
- * trades extra writes for a tighter safety margin.
+ * Re-append tail-readable metadata to EOF once this many bytes of other JSONL
+ * content have been written since its last anchor. Half of the reader's 64KB
+ * tail window leaves room for the anchor record itself.
  */
-const TITLE_REANCHOR_BYTES = 32 * 1024;
+const METADATA_REANCHOR_BYTES = 32 * 1024;
 
 function isFileDiffDisplay(resultDisplay: unknown): resultDisplay is FileDiff {
   if (
@@ -305,6 +302,7 @@ export interface ChatRecord {
     | 'custom_title'
     | 'parent_session'
     | 'session_source'
+    | 'session_model'
     | 'rewind'
     | 'agent_bootstrap'
     | 'agent_launch_prompt'
@@ -367,6 +365,7 @@ export interface ChatRecord {
     | CustomTitleRecordPayload
     | ParentSessionRecordPayload
     | SessionSourceRecordPayload
+    | SessionModelRecordPayload
     | NotificationRecordPayload
     | UserPromptRecordPayload
     | RewindRecordPayload
@@ -416,11 +415,11 @@ export interface ChatRecord {
 
 export interface NotificationRecordPayload {
   displayText: string;
-  mediaReferences?: UserPromptMediaReference[];
+  attachmentReferences?: UserPromptAttachmentReference[];
   backgroundTask?: {
     taskId: string;
     status: string;
-    kind: 'agent' | 'monitor' | 'shell';
+    kind: 'agent' | 'monitor' | 'shell' | 'workflow';
     toolUseId?: string;
     /** Structured fields for i18n rendering (persisted for page refresh). */
     description?: string;
@@ -438,13 +437,13 @@ export interface UserPromptRecordPayload {
   displayText: string;
   /** Sanitized hook context duplicated from the tagged model-bound part. */
   hookContext: string;
-  /** Daemon-owned media references used to restore prompt previews. */
-  mediaReferences?: UserPromptMediaReference[];
+  /** Daemon-owned attachment references used to restore prompt previews. */
+  attachmentReferences?: UserPromptAttachmentReference[];
 }
 
-export interface UserPromptMediaReference {
-  type: 'image' | 'audio';
-  mediaId: string;
+export interface UserPromptAttachmentReference {
+  type: 'image' | 'resource';
+  attachmentId: string;
   mimeType: string;
   size: number;
 }
@@ -478,6 +477,15 @@ export interface AgentRetryRecordPayload {
 /**
  * Stored payload for chat compression checkpoints. This allows us to rebuild the
  * effective chat history on resume while keeping the original UI-visible history.
+ *
+ * NOTE: the payload carries `ChatCompressionInfo`, which has no
+ * `compressionKind` — the 'summarize' vs 'fast' distinction (see
+ * `CompressionProps.compressionKind` in cli's ui/types.ts) exists only on
+ * ephemeral UI items today. If resume ever reconstructs compression markers
+ * from this record, it must re-derive the kind; rebuilding every marker
+ * kind-less and falling back to 'summarize' would misclassify fast markers
+ * as truncation boundaries and re-introduce the silent pre-marker history
+ * drop of #9320 on any session that ran /compress-fast before being resumed.
  */
 export interface ChatCompressionRecordPayload {
   /** Compression metrics/status returned by the compression service */
@@ -562,6 +570,54 @@ export interface ParentSessionRecordPayload {
 export interface SessionSourceRecordPayload {
   sourceType: string;
   sourceId?: string;
+}
+
+/** Last-wins binding of the model a daemon session should restore. */
+export interface SessionModelRecordPayload {
+  modelId: string;
+  authType: string;
+  baseUrl?: string;
+  isRuntime?: boolean;
+}
+
+export function isValidSessionModelPayload(
+  payload: unknown,
+): payload is SessionModelRecordPayload {
+  const candidate = payload as SessionModelRecordPayload | null | undefined;
+  return (
+    typeof candidate?.modelId === 'string' &&
+    Boolean(candidate.modelId.trim()) &&
+    typeof candidate.authType === 'string' &&
+    Boolean(candidate.authType.trim())
+  );
+}
+
+export function normalizeSessionModelPayload(
+  payload: SessionModelRecordPayload,
+): SessionModelRecordPayload {
+  const normalized: SessionModelRecordPayload = {
+    modelId: stripRuntimeSnapshotPrefix(payload.modelId.trim()),
+    authType: payload.authType.trim(),
+  };
+  if (payload.baseUrl !== undefined) {
+    normalized.baseUrl = payload.baseUrl;
+  }
+  if (payload.isRuntime) {
+    normalized.isRuntime = true;
+  }
+  return normalized;
+}
+
+export function sessionModelPayloadsEqual(
+  a: SessionModelRecordPayload,
+  b: SessionModelRecordPayload,
+): boolean {
+  return (
+    a.modelId === b.modelId &&
+    a.authType === b.authType &&
+    (a.baseUrl ?? '') === (b.baseUrl ?? '') &&
+    Boolean(a.isRuntime) === Boolean(b.isRuntime)
+  );
 }
 
 /**
@@ -812,6 +868,7 @@ export interface ChatRecordingRestoreState {
   parentSessionId?: string;
   sourceType?: string;
   sourceId?: string;
+  sessionModel?: SessionModelRecordPayload;
 }
 
 /**
@@ -904,6 +961,8 @@ export class ChatRecordingService {
   /** Immutable creator attribution once recorded. */
   private currentSourceType: string | undefined;
   private currentSourceId: string | undefined;
+  /** Last-wins daemon session model binding, used to skip duplicate writes. */
+  private currentSessionModel: SessionModelRecordPayload | undefined;
   private readonly userDisplayTextsForTitle: Array<string | undefined> = [];
   /**
    * How many auto-title attempts have been made this process.
@@ -930,6 +989,8 @@ export class ChatRecordingService {
   private pendingExplicitTitleWrites = 0;
   /** Title writes whose durable result and final cached value are unresolved. */
   private pendingTitleWrites = 0;
+  /** Source writes whose durable result and cached value are unresolved. */
+  private pendingSourceWrites = 0;
 
   /**
    * JSON-serialized form of the most recent attribution snapshot accepted for
@@ -959,6 +1020,7 @@ export class ChatRecordingService {
    */
   private bytesSinceTitleAnchor = 0;
   private hasNonTitleContentSinceTitleAnchor = false;
+  private bytesSinceSourceAnchor = 0;
 
   constructor(
     config: Config,
@@ -1081,6 +1143,7 @@ export class ChatRecordingService {
     this.currentParentSessionId = undefined;
     this.currentSourceType = undefined;
     this.currentSourceId = undefined;
+    this.currentSessionModel = undefined;
     this.activeBranchRecords = [];
     this.activeBranchBaseUuid = null;
     this.pendingBranchToolCalls = [];
@@ -1111,6 +1174,12 @@ export class ChatRecordingService {
           | undefined;
         this.currentSourceType = payload?.sourceType;
         this.currentSourceId = payload?.sourceId;
+      } else if (record.subtype === 'session_model') {
+        if (isValidSessionModelPayload(record.systemPayload)) {
+          this.currentSessionModel = normalizeSessionModelPayload(
+            record.systemPayload,
+          );
+        }
       }
     }
     if (persistedTitleInfo !== undefined) {
@@ -1118,7 +1187,10 @@ export class ChatRecordingService {
       this.currentTitleSource = persistedTitleInfo.source;
     }
     if (this.currentCustomTitle) {
-      this.bytesSinceTitleAnchor = TITLE_REANCHOR_BYTES;
+      this.bytesSinceTitleAnchor = METADATA_REANCHOR_BYTES;
+    }
+    if (this.currentSourceType) {
+      this.bytesSinceSourceAnchor = METADATA_REANCHOR_BYTES;
     }
   }
 
@@ -1139,8 +1211,14 @@ export class ChatRecordingService {
     this.currentParentSessionId = state.parentSessionId;
     this.currentSourceType = state.sourceType;
     this.currentSourceId = state.sourceId;
+    this.currentSessionModel = state.sessionModel
+      ? normalizeSessionModelPayload(state.sessionModel)
+      : undefined;
     if (this.currentCustomTitle) {
-      this.bytesSinceTitleAnchor = TITLE_REANCHOR_BYTES;
+      this.bytesSinceTitleAnchor = METADATA_REANCHOR_BYTES;
+    }
+    if (this.currentSourceType) {
+      this.bytesSinceSourceAnchor = METADATA_REANCHOR_BYTES;
     }
   }
 
@@ -1325,7 +1403,7 @@ export class ChatRecordingService {
       this.updateActiveBranch(record);
     }
     this.enqueueRecordWrite(record, legacyConversationFile, updateActiveTail);
-    this.updateTitleAnchorTracking(record);
+    this.updateMetadataAnchorTracking(record);
   }
 
   private async appendRecordStrict(
@@ -1363,7 +1441,7 @@ export class ChatRecordingService {
     // Keep anchor accounting in logical queue order, matching appendRecord.
     // Once accepted, a failed write permanently stops this recorder, so no
     // rollback of this bookkeeping is needed on rejection.
-    this.updateTitleAnchorTracking(record);
+    this.updateMetadataAnchorTracking(record);
 
     await pendingWrite;
   }
@@ -1388,17 +1466,13 @@ export class ChatRecordingService {
   }
 
   /**
-   * Maintain the "title is always in the tail window" invariant by
-   * counting bytes accepted since the last `custom_title` record and
-   * re-anchoring once enough non-title content has been written.
+   * Keep title and source metadata inside the reader's tail window by
+   * counting bytes accepted since each metadata record and re-anchoring
+   * independently before either can drift beyond that window.
    *
-   * - A `custom_title` record IS the new anchor — reset the counter.
-   * - Without a current or pending title, the counter is irrelevant.
-   * - Otherwise accumulate this record's serialized size; if the
-   *   running total breaches the threshold, re-append a fresh
-   *   `custom_title` to EOF. The recursive `appendRecord` call will
-   *   land this branch's first arm (subtype === 'custom_title') and
-   *   reset the counter to 0.
+   * Each metadata subtype resets only its own counter. Otherwise, active or
+   * pending metadata accumulates the serialized record size and is re-appended
+   * to EOF once its threshold is reached.
    *
    * Size estimate uses `JSON.stringify` for parity with the actual
    * write path (`jsonl.writeLine` serializes the same way). It's an
@@ -1412,14 +1486,25 @@ export class ChatRecordingService {
    * actual on-disk distance from the last anchor blow past the 64KB
    * tail window before the threshold fires.
    */
-  private updateTitleAnchorTracking(record: ChatRecord): void {
-    if (record.type === 'system' && record.subtype === 'custom_title') {
+  private updateMetadataAnchorTracking(record: ChatRecord): void {
+    const isTitleAnchor =
+      record.type === 'system' && record.subtype === 'custom_title';
+    const isSourceAnchor =
+      record.type === 'system' && record.subtype === 'session_source';
+    if (isTitleAnchor) {
       this.bytesSinceTitleAnchor = 0;
       this.hasNonTitleContentSinceTitleAnchor = false;
-      return;
     }
-    if (!this.currentCustomTitle && this.pendingTitleWrites === 0) return;
-    this.hasNonTitleContentSinceTitleAnchor = true;
+    if (isSourceAnchor) {
+      this.bytesSinceSourceAnchor = 0;
+    }
+    const trackTitle =
+      !isTitleAnchor &&
+      (this.currentCustomTitle !== undefined || this.pendingTitleWrites > 0);
+    const trackSource =
+      !isSourceAnchor &&
+      (this.currentSourceType !== undefined || this.pendingSourceWrites > 0);
+    if (!trackTitle && !trackSource) return;
     let serializedRecord: string;
     try {
       serializedRecord = JSON.stringify(record);
@@ -1428,14 +1513,25 @@ export class ChatRecordingService {
       // The real serializer will surface the failure through writeChain.
       return;
     }
-    // +1 for the trailing newline jsonl.writeLine appends.
-    this.bytesSinceTitleAnchor +=
-      Buffer.byteLength(serializedRecord, 'utf8') + 1;
+    const bytes = Buffer.byteLength(serializedRecord, 'utf8') + 1;
+    if (trackTitle) {
+      this.hasNonTitleContentSinceTitleAnchor = true;
+      this.bytesSinceTitleAnchor += bytes;
+    }
+    if (trackSource) {
+      this.bytesSinceSourceAnchor += bytes;
+    }
     if (
-      this.bytesSinceTitleAnchor >= TITLE_REANCHOR_BYTES &&
+      this.bytesSinceTitleAnchor >= METADATA_REANCHOR_BYTES &&
       this.pendingTitleWrites === 0
     ) {
       this.reanchorTitle();
+    }
+    if (
+      this.bytesSinceSourceAnchor >= METADATA_REANCHOR_BYTES &&
+      this.pendingSourceWrites === 0
+    ) {
+      this.reanchorSessionSource();
     }
   }
 
@@ -1447,7 +1543,13 @@ export class ChatRecordingService {
    * scanning the middle of the file.
    */
   private reanchorTitle(): void {
-    if (!this.currentCustomTitle) return;
+    if (
+      !this.currentCustomTitle ||
+      this.bytesSinceTitleAnchor < METADATA_REANCHOR_BYTES
+    ) {
+      return;
+    }
+    this.bytesSinceTitleAnchor = 0;
     try {
       const record: ChatRecord = {
         ...this.createBaseRecord('system'),
@@ -1469,6 +1571,32 @@ export class ChatRecordingService {
       // will re-emit one on the next lifecycle event.
       this.bytesSinceTitleAnchor = 0;
       debugLogger.error('Error re-anchoring custom title:', error);
+    }
+  }
+
+  private reanchorSessionSource(): void {
+    if (
+      !this.currentSourceType ||
+      this.bytesSinceSourceAnchor < METADATA_REANCHOR_BYTES
+    ) {
+      return;
+    }
+    this.bytesSinceSourceAnchor = 0;
+    try {
+      const record: ChatRecord = {
+        ...this.createBaseRecord('system'),
+        type: 'system',
+        subtype: 'session_source',
+        systemPayload: {
+          sourceType: this.currentSourceType,
+          ...(this.currentSourceId !== undefined
+            ? { sourceId: this.currentSourceId }
+            : {}),
+        },
+      };
+      this.appendRecord(record, { updateActiveTail: false });
+    } catch (error) {
+      debugLogger.error('Error re-anchoring session source:', error);
     }
   }
 
@@ -1553,8 +1681,18 @@ export class ChatRecordingService {
     if (this.closePromise) return this.closePromise;
     if (this.state === 'closed') return Promise.resolve();
     this.beginClose(options);
-    this.closePromise = this.closeOnce();
-    return this.closePromise;
+    const pending = this.closeOnce();
+    this.closePromise = pending;
+    void pending.catch(() => {
+      if (
+        this.closePromise === pending &&
+        this.binding !== undefined &&
+        this.state === 'integrity_failed'
+      ) {
+        this.closePromise = undefined;
+      }
+    });
+    return pending;
   }
 
   beginClose(options?: { handoff?: boolean }): void {
@@ -1595,7 +1733,10 @@ export class ChatRecordingService {
       this.binding = undefined;
       this.state = 'closed';
     } catch (error) {
-      if (lease?.isReleased || error instanceof SessionWriterLostError) {
+      if (
+        error instanceof SessionWriterLostError ||
+        (lease?.isReleased && !lease.isReleaseDurabilityPending)
+      ) {
         this.binding = undefined;
         this.state = 'closed';
       } else {
@@ -1607,7 +1748,7 @@ export class ChatRecordingService {
   }
 
   hasWriteOwnership(): boolean {
-    return this.binding !== undefined;
+    return this.binding !== undefined && !this.binding.lease.isReleased;
   }
 
   /**
@@ -1788,7 +1929,7 @@ export class ChatRecordingService {
     message: PartListUnion,
     displayText: string,
     goalContext?: GoalTurnPermit,
-    mediaReferences?: UserPromptMediaReference[],
+    attachmentReferences?: UserPromptAttachmentReference[],
   ): void {
     try {
       const record: ChatRecord = {
@@ -1798,7 +1939,7 @@ export class ChatRecordingService {
         message: createUserContent(message),
         systemPayload: {
           displayText,
-          ...(mediaReferences ? { mediaReferences } : {}),
+          ...(attachmentReferences ? { attachmentReferences } : {}),
         },
       };
       this.appendRecord(record);
@@ -1910,6 +2051,43 @@ export class ChatRecordingService {
   }
 
   /**
+   * Tokens billed to the Goal turn that is currently open.
+   *
+   * One entry, not a map: the Goal runtime holds a single permit at a time, so
+   * a record stamped with a different turn id means the previous turn is over
+   * and its total was either already taken or is no longer wanted.
+   */
+  private goalTurnSpend?: { turnId: string; tokens: number };
+
+  private accumulateGoalTurnTokens(
+    turnId: string,
+    usage: GenerateContentResponseUsageMetadata,
+  ): void {
+    const total = usage.totalTokenCount;
+    if (typeof total !== 'number' || !Number.isFinite(total) || total <= 0) {
+      return;
+    }
+    if (this.goalTurnSpend?.turnId !== turnId) {
+      this.goalTurnSpend = { turnId, tokens: 0 };
+    }
+    this.goalTurnSpend.tokens += total;
+  }
+
+  /**
+   * The tokens billed to `turnId`, consuming them so a turn is counted once.
+   *
+   * Answers zero for a turn that spent nothing, that was never opened, or
+   * whose total has already been taken — a Goal with no model calls in a turn
+   * bills nothing rather than guessing.
+   */
+  takeGoalTurnTokens(turnId: string): number {
+    if (this.goalTurnSpend?.turnId !== turnId) return 0;
+    const { tokens } = this.goalTurnSpend;
+    this.goalTurnSpend = undefined;
+    return tokens;
+  }
+
+  /**
    * Records an assistant turn with all available data.
    * Queues the write immediately on the serialized async writer.
    *
@@ -1941,6 +2119,9 @@ export class ChatRecordingService {
 
       if (data.tokens) {
         record.usageMetadata = data.tokens;
+        if (data.goalContext) {
+          this.accumulateGoalTurnTokens(data.goalContext.turnId, data.tokens);
+        }
       }
 
       if (data.contextWindowSize !== undefined) {
@@ -2284,6 +2465,17 @@ export class ChatRecordingService {
 
       this.appendRecord(record);
 
+      // Last-wins session_model may now sit on the abandoned branch. Re-append
+      // the live binding so cold restore still sees the model Config is on.
+      if (this.currentSessionModel) {
+        this.appendRecord({
+          ...this.createBaseRecord('system'),
+          type: 'system',
+          subtype: 'session_model',
+          systemPayload: this.currentSessionModel,
+        });
+      }
+
       // Re-record surviving file history snapshots on the active branch so
       // they are visible to reconstructHistory on resume.
       if (survivingFileHistorySnapshots?.length) {
@@ -2429,7 +2621,7 @@ export class ChatRecordingService {
       if (
         persisted &&
         this.pendingTitleWrites === 0 &&
-        this.bytesSinceTitleAnchor >= TITLE_REANCHOR_BYTES &&
+        this.bytesSinceTitleAnchor >= METADATA_REANCHOR_BYTES &&
         !this.writeFailure
       ) {
         this.reanchorTitle();
@@ -2484,6 +2676,8 @@ export class ChatRecordingService {
         this.currentSourceId === sourceId
       );
     }
+    this.pendingSourceWrites++;
+    let persisted = false;
     try {
       const record: ChatRecord = {
         ...this.createBaseRecord('system'),
@@ -2497,10 +2691,64 @@ export class ChatRecordingService {
       await this.appendRecordStrict(record);
       this.currentSourceType = sourceType;
       this.currentSourceId = sourceId;
+      persisted = true;
       return true;
     } catch (error) {
       if (error !== this.writeFailure) {
         debugLogger.error('Error saving session source:', error);
+      }
+      return false;
+    } finally {
+      this.pendingSourceWrites--;
+      if (
+        persisted &&
+        this.pendingSourceWrites === 0 &&
+        this.bytesSinceSourceAnchor >= METADATA_REANCHOR_BYTES &&
+        !this.writeFailure
+      ) {
+        this.reanchorSessionSource();
+      }
+    }
+  }
+
+  /** Persist the daemon session's current model so load/resume can restore it. */
+  async recordSessionModel(
+    payload: SessionModelRecordPayload,
+  ): Promise<boolean> {
+    if (!isValidSessionModelPayload(payload)) {
+      return false;
+    }
+    const normalized = normalizeSessionModelPayload(payload);
+    if (
+      this.currentSessionModel &&
+      sessionModelPayloadsEqual(this.currentSessionModel, normalized)
+    ) {
+      return true;
+    }
+    try {
+      const record: ChatRecord = {
+        ...this.createBaseRecord('system'),
+        type: 'system',
+        subtype: 'session_model',
+        systemPayload: normalized,
+      };
+      // Assign before the awaited write so a rewind landing in the
+      // pending-write window re-appends the new binding rather than the
+      // stale one. Roll back on failure: ensureConversationFile can throw
+      // before writeFailure latches, and a later identical call would
+      // otherwise skip the write.
+      const previous = this.currentSessionModel;
+      this.currentSessionModel = normalized;
+      try {
+        await this.appendRecordStrict(record);
+      } catch (error) {
+        this.currentSessionModel = previous;
+        throw error;
+      }
+      return true;
+    } catch (error) {
+      if (error !== this.writeFailure) {
+        debugLogger.error('Error saving session model record:', error);
       }
       return false;
     }

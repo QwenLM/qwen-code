@@ -5,6 +5,7 @@
  */
 
 import type {
+  ApprovalModeValue,
   Config,
   ToolArtifact,
   ToolResultBoundaryArtifact,
@@ -17,12 +18,7 @@ import type {
 } from '@agentclientprotocol/sdk';
 import type { MessageRewriteMiddleware } from './rewrite/index.js';
 
-export type ApprovalModeValue =
-  | 'plan'
-  | 'default'
-  | 'auto-edit'
-  | 'auto'
-  | 'yolo';
+export type { ApprovalModeValue };
 
 /**
  * Interface for sending session updates to the ACP client.

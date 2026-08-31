@@ -25,6 +25,7 @@ const root = {
   canonicalRoot: '/work/conversations',
   device: 1,
   inode: 2,
+  inodeVerifiable: true,
 };
 
 function createBridge() {
@@ -101,12 +102,18 @@ function createOwnedRuntime(bridge = createBridge()): WorkspaceRuntime {
 }
 
 function createManager(
-  options: Omit<ConversationRuntimeManagerOptions, 'ownership'> & {
+  options: Omit<
+    ConversationRuntimeManagerOptions,
+    'ownership' | 'quarantineRuntime'
+  > & {
     ownership?: ConversationRuntimeOwnership;
+    quarantineRuntime?: ConversationRuntimeManagerOptions['quarantineRuntime'];
   },
 ): ConversationRuntimeManager {
   return new ConversationRuntimeManager({
     ...options,
+    quarantineRuntime:
+      options.quarantineRuntime ?? vi.fn(async () => undefined),
     ownership: options.ownership ?? {
       acquire: vi.fn(async () => ({ reclaimed: false })),
       release: vi.fn(async () => false),
@@ -192,6 +199,143 @@ describe('ConversationRuntimeManager', () => {
     await expect(manager.ensure()).resolves.toBe(candidate);
     expect(publishRuntime).not.toHaveBeenCalled();
     expect(workspace.assertExactRoot).toHaveBeenCalledWith(root.canonicalRoot);
+  });
+
+  it('asserts the cached current generation without root I/O', async () => {
+    const candidate = createOwnedRuntime();
+    const registry = createRegistry(candidate);
+    const workspace = createWorkspace();
+    const manager = createManager({
+      workspace,
+      registry,
+      publishRuntime: vi.fn(),
+    });
+    await manager.ensure();
+    workspace.revalidate.mockClear();
+    workspace.assertExactRoot.mockClear();
+
+    expect(manager.assertCurrent(candidate)).toBe(candidate);
+    expect(workspace.revalidate).not.toHaveBeenCalled();
+    expect(workspace.assertExactRoot).not.toHaveBeenCalled();
+  });
+
+  it('rejects a stale expected runtime generation without root I/O', async () => {
+    const candidate = createOwnedRuntime();
+    const replacement = createOwnedRuntime();
+    const registry = createRegistry(candidate);
+    const workspace = createWorkspace();
+    const manager = createManager({
+      workspace,
+      registry,
+      publishRuntime: vi.fn(),
+    });
+    await manager.ensure();
+    const entry = registry.getManagedEntryByWorkspaceCwd(root.canonicalRoot)!;
+    registry.beginReplacement(entry, 'replacement');
+    registry.activateReplacement(entry, replacement, 'replacement');
+    workspace.revalidate.mockClear();
+    workspace.assertExactRoot.mockClear();
+
+    let error: unknown;
+    try {
+      manager.assertCurrent(candidate);
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toMatchObject({
+      code: 'conversation_runtime_unavailable',
+      retryable: true,
+    });
+    expect(workspace.revalidate).not.toHaveBeenCalled();
+    expect(workspace.assertExactRoot).not.toHaveBeenCalled();
+  });
+
+  it('terminally quarantines the current runtime with one disposal', async () => {
+    const candidate = createOwnedRuntime();
+    const registry = createRegistry(candidate);
+    let releaseQuarantine!: () => void;
+    const quarantineGate = new Promise<void>((resolve) => {
+      releaseQuarantine = resolve;
+    });
+    const quarantineRuntime = vi.fn(() => quarantineGate);
+    const onTerminalQuarantine = vi.fn();
+    const manager = createManager({
+      workspace: createWorkspace(),
+      registry,
+      publishRuntime: vi.fn(),
+      quarantineRuntime,
+      onTerminalQuarantine,
+    });
+    await manager.ensure();
+
+    const first = manager.quarantine(
+      candidate,
+      'standalone_session_containment_failed',
+    );
+    const second = manager.quarantine(
+      candidate,
+      'standalone_session_containment_failed',
+    );
+
+    expect(second).toBe(first);
+    expect(onTerminalQuarantine).toHaveBeenCalledOnce();
+    expect(() => manager.assertCurrent(candidate)).toThrowError(
+      expect.objectContaining({ code: 'conversation_runtime_unavailable' }),
+    );
+    await expect(manager.ensure()).rejects.toMatchObject({
+      code: 'conversation_runtime_unavailable',
+    });
+    await vi.waitFor(() => expect(quarantineRuntime).toHaveBeenCalledOnce());
+    releaseQuarantine();
+    await expect(first).resolves.toBeUndefined();
+  });
+
+  it('does not terminalize for a stale quarantine target', async () => {
+    const candidate = createOwnedRuntime();
+    const stale = createOwnedRuntime();
+    const registry = createRegistry(candidate);
+    const quarantineRuntime = vi.fn(async () => undefined);
+    const onTerminalQuarantine = vi.fn();
+    const manager = createManager({
+      workspace: createWorkspace(),
+      registry,
+      publishRuntime: vi.fn(),
+      quarantineRuntime,
+      onTerminalQuarantine,
+    });
+    await manager.ensure();
+
+    expect(() =>
+      manager.quarantine(stale, 'standalone_session_containment_failed'),
+    ).toThrowError(
+      expect.objectContaining({ code: 'conversation_runtime_unavailable' }),
+    );
+    expect(manager.assertCurrent(candidate)).toBe(candidate);
+    expect(onTerminalQuarantine).not.toHaveBeenCalled();
+    expect(quarantineRuntime).not.toHaveBeenCalled();
+  });
+
+  it('keeps quarantine terminal when its observer or disposal fails', async () => {
+    const candidate = createOwnedRuntime();
+    const registry = createRegistry(candidate);
+    const disposalError = new Error('dispose failed');
+    const manager = createManager({
+      workspace: createWorkspace(),
+      registry,
+      publishRuntime: vi.fn(),
+      onTerminalQuarantine: () => {
+        throw new Error('observer failed');
+      },
+      quarantineRuntime: vi.fn(async () => Promise.reject(disposalError)),
+    });
+    await manager.ensure();
+
+    await expect(
+      manager.quarantine(candidate, 'standalone_session_containment_failed'),
+    ).rejects.toBe(disposalError);
+    await expect(manager.ensure()).rejects.toMatchObject({
+      code: 'conversation_runtime_unavailable',
+    });
   });
 
   it('rejects an adopted runtime marked as primary', async () => {

@@ -2,7 +2,7 @@
 
 Channels let you interact with a Qwen Code agent from messaging platforms like Telegram, WeChat, QQ, DingTalk, WeCom, or Feishu, instead of the terminal. You send messages from your phone or desktop chat app, and the agent responds just like it would in the CLI.
 
-Code-hosting platforms (starting with [GitHub](./github)) are also supported via polling adapters — the agent monitors notifications and responds to @mentions on issues and pull requests.
+Code-hosting platforms (starting with [GitHub](./github)) and authenticated workspace accounts (starting with [DingTalk Workspace](./dws)) are also supported through channels.
 
 ## How It Works
 
@@ -17,7 +17,7 @@ All channels share one agent process with isolated sessions per user. Each chann
 
 ## Quick Start
 
-1. Set up a bot on your messaging platform (see channel-specific guides: [Telegram](./telegram), [WeChat](./weixin), [QQ Bot](./qqbot), [DingTalk](./dingtalk), [WeCom](./wecom), [Feishu](./feishu), [GitHub](./github))
+1. Set up a bot or authenticated workspace account (see channel-specific guides: [Telegram](./telegram), [WeChat](./weixin), [QQ Bot](./qqbot), [DingTalk](./dingtalk), [DingTalk Workspace](./dws), [WeCom](./wecom), [Feishu](./feishu), [GitHub](./github))
 2. Add the channel configuration to `~/.qwen/settings.json`
 3. Run `qwen channel start` to start all channels, or `qwen channel start <name>` for a single channel
 
@@ -52,7 +52,7 @@ Channels are configured under the `channels` key in `settings.json`. Each channe
 
 | Option                   | Required         | Description                                                                                                                                                                                                             |
 | ------------------------ | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `type`                   | Yes              | Channel type: `telegram`, `weixin`, `qq`, `dingtalk`, `wecom`, `feishu`, `github`, or a custom type from an extension (see [Plugins](./plugins))                                                                        |
+| `type`                   | Yes              | Channel type: `telegram`, `weixin`, `qq`, `dingtalk`, `dws`, `wecom`, `feishu`, `github`, `gitlab`, or a custom type from an extension (see [Plugins](./plugins))                                                       |
 | `token`                  | Telegram         | Bot token. Supports `$ENV_VAR` syntax to read from environment variables. Not needed for WeChat, DingTalk, WeCom, or Feishu                                                                                             |
 | `clientId`               | DingTalk, Feishu | DingTalk AppKey or Feishu App ID. Supports `$ENV_VAR` syntax                                                                                                                                                            |
 | `clientSecret`           | DingTalk, Feishu | DingTalk AppSecret or Feishu App Secret. Supports `$ENV_VAR` syntax                                                                                                                                                     |
@@ -62,6 +62,7 @@ Channels are configured under the `channels` key in `settings.json`. Each channe
 | `senderPolicy`           | No               | Who can talk to the bot: `allowlist` (default), `open`, or `pairing`                                                                                                                                                    |
 | `allowedUsers`           | No               | List of user IDs allowed to use the bot (used by `allowlist` and `pairing` policies)                                                                                                                                    |
 | `sessionScope`           | No               | How sessions are scoped: `user` (default), `chat_thread`, or `single`. Legacy `thread` remains compatible when already configured but is not offered for new Web Shell configurations                                   |
+| `multiSession`           | No               | Retain up to eight owner-scoped named tasks in one chat. Requires daemon-managed mode, `sessionScope: "user"`, no webhooks or group-history backfill, and no enabled Channel loops                                      |
 | `cwd`                    | No               | Working directory for the agent. Defaults to the current directory                                                                                                                                                      |
 | `approvalMode`           | No               | Tool approval mode for channel sessions. Unattended webhook tasks require `yolo`; the setting applies to every session on the channel                                                                                   |
 | `instructions`           | No               | Custom instructions prepended to the first message of each session                                                                                                                                                      |
@@ -88,8 +89,33 @@ Controls who can interact with the bot:
 Controls how conversation sessions are managed:
 
 - **`user`** (default) — One session per user. All messages from the same user share a conversation.
-- **`thread`** — One session per thread/topic. Useful for group chats with threads.
+- **`chat_thread`** — One session per chat thread/topic, shared by participants in that thread.
+- **`thread`** — Legacy thread/topic routing retained for existing configurations.
 - **`single`** — One shared session for all users. Everyone shares the same conversation.
+
+### Named Tasks
+
+Daemon-managed Channels can retain several named conversations for the same user in one chat:
+
+```json
+{
+  "channels": {
+    "my-channel": {
+      "type": "telegram",
+      "sessionScope": "user",
+      "multiSession": true
+    }
+  }
+}
+```
+
+The catalog is private to the exact channel, chat, and sender. Task names use 1–32 ASCII letters, numbers, underscores, or hyphens, and are unique case-insensitively. Up to eight tasks may be open; closing a task detaches it without deleting its transcript, so selecting it later reopens the exact conversation. Session IDs are never accepted by or shown in chat commands.
+
+Named results identify their originating task: direct chats use `[task]`, while group chats use `[sender · task]`. Named text permission prompts also show the exact request ID and the corresponding `/approve <id>`, `/approve-always <id>`, and `/deny <id>` commands. The label is presentation-only and is not stored in the model transcript.
+
+One task remains selected to receive the next normal message, but other named tasks may keep running concurrently in the shared working directory. Creating or selecting another task does not cancel or retarget earlier work, and late results retain their originating task label. A busy task cannot be closed, but its active prompt can be cancelled with `/session cancel [<name>]` through the existing Channel cancellation behavior. Independently queued turns are not cancelled, but in `collect` dispatch mode any follow-ups buffered behind the cancelled prompt are discarded by that existing behavior. Media preparation is not targeted. Bare permission commands apply only to the selected task, while an explicit request ID can answer an owned inactive task. Per-task worktrees are planned for Part 4. Channel memory remains scoped to the chat rather than to a named task.
+
+This mode is unavailable in standalone `qwen channel start`, with webhooks, with non-zero channel or group `groupHistoryLimit`, or with Channel loops. If an enabled loop already exists for that channel, the daemon worker refuses to start until the loop is disabled.
 
 ### Channel Memory
 
@@ -463,14 +489,21 @@ Channels support slash commands. These are handled locally (no agent round-trip)
 - `/help` — List available commands
 - `/clear` — Clear your session and start fresh (aliases: `/reset`, `/new`)
 - `/status` — Show session info and access policy
+- `/sessions [all]` — List open named tasks, or include closed tasks; available only with `multiSession: true`
+- `/session current` — Show the selected named task
+- `/session new <name>` — Create and select a shared-workspace task
+- `/session new <name> --worktree` — Recognized but deferred to Part 4
+- `/session use <name>` — Select an open task or reopen a closed task
+- `/session cancel [<name>]` — Cancel the selected task's active prompt, or name another owned task; independently queued turns are not cancelled, but `collect`-mode follow-ups buffered behind the cancelled prompt are discarded by the existing cancellation behavior; media preparation is not targeted
+- `/session close <name>` — Close a task without deleting its transcript
 - `/loop add "<cron>" <prompt>` — Create a persistent scheduled channel loop
 - `/loop list` — List loops for the current chat
 - `/loop inspect <id>` — Show loop status and run details
 - `/loop cancel <id>` — Disable a loop
 
-All other slash commands (e.g., `/compress`, `/summary`) are forwarded to the agent.
+All other slash commands (e.g., `/compress`, `/summary`) are forwarded to the agent. Named-task commands are registered only when the mode is enabled, so `/sessions` remains agent-visible for existing configurations.
 
-These commands work on all channel types (Telegram, WeChat, QQ, DingTalk, WeCom, Feishu, GitHub), although loop creation also requires proactive delivery support for the current adapter and target.
+Named-task commands work on all channel types (Telegram, WeChat, QQ, DingTalk, WeCom, Feishu, GitHub). `/cancel` is currently registered only by Telegram, and loop creation requires proactive delivery support for the current adapter and target.
 
 ## Running
 

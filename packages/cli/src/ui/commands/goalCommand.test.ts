@@ -49,6 +49,7 @@ function goalSnapshot(
       evidenceCursor: { recordId: 'cursor-1' },
       turnCount: 3,
       activeTimeMs: 1_000,
+      tokensUsed: 0,
       createdAt: 10,
       updatedAt: 20,
       ...overrides,
