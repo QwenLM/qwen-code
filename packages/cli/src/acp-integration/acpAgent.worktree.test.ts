@@ -215,6 +215,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
     snapshot: vi.fn(() => ({})),
   })),
   restoreWorktreeContext: mockRestoreWorktreeContext,
+  listWorkflowSnapshots: vi.fn().mockResolvedValue([]),
   HookEventName: {
     PreToolUse: 'PreToolUse',
     PostToolUse: 'PostToolUse',

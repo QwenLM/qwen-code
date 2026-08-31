@@ -1062,17 +1062,17 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
 });
 
 describe('legacy session telemetry route catalog', () => {
-  it('contains 61 unique routes with the audited 59/2 attribution split', () => {
+  it('contains 62 unique routes with the audited 60/2 attribution split', () => {
     const keys = legacySessionTelemetryRoutes.map(
       ({ method, path }) => `${method} ${path}`,
     );
-    expect(keys).toHaveLength(61);
-    expect(new Set(keys).size).toBe(61);
+    expect(keys).toHaveLength(62);
+    expect(new Set(keys).size).toBe(62);
     expect(
       legacySessionTelemetryRoutes.filter(
         ({ attribution }) => attribution === 'handler_resolved',
       ),
-    ).toHaveLength(59);
+    ).toHaveLength(60);
     expect(
       legacySessionTelemetryRoutes.filter(
         ({ attribution }) => attribution === 'pre_resolved',
