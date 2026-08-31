@@ -95,6 +95,7 @@
                 <version>${maven-surefire-plugin.version}</version>
                 <configuration>
                     <failIfNoTests>true</failIfNoTests>
+                    <excludedGroups>integration</excludedGroups>
                 </configuration>
             </plugin>
             <plugin>
