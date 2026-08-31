@@ -1669,7 +1669,13 @@ function restoreProbeTreeTracked(probeTree: string): string | null {
   // would put every contributor with git-lfs into permanent refusal — the same
   // failure as a tripwire that fires on every healthy run.
   const filters = localFilterCommands(probeTree);
-  if (filters.unreadable) {
+  // Gate on `stopped`, not `unreadable` — the same field `scratch-tree` gates
+  // on. A screen that stopped for ANY reason (an unreadable candidate OR an
+  // over-cap admin dir) did not finish, and either way the checkout below would
+  // execute a filter it failed to see. Keying on the `unreadable` file field
+  // would let a future stop mode that sets `stopped` without a file silently
+  // authorise the checkout while scratch-tree refuses.
+  if (filters.stopped) {
     return `the screen could not clear this tree's restore: ${screenStopDetail(filters)}`;
   }
   if (filters.keys.length > 0) {
@@ -3006,7 +3012,10 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
         // The throw lands in this phase's existing catch and is recorded as a
         // probe that did not run, which is what it is.
         const revertFilters = localFilterCommands(probeTree);
-        if (revertFilters.unreadable) {
+        // Gate on `stopped`, matching the restore and scratch-tree — a screen
+        // that stopped for any reason did not finish, so the checkout must not
+        // proceed on it (see the restore's note above).
+        if (revertFilters.stopped) {
           throw new Error(
             'the screen could not clear this revert: ' +
               screenStopDetail(revertFilters),
