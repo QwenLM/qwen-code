@@ -19,7 +19,8 @@ import { parse } from 'yaml';
 
 // Executes the e2e workflow's 'Run E2E tests' script under GitHub Actions'
 // default Linux step shell — `bash -e {0}`: the step has no `shell:` override
-// and e2e.yml no `defaults:` block, so no pipefail — with npm stubbed and the
+// and e2e.yml no `defaults:` block (both absences pinned in
+// e2e-workflow.test.js), so no pipefail — with npm stubbed and the
 // clock pinned, so the retry's exit-code semantics and the budget gate's
 // exact threshold are witnessed by bash rather than by shape assertions
 // alone. A failure-swallowing mutation (a group-level `|| true`) or a missing
@@ -90,6 +91,20 @@ describe('e2e workflow sandbox:none shard retry execution', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   }
+
+  it('runs a green shard straight through with no retry noise', () => {
+    // The green first-attempt path needs its own witness: without one, an
+    // unconditional pre-gate side effect (a spurious ::warning:: before
+    // `run_shard || {`) ships with every other witness green.
+    const { exitCode, npmCalls, output } = runStepScript({
+      failCalls: '',
+      elapsedSeconds: 1200,
+    });
+    expect(npmCalls).toBe(1);
+    expect(output).not.toContain('::warning::');
+    expect(output).not.toContain('::error::');
+    expect(exitCode).toBe(0);
+  });
 
   it('retries a shard that dies once and passes on the second attempt', () => {
     // The transient class the retry exists for: first attempt dead, re-run

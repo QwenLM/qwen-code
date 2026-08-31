@@ -169,15 +169,30 @@ describe('e2e workflow', () => {
       expect(yml.jobs['e2e-test-linux']['continue-on-error']).toBeUndefined();
     });
 
+    it('keeps the default step shell the execution harness assumes', () => {
+      // e2e-shard-retry.test.js executes this step's script under `bash -e`,
+      // GitHub's default Linux step shell only while the step carries no
+      // `shell:` override and the workflow no `defaults:` block. Either one
+      // switches the lane's shell semantics — explicit `bash` expands to
+      // `bash --noprofile --norc -e -o pipefail {0}` — while the harness
+      // keeps executing the old shell, so every execution witness stays
+      // green for a contract the lane no longer runs. Absence only: this
+      // pins e2e.yml, not workflows that deliberately set a shell.
+      expect(runStep.shell).toBeUndefined();
+      expect(yml.defaults).toBeUndefined();
+    });
+
     it('does not retry the docker leg', () => {
       // Two ~30min docker attempts would outrun the job's timeout-minutes.
       expect(runStep.run.match(/QWEN_SANDBOX=docker vitest run/g)).toHaveLength(
         1,
       );
       // Structure, not just count: wrapping the docker command in a
-      // function and calling it twice keeps the literal count at one.
+      // function and calling it twice keeps the literal count at one. The
+      // match spans inner braces so a body with its own `}` (a preflight
+      // brace group folded into the wrapper) cannot hide the wrapping.
       expect(runStep.run).not.toMatch(
-        /[A-Za-z_]+\(\)\s*\{[^}]*QWEN_SANDBOX=docker/s,
+        /[A-Za-z_]+\(\)\s*\{.*?QWEN_SANDBOX=docker/s,
       );
     });
   });
