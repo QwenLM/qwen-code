@@ -14,7 +14,12 @@ import type {
 } from '@qwen-code/channel-base';
 import { sanitizeLogText } from '@qwen-code/channel-base';
 import { loadSettings, type LoadedSettings } from '../../config/settings.js';
-import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
+import { isAllChannelSelectionName } from '../../serve/channel-selection.js';
+import {
+  writeStderrLine,
+  writeStderrLineBestEffort,
+  writeStdoutLine,
+} from '../../utils/stdioHelpers.js';
 import { getExtensionManager } from '../extensions/utils.js';
 import { getPlugin, registerPlugin } from './channel-registry.js';
 import { parseChannelConfig } from './config-utils.js';
@@ -57,6 +62,21 @@ export function daemonChannelLoopPath(workspaceCwd: string): string {
   return daemonChannelStatePath(workspaceCwd, 'cron.json');
 }
 
+/**
+ * Daemon-managed counterpart of the standalone `channelRuntimeStatePath`
+ * (channel-state-store.ts): `qwen serve` persists per-workspace channel
+ * runtime state under `channels/daemon/<hash>/channel-state.json`, the
+ * standalone `qwen channel` commands under `channels/standalone/<hash>`.
+ * Each service owns its own file exclusively — a stop in one mode never
+ * writes the other's file, so the two state trees never cross-contaminate
+ * (#8975). The workspace arrives already canonicalized by the daemon
+ * (canonicalizeWorkspace); unlike the standalone path helper this one
+ * requires a workspace — daemon channel state is always workspace-scoped.
+ */
+export function daemonChannelRuntimeStatePath(workspaceCwd: string): string {
+  return daemonChannelStatePath(workspaceCwd, 'channel-state.json');
+}
+
 export function daemonChannelStateDir(
   workspaceCwd: string,
   channelName: string,
@@ -77,6 +97,25 @@ export function channelLoopPath(): string {
   return path.join(Storage.getGlobalQwenDir(), 'channels', 'cron.json');
 }
 
+// (workspace, name) pairs already warned about a reserved channel name
+// this process (R11-15): `loadChannelsConfig` runs per-request on the
+// deferred webhook auth path (readDeferredWebhookSecret), so without
+// dedup one unresolved hand-edited entry grows stderr by an identical
+// line per webhook POST, burying real diagnostics while the runtime
+// stays deferred. Key on the PAIR, not the workspace: `all`, ` all` and
+// `all ` are all reserved variants, and a workspace-keyed set silences
+// every later variant once one warned — a user who edits settings to a
+// differently-spelled reserved key then gets a silently
+// never-connecting channel with nothing in the logs explaining why.
+// The NUL separator cannot occur in a path or a settings key as parsed
+// here, so the pair cannot collide (#8975).
+const reservedNameWarnedEntries = new Set<string>();
+
+/** Test seam (R11-15): forget the warned-entry dedup set. */
+export function resetReservedNameWarningsForTesting(): void {
+  reservedNameWarnedEntries.clear();
+}
+
 export function loadChannelsConfig(
   cwd: string = process.cwd(),
   settings: LoadedSettings = loadSettings(cwd),
@@ -84,7 +123,47 @@ export function loadChannelsConfig(
   const channels = (
     settings.merged as unknown as { channels?: Record<string, unknown> }
   ).channels;
-  return channels || {};
+  if (!channels) return Object.create(null);
+  // `all` is the whole-selection placeholder, reserved by the management
+  // API but unenforced here: a hand-edited/legacy `channels.all` entry
+  // would be connected by a mode-`all` worker, yet the stop capture's
+  // placeholder filter then drops the name from the persisted stopped
+  // set and the channel resurrects on the next `--channel all` (R10-36).
+  // Warn and skip the entry where settings are read so the collision
+  // cannot be established; the placeholder filters downstream stay as
+  // defense in depth.
+  //
+  // ALWAYS rebuild into the null-prototype map (R11-31): channel names are
+  // user-controlled settings keys, and lookup sites index this map with
+  // them (`channelsConfig[name]`); an identity return of the
+  // prototype-bearing settings object resolves inherited
+  // Object.prototype members (`constructor`, `toString`, ...) for
+  // unconfigured names, bypassing not-found guards. The rebuild also keeps
+  // a channel literally named `__proto__` as an own entry instead of
+  // routing through the Object.prototype setter — which would silently
+  // drop the channel and set the map's prototype to its config (same
+  // hazard the state store's filterChannelStates avoids).
+  const filtered: Record<string, unknown> = Object.create(null);
+  for (const [name, config] of Object.entries(channels)) {
+    if (isAllChannelSelectionName(name)) {
+      const dedupKey = `${cwd}\u0000${name}`;
+      if (!reservedNameWarnedEntries.has(dedupKey)) {
+        reservedNameWarnedEntries.add(dedupKey);
+        // Best-effort sink: this warning fires on EVERY launch of a
+        // worker whose settings keep the reserved entry, and the daemon
+        // supervisor spawns a fresh process per launch — a loud write to
+        // a failing stderr target raises an async 'error' event that
+        // kills the process past any try/catch, turning a tolerated
+        // config into a crash loop bounded only by the restart budget.
+        writeStderrLineBestEffort(
+          `[Channel] Warning: ignoring channel "${sanitizeLogText(name, 128)}" — the name is reserved for the whole-channel selection (#8975).`,
+        );
+      }
+      continue;
+    }
+    filtered[name] = config;
+  }
+  return filtered;
 }
 
 export function resolveExtensionChannelEntrySpecifier(

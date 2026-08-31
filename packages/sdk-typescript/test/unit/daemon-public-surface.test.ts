@@ -14,10 +14,12 @@ import {
   asKnownDaemonEvent,
 } from '../../src/daemon/events.js';
 // Type-only imports also exercise the public entry: any name missing
-// from `src/index.ts` is a tsc compile error and the suite refuses to
-// build, which is the regression fence for the kind of "exists in
-// `src/daemon/index.ts` but not re-exported by the published entry"
-// gap that two-layer SDK re-exports are easy to drift on.
+// from `src/index.ts` is a tsc compile error under this package's
+// typecheck fence (tsconfig.typetest.json compiles this file — the
+// package tsconfig only includes src/), which is the regression fence
+// for the kind of "exists in `src/daemon/index.ts` but not re-exported
+// by the published entry" gap that two-layer SDK re-exports are easy
+// to drift on.
 import type {
   DaemonClient,
   CreateStandaloneSessionOptions,
@@ -45,6 +47,8 @@ import type {
   DaemonChannelControlState,
   DaemonChannelControlTransition,
   DaemonChannelDelivery,
+  DaemonChannelInstanceSnapshot,
+  DaemonChannelsSnapshot,
   DaemonChannelNotifyRequest,
   DaemonChannelNotifyResult,
   DaemonChannelPairingApprovalsSnapshot,
@@ -59,6 +63,8 @@ import type {
   DaemonChannelStartupAttemptFailure,
   DaemonChannelStartupFailure,
   DaemonChannelStopResult,
+  DaemonChannelStopErrorResponse,
+  DaemonChannelStopInstanceResult,
   DaemonChannelWorkerStartErrorResponse,
   DaemonControlEvent,
   DaemonEvent,
@@ -307,9 +313,109 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expectTypeOf<DaemonChannelControlTransition>().not.toBeNever();
     expectTypeOf<DaemonChannelControlState>().not.toBeNever();
     expectTypeOf<DaemonChannelSetResult>().not.toBeNever();
+    // #8975 (R16-6): pin the names-mode set result's SHAPE too — the
+    // loss fields ride the 200 body whenever an enable/disable commit
+    // failed to clear a committed name's persisted `stopped` record, and
+    // `not.toBeNever()` stays green if the type degrades to the plain
+    // mutation result and the retry handle disappears from the typed
+    // surface. Twin of the stop-family pins below.
+    expectTypeOf<DaemonChannelSetResult>().toEqualTypeOf<{
+      changed: boolean;
+      replaced: boolean;
+      partial: boolean;
+      state: DaemonChannelControlState;
+      statePersisted?: boolean;
+      // Attribution twin: a targeted retry must be able to aim at the
+      // affected workspaces.
+      statePersistFailedWorkspaces?: string[];
+    }>();
     expectTypeOf<DaemonChannelStartupFailure>().not.toBeNever();
     expectTypeOf<DaemonChannelStartupAttemptFailure>().not.toBeNever();
-    expectTypeOf<DaemonChannelStopResult>().not.toBeNever();
+    // #8975: pin the whole-selection stop result's SHAPE too — like its
+    // per-channel sibling below, `not.toBeNever()` stays green if the
+    // type degrades to the plain mutation result and the `statePersisted`
+    // durability signal disappears from the typed surface. Compiled under
+    // tsconfig.typetest.json, which this package's `test:ci` script runs,
+    // so the required PR test jobs (root fans `npm run test:ci` out to
+    // the workspaces) enforce it.
+    expectTypeOf<DaemonChannelStopResult>().toEqualTypeOf<{
+      changed: boolean;
+      state: DaemonChannelControlState;
+      statePersisted?: boolean;
+      // R14: the attribution field rides with the loss flag so a targeted
+      // retry can aim at the affected workspaces; dropping it from the
+      // typed surface must fail the PR's typecheck.
+      statePersistFailedWorkspaces?: string[];
+    }>();
+    // #8975: pin the per-channel stop result's SHAPE, not just its
+    // existence — `not.toBeNever()` stays green if the type degrades to
+    // the plain mutation result and the `statePersisted` durability
+    // signal disappears from the typed surface. The runtime fence below
+    // (prototype check, same convention as setWorkspaceSkillsEnabled)
+    // executes under vitest, where type-only imports are erased; the
+    // package's tsconfig.typetest.json compiles this file under tsc, so
+    // dropping the re-export from src/index.ts fails typecheck too.
+    expectTypeOf<DaemonChannelStopInstanceResult>().toEqualTypeOf<{
+      snapshot: DaemonChannelsSnapshot;
+      instance: DaemonChannelInstanceSnapshot;
+      statePersisted?: boolean;
+      // R14 attribution twin of the whole-selection pin above.
+      statePersistFailedWorkspaces?: string[];
+    }>();
+    expect(typeof Public.DaemonClient.prototype.stopWorkspaceChannel).toBe(
+      'function',
+    );
+    // The workspace-scoped client carries the same stop method:
+    // pin its existence too, or a regression dropping it from the
+    // workspace client ships green while the daemon-client pin holds.
+    expect(
+      typeof Public.WorkspaceDaemonClient.prototype.stopWorkspaceChannel,
+    ).toBe('function');
+    // Tie the method's declared return type to the shape pinned above:
+    // the shape assertion exercises the standalone type
+    // declaration and the prototype checks only test existence, so a
+    // return-type regression to the sibling methods'
+    // `Promise<DaemonChannelMutationResult>` (startWorkspaceChannel /
+    // restartWorkspaceChannel share exactly it from the same private
+    // helper) compiled cleanly and shipped green — consumers lost typed
+    // access to `statePersisted`. Mirrors the setWorkspaceSkillsEnabled
+    // sibling convention. Compiled under tsconfig.typetest.json.
+    expectTypeOf<
+      ReturnType<typeof Public.DaemonClient.prototype.stopWorkspaceChannel>
+    >().resolves.toEqualTypeOf<DaemonChannelStopInstanceResult>();
+    expectTypeOf<
+      ReturnType<
+        typeof Public.WorkspaceDaemonClient.prototype.stopWorkspaceChannel
+      >
+    >().resolves.toEqualTypeOf<DaemonChannelStopInstanceResult>();
+    // The whole-selection stop method needs the same binding pin:
+    // `statePersisted` is typed for the whole-selection stop on
+    // `DaemonClient.stopChannelWorker`'s `Promise<DaemonChannelStopResult>`,
+    // and the standalone shape assertion below tests the TYPE, not the
+    // method binding — a refactor swapping the declared return type for
+    // any other existing result type compiles and ships green while typed
+    // SDK consumers lose `statePersisted` (the CLI duck-types the import,
+    // so nothing else catches it).
+    expect(typeof Public.DaemonClient.prototype.stopChannelWorker).toBe(
+      'function',
+    );
+    expectTypeOf<
+      ReturnType<typeof Public.DaemonClient.prototype.stopChannelWorker>
+    >().resolves.toEqualTypeOf<DaemonChannelStopResult>();
+    // #8975: pin the typed FAILED-stop body's SHAPE — consumers cast
+    // `DaemonHttpError.body` to it to read the durability-loss signal;
+    // `not.toBeNever()` stays green if the shape degrades. `state` rides
+    // every structured stop error body that carries the loss signal.
+    expectTypeOf<DaemonChannelStopErrorResponse>().toEqualTypeOf<{
+      error: string;
+      code: string;
+      statePersisted?: boolean;
+      // R14 attribution field on the FAILED-stop body too (a failed stop
+      // can also lose the record); consumers cast DaemonHttpError.body to
+      // this shape.
+      statePersistFailedWorkspaces?: string[];
+      state?: DaemonChannelControlState;
+    }>();
     expectTypeOf<DaemonChannelWorkerStartErrorResponse>().not.toBeNever();
     expectTypeOf<DaemonChannelStartupFailure>().toEqualTypeOf<DaemonEntryChannelStartupFailure>();
     expectTypeOf<DaemonChannelStartupAttemptFailure>().toEqualTypeOf<DaemonEntryChannelStartupAttemptFailure>();

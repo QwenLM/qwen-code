@@ -138,6 +138,8 @@ Replacing a selection preflights configuration, ownership, and trust before stop
 
 When an adapter rejects `connect()`, current worker snapshots may include `startupFailures` entries with the channel, `phase: "connect"`, an optional adapter code, and a credential-redacted message. `qwen channel set`, `qwen channel reload`, and remote `qwen channel status --daemon-url …` print these reasons. If every adapter fails during a dynamic set or reload, the command receives `502 channel_worker_start_failed`; the response reasons describe that attempt and its `state` describes the result after rollback. The failed attempt is not retained by later status requests. At most 64 reasons are retained per worker startup, and adapter codes should be treated as diagnostic rather than stable categories. Initial `qwen serve --channel …` startup still exits when no adapter connects.
 
+`--channel all` remembers explicit stops: stopping daemon-managed channels records them as `stopped` in a daemon-managed state file (not settings.json), and the next `--channel all` start skips those channels while starting the remaining configured ones. Starting a channel explicitly by name always starts it and records it as `active` again. If nothing remains to start — no channels configured, or every configured channel stopped — the daemon keeps serving with 0 channels and logs that fact instead of exiting; malformed channel configuration still fails startup when at least one channel is selected to start.
+
 The daemon also exposes read-only runtime snapshots for client UIs and
 operators: `GET /daemon/status`, `GET /workspace/mcp`,
 `GET /workspace/skills`, `GET /workspace/providers`, `GET /workspace/env`,

@@ -138,6 +138,26 @@ export interface ChannelWorkerSnapshot {
   state: ChannelWorkerState;
   channels: string[];
   requestedChannels?: string[];
+  /**
+   * The connected set from the last ready report, carried across crash
+   * restarts. During the relaunch starting window `channels` is the launch
+   * placeholder, so stop captures intersect this instead to record exactly
+   * the channels that were connected before the crash (#8975).
+   */
+  lastConnectedChannels?: string[];
+  /**
+   * The attempted set a budget-exhausted worker carried when it went
+   * terminal. `requestedChannels`/`adapters` are dropped there (they would
+   * report every channel as `starting` forever), but the manager's
+   * mode-names dead-name computation needs the FULL attempted set — not
+   * just the last ready's connected subset in `channels` — or a channel
+   * whose connect failed before the crash stays "committed" on the dead
+   * worker and its own start/stop/remove throws
+   * channel_runtime_owner_mismatch instead of relaunching it (R9-6).
+   * Internal input of that computation only; stripped from every public
+   * snapshot surface like lastConnectedChannels.
+   */
+  lastRequestedChannels?: string[];
   pid?: number;
   startedAt?: string;
   exitCode?: number | null;
@@ -816,6 +836,12 @@ export function createChannelWorkerSupervisor(
     ...(snapshot.requestedChannels
       ? { requestedChannels: [...snapshot.requestedChannels] }
       : {}),
+    ...(snapshot.lastConnectedChannels
+      ? { lastConnectedChannels: [...snapshot.lastConnectedChannels] }
+      : {}),
+    ...(snapshot.lastRequestedChannels
+      ? { lastRequestedChannels: [...snapshot.lastRequestedChannels] }
+      : {}),
     ...(snapshot.startupFailures
       ? {
           startupFailures: snapshot.startupFailures.map((failure) => ({
@@ -1006,6 +1032,39 @@ export function createChannelWorkerSupervisor(
           : 'Channel worker restart budget exhausted.',
         nextRestartAt: undefined,
       };
+      // The restart budget is exhausted, so no relaunch will ever commit a
+      // new ready report: drop the carried names and starting-state
+      // adapters. Keeping them would report every channel as `starting`
+      // forever, and an explicit per-channel start would see the channel as
+      // enabled and do nothing on the dead worker — silently swallowing the
+      // natural recovery command (#8975). Keep `lastConnectedChannels`:
+      // its only production reader is the manager's stop capture, which
+      // needs the last committed connected set on this terminal snapshot —
+      // dropping it degrades a budget-exhausted stop to the launch
+      // placeholder/attempted set, recording never-connected channels
+      // (mode-names) or nothing at all (mode-all) as stopped (#8975).
+      // Carry the attempted set into `lastRequestedChannels` BEFORE the
+      // delete: the manager's mode-names dead-name computation falls back
+      // to `channels` (the last ready's CONNECTED subset) without it,
+      // leaving a channel whose connect failed before the crash
+      // "committed" on the dead worker — its own start/stop/remove then
+      // throws channel_runtime_owner_mismatch instead of relaunching
+      // (R9-6). The stop capture deliberately ignores this field, so a
+      // never-connected channel is still not recorded as explicitly
+      // stopped (#8975).
+      if (snapshot.requestedChannels) {
+        snapshot = {
+          ...snapshot,
+          lastRequestedChannels: [...snapshot.requestedChannels],
+        };
+      }
+      delete snapshot.requestedChannels;
+      delete snapshot.adapters;
+      // Keep the enable path honest on a dead worker: the manager's
+      // committedChannelNames() must skip terminal-failed workers
+      // (state === 'failed' && nextRestartAt === undefined), or a
+      // per-channel start early-returns {changed: false} and never
+      // relaunches (#8975).
       return false;
     }
     clearRestartTimer();
@@ -1081,13 +1140,29 @@ export function createChannelWorkerSupervisor(
       }
     };
     const redaction = workerLogRedactionOptions(opts.daemonToken, env);
-    const requestedChannels = requestedChannelNames(opts.selection);
+    // A mode-`all` worker only reports real names in its ready report, so a
+    // crash restart would otherwise rebuild the snapshot with just the
+    // `['all']` placeholder; carry the last committed names across the
+    // relaunch so stops and status in the starting window see real channels
+    // (#8975).
+    const requestedChannels =
+      requestedChannelNames(opts.selection) ??
+      (kind === 'restart' ? snapshot.requestedChannels : undefined);
+    // The relaunch window's `channels` is the launch placeholder, which a
+    // stop capture cannot intersect with real names; carry the connected
+    // set from the last ready report so the capture records exactly what
+    // was connected before the crash (#8975).
+    const lastConnectedChannels =
+      kind === 'restart' ? snapshot.lastConnectedChannels : undefined;
     const startedAt = new Date().toISOString();
     snapshot = {
       enabled: true,
       state: 'starting',
       channels: channelSelectionNames(opts.selection),
       ...(requestedChannels ? { requestedChannels } : {}),
+      ...(lastConnectedChannels
+        ? { lastConnectedChannels: [...lastConnectedChannels] }
+        : {}),
       ...(requestedChannels
         ? {
             adapters: requestedChannels.map((name) => ({
@@ -1387,23 +1462,31 @@ export function createChannelWorkerSupervisor(
         settled = true;
         ready = true;
         cleanupStartupTimer();
+        // An explicit array in the ready message is authoritative even when
+        // empty: a zero-channel worker (nothing configured, or everything
+        // stopped) must not keep the `['all']` launch placeholder, or the
+        // phantom name leaks into committed names, stop routes and status
+        // (#8975).
         const next: ChannelWorkerSnapshot = {
           ...snapshot,
           state: 'running',
           pid: message.pid ?? startedChild.pid,
-          channels:
-            message.channels && message.channels.length > 0
-              ? [...message.channels]
-              : [...snapshot.channels],
+          channels: Array.isArray(message.channels)
+            ? [...message.channels]
+            : [...snapshot.channels],
         };
         delete next.error;
         delete next.lastHeartbeatAt;
         delete next.nextRestartAt;
         delete next.staleHeartbeatAt;
-        if (message.requestedChannels?.length) {
+        // Snapshot the connected set for the next crash-restart window:
+        // its `channels` reverts to the launch placeholder, and stop
+        // captures intersect this carried set instead (#8975).
+        next.lastConnectedChannels = [...next.channels];
+        if (Array.isArray(message.requestedChannels)) {
           next.requestedChannels = [...message.requestedChannels];
         }
-        const adapterNames = message.requestedChannels?.length
+        const adapterNames = Array.isArray(message.requestedChannels)
           ? message.requestedChannels
           : (next.requestedChannels ?? next.channels);
         const connected = new Set(next.channels);

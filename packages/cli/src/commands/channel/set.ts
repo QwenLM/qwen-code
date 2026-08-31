@@ -5,7 +5,11 @@
  */
 
 import type { CommandModule } from 'yargs';
-import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
+import {
+  writeStderrLine,
+  writeStdoutLine,
+  writeStdoutLineBestEffort,
+} from '../../utils/stdioHelpers.js';
 import {
   QWEN_DAEMON_TOKEN_ENV,
   QWEN_DAEMON_URL_ENV,
@@ -35,6 +39,14 @@ interface ChannelSetResultLike {
       startupFailuresTruncated?: unknown;
     }>;
   };
+  /**
+   * Present (and `false`) only when the names-mode commit succeeded but
+   * failed to clear a committed name's persisted `stopped` record —
+   * mirrors the SDK's `DaemonChannelSetResult` loss signal (#8975, R16-6).
+   */
+  statePersisted?: boolean;
+  /** Present alongside `statePersisted: false` (R14/R16-6). */
+  statePersistFailedWorkspaces?: string[];
 }
 
 interface DaemonClientLike {
@@ -140,6 +152,23 @@ export const setCommand: CommandModule<unknown, SetArgs> = {
         )) {
           writeStdoutLine(line);
         }
+      }
+      // The PUT route reports a successful names-mode commit whose clear of
+      // committed names' persisted `stopped` records did not persist;
+      // surface it like stop()'s daemon success path (R16-2) — a surviving
+      // record lets the next automatic reload-op resolve filter the name
+      // out and permanently trim the committed selection, and `set` was the
+      // only mutating surface dropping the signal (R18-1). Best-effort
+      // sink: a warning write must not terminate the process when stdout is
+      // already failing (R11-13).
+      if (result.statePersisted === false) {
+        writeStdoutLineBestEffort(
+          `[Channel] Warning: selection applied but clearing persisted stopped records failed` +
+            (result.statePersistFailedWorkspaces?.length
+              ? ` (workspaces: ${result.statePersistFailedWorkspaces.join(', ')})`
+              : '') +
+            ` — retry \`qwen channel set\` to re-clear (#8975).`,
+        );
       }
       process.exit(0);
     } catch (error) {

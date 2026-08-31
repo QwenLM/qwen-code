@@ -41,6 +41,10 @@ import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
 import { isLoopbackBind } from './loopback-binds.js';
 import { isOwnInterfaceAddress } from './local-bind-addresses.js';
 import { ChannelDeliveryAuthorizationStore } from './channel-delivery-authorization.js';
+import { ChannelStateStore } from '../commands/channel/channel-state-store.js';
+import { daemonChannelRuntimeStatePath } from '../commands/channel/runtime.js';
+import type { ServeChannelSelection } from './types.js';
+import type { ChannelWorkspaceGroup } from './channel-workspace-grouping.js';
 import * as acpBridge from '@qwen-code/acp-bridge/bridge';
 import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
 import {
@@ -649,6 +653,17 @@ const mockCreateSpawnChannelFactoryOptions = vi.hoisted(
 const mockChannelWorkerEnabledState = vi.hoisted(() => ({
   value: undefined as boolean | undefined,
 }));
+// R15-11: capture the options run-qwen-serve passes to
+// createChannelWorkerManager so the wiring tests can pin the reload
+// filter / stopped-record hooks the serve layer injects.
+const capturedChannelManagerOptions = vi.hoisted(() => ({
+  value: undefined as
+    | {
+        filterReloadSelection?: unknown;
+        clearStoppedRecords?: unknown;
+      }
+    | undefined,
+}));
 const mockTotalMemBytes = vi.hoisted(() => ({
   value: undefined as number | undefined,
 }));
@@ -706,6 +721,7 @@ vi.mock('./channel-worker-manager.js', async (importOriginal) => {
     createChannelWorkerManager: (
       ...args: Parameters<typeof actual.createChannelWorkerManager>
     ) => {
+      capturedChannelManagerOptions.value = args[0];
       const manager = actual.createChannelWorkerManager(...args);
       return {
         ...manager,
@@ -12744,6 +12760,203 @@ describe('runQwenServe channel worker supervisor', () => {
       expect(worker.deliverChannelMessage).toHaveBeenCalledWith(delivery);
     } finally {
       await handle.close();
+    }
+  });
+
+  it('wires the reload filter and stopped-record clear hooks into the channel worker manager (R15-11)', async () => {
+    // The two wiring lines in run-qwen-serve (filterReloadSelection +
+    // clearStoppedRecords) are the serve half of the R14 reload-filter
+    // contract; the manager/filter/store suites cover the units in
+    // isolation but nothing composes them. Pin that the serve layer
+    // actually injects BOTH hooks when it builds the manager, or a
+    // dropped wiring line desyncs the pair and re-opens the explicit-stop
+    // resurrection the filter exists to prevent (#8975).
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-wiring-')),
+    );
+    capturedChannelManagerOptions.value = undefined;
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+    });
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        bridge: makeFakeBridge(),
+        channelWorkerSupervisorFactory: makeReadyWorkerFactory(worker),
+        channelServicePidfile: makePidfileDeps(),
+      },
+    );
+    try {
+      await handle.runtimeReady;
+      // Read through a typed local: the `= undefined` reset above narrows
+      // the mutable ref to `undefined` under control-flow analysis (the
+      // mock's reassignment happens in a callback TS cannot track).
+      const options = capturedChannelManagerOptions.value as
+        | {
+            filterReloadSelection?: (
+              selection: ServeChannelSelection,
+              groups: readonly ChannelWorkspaceGroup[],
+            ) => ServeChannelSelection;
+            clearStoppedRecords?: (
+              groups: readonly ChannelWorkspaceGroup[],
+            ) => readonly string[];
+          }
+        | undefined;
+      expect(options).toBeDefined();
+      expect(options?.filterReloadSelection).toEqual(expect.any(Function));
+      expect(options?.clearStoppedRecords).toEqual(expect.any(Function));
+
+      // Drive the captured hooks against the daemon state path (R15-11):
+      // the existence pins alone let signature-compatible regressions
+      // ship — a tolerant readAll pre-read in the clear closure, or
+      // either closure deriving the STANDALONE state-file family. Scope
+      // the state home to this test via QWEN_HOME so the real store
+      // writes land in a throwaway dir, not the user's home.
+      const prevHome = process.env['QWEN_HOME'];
+      const stateHome = fs.mkdtempSync(
+        path.join(os.tmpdir(), 'qws-wiring-state-home-'),
+      );
+      process.env['QWEN_HOME'] = stateHome;
+      try {
+        const canonical = canonicalizeWorkspace(tmpDir);
+        const storePath = daemonChannelRuntimeStatePath(canonical);
+        new ChannelStateStore(storePath).set('telegram', 'stopped');
+        const selection: ServeChannelSelection = {
+          mode: 'names',
+          names: ['telegram'],
+        };
+        const groups: ChannelWorkspaceGroup[] = [
+          { workspaceCwd: tmpDir, selection },
+        ];
+
+        // Pre-clear: the reload filter drops the stopped name.
+        expect(options!.filterReloadSelection!(selection, groups)).toEqual({
+          mode: 'names',
+          names: [],
+        });
+
+        // A names-mode commit through the clear hook flips the record
+        // and reports no loss.
+        expect(options!.clearStoppedRecords!(groups)).toEqual([]);
+        expect(new ChannelStateStore(storePath).readAll()).toEqual({
+          telegram: 'active',
+        });
+
+        // Post-clear: the name survives the filter.
+        expect(options!.filterReloadSelection!(selection, groups)).toEqual({
+          mode: 'names',
+          names: ['telegram'],
+        });
+
+        // Fail-closed pre-read (R15-2): an unreadable state file — a
+        // directory at the path gives EISDIR on every read — reports the
+        // workspace in the failure list instead of silently degrading to
+        // a tolerant empty read, which would hide the stopped record the
+        // filter then uses to drop the name.
+        fs.rmSync(storePath, { force: true });
+        fs.mkdirSync(storePath, { recursive: true });
+        expect(options!.clearStoppedRecords!(groups)).toEqual([canonical]);
+      } finally {
+        if (prevHome === undefined) {
+          delete process.env['QWEN_HOME'];
+        } else {
+          process.env['QWEN_HOME'] = prevHome;
+        }
+        fs.rmSync(stateHome, { recursive: true, force: true });
+      }
+    } finally {
+      await handle.close();
+      capturedChannelManagerOptions.value = undefined;
+    }
+  });
+
+  it('warns at boot when the initial commit loses a stopped-record clear (R16-26)', async () => {
+    // completeRuntimeStartup used to discard startInitial's set result:
+    // a committed name whose `stopped` record could not be cleared would
+    // be filtered out by a later reload-op resolve and permanently
+    // trimmed from the committed selection with ZERO diagnostics tying
+    // the trim to the failed clear. The boot path must surface the loss
+    // — on the best-effort sink, since a warning write must not kill the
+    // daemon boot when stderr is already failing (R11-13).
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-boot-loss-')),
+    );
+    const prevHome = process.env['QWEN_HOME'];
+    const stateHome = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'qws-boot-loss-home-'),
+    );
+    process.env['QWEN_HOME'] = stateHome;
+    capturedChannelManagerOptions.value = undefined;
+    try {
+      // Block the clear BEFORE boot: a directory at the state-file path
+      // makes the fail-closed pre-read throw EISDIR, so the closure
+      // reports the workspace and the initial commit's result carries
+      // statePersisted: false. Deterministic under any uid (chmod-based
+      // injection would not fail writes as root).
+      fs.mkdirSync(
+        daemonChannelRuntimeStatePath(canonicalizeWorkspace(tmpDir)),
+        { recursive: true },
+      );
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation((() => true) as typeof process.stderr.write);
+      const worker = makeWorker({
+        enabled: true,
+        state: 'running',
+        pid: 1234,
+        channels: ['telegram'],
+      });
+      const handle = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          serveWebShell: false,
+          channelSelection: { mode: 'names', names: ['telegram'] },
+        },
+        {
+          bridge: makeFakeBridge(),
+          channelWorkerSupervisorFactory: makeReadyWorkerFactory(worker),
+          channelServicePidfile: makePidfileDeps(),
+        },
+      );
+      try {
+        // The loss must not fail the boot itself (a clear failure never
+        // fails an already-committed selection)...
+        await handle.runtimeReady;
+        // ...and must be surfaced loudly, naming the failed workspace so
+        // the trim is diagnosable.
+        expect(stderrSpy).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'could not clear persisted stopped records in workspace(s)',
+          ),
+        );
+        expect(stderrSpy).toHaveBeenCalledWith(
+          expect.stringContaining(canonicalizeWorkspace(tmpDir)),
+        );
+      } finally {
+        stderrSpy.mockRestore();
+        await handle.close();
+        capturedChannelManagerOptions.value = undefined;
+      }
+    } finally {
+      if (prevHome === undefined) {
+        delete process.env['QWEN_HOME'];
+      } else {
+        process.env['QWEN_HOME'] = prevHome;
+      }
+      fs.rmSync(stateHome, { recursive: true, force: true });
     }
   });
 

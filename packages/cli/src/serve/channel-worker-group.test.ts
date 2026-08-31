@@ -1212,6 +1212,71 @@ describe('createChannelWorkerGroup', () => {
     expect(group.snapshots()).toHaveLength(2);
   });
 
+  it('preserves a terminal-failed workspace entry against its resolved target (R20-3)', async () => {
+    // The per-channel enable/disable rebuild resolves the committed
+    // selection — including a terminal-failed worker's carried names —
+    // into target groups; reconciling the dead workspace's target would
+    // replace the terminal entry with a fresh one on a FRESH restart
+    // budget, resurrecting the crash-looping channel the budget exists
+    // to stop. With preserveWorkspaceCwds the entry is neither stopped
+    // nor replaced and no new supervisor is created for it, while the
+    // live workspaces reconcile normally.
+    const registry = fakeRegistry([
+      fakeRuntime(PRIMARY, true),
+      fakeRuntime(SECONDARY, false),
+    ]);
+    const { createSupervisor, recorded } = makeCreateSupervisor((workspace) =>
+      snapshot(workspace === SECONDARY ? { state: 'failed' } : {}),
+    );
+    const group = createChannelWorkerGroup({
+      groups: [
+        {
+          workspaceCwd: PRIMARY,
+          selection: { mode: 'names', names: ['live'] },
+        },
+        {
+          workspaceCwd: SECONDARY,
+          selection: { mode: 'names', names: ['dead'] },
+        },
+      ],
+      registry,
+      createSupervisor,
+      shared,
+    });
+    await group.start();
+    expect(recorded).toHaveLength(2);
+    expect(recorded[1]!.supervisor.start).toHaveBeenCalledTimes(1);
+
+    const result = await group.reconcile(
+      // The rebuilt selection stopped `live` (PRIMARY drops out of the
+      // targets) but still carries the dead workspace's name.
+      [
+        {
+          workspaceCwd: SECONDARY,
+          selection: { mode: 'names', names: ['dead'] },
+        },
+      ],
+      { preserveWorkspaceCwds: new Set([SECONDARY]) },
+    );
+
+    // PRIMARY's worker was torn down; the dead workspace kept its
+    // original supervisor — no stop, no replacement start, and no third
+    // supervisor created.
+    expect(result.changed).toBe(true);
+    expect(recorded).toHaveLength(2);
+    expect(recorded[0]!.opts.workspace).toBe(PRIMARY);
+    expect(recorded[0]!.supervisor.stop).toHaveBeenCalledTimes(1);
+    expect(recorded[1]!.opts.workspace).toBe(SECONDARY);
+    expect(recorded[1]!.supervisor.stop).not.toHaveBeenCalled();
+    expect(recorded[1]!.supervisor.start).toHaveBeenCalledTimes(1);
+    // The terminal snapshot survives for the recovery predicates.
+    expect(group.snapshots()).toHaveLength(1);
+    expect(group.snapshots()[0]).toMatchObject({
+      workspaceCwd: SECONDARY,
+      state: 'failed',
+    });
+  });
+
   it('coalesces concurrent reconciles onto the in-flight operation', async () => {
     const registry = fakeRegistry([fakeRuntime(PRIMARY, true)]);
     let releaseReplacement!: () => void;
@@ -1458,6 +1523,12 @@ describe('createChannelWorkerGroup', () => {
     ).rejects.toMatchObject({
       rolledBack: false,
       rollbackError: 'primary restore failed',
+      // `rolledBack` is aggregate: it is false because PRIMARY's restore
+      // failed, but SECONDARY's entry WAS restored. Callers deciding
+      // whether a specific workspace's channel is confirmed dead need
+      // the per-workspace report, or they record a stop for a channel
+      // that is relaunching (R9-4).
+      restoredWorkspaces: [SECONDARY],
     });
     expect(recorded[0]!.supervisor.start).toHaveBeenCalledTimes(2);
     expect(recorded[1]!.supervisor.start).toHaveBeenCalledTimes(2);

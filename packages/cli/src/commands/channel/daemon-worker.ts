@@ -67,11 +67,16 @@ import {
 import { isLoopbackBind } from '../../serve/loopback-binds.js';
 import { isOwnInterfaceAddress } from '../../serve/local-bind-addresses.js';
 import { ChannelLoopMcpWorkerHost } from '../../serve/channel-loop-mcp-ipc.js';
-import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
+import {
+  writeStderrLine,
+  writeStdoutLine,
+  writeStdoutLineBestEffort,
+} from '../../utils/stdioHelpers.js';
 import { resolveProxyUrl } from './proxy.js';
 import {
   createChannel,
   daemonChannelLoopPath,
+  daemonChannelRuntimeStatePath,
   daemonChannelStateDir,
   daemonObservedContactsPath,
   daemonSessionRoutesPath,
@@ -85,6 +90,11 @@ import {
   selectFirstModel,
   type ParsedChannel,
 } from './runtime.js';
+import {
+  ChannelStateStore,
+  selectActiveChannels,
+  type ChannelRuntimeState,
+} from './channel-state-store.js';
 import { BridgeChannelMemoryIntentClassifier } from './memory-intent-classifier.js';
 import {
   OBSERVED_CONTACT_MAX_FRESH_WITHIN_SECONDS,
@@ -290,11 +300,10 @@ function selectedChannelNames(
   channelsConfig: Record<string, unknown>,
   selection: ServeChannelSelection,
 ): string[] {
+  // An empty name list is legitimate for `--channel all` with no configured
+  // channels; the caller degrades to serving with 0 channels (#8975).
   const names =
     selection.mode === 'all' ? Object.keys(channelsConfig) : selection.names;
-  if (names.length === 0) {
-    throw new Error('No channels configured in settings.json.');
-  }
   for (const name of names) {
     if (!channelsConfig[name]) {
       throw new Error(`Channel "${name}" not found in settings.`);
@@ -479,8 +488,105 @@ export async function runChannelDaemonWorker(
   );
   const channelsConfig = loadChannelsConfig(daemonWorkspace, settings);
   const names = selectedChannelNames(channelsConfig, opts.selection);
+  const stateStore = new ChannelStateStore(
+    daemonChannelRuntimeStatePath(daemonWorkspace),
+  );
+  // Restore semantics (#8975): `--channel all` skips channels explicitly
+  // stopped before the last restart; channels without recorded state are
+  // treated as active. Explicit name selections force-start regardless of
+  // persisted state.
+  let selectedNames = names;
+  if (opts.selection.mode === 'all') {
+    let states: Record<string, ChannelRuntimeState>;
+    try {
+      // Drop entries for channels removed from settings so they cannot be
+      // skipped forever by a stale `stopped` record. Never prune with an
+      // empty configured set (e.g. settings transiently recovered to
+      // empty): the store no-ops prune([]) today, but keep this
+      // caller-side guard so a future store change cannot turn an empty
+      // read into a wipe of every recorded stop, resurrecting exactly
+      // the channels #8975 must keep stopped.
+      states =
+        names.length > 0 ? stateStore.prune(names) : stateStore.readAll();
+    } catch {
+      // prune throws on ANY store failure — a transient READ failure
+      // (applyChange rethrows every non-ENOENT read error) as well as a
+      // write failure. Fall back to whatever is still readable; when that
+      // is empty, say so: selecting from an empty map treats every
+      // configured channel as active, including explicitly stopped ones
+      // (#8975). Best-effort sink (R11-13).
+      states = stateStore.readAll();
+      writeStdoutLineBestEffort(
+        Object.keys(states).length === 0
+          ? '[Channel] Warning: no recorded channel state readable; treating all channels as active.'
+          : '[Channel] Warning: failed to update channel state; falling back to recorded states.',
+      );
+    }
+    // Skip notices are best-effort diagnostics: a dead stdout reader must
+    // not kill the worker start (R11-13).
+    selectedNames = selectActiveChannels(
+      names,
+      states,
+      writeStdoutLineBestEffort,
+    );
+  } else if (Object.keys(channelsConfig).length > 0) {
+    // Names mode also prunes, and by the FULL configured set, not the
+    // selection (R14-11): the store's freshness guarantee ("a channel
+    // removed from settings and re-added later is not skipped forever by
+    // a stale `stopped` entry") must not depend on an all-mode start
+    // happening inside the removal window. Pruning by the selection
+    // instead would delete the records of configured-but-unselected
+    // channels — resurrecting exactly the channels #8975 keeps stopped.
+    // Selection here never consults records (explicit names force-start),
+    // so a prune failure must not block the start — best-effort warning
+    // only (R11-13).
+    try {
+      stateStore.prune(Object.keys(channelsConfig));
+    } catch {
+      writeStdoutLineBestEffort(
+        '[Channel] Warning: failed to update channel state; continuing with the explicit selection.',
+      );
+    }
+  }
+  if (selectedNames.length === 0) {
+    // Zero-channel degrade notice: the worker survives with no channels,
+    // so the notice is best-effort and must not crash it when stdout is
+    // the thing that is failing (R11-13).
+    writeStdoutLineBestEffort(
+      names.length === 0
+        ? '[Channel] No channels configured; serving with 0 channels.'
+        : '[Channel] All configured channels are stopped; serving with 0 channels.',
+    );
+    opts.sendReady?.({
+      channels: [],
+      requestedChannels: [],
+      pid: process.pid,
+    });
+    return {
+      channels: [],
+      async deliverChannelMessage(request: ChannelDeliveryRequest) {
+        throw new ChannelDeliveryError(
+          'channel_worker_unavailable',
+          `Channel "${request.channelName}" is not running.`,
+        );
+      },
+      validateWebhookTask(task: ChannelWebhookTask): void {
+        throw new Error(
+          `Channel "${sanitizeLogText(task.channelName, 128)}" is not running.`,
+        );
+      },
+      async runWebhookTask(task: ChannelWebhookTask) {
+        throw new Error(
+          `Channel "${sanitizeLogText(task.channelName, 128)}" is not running.`,
+        );
+      },
+      async close() {
+        // No runtime was started; nothing to tear down.
+      },
+    };
+  }
   const parsed = await abortableStartup(
-    parseConfiguredChannels(channelsConfig, names, {
+    parseConfiguredChannels(channelsConfig, selectedNames, {
       defaultCwd: daemonWorkspace,
     }),
     startupSignal,
@@ -712,6 +818,20 @@ export async function runChannelDaemonWorker(
       }
     }
 
+    // One batched best-effort write after the connect loop instead of a
+    // fsync'd read-modify-write per channel on the startup critical path.
+    // A failed write leaves stale `stopped` records: the channels ARE
+    // running, so warn instead of failing the start — but surface the loss
+    // like the stop direction does, or the next `--channel all` restore
+    // skips channels the user explicitly asked for (#8975).
+    if (!stateStore.trySetMany(connected, 'active')) {
+      // Best-effort sink: a warning write must not terminate the worker
+      // when stdout is already failing (R11-13).
+      writeStdoutLineBestEffort(
+        '[Channel] Warning: could not persist the active record; --channel all may still skip this channel.',
+      );
+    }
+
     if (connected.length === 0) {
       throw new Error('No channels connected.');
     }
@@ -773,7 +893,9 @@ export async function runChannelDaemonWorker(
       validateWebhookTask(task: ChannelWebhookTask): void {
         const channel = channels.get(task.channelName);
         if (!channel || !connected.includes(task.channelName)) {
-          throw new Error(`Channel "${task.channelName}" is not running.`);
+          throw new Error(
+            `Channel "${sanitizeLogText(task.channelName, 128)}" is not running.`,
+          );
         }
         channel.validateWebhookTask(task);
       },
@@ -783,7 +905,9 @@ export async function runChannelDaemonWorker(
       ): Promise<void> {
         const channel = channels.get(task.channelName);
         if (!channel || !connected.includes(task.channelName)) {
-          throw new Error(`Channel "${task.channelName}" is not running.`);
+          throw new Error(
+            `Channel "${sanitizeLogText(task.channelName, 128)}" is not running.`,
+          );
         }
         if (options) {
           await channel.runWebhookTask(task, options);

@@ -8,6 +8,8 @@ import type { Application, Request, RequestHandler, Response } from 'express';
 import { redactLogCredentials } from '@qwen-code/acp-bridge/logRedaction';
 import { MAX_WORKSPACE_PATH_LENGTH } from '@qwen-code/acp-bridge/workspacePaths';
 import { sanitizeLogText } from '@qwen-code/channel-base';
+import { ChannelStateStore } from '../../commands/channel/channel-state-store.js';
+import { daemonChannelRuntimeStatePath } from '../../commands/channel/runtime.js';
 import { normalizeServeChannelSelection } from '../channel-selection.js';
 import {
   MAX_CHANNEL_STARTUP_FAILURES,
@@ -16,6 +18,7 @@ import {
   MAX_CHANNEL_STARTUP_FAILURE_MESSAGE_LENGTH,
 } from '../channel-worker-startup-ipc.js';
 import { normalizeWorkerDiagnostic } from '../channel-worker-diagnostics.js';
+import { ChannelWorkerControlError } from '../channel-worker-manager.js';
 import type {
   ChannelWorkerControlState,
   ChannelWorkerSetResult,
@@ -195,6 +198,7 @@ function sendChannelControlError(
   res: Response,
   error: unknown,
   getState: () => ChannelWorkerControlState,
+  extraBody?: Record<string, unknown>,
 ): boolean {
   const code =
     error && typeof error === 'object' && 'code' in error
@@ -273,8 +277,49 @@ function sendChannelControlError(
       ? startupFailureResponseFields(error)
       : {}),
     state: getState(),
+    // Route-supplied persistence signals (e.g. a lost stop record) ride on
+    // the structured error body, mirroring the success path (#8975).
+    ...extraBody,
   });
   return true;
+}
+
+/**
+ * Best-effort persistence of an explicit stop: a later `--channel all`
+ * restart must not bring these channels back (#8975). Recorded from the
+ * manager's stop result — the names torn down at commit time — because a
+ * pre-stop snapshot of the control state can race an in-flight start.
+ * Shared by the whole-selection DELETE route and the channel management
+ * service's per-channel stop routes, which tear down through the same
+ * manager and persist its torn-down set the same way. Returns the
+ * workspaces whose state write FAILED (empty = every group persisted);
+ * a failed write must be surfaced to the caller, or automation treats
+ * the stop as durable and the stopped channels silently resurrect on the
+ * next restart. The per-workspace identity matters: a partial
+ * multi-workspace failure surfaced as a bare boolean gives the client no
+ * handle for a targeted retry, and a re-issued stop takes the
+ * `{changed: false}` single-name path that can never re-record the OTHER
+ * workspace's torn-down set (R14).
+ */
+export function recordChannelsStopped(
+  groups:
+    | ReadonlyArray<{
+        readonly workspaceCwd: string;
+        readonly names: readonly string[];
+      }>
+    | undefined,
+): string[] {
+  const failedWorkspaces: string[] = [];
+  for (const { workspaceCwd, names } of groups ?? []) {
+    if (
+      !new ChannelStateStore(
+        daemonChannelRuntimeStatePath(workspaceCwd),
+      ).trySetMany(names, 'stopped')
+    ) {
+      failedWorkspaces.push(workspaceCwd);
+    }
+  }
+  return failedWorkspaces;
 }
 
 export function registerWorkspaceChannelControlRoutes(
@@ -334,10 +379,61 @@ export function registerWorkspaceChannelControlRoutes(
           return;
         }
         try {
-          res.status(200).json(await deps.stopChannelWorker!());
+          const result = await deps.stopChannelWorker!();
+          const persistFailedWorkspaces = recordChannelsStopped(
+            result.stoppedChannels,
+          );
+          // Strip the internal manager→route persistence plumbing before
+          // responding: `stoppedChannels` (per-workspace tear-down
+          // grouping) is not part of the documented response shape, and a
+          // raw API client must not start depending on it — the PUT route
+          // establishes the same stripping convention for `created`
+          // (#8975).
+          const { stoppedChannels: _stoppedChannels, ...response } = result;
+          res.status(200).json({
+            ...response,
+            // Only on failure: the happy-path response shape stays
+            // unchanged, but an API client must be able to tell that the
+            // stop record did not persist and the stop is not durable —
+            // and WHICH workspaces lost their records, so a retry can
+            // target the affected channels (#8975, R14).
+            ...(persistFailedWorkspaces.length === 0
+              ? {}
+              : {
+                  statePersisted: false,
+                  statePersistFailedWorkspaces: persistFailedWorkspaces,
+                }),
+          });
         } catch (error) {
+          // A failed stop can still have torn down workers (partial
+          // multi-workspace failure, or a lease-release failure after a
+          // successful tear-down). The manager carries the captured set on
+          // the error; persist it here too, or those channels resurrect on
+          // the next `--channel all` start (#8975).
+          let persistFailedWorkspaces: string[] = [];
           if (
-            sendChannelControlError(res, error, deps.getChannelWorkerControl)
+            error instanceof ChannelWorkerControlError &&
+            error.stoppedChannels
+          ) {
+            persistFailedWorkspaces = recordChannelsStopped(
+              error.stoppedChannels,
+            );
+          }
+          if (
+            sendChannelControlError(res, error, deps.getChannelWorkerControl, {
+              // A failed stop whose torn-down record ALSO failed to persist
+              // gives the client no retry handle (a release() failure
+              // clears the group before any retry could re-capture the
+              // names), so the error body must carry the loss — mirroring
+              // the success path's statePersisted field (#8975) and the
+              // failed workspaces (R14).
+              ...(persistFailedWorkspaces.length === 0
+                ? {}
+                : {
+                    statePersisted: false,
+                    statePersistFailedWorkspaces: persistFailedWorkspaces,
+                  }),
+            })
           ) {
             return;
           }

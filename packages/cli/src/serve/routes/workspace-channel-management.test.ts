@@ -488,6 +488,133 @@ describe('workspace Channel management routes', () => {
     expect(response.body.code).toBe('channel_pairing_approval_not_found');
   });
 
+  it('returns 409 when a stop cannot be confirmed while the worker starts (#8975)', async () => {
+    const { app, primaryService } = mount();
+    vi.mocked(primaryService.stop).mockRejectedValueOnce(
+      Object.assign(
+        new Error('Channel "bot" cannot be stopped while starting.'),
+        { code: 'channel_worker_starting' },
+      ),
+    );
+
+    const response = await auth(
+      request(app).post('/workspace/channels/bot/stop'),
+    );
+
+    expect(response.status).toBe(409);
+    expect(response.body.code).toBe('channel_worker_starting');
+  });
+
+  it('returns 500 with the structured code when the stopped record cannot be cleared (R14-6)', async () => {
+    // Route-level twin of the 409 mapping pin for the OTHER new code this
+    // PR added: `clearStoppedRecord` fails on
+    // POST /workspace/channels/<name>/start|restart when the persisted
+    // stopped record cannot be cleared. If the ERROR_STATUS line is
+    // dropped in a future reordering, sendManagementError falls into the
+    // unstructured fallback and the client loses the signal that
+    // distinguishes "stopped record could not be cleared" from an opaque
+    // failure — the service test only pins the rejection code, never the
+    // HTTP mapping.
+    const { app, primaryService } = mount();
+    vi.mocked(primaryService.start).mockRejectedValueOnce(
+      Object.assign(
+        new Error(
+          'Channel "bot" cannot be started: its persisted stopped record could not be cleared.',
+        ),
+        { code: 'channel_state_persist_failed' },
+      ),
+    );
+
+    const response = await auth(
+      request(app).post('/workspace/channels/bot/start'),
+    );
+
+    expect(response.status).toBe(500);
+    expect(response.body.code).toBe('channel_state_persist_failed');
+  });
+
+  it('carries statePersisted on the failed stop body when the record was lost (#8975)', async () => {
+    const { app, primaryService } = mount();
+    // A per-channel stop that already tore down workers before failing:
+    // the service persists the carried set best-effort and marks the
+    // rethrown error when that write also fails. The client has no retry
+    // handle (the group is cleared), so the 500 body must carry the loss
+    // — mirroring the DELETE route's statePersisted field (#8975).
+    vi.mocked(primaryService.stop).mockRejectedValueOnce(
+      Object.assign(new Error('Stop failed after tear-down.'), {
+        code: 'channel_worker_stop_failed',
+        statePersisted: false,
+        statePersistFailedWorkspaces: ['/workspace/a'],
+      }),
+    );
+
+    const response = await auth(
+      request(app).post('/workspace/channels/bot/stop'),
+    );
+
+    expect(response.status).toBe(500);
+    expect(response.body.code).toBe('channel_worker_stop_failed');
+    expect(response.body.statePersisted).toBe(false);
+    // The error body mirrors the attribution the service carries (R14).
+    expect(response.body.statePersistFailedWorkspaces).toEqual([
+      '/workspace/a',
+    ]);
+  });
+
+  it('keeps the failed stop body shape when the record persisted (#8975)', async () => {
+    const { app, primaryService } = mount();
+    vi.mocked(primaryService.stop).mockRejectedValueOnce(
+      Object.assign(new Error('Stop failed after tear-down.'), {
+        code: 'channel_worker_stop_failed',
+      }),
+    );
+
+    const response = await auth(
+      request(app).post('/workspace/channels/bot/stop'),
+    );
+
+    expect(response.status).toBe(500);
+    expect(response.body.code).toBe('channel_worker_stop_failed');
+    expect(response.body).not.toHaveProperty('statePersisted');
+    expect(response.body).not.toHaveProperty('statePersistFailedWorkspaces');
+  });
+
+  it('carries statePersisted on the successful stop body when the record was lost (#8975)', async () => {
+    const { app, primaryService } = mount();
+    // Happy-path twin of the 500 pin: the route handler is the generic
+    // `res.status(200).json(await service.stop(name))` passthrough and
+    // the default route mock resolves without the field, so a reshape
+    // that destructures statePersisted out of the success payload would
+    // drop it with every other test green. The SDK's
+    // DaemonChannelStopInstanceResult.statePersisted would then read
+    // undefined, the client would report the stop as durable, and the
+    // stopped channel would silently resurrect on `--channel all`
+    // (#8975).
+    vi.mocked(primaryService.stop).mockResolvedValueOnce({
+      snapshot: { revision: 'r2', instances: {} },
+      instance: {
+        name: 'bot',
+        config: {},
+        secrets: {},
+        startsWithServe: false,
+        runtime: { state: 'stopped' },
+      },
+      statePersisted: false,
+      statePersistFailedWorkspaces: ['/workspace/a'],
+    });
+
+    const response = await auth(
+      request(app).post('/workspace/channels/bot/stop'),
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.statePersisted).toBe(false);
+    // The success passthrough keeps the attribution too (R14).
+    expect(response.body.statePersistFailedWorkspaces).toEqual([
+      '/workspace/a',
+    ]);
+  });
+
   it('rejects requests with an invalid client ID', async () => {
     const { app, primaryService } = mount();
     const invalidClient = (test: request.Test) =>

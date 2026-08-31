@@ -378,6 +378,12 @@ describe('sanitizeLogText', () => {
     expect(out).not.toContain(PS);
     expect(out).not.toContain(RLO);
     expect(out).not.toContain(PDI);
+    // Also pin the ABSENCE of a REAL newline (R14-9): a mutation
+    // normalizing NEL/U+2028/U+2029 to a real '\n' passes the raw-char
+    // negatives above while re-opening log-line forgery at every audit
+    // call site, which writes the result straight to a single line.
+    expect(out).not.toContain('\n');
+    expect(out).not.toContain('\r');
   });
 
   it('neutralizes format characters that can visually hide inside text', () => {

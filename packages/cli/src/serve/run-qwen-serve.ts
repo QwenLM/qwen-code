@@ -21,7 +21,11 @@ import express, {
   type RequestHandler,
   type Response,
 } from 'express';
-import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
+import {
+  writeStderrLine,
+  writeStderrLineBestEffort,
+  writeStdoutLine,
+} from '../utils/stdioHelpers.js';
 import { isWithinRoot } from '../config/path-comparison.js';
 import {
   acquireInheritedLoaderEnvScrub,
@@ -171,6 +175,7 @@ import type { AcpHttpHandle } from './acp-http/index.js';
 import { resolveAcpHttpEnabled } from './acp-http-enabled.js';
 import type { ChannelManagementService } from './channel-management-service.js';
 import type { WorkspaceRuntimeRemovalController } from './routes/workspace-management.js';
+import { createDaemonReloadSelectionFilter } from './channel-reload-filter.js';
 import {
   allowOriginMode,
   listenerMaxConnections,
@@ -1900,6 +1905,8 @@ type ChannelWorkerRuntime = {
   ): ChannelWorkerSupervisor;
   channelServicePidfile: ChannelServicePidfile;
   loadChannelsConfig: (typeof import('../commands/channel/runtime.js'))['loadChannelsConfig'];
+  daemonChannelRuntimeStatePath: (typeof import('../commands/channel/runtime.js'))['daemonChannelRuntimeStatePath'];
+  ChannelStateStore: (typeof import('../commands/channel/channel-state-store.js'))['ChannelStateStore'];
   createChannelWorkerGroup: (typeof import('./channel-worker-group.js'))['createChannelWorkerGroup'];
   createChannelWorkerManager: (
     opts: CreateChannelWorkerManagerOptions,
@@ -1920,6 +1927,7 @@ async function loadChannelWorkerRuntime(): Promise<ChannelWorkerRuntime> {
     import('../commands/channel/cli-entry-path.js'),
     import('./channel-worker-group.js'),
     import('./channel-worker-manager.js'),
+    import('../commands/channel/channel-state-store.js'),
   ])
     .then(
       ([
@@ -1929,11 +1937,15 @@ async function loadChannelWorkerRuntime(): Promise<ChannelWorkerRuntime> {
         cliEntryPath,
         workerGroup,
         workerManager,
+        channelStateStore,
       ]) => ({
         createChannelWorkerSupervisor: supervisor.createChannelWorkerSupervisor,
         resolveWorkerCaCertPath: supervisor.resolveWorkerCaCertPath,
         channelServicePidfile: pidfile,
         loadChannelsConfig: channelRuntime.loadChannelsConfig,
+        daemonChannelRuntimeStatePath:
+          channelRuntime.daemonChannelRuntimeStatePath,
+        ChannelStateStore: channelStateStore.ChannelStateStore,
         createChannelWorkerGroup: workerGroup.createChannelWorkerGroup,
         createChannelWorkerManager: workerManager.createChannelWorkerManager,
         findCliEntryPath: cliEntryPath.findCliEntryPath,
@@ -8658,6 +8670,88 @@ async function runQwenServeImpl(
               }
             }
           }
+          // R14: a names-mode recovery reconcile from the full untrimmed
+          // committedSelection force-starts explicitly stopped SIBLING
+          // channels — the mode-`all` worker's restore filter protects only
+          // mode-`all` selections. Drop names carrying a persisted
+          // `stopped` record before every reload-operation resolve;
+          // explicit by-name start/restart clear the target's own record
+          // before the recovery reload, so the requested name survives.
+          // Never-fails: unreadable state degrades to keeping the name
+          // (the pre-R14 behavior) (#8975). The closure lives in
+          // channel-reload-filter (ACP-free, so it respects the serve
+          // fast-path import boundary), mirroring the stop-record
+          // contract, so its filtering logic is directly testable (R14-5).
+          // The state access is dependency-injected from this lazily
+          // loaded runtime: a static import of the channel command graph
+          // in channel-reload-filter would drag the settings/extension
+          // closure into the serve fast-path bundle (check-serve-fast-
+          // path-bundle), while injection keeps the production derivation
+          // — the same canonicalization and daemon state file the stop
+          // side writes (#8975).
+          const filterReloadSelection = createDaemonReloadSelectionFilter({
+            canonicalizeWorkspace,
+            readRuntimeStates: (canonicalWorkspaceCwd) =>
+              new workerRuntime.ChannelStateStore(
+                workerRuntime.daemonChannelRuntimeStatePath(
+                  canonicalWorkspaceCwd,
+                ),
+              ).readAll(),
+          });
+          // R14: the explicit-set side of the reload-filter contract. An
+          // explicit names-mode (re-)commit force-starts, but its
+          // pre-existing `stopped` records survive the commit; an
+          // automatic reload-op resolve before the worker connects
+          // (workspace attach/detach -> refreshWorkspaces) then filters
+          // the still-starting name out and leaves it committed-but-
+          // ownerless with the record never cleared. Clear the committed
+          // names' records on commit so the filter cannot drop them.
+          // mode-`all` groups keep their records (`--channel all` honors
+          // them by design). Never throws — a clear failure must not
+          // fail an already-committed selection — but reports the failed
+          // workspaces: post-R14 a surviving record means the filter
+          // DROPS the name and a later reload-op permanently trims the
+          // committed selection, so the loss rides the set result as
+          // statePersisted: false (the "degrades to the pre-fix window"
+          // framing predates the filter and was wrong, R15-19).
+          const clearStoppedRecords = (
+            groups: readonly ChannelWorkspaceGroup[],
+          ): string[] => {
+            const failedWorkspaces: string[] = [];
+            for (const target of groups) {
+              if (target.selection.mode !== 'names') continue;
+              let canonical: string;
+              try {
+                canonical = canonicalizeWorkspace(target.workspaceCwd);
+              } catch {
+                canonical = path.resolve(target.workspaceCwd);
+              }
+              const store = new workerRuntime.ChannelStateStore(
+                workerRuntime.daemonChannelRuntimeStatePath(canonical),
+              );
+              // Fail-closed pre-read (the service-side clearStoppedRecord
+              // twin, R15-2): readAll() swallows non-ENOENT failures as
+              // an empty map, which would hide a stopped record that the
+              // filter then uses to drop the name. prune([]) reads
+              // through the writers' fail-closed path without writing; a
+              // throw means the record is UNKNOWN — report the loss.
+              let states: Record<string, 'active' | 'stopped'>;
+              try {
+                states = store.prune([]);
+              } catch {
+                failedWorkspaces.push(canonical);
+                continue;
+              }
+              let failedHere = false;
+              for (const name of target.selection.names) {
+                if (states[name] === 'stopped') {
+                  if (!store.trySet(name, 'active')) failedHere = true;
+                }
+              }
+              if (failedHere) failedWorkspaces.push(canonical);
+            }
+            return failedWorkspaces;
+          };
           const createSupervisor =
             deps.channelWorkerSupervisorFactory ??
             workerRuntime.createChannelWorkerSupervisor;
@@ -8715,6 +8809,8 @@ async function runQwenServeImpl(
           channelWorkerManager = workerRuntime.createChannelWorkerManager({
             resolveGroups: (selection, operation) =>
               resolveRuntimeChannelGroups(selection, candidateApp, operation),
+            filterReloadSelection,
+            clearStoppedRecords,
             createGroup,
             reserveLease: reserveChannelServicePidfile,
             releaseLease: () => {
@@ -8763,7 +8859,30 @@ async function runQwenServeImpl(
         if (opts.channelSelection) {
           closeServerAfterChannelWorkerStartupFailure = true;
           const manager = await ensureChannelWorkerManager!();
-          await manager.startInitial(opts.channelSelection);
+          const initialCommit = await manager.startInitial(
+            opts.channelSelection,
+          );
+          // The clearStoppedRecords closure reports its failed workspaces
+          // on the set result, but pre-R16-26 the boot path discarded the
+          // result: a committed name whose `stopped` record could not be
+          // cleared would be filtered out by a later reload-op resolve and
+          // permanently trimmed from the committed selection with ZERO
+          // diagnostics tying the trim to the failed clear. Surface the
+          // loss loudly — the manager's option contract says a clear
+          // failure "must not be SILENT either" (#8975, R16-26).
+          // Best-effort sink: a warning write must not kill the daemon
+          // boot when stderr is already failing (R11-13).
+          if (initialCommit.statePersisted === false) {
+            const failedWorkspaces =
+              initialCommit.statePersistFailedWorkspaces ?? [];
+            writeStderrLineBestEffort(
+              `[Channel] Warning: could not clear persisted stopped records in workspace(s) ${
+                failedWorkspaces.length > 0
+                  ? failedWorkspaces.join(', ')
+                  : 'unknown'
+              }; the affected channels may be dropped from the committed selection on the next reload.`,
+            );
+          }
           if (runtimeStartupSettled) return;
         }
         if (runtimeStartupSettled) return;

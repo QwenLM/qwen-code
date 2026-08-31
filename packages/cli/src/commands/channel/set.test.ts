@@ -12,11 +12,13 @@ const mockDaemonClient = vi.hoisted(() =>
 );
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
+const mockWriteStdoutLineBestEffort = vi.hoisted(() => vi.fn());
 
 vi.mock('@qwen-code/sdk/daemon', () => ({ DaemonClient: mockDaemonClient }));
 vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStdoutLine: mockWriteStdoutLine,
   writeStderrLine: mockWriteStderrLine,
+  writeStdoutLineBestEffort: mockWriteStdoutLineBestEffort,
 }));
 
 import { setCommand } from './set.js';
@@ -156,5 +158,44 @@ describe('channel set command', () => {
       '[Channel] Startup failure (workspace=/work, channel=telegram, phase=connect): invalid token',
     );
     expect(process.exit).toHaveBeenCalledWith(1);
+  });
+
+  it('warns when the selection applied but clearing persisted stopped records failed (R18-1)', async () => {
+    // The PUT route rides the loss on the success body; the handler must
+    // surface it like stop()'s daemon success path (R16-2) instead of
+    // exiting 0 silently — a surviving record lets the next reload-op
+    // resolve trim the committed selection. The warning uses the
+    // best-effort sink so a failing stdout cannot kill the process
+    // (R11-13), and it must not flip the exit code (R18-1).
+    mockSetSelection.mockResolvedValueOnce({
+      changed: true,
+      replaced: true,
+      partial: false,
+      state: {
+        transition: 'idle',
+        workers: [
+          { workspaceCwd: '/work', state: 'running', channels: ['bot1'] },
+        ],
+      },
+      statePersisted: false,
+      statePersistFailedWorkspaces: ['/work'],
+    });
+
+    await runHandler({ names: ['bot1'] });
+
+    expect(mockWriteStdoutLineBestEffort).toHaveBeenCalledWith(
+      expect.stringContaining('clearing persisted stopped records failed'),
+    );
+    expect(mockWriteStdoutLineBestEffort).toHaveBeenCalledWith(
+      expect.stringContaining('/work'),
+    );
+    expect(process.exit).toHaveBeenCalledWith(0);
+  });
+
+  it('does not warn when the selection persisted cleanly (R18-1)', async () => {
+    await runHandler({ names: ['telegram'] });
+
+    expect(mockWriteStdoutLineBestEffort).not.toHaveBeenCalled();
+    expect(process.exit).toHaveBeenCalledWith(0);
   });
 });

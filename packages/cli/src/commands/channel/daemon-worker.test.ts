@@ -40,6 +40,83 @@ const mockDaemonChannelStateDir = vi.hoisted(() =>
       `/tmp/qwen/channels/daemon/${workspace === '/workspace' ? 'workspace-hash' : 'other-hash'}/instances/${channelName}-hash`,
   ),
 );
+const mockDaemonChannelRuntimeStatePath = vi.hoisted(() =>
+  // Argument-derived on purpose (mirrors the instanceDir mock above): the
+  // real helper hashes the workspace, so two different arguments are two
+  // different files. A constant mock would let a split derivation (one
+  // call for the assertion, another for the store, or the store built
+  // from a different workspace than this worker's) coincide by accident
+  // and ship green — resurrecting explicitly stopped channels (R9-26).
+  vi.fn((workspace?: string) =>
+    workspace === undefined
+      ? '/tmp/qwen/channels/daemon/legacy/channel-state.json'
+      : `/tmp/qwen/channels/daemon/${
+          workspace === '/workspace' ? 'workspace-hash' : 'other-hash'
+        }/channel-state.json`,
+  ),
+);
+const mockChannelStateStoreReadAll = vi.hoisted(() => vi.fn(() => ({})));
+const mockChannelStateStoreSet = vi.hoisted(() => vi.fn());
+const mockChannelStateStoreSetMany = vi.hoisted(() => vi.fn());
+const mockChannelStateStorePrune = vi.hoisted(() =>
+  vi.fn(() => mockChannelStateStoreReadAll()),
+);
+const mockChannelStateStore = vi.hoisted(() =>
+  vi.fn(() => ({
+    readAll: mockChannelStateStoreReadAll,
+    set: mockChannelStateStoreSet,
+    setMany: mockChannelStateStoreSetMany,
+    prune: mockChannelStateStorePrune,
+    // Mirror the real best-effort wrappers so throwing `set`/`setMany`
+    // mocks still exercise "persistence failure never blocks a connect".
+    // Return the persistence boolean like the real store: callers surface a
+    // failed write (#8975).
+    trySet: (name: string, state: 'active' | 'stopped') => {
+      try {
+        mockChannelStateStoreSet(name, state);
+        return true;
+      } catch {
+        // best-effort
+        return false;
+      }
+    },
+    trySetMany: (names: string[], state: 'active' | 'stopped') => {
+      // Mirror the real setMany: an empty name list is a no-op and must
+      // not be recorded, or tests diverge from production in both
+      // directions (the all-channels-fail path reaches trySetMany([])).
+      if (names.length === 0) return true;
+      try {
+        mockChannelStateStoreSetMany(names, state);
+        return true;
+      } catch {
+        // best-effort
+        return false;
+      }
+    },
+  })),
+);
+const mockSelectActiveChannels = vi.hoisted(
+  () =>
+    (
+      names: readonly string[],
+      states: Record<string, 'active' | 'stopped'>,
+      onSkipped?: (message: string) => void,
+    ): string[] =>
+      names.filter((name) => {
+        if (states[name] === 'stopped') {
+          // Route the name through the SAME sanitizer mock the module
+          // under test uses (R14): the real helper embeds
+          // sanitizeLogText(name, 128), so a hand-copied message here
+          // would keep asserting the old format if the production
+          // sanitization (or its arguments) ever changed.
+          onSkipped?.(
+            `[Channel] "${mockSanitizeLogText(name, 128)}" skipped (stopped before restart)`,
+          );
+          return false;
+        }
+        return true;
+      }),
+);
 const mockObserveContact = vi.hoisted(() => vi.fn());
 const mockListContacts = vi.hoisted(() => vi.fn());
 const mockObservedContactStore = vi.hoisted(() =>
@@ -69,6 +146,7 @@ const mockResolveProxyUrl = vi.hoisted(() =>
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 const mockWriteStderrLineSafe = vi.hoisted(() => vi.fn());
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
+const mockWriteStdoutLineBestEffort = vi.hoisted(() => vi.fn());
 const mockSelectFirstModel = vi.hoisted(() =>
   vi.fn(
     (
@@ -93,7 +171,29 @@ const mockSelectFirstModel = vi.hoisted(() =>
   ),
 );
 const mockSanitizeLogText = vi.hoisted(() =>
-  vi.fn((value: unknown) => String(value).replace(/[\r\n]/g, ' ')),
+  // Mirror the REAL sanitizeLogText contract (channels/base/sanitize.ts)
+  // — cap by code points, render a real `\n` as the visible `\n` escape,
+  // then strip the C1/Unicode line-break + bidi block and the C0/DEL
+  // controls. This suite pins the not-running classifier contract
+  // end-to-end (R14-10), so the stand-in must strip the same characters
+  // the real helper does; a CR/LF-only stand-in would let NEL/U+2028/
+  // U+2029 (all rendered line breaks) through and falsify the pin.
+  vi.fn((value: unknown, maxLen?: number) => {
+    const capped =
+      maxLen === undefined
+        ? String(value)
+        : Array.from(String(value)).slice(0, maxLen).join('');
+    return (
+      capped
+        .replace(/\n/g, '\\n')
+        .replace(
+          /[\u0080-\u009f\p{Cf}\u2028\u2029]|\p{Variation_Selector}/gu,
+          ' ',
+        )
+        // eslint-disable-next-line no-control-regex
+        .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    );
+  }),
 );
 const mockIsChannelProactiveDeliveryError = vi.hoisted(() =>
   vi.fn(
@@ -242,6 +342,16 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStderrLine: mockWriteStderrLine,
   writeStderrLineSafe: mockWriteStderrLineSafe,
   writeStdoutLine: mockWriteStdoutLine,
+  // OWN mock, de-aliased from the loud sink (R12-3): with a shared mock,
+  // swapping a best-effort diagnostic (the prune-fallback warning, the
+  // skip notices, the zero-channel degrade notice, the active-record loss
+  // warning) back to the loud `writeStdoutLine` ships every pin green,
+  // while in production a failing stdout target — the same disk condition
+  // that fails the state writes these diagnostics accompany — raises the
+  // async stdout 'error' event and kills the worker mid-startup. The
+  // EPIPE-crash resilience of the real helper itself is pinned in
+  // stdioHelpers.test (R11-13).
+  writeStdoutLineBestEffort: mockWriteStdoutLineBestEffort,
 }));
 
 vi.mock('../../config/settings.js', () => ({
@@ -255,6 +365,7 @@ vi.mock('./proxy.js', () => ({
 vi.mock('./runtime.js', () => ({
   createChannel: mockCreateChannel,
   daemonChannelLoopPath: mockDaemonChannelLoopPath,
+  daemonChannelRuntimeStatePath: mockDaemonChannelRuntimeStatePath,
   daemonChannelStateDir: mockDaemonChannelStateDir,
   daemonObservedContactsPath: mockDaemonObservedContactsPath,
   daemonSessionRoutesPath: mockDaemonSessionRoutesPath,
@@ -267,6 +378,11 @@ vi.mock('./runtime.js', () => ({
   registerToolCallDispatch: mockRegisterToolCallDispatch,
   selectFirstModel: mockSelectFirstModel,
   sessionsPath: mockSessionsPath,
+}));
+
+vi.mock('./channel-state-store.js', () => ({
+  ChannelStateStore: mockChannelStateStore,
+  selectActiveChannels: mockSelectActiveChannels,
 }));
 
 vi.mock('./observed-contact-store.js', () => ({
@@ -393,6 +509,7 @@ beforeEach(() => {
     feishu: { type: 'feishu' },
   });
   mockLoadChannelsFromExtensions.mockResolvedValue(0);
+  mockChannelStateStoreReadAll.mockReturnValue({});
   mockParseConfiguredChannels.mockResolvedValue([parsedTelegram]);
   mockChannelLoopStoreCreate.mockResolvedValue({ id: 'job-1' });
   mockChannelLoopStoreCreateForTarget.mockResolvedValue({ id: 'job-1' });
@@ -1380,11 +1497,15 @@ describe('runChannelDaemonWorker', () => {
     });
 
     expect(mockSanitizeLogText).toHaveBeenCalledWith(unsafeName, 128);
+    // The real sanitizeLogText renders an ASCII newline as the VISIBLE
+    // `\n` escape (not a space), keeping the payload one readable log
+    // line — mirror that here (the mock now tracks the real contract,
+    // R14-10).
     expect(mockWriteStdoutLine).toHaveBeenCalledWith(
-      '[Channel] Connecting "evil channel"...',
+      '[Channel] Connecting "evil\\nchannel"...',
     );
     expect(mockWriteStdoutLine).toHaveBeenCalledWith(
-      '[Channel] "evil channel" connected.',
+      '[Channel] "evil\\nchannel" connected.',
     );
   });
 
@@ -1669,9 +1790,613 @@ describe('runChannelDaemonWorker', () => {
     });
   });
 
-  it('fails fast when no channels are configured', async () => {
+  it('serves with zero channels when no channels are configured (#8975)', async () => {
     const sdk = createSdk();
+    const ready = vi.fn();
     mockLoadChannelsConfig.mockReturnValueOnce({});
+
+    const handle = await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'all' },
+      loadDaemonSdk: async () => sdk,
+      sendReady: ready,
+    });
+
+    expect(handle.channels).toEqual([]);
+    expect(ready).toHaveBeenCalledWith({
+      channels: [],
+      requestedChannels: [],
+      pid: process.pid,
+    });
+    // Sink pin (R12-3): the zero-channel degrade notice rides the
+    // best-effort sink — the worker survives with no channels, so the
+    // notice must not crash it when stdout is the thing that is failing
+    // (R11-13).
+    expect(mockWriteStdoutLineBestEffort).toHaveBeenCalledWith(
+      '[Channel] No channels configured; serving with 0 channels.',
+    );
+    // Strict sink negative (R14-25): the degrade notice must not ALSO land
+    // on the loud sink — under the exact failing-stdout condition this
+    // diagnostic exists for, a loud write raises the async stdout 'error'
+    // event and kills the worker the degrade path exists to keep alive
+    // (R11-13). The membership positive alone lets a dual-write ship green.
+    expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+      '[Channel] No channels configured; serving with 0 channels.',
+    );
+    // Never prune with an empty configured set: settings can transiently
+    // recover to empty. The store no-ops prune([]) today, but keep this
+    // caller-side guard pinned so a future store change cannot turn an
+    // empty read into a wipe of every recorded stop (#8975).
+    expect(mockChannelStateStorePrune).not.toHaveBeenCalled();
+    expect(mockParseConfiguredChannels).not.toHaveBeenCalled();
+    expect(mockDaemonChannelBridge).not.toHaveBeenCalled();
+    expect(mockCreateChannel).not.toHaveBeenCalled();
+
+    await expect(
+      handle.deliverChannelMessage({
+        deliveryId: 'delivery-1',
+        channelName: 'telegram',
+        target: { type: 'chat', id: 'chat-1' },
+        text: 'hello',
+      }),
+      // Pin the ChannelDeliveryError CODE, not just the message: the
+      // delivery classifier has no message fallback, so a plain Error
+      // with the same message would map to channel_delivery_failed (502)
+      // instead of the 503 channel_worker_unavailable the SDK documents
+      // as an expected outcome (#8975).
+    ).rejects.toMatchObject({ code: 'channel_worker_unavailable' });
+    // Webhooks must be rejected upfront too, not silently accepted and
+    // dropped (#8975). Pin the CLASSIFIER-VISIBLE shape with the anchored
+    // regex (R12-19): classifyWebhookTaskValidationError decides the IPC
+    // code via /^Channel ".+" is not running\.$/u — appending context to
+    // the degrade copy keeps a substring pin green while flipping every
+    // zero-channel webhook to channel_webhook_enqueue_failed.
+    const webhookTask = {
+      channelName: 'telegram',
+      source: 'github-ci',
+      eventType: 'check_failed',
+      targetRef: 'default',
+      title: 'CI failed',
+      payload: { runId: 123 },
+    };
+    expect(() => handle.validateWebhookTask(webhookTask)).toThrow(
+      /^Channel "telegram" is not running\.$/,
+    );
+    await expect(handle.runWebhookTask(webhookTask)).rejects.toThrow(
+      /^Channel "telegram" is not running\.$/,
+    );
+    await handle.close();
+  });
+
+  it('sanitizes an evil webhook channel name in the zero-channel degrade stub (R15-27)', async () => {
+    // R14-10's evil-name assertions run against a names-mode selection
+    // that never reaches the zero-channel stub, and the stub's own pins
+    // use the plain name 'telegram' (identity for the sanitizer). A
+    // stub-only sanitizer drop therefore ships green while a zero-channel
+    // worker receiving a webhook whose channelName carries CR/LF/NEL/
+    // U+2028/U+2029 fails the anchored classifier `/^Channel ".+" is not
+    // running\.$/u` (no `s` flag: `.` rejects real line breaks), flipping
+    // channel_worker_unavailable (503) to channel_webhook_enqueue_failed.
+    // Drive the stub with an evil name and pin the classifier match.
+    const sdk = createSdk();
+    const ready = vi.fn();
+    mockLoadChannelsConfig.mockReturnValueOnce({});
+
+    const handle = await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'all' },
+      loadDaemonSdk: async () => sdk,
+      sendReady: ready,
+    });
+
+    const evilName = 'evil\r\n\u0085\u2028\u2029channel';
+    const webhookTask = {
+      channelName: evilName,
+      source: 'github-ci',
+      eventType: 'check_failed',
+      targetRef: 'default',
+      title: 'CI failed',
+      payload: { runId: 123 },
+    };
+
+    // The anchored classifier matches ONLY because the sanitizer removed
+    // every raw line break from the embedded name.
+    expect(() => handle.validateWebhookTask(webhookTask)).toThrow(
+      /^Channel ".+" is not running\.$/,
+    );
+    let message = '';
+    try {
+      handle.validateWebhookTask(webhookTask);
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).not.toMatch(/[\r\n\u0085\u2028\u2029]/);
+    expect(mockSanitizeLogText).toHaveBeenCalledWith(evilName, 128);
+    await expect(handle.runWebhookTask(webhookTask)).rejects.toThrow(
+      /^Channel ".+" is not running\.$/,
+    );
+    await handle.close();
+  });
+
+  it('serves with zero channels when every configured channel is stopped (#8975)', async () => {
+    const sdk = createSdk();
+    const ready = vi.fn();
+    mockChannelStateStoreReadAll.mockReturnValueOnce({
+      telegram: 'stopped',
+      feishu: 'stopped',
+    });
+
+    const handle = await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'all' },
+      loadDaemonSdk: async () => sdk,
+      sendReady: ready,
+    });
+
+    expect(handle.channels).toEqual([]);
+    expect(ready).toHaveBeenCalledWith({
+      channels: [],
+      requestedChannels: [],
+      pid: process.pid,
+    });
+    // Sink pins (R12-3): the skip notices and the zero-channel degrade
+    // notice ride the best-effort sink (R11-13).
+    expect(mockWriteStdoutLineBestEffort).toHaveBeenCalledWith(
+      '[Channel] "telegram" skipped (stopped before restart)',
+    );
+    expect(mockWriteStdoutLineBestEffort).toHaveBeenCalledWith(
+      '[Channel] "feishu" skipped (stopped before restart)',
+    );
+    expect(mockWriteStdoutLineBestEffort).toHaveBeenCalledWith(
+      '[Channel] All configured channels are stopped; serving with 0 channels.',
+    );
+    // Strict sink negative, twin of the no-config degrade pin (R14-25).
+    expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+      '[Channel] All configured channels are stopped; serving with 0 channels.',
+    );
+    expect(mockParseConfiguredChannels).not.toHaveBeenCalled();
+    expect(mockCreateChannel).not.toHaveBeenCalled();
+    // The all-stopped branch is exactly where every recorded state is
+    // 'stopped': a state WRITE added here (e.g. persisting the configured
+    // set as 'active') would flip the recorded stops and resurrect every
+    // explicitly stopped channel on the next `--channel all` — the #8975
+    // regression class.
+    expect(mockChannelStateStoreSetMany).not.toHaveBeenCalled();
+    expect(mockChannelStateStoreSet).not.toHaveBeenCalled();
+    // prune IS called — and pin it: pruning stale entries against the
+    // configured set is a read-side cleanup, not a state flip, and a
+    // refactor skipping prune exactly in this branch would strand stale
+    // `stopped` entries for channels removed from settings (#8975).
+    // Count pin, matching the two sibling prune-calling branches
+    // (R15-29, R16-46): a second call on this zero-selection branch
+    // (e.g. a symmetric post-selection prune([])) stays green against
+    // membership alone, and wipes the recorded stops the moment prune
+    // semantics on an empty list change.
+    expect(mockChannelStateStorePrune).toHaveBeenCalledTimes(1);
+    expect(mockChannelStateStorePrune).toHaveBeenCalledWith([
+      'telegram',
+      'feishu',
+    ]);
+  });
+
+  it('skips stopped channels when restoring --channel all (#8975)', async () => {
+    const sdk = createSdk();
+    const ready = vi.fn();
+    mockParseConfiguredChannels.mockResolvedValueOnce([parsedTelegram]);
+    mockChannelStateStoreReadAll.mockReturnValueOnce({ feishu: 'stopped' });
+
+    const handle = await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'all' },
+      loadDaemonSdk: async () => sdk,
+      sendReady: ready,
+    });
+
+    // Sink pin (R12-3): the skip notice rides the best-effort sink.
+    expect(mockWriteStdoutLineBestEffort).toHaveBeenCalledWith(
+      '[Channel] "feishu" skipped (stopped before restart)',
+    );
+    expect(mockParseConfiguredChannels).toHaveBeenCalledWith(
+      expect.any(Object),
+      ['telegram'],
+      { defaultCwd: '/workspace' },
+    );
+    expect(mockCreateChannel).toHaveBeenCalledTimes(1);
+    expect(mockCreateChannel).toHaveBeenCalledWith(
+      'telegram',
+      parsedTelegram.config,
+      expect.any(Object),
+      expect.any(Object),
+    );
+    expect(ready).toHaveBeenCalledWith({
+      channels: ['telegram'],
+      requestedChannels: ['telegram'],
+      pid: process.pid,
+    });
+    // Connects are batched into one best-effort write after the loop.
+    expect(mockChannelStateStoreSetMany).toHaveBeenCalledWith(
+      ['telegram'],
+      'active',
+    );
+    // Negative twin of the batched-write pin (R12-14): per-channel
+    // `trySet(name, 'active')` inside the connect loop alongside the
+    // batch would reintroduce N full-file read-modify-write cycles on
+    // the startup critical path while every membership pin stays green.
+    expect(mockChannelStateStoreSet).not.toHaveBeenCalled();
+    // State file wiring: the helper receives this worker's workspace and
+    // the store is constructed with the path it returns — a split here
+    // reads state from a different file than the stop writes target,
+    // resurrecting explicitly stopped channels (#8975). The path mock is
+    // argument-derived, and the store is pinned to the value returned for
+    // THIS workspace's call, so a split fails (R9-26).
+    expect(mockDaemonChannelRuntimeStatePath).toHaveBeenCalledWith(
+      '/workspace',
+    );
+    expect(mockChannelStateStore).toHaveBeenCalledWith(
+      mockDaemonChannelRuntimeStatePath.mock.results[0]!.value,
+    );
+    // Uniqueness pins (R11-21): the membership pins above are satisfied
+    // by a read/write store SPLIT (a second construction landing in a
+    // different file), so assert the store is constructed exactly once
+    // from exactly one path derivation.
+    expect(mockChannelStateStore).toHaveBeenCalledTimes(1);
+    expect(mockDaemonChannelRuntimeStatePath).toHaveBeenCalledTimes(1);
+    // One-sided warning pin: the prune-fallback warning is pinned on the
+    // failure path below; a prune-success restore must NOT emit it —
+    // emitting it on every normal restore drowns the genuine warning
+    // (R9-12). Sink twin (R12-3): the real warning sink is the
+    // best-effort one.
+    expect(mockWriteStdoutLineBestEffort).not.toHaveBeenCalledWith(
+      '[Channel] Warning: failed to update channel state; falling back to recorded states.',
+    );
+    expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+      '[Channel] Warning: failed to update channel state; falling back to recorded states.',
+    );
+    // prune receives the FULL configured set: a post-selection or partial
+    // list would wipe the stopped records of exactly the skipped channels.
+    // Call-COUNT pin (R15-29): membership alone is satisfied by a refactor
+    // adding a SECOND post-selection `prune(selectedNames)` — the real
+    // store would then delete the skipped channels' stopped entries and the
+    // next `--channel all` resurrects them. Match the names-mode pin pair.
+    expect(mockChannelStateStorePrune).toHaveBeenCalledTimes(1);
+    expect(mockChannelStateStorePrune).toHaveBeenCalledWith([
+      'telegram',
+      'feishu',
+    ]);
+    await handle.close();
+  });
+
+  it('falls back to the recorded states when prune fails (#8975)', async () => {
+    const sdk = createSdk();
+    const ready = vi.fn();
+    mockParseConfiguredChannels.mockResolvedValueOnce([parsedTelegram]);
+    mockChannelStateStorePrune.mockImplementationOnce(() => {
+      throw new Error('EACCES');
+    });
+    mockChannelStateStoreReadAll.mockReturnValueOnce({ feishu: 'stopped' });
+
+    const handle = await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'all' },
+      loadDaemonSdk: async () => sdk,
+      sendReady: ready,
+    });
+
+    // Startup proceeds and the fallback read drives the restore filter.
+    // Sink pin (R12-3): the skip notice rides the best-effort sink.
+    expect(mockWriteStdoutLineBestEffort).toHaveBeenCalledWith(
+      '[Channel] "feishu" skipped (stopped before restart)',
+    );
+    // A silent fallback would hide that persistence is broken: stale
+    // entries survive, and a re-added channel is skipped forever with no
+    // diagnostic tracing the cause (#8975). Sink pin (R12-3): the
+    // warning rides the best-effort sink — it fires exactly when the
+    // disk is failing.
+    expect(mockWriteStdoutLineBestEffort).toHaveBeenCalledWith(
+      '[Channel] Warning: failed to update channel state; falling back to recorded states.',
+    );
+    expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+      '[Channel] Warning: failed to update channel state; falling back to recorded states.',
+    );
+    expect(mockParseConfiguredChannels).toHaveBeenCalledWith(
+      expect.any(Object),
+      ['telegram'],
+      { defaultCwd: '/workspace' },
+    );
+    expect(ready).toHaveBeenCalledWith({
+      channels: ['telegram'],
+      requestedChannels: ['telegram'],
+      pid: process.pid,
+    });
+    await handle.close();
+  });
+
+  it('keeps the names-mode prune-failure warning on the best-effort sink and still starts (R15-28)', async () => {
+    // Names-mode twin of the mode-all prune-failure test: the prune
+    // catch -> best-effort warning -> start-continues branch has zero
+    // names-mode coverage (both prune-failure tests use mode:'all').
+    // Routing the warning to the loud writeStdoutLine ships green through
+    // the suite, yet under the failing-stdout condition the warning exists
+    // for, the loud write raises the async stdout 'error' event and kills
+    // the worker mid-start (the R11-13 hazard). Deleting the warning
+    // likewise ships green.
+    const sdk = createSdk();
+    const ready = vi.fn();
+    mockParseConfiguredChannels.mockResolvedValueOnce([parsedTelegram]);
+    mockChannelStateStorePrune.mockImplementationOnce(() => {
+      throw new Error('EACCES');
+    });
+    mockChannelStateStoreReadAll.mockReturnValueOnce({});
+
+    const handle = await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      loadDaemonSdk: async () => sdk,
+      sendReady: ready,
+    });
+
+    // Warning on the best-effort sink, absent on the loud sink. The
+    // names-mode branch carries its OWN copy ('continuing with the
+    // explicit selection.') — the mode-all 'falling back to recorded
+    // states.' wording is a different string, so this pin is branch-
+    // specific and a loud-sink move of THIS copy fails here.
+    expect(mockWriteStdoutLineBestEffort).toHaveBeenCalledWith(
+      '[Channel] Warning: failed to update channel state; continuing with the explicit selection.',
+    );
+    expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+      '[Channel] Warning: failed to update channel state; continuing with the explicit selection.',
+    );
+    // The explicit selection still starts despite the prune failure.
+    expect(ready).toHaveBeenCalledWith({
+      channels: ['telegram'],
+      requestedChannels: ['telegram'],
+      pid: process.pid,
+    });
+    await handle.close();
+  });
+
+  it('treats all channels as active when prune fails and nothing is readable (R12-13)', async () => {
+    // prune throws on ANY store failure — a transient READ failure
+    // (applyChange rethrows every non-ENOENT read error, the EBUSY/EPERM
+    // AV-lock class) as well as a write failure — and the fallback
+    // readAll() can then return an EMPTY map while channels are
+    // explicitly stopped. The warning must say so: selecting from an
+    // empty map treats every configured channel as active, including the
+    // stopped ones, and claiming 'falling back to recorded states' there
+    // would be a lie (#8975).
+    const sdk = createSdk();
+    const ready = vi.fn();
+    mockParseConfiguredChannels.mockResolvedValueOnce([
+      parsedTelegram,
+      parsedFeishu,
+    ]);
+    mockChannelStateStorePrune.mockImplementationOnce(() => {
+      throw new Error('EBUSY');
+    });
+    // Persistent mock (beforeEach resets it): the fallback read comes
+    // back EMPTY — the shape a transient read failure leaves behind.
+    mockChannelStateStoreReadAll.mockReturnValue({});
+
+    const handle = await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'all' },
+      loadDaemonSdk: async () => sdk,
+      sendReady: ready,
+    });
+
+    expect(mockWriteStdoutLineBestEffort).toHaveBeenCalledWith(
+      '[Channel] Warning: no recorded channel state readable; treating all channels as active.',
+    );
+    // Mirror-pin the ternary's other half: with an empty fallback the
+    // recorded-states wording must NOT appear (#8975).
+    expect(mockWriteStdoutLineBestEffort).not.toHaveBeenCalledWith(
+      '[Channel] Warning: failed to update channel state; falling back to recorded states.',
+    );
+    // Nothing is skipped: ALL configured channels are selected.
+    expect(mockWriteStdoutLineBestEffort).not.toHaveBeenCalledWith(
+      expect.stringContaining('skipped (stopped before restart)'),
+    );
+    expect(mockParseConfiguredChannels).toHaveBeenCalledWith(
+      expect.any(Object),
+      ['telegram', 'feishu'],
+      { defaultCwd: '/workspace' },
+    );
+    expect(ready).toHaveBeenCalledWith({
+      channels: ['telegram', 'feishu'],
+      requestedChannels: ['telegram', 'feishu'],
+      pid: process.pid,
+    });
+    await handle.close();
+  });
+
+  it('records connected channels as active in one batched write (#8975)', async () => {
+    const sdk = createSdk();
+    const ready = vi.fn();
+    // Two channels on purpose: with a single channel, batched and
+    // per-channel writes are observationally identical, so moving the
+    // write into the connect loop would ship green (#8975).
+    mockParseConfiguredChannels.mockResolvedValueOnce([
+      parsedTelegram,
+      parsedFeishu,
+    ]);
+
+    const handle = await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'all' },
+      loadDaemonSdk: async () => sdk,
+      sendReady: ready,
+    });
+
+    expect(mockChannelStateStoreSetMany).toHaveBeenCalledTimes(1);
+    expect(mockChannelStateStoreSetMany).toHaveBeenCalledWith(
+      ['telegram', 'feishu'],
+      'active',
+    );
+    // Per-channel `trySet(name, 'active')` inside the connect loop
+    // alongside the batch ships every membership pin green while
+    // reintroducing N full-file read-modify-write cycles on the startup
+    // critical path — narrower than the regression this test's comment
+    // claims to prevent (R12-14).
+    expect(mockChannelStateStoreSet).not.toHaveBeenCalled();
+    // One-sided warning pin: the persistence-failure warning is pinned on
+    // the failure twin below; a successful batched write must NOT emit it
+    // — a false data-loss alarm on every normal restore (R9-13). Sink
+    // twin (R12-3): the real warning sink is the best-effort one.
+    expect(mockWriteStdoutLineBestEffort).not.toHaveBeenCalledWith(
+      '[Channel] Warning: could not persist the active record; --channel all may still skip this channel.',
+    );
+    expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+      '[Channel] Warning: could not persist the active record; --channel all may still skip this channel.',
+    );
+    // The store reads and writes the SAME workspace-derived file (the
+    // path mock is argument-derived; the store is pinned to the value
+    // returned for this workspace's call) — a split here resurrects
+    // explicitly stopped channels (R9-26).
+    expect(mockDaemonChannelRuntimeStatePath).toHaveBeenCalledWith(
+      '/workspace',
+    );
+    expect(mockChannelStateStore).toHaveBeenCalledWith(
+      mockDaemonChannelRuntimeStatePath.mock.results[0]!.value,
+    );
+    // Uniqueness pins (R11-21): a read/write store split ships green
+    // against the membership pins alone.
+    expect(mockChannelStateStore).toHaveBeenCalledTimes(1);
+    expect(mockDaemonChannelRuntimeStatePath).toHaveBeenCalledTimes(1);
+    expect(ready).toHaveBeenCalledWith({
+      channels: ['telegram', 'feishu'],
+      requestedChannels: ['telegram', 'feishu'],
+      pid: process.pid,
+    });
+    await handle.close();
+  });
+
+  it('force-starts explicitly selected channels even when stopped (#8975)', async () => {
+    const sdk = createSdk();
+    // Seed a recorded stop with a PERSISTENT mock (beforeEach resets it):
+    // a mockReturnValueOnce leaks into the NEXT test because
+    // vi.clearAllMocks() does not clear Vitest's once-implementation
+    // queue. The seeded stop distinguishes force-start from a restore
+    // filter mistakenly applied to names mode — with the filter applied,
+    // the explicitly requested channel would be skipped (#8975).
+    mockChannelStateStoreReadAll.mockReturnValue({ telegram: 'stopped' });
+
+    const handle = await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      loadDaemonSdk: async () => sdk,
+    });
+
+    // Sink twin (R12-3): the real skip-notice sink is the best-effort one.
+    expect(mockWriteStdoutLineBestEffort).not.toHaveBeenCalledWith(
+      expect.stringContaining('skipped (stopped before restart)'),
+    );
+    expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+      expect.stringContaining('skipped (stopped before restart)'),
+    );
+    expect(mockCreateChannel).toHaveBeenCalledWith(
+      'telegram',
+      parsedTelegram.config,
+      expect.any(Object),
+      expect.any(Object),
+    );
+    expect(mockChannelStateStoreSetMany).toHaveBeenCalledWith(
+      ['telegram'],
+      'active',
+    );
+    // Names mode never CONSULTS the restore filter for SELECTION: the
+    // selection is the explicit name list verbatim, so a recorded stop
+    // can never filter an explicitly requested channel out (the skip
+    // negatives above + the active write below are the behavioral pin).
+    // A state READ still happens — prune's freshness cleanup reads the
+    // store (this suite's mock wires prune through the readAll spy), but
+    // the selection never sees it. Prune runs by the FULL configured set
+    // — here `['telegram','feishu']`, NOT just the selected
+    // `['telegram']`: that distinction is load-bearing (R14-11). Pruning
+    // by the selection would wipe the record of a configured-but-
+    // unselected channel (feishu), resurrecting exactly what #8975 keeps
+    // stopped; pruning by the configured set matches standalone startAll
+    // and only drops entries ABSENT from settings, so the store's
+    // freshness guarantee ("a channel removed from settings and re-added
+    // later is not skipped forever") holds without an all-mode start in
+    // the removal window.
+    expect(mockChannelStateStorePrune).toHaveBeenCalledTimes(1);
+    expect(mockChannelStateStorePrune).toHaveBeenCalledWith([
+      'telegram',
+      'feishu',
+    ]);
+    // The forced-start write lands in the SAME workspace-derived file the
+    // restore filter reads (argument-derived path mock; the store is
+    // pinned to the value returned for this workspace's call) — the
+    // cleared `stopped` record must be visible to the next `--channel
+    // all`, or the forced channel is re-skipped (R9-26).
+    expect(mockDaemonChannelRuntimeStatePath).toHaveBeenCalledWith(
+      '/workspace',
+    );
+    expect(mockChannelStateStore).toHaveBeenCalledWith(
+      mockDaemonChannelRuntimeStatePath.mock.results[0]!.value,
+    );
+    // Uniqueness pins (R11-21): a read/write store split ships green
+    // against the membership pins alone.
+    expect(mockChannelStateStore).toHaveBeenCalledTimes(1);
+    expect(mockDaemonChannelRuntimeStatePath).toHaveBeenCalledTimes(1);
+    await handle.close();
+  });
+
+  it('still reports connected channels when state persistence fails (#8975)', async () => {
+    const sdk = createSdk();
+    const ready = vi.fn();
+    mockParseConfiguredChannels.mockResolvedValueOnce([parsedTelegram]);
+    mockChannelStateStoreSetMany.mockImplementationOnce(() => {
+      throw new Error('disk full');
+    });
+
+    const handle = await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'all' },
+      loadDaemonSdk: async () => sdk,
+      sendReady: ready,
+    });
+
+    // The persistence failure must not reclassify a connected channel as a
+    // startup failure or keep it out of the ready payload.
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      '[Channel] "telegram" connected.',
+    );
+    expect(handle.channels).toEqual(['telegram']);
+    expect(ready).toHaveBeenCalledWith({
+      channels: ['telegram'],
+      requestedChannels: ['telegram'],
+      pid: process.pid,
+    });
+    // The loss must still be surfaced like the stop direction does: a
+    // stale `stopped` record would re-skip the explicitly restarted
+    // channel on the next `--channel all` restore (#8975). Sink pin
+    // (R12-3): the warning rides the best-effort sink — it fires exactly
+    // when the disk is failing.
+    expect(mockWriteStdoutLineBestEffort).toHaveBeenCalledWith(
+      '[Channel] Warning: could not persist the active record; --channel all may still skip this channel.',
+    );
+    expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+      '[Channel] Warning: could not persist the active record; --channel all may still skip this channel.',
+    );
+    await handle.close();
+  });
+
+  it('still fails fast for malformed channel config (#8975)', async () => {
+    const sdk = createSdk();
+    mockParseConfiguredChannels.mockRejectedValueOnce(
+      new Error('Error in channel "telegram": token is required.'),
+    );
 
     await expect(
       runChannelDaemonWorker({
@@ -1680,7 +2405,7 @@ describe('runChannelDaemonWorker', () => {
         selection: { mode: 'all' },
         loadDaemonSdk: async () => sdk,
       }),
-    ).rejects.toThrow('No channels configured in settings.json.');
+    ).rejects.toThrow('Error in channel "telegram": token is required.');
   });
 
   it('fails fast when daemon capabilities report a different workspace', async () => {
@@ -2349,6 +3074,46 @@ describe('runChannelDaemonWorker', () => {
     await expect(
       handle.runWebhookTask({ ...webhookTask, channelName: 'missing' }),
     ).rejects.toThrow('Channel "missing" is not running.');
+  });
+
+  it('keeps the not-running error classifier-visible for newline-laden channel names (R14-10)', async () => {
+    // classifyWebhookTaskValidationError maps the not-running message via
+    // /^Channel ".+" is not running\.$/u (no `s` flag: `.` rejects real
+    // CR/LF). A raw CR/LF/NEL/U+2028/U+2029 embedded in the task's
+    // channelName used to break the anchored match, flipping a clean 404
+    // into channel_webhook_enqueue_failed. The throws now sanitize the
+    // name through sanitizeLogText; pin the classifier contract with the
+    // anchored regex for BOTH webhook entry points.
+    const sdk = createSdk();
+
+    const handle = await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      loadDaemonSdk: async () => sdk,
+    });
+
+    const evilName = 'evil\r\n\u0085\u2028\u2029name';
+    await expect(
+      handle.runWebhookTask({ ...webhookTask, channelName: evilName }),
+    ).rejects.toThrow(/^Channel ".+" is not running\.$/u);
+    expect(() =>
+      handle.validateWebhookTask({ ...webhookTask, channelName: evilName }),
+    ).toThrow(/^Channel ".+" is not running\.$/u);
+    // The raw newline/control characters must not survive into the
+    // message either (log-line forgery, twin of the skip-notice pins).
+    await expect(
+      handle.runWebhookTask({ ...webhookTask, channelName: evilName }),
+    ).rejects.toSatisfy((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      return (
+        !message.includes('\r') &&
+        !message.includes('\n') &&
+        !message.includes('\u0085') &&
+        !message.includes('\u2028') &&
+        !message.includes('\u2029')
+      );
+    });
   });
 });
 

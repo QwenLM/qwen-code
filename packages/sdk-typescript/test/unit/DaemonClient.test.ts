@@ -6083,6 +6083,47 @@ describe('DaemonClient', () => {
       });
     });
 
+    it('passes the stop durability-loss signal and R14 attribution through untouched', async () => {
+      // Runtime twin of the typetest shape pins: the client returns the
+      // parsed body as-is, so statePersisted / statePersistFailedWorkspaces
+      // survive to the caller. A destructure-and-rebuild regression
+      // (`const { changed, state } = await res.json()`) drops both fields
+      // and the CLI's loss warning never fires — nothing else catches it
+      // (the CLI duck-types the response).
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          changed: true,
+          state: {
+            enabled: false,
+            selection: null,
+            transition: 'idle',
+            workers: [],
+          },
+          statePersisted: false,
+          statePersistFailedWorkspaces: ['/workspace/a', '/workspace/b'],
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(client.stopChannelWorker()).resolves.toMatchObject({
+        changed: true,
+        statePersisted: false,
+        statePersistFailedWorkspaces: ['/workspace/a', '/workspace/b'],
+      });
+
+      // Probe inertia (R15-14): the body-passthrough assertion alone stays
+      // green with the collocated DaemonClient stop change reverted, since
+      // the client returns the parsed body as-is (pre-existing behavior).
+      // Also pin the STOP CALL SHAPE this diff exercises — the DELETE to
+      // /workspace/channel with no body — so the test exercises the code
+      // path the change touches, not just the generic passthrough.
+      expect(calls[0]).toMatchObject({
+        url: 'http://daemon/workspace/channel',
+        method: 'DELETE',
+        body: null,
+      });
+    });
+
     it('allows lifecycle mutations to outlive the generic fetch timeout', async () => {
       const fetch = vi.fn(
         (_input: RequestInfo | URL, init?: RequestInit) =>
@@ -9275,6 +9316,31 @@ describe('DaemonClient', () => {
       expect(calls[1]?.headers['x-qwen-client-id']).toBe('reader');
       expect(calls[2]?.headers['x-qwen-client-id']).toBe('writer');
       expect(JSON.parse(calls[11]!.body!)).toEqual({ senderId: 'sender/1' });
+    });
+
+    it('passes the per-channel stop durability-loss signal through untouched (R15-61)', async () => {
+      // Runtime twin of the whole-selection stopChannelWorker pin: the
+      // per-channel stop route carries the same statePersisted /
+      // statePersistFailedWorkspaces loss signal, and the client returns
+      // the parsed body as-is. A destructure-and-rebuild regression in the
+      // shared workspaceChannelAction path drops both fields and the CLI's
+      // loss warning never fires — the whole-selection pin alone does not
+      // catch it because it exercises a different method.
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(200, {
+          ...mutation,
+          statePersisted: false,
+          statePersistFailedWorkspaces: ['/workspace/a'],
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.stopWorkspaceChannel('bot/name'),
+      ).resolves.toMatchObject({
+        statePersisted: false,
+        statePersistFailedWorkspaces: ['/workspace/a'],
+      });
     });
 
     it('uses the exact qualified workspace routes', async () => {

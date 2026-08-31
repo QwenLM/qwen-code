@@ -3650,11 +3650,37 @@ export interface DaemonChannelSetResult {
   replaced: boolean;
   partial: boolean;
   state: DaemonChannelControlState;
+  /**
+   * Present (and `false`) only when the names-mode commit succeeded but
+   * failed to clear a committed name's persisted `stopped` record: the
+   * surviving record lets the next reload-op resolve filter the name out
+   * and permanently trim the committed selection, so typed clients must be
+   * able to read the loss and retry. Absent on the happy path (#8975,
+   * R16-6).
+   */
+  statePersisted?: boolean;
+  /**
+   * Present alongside `statePersisted: false`: the canonical workspaces
+   * whose record clear failed, so a retry can be targeted (R14/R16-6).
+   */
+  statePersistFailedWorkspaces?: string[];
 }
 
 export interface DaemonChannelStopResult {
   changed: boolean;
   state: DaemonChannelControlState;
+  /**
+   * Present (and `false`) only when the stop succeeded but its `stopped`
+   * record failed to persist: a later `--channel all` restart may bring
+   * the channels back. Absent on the happy path (#8975).
+   */
+  statePersisted?: boolean;
+  /**
+   * Present alongside `statePersisted: false`: the canonical workspaces
+   * whose `stopped` record write failed, so a retry can be targeted at
+   * the affected channels (R14). Absent when every record persisted.
+   */
+  statePersistFailedWorkspaces?: string[];
 }
 
 export interface DaemonChannelWorkerStartErrorResponse {
@@ -3665,6 +3691,28 @@ export interface DaemonChannelWorkerStartErrorResponse {
   state: DaemonChannelControlState;
   startupFailures?: DaemonChannelStartupAttemptFailure[];
   startupFailuresTruncated?: boolean;
+}
+
+/**
+ * Typed body of a FAILED stop (`DaemonHttpError.body` from
+ * `stopChannelWorker` / `stopWorkspaceChannel`). Carries the same
+ * durability-loss signal as the success side: `statePersisted` is present
+ * (and `false`) only when the stop failed AND its torn-down `stopped`
+ * record also failed to persist — a later `--channel all` restart may bring
+ * the channels back (#8975). `statePersistFailedWorkspaces` names the
+ * canonical workspaces that lost their records so a retry can be targeted
+ * (R14). `DaemonHttpError.body` is declared `unknown`; cast it to this
+ * type to read the fields. `state` rides every structured stop error body
+ * that carries the loss signal (the daemon appends its control state to
+ * the stop-relevant error codes); it is optional because per-channel
+ * management error bodies carry no state.
+ */
+export interface DaemonChannelStopErrorResponse {
+  error: string;
+  code: string;
+  statePersisted?: boolean;
+  statePersistFailedWorkspaces?: string[];
+  state?: DaemonChannelControlState;
 }
 
 /**
@@ -3819,6 +3867,22 @@ export interface DaemonChannelStartupRequest extends DaemonRevisionRequest {
 export interface DaemonChannelMutationResult {
   snapshot: DaemonChannelsSnapshot;
   instance: DaemonChannelInstanceSnapshot;
+}
+
+export interface DaemonChannelStopInstanceResult
+  extends DaemonChannelMutationResult {
+  /**
+   * Present (and `false`) only when the per-channel stop succeeded but its
+   * `stopped` record failed to persist: a later `--channel all` restart
+   * may bring the channel back. Absent on the happy path (#8975).
+   */
+  statePersisted?: boolean;
+  /**
+   * Present alongside `statePersisted: false`: the canonical workspaces
+   * whose `stopped` record write failed, so a retry can be targeted at
+   * the affected channel (R14). Absent when every record persisted.
+   */
+  statePersistFailedWorkspaces?: string[];
 }
 
 export interface DaemonChannelPairingRequest {

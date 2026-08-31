@@ -67,6 +67,53 @@ export const writeStderrLineSafe = (message: string): void => {
 };
 
 /**
+ * `writeStdoutLine` that cannot terminate the process — the stdout twin of
+ * `writeStderrLineBestEffort`.
+ *
+ * A try/catch alone is not enough: when stdout is redirected to a failing
+ * target (a dead pipe after `qwen … | head`, a full daemon-log disk), Node
+ * emits an ASYNCHRONOUS `'error'` event on `process.stdout` that terminates
+ * the process past any surrounding try/catch. Best-effort diagnostics — the
+ * persistence-loss warnings that fire exactly when the disk is failing, the
+ * skip notices on a dead reader — must not defeat the never-fails design
+ * they belong to, so install a no-op `'error'` guard while nothing else
+ * listens, then write through the sync-safe helper (#8975). Primary command
+ * output stays on the loud `writeStdoutLine`.
+ */
+export const writeStdoutLineBestEffort = (message: string): void => {
+  if (process.stdout.listenerCount('error') === 0) {
+    process.stdout.on('error', () => {
+      // The stdout target is gone; this diagnostic is already lost.
+    });
+  }
+  writeStdoutLineSafe(message);
+};
+
+/**
+ * `writeStderrLine` that cannot terminate the process — the stderr
+ * analogue of `writeStdoutLineBestEffort`.
+ *
+ * A try/catch alone is not enough: when stderr is redirected to a failing
+ * target (a full daemon-log disk — the same disk condition that fails the
+ * state writes these diagnostics accompany — or a dead redirect), Node
+ * emits an ASYNCHRONOUS `'error'` event on `process.stderr` that
+ * terminates the process past any surrounding try/catch. A warning fired
+ * from a long-lived supervisor path on every launch (a reserved channel
+ * name left in settings) becomes a crash loop bounded only by the restart
+ * budget, so guard the async channel while nothing else listens, then
+ * write through the sync-safe helper (#8975). Primary error output stays
+ * on the loud `writeStderrLine`.
+ */
+export const writeStderrLineBestEffort = (message: string): void => {
+  if (process.stderr.listenerCount('error') === 0) {
+    process.stderr.on('error', () => {
+      // The stderr target is gone; this diagnostic is already lost.
+    });
+  }
+  writeStderrLineSafe(message);
+};
+
+/**
  * Clears the terminal screen.
  * Use instead of console.clear() to satisfy no-console lint rules.
  */

@@ -1,16 +1,20 @@
 import { EventEmitter } from 'node:events';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { LoadedSettings } from '../../config/settings.js';
+import * as stdioHelpers from '../../utils/stdioHelpers.js';
 import {
   channelLoopPath,
   daemonChannelLoopPath,
   daemonChannelStateDir,
   daemonObservedContactsPath,
   daemonSessionRoutesPath,
+  loadChannelsConfig,
   parseConfiguredChannels,
   registerBackgroundResponseRelay,
   registerPermissionRelay,
   registerSessionCleanup,
+  resetReservedNameWarningsForTesting,
   sessionsPath,
 } from './runtime.js';
 
@@ -100,6 +104,211 @@ it('isolates daemon channel state by workspace and safe instance key', () => {
   expect(daemonChannelStateDir('/workspace', 'team/../bot')).toBe(stateDir);
   expect(daemonChannelStateDir('/workspace', 'team:../bot')).not.toBe(stateDir);
   expect(daemonChannelStateDir('/other', 'team/../bot')).not.toBe(stateDir);
+});
+
+describe('loadChannelsConfig (#8975)', () => {
+  function settingsWith(
+    channels: Record<string, unknown> | undefined,
+  ): LoadedSettings {
+    return { merged: { channels } } as unknown as LoadedSettings;
+  }
+
+  // The reserved-name warning rides the real best-effort sink, which
+  // installs a process-wide no-op stderr 'error' guard when nothing else
+  // listens (R12-8) and never removes it. Drop exactly the listeners the
+  // test attached so the process-wide stderr state leaks into no later
+  // test file running in the same worker (the R12-17 discipline).
+  let stderrErrorListenersBefore: Set<(...args: unknown[]) => void>;
+
+  beforeEach(() => {
+    // The reserved-name warning dedup is process-scoped (R11-15).
+    resetReservedNameWarningsForTesting();
+    stderrErrorListenersBefore = new Set(
+      process.stderr.listeners('error') as Array<(...args: unknown[]) => void>,
+    );
+  });
+
+  afterEach(() => {
+    for (const listener of process.stderr.listeners('error')) {
+      if (
+        !stderrErrorListenersBefore.has(
+          listener as (...args: unknown[]) => void,
+        )
+      ) {
+        process.stderr.removeListener(
+          'error',
+          listener as (...args: unknown[]) => void,
+        );
+      }
+    }
+  });
+
+  it('returns the configured channels on a hardened null-prototype copy (R11-31)', () => {
+    // No identity fast path: the returned map is always a null-prototype
+    // rebuild, so indexing it with an unconfigured user-controlled name
+    // (`channelsConfig['constructor']` in startSingle's not-found guard)
+    // resolves undefined instead of an inherited Object.prototype member.
+    const channels = {
+      telegram: { type: 'telegram' },
+      feishu: { type: 'feishu' },
+    };
+    const loaded = loadChannelsConfig('/workspace', settingsWith(channels));
+    expect(loaded).toEqual(channels);
+    expect(loaded).not.toBe(channels);
+    expect(Object.getPrototypeOf(loaded)).toBeNull();
+    expect(loaded['constructor']).toBeUndefined();
+    expect(loaded['toString']).toBeUndefined();
+    expect(loadChannelsConfig('/workspace', settingsWith(undefined))).toEqual(
+      {},
+    );
+  });
+
+  it('warns once per process per (workspace, name) pair for a reserved name (R11-15, R12-33)', () => {
+    // The deferred webhook auth path calls loadChannelsConfig per request;
+    // an unresolved hand-edited entry must not add an identical stderr
+    // line per webhook POST.
+    const writeSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((() => true) as typeof process.stderr.write);
+
+    try {
+      const entry = { all: { type: 'telegram' } };
+      // The SAME entry twice warns once.
+      loadChannelsConfig('/workspace', settingsWith(entry));
+      loadChannelsConfig('/workspace', settingsWith(entry));
+      expect(writeSpy).toHaveBeenCalledTimes(1);
+
+      // A different workspace warns independently.
+      loadChannelsConfig('/other', settingsWith(entry));
+      expect(writeSpy).toHaveBeenCalledTimes(2);
+
+      // Two DIFFERENTLY-SPELLED reserved variants are two distinct
+      // (workspace, name) pairs, so each warns once (R12-33):
+      // isAllChannelSelectionName matches on the TRIMMED name, so ` all`
+      // is a reserved variant too — a workspace-keyed dedup set silenced
+      // every later variant after the first, and a user who edits
+      // settings to a differently-spelled reserved key got a silently
+      // never-connecting channel with nothing in the logs explaining why.
+      // 'all' already warned for /workspace above, so only ' all' is new.
+      loadChannelsConfig(
+        '/workspace',
+        settingsWith({
+          all: { type: 'telegram' },
+          ' all': { type: 'telegram' },
+        }),
+      );
+      expect(writeSpy).toHaveBeenCalledTimes(3);
+      // Repeating the SAME pair stays silent.
+      loadChannelsConfig(
+        '/workspace',
+        settingsWith({
+          all: { type: 'telegram' },
+          ' all': { type: 'telegram' },
+        }),
+      );
+      expect(writeSpy).toHaveBeenCalledTimes(3);
+    } finally {
+      writeSpy.mockRestore();
+    }
+  });
+
+  it('routes the reserved-name warning through the guarded stderr sink (R12-8)', () => {
+    // The warning fires on EVERY launch of a worker whose settings keep
+    // the reserved entry, and the daemon supervisor spawns a fresh
+    // process per launch: on the loud `writeStderrLine`, a failing
+    // stderr target (full disk, dead redirect) raises an ASYNCHRONOUS
+    // stderr 'error' event that kills the process past any try/catch —
+    // a tolerated config becomes a crash loop bounded only by the
+    // restart budget. Pin the sink choice: the guarded best-effort
+    // wrapper, never the loud sink.
+    const bestEffortSpy = vi
+      .spyOn(stdioHelpers, 'writeStderrLineBestEffort')
+      .mockImplementation(() => {});
+    const loudSpy = vi
+      .spyOn(stdioHelpers, 'writeStderrLine')
+      .mockImplementation(() => {});
+
+    try {
+      loadChannelsConfig(
+        '/workspace',
+        settingsWith({ all: { type: 'telegram' } }),
+      );
+
+      expect(bestEffortSpy).toHaveBeenCalledTimes(1);
+      expect(bestEffortSpy).toHaveBeenCalledWith(
+        expect.stringContaining('the name is reserved'),
+      );
+      expect(loudSpy).not.toHaveBeenCalled();
+    } finally {
+      bestEffortSpy.mockRestore();
+      loudSpy.mockRestore();
+    }
+  });
+
+  it('warns and skips a channel literally named "all" (R10-36)', () => {
+    // `all` is the whole-selection placeholder: a real channel with that
+    // name would be connected by a mode-`all` worker, yet the stop
+    // capture's placeholder filter would drop it from the persisted
+    // stopped set and the channel resurrects on the next `--channel all`.
+    // The collision is refused where settings are read.
+    const writeSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((() => true) as typeof process.stderr.write);
+
+    try {
+      const loaded = loadChannelsConfig(
+        '/workspace',
+        settingsWith({
+          all: { type: 'telegram' },
+          telegram: { type: 'telegram' },
+        }),
+      );
+
+      expect(Object.keys(loaded)).toEqual(['telegram']);
+      expect(writeSpy).toHaveBeenCalledWith(
+        expect.stringContaining('the name is reserved'),
+      );
+    } finally {
+      writeSpy.mockRestore();
+    }
+  });
+
+  it('keeps a channel literally named "__proto__" in the reserved-name filter (R11-1)', () => {
+    // The filter rebuilds the map when a reserved name is present; on a
+    // plain object, assigning a channel named `__proto__` routes through
+    // the Object.prototype setter — the entry silently drops and the
+    // map's prototype becomes the channel config. Channel names are
+    // user-controlled settings keys, so the rebuild must be a
+    // null-prototype map (the same hazard the state store's
+    // filterChannelStates avoids) (#8975).
+    //
+    // REACHABILITY (R14-27): loadChannelsConfig consumes the ALREADY-
+    // MERGED settings. customDeepMerge's prototype-pollution guard drops
+    // a `__proto__` key in the SINGLE-scope case (the common one), so
+    // such a channel never reaches this filter from settings.json — the
+    // drop is pinned at the merge layer (deepMerge.test). This test
+    // injects merged.channels directly, covering the scopes where the
+    // key DOES survive the merge (a later scope defining `channels`
+    // takes the spread branch) and any future caller handing in a
+    // merged-equivalent map with the key as an own entry — JSON.parse
+    // yields `__proto__` as an own key, exercising exactly that shape.
+    const channels = JSON.parse(
+      '{"all":{"type":"telegram"},"__proto__":{"type":"feishu"},"telegram":{"type":"telegram"}}',
+    ) as Record<string, unknown>;
+    const writeSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((() => true) as typeof process.stderr.write);
+
+    try {
+      const loaded = loadChannelsConfig('/workspace', settingsWith(channels));
+
+      expect(Object.keys(loaded).sort()).toEqual(['__proto__', 'telegram']);
+      expect(Object.getPrototypeOf(loaded)).toBeNull();
+      expect(loaded['__proto__']).toEqual({ type: 'feishu' });
+    } finally {
+      writeSpy.mockRestore();
+    }
+  });
 });
 
 describe('parseConfiguredChannels', () => {

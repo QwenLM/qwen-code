@@ -35,8 +35,86 @@ const mockGetExtensionManager = vi.hoisted(() => vi.fn());
 const mockReadServiceInfo = vi.hoisted(() => vi.fn());
 const mockWriteServiceInfo = vi.hoisted(() => vi.fn());
 const mockRemoveServiceInfo = vi.hoisted(() => vi.fn());
+const mockChannelStateStoreReadAll = vi.hoisted(() => vi.fn(() => ({})));
+const mockChannelStateStoreSet = vi.hoisted(() => vi.fn());
+const mockChannelStateStoreSetMany = vi.hoisted(() => vi.fn());
+const mockChannelStateStorePrune = vi.hoisted(() =>
+  vi.fn(() => mockChannelStateStoreReadAll()),
+);
+const mockChannelStateStore = vi.hoisted(() =>
+  vi.fn(() => ({
+    readAll: mockChannelStateStoreReadAll,
+    set: mockChannelStateStoreSet,
+    setMany: mockChannelStateStoreSetMany,
+    prune: mockChannelStateStorePrune,
+    // Mirror the real best-effort wrappers so throwing `set`/`setMany`
+    // mocks still exercise "persistence failure never blocks startup".
+    // Return the persistence boolean like the real store: callers surface a
+    // failed write (#8975).
+    trySet: (name: string, state: 'active' | 'stopped') => {
+      try {
+        mockChannelStateStoreSet(name, state);
+        return true;
+      } catch {
+        // best-effort
+        return false;
+      }
+    },
+    trySetMany: (names: string[], state: 'active' | 'stopped') => {
+      try {
+        mockChannelStateStoreSetMany(names, state);
+        return true;
+      } catch {
+        // best-effort
+        return false;
+      }
+    },
+  })),
+);
+const mockSelectActiveChannels = vi.hoisted(
+  () =>
+    (
+      names: readonly string[],
+      states: Record<string, 'active' | 'stopped'>,
+      onSkipped?: (message: string) => void,
+    ): string[] =>
+      names.filter((name) => {
+        if (states[name] === 'stopped') {
+          // Route the name through the SAME sanitizer mock the module
+          // under test uses (R14): the real helper embeds
+          // sanitizeLogText(name, 128), so a hand-copied message here
+          // would keep asserting the old format if the production
+          // sanitization (or its arguments) ever changed.
+          onSkipped?.(
+            `[Channel] "${mockSanitizeLogText(name, 128)}" skipped (stopped before restart)`,
+          );
+          return false;
+        }
+        return true;
+      }),
+);
+const mockChannelRuntimeStatePath = vi.hoisted(() =>
+  // Argument-sensitive on purpose: with a constant mock, a split
+  // derivation (one call for the assertion, another for the store) would
+  // coincide by accident and ship green — the two real derivations are
+  // DIFFERENT files (`channels/channel-state.json` vs
+  // `channels/standalone/<hash>/channel-state.json`) (#8975). The return
+  // is derived FROM the argument (not collapsed to one constant for every
+  // defined argument): the real helper hashes the workspace, so two
+  // DIFFERENT defined arguments are two different files — a
+  // defined-vs-defined split (store derived from another directory than
+  // stop.ts addresses) must fail the constructor-path pin (R9-15).
+  vi.fn((cwd?: string) =>
+    cwd === undefined
+      ? '/tmp/qwen-home/channels/channel-state.json'
+      : `/tmp/qwen-home/channels/standalone/${cwd}/channel-state.json`,
+  ),
+);
+const mockAdoptLegacyChannelState = vi.hoisted(() => vi.fn());
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
+const mockWriteStdoutLineBestEffort = vi.hoisted(() => vi.fn());
+const mockWriteStderrLineBestEffort = vi.hoisted(() => vi.fn());
 const mockFindCliEntryPath = vi.hoisted(() => vi.fn());
 const mockParseChannelConfig = vi.hoisted(() => vi.fn());
 const mockGetPlugin = vi.hoisted(() => vi.fn());
@@ -138,9 +216,31 @@ vi.mock('./pidfile.js', () => ({
   writeServiceInfo: mockWriteServiceInfo,
 }));
 
+vi.mock('./channel-state-store.js', () => ({
+  adoptLegacyChannelState: mockAdoptLegacyChannelState,
+  ChannelStateStore: mockChannelStateStore,
+  channelRuntimeStatePath: mockChannelRuntimeStatePath,
+  selectActiveChannels: mockSelectActiveChannels,
+}));
+
 vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStderrLine: mockWriteStderrLine,
   writeStdoutLine: mockWriteStdoutLine,
+  // OWN mock, de-aliased from the loud sink (R12-3): with a shared mock,
+  // swapping a best-effort diagnostic (the prune-fallback warning, the
+  // skip notices, the active-record loss warning) back to the loud
+  // `writeStdoutLine` ships every pin green, while in production a
+  // failing stdout target raises the async stdout 'error' event and kills
+  // the start mid-flight. The EPIPE-crash resilience of the real helper
+  // itself is pinned in stdioHelpers.test (R11-13).
+  writeStdoutLineBestEffort: mockWriteStdoutLineBestEffort,
+  // R14-28: the unmocked runtime.ts loaded into this test's graph (via
+  // start.ts — no vi.mock('./runtime.js') here) calls
+  // writeStderrLineBestEffort in loadChannelsConfig's reserved-name
+  // branch. Without the export a reserved-channel-key regression test
+  // rejects with `No "writeStderrLineBestEffort" export is defined on
+  // the mock` instead of exercising skip-and-warn.
+  writeStderrLineBestEffort: mockWriteStderrLineBestEffort,
 }));
 
 vi.mock('./config-utils.js', () => ({
@@ -167,6 +267,7 @@ import {
   resolveProxy,
   startCommand,
 } from './start.js';
+import { resetReservedNameWarningsForTesting } from './runtime.js';
 
 type StartCommandArgs = Parameters<NonNullable<typeof startCommand.handler>>[0];
 
@@ -198,8 +299,37 @@ const mockChannel = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // mockReset (not just clearAllMocks/mockClear): clearAllMocks does NOT
+  // drain queued mockImplementationOnce/mockReturnValueOnce entries, so an
+  // unconsumed once-entry — exactly what a regression in a pinned path
+  // leaves behind — leaks into the NEXT test's first call, mislocalizing
+  // the failure or silently flipping results (R15-30). These eight mocks
+  // receive the PR's once-entries; reset drains the queue. Their defaults
+  // are re-applied below (mockRouterRestoreSessions, mockChannelConnect,
+  // the three store mocks) or they are plain recorders (the rest).
+  mockWriteServiceInfo.mockReset();
+  mockChannelDisconnect.mockReset();
+  mockBridgeStop.mockReset();
+  mockRouterRestoreSessions.mockReset();
+  mockChannelLoopSchedulerStart.mockReset();
+  // The store prune/set and connect mocks ALSO queue throwing
+  // once-entries (the prune-failure, set-failure and connect-failure
+  // tests); clearAllMocks leaves those queued (only mockReset drains
+  // onceImplementations — verified against @vitest/spy). The sibling
+  // channel-management-service.test.ts drains fully (R15-18); match it.
+  mockChannelStateStorePrune.mockReset();
+  mockChannelConnect.mockReset();
   mockBridgeStart.mockResolvedValue(undefined);
   mockChannelConnect.mockRejectedValue(new Error('stop after channel setup'));
+  mockChannelStateStoreReadAll.mockReturnValue({});
+  // mockReset wiped prune's default implementation — re-apply it (mockReset
+  // empties the queue AND the implementation, R15-30).
+  mockChannelStateStorePrune.mockImplementation(() =>
+    mockChannelStateStoreReadAll(),
+  );
+  mockChannelStateStoreSet.mockReset();
+  mockChannelStateStoreSet.mockImplementation(() => undefined);
+  mockChannelStateStoreSetMany.mockImplementation(() => undefined);
   mockCreateChannel.mockReturnValue(mockChannel);
   mockFindCliEntryPath.mockReturnValue('/tmp/qwen-cli-entry.js');
   mockGetExtensionManager.mockResolvedValue({ getLoadedExtensions: () => [] });
@@ -312,6 +442,173 @@ describe('startCommand.handler', () => {
       expect.stringContaining('managed by qwen serve'),
     );
     expect(mockBridgeStart).not.toHaveBeenCalled();
+    // Serve-owned twin of the standalone abort pins (R14-12): the
+    // serve-owned pidfile belongs to the live serve process and the
+    // daemon owns the state files — the refused start must touch
+    // neither.
+    expect(mockRemoveServiceInfo).not.toHaveBeenCalled();
+    expect(mockWriteServiceInfo).not.toHaveBeenCalled();
+    expect(mockAdoptLegacyChannelState).not.toHaveBeenCalled();
+    expect(mockChannelStateStoreSet).not.toHaveBeenCalled();
+    expect(mockChannelStateStoreSetMany).not.toHaveBeenCalled();
+    // prune is the one state-mutating store call the set/setMany
+    // negatives cannot cover — a refused start must not prune the LIVE
+    // service's state file either (R16-28).
+    expect(mockChannelStateStorePrune).not.toHaveBeenCalled();
+  });
+
+  it('refuses to start when a standalone service is already running (#8975)', async () => {
+    // The standalone branch of checkDuplicateInstance, twin of the
+    // serve-owned test above: its guidance is the only place users learn
+    // the #8975 stop-then-skip semantics on this error path, so the
+    // rewritten lines must be pinned — a mangled or dropped guidance
+    // ships green otherwise (R12-16).
+    mockReadServiceInfo.mockReturnValue({
+      owner: 'channel',
+      pid: 1234,
+      startedAt: '2026-01-01T00:00:00.000Z',
+      channels: ['telegram'],
+    });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit: ${String(code)}`);
+    });
+
+    try {
+      await expect(invokeStartHandler({ name: 'telegram' })).rejects.toThrow(
+        'process.exit: 1',
+      );
+    } finally {
+      exitSpy.mockRestore();
+    }
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('Channel service is already running'),
+    );
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      'A standalone service hosts the channels it was started with; exit it (Ctrl+C, or "qwen channel stop") before starting a different channel set.',
+    );
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      'Note: "qwen channel stop" records the running channels as stopped, so a later "qwen channel start" skips them until each is started again by name.',
+    );
+    // The duplicate-instance abort must precede full setup: no bridge
+    // child may be spawned on this path (R12-16).
+    expect(mockBridgeStart).not.toHaveBeenCalled();
+    // …and it must leave the RUNNING service's pidfile and the state
+    // store untouched (R14-12): a "cleanup" removeServiceInfo() in the
+    // abort branch would unlink a live service's pidfile on every
+    // refused start — stop then reports "No channel service is running."
+    // while the service lives, and the next start passes both the
+    // duplicate check and the 'wx' guard (two services on the same
+    // channels, duplicate delivery). Adoption / an active-record write
+    // moved ahead of the check would overwrite the user's explicit
+    // stopped record (resurrection).
+    expect(mockRemoveServiceInfo).not.toHaveBeenCalled();
+    expect(mockWriteServiceInfo).not.toHaveBeenCalled();
+    expect(mockAdoptLegacyChannelState).not.toHaveBeenCalled();
+    expect(mockChannelStateStoreSet).not.toHaveBeenCalled();
+    expect(mockChannelStateStoreSetMany).not.toHaveBeenCalled();
+    // prune negative, twin of the serve-owned refusal test (R16-28).
+    expect(mockChannelStateStorePrune).not.toHaveBeenCalled();
+  });
+
+  it('refuses an UNNAMED start when a standalone service is already running (R16-28)', async () => {
+    // The two refusal tests above both invoke the NAMED path
+    // (startSingle, which never prunes). startAll is the only startup
+    // path calling state-mutating prune, and a refactor hoisting its
+    // state setup (adoption + store construction + prune) ahead of or
+    // around checkDuplicateInstance() would prune the LIVE service's
+    // workspace state file on a refused start — dropping `stopped`
+    // records of removed-but-stopped channels (resurrection) and bumping
+    // the adoption watermark — with every named-path pin green. Pin the
+    // duplicate-check-first ordering for the unnamed path too.
+    mockReadServiceInfo.mockReturnValue({
+      owner: 'channel',
+      pid: 1234,
+      startedAt: '2026-01-01T00:00:00.000Z',
+      channels: ['telegram'],
+    });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit: ${String(code)}`);
+    });
+
+    try {
+      await expect(invokeStartHandler({})).rejects.toThrow('process.exit: 1');
+    } finally {
+      exitSpy.mockRestore();
+    }
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('Channel service is already running'),
+    );
+    expect(mockBridgeStart).not.toHaveBeenCalled();
+    expect(mockRemoveServiceInfo).not.toHaveBeenCalled();
+    expect(mockWriteServiceInfo).not.toHaveBeenCalled();
+    expect(mockAdoptLegacyChannelState).not.toHaveBeenCalled();
+    expect(mockChannelStateStoreSet).not.toHaveBeenCalled();
+    expect(mockChannelStateStoreSetMany).not.toHaveBeenCalled();
+    expect(mockChannelStateStorePrune).not.toHaveBeenCalled();
+  });
+
+  it('skips a reserved channel key with a best-effort warning and keeps the rest (R14-28)', async () => {
+    // The natural regression test for this PR's own skip-and-warn
+    // behavior was unrunnable in this suite: the stdioHelpers mock
+    // factory omitted writeStderrLineBestEffort, so this shape rejected
+    // with `[vitest] No "writeStderrLineBestEffort" export is defined on
+    // the mock` instead of exercising loadChannelsConfig's reserved-name
+    // branch (the unmocked runtime.ts reaches it via start.ts). The
+    // factory now carries the export; pin the behavior end-to-end.
+    resetReservedNameWarningsForTesting();
+    mockLoadSettings.mockReturnValue({
+      merged: {
+        channels: {
+          all: { type: 'telegram' },
+          telegram: { type: 'telegram' },
+        },
+      },
+    });
+    const exitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((() => undefined) as never);
+    const processOnSpy = vi
+      .spyOn(process, 'on')
+      .mockImplementation(() => process);
+    const setIntervalSpy = vi.spyOn(globalThis, 'setInterval');
+    let keepAlive: NodeJS.Timeout | undefined;
+
+    try {
+      void invokeStartHandler({});
+      await new Promise((resolve) => setImmediate(resolve));
+
+      keepAlive = setIntervalSpy.mock.results.at(-1)?.value as
+        | NodeJS.Timeout
+        | undefined;
+
+      // The reserved entry is skipped with a best-effort warning…
+      expect(mockWriteStderrLineBestEffort).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'the name is reserved for the whole-channel selection',
+        ),
+      );
+      // …and dropped before channel creation: only the configured
+      // sibling is created.
+      expect(mockCreateChannel).toHaveBeenCalledTimes(1);
+      // Pin the CREATED name (R15-52): a count-only assertion lets an
+      // inverted reserved-name filter (keeping only reserved keys) pass —
+      // it would still warn once and call createChannel exactly once, but
+      // for the reserved `'all'` entry, connecting the placeholder the
+      // filter exists to prevent.
+      expect(mockCreateChannel).toHaveBeenCalledWith(
+        'telegram',
+        expect.anything(),
+        expect.anything(),
+        expect.anything(),
+      );
+    } finally {
+      if (keepAlive) clearInterval(keepAlive);
+      exitSpy.mockRestore();
+      processOnSpy.mockRestore();
+      setIntervalSpy.mockRestore();
+    }
   });
 
   it('rejects named sessions in standalone single-channel mode', async () => {
@@ -574,7 +871,10 @@ describe('startCommand.handler', () => {
       exitSpy.mockRestore();
     }
 
-    expect(mockWriteServiceInfo).toHaveBeenCalledWith(['telegram']);
+    expect(mockWriteServiceInfo).toHaveBeenCalledWith(
+      ['telegram'],
+      process.cwd(),
+    );
     expect(mockChannelDisconnect).toHaveBeenCalled();
     expect(mockBridgeStop).toHaveBeenCalled();
     expect(mockRouterClearAll).toHaveBeenCalled();
@@ -640,7 +940,10 @@ describe('startCommand.handler', () => {
       exitSpy.mockRestore();
     }
 
-    expect(mockWriteServiceInfo).toHaveBeenCalledWith(['telegram', 'feishu']);
+    expect(mockWriteServiceInfo).toHaveBeenCalledWith(
+      ['telegram', 'feishu'],
+      process.cwd(),
+    );
     expect(mockChannelDisconnect).toHaveBeenCalledTimes(2);
     expect(mockBridgeStop).toHaveBeenCalled();
     expect(mockRouterClearAll).toHaveBeenCalled();
@@ -1427,5 +1730,864 @@ describe('startCommand.handler', () => {
       processOnSpy.mockRestore();
       vi.useRealTimers();
     }
+  });
+
+  describe('empty effective channel set (#8975)', () => {
+    it('keeps serving instead of exiting when no channels are configured', async () => {
+      mockLoadSettings.mockReturnValue({ merged: { channels: {} } });
+      const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+        throw new Error(`process.exit: ${String(code)}`);
+      });
+      const processOnSpy = vi
+        .spyOn(process, 'on')
+        .mockImplementation(() => process);
+      // Spy the timer like the twins so the keep-alive handle is
+      // capturable: an assertion failure before the signal call must not
+      // leak a ref'd 24.8-day interval into the vitest worker (R10-30).
+      const setIntervalSpy = vi.spyOn(globalThis, 'setInterval');
+      let keepAlive: NodeJS.Timeout | undefined;
+
+      try {
+        void invokeStartHandler({});
+        await new Promise((resolve) => setImmediate(resolve));
+
+        // Capture the keep-alive handle BEFORE any fallible assertion: if
+        // one throws, the finally block must still clear the ref'd
+        // ~24.8-day interval or it leaks past this test (#8975).
+        keepAlive = setIntervalSpy.mock.results.at(-1)?.value as
+          | NodeJS.Timeout
+          | undefined;
+
+        expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+          '[Channel] No channels configured; serving with 0 channels.',
+        );
+        expect(mockWriteServiceInfo).toHaveBeenCalledWith([], process.cwd());
+        // Write-COUNT pin (R14-29): membership alone cannot stop an
+        // additional writeServiceInfo(configuredNames) on the
+        // empty-effective-set path landing AFTER the `[]` write — the
+        // final pidfile would then list explicitly-stopped channels as
+        // running (the hazard this test's own comment names).
+        expect(mockWriteServiceInfo).toHaveBeenCalledTimes(1);
+        expect(mockAcpBridge).not.toHaveBeenCalled();
+        expect(mockCreateChannel).not.toHaveBeenCalled();
+        // The empty-effective-set path must not write state either (twin
+        // of the all-stopped pin, #8975).
+        expect(mockChannelStateStoreSet).not.toHaveBeenCalled();
+        expect(mockChannelStateStoreSetMany).not.toHaveBeenCalled();
+        // Startup no longer exits on an empty channel set.
+        expect(exitSpy).not.toHaveBeenCalled();
+        expect(keepAlive).toBeDefined();
+
+        const sigint = processOnSpy.mock.calls.find(
+          ([eventName]) => eventName === 'SIGINT',
+        )?.[1] as (() => void) | undefined;
+        expect(sigint).toBeDefined();
+        // The exit mock throws instead of terminating the process.
+        expect(() => sigint!()).toThrow('process.exit: 0');
+        expect(mockRemoveServiceInfo).toHaveBeenCalled();
+      } finally {
+        if (keepAlive) clearInterval(keepAlive);
+        setIntervalSpy.mockRestore();
+        processOnSpy.mockRestore();
+        exitSpy.mockRestore();
+      }
+    });
+
+    it('keeps serving when every configured channel is stopped', async () => {
+      mockLoadSettings.mockReturnValue({
+        merged: {
+          channels: {
+            telegram: { type: 'telegram' },
+            feishu: { type: 'feishu' },
+          },
+        },
+      });
+      mockChannelStateStoreReadAll.mockReturnValue({
+        telegram: 'stopped',
+        feishu: 'stopped',
+      });
+      const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+        throw new Error(`process.exit: ${String(code)}`);
+      });
+      const processOnSpy = vi
+        .spyOn(process, 'on')
+        .mockImplementation(() => process);
+      const setIntervalSpy = vi.spyOn(globalThis, 'setInterval');
+      const clearIntervalSpy = vi.spyOn(globalThis, 'clearInterval');
+      // Hoisted above the try and captured BEFORE any fallible assertion:
+      // an assertion failure must not leak the ref'd keep-alive timer
+      // into the vitest worker — the finally clears it unconditionally
+      // (R10-30).
+      let keepAlive: NodeJS.Timeout | undefined;
+
+      try {
+        void invokeStartHandler({});
+        await new Promise((resolve) => setImmediate(resolve));
+
+        keepAlive = setIntervalSpy.mock.results.at(-1)?.value as
+          | NodeJS.Timeout
+          | undefined;
+
+        // Sink pins (R12-3): the skip notices ride the best-effort sink —
+        // a dead stdout reader must not kill the start (R11-13).
+        expect(mockWriteStdoutLineBestEffort).toHaveBeenCalledWith(
+          '[Channel] "telegram" skipped (stopped before restart)',
+        );
+        expect(mockWriteStdoutLineBestEffort).toHaveBeenCalledWith(
+          '[Channel] "feishu" skipped (stopped before restart)',
+        );
+        // Pin the FULL message: the recovery-guidance suffix is the only
+        // user-visible way back out of the zero-channel serving state
+        // (otherwise indistinguishable from a hang), and a `--channel`
+        // style pointer would be rejected by the standalone parser
+        // (#8975).
+        expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+          '[Channel] All configured channels are stopped; serving with 0 channels. Exit this process, then restart individual channels with "qwen channel start <name>".',
+        );
+        expect(mockCreateChannel).not.toHaveBeenCalled();
+        // Sibling hazards of the zero-channel funnel, each twin-pinned on
+        // the no-config entry: the pidfile must carry the EMPTY channel
+        // set (threading the configured names here would make `qwen
+        // channel status` report stopped channels as running), no bridge
+        // child may be spawned on this path, and the keep-alive timer
+        // must hold the event loop open (#8975).
+        expect(mockWriteServiceInfo).toHaveBeenCalledWith([], process.cwd());
+        // Write-COUNT pin, twin of the no-config test (R14-29).
+        expect(mockWriteServiceInfo).toHaveBeenCalledTimes(1);
+        expect(mockAcpBridge).not.toHaveBeenCalled();
+        expect(keepAlive).toBeDefined();
+        expect(keepAlive!.hasRef()).toBe(true);
+        // The state file holds every channel as 'stopped' here: a state
+        // write added or hoisted on the empty-effective-set path would
+        // flip those records to active and resurrect exactly the channels
+        // the user explicitly stopped — the #8975 regression class.
+        expect(mockChannelStateStoreSet).not.toHaveBeenCalled();
+        expect(mockChannelStateStoreSetMany).not.toHaveBeenCalled();
+        // prune IS called — and pin it: pruning stale entries against the
+        // configured set is a read-side cleanup, not a state flip, and a
+        // refactor skipping prune exactly in this branch would strand stale
+        // `stopped` entries for channels removed from settings (#8975).
+        // Adopted legacy stops are exempt from that cleanup (#8975,
+        // R12-47 fix); pin the option so a plain prune() call here fails.
+        expect(mockChannelStateStorePrune).toHaveBeenCalledWith(
+          ['telegram', 'feishu'],
+          { preserveAdopted: true },
+        );
+        // Uniqueness pin, mirroring the daemon-worker suite (R12-15): an
+        // additional wrong-path prune call alongside the right one ships
+        // green against the membership pin alone.
+        expect(mockChannelStateStorePrune).toHaveBeenCalledTimes(1);
+        // Startup no longer exits when every channel is stopped.
+        expect(exitSpy).not.toHaveBeenCalled();
+
+        const sigterm = processOnSpy.mock.calls.find(
+          ([eventName]) => eventName === 'SIGTERM',
+        )?.[1] as (() => void) | undefined;
+        expect(sigterm).toBeDefined();
+        // The exit mock throws instead of terminating the process.
+        expect(() => sigterm!()).toThrow('process.exit: 0');
+        expect(mockRemoveServiceInfo).toHaveBeenCalled();
+        // Shutdown releases the keep-alive handle it installed.
+        expect(clearIntervalSpy).toHaveBeenCalledWith(keepAlive);
+      } finally {
+        if (keepAlive) clearInterval(keepAlive);
+        clearIntervalSpy.mockRestore();
+        setIntervalSpy.mockRestore();
+        processOnSpy.mockRestore();
+        exitSpy.mockRestore();
+      }
+    });
+
+    it("holds a ref'd keep-alive timer so the zero-channel service survives (#8975)", async () => {
+      mockLoadSettings.mockReturnValue({ merged: { channels: {} } });
+      const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+        throw new Error(`process.exit: ${String(code)}`);
+      });
+      const processOnSpy = vi
+        .spyOn(process, 'on')
+        .mockImplementation(() => process);
+      const setIntervalSpy = vi.spyOn(globalThis, 'setInterval');
+      const clearIntervalSpy = vi.spyOn(globalThis, 'clearInterval');
+      // Hoisted above the try so the finally can clear it unconditionally
+      // (R10-30).
+      let keepAlive: NodeJS.Timeout | undefined;
+
+      try {
+        void invokeStartHandler({});
+        await new Promise((resolve) => setImmediate(resolve));
+
+        // Signal listeners plus a pending promise cannot keep the Node event
+        // loop alive; a ref'd timer must hold it open or the zero-channel
+        // service exits on its own and leaves a dangling pidfile.
+        keepAlive = setIntervalSpy.mock.results.at(-1)?.value as
+          | NodeJS.Timeout
+          | undefined;
+        expect(keepAlive).toBeDefined();
+        expect(keepAlive!.hasRef()).toBe(true);
+        // Pin the delay too: the load-bearing value is TIMEOUT_MAX
+        // (2^31 - 1 ms ≈ 24.8 days). A cleanup refactor 'simplifying' the
+        // odd-looking literal to a small delay ships green against the
+        // hasRef/clearInterval pins alone, then ticks an empty callback
+        // thousands of times a second in the long-lived zero-channel
+        // steady state, burning a CPU core (R10-44).
+        expect(setIntervalSpy).toHaveBeenCalledWith(
+          expect.any(Function),
+          2_147_483_647,
+        );
+
+        const sigterm = processOnSpy.mock.calls.find(
+          ([eventName]) => eventName === 'SIGTERM',
+        )?.[1] as (() => void) | undefined;
+        expect(sigterm).toBeDefined();
+        expect(() => sigterm!()).toThrow('process.exit: 0');
+        // Shutdown releases the handle it installed.
+        expect(clearIntervalSpy).toHaveBeenCalledWith(keepAlive);
+      } finally {
+        if (keepAlive) clearInterval(keepAlive);
+        clearIntervalSpy.mockRestore();
+        setIntervalSpy.mockRestore();
+        processOnSpy.mockRestore();
+        exitSpy.mockRestore();
+      }
+    });
+
+    it('falls back to the recorded states when prune fails (#8975)', async () => {
+      mockLoadSettings.mockReturnValue({
+        merged: {
+          channels: {
+            telegram: { type: 'telegram' },
+            feishu: { type: 'feishu' },
+          },
+        },
+      });
+      mockChannelStateStorePrune.mockImplementationOnce(() => {
+        throw new Error('EACCES');
+      });
+      mockChannelStateStoreReadAll.mockReturnValue({ feishu: 'stopped' });
+      const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+        throw new Error(`process.exit: ${String(code)}`);
+      });
+
+      try {
+        // Default connect rejection ends startAll at the connectedCount check.
+        await expect(invokeStartHandler({})).rejects.toThrow('process.exit: 1');
+      } finally {
+        exitSpy.mockRestore();
+      }
+
+      // The fallback read still drives the restore filter. Sink pin
+      // (R12-3): the skip notice rides the best-effort sink.
+      expect(mockWriteStdoutLineBestEffort).toHaveBeenCalledWith(
+        '[Channel] "feishu" skipped (stopped before restart)',
+      );
+      // A silent fallback would hide that persistence is broken: stale
+      // entries survive and a re-added channel is skipped forever with
+      // no diagnostic tracing the cause — the daemon-side twin asserts
+      // this warning too (#8975). Sink pin (R12-3): the warning rides
+      // the best-effort sink — it fires exactly when the disk is
+      // failing.
+      expect(mockWriteStdoutLineBestEffort).toHaveBeenCalledWith(
+        '[Channel] Warning: failed to update channel state; falling back to recorded states.',
+      );
+      expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+        '[Channel] Warning: failed to update channel state; falling back to recorded states.',
+      );
+      expect(mockCreateChannel).toHaveBeenCalledTimes(1);
+      expect(mockCreateChannel).toHaveBeenCalledWith(
+        'telegram',
+        mockParsedChannelConfig,
+        expect.any(Object),
+        expect.any(Object),
+      );
+    });
+
+    it('treats all channels as active when prune fails and nothing is readable (R12-13)', async () => {
+      // prune throws on ANY store failure — a transient READ failure as
+      // well as a write failure — and the fallback readAll() can then
+      // return an EMPTY map while channels are explicitly stopped. The
+      // warning must say so: selecting from an empty map treats every
+      // configured channel as active, including the stopped ones, and
+      // claiming 'falling back to recorded states' there would be a lie
+      // (#8975). Mirror of the daemon-worker twin.
+      mockLoadSettings.mockReturnValue({
+        merged: {
+          channels: {
+            telegram: { type: 'telegram' },
+            feishu: { type: 'feishu' },
+          },
+        },
+      });
+      mockChannelStateStorePrune.mockImplementationOnce(() => {
+        throw new Error('EBUSY');
+      });
+      mockChannelStateStoreReadAll.mockReturnValue({});
+      const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+        throw new Error(`process.exit: ${String(code)}`);
+      });
+
+      try {
+        // Default connect rejection ends startAll at the connectedCount check.
+        await expect(invokeStartHandler({})).rejects.toThrow('process.exit: 1');
+      } finally {
+        exitSpy.mockRestore();
+      }
+
+      expect(mockWriteStdoutLineBestEffort).toHaveBeenCalledWith(
+        '[Channel] Warning: no recorded channel state readable; treating all channels as active.',
+      );
+      // Mirror-pin the ternary's other half: with an empty fallback the
+      // recorded-states wording must NOT appear (#8975).
+      expect(mockWriteStdoutLineBestEffort).not.toHaveBeenCalledWith(
+        '[Channel] Warning: failed to update channel state; falling back to recorded states.',
+      );
+      // Nothing is skipped: ALL configured channels are selected.
+      expect(mockWriteStdoutLineBestEffort).not.toHaveBeenCalledWith(
+        expect.stringContaining('skipped (stopped before restart)'),
+      );
+      expect(mockCreateChannel).toHaveBeenCalledTimes(2);
+      expect(mockCreateChannel).toHaveBeenCalledWith(
+        'telegram',
+        mockParsedChannelConfig,
+        expect.any(Object),
+        expect.any(Object),
+      );
+      expect(mockCreateChannel).toHaveBeenCalledWith(
+        'feishu',
+        mockParsedChannelConfig,
+        expect.any(Object),
+        expect.any(Object),
+      );
+    });
+
+    it('skips stopped channels but still starts the rest', async () => {
+      mockLoadSettings.mockReturnValue({
+        merged: {
+          channels: {
+            telegram: { type: 'telegram' },
+            feishu: { type: 'feishu' },
+          },
+        },
+      });
+      mockChannelStateStoreReadAll.mockReturnValue({ feishu: 'stopped' });
+      const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+        throw new Error(`process.exit: ${String(code)}`);
+      });
+
+      try {
+        // Default connect rejection ends startAll at the connectedCount check.
+        await expect(invokeStartHandler({})).rejects.toThrow('process.exit: 1');
+      } finally {
+        exitSpy.mockRestore();
+      }
+
+      // Sink pin (R12-3): the skip notice rides the best-effort sink.
+      expect(mockWriteStdoutLineBestEffort).toHaveBeenCalledWith(
+        '[Channel] "feishu" skipped (stopped before restart)',
+      );
+      // One-sided warning pin: the prune-fallback warning is pinned on the
+      // failure path above; a prune-success startup must NOT emit it —
+      // emitting it on every normal startup drowns the genuine warning
+      // the test above says must stay traceable (R9-14). Sink twin
+      // (R12-3): the real warning sink is the best-effort one.
+      expect(mockWriteStdoutLineBestEffort).not.toHaveBeenCalledWith(
+        '[Channel] Warning: failed to update channel state; falling back to recorded states.',
+      );
+      expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+        '[Channel] Warning: failed to update channel state; falling back to recorded states.',
+      );
+      // prune receives every configured name, including the skipped one: a
+      // post-selection list would wipe the skipped channel's stopped record
+      // and resurrect it on the next start (#8975). Adopted legacy stops
+      // are exempt from that cleanup (#8975, R12-47 fix).
+      expect(mockChannelStateStorePrune).toHaveBeenCalledWith(
+        ['telegram', 'feishu'],
+        { preserveAdopted: true },
+      );
+      // Uniqueness pin, mirroring the daemon-worker suite (R12-15).
+      expect(mockChannelStateStorePrune).toHaveBeenCalledTimes(1);
+      expect(mockCreateChannel).toHaveBeenCalledTimes(1);
+      expect(mockCreateChannel).toHaveBeenCalledWith(
+        'telegram',
+        mockParsedChannelConfig,
+        expect.any(Object),
+        expect.any(Object),
+      );
+    });
+
+    it('writes only the connected channels to the pidfile after a partial connect (#8975)', async () => {
+      mockLoadSettings.mockReturnValue({
+        merged: {
+          channels: {
+            telegram: { type: 'telegram' },
+            feishu: { type: 'feishu' },
+          },
+        },
+      });
+      mockChannelConnect
+        .mockResolvedValueOnce(undefined)
+        .mockRejectedValueOnce(new Error('feishu connect failed'));
+      const err = new Error('EEXIST') as NodeJS.ErrnoException;
+      err.code = 'EEXIST';
+      mockWriteServiceInfo.mockImplementationOnce(() => {
+        throw err;
+      });
+      const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+        throw new Error(`process.exit: ${String(code)}`);
+      });
+
+      try {
+        await expect(invokeStartHandler({})).rejects.toThrow('process.exit: 1');
+      } finally {
+        exitSpy.mockRestore();
+      }
+
+      // The pidfile lists the CONNECTED set: `qwen channel stop` persists
+      // these names as explicitly stopped, so a channel whose connect()
+      // failed (never ran) must not be recorded, or every later
+      // `--channel all` start skips it (#8975).
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        expect.stringContaining('Failed to connect "feishu"'),
+      );
+      // The restore filter reads the STATE file, not the pidfile: the
+      // pidfile pins the connected set above; startAll itself performs no
+      // state write for the connected names (the file already holds
+      // active-or-nothing for every selected name — R9-19), and a write
+      // recording the connect-failed channel would skip it on every later
+      // `--channel all` start (#8975).
+      expect(mockChannelStateStoreSetMany).not.toHaveBeenCalled();
+      expect(mockChannelStateStoreSet).not.toHaveBeenCalled();
+      expect(mockWriteServiceInfo).toHaveBeenCalledWith(
+        ['telegram'],
+        process.cwd(),
+      );
+    });
+
+    it('keeps the partial-connect pidfile at the connected set for the whole lifecycle (R16-47)', async () => {
+      // The EEXIST-abort twin above exits at the FIRST pidfile write, so
+      // a second writeServiceInfo carrying the attempted/configured set
+      // (a hoisted pre-connect write left in place, or a later
+      // "refresh") never executes in-test — the membership assertion
+      // matches the first call and the regression ships green. In
+      // production the FINAL pidfile would then list `feishu` (whose
+      // connect() failed, never ran) as running; `qwen channel stop`
+      // persists the pidfile names as explicitly stopped, so `feishu`
+      // acquires a `stopped` record and every later `--channel all`
+      // skips it (#8975). Let the write succeed and exit through the
+      // captured SIGTERM handler — the zero-channel twins' lifecycle
+      // shape (R14-29) — so a later wrong-set rewrite is observable via
+      // the write COUNT.
+      mockLoadSettings.mockReturnValue({
+        merged: {
+          channels: {
+            telegram: { type: 'telegram' },
+            feishu: { type: 'feishu' },
+          },
+        },
+      });
+      mockChannelConnect
+        .mockResolvedValueOnce(undefined)
+        .mockRejectedValueOnce(new Error('feishu connect failed'));
+      const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+        throw new Error(`process.exit: ${String(code)}`);
+      });
+      const processOnSpy = vi
+        .spyOn(process, 'on')
+        .mockImplementation(() => process);
+
+      try {
+        void invokeStartHandler({});
+        await new Promise((resolve) => setImmediate(resolve));
+
+        expect(mockWriteStderrLine).toHaveBeenCalledWith(
+          expect.stringContaining('Failed to connect "feishu"'),
+        );
+        // The pidfile lists the CONNECTED set...
+        expect(mockWriteServiceInfo).toHaveBeenCalledWith(
+          ['telegram'],
+          process.cwd(),
+        );
+        // ...exactly ONCE: no later rewrite with the attempted/configured
+        // set anywhere in the lifecycle (this is the only startAll path
+        // where the connected set differs from the configured set).
+        expect(mockWriteServiceInfo).toHaveBeenCalledTimes(1);
+        expect(mockChannelStateStoreSetMany).not.toHaveBeenCalled();
+        expect(mockChannelStateStoreSet).not.toHaveBeenCalled();
+
+        const sigterm = processOnSpy.mock.calls.find(
+          ([eventName]) => eventName === 'SIGTERM',
+        )?.[1] as (() => void) | undefined;
+        expect(sigterm).toBeDefined();
+        // The exit mock throws instead of terminating the process.
+        expect(() => sigterm!()).toThrow('process.exit: 0');
+        expect(mockRemoveServiceInfo).toHaveBeenCalled();
+        // Shutdown cleans up the pidfile but does not rewrite it.
+        expect(mockWriteServiceInfo).toHaveBeenCalledTimes(1);
+      } finally {
+        processOnSpy.mockRestore();
+        exitSpy.mockRestore();
+      }
+    });
+
+    it('stops the bridge when no channel connects (#8975)', async () => {
+      // The connectedCount === 0 exit path calls bridge.stop() before
+      // process.exit(1); deleting that call ships green without this pin
+      // and orphans the started bridge's CLI child on every all-failed
+      // startup (#8975).
+      mockLoadSettings.mockReturnValue({
+        merged: {
+          channels: {
+            telegram: { type: 'telegram' },
+            feishu: { type: 'feishu' },
+          },
+        },
+      });
+      mockChannelConnect.mockRejectedValue(new Error('connect failed'));
+      const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+        throw new Error(`process.exit: ${String(code)}`);
+      });
+
+      try {
+        await expect(invokeStartHandler({})).rejects.toThrow('process.exit: 1');
+      } finally {
+        exitSpy.mockRestore();
+      }
+
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        expect.stringContaining('Failed to connect "telegram"'),
+      );
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        expect.stringContaining('Failed to connect "feishu"'),
+      );
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        '[Channel] No channels connected. Exiting.',
+      );
+      expect(mockBridgeStop).toHaveBeenCalled();
+      // Nothing connected: no state write at all (R9-19) and no pidfile
+      // is written (#8975).
+      expect(mockChannelStateStoreSetMany).not.toHaveBeenCalled();
+      expect(mockWriteServiceInfo).not.toHaveBeenCalled();
+    });
+
+    it('reads the workspace-scoped state file without rewriting it for the connected set (R9-19)', async () => {
+      // Two channels on purpose: with a single channel, batched and
+      // per-channel writes are observationally identical (#8975).
+      mockLoadSettings.mockReturnValue({
+        merged: {
+          channels: {
+            telegram: { type: 'telegram' },
+            feishu: { type: 'feishu' },
+          },
+        },
+      });
+      mockChannelConnect.mockResolvedValue(undefined);
+      const err = new Error('EEXIST') as NodeJS.ErrnoException;
+      err.code = 'EEXIST';
+      mockWriteServiceInfo.mockImplementationOnce(() => {
+        throw err;
+      });
+      const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+        throw new Error(`process.exit: ${String(code)}`);
+      });
+
+      try {
+        await expect(invokeStartHandler({})).rejects.toThrow('process.exit: 1');
+      } finally {
+        exitSpy.mockRestore();
+      }
+
+      // The connect loop must not write the state file: every connected
+      // name was selected by selectActiveChannels, which excludes exactly
+      // the `stopped` entries — the file already holds active-or-nothing
+      // for each of them and no reader distinguishes those, so the old
+      // batched `active` write (and its false skip-consequence warning)
+      // was pure noise on the startup critical path (R9-19).
+      expect(mockAdoptLegacyChannelState).toHaveBeenCalledWith(process.cwd());
+      expect(mockAdoptLegacyChannelState).toHaveBeenCalledTimes(1);
+      expect(mockChannelRuntimeStatePath).toHaveBeenCalledWith(process.cwd());
+      // ...and the store is constructed with the path the helper returns
+      // for THAT argument — a split here reads/writes a different file
+      // than stop.ts addresses. The path mock derives its return from the
+      // argument, so this fails unless both derivations use the same
+      // workspace form (R9-15).
+      expect(mockChannelStateStore).toHaveBeenCalledWith(
+        `/tmp/qwen-home/channels/standalone/${process.cwd()}/channel-state.json`,
+      );
+      // Uniqueness pins, mirroring the daemon-worker suite (R12-15): the
+      // membership pins above are satisfied by an additional wrong-path
+      // store construction or path derivation alongside the right one —
+      // a read/write store split ships green against membership alone.
+      expect(mockChannelRuntimeStatePath).toHaveBeenCalledTimes(1);
+      expect(mockChannelStateStore).toHaveBeenCalledTimes(1);
+      // prune receives the FULL configured set: a partial list would wipe
+      // the stopped records of exactly the skipped channels (#8975).
+      // Adopted legacy stops are exempt from that cleanup (#8975, R12-47
+      // fix).
+      expect(mockChannelStateStorePrune).toHaveBeenCalledWith(
+        ['telegram', 'feishu'],
+        { preserveAdopted: true },
+      );
+      expect(mockChannelStateStorePrune).toHaveBeenCalledTimes(1);
+      // Adoption must run before the state read, or startAll reads the
+      // still-empty workspace file and overwrites the legacy stops (#8975).
+      expect(
+        mockAdoptLegacyChannelState.mock.invocationCallOrder[0],
+      ).toBeLessThan(mockChannelStateStorePrune.mock.invocationCallOrder[0]!);
+      // No write after the read: the restore filter is the only consumer
+      // of the file on this path (R9-19).
+      expect(mockChannelStateStoreSetMany).not.toHaveBeenCalled();
+      expect(mockChannelStateStoreSet).not.toHaveBeenCalled();
+      // One-sided warning pin: the removed batched write's warning must
+      // not fire on a successful startup — a false data-loss alarm on
+      // every normal start (R9-18). Sink twin (R12-3): the real warning
+      // sink is the best-effort one.
+      expect(mockWriteStdoutLineBestEffort).not.toHaveBeenCalledWith(
+        '[Channel] Warning: could not persist the active record; --channel all may still skip this channel.',
+      );
+      expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+        '[Channel] Warning: could not persist the active record; --channel all may still skip this channel.',
+      );
+      expect(mockWriteServiceInfo).toHaveBeenCalledWith(
+        ['telegram', 'feishu'],
+        process.cwd(),
+      );
+    });
+  });
+
+  it('force-starts a named channel even when its state is stopped', async () => {
+    mockLoadSettings.mockReturnValue({
+      merged: { channels: { telegram: { type: 'telegram' } } },
+    });
+    mockChannelStateStoreReadAll.mockReturnValue({ telegram: 'stopped' });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit: ${String(code)}`);
+    });
+
+    try {
+      await expect(invokeStartHandler({ name: 'telegram' })).rejects.toThrow(
+        'process.exit: 1',
+      );
+    } finally {
+      exitSpy.mockRestore();
+    }
+
+    expect(mockCreateChannel).toHaveBeenCalledWith(
+      'telegram',
+      mockParsedChannelConfig,
+      expect.any(Object),
+      expect.any(Object),
+    );
+    // This named start's connect fails (default rejection): a failed
+    // connect must NOT overwrite the `stopped` record — recording active
+    // here would resurrect the channel on every later `--channel all`
+    // start (#8975).
+    expect(mockChannelStateStoreSet).not.toHaveBeenCalled();
+    expect(mockChannelStateStoreSetMany).not.toHaveBeenCalled();
+    // The connect-failure exit path must tear down the already-started
+    // bridge, or its CLI child is orphaned on every failed startup (bad
+    // credentials, network down — the routine failure paths) (#8975).
+    expect(mockBridgeStop).toHaveBeenCalled();
+  });
+
+  it('records a named channel as active after a successful connect', async () => {
+    mockLoadSettings.mockReturnValue({
+      merged: { channels: { telegram: { type: 'telegram' } } },
+    });
+    mockChannelConnect.mockResolvedValue(undefined);
+    const err = new Error('EEXIST') as NodeJS.ErrnoException;
+    err.code = 'EEXIST';
+    mockWriteServiceInfo.mockImplementationOnce(() => {
+      throw err;
+    });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit: ${String(code)}`);
+    });
+
+    try {
+      await expect(invokeStartHandler({ name: 'telegram' })).rejects.toThrow(
+        'process.exit: 1',
+      );
+    } finally {
+      exitSpy.mockRestore();
+    }
+
+    expect(mockChannelStateStoreSet).toHaveBeenCalledWith('telegram', 'active');
+    // Scoped write only (doudouOUC C2): the legacy global write is GATED
+    // on a differing record, and this test's legacy file carries none
+    // (default readAll `{}`). Absence already means active to adoption,
+    // so the fsync'd legacy write is skipped for a first-ever named
+    // start. The R16-30 flip direction — legacy record `stopped` →
+    // legacy write — is pinned by the `overwrites a prior stopped
+    // record` test below.
+    expect(mockChannelStateStoreSet).toHaveBeenCalledTimes(1);
+    // The gate still constructs a legacy store to READ the record: the
+    // path helper and store counts stay two each (scoped write + legacy
+    // gate read), the write count drops to one.
+    expect(mockChannelRuntimeStatePath).toHaveBeenCalledWith();
+    expect(mockChannelStateStore).toHaveBeenCalledWith(
+      '/tmp/qwen-home/channels/channel-state.json',
+    );
+    expect(mockChannelStateStoreReadAll).toHaveBeenCalled();
+    // Cardinality pin (the startAll twins pin it; the named path did not):
+    // a refactor generalizing recordChannelActive to write every configured
+    // name would flip other channels' `stopped` records to `active` while
+    // the any-call assertion above still matches (#8975).
+    expect(mockChannelStateStoreSetMany).not.toHaveBeenCalled();
+    // One-sided warning pin: the persistence-failure warning is pinned on
+    // the failure twin below; a successful named start must NOT fire it —
+    // a false data-loss alarm on every successful restart-by-name (R9-18).
+    // Sink twin (R12-3): the real warning sink is the best-effort one.
+    expect(mockWriteStdoutLineBestEffort).not.toHaveBeenCalledWith(
+      '[Channel] Warning: could not persist the active record; --channel all may still skip this channel.',
+    );
+    expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+      '[Channel] Warning: could not persist the active record; --channel all may still skip this channel.',
+    );
+    // The named path adopts legacy stops too, and BEFORE the first
+    // workspace-scoped write: a named start must not create a
+    // snapshot-less workspace file first, or the next adoption treats it
+    // as predating snapshot recording, baselines without merging, and
+    // drops the legacy stops (#8975).
+    expect(mockAdoptLegacyChannelState).toHaveBeenCalledWith(process.cwd());
+    expect(mockChannelRuntimeStatePath).toHaveBeenCalledWith(process.cwd());
+    // The store is constructed with the workspace-scoped path the helper
+    // returns for THAT argument — the mock derives its return from the
+    // argument, so a split derivation here writes to a different file
+    // than stop.ts addresses (R9-16).
+    expect(mockChannelStateStore).toHaveBeenCalledWith(
+      `/tmp/qwen-home/channels/standalone/${process.cwd()}/channel-state.json`,
+    );
+    // Uniqueness pins, mirroring the daemon-worker suite (R12-15): an
+    // additional wrong-path adoption/store construction alongside the
+    // right one ships green against the membership pins alone. The path
+    // helper and store counts are two each since the dual-write (scoped +
+    // legacy, R16-30); adoption stays a single call.
+    expect(mockAdoptLegacyChannelState).toHaveBeenCalledTimes(1);
+    expect(mockChannelRuntimeStatePath).toHaveBeenCalledTimes(2);
+    expect(mockChannelStateStore).toHaveBeenCalledTimes(2);
+    expect(
+      mockAdoptLegacyChannelState.mock.invocationCallOrder[0],
+    ).toBeLessThan(mockChannelStateStoreSet.mock.invocationCallOrder[0]!);
+  });
+
+  it('overwrites a prior stopped record when a named channel connects (#8975)', async () => {
+    // Positive half of the restore contract: the only stopped-seed named
+    // test fails the connect and asserts NO write, leaving the overwrite
+    // direction untested. A future "don't overwrite an explicit stop"
+    // guard would leave `stopped` persisted after an explicit restart, so
+    // the next `--channel all` skips the channel the user just restarted.
+    mockLoadSettings.mockReturnValue({
+      merged: { channels: { telegram: { type: 'telegram' } } },
+    });
+    mockChannelStateStoreReadAll.mockReturnValue({ telegram: 'stopped' });
+    mockChannelConnect.mockResolvedValue(undefined);
+    const err = new Error('EEXIST') as NodeJS.ErrnoException;
+    err.code = 'EEXIST';
+    mockWriteServiceInfo.mockImplementationOnce(() => {
+      throw err;
+    });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit: ${String(code)}`);
+    });
+
+    try {
+      await expect(invokeStartHandler({ name: 'telegram' })).rejects.toThrow(
+        'process.exit: 1',
+      );
+    } finally {
+      exitSpy.mockRestore();
+    }
+
+    // Two writes (R16-30 flip, doudouOUC C2 gate FIRES): the legacy file
+    // records `stopped` for the name (readAll seed above), so the gated
+    // legacy write runs and BOTH files flip the explicitly restarted
+    // name to `active`.
+    expect(mockChannelStateStoreSet).toHaveBeenCalledTimes(2);
+    expect(mockChannelStateStoreSet).toHaveBeenCalledWith('telegram', 'active');
+    expect(mockChannelStateStoreSetMany).not.toHaveBeenCalled();
+  });
+
+  it('skips the legacy active write when the legacy record is already active (doudouOUC C2)', async () => {
+    // The C2 gate's third arm: a legacy record that already matches the
+    // restart (`active`) needs no fsync'd rewrite — only a differing
+    // `stopped` record does (pinned by the test above). A restart-by-name
+    // loop on a warm legacy file pays one scoped write per restart.
+    mockLoadSettings.mockReturnValue({
+      merged: { channels: { telegram: { type: 'telegram' } } },
+    });
+    mockChannelStateStoreReadAll.mockReturnValue({ telegram: 'active' });
+    mockChannelConnect.mockResolvedValue(undefined);
+    const err = new Error('EEXIST') as NodeJS.ErrnoException;
+    err.code = 'EEXIST';
+    mockWriteServiceInfo.mockImplementationOnce(() => {
+      throw err;
+    });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit: ${String(code)}`);
+    });
+
+    try {
+      await expect(invokeStartHandler({ name: 'telegram' })).rejects.toThrow(
+        'process.exit: 1',
+      );
+    } finally {
+      exitSpy.mockRestore();
+    }
+
+    // Scoped write only; the legacy gate read happens (readAll) but the
+    // legacy write is skipped.
+    expect(mockChannelStateStoreSet).toHaveBeenCalledTimes(1);
+    expect(mockChannelStateStoreSet).toHaveBeenCalledWith('telegram', 'active');
+    expect(mockChannelStateStoreReadAll).toHaveBeenCalled();
+    expect(mockChannelStateStoreSetMany).not.toHaveBeenCalled();
+    // No loss warning: nothing was lost — the legacy record already
+    // matches.
+    expect(mockWriteStdoutLineBestEffort).not.toHaveBeenCalledWith(
+      '[Channel] Warning: could not persist the active record; --channel all may still skip this channel.',
+    );
+  });
+
+  it('still finishes a named start when state persistence fails (#8975)', async () => {
+    mockLoadSettings.mockReturnValue({
+      merged: { channels: { telegram: { type: 'telegram' } } },
+    });
+    mockChannelConnect.mockResolvedValue(undefined);
+    mockChannelStateStoreSet.mockImplementationOnce(() => {
+      throw new Error('disk full');
+    });
+    const err = new Error('EEXIST') as NodeJS.ErrnoException;
+    err.code = 'EEXIST';
+    mockWriteServiceInfo.mockImplementationOnce(() => {
+      throw err;
+    });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit: ${String(code)}`);
+    });
+
+    try {
+      await expect(invokeStartHandler({ name: 'telegram' })).rejects.toThrow(
+        'process.exit: 1',
+      );
+    } finally {
+      exitSpy.mockRestore();
+    }
+
+    // The connect already succeeded; a persistence failure must not abort
+    // the start before the pidfile write, or the connected channel is left
+    // stranded without a pidfile (#8975).
+    expect(mockWriteServiceInfo).toHaveBeenCalledWith(
+      ['telegram'],
+      process.cwd(),
+    );
+    // The loss must still be surfaced like the stop direction does: a
+    // stale `stopped` record would re-skip the explicitly restarted
+    // channel on the next `--channel all` restore (#8975). Sink pin
+    // (R12-3): the warning rides the best-effort sink — it fires exactly
+    // when the disk is failing.
+    expect(mockWriteStdoutLineBestEffort).toHaveBeenCalledWith(
+      '[Channel] Warning: could not persist the active record; --channel all may still skip this channel.',
+    );
+    expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+      '[Channel] Warning: could not persist the active record; --channel all may still skip this channel.',
+    );
   });
 });

@@ -42,6 +42,15 @@ export class ChannelWorkerReconcileError extends Error {
   readonly stopFailed: boolean;
   readonly startupFailures?: ChannelStartupAttemptFailure[];
   readonly startupFailuresTruncated?: boolean;
+  /**
+   * Workspaces whose old entry WAS successfully restored by the rollback.
+   * `rolledBack` is aggregate: with a multi-workspace reconcile it is
+   * `false` when ANY workspace's restore fails — even though the other
+   * workspaces' channels are relaunching. Callers deciding whether a
+   * specific workspace's channel is confirmed dead must consult this
+   * instead of the aggregate flag (R9-4).
+   */
+  readonly restoredWorkspaces?: string[];
 
   constructor(
     message: string,
@@ -51,6 +60,7 @@ export class ChannelWorkerReconcileError extends Error {
       stopFailed?: boolean;
       startupFailures?: readonly ChannelStartupAttemptFailure[];
       startupFailuresTruncated?: boolean;
+      restoredWorkspaces?: readonly string[];
     },
   ) {
     super(message);
@@ -62,6 +72,9 @@ export class ChannelWorkerReconcileError extends Error {
       ...failure,
     }));
     this.startupFailuresTruncated = options.startupFailuresTruncated;
+    this.restoredWorkspaces = options.restoredWorkspaces
+      ? [...options.restoredWorkspaces]
+      : undefined;
   }
 }
 
@@ -77,6 +90,16 @@ export interface ChannelWorkerGroup {
     options?: {
       force?: boolean;
       forceWorkspaceCwd?: string;
+      /**
+       * Workspaces whose existing entry must be preserved exactly as-is:
+       * the entry is neither stopped nor replaced, and a target group for
+       * the workspace is ignored (no new entry is created). Used by the
+       * per-channel enable/disable rebuild to keep terminal-failed
+       * workers — relaunching their workspace on a fresh restart budget
+       * resurrects the crash-looping channel the budget exists to stop
+       * (R20-3).
+       */
+      preserveWorkspaceCwds?: ReadonlySet<string>;
       onRollingBack?: () => void;
     },
   ): Promise<ChannelWorkerGroupReconcileResult>;
@@ -460,18 +483,24 @@ export function createChannelWorkerGroup(
 
   const restoreEntries = async (
     entriesToRestore: readonly ChannelWorkerGroupEntry[],
-  ): Promise<{ rolledBack: boolean; rollbackError?: string }> => {
+  ): Promise<{
+    rolledBack: boolean;
+    rollbackError?: string;
+    restoredWorkspaces: string[];
+  }> => {
     let firstError: string | undefined;
+    const restoredWorkspaces: string[] = [];
     for (const entry of entriesToRestore) {
       try {
         await entry.supervisor.start();
+        restoredWorkspaces.push(entry.workspaceCwd);
       } catch (error) {
         firstError ??= errorMessage(error);
       }
     }
     return firstError
-      ? { rolledBack: false, rollbackError: firstError }
-      : { rolledBack: true };
+      ? { rolledBack: false, rollbackError: firstError, restoredWorkspaces }
+      : { rolledBack: true, restoredWorkspaces };
   };
 
   const routeEntry = (
@@ -578,6 +607,15 @@ export function createChannelWorkerGroup(
             }
           }
         }
+        // Preserved workspaces are untouched: drop their targets so no new
+        // entry is created for them (R20-3).
+        if (reconcileOptions?.preserveWorkspaceCwds) {
+          for (const workspaceCwd of targets.keys()) {
+            if (reconcileOptions.preserveWorkspaceCwds.has(workspaceCwd)) {
+              targets.delete(workspaceCwd);
+            }
+          }
+        }
         const unchanged = new Map<string, ChannelWorkerGroupEntry>();
         const oldAffected: ChannelWorkerGroupEntry[] = [];
         const newEntries: ChannelWorkerGroupEntry[] = [];
@@ -593,6 +631,15 @@ export function createChannelWorkerGroup(
           if (preserveOtherWorkspace) {
             unchanged.set(workspaceCwd, entry);
             targets.delete(workspaceCwd);
+            continue;
+          }
+          // A preserved entry (a terminal-failed worker under the
+          // enable/disable rebuild) stays exactly as-is: it is neither
+          // stopped as an affected old entry nor replaced by its target,
+          // or the workspace relaunches on a fresh restart budget and
+          // resurrects the crash-looping channel (R20-3).
+          if (reconcileOptions?.preserveWorkspaceCwds?.has(workspaceCwd)) {
+            unchanged.set(workspaceCwd, entry);
             continue;
           }
           if (
