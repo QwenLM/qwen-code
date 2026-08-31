@@ -48,6 +48,8 @@ describeE2E('qwen-live M2 — mid-turn steering', () => {
   let sessionHandle = '';
   const slowGate: Deferred = deferred();
   const slowRequestSeen: Deferred = deferred();
+  /** Serialized `messages` of every model request the fake endpoint saw. */
+  const modelRequests: string[] = [];
 
   const toolCall = async (
     name: string,
@@ -111,6 +113,7 @@ describeE2E('qwen-live M2 — mid-turn steering', () => {
         () =>
         async ({ body }) => {
           const messages = JSON.stringify(body['messages'] ?? []);
+          modelRequests.push(messages);
           if (messages.includes(SLOW_MARKER)) {
             slowRequestSeen.resolve();
             await slowGate.promise; // hang the turn until the test releases it
@@ -171,6 +174,15 @@ describeE2E('qwen-live M2 — mid-turn steering', () => {
     // The joined instruction may be promoted into a follow-up turn after the
     // first turn completes; wait until the orchestrator reports idle.
     await waitForIdleSession(sessionHandle);
+
+    // The 'joined' receipt was not just wording: by the time the session is
+    // idle again, the steered instruction must have reached the model in
+    // some request (injected mid-turn or promoted to a follow-up turn).
+    expect(
+      modelRequests.some((request) =>
+        request.includes('also update the changelog'),
+      ),
+    ).toBe(true);
 
     const receipt = await handoff('call-s3', {
       task: 'one more quick task',
