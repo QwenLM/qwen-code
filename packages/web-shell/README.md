@@ -224,15 +224,16 @@ const projection = projectChatRecordsToDaemonTranscript(records);
 
 ### WebShell
 
-| 属性                | 类型                                                                                    | 说明                                                                             |
-| ------------------- | --------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
-| `onSessionIdChange` | `(sessionId: string \| undefined, workspaceId?: string, workspaceCwd?: string) => void` | 当前 session 或工作区变化时触发                                                  |
-| `onSessionCreated`  | `(sessionId: string) => Promise<void> \| void`                                          | 新 session 创建后触发；完成前会阻塞 session 初始化和 prompt 提交，最长等待 30 秒 |
-| `theme`             | `'dark' \| 'light'`                                                                     | UI 主题，默认 `dark`                                                             |
-| `onThemeChange`     | `(theme: WebShellTheme) => void`                                                        | `/theme` 命令切换主题后触发                                                      |
-| `language`          | `'en' \| 'zh-CN' \| 'zh' \| 'zh-cn'`                                                    | UI 语言                                                                          |
-| `onLanguageChange`  | `(language: WebShellLanguage) => void`                                                  | `/language ui` 切换 UI 语言后触发                                                |
-| `onSlashCommand`    | `(command: WebShellSlashCommand) => boolean \| void`                                    | 斜杠命令进入默认处理前触发；返回 `true` 时由宿主接管并跳过默认行为               |
+| 属性                      | 类型                                                                                    | 说明                                                                             |
+| ------------------------- | --------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| `onSessionIdChange`       | `(sessionId: string \| undefined, workspaceId?: string, workspaceCwd?: string) => void` | 当前 session 或工作区变化时触发                                                  |
+| `onSessionCreated`        | `(sessionId: string) => Promise<void> \| void`                                          | 新 session 创建后触发；完成前会阻塞 session 初始化和 prompt 提交，最长等待 30 秒 |
+| `onSessionArtifactsReady` | `(snapshot: WebShellSessionArtifactsSnapshot) => void`                                  | session 初始恢复及每轮最终 artifact 刷新完成后，向宿主提供完整 artifact 快照     |
+| `theme`                   | `'dark' \| 'light'`                                                                     | UI 主题，默认 `dark`                                                             |
+| `onThemeChange`           | `(theme: WebShellTheme) => void`                                                        | `/theme` 命令切换主题后触发                                                      |
+| `language`                | `'en' \| 'zh-CN' \| 'zh' \| 'zh-cn'`                                                    | UI 语言                                                                          |
+| `onLanguageChange`        | `(language: WebShellLanguage) => void`                                                  | `/language ui` 切换 UI 语言后触发                                                |
+| `onSlashCommand`          | `(command: WebShellSlashCommand) => boolean \| void`                                    | 斜杠命令进入默认处理前触发；返回 `true` 时由宿主接管并跳过默认行为               |
 
 宿主可以监听命令，也可以返回 `true` 接管对应操作：
 
