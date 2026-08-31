@@ -966,6 +966,37 @@ export interface WebShellApi {
   createSideTask: () => boolean;
 }
 
+interface WebShellSessionArtifactsSnapshotBase {
+  /** Session whose artifact store produced this snapshot. */
+  sessionId: string;
+  /** Complete visible artifact rows for the session. */
+  artifacts: readonly DaemonSessionArtifact[];
+  /** Artifact rows correlated to user turn ids using daemon provenance. */
+  artifactsByTurn: ReadonlyMap<string, readonly DaemonSessionArtifact[]>;
+}
+
+export type WebShellSessionArtifactsSnapshot =
+  | (WebShellSessionArtifactsSnapshotBase & {
+      /** Initial session restoration never represents new workspace changes. */
+      reason: 'restore';
+    })
+  | (WebShellSessionArtifactsSnapshotBase & {
+      /** A completed user turn whose artifacts have finished refreshing. */
+      reason: 'turn_complete';
+      /** User turn captured before the asynchronous artifact refresh started. */
+      turnId: string;
+    });
+
+function getLatestUserTurnId(messages: readonly Message[]): string | undefined {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.role === 'user' || message?.role === 'user_shell') {
+      return message.id;
+    }
+  }
+  return undefined;
+}
+
 export type WebShellComposerPlaceholderState = ComposerPlaceholderState;
 
 export type WebShellComposerPlaceholders = Readonly<
@@ -1105,6 +1136,13 @@ export interface WebShellProps {
    * at most once per animation frame during active generation.
    */
   onTranscriptChange?: (blocks: readonly DaemonTranscriptBlock[]) => void;
+  /**
+   * Called once after initial session restoration and once after each turn's
+   * final artifact refresh, with the complete artifact-store snapshot.
+   */
+  onSessionArtifactsReady?: (
+    snapshot: WebShellSessionArtifactsSnapshot,
+  ) => void;
   /**
    * Called when a critical error occurs (auth failure, session gone, etc).
    * Each distinct connection error value is reported once; reporting resets
@@ -2097,6 +2135,7 @@ export function App({
   loadingPhrases,
   onAgentTasksChange,
   onTranscriptChange,
+  onSessionArtifactsReady,
   onToast,
   composerRef,
   onComposerReady,
@@ -2885,6 +2924,10 @@ export function App({
     () => buildDisplayMessages(messages, recapMessage),
     [messages, recapMessage],
   );
+  const activeArtifactTurnId = useMemo(
+    () => getLatestUserTurnId(displayMessages),
+    [displayMessages],
+  );
   useEffect(() => {
     const failed = failedPromptRef.current;
     if (!failed) return;
@@ -2941,9 +2984,10 @@ export function App({
   }, [connection.sessionId, updateUnknownPromptAdmission]);
   const {
     artifacts,
+    ready: artifactsReady,
     loading: artifactsLoading,
     error: artifactsError,
-  } = useSessionArtifacts();
+  } = useSessionArtifacts(activeArtifactTurnId);
   const [artifactPanelExtraArtifacts, setArtifactPanelExtraArtifacts] =
     useState<DaemonSessionArtifact[]>([]);
   const [paneArtifactSnapshots, setPaneArtifactSnapshots] = useState<
@@ -3069,6 +3113,45 @@ export function App({
       ),
     [displayMessages, artifacts, connection.workspaceCwd],
   );
+  const lastNotifiedArtifactsReadySequenceRef = useRef(0);
+  useEffect(() => {
+    const sessionId = connection.sessionId;
+    if (
+      !onSessionArtifactsReady ||
+      !sessionId ||
+      !artifactsReady ||
+      connection.loadingTranscript ||
+      connection.catchingUp ||
+      lastNotifiedArtifactsReadySequenceRef.current === artifactsReady.sequence
+    ) {
+      return;
+    }
+    lastNotifiedArtifactsReadySequenceRef.current = artifactsReady.sequence;
+    if (artifactsReady.reason === 'turn_complete') {
+      onSessionArtifactsReady({
+        reason: artifactsReady.reason,
+        sessionId,
+        turnId: artifactsReady.turnId,
+        artifacts,
+        artifactsByTurn,
+      });
+    } else {
+      onSessionArtifactsReady({
+        reason: artifactsReady.reason,
+        sessionId,
+        artifacts,
+        artifactsByTurn,
+      });
+    }
+  }, [
+    artifacts,
+    artifactsByTurn,
+    artifactsReady,
+    connection.catchingUp,
+    connection.loadingTranscript,
+    connection.sessionId,
+    onSessionArtifactsReady,
+  ]);
   const fileChangesByTurn = useMemo(
     () =>
       getFileChangesByTurn(
