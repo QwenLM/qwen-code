@@ -80,7 +80,7 @@ export function transcribeSession(
       const text = parts
         .filter((p) => p.text && !p.thought)
         .map((p) => p.text as string)
-        .join('');
+        .join('\n');
       if (text) {
         events.push({ type: 'user', text });
         prompts.push(text);
@@ -113,7 +113,8 @@ export function transcribeSession(
           });
         }
       }
-      const ok = (r.status ?? 'success') !== 'error';
+      const status = r.status ?? 'success';
+      const ok = status !== 'error' && status !== 'cancelled';
       events.push({
         type: 'tool-end',
         id,
@@ -123,16 +124,15 @@ export function transcribeSession(
       continue;
     }
     if (o.type === 'assistant') {
-      let sawThought = false;
-      let closed = false;
+      let thinkingOpen = false;
       for (const p of parts) {
         if (p.thought && p.text) {
           events.push({ type: 'thinking', delta: p.text });
-          sawThought = true;
+          thinkingOpen = true;
         } else {
-          if (sawThought && !closed) {
+          if (thinkingOpen) {
             events.push({ type: 'thinking-end' });
-            closed = true;
+            thinkingOpen = false;
           }
           if (p.functionCall) {
             const name = p.functionCall.name ?? 'tool';
@@ -152,7 +152,7 @@ export function transcribeSession(
           }
         }
       }
-      if (sawThought && !closed) events.push({ type: 'thinking-end' });
+      if (thinkingOpen) events.push({ type: 'thinking-end' });
     }
   }
   events.push({ type: 'done' });
