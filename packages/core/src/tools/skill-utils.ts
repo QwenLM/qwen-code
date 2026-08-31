@@ -142,14 +142,13 @@ async function collectAvailableSkillEntriesUncached(
   // matching file path this session. Keeps the listing small in large monorepos
   // where most conditional skills are not yet relevant.
   const allSkills = await skillManager.listSkills();
-  const disabledNames = config.getDisabledSkillNames();
-  const isDisabled = (name: string) => disabledNames.has(name.toLowerCase());
+  const isEnabled = (skill: SkillConfig) => config.isSkillEnabled(skill);
 
   const availableSkills = allSkills.filter(
     (s) =>
       !s.disableModelInvocation &&
       skillManager.isSkillActive(s) &&
-      !isDisabled(s.name),
+      isEnabled(s),
   );
   const hiddenSkillNames = new Set(
     allSkills.filter((s) => s.disableModelInvocation).map((s) => s.name),
@@ -166,7 +165,7 @@ async function collectAvailableSkillEntriesUncached(
           s.paths &&
           s.paths.length > 0 &&
           !skillManager.isSkillActive(s) &&
-          !isDisabled(s.name),
+          isEnabled(s),
       )
       .map((s) => s.name),
   );
@@ -182,7 +181,7 @@ async function collectAvailableSkillEntriesUncached(
   const allCommands = provider ? provider() : [];
   const fileBasedSkillNames = new Set(
     allSkills
-      .filter((s) => !s.disableModelInvocation && !isDisabled(s.name))
+      .filter((s) => !s.disableModelInvocation && isEnabled(s))
       .map((s) => s.name),
   );
   const modelInvocableCommands = allCommands.filter(

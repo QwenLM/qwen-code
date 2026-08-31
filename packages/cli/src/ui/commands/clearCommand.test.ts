@@ -92,6 +92,8 @@ describe('clearCommand', () => {
           }),
           getWorkflowRunRegistry: () => ({
             hasRunningEntries: vi.fn().mockReturnValue(false),
+            list: vi.fn().mockReturnValue([]),
+            listStartingRunIds: vi.fn().mockReturnValue([]),
             reset: vi.fn(),
             abortAll: vi.fn(),
           }),
@@ -350,6 +352,8 @@ describe('clearCommand', () => {
             }),
             getWorkflowRunRegistry: () => ({
               hasRunningEntries: vi.fn().mockReturnValue(false),
+              list: vi.fn().mockReturnValue([]),
+              listStartingRunIds: vi.fn().mockReturnValue([]),
               reset: vi.fn(),
               abortAll: vi.fn(),
             }),
@@ -428,6 +432,7 @@ describe('clearCommand', () => {
             getWorkflowRunRegistry: vi.fn().mockReturnValue({
               hasRunningEntries: vi.fn().mockReturnValue(false),
               list: vi.fn().mockReturnValue([]),
+              listStartingRunIds: vi.fn().mockReturnValue([]),
               reset: vi.fn(),
               abortAll: vi.fn(),
             }),
@@ -501,6 +506,7 @@ describe('clearCommand', () => {
             getWorkflowRunRegistry: vi.fn().mockReturnValue({
               hasRunningEntries: vi.fn().mockReturnValue(false),
               list: vi.fn().mockReturnValue([]),
+              listStartingRunIds: vi.fn().mockReturnValue([]),
               reset: vi.fn(),
               abortAll: vi.fn(),
             }),
@@ -570,6 +576,7 @@ describe('clearCommand', () => {
             getWorkflowRunRegistry: vi.fn().mockReturnValue({
               hasRunningEntries: vi.fn().mockReturnValue(false),
               list: vi.fn().mockReturnValue([]),
+              listStartingRunIds: vi.fn().mockReturnValue([]),
               reset: vi.fn(),
               abortAll: vi.fn(),
             }),
@@ -640,6 +647,7 @@ describe('clearCommand', () => {
             getWorkflowRunRegistry: vi.fn().mockReturnValue({
               hasRunningEntries: vi.fn().mockReturnValue(false),
               list: vi.fn().mockReturnValue([]),
+              listStartingRunIds: vi.fn().mockReturnValue([]),
               reset: vi.fn(),
               abortAll: vi.fn(),
             }),

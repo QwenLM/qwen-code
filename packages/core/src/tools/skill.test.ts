@@ -115,6 +115,10 @@ describe('SkillTool', () => {
       // `skills.disabled` filter. Default empty so existing tests are
       // unaffected; per-test cases override.
       getDisabledSkillNames: vi.fn().mockReturnValue(new Set<string>()),
+      isSkillEnabled: vi.fn(
+        (skill: SkillConfig) =>
+          !config.getDisabledSkillNames().has(skill.name.toLowerCase()),
+      ),
     } as unknown as Config;
 
     changeListeners = [];
@@ -638,6 +642,16 @@ describe('SkillTool', () => {
   });
 
   describe('refreshSkills', () => {
+    it('surfaces collection failures for strict refreshes without changing the default behavior', async () => {
+      vi.mocked(mockSkillManager.listSkills).mockRejectedValue(
+        new Error('skill listing failed'),
+      );
+      await expect(
+        skillTool.refreshSkills({ throwOnError: true }),
+      ).rejects.toThrow('skill listing failed');
+      await expect(skillTool.refreshSkills()).resolves.toBeUndefined();
+    });
+
     it('should refresh when change listener fires', async () => {
       const newSkills: SkillConfig[] = [
         {
@@ -1724,6 +1738,55 @@ describe('SkillTool', () => {
   });
 
   describe('disabled-skill execute guard', () => {
+    it.each([false, true])(
+      'rechecks the actual source after loading a stale invocation and preserves command fallback: %s',
+      async (withCommand) => {
+        const extensionSkill: SkillConfig = {
+          ...mockSkills[1],
+          level: 'extension',
+          extensionName: 'suite',
+          body: 'CLOSED_EXTENSION_BODY',
+          hooks: {},
+        };
+        config.getHookSystem = vi.fn();
+        const executor = vi.fn().mockResolvedValue('Independent command body');
+        if (withCommand) {
+          vi.mocked(config.getModelInvocableCommandsExecutor).mockReturnValue(
+            executor,
+          );
+        }
+        let finishLoading!: (skill: SkillConfig) => void;
+        vi.mocked(mockSkillManager.loadSkillForRuntime).mockReturnValue(
+          new Promise((resolve) => {
+            finishLoading = resolve;
+          }),
+        );
+        const invocation = (
+          skillTool as SkillToolWithProtectedMethods
+        ).createInvocation({ skill: 'testing' });
+        const executing = invocation.execute();
+        vi.mocked(config.isSkillEnabled).mockReturnValue(false);
+        finishLoading(extensionSkill);
+        const result = await executing;
+
+        expect(config.isSkillEnabled).toHaveBeenCalledWith(extensionSkill);
+        expect(partToString(result.llmContent)).not.toContain(
+          'CLOSED_EXTENSION_BODY',
+        );
+        expect(mockAddSessionAllowRule).not.toHaveBeenCalled();
+        expect(config.getHookSystem).not.toHaveBeenCalled();
+        expect(skillTool.getLoadedSkillContents()).toEqual(new Set());
+        if (withCommand) {
+          expect(executor).toHaveBeenCalledExactlyOnceWith('testing', '');
+          expect(partToString(result.llmContent)).toBe(
+            'Independent command body',
+          );
+        } else {
+          expect(partToString(result.llmContent)).toContain('is disabled');
+        }
+      },
+    );
+
     const createHiddenSkillInvocation = async (
       executor: ReturnType<Config['getModelInvocableCommandsExecutor']>,
       params: SkillParams = { skill: 'mcp-prompt-a' },
