@@ -467,6 +467,7 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_archived_session_export',
       'workspace_session_live_state',
       'workspace_session_metadata',
+      'session_worktree_persistence_v1',
       'voice_transcribe',
       'web_terminal',
     ]);
