@@ -377,3 +377,38 @@ describe('Injector transport refusal', () => {
     expect(sink.injected).toHaveLength(1);
   });
 });
+
+describe('Injector size caps', () => {
+  it('caps the combined context injection at 6000 chars', () => {
+    injector.noteSpeechStarted();
+    injector.enqueue(complete('a'.repeat(4_000)));
+    injector.enqueue(complete('b'.repeat(4_000)));
+    injector.noteSpeechStopped();
+
+    expect(sink.contextCalls).toHaveLength(1);
+    expect(sink.contextCalls[0]).toHaveLength(6_000);
+    // The first item survives whole; the second is what the cap trims.
+    expect(sink.contextCalls[0]!.startsWith('a'.repeat(4_000))).toBe(true);
+  });
+
+  it('joins spoken lines whole and stops before breaching 280 chars', () => {
+    injector.noteSpeechStarted();
+    injector.enqueue(complete('one', 'x'.repeat(200)));
+    injector.enqueue(complete('two', 'y'.repeat(200)));
+    injector.noteSpeechStopped();
+
+    expect(sink.speechCalls).toHaveLength(1);
+    // Whole-line greedy join: the second line would breach the cap, so
+    // only the first is spoken — never a mid-line cut of line two.
+    expect(sink.speechCalls[0]).toBe('x'.repeat(200));
+  });
+
+  it('truncates a single over-long spoken line with an ellipsis', () => {
+    injector.noteSpeechStarted();
+    injector.enqueue(complete('ctx', 'z'.repeat(400)));
+    injector.noteSpeechStopped();
+
+    expect(sink.speechCalls).toHaveLength(1);
+    expect(sink.speechCalls[0]).toBe(`${'z'.repeat(280)}…`);
+  });
+});
