@@ -1304,6 +1304,20 @@ interface TestEfficacyArgs {
 // resets, the revert's checkout — so the mutations would land in whichever
 // repository the environment names while every check against the tree passes
 // silently. The trees this file touches are chosen by the paths it is given.
+// The two config-driven command surfaces a checkout fires from the very tree it
+// is cleaning: `core.hooksPath` (a `post-checkout` hook planted in the shared
+// common dir) and `core.fsmonitor` (a command git runs on checkout/status).
+// Disabling hooks does not cover filters and neutralising one checkout does not
+// cover the next — so every checkout in this file that rewrites files (the
+// restore and the revert alike) passes these, and none is hardened while a
+// sibling stays steerable.
+const CHECKOUT_INERT = [
+  '-c',
+  'core.hooksPath=/dev/null/no-hooks',
+  '-c',
+  'core.fsmonitor=',
+] as const;
+
 function git(cwd: string, ...args: string[]): void {
   const r = spawnSync('git', args, {
     cwd,
@@ -1661,15 +1675,10 @@ function restoreProbeTreeTracked(probeTree: string): string | null {
   if (filters.keys.length > 0) {
     return `the repository's local config defines content filter(s) ${screenKeyList(filters)}, which this tree's restore would EXECUTE`;
   }
-  // `core.fsmonitor` runs a command on BOTH of these, and the config that sets
-  // it lives in the tree they are cleaning: the residue probe empties it for
-  // exactly this reason and these two spawns were the ones still steerable.
-  const inert = [
-    '-c',
-    'core.hooksPath=/dev/null/no-hooks',
-    '-c',
-    'core.fsmonitor=',
-  ];
+  // `core.hooksPath` and `core.fsmonitor` both run a command on these two
+  // spawns, and the config that sets them lives in the tree they are cleaning:
+  // the residue probe empties them for exactly this reason.
+  const inert = CHECKOUT_INERT;
   for (const args of [
     [...inert, 'checkout', '--force', 'HEAD', '--', '.'],
     // `-ffdx`, because `-fd` honors the ignore rules — and those belong to the
@@ -3022,7 +3031,20 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
           (existsAtBase(probeTree, base, p) ? modified : added).push(p);
         }
         if (modified.length > 0) {
-          git(probeTree, 'checkout', base, '--', ...modified);
+          // Same neutralisation the restore's checkout runs (CHECKOUT_INERT):
+          // this revert rewrites the PR-modified files, and a `post-checkout`
+          // hook or a `core.fsmonitor` command planted in the never-wiped
+          // common dir mid-run would otherwise fire here — a surface the filter
+          // screen above does not cover, on a checkout the restore hardens and
+          // this one used to leave steerable.
+          git(
+            probeTree,
+            ...CHECKOUT_INERT,
+            'checkout',
+            base,
+            '--',
+            ...modified,
+          );
         }
         for (const p of added) safeRmWithin(probeTree, p);
 

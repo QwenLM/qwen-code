@@ -144,7 +144,9 @@ describe('runScratchTree', () => {
 
     expect(r.available).toBe(false);
     expect(r.note).toContain('capped enumeration');
-    expect(r.note).toContain(`${MAX_SCREEN_KEYS} shown of ${MAX_SCREEN_KEYS + 1}`);
+    expect(r.note).toContain(
+      `${MAX_SCREEN_KEYS} shown of ${MAX_SCREEN_KEYS + 1}`,
+    );
   });
 
   it("screens ANOTHER worktree's per-worktree config, not just this one's", () => {
@@ -181,6 +183,28 @@ describe('runScratchTree', () => {
 
     expect(r.available).toBe(false);
     expect(r.note).toContain('filter.planted.smudge');
+  });
+
+  it('refuses when the screen STOPPED before finishing — not only when it found a key', () => {
+    // `runScratchTree` gates on `filters.stopped`, a branch distinct from the
+    // "found a filter key" one: a screen that could not read a candidate to the
+    // end is not a clean result, because the checkouts below would execute any
+    // filter it failed to see. Here the review worktree's own `config.worktree`
+    // candidate is a directory — a candidate the screen cannot read — so the
+    // screen stops and the command refuses before creating or resetting a tree.
+    const gitDir = execFileSync('git', ['rev-parse', '--absolute-git-dir'], {
+      cwd: worktree,
+      encoding: 'utf8',
+    }).trim();
+    mkdirSync(join(gitDir, 'config.worktree'));
+
+    const r = run();
+
+    expect(r.available).toBe(false);
+    expect(r.note).toContain('the screen could not clear this repository');
+    expect(
+      existsSync(scratchWorktreePath(worktree, 'verify--round-1--abc123')),
+    ).toBe(false);
   });
 
   it('places it BESIDE the review worktree, never inside it', () => {

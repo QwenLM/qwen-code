@@ -650,12 +650,15 @@ describe('restoreProbeTreeTracked, through runOneMutant', () => {
     }
   });
 
-  it('still sees a filter whose value is padded past the default spawn buffer', () => {
-    // The screened file is attacker-writable and git prints every matching
-    // value in full, so a `smudge` padded past `spawnSync`'s DEFAULT 1 MiB
-    // buffer used to kill git with ENOBUFS — and the screen skipped the one
-    // file that defines the filter and reported the repository clean, while
-    // the restore's checkout ran the last value.
+  it('still sees a filter whose value is padded huge — `--name-only` never prints the value', () => {
+    // The screened file is attacker-writable, and a `smudge` value padded past
+    // `spawnSync`'s DEFAULT 1 MiB buffer would kill git with ENOBUFS if the
+    // enumeration printed values — the screen would skip the one file that
+    // defines the filter and report the repository clean. `--name-only` prints
+    // only the KEY, so the padded value never reaches stdout: the key is found
+    // and the refusal fires with no raised buffer at all. Remove `--name-only`
+    // and this goes red (the 1.2 MiB value overflows the default buffer and the
+    // detail no longer names the key), which is what pins the flag.
     const dir = mkdtempSync(join(tmpdir(), 'qwen-bigvalue-'));
     const canaryDir = mkdtempSync(join(tmpdir(), 'qwen-canary-'));
     const isolation = isolateHostGitConfig();

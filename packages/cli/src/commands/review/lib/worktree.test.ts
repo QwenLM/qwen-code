@@ -38,6 +38,7 @@ import {
   exposeDependencies,
   localFilterCommands,
   sanitizedGitEnv,
+  screenStopDetail,
   worktreeCreateFailureDetail,
   worktreeResidue,
 } from './worktree.js';
@@ -1943,7 +1944,7 @@ describe('localFilterCommands', () => {
     expect(screen.keys[0]).toMatch(/^filter\.evil\d+\.smudge$/);
   });
 
-  it('refuses past the candidate cap instead of walking a plant\'s filler', () => {
+  it("refuses past the candidate cap instead of walking a plant's filler", () => {
     // Each entry costs one synchronous `git config` spawn, on every screen
     // call — once per mutant. Skipping past the bound would let filler hide a
     // real filter behind it, so the screen refuses.
@@ -2070,5 +2071,65 @@ describe('localFilterCommands', () => {
     const screen = localFilterCommands(dir);
 
     expect(screen.unreadable).toBe(join(dir, '.git', 'config.worktree'));
+  });
+
+  it('follows an include directive the checkout would follow', () => {
+    // `git config --file` does NOT expand `include.path` / `includeIf` on its
+    // own — git's documented default for a single-file read — while every
+    // checkout this screen authorises reads MERGED config, which does. A filter
+    // one include-hop behind a screened candidate is invisible to a screen that
+    // omits `--includes` and executed by the checkout. The screen passes
+    // `--includes`, so it sees exactly what the checkout will.
+    writeFileSync(
+      join(dir, '.git', 'evil.inc'),
+      '[filter "evil"]\n\tsmudge = cat\n',
+    );
+    appendFileSync(
+      join(dir, '.git', 'config'),
+      '[include]\n\tpath = evil.inc\n',
+    );
+
+    const screen = localFilterCommands(dir);
+
+    expect(screen.keys).toEqual(['filter.evil.smudge']);
+    expect(screen.total).toBe(1);
+    expect(screen.unreadable).toBeNull();
+  });
+});
+
+describe('screenStopDetail', () => {
+  // The two refusal causes call for OPPOSITE remedies, so they must not share a
+  // sentence — an unreadable candidate is a file to fix or remove, while an
+  // over-cap admin directory was read perfectly well and "remove that file"
+  // there would deregister every legitimate linked worktree. Each arm is pinned
+  // directly: the producer's classification is tested elsewhere, but the
+  // rendered remedy a reader acts on is only here.
+  it('names the prune remedy for an over-cap directory, not a file to remove', () => {
+    const detail = screenStopDetail({
+      keys: [],
+      total: 0,
+      unreadable: '/repo/.git/worktrees',
+      stopped: 'over-cap',
+    });
+
+    expect(detail).toContain('git worktree prune');
+    expect(detail).toContain('registered under');
+    expect(detail).toContain(String(MAX_SCREEN_CANDIDATES));
+    expect(detail).toContain('/repo/.git/worktrees');
+    // Must NOT tell the reader the directory could not be read — it was.
+    expect(detail).not.toContain('could not be read to the end');
+  });
+
+  it('names the unreadable file plainly, without the prune remedy', () => {
+    const detail = screenStopDetail({
+      keys: [],
+      total: 0,
+      unreadable: '/repo/.git/config.worktree',
+      stopped: 'unreadable',
+    });
+
+    expect(detail).toContain('/repo/.git/config.worktree');
+    expect(detail).toContain('could not be read to the end');
+    expect(detail).not.toContain('git worktree prune');
   });
 });

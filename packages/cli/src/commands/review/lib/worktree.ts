@@ -615,11 +615,15 @@ export const MAX_SCREEN_CANDIDATES = 256;
  * `$(git rev-parse --git-path info/attributes)`. discard and cleanup never
  * wipe the common dir, so a filter planted while reviewing one PR fires on
  * every later matching checkout of the user's OWN repository — persistence
- * planted by reviewing a malicious PR, measured live. The two local config
- * files are checked with `--file` rather than merged config because filters
+ * planted by reviewing a malicious PR, measured live. The candidate config
+ * files are read with `--file … --includes` rather than merged config: filters
  * in the user's global config (git-lfs is the common one) are the user's own
- * contract, exactly like any git command they run. That is a deliberate
- * TRADE, not a claim that repo-local files are all a probe can reach: probe
+ * contract, exactly like any git command they run, so global config stays out
+ * of scope — but `--includes` follows the `include.path` / `includeIf` chain a
+ * screened file itself names, because the checkout does, and a filter hidden
+ * one include-hop behind a screened candidate would otherwise be invisible to
+ * the screen and executed by the checkout. Screening repo-local-only is a
+ * deliberate TRADE, not a claim that repo-local files are all a probe can reach: probe
  * code runs as the user, so `git config --global` is open to it, and a filter
  * planted there is read by every checkout here and never seen by this screen.
  * Refusing on merged config is not the answer — `git lfs install` writes
@@ -652,12 +656,12 @@ export interface LocalFilterScreen {
    * stopped it — otherwise null.
    *
    * Exit 1 is git's ordinary "no key matched" and is not a failure. Anything
-   * else is: a spawn error, or the `maxBuffer` kill an attacker reaches by
-   * making the screened file itself large — the value is theirs to write, and
-   * git prints the whole of it. Skipping such a file reports the repository
-   * clean on the one file that defines the filter, so the caller refuses
-   * instead. One file, not a list: the refusal only has to name where the
-   * screen stopped, and an unbounded join is its own denial-of-service.
+   * else is: a spawn error, a config git could not parse to the end (a
+   * malformed section, or an include it could not follow), or an ENOBUFS from
+   * more filter keys than the buffer holds. Skipping such a file reports the
+   * repository clean on the one file that might define the filter, so the caller
+   * refuses instead. One file, not a list: the refusal only has to name where
+   * the screen stopped, and an unbounded join is its own denial-of-service.
    */
   unreadable: string | null;
 }
@@ -695,27 +699,32 @@ export function screenStopDetail(screen: LocalFilterScreen): string {
     : `${where} could not be read to the end`;
 }
 
+/**
+ * A single `git rev-parse <flag>` answer, as a path, or null on any failure.
+ *
+ * One invocation per value, never a combined newline-delimited request: the
+ * answers are arbitrary filesystem paths and a POSIX path may itself carry a
+ * newline, so a combined answer cannot be split unambiguously — a healthy
+ * worktree below a directory whose name holds a newline parses to extra
+ * records, misassigns the paths, and the caller reports a live plant as clean
+ * or a real worktree as not-a-worktree. Measured with exactly such a directory.
+ * The only byte removed is git's terminal record delimiter; every other byte
+ * belongs to the path, so neither a split nor a trim is a parse here. Callers
+ * that need absolute paths pass `--path-format=absolute` as a leading flag.
+ */
+function revParsePath(cwd: string, ...flags: string[]): string | null {
+  const r = spawnSync('git', ['rev-parse', ...flags], {
+    cwd,
+    encoding: 'utf8',
+    env: sanitizedGitEnv(),
+  });
+  if (r.error || r.status !== 0 || typeof r.stdout !== 'string') return null;
+  return r.stdout.endsWith('\n') ? r.stdout.slice(0, -1) : r.stdout;
+}
+
 export function localFilterCommands(worktree: string): LocalFilterScreen {
-  // One invocation per value, the shape `worktreeResidue`'s `discover` already
-  // uses in this file and for the same reason: the answers are filesystem
-  // paths, a POSIX path may carry a newline, and a combined newline-delimited
-  // answer cannot then be split unambiguously. A linked worktree under such a
-  // directory parses to four records instead of two, `commonDir` gets the head
-  // of the path and `gitDir` its tail, every candidate resolves to nothing,
-  // the admin readdir hits ENOENT — the branch this code calls ordinary — and
-  // the screen answers CLEAN over a live plant. Measured with exactly such a
-  // directory. Strip only git's terminal delimiter; every other byte is path.
-  const askPath = (flag: string): string | null => {
-    const r = spawnSync('git', ['rev-parse', flag], {
-      cwd: worktree,
-      encoding: 'utf8',
-      env: sanitizedGitEnv(),
-    });
-    if (r.error || r.status !== 0 || typeof r.stdout !== 'string') return null;
-    return r.stdout.endsWith('\n') ? r.stdout.slice(0, -1) : r.stdout;
-  };
-  const commonDir = askPath('--git-common-dir');
-  const gitDir = askPath('--git-dir');
+  const commonDir = revParsePath(worktree, '--git-common-dir');
+  const gitDir = revParsePath(worktree, '--git-dir');
   if (commonDir === null || gitDir === null) {
     // Not a usable repository from here: the checkout this screen guards has
     // nothing to run in either, and its own failure is the caller's answer.
@@ -799,6 +808,16 @@ export function localFilterCommands(worktree: string): LocalFilterScreen {
         'config',
         '--file',
         file,
+        // `--file` alone does NOT expand `include.path` / `includeIf` — git's
+        // documented default for a single-file read — while every checkout this
+        // screen authorises reads MERGED config, which does. A probe appends
+        // `[include] path = evil.inc` to a screened candidate and writes the
+        // `filter.<name>.smudge` into the include target: without `--includes`
+        // the screen answers clean and the checkout runs it. With it, the screen
+        // reads the file exactly as the checkout will. A config this read cannot
+        // parse to the end — a malformed section, or an include it cannot follow
+        // — exits git non-zero, which the gate below turns into a refusal.
+        '--includes',
         // BEFORE the pattern: `--name-only` after it silently prints nothing
         // and exits 1 even with live keys. With it, each line is the whole key
         // and nothing has to be parsed out of a `key value` pair — a config
@@ -816,12 +835,14 @@ export function localFilterCommands(worktree: string): LocalFilterScreen {
       {
         cwd: worktree,
         encoding: 'utf8',
-        // The screened file is attacker-writable and git prints every matching
-        // value in full, so the DEFAULT 1 MiB buffer is a switch the plant can
-        // flip: pad one `smudge` value past the cap, `spawnSync` kills git with
-        // ENOBUFS, and a screen that skips the file reports clean while the
-        // checkout runs the last value. Sized like the `ls-files` spawn above.
-        maxBuffer: 64 * 1024 * 1024,
+        // No raised `maxBuffer`: `--name-only` prints one KEY per matching line
+        // and never the value, so the padded-`smudge`-value overflow that a full
+        // print invited cannot reach stdout — output is bounded by key count,
+        // not by an attacker-chosen value length. The one residual overflow is a
+        // config carrying more filter keys than the default 1 MiB holds, and
+        // that path sets `r.error` (ENOBUFS), which the gate below turns into a
+        // refusal. Fail closed on the pathological count; do not carry a buffer
+        // whose stated reason no longer exists.
         env: sanitizedGitEnv(),
       },
     );
@@ -835,12 +856,10 @@ export function localFilterCommands(worktree: string): LocalFilterScreen {
     if (r.status === 1 || typeof r.stdout !== 'string') continue;
     for (const line of r.stdout.split('\n')) {
       const key = line;
-      // A Set, not `Array.includes`: the values here are attacker-written and
-      // the 64 MiB ceiling above admits millions of distinct keys, so a linear
-      // membership test per line is quadratic on exactly the input this screen
-      // exists to survive. (Measured: 100k keys took 144 s as an array scan and
-      // 53 ms as a Set — and the 1 MiB default this raised from used to hide it
-      // by ENOBUFS-killing git and skipping the loop entirely.)
+      // A Set, not `Array.includes`: the key names here are attacker-written and
+      // as many as the 1 MiB output holds, so a linear membership test per line
+      // is quadratic on exactly the input this screen exists to survive.
+      // (Measured: 100k keys took 144 s as an array scan and 53 ms as a Set.)
       if (key) found.add(key);
     }
   }
@@ -974,25 +993,14 @@ export function worktreeResidue(
   // add`, a cleanup whose `rmSync` failed — `status` exits 0 against the
   // enclosing user checkout: the wrong tree's dirty state answered as this
   // one's. Fail closed the way a loud git failure below does.
-  // One invocation per value: the answers are three arbitrary filesystem
-  // paths, and a POSIX name may carry a newline, so no combined
-  // newline-delimited answer can be split unambiguously — a healthy
-  // worktree below a directory whose name holds one parses to extra
-  // records, misassigns gitDir/commondir, and reports the checkout as not
-  // a worktree. Measured with exactly such a directory.
-  const discover = (flag: string): string | null => {
-    const r = spawnSync('git', ['rev-parse', '--path-format=absolute', flag], {
-      cwd,
-      encoding: 'utf8',
-      env: sanitizedGitEnv(),
-    });
-    if (r.error || r.status !== 0 || typeof r.stdout !== 'string') {
-      return null;
-    }
-    // Remove only git's terminal record delimiter: every other byte
-    // belongs to the path, so neither a split nor a trim is a parse here.
-    return r.stdout.endsWith('\n') ? r.stdout.slice(0, -1) : r.stdout;
-  };
+  // One invocation per value (see `revParsePath`): the answers are three
+  // arbitrary filesystem paths, a POSIX name may carry a newline, so no combined
+  // newline-delimited answer can be split unambiguously — a healthy worktree
+  // below a directory whose name holds one parses to extra records, misassigns
+  // gitDir/commondir, and reports the checkout as not a worktree. These need
+  // absolute paths, so they pass `--path-format=absolute`.
+  const discover = (flag: string): string | null =>
+    revParsePath(cwd, '--path-format=absolute', flag);
   const toplevel = discover('--show-toplevel');
   const gitDir = discover('--git-dir');
   const commonDir = discover('--git-common-dir');

@@ -1724,6 +1724,56 @@ process.stdout.write(JSON.stringify({
     expect(existsSync(canary)).toBe(false);
   });
 
+  it('neutralises core.fsmonitor at the REVERT checkout, not only at the restore', async () => {
+    // The filter screen names `filter.*` keys; `core.fsmonitor` is a different
+    // config-driven command surface it does not cover, and git runs it on a
+    // pathspec checkout. The restore already empties it (`-c core.fsmonitor=`);
+    // the revert's `checkout base -- <paths>` used to run bare. A baseline that
+    // plants `core.fsmonitor` into the never-wiped common config would then have
+    // its command fire when the revert rewrites the PR-modified files. The
+    // revert now passes the same neutralisation the restore does, so it never
+    // runs — this file's absence is the assertion.
+    const canary = join(repo, 'PWNED-revert-fsmonitor');
+    writeFileSync(
+      vitestScript(),
+      `#!/usr/bin/env node
+import path from 'node:path';
+import fs from 'node:fs';
+import { execFileSync } from 'node:child_process';
+const g = (...a) => execFileSync('git', a, { encoding: 'utf8' }).trim();
+// Plant once — on the baseline — the way a probe's own test code would. No
+// filter and no attributes: fsmonitor is not attribute-gated, so this slips
+// past the filter screen entirely and only the checkout's own -c can stop it.
+const common = g('rev-parse', '--git-common-dir');
+const stamp = path.join(common, 'PLANTED');
+if (!fs.existsSync(stamp)) {
+  fs.writeFileSync(stamp, '');
+  execFileSync('git', ['config', 'core.fsmonitor', 'sh -c "touch ${canary}; :"']);
+}
+const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
+const results = files.map((f) => ({
+  name: path.resolve(f),
+  assertionResults: [{ status: 'passed' }],
+}));
+process.stdout.write(JSON.stringify({
+  numPassedTests: results.length,
+  numFailedTests: 0,
+  testResults: results,
+}));
+`,
+    );
+    const { wt, base } = scaffoldModifiedPr();
+
+    await runHandler({
+      report: join(repo, 'report.json'),
+      worktree: wt,
+      base,
+      out: join(repo, 'out.json'),
+    });
+
+    expect(existsSync(canary)).toBe(false);
+  });
+
   it('never deletes a line that does not hold the selected statement', () => {
     // `runOneMutant`'s mismatch guard, pinned directly: selection and the
     // probe tree both derive from the same commit, so the command cannot reach
