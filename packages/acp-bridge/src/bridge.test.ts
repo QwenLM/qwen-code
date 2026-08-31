@@ -29598,6 +29598,80 @@ describe('extractErrorMessage', () => {
     ).toBe('<503> model serving is throttled');
   });
 
+  it('extracts nested provider messages from data.error.message', () => {
+    // Shape the ACP SDK produces when the agent throws an error whose
+    // message is a JSON string: internalError(JSON.parse(message)).
+    expect(
+      extractErrorMessage(
+        new RequestError(-32603, 'Internal error', {
+          error: {
+            message:
+              'The engine is currently overloaded, please try again later',
+            type: 'engine_overloaded_error',
+          },
+        }),
+      ),
+    ).toBe('The engine is currently overloaded, please try again later');
+  });
+
+  it('extracts string data.error from JSON-RPC error data', () => {
+    expect(
+      extractErrorMessage({
+        code: -32603,
+        message: 'Internal error',
+        data: { error: 'plain string detail' },
+      }),
+    ).toBe('plain string detail');
+  });
+
+  it('prefers top-level data.details over nested data.error.message', () => {
+    expect(
+      extractErrorMessage({
+        code: -32603,
+        message: 'Internal error',
+        data: { details: 'top', error: { message: 'nested' } },
+      }),
+    ).toBe('top');
+  });
+
+  it('prefers top-level data.message over nested data.error.message', () => {
+    expect(
+      extractErrorMessage({
+        code: -32603,
+        message: 'Internal error',
+        data: { message: 'top', error: { message: 'nested' } },
+      }),
+    ).toBe('top');
+  });
+
+  it('falls back to message when data.error has no usable string', () => {
+    expect(
+      extractErrorMessage(
+        new RequestError(-32603, 'Internal error', {
+          error: { type: 'engine_overloaded_error' },
+        }),
+      ),
+    ).toBe('Internal error');
+  });
+
+  it('falls back to message when data.error is an empty string', () => {
+    expect(
+      extractErrorMessage(
+        new RequestError(-32603, 'Internal error', { error: '' }),
+      ),
+    ).toBe('Internal error');
+  });
+
+  it('falls back to message when data.error.message is an empty string', () => {
+    expect(
+      extractErrorMessage(
+        new RequestError(-32603, 'Internal error', {
+          error: { message: '' },
+        }),
+      ),
+    ).toBe('Internal error');
+  });
+
   it('extracts details from Error subclasses with JSON-RPC data', () => {
     expect(
       extractErrorMessage(
