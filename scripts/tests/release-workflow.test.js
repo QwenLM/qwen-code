@@ -406,6 +406,10 @@ describe('release workflow', () => {
       (step) => step.name === 'Pack Build Outputs',
     );
     expect(pack.run).toContain('packages/web-templates/src/generated');
+    // npm ci leaves nested dependency dist dirs under workspace
+    // node_modules; the find must prune them so only real build outputs
+    // travel in release-quality-build.
+    expect(pack.run).toContain('-type d -name node_modules -prune');
   });
 
   it('fans workspace tests into three complete Vitest shards', () => {

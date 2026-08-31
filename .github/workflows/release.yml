@@ -412,7 +412,7 @@ jobs:
           build_paths=('dist' 'packages/web-templates/src/generated')
           while IFS= read -r -d '' path; do
             build_paths+=("${path}")
-          done < <(find packages integrations -type d -name dist -prune -print0)
+          done < <(find packages integrations -type d -name node_modules -prune -o -type d -name dist -prune -print0)
           tar -czf "${RUNNER_TEMP}/release-build.tgz" "${build_paths[@]}"
 
       - name: 'Upload Build Outputs'
