@@ -851,35 +851,10 @@ setInterval(() => {}, 1000);
 
     it('keeps supervising a surviving hook group after its root exits', async () => {
       const tempDir = await mkdtemp(join(tmpdir(), 'qwen-hook-descendant-'));
-      const rootPath = join(tempDir, 'root.mjs');
-      const descendantPath = join(tempDir, 'descendant.mjs');
       const descendantPidPath = join(tempDir, 'descendant.pid');
       let descendantPid: number | undefined;
 
       try {
-        await writeFile(
-          rootPath,
-          `import { spawn } from 'node:child_process';
-import { readFileSync } from 'node:fs';
-
-const descendant = spawn(process.execPath, [process.argv[2], process.argv[3]], { stdio: 'ignore' });
-descendant.unref();
-while (true) {
-  try {
-    if (readFileSync(process.argv[3], 'utf8')) break;
-  } catch {}
-  await new Promise((resolve) => setTimeout(resolve, 5));
-}
-`,
-        );
-        await writeFile(
-          descendantPath,
-          `import { writeFileSync } from 'node:fs';
-
-writeFileSync(process.argv[2], String(process.pid));
-setInterval(() => {}, 1000);
-`,
-        );
         const runner = new HookRunner();
         const input: HookInput = {
           session_id: 'surviving-descendant-test',
@@ -888,7 +863,7 @@ setInterval(() => {}, 1000);
           hook_event_name: HookEventName.SessionDelete,
           timestamp: new Date().toISOString(),
         };
-        const command = `exec ${JSON.stringify(process.execPath)} ${JSON.stringify(rootPath)} ${JSON.stringify(descendantPath)} ${JSON.stringify(descendantPidPath)}`;
+        const command = `sleep 60 </dev/null >/dev/null 2>&1 & printf '%s' "$!" > ${JSON.stringify(descendantPidPath)}`;
 
         const result = await runner.executeHook(
           {
