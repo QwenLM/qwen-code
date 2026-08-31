@@ -1,4 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const wsMock = vi.hoisted(() => ({
   close: vi.fn(),
@@ -18,6 +21,7 @@ vi.mock('@larksuiteoapi/node-sdk', async (importOriginal) => {
 });
 
 import { FeishuChannel } from './FeishuAdapter.js';
+import { PairingStore } from '@qwen-code/channel-base';
 import type {
   ChannelAgentBridge,
   ChannelBaseOptions,
@@ -72,6 +76,10 @@ function createChannel(
 class TestableFeishuChannel extends FeishuChannel {
   pushLoop(target: SessionTarget, text: string): Promise<void> {
     return this.pushProactive(target, text);
+  }
+
+  sendAttributed(chatId: string, text: string, sourceLabel: string) {
+    return this.sendThreadMessage(chatId, undefined, text, sourceLabel);
   }
 }
 
@@ -632,6 +640,182 @@ describe('FeishuChannel', () => {
       expect(result.text).toBe('');
     });
   });
+
+  it('resolves reply-to-bot status before group mention gating', async () => {
+    const bridge = createMockBridge();
+    const channel = new FeishuChannel('test', createConfig(), bridge);
+    Object.assign(channel as unknown as Record<string, unknown>, {
+      tokenCache: {
+        token: 'test_token',
+        expiresAt: Date.now() + 3_600_000,
+      },
+    });
+    const fetchSpy = vi.spyOn(global, 'fetch').mockImplementation((input) => {
+      const url = String(input);
+      if (url.includes('/im/v1/messages/om_parent?')) {
+        return Promise.resolve(
+          jsonResponse({
+            data: {
+              items: [
+                {
+                  msg_type: 'text',
+                  body: {
+                    content: JSON.stringify({ text: 'previous bot reply' }),
+                  },
+                  sender: { sender_type: 'app' },
+                },
+              ],
+            },
+          }),
+        );
+      }
+      if (url.includes('/im/v1/messages/om_user_parent?')) {
+        return Promise.resolve(
+          jsonResponse({
+            data: {
+              items: [
+                {
+                  msg_type: 'text',
+                  body: { content: JSON.stringify({ text: 'user reply' }) },
+                  sender: { sender_type: 'user' },
+                },
+              ],
+            },
+          }),
+        );
+      }
+      return Promise.resolve(jsonResponse({ code: 0 }));
+    });
+    const reply = feishuGroupMessage('message_reply');
+    (reply['message'] as Record<string, unknown>)['parent_id'] = 'om_parent';
+
+    try {
+      getPrivateMethod<(data: unknown) => void>(channel, 'onMessage').call(
+        channel,
+        reply,
+      );
+
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      expect(bridge.prompt).toHaveBeenCalledWith(
+        'session-1',
+        expect.stringContaining('previous bot reply'),
+        expect.anything(),
+      );
+
+      const userReply = feishuGroupMessage('message_user_reply');
+      (userReply['message'] as Record<string, unknown>)['parent_id'] =
+        'om_user_parent';
+      getPrivateMethod<(data: unknown) => void>(channel, 'onMessage').call(
+        channel,
+        userReply,
+      );
+      await vi.waitFor(() =>
+        expect(
+          fetchSpy.mock.calls.filter(([input]) =>
+            String(input).includes('/im/v1/messages/om_user_parent?'),
+          ),
+        ).toHaveLength(1),
+      );
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(bridge.prompt).toHaveBeenCalledTimes(1);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it.each([
+    {
+      label: 'group pairing with a user parent',
+      config: { groupPolicy: 'pairing' as const },
+      parentType: 'user',
+      expectedSubject: undefined,
+    },
+    {
+      label: 'sender pairing with a user parent',
+      config: { senderPolicy: 'pairing' as const },
+      parentType: 'user',
+      expectedSubject: undefined,
+    },
+    {
+      label: 'group pairing with a bot parent',
+      config: { groupPolicy: 'pairing' as const },
+      parentType: 'app',
+      expectedSubject: { type: 'group', id: 'oc_group' },
+    },
+    {
+      label: 'sender pairing with a bot parent',
+      config: { senderPolicy: 'pairing' as const },
+      parentType: 'app',
+      expectedSubject: { type: 'user', id: 'ou_user' },
+    },
+  ])(
+    'defers $label until parent authorship is resolved',
+    async ({ config, parentType, expectedSubject }) => {
+      const previousQwenHome = process.env['QWEN_HOME'];
+      const qwenHome = mkdtempSync(join(tmpdir(), 'feishu-pairing-'));
+      process.env['QWEN_HOME'] = qwenHome;
+      const bridge = createMockBridge();
+      const channel = new FeishuChannel(
+        'test',
+        createConfig({ ...config, cwd: '/tmp' }),
+        bridge,
+      );
+      Object.assign(channel as unknown as Record<string, unknown>, {
+        tokenCache: {
+          token: 'test_token',
+          expiresAt: Date.now() + 3_600_000,
+        },
+      });
+      const sendMessage = vi
+        .spyOn(channel as never, 'sendMessage')
+        .mockResolvedValue(undefined);
+      const preflight = vi.spyOn(channel as never, 'preflightInbound');
+      const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue(
+        jsonResponse({
+          data: {
+            items: [
+              {
+                msg_type: 'text',
+                body: { content: JSON.stringify({ text: 'parent text' }) },
+                sender: { sender_type: parentType },
+              },
+            ],
+          },
+        }),
+      );
+      const reply = feishuGroupMessage(
+        `message_${parentType}_${config.groupPolicy ?? config.senderPolicy}`,
+      );
+      (reply['message'] as Record<string, unknown>)['parent_id'] = 'om_parent';
+
+      try {
+        getPrivateMethod<(data: unknown) => void>(channel, 'onMessage').call(
+          channel,
+          reply,
+        );
+
+        await vi.waitFor(() => expect(preflight).toHaveBeenCalledTimes(2));
+        await new Promise<void>((resolve) => setImmediate(resolve));
+
+        const requests = new PairingStore('test', '/tmp').listPending();
+        if (expectedSubject) {
+          expect(requests).toHaveLength(1);
+          expect(requests[0]?.subject).toMatchObject(expectedSubject);
+          expect(sendMessage).toHaveBeenCalledOnce();
+        } else {
+          expect(requests).toEqual([]);
+          expect(sendMessage).not.toHaveBeenCalled();
+        }
+        expect(fetchSpy).toHaveBeenCalledOnce();
+        expect(bridge.prompt).not.toHaveBeenCalled();
+      } finally {
+        fetchSpy.mockRestore();
+        if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
+        else process.env['QWEN_HOME'] = previousQwenHome;
+        rmSync(qwenHome, { recursive: true, force: true });
+      }
+    },
+  );
 
   describe('observed contact enrichment', () => {
     it('resolves labels once and reuses them on later observations', async () => {
@@ -1738,6 +1922,99 @@ describe('FeishuChannel', () => {
       extractCardText = getPrivateMethod<
         (card: Record<string, unknown>) => string | undefined
       >(channel, 'extractCardText').bind(channel);
+    });
+
+    it('strips named-task attribution from quoted cards', () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-feishu-card-text-'));
+      try {
+        channel = new FeishuChannel(
+          'test',
+          createConfig({ multiSession: true }),
+          createMockBridge(),
+          { stateDir },
+        );
+        extractCardText = getPrivateMethod<
+          (
+            card: Record<string, unknown>,
+            isFromBot?: boolean,
+          ) => string | undefined
+        >(channel, 'extractCardText').bind(channel);
+
+        expect(
+          extractCardText(
+            {
+              body: {
+                elements: [
+                  {
+                    tag: 'markdown',
+                    content: '\\[Alice · review\\]\n\nAnswer',
+                  },
+                ],
+              },
+            },
+            true,
+          ),
+        ).toBe('Answer');
+        expect(
+          extractCardText(
+            {
+              body: {
+                elements: [
+                  {
+                    tag: 'markdown',
+                    content:
+                      '好的，<at id=ou_user></at>\n\n\\[review\\_x\\]\n\nAnswer',
+                  },
+                ],
+              },
+            },
+            true,
+          ),
+        ).toBe('Answer');
+        expect(
+          extractCardText(
+            {
+              body: {
+                elements: [
+                  {
+                    tag: 'markdown',
+                    content: '\\[review\\]\n\n---\n*已停止生成*',
+                  },
+                ],
+              },
+            },
+            true,
+          ),
+        ).toBeUndefined();
+
+        expect(
+          extractCardText(
+            {
+              body: {
+                elements: [
+                  {
+                    tag: 'markdown',
+                    content: '\\[review\\]\n\nUser-authored content',
+                  },
+                ],
+              },
+            },
+            false,
+          ),
+        ).toBe('\\[review\\]\n\nUser-authored content');
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('preserves leading escaped brackets when named tasks are disabled', () => {
+      const card = {
+        body: {
+          elements: [{ tag: 'markdown', content: '\\[review\\]\n\nAnswer' }],
+        },
+      };
+
+      expect(extractCardText(card)).toBe('\\[review\\]\n\nAnswer');
     });
 
     it('extracts markdown from v2 card format (body.elements)', () => {
@@ -3785,6 +4062,30 @@ describe('FeishuChannel', () => {
       fetchSpy.mockRestore();
     });
 
+    it('neutralizes Feishu mention markup in attributed messages', async () => {
+      const channel = createTestableChannel();
+      (channel as unknown as Record<string, unknown>)['tokenCache'] = {
+        token: 'tenant-token',
+        expiresAt: Date.now() + 3600_000,
+      };
+      const fetchSpy = vi
+        .spyOn(global, 'fetch')
+        .mockResolvedValue(new Response('{}', { status: 200 }));
+
+      await channel.sendAttributed(
+        'oc_chat_id',
+        'done',
+        '[Alice <at id=ou_other></at> & review]',
+      );
+
+      const body = String(fetchSpy.mock.calls[0]?.[1]?.body);
+      expect(body).toContain('&lt;at');
+      expect(body).toContain('&lt;/at&gt;');
+      expect(body).toContain('&amp;');
+      expect(body).not.toContain('<at');
+      fetchSpy.mockRestore();
+    });
+
     it('maps typed chat and user deliveries to Feishu receive ID types', async () => {
       const channel = createTestableChannel();
       (channel as unknown as Record<string, unknown>)['tokenCache'] = {
@@ -4949,6 +5250,55 @@ describe('FeishuChannel', () => {
       const stoppedCard = updateCard.mock.calls[1]![1] as string;
       expect(stoppedCard).toContain('已停止生成');
       expect(stoppedCard).not.toContain('已完成');
+    });
+
+    it('keeps the sender mention before attribution in stopped-card fallback', async () => {
+      const channel = createChannel();
+      (channel as unknown as Record<string, unknown>)['tokenCache'] = {
+        token: 'tenant-token',
+        expiresAt: Date.now() + 3600_000,
+      };
+      const fetchSpy = vi
+        .spyOn(global, 'fetch')
+        .mockResolvedValue(new Response('{}', { status: 200 }));
+      const cardState = {
+        messageId: 'om_valid_message_id',
+        created: true,
+        creating: false,
+        stopped: true,
+        accumulatedText: 'partial answer',
+        atPrefix: '好的，<at id=ou_sender></at>',
+        sourceLabel: '[Alice · review_*]',
+        lastUpdateAt: Date.now(),
+      };
+      Object.assign(channel as unknown as Record<string, unknown>, {
+        updateCard: vi.fn().mockResolvedValue(false),
+        deleteCard: vi.fn().mockResolvedValue(true),
+      });
+
+      await getPrivateMethod<
+        (
+          inboundMsgId: string,
+          state: typeof cardState,
+          chatId: string,
+        ) => Promise<boolean>
+      >(channel, 'finalizeStoppedCardUpdate').call(
+        channel,
+        'inbound_1',
+        cardState,
+        'oc_chat_id',
+      );
+
+      expect(fetchSpy).toHaveBeenCalledOnce();
+      const body = JSON.parse(String(fetchSpy.mock.calls[0]?.[1]?.body));
+      const card = JSON.parse(body.content) as {
+        body: { elements: Array<{ content?: string }> };
+      };
+      const content = card.body.elements[0]?.content ?? '';
+      expect(content).toBe(
+        '好的，<at id=ou_sender></at>\n\n\\[Alice · review\\_\\*\\]\n\npartial answer\n\n---\n*已停止生成*',
+      );
+      expect(content.match(/<at id=ou_sender><\/at>/g)).toHaveLength(1);
     });
 
     it('keeps the card running when cancellation fails mid-finalization', async () => {
@@ -6427,6 +6777,50 @@ describe('FeishuChannel', () => {
       expect(finalText.length).toBeLessThanOrEqual(20_000);
       expect(finalText.startsWith('```\n')).toBe(true);
       expect(finalText).toContain('内容过长，已截断早期内容');
+    });
+
+    it('renders one truncation marker through the real card update path', async () => {
+      const channel = createChannel();
+      const patchInteractiveCard = vi.fn().mockResolvedValue(true);
+      Object.assign(channel as unknown as Record<string, unknown>, {
+        patchInteractiveCard,
+      });
+      const cardState = {
+        messageId: 'om_stream',
+        created: true,
+        creating: false,
+        stopped: false,
+        finalizing: false,
+        accumulatedText: `HEAD${'x'.repeat(21_000)}TAIL`,
+        sourceLabel: '[review_task]',
+        lastUpdateAt: Date.now(),
+      };
+      getPrivateMethod<Map<string, typeof cardState>>(
+        channel,
+        'cardSessions',
+      ).set('inbound_1', cardState);
+
+      await getPrivateMethod<
+        (inboundMsgId: string, state: typeof cardState) => Promise<void>
+      >(channel, 'runThrottledCardUpdate').call(
+        channel,
+        'inbound_1',
+        cardState,
+      );
+
+      expect(patchInteractiveCard).toHaveBeenCalledTimes(1);
+      const renderedCard = patchInteractiveCard.mock.calls[0]?.[1] as {
+        body: { elements: Array<{ tag: string; content?: string }> };
+      };
+      const markdown =
+        renderedCard.body.elements.find((element) => element.tag === 'markdown')
+          ?.content ?? '';
+      expect(markdown.length).toBeLessThanOrEqual(20_000);
+      expect(markdown.match(/内容过长，已截断早期内容/gu)).toHaveLength(1);
+      expect(markdown.match(/\\\[review\\_task\\\]/gu)).toHaveLength(1);
+      expect(markdown.match(/运行中\.\.\./gu)).toHaveLength(1);
+      expect(markdown).not.toContain('HEAD');
+      expect(markdown).toContain('TAIL');
     });
   });
 

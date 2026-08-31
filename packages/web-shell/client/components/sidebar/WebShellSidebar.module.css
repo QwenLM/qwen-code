@@ -27,6 +27,23 @@
   align-items: center;
 }
 
+.sidebar.mobileOpen {
+  width: clamp(
+    var(--web-shell-sidebar-min-width, 220px),
+    70%,
+    var(--web-shell-sidebar-max-width, 420px)
+  );
+  min-width: clamp(
+    var(--web-shell-sidebar-min-width, 220px),
+    70%,
+    var(--web-shell-sidebar-max-width, 420px)
+  );
+}
+
+.sidebar.mobileOpen .resizeHandle {
+  display: none;
+}
+
 .newChatButton,
 .pluginButton,
 .footerButton,
@@ -725,8 +742,6 @@
   align-items: stretch;
   gap: 10px;
   padding: 12px 14px;
-  border: 1px solid var(--border);
-  box-shadow: none;
   font-size: 12px;
   line-height: 20px;
 }
@@ -776,6 +791,20 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Match the session-row badge text: neutral muted tone, not the global link
+   blue — a blue/purple link would clash with the merged state icon's purple. */
+.sessionDetailsRow a {
+  color: color-mix(
+    in srgb,
+    var(--muted-foreground, #6b7280) 75%,
+    var(--foreground)
+  );
+}
+
+.sessionDetailsRow a:hover {
+  color: var(--foreground);
 }
 
 .sessionDetailsIdRow {
@@ -883,6 +912,32 @@
   background: currentColor;
   box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 14%, transparent);
   animation: sidebarPulse 1.6s ease-in-out infinite;
+}
+
+.sessionStatusDotOverlay {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 5px;
+  height: 5px;
+  box-shadow: 0 0 0 1.5px var(--sidebar-background);
+}
+
+.sessionSourceIcon {
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted-foreground);
+}
+
+.sessionSourceIcon svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
 }
 
 .collapsedSessionStatusDot {
@@ -1799,12 +1854,24 @@
   .sidebar.mobileOpen {
     display: flex;
     z-index: 50;
-    /* The width var is shared with the desktop resize handle and can be wider
-       than a phone viewport; cap it so the drawer never overflows the screen. */
-    max-width: 100vw;
   }
 
   .resizeHandle {
     display: none;
   }
+}
+
+/* Registered workspace count next to the Projects label. */
+.projectsHeaderCount {
+  display: inline-flex;
+  align-items: center;
+  height: 16px;
+  padding: 0 6px;
+  border-radius: 8px;
+  background: var(--sidebar-accent);
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
 }

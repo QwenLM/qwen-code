@@ -915,7 +915,12 @@ for (const theme of THEMES) {
       // per-workspace fetch. Wait for the loaded session's row before capturing
       // so the async load has settled — otherwise the row list races the
       // screenshot and the capture differs between runs.
-      await expect(sidebar.getByText(primarySessionName)).toBeVisible();
+      await expect(
+        sidebar.getByRole('button', {
+          name: primarySessionName,
+          exact: true,
+        }),
+      ).toBeVisible();
       await captureScreenshot(page, `workspace-sidebar-${theme}`);
     });
 

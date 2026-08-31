@@ -17,6 +17,7 @@ import { type PartListUnion } from '@google/genai';
 import process from 'node:process';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import type { ArenaDialogType } from './useArenaCommand.js';
+import { usePeerMessaging } from '../../peerMessaging/PeerMessagingContext.js';
 import {
   type Logger,
   type Config,
@@ -222,7 +223,7 @@ export const useSlashCommandProcessor = (
   isProcessing: boolean,
   setIsProcessing: (isProcessing: boolean) => void,
   isIdleRef: MutableRefObject<boolean>,
-  setGeminiMdFileCount: (count: number) => void,
+  setMemoryFileCount: (count: number) => void,
   actions: SlashCommandProcessorActions,
   extensionsUpdateState: Map<string, ExtensionUpdateStatus>,
   isConfigInitialized: boolean,
@@ -239,6 +240,10 @@ export const useSlashCommandProcessor = (
   }
   const activeExtensionRefreshState =
     extensionRefreshState ?? fallbackExtensionRefreshStateRef.current;
+
+  // Null unless cross-session messaging is enabled and bound; `/peers`
+  // reads that as "the feature is off" rather than as an error.
+  const peerMessaging = usePeerMessaging();
 
   // Ref avoids adding `history` to the commandContext useMemo deps,
   // which would cause a full context rebuild on every history append.
@@ -513,6 +518,7 @@ export const useSlashCommandProcessor = (
         settings,
         logger,
         extensionRefreshState: activeExtensionRefreshState,
+        peerMessaging,
       },
       ui: {
         get history() {
@@ -539,7 +545,7 @@ export const useSlashCommandProcessor = (
         btwAbortControllerRef,
         isIdleRef,
         toggleVimEnabled,
-        setGeminiMdFileCount,
+        setMemoryFileCount,
         reloadCommands,
         setSessionName: setSessionName ?? (() => {}),
         extensionsUpdateState,
@@ -572,12 +578,13 @@ export const useSlashCommandProcessor = (
       cancelBtw,
       toggleVimEnabled,
       sessionShellAllowlist,
-      setGeminiMdFileCount,
+      setMemoryFileCount,
       reloadCommands,
       setSessionName,
       extensionsUpdateState,
       isIdleRef,
       activeExtensionRefreshState,
+      peerMessaging,
     ],
   );
 
@@ -1314,7 +1321,7 @@ export const useSlashCommandProcessor = (
                     }
                   }
                 case 'load_history': {
-                  config?.getGeminiClient()?.setHistory(result.clientHistory);
+                  config?.getLlmClient()?.setHistory(result.clientHistory);
                   fullCommandContext.ui.clear();
                   result.history.forEach((item, index) => {
                     fullCommandContext.ui.addItem(item, index);

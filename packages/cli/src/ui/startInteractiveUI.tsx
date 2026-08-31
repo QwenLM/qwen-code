@@ -10,11 +10,14 @@ import { render } from 'ink';
 import React from 'react';
 import {
   createDebugLogger,
+  type InboundPolicy,
   isDebugLogFileEnabled,
   registerSession,
   type Config,
   writeRuntimeStatus,
 } from '@qwen-code/qwen-code-core';
+import { PeerMessaging } from '../peerMessaging/peer-messaging.js';
+import { PeerMessagingContext } from '../peerMessaging/PeerMessagingContext.js';
 import type { LoadedSettings } from '../config/settings.js';
 import { isValidSessionId } from '../config/config.js';
 import type { InitializationResult } from '../core/initializer.js';
@@ -172,47 +175,79 @@ export async function startInteractiveUI(
       ? installTerminalResizeReflow(process.stdout, { virtualViewport: useVP })
       : { restore: () => {}, repaint: () => {} };
 
+  // Cross-session messaging (experimental, off by default). The inbox is
+  // owned outside React — bound once per process by the block at the end of
+  // this function — and this promise is how the bound instance (or null,
+  // when the feature is off or the socket could not be bound) reaches the
+  // tree.
+  let publishPeerMessaging: (
+    messaging: PeerMessaging | null,
+  ) => void = () => {};
+  const peerMessagingReady = new Promise<PeerMessaging | null>((resolve) => {
+    publishPeerMessaging = resolve;
+  });
+
   // Create wrapper component to use hooks inside render
   const AppWrapper = () => {
     const kittyProtocolStatus = useKittyKeyboardProtocol();
     const nodeMajorVersion = parseInt(process.versions.node.split('.')[0], 10);
+
+    // Subscribe only. Binding the inbox from an effect would bind it twice
+    // under StrictMode's mount/unmount/remount, and both mounts resolve the
+    // same PID-keyed socket path: the first instance's deferred close()
+    // unlinks the socket file the second one just bound, leaving a server
+    // listening where no peer can reach it.
+    const [peerMessaging, setPeerMessaging] =
+      React.useState<PeerMessaging | null>(null);
+    React.useEffect(() => {
+      let alive = true;
+      void peerMessagingReady.then((messaging) => {
+        if (alive) setPeerMessaging(messaging);
+      });
+      return () => {
+        alive = false;
+      };
+    }, []);
+
     return (
-      <RemoteInputContext.Provider value={remoteInputWatcher}>
-        <DualOutputContext.Provider value={dualOutputBridge}>
-          <SettingsContext.Provider value={settings}>
-            <KeypressProvider
-              kittyProtocolEnabled={kittyProtocolStatus.enabled}
-              config={config}
-              debugKeystrokeLogging={
-                settings.merged.general?.debugKeystrokeLogging
-              }
-              pasteWorkaround={
-                process.platform === 'win32' || nodeMajorVersion < 20
-              }
-              initialCapturedInput={initialCapturedInput}
-            >
-              <SessionStatsProvider sessionId={config.getSessionId()}>
-                <VimModeProvider settings={settings}>
-                  <AgentViewProvider config={config}>
-                    <BackgroundTaskViewProvider config={config}>
-                      <AppContainer
-                        config={config}
-                        settings={settings}
-                        startupWarnings={startupWarnings}
-                        version={version}
-                        initializationResult={initializationResult}
-                        initialUseVirtualViewport={useVP}
-                        extensionRefreshState={options.extensionRefreshState}
-                        repaintViewport={resizeReflow.repaint}
-                      />
-                    </BackgroundTaskViewProvider>
-                  </AgentViewProvider>
-                </VimModeProvider>
-              </SessionStatsProvider>
-            </KeypressProvider>
-          </SettingsContext.Provider>
-        </DualOutputContext.Provider>
-      </RemoteInputContext.Provider>
+      <PeerMessagingContext.Provider value={peerMessaging}>
+        <RemoteInputContext.Provider value={remoteInputWatcher}>
+          <DualOutputContext.Provider value={dualOutputBridge}>
+            <SettingsContext.Provider value={settings}>
+              <KeypressProvider
+                kittyProtocolEnabled={kittyProtocolStatus.enabled}
+                config={config}
+                debugKeystrokeLogging={
+                  settings.merged.general?.debugKeystrokeLogging
+                }
+                pasteWorkaround={
+                  process.platform === 'win32' || nodeMajorVersion < 20
+                }
+                initialCapturedInput={initialCapturedInput}
+              >
+                <SessionStatsProvider sessionId={config.getSessionId()}>
+                  <VimModeProvider settings={settings}>
+                    <AgentViewProvider config={config}>
+                      <BackgroundTaskViewProvider config={config}>
+                        <AppContainer
+                          config={config}
+                          settings={settings}
+                          startupWarnings={startupWarnings}
+                          version={version}
+                          initializationResult={initializationResult}
+                          initialUseVirtualViewport={useVP}
+                          extensionRefreshState={options.extensionRefreshState}
+                          repaintViewport={resizeReflow.repaint}
+                        />
+                      </BackgroundTaskViewProvider>
+                    </AgentViewProvider>
+                  </VimModeProvider>
+                </SessionStatsProvider>
+              </KeypressProvider>
+            </SettingsContext.Provider>
+          </DualOutputContext.Provider>
+        </RemoteInputContext.Provider>
+      </PeerMessagingContext.Provider>
     );
   };
 
@@ -364,7 +399,7 @@ export async function startInteractiveUI(
         // record lands, and `--resume` refuses to load an empty one.
         // Non-emptiness here relies on config.shutdown() flushing the
         // recorder first — it is registered earlier in the cleanup chain
-        // in gemini.tsx; keep that registration order.
+        // in llm.tsx; keep that registration order.
         if (isValidSessionId(sessionId) && (await stat(sessionFile)).size > 0) {
           writeStdoutLine(
             `\n${t('To continue this session, run')}\nqwen --resume ${sessionId}`,
@@ -388,6 +423,63 @@ export async function startInteractiveUI(
       qwenVersion: version,
     }),
   );
+
+  // Bind the peer-messaging inbox, strictly after the registration above was
+  // queued: the inbox advertises its address by patching this session's
+  // registry record, and `patchSessionRecord` no-ops when there is no record
+  // yet, so binding any earlier would publish the socket path into nothing.
+  // Not awaited — startup must never block on binding a socket.
+  if (settings.merged.agents?.crossSessionMessaging !== true) {
+    publishPeerMessaging(null);
+  } else {
+    let exiting = false;
+    const peerMessagingStart = (async (): Promise<PeerMessaging | null> => {
+      try {
+        const registered = await config.whenSessionRegistered();
+        if (!registered || exiting) return null;
+        const peerMessaging = await PeerMessaging.start({
+          getApprovalMode: () => {
+            try {
+              return config.getApprovalMode();
+            } catch {
+              // An unreadable mode must read as unknown, which the gate
+              // treats as "hold", not as "accept".
+              return null;
+            }
+          },
+          getPolicySetting: () =>
+            settings.merged.agents?.crossSessionInbound as
+              | InboundPolicy
+              | undefined,
+          updateSessionRegistryIpcPath: (ipcPath) =>
+            config.updateSessionRegistryIpcPath(ipcPath),
+          getSessionId: () => config.getSessionId(),
+          reassertSessionRecord: () => config.reassertSessionRegistryRecord(),
+        });
+        if (exiting) {
+          await peerMessaging?.close();
+          return null;
+        }
+        return peerMessaging;
+      } catch (error) {
+        debugLogger.error('Failed to start cross-session messaging:', error);
+        return null;
+      }
+    })();
+    registerCleanup(async () => {
+      exiting = true;
+      // Awaited, unlike a fire-and-forget close on unmount: the socket file
+      // and the record's ipcPath have to be gone before the process exits.
+      // runExitCleanup caps every entry, so a stuck close cannot hang exit.
+      await (await peerMessagingStart)?.close();
+    });
+    void (async () => {
+      publishPeerMessaging(await peerMessagingStart);
+    })();
+  }
+  // The peer cleanup is registered first so its final ipcPath clear stays
+  // inside Config's serial registry queue before unregister removes the
+  // record. With messaging disabled this remains the next cleanup entry.
   registerCleanup(() => config.unregisterSessionRegistry());
 }
 

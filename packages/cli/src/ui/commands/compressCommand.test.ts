@@ -7,7 +7,7 @@
 import {
   CompressionStatus,
   type ChatCompressionInfo,
-  type GeminiClient,
+  type LlmClient,
 } from '@qwen-code/qwen-code-core';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import { compressCommand } from './compressCommand.js';
@@ -23,10 +23,10 @@ describe('compressCommand', () => {
     context = createMockCommandContext({
       services: {
         config: {
-          getGeminiClient: () =>
+          getLlmClient: () =>
             ({
               tryCompressChat: mockTryCompressChat,
-            }) as unknown as GeminiClient,
+            }) as unknown as LlmClient,
         },
       },
     });
@@ -133,6 +133,31 @@ describe('compressCommand', () => {
     expect(context.ui.setPendingItem).toHaveBeenCalledWith(null);
   });
 
+  it('should keep compression failure statuses in the interactive history', async () => {
+    const failedResult: ChatCompressionInfo = {
+      originalTokenCount: 100000,
+      newTokenCount: 100000,
+      compressionStatus: CompressionStatus.COMPRESSION_FAILED_API_ERROR,
+    };
+    mockTryCompressChat.mockResolvedValue(failedResult);
+
+    await compressCommand.action!(context, '');
+
+    expect(context.ui.addItem).toHaveBeenCalledWith(
+      {
+        type: MessageType.COMPRESSION,
+        compression: {
+          isPending: false,
+          compressionStatus: CompressionStatus.COMPRESSION_FAILED_API_ERROR,
+          originalTokenCount: 100000,
+          newTokenCount: 100000,
+          compressionKind: 'summarize',
+        },
+      },
+      expect.any(Number),
+    );
+  });
+
   // Issue #9309: after /compress-fast the summarize banner is measured on a
   // different scale (local history-only estimate vs the fast banner's
   // API-reported baseline), so the compression item must carry per-side
@@ -166,6 +191,56 @@ describe('compressCommand', () => {
     );
   });
 
+  it('should return an error in non-interactive mode for compression failure statuses', async () => {
+    const failedResult: ChatCompressionInfo = {
+      originalTokenCount: 100000,
+      newTokenCount: 100000,
+      compressionStatus: CompressionStatus.COMPRESSION_FAILED_API_ERROR,
+    };
+    mockTryCompressChat.mockResolvedValue(failedResult);
+    const ctx = createMockCommandContext({
+      executionMode: 'non_interactive',
+      services: context.services,
+    });
+
+    await expect(compressCommand.action!(ctx, '')).resolves.toEqual({
+      type: 'message',
+      messageType: 'error',
+      content: 'Could not compress chat history due to an API error.',
+    });
+  });
+
+  it('should yield an ACP error for compression failure statuses', async () => {
+    const failedResult: ChatCompressionInfo = {
+      originalTokenCount: 100000,
+      newTokenCount: 100000,
+      compressionStatus: CompressionStatus.COMPRESSION_FAILED_API_ERROR,
+    };
+    mockTryCompressChat.mockResolvedValue(failedResult);
+    const ctx = createMockCommandContext({
+      executionMode: 'acp',
+      services: context.services,
+    });
+
+    const result = await compressCommand.action!(ctx, '');
+    expect(result?.type).toBe('stream_messages');
+
+    const messages = [];
+    if (result?.type === 'stream_messages') {
+      for await (const message of result.messages) {
+        messages.push(message);
+      }
+    }
+
+    expect(messages).toEqual([
+      { messageType: 'info', content: 'Compressing context...' },
+      {
+        messageType: 'error',
+        content: 'Could not compress chat history due to an API error.',
+      },
+    ]);
+  });
+
   it('should mark estimated counts in the non-interactive message', async () => {
     // Asymmetric flags mirror the real post-/compress-fast scenario and catch
     // a swapped flag-argument mutation at the formatTokenCount call sites.
@@ -181,10 +256,10 @@ describe('compressCommand', () => {
       executionMode: 'non_interactive',
       services: {
         config: {
-          getGeminiClient: () =>
+          getLlmClient: () =>
             ({
               tryCompressChat: mockTryCompressChat,
-            }) as unknown as GeminiClient,
+            }) as unknown as LlmClient,
         },
       },
     });
@@ -213,10 +288,10 @@ describe('compressCommand', () => {
       executionMode: 'acp',
       services: {
         config: {
-          getGeminiClient: () =>
+          getLlmClient: () =>
             ({
               tryCompressChat: mockTryCompressChat,
-            }) as unknown as GeminiClient,
+            }) as unknown as LlmClient,
         },
       },
     });
@@ -271,10 +346,10 @@ describe('compressCommand', () => {
       const ctx = createMockCommandContext({
         services: {
           config: {
-            getGeminiClient: () =>
+            getLlmClient: () =>
               ({
                 tryCompressChat: mockTryCompressChat,
-              }) as unknown as GeminiClient,
+              }) as unknown as LlmClient,
           },
         },
         invocation: {
@@ -296,10 +371,10 @@ describe('compressCommand', () => {
       const ctx = createMockCommandContext({
         services: {
           config: {
-            getGeminiClient: () =>
+            getLlmClient: () =>
               ({
                 tryCompressChat: mockTryCompressChat,
-              }) as unknown as GeminiClient,
+              }) as unknown as LlmClient,
           },
         },
         invocation: { raw: '/compress    ', name: 'compress', args: '    ' },
@@ -318,10 +393,10 @@ describe('compressCommand', () => {
       const ctx = createMockCommandContext({
         services: {
           config: {
-            getGeminiClient: () =>
+            getLlmClient: () =>
               ({
                 tryCompressChat: mockTryCompressChat,
-              }) as unknown as GeminiClient,
+              }) as unknown as LlmClient,
           },
         },
         invocation: {
@@ -341,10 +416,10 @@ describe('compressCommand', () => {
       const ctx = createMockCommandContext({
         services: {
           config: {
-            getGeminiClient: () =>
+            getLlmClient: () =>
               ({
                 tryCompressChat: mockTryCompressChat,
-              }) as unknown as GeminiClient,
+              }) as unknown as LlmClient,
           },
         },
         invocation: { raw: `/compress ${long}`, name: 'compress', args: long },
@@ -363,10 +438,10 @@ describe('compressCommand', () => {
       const ctx = createMockCommandContext({
         services: {
           config: {
-            getGeminiClient: () =>
+            getLlmClient: () =>
               ({
                 tryCompressChat: mockTryCompressChat,
-              }) as unknown as GeminiClient,
+              }) as unknown as LlmClient,
           },
         },
         invocation: {

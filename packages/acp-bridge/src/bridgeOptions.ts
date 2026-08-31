@@ -358,8 +358,9 @@ export interface BridgeOptions {
   restoreAskUserQuestion?: boolean;
   /**
    * Enables direct daemon shell execution through session shell APIs.
-   * Defaults to false. Callers should turn this on only after the daemon has
-   * bearer auth configured and route layers require a session-bound client id.
+   * Defaults to false. Callers should turn this on only when the daemon has
+   * bearer auth or trusted-loopback operator authority and route layers require
+   * a session-bound client id.
    */
   sessionShellCommandEnabled?: boolean;
   /**
@@ -603,6 +604,9 @@ export interface BridgeOptions {
    * reports itself unavailable (daemon-only).
    */
   onCreateSubSession?: CreateSubSessionHandler;
+  /** Handles a trusted `cron_create` request to bind a durable task to the
+   * caller's currently executing daemon session. */
+  onCreateCurrentSessionScheduledTask?: CurrentSessionScheduledTaskCreateHandler;
   /** Handles one child-initiated Channel delivery attempt. The bridge
    * authenticates the session and publishes the sanitized result event. */
   onChannelDelivery?: ChannelDeliveryHandler;
@@ -649,6 +653,10 @@ export interface CreateSubSessionInfo {
   model?: string;
   /** Optional display name for the sub-session in the session list. */
   name?: string;
+  /** Optional immutable creator attribution for the fresh session. */
+  sourceType?: string;
+  /** Optional source-specific identifier paired with `sourceType`. */
+  sourceId?: string;
   /**
    * The calling session's id. REQUIRED, and authenticated against the
    * connection's owned sessions before it reaches the host — it keys the
@@ -675,6 +683,24 @@ export interface CreateSubSessionResult {
 export type CreateSubSessionHandler = (
   info: CreateSubSessionInfo,
 ) => Promise<CreateSubSessionResult>;
+
+export interface CurrentSessionScheduledTaskCreateInfo {
+  callerSessionId: string;
+  promptId: string;
+  cron: string;
+  prompt: string;
+  recurring: boolean;
+  assertCallerPromptActive: () => void;
+}
+
+export interface CurrentSessionScheduledTaskCreateResult {
+  id: string;
+  cron: string;
+}
+
+export type CurrentSessionScheduledTaskCreateHandler = (
+  info: CurrentSessionScheduledTaskCreateInfo,
+) => Promise<CurrentSessionScheduledTaskCreateResult>;
 
 export const MAX_LIVE_SCREEN_CONTEXT_TEXT_CHARS = 32_000;
 

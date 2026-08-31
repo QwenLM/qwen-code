@@ -118,6 +118,17 @@ export const SETTINGS_VERSION_KEY = '$version';
  *   tools.core     → permissions.allow (only listed tools enabled)
  *                    + permissions.deny with a wildcard deny-all if needed
  *
+ * DELIBERATELY UNWIRED — nothing calls this, and settings.md documents the
+ * legacy keys as "not automatically migrated; still honoured at startup".
+ * Do not wire it up as written: the `tools.core` → `permissions.allow` arm
+ * below encodes exactly the conflation #10075 was reported for and #10098
+ * removed. `permissions.allow` is pure auto-approval and cannot restrict
+ * registration, so that arm would delete a user's `tools.core` allowlist
+ * and silently replace it with a no-op. A real migration maps `tools.core`
+ * to `tools.eager` (defer unlisted tools) or `permissions.deny` (remove
+ * them) — see the migration table in
+ * docs/users/configuration/settings.md.
+ *
  * Returns the updated settings object, or null if no migration is needed.
  */
 export function migrateLegacyPermissions(
@@ -376,7 +387,6 @@ export function getSettingsWarnings(loadedSettings: LoadedSettings): string[] {
       );
     }
   }
-
   return [...warningSet];
 }
 
@@ -596,15 +606,23 @@ export class LoadedSettings {
     this._merged = this.computeMergedSettings();
   }
 
-  reloadScopeFromDisk(scope: SettingScope): void {
+  reloadScopeFromDisk(scope: SettingScope): boolean {
     const file = this.forScope(scope);
+    if (scope === SettingScope.Workspace && !this.workspaceSettingsActive) {
+      file.settings = {};
+      file.originalSettings = {};
+      file.rawJson = undefined;
+      this._merged = this.computeMergedSettings();
+      return true;
+    }
+    let reloaded = false;
     try {
       if (!fs.existsSync(file.path)) {
         file.settings = {};
         file.originalSettings = {};
         file.rawJson = undefined;
         this._merged = this.computeMergedSettings();
-        return;
+        return true;
       }
 
       const content = fs.readFileSync(file.path, 'utf-8');
@@ -617,6 +635,11 @@ export class LoadedSettings {
         file.settings = resolved;
         file.originalSettings = structuredClone(parsed) as Settings;
         file.rawJson = content;
+        reloaded = true;
+      } else {
+        debugLogger.warn(
+          `reloadScopeFromDisk(${scope}): settings file is not a JSON object, keeping previous settings`,
+        );
       }
     } catch (err) {
       debugLogger.warn(
@@ -624,6 +647,29 @@ export class LoadedSettings {
       );
     }
     this._merged = this.computeMergedSettings();
+    return reloaded;
+  }
+
+  reloadScopesFromDiskAtomically(scopes: readonly SettingScope[]): boolean {
+    const snapshots = scopes.map((scope) => {
+      const file = this.forScope(scope);
+      return {
+        file,
+        settings: structuredClone(file.settings),
+        originalSettings: structuredClone(file.originalSettings),
+        rawJson: file.rawJson,
+      };
+    });
+    const reloaded = scopes.map((scope) => this.reloadScopeFromDisk(scope));
+    if (reloaded.every(Boolean)) return true;
+
+    for (const snapshot of snapshots) {
+      snapshot.file.settings = snapshot.settings;
+      snapshot.file.originalSettings = snapshot.originalSettings;
+      snapshot.file.rawJson = snapshot.rawJson;
+    }
+    this._merged = this.computeMergedSettings();
+    return false;
   }
 
   /**

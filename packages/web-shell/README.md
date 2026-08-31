@@ -7,7 +7,6 @@ Qwen Code Web Shell 是面向浏览器的 daemon 会话终端 UI，可以作为 
 
 - React：`^18.0.0 || ^19.0.0`
 - React DOM：`^18.0.0 || ^19.0.0`
-- `@qwen-code/webui`：`>=0.0.1`
 - `@qwen-code/sdk`：`>=0.1.8`
 - 浏览器环境需要能访问 Qwen Code daemon serve 的 HTTP 接口。
 
@@ -114,7 +113,7 @@ npm install @qwen-code/web-shell
 Peer dependencies 需要同时安装：
 
 ```bash
-npm install react react-dom @qwen-code/webui @qwen-code/sdk
+npm install react react-dom @qwen-code/sdk
 ```
 
 ## 接入方式
@@ -157,8 +156,8 @@ chat + terminal）。宿主自行提供 Provider，WebShell 只消费 hooks。
 import {
   DaemonWorkspaceProvider,
   DaemonSessionProvider,
-} from '@qwen-code/webui/daemon-react-sdk';
-import { WebShell } from '@qwen-code/web-shell';
+  WebShell,
+} from '@qwen-code/web-shell';
 
 export function App() {
   return (
@@ -251,6 +250,15 @@ const projection = projectChatRecordsToDaemonTranscript(records);
 命令名后必须是空白或输入结束，因此 `/usr/local/bin/tool` 等绝对路径不会触发
 回调。如果回调抛出异常，Web Shell 会报告错误并继续执行默认命令流程。
 
+嵌入宿主只展示普通任务会话时，可以隐藏 Sidebar 的“任务 / 频道”来源切换：
+
+```tsx
+<WebShellWithProviders sidebar={{ showSessionSourceSwitch: false }} />
+```
+
+隐藏后，Sidebar 的会话目录固定查询 `sourceType: "default"`；独立 WebShell 和未配置
+该选项的宿主仍默认展示来源切换。
+
 锁定工作区时，可以自定义 Sidebar 文件夹行的内容：
 
 ```tsx
@@ -323,8 +331,7 @@ Chart/Data 控件、无数据提示和错误提示默认跟随 WebShell 语言�
 
 ```text
 @qwen-code/sdk/daemon         ← 协议层（SSE, REST, normalizer）
-@qwen-code/webui/daemon-react-sdk  ← React adapter（Provider, hooks, store）
-@qwen-code/web-shell          ← 终端 UI 组件
+@qwen-code/web-shell          ← React adapter（Provider, hooks, store）+ 终端 UI 组件
 ```
 
 - `WebShell` 必须在 `DaemonWorkspaceProvider` 和 `DaemonSessionProvider` 之下使用。

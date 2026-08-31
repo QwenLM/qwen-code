@@ -25,7 +25,12 @@ import type { WorkspaceFileSystemFactory } from '../fs/index.js';
 import { resolveAcpHttpEnabled } from '../acp-http-enabled.js';
 import type { DeviceFlowRegistry } from '../auth/device-flow.js';
 import type { ParsedAllowOriginPatterns } from '../auth.js';
-import { AcpDispatcher, type LiveSessionIsolation } from './dispatch.js';
+import { formatHostForAuthority, isLoopbackBind } from '../loopback-binds.js';
+import {
+  AcpDispatcher,
+  type LegacyStandaloneSessionRestorer,
+  type LiveSessionIsolation,
+} from './dispatch.js';
 import { WorkspaceRememberTaskLane } from '../workspace-remember.js';
 import type {
   WorkspaceRegistry,
@@ -348,7 +353,11 @@ const WS_READ_METHODS = new Set([
   '_qwen/file/glob',
 ]);
 
-function isSameLoopbackOrigin(origin: string, localPort?: number): boolean {
+function isSameLoopbackOrigin(
+  origin: string,
+  localPort?: number,
+  hostname?: string,
+): boolean {
   if (!localPort) return false;
   const parsed = new URL(origin);
   // Both schemes: under `--tls-cert/--tls-key` the loopback ACP client
@@ -361,13 +370,29 @@ function isSameLoopbackOrigin(origin: string, localPort?: number): boolean {
     `https://127.0.0.1:${localPort}`,
     `https://[::1]:${localPort}`,
   ]);
+  const boundHost =
+    hostname && isLoopbackBind(hostname)
+      ? formatHostForAuthority(hostname)
+      : undefined;
+  if (boundHost) {
+    allowed.add(`http://${boundHost}:${localPort}`);
+    allowed.add(`https://${boundHost}:${localPort}`);
+  }
   // RFC 7230 §5.4: browsers omit the port in the Origin header when it
-  // matches the scheme default (http→80, https→443). Accept the port-less
-  // forms so the check doesn't fail on default ports.
-  if (localPort === 80 || localPort === 443) {
+  // matches the scheme default (http→80, https→443).
+  if (localPort === 80) {
     for (const host of ['localhost', '127.0.0.1', '[::1]']) {
       allowed.add(`http://${host}`);
+    }
+    if (boundHost) {
+      allowed.add(`http://${boundHost}`);
+    }
+  } else if (localPort === 443) {
+    for (const host of ['localhost', '127.0.0.1', '[::1]']) {
       allowed.add(`https://${host}`);
+    }
+    if (boundHost) {
+      allowed.add(`https://${boundHost}`);
     }
   }
   return allowed.has(parsed.origin.toLowerCase());
@@ -483,6 +508,7 @@ export interface MountAcpHttpOptions {
     req: IncomingMessage,
   ) => void;
   liveSessionIsolation?: LiveSessionIsolation;
+  standaloneSessionService?: LegacyStandaloneSessionRestorer;
 }
 
 /**
@@ -493,6 +519,8 @@ export interface MountAcpHttpOptions {
  */
 export interface ExtraWsRoute {
   path: string;
+  /** The route resolves its own workspace lifecycle instead of using primary. */
+  bypassPrimaryDrain?: boolean;
   onConnection: (ws: WebSocket, req: IncomingMessage) => void;
 }
 
@@ -909,11 +937,11 @@ export function mountAcpHttp(
       res.status(400).json({ error: 'Missing Acp-Connection-Id' });
       return;
     }
-    // NOTE: like every other route, DELETE is gated only by the bearer
-    // token — the daemon's trust boundary is "holds the token for this
-    // daemon", so any token-holder may tear down any connection (same posture
+    // NOTE: like every other route, DELETE is gated by deployment-level
+    // operator authority, not by ownership of this ACP connection. Any
+    // authorized caller may therefore tear down any connection (same posture
     // as the REST `DELETE /session/:id`). A per-connection secret would add
-    // intra-token isolation; deferred with the rest of the multi-tenant
+    // intra-operator isolation; deferred with the rest of the multi-tenant
     // hardening (design §7).
     const existed = mount.registry.delete(connectionId);
     if (existed) {
@@ -1372,6 +1400,9 @@ export function mountAcpHttp(
         sessionRuntimeBaseDir: rt.sessionRuntimeBaseDir,
         workspaceId: rt.workspaceId,
       }),
+      rt.provenance === 'live-conversation'
+        ? opts.standaloneSessionService
+        : undefined,
     );
     secondaryDispatcherRef.current = secondaryDispatcher;
     return {
@@ -1632,6 +1663,9 @@ export function mountAcpHttp(
           `[::1]:${localPort}`,
           `host.docker.internal:${localPort}`,
         ]);
+        if (opts.hostname && isLoopbackBind(opts.hostname)) {
+          allowed.add(`${formatHostForAuthority(opts.hostname)}:${localPort}`);
+        }
         // RFC 7230 §5.4: browsers omit the port suffix when it matches the
         // scheme default (http→80, https→443). On TLS/port 443 the browser
         // sends `Host: localhost`, which won't match `localhost:443` and
@@ -1642,6 +1676,9 @@ export function mountAcpHttp(
           allowed.add('127.0.0.1');
           allowed.add('[::1]');
           allowed.add('host.docker.internal');
+          if (opts.hostname && isLoopbackBind(opts.hostname)) {
+            allowed.add(formatHostForAuthority(opts.hostname));
+          }
         }
         if (!allowed.has(host)) {
           logReject(`host-not-allowed ${host || '(missing)'}`);
@@ -1657,7 +1694,11 @@ export function mountAcpHttp(
       const origin = req.headers['origin'];
       if (origin) {
         try {
-          const isLoopbackOrigin = isSameLoopbackOrigin(origin, localPort);
+          const isLoopbackOrigin = isSameLoopbackOrigin(
+            origin,
+            localPort,
+            opts.hostname,
+          );
           // `--allow-origin` allowlist (same match semantics as the REST
           // `allowOriginCors`): lets an explicitly permitted non-loopback
           // origin — e.g. a browser extension's `chrome-extension://<id>`
@@ -1844,7 +1885,7 @@ export function mountAcpHttp(
         activeMount = resolvedMount;
       }
 
-      if (activeMount.draining) {
+      if (extraRoute?.bypassPrimaryDrain !== true && activeMount.draining) {
         logReject(`workspace-draining ${activeMount.routeLabel}`);
         socket.write(
           'HTTP/1.1 503 Service Unavailable\r\nRetry-After: 5\r\n\r\n',

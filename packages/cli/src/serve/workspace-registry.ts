@@ -18,6 +18,7 @@ export interface WorkspaceRuntimeEnvMetadata {
   readonly mode: 'parent-process' | 'runtime-overlay';
   readonly overlayKeys: readonly string[];
   readonly effectiveEnv?: Readonly<NodeJS.ProcessEnv>;
+  readonly workflowsEnabledBySettings?: boolean;
   readonly envFilePaths?: readonly string[];
   readonly envFileReadFailed?: boolean;
   readonly envFileReadFailures?: ReadonlyArray<{
@@ -135,6 +136,8 @@ export interface WorkspaceSessionOwnerIndex {
   register(sessionId: string, workspaceCwd: string): void;
   remove(sessionId: string, workspaceCwd?: string): void;
   getWorkspaceCwds(sessionId: string): readonly string[];
+  markWorkspaceUnavailable(workspaceCwd: string): void;
+  isWorkspaceUnavailable(workspaceCwd: string): boolean;
   removeWorkspace(workspaceCwd: string): void;
   handleBridgeSessionLifecycle(event: WorkspaceSessionLifecycleEvent): void;
 }
@@ -184,6 +187,7 @@ export interface WorkspaceRegistryOptions {
 
 export function createWorkspaceSessionOwnerIndex(): WorkspaceSessionOwnerIndex {
   const bySessionId = new Map<string, Set<string>>();
+  const unavailableWorkspaces = new Set<string>();
 
   const register = (sessionId: string, workspaceCwd: string): void => {
     let owners = bySessionId.get(sessionId);
@@ -196,9 +200,15 @@ export function createWorkspaceSessionOwnerIndex(): WorkspaceSessionOwnerIndex {
 
   const remove = (sessionId: string, workspaceCwd?: string): void => {
     if (workspaceCwd === undefined) {
-      bySessionId.delete(sessionId);
+      const owners = bySessionId.get(sessionId);
+      if (!owners) return;
+      for (const owner of owners) {
+        if (!unavailableWorkspaces.has(owner)) owners.delete(owner);
+      }
+      if (owners.size === 0) bySessionId.delete(sessionId);
       return;
     }
+    if (unavailableWorkspaces.has(workspaceCwd)) return;
     const owners = bySessionId.get(sessionId);
     if (!owners) return;
     owners.delete(workspaceCwd);
@@ -211,7 +221,13 @@ export function createWorkspaceSessionOwnerIndex(): WorkspaceSessionOwnerIndex {
     register,
     remove,
     getWorkspaceCwds: (sessionId) => [...(bySessionId.get(sessionId) ?? [])],
+    markWorkspaceUnavailable: (workspaceCwd) => {
+      unavailableWorkspaces.add(workspaceCwd);
+    },
+    isWorkspaceUnavailable: (workspaceCwd) =>
+      unavailableWorkspaces.has(workspaceCwd),
     removeWorkspace: (workspaceCwd) => {
+      if (unavailableWorkspaces.has(workspaceCwd)) return;
       for (const [sessionId, owners] of bySessionId) {
         owners.delete(workspaceCwd);
         if (owners.size === 0) bySessionId.delete(sessionId);
@@ -525,7 +541,9 @@ export function createWorkspaceRegistry(
       const entry = entryForRuntime(runtime);
       if (!entry || runtime.primary || entry.state !== 'draining') return;
       entry.current?.guard.close();
-      if (!entry.internal) {
+      if (entry.internal) {
+        sessionOwnerIndex?.markWorkspaceUnavailable(runtime.workspaceCwd);
+      } else {
         sessionOwnerIndex?.removeWorkspace(runtime.workspaceCwd);
       }
     },
@@ -538,7 +556,9 @@ export function createWorkspaceRegistry(
       byId.delete(runtime.workspaceId);
       const index = entries.indexOf(entry);
       if (index >= 0) entries.splice(index, 1);
-      sessionOwnerIndex?.removeWorkspace(runtime.workspaceCwd);
+      if (!entry.internal) {
+        sessionOwnerIndex?.removeWorkspace(runtime.workspaceCwd);
+      }
     },
     resolveLiveSessionOwner: (sessionId) => {
       const indexedCwds = sessionOwnerIndex?.getWorkspaceCwds(sessionId) ?? [];
@@ -549,6 +569,10 @@ export function createWorkspaceRegistry(
           const entry = byCwd.get(workspaceCwd);
           const runtime = entry?.current?.runtime;
           if (!entry || !runtime || entry.state === 'removed') {
+            if (sessionOwnerIndex?.isWorkspaceUnavailable(workspaceCwd)) {
+              internalUnavailable = true;
+              continue;
+            }
             sessionOwnerIndex?.remove(sessionId, workspaceCwd);
             continue;
           }
