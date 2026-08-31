@@ -719,13 +719,11 @@ describe('assertTarArchiveLinksAreSafe', () => {
     it.runIf(process.platform !== 'win32')(
       'rejects a hard link even when it points inside the archive root',
       async () => {
-        await fs.writeFile(path.join(root, 'original.txt'), 'y\n');
-        await fs.link(
-          path.join(root, 'original.txt'),
-          path.join(root, 'hard.txt'),
-        );
         const archive = path.join(root, 'hard.tar');
-        await tar.c({ cwd: root, file: archive }, ['original.txt', 'hard.txt']);
+        await writeCraftedTar(archive, [
+          createTarFileHeader('original.txt', 0),
+          createTarFileHeader('hard.txt', 0, '1', 'original.txt'),
+        ]);
 
         await expect(
           assertTarArchiveLinksAreSafe(archive, undefined, allowLinks),
