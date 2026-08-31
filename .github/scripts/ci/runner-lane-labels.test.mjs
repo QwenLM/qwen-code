@@ -122,6 +122,71 @@ function embeddedArrays(expr) {
   });
 }
 
+// Splits a GitHub expression body on top-level `||`, then takes the LAST
+// top-level `&&` operand of each part — GitHub's `cond && value || fallback`
+// yields exactly those operands as possible runs-on VALUES, while the
+// preceding `&&` operands are conditions (whose quoted scalars, e.g. the
+// `!= 'true'` comparisons in ci.yml's classify_pr, are operands of the
+// condition, not labels, and must not be judged). Quote state honors the
+// GitHub-expression `''` escape; parens/brackets nest.
+function valueArms(body) {
+  const parts = [[]];
+  let depth = 0;
+  let quote = null;
+  for (let i = 0; i < body.length; i += 1) {
+    const ch = body[i];
+    if (quote) {
+      if (ch === quote) {
+        if (quote === "'" && body[i + 1] === "'") {
+          parts[parts.length - 1].push("''");
+          i += 1;
+          continue;
+        }
+        quote = null;
+      }
+      parts[parts.length - 1].push(ch);
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      parts[parts.length - 1].push(ch);
+      continue;
+    }
+    if (ch === '(' || ch === '[') depth += 1;
+    if (ch === ')' || ch === ']') depth -= 1;
+    if (depth === 0 && (ch === '|' || ch === '&') && body[i + 1] === ch) {
+      parts[parts.length - 1].push(ch === '|' ? '\u0000OR' : '\u0000AND');
+      parts.push([]);
+      i += 1;
+      continue;
+    }
+    parts[parts.length - 1].push(ch);
+  }
+  const tokens = parts.map((p) => p.join(''));
+  const arms = [];
+  let current = [];
+  for (const tok of tokens) {
+    if (tok.endsWith('\u0000OR')) {
+      current.push(tok.slice(0, -3));
+      arms.push(current);
+      current = [];
+    } else if (tok.endsWith('\u0000AND')) {
+      current.push(tok.slice(0, -4));
+    } else {
+      current.push(tok);
+    }
+  }
+  arms.push(current);
+  // value = last && operand of each || part, outer parens stripped
+  return arms.map((ops) => {
+    let v = ops[ops.length - 1].trim();
+    while (v.startsWith('(') && v.endsWith(')')) {
+      v = v.slice(1, -1).trim();
+    }
+    return v;
+  });
+}
+
 const WHOLE_EXPRESSION = /^\$\{\{[\s\S]*\}\}$/;
 const MATRIX_REF = /^\$\{\{\s*matrix\.([A-Za-z0-9_-]+)\s*\}\}$/;
 const ENV_REF = /^\$\{\{\s*env\.([A-Za-z0-9_-]+)\s*\}\}$/;
@@ -269,41 +334,78 @@ function laneTestPlan(file, text) {
     if (typeof value === 'string') {
       const t = value.trim();
       if (WHOLE_EXPRESSION.test(t)) {
-        const arrays = embeddedArrays(t);
-        if (arrays !== null) {
-          for (const { raw, tokens } of arrays) {
-            // An all-caps token list (["OWNER","MEMBER","COLLABORATOR"]) is a
-            // contains()-operand — author associations, not runner labels.
-            // Runner labels are lowercase-with-hyphens; nothing the fleet
-            // registers matches /^[A-Z_]+$/, so this cannot hide a lane.
-            if (tokens.length > 0 && tokens.every((t) => /^[A-Z_]+$/.test(t))) {
-              continue;
+        // Judge every VALUE arm of the expression, not just its embedded
+        // arrays: `cond && fromJSON('[…]') || 'ecs-x'` routes the quoted
+        // scalar arm when the condition is false, so an unjudged arm is a
+        // fail-open door (sdk-java.yml already routes with `|| 'ubuntu-
+        // latest'` and `|| matrix.os` arms).
+        const body = t.replace(/^\$\{\{/, '').replace(/\}\}$/, '');
+        for (const arm of valueArms(body)) {
+          const arrays = embeddedArrays(arm);
+          if (arrays !== null) {
+            for (const { raw, tokens } of arrays) {
+              // An all-caps token list (["OWNER","MEMBER","COLLABORATOR"])
+              // is a contains()-operand — author associations, not runner
+              // labels. Runner labels are lowercase-with-hyphens; nothing
+              // the fleet registers matches /^[A-Z_]+$/.
+              if (
+                tokens.length > 0 &&
+                tokens.every((t2) => /^[A-Z_]+$/.test(t2))
+              ) {
+                continue;
+              }
+              if (tokens.length === 0) {
+                problem(
+                  `${file}: ${origin} embeds an unquoted array`,
+                  `${raw} inside the expression has no quoted labels the ` +
+                    `guard can read.`,
+                );
+                continue;
+              }
+              checkSet(tokens, `${origin} → ${raw}`);
             }
-            if (tokens.length === 0) {
+            continue;
+          }
+          const scalar =
+            arm.match(/^'((?:[^']|'')*)'$/) ?? arm.match(/^"([^"]*)"$/);
+          if (scalar) {
+            checkScalarLabel(
+              scalar[1].replaceAll("''", "'"),
+              `${origin} → ${arm}`,
+            );
+            continue;
+          }
+          const ref =
+            arm.match(/^matrix\.([A-Za-z0-9_-]+)$/) ??
+            arm.match(/^env\.([A-Za-z0-9_-]+)$/);
+          if (ref) {
+            const resolved = arm.startsWith('matrix.')
+              ? matrixValues(job, ref[1])
+              : (() => {
+                  const v = envValue(doc, job, ref[1]);
+                  return v === null ? null : [v];
+                })();
+            if (resolved === null) {
               problem(
-                `${file}: ${origin} embeds an unquoted array`,
-                `${raw} inside the expression has no quoted labels the ` +
-                  `guard can read.`,
+                `${file}: ${origin} is an unresolvable expression`,
+                `'${arm}' resolves to nothing defined in this file — the ` +
+                  `guard cannot vouch for the arm, so it fails closed.`,
               );
               continue;
             }
-            checkSet(tokens, `${origin} → ${raw}`);
+            for (const v of resolved) {
+              checkValue(v, job, `${origin} (${arm} = ${JSON.stringify(v)})`);
+            }
+            continue;
           }
-          return;
-        }
-        const resolved = resolveExpression(t, job);
-        if (resolved === null) {
           problem(
             `${file}: ${origin} is an unresolvable expression`,
-            `'${t}' embeds no label array and resolves to nothing defined ` +
-              `in this file — the guard cannot vouch for it, so it fails ` +
-              `closed. Inline the label set, or resolve it from matrix/env ` +
-              `values defined in this workflow.`,
+            `value arm '${arm}' embeds no label array, is not a quoted ` +
+              `scalar, and resolves to nothing defined in this file — the ` +
+              `guard cannot vouch for it, so it fails closed. Inline the ` +
+              `label set, or resolve it from matrix/env values defined in ` +
+              `this workflow.`,
           );
-          return;
-        }
-        for (const v of resolved) {
-          checkValue(v, job, `${origin} (= ${JSON.stringify(v)})`);
         }
         return;
       }
@@ -521,6 +623,43 @@ describe('laneTestPlan fail-closed behavior', () => {
     );
     assert.equal(problems.length, 1);
     assert.match(blob(problems[0]), /not a registered lane/);
+  });
+
+  // R4-1: the expression's VALUE ARMS are judged, not just its arrays — a
+  // quoted-scalar or bare-reference fallback arm routes when the condition
+  // is false, so it must pass the same rules.
+  it('catches an invented lane riding a scalar fallback arm', () => {
+    const { problems } = laneTestPlan(
+      'probe.yml',
+      wrap(
+        `'\${{ x && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || ''ecs-new-lane'' }}'`,
+      ),
+    );
+    assert.equal(problems.length, 1);
+    assert.match(blob(problems[0]), /single non-hosted label/);
+  });
+
+  it('catches an invented lane riding a bare matrix fallback arm', () => {
+    const { problems } = laneTestPlan(
+      'probe.yml',
+      wrap(
+        `'\${{ x && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || matrix.os }}'`,
+        `    strategy:\n      matrix:\n        os: ['ecs-invented']\n`,
+      ),
+    );
+    assert.equal(problems.length, 1);
+    assert.match(blob(problems[0]), /single non-hosted label/);
+  });
+
+  it('accepts the hosted scalar fallback arm sdk-java routes with', () => {
+    const plan = laneTestPlan(
+      'probe.yml',
+      wrap(
+        `'\${{ x && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || ''ubuntu-latest'' }}'`,
+      ),
+    );
+    assert.deepEqual(plan.problems, []);
+    assert.deepEqual(plan.lanes, ['ecs-qwen']);
   });
 
   it('catches a second static lane smuggled beside a registered one', () => {
