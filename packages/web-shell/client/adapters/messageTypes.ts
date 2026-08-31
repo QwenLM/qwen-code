@@ -91,7 +91,12 @@ export interface DaemonUserMessage extends DaemonMessageMeta {
   id: string;
   role: 'user';
   content: string;
-  images?: Array<{ data: string; mimeType: string }>;
+  images?: Array<{
+    data: string;
+    mimeType: string;
+    /** Present when the image is a session attachment; keeps it re-fetchable. */
+    attachmentId?: string;
+  }>;
   files?: Array<{
     name: string;
     mimeType: string;

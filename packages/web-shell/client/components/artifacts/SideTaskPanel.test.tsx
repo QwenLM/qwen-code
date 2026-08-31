@@ -176,6 +176,94 @@ it('creates a side task and reports the new session id', async () => {
   expect(onTitleChange).toHaveBeenCalledWith('side-task:draft:1', 'Side task');
 });
 
+it('does not report a failed creation after the draft unmounts', async () => {
+  let rejectCreation: ((error: Error) => void) | undefined;
+  const createSession = vi.fn(
+    () =>
+      new Promise<never>((_resolve, reject) => {
+        rejectCreation = reject;
+      }),
+  );
+  const onError = vi.fn();
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+
+  await act(async () => {
+    root!.render(
+      <I18nProvider language="en">
+        <SideTaskPanel
+          tabId="side-task:draft:1"
+          parentSessionId="parent-session"
+          workspaceCwd="/work/project"
+          title="Side task"
+          createSession={createSession}
+          onCreated={vi.fn()}
+          onTitleChange={vi.fn()}
+          onError={onError}
+        />
+      </I18nProvider>,
+    );
+    await Promise.resolve();
+  });
+  act(() => root!.unmount());
+  root = null;
+
+  await act(async () => {
+    rejectCreation?.(new Error('create failed'));
+    await Promise.resolve();
+  });
+
+  expect(onError).not.toHaveBeenCalled();
+});
+
+it('reports a successful creation after the draft unmounts', async () => {
+  let resolveCreation:
+    | ((value: { sessionId: string; displayName?: string }) => void)
+    | undefined;
+  const createSession = vi.fn(
+    () =>
+      new Promise<{ sessionId: string; displayName?: string }>((resolve) => {
+        resolveCreation = resolve;
+      }),
+  );
+  const onCreated = vi.fn();
+  const onTitleChange = vi.fn();
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+
+  await act(async () => {
+    root!.render(
+      <I18nProvider language="en">
+        <SideTaskPanel
+          tabId="side-task:draft:1"
+          parentSessionId="parent-session"
+          workspaceCwd="/work/project"
+          title="Side task"
+          createSession={createSession}
+          onCreated={onCreated}
+          onTitleChange={onTitleChange}
+        />
+      </I18nProvider>,
+    );
+    await Promise.resolve();
+  });
+  act(() => root!.unmount());
+  root = null;
+
+  await act(async () => {
+    resolveCreation?.({
+      sessionId: 'side-session-1',
+      displayName: 'Created side task',
+    });
+    await Promise.resolve();
+  });
+
+  expect(onCreated).toHaveBeenCalledWith('side-task:draft:1', 'side-session-1');
+  expect(onTitleChange).not.toHaveBeenCalled();
+});
+
 it('does not retry creation after a prop change until the user requests it', async () => {
   const createSession = vi
     .fn()

@@ -15,6 +15,7 @@ import {
   normalizePendingPromptLimit,
 } from '../../src/daemon/DaemonClient.js';
 import type { DaemonTransport } from '../../src/daemon/DaemonTransport.js';
+import type { DaemonSessionAgentsStatus } from '../../src/daemon/index.js';
 import { negotiateTransport } from '../../src/daemon/negotiateTransport.js';
 import {
   DaemonCapabilityMissingError,
@@ -1700,6 +1701,60 @@ describe('DaemonClient', () => {
         'client-1',
       ]);
     });
+
+    it('GETs session agents, trace, and attachments with identity and cancellation', async () => {
+      const controller = new AbortController();
+      const { signal } = controller;
+      const agents: DaemonSessionAgentsStatus = {
+        v: 1,
+        sessionId: 'with/slash',
+        now: 0,
+        tasks: [],
+      };
+      const { fetch, calls } = recordingFetch((req) => {
+        if (req.url.endsWith('/agents')) {
+          return jsonResponse(200, agents);
+        }
+        if (req.url.includes('/agent-trace')) {
+          return jsonResponse(200, {
+            v: 1,
+            sessionId: 'with/slash',
+            nodes: [],
+            rootAgentIds: [],
+            warnings: [],
+          });
+        }
+        return jsonResponse(200, { attachments: [] });
+      });
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.sessionAgents('with/slash', 'client-1', signal),
+      ).resolves.toMatchObject({ sessionId: 'with/slash', tasks: [] });
+      await expect(
+        client.sessionAgentTrace('with/slash', {
+          rootAgentId: 'root-1',
+          clientId: 'client-1',
+          signal,
+        }),
+      ).resolves.toMatchObject({ sessionId: 'with/slash', nodes: [] });
+      await expect(
+        client.listSessionAttachments('with/slash', {
+          clientId: 'client-1',
+          signal,
+        }),
+      ).resolves.toEqual([]);
+      expect(calls.map((call) => call.url)).toEqual([
+        'http://daemon/session/with%2Fslash/agents',
+        'http://daemon/session/with%2Fslash/agent-trace?rootAgentId=root-1',
+        'http://daemon/session/with%2Fslash/attachments',
+      ]);
+      controller.abort();
+      expect(calls.every((call) => call.signal?.aborted)).toBe(true);
+      expect(
+        calls.every((call) => call.headers['x-qwen-client-id'] === 'client-1'),
+      ).toBe(true);
+    });
   });
 
   describe('exportSession', () => {
@@ -1859,6 +1914,27 @@ describe('DaemonClient', () => {
         },
         signal: expect.any(AbortSignal),
       });
+    });
+
+    it('encodes backward transcript pagination', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          v: 1,
+          sessionId: 'with/slash',
+          events: [],
+          hasMore: false,
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await client.getSessionTranscriptPage('with/slash', {
+        direction: 'backward',
+        limit: 2,
+      });
+
+      expect(calls[0]?.url).toBe(
+        'http://daemon/session/with%2Fslash/transcript?direction=backward&limit=2',
+      );
     });
 
     it('encodes a before-record transcript boundary', async () => {

@@ -278,6 +278,9 @@ const ALL_QWEN_VENDOR_METHODS: readonly string[] = [
   `${QWEN_METHOD_NS}session/detach`,
   `${QWEN_METHOD_NS}session/context_usage`,
   `${QWEN_METHOD_NS}session/tasks`,
+  `${QWEN_METHOD_NS}session/agents`,
+  `${QWEN_METHOD_NS}session/agent_trace`,
+  `${QWEN_METHOD_NS}session/attachments`,
   `${QWEN_METHOD_NS}session/lsp`,
   `${QWEN_METHOD_NS}session/artifacts`,
   `${QWEN_METHOD_NS}session/artifacts/add`,
@@ -3746,6 +3749,50 @@ export class AcpDispatcher {
           if (!this.requireOwned(conn, sessionId, id)) return;
           const result = await this.bridge.getSessionTasksStatus(sessionId);
           this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}session/agents`: {
+          const sessionId = String(params['sessionId'] ?? '');
+          if (!this.requireOwned(conn, sessionId, id)) return;
+          const result = await this.bridge.getSessionAgentsStatus(sessionId);
+          this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}session/agent_trace`: {
+          const sessionId = String(params['sessionId'] ?? '');
+          if (!this.requireOwned(conn, sessionId, id)) return;
+          const rootAgentId = params['rootAgentId'];
+          if (
+            rootAgentId !== undefined &&
+            (typeof rootAgentId !== 'string' ||
+              rootAgentId.length === 0 ||
+              rootAgentId.length > 500)
+          ) {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(id, RPC.INVALID_PARAMS, 'Invalid rootAgentId'),
+              );
+            }
+            return;
+          }
+          const result = await this.bridge.getSessionAgentTrace(
+            sessionId,
+            rootAgentId,
+          );
+          this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}session/attachments`: {
+          const sessionId = String(params['sessionId'] ?? '');
+          if (!this.requireOwned(conn, sessionId, id)) return;
+          const attachments = await this.bridge.listSessionAttachments(
+            sessionId,
+            this.sessionCtx(conn, sessionId, loopback),
+          );
+          this.replyConn(conn, id, { attachments });
           return;
         }
 

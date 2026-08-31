@@ -805,12 +805,18 @@ function normalizeSessionUpdate(
             else if (prefix.startsWith('UklGR')) mimeType = 'image/webp';
           }
           if (data) {
+            const contentRecord = isRecord(content) ? content : undefined;
+            const attachmentId =
+              typeof contentRecord?.['attachmentId'] === 'string'
+                ? (contentRecord['attachmentId'] as string)
+                : undefined;
             return [
               {
                 ...base,
                 type: 'user.image.delta',
                 data,
                 mimeType,
+                ...(attachmentId ? { attachmentId } : {}),
                 ...(meta ? { meta } : {}),
               },
             ];

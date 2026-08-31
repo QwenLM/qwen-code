@@ -76,6 +76,8 @@ import {
   SERVE_CONTROL_EXT_METHODS,
   SERVE_STATUS_EXT_METHODS,
   STATUS_SCHEMA_VERSION,
+  type ServeSessionAgentsStatus,
+  type ServeSessionAgentTrace,
   type ServeSessionStatsStatus,
   type ServeSessionContextStatus,
   type ServeSessionLspStatus,
@@ -11423,6 +11425,21 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       );
     },
 
+    async getSessionAgentsStatus(sessionId) {
+      return requestSessionStatus<ServeSessionAgentsStatus>(
+        sessionId,
+        SERVE_STATUS_EXT_METHODS.sessionAgents,
+      );
+    },
+
+    async getSessionAgentTrace(sessionId, rootAgentId) {
+      return requestSessionStatus<ServeSessionAgentTrace>(
+        sessionId,
+        SERVE_STATUS_EXT_METHODS.sessionAgentTrace,
+        rootAgentId === undefined ? undefined : { rootAgentId },
+      );
+    },
+
     async getSessionLspStatus(sessionId) {
       return requestSessionStatus<ServeSessionLspStatus>(
         sessionId,
@@ -12198,6 +12215,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       if (!entry) throw new SessionNotFoundError(sessionId);
       resolveTrustedClientId(entry, context?.clientId);
       return await entry.attachments.read(attachmentId);
+    },
+
+    async listSessionAttachments(sessionId, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      resolveTrustedClientId(entry, context?.clientId);
+      return await entry.attachments.list();
     },
 
     async removeSessionAttachment(sessionId, attachmentId, context) {

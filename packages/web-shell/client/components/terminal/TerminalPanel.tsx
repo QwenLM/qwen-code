@@ -18,6 +18,7 @@ interface TerminalPanelProps {
   terminalId: string;
   cwd?: string;
   active?: boolean;
+  enabled?: boolean;
 }
 
 const CONTROL_FRAME_PREFIX = '\x00';
@@ -91,6 +92,7 @@ export function TerminalPanel({
   terminalId,
   cwd,
   active = true,
+  enabled = true,
 }: TerminalPanelProps) {
   const theme = useTheme();
   const { baseUrl } = useWorkspace();
@@ -110,6 +112,21 @@ export function TerminalPanel({
   }, [theme]);
 
   useEffect(() => {
+    if (!enabled) {
+      const release = () => {
+        const ws = new WebSocket(
+          buildWsUrl(baseUrl, terminalId, cwd, true),
+          wsProtocols(),
+        );
+        ws.onerror = () => ws.close();
+      };
+      releaseCallbacks.set(terminalId, release);
+      return () => {
+        if (releaseCallbacks.get(terminalId) === release) {
+          releaseCallbacks.delete(terminalId);
+        }
+      };
+    }
     if (!containerRef.current) return;
 
     const term = new Terminal({
@@ -339,7 +356,7 @@ export function TerminalPanel({
       wsRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [enabled]);
 
   useEffect(() => {
     const term = termRef.current;

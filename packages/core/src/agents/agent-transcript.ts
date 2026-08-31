@@ -157,6 +157,173 @@ export interface AgentMeta {
   lastError?: string;
 }
 
+export interface AgentTraceNode {
+  agentId: string;
+  agentType: string;
+  description: string;
+  parentSessionId: string;
+  parentAgentId: string | null;
+  rootAgentId: string;
+  toolUseId?: string;
+  depth?: number;
+  status?: AgentMeta['status'];
+  createdAt: string;
+  lastUpdatedAt?: string;
+  lastError?: string;
+  lineageState: 'complete' | 'orphaned' | 'cycle';
+}
+
+export interface AgentTrace {
+  nodes: AgentTraceNode[];
+  rootAgentIds: string[];
+  warnings: string[];
+}
+
+const TRACE_WARNING_LIMIT = 20;
+export const MAX_AGENT_TRACE_NODES = 2_000;
+const TRACE_READ_CONCURRENCY = 8;
+
+export async function readAgentTrace(
+  projectDir: string,
+  sessionId: string,
+  rootAgentId?: string,
+): Promise<AgentTrace> {
+  const dir = getSubagentSessionDir(projectDir, sessionId);
+  const warnings: string[] = [];
+  let discovered: string[];
+  try {
+    discovered = (await fs.promises.readdir(dir))
+      .filter((name) => name.endsWith('.meta.json'))
+      .sort();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { nodes: [], rootAgentIds: [], warnings: [] };
+    }
+    throw error;
+  }
+
+  const fileNames = discovered.slice(0, MAX_AGENT_TRACE_NODES);
+  if (discovered.length > MAX_AGENT_TRACE_NODES) {
+    warnings.push(
+      `Trace contains more than ${MAX_AGENT_TRACE_NODES} metadata files; results were truncated`,
+    );
+  }
+
+  const metas = new Map<string, AgentMeta>();
+  for (
+    let offset = 0;
+    offset < fileNames.length;
+    offset += TRACE_READ_CONCURRENCY
+  ) {
+    const batch = fileNames.slice(offset, offset + TRACE_READ_CONCURRENCY);
+    await Promise.all(
+      batch.map(async (fileName) => {
+        try {
+          const parsed = JSON.parse(
+            await fs.promises.readFile(path.join(dir, fileName), 'utf8'),
+          ) as AgentMeta;
+          if (
+            typeof parsed.agentId !== 'string' ||
+            parsed.agentId.length === 0 ||
+            typeof parsed.agentType !== 'string' ||
+            typeof parsed.description !== 'string' ||
+            typeof parsed.createdAt !== 'string' ||
+            !Number.isFinite(Date.parse(parsed.createdAt)) ||
+            (parsed.parentAgentId !== null &&
+              typeof parsed.parentAgentId !== 'string') ||
+            (parsed.toolUseId !== undefined &&
+              typeof parsed.toolUseId !== 'string') ||
+            (parsed.depth !== undefined && !Number.isFinite(parsed.depth)) ||
+            (parsed.status !== undefined &&
+              ![
+                'running',
+                'paused',
+                'completed',
+                'failed',
+                'cancelled',
+              ].includes(parsed.status)) ||
+            (parsed.lastUpdatedAt !== undefined &&
+              (typeof parsed.lastUpdatedAt !== 'string' ||
+                !Number.isFinite(Date.parse(parsed.lastUpdatedAt)))) ||
+            (parsed.lastError !== undefined &&
+              typeof parsed.lastError !== 'string') ||
+            parsed.parentSessionId !== sessionId ||
+            path.basename(
+              getAgentMetaPath(projectDir, sessionId, parsed.agentId),
+            ) !== fileName
+          ) {
+            throw new Error('invalid agent metadata identity');
+          }
+          metas.set(parsed.agentId, parsed);
+        } catch (error) {
+          if (warnings.length < TRACE_WARNING_LIMIT) {
+            warnings.push(
+              `${fileName}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+        }
+      }),
+    );
+  }
+
+  const nodes = [...metas.values()]
+    .sort(
+      (left, right) =>
+        left.createdAt.localeCompare(right.createdAt) ||
+        left.agentId.localeCompare(right.agentId),
+    )
+    .map((meta): AgentTraceNode => {
+      let cursor = meta;
+      const lineage: string[] = [];
+      const positions = new Map<string, number>();
+      let lineageState: AgentTraceNode['lineageState'] = 'complete';
+      let cycleRoot: string | undefined;
+      while (cursor.parentAgentId !== null) {
+        const previousPosition = positions.get(cursor.agentId);
+        if (previousPosition !== undefined) {
+          lineageState = 'cycle';
+          cycleRoot = [...lineage.slice(previousPosition)].sort()[0];
+          break;
+        }
+        positions.set(cursor.agentId, lineage.length);
+        lineage.push(cursor.agentId);
+        const parent = metas.get(cursor.parentAgentId);
+        if (!parent) {
+          lineageState = 'orphaned';
+          break;
+        }
+        cursor = parent;
+      }
+      const resolvedRoot =
+        lineageState === 'cycle'
+          ? (cycleRoot ?? cursor.agentId)
+          : cursor.agentId;
+      return {
+        agentId: meta.agentId,
+        agentType: meta.agentType,
+        description: meta.description,
+        parentSessionId: meta.parentSessionId,
+        parentAgentId: meta.parentAgentId,
+        rootAgentId: resolvedRoot,
+        ...(meta.toolUseId ? { toolUseId: meta.toolUseId } : {}),
+        ...(meta.depth !== undefined ? { depth: meta.depth } : {}),
+        ...(meta.status ? { status: meta.status } : {}),
+        createdAt: meta.createdAt,
+        ...(meta.lastUpdatedAt ? { lastUpdatedAt: meta.lastUpdatedAt } : {}),
+        ...(meta.lastError ? { lastError: meta.lastError } : {}),
+        lineageState,
+      };
+    });
+  const filtered = rootAgentId
+    ? nodes.filter((node) => node.rootAgentId === rootAgentId)
+    : nodes;
+  return {
+    nodes: filtered,
+    rootAgentIds: [...new Set(filtered.map((node) => node.rootAgentId))].sort(),
+    warnings,
+  };
+}
+
 export interface AgentPersistedCliFlags {
   /** Mirrors resolvedApprovalMode; kept here so the restored flag set is explicit. */
   approvalMode?: string;
@@ -230,6 +397,21 @@ export function writeAgentMeta(metaPath: string, meta: AgentMeta): void {
 export function readAgentMeta(metaPath: string): AgentMeta | undefined {
   try {
     return JSON.parse(fs.readFileSync(metaPath, 'utf8')) as AgentMeta;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      debugLogger.warn(`Failed to read agent meta sidecar ${metaPath}:`, error);
+    }
+    return undefined;
+  }
+}
+
+export async function readAgentMetaAsync(
+  metaPath: string,
+): Promise<AgentMeta | undefined> {
+  try {
+    return JSON.parse(
+      await fs.promises.readFile(metaPath, 'utf8'),
+    ) as AgentMeta;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
       debugLogger.warn(`Failed to read agent meta sidecar ${metaPath}:`, error);

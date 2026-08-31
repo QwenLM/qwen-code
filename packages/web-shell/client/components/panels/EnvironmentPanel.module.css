@@ -56,6 +56,45 @@
   text-align: left;
 }
 
+.sectionHeaderRow {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.sectionHeaderRow .sectionHeader {
+  width: auto;
+  flex: 1 1 auto;
+}
+
+.sectionAction {
+  display: inline-flex;
+  width: 26px;
+  height: 26px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+
+.sectionAction:hover,
+.sectionAction:focus-visible {
+  background: var(--accent);
+  color: var(--foreground);
+  outline: none;
+}
+
+.sectionAction svg {
+  width: 15px;
+  height: 15px;
+  stroke-width: 1.7;
+}
+
 .sectionHeader:hover,
 .sectionHeader:focus-visible {
   background: var(--accent);
@@ -124,6 +163,11 @@ button.row:disabled {
   width: 14px;
   height: 14px;
   color: var(--muted-foreground);
+}
+
+.label {
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 .branchName {
@@ -262,4 +306,56 @@ button.row:disabled {
   to {
     transform: rotate(360deg);
   }
+}
+
+.attachmentFiles {
+  display: flex;
+  flex-direction: column;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.attachmentFile {
+  display: flex;
+  width: calc(100% + 12px);
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  margin-right: -6px;
+  margin-left: -6px;
+  padding: 5px 6px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--foreground);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+}
+
+.attachmentFile:hover,
+.attachmentFile:focus-visible {
+  background: var(--accent);
+  outline: none;
+}
+
+.attachmentFileIcon {
+  flex: 0 0 auto;
+}
+
+.attachmentFileName {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.emptyDescription {
+  margin: 10px 0 0;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.5;
 }

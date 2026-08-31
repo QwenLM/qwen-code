@@ -35,13 +35,20 @@ import {
   type DaemonStreamingState,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import {
+  createDaemonTranscriptState,
   DaemonHttpError,
+  getSessionUpdatePayload,
   isDaemonTurnError,
   isStaleBranchPointError,
+  normalizeDaemonEvent,
+  reduceDaemonTranscriptEvents,
 } from '@qwen-code/sdk/daemon';
 import type {
+  DaemonAgentTrace,
+  DaemonEvent,
   DaemonInputAnnotation,
   DaemonSessionAgentTaskStatus,
+  DaemonSessionAttachmentReference,
   DaemonSkillToggleMutation,
   DaemonTranscriptBlockChangeSummary,
   DaemonTranscriptBlock,
@@ -68,8 +75,12 @@ import {
   WEB_SHELL_SIDE_TASK_SOURCE_TYPE,
 } from './constants/sessions';
 import { extractPendingPermission } from './adapters/transcriptAdapter';
-import { isRetryableTurnErrorKind } from './adapters/transcriptToMessages';
+import {
+  isRetryableTurnErrorKind,
+  transcriptBlocksToDaemonMessages,
+} from './adapters/transcriptToMessages';
 import { MessageList, type MessageListHandle } from './components/MessageList';
+import { reorderChildrenUnderParents } from './components/messages/agentForest';
 import { SubagentDetailsProvider } from './subagentDetailsContext';
 import { MonitorDetailsProvider } from './monitorDetailsContext';
 import { findMonitorTaskForTool } from './utils/monitorTasks';
@@ -143,6 +154,7 @@ import type { PaneHeaderActionsRenderer } from './components/ChatPane';
 import {
   ArtifactPanel,
   type ArtifactPanelTab,
+  type ImageTabSource,
   type SideTaskListItem,
 } from './components/artifacts/ArtifactPanel';
 import { releaseWebTerminal } from './components/terminal/TerminalPanel';
@@ -433,6 +445,9 @@ const DEFAULT_EMPTY_COMPOSER_TOOLBAR_ACTIONS = [
   'gitBranch',
 ] as const satisfies readonly ComposerToolbarAction[];
 const MAX_ARTIFACT_PANEL_SESSION_STATES = 20;
+// ponytail: malformed pagination stops at 250k events; add a targeted daemon
+// lookup if real sessions approach this ceiling.
+const MAX_ARTIFACT_PANEL_TRANSCRIPT_PAGES = 1_000;
 interface ArtifactPanelSessionState {
   open: boolean;
   tabs: ArtifactPanelTab[];
@@ -1293,9 +1308,29 @@ const DEFAULT_RIGHT_PANEL_ITEMS: readonly WebShellRightPanelItem[] = [
   'sideTask',
 ];
 const DEFAULT_ENVIRONMENT_PANEL_ITEMS: readonly WebShellEnvironmentPanelItem[] =
-  ['environment', 'subagents', 'backgroundTasks'];
+  ['environment', 'subagents', 'backgroundTasks', 'attachments', 'artifacts'];
+const ATTACHMENTS_REFRESH_INTERVAL_MS = 1000;
+const SESSION_AGENTS_REFRESH_INTERVAL_MS = 3000;
+const SESSION_AGENTS_MAX_RETRY_INTERVAL_MS = 30_000;
+const SESSION_AGENTS_FEATURE = 'session_agents';
+const SESSION_AGENT_TRACE_FEATURE = 'session_agent_trace';
+const SESSION_ATTACHMENT_LIST_FEATURE = 'session_attachment_list';
 const BOTTOM_PANEL_GAP_PX = 6;
 const BOTTOM_PANEL_FALLBACK_INSET_PX = 40;
+
+function setBoundedMapEntry<V>(
+  map: Map<string, V>,
+  key: string,
+  value: V,
+): void {
+  map.delete(key);
+  map.set(key, value);
+  while (map.size > MAX_ARTIFACT_PANEL_SESSION_STATES) {
+    const oldest = map.keys().next().value;
+    if (!oldest) break;
+    map.delete(oldest);
+  }
+}
 
 // One preview tab per image, keyed by its content, so opening several images
 // keeps a tab each while re-clicking the same image just focuses its tab.
@@ -1312,6 +1347,9 @@ type ChatWidthMode = `${typeof DEFAULT_CHAT_MAX_WIDTH}` | 'wide';
 const CHAT_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-chat-width';
 const CHAT_SHELL_HORIZONTAL_PADDING = 40;
 const SIDEBAR_COLLAPSED_STORAGE_KEY = 'qwen-code-web-shell-sidebar-collapsed';
+const ENVIRONMENT_PANEL_OPEN_STORAGE_KEY =
+  'qwen-code-web-shell-environment-panel-open';
+const RIGHT_PANEL_STATE_STORAGE_KEY = 'qwen-code-web-shell-right-panel-state';
 
 function resolveSidebarOptions(sidebar: WebShellProps['sidebar']): {
   enabled: boolean;
@@ -1377,6 +1415,572 @@ function writeSidebarCollapsed(collapsed: boolean): void {
     );
   } catch {
     // localStorage can be unavailable in private or embedded contexts.
+  }
+}
+
+function readStoredBooleanMap(key: string): Record<string, boolean> {
+  if (typeof window === 'undefined') return {};
+  try {
+    const stored = window.localStorage.getItem(key);
+    if (!stored) return {};
+    const parsed = JSON.parse(stored) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return {};
+    }
+    const storedStates = { ...(parsed as Record<string, unknown>) };
+    if (storedStates['v'] !== undefined && storedStates['v'] !== 1) return {};
+    delete storedStates['v'];
+    const result: Record<string, boolean> = {};
+    for (const [sessionKey, value] of Object.entries(storedStates).slice(
+      -MAX_ARTIFACT_PANEL_SESSION_STATES,
+    )) {
+      if (typeof value === 'boolean') result[sessionKey] = value;
+    }
+    return result;
+  } catch {
+    // localStorage can be unavailable in private or embedded contexts.
+  }
+  return {};
+}
+
+function writeStoredBooleanMap(
+  key: string,
+  value: Record<string, boolean>,
+): void {
+  try {
+    while (Object.keys(value).length > MAX_ARTIFACT_PANEL_SESSION_STATES) {
+      const oldestSessionKey = Object.keys(value)[0];
+      if (!oldestSessionKey) break;
+      delete value[oldestSessionKey];
+    }
+    window.localStorage.setItem(key, JSON.stringify({ v: 1, ...value }));
+  } catch (error) {
+    console.warn(
+      '[web-shell] failed to persist environment panel state:',
+      error,
+    );
+  }
+}
+
+interface ArtifactPanelPersistedState {
+  open: boolean;
+  activeTabId: string | null;
+  tabs: PersistedArtifactPanelTab[];
+}
+
+type PersistedArtifactPanelTab =
+  | Pick<
+      Extract<ArtifactPanelTab, { kind: 'review' }>,
+      | 'id'
+      | 'kind'
+      | 'title'
+      | 'workspaceCwd'
+      | 'workspaceId'
+      | 'selectedPath'
+      | 'sourceTurnId'
+      | 'sourceSessionId'
+      | 'sourceToolCallIds'
+    >
+  | Pick<
+      Extract<ArtifactPanelTab, { kind: 'file' }>,
+      | 'id'
+      | 'kind'
+      | 'title'
+      | 'workspacePath'
+      | 'workspaceCwd'
+      | 'workspaceId'
+      | 'previewMimeType'
+      | 'previewOnly'
+      | 'attachmentId'
+      | 'sourceSessionId'
+    >
+  | Pick<
+      Extract<ArtifactPanelTab, { kind: 'artifact' }>,
+      | 'id'
+      | 'kind'
+      | 'title'
+      | 'artifactId'
+      | 'workspaceCwd'
+      | 'workspaceId'
+      | 'sourceSessionId'
+    >
+  | {
+      id: string;
+      kind: 'scheduled_task';
+      title: string;
+      toolCallId: string;
+      sourceSessionId?: string;
+      workspaceCwd?: string;
+      workspaceId?: string;
+    }
+  | Pick<
+      Extract<ArtifactPanelTab, { kind: 'image' }>,
+      'id' | 'kind' | 'title' | 'alt' | 'source'
+    >
+  | Pick<
+      Extract<ArtifactPanelTab, { kind: 'subagent' }>,
+      'id' | 'kind' | 'title' | 'sessionId' | 'rootToolCallId' | 'workspaceCwd'
+    >
+  | {
+      id: string;
+      kind: 'monitor' | 'shell';
+      title: string;
+      taskId: string;
+      sessionId?: string;
+    }
+  | Pick<
+      Extract<ArtifactPanelTab, { kind: 'side_task' }>,
+      'id' | 'kind' | 'title' | 'sessionId' | 'parentSessionId' | 'workspaceCwd'
+    >
+  | Pick<
+      Extract<ArtifactPanelTab, { kind: 'terminal' }>,
+      'id' | 'kind' | 'title' | 'workspaceCwd'
+    >
+  | Pick<
+      Extract<ArtifactPanelTab, { kind: 'token_usage' }>,
+      'id' | 'kind' | 'title' | 'sessionId' | 'closeWithPane'
+    >
+  | Pick<
+      Extract<ArtifactPanelTab, { kind: 'workflow' }>,
+      'id' | 'kind' | 'title' | 'sessionId'
+    >;
+
+function parsePersistedArtifactPanelTab(
+  value: unknown,
+): PersistedArtifactPanelTab | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return;
+  const tab = value as Record<string, unknown>;
+  if (typeof tab['id'] !== 'string' || typeof tab['title'] !== 'string') return;
+  const optionalStrings = [
+    'workspaceCwd',
+    'workspaceId',
+    'selectedPath',
+    'sourceTurnId',
+    'sourceSessionId',
+    'workspacePath',
+    'previewMimeType',
+    'attachmentId',
+    'artifactId',
+    'toolCallId',
+    'alt',
+    'sessionId',
+    'rootToolCallId',
+    'taskId',
+    'parentSessionId',
+  ];
+  if (
+    optionalStrings.some(
+      (key) => tab[key] !== undefined && typeof tab[key] !== 'string',
+    ) ||
+    (tab['previewOnly'] !== undefined &&
+      typeof tab['previewOnly'] !== 'boolean') ||
+    (tab['closeWithPane'] !== undefined &&
+      typeof tab['closeWithPane'] !== 'boolean') ||
+    (tab['sourceToolCallIds'] !== undefined &&
+      (!Array.isArray(tab['sourceToolCallIds']) ||
+        !tab['sourceToolCallIds'].every((id) => typeof id === 'string')))
+  ) {
+    return;
+  }
+  const common = { id: tab['id'], title: tab['title'] };
+  switch (tab['kind']) {
+    case 'review':
+      return {
+        ...common,
+        kind: 'review',
+        workspaceCwd: tab['workspaceCwd'],
+        workspaceId: tab['workspaceId'],
+        selectedPath: tab['selectedPath'],
+        sourceTurnId: tab['sourceTurnId'],
+        sourceSessionId: tab['sourceSessionId'],
+        sourceToolCallIds: tab['sourceToolCallIds'],
+      } as PersistedArtifactPanelTab;
+    case 'file':
+      if (typeof tab['workspacePath'] !== 'string') return;
+      return {
+        ...common,
+        kind: 'file',
+        workspacePath: tab['workspacePath'],
+        workspaceCwd: tab['workspaceCwd'],
+        workspaceId: tab['workspaceId'],
+        previewMimeType: tab['previewMimeType'],
+        previewOnly: tab['previewOnly'],
+        attachmentId: tab['attachmentId'],
+        sourceSessionId: tab['sourceSessionId'],
+      } as PersistedArtifactPanelTab;
+    case 'artifact':
+      if (typeof tab['artifactId'] !== 'string') return;
+      return {
+        ...common,
+        kind: 'artifact',
+        artifactId: tab['artifactId'],
+        workspaceCwd: tab['workspaceCwd'],
+        workspaceId: tab['workspaceId'],
+        sourceSessionId: tab['sourceSessionId'],
+      } as PersistedArtifactPanelTab;
+    case 'scheduled_task':
+      if (typeof tab['toolCallId'] !== 'string') return;
+      return {
+        ...common,
+        kind: 'scheduled_task',
+        toolCallId: tab['toolCallId'],
+        sourceSessionId: tab['sourceSessionId'],
+        workspaceCwd: tab['workspaceCwd'],
+        workspaceId: tab['workspaceId'],
+      } as PersistedArtifactPanelTab;
+    case 'image': {
+      const source = tab['source'];
+      if (
+        !source ||
+        typeof source !== 'object' ||
+        Array.isArray(source) ||
+        (source as Record<string, unknown>)['kind'] !== 'attachment' ||
+        typeof (source as Record<string, unknown>)['attachmentId'] !==
+          'string' ||
+        ((source as Record<string, unknown>)['sessionId'] !== undefined &&
+          typeof (source as Record<string, unknown>)['sessionId'] !== 'string')
+      ) {
+        return;
+      }
+      const attachmentSource = source as Record<string, unknown>;
+      return {
+        ...common,
+        kind: 'image',
+        alt: tab['alt'],
+        source: {
+          kind: 'attachment',
+          attachmentId: attachmentSource['attachmentId'],
+          sessionId: attachmentSource['sessionId'],
+        },
+      } as PersistedArtifactPanelTab;
+    }
+    case 'subagent':
+      if (
+        typeof tab['sessionId'] !== 'string' ||
+        typeof tab['rootToolCallId'] !== 'string'
+      ) {
+        return;
+      }
+      return {
+        ...common,
+        kind: 'subagent',
+        sessionId: tab['sessionId'],
+        rootToolCallId: tab['rootToolCallId'],
+        workspaceCwd: tab['workspaceCwd'],
+      } as PersistedArtifactPanelTab;
+    case 'monitor':
+    case 'shell':
+      if (typeof tab['taskId'] !== 'string') return;
+      return {
+        ...common,
+        kind: tab['kind'],
+        taskId: tab['taskId'],
+        sessionId: tab['sessionId'],
+      } as PersistedArtifactPanelTab;
+    case 'side_task':
+      if (
+        typeof tab['sessionId'] !== 'string' ||
+        typeof tab['parentSessionId'] !== 'string'
+      ) {
+        return;
+      }
+      return {
+        ...common,
+        kind: 'side_task',
+        sessionId: tab['sessionId'],
+        parentSessionId: tab['parentSessionId'],
+        workspaceCwd: tab['workspaceCwd'],
+      } as PersistedArtifactPanelTab;
+    case 'terminal':
+      return {
+        ...common,
+        kind: 'terminal',
+        workspaceCwd: tab['workspaceCwd'],
+      } as PersistedArtifactPanelTab;
+    case 'token_usage':
+      if (typeof tab['sessionId'] !== 'string') return;
+      return {
+        ...common,
+        kind: 'token_usage',
+        sessionId: tab['sessionId'],
+        closeWithPane: tab['closeWithPane'],
+      } as PersistedArtifactPanelTab;
+    case 'workflow':
+      if (typeof tab['sessionId'] !== 'string') return;
+      return {
+        ...common,
+        kind: 'workflow',
+        sessionId: tab['sessionId'],
+      } as PersistedArtifactPanelTab;
+    default:
+      return;
+  }
+}
+
+// localStorage holds only stable lookup keys. Runtime snapshots, transcript
+// content, Blobs, data URLs and live actions are rebuilt after session load.
+function serializeArtifactPanelTabs(
+  tabs: readonly ArtifactPanelTab[],
+): PersistedArtifactPanelTab[] {
+  return tabs.flatMap((tab): PersistedArtifactPanelTab[] => {
+    const { id, title } = tab;
+    switch (tab.kind) {
+      case 'review':
+        return [
+          {
+            id,
+            kind: tab.kind,
+            title,
+            workspaceCwd: tab.workspaceCwd,
+            workspaceId: tab.workspaceId,
+            selectedPath: tab.selectedPath,
+            sourceTurnId: tab.sourceTurnId,
+            sourceSessionId: tab.sourceSessionId,
+            sourceToolCallIds: tab.sourceToolCallIds,
+          },
+        ];
+      case 'file':
+        return tab.previewOnly && !tab.attachmentId
+          ? []
+          : [
+              {
+                id,
+                kind: tab.kind,
+                title,
+                workspacePath: tab.workspacePath,
+                workspaceCwd: tab.workspaceCwd,
+                workspaceId: tab.workspaceId,
+                previewMimeType: tab.previewMimeType,
+                previewOnly: tab.previewOnly,
+                attachmentId: tab.attachmentId,
+                sourceSessionId: tab.sourceSessionId,
+              },
+            ];
+      case 'artifact':
+        return [
+          {
+            id,
+            kind: tab.kind,
+            title,
+            artifactId: tab.artifactId,
+            workspaceCwd: tab.workspaceCwd,
+            workspaceId: tab.workspaceId,
+            sourceSessionId: tab.sourceSessionId,
+          },
+        ];
+      case 'scheduled_task':
+        return [
+          {
+            id,
+            kind: tab.kind,
+            title,
+            toolCallId: tab.task.toolCallId,
+            sourceSessionId: tab.sourceSessionId,
+            workspaceCwd: tab.workspaceCwd,
+            workspaceId: tab.workspaceId,
+          },
+        ];
+      case 'image':
+        return tab.source
+          ? [
+              {
+                id,
+                kind: tab.kind,
+                title,
+                alt: tab.alt,
+                source: tab.source,
+              },
+            ]
+          : [];
+      case 'subagent':
+        return [
+          {
+            id,
+            kind: tab.kind,
+            title,
+            sessionId: tab.sessionId,
+            rootToolCallId: tab.rootToolCallId,
+            workspaceCwd: tab.workspaceCwd,
+          },
+        ];
+      case 'monitor':
+      case 'shell':
+        return [
+          {
+            id,
+            kind: tab.kind,
+            title,
+            taskId: tab.task.id,
+            sessionId: tab.sessionId,
+          },
+        ];
+      case 'side_task':
+        return tab.sessionId
+          ? [
+              {
+                id,
+                kind: tab.kind,
+                title,
+                sessionId: tab.sessionId,
+                parentSessionId: tab.parentSessionId,
+                workspaceCwd: tab.workspaceCwd,
+              },
+            ]
+          : [];
+      case 'terminal':
+        return [
+          {
+            id,
+            kind: tab.kind,
+            title,
+            workspaceCwd: tab.workspaceCwd,
+          },
+        ];
+      case 'token_usage':
+        return tab.sessionId
+          ? [
+              {
+                id,
+                kind: tab.kind,
+                title,
+                sessionId: tab.sessionId,
+                closeWithPane: tab.closeWithPane,
+              },
+            ]
+          : [];
+      case 'workflow':
+        return [{ id, kind: tab.kind, title, sessionId: tab.sessionId }];
+      case 'pending': {
+        const common = {
+          id,
+          title,
+        };
+        switch (tab.targetKind) {
+          case 'review':
+            return [
+              {
+                ...common,
+                kind: 'review',
+                sourceSessionId: tab.sourceSessionId,
+                sourceTurnId: tab.sourceTurnId,
+                sourceToolCallIds: tab.sourceToolCallIds,
+                selectedPath: tab.selectedPath,
+                workspaceCwd: tab.workspaceCwd,
+                workspaceId: tab.workspaceId,
+              },
+            ];
+          case 'artifact':
+            return tab.artifactId
+              ? [
+                  {
+                    ...common,
+                    kind: 'artifact',
+                    artifactId: tab.artifactId,
+                    sourceSessionId: tab.sourceSessionId,
+                    workspaceCwd: tab.workspaceCwd,
+                    workspaceId: tab.workspaceId,
+                  },
+                ]
+              : [];
+          case 'scheduled_task':
+            return tab.toolCallId
+              ? [
+                  {
+                    ...common,
+                    kind: 'scheduled_task',
+                    sourceSessionId: tab.sourceSessionId,
+                    toolCallId: tab.toolCallId,
+                    workspaceCwd: tab.workspaceCwd,
+                    workspaceId: tab.workspaceId,
+                  },
+                ]
+              : [];
+          case 'subagent':
+            return tab.rootToolCallId
+              ? [
+                  {
+                    id,
+                    kind: 'subagent',
+                    title,
+                    sessionId: tab.sourceSessionId,
+                    rootToolCallId: tab.rootToolCallId,
+                    workspaceCwd: tab.workspaceCwd,
+                  },
+                ]
+              : [];
+          case 'monitor':
+          case 'shell':
+            return tab.taskId
+              ? [
+                  {
+                    ...common,
+                    kind: tab.targetKind,
+                    taskId: tab.taskId,
+                    sessionId: tab.sourceSessionId,
+                  },
+                ]
+              : [];
+        }
+      }
+    }
+  });
+}
+
+function readStoredArtifactPanelStates(
+  key: string,
+): Record<string, ArtifactPanelPersistedState> {
+  if (typeof window === 'undefined') return {};
+  try {
+    const stored = window.localStorage.getItem(key);
+    if (!stored) return {};
+    const parsed = JSON.parse(stored) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return {};
+    }
+    const storedStates = { ...(parsed as Record<string, unknown>) };
+    if (storedStates['v'] !== undefined && storedStates['v'] !== 1) return {};
+    delete storedStates['v'];
+    const result: Record<string, ArtifactPanelPersistedState> = {};
+    for (const [sessionKey, value] of Object.entries(storedStates).slice(
+      -MAX_ARTIFACT_PANEL_SESSION_STATES,
+    )) {
+      if (!value || typeof value !== 'object') continue;
+      const state = value as Record<string, unknown>;
+      if (typeof state['open'] !== 'boolean') continue;
+      result[sessionKey] = {
+        open: state['open'],
+        activeTabId:
+          typeof state['activeTabId'] === 'string'
+            ? state['activeTabId']
+            : null,
+        tabs: Array.isArray(state['tabs'])
+          ? state['tabs']
+              .map(parsePersistedArtifactPanelTab)
+              .filter((tab): tab is PersistedArtifactPanelTab => Boolean(tab))
+          : [],
+      };
+    }
+    return result;
+  } catch {
+    // localStorage can be unavailable in private or embedded contexts.
+  }
+  return {};
+}
+
+function writeStoredArtifactPanelStates(
+  key: string,
+  states: Record<string, ArtifactPanelPersistedState>,
+): void {
+  if (typeof window === 'undefined') return;
+  try {
+    while (Object.keys(states).length > MAX_ARTIFACT_PANEL_SESSION_STATES) {
+      const oldestSessionKey = Object.keys(states)[0];
+      if (!oldestSessionKey) break;
+      delete states[oldestSessionKey];
+    }
+    window.localStorage.setItem(key, JSON.stringify({ v: 1, ...states }));
+  } catch (error) {
+    console.warn('[web-shell] failed to persist right panel state:', error);
   }
 }
 
@@ -1668,7 +2272,7 @@ function agentTaskAsToolCall(task: DaemonSessionAgentTaskStatus): ACPToolCall {
         ? 'failed'
         : 'completed';
   return {
-    callId: task.id,
+    callId: task.toolUseId ?? task.id,
     toolName: 'agent',
     title: `Agent: ${task.label}`,
     status,
@@ -1875,14 +2479,73 @@ export function getEnvironmentAgentTasks(
       continue;
     }
     const alreadyListed = agents.some(
-      (a) =>
-        (a.toolUseId != null && a.toolUseId === task.toolUseId) ||
-        (a.description !== '' && a.description === task.description),
+      (agent) =>
+        agent.id === task.id ||
+        (agent.toolUseId != null && agent.toolUseId === task.toolUseId),
     );
     if (alreadyListed) continue;
     agents.push(task);
   }
   return agents;
+}
+
+export function mergeAgentTrace(
+  liveAgents: readonly EnvironmentAgentTask[],
+  trace: DaemonAgentTrace | undefined,
+  now = Date.now(),
+): EnvironmentAgentTask[] {
+  if (!trace) return [...liveAgents];
+  const liveById = new Map(liveAgents.map((task) => [task.id, task]));
+  const tracedIds = new Set(trace.nodes.map((node) => node.agentId));
+  const traced = [...trace.nodes]
+    .sort(
+      (left, right) =>
+        left.createdAt.localeCompare(right.createdAt) ||
+        left.agentId.localeCompare(right.agentId),
+    )
+    .map((node): EnvironmentAgentTask => {
+      const live = liveById.get(node.agentId);
+      const {
+        parentAgentId: _liveParentAgentId,
+        depth: _liveDepth,
+        ...liveFields
+      } = live ?? {};
+      const startTime = Date.parse(node.createdAt) || live?.startTime || 0;
+      const status =
+        live?.status ??
+        (node.status === 'running' ? 'paused' : (node.status ?? 'completed'));
+      const persistedEndTime =
+        status !== 'running' && node.lastUpdatedAt
+          ? Date.parse(node.lastUpdatedAt) || undefined
+          : undefined;
+      const endTime = live?.endTime ?? persistedEndTime;
+      return {
+        ...liveFields,
+        kind: 'agent',
+        id: node.agentId,
+        isBackgrounded: live?.isBackgrounded ?? true,
+        label: live?.label ?? node.agentType,
+        description: live?.description ?? node.description,
+        status,
+        startTime,
+        runtimeMs:
+          live?.runtimeMs ??
+          (endTime !== undefined
+            ? Math.max(0, endTime - startTime)
+            : status === 'running'
+              ? Math.max(0, now - startTime)
+              : 0),
+        ...(endTime !== undefined ? { endTime } : {}),
+        ...(node.parentAgentId ? { parentAgentId: node.parentAgentId } : {}),
+        ...(node.depth !== undefined ? { depth: node.depth } : {}),
+        ...(node.toolUseId ? { toolUseId: node.toolUseId } : {}),
+        lineageState: node.lineageState,
+      };
+    });
+  return reorderChildrenUnderParents([
+    ...traced,
+    ...liveAgents.filter((task) => !tracedIds.has(task.id)),
+  ]);
 }
 
 function findToolCall(
@@ -1906,6 +2569,16 @@ function findToolCall(
     if (tool) return tool;
   }
   return undefined;
+}
+
+function transcriptEventsToMessages(events: readonly DaemonEvent[]): Message[] {
+  let state = createDaemonTranscriptState({
+    maxBlocks: Math.max(2_000, events.length),
+  });
+  for (const event of events) {
+    state = reduceDaemonTranscriptEvents(state, normalizeDaemonEvent(event));
+  }
+  return transcriptBlocksToDaemonMessages(state.blocks);
 }
 
 function mapToWebShellTaskInfo(
@@ -2943,7 +3616,10 @@ export function App({
     artifacts,
     loading: artifactsLoading,
     error: artifactsError,
+    refresh: refreshArtifacts,
   } = useSessionArtifacts();
+  const artifactsRef = useRef(artifacts);
+  artifactsRef.current = artifacts;
   const [artifactPanelExtraArtifacts, setArtifactPanelExtraArtifacts] =
     useState<DaemonSessionArtifact[]>([]);
   const [paneArtifactSnapshots, setPaneArtifactSnapshots] = useState<
@@ -3085,21 +3761,237 @@ export function App({
     }
     return latest;
   }, [fileChangesByTurn]);
+  const latestReviewTurnId = useMemo(() => {
+    let latest: string | undefined;
+    for (const [turnId, changes] of fileChangesByTurn) {
+      if (changes.length > 0) latest = turnId;
+    }
+    return latest;
+  }, [fileChangesByTurn]);
   const scheduledTasksByTurn = useMemo(
     () => getScheduledTasksByTurn(displayMessages),
     [displayMessages],
   );
+  const artifactPanelRestoreInputsRef = useRef({
+    displayMessages,
+    fileChangesByTurn,
+    latestReviewChanges,
+    scheduledTasksByTurn,
+  });
+  artifactPanelRestoreInputsRef.current = {
+    displayMessages,
+    fileChangesByTurn,
+    latestReviewChanges,
+    scheduledTasksByTurn,
+  };
   const visibleTurnOutputKinds = useMemo(
     () => new Set<TurnOutputKind>(messageTurnOutputs ?? TURN_OUTPUT_KINDS),
     [messageTurnOutputs],
   );
-  const [artifactPanelOpen, setArtifactPanelOpen] = useState(false);
-  const [environmentPanelOpen, setEnvironmentPanelOpen] = useState(false);
+  // The artifact panel's open state and restorable tabs survive reloads per
+  // session; tab content itself re-fetches from the daemon where possible.
+  const [initialArtifactPanelPersistedStates] = useState(() =>
+    readStoredArtifactPanelStates(RIGHT_PANEL_STATE_STORAGE_KEY),
+  );
+  const artifactPanelPersistedStatesRef = useRef(
+    initialArtifactPanelPersistedStates,
+  );
+  const initialArtifactPanelOpen = Boolean(
+    logicalSessionKey &&
+      initialArtifactPanelPersistedStates[logicalSessionKey]?.open,
+  );
+  const [artifactPanelOpen, setArtifactPanelOpen] = useState(
+    initialArtifactPanelOpen,
+  );
+  const [artifactPanelRestoring, setArtifactPanelRestoring] = useState(
+    initialArtifactPanelOpen,
+  );
+  // The environment panel's open state is per session: opening it in one
+  // session must not leak into another, while switching back restores it.
+  const [initialEnvironmentPanelOpenBySession] = useState(() =>
+    readStoredBooleanMap(ENVIRONMENT_PANEL_OPEN_STORAGE_KEY),
+  );
+  const environmentPanelOpenBySessionRef = useRef(
+    initialEnvironmentPanelOpenBySession,
+  );
+  const [environmentPanelOpen, setEnvironmentPanelOpen] = useState(() =>
+    logicalSessionKey
+      ? (environmentPanelOpenBySessionRef.current[logicalSessionKey] ?? false)
+      : false,
+  );
+  const environmentPanelRestoreRef = useRef<
+    { sessionKey: string; open: boolean } | undefined
+  >(undefined);
+  const environmentArtifactsOpenRef = useRef({
+    sessionKey: logicalSessionKey,
+    open: environmentPanelOpen,
+  });
   const preserveEnvironmentPanelOnArtifactOpenRef = useRef(false);
   useLayoutEffect(() => {
     preserveEnvironmentPanelOnArtifactOpenRef.current = false;
-    setEnvironmentPanelOpen(false);
+    const open = logicalSessionKey
+      ? (environmentPanelOpenBySessionRef.current[logicalSessionKey] ?? false)
+      : false;
+    environmentPanelRestoreRef.current = logicalSessionKey
+      ? { sessionKey: logicalSessionKey, open }
+      : undefined;
+    setEnvironmentPanelOpen(open);
   }, [logicalSessionKey]);
+  useEffect(() => {
+    if (!logicalSessionKey) return;
+    const restore = environmentPanelRestoreRef.current;
+    if (restore?.sessionKey === logicalSessionKey) {
+      if (environmentPanelOpen !== restore.open) return;
+      environmentPanelRestoreRef.current = undefined;
+      return;
+    }
+    delete environmentPanelOpenBySessionRef.current[logicalSessionKey];
+    environmentPanelOpenBySessionRef.current[logicalSessionKey] =
+      environmentPanelOpen;
+    writeStoredBooleanMap(
+      ENVIRONMENT_PANEL_OPEN_STORAGE_KEY,
+      environmentPanelOpenBySessionRef.current,
+    );
+  }, [environmentPanelOpen, logicalSessionKey]);
+  useEffect(() => {
+    const previous = environmentArtifactsOpenRef.current;
+    environmentArtifactsOpenRef.current = {
+      sessionKey: logicalSessionKey,
+      open: environmentPanelOpen,
+    };
+    if (
+      previous.sessionKey === logicalSessionKey &&
+      !previous.open &&
+      environmentPanelOpen &&
+      environmentPanelItems.includes('artifacts')
+    ) {
+      void refreshArtifacts();
+    }
+  }, [
+    environmentPanelItems,
+    environmentPanelOpen,
+    logicalSessionKey,
+    refreshArtifacts,
+  ]);
+  const [, setSessionAttachments] = useState<
+    DaemonSessionAttachmentReference[]
+  >([]);
+  const [sessionAttachmentsLoading, setSessionAttachmentsLoading] =
+    useState(false);
+  const sessionAttachmentsOwnerRef = useRef(sessionOwnerGuard.capture());
+  if (!sessionAttachmentsOwnerRef.current.isCurrent()) {
+    sessionAttachmentsOwnerRef.current = sessionOwnerGuard.capture();
+  }
+  const sessionAttachmentsOwner = sessionAttachmentsOwnerRef.current;
+  const sessionAttachmentsBySessionRef = useRef(
+    new Map<string, DaemonSessionAttachmentReference[]>(),
+  );
+  const sessionAttachmentsSkeletonLoading =
+    sessionAttachmentsLoading ||
+    Boolean(
+      environmentPanelOpen &&
+        logicalSessionKey &&
+        !sessionAttachmentsBySessionRef.current.has(logicalSessionKey),
+    );
+  const lastAttachmentsFetchRef = useRef({
+    sessionKey: '',
+    fetchedAt: 0,
+  });
+  // The attachments panel is fed by the daemon's attachment store, never by
+  // parsing transcript blocks. Refetch while the panel is open whenever the
+  // transcript moves (a sent message is the only way the store gains
+  // attachments) — throttled so streaming appends do not hammer the route.
+  const transcriptRevision = blockChangeSummary?.revision ?? 0;
+  useEffect(() => {
+    const attachmentsSectionEnabled =
+      environmentPanelReachable &&
+      environmentPanelItems.includes('attachments');
+    const attachmentsSupported =
+      connection.capabilities?.features.includes(
+        SESSION_ATTACHMENT_LIST_FEATURE,
+      ) === true;
+    if (
+      !attachmentsSectionEnabled ||
+      !environmentPanelOpen ||
+      connection.status !== 'connected' ||
+      !connection.sessionId ||
+      !logicalSessionKey
+    ) {
+      setSessionAttachmentsLoading(false);
+      return;
+    }
+    if (!attachmentsSupported) {
+      setBoundedMapEntry(
+        sessionAttachmentsBySessionRef.current,
+        logicalSessionKey,
+        [],
+      );
+      setSessionAttachments([]);
+      setSessionAttachmentsLoading(false);
+      return;
+    }
+    const firstLoad =
+      !sessionAttachmentsBySessionRef.current.has(logicalSessionKey);
+    if (connection.loadingTranscript) {
+      setSessionAttachmentsLoading(firstLoad);
+      return;
+    }
+    setSessionAttachmentsLoading(firstLoad);
+    const elapsed =
+      lastAttachmentsFetchRef.current.sessionKey === logicalSessionKey
+        ? Date.now() - lastAttachmentsFetchRef.current.fetchedAt
+        : ATTACHMENTS_REFRESH_INTERVAL_MS;
+    const delay = Math.max(0, ATTACHMENTS_REFRESH_INTERVAL_MS - elapsed);
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      lastAttachmentsFetchRef.current = {
+        sessionKey: logicalSessionKey,
+        fetchedAt: Date.now(),
+      };
+      const listing = sessionActions.listAttachments();
+      void listing
+        .then((attachments) => {
+          if (!cancelled && sessionAttachmentsOwner.isCurrent()) {
+            setBoundedMapEntry(
+              sessionAttachmentsBySessionRef.current,
+              logicalSessionKey,
+              attachments,
+            );
+            setSessionAttachments(attachments);
+            setSessionAttachmentsLoading(false);
+          }
+        })
+        .catch(() => {
+          if (!cancelled && sessionAttachmentsOwner.isCurrent()) {
+            if (firstLoad) {
+              setBoundedMapEntry(
+                sessionAttachmentsBySessionRef.current,
+                logicalSessionKey,
+                [],
+              );
+              setSessionAttachments([]);
+            }
+            setSessionAttachmentsLoading(false);
+          }
+        });
+    }, delay);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [
+    connection.capabilities,
+    connection.sessionId,
+    connection.loadingTranscript,
+    connection.status,
+    environmentPanelOpen,
+    environmentPanelReachable,
+    environmentPanelItems,
+    logicalSessionKey,
+    transcriptRevision,
+    sessionActions,
+    sessionAttachmentsOwner,
+  ]);
   const artifactPanelOpenRef = useRef(artifactPanelOpen);
   artifactPanelOpenRef.current = artifactPanelOpen;
   const [activeArtifactPanelTabId, setActiveArtifactPanelTabId] = useState<
@@ -3107,6 +3999,31 @@ export function App({
   >(null);
   const activeArtifactPanelTabIdRef = useRef(activeArtifactPanelTabId);
   activeArtifactPanelTabIdRef.current = activeArtifactPanelTabId;
+  const artifactPanelRestoredSessionKeyRef = useRef<string | undefined>(
+    undefined,
+  );
+  useLayoutEffect(() => {
+    if (
+      !logicalSessionKey ||
+      artifactPanelRestoredSessionKeyRef.current !== logicalSessionKey
+    )
+      return;
+    delete artifactPanelPersistedStatesRef.current[logicalSessionKey];
+    artifactPanelPersistedStatesRef.current[logicalSessionKey] = {
+      open: artifactPanelOpen,
+      activeTabId: activeArtifactPanelTabId,
+      tabs: serializeArtifactPanelTabs(artifactPanelTabs),
+    };
+    writeStoredArtifactPanelStates(
+      RIGHT_PANEL_STATE_STORAGE_KEY,
+      artifactPanelPersistedStatesRef.current,
+    );
+  }, [
+    activeArtifactPanelTabId,
+    artifactPanelOpen,
+    artifactPanelTabs,
+    logicalSessionKey,
+  ]);
   const [reviewChanges, setReviewChanges] = useState<
     readonly TurnOutputFileChange[]
   >([]);
@@ -3126,7 +4043,7 @@ export function App({
   const [
     suppressArtifactDockOpenAnimation,
     setSuppressArtifactDockOpenAnimation,
-  ] = useState(false);
+  ] = useState(initialArtifactPanelOpen);
   const [waitForSubagentPanelAnimation, setWaitForSubagentPanelAnimation] =
     useState(false);
   // In-tree portal target for the docked panel (display:contents keeps the
@@ -3152,62 +4069,6 @@ export function App({
     extraArtifacts: artifactPanelExtraArtifacts,
     width: artifactPanelWidth,
   };
-  useEffect(() => {
-    const previousSessionId = artifactPanelSessionIdRef.current;
-    if (previousSessionId) {
-      const currentState = artifactPanelSessionStateRef.current;
-      if (currentState) {
-        artifactPanelStateBySessionRef.current.set(
-          previousSessionId,
-          currentState,
-        );
-        if (
-          artifactPanelStateBySessionRef.current.size >
-          MAX_ARTIFACT_PANEL_SESSION_STATES
-        ) {
-          const oldestSessionId = artifactPanelStateBySessionRef.current
-            .keys()
-            .next().value;
-          if (oldestSessionId) {
-            const oldestState =
-              artifactPanelStateBySessionRef.current.get(oldestSessionId);
-            for (const tab of oldestState?.tabs ?? []) {
-              if (tab.kind === 'terminal') releaseWebTerminal(tab.id);
-            }
-            artifactPanelStateBySessionRef.current.delete(oldestSessionId);
-          }
-        }
-      }
-    }
-
-    const nextSessionId = logicalSessionKey;
-    artifactPanelSessionIdRef.current = nextSessionId;
-    const savedState = nextSessionId
-      ? artifactPanelStateBySessionRef.current.get(nextSessionId)
-      : undefined;
-    if (!savedState) {
-      setArtifactPanelOpen(false);
-      setArtifactPanelTabs([]);
-      setActiveArtifactPanelTabId(null);
-      setReviewChanges([]);
-      setSelectedReviewPath(null);
-      setArtifactPanelExtraArtifacts([]);
-      setPaneArtifactSnapshots(new Map());
-      setArtifactPanelWidth(DEFAULT_REVIEW_PANEL_WIDTH);
-      setArtifactPanelFullscreen(false);
-      return;
-    }
-
-    setArtifactPanelOpen(savedState.open);
-    setArtifactPanelTabs(savedState.tabs);
-    setActiveArtifactPanelTabId(savedState.activeTabId);
-    setReviewChanges(savedState.reviewChanges);
-    setSelectedReviewPath(savedState.selectedReviewPath);
-    setArtifactPanelExtraArtifacts(savedState.extraArtifacts);
-    setPaneArtifactSnapshots(new Map());
-    setArtifactPanelWidth(savedState.width);
-    setArtifactPanelFullscreen(false);
-  }, [logicalSessionKey]);
   const sideTasksAvailable =
     Boolean(connection.sessionId && connection.workspaceCwd) &&
     connection.capabilities?.features.includes(SESSION_SIDE_TASK_FEATURE) ===
@@ -3269,35 +4130,45 @@ export function App({
       kind: 'terminal',
       title: count === 0 ? base : `${base} (${count + 1})`,
       workspaceCwd: connection.workspaceCwd,
+      initialized: true,
     };
     setArtifactPanelTabs((tabs) => [...tabs, tab]);
     setActiveArtifactPanelTabId(tab.id);
     setArtifactPanelOpen(true);
   }, [connection.workspaceCwd, t]);
+  const sideTaskCreationPromisesRef = useRef(
+    new Map<string, Promise<{ sessionId: string; displayName?: string }>>(),
+  );
   const createSideTaskSession = useCallback(
-    async (_tabId: string, parentSessionId: string, title: string) => {
-      const ownerCwd = connection.workspaceCwd;
-      const parentClientId =
-        connection.sessionId === parentSessionId
-          ? connection.clientId
-          : undefined;
-      const session = await workspace.client.createSideTaskSession(
-        parentSessionId,
-        {
-          name: title,
-        },
-        parentClientId,
-      );
-      if (ownerCwd) {
-        sessionCatalogController.sessionCreated(ownerCwd, session.sessionId);
-      }
-      await workspace.client
-        .detachSession(session.sessionId, session.clientId)
-        .catch(() => undefined);
-      return {
-        sessionId: session.sessionId,
-        displayName: session.displayName,
-      };
+    (tabId: string, parentSessionId: string, title: string) => {
+      const pending = sideTaskCreationPromisesRef.current.get(tabId);
+      if (pending) return pending;
+      const creation = (async () => {
+        const ownerCwd = connection.workspaceCwd;
+        const parentClientId =
+          connection.sessionId === parentSessionId
+            ? connection.clientId
+            : undefined;
+        const session = await workspace.client.createSideTaskSession(
+          parentSessionId,
+          {
+            name: title,
+          },
+          parentClientId,
+        );
+        if (ownerCwd) {
+          sessionCatalogController.sessionCreated(ownerCwd, session.sessionId);
+        }
+        await workspace.client
+          .detachSession(session.sessionId, session.clientId)
+          .catch(() => undefined);
+        return {
+          sessionId: session.sessionId,
+          displayName: session.displayName,
+        };
+      })().finally(() => sideTaskCreationPromisesRef.current.delete(tabId));
+      sideTaskCreationPromisesRef.current.set(tabId, creation);
+      return creation;
     },
     [
       connection.clientId,
@@ -3324,7 +4195,10 @@ export function App({
         // the draft tab then lives in a saved per-session bucket rather than the
         // live tabs, so write the sessionId there too or reopening the parent
         // creates a duplicate side task.
-        for (const state of artifactPanelStateBySessionRef.current.values()) {
+        for (const [
+          sessionKey,
+          state,
+        ] of artifactPanelStateBySessionRef.current) {
           const candidate = state.tabs.find(
             (bucketTab) => bucketTab.id === tabId,
           );
@@ -3334,6 +4208,16 @@ export function App({
             bucketTab.id === tabId && bucketTab.kind === 'side_task'
               ? { ...bucketTab, sessionId }
               : bucketTab,
+          );
+          delete artifactPanelPersistedStatesRef.current[sessionKey];
+          artifactPanelPersistedStatesRef.current[sessionKey] = {
+            open: state.open,
+            activeTabId: state.activeTabId,
+            tabs: serializeArtifactPanelTabs(state.tabs),
+          };
+          writeStoredArtifactPanelStates(
+            RIGHT_PANEL_STATE_STORAGE_KEY,
+            artifactPanelPersistedStatesRef.current,
           );
           break;
         }
@@ -3570,6 +4454,8 @@ export function App({
       reviewWorkspaceCwd?: string,
       reviewWorkspaceId?: string,
       tabId = 'review',
+      sourceTurnId?: string,
+      sourceSessionId?: string,
     ) => {
       const reviewTab: ArtifactPanelTab = {
         id: tabId,
@@ -3579,6 +4465,9 @@ export function App({
         ...(selectedPath ? { selectedPath } : {}),
         ...(reviewWorkspaceCwd ? { workspaceCwd: reviewWorkspaceCwd } : {}),
         ...(reviewWorkspaceId ? { workspaceId: reviewWorkspaceId } : {}),
+        ...(sourceTurnId ? { sourceTurnId } : {}),
+        ...(sourceSessionId ? { sourceSessionId } : {}),
+        sourceToolCallIds: changes.map((change) => change.toolCallId),
       };
       setArtifactPanelTabs((tabs) =>
         tabs.some((item) => item.id === reviewTab.id)
@@ -3602,11 +4491,16 @@ export function App({
       undefined,
       connection.workspaceCwd,
       artifactWorkspaceTarget?.workspaceId,
+      undefined,
+      latestReviewTurnId,
+      connection.sessionId,
     );
   }, [
     artifactWorkspaceTarget?.workspaceId,
     connection.workspaceCwd,
+    connection.sessionId,
     latestReviewChanges,
+    latestReviewTurnId,
     openReviewPanel,
   ]);
   const openScheduledTaskPanel = useCallback(
@@ -3625,6 +4519,7 @@ export function App({
         task: tabWorkspaceId ? { ...task, workspaceId: tabWorkspaceId } : task,
         ...(tabWorkspaceCwd ? { workspaceCwd: tabWorkspaceCwd } : {}),
         ...(tabWorkspaceId ? { workspaceId: tabWorkspaceId } : {}),
+        ...(sourceSessionId ? { sourceSessionId } : {}),
       };
       setArtifactPanelTabs((tabs) =>
         tabs.some((item) => item.id === tab.id)
@@ -3679,13 +4574,20 @@ export function App({
     [getDefaultReviewPanelWidth],
   );
   const openImagePanel = useCallback(
-    (src: string, alt?: string) => {
+    (src: string, alt?: string, source?: ImageTabSource) => {
+      const resolvedSource =
+        source && !source.sessionId && connection.sessionId
+          ? { ...source, sessionId: connection.sessionId }
+          : source;
       const tab: ArtifactPanelTab = {
-        id: imageTabId(src),
+        id: resolvedSource
+          ? `image:${resolvedSource.sessionId ?? ''}:${resolvedSource.attachmentId}`
+          : imageTabId(src),
         kind: 'image',
         title: t('turnOutputs.imagePreview'),
         src,
         ...(alt ? { alt } : {}),
+        ...(resolvedSource ? { source: resolvedSource } : {}),
       };
       setArtifactPanelTabs((tabs) =>
         tabs.some((item) => item.id === tab.id)
@@ -3698,7 +4600,14 @@ export function App({
       );
       setArtifactPanelOpen(true);
     },
-    [getDefaultReviewPanelWidth, t],
+    [connection.sessionId, getDefaultReviewPanelWidth, t],
+  );
+  const readSessionImage = useCallback(
+    async (attachmentId: string): Promise<string> => {
+      const attachment = await sessionActions.readAttachment(attachmentId);
+      return `data:${attachment.mimeType};base64,${attachment.data}`;
+    },
+    [sessionActions],
   );
   const openTokenUsagePanel = useCallback(
     (
@@ -3759,6 +4668,10 @@ export function App({
           ...(resolvedFile.mimeType
             ? { previewMimeType: resolvedFile.mimeType }
             : {}),
+          ...(resolvedFile.attachmentId
+            ? { attachmentId: resolvedFile.attachmentId }
+            : {}),
+          ...(sourceSessionId ? { sourceSessionId } : {}),
           ...(previewOnly ? { previewOnly: true } : {}),
           ...(workspaceCwd ? { workspaceCwd } : {}),
           ...(workspaceId ? { workspaceId } : {}),
@@ -3830,6 +4743,698 @@ export function App({
       sessionOwnerGuard,
     ],
   );
+  const hydrateRestoredAttachmentTab = useCallback(
+    async (tab: ArtifactPanelTab | undefined) => {
+      if (!tab || (tab.kind !== 'image' && tab.kind !== 'file')) return;
+      const attachmentId =
+        tab.kind === 'image' ? tab.source?.attachmentId : tab.attachmentId;
+      if (!attachmentId) return;
+      if (tab.kind === 'image' && tab.src) return;
+      if (tab.kind === 'file' && tab.previewData) return;
+      const sourceSessionId =
+        tab.kind === 'image' ? tab.source?.sessionId : tab.sourceSessionId;
+      const owner = sessionOwnerGuard.capture();
+      setArtifactPanelTabs((tabs) =>
+        tabs.map((item) =>
+          item.id === tab.id && item.kind === tab.kind
+            ? { ...item, loadError: undefined }
+            : item,
+        ),
+      );
+      let attachment:
+        | Awaited<ReturnType<typeof sessionActions.readAttachment>>
+        | undefined;
+      try {
+        attachment = await (sourceSessionId &&
+        sourceSessionId !== connection.sessionId
+          ? workspace.client.readSessionAttachment(
+              sourceSessionId,
+              attachmentId,
+            )
+          : sessionActions.readAttachment(attachmentId));
+      } catch (error) {
+        if (!owner.isCurrent()) return;
+        const loadError = t('rightPanel.attachmentLoadFailed', {
+          error: formatError(error, t('environment.unavailable')),
+        });
+        setArtifactPanelTabs((tabs) =>
+          tabs.map((item) =>
+            item.id === tab.id && item.kind === tab.kind
+              ? { ...item, loadError }
+              : item,
+          ),
+        );
+        return;
+      }
+      if (!owner.isCurrent()) return;
+      setArtifactPanelTabs((tabs) =>
+        tabs.map((item) => {
+          if (item.id !== tab.id || item.kind !== tab.kind) return item;
+          return item.kind === 'image'
+            ? {
+                ...item,
+                src: `data:${attachment.mimeType};base64,${attachment.data}`,
+              }
+            : {
+                ...item,
+                previewData: base64ToBlob(attachment.data, attachment.mimeType),
+                previewMimeType: attachment.mimeType,
+                previewOnly: true,
+              };
+        }),
+      );
+    },
+    [
+      connection.sessionId,
+      sessionActions,
+      sessionOwnerGuard,
+      t,
+      workspace.client,
+    ],
+  );
+  const hydratePendingArtifactPanelTab = useCallback(
+    async (tab: Extract<ArtifactPanelTab, { kind: 'pending' }> | undefined) => {
+      if (!tab) return;
+      const owner = sessionOwnerGuard.capture();
+      setArtifactPanelTabs((tabs) =>
+        tabs.map((item) =>
+          item.id === tab.id && item.kind === 'pending'
+            ? { ...item, loadError: undefined }
+            : item,
+        ),
+      );
+      try {
+        let restored: ArtifactPanelTab | undefined;
+        if (tab.targetKind === 'artifact') {
+          const artifact = (
+            await workspace.client.listSessionArtifacts(tab.sourceSessionId)
+          ).artifacts.find((item) => item.id === tab.artifactId);
+          if (artifact) {
+            setArtifactPanelExtraArtifacts((current) =>
+              current.some((item) => item.id === artifact.id)
+                ? current.map((item) =>
+                    item.id === artifact.id ? artifact : item,
+                  )
+                : [...current, artifact],
+            );
+            restored = {
+              id: tab.id,
+              kind: 'artifact',
+              title: tab.title,
+              artifactId: artifact.id,
+              sourceSessionId: tab.sourceSessionId,
+              workspaceCwd: tab.workspaceCwd,
+              workspaceId: tab.workspaceId,
+            };
+          }
+        } else if (tab.targetKind === 'monitor' || tab.targetKind === 'shell') {
+          const snapshot = await workspace.client.sessionTasks(
+            tab.sourceSessionId,
+          );
+          const task = snapshot.tasks.find(
+            (item) => item.kind === tab.targetKind && item.id === tab.taskId,
+          );
+          if (task?.kind === 'monitor' || task?.kind === 'shell') {
+            const crossSessionActions: DaemonSessionActions = {
+              ...sessionActions,
+              getTasks: () =>
+                workspace.client.sessionTasks(tab.sourceSessionId),
+              cancelTask: (taskId, kind) =>
+                workspace.client.sessionTaskCancel(
+                  tab.sourceSessionId,
+                  taskId,
+                  kind,
+                ),
+            };
+            restored =
+              task.kind === 'monitor'
+                ? {
+                    id: tab.id,
+                    kind: 'monitor',
+                    title: tab.title,
+                    task,
+                    sessionId: tab.sourceSessionId,
+                    sessionActions: crossSessionActions,
+                  }
+                : {
+                    id: tab.id,
+                    kind: 'shell',
+                    title: tab.title,
+                    task,
+                    sessionId: tab.sourceSessionId,
+                    sessionActions: crossSessionActions,
+                  };
+          }
+        } else {
+          let cursor: string | undefined;
+          const events: DaemonEvent[] = [];
+          const seenCursors = new Set<string>();
+          const reviewToolCallIds = new Set(
+            tab.targetKind === 'review' ? (tab.sourceToolCallIds ?? []) : [],
+          );
+          const targetToolCallIds = new Set(
+            tab.targetKind === 'review'
+              ? reviewToolCallIds
+              : tab.targetKind === 'scheduled_task'
+                ? tab.toolCallId
+                  ? [tab.toolCallId]
+                  : []
+                : tab.targetKind === 'subagent'
+                  ? tab.rootToolCallId
+                    ? [tab.rootToolCallId]
+                    : []
+                  : [],
+          );
+          const stopWhenToolCallsFound = targetToolCallIds.size > 0;
+          let pageCount = 0;
+          for (;;) {
+            if (!owner.isCurrent()) return;
+            const page = await workspace.client.getSessionTranscriptPage(
+              tab.sourceSessionId,
+              {
+                ...(cursor ? { cursor } : { direction: 'backward' }),
+                limit: 250,
+              },
+            );
+            if (!owner.isCurrent()) return;
+            events.unshift(...page.events);
+            pageCount += 1;
+            for (const event of page.events) {
+              if (event.type === 'session_update') {
+                const update = getSessionUpdatePayload(event.data);
+                const toolCallId = update?.['toolCallId'];
+                if (
+                  update?.['sessionUpdate'] === 'tool_call' &&
+                  typeof toolCallId === 'string'
+                ) {
+                  targetToolCallIds.delete(toolCallId);
+                }
+              }
+            }
+            cursor = page.nextCursor;
+            if (
+              !page.hasMore ||
+              !cursor ||
+              (stopWhenToolCallsFound && targetToolCallIds.size === 0)
+            ) {
+              break;
+            }
+            if (seenCursors.has(cursor)) {
+              throw new Error(t('rightPanel.savedContentUnavailable'));
+            }
+            if (pageCount >= MAX_ARTIFACT_PANEL_TRANSCRIPT_PAGES) {
+              throw new Error(t('rightPanel.savedContentUnavailable'));
+            }
+            seenCursors.add(cursor);
+          }
+          const sourceMessages = transcriptEventsToMessages(events);
+          if (tab.targetKind === 'review') {
+            const sourceArtifacts =
+              tab.sourceSessionId === connection.sessionId
+                ? artifactsRef.current
+                : ((
+                    await workspace.client
+                      .listSessionArtifacts(tab.sourceSessionId)
+                      .catch(() => undefined)
+                  )?.artifacts ?? []);
+            if (!owner.isCurrent()) return;
+            const changesByTurn = getFileChangesByTurn(
+              sourceMessages,
+              getArtifactsByTurn(
+                sourceMessages,
+                sourceArtifacts,
+                tab.workspaceCwd ?? '',
+              ),
+              tab.workspaceCwd ?? '',
+            );
+            const matchedChanges = [...changesByTurn.values()]
+              .flat()
+              .filter((change) => reviewToolCallIds.has(change.toolCallId));
+            const changes =
+              changesByTurn.get(tab.sourceTurnId ?? '') ??
+              (matchedChanges.length > 0 ? matchedChanges : undefined);
+            if (changes) {
+              restored = {
+                id: tab.id,
+                kind: 'review',
+                title: tab.title,
+                changes,
+                selectedPath: tab.selectedPath,
+                sourceTurnId: tab.sourceTurnId,
+                sourceSessionId: tab.sourceSessionId,
+                sourceToolCallIds: tab.sourceToolCallIds,
+                workspaceCwd: tab.workspaceCwd,
+                workspaceId: tab.workspaceId,
+              };
+            }
+          } else if (tab.targetKind === 'scheduled_task') {
+            const task = Array.from(
+              getScheduledTasksByTurn(sourceMessages).values(),
+            )
+              .flat()
+              .find((item) => item.toolCallId === tab.toolCallId);
+            if (task) {
+              restored = {
+                id: tab.id,
+                kind: 'scheduled_task',
+                title: tab.title,
+                task,
+                sourceSessionId: tab.sourceSessionId,
+                workspaceCwd: tab.workspaceCwd,
+                workspaceId: tab.workspaceId,
+              };
+            }
+          } else {
+            const rootTool = findToolCall(
+              sourceMessages,
+              tab.rootToolCallId ?? '',
+            );
+            if (rootTool) {
+              restored = {
+                id: tab.id,
+                kind: 'subagent',
+                title: tab.title,
+                sessionId: tab.sourceSessionId,
+                rootToolCallId: rootTool.callId,
+                rootTool,
+                workspaceCwd: tab.workspaceCwd,
+              };
+            }
+          }
+        }
+        if (!restored) {
+          throw new Error(t('rightPanel.savedContentUnavailable'));
+        }
+        if (!owner.isCurrent()) return;
+        setArtifactPanelTabs((tabs) =>
+          tabs.map((item) => (item.id === tab.id ? restored : item)),
+        );
+      } catch (error) {
+        if (!owner.isCurrent()) return;
+        const loadError = t('rightPanel.restoreFailed', {
+          error: formatError(error, t('environment.unavailable')),
+        });
+        setArtifactPanelTabs((tabs) =>
+          tabs.map((item) =>
+            item.id === tab.id && item.kind === 'pending'
+              ? { ...item, loadError }
+              : item,
+          ),
+        );
+      }
+    },
+    [
+      connection.sessionId,
+      sessionActions,
+      sessionOwnerGuard,
+      t,
+      workspace.client,
+    ],
+  );
+  const selectArtifactPanelTab = useCallback(
+    (tabId: string) => {
+      setArtifactPanelTabs((tabs) =>
+        tabs.map((tab) =>
+          tab.id === tabId && tab.kind === 'terminal' && !tab.initialized
+            ? { ...tab, initialized: true }
+            : tab,
+        ),
+      );
+      setActiveArtifactPanelTabId(tabId);
+      const tab = artifactPanelTabsRef.current.find(
+        (item) => item.id === tabId,
+      );
+      void hydrateRestoredAttachmentTab(tab);
+      void hydratePendingArtifactPanelTab(
+        tab?.kind === 'pending' ? tab : undefined,
+      );
+    },
+    [hydratePendingArtifactPanelTab, hydrateRestoredAttachmentTab],
+  );
+  const sessionAgentTraceSupported =
+    connection.capabilities?.features.includes(SESSION_AGENT_TRACE_FEATURE) ===
+    true;
+  useLayoutEffect(() => {
+    const previousSessionId = artifactPanelSessionIdRef.current;
+    const nextSessionId = logicalSessionKey;
+    if (previousSessionId && previousSessionId !== nextSessionId) {
+      const currentState = artifactPanelSessionStateRef.current;
+      if (currentState) {
+        artifactPanelStateBySessionRef.current.delete(previousSessionId);
+        artifactPanelStateBySessionRef.current.set(
+          previousSessionId,
+          currentState,
+        );
+        if (
+          artifactPanelStateBySessionRef.current.size >
+          MAX_ARTIFACT_PANEL_SESSION_STATES
+        ) {
+          const oldestSessionId = artifactPanelStateBySessionRef.current
+            .keys()
+            .next().value;
+          if (oldestSessionId) {
+            const oldestState =
+              artifactPanelStateBySessionRef.current.get(oldestSessionId);
+            for (const tab of oldestState?.tabs ?? []) {
+              if (tab.kind === 'terminal') releaseWebTerminal(tab.id);
+            }
+            artifactPanelStateBySessionRef.current.delete(oldestSessionId);
+          }
+        }
+      }
+    }
+
+    artifactPanelSessionIdRef.current = nextSessionId;
+    if (!nextSessionId) {
+      artifactPanelRestoredSessionKeyRef.current = undefined;
+      setArtifactPanelRestoring(false);
+      setArtifactPanelOpen(false);
+      setArtifactPanelTabs([]);
+      setActiveArtifactPanelTabId(null);
+      return;
+    }
+    if (
+      artifactPanelRestoredSessionKeyRef.current === nextSessionId &&
+      !connection.loadingTranscript
+    ) {
+      return;
+    }
+    if (connection.loadingTranscript) {
+      if (artifactPanelRestoredSessionKeyRef.current === nextSessionId) {
+        const currentState = artifactPanelSessionStateRef.current;
+        if (currentState) {
+          artifactPanelStateBySessionRef.current.delete(nextSessionId);
+          artifactPanelStateBySessionRef.current.set(
+            nextSessionId,
+            currentState,
+          );
+        }
+      }
+      artifactPanelRestoredSessionKeyRef.current = undefined;
+      const pendingState =
+        artifactPanelStateBySessionRef.current.get(nextSessionId) ??
+        artifactPanelPersistedStatesRef.current[nextSessionId];
+      const shouldOpen = Boolean(pendingState?.open);
+      setArtifactPanelRestoring(shouldOpen);
+      setSuppressArtifactDockOpenAnimation(shouldOpen);
+      setArtifactPanelOpen(shouldOpen);
+      setArtifactPanelTabs([]);
+      setActiveArtifactPanelTabId(null);
+      return;
+    }
+    if (connection.status !== 'connected') {
+      artifactPanelRestoredSessionKeyRef.current = undefined;
+      const pendingState =
+        artifactPanelStateBySessionRef.current.get(nextSessionId) ??
+        artifactPanelPersistedStatesRef.current[nextSessionId];
+      const shouldOpen = Boolean(pendingState?.open);
+      setArtifactPanelRestoring(shouldOpen);
+      setSuppressArtifactDockOpenAnimation(shouldOpen);
+      setArtifactPanelOpen(shouldOpen);
+      setArtifactPanelTabs([]);
+      setActiveArtifactPanelTabId(null);
+      return;
+    }
+    if (artifactsLoading) {
+      const pendingState =
+        artifactPanelStateBySessionRef.current.get(nextSessionId) ??
+        artifactPanelPersistedStatesRef.current[nextSessionId];
+      const shouldOpen = Boolean(pendingState?.open);
+      setArtifactPanelRestoring(shouldOpen);
+      setSuppressArtifactDockOpenAnimation(shouldOpen);
+      setArtifactPanelOpen(shouldOpen);
+      setArtifactPanelTabs([]);
+      setActiveArtifactPanelTabId(null);
+      return;
+    }
+
+    const savedState =
+      artifactPanelStateBySessionRef.current.get(nextSessionId);
+    const savedDrafts =
+      savedState?.tabs.filter(
+        (tab) => tab.kind === 'side_task' && !tab.sessionId,
+      ) ?? [];
+    const persisted =
+      artifactPanelPersistedStatesRef.current[nextSessionId] ?? undefined;
+    if (!persisted && savedDrafts.length === 0) {
+      artifactPanelRestoredSessionKeyRef.current = nextSessionId;
+      setArtifactPanelRestoring(false);
+      if (previousSessionId !== nextSessionId) {
+        setArtifactPanelOpen(false);
+        setArtifactPanelTabs([]);
+        setActiveArtifactPanelTabId(null);
+        setReviewChanges([]);
+        setSelectedReviewPath(null);
+        setArtifactPanelExtraArtifacts([]);
+        setPaneArtifactSnapshots(new Map());
+        setArtifactPanelFullscreen(false);
+      }
+      return;
+    }
+    const restoredOpen = savedState?.open ?? persisted?.open ?? false;
+    setArtifactPanelRestoring(restoredOpen);
+    setSuppressArtifactDockOpenAnimation(restoredOpen);
+    if (previousSessionId !== nextSessionId) {
+      setArtifactPanelOpen(restoredOpen);
+      setArtifactPanelTabs([]);
+      setActiveArtifactPanelTabId(null);
+    }
+    let cancelled = false;
+    const restore = async () => {
+      const needsTasks = persisted?.tabs.some(
+        (tab) =>
+          (tab.kind === 'monitor' || tab.kind === 'shell') &&
+          (!tab.sessionId || tab.sessionId === connection.sessionId),
+      );
+      const taskSnapshot = needsTasks
+        ? await sessionActions.getTasks({ silent: true }).catch(() => undefined)
+        : undefined;
+      const restoreInputs = artifactPanelRestoreInputsRef.current;
+      const restoredTabs = (
+        await Promise.all(
+          (persisted?.tabs ?? []).map(
+            async (tab): Promise<ArtifactPanelTab | undefined> => {
+              switch (tab.kind) {
+                case 'review': {
+                  if (
+                    tab.sourceSessionId &&
+                    tab.sourceSessionId !== connection.sessionId
+                  ) {
+                    return {
+                      ...tab,
+                      kind: 'pending',
+                      targetKind: 'review',
+                      sourceSessionId: tab.sourceSessionId,
+                    };
+                  }
+                  const changes = tab.sourceTurnId
+                    ? restoreInputs.fileChangesByTurn.get(tab.sourceTurnId)
+                    : restoreInputs.latestReviewChanges;
+                  const sourceSessionId =
+                    tab.sourceSessionId ?? connection.sessionId;
+                  return changes
+                    ? { ...tab, changes }
+                    : tab.sourceTurnId && sourceSessionId
+                      ? {
+                          ...tab,
+                          kind: 'pending',
+                          targetKind: 'review',
+                          sourceSessionId,
+                        }
+                      : undefined;
+                }
+                case 'file': {
+                  return tab;
+                }
+                case 'artifact':
+                  return tab.sourceSessionId &&
+                    tab.sourceSessionId !== connection.sessionId
+                    ? {
+                        ...tab,
+                        kind: 'pending',
+                        targetKind: 'artifact',
+                        sourceSessionId: tab.sourceSessionId,
+                      }
+                    : tab;
+                case 'scheduled_task': {
+                  if (
+                    tab.sourceSessionId &&
+                    tab.sourceSessionId !== connection.sessionId
+                  ) {
+                    return {
+                      ...tab,
+                      kind: 'pending',
+                      targetKind: 'scheduled_task',
+                      sourceSessionId: tab.sourceSessionId,
+                    };
+                  }
+                  const task = Array.from(
+                    restoreInputs.scheduledTasksByTurn.values(),
+                  )
+                    .flat()
+                    .find((item) => item.toolCallId === tab.toolCallId);
+                  if (!task) {
+                    const sourceSessionId =
+                      tab.sourceSessionId ?? connection.sessionId;
+                    return sourceSessionId
+                      ? {
+                          ...tab,
+                          kind: 'pending',
+                          targetKind: 'scheduled_task',
+                          sourceSessionId,
+                        }
+                      : undefined;
+                  }
+                  const { toolCallId: _toolCallId, ...rest } = tab;
+                  return { ...rest, task };
+                }
+                case 'image': {
+                  if (!tab.source) return undefined;
+                  return { ...tab, src: '' };
+                }
+                case 'subagent': {
+                  if (tab.sessionId !== connection.sessionId) {
+                    return {
+                      id: tab.id,
+                      kind: 'pending',
+                      title: tab.title,
+                      targetKind: 'subagent',
+                      sourceSessionId: tab.sessionId,
+                      rootToolCallId: tab.rootToolCallId,
+                      workspaceCwd: tab.workspaceCwd,
+                    };
+                  }
+                  const rootTool = findToolCall(
+                    restoreInputs.displayMessages,
+                    tab.rootToolCallId,
+                  );
+                  return {
+                    ...tab,
+                    rootTool: rootTool ?? {
+                      callId: tab.rootToolCallId,
+                      toolName: 'agent',
+                      title: tab.title,
+                      status: 'completed',
+                      args: {},
+                    },
+                  };
+                }
+                case 'monitor':
+                case 'shell': {
+                  if (tab.sessionId && tab.sessionId !== connection.sessionId) {
+                    return {
+                      id: tab.id,
+                      kind: 'pending',
+                      title: tab.title,
+                      targetKind: tab.kind,
+                      sourceSessionId: tab.sessionId,
+                      taskId: tab.taskId,
+                    };
+                  }
+                  const task = taskSnapshot?.tasks.find(
+                    (item) => item.kind === tab.kind && item.id === tab.taskId,
+                  );
+                  if (!task || task.kind !== tab.kind) return undefined;
+                  const { taskId: _taskId, ...rest } = tab;
+                  return { ...rest, task, sessionActions } as ArtifactPanelTab;
+                }
+                case 'side_task':
+                  return tab.sessionId ? tab : undefined;
+                case 'terminal':
+                  return webTerminalAvailable
+                    ? { ...tab, initialized: false }
+                    : undefined;
+                case 'token_usage': {
+                  if (!tab.sessionId) return undefined;
+                  const sessionId = tab.sessionId;
+                  return {
+                    ...tab,
+                    sessionActions:
+                      sessionId === connection.sessionId
+                        ? sessionActions
+                        : {
+                            ...sessionActions,
+                            getStats: () =>
+                              workspace.client.sessionStats(sessionId),
+                          },
+                  };
+                }
+                case 'workflow':
+                  return tab.sessionId === connection.sessionId &&
+                    sessionAgentTraceSupported
+                    ? tab
+                    : undefined;
+              }
+            },
+          ),
+        )
+      ).filter((tab): tab is ArtifactPanelTab => tab !== undefined);
+      restoredTabs.push(...savedDrafts);
+      if (cancelled) return;
+      artifactPanelRestoredSessionKeyRef.current = nextSessionId;
+      setArtifactPanelRestoring(false);
+      const desiredActiveTabId =
+        savedState?.activeTabId ?? persisted?.activeTabId ?? null;
+      const tabsOpenedDuringRestore = artifactPanelTabsRef.current;
+      const newlyOpenedIds = new Set(
+        tabsOpenedDuringRestore.map((tab) => tab.id),
+      );
+      const mergedTabs = [
+        ...restoredTabs.filter((tab) => !newlyOpenedIds.has(tab.id)),
+        ...tabsOpenedDuringRestore,
+      ];
+      const activeTabId = mergedTabs.some(
+        (tab) => tab.id === activeArtifactPanelTabIdRef.current,
+      )
+        ? activeArtifactPanelTabIdRef.current
+        : mergedTabs.some((tab) => tab.id === desiredActiveTabId)
+          ? desiredActiveTabId
+          : (mergedTabs[0]?.id ?? null);
+      const activatedTabs = mergedTabs.map((tab) =>
+        tab.id === activeTabId && tab.kind === 'terminal'
+          ? { ...tab, initialized: true }
+          : tab,
+      );
+      setSuppressArtifactDockOpenAnimation(restoredOpen);
+      setArtifactPanelOpen(artifactPanelOpenRef.current);
+      setArtifactPanelTabs(activatedTabs);
+      setActiveArtifactPanelTabId(activeTabId);
+      setReviewChanges(restoreInputs.latestReviewChanges);
+      setSelectedReviewPath(null);
+      setArtifactPanelExtraArtifacts([]);
+      setPaneArtifactSnapshots(new Map());
+      setArtifactPanelWidth(DEFAULT_REVIEW_PANEL_WIDTH);
+      setArtifactPanelFullscreen(false);
+      void hydrateRestoredAttachmentTab(
+        activatedTabs.find((tab) => tab.id === activeTabId),
+      );
+      const activeTab = activatedTabs.find((tab) => tab.id === activeTabId);
+      void hydratePendingArtifactPanelTab(
+        activeTab?.kind === 'pending' ? activeTab : undefined,
+      );
+    };
+    void restore().catch((error: unknown) => {
+      if (cancelled) return;
+      artifactPanelRestoredSessionKeyRef.current = nextSessionId;
+      setArtifactPanelRestoring(false);
+      console.warn('[web-shell] failed to restore right panel:', error);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    artifactsLoading,
+    connection.loadingTranscript,
+    connection.sessionId,
+    connection.status,
+    hydratePendingArtifactPanelTab,
+    hydrateRestoredAttachmentTab,
+    logicalSessionKey,
+    sessionAgentTraceSupported,
+    sessionActions,
+    webTerminalAvailable,
+    workspace.client,
+  ]);
   const openShellPanel = useCallback(
     (
       task: DaemonSessionShellTaskStatus,
@@ -3944,6 +5549,26 @@ export function App({
       openSubagentPanelForSession,
     ],
   );
+  const openAgentWorkflow = useCallback(() => {
+    if (!connection.sessionId) return;
+    if (!artifactPanelOpenRef.current) {
+      preserveEnvironmentPanelOnArtifactOpenRef.current = true;
+    }
+    const tab: ArtifactPanelTab = {
+      id: `workflow:${connection.sessionId}`,
+      kind: 'workflow',
+      title: t('workflow.title'),
+      sessionId: connection.sessionId,
+    };
+    setArtifactPanelTabs((tabs) =>
+      tabs.some((item) => item.id === tab.id) ? tabs : [...tabs, tab],
+    );
+    setActiveArtifactPanelTabId(tab.id);
+    setArtifactPanelWidth((width) =>
+      artifactPanelOpenRef.current ? width : getDefaultReviewPanelWidth(),
+    );
+    setArtifactPanelOpen(true);
+  }, [connection.sessionId, getDefaultReviewPanelWidth, t]);
   const handleTurnOutputOpen = useCallback(
     (request: TurnOutputOpenRequest) => {
       if (request.kind === 'review' && onFileReviewOpen) {
@@ -3963,6 +5588,8 @@ export function App({
           request.sourceSessionId
             ? `review:${request.sourceSessionId}:${request.turnId}`
             : undefined,
+          request.turnId,
+          request.sourceSessionId,
         );
         return;
       }
@@ -3976,7 +5603,19 @@ export function App({
         return;
       }
       if (request.kind === 'image') {
-        openImagePanel(request.src, request.alt);
+        openImagePanel(
+          request.src,
+          request.alt,
+          request.attachmentId
+            ? {
+                kind: 'attachment',
+                attachmentId: request.attachmentId,
+                ...(request.sourceSessionId
+                  ? { sessionId: request.sourceSessionId }
+                  : {}),
+              }
+            : undefined,
+        );
         return;
       }
       if (request.kind === 'attachment') {
@@ -3986,6 +5625,9 @@ export function App({
             ...(request.mimeType ? { mimeType: request.mimeType } : {}),
             ...(request.data ? { data: request.data } : {}),
             ...(request.text !== undefined ? { text: request.text } : {}),
+            ...(request.attachmentId
+              ? { attachmentId: request.attachmentId }
+              : {}),
             ...(request.workspacePath
               ? { workspacePath: request.workspacePath }
               : {}),
@@ -4392,6 +6034,97 @@ export function App({
     connection.status === 'connected',
     backgroundTasksRefreshTrigger,
   );
+  const [sessionAgentInventory, setSessionAgentInventory] = useState<{
+    sessionKey: string;
+    tasks: DaemonSessionAgentTaskStatus[];
+  }>();
+  const workflowTabActive =
+    artifactPanelOpen &&
+    Boolean(
+      connection.sessionId &&
+        artifactPanelTabs.some(
+          (tab) =>
+            tab.id === activeArtifactPanelTabId &&
+            tab.kind === 'workflow' &&
+            tab.sessionId === connection.sessionId,
+        ),
+    );
+  const environmentNeedsAgents =
+    environmentPanelOpen &&
+    environmentPanelReachable &&
+    environmentPanelItems.includes('subagents');
+  const sessionAgentsSupported =
+    connection.capabilities?.features.includes(SESSION_AGENTS_FEATURE) === true;
+  useEffect(() => {
+    if (
+      connection.status !== 'connected' ||
+      connection.loadingTranscript ||
+      !connection.sessionId ||
+      (!environmentNeedsAgents && !workflowTabActive) ||
+      !sessionAgentsSupported
+    ) {
+      return;
+    }
+    const sessionId = connection.sessionId;
+    const owner = sessionOwnerGuard.capture();
+    const controller = new AbortController();
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let consecutiveFailures = 0;
+    const refresh = async () => {
+      try {
+        const snapshot = await workspace.client.sessionAgents(
+          sessionId,
+          undefined,
+          controller.signal,
+        );
+        if (disposed || !owner.isCurrent() || snapshot.sessionId !== sessionId)
+          return;
+        const agents = snapshot.tasks;
+        if (logicalSessionKey) {
+          setSessionAgentInventory({
+            sessionKey: logicalSessionKey,
+            tasks: agents,
+          });
+        }
+        consecutiveFailures = 0;
+        if (agents.some((task) => task.status === 'running')) {
+          timer = setTimeout(refresh, SESSION_AGENTS_REFRESH_INTERVAL_MS);
+        }
+      } catch (error) {
+        if (disposed || !owner.isCurrent()) return;
+        if (consecutiveFailures === 0) {
+          console.warn('[web-shell] failed to refresh session agents:', error);
+        }
+        consecutiveFailures += 1;
+        timer = setTimeout(
+          refresh,
+          Math.min(
+            SESSION_AGENTS_REFRESH_INTERVAL_MS * 2 ** (consecutiveFailures - 1),
+            SESSION_AGENTS_MAX_RETRY_INTERVAL_MS,
+          ),
+        );
+      }
+    };
+    void refresh();
+    return () => {
+      disposed = true;
+      controller.abort();
+      if (timer) clearTimeout(timer);
+    };
+  }, [
+    backgroundTasksRefreshTrigger,
+    connection.loadingTranscript,
+    connection.sessionId,
+    connection.status,
+    environmentNeedsAgents,
+    logicalSessionKey,
+    sessionAgentsSupported,
+    sessionOwnerGuard,
+    taskActivityKey,
+    workspace.client,
+    workflowTabActive,
+  ]);
   const terminalBackgroundShellTaskIdsKey = useMemo(
     () =>
       sessionTasks
@@ -4411,8 +6144,101 @@ export function App({
     [terminalBackgroundShellTaskIdsKey],
   );
   const environmentAgentTasks = useMemo(
-    () => getEnvironmentAgentTasks(messages, sessionTasks),
-    [messages, sessionTasks],
+    () =>
+      getEnvironmentAgentTasks(
+        messages,
+        sessionAgentsSupported &&
+          sessionAgentInventory &&
+          sessionAgentInventory.sessionKey === logicalSessionKey
+          ? sessionAgentInventory.tasks
+          : sessionTasks,
+      ),
+    [
+      logicalSessionKey,
+      messages,
+      sessionAgentInventory,
+      sessionAgentsSupported,
+      sessionTasks,
+    ],
+  );
+  const [sessionAgentTrace, setSessionAgentTrace] = useState<{
+    sessionKey: string;
+    trace: DaemonAgentTrace;
+  }>();
+  const [agentTraceFailedSessionKey, setAgentTraceFailedSessionKey] =
+    useState<string>();
+  const agentTraceActivityKey = useMemo(
+    () =>
+      environmentAgentTasks
+        .map((task) => `${task.id}:${task.status}`)
+        .join(','),
+    [environmentAgentTasks],
+  );
+  useEffect(() => {
+    if (
+      connection.status !== 'connected' ||
+      connection.loadingTranscript ||
+      !connection.sessionId ||
+      !logicalSessionKey ||
+      !workflowTabActive ||
+      !sessionAgentTraceSupported
+    ) {
+      return;
+    }
+    const sessionId = connection.sessionId;
+    const sessionKey = logicalSessionKey;
+    const owner = sessionOwnerGuard.capture();
+    const controller = new AbortController();
+    setAgentTraceFailedSessionKey(undefined);
+    let retryCount = 0;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const refresh = () => {
+      void workspace.client
+        .sessionAgentTrace(sessionId, { signal: controller.signal })
+        .then((trace) => {
+          if (!owner.isCurrent() || trace.sessionId !== sessionId) return;
+          const value = { sessionKey, trace };
+          setSessionAgentTrace(value);
+        })
+        .catch(() => {
+          if (controller.signal.aborted || !owner.isCurrent()) return;
+          if (retryCount < 3) {
+            retryCount += 1;
+            timer = setTimeout(refresh, SESSION_AGENTS_REFRESH_INTERVAL_MS);
+          } else {
+            setAgentTraceFailedSessionKey(sessionKey);
+          }
+        });
+    };
+    refresh();
+    return () => {
+      controller.abort();
+      if (timer) clearTimeout(timer);
+    };
+  }, [
+    agentTraceActivityKey,
+    connection.loadingTranscript,
+    connection.sessionId,
+    connection.status,
+    logicalSessionKey,
+    sessionAgentTraceSupported,
+    sessionOwnerGuard,
+    workflowTabActive,
+    workspace.client,
+  ]);
+  const currentAgentTrace =
+    sessionAgentTrace && sessionAgentTrace.sessionKey === logicalSessionKey
+      ? sessionAgentTrace.trace
+      : undefined;
+  const agentTraceFailed = agentTraceFailedSessionKey === logicalSessionKey;
+  const agentTraceInitialLoading =
+    workflowTabActive &&
+    sessionAgentTraceSupported &&
+    !currentAgentTrace &&
+    !agentTraceFailed;
+  const tracedEnvironmentAgentTasks = useMemo(
+    () => mergeAgentTrace(environmentAgentTasks, currentAgentTrace),
+    [currentAgentTrace, environmentAgentTasks],
   );
   const lastReportedAgentTasksRef = useRef<string | undefined>(undefined);
   useEffect(() => {
@@ -11982,6 +13808,7 @@ export function App({
       return;
     }
     setEnvironmentPanelOpen(true);
+    setBackgroundTasksRefreshTrigger((value) => value + 1);
   }, []);
   const dismissEnvironmentPanel = useCallback(() => {
     preserveEnvironmentPanelOnArtifactOpenRef.current = false;
@@ -12212,8 +14039,9 @@ export function App({
     selectedReviewPath,
     workspaceCwd: connection.workspaceCwd || '',
     loading: artifactsLoading,
+    restoring: artifactPanelRestoring,
     error: artifactsError,
-    onSelectTab: setActiveArtifactPanelTabId,
+    onSelectTab: selectArtifactPanelTab,
     onCloseTab: closeArtifactPanelTab,
     onOpenFilePreview: openFilePreview,
     latestReviewAvailable: latestReviewChanges.length > 0,
@@ -12229,6 +14057,11 @@ export function App({
     onSideTaskTitleChange: handleSideTaskTitleChange,
     onNestedRightPanelOpen: handleTurnOutputOpen,
     onNestedArtifactsChange: handlePaneArtifactsChange,
+    onOpenNestedSubagent: openSubagentPanelForSession,
+    agentTasks: tracedEnvironmentAgentTasks,
+    agentTraceLoading: agentTraceInitialLoading,
+    agentTraceError: agentTraceFailed ? t('workflow.loadFailed') : undefined,
+    onOpenWorkflowAgent: openEnvironmentAgent,
     onError: reportError,
     sessionWorkflowEnabled,
     onImageIngestionNotice: pushToast,
@@ -12237,6 +14070,7 @@ export function App({
     fullscreen: artifactPanelFullscreen,
     onToggleFullscreen: toggleArtifactPanelFullscreen,
   };
+  const environmentPanelOwner = sessionOwnerGuard.capture();
 
   return (
     <ThemeProvider value={selectedTheme}>
@@ -14202,6 +16036,16 @@ export function App({
                 gitStatus={selectedWorkspaceGitStatus}
                 tasks={sessionTasks}
                 agentTasks={environmentAgentTasks}
+                attachments={
+                  logicalSessionKey
+                    ? (sessionAttachmentsBySessionRef.current.get(
+                        logicalSessionKey,
+                      ) ?? [])
+                    : []
+                }
+                attachmentsLoading={sessionAttachmentsSkeletonLoading}
+                artifacts={artifacts}
+                artifactsLoading={artifactsLoading}
                 items={environmentPanelItems}
                 onOpenGitDiff={
                   gitDiffWorkspaceCwd ? handleOpenGitDiff : undefined
@@ -14210,7 +16054,27 @@ export function App({
                   gitDiffWorkspaceCwd ? handleOpenCommit : undefined
                 }
                 onOpenAgent={openEnvironmentAgent}
+                onOpenAgentWorkflow={
+                  sessionAgentTraceSupported ? openAgentWorkflow : undefined
+                }
                 onOpenTask={openEnvironmentTask}
+                onReadImage={readSessionImage}
+                onImagePreview={(src, alt, source) => {
+                  if (environmentPanelOwner.isCurrent()) {
+                    openImagePanel(src, alt, source);
+                  }
+                }}
+                onAttachmentPreview={openAttachmentPanel}
+                onAttachmentPreviewError={(error) => {
+                  if (!environmentPanelOwner.isCurrent()) return;
+                  pushToast(
+                    'error',
+                    t('rightPanel.attachmentLoadFailed', {
+                      error: formatError(error, t('environment.unavailable')),
+                    }),
+                  );
+                }}
+                onOpenArtifact={openArtifactPanel}
                 onDismiss={dismissEnvironmentPanel}
               />
             )}
@@ -14224,16 +16088,28 @@ export function App({
                 }}
               >
                 <DrawerContent
+                  overlayProps={
+                    suppressArtifactDockOpenAnimation
+                      ? {
+                          className:
+                            '!duration-0 data-[state=open]:!animate-none',
+                        }
+                      : undefined
+                  }
                   onAnimationEnd={(event) => {
                     if (event.target === event.currentTarget) {
                       setWaitForSubagentPanelAnimation(false);
                     }
                   }}
-                  className={
+                  className={`${
                     artifactPanelFullscreen
                       ? 'data-[vaul-drawer-direction=right]:w-full data-[vaul-drawer-direction=right]:sm:max-w-none data-[vaul-drawer-direction=right]:rounded-none data-[vaul-drawer-direction=right]:border-0 data-[vaul-drawer-direction=right]:pt-[env(safe-area-inset-top)] data-[vaul-drawer-direction=right]:pr-[env(safe-area-inset-right)] data-[vaul-drawer-direction=right]:pb-[env(safe-area-inset-bottom)] data-[vaul-drawer-direction=right]:pl-[env(safe-area-inset-left)]'
                       : 'data-[vaul-drawer-direction=right]:w-[min(520px,calc(100vw-16px))] data-[vaul-drawer-direction=right]:sm:max-w-[520px]'
-                  }
+                  } ${
+                    suppressArtifactDockOpenAnimation
+                      ? '!duration-0 !transition-none data-[state=open]:!animate-none'
+                      : ''
+                  }`}
                   onEscapeKeyDown={(event) => {
                     if (isWebTerminalTarget(event)) {
                       event.preventDefault();

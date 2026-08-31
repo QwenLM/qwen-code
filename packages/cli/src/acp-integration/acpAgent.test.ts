@@ -708,6 +708,21 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
         ? `${entry.subagentType}: ${entry.description}`
         : entry.description,
   ),
+  getSubagentSessionDir: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).getSubagentSessionDir,
+  MAX_RETAINED_TERMINAL_AGENTS: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).MAX_RETAINED_TERMINAL_AGENTS,
+  readAgentMeta: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).readAgentMeta,
+  readAgentMetaAsync: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).readAgentMetaAsync,
+  sanitizeFilenameComponent: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).sanitizeFilenameComponent,
   SessionStartSource: {
     Startup: 'startup',
     Resume: 'resume',
@@ -4178,6 +4193,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getModel: vi.fn().mockReturnValue('m'),
       storage: {
         getProjectRoot: vi.fn().mockReturnValue('/tmp'),
+        getProjectDir: vi.fn().mockReturnValue('/tmp'),
       },
       getProjectRoot: vi.fn().mockReturnValue('/tmp'),
       getTargetDir: vi.fn().mockReturnValue('/tmp'),
@@ -9325,6 +9341,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     const tasks = await agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTasks, {
       sessionId,
     });
+    const agents = await agent.extMethod(
+      SERVE_STATUS_EXT_METHODS.sessionAgents,
+      { sessionId },
+    );
     const contextUsage = await agent.extMethod(
       SERVE_STATUS_EXT_METHODS.sessionContextUsage,
       { sessionId, detail: true },
@@ -9413,6 +9433,17 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       ],
     });
     expect(JSON.stringify(tasks)).not.toContain('abortController');
+    expect(agents).toMatchObject({
+      v: 1,
+      sessionId,
+      tasks: [
+        {
+          kind: 'agent',
+          id: 'agent-1',
+          status: 'paused',
+        },
+      ],
+    });
     expect(JSON.stringify(tasks)).not.toContain('outputOffset');
     expect(JSON.stringify(tasks)).not.toContain('pendingMessages');
     expect(JSON.stringify(tasks)).not.toContain('idleTimer');

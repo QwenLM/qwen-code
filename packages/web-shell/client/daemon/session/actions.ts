@@ -1995,6 +1995,14 @@ export function createDaemonSessionActions({
       return await session.readAttachment(attachmentId);
     },
 
+    async listAttachments() {
+      // Background panel refresh: failures are swallowed by the caller, so a
+      // missing or unreachable session must never surface a user-facing notice.
+      const session = sessionRef.current;
+      if (!session) throw new Error('Daemon session is not connected');
+      return await session.listAttachments();
+    },
+
     async removeAttachment(attachmentId, opts) {
       const session = sessionRef.current;
       const sessionId = opts?.sessionId ?? session?.sessionId;

@@ -253,12 +253,18 @@ function getSessionBranchDisplayName(data: unknown): string | null {
  */
 function getMidTurnInjectedImages(
   data: unknown,
-): Array<{ data: string; mimeType: string }> | undefined {
+):
+  | Array<{ data: string; mimeType: string; attachmentId?: string }>
+  | undefined {
   if (!data || typeof data !== 'object') return undefined;
   const items = (data as { items?: unknown }).items;
   if (!Array.isArray(items) || items.length === 0) return undefined;
 
-  const images: Array<{ data: string; mimeType: string }> = [];
+  const images: Array<{
+    data: string;
+    mimeType: string;
+    attachmentId?: string;
+  }> = [];
   for (const item of items) {
     if (!item || typeof item !== 'object') continue;
     const content = (item as { content?: unknown }).content;
@@ -275,7 +281,14 @@ function getMidTurnInjectedImages(
         typeof blockData === 'string' &&
         typeof mimeType === 'string'
       ) {
-        images.push({ data: blockData, mimeType });
+        const record = block as Record<string, unknown>;
+        images.push({
+          data: blockData,
+          mimeType,
+          ...(typeof record['attachmentId'] === 'string'
+            ? { attachmentId: record['attachmentId'] }
+            : {}),
+        });
       }
     }
   }
@@ -446,6 +459,7 @@ export function transcriptBlocksToDaemonMessages(
         const images = textBlock.images?.map((img) => ({
           data: img.data,
           mimeType: img.mimeType || 'image/*',
+          ...(img.attachmentId ? { attachmentId: img.attachmentId } : {}),
         }));
         const files = textBlock.files?.map((file) => ({
           name: file.name,

@@ -939,7 +939,11 @@ export function ChatPane({
   previewSessionIdRef.current = connection.sessionId;
 
   const handleImagePreview = useCallback(
-    (src: string, alt?: string) => {
+    (
+      src: string,
+      alt?: string,
+      source?: { kind: 'attachment'; attachmentId: string },
+    ) => {
       if (!connection.sessionId) return;
       handleRightPanelOpen({
         id: 'image',
@@ -948,6 +952,7 @@ export function ChatPane({
         turnId: connection.sessionId,
         src,
         ...(alt ? { alt } : {}),
+        ...(source ? { attachmentId: source.attachmentId } : {}),
       });
     },
     [connection.sessionId, handleRightPanelOpen, t],
@@ -966,6 +971,9 @@ export function ChatPane({
           ...(resolvedFile.data ? { data: resolvedFile.data } : {}),
           ...(resolvedFile.text !== undefined
             ? { text: resolvedFile.text }
+            : {}),
+          ...(resolvedFile.attachmentId
+            ? { attachmentId: resolvedFile.attachmentId }
             : {}),
           ...(paneWorkspaceCwd ? { workspaceCwd: paneWorkspaceCwd } : {}),
           ...(resolvedFile.workspacePath

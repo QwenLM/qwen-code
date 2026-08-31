@@ -180,7 +180,13 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
               items: ['review', 'sideTask', 'terminal'],
             },
             environmentPanel: {
-              items: ['environment', 'subagents', 'backgroundTasks'],
+              items: [
+                'environment',
+                'subagents',
+                'backgroundTasks',
+                'attachments',
+                'artifacts',
+              ],
             },
             compactThinking: true,
             markdownTableMode: 'advanced',

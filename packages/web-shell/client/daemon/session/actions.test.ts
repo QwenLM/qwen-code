@@ -2932,6 +2932,39 @@ describe('createDaemonSessionActions', () => {
     }
   });
 
+  it('lists attachments through the active session client', async () => {
+    const session = createMockSession('session-current', 'client-current');
+    session.listAttachments = vi.fn(async () => [
+      {
+        type: 'resource',
+        attachmentId: 'notes.txt',
+        mimeType: 'text/plain',
+        size: 5,
+      },
+    ]);
+    const { actions } = createActionsHarness({ session });
+
+    await expect(actions.listAttachments()).resolves.toEqual([
+      {
+        type: 'resource',
+        attachmentId: 'notes.txt',
+        mimeType: 'text/plain',
+        size: 5,
+      },
+    ]);
+    expect(session.listAttachments).toHaveBeenCalledOnce();
+  });
+
+  it('rejects listing attachments without a notice when no session exists', async () => {
+    const addNotice = vi.fn();
+    const { actions } = createActionsHarness({ addNotice });
+
+    await expect(actions.listAttachments()).rejects.toThrow(
+      'Daemon session is not connected',
+    );
+    expect(addNotice).not.toHaveBeenCalled();
+  });
+
   it('normalizes image MIME parameters when naming an uploaded attachment', async () => {
     const session = createMockSession('session-a');
     const { actions } = createActionsHarness({ session });
@@ -3498,6 +3531,7 @@ function createMockSession(
       data: 'aGVsbG8=',
       mimeType: 'text/plain',
     })),
+    listAttachments: vi.fn(async () => []),
     removeAttachment: vi.fn(async () => true),
     removePendingPrompt: vi.fn(async () => ({ removed: true })),
     submitPrompt: vi.fn(async () => ({ promptId: 'prompt-1' })),

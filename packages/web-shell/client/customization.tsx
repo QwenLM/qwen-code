@@ -139,7 +139,9 @@ export interface WebShellRightPanelOptions {
 export type WebShellEnvironmentPanelItem =
   | 'environment'
   | 'subagents'
-  | 'backgroundTasks';
+  | 'backgroundTasks'
+  | 'attachments'
+  | 'artifacts';
 
 export interface WebShellEnvironmentPanelOptions {
   /** Sections to show. Defaults to all sections. */

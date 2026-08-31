@@ -212,6 +212,54 @@ describe('TerminalPanel', () => {
     expect(ws.send).toHaveBeenCalledWith('\x00{"type":"release"}');
   });
 
+  it('does not connect a restored inactive terminal until it is enabled', () => {
+    act(() => {
+      root.render(
+        <TerminalPanel
+          terminalId="terminal:one"
+          cwd="/workspace"
+          active={false}
+          enabled={false}
+        />,
+      );
+    });
+
+    expect(FakeWebSocket.instances).toHaveLength(0);
+    act(() => {
+      root.render(
+        <TerminalPanel
+          terminalId="terminal:one"
+          cwd="/workspace"
+          active
+          enabled
+        />,
+      );
+    });
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    expect(
+      new URL(FakeWebSocket.instances[0]!.url).searchParams.has('release'),
+    ).toBe(false);
+  });
+
+  it('releases a restored terminal that was never enabled', () => {
+    act(() => {
+      root.render(
+        <TerminalPanel
+          terminalId="terminal:one"
+          cwd="/workspace"
+          active={false}
+          enabled={false}
+        />,
+      );
+    });
+
+    act(() => releaseWebTerminal('terminal:one'));
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    expect(
+      new URL(FakeWebSocket.instances[0]!.url).searchParams.get('release'),
+    ).toBe('1');
+  });
+
   it('releases an exited session through a release handshake', async () => {
     const ws = render();
     act(() => ws.open());

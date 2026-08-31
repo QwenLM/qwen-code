@@ -468,6 +468,21 @@ function parseTranscriptCursorQuery(
   return rawCursor;
 }
 
+function parseTranscriptDirectionQuery(
+  rawDirection: unknown,
+  res: Response,
+): 'backward' | undefined | null {
+  if (rawDirection === undefined) return undefined;
+  if (rawDirection !== 'backward') {
+    res.status(400).json({
+      error: '`direction` must be `backward`',
+      code: 'invalid_transcript_cursor',
+    });
+    return null;
+  }
+  return rawDirection;
+}
+
 function parseTranscriptRecordBoundaryQuery(
   rawBoundary: unknown,
   res: Response,
@@ -4321,14 +4336,30 @@ export function registerSessionRoutes(
     if (limit === null) return;
     const cursor = parseTranscriptCursorQuery(req.query['cursor'], res);
     if (cursor === null) return;
+    const direction = parseTranscriptDirectionQuery(
+      req.query['direction'],
+      res,
+    );
+    if (direction === null) return;
     const beforeRecordId = parseTranscriptRecordBoundaryQuery(
       req.query['beforeRecordId'],
       res,
     );
     if (beforeRecordId === null) return;
-    if (cursor !== undefined && beforeRecordId !== undefined) {
+    if (beforeRecordId !== undefined && direction !== undefined) {
       res.status(400).json({
-        error: '`cursor` and `beforeRecordId` are mutually exclusive',
+        error: '`beforeRecordId` and `direction` are mutually exclusive',
+        code: 'invalid_transcript_cursor',
+      });
+      return;
+    }
+    if (
+      cursor !== undefined &&
+      (beforeRecordId !== undefined || direction !== undefined)
+    ) {
+      res.status(400).json({
+        error:
+          '`cursor` and `beforeRecordId`/`direction` are mutually exclusive',
         code: 'invalid_transcript_cursor',
       });
       return;
@@ -4350,6 +4381,7 @@ export function registerSessionRoutes(
             sessionId,
             ...(limit !== undefined ? { limit } : {}),
             ...(cursor !== undefined ? { cursor } : {}),
+            ...(direction !== undefined ? { direction } : {}),
             ...(beforeRecordId !== undefined ? { beforeRecordId } : {}),
           });
         },
@@ -4384,14 +4416,30 @@ export function registerSessionRoutes(
     if (limit === null) return;
     const cursor = parseTranscriptCursorQuery(req.query['cursor'], res);
     if (cursor === null) return;
+    const direction = parseTranscriptDirectionQuery(
+      req.query['direction'],
+      res,
+    );
+    if (direction === null) return;
     const beforeRecordId = parseTranscriptRecordBoundaryQuery(
       req.query['beforeRecordId'],
       res,
     );
     if (beforeRecordId === null) return;
-    if (cursor !== undefined && beforeRecordId !== undefined) {
+    if (beforeRecordId !== undefined && direction !== undefined) {
       res.status(400).json({
-        error: '`cursor` and `beforeRecordId` are mutually exclusive',
+        error: '`beforeRecordId` and `direction` are mutually exclusive',
+        code: 'invalid_transcript_cursor',
+      });
+      return;
+    }
+    if (
+      cursor !== undefined &&
+      (beforeRecordId !== undefined || direction !== undefined)
+    ) {
+      res.status(400).json({
+        error:
+          '`cursor` and `beforeRecordId`/`direction` are mutually exclusive',
         code: 'invalid_transcript_cursor',
       });
       return;
@@ -4450,6 +4498,7 @@ export function registerSessionRoutes(
               page = await reader.readPage(sessionId, {
                 ...(limit !== undefined ? { limit } : {}),
                 ...(cursor !== undefined ? { cursor } : {}),
+                ...(direction !== undefined ? { direction } : {}),
                 ...(beforeRecordId !== undefined ? { beforeRecordId } : {}),
                 maxBytes: SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
               });
@@ -4655,6 +4704,45 @@ export function registerSessionRoutes(
         res
           .status(200)
           .json(await runtime.bridge.getSessionTasksStatus(sessionId));
+      },
+    ),
+  );
+
+  app.get(
+    '/session/:id/agents',
+    withOwnerReadSession(
+      'GET /session/:id/agents',
+      async (_req, res, sessionId, runtime) => {
+        res
+          .status(200)
+          .json(await runtime.bridge.getSessionAgentsStatus(sessionId));
+      },
+    ),
+  );
+
+  app.get(
+    '/session/:id/agent-trace',
+    withOwnerReadSession(
+      'GET /session/:id/agent-trace',
+      async (req, res, sessionId, runtime) => {
+        const rootAgentId = req.query['rootAgentId'];
+        if (
+          rootAgentId !== undefined &&
+          (typeof rootAgentId !== 'string' ||
+            rootAgentId.length === 0 ||
+            rootAgentId.length > MAX_VIRTUAL_SESSION_ID_PART_LENGTH)
+        ) {
+          res.status(400).json({
+            error: '`rootAgentId` must be a non-empty agent id',
+            code: 'invalid_root_agent_id',
+          });
+          return;
+        }
+        res
+          .status(200)
+          .json(
+            await runtime.bridge.getSessionAgentTrace(sessionId, rootAgentId),
+          );
       },
     ),
   );
@@ -4973,6 +5061,22 @@ export function registerSessionRoutes(
           }
           throw error;
         }
+      },
+    ),
+  );
+
+  app.get(
+    '/session/:id/attachments',
+    withOwnerReadSession(
+      'GET /session/:id/attachments',
+      async (req, res, sessionId, runtime) => {
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        const attachments = await runtime.bridge.listSessionAttachments(
+          sessionId,
+          clientId !== undefined ? { clientId } : undefined,
+        );
+        res.status(200).json({ attachments });
       },
     ),
   );

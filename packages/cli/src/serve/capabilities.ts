@@ -56,6 +56,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // Prompts and mid-turn messages reference session-scoped image and file
   // attachments by their stored filename.
   session_attachments: { since: 'v1' },
+  session_attachment_list: { since: 'v1' },
   session_mid_turn_message_mutation: { since: 'v1' },
   // Daemon-owned reconciliation surface for mid-turn messages:
   // `GET /session/:id/mid-turn-messages` returns the messages still waiting
@@ -122,6 +123,8 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_context_usage: { since: 'v1' },
   session_supported_commands: { since: 'v1' },
   session_tasks: { since: 'v1' },
+  session_agents: { since: 'v1' },
+  session_agent_trace: { since: 'v1' },
   scheduled_task_session_reuse: { since: 'v1' },
   session_monitor_tool_correlation: { since: 'v1' },
   session_stats: { since: 'v1' },

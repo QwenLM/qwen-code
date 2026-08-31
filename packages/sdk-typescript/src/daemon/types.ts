@@ -1305,6 +1305,8 @@ export interface DaemonSessionTranscriptPageOptions {
   cursor?: string;
   /** Start a newest-to-oldest page before this persisted record UUID. */
   beforeRecordId?: string;
+  /** Read pages from newest to oldest. */
+  direction?: 'backward';
   limit?: number;
   clientId?: string;
 }
@@ -2615,6 +2617,37 @@ export interface DaemonSessionTasksStatus {
   sessionId: string;
   now: number;
   tasks: DaemonSessionTaskStatus[];
+}
+
+export interface DaemonSessionAgentsStatus {
+  v: 1;
+  sessionId: string;
+  now: number;
+  tasks: DaemonSessionAgentTaskStatus[];
+}
+
+export interface DaemonAgentTraceNode {
+  agentId: string;
+  agentType: string;
+  description: string;
+  parentSessionId: string;
+  parentAgentId: string | null;
+  rootAgentId: string;
+  toolUseId?: string;
+  depth?: number;
+  status?: 'running' | 'completed' | 'failed' | 'cancelled' | 'paused';
+  createdAt: string;
+  lastUpdatedAt?: string;
+  lastError?: string;
+  lineageState: 'complete' | 'orphaned' | 'cycle';
+}
+
+export interface DaemonAgentTrace {
+  v: 1;
+  sessionId: string;
+  nodes: DaemonAgentTraceNode[];
+  rootAgentIds: string[];
+  warnings: string[];
 }
 
 export interface DaemonLspServerStatus {

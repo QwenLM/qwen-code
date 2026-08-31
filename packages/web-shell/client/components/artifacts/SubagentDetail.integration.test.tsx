@@ -13,6 +13,7 @@ const {
   workspaceActions,
   workspaceClient,
   latestMessageListProps,
+  latestOpenSubagent,
   messages,
 } = vi.hoisted(() => ({
   animationFrameBlocks: [{ id: 'frame-block' }],
@@ -32,6 +33,9 @@ const {
   },
   latestMessageListProps: {
     current: undefined as Record<string, unknown> | undefined,
+  },
+  latestOpenSubagent: {
+    current: undefined as ((tool: ACPToolCall) => void) | undefined,
   },
   messages: [
     {
@@ -83,9 +87,11 @@ vi.mock('../../WebShellContexts', async () => {
 vi.mock('../MessageList', async () => {
   const React = await import('react');
   const { CompactModeContext } = await import('../../WebShellContexts');
+  const { useSubagentDetails } = await import('../../subagentDetailsContext');
   return {
     MessageList: (props: Record<string, unknown>) => {
       latestMessageListProps.current = props;
+      latestOpenSubagent.current = useSubagentDetails()?.onOpen;
       const compactMode = React.useContext(CompactModeContext);
       return React.createElement('div', {
         'data-testid': 'subagent-transcript',
@@ -109,8 +115,10 @@ afterEach(() => {
   container = null;
   root = null;
   latestMessageListProps.current = undefined;
+  latestOpenSubagent.current = undefined;
   messagesFromBlocks.mockClear();
   workspaceClient.resolveSubagentSession.mockReset();
+  vi.useRealTimers();
 });
 
 it('opens subagent and fork transcript outputs in source-scoped panel tabs', async () => {
@@ -232,4 +240,78 @@ it('renders the subagent transcript with compact mode when the panel provides it
     '[data-testid="subagent-transcript"]',
   );
   expect(transcript?.getAttribute('data-compact-mode')).toBe('true');
+});
+
+it('opens a nested subagent within the parent session scope', async () => {
+  workspaceClient.resolveSubagentSession.mockResolvedValue({
+    sessionId: 'subagent-session',
+    status: 'completed',
+  });
+  const onOpenSubagent = vi.fn();
+  container = document.createElement('div');
+  root = createRoot(container);
+
+  await act(async () => {
+    root!.render(
+      <I18nProvider language="en">
+        <SubagentDetail
+          sessionId="parent-session"
+          rootToolCallId="agent-1"
+          initialRootTool={
+            (messages[0] as Extract<Message, { role: 'tool_group' }>).tools[0]
+          }
+          workspaceCwd="/work/project"
+          onOpenSubagent={onOpenSubagent}
+        />
+      </I18nProvider>,
+    );
+    await Promise.resolve();
+  });
+
+  const nestedTool = {
+    callId: 'nested-agent-1',
+    toolName: 'agent',
+    title: 'agent: nested',
+    status: 'completed',
+  } as ACPToolCall;
+  act(() => latestOpenSubagent.current?.(nestedTool));
+  expect(onOpenSubagent).toHaveBeenCalledWith(
+    nestedTool,
+    'parent-session',
+    '/work/project',
+  );
+});
+
+it('backs off polling after repeated failures following a running result', async () => {
+  vi.useFakeTimers();
+  workspaceClient.resolveSubagentSession
+    .mockResolvedValueOnce({
+      sessionId: 'subagent-session',
+      status: 'running',
+    })
+    .mockRejectedValue(new Error('session unavailable'));
+  container = document.createElement('div');
+  root = createRoot(container);
+
+  await act(async () => {
+    root!.render(
+      <I18nProvider language="en">
+        <SubagentDetail
+          sessionId="parent-session"
+          rootToolCallId="agent-1"
+          initialRootTool={
+            (messages[0] as Extract<Message, { role: 'tool_group' }>).tools[0]
+          }
+        />
+      </I18nProvider>,
+    );
+    await Promise.resolve();
+  });
+
+  await act(async () => vi.advanceTimersByTimeAsync(15_000));
+  expect(workspaceClient.resolveSubagentSession).toHaveBeenCalledTimes(5);
+  await act(async () => vi.advanceTimersByTimeAsync(30_000));
+  expect(workspaceClient.resolveSubagentSession).toHaveBeenCalledTimes(6);
+  await act(async () => vi.advanceTimersByTimeAsync(30_000));
+  expect(workspaceClient.resolveSubagentSession).toHaveBeenCalledTimes(7);
 });

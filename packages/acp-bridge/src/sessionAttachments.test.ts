@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { promises as fs } from 'node:fs';
+import { promises as fs, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import type { ContentBlock } from '@agentclientprotocol/sdk';
@@ -1355,6 +1355,145 @@ describe('SessionAttachmentStore', () => {
     } finally {
       write.mockRestore();
       await store.close();
+    }
+  });
+
+  it('lists persisted attachments with their metadata', async () => {
+    const root = await fs.mkdtemp(
+      path.join(tmpdir(), 'qwen-attachments-list-'),
+    );
+    const store = new SessionAttachmentStore(root, 'session:list');
+    try {
+      const text = await store.putAttachment(
+        new TextEncoder().encode('hello'),
+        'text/plain',
+        'notes.txt',
+      );
+      const image = await store.putAttachment(
+        Uint8Array.of(1, 2, 3),
+        'image/png',
+        'photo.png',
+      );
+      const pdf = await store.putAttachment(
+        Uint8Array.of(4, 5),
+        'application/pdf',
+        'report.pdf',
+      );
+
+      expect(await store.list()).toEqual(
+        expect.arrayContaining([text, image, pdf]),
+      );
+    } finally {
+      await store.close();
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('returns an empty list when nothing is stored', async () => {
+    const root = await fs.mkdtemp(
+      path.join(tmpdir(), 'qwen-attachments-empty-'),
+    );
+    const store = new SessionAttachmentStore(root, 'session:empty');
+    try {
+      expect(await store.list()).toEqual([]);
+    } finally {
+      await store.close();
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('orders attachments by upload time', async () => {
+    const root = await fs.mkdtemp(
+      path.join(tmpdir(), 'qwen-attachments-order-'),
+    );
+    const sessionId = 'session:order';
+    const store = new SessionAttachmentStore(root, sessionId);
+    try {
+      const directory = path.join(
+        root,
+        `session-${encodeURIComponent(sessionId)}`,
+      );
+      await fs.mkdir(directory, { recursive: true });
+      const older = path.join(directory, 'older.txt');
+      const newer = path.join(directory, 'newer.png');
+      await fs.writeFile(older, 'a');
+      await fs.writeFile(newer, 'b');
+      await fs.utimes(older, new Date(1000), new Date(1000));
+      await fs.utimes(newer, new Date(2000), new Date(2000));
+
+      expect((await store.list()).map((item) => item.attachmentId)).toEqual([
+        'older.txt',
+        'newer.png',
+      ]);
+    } finally {
+      await store.close();
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('skips invalid names and non-file entries when listing', async () => {
+    const root = await fs.mkdtemp(
+      path.join(tmpdir(), 'qwen-attachments-filter-'),
+    );
+    const sessionId = 'session:filter';
+    const store = new SessionAttachmentStore(root, sessionId);
+    try {
+      const directory = path.join(
+        root,
+        `session-${encodeURIComponent(sessionId)}`,
+      );
+      await fs.mkdir(directory, { recursive: true });
+      await fs.writeFile(path.join(directory, 'notes.txt'), 'a');
+      await fs.writeFile(path.join(directory, 'bad?.txt'), 'b');
+      await fs.mkdir(path.join(directory, 'sub'));
+
+      expect((await store.list()).map((item) => item.attachmentId)).toEqual([
+        'notes.txt',
+      ]);
+    } finally {
+      await store.close();
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('does not list an attachment whose write is still in flight', async () => {
+    let finishWrite: (() => void) | undefined;
+    const root = await fs.mkdtemp(
+      path.join(tmpdir(), 'qwen-attachments-pending-'),
+    );
+    const directory = path.join(
+      root,
+      `session-${encodeURIComponent('session:pending')}`,
+    );
+    const target = path.join(directory, 'slow.png');
+    const write = vi.spyOn(fs, 'writeFile').mockImplementationOnce(async () => {
+      writeFileSync(target, '', { flag: 'wx' });
+      await new Promise<void>((resolve) => {
+        finishWrite = resolve;
+      });
+      writeFileSync(target, Uint8Array.of(1));
+    });
+    const store = new SessionAttachmentStore(root, 'session:pending');
+    try {
+      const pending = store.putAttachment(
+        Uint8Array.of(1),
+        'image/png',
+        'slow.png',
+      );
+      await vi.waitFor(() => expect(write).toHaveBeenCalled());
+
+      await vi.waitFor(async () =>
+        expect((await fs.stat(target).catch(() => undefined))?.size).toBe(0),
+      );
+
+      expect(await store.list()).toEqual([]);
+
+      finishWrite?.();
+      await pending;
+    } finally {
+      write.mockRestore();
+      await store.close();
+      await fs.rm(root, { recursive: true, force: true });
     }
   });
 });

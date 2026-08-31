@@ -122,6 +122,8 @@ export const SERVE_STATUS_EXT_METHODS = {
   sessionContextUsage: 'qwen/status/session/context_usage',
   sessionSupportedCommands: 'qwen/status/session/supported_commands',
   sessionTasks: 'qwen/status/session/tasks',
+  sessionAgents: 'qwen/status/session/agents',
+  sessionAgentTrace: 'qwen/status/session/agent_trace',
   sessionStats: 'qwen/status/session/stats',
   sessionLspStatus: 'qwen/status/session/lsp',
   sessionTranscript: 'qwen/status/session/transcript',
@@ -738,6 +740,37 @@ export interface ServeSessionTasksStatus {
   sessionId: string;
   now: number;
   tasks: ServeSessionTaskStatus[];
+}
+
+export interface ServeSessionAgentsStatus {
+  v: typeof STATUS_SCHEMA_VERSION;
+  sessionId: string;
+  now: number;
+  tasks: ServeSessionAgentTaskStatus[];
+}
+
+export interface ServeAgentTraceNode {
+  agentId: string;
+  agentType: string;
+  description: string;
+  parentSessionId: string;
+  parentAgentId: string | null;
+  rootAgentId: string;
+  toolUseId?: string;
+  depth?: number;
+  status?: 'running' | 'completed' | 'failed' | 'cancelled' | 'paused';
+  createdAt: string;
+  lastUpdatedAt?: string;
+  lastError?: string;
+  lineageState: 'complete' | 'orphaned' | 'cycle';
+}
+
+export interface ServeSessionAgentTrace {
+  v: typeof STATUS_SCHEMA_VERSION;
+  sessionId: string;
+  nodes: ServeAgentTraceNode[];
+  rootAgentIds: string[];
+  warnings: string[];
 }
 
 export interface ServeSessionStatsModelMetrics {
