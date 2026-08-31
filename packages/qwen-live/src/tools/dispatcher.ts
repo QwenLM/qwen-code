@@ -42,7 +42,6 @@ export interface ToolDispatchResult {
 export interface ToolDispatcherOptions {
   handlers: ReadonlyMap<string, ToolHandler>;
   timeoutMs?: number;
-  now?: () => number;
 }
 
 function parseArguments(raw: string): Record<string, unknown> {

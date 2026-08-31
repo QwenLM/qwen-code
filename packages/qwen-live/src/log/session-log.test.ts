@@ -128,9 +128,14 @@ describe('SessionLog', () => {
     log.write('session.start', {});
     await log.close();
 
+    // close() is terminal: a late write must not silently reopen a stream
+    // whose buffer would be lost at process.exit. Deleting the file first
+    // proves the write was a no-op rather than a reopen.
+    await rm(log.filePath);
     expect(() => {
       log.write('session.end', {});
     }).not.toThrow();
+    await expect(stat(log.filePath)).rejects.toMatchObject({ code: 'ENOENT' });
     await log.close();
   });
 

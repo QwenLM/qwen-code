@@ -100,7 +100,7 @@ describe('PermissionBroker', () => {
     expect(broker.resolveHandle('req_1')).toBeUndefined();
   });
 
-  it('translates allow_always to a one-shot allow and auto-answers similar requests', async () => {
+  it('translates allow_always to a one-shot allow and auto-answers identical repeats', async () => {
     const { adaptor, broker } = createBroker();
     await request(broker, { requestId: 'r1', title: 'Bash: rm -rf /a' });
 
@@ -112,10 +112,10 @@ describe('PermissionBroker', () => {
       'allow',
     );
 
-    // Same session, same title key (tool name + first detail word).
+    // Same session, same normalized title: the grant covers the repeat.
     const ask = await request(broker, {
       requestId: 'r2',
-      title: 'Bash: rm -rf /b',
+      title: 'Bash:  rm  -rf /a ',
     });
     expect(ask.autoAnswered).toBe(true);
     expect(adaptor.respondPermission).toHaveBeenLastCalledWith(
@@ -124,6 +124,39 @@ describe('PermissionBroker', () => {
       'allow',
     );
     expect(broker.pendingCount).toBe(0);
+  });
+
+  it('scopes the standing rule to the whole approved command, not its prefix', async () => {
+    const { broker } = createBroker();
+    await request(broker, {
+      requestId: 'r1',
+      title: 'Bash: git push origin main',
+    });
+    await broker.respond('req_1', 'allow_always');
+    await request(broker, { requestId: 'r2', title: 'Bash: rm -rf /a' });
+    await broker.respond('req_2', 'allow_always');
+
+    // A flag variant is a different command; the user approved a command,
+    // not its destructive variants.
+    const forced = await request(broker, {
+      requestId: 'r3',
+      title: 'Bash: git push --force origin main',
+    });
+    expect(forced.autoAnswered).toBe(false);
+
+    // Same two-token prefix, different target: likewise not covered.
+    const differentTarget = await request(broker, {
+      requestId: 'r4',
+      title: 'Bash: rm -rf /b',
+    });
+    expect(differentTarget.autoAnswered).toBe(false);
+
+    // The identical repeat is.
+    const repeat = await request(broker, {
+      requestId: 'r5',
+      title: 'Bash: git push origin main',
+    });
+    expect(repeat.autoAnswered).toBe(true);
   });
 
   it('does not auto-answer requests with a different title key', async () => {
@@ -197,7 +230,7 @@ describe('PermissionBroker', () => {
 
     await request(broker, { requestId: 'r1', title: 'Bash: rm -rf /a' });
     await broker.respond('req_1', 'allow_always');
-    await request(broker, { requestId: 'r2', title: 'Bash: rm -rf /b' });
+    await request(broker, { requestId: 'r2', title: 'Bash: rm -rf /a' });
 
     expect(logEvents.map((event) => event.type)).toEqual([
       'permission.request',
@@ -223,6 +256,39 @@ describe('PermissionBroker', () => {
       decision: 'allow',
       auto: true,
     });
+  });
+
+  it("records the user's spoken constraint note in the decision log", async () => {
+    const { broker, logEvents } = createBroker();
+    await request(broker, { requestId: 'r1' });
+
+    const outcome = await broker.respond('req_1', 'allow', 'only this file');
+
+    expect(outcome).toBe('delivered');
+    const decision = logEvents.find(
+      (event) => event.type === 'permission.decision',
+    );
+    expect(decision?.payload).toMatchObject({
+      requestHandle: 'req_1',
+      decision: 'allow',
+      note: 'only this file',
+    });
+  });
+
+  it('clears the pending ask when the backend reports it already resolved', async () => {
+    const { adaptor, broker } = createBroker();
+    await request(broker, { requestId: 'r1' });
+    adaptor.respondPermission.mockResolvedValueOnce('already_resolved');
+
+    const outcome = await broker.respond('req_1', 'allow');
+
+    expect(outcome).toBe('already_resolved');
+    expect(broker.pendingCount).toBe(0);
+    expect(broker.resolveHandle('req_1')).toBeUndefined();
+    // The handle is gone: a second relay reports not_found instead of
+    // re-voting on a settled request.
+    expect(await broker.respond('req_1', 'allow')).toBe('not_found');
+    expect(adaptor.respondPermission).toHaveBeenCalledTimes(1);
   });
 
   it('falls back to a spoken ask when the silent auto-approval fails to deliver', async () => {

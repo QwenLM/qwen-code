@@ -153,8 +153,19 @@ export class LiveDaemon {
       }
     }
     await this.log?.close();
+    // Graceful close waits on the peer; shutdown must not. Any client still
+    // attached (or attached between dispose() and here) is torn down hard.
+    if (this.wss) {
+      for (const client of this.wss.clients) {
+        client.terminate();
+      }
+    }
     await new Promise<void>((resolve) => {
-      this.wss?.close(() => {
+      if (!this.wss) {
+        resolve();
+        return;
+      }
+      this.wss.close(() => {
         resolve();
       });
     });
@@ -194,6 +205,12 @@ export class LiveDaemon {
     this.wss = wss;
 
     server.on('upgrade', (req, socket, head) => {
+      // A Host redialing its cached discovery URL during shutdown must not
+      // re-register — stop() would then wait on the fresh lease forever.
+      if (this.stopping) {
+        socket.destroy();
+        return;
+      }
       const path = (req.url ?? '').split('?', 1)[0];
       if (path !== HOST_WS_PATH) {
         socket.destroy();
@@ -241,14 +258,18 @@ export class LiveDaemon {
     } catch (error) {
       if (!(error instanceof LiveDiscoveryOwnerActiveError)) {
         // A dead owner's record can be reclaimed through the handoff path.
+        // The handoff's commitOwner must not touch the discovery file: the
+        // handoff holds the directory lock (a nested write would deadlock)
+        // and its confirm step expects the stale record to still be there.
+        // Publish the new record after the reclaim completes — the same
+        // contract qwen serve's wiring follows.
         await handoffLiveDiscoveryOwner(
           this.config.discoveryDir,
           { pid: process.pid, instanceNonce: this.instanceNonce },
-          async () => {
-            await writeLiveDiscoveryFile(this.config.discoveryDir, record);
-          },
+          async () => undefined,
           { waitForHandoffGrace: false },
         );
+        await writeLiveDiscoveryFile(this.config.discoveryDir, record);
         this.discoveryPublished = true;
         return;
       }

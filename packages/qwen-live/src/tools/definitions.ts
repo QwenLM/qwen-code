@@ -178,7 +178,9 @@ const RESPOND_PERMISSION_TOOL: RealtimeToolDefinition = {
         },
         note: {
           type: 'string',
-          description: "Optional constraint the user added ('only this file').",
+          description:
+            "Optional constraint the user added ('only this file'); it is " +
+            'relayed to the coding session together with the vote.',
         },
       },
       required: ['request_id', 'decision'],

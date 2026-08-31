@@ -58,14 +58,16 @@ interface StandingRule {
 }
 
 /**
- * Group similar requests: tool name plus the first two tokens of its detail
- * (for shell-style titles that is the program and its subcommand, so an
- * "always allow" for `git status` does not silently cover `git push`).
+ * Standing-rule key: tool name plus the WHOLE normalized detail (trimmed,
+ * whitespace-collapsed, lowercased). A voice "always allow" is a trust
+ * grant; it must cover only repeats of the exact command the user heard
+ * and approved — `git push origin main` never silently covers
+ * `git push --force origin main`.
  */
 function titleKeyOf(title: string): string {
   const [head = '', detail = ''] = title.split(':', 2);
-  const words = detail.trim().split(/\s+/).slice(0, 2).join(' ');
-  return `${head.trim().toLowerCase()}:${words.toLowerCase()}`;
+  const normalized = detail.trim().split(/\s+/).join(' ');
+  return `${head.trim().toLowerCase()}:${normalized.toLowerCase()}`;
 }
 
 export class PermissionBroker {
@@ -131,10 +133,16 @@ export class PermissionBroker {
     return { pending, autoAnswered: false };
   }
 
-  /** The user answered aloud (via the respond_permission tool). */
+  /**
+   * The user answered aloud (via the respond_permission tool). `note` is a
+   * spoken constraint the user attached ("only this file"); the vote channel
+   * cannot carry it, so it is recorded in the decision log here and relayed
+   * to the backend session by the caller.
+   */
   async respond(
     requestHandle: string,
     decision: SpokenPermissionDecision,
+    note?: string,
   ): Promise<'delivered' | 'already_resolved' | 'not_found'> {
     const pending = this.pending.get(requestHandle.trim());
     if (!pending) return 'not_found';
@@ -145,6 +153,7 @@ export class PermissionBroker {
       pending,
       decision === 'deny' ? 'deny' : 'allow',
       false,
+      note,
     );
   }
 
@@ -189,6 +198,7 @@ export class PermissionBroker {
     pending: PendingPermission,
     decision: 'allow' | 'deny',
     auto: boolean,
+    note?: string,
   ): Promise<'delivered' | 'already_resolved'> {
     const outcome = await this.options.adaptor.respondPermission(
       pending.backend,
@@ -201,6 +211,7 @@ export class PermissionBroker {
       decision,
       auto,
       outcome,
+      ...(note ? { note } : {}),
     });
     if (outcome === 'delivered' || outcome === 'already_resolved') {
       this.pending.delete(pending.requestHandle);

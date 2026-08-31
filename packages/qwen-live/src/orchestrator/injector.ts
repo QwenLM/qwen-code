@@ -62,6 +62,14 @@ export interface InjectorOptions {
   progressThrottleMs?: number;
 }
 
+/**
+ * Progress-throttle key: the job handle when the item has one, otherwise the
+ * item's full context (the map is per-call and bounded in practice).
+ */
+function progressKeyOf(item: InjectorItem): string {
+  return item.jobHandle ?? `ctx:${item.context}`;
+}
+
 export class Injector {
   private readonly sink: InjectorSink;
   private readonly now: () => number;
@@ -89,8 +97,18 @@ export class Injector {
   noteSpeechStarted(): void {
     this.speechInProgress = true;
     // Barge-in semantics: pending progress is stale the moment the user
-    // speaks; conclusions and permission asks stay queued.
-    this.queue = this.queue.filter((item) => item.kind !== 'progress');
+    // speaks; conclusions and permission asks stay queued. A dropped item
+    // was never delivered, so its throttle stamp must not stand — the job's
+    // next progress report may come well within the window.
+    const kept: InjectorItem[] = [];
+    for (const item of this.queue) {
+      if (item.kind === 'progress') {
+        this.lastProgressAt.delete(progressKeyOf(item));
+      } else {
+        kept.push(item);
+      }
+    }
+    this.queue = kept;
   }
 
   noteSpeechStopped(): void {
@@ -117,28 +135,22 @@ export class Injector {
     this.poke();
   }
 
-  /** The realtime connection was replaced: everything queued is stale. */
-  noteGenerationChanged(): void {
-    this.queue = [];
-    this.speechInProgress = false;
-    this.responseInFlight = false;
-    this.playbackDeadline = 0;
-  }
-
   // -- queue --------------------------------------------------------------
 
   enqueue(item: InjectorItem): void {
     if (this.disposed) return;
     if (item.kind === 'progress') {
-      // Throttle per job; jobless progress falls back to a content-prefix
-      // key so unrelated sessions do not share one throttle window.
-      const key = item.jobHandle ?? `ctx:${item.context.slice(0, 32)}`;
+      // Throttle per job; jobless progress is keyed on its full context so
+      // distinct notices (which may share a long common prefix) never
+      // collide on one throttle window.
+      const key = progressKeyOf(item);
       const last = this.lastProgressAt.get(key) ?? 0;
       if (this.now() - last < this.progressThrottleMs) return;
       this.lastProgressAt.set(key, this.now());
-      // At most one queued progress item per job.
+      // At most one queued progress item per key.
       this.queue = this.queue.filter(
-        (queued) => !(queued.kind === 'progress' && queued.jobHandle === key),
+        (queued) =>
+          !(queued.kind === 'progress' && progressKeyOf(queued) === key),
       );
     }
     this.queue.push(item);

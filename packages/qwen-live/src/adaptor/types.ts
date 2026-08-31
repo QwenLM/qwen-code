@@ -63,6 +63,14 @@ export interface PermissionOption {
   optionId: string;
   label?: string;
   kind: PermissionOptionKind;
+  /**
+   * Grant breadth, from the wire's structured kind (`allow_once` vs
+   * `allow_always`, `reject_once` vs `reject_always`). A bare voice
+   * "allow" must take the narrowest ('once') option on offer instead of
+   * persisting an always-allow rule. Absent when the backend gave no
+   * signal.
+   */
+  escalation?: 'once' | 'always';
 }
 
 export type BackendEvent =

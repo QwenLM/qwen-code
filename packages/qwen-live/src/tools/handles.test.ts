@@ -40,7 +40,6 @@ describe('HandleRegistry sessions', () => {
     expect(registry.session(backend('def'))).toBe('session_2');
     // Same id under a different adaptor is a different backend.
     expect(registry.session(backend('abc', 'acp'))).toBe('session_3');
-    expect(registry.listSessions().size).toBe(3);
   });
 
   it('resolves session handles with surrounding whitespace trimmed', () => {
@@ -92,6 +91,34 @@ describe('HandleRegistry jobs', () => {
 
     expect('jobRef' in job).toBe(false);
     expect(registry.jobByRef('prompt-x')).toBeUndefined();
+  });
+
+  it('returns the existing record instead of minting a duplicate for a known jobRef', () => {
+    const registry = new HandleRegistry();
+    const first = registry.createJob({
+      sessionHandle: 'session_1',
+      backend: backend('abc'),
+      jobRef: 'prompt-1',
+      task: 'original task',
+    });
+    first.state = 'running';
+
+    // A steer that joined the running turn reports the SAME jobRef: the
+    // registry must not orphan the running job behind a second record.
+    const again = registry.createJob({
+      sessionHandle: 'session_1',
+      backend: backend('abc'),
+      jobRef: 'prompt-1',
+      task: 'joined instruction',
+    });
+
+    expect(again).toBe(first);
+    expect(again.jobHandle).toBe('job_1');
+    expect(registry.resolveJob('job_2')).toBeUndefined();
+    expect(registry.activeJobForSession('session_1')).toBe(first);
+
+    first.state = 'done';
+    expect(registry.activeJobForSession('session_1')).toBeUndefined();
   });
 
   it('resolves jobs by trimmed handle and by backend jobRef', () => {

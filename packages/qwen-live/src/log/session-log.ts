@@ -62,6 +62,7 @@ export class SessionLog {
   private bytes = 0;
   private rotations = 0;
   private failed = false;
+  private closed = false;
 
   constructor(private readonly options: SessionLogOptions) {
     this.path = join(options.directory, `${options.liveSessionId}.jsonl`);
@@ -69,9 +70,13 @@ export class SessionLog {
     this.now = options.now ?? Date.now;
   }
 
-  /** Logging must never take the call down: failures flip to no-op mode. */
+  /**
+   * Logging must never take the call down: failures flip to no-op mode, and
+   * writes after close() are dropped (a reopened stream would only lose its
+   * buffer at process.exit).
+   */
   write(type: SessionLogEventType, payload: Record<string, unknown>): void {
-    if (this.failed) return;
+    if (this.failed || this.closed) return;
     try {
       const line = `${JSON.stringify({
         ts: this.now(),
@@ -90,7 +95,9 @@ export class SessionLog {
     }
   }
 
+  /** Terminal: later write() calls are documented no-ops. */
   async close(): Promise<void> {
+    this.closed = true;
     const stream = this.stream;
     this.stream = undefined;
     if (!stream) return;

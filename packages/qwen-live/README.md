@@ -36,6 +36,11 @@ fails fast at startup instead of taking over.
 
 ## Status
 
-Incubating inside the qwen-code monorepo (M1+M2 of the Live split roadmap,
-see issue #10118). The Host app itself and non-qwen-code adaptors are tracked
-in later milestones.
+Incubating inside the qwen-code monorepo, tracking M1+M2 of the Live split
+roadmap (issue #10118) with one M1 gap: the Live Host **installer**
+(`packages/cli/src/serve/live/live-host-installer.ts`) is not ported yet.
+Bootstrapping therefore requires a Host that was already installed through
+the built-in qwen-code Live integration; porting the installer is a
+follow-up. The Host app itself, non-qwen-code adaptors (M4), and retiring
+the built-in Live integration (M5) are tracked in later milestones of
+issue #10118.
