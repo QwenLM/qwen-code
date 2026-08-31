@@ -20,6 +20,7 @@ import { createServer, type IncomingMessage, type Server } from 'node:http';
 import { join } from 'node:path';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { QwenCodeAdaptor } from './adaptor/qwen-code-adaptor.js';
+import { LiveHostInstaller } from './host/live-host-installer.js';
 import type { LiveConfig } from './config.js';
 import {
   handoffLiveDiscoveryOwner,
@@ -37,12 +38,15 @@ const HOST_WS_PATH = '/live/host';
 
 export interface LiveDaemonDeps {
   adaptor?: QwenCodeAdaptor;
+  /** Installer (tests inject a fake); production installs the real Host. */
+  installer?: LiveHostInstaller;
   logger?: LiveLogger;
 }
 
 export class LiveDaemon {
   private readonly logger: LiveLogger;
   private readonly adaptor: QwenCodeAdaptor;
+  private readonly installer: LiveHostInstaller;
   private readonly token = randomUUID();
   private readonly instanceNonce = randomUUID();
   private server: Server | undefined;
@@ -58,6 +62,7 @@ export class LiveDaemon {
     deps: LiveDaemonDeps = {},
   ) {
     this.logger = deps.logger ?? new LiveLogger();
+    this.installer = deps.installer ?? new LiveHostInstaller();
     this.adaptor =
       deps.adaptor ??
       new QwenCodeAdaptor({
@@ -182,6 +187,50 @@ export class LiveDaemon {
 
   // -- internals ------------------------------------------------------------
 
+  /**
+   * Minimal HTTP surface for Host bootstrap: the installer endpoints. The
+   * same Bearer wall as the WS upgrade guards them — a browser context
+   * (Origin) is always refused.
+   */
+  private handleRequest(
+    req: IncomingMessage,
+    res: import('node:http').ServerResponse,
+  ): void {
+    const url = (req.url ?? '').split('?', 1)[0];
+    const route = `${req.method} ${url}`;
+    if (
+      (route === 'GET /live/setup' ||
+        route === 'POST /live/setup/install' ||
+        route === 'POST /live/setup/launch') &&
+      this.authorize(req)
+    ) {
+      void this.serveSetup(route, res);
+      return;
+    }
+    if (route === 'GET /healthz') {
+      res.statusCode = 200;
+      res.end('ok');
+      return;
+    }
+    res.statusCode = route.startsWith('GET /live/setup') ? 401 : 404;
+    res.end();
+  }
+
+  private async serveSetup(
+    route: string,
+    res: import('node:http').ServerResponse,
+  ): Promise<void> {
+    const status =
+      route === 'GET /live/setup'
+        ? await this.installer.refresh()
+        : route === 'POST /live/setup/install'
+          ? await this.installer.ensureInstalled()
+          : await this.installer.launch();
+    res.statusCode = 200;
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify(status));
+  }
+
   private authorize(req: IncomingMessage): boolean {
     // CSRF wall: a browser context always sends Origin; the Host never does.
     if (req.headers['origin'] !== undefined) return false;
@@ -196,9 +245,8 @@ export class LiveDaemon {
   }
 
   private listen(): Promise<number> {
-    const server = createServer((_req, res) => {
-      res.statusCode = 404;
-      res.end();
+    const server = createServer((req, res) => {
+      this.handleRequest(req, res);
     });
     this.server = server;
     const wss = new WebSocketServer({ noServer: true });

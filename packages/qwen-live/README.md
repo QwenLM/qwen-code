@@ -34,13 +34,24 @@ Only one Live daemon may own the Host discovery file at a time. If the
 built-in `qwen serve` Live integration is enabled and running, `qwen-live`
 fails fast at startup instead of taking over.
 
+## Host bootstrap
+
+The Live Host installer is ported: `GET /live/setup` reports the installed
+Host's state, `POST /live/setup/install` downloads, verifies (sha256 +
+codesign + team identifier), and installs the latest Host release, and
+`POST /live/setup/launch` opens it. macOS only (the same surface `qwen
+serve` exposes). All three sit behind the daemon's Bearer token; a browser
+context (Origin header) is always refused.
+
+```bash
+TOKEN=$(jq -r .token ~/.qwen/live/daemon.json)
+PORT=$(jq -r .url ~/.qwen/live/daemon.json | sed 's/.*://')
+curl -H "authorization: Bearer $TOKEN" "http://127.0.0.1:$PORT/live/setup"
+```
+
 ## Status
 
-Incubating inside the qwen-code monorepo, tracking M1+M2 of the Live split
-roadmap (issue #10118) with one M1 gap: the Live Host **installer**
-(`packages/cli/src/serve/live/live-host-installer.ts`) is not ported yet.
-Bootstrapping therefore requires a Host that was already installed through
-the built-in qwen-code Live integration; porting the installer is a
-follow-up. The Host app itself, non-qwen-code adaptors (M4), and retiring
+Incubating inside the qwen-code monorepo, tracking M1+M2 (plus the M1
+installer, now ported) of the Live split roadmap (issue #10118). The Host app itself, non-qwen-code adaptors (M4), and retiring
 the built-in Live integration (M5) are tracked in later milestones of
 issue #10118.
