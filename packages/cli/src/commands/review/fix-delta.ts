@@ -556,39 +556,39 @@ function captureSteeringSurfaces(root: string): string[] {
  * precedence and path resolution — the derivation a hand-read of one file
  * cannot match.
  */
-function renderSteeringPaths(root: string, files: readonly string[]): string[] {
+function renderSteeringPaths(root: string, files: readonly Buffer[]): number[] {
   if (files.length === 0) return [];
+  const all = files.map((_, i) => i);
   let raw: string;
   try {
-    raw = gitWithInputRaw(Buffer.from(`${files.join('\0')}\0`), [
-      '-C',
-      root,
-      'check-attr',
-      '--stdin',
-      '-z',
-      'diff',
-    ]);
+    // The RAW name bytes on stdin, never the display decode: `decodePath`
+    // renders a non-UTF-8 name through latin1, and re-encoding that string
+    // as UTF-8 asks about a DIFFERENT path — which resolves `unspecified`
+    // and answers "no steering" for exactly the path the probe could not
+    // name. `-z` on both sides so a name holding a newline cannot forge a
+    // record.
+    raw = gitWithInputRaw(
+      Buffer.concat(files.flatMap((f) => [f, Buffer.from([0])])),
+      ['-C', root, 'check-attr', '--stdin', '-z', 'diff'],
+    );
   } catch {
     // Unanswerable is not "clean": name every changed path rather than
     // certify a rendering the probe could not read.
-    return [...files];
+    return all;
   }
   // Records are `<path> NUL <attr> NUL <value> NUL` in INPUT ORDER, one per
   // path for the one attribute asked. Read positionally, never by the
-  // echoed key: a path whose bytes are not UTF-8 comes back through the
-  // decode as U+FFFD and would match no key at all — and a probe that
-  // matched nothing would answer "no steering" for exactly the paths it
-  // could not name.
+  // echoed key: the stream is decoded on the way back, so a non-UTF-8 name
+  // returns as U+FFFD and would match no key at all — and a probe that
+  // matched nothing would fail open the same way. The VALUES are ASCII, so
+  // the decode cannot corrupt what is actually read.
   const fields = raw.split('\0');
-  const steered: string[] = [];
+  const steered: number[] = [];
   for (let i = 0; i < files.length; i++) {
     const value = fields[i * 3 + 2];
-    if (value === undefined) {
-      // Fewer records than paths: the rest were never answered for.
-      steered.push(...files.slice(i));
-      break;
-    }
-    if (value !== 'unspecified') steered.push(files[i]);
+    // Fewer records than paths: the rest were never answered for.
+    if (value === undefined) return [...steered, ...all.slice(i)];
+    if (value !== 'unspecified') steered.push(i);
   }
   return steered;
 }
@@ -647,7 +647,7 @@ function filesBetweenTrees(
   fromTree: string,
   toTree: string,
   sidePaths: readonly string[],
-): string[] {
+): Buffer[] {
   const raw = gitRaw(
     '-C',
     root,
@@ -661,11 +661,11 @@ function filesBetweenTrees(
     '--',
     ...excludePathspec(root, sidePaths),
   );
-  // One `decodePath` per name, never a whole-buffer string roundtrip: a
-  // non-UTF-8 name must reach the summary byte-preserved, not as U+FFFD.
-  return splitNul(raw)
-    .filter((name) => name.length > 0)
-    .map((name) => decodePath(name));
+  // RAW, one Buffer per name: the display decode happens at the reporting
+  // edge (`decodePath`), because a non-UTF-8 name must reach the summary
+  // byte-preserved rather than as U+FFFD — and because the attribute probe
+  // below has to ask git about the bytes, not about their rendering.
+  return splitNul(raw).filter((name) => name.length > 0);
 }
 
 /**
@@ -1650,12 +1650,15 @@ export function runFixDelta(args: FixDeltaArgs): void {
   const files = filesBetweenTrees(root, snapshot.tree, now, sidePaths);
   const steeredRendering = renderSteeringPaths(root, files);
   if (steeredRendering.length > 0) {
-    writeStderrLine(renderSteeringNote(steeredRendering));
+    writeStderrLine(
+      renderSteeringNote(steeredRendering.map((i) => decodePath(files[i]))),
+    );
   }
-  const shown = files.slice(0, 8).join(', ');
+  const names = files.map((name) => decodePath(name));
+  const shown = names.slice(0, 8).join(', ');
   writeStderrLine(
-    `fix-delta: ${files.length} file(s) changed since the snapshot — ${shown}` +
-      (files.length > 8 ? `, and ${files.length - 8} more` : ''),
+    `fix-delta: ${names.length} file(s) changed since the snapshot — ${shown}` +
+      (names.length > 8 ? `, and ${names.length - 8} more` : ''),
   );
   if (preExisting.length > 0) {
     writeStderrLine(preExistingDirtNote(displayNames(preExisting)));

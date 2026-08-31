@@ -2633,6 +2633,43 @@ describe('fix-delta', () => {
     );
   });
 
+  // POSIX-only: a byte that is not valid UTF-8 cannot be a name on NTFS.
+  it.skipIf(process.platform === 'win32')(
+    'asks git about the raw name bytes, not their display rendering',
+    () => {
+      // The attribute probe is fed the names `diff-tree` printed. Sending
+      // the DISPLAY decode instead asks about a different path — a
+      // non-UTF-8 name renders through latin1, and re-encoding that string
+      // as UTF-8 is a name no rule matches — so the probe resolves
+      // `unspecified` and answers 'no steering' for exactly the path it
+      // could not name. Fail-open, in the one direction this disclosure
+      // exists to close.
+      const nameBytes = Buffer.concat([
+        Buffer.from('bad'),
+        Buffer.from([0xe9]),
+        Buffer.from('.txt'),
+      ]);
+      const absFile = Buffer.concat([Buffer.from(`${repo}/`), nameBytes]);
+      overwriteSh(absFile, 'v1');
+      git('add', '-A');
+      git('commit', '-qm', 'the non-UTF-8 file');
+
+      runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+      mkdirSync(join(repo, '.git', 'info'), { recursive: true });
+      writeFileSync(
+        join(repo, '.git', 'info', 'attributes'),
+        Buffer.concat([nameBytes, Buffer.from(' -diff\n')]),
+      );
+      overwriteSh(absFile, 'the fix');
+      runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+
+      expect(readFileSync(hunksFile(), 'utf8')).toContain('GIT binary patch');
+      expect(
+        stderr().some((l) => l.includes('steers how the hunks above render')),
+      ).toBe(true);
+    },
+  );
+
   it('stays quiet about steering surfaces an ordinary repository does not have', () => {
     // `git init` writes a comment-only `info/exclude`, and the disclosure
     // must not fire on it — a note every run prints is a note nobody reads.
