@@ -987,8 +987,15 @@ export class ToolRegistry {
    * set of on-demand tools in the startup reminder so the model knows what is
    * reachable via ToolSearch. `alwaysLoad` tools and tools listed in
    * {@link Config.getVisibleTools} are excluded.
+   *
+   * Always empty in CodeModeOnly: every schema is already bound into the `exec`
+   * description and ToolSearch is hidden, so a reminder built from this summary
+   * would offer a lookup step the model has no way to take.
    */
   getDeferredToolSummary(): DeferredToolSummary[] {
+    if (this.config.getToolMode?.() === ToolMode.CodeModeOnly) {
+      return [];
+    }
     const summary: DeferredToolSummary[] = [];
     this.tools.forEach((tool) => {
       if (

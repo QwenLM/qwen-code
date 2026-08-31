@@ -6,7 +6,6 @@
 
 import type { Content, Part } from '@google/genai';
 import type { Config } from '../config/config.js';
-import { ToolMode } from '../tools/code-mode.js';
 import { ToolNames } from '../tools/tool-names.js';
 import type {
   DeferredToolSummary,
@@ -501,14 +500,8 @@ export async function getInitialChatHistory(
   const toolRegistry = config.getToolRegistry();
   await toolRegistry.warmAll();
 
-  // CodeModeOnly hides `tool_search` and binds every deferred schema into the
-  // `exec` description, so this reminder would point the model at a tool it
-  // cannot call. Gated here rather than at the callers: the main-session prelude
-  // is rebuilt from several sites (startChat, post-compaction restore, reminder
-  // refresh) that all leave this option at its default.
   const includeDeferredToolsReminder =
-    (options.includeDeferredToolsReminder ?? true) &&
-    config.getToolMode?.() !== ToolMode.CodeModeOnly;
+    options.includeDeferredToolsReminder ?? true;
   const includeAvailableSkillsReminder =
     options.includeAvailableSkillsReminder ?? true;
   const startupReminder = config.getSkipStartupContext()

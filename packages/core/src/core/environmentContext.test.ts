@@ -37,7 +37,6 @@ import {
 } from './environmentContext.js';
 import { prependToFirstTextPart } from '../utils/partUtils.js';
 import type { Config } from '../config/config.js';
-import { ToolMode } from '../tools/code-mode.js';
 import type { ToolRegistry } from '../tools/tool-registry.js';
 import { SendMessageTool } from '../tools/send-message.js';
 import { getFolderStructure } from '../utils/getFolderStructure.js';
@@ -339,22 +338,6 @@ describe('getInitialChatHistory', () => {
     expect(lastText).toContain('reachable via `tool_search`');
     expect(lastText).toContain('web_fetch');
     expect(parts[0]?.text).not.toContain('reachable via `tool_search`');
-  });
-
-  it('omits the deferred-tools reminder in CodeModeOnly, where tool_search is hidden', async () => {
-    mockConfig.getToolMode = vi.fn().mockReturnValue(ToolMode.CodeModeOnly);
-    mockToolRegistry.getDeferredToolSummary.mockReturnValue([
-      { name: 'web_fetch', description: 'Fetches web pages' },
-    ]);
-
-    const [history] = await getInitialChatHistory(mockConfig as Config);
-
-    const parts = history[0]?.parts ?? [];
-    expect(parts).toHaveLength(1);
-    expect(parts[0]?.text).toContain("I'm currently working in the directory");
-    expect(parts.map((part) => part.text).join('\n')).not.toContain(
-      'reachable via `tool_search`',
-    );
   });
 });
 

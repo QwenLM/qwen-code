@@ -1035,9 +1035,7 @@ export class LlmClient {
     const toolRegistry = this.config.getToolRegistry();
     await toolRegistry.warmAll();
     const codeModeOnly = this.config.getToolMode?.() === ToolMode.CodeModeOnly;
-    const deferredSummary = codeModeOnly
-      ? []
-      : toolRegistry.getDeferredToolSummary();
+    const deferredSummary = toolRegistry.getDeferredToolSummary();
     // Progressive MCP discovery registers tools after a resumed chat has
     // already been constructed. Re-scan the live history here so historical
     // MCP calls reveal their newly registered schemas before declarations are
@@ -2089,9 +2087,7 @@ export class LlmClient {
       await profiler.time('tool_registry_warm', () => toolRegistry.warmAll());
       const codeModeOnly =
         this.config.getToolMode?.() === ToolMode.CodeModeOnly;
-      const deferredSummary = codeModeOnly
-        ? []
-        : toolRegistry.getDeferredToolSummary();
+      const deferredSummary = toolRegistry.getDeferredToolSummary();
       // Resume support: when a transcript contains prior calls to a deferred
       // tool, re-reveal that tool so `setTools()` below sends its schema in
       // the declaration list. Without this, the model sees history like
