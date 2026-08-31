@@ -2981,6 +2981,25 @@ export interface SetSessionLanguageResult {
 }
 
 /**
+ * Returned from `POST /language` (capability `user_language_sync`). The
+ * sessionless user-level sync succeeds with zero sessions; the `refresh`
+ * summary reports the best-effort runtime fan-out.
+ */
+export interface SetUserLanguageResult {
+  language: string;
+  /** Resolved output language, or `null` when `syncOutputLanguage` was false. */
+  outputLanguage: string | null;
+  refresh: {
+    /** Runtimes that applied the switch over a live channel. */
+    runtimes: number;
+    /** Sessions attempted (per-session failures are counted in `failed`). */
+    sessions: number;
+    /** Session-level refresh failures plus failed runtimes. */
+    failed: number;
+  };
+}
+
+/**
  * Closed enumeration of session approval modes the
  * daemon exposes via `POST /session/:id/approval-mode`. Mirrors core's
  * `ApprovalMode` enum — the drift detector test in
