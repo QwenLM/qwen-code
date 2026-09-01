@@ -195,13 +195,10 @@ The parser is not intent-aware — prose like "resolves #123's closer" links
 `ISSUES`. There is no deterministic intent check: the linkage decides WHICH
 issues the branches below read, and they then act on those issues' states.
 The blast radius stays bounded — the only irreversible act (close)
-additionally requires this PR's diff to be fully subsumed by the merged
-fix, which is true only when the change is contained in that fix's own
-patch — judged against the closer's frozen patch below, not the live
-default branch — so an accidental linkage can at worst reach a close as
-duplicate of a merged fix that contains the change (reversible via the
-reopen invitation in the close comment), or a visible, reversible
-request-changes review or a maintainer escalation.
+additionally requires this PR's diff to be fully subsumed by the default
+branch, which is true only when the change is already landed, so an
+accidental linkage can at worst reach a visible, reversible request-changes
+review or a maintainer escalation, never a substantively wrong close.
 
 ```bash
 # Record each linked issue's state; $N feeds the closer query below. The loop
@@ -232,248 +229,65 @@ proceed to 1a.
 gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body-file /tmp/stage-1pre-not-planned.md
 ```
 
-- Any linked issue **closed as completed** → resolve one closer candidate
-  per closed-as-completed linked issue, in the deterministic `$ISSUES` order:
+- Any linked issue **closed as completed** → find what closed it (GraphQL —
+  the REST timeline's `closed` event carries no reliable closer reference):
 
-  ```bash
-  CLOSER=$(gh api graphql -f query='
-    query($owner: String!, $name: String!, $n: Int!) {
-      repository(owner: $owner, name: $name) {
-        issue(number: $n) {
-          timelineItems(last: 20, itemTypes: [CLOSED_EVENT]) {
-            nodes {
-              ... on ClosedEvent {
-                closer {
-                  ... on PullRequest {
-                    number
-                    state
-                    merged
-                    baseRefName
-                    repository { nameWithOwner }
-                  }
-                  ... on Commit { oid }
-                }
+```bash
+gh api graphql -f query='
+  query($owner: String!, $name: String!, $n: Int!) {
+    repository(owner: $owner, name: $name) {
+      issue(number: $n) {
+        timelineItems(last: 20, itemTypes: [CLOSED_EVENT]) {
+          nodes {
+            ... on ClosedEvent {
+              closer {
+                ... on PullRequest { number state merged }
+                ... on Commit { oid }
               }
             }
           }
         }
       }
-    }' -f owner="${REPO%%/*}" -f name="${REPO##*/}" -F n="$N" \
-    --jq '.data.repository.issue.timelineItems.nodes // [] | last | .closer
-      | select(. != null and .number != null)
-      | "\(.number) \(.merged) \(.baseRefName) \(.repository.nameWithOwner)"')
-  read -r MERGED_PR MERGED_FLAG MERGED_BASE MERGED_REPO <<< "$CLOSER"
-  if [ "$MERGED_FLAG" = "true" ] && [ "$MERGED_BASE" = "$DEFAULT_BRANCH" ] && [ "$MERGED_REPO" = "$REPO" ]; then
-    # One closer can close several linked issues — keep only its first
-    # entry: a duplicate iteration re-fetches, and its `>` truncates the
-    # already-fetched patch before gh retries
-    case " $MERGED_PRS " in
-      *" $MERGED_PR "*) ;;
-      *) MERGED_PRS="$MERGED_PRS $MERGED_PR" ;;
-    esac
-  fi
-  ```
+    }
+  }' -f owner="${REPO%%/*}" -f name="${REPO##*/}" -F n="$N" \
+  --jq '.data.repository.issue.timelineItems.nodes // [] | last | .closer | select(. != null and .number != null) | "\(.number) \(.merged)"'
+```
 
-  One query run resolves one issue's closer — run it once per issue
-  with that issue's `$N`, never once for all issues: bash leaves `$N`
-  bound to the loop's last element, so a single out-of-loop query
-  resolves only the last issue's closer. GraphQL is the closer source —
-  the REST timeline's `closed` event carries no reliable closer
-  reference. Only the LAST (most recent) close event counts — earlier
-  closes belong to reopen cycles and their closers are stale. If the
-  query fails or emits
-  nothing (the number is a PR, not an issue; the issue does not exist;
-  the latest close was manual), treat that issue's closer as unresolved.
-  The closer must also be a merged PR of `$REPO` itself that landed on
-  the default branch (`MERGED_FLAG` true, `MERGED_BASE` equal to
-  `$DEFAULT_BRANCH`, and `MERGED_REPO` equal to `$REPO`): a closing
-  keyword can close an issue from a merged PR in a DIFFERENT repository,
-  and PR numbers restart at 1 in every repository, so a foreign closer's
-  number collides within `$REPO` — `gh pr diff` would fetch this repo's
-  unrelated same-number PR. A closer merged into a non-default branch (a
-  `release/*` backport) cannot be judged either — it closed the issue
-  without its patch ever landing on the default branch, so judging a
-  default-branch PR against it would close as duplicate a fix the default
-  branch still lacks. The gate can only fetch and judge `$REPO`'s patches:
-  a foreign-repo or non-default-branch closer cannot be verified and is
-  treated as unresolved — never resolved to a colliding number.
-  `$MERGED_PRS`
-  lists the resolved closers in the deterministic `$ISSUES` order, each
-  closer number once even when one closer closed several linked issues.
+Only the LAST (most recent) close event counts — earlier closes belong to
+reopen cycles and their closers are stale. If the query fails or emits
+nothing (the number is a PR, not an issue; the issue does not exist; the
+latest close was manual), treat the closer as unresolved.
 
-- Closed by one or more **merged PRs** of this repo (`$MERGED_PRS`
-  non-empty) → compare this PR's production diff (exclude test/generated
-  files per the Stage 0 size rules) against each resolved closer's
-  production diff. Read each patch once; two calls per closer cover any
-  number of files. Every fetch carries a failure guard: a failed or
-  empty fetch never reaches the judgment as an empty patch — an
-  unfetchable closer is dropped as unverifiable (if no resolved closer
-  remains, the unresolved-closer branch below applies), and an
-  unfetchable PR patch aborts the run fail-closed — except one class of
-  fetch failure is permanent rather than transient: GitHub's diff
-  endpoint hard-refuses diffs with more than 300 files (HTTP 406
-  `PullRequest.diff too_large`), so every retry fails identically and a
-  bare abort there would leave such a PR with no triage outcome at all,
-  on every run. Route that class to the unresolved-state branch below
-  (flag in the Stage 1 comment and escalate to the maintainer), exactly
-  as an unfetchable closer is treated — the gate reaches a classified
-  outcome without ever judging an unfetchable patch. Do NOT fall back to
-  the `pulls/$PR_NUMBER/files` API for it: that endpoint omits exactly
-  the structure the judgment compares (mode headers, rename pairs, blob
-  hashes), and transiting a 300+-file diff through the agent's context
-  breaks the constant-cost bound this gate exists to enforce:
+- Closed by a **merged PR** → compare this PR's production diff (exclude
+  test/generated files per the Stage 0 size rules) against the default
+  branch (`$DEFAULT_BRANCH` — this PR's base, per the scope check above):
+  - **Fully subsumed** — applying this PR's ENTIRE diff to the default
+    branch would change nothing: every production line this PR adds already
+    exists there, AND every production line this PR deletes is already
+    absent there. Read each file as raw bytes via
+    `gh api -H "Accept: application/vnd.github.raw+json" "repos/$REPO/contents/<path>?ref=$DEFAULT_BRANCH"`;
+    the default JSON representation leaves `content` empty for files at or
+    above 1 MiB. If a raw fetch fails, subsumption is unverified: never close;
+    flag it in the Stage 1 comment and escalate to the maintainer. A diff
+    with NO production changes (e.g. tests-only) is never fully subsumed —
+    any file it adds outside the production set is itself a remaining
+    delta. → post the terminal comment below, then close the PR. This is
+    the ONLY place triage closes a PR.
+  - **Any remaining delta** — everything else: an added production line
+    that is missing there, a deleted production line that still exists
+    there, or any non-production addition → submit exactly one
+    `CHANGES_REQUESTED` review: name the merged PR, name the remaining
+    delta, ask the author to rebase onto the default branch and reduce the
+    PR to that delta (bilingual body whose first line is the
+    `<!-- qwen-triage stage=1-pre -->` marker, @mention the author). Stop:
 
-  ```bash
-  OVERSIZE=0
-  gh pr diff "$PR_NUMBER" --repo "$REPO" \
-    > /tmp/stage-1pre-pr.patch 2>/tmp/stage-1pre-pr.diff.err || {
-    # HTTP 406 too_large (over 300 files) is permanent — route to the
-    # unresolved-state branch below; any other fetch failure aborts
-    # fail-closed and the next run retries
-    grep -q 'too_large' /tmp/stage-1pre-pr.diff.err && OVERSIZE=1 || exit 1
-  }
-  [ "$OVERSIZE" = 1 ] || [ -s /tmp/stage-1pre-pr.patch ] || exit 1
-  # OVERSIZE=1: skip the closer fetches and the judgment below, take the
-  # unresolved-state branch at the end of this bullet list
-  FETCHED_PRS=""
-  for MERGED_PR in $MERGED_PRS; do
-    # failed or empty: this closer is unverifiable — drop it, never judge
-    # an empty patch
-    gh pr diff "$MERGED_PR" --repo "$REPO" \
-      > "/tmp/stage-1pre-closer-$MERGED_PR.patch" || continue
-    [ -s "/tmp/stage-1pre-closer-$MERGED_PR.patch" ] || continue
-    FETCHED_PRS="$FETCHED_PRS $MERGED_PR"
-  done
-  # judge only the fetchable set — if every closer fetch failed this
-  # leaves $MERGED_PRS empty and the unresolved-closer branch below
-  # escalates instead of judging nothing as verified
-  MERGED_PRS="$FETCHED_PRS"
-  ```
+```bash
+gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body-file /tmp/stage-1pre-remaining-delta.md
+```
 
-  Do NOT download the default branch's files one by one via
-  `gh api "repos/$REPO/contents/<path>?ref=$DEFAULT_BRANCH"`: above ~1 MiB
-  that endpoint silently returns HTTP 200 with empty content
-  (`content_len: 0`, `encoding: "none"`, no error), so a per-file download
-  can never confirm subsumption for large files — the check would fail
-  silently exactly where a duplicate is most expensive. It would also
-  spend one REST call per file against the shared CI PAT's rate limit and
-  transit every full blob through the agent's context. Two frozen patches
-  per closer cost two calls for any file count and keep the verdict atomic
-  with respect to base-branch movement during the check. Judge this PR's
-  patch against each closer's patch in `$MERGED_PRS` order, comparing
-  within the same file:
-  - **Fully subsumed** — file by file: every production file section in
-    this PR's patch has a counterpart section in the closer's patch, and
-    within each matched pair, every production line this PR adds also
-    appears among the lines the closer's patch adds to that file at
-    least as many times as this PR adds it, and, symmetrically for
-    deletions, every production line this PR deletes appears among the
-    lines the closer's patch deletes from it at least as many times as
-    this PR deletes it. The quantifiers count occurrences, not set membership:
-    identical line text occurs many times (blank lines make
-    this commonplace), so one occurrence in the closer's patch covers
-    exactly one occurrence in this PR's patch — a closer that deletes
-    one blank line never covers this PR deleting three. These occurrences
-    are matched hunk by hunk, never anywhere in the file: an added or
-    deleted line is covered only when the counterpart's matched section
-    carries the same line text in a hunk
-    at a corresponding position with matching surrounding context lines —
-    a closer that deletes a given line inside one function never covers
-    this PR deleting the same line text inside a sibling function, even
-    though each patch deletes that line exactly once at the same path —
-    and when the same line text is added or deleted in more than one
-    hunk of either patch, the occurrences cannot be paired
-    one-to-one by position, so that line text cannot establish coverage.
-    A section with
-    no line-level
-    representation (a pure rename, a binary, a mode change, an empty
-    file) is covered only by an equivalent change to the same path in
-    the closer's patch. Equivalence is structural, never path alone —
-    every section, including one that also carries content lines, is
-    compared on the full structure its headers carry, and a matched
-    pair must agree on each of: file existence — a deletion
-    (`deleted file mode` / `+++ /dev/null`) is covered only by a
-    same-path deletion, because a closer that removes the same lines
-    while keeping the file (an emptied result, `index <hash>..e69de29`)
-    leaves the file on the default branch and does not cover the
-    deletion, and symmetrically a creation (`--- /dev/null` /
-    `new file mode`) is covered only by a same-path creation, and
-    the kind binds both ways — when the counterpart section is a
-    deletion or a creation, this PR's own section must be of the same
-    kind, because a closer that deletes a file this PR merely modifies
-    leaves the default branch without the file this PR's patch edits,
-    so the modification never landed; mode values — wherever a mode
-    header appears (`new file mode`, `deleted file mode`, or an
-    `old mode`/`new mode` pair), with or without content lines,
-    the counterpart must carry the same mode value or values, and
-    the match is directional for an `old mode`/`new mode` pair — the
-    counterpart's `old mode` against this section's `old mode` and its
-    `new mode` against its `new mode` — because the unordered pair
-    cannot tell a change from its reversal, and a blob encodes content,
-    not mode, so identical content under 100644 does not cover 100755;
-    rename pairs
-    — any section carrying `rename from`/`rename to` headers requires
-    the identical pair in the counterpart, same source and same target,
-    whether or not the section also edits content; blob hashes — a
-    section whose content has no line-level representation (binary,
-    empty file) is covered only when the resulting blob hash from its
-    `index` line matches; and trailing-newline state — the
-    `\ No newline at end of file` marker distinguishes otherwise-identical
-    last lines, and each matched pair must agree on it.
-    A line the closer's patch both adds and deletes
-    in that file cancels out and covers neither direction, and the
-    quantifiers range over matched sections only, so they never hold
-    vacuously — a rename-only diff closes only when its rename section
-    has that same-path counterpart. The closer's patch is frozen against
-    ITS merge base, so a line later edited or reverted on the default
-    branch still counts as covered here — the close comment below invites
-    reopening for exactly that case. Subsumption ranges over the ENTIRE diff,
-    not the production sections alone: a diff with NO production changes
-    (e.g. tests-only) is never fully subsumed, and a diff whose production
-    lines are fully covered but which ALSO changes tests or docs is not
-    subsumed either — anything it adds outside the covered production set
-    is itself a remaining delta. If more than one
-    closer fully subsumes this PR, the FIRST one in `$MERGED_PRS` order
-    is the duplicate target, and the close comment names the FIRST linked
-    issue the chosen closer closed, in `$ISSUES` order: `$MERGED_PRS`
-    records closer numbers only, so this rule fixes which #N the singular
-    template names when one closer closed several linked issues. → post
-    the terminal comment below, then close the PR. This is the ONLY place
-    triage closes a PR.
-  - **Any remaining delta** — no closer fully subsumes this PR: for each
-    closer, an added production line ITS patch does not add, a deleted
-    production line ITS patch does not delete, a line ITS patch adds or
-    deletes fewer times than this PR does, an added or deleted production
-    line ITS patch carries only at a non-corresponding hunk position or
-    without matching surrounding context lines, a line text
-    that either patch adds or deletes in more than one hunk,
-    any non-production change, or a section with no line-level
-    representation (rename, binary, mode change,
-    empty file) ITS patch does not equivalently change at the same path —
-    where "equivalently" is the structural test above: a deletion ITS
-    patch does not also perform at the same path
-    (emptying a file is not deleting it), a counterpart deletion or
-    creation this PR's own section does not match in kind, a mode value,
-    an `old mode`/`new mode` pair matched in the wrong direction, a rename
-    from/to pair, a resulting blob hash of a line-less section, or a
-    trailing-newline state ITS counterpart section does not match
-    → submit exactly one `CHANGES_REQUESTED` review: name the resolved
-    closers,
-    name the remaining delta, ask the author to rebase onto the default
-    branch and reduce the PR to that delta (bilingual body whose first
-    line is the `<!-- qwen-triage stage=1-pre -->` marker, @mention the
-    author). Stop:
-
-  ```bash
-  gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body-file /tmp/stage-1pre-remaining-delta.md
-  ```
-
-- No resolved and fetchable closer remains (`$MERGED_PRS` empty — every
-  close was manual or by a commit, or every closer is unmerged or from
-  a foreign repository — or every closer fetch failed), or this PR's own
-  patch is unfetchable (the `OVERSIZE` class above) → the gate must
-  never close on ambiguity: flag it in the Stage 1 comment and escalate
-  to the maintainer.
+- Closed manually (no close commit) or the closer cannot be resolved →
+  never close on ambiguity: flag it in the Stage 1 comment and escalate to
+  the maintainer.
 
 **Reopen guard.** The close below is the gate's only irreversible act, and an
 explicit `@qwen-code /triage` re-run executes every stage again — including
@@ -500,15 +314,14 @@ cat > /tmp/stage-1pre-duplicate.md <<'EOF'
 <!-- qwen-triage stage=1-pre -->
 
 The linked issue #N was already fixed by #M, and every production change in
-this PR is covered by #M's merged fix — closing as a duplicate of #M. If
-something here is NOT covered by #M, or #M's fix was later edited or
-reverted on the default branch, say so and this can be reopened.
+this PR is already on the default branch — closing as a duplicate of #M. If
+something here is NOT covered by #M, say so and this can be reopened.
 
 <details>
 <summary>中文说明</summary>
 
-关联 issue #N 已由 #M 修复，本 PR 的生产代码改动均已被 #M 的合并修复覆盖，
-现作为 #M 的重复 PR 关闭。如本 PR 有 #M 未覆盖的内容，或 #M 的修复后续在默认分支上被修改或回退，请说明，可以重新打开。
+关联 issue #N 已由 #M 修复，本 PR 的生产代码改动均已存在于默认分支，
+现作为 #M 的重复 PR 关闭。如本 PR 有 #M 未覆盖的内容，请说明，可以重新打开。
 
 </details>
 
