@@ -5,6 +5,7 @@
  */
 
 import { afterEach, beforeEach, describe, it, expect } from 'vitest';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -803,6 +804,24 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
     const merged = await loadUsageHistoryWithLive();
     expect(merged.map((r) => r.sessionId)).toEqual(['sess-daemon']);
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'withLive: skips non-regular transcript entries (a FIFO cannot wedge the replay)',
+    async () => {
+      // A FIFO passing the `*.jsonl` name filter must be skipped before any
+      // read: opening it would block forever (no writer ever arrives) and
+      // wedge the rebuild — the daemon usage dashboard serves from this path.
+      // Observed in the wild from a test-suite leftover. The mkfifo call is
+      // skipped on Windows, matching storage.test.ts.
+      plantChatJsonl('sess-real', 1600);
+      const fifoPath = planted('sess-fifo');
+      const mkfifo = spawnSync('mkfifo', [fifoPath], { stdio: 'inherit' });
+      expect(mkfifo.status).toBe(0);
+
+      const merged = await loadUsageHistoryWithLive();
+      expect(merged.map((r) => r.sessionId)).toEqual(['sess-real']);
+    },
+  );
 });
 
 // Regression for #7384: deleting a session erased its usage from the
