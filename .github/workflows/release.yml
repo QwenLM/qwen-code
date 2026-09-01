@@ -413,6 +413,16 @@ jobs:
           while IFS= read -r -d '' path; do
             build_paths+=("${path}")
           done < <(find packages integrations -type d -name node_modules -prune -o -type d -name dist -prune -print0)
+          printf '%s\n' "${build_paths[@]}"
+          # Fail closed on a silent under-pack: if find contributes nothing
+          # beyond the two hardcoded paths (a dropped `-o` turns the two
+          # -prune clauses into one conjunction that matches nothing), tar
+          # would still succeed and the missing outputs would surface as
+          # dist errors in downstream consumers instead of here.
+          [[ ${#build_paths[@]} -gt 2 ]] || {
+            echo "::error::Pack Build Outputs found no build outputs beyond the hardcoded paths."
+            exit 1
+          }
           tar -czf "${RUNNER_TEMP}/release-build.tgz" "${build_paths[@]}"
 
       - name: 'Upload Build Outputs'

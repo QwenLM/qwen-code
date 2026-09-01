@@ -427,6 +427,12 @@ describe('release workflow', () => {
     // node_modules; the find must prune them so only real build outputs
     // travel in release-quality-build.
     expect(pack.run).toContain('-type d -name node_modules -prune');
+    // Log what is packed and fail closed on a silent under-pack: a dropped
+    // `-o` in the find turns the two -prune clauses into one conjunction
+    // that matches nothing, and tar would then ship only the two hardcoded
+    // paths while the symptom lands in downstream consumers.
+    expect(pack.run).toContain('printf');
+    expect(pack.run).toContain('${#build_paths[@]} -gt 2');
   });
 
   it('fans workspace tests into three complete Vitest shards', () => {
