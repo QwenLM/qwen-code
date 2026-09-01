@@ -238,6 +238,9 @@ export {
   type DaemonSessionListPage,
   type DaemonSessionListPageOptions,
   type DaemonSessionListView,
+  type DaemonSessionSearchMatch,
+  type DaemonSessionSearchOptions,
+  type DaemonSessionSearchResult,
   type DaemonSessionCatalogVersion,
   type DaemonSessionLiveState,
   type DaemonWorkspaceSessionLiveState,
@@ -371,6 +374,7 @@ export {
   type RestoreSessionRequest,
   type SetModelResult,
   type SetSessionLanguageResult,
+  type SetUserLanguageResult,
   type SessionMetadataResult,
   type SubscribeOptions,
 } from './daemon/index.js';

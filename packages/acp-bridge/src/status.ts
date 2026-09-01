@@ -177,11 +177,21 @@ export const SERVE_CONTROL_EXT_METHODS = {
   workspaceAgentGenerate: 'qwen/control/workspace/agents/generate',
   workspaceGenerationStart: 'qwen/control/workspace/generation/start',
   workspaceGenerationCancel: 'qwen/control/workspace/generation/cancel',
+  workspaceSessionWorkflow: 'qwen/control/workspace/session-workflow',
   workspaceMemoryRememberAvailability:
     'qwen/control/workspace/memory/remember/availability',
   workspaceMemoryRemember: 'qwen/control/workspace/memory/remember',
   workspaceMemoryForget: 'qwen/control/workspace/memory/forget',
   workspaceMemoryDream: 'qwen/control/workspace/memory/dream',
+  /**
+   * Sessionless user-level language sync: the runtime switches its process
+   * UI language, reloads the user-scope settings the daemon already
+   * persisted, and, when `syncOutputLanguage` is true, refreshes every local
+   * session's system instruction.
+   * Params: `{ language, syncOutputLanguage }`; result:
+   * `{ language, sessions, failed }`.
+   */
+  userLanguage: 'qwen/control/user/language',
   // Runtime MCP server mutation ext-methods
   sessionTaskCancel: 'qwen/control/session/task/cancel',
   sessionWorkflowTaskAction: 'qwen/control/session/task/workflow-action',
