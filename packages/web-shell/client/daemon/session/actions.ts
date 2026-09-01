@@ -415,6 +415,17 @@ export function createDaemonSessionActions({
     );
   }
 
+  function discardsSlashCommandAttachments(text: string): boolean {
+    const name = /^\/([^\s]+)/.exec(text.trimStart())?.[1]?.toLowerCase();
+    if (!name) return false;
+    const command = getConnection().commands?.find(
+      (candidate) =>
+        candidate.name.toLowerCase() === name ||
+        candidate.altNames?.some((alias) => alias.toLowerCase() === name),
+    );
+    return command?.source === 'builtin-command';
+  }
+
   async function promptContentWithUploadedAttachments(
     session: DaemonSessionClient,
     text: string,
@@ -431,7 +442,7 @@ export function createDaemonSessionActions({
     references: DaemonSessionAttachmentReference[];
     fileReferences: DaemonSessionAttachmentReference[];
   }> {
-    if (text.trimStart().startsWith('/')) {
+    if (discardsSlashCommandAttachments(text)) {
       return {
         content: toDaemonPromptContent(text),
         references: [],
@@ -855,9 +866,9 @@ export function createDaemonSessionActions({
             img.mimeType || img.mediaType || img.media_type || 'image/*',
         }));
         const normalizedFiles = normalizePromptFiles(options?.files);
-        const slashCommand = text.trimStart().startsWith('/');
-        const displayedImages = slashCommand ? [] : normalizedImages;
-        const displayedFiles = slashCommand ? [] : normalizedFiles;
+        const discardAttachments = discardsSlashCommandAttachments(text);
+        const displayedImages = discardAttachments ? [] : normalizedImages;
+        const displayedFiles = discardAttachments ? [] : normalizedFiles;
         const inputAnnotations =
           options?.inputAnnotations && options.inputAnnotations.length > 0
             ? options.inputAnnotations
@@ -1017,9 +1028,9 @@ export function createDaemonSessionActions({
         mimeType: img.mimeType || img.mediaType || img.media_type || 'image/*',
       }));
       const normalizedFiles = normalizePromptFiles(options?.files);
-      const slashCommand = text.trimStart().startsWith('/');
-      const displayedImages = slashCommand ? [] : normalizedImages;
-      const displayedFiles = slashCommand ? [] : normalizedFiles;
+      const discardAttachments = discardsSlashCommandAttachments(text);
+      const displayedImages = discardAttachments ? [] : normalizedImages;
+      const displayedFiles = discardAttachments ? [] : normalizedFiles;
       const inputAnnotations =
         options?.inputAnnotations && options.inputAnnotations.length > 0
           ? options.inputAnnotations

@@ -321,6 +321,7 @@ export interface DaemonCommandInfo {
   argumentHint?: string;
   autoSubmit?: boolean;
   source?: string;
+  altNames?: string[];
   raw: DaemonAvailableCommand;
 }
 

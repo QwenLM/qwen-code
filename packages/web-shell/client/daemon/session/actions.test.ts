@@ -2263,6 +2263,7 @@ describe('createDaemonSessionActions', () => {
       connection: {
         status: 'connected',
         workspaceCwd: '/workspace',
+        commands: [commandInfo('help', 'builtin-command')],
         capabilities: {
           v: 1,
           mode: 'http-bridge',
@@ -2284,6 +2285,79 @@ describe('createDaemonSessionActions', () => {
     expect(store.appendLocalUserMessage).toHaveBeenCalledWith(
       '/help',
       [],
+      undefined,
+      [],
+    );
+  });
+
+  it('does not upload attachments for built-in command aliases', async () => {
+    const session = createMockSession('session-a');
+    const { actions } = createActionsHarness({
+      session,
+      connection: {
+        status: 'connected',
+        workspaceCwd: '/workspace',
+        commands: [commandInfo('compress', 'builtin-command', ['summarize'])],
+        capabilities: {
+          v: 1,
+          mode: 'http-bridge',
+          features: ['session_attachments'],
+          modelServices: [],
+        },
+      },
+    });
+
+    await actions.submitPrompt('/summarize', {
+      images: [{ data: 'AQID', mimeType: 'image/png' }],
+    });
+
+    expect(session.uploadAttachment).not.toHaveBeenCalled();
+    expect(session.submitPrompt).toHaveBeenCalledWith({
+      prompt: [{ type: 'text', text: '/summarize' }],
+    });
+  });
+
+  it('uploads attachments used by skill slash commands', async () => {
+    const session = createMockSession('session-a');
+    const { actions, store } = createActionsHarness({
+      session,
+      connection: {
+        status: 'connected',
+        workspaceCwd: '/workspace',
+        commands: [commandInfo('price-sheet', 'skill-dir-command')],
+        capabilities: {
+          v: 1,
+          mode: 'http-bridge',
+          features: ['session_attachments'],
+          modelServices: [],
+        },
+      },
+    });
+
+    await actions.submitPrompt('/price-sheet update these prices', {
+      images: [{ data: 'AQID', mimeType: 'image/png' }],
+    });
+
+    expect(session.uploadAttachment).toHaveBeenCalledWith(
+      expect.any(Blob),
+      'image.png',
+      'image/png',
+      undefined,
+    );
+    expect(session.submitPrompt).toHaveBeenCalledWith({
+      prompt: [
+        { type: 'text', text: '/price-sheet update these prices' },
+        {
+          type: 'image',
+          attachmentId: 'image.png',
+          mimeType: 'image/png',
+          size: 3,
+        },
+      ],
+    });
+    expect(store.appendLocalUserMessage).toHaveBeenCalledWith(
+      '/price-sheet update these prices',
+      [{ data: 'AQID', mimeType: 'image/png' }],
       undefined,
       [],
     );
@@ -3885,11 +3959,13 @@ function createDeferred<T>() {
   return { promise, resolve, reject };
 }
 
-function commandInfo(name: string) {
+function commandInfo(name: string, source?: string, altNames?: string[]) {
   const raw = commandRaw(name);
   return {
     name,
     description: '',
+    ...(source ? { source } : {}),
+    ...(altNames ? { altNames } : {}),
     raw,
   };
 }

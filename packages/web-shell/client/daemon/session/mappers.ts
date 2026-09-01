@@ -831,11 +831,17 @@ function mapAvailableCommandsUpdate(
 
 function mapCommandMeta(
   meta: Record<string, unknown> | null | undefined,
-): Pick<DaemonCommandInfo, 'source'> {
+): Pick<DaemonCommandInfo, 'source' | 'altNames'> {
   const record = meta ?? undefined;
   const source = getString(record, 'source');
+  const altNames = Array.isArray(record?.['altNames'])
+    ? record['altNames'].filter(
+        (name): name is string => typeof name === 'string',
+      )
+    : [];
   return {
     ...(source ? { source } : {}),
+    ...(altNames.length > 0 ? { altNames } : {}),
   };
 }
 

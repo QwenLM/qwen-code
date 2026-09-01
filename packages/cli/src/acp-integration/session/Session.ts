@@ -13490,14 +13490,24 @@ export class Session implements SessionContext {
       : undefined;
 
     switch (result.type) {
-      case 'submit_prompt':
-        // Command wants to submit a prompt to the model
-        // Convert PartListUnion to Part[]
+      case 'submit_prompt': {
+        const expandedPrompt = normalizePartList(result.content);
+        const attachmentBlocks =
+          result.resolvedCommand?.kind === CommandKind.BUILT_IN
+            ? []
+            : originalPrompt.filter((block) => block.type !== 'text');
+        const attachmentParts =
+          attachmentBlocks.length === 0
+            ? []
+            : await this.#resolvePrompt(attachmentBlocks, abortSignal, {
+                deferBridgeConversions: true,
+              });
         return this.#applyBridgeConversionsIfNeeded(
-          normalizePartList(result.content),
+          [...attachmentParts, ...expandedPrompt],
           abortSignal,
           onFullTurnModel,
         );
+      }
 
       case 'message': {
         if (result.messageType === 'error') {
