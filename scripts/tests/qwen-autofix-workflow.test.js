@@ -202,6 +202,15 @@ const verificationGateBodies = [
   verificationGateSteps[0] ?? '',
   reviewVerificationRunner,
 ];
+const quotedCriticalWitness = (label = '') =>
+  [
+    '**[Suggestion]** Add a regression assertion for the fallback path.',
+    '',
+    ...(label ? [label] : []),
+    '```text',
+    '**[Critical]** quoted fixture output',
+    '```',
+  ].join('\n');
 const resolveSandboxImageSteps =
   workflow.match(
     /- name: 'Resolve sandbox image'[\s\S]*?(?=\n[ ]{6}- name: ')/g,
@@ -7063,14 +7072,7 @@ exit 1
         created_at: '2026-01-02T00:00:05Z',
         user: { login: 'qwen-code-ci-bot' },
         author_association: 'NONE',
-        body: [
-          '**[Suggestion]** Add a regression assertion for the fallback path.',
-          '',
-          'Witness:',
-          '```text',
-          '**[Critical]** quoted fixture output',
-          '```',
-        ].join('\n'),
+        body: quotedCriticalWitness('Witness:'),
       },
       {
         id: 17,
@@ -7194,13 +7196,7 @@ exit 1
         submitted_at: '2026-01-02T00:00:04Z',
         user: { login: 'qwen-code-ci-bot' },
         author_association: 'NONE',
-        body: [
-          '**[Suggestion]** Add a regression assertion for the fallback path.',
-          '',
-          '```text',
-          '**[Critical]** quoted fixture output',
-          '```',
-        ].join('\n'),
+        body: quotedCriticalWitness(),
       },
     ];
     const countActionableReviews = (criticalOnly, over = []) =>
@@ -7272,13 +7268,7 @@ exit 1
         created_at: '2026-01-02T00:00:03Z',
         user: { login: 'qwen-code-ci-bot' },
         author_association: 'NONE',
-        body: [
-          '**[Suggestion]** Add a regression assertion for the fallback path.',
-          '',
-          '```text',
-          '**[Critical]** quoted fixture output',
-          '```',
-        ].join('\n'),
+        body: quotedCriticalWitness(),
       },
     ];
     const countActionableIssue = (criticalOnly, over = []) =>
@@ -7360,13 +7350,7 @@ exit 1
         submitted_at: '2026-01-02T00:00:03Z',
         user: { login: 'qwen-code-ci-bot' },
         author_association: 'NONE',
-        body: [
-          '**[Suggestion]** Add a regression assertion for the fallback path.',
-          '',
-          '```text',
-          '**[Critical]** quoted fixture output',
-          '```',
-        ].join('\n'),
+        body: quotedCriticalWitness(),
         html_url: 'https://github.com/test/pull/1#review-24',
       },
     ];
@@ -7483,13 +7467,7 @@ exit 1
         created_at: '2026-01-02T00:00:04Z',
         user: { login: 'qwen-code-ci-bot' },
         author_association: 'NONE',
-        body: [
-          '**[Suggestion]** Add a regression assertion for the fallback path.',
-          '',
-          '```text',
-          '**[Critical]** quoted fixture output',
-          '```',
-        ].join('\n'),
+        body: quotedCriticalWitness(),
         html_url: 'https://github.com/test/pull/1#issuecomment-34',
       },
     ];
@@ -7572,13 +7550,6 @@ exit 1
       author_association: assoc,
       body,
     });
-    const quotedCriticalWitness = [
-      '**[Suggestion]** Add a regression assertion for the fallback path.',
-      '',
-      '```text',
-      '**[Critical]** quoted fixture output',
-      '```',
-    ].join('\n');
     const budgetDir = mkdtempSync(join(tmpdir(), 'over-budget-'));
     try {
       writeFileSync(
@@ -7610,13 +7581,13 @@ exit 1
             'quoted-issue',
             '2026-07-02T13:30:00Z',
             'MEMBER',
-            quotedCriticalWitness,
+            quotedCriticalWitness(),
           ),
           humanC(
             'quoted-issue',
             '2026-07-03T13:30:00Z',
             'MEMBER',
-            quotedCriticalWitness,
+            quotedCriticalWitness(),
           ),
           humanC('rando', '2026-07-02T13:00:00Z', 'NONE'),
           humanC(
@@ -7695,14 +7666,14 @@ exit 1
             author_association: 'MEMBER',
             state: 'COMMENTED',
             submitted_at: '2026-07-02T13:00:00Z',
-            body: quotedCriticalWitness,
+            body: quotedCriticalWitness(),
           },
           {
             user: { login: 'quoted-reviewer' },
             author_association: 'MEMBER',
             state: 'COMMENTED',
             submitted_at: '2026-07-03T13:00:00Z',
-            body: quotedCriticalWitness,
+            body: quotedCriticalWitness(),
           },
           // Request changes / APPROVED reviews are never deferrable, so two
           // consumed-span batches of each must not count (both authors absent):
@@ -7760,20 +7731,20 @@ exit 1
             user: { login: 'quoted-inline' },
             author_association: 'MEMBER',
             created_at: '2026-07-02T13:15:00Z',
-            body: quotedCriticalWitness,
+            body: quotedCriticalWitness(),
           },
           {
             user: { login: 'quoted-inline' },
             author_association: 'MEMBER',
             created_at: '2026-07-03T13:15:00Z',
-            body: quotedCriticalWitness,
+            body: quotedCriticalWitness(),
           },
           {
             id: 902,
             user: { login: 'quoted-reply' },
             author_association: 'MEMBER',
             created_at: '2026-07-02T13:20:00Z',
-            body: quotedCriticalWitness,
+            body: quotedCriticalWitness(),
           },
           {
             user: { login: 'quoted-reply' },
@@ -14946,13 +14917,6 @@ exit 1
         ]),
         'rv.json': JSON.stringify([]),
       };
-      const quotedCriticalWitness = [
-        '**[Suggestion]** Add a regression assertion for the fallback path.',
-        '',
-        '```text',
-        '**[Critical]** quoted fixture output',
-        '```',
-      ].join('\n');
       // Defect-claim round + all changed tests green on the pre-round tree =>
       // the claimed defect does not reproduce => non-retryable rejection.
       const rejected = run(srcAndTest, {
@@ -15056,7 +15020,7 @@ exit 1
             {
               id: 102,
               path: 'packages/cli/src/a.ts',
-              body: quotedCriticalWitness,
+              body: quotedCriticalWitness(),
             },
           ]),
           'rv.json': JSON.stringify([]),
@@ -15079,7 +15043,7 @@ exit 1
             {
               id: 102,
               path: 'packages/cli/src/a.ts',
-              body: quotedCriticalWitness,
+              body: quotedCriticalWitness(),
             },
             {
               id: 103,
