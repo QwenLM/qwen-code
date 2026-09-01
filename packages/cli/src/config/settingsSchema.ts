@@ -437,13 +437,14 @@ const SETTINGS_SCHEMA = {
         type: 'string',
         label: 'Output Style',
         category: 'General',
-        // Read once in `loadCliConfig` and frozen into `Config`; nothing
-        // applies a mid-session change, so the restart hint is the honest
-        // answer. Same as `general.outputLanguage`.
-        requiresRestart: true,
+        // `/output-style` applies a change to the running session (it rebuilds
+        // the system instruction in place), so no restart is needed.
+        requiresRestart: false,
         default: undefined as string | undefined,
         description:
-          'Name of the output style that shapes how responses are written, for example "Concise" or "Explanatory". Leave unset for the default style.',
+          'Name of the output style that shapes how responses are written, for example "Concise" or "Explanatory". Leave unset for the default style. Change it with /output-style.',
+        // The style list will grow user/project-defined entries; the dedicated
+        // /output-style picker owns selection rather than a static enum here.
         showInDialog: false,
       },
       vimMode: {

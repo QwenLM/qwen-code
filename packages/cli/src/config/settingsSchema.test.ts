@@ -222,10 +222,9 @@ describe('SettingsSchema', () => {
       expect(outputStyle.type).toBe('string');
       expect(outputStyle.category).toBe('General');
       expect(outputStyle.default).toBe(undefined);
-      // Read once at startup and frozen into `Config` — nothing applies a
-      // mid-session change, so the restart hint has to fire. Same reasoning
-      // as `general.outputLanguage` above.
-      expect(outputStyle.requiresRestart).toBe(true);
+      // `/output-style` rebuilds the system instruction in place, so an edit
+      // takes effect without a restart.
+      expect(outputStyle.requiresRestart).toBe(false);
     });
 
     it('should have plansDirectory setting in schema', () => {
