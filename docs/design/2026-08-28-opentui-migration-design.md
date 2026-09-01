@@ -9,9 +9,12 @@ composition root). Renderer activation is the next batch.
 
 Replace the ink-based TUI renderer with an OpenTUI-based one without any
 user-visible regression, landing the implementation on main in reviewable
-batches. OpenTUI stays opt-in (`QWEN_TUI_RENDERER=opentui`) and ink remains
+batches. OpenTUI is opt-in (`QWEN_TUI_RENDERER=opentui`) and ink remains
 the default renderer for all of Phase 1; the default flip and the ink
-removal are separate, explicitly gated phases.
+removal are separate, explicitly gated phases. That opt-in is not a switch a
+user can pull yet: the variable appears in no code until the activation
+batch adds it, so every batch before it is inert because nothing imports it
+— not because a gate routes around it.
 
 ## Why migrate
 
@@ -147,9 +150,14 @@ The pieces, in landing order:
   turn, session re-key and composer control stay explicit seams for the
   activation batch to own.
 - **Renderer activation** (next). Renderer dispatch plus the runtime gate
-  and the entry wiring into `startInteractiveUI`; small shared exports and
-  runtime fixes. **Default renderer stays ink.** OpenTUI becomes reachable
-  only through the flag.
+  and the entry wiring into `startInteractiveUI`, and small shared exports.
+  **Default renderer stays ink.** OpenTUI becomes reachable only through the
+  flag. This is where the composition root's seams get their owners, so the
+  contracts below become load-bearing here: the mount passes stable callback
+  identities (#8662 U-8), the confirmation stub becomes a real dialog rather
+  than keeping its denial, and the boundary is mounted the way ink mounts its
+  own (#8662 U-10). The runtime fixes this batch used to carry — the Bun
+  memory flags and the goal-runtime startup wait — landed early in #10128.
 - **Build & CI.** Bundle asset pipeline for the OpenTUI runtime assets, the
   CI legs (e2e, tui-parity), renderer-matrix integration tests, and the
   parity tooling (codemod, PTY harness).
@@ -157,11 +165,41 @@ The pieces, in landing order:
 ### Renderer selection and runtime gate
 
 Selection is environment-driven, not config-file-driven:
-`QWEN_TUI_RENDERER=opentui` opts in; anything else (or unset) is ink. The
-activation batch additionally gates on the runtime: OpenTUI's native core
-loads under Bun and under Node with `node:ffi`; where neither holds, the
-dispatcher falls back to ink silently. npm remains the primary install path,
-so plain-Node loadability is a Phase 3 gate (below), not an assumption.
+`QWEN_TUI_RENDERER=opentui` opts in; anything else (or unset) is ink. None of
+that exists yet — the env read, the dispatcher and the fallback are all
+delivered by the activation batch, which is the first code to name the
+variable. The activation batch additionally gates on the runtime: OpenTUI's
+native core loads under Bun and under Node with `node:ffi`; where neither
+holds, the dispatcher falls back to ink silently. npm remains the primary
+install path, so plain-Node loadability is a Phase 3 gate (below), not an
+assumption.
+
+### Composition-root contracts
+
+Settled while reviewing #10696. They are what keeps a deliberately thin root
+safe to run before its owners exist, and the activation batch inherits them:
+
+1. **A seam may be unwired, never parked.** Every confirmation or resolution
+   the root owns must settle unconditionally — the stub bridge denies
+   outright, and denies again if the bridge itself rejects. A resolver left
+   in a slot nothing reads is not a missing feature: the slash gateway's
+   busy flag never clears, so every later command is refused until restart.
+2. **No silent no-op for an action the user took.** Where the owner does not
+   exist yet, the root reports through the visible notice channel instead of
+   an empty arrow, so the missing owner is named rather than the input
+   vanishing.
+3. **Seams carry structured data, not invented formats.** Pasted image paths
+   travel beside the prompt text as their own argument; constructing the
+   image part belongs to the entry layer. Folded into the text, the entry
+   would have to reverse a private encoding.
+4. **Isolate caller-owned steps inside another layer's commit window.**
+   `/resume` and `/branch` set their commit flag only after the last UI step
+   returns, so one throwing subscriber rolled core back to the previous
+   session and deleted the fork just shown. Each step now runs isolated.
+5. **Callback identity at the mount is a contract, not a perf note.** The
+   host memo and dispatcher effect key on the callbacks they are given, so
+   the mount site must pass stable refs (U-8) — inline callbacks would
+   rebuild the host and re-run the interactive command loader per render.
 
 ## Rollout phases and gates
 
@@ -197,11 +235,11 @@ so plain-Node loadability is a Phase 3 gate (below), not an assumption.
   library, runner scenarios, and fixtures).
 - **Per-batch acceptance criteria** (each landing PR): build and typecheck
   clean across workspaces; ESLint + Prettier clean; the full `packages/cli`
-  vitest suite green; the default (ink) path byte-for-byte unchanged —
-  batches that add flag-gated code touch zero reachable ink code paths. The
-  activation batch additionally smoke-tests the flag under Bun (boot,
-  dialog, live turn, exit drain); the build/CI batch runs the OpenTUI e2e
-  leg green on CI.
+  vitest suite green; the default (ink) path byte-for-byte unchanged — the
+  batches landed so far touch zero reachable ink code paths because nothing
+  outside `src/ui/opentui/` imports them. The activation batch additionally
+  smoke-tests the flag under Bun (boot, dialog, live turn, exit drain); the
+  build/CI batch runs the OpenTUI e2e leg green on CI.
 - **1:1 parity audits** — screen-by-screen comparison against ink, plus a
   reverse audit pass, with surviving differences landing as tracked gaps
   (G-series) rather than silent drift.
@@ -230,6 +268,12 @@ so plain-Node loadability is a Phase 3 gate (below), not an assumption.
   to a sub-dialog and the composer belongs to the entry layer, so those
   settings rows and the arena picker report an unwired seam instead of
   acting.
+- Fatal render-error parity at the mount (#8662 U-10) — the composition root
+  wraps its subtree in the boundary with no props, while ink's call site
+  passes the exit-echo flag and an error hook that logs and schedules a
+  graceful exit; nothing outside the boundary's own test reads the OpenTUI
+  render-error store. Both ends live in the entry, so only the activation
+  batch can wire and verify them.
 - Gate hardening noted in the infra PR's second review round: JSX implicit
   runtime imports, triple-slash/JSDoc type references, UTF-16 sources, and
   tsconfig `baseUrl` bare-specifier resolution.
@@ -238,13 +282,15 @@ so plain-Node loadability is a Phase 3 gate (below), not an assumption.
 
 ## Related PRs
 
-| Batch                                               | PR                                       |
-| --------------------------------------------------- | ---------------------------------------- |
-| Infra                                               | #10134 (merged)                          |
-| Foundation modules                                  | #10146 (merged)                          |
-| Live-session & input                                | #10368 (merged)                          |
-| Dialogs & commands                                  | #10383 (merged)                          |
-| Backend composition root                            | #10696 (merged)                          |
-| Renderer activation                                 | next batch                               |
-| OpenTUI runtime npm packaging                       | #9885 (rebases after the build/CI batch) |
-| Original implementation (superseded by the batches) | #8677 (draft)                            |
+| Batch                                               | PR              |
+| --------------------------------------------------- | --------------- |
+| Infra                                               | #10134 (merged) |
+| Foundation modules                                  | #10146 (merged) |
+| Live-session & input                                | #10368 (merged) |
+| Dialogs & commands                                  | #10383 (merged) |
+| Backend composition root                            | #10696 (merged) |
+| Renderer activation                                 | next batch      |
+| OpenTUI runtime npm packaging (not a batch)         | #9885 (merged)  |
+| These design notes (not a batch)                    | #10343 (merged) |
+| Startup robustness: goal-runtime wait, Bun relaunch | #10128 (merged) |
+| Original implementation (superseded by the batches) | #8677 (draft)   |
