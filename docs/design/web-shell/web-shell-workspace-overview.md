@@ -143,3 +143,27 @@ workspace, whose sessions the sidebar lists itself, gets its counts passed in.
 - `GET /workspaces/:w/overview` on the daemon to collapse the fan-out into one
   request, advertised as `workspace_overview`, once the workspace-runtime
   stack has landed.
+
+## Layer B2 — the Workspaces panel
+
+`WorkspacesOverviewPanel` (App panel id `'workspaces'`) is a full-page table
+of every registered workspace, styled after the Session Overview panel:
+name with primary/untrusted badges, path, active session counts (running /
+needs-attention, 30 s cadence), MCP health (`connected/configured`, unknown
+while the runtime is not initialized), branch plus dirty count (60 s, the
+sidebar chip's discipline) and last activity. Daemon-owned `kind: 'live'`
+runtimes are not rows. Per-row actions: New task (targets that workspace)
+and Remove where the sidebar row would offer it. Entries: a "Manage
+workspaces…" row at the end of the Projects section (hidden when the
+sidebar is locked to one workspace) and an opt-in `workspacesOverview`
+footer item outside the default set.
+
+The removal flow moved out of the sidebar into
+`workspaces/useWorkspaceRemoval` + `WorkspaceRemovalDialog`, shared by the
+sidebar row and the panel: confirm → remove, `workspace_busy` surfaces the
+daemon's activity report and arms a forced retry (still blocked for the
+workspace the active session lives in), `workspace_mismatch` reconciles,
+and in-progress answers retry briefly. The sidebar keeps its own
+reconciliation (catalog invalidation, selection, capability refresh) as the
+hook's `onRemoved` callback; the panel invalidates the catalog and
+refreshes capabilities.
