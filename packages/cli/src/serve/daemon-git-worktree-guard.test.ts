@@ -3270,6 +3270,7 @@ describe('createDaemonToolGuard – win32 backslash masking (platform-stubbed)',
 
   beforeEach(() => {
     platformSpy = vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+    vi.spyOn(os, 'platform').mockReturnValue('win32');
     delete process.env['MSYSTEM'];
     delete process.env['TERM'];
     process.env['ComSpec'] = 'cmd.exe';
@@ -3369,7 +3370,10 @@ describe('createDaemonToolGuard – win32 backslash masking (platform-stubbed)',
     // traversal rather than be masked into an in-boundary-looking literal.
     await expect(
       guard(request('sh -c "git -C ./\\..\\/..\\/ reset --hard"')),
-    ).resolves.toMatchObject({ allowed: false });
+    ).resolves.toMatchObject({
+      allowed: false,
+      reason: expect.stringContaining('unresolvable repository location'),
+    });
   });
 
   it('treats backslashes as POSIX escapes and does not refute a benign command when the shell is git bash', async () => {
