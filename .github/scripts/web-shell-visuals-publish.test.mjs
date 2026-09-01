@@ -512,7 +512,7 @@ const runPublishStep = ({ uploadSucceeds, script = publishStep() }) => {
       join(bin, 'gh'),
       `#!/usr/bin/env node
 const args = process.argv.slice(2);
-require('node:fs').appendFileSync(process.env.CALL_LOG, args.join(' ') + '\\n');
+process.getBuiltinModule('node:fs').appendFileSync(process.env.CALL_LOG, args.join(' ') + '\\n');
 const endpoint = args[1] ?? '';
 if (endpoint === 'user') {
   process.stdout.write('qwen-code-bot\\n');
