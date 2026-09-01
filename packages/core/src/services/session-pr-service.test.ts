@@ -464,3 +464,136 @@ describe('mergeSessionPrLists', () => {
     expect(merged[merged.length - 1]?.number).toBe(SESSION_PR_LIST_LIMIT + 1);
   });
 });
+
+describe('issue snapshot', () => {
+  const issue = (number: number) => ({
+    number,
+    url: `https://github.com/owner/repo/issues/${number}`,
+    state: 'open' as const,
+  });
+
+  it('round-trips issues on an entry', async () => {
+    const prs = [{ ...entry(100), issues: [issue(7)] }];
+    await writeSessionPrs(filePath, prs);
+    expect(await readSessionPrs(filePath)).toEqual(prs);
+  });
+
+  it('voids the sidecar on a malformed or oversized issue list', async () => {
+    // The issue url is rendered as a link target exactly like the PR url.
+    await fs.writeFile(
+      filePath,
+      JSON.stringify({
+        prs: [{ ...entry(100), issues: [{ number: 7, url: 'javascript:x' }] }],
+      }),
+    );
+    expect(await readSessionPrs(filePath)).toBeNull();
+    await fs.writeFile(
+      filePath,
+      JSON.stringify({
+        prs: [{ ...entry(100), issues: [{ ...issue(7), state: 'merged' }] }],
+      }),
+    );
+    expect(await readSessionPrs(filePath)).toBeNull();
+    await fs.writeFile(
+      filePath,
+      JSON.stringify({
+        prs: [
+          {
+            ...entry(100),
+            issues: Array.from({ length: 11 }, (_, index) => issue(index + 1)),
+          },
+        ],
+      }),
+    );
+    expect(await readSessionPrs(filePath)).toBeNull();
+  });
+
+  it('keeps the snapshot on a re-bind of the same PR only', async () => {
+    await writeSessionPrs(filePath, [
+      { ...entry(100), state: 'open', issues: [issue(7)] },
+    ]);
+    const same = await upsertSessionPr(filePath, {
+      number: 100,
+      url: entry(100).url,
+    });
+    expect(same[0]?.issues).toEqual([issue(7)]);
+    const other = await upsertSessionPr(filePath, {
+      number: 100,
+      url: 'https://github.com/other/repo/pull/100',
+    });
+    expect(other[0]?.issues).toBeUndefined();
+  });
+
+  it('updateSessionPrStates writes issues with or without a state', async () => {
+    await writeSessionPrs(filePath, [
+      { ...entry(100), state: 'open' },
+      { ...entry(101), state: 'merged' },
+    ]);
+    const updated = await updateSessionPrStates(
+      filePath,
+      new Map([
+        [
+          100,
+          { state: 'merged' as const, url: entry(100).url, issues: [issue(7)] },
+        ],
+        [101, { url: entry(101).url, issues: [] }],
+      ]),
+    );
+    expect(updated).toBe(2);
+    const persisted = await readSessionPrs(filePath);
+    expect(persisted?.[0]).toMatchObject({
+      state: 'merged',
+      issues: [issue(7)],
+      createdAt: entry(100).createdAt,
+    });
+    // An empty snapshot is still a snapshot ("fetched, none").
+    expect(persisted?.[1]).toMatchObject({ state: 'merged', issues: [] });
+  });
+
+  it('updateSessionPrStates leaves issues alone when unchanged or omitted', async () => {
+    await writeSessionPrs(filePath, [
+      { ...entry(100), state: 'open', issues: [issue(7)] },
+    ]);
+    const before = await fs.readFile(filePath, 'utf-8');
+    expect(
+      await updateSessionPrStates(
+        filePath,
+        new Map([[100, { url: entry(100).url, issues: [issue(7)] }]]),
+      ),
+    ).toBe(0);
+    expect(await fs.readFile(filePath, 'utf-8')).toBe(before);
+    expect(
+      await updateSessionPrStates(
+        filePath,
+        new Map([[100, { state: 'closed' as const, url: entry(100).url }]]),
+      ),
+    ).toBe(1);
+    expect((await readSessionPrs(filePath))?.[0]).toMatchObject({
+      state: 'closed',
+      issues: [issue(7)],
+    });
+  });
+
+  it('updateSessionPrStates rewrites a changed issue state', async () => {
+    await writeSessionPrs(filePath, [
+      { ...entry(100), state: 'merged', issues: [issue(7)] },
+    ]);
+    expect(
+      await updateSessionPrStates(
+        filePath,
+        new Map([
+          [
+            100,
+            {
+              url: entry(100).url,
+              issues: [{ ...issue(7), state: 'completed' as const }],
+            },
+          ],
+        ]),
+      ),
+    ).toBe(1);
+    expect((await readSessionPrs(filePath))?.[0]?.issues?.[0]?.state).toBe(
+      'completed',
+    );
+  });
+});
