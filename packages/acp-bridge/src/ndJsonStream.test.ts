@@ -396,6 +396,7 @@ describe('ndJsonStream', () => {
         maxFrameBytes: 200,
         maxQueuedMessages: 2,
         maxQueuedBytes: 200,
+        queueSaturationGraceMs: 25,
       }),
     );
     await vi.waitFor(() =>
@@ -422,6 +423,7 @@ describe('ndJsonStream', () => {
         maxFrameBytes: 200,
         maxQueuedMessages: 100,
         maxQueuedBytes: firstBytes + 1,
+        queueSaturationGraceMs: 25,
       }),
     );
     await vi.waitFor(() =>
@@ -434,6 +436,88 @@ describe('ndJsonStream', () => {
     );
     expect(onTransportError).toHaveBeenCalledOnce();
     expect(onMessageReceived).toHaveBeenCalledOnce();
+    await stream.readable.cancel();
+  });
+
+  it('backpressures a saturated queue until a transiently slow consumer drains', async () => {
+    let inputController!: ReadableStreamDefaultController<Uint8Array>;
+    const input = new ReadableStream<Uint8Array>({
+      start(controller) {
+        inputController = controller;
+      },
+    });
+    const first = message('first', { text: 'x'.repeat(120) });
+    const second = message('second', { text: 'y'.repeat(120) });
+    const onQueueSaturated = vi.fn();
+    const onTransportError = vi.fn();
+    const stream = ndJsonStream(
+      new WritableStream<Uint8Array>(),
+      input,
+      { onQueueSaturated, onTransportError },
+      limits({
+        maxFrameBytes: 1024,
+        maxQueuedMessages: 2,
+        maxQueuedBytes: 220,
+        queueSaturationGraceMs: 5_000,
+      }),
+    );
+    inputController.enqueue(
+      encoder.encode(`${JSON.stringify(first)}\n${JSON.stringify(second)}\n`),
+    );
+
+    // No consumer read yet, so both frames charge the decoded queue and the
+    // second one saturates it. The pump must wait instead of failing.
+    await vi.waitFor(() => expect(onQueueSaturated).toHaveBeenCalledOnce());
+    expect(onTransportError).not.toHaveBeenCalled();
+
+    // Draining frees the queue; the waiting frame is then delivered.
+    const reader = stream.readable.getReader();
+    await expect(reader.read()).resolves.toMatchObject({
+      value: first,
+      done: false,
+    });
+    inputController.close();
+    await expect(reader.read()).resolves.toMatchObject({
+      value: second,
+      done: false,
+    });
+    await expect(reader.read()).resolves.toMatchObject({ done: true });
+    expect(onQueueSaturated).toHaveBeenCalledOnce();
+    expect(onTransportError).not.toHaveBeenCalled();
+    reader.releaseLock();
+  });
+
+  it('warns once before failing closed when the consumer stays stalled', async () => {
+    const first = message('first', { text: 'x'.repeat(120) });
+    const second = message('second', { text: 'y'.repeat(120) });
+    const onQueueSaturated = vi.fn();
+    const onTransportError = vi.fn();
+    const stream = ndJsonStream(
+      new WritableStream<Uint8Array>(),
+      byteStream([
+        encoder.encode(`${JSON.stringify(first)}\n${JSON.stringify(second)}\n`),
+      ]),
+      { onQueueSaturated, onTransportError },
+      limits({
+        maxFrameBytes: 1024,
+        maxQueuedMessages: 2,
+        maxQueuedBytes: 220,
+        queueSaturationGraceMs: 25,
+      }),
+    );
+
+    await vi.waitFor(() =>
+      expect(onTransportError).toHaveBeenCalledWith(
+        expect.any(NdJsonQueueLimitError),
+      ),
+    );
+    expect(onQueueSaturated).toHaveBeenCalledOnce();
+    expect(onQueueSaturated).toHaveBeenCalledWith(
+      expect.objectContaining({
+        maxQueuedBytes: 220,
+        graceMs: 25,
+      }),
+    );
     await stream.readable.cancel();
   });
 
@@ -481,6 +565,7 @@ describe('ndJsonStream', () => {
         maxFrameBytes: 1024,
         maxQueuedMessages: 2,
         maxQueuedBytes: 4096,
+        queueSaturationGraceMs: 25,
       }),
     );
     const connection = new ClientSideConnection(() => ({}) as never, stream);

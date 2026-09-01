@@ -14,17 +14,42 @@ export interface NdJsonMessageObservation {
   message: AnyMessage;
 }
 
+export interface NdJsonQueueSaturationInfo {
+  requiredBytes: number;
+  availableBytes: number;
+  maxQueuedMessages: number;
+  maxQueuedBytes: number;
+  graceMs: number;
+}
+
 export interface NdJsonStreamHooks {
   onMessageReceived?: (bytes: number) => void;
   onMessageSent?: (bytes: number) => void;
   onMessageObserved?: (observation: NdJsonMessageObservation) => void;
   onTransportError?: (error: unknown) => void;
+  /**
+   * Fired once per saturation episode, before the bounded backpressure wait
+   * starts. Warns that the decoded queue is full BEFORE the fail-closed
+   * guard can fire (issue #10162).
+   */
+  onQueueSaturated?: (info: NdJsonQueueSaturationInfo) => void;
 }
+
+/**
+ * How long the bounded reader waits for the consumer to drain the decoded
+ * queue before falling back to the fail-closed `NdJsonQueueLimitError`.
+ * Transient slow consumers (channel clients reconnecting, blocked outbound
+ * SSE) resolve within this window and keep the channel alive; a genuinely
+ * stalled consumer still tears the transport down afterwards so the memory
+ * bound remains effective.
+ */
+export const NDJSON_QUEUE_SATURATION_GRACE_MS = 10_000;
 
 export interface NdJsonStreamLimits {
   maxFrameBytes: number;
   maxQueuedMessages: number;
   maxQueuedBytes: number;
+  queueSaturationGraceMs?: number;
 }
 
 export type NdJsonInboundMessageValidator = (message: AnyMessage) => boolean;
@@ -216,9 +241,23 @@ function createBoundedReadable(
   const minimumQueueCharge = Math.ceil(
     limits.maxQueuedBytes / limits.maxQueuedMessages,
   );
+  const graceMs =
+    limits.queueSaturationGraceMs ?? NDJSON_QUEUE_SATURATION_GRACE_MS;
   let nextQueueCharge = minimumQueueCharge;
   let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   let canceled = false;
+  // Single waiter: only the pump loop ever waits for queue space.
+  let wakeQueueWaiter: (() => void) | undefined;
+  const waitForQueueSpace = (timeoutMs: number): Promise<void> =>
+    new Promise<void>((resolve) => {
+      const timer = setTimeout(finish, Math.max(0, timeoutMs));
+      function finish() {
+        clearTimeout(timer);
+        wakeQueueWaiter = undefined;
+        resolve();
+      }
+      wakeQueueWaiter = finish;
+    });
 
   return new ReadableStream<AnyMessage>(
     {
@@ -236,15 +275,23 @@ function createBoundedReadable(
           validateInboundMessage,
           fatalCleanEof,
           minimumQueueCharge,
+          graceMs,
+          waitForQueueSpace,
           (charge) => {
             nextQueueCharge = charge;
           },
           () => canceled,
         );
       },
+      pull() {
+        // The consumer drained enough to want more: wake a pump that is
+        // backpressured on a saturated decoded queue.
+        wakeQueueWaiter?.();
+      },
       async cancel(reason) {
         canceled = true;
         pending.clear();
+        wakeQueueWaiter?.();
         if (reader) await cancelReader(reader, reason);
       },
     },
@@ -267,6 +314,8 @@ async function pumpBoundedInput(
   validateInboundMessage: NdJsonInboundMessageValidator | undefined,
   fatalCleanEof: boolean,
   minimumQueueCharge: number,
+  queueSaturationGraceMs: number,
+  waitForQueueSpace: (timeoutMs: number) => Promise<void>,
   setNextQueueCharge: (charge: number) => void,
   isCanceled: () => boolean,
 ): Promise<void> {
@@ -283,7 +332,7 @@ async function pumpBoundedInput(
         return;
       }
       if (!result.value) continue;
-      readBoundedChunk(
+      await readBoundedChunk(
         result.value,
         pending,
         controller,
@@ -294,8 +343,12 @@ async function pumpBoundedInput(
         inboundRequests,
         validateInboundMessage,
         minimumQueueCharge,
+        queueSaturationGraceMs,
+        waitForQueueSpace,
         setNextQueueCharge,
+        isCanceled,
       );
+      if (isCanceled()) return;
     }
   } catch (error) {
     if (isCanceled()) return;
@@ -337,7 +390,7 @@ function readLegacyChunk(
   }
 }
 
-function readBoundedChunk(
+async function readBoundedChunk(
   chunk: Uint8Array,
   pending: BoundedFrameBuffer,
   controller: ReadableStreamDefaultController<AnyMessage>,
@@ -348,8 +401,11 @@ function readBoundedChunk(
   inboundRequests: BoundedInboundRequestLedger,
   validateInboundMessage: NdJsonInboundMessageValidator | undefined,
   minimumQueueCharge: number,
+  queueSaturationGraceMs: number,
+  waitForQueueSpace: (timeoutMs: number) => Promise<void>,
   setNextQueueCharge: (charge: number) => void,
-): void {
+  isCanceled: () => boolean,
+): Promise<void> {
   let start = 0;
   let newline = chunk.indexOf(0x0a, start);
   while (newline !== -1) {
@@ -363,15 +419,16 @@ function readBoundedChunk(
       continue;
     }
     const queueCharge = Math.max(frameBytes, minimumQueueCharge);
-    const availableBytes = controller.desiredSize;
-    if (availableBytes === null || queueCharge > availableBytes) {
-      throw new NdJsonQueueLimitError(
-        limits.maxQueuedMessages,
-        limits.maxQueuedBytes,
-        queueCharge,
-        Math.max(0, availableBytes ?? 0),
-      );
-    }
+    await waitForDecodedQueueSpace({
+      controller,
+      limits,
+      queueCharge,
+      queueSaturationGraceMs,
+      waitForQueueSpace,
+      hooks,
+      isCanceled,
+    });
+    if (isCanceled()) return;
     setNextQueueCharge(queueCharge);
     handleBoundedLine(
       pending.take(current),
@@ -386,6 +443,88 @@ function readBoundedChunk(
     newline = chunk.indexOf(0x0a, start);
   }
   if (start < chunk.length) pending.append(chunk.subarray(start));
+}
+
+interface DecodedQueueSpaceOptions {
+  controller: ReadableStreamDefaultController<AnyMessage>;
+  limits: NdJsonStreamLimits;
+  queueCharge: number;
+  queueSaturationGraceMs: number;
+  waitForQueueSpace: (timeoutMs: number) => Promise<void>;
+  hooks: NdJsonStreamHooks | undefined;
+  isCanceled: () => boolean;
+}
+
+/**
+ * Waits (bounded) for room in the decoded queue instead of failing the
+ * transport immediately (issue #10162). Saturating the queue means the
+ * consumer is slow; pausing the producer backpressures the agent's stdout
+ * pipe and keeps the memory bound intact. Only if the consumer stays slow
+ * for the whole grace window does the original fail-closed guard fire.
+ */
+async function waitForDecodedQueueSpace({
+  controller,
+  limits,
+  queueCharge,
+  queueSaturationGraceMs,
+  waitForQueueSpace,
+  hooks,
+  isCanceled,
+}: DecodedQueueSpaceOptions): Promise<void> {
+  let availableBytes = controller.desiredSize;
+  if (availableBytes === null) {
+    throw new NdJsonQueueLimitError(
+      limits.maxQueuedMessages,
+      limits.maxQueuedBytes,
+      queueCharge,
+      0,
+    );
+  }
+  if (queueCharge <= availableBytes) return;
+  // A frame that would not fit even in a fully drained queue can never be
+  // rescued by waiting.
+  if (queueCharge > limits.maxQueuedBytes) {
+    throw new NdJsonQueueLimitError(
+      limits.maxQueuedMessages,
+      limits.maxQueuedBytes,
+      queueCharge,
+      Math.max(0, availableBytes),
+    );
+  }
+
+  callHook(hooks?.onQueueSaturated, {
+    requiredBytes: queueCharge,
+    availableBytes: Math.max(0, availableBytes),
+    maxQueuedMessages: limits.maxQueuedMessages,
+    maxQueuedBytes: limits.maxQueuedBytes,
+    graceMs: queueSaturationGraceMs,
+  });
+
+  const deadline = Date.now() + queueSaturationGraceMs;
+  while (queueCharge > availableBytes) {
+    if (isCanceled()) return;
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) {
+      throw new NdJsonQueueLimitError(
+        limits.maxQueuedMessages,
+        limits.maxQueuedBytes,
+        queueCharge,
+        Math.max(0, availableBytes),
+      );
+    }
+    await waitForQueueSpace(remainingMs);
+    if (isCanceled()) return;
+    const nextAvailableBytes = controller.desiredSize;
+    if (nextAvailableBytes === null) {
+      throw new NdJsonQueueLimitError(
+        limits.maxQueuedMessages,
+        limits.maxQueuedBytes,
+        queueCharge,
+        0,
+      );
+    }
+    availableBytes = nextAvailableBytes;
+  }
 }
 
 function takeLegacyLineBytes(
@@ -721,6 +860,9 @@ export function validateNdJsonStreamLimits(limits: NdJsonStreamLimits): void {
     ['maxFrameBytes', limits.maxFrameBytes],
     ['maxQueuedMessages', limits.maxQueuedMessages],
     ['maxQueuedBytes', limits.maxQueuedBytes],
+    ...(limits.queueSaturationGraceMs !== undefined
+      ? ([['queueSaturationGraceMs', limits.queueSaturationGraceMs]] as const)
+      : []),
   ] as const;
   for (const [name, value] of values) {
     if (!Number.isSafeInteger(value) || value <= 0) {
