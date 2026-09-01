@@ -107,9 +107,12 @@ describe('useDaemonMcp', () => {
     expect(current?.loadTools).toBe(first?.loadTools);
   });
 
-  it('does not treat prototype properties as user config servers', async () => {
-    workspaceClient.mcpConfig.mockResolvedValue({ user: {}, workspace: {} });
-    workspaceClient.setMcpServerEnabled.mockResolvedValue({ changed: true });
+  it('uses own properties when selecting a config scope', async () => {
+    workspaceClient.mcpConfig.mockResolvedValue({
+      user: { constructor: { command: 'user-server' } },
+      workspace: {},
+    });
+    client.setUserMcpServerEnabled.mockResolvedValue({ changed: true });
     let current: ReturnType<typeof useDaemonMcp> | undefined;
     function TestComponent() {
       current = useDaemonMcp({
@@ -121,10 +124,10 @@ describe('useDaemonMcp', () => {
     await act(async () => root.render((<TestComponent />) as ReactNode));
     await current?.manageServer('constructor', 'disable');
 
-    expect(client.setUserMcpServerEnabled).not.toHaveBeenCalled();
-    expect(workspaceClient.setMcpServerEnabled).toHaveBeenCalledWith(
+    expect(client.setUserMcpServerEnabled).toHaveBeenCalledWith(
       'constructor',
       false,
     );
+    expect(workspaceClient.setMcpServerEnabled).not.toHaveBeenCalled();
   });
 });

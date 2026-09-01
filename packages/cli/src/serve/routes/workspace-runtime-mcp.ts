@@ -19,7 +19,7 @@ import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from '../workspace-registry.js';
-import { getWorkspaceRuntimeCoordinator } from '../workspace-runtime-coordinator.js';
+import { getWorkspaceRuntimeCoordinatorIfSupported } from '../workspace-runtime-coordinator.js';
 
 interface WorkspaceRuntimeMcpRoutesDeps {
   workspaceRegistry: WorkspaceRegistry;
@@ -37,17 +37,32 @@ function validateRuntimeServerName(
   if (
     typeof name === 'string' &&
     name.length > 0 &&
-    name.length <= MAX_SERVER_NAME_LENGTH
+    name.length <= MAX_SERVER_NAME_LENGTH &&
+    name !== '__proto__' &&
+    name !== 'constructor' &&
+    name !== 'prototype'
   )
     return true;
   res.status(400).json({
     error:
-      typeof name === 'string' && name.length > 0
-        ? `Server name exceeds ${MAX_SERVER_NAME_LENGTH}-character limit`
-        : 'Server name is required and must be a non-empty string',
+      name === '__proto__' || name === 'constructor' || name === 'prototype'
+        ? 'Server name must not be a reserved JS property name'
+        : typeof name === 'string' && name.length > 0
+          ? `Server name exceeds ${MAX_SERVER_NAME_LENGTH}-character limit`
+          : 'Server name is required and must be a non-empty string',
     code: 'invalid_server_name',
   });
   return false;
+}
+
+function requireRuntimeCoordinator(runtime: WorkspaceRuntime, res: Response) {
+  const coordinator = getWorkspaceRuntimeCoordinatorIfSupported(runtime);
+  if (coordinator) return coordinator;
+  res.status(501).json({
+    error: 'Workspace runtime lifecycle is not supported',
+    code: 'workspace_runtime_not_supported',
+  });
+  return undefined;
 }
 
 function parseReloadOptions(body: Record<string, unknown>, res: Response) {
@@ -167,13 +182,13 @@ function registerFor(
     async (req, res) => {
       const runtime = resolveRuntime(req, res);
       if (!runtime) return;
+      const coordinator = requireRuntimeCoordinator(runtime, res);
+      if (!coordinator) return;
       const options = parseReloadOptions(deps.safeBody(req), res);
       if (!options) return;
       const route = `POST ${base}/runtime/mcp/reload`;
       try {
-        const result = await getWorkspaceRuntimeCoordinator(
-          runtime,
-        ).runMcpRuntimeMutation(() =>
+        const result = await coordinator.runMcpRuntimeMutation(() =>
           runtime.bridge.reloadWorkspaceMcp(options),
         );
         runtime.generationGuard?.assertOpen();
@@ -190,15 +205,15 @@ function registerFor(
     async (req, res) => {
       const runtime = resolveRuntime(req, res);
       if (!runtime) return;
+      const coordinator = requireRuntimeCoordinator(runtime, res);
+      if (!coordinator) return;
       const serverName = req.params['server'];
       if (!validateRuntimeServerName(serverName, res)) return;
       const entryIndex = parseEntryIndex(req, res);
       if (entryIndex === null) return;
       const route = `POST ${base}/runtime/mcp/:server/restart`;
       try {
-        const result = await getWorkspaceRuntimeCoordinator(
-          runtime,
-        ).runMcpRuntimeMutation(() =>
+        const result = await coordinator.runMcpRuntimeMutation(() =>
           runtime.workspaceService.restartMcpServer(
             createBuildWorkspaceCtx(runtime.workspaceCwd)(route),
             serverName,
@@ -220,13 +235,13 @@ function registerFor(
       async (req, res) => {
         const runtime = resolveRuntime(req, res);
         if (!runtime) return;
+        const coordinator = requireRuntimeCoordinator(runtime, res);
+        if (!coordinator) return;
         const serverName = req.params['server'];
         if (!validateRuntimeServerName(serverName, res)) return;
         const route = `POST ${base}/runtime/mcp/:server/${action}`;
         try {
-          const result = await getWorkspaceRuntimeCoordinator(
-            runtime,
-          ).runMcpRuntimeMutation(() =>
+          const result = await coordinator.runMcpRuntimeMutation(() =>
             runtime.bridge.manageMcpServer(serverName, action, undefined),
           );
           runtime.generationGuard?.assertOpen();

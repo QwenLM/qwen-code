@@ -434,6 +434,34 @@ describe('workspace actions', () => {
     );
   });
 
+  it('disables a user MCP server in user scope', async () => {
+    const setUserMcpServerEnabled = vi
+      .fn()
+      .mockResolvedValue({ changed: true, activation: 'reconciling' });
+    const setMcpServerEnabled = vi.fn();
+    const workspaceByCwd = vi.fn(() => ({
+      mcpConfig: vi.fn().mockResolvedValue({
+        user: { docs: { command: 'docs' } },
+        workspace: {},
+      }),
+      setMcpServerEnabled,
+    }));
+    const actions = createDaemonWorkspaceActions({
+      getClient: () =>
+        ({
+          setUserMcpServerEnabled,
+          workspaceByCwd,
+        }) as unknown as DaemonClient,
+      getWorkspaceCwd: () => '/secondary',
+      baseUrl: 'http://daemon',
+    });
+
+    await actions.manageMcpServer('docs', 'disable');
+
+    expect(setUserMcpServerEnabled).toHaveBeenCalledWith('docs', false);
+    expect(setMcpServerEnabled).not.toHaveBeenCalled();
+  });
+
   it('forwards an extension interaction response to the daemon client', async () => {
     const respondToExtensionInteraction = vi
       .fn()

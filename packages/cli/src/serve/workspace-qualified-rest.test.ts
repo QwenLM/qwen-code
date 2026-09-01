@@ -1131,6 +1131,18 @@ describe('workspace-qualified core REST', () => {
         restarted: true,
       });
 
+      for (const name of ['constructor', '__proto__', 'prototype']) {
+        const reserved = await request(h.app)
+          .post(
+            `/workspaces/${encodeURIComponent(h.secondaryId)}/runtime/mcp/${name}/clear-auth`,
+          )
+          .set('Authorization', 'Bearer secret')
+          .set('Host', host())
+          .send({});
+        expect(reserved.status).toBe(400);
+        expect(reserved.body.code).toBe('invalid_server_name');
+      }
+
       const enable = await request(h.app)
         .post(
           `/workspaces/${encodeURIComponent(h.secondaryId)}/mcp/docs/enable`,
@@ -1184,6 +1196,28 @@ describe('workspace-qualified core REST', () => {
       expect(res.body.code).toBe('untrusted_workspace');
     } finally {
       await fsp.rm(untrusted.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('reports unsupported lifecycle for runtime MCP mutations', async () => {
+    const h = await makeHarness({ token: 'secret' });
+    try {
+      const runtime = h.workspaceRegistry.getByWorkspaceId(h.secondaryId)!;
+      delete (runtime.bridge as Partial<typeof runtime.bridge>)
+        .getWorkspaceRuntimeLifecycleSnapshot;
+
+      const res = await request(h.app)
+        .post(
+          `/workspaces/${encodeURIComponent(h.secondaryId)}/runtime/mcp/reload`,
+        )
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({});
+
+      expect(res.status).toBe(501);
+      expect(res.body.code).toBe('workspace_runtime_not_supported');
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
     }
   });
 

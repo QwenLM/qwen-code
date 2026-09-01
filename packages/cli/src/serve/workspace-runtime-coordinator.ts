@@ -231,12 +231,20 @@ export class WorkspaceRuntimeCoordinator {
       revision,
       ...(initial.runtimeLive ? { runtimeEpoch: initial.runtimeEpoch } : {}),
     };
-    return await this.queueMcpWork(async () => {
+    let started = false;
+    const operation = this.queueMcpWork(async () => {
+      started = true;
       let snapshot = this.bridge.getWorkspaceRuntimeLifecycleSnapshot();
       let mutationRejected = false;
       try {
         if (!snapshot.runtimeLive) {
-          await this.bridge.preheat({ keepAliveMs: ENSURE_KEEP_ALIVE_MS });
+          try {
+            await this.bridge.preheat({ keepAliveMs: ENSURE_KEEP_ALIVE_MS });
+          } catch (error) {
+            if (error instanceof WorkspaceRuntimeStillStartingError)
+              throw error;
+            throw new WorkspaceRuntimeInitializationError(error);
+          }
           snapshot = this.bridge.getWorkspaceRuntimeLifecycleSnapshot();
           if (!snapshot.runtimeLive) {
             throw new WorkspaceRuntimeInitializationError(
@@ -276,6 +284,15 @@ export class WorkspaceRuntimeCoordinator {
         throw error;
       }
     });
+    try {
+      return await operation;
+    } catch (error) {
+      if (!started) {
+        if (this.draining && !this.disposed) this.mcpReconcileDeferred = true;
+        this.recordMcpError(revision, initial.runtimeEpoch, error);
+      }
+      throw error;
+    }
   }
 
   private prepareMcp(): Promise<void> {
@@ -305,7 +322,12 @@ export class WorkspaceRuntimeCoordinator {
     const deadline = Date.now() + MCP_PREPARE_TIMEOUT_MS;
     let snapshot = this.bridge.getWorkspaceRuntimeLifecycleSnapshot();
     if (!snapshot.runtimeLive) {
-      await this.bridge.preheat({ keepAliveMs: ENSURE_KEEP_ALIVE_MS });
+      try {
+        await this.bridge.preheat({ keepAliveMs: ENSURE_KEEP_ALIVE_MS });
+      } catch (error) {
+        if (error instanceof WorkspaceRuntimeStillStartingError) throw error;
+        throw new WorkspaceRuntimeInitializationError(error);
+      }
       snapshot = this.bridge.getWorkspaceRuntimeLifecycleSnapshot();
     }
     const epoch = snapshot.runtimeEpoch;

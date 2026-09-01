@@ -532,7 +532,11 @@ export function McpStatusMessage({
                 : details;
           }
         }
-        await reloadSelectedServer();
+        try {
+          await reloadSelectedServer();
+        } catch (error) {
+          if (!nextActionMessage) throw error;
+        }
         setActionMessage(
           nextActionMessage ?? t('mcp.action.done', { action: action.label }),
         );
