@@ -3106,6 +3106,12 @@ export class CoreToolScheduler {
                     `Auto mode fallback to manual approval (${outcome.reason}): ` +
                       formatDenialStateLog(denialState),
                   );
+                } else if (outcome.reason === 'external_write') {
+                  this.autoModeFallbackCallIds.add(reqInfo.callId);
+                  autoModeFallbackMessage = outcome.message;
+                  debugLogger.warn(
+                    `Auto mode fallback to manual approval (external_write): Write attempted outside workspace.`,
+                  );
                 }
                 break;
               default: {
@@ -6513,18 +6519,23 @@ export class CoreToolScheduler {
                 outcome.reason === 'classifier_unavailable'
               ) {
                 this.autoModeFallbackCallIds.add(pendingTool.request.callId);
-                if (outcome.message) {
-                  this.setStatusInternal(
-                    pendingTool.request.callId,
-                    'awaiting_approval',
-                    decorateClassifierUnavailableConfirmation(
-                      pendingTool.confirmationDetails,
-                      outcome.message,
-                    ),
-                  );
-                }
                 debugLogger.warn(
                   `Auto mode fallback for pending tool (${outcome.reason}): consecutiveBlock=${denialState.consecutiveBlock}, consecutiveUnavailable=${denialState.consecutiveUnavailable}`,
+                );
+              } else if (outcome.reason === 'external_write') {
+                debugLogger.warn(
+                  `Auto mode fallback to manual approval (external_write): Write attempted outside workspace.`,
+                );
+              }
+
+              if (outcome.message) {
+                this.setStatusInternal(
+                  pendingTool.request.callId,
+                  'awaiting_approval',
+                  decorateClassifierUnavailableConfirmation(
+                    pendingTool.confirmationDetails,
+                    outcome.message,
+                  ),
                 );
               }
               break;
