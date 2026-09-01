@@ -114,15 +114,17 @@ template at all — no new plumbing anywhere.
 - `qwen-autofix`'s Critical-only mode (engaged after round 5, or earlier when
   a counting window's diff-growth budget trips) recognizes visible
   `**[Critical]**` markers and Request-changes review state. Attribution-off
-  findings posted under another verdict lose the visible marker and are
-  deferred as non-Critical; attribution-off findings in a Request-changes
-  review remain actionable through that state. Disclosed in the setting's
-  description. A fix that parses the invisible severity marker is a possible
-  follow-up, not part of this PR.
+  findings lose the visible marker; when their poster is subject to deferral
+  (the review bot, or an author over the window's feedback-batch budget), they
+  are deferred unless the posted review has Request-changes state. That state
+  keeps the findings actionable. A self-authored PR's Request-changes verdict
+  is posted as Comment, so it provides no state-based exception. Disclosed in
+  the setting's description. A fix that parses the invisible severity marker
+  is a possible follow-up, not part of this PR.
 
 ### Prompt layer (SKILL.md, dogfooded)
 
-3. Step 7's comment-body paragraph drops the labelled template **as the
+5. Step 7's comment-body paragraph drops the labelled template **as the
    only register**: write each description as plain reviewer prose in the
    PR's language — no `Failure scenario:` label, no `→` notation; state the
    problem, when it bites, and the fix in ordinary sentences. The evidence
