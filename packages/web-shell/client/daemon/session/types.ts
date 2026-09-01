@@ -30,8 +30,10 @@ import type {
   DaemonSession,
   DaemonSessionSummary,
   DaemonSessionSupportedCommandsStatus,
-  DaemonSessionTaskStatus,
+  DaemonSessionTaskWithWorkflowStatus,
   DaemonSessionTasksStatus,
+  DaemonSessionWorkflowTaskStatus,
+  DaemonSessionWorkflowTasksStatus,
   DaemonSessionStatsStatus,
   DaemonSessionArtifactsEnvelope,
   DaemonSkillToggleMutation,
@@ -250,6 +252,8 @@ export type DaemonNoticeOperation =
   | 'read_attachment'
   | 'remove_attachment'
   | 'cancel_task'
+  | 'control_workflow'
+  | 'run_saved_workflow'
   | 'load_goal'
   | 'control_goal'
   | 'clear_goal'
@@ -549,10 +553,26 @@ export interface DaemonSessionActions {
   ): Promise<DaemonRemovePendingPromptResult>;
   sendShellCommand(command: string): Promise<DaemonShellCommandResult>;
   getTasks(opts?: GetTasksActionOptions): Promise<DaemonSessionTasksStatus>;
+  getWorkflowTasks(
+    opts?: GetTasksActionOptions,
+  ): Promise<DaemonSessionWorkflowTasksStatus>;
   cancelTask(
     taskId: string,
-    kind: DaemonSessionTaskStatus['kind'],
+    kind: DaemonSessionTaskWithWorkflowStatus['kind'],
   ): Promise<{ cancelled: boolean }>;
+  controlWorkflowTask(
+    taskId: string,
+    action: 'pause' | 'resume' | 'retry' | 'rerun' | 'delete-history',
+  ): Promise<{
+    changed: boolean;
+    status?: DaemonSessionWorkflowTaskStatus['status'];
+    taskId?: string;
+  }>;
+  runSavedWorkflow(name: string): Promise<{
+    started: boolean;
+    status?: DaemonSessionWorkflowTaskStatus['status'];
+    taskId?: string;
+  }>;
   getGoal(): Promise<GoalStateResponse>;
   controlGoal(request: GoalControlRequest): Promise<GoalStateResponse>;
   /**
