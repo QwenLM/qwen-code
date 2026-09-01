@@ -207,6 +207,27 @@ describe('CodeModeOnly exposure', () => {
     expect(description).not.toContain('mcp__server__fetch(args: Record');
     expect(description).toContain('"deferred":true');
   });
+
+  it('keeps numeric schema limits visible in nested tool declarations', () => {
+    const boundedPlan = planCodeModeBindings(
+      [
+        new MockTool({
+          name: 'run_shell_command',
+          params: {
+            type: 'object',
+            properties: {
+              timeout: { type: 'integer', minimum: 1, maximum: 600000 },
+            },
+          },
+        }),
+      ],
+      () => false,
+    );
+
+    expect(buildExecDescription(boundedPlan)).toContain(
+      '"timeout"?: number /* min 1, max 600000 */',
+    );
+  });
 });
 
 describe('code mode protocol', () => {

@@ -172,7 +172,16 @@ function schemaToType(schema: unknown): string {
       .join(' | ');
   }
   if (type === 'string') return 'string';
-  if (type === 'number' || type === 'integer') return 'number';
+  if (type === 'number' || type === 'integer') {
+    const bounds: string[] = [];
+    if (typeof node['minimum'] === 'number') {
+      bounds.push(`min ${node['minimum']}`);
+    }
+    if (typeof node['maximum'] === 'number') {
+      bounds.push(`max ${node['maximum']}`);
+    }
+    return bounds.length > 0 ? `number /* ${bounds.join(', ')} */` : 'number';
+  }
   if (type === 'boolean') return 'boolean';
   if (type === 'null') return 'null';
   if (type === 'array') return `Array<${schemaToType(node['items'])}>`;
