@@ -67,6 +67,17 @@ describe('OpenAIContentConverter', () => {
     };
   }
 
+  function withQwen3TaggedThinkingStreamParser(): RequestContext {
+    return {
+      ...withStreamParser(),
+      model: 'qwen3.8-max',
+      responseParsingOptions: {
+        contentOnlyThinkingTagLeaks: true,
+        taggedThinkingTagsAfterReasoning: true,
+      },
+    };
+  }
+
   function hasOpenAIToolCalls(
     message: OpenAI.Chat.ChatCompletionMessageParam,
   ): message is OpenAI.Chat.ChatCompletionAssistantMessageParam & {
@@ -5845,6 +5856,117 @@ describe('OpenAIContentConverter', () => {
         { text: 'answer ' },
         { text: 'still thinking', thought: true },
       ]);
+    });
+
+    it('should stream ordinary Qwen3 reasoning and content immediately', () => {
+      const context = withQwen3TaggedThinkingStreamParser();
+
+      const reasoningChunk = converter.convertOpenAIChunkToLlm(
+        {
+          choices: [
+            {
+              index: 0,
+              delta: { reasoning_content: 'step 1' },
+              finish_reason: null,
+            },
+          ],
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        context,
+      );
+      const contentChunk = converter.convertOpenAIChunkToLlm(
+        {
+          choices: [
+            {
+              index: 0,
+              delta: { content: 'answer' },
+              finish_reason: null,
+            },
+          ],
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        context,
+      );
+
+      expect(reasoningChunk.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'step 1', thought: true },
+      ]);
+      expect(contentChunk.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'answer' },
+      ]);
+    });
+
+    it('should parse a balanced Qwen3 thinking block after reasoning', () => {
+      const context = withQwen3TaggedThinkingStreamParser();
+
+      converter.convertOpenAIChunkToLlm(
+        {
+          choices: [
+            {
+              index: 0,
+              delta: { reasoning_content: 'step 1' },
+              finish_reason: null,
+            },
+          ],
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        context,
+      );
+      const openingChunk = converter.convertOpenAIChunkToLlm(
+        {
+          choices: [
+            { index: 0, delta: { content: '<thi' }, finish_reason: null },
+          ],
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        context,
+      );
+      const finalChunk = converter.convertOpenAIChunkToLlm(
+        {
+          choices: [
+            {
+              index: 0,
+              delta: { content: 'nking>step 2</thinking>answer' },
+              finish_reason: 'stop',
+            },
+          ],
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        context,
+      );
+
+      expect(openingChunk.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(finalChunk.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'step 2', thought: true },
+        { text: 'answer' },
+      ]);
+    });
+
+    it('should reject an unclosed Qwen3 thinking block after reasoning', () => {
+      const context = withQwen3TaggedThinkingStreamParser();
+
+      converter.convertOpenAIChunkToLlm(
+        {
+          choices: [
+            {
+              index: 0,
+              delta: { reasoning_content: 'step 1' },
+              finish_reason: null,
+            },
+          ],
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        context,
+      );
+
+      expect(() =>
+        converter.convertOpenAIChunkToLlm(
+          {
+            choices: [
+              {
+                index: 0,
+                delta: { content: '<thinking>step 2' },
+                finish_reason: 'stop',
+              },
+            ],
+          } as unknown as OpenAI.Chat.ChatCompletionChunk,
+          context,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
     });
   });
 

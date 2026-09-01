@@ -113,7 +113,7 @@ describe('DefaultOpenAICompatibleProvider', () => {
     it('parses tagged thinking for Qwen3 models', () => {
       expect(provider.getResponseParsingOptions('qwen3.8-max')).toEqual({
         contentOnlyThinkingTagLeaks: true,
-        taggedThinkingTags: true,
+        taggedThinkingTagsAfterReasoning: true,
       });
     });
   });

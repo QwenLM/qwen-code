@@ -226,7 +226,9 @@ export class DefaultOpenAICompatibleProvider
     // (observed in production on qwen3-class models, issue #6666).
     return {
       contentOnlyThinkingTagLeaks: true,
-      ...(model && isQwen3Model(model) ? { taggedThinkingTags: true } : {}),
+      ...(model && isQwen3Model(model)
+        ? { taggedThinkingTagsAfterReasoning: true }
+        : {}),
     };
   }
 
