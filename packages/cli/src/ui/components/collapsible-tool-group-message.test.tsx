@@ -11,6 +11,7 @@ import type { Config } from '@qwen-code/qwen-code-core';
 import { LoadedSettings } from '../../config/settings.js';
 import { renderWithProviders } from '../../test-utils/render.js';
 import { VirtualViewportContext } from '../contexts/VirtualViewportContext.js';
+import { ToolDetailsExpandedProvider } from '../contexts/ToolDetailsExpandedContext.js';
 import { useMouseEvents } from '../hooks/useMouseEvents.js';
 import type { MouseEvent } from '../utils/mouse.js';
 import {
@@ -18,7 +19,10 @@ import {
   measureElementPosition,
 } from '../utils/measure-element-position.js';
 import { ToolCallStatus } from '../types.js';
-import { CollapsibleToolGroupMessage } from './HistoryItemDisplay.js';
+import {
+  CollapsibleToolGroupMessage,
+  HistoryItemDisplay,
+} from './HistoryItemDisplay.js';
 import { ToolGroupMessage } from './messages/ToolGroupMessage.js';
 
 vi.mock('../hooks/useMouseEvents.js', () => ({
@@ -136,6 +140,75 @@ describe('<CollapsibleToolGroupMessage />', () => {
 
     expect(lastFrame()).toContain('const veryLongSource = true;');
     expect(lastFrame()).toContain('very long result');
+  });
+
+  it('keeps a live tool expanded when its history row remounts', () => {
+    vi.mocked(measureElementPosition).mockReturnValue({
+      x: 0,
+      y: 0,
+      width: 80,
+      height: 1,
+    });
+    vi.mocked(layoutRowForEvent).mockImplementation((_node, row) => row - 1);
+    const expandBatch = vi.fn();
+    vi.mocked(useMouseEvents).mockClear();
+    const pending = renderWithProviders(
+      <ToolDetailsExpandedProvider
+        value={{ expandedBatchIds: new Set<string>(), expandBatch }}
+      >
+        <VirtualViewportContext.Provider value={true}>
+          <HistoryItemDisplay
+            item={{
+              id: 0,
+              type: 'tool_group',
+              batchId: 'tool-batch-test-1',
+              tools: [tool],
+            }}
+            terminalWidth={100}
+            isPending
+          />
+        </VirtualViewportContext.Provider>
+      </ToolDetailsExpandedProvider>,
+      { settings: collapsedSettings, config: {} as Config },
+    );
+    const handler = vi.mocked(useMouseEvents).mock.calls.at(-1)?.[0];
+
+    act(() => {
+      handler?.(mouseEvent('left-press', 5));
+      handler?.(mouseEvent('left-release', 5));
+    });
+
+    expect(expandBatch).toHaveBeenCalledWith('tool-batch-test-1');
+    pending.unmount();
+    vi.mocked(useMouseEvents).mockClear();
+
+    const committed = renderWithProviders(
+      <ToolDetailsExpandedProvider
+        value={{
+          expandedBatchIds: new Set(['tool-batch-test-1']),
+          expandBatch,
+        }}
+      >
+        <VirtualViewportContext.Provider value={true}>
+          <HistoryItemDisplay
+            item={{
+              id: 1,
+              type: 'tool_group',
+              batchId: 'tool-batch-test-1',
+              tools: [tool],
+            }}
+            terminalWidth={100}
+            isPending={false}
+          />
+        </VirtualViewportContext.Provider>
+      </ToolDetailsExpandedProvider>,
+      { settings: collapsedSettings, config: {} as Config },
+    );
+
+    expect(committed.lastFrame()).toContain('very long result');
+    expect(vi.mocked(useMouseEvents).mock.calls.at(-1)?.[1]).toMatchObject({
+      isActive: false,
+    });
   });
 
   it('does not expand while selecting text', () => {

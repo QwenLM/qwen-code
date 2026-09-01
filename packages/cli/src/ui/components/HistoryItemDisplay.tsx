@@ -63,6 +63,7 @@ import { GoalStatusMessage } from './messages/GoalStatusMessage.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { useVirtualViewport } from '../contexts/VirtualViewportContext.js';
 import { useThoughtExpanded } from '../contexts/ThoughtExpandedContext.js';
+import { useToolDetailsExpanded } from '../contexts/ToolDetailsExpandedContext.js';
 import { useMouseEvents } from '../hooks/useMouseEvents.js';
 import { useMouseTrackingEnabled } from '../hooks/use-mouse-tracking-enabled.js';
 import type { MouseEvent } from '../utils/mouse.js';
@@ -221,11 +222,18 @@ function hasRequiredToolInteraction(
   });
 }
 
+type CollapsibleToolGroupMessageProps = React.ComponentProps<
+  typeof ToolGroupMessage
+> & {
+  expansionKey?: string;
+};
+
 export const CollapsibleToolGroupMessage: React.FC<
-  React.ComponentProps<typeof ToolGroupMessage>
-> = (props) => {
+  CollapsibleToolGroupMessageProps
+> = ({ expansionKey, ...props }) => {
   const settings = useSettings();
-  const [expanded, setExpanded] = useState(false);
+  const [locallyExpanded, setLocallyExpanded] = useState(false);
+  const { expandedBatchIds, expandBatch } = useToolDetailsExpanded();
   const ref = useRef<DOMElement>(null);
   const pressRef = useRef<{ col: number; row: number } | null>(null);
   const { rows: terminalHeight } = useTerminalSize();
@@ -235,7 +243,8 @@ export const CollapsibleToolGroupMessage: React.FC<
     mouseTrackingEnabled;
   const collapsed =
     settings.merged.ui?.showToolCallDetails === false &&
-    !expanded &&
+    !locallyExpanded &&
+    !(expansionKey && expandedBatchIds.has(expansionKey)) &&
     !props.fullDetail &&
     !hasRequiredToolInteraction(props);
 
@@ -274,10 +283,14 @@ export const CollapsibleToolGroupMessage: React.FC<
         const press = pressRef.current;
         pressRef.current = null;
         if (isInside && press?.col === event.col && press.row === event.row) {
-          setExpanded(true);
+          if (expansionKey) {
+            expandBatch(expansionKey);
+          } else {
+            setLocallyExpanded(true);
+          }
         }
       },
-      [collapsed, terminalHeight],
+      [collapsed, terminalHeight, expansionKey, expandBatch],
     ),
     { isActive: collapsed && clickable },
   );
@@ -515,6 +528,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           memoryReadCount={itemForDisplay.memoryReadCount}
           isUserInitiated={itemForDisplay.isUserInitiated}
           fullDetail={fullDetail}
+          expansionKey={itemForDisplay.batchId}
         />
       )}
       {itemForDisplay.type === 'tool_use_summary' && (

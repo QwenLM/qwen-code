@@ -15,10 +15,12 @@ time, and an expansion hint. Arguments, results, images, and notices remain in
 the history item and are only hidden by the renderer.
 
 In Virtualized History with mouse tracking enabled, clicking the collapsed row
-expands that tool group for the rest of its mounted lifetime. In append-only
-terminal mode, the row points to `Ctrl+O`, which already opens full transcript
-detail. Approval prompts, user-initiated shell calls, and focused interactive
-shells stay expanded because collapsing them would hide required interaction.
+expands that tool group. Scheduler-backed groups keep this state by `batchId`
+when their live pending row becomes committed history; adapter-built groups
+without a batch id keep it for their mounted lifetime. In append-only terminal
+mode, the row points to `Ctrl+O`, which already opens full transcript detail.
+Approval prompts, user-initiated shell calls, and focused interactive shells
+stay expanded because collapsing them would hide required interaction.
 
 The setting is runtime-only UI state: it does not change tool execution,
 recording, model context, or serialized history.
