@@ -17,6 +17,10 @@
       "types": "./dist/src/utils/transcript-records.d.ts",
       "import": "./dist/src/utils/transcript-records.js"
     },
+    "./envVarResolver": {
+      "types": "./dist/src/utils/envVarResolver.d.ts",
+      "import": "./dist/src/utils/envVarResolver.js"
+    },
     "./goalWire": {
       "types": "./dist/src/goals/goal-wire.d.ts",
       "import": "./dist/src/goals/goal-wire.js"
@@ -36,6 +40,10 @@
     "./userPromptSubmitContext": {
       "types": "./dist/src/hooks/user-prompt-submit-context.d.ts",
       "import": "./dist/src/hooks/user-prompt-submit-context.js"
+    },
+    "./noFollowOpen": {
+      "types": "./dist/src/utils/no-follow-open.d.ts",
+      "import": "./dist/src/utils/no-follow-open.js"
     },
     "./package.json": "./package.json",
     "./dist/*": "./dist/*",
