@@ -137,6 +137,142 @@ describe('ExtensionStore', () => {
     ).toMatchObject({ effective: 'enabled', source: 'workspace_override' });
   });
 
+  it('merges concurrent skill batches without splitting workspace aliases or losing other entries', async () => {
+    const workspace = path.join(root, 'workspace');
+    const alias = path.join(root, 'workspace-alias');
+    await fsp.mkdir(workspace);
+    await fsp.symlink(
+      workspace,
+      alias,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    const identity = { id: 'a1'.repeat(32), name: 'suite' };
+    const other = { id: 'b1'.repeat(32), name: 'other' };
+    const store = makeStore();
+    const initial = await store.ensureInitialized([identity, other]);
+    const results = await Promise.all([
+      store.setSkillWorkspaceOverrides(
+        identity,
+        workspace,
+        Object.fromEntries([
+          ['__proto__', false],
+          ['skill-a', false],
+        ]),
+        0,
+      ),
+      makeStore().setSkillWorkspaceOverrides(
+        identity,
+        alias,
+        { constructor: true },
+        0,
+      ),
+      makeStore().setSkillWorkspaceOverrides(
+        identity,
+        workspacePath('other'),
+        { 'skill-a': true },
+        0,
+      ),
+      makeStore().setSkillWorkspaceOverrides(
+        other,
+        workspace,
+        { 'skill-a': true },
+        0,
+      ),
+    ]);
+    expect(results.map((result) => result.generation).sort()).toEqual([
+      initial.generation + 1,
+      initial.generation + 2,
+      initial.generation + 3,
+      initial.generation + 4,
+    ]);
+    const snapshot = await makeStore().readSnapshot();
+    expect(snapshot.extensions[identity.id]?.skillWorkspaceOverrides).toEqual({
+      [await fsp.realpath(workspace)]: Object.fromEntries([
+        ['__proto__', false],
+        ['skill-a', false],
+        ['constructor', true],
+      ]),
+      [workspacePath('other')]: { 'skill-a': true },
+    });
+    expect(
+      store.getSkillWorkspaceOverride(
+        snapshot,
+        identity.id,
+        alias,
+        '__proto__',
+      ),
+    ).toBe(false);
+    expect(
+      store.getSkillWorkspaceOverride(
+        snapshot,
+        identity.id,
+        alias,
+        'Constructor',
+      ),
+    ).toBe(true);
+    expect(
+      store.getSkillWorkspaceOverride(snapshot, identity.id, alias, 'toString'),
+    ).toBeNull();
+    expect(
+      store.getSkillWorkspaceOverride(snapshot, other.id, workspace, 'skill-a'),
+    ).toBe(true);
+  });
+
+  it('preserves skill overrides on update and rejects stale or closed-workspace commits without writing', async () => {
+    const identity = { id: 'd1'.repeat(32), name: 'suite' };
+    const store = makeStore();
+    const destinationDirectory = path.join(extensionsDir, identity.name);
+    await fsp.mkdir(destinationDirectory);
+    await store.ensureInitialized([identity]);
+    await store.setSkillWorkspaceOverrides(
+      identity,
+      workspacePath('a'),
+      { review: false },
+      0,
+    );
+    const updated = await store.commitArtifact({
+      operation: 'update',
+      identity,
+      destinationDirectory,
+      stagingDirectory: await store.createStagingDirectory(),
+      expectedArtifactGeneration: 0,
+    });
+    expect(
+      store.getSkillWorkspaceOverride(
+        updated,
+        identity.id,
+        workspacePath('a'),
+        'review',
+      ),
+    ).toBe(false);
+    await expect(
+      store.setSkillWorkspaceOverrides(
+        identity,
+        workspacePath('a'),
+        { review: true },
+        0,
+      ),
+    ).rejects.toBeInstanceOf(ExtensionConflictError);
+    await expect(
+      store.setSkillWorkspaceOverrides(
+        identity,
+        workspacePath('a'),
+        { review: true },
+        updated.extensions[identity.id]!.artifactGeneration!,
+        () => {
+          throw new Error('workspace closed');
+        },
+      ),
+    ).rejects.toThrow('workspace closed');
+    expect(await store.readSnapshot()).toEqual(updated);
+    const uninstalled = await store.commitArtifact({
+      operation: 'uninstall',
+      identity,
+      destinationDirectory,
+    });
+    expect(uninstalled.extensions[identity.id]).toBeUndefined();
+  });
+
   it('changes multiple workspace activations in one generation', async () => {
     const store = makeStore();
     const identities = [

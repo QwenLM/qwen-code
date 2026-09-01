@@ -26,6 +26,7 @@ import type { UseDaemonFollowupSuggestionReturn } from '@qwen-code/web-shell/dae
 import type {
   DaemonSessionGroupPresetColor,
   DaemonWorkspaceGitStatus,
+  ReasoningSelection,
 } from '@qwen-code/sdk/daemon';
 import type { CommandDisplayCategoryOrder } from '../utils/commandDisplay';
 import type { SkillInfo } from '../completions/slashCompletion';
@@ -242,7 +243,7 @@ interface ChatEditorProps {
   onSelectMode?: (mode: string) => void;
   onSelectModel?: (model: string) => void;
   reasoning?: DaemonReasoningControls;
-  onSelectReasoningEffort?: (value: string) => Promise<void> | void;
+  onSelectReasoningEffort?: (value: ReasoningSelection) => Promise<void> | void;
   workspaces?: Array<{
     id: string;
     cwd: string;
@@ -1074,13 +1075,13 @@ function ModelReasoningControls({
   onSelect,
 }: {
   reasoning: DaemonReasoningControls;
-  onSelect?: (value: string) => Promise<void> | void;
+  onSelect?: (value: ReasoningSelection) => Promise<void> | void;
 }) {
   const { t } = useI18n();
   const [busy, setBusy] = useState(false);
   const canDisable = reasoning.canDisable !== false;
   const hasEffortOptions = reasoning.efforts.length > 0;
-  const select = async (value: string) => {
+  const select = async (value: ReasoningSelection) => {
     if (busy || !onSelect) return;
     setBusy(true);
     try {
@@ -1105,7 +1106,7 @@ function ModelReasoningControls({
           aria-label={t('reasoning.thinking')}
           data-web-shell-thinking-toggle
           onCheckedChange={(enabled) =>
-            void select(enabled ? reasoning.effort : 'none')
+            void select(enabled ? 'default' : 'none')
           }
         />
       </div>
@@ -2408,7 +2409,9 @@ export const ChatEditor = memo(
     const showReasoningOptions = Boolean(reasoning);
     const reasoningEffortLabel = reasoning
       ? reasoning.efforts.length > 0
-        ? t(`reasoning.effort.${reasoning.effort}`)
+        ? reasoning.effort !== 'none' && reasoning.effort !== 'default'
+          ? t(`reasoning.effort.${reasoning.effort}`)
+          : t('reasoning.thinking')
         : t('reasoning.thinking')
       : '';
     const modelChipLabel = showReasoningOptions

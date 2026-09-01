@@ -4,12 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { Config, ContentGeneratorConfig } from '@qwen-code/qwen-code-core';
 import { describe, expect, it } from 'vitest';
 import { AuthType } from '@qwen-code/qwen-code-core';
 import {
+  applyReasoningSelection,
   buildModelReasoningConfigOption,
   buildModelReasoningConfigPreview,
   getModelConfiguration,
+  isReasoningSelectionSupported,
+  resolvePersistedReasoningConfigState,
 } from './model-configuration.js';
 
 const OPENAI = AuthType.USE_OPENAI;
@@ -81,7 +85,6 @@ describe('model configuration manifest', () => {
 
   it.each([
     undefined,
-    'qwen3.7-plus',
     'qwen3.8-max-preview',
     'qwen3.8-max-latest',
     'qwen3.8-max-2026-08-12',
@@ -90,6 +93,32 @@ describe('model configuration manifest', () => {
   ])('does not project a tiered welcome preview for %s', (modelId) => {
     expect(buildModelReasoningConfigPreview(modelId)).toBeUndefined();
   });
+
+  it('projects toggle-only reasoning on Welcome without effort tiers', () => {
+    expect(buildModelReasoningConfigPreview('qwen3.7-plus')).toEqual([
+      buildModelReasoningConfigOption('qwen3.7-plus'),
+    ]);
+  });
+
+  it.each([
+    ['qwen3.8-max', 'low', false, true],
+    ['qwen3.8-max', 'high', false, true],
+    ['qwen3.8-max', 'max', false, false],
+    ['qwen3.8-max', 'none', false, true],
+    ['qwen3.8-max', 'none', true, false],
+    ['qwen3.7-plus', 'default', false, true],
+    ['qwen3.7-plus', 'none', false, true],
+    ['qwen3.7-plus', 'low', false, false],
+    ['qwen-plus', 'max', false, false],
+    ['claude-opus-4-6', 'max', false, true],
+  ] as const)(
+    'validates %s selection %s with mandatory=%s',
+    (modelId, selection, thinkingMandatory, supported) => {
+      expect(
+        isReasoningSelectionSupported(modelId, selection, thinkingMandatory),
+      ).toBe(supported);
+    },
+  );
 
   it('wraps the stable default option for workspace preview', () => {
     expect(buildModelReasoningConfigPreview('qwen3.8-max')).toEqual([
@@ -119,6 +148,20 @@ describe('model configuration manifest', () => {
       buildModelReasoningConfigOption('kimi-k3', {}, route),
     ]);
   });
+
+  it.each([
+    ['qwen3.8-max', 'medium', false, { enabled: true, effort: 'medium' }],
+    ['qwen3.8-max', 'none', false, { enabled: false }],
+    ['qwen3.8-max', 'max', false, {}],
+    ['qwen3.8-max', 'none', true, {}],
+  ] as const)(
+    'projects persisted %s selection %s with mandatory=%s',
+    (modelId, selection, mandatory, expected) => {
+      expect(
+        resolvePersistedReasoningConfigState(modelId, selection, mandatory),
+      ).toEqual({ ...expected, thinkingMandatory: mandatory });
+    },
+  );
 
   it.each([
     'qwen3.5-plus',
@@ -183,6 +226,23 @@ describe('model configuration manifest', () => {
     );
   });
 
+  it('validates persisted selections against provider-aware controls', () => {
+    const route = {
+      authType: OPENAI,
+      baseUrl: 'https://api.moonshot.cn/v1',
+    };
+
+    expect(isReasoningSelectionSupported('kimi-k3', 'max', false, route)).toBe(
+      true,
+    );
+    expect(isReasoningSelectionSupported('kimi-k3', 'none', false, route)).toBe(
+      false,
+    );
+    expect(
+      resolvePersistedReasoningConfigState('kimi-k3', 'none', false, route),
+    ).toEqual({ thinkingMandatory: false });
+  });
+
   it('requires a supported OpenAI endpoint for non-Qwen controls', () => {
     expect(getModelConfiguration('deepseek-v4-pro')).toBeUndefined();
     expect(
@@ -212,5 +272,57 @@ describe('model configuration manifest', () => {
     'qwen3-coder-next',
   ])('does not broaden the manifest to %s', (modelId) => {
     expect(getModelConfiguration(modelId)).toBeUndefined();
+  });
+
+  it('preserves reasoning siblings when returning to the model default', () => {
+    const live = {
+      reasoning: { effort: 'high' as const, budget_tokens: 42_000 },
+    };
+    const rebuildable = {
+      reasoning: { effort: 'high' as const, budget_tokens: 42_000 },
+    };
+    const config = {
+      getContentGeneratorConfig: () => live,
+      getModelsConfig: () => ({
+        getGenerationConfig: () => rebuildable,
+      }),
+    } as unknown as Config;
+
+    applyReasoningSelection(config, 'default');
+
+    expect(live.reasoning).toEqual({ budget_tokens: 42_000 });
+    expect(rebuildable.reasoning).toEqual({ budget_tokens: 42_000 });
+  });
+
+  it('restores configured reasoning siblings after thinking is turned off', () => {
+    const live: Partial<ContentGeneratorConfig> = {
+      reasoning: { effort: 'max', budget_tokens: 42_000 },
+    };
+    const rebuildable = { ...live };
+    const config = {
+      getContentGeneratorConfig: () => live,
+      getModelsConfig: () => ({
+        getGenerationConfig: () => rebuildable,
+      }),
+    } as unknown as Config;
+
+    applyReasoningSelection(config, 'none');
+    applyReasoningSelection(config, 'default', { budget_tokens: 42_000 });
+
+    expect(live.reasoning).toEqual({ budget_tokens: 42_000 });
+    expect(rebuildable.reasoning).toEqual({ budget_tokens: 42_000 });
+  });
+
+  it('resets to a configured default-off state instead of enabling thinking', () => {
+    const live: Partial<ContentGeneratorConfig> = {
+      reasoning: { effort: 'max' },
+    };
+    const config = {
+      getContentGeneratorConfig: () => live,
+    } as unknown as Config;
+
+    applyReasoningSelection(config, 'default', false);
+
+    expect(live.reasoning).toBe(false);
   });
 });

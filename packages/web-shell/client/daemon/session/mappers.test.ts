@@ -115,6 +115,7 @@ describe('mapReasoningControls', () => {
     ).toEqual({
       enabled: true,
       canDisable: false,
+      defaultEffort: 'max',
       effort: 'max',
       efforts: ['low', 'high', 'max'],
     });
@@ -151,7 +152,29 @@ describe('mapReasoningControls', () => {
       enabled: true,
       effort: 'xhigh',
       efforts: ['low', 'medium', 'xhigh'],
+      defaultEffort: 'xhigh',
       canDisable: false,
+    });
+  });
+
+  it('does not restore a dormant effort when the daemon confirms default', () => {
+    expect(
+      mapReasoningControls([
+        {
+          id: 'reasoning_effort',
+          currentValue: 'default',
+          options: [
+            { value: 'none', name: 'Thinking off' },
+            { value: 'default', name: 'Provider default' },
+            { value: 'low', name: 'Daemon Low' },
+            { value: 'max', name: 'Daemon Max' },
+          ],
+        },
+      ]),
+    ).toEqual({
+      enabled: true,
+      effort: 'default',
+      efforts: ['low', 'max'],
     });
   });
 });
@@ -180,6 +203,7 @@ describe('mapProviderStatus reasoning preview', () => {
       enabled: true,
       effort: 'xhigh',
       efforts: ['low', 'medium', 'xhigh'],
+      defaultEffort: 'xhigh',
     });
   });
 

@@ -33,7 +33,10 @@ import {
   parseAcpBaseModelId,
   sanitizeProviderBaseUrl,
 } from '../utils/acpModelUtils.js';
-import { buildModelReasoningConfigPreview } from '../acp-integration/model-configuration.js';
+import {
+  buildModelReasoningConfigPreview,
+  resolvePersistedReasoningConfigState,
+} from '../acp-integration/model-configuration.js';
 import { snapshotProcessEnv } from './env-snapshot.js';
 
 const debugLogger = createDebugLogger('WORKSPACE_PROVIDERS_STATUS');
@@ -167,14 +170,19 @@ function buildWorkspaceProvidersStatus(
         ? undefined
         : buildModelReasoningConfigPreview(
             model.id,
-            {
-              thinkingMandatory:
-                modelsConfig.getResolvedModel(
-                  model.authType,
-                  model.id,
-                  model.registryBaseUrl ?? model.baseUrl,
-                )?.generationConfig.thinkingMandatory === true,
-            },
+            resolvePersistedReasoningConfigState(
+              model.id,
+              settings.model?.reasoningEffort,
+              modelsConfig.getResolvedModel(
+                model.authType,
+                model.id,
+                model.registryBaseUrl ?? model.baseUrl,
+              )?.generationConfig.thinkingMandatory === true,
+              {
+                authType: model.authType,
+                baseUrl: model.registryBaseUrl ?? model.baseUrl,
+              },
+            ),
             {
               authType: model.authType,
               baseUrl: model.registryBaseUrl ?? model.baseUrl,

@@ -42,6 +42,8 @@ type StreamingState = 'idle' | 'responding';
 type MockConnection = {
   status: 'connected' | 'connecting' | 'disconnected' | 'error';
   sessionId: string | undefined;
+  sessionContext?: { kind: 'standalone' };
+  context?: { sessionId: string };
   clientId: string;
   displayName: string | undefined;
   workspaceCwd: string;
@@ -121,6 +123,7 @@ type ChatEditorTestProps = {
     defaultEffort: string;
     canDisable?: boolean;
   };
+  onSelectModel?: (modelId: string) => void;
   onSelectReasoningEffort?: (value: string) => Promise<void> | void;
   voiceTarget?: VoiceWorkspaceTarget;
   voiceStatusRevision?: VoiceStatusRevision;
@@ -1093,6 +1096,10 @@ vi.mock('./components/sidebar/WebShellSidebar', async () => {
       onOpenSplitView?: () => void;
       onMobileClose?: () => void;
       onNewSession?: () => Promise<boolean> | boolean;
+      onNewWorktreeSession?: (
+        workspaceCwd?: string,
+      ) => Promise<boolean> | boolean | void;
+      onSelectWorkspace?: (workspaceCwd: string | undefined) => void;
       onLoadSession?: (sessionId: string) => Promise<void> | void;
       onSelectCurrentSession?: () => void;
       onSessionsDeleted?: (sessionIds: string[]) => void;
@@ -1127,6 +1134,33 @@ vi.mock('./components/sidebar/WebShellSidebar', async () => {
             onClick: props.onNewSession,
           },
           'new session',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'new-worktree-session',
+            type: 'button',
+            onClick: () => void props.onNewWorktreeSession?.(),
+          },
+          'new worktree session',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'new-worktree-session-other',
+            type: 'button',
+            onClick: () => void props.onNewWorktreeSession?.('/other'),
+          },
+          'new worktree session in other',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'select-other-workspace',
+            type: 'button',
+            onClick: () => props.onSelectWorkspace?.('/other'),
+          },
+          'select other workspace',
         ),
         React.createElement(
           'button',
@@ -5152,6 +5186,12 @@ function makePendingPermissionBlock(
     toolName?: string;
     kind?: string;
     todoPlan?: { planId: string; sourceCallId: string };
+    options?: Array<{
+      optionId: string;
+      label: string;
+      raw: Record<string, unknown>;
+    }>;
+    content?: unknown[];
   } = {},
 ): unknown {
   const toolName = overrides.toolName ?? 'run_shell_command';
@@ -5169,11 +5209,12 @@ function makePendingPermissionBlock(
         toolName,
         ...(overrides.todoPlan ? { qwenTodoApproval: overrides.todoPlan } : {}),
       },
+      ...(overrides.content ? { content: overrides.content } : {}),
       ...(isAskUser
         ? { input: { questions: [{ question: 'Pick one', options: [] }] } }
         : {}),
     },
-    options: [
+    options: overrides.options ?? [
       { optionId: 'proceed_once', label: 'Allow', raw: {} },
       { optionId: 'cancel', label: 'Reject', raw: {} },
     ],
@@ -5183,8 +5224,12 @@ function makePendingPermissionBlock(
 beforeEach(() => {
   // Split persistence uses sessionStorage; clear it so one test's split doesn't
   // auto-restore into the next test's App mount.
-  sessionStorage.clear();
-  localStorage.removeItem('qwen-code-web-shell-chat-width');
+  try {
+    sessionStorage.clear();
+    window.localStorage?.removeItem('qwen-code-web-shell-chat-width');
+  } catch {
+    // Web storage may be unavailable under storage-disabled jsdom contexts.
+  }
   mockReleaseWebTerminal.mockReset();
   Object.defineProperty(document, 'hidden', {
     configurable: true,
@@ -5203,6 +5248,8 @@ beforeEach(() => {
     })),
   });
   mockConnection.sessionId = 'session-1';
+  mockConnection.sessionContext = undefined;
+  mockConnection.context = undefined;
   mockConnection.workspaceCwd = '/tmp/project';
   mockConnection.status = 'connected';
   mockConnection.displayName = 'Session One';
@@ -11072,6 +11119,368 @@ describe('App session callbacks', () => {
     );
   });
 
+  it('keeps an armed worktree intent across a transient git-status failure', async () => {
+    mockConnection.sessionId = undefined;
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    };
+    const workspaceGit = vi.fn().mockResolvedValue({ branch: 'main' });
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit,
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    renderApp();
+    await flush();
+    await flush();
+
+    const intentChange = testState.latestChatEditorProps?.onGitModeIntentChange;
+    act(() => {
+      intentChange?.({ mode: 'worktree', slug: 'feat-a' });
+    });
+    await flush();
+    expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+      mode: 'worktree',
+      slug: 'feat-a',
+    });
+
+    // One refetch round fails (daemon busy, network blip): the status is
+    // transiently unknown, but the requested worktree must not silently
+    // degrade to a plain session once the status recovers.
+    workspaceGit.mockRejectedValueOnce(new Error('daemon busy'));
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await flush();
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await flush();
+    await flush();
+    expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+      mode: 'worktree',
+      slug: 'feat-a',
+    });
+  });
+
+  it('arms the worktree intent from the sidebar entry, unless another session start intervened', async () => {
+    mockConnection.sessionId = undefined;
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    };
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    const { container } = renderApp();
+    await flush();
+    await flush();
+    const worktreeButton = container.querySelector<HTMLButtonElement>(
+      '[data-testid="new-worktree-session"]',
+    )!;
+    const newSessionButton = container.querySelector<HTMLButtonElement>(
+      '[data-testid="new-session"]',
+    )!;
+
+    // Alone: the draft is armed for a worktree.
+    await act(async () => {
+      worktreeButton.click();
+      await Promise.resolve();
+    });
+    await flush();
+    await flush();
+    expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+      mode: 'worktree',
+    });
+
+    // A plain new task started while the worktree creation is still in
+    // flight owns the draft; the late arm must not land on it.
+    await act(async () => {
+      worktreeButton.click();
+      newSessionButton.click();
+      await Promise.resolve();
+    });
+    await flush();
+    await flush();
+    expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+      mode: 'current',
+    });
+  });
+
+  it('gives a prompt submitted while the worktree draft is still clearing the worktree', async () => {
+    mockConnection.sessionId = undefined;
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    };
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    let resolveClear: () => void = () => {};
+    mockSessionActions.clearSession.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveClear = resolve;
+        }),
+    );
+    const { container } = renderApp();
+    await flush();
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="new-worktree-session"]',
+        )!
+        .click();
+      await Promise.resolve();
+    });
+    // The clear is still in flight; the intent is already the draft's.
+    expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+      mode: 'worktree',
+    });
+    await act(async () => {
+      resolveClear();
+      await Promise.resolve();
+    });
+    await flush();
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('first prompt');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.createSession).toHaveBeenCalled();
+      });
+    });
+    expect(mockSessionActions.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ worktree: { slug: undefined } }),
+    );
+  });
+
+  it('drops the worktree intent when the draft is re-targeted before it settles', async () => {
+    mockConnection.sessionId = undefined;
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+        { id: 'other', cwd: '/other', primary: false, trusted: true },
+      ],
+    };
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    let resolveClear: () => void = () => {};
+    mockSessionActions.clearSession.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveClear = resolve;
+        }),
+    );
+    const { container } = renderApp();
+    await flush();
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="new-worktree-session"]',
+        )!
+        .click();
+      await Promise.resolve();
+    });
+    // The sidebar re-targets the draft while the clear is still in flight.
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="select-other-workspace"]',
+        )!
+        .click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      resolveClear();
+      await Promise.resolve();
+    });
+    await flush();
+    await flush();
+    expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+      mode: 'current',
+    });
+  });
+
+  it('keeps the worktree intent when the composer re-selects the draft workspace', async () => {
+    mockConnection.sessionId = undefined;
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+        { id: 'other', cwd: '/other', primary: false, trusted: true },
+      ],
+    };
+    mockWorkspace.client.workspaceByCwd.mockImplementation((cwd: string) => ({
+      workspaceGit: vi
+        .fn()
+        .mockResolvedValue({ v: 2, workspaceCwd: cwd, branch: 'main' }),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    renderApp();
+    await flush();
+    await flush();
+    act(() => {
+      testState.latestChatEditorProps?.onSelectWorkspace?.('/other');
+    });
+    await flush();
+    await flush();
+    act(() => {
+      testState.latestChatEditorProps?.onGitModeIntentChange?.({
+        mode: 'worktree',
+        slug: 'feat-a',
+      });
+    });
+    await flush();
+    expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+      mode: 'worktree',
+      slug: 'feat-a',
+    });
+
+    // Radix fires onValueChange for the already-checked radio row too; a
+    // re-select of the draft's own workspace changes nothing.
+    act(() => {
+      testState.latestChatEditorProps?.onSelectWorkspace?.('/other');
+    });
+    await flush();
+    await flush();
+    expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+      mode: 'worktree',
+      slug: 'feat-a',
+    });
+
+    // A real switch still drops it.
+    act(() => {
+      testState.latestChatEditorProps?.onSelectWorkspace?.(undefined);
+    });
+    await flush();
+    await flush();
+    expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+      mode: 'current',
+    });
+  });
+
+  it("keeps a worktree intent armed for another workspace across the draft's stale no-branch status", async () => {
+    mockConnection.sessionId = undefined;
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+        { id: 'other', cwd: '/other', primary: false, trusted: true },
+      ],
+    };
+    // The primary is not a repository; the daemon answers a definitive
+    // no-branch status for it. The secondary is a repo on main.
+    mockWorkspace.client.workspaceByCwd.mockImplementation((cwd: string) => ({
+      workspaceGit: vi
+        .fn()
+        .mockResolvedValue(
+          cwd === '/other'
+            ? { v: 2, workspaceCwd: '/other', branch: 'main' }
+            : { v: 2, workspaceCwd: '/workspace', branch: null },
+        ),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    const { container } = renderApp();
+    await flush();
+    await flush();
+    expect(testState.latestChatEditorProps?.gitModeIntent).toBeUndefined();
+
+    // "New worktree task" on the secondary's row while the draft still
+    // holds the primary's no-branch answer.
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="new-worktree-session-other"]',
+        )!
+        .click();
+      await Promise.resolve();
+    });
+    await flush();
+    await flush();
+    expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+      mode: 'worktree',
+    });
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit('first prompt');
+    });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.createSession).toHaveBeenCalled();
+    });
+    expect(mockSessionActions.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workspaceCwd: '/other',
+        worktree: { slug: undefined },
+      }),
+    );
+  });
+
+  it("clears the worktree intent once the draft workspace's own status turns definitively no-branch", async () => {
+    mockConnection.sessionId = undefined;
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    };
+    const workspaceGit = vi
+      .fn()
+      .mockResolvedValue({ v: 2, workspaceCwd: '/workspace', branch: 'main' });
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit,
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    renderApp();
+    await flush();
+    await flush();
+    act(() => {
+      testState.latestChatEditorProps?.onGitModeIntentChange?.({
+        mode: 'worktree',
+        slug: 'feat-a',
+      });
+    });
+    await flush();
+    expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+      mode: 'worktree',
+      slug: 'feat-a',
+    });
+
+    // The repository is gone (.git removed): the daemon now answers a
+    // definitive no-branch status for this very workspace.
+    workspaceGit.mockResolvedValue({
+      v: 2,
+      workspaceCwd: '/workspace',
+      branch: null,
+    });
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await flush();
+    await flush();
+    // The chip is gone with the branch; the reset is observable on the
+    // session the next prompt creates.
+    expect(testState.latestChatEditorProps?.gitModeIntent).toBeUndefined();
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit('first prompt');
+    });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.createSession).toHaveBeenCalled();
+    });
+    expect(mockSessionActions.createSession).toHaveBeenCalledWith(
+      expect.not.objectContaining({ worktree: expect.anything() }),
+    );
+  });
+
   it('reloads skills from the target workspace when starting a new session', async () => {
     const { container } = renderApp({
       lockedWorkspaceCwd: '/work/secondary',
@@ -14571,7 +14980,7 @@ describe('App session callbacks', () => {
     ).not.toBeNull();
   });
 
-  it('does not restore a stale welcome disable after mandatory reasoning clears it', async () => {
+  it('clears a stale welcome disable after reasoning becomes mandatory', async () => {
     const reasoningPreview = (canDisable: boolean) => ({
       enabled: true,
       effort: 'xhigh',
@@ -14638,8 +15047,165 @@ describe('App session callbacks', () => {
         expect(mockSessionActions.sendPrompt).toHaveBeenCalledOnce();
       });
     });
-    expect(mockSessionActions.setReasoningEffort).not.toHaveBeenCalled();
+    expect(mockSessionActions.setReasoningEffort).toHaveBeenCalledWith(
+      'default',
+      { persist: true },
+    );
   });
+
+  it.each([false, true])(
+    'keeps reasoning persistence scoped with standalone=%s',
+    async (standalone) => {
+      mockConnection.sessionContext = standalone
+        ? { kind: 'standalone' }
+        : undefined;
+      mockConnection.context = { sessionId: 'session-1' };
+      renderApp();
+      await flush();
+      await act(async () => {
+        await testState.latestChatEditorProps?.onSelectReasoningEffort?.(
+          'medium',
+        );
+      });
+      expect(mockSessionActions.setReasoningEffort).toHaveBeenCalledWith(
+        'medium',
+        { persist: !standalone },
+      );
+    },
+  );
+
+  it('does not retarget a stale model-bound reasoning intent', async () => {
+    const reasoningPreview = (effort: string) => ({
+      enabled: true,
+      effort,
+      efforts: ['low', 'medium', 'max'],
+      defaultEffort: effort,
+      canDisable: true,
+    });
+    mockConnection.sessionId = undefined;
+    mockConnection.workspaceCwd = '/workspace';
+    mockConnection.currentModel = 'model-a';
+    mockConnection.models = [
+      {
+        id: 'model-a',
+        label: 'model-a',
+        reasoningPreview: reasoningPreview('low'),
+      },
+      {
+        id: 'model-b',
+        label: 'model-b',
+        reasoningPreview: reasoningPreview('medium'),
+      },
+      {
+        id: 'model-c',
+        label: 'model-c',
+        reasoningPreview: reasoningPreview('low'),
+      },
+    ];
+
+    const { rerender } = renderApp();
+    await flush();
+    act(() => {
+      testState.latestChatEditorProps?.onSelectReasoningEffort?.('max');
+    });
+    await flush();
+    expect(testState.latestChatEditorProps?.reasoning?.effort).toBe('max');
+
+    mockConnection.currentModel = 'model-b';
+    rerender();
+    await flush();
+    expect(testState.latestChatEditorProps?.reasoning?.effort).toBe('medium');
+
+    act(() => {
+      testState.latestChatEditorProps?.onSelectModel?.('model-c');
+    });
+    await flush();
+
+    expect(testState.latestChatEditorProps?.reasoning?.effort).toBe('low');
+  });
+
+  it.each([
+    ['picker', 'none'],
+    ['slash', 'none'],
+    ['picker', 'medium'],
+    ['slash', 'medium'],
+  ] as const)(
+    'retains compatible Welcome %s selection %s until first-prompt persistence',
+    async (entry, selection) => {
+      const targetModel = selection === 'none' ? 'qwen3.7-plus' : 'model-b';
+      const tieredPreview = {
+        enabled: true,
+        effort: 'low',
+        efforts: ['low', 'medium', 'xhigh'],
+        defaultEffort: 'low',
+        canDisable: true,
+      };
+      mockConnection.sessionId = undefined;
+      mockConnection.workspaceCwd = '/workspace';
+      mockConnection.currentModel = 'qwen3.8-max';
+      mockConnection.models = [
+        { id: 'qwen3.8-max', label: 'Source', reasoningPreview: tieredPreview },
+        {
+          id: targetModel,
+          label: 'Target',
+          reasoningPreview:
+            selection === 'none'
+              ? { enabled: true, efforts: [], canDisable: true }
+              : tieredPreview,
+        },
+      ];
+      mockSessionActions.createSession.mockImplementation(async () => {
+        mockConnection.sessionId = 'session-created';
+        return { sessionId: 'session-created' };
+      });
+
+      renderApp();
+      await flush();
+      act(() => {
+        testState.latestChatEditorProps?.onSelectReasoningEffort?.(selection);
+      });
+      await flush();
+      act(() => {
+        if (entry === 'slash') {
+          testState.latestChatEditorProps?.onSubmit(`/model ${targetModel}`);
+        } else {
+          testState.latestChatEditorProps?.onSelectModel?.(targetModel);
+        }
+      });
+      await flush();
+
+      expect(testState.latestChatEditorProps?.reasoning).toMatchObject(
+        selection === 'none'
+          ? { enabled: false, efforts: [] }
+          : { enabled: true, effort: selection },
+      );
+      expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+      expect(mockSessionActions.setModel).not.toHaveBeenCalled();
+      expect(mockSessionActions.setReasoningEffort).not.toHaveBeenCalled();
+
+      await act(async () => {
+        testState.latestChatEditorProps?.onSubmit('first prompt');
+        await vi.waitFor(() =>
+          expect(mockSessionActions.sendPrompt).toHaveBeenCalledOnce(),
+        );
+      });
+      expect(mockSessionActions.setModel).toHaveBeenCalledWith(targetModel);
+      expect(mockSessionActions.setReasoningEffort).toHaveBeenCalledWith(
+        selection,
+        { persist: true },
+      );
+      expect(
+        mockSessionActions.setReasoningEffort.mock.invocationCallOrder[0],
+      ).toBeGreaterThan(
+        mockSessionActions.setModel.mock.invocationCallOrder[0],
+      );
+      expect(
+        mockSessionActions.sendPrompt.mock.invocationCallOrder[0],
+      ).toBeGreaterThan(
+        mockSessionActions.setReasoningEffort.mock.invocationCallOrder[0],
+      );
+    },
+  );
 
   it('commits the first prompt after creating its session', async () => {
     mockConnection.sessionId = undefined;
@@ -17890,6 +18456,61 @@ describe('App session callbacks', () => {
     ).toBe('true');
   });
 
+  it('restores composer interaction after closing Plugins on the MCP tab', async () => {
+    mockWorkspaceActions.loadMcpStatus.mockResolvedValue({
+      initialized: true,
+      discoveryState: 'completed',
+      servers: [],
+    });
+    const { container } = renderApp();
+    await flush();
+    expect(testState.latestChatEditorProps?.dialogOpen).toBe(false);
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-plugins"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+    const panel = container.querySelector('[data-testid="inline-panel"]');
+    const tabs =
+      panel?.querySelectorAll<HTMLButtonElement>('button[role="tab"]');
+    expect(Array.from(tabs ?? []).map((tab) => tab.textContent)).toEqual([
+      'Extensions',
+      'MCP',
+      'Skills',
+      'Agents',
+    ]);
+    const mcpTab = Array.from(tabs ?? []).find(
+      (tab) => tab.textContent === 'MCP',
+    );
+    await act(async () => {
+      mcpTab?.focus();
+      mcpTab?.click();
+      await Promise.resolve();
+    });
+    await flush();
+    expect(mockWorkspaceActions.loadMcpStatus).toHaveBeenCalled();
+    expect(testState.latestChatEditorProps?.dialogOpen).toBe(true);
+
+    const mcpPanel = container.querySelector('[data-testid="inline-panel"]');
+    await act(async () => {
+      mcpPanel?.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          bubbles: true,
+          cancelable: true,
+          key: 'Escape',
+        }),
+      );
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
+    expect(testState.latestChatEditorProps?.dialogOpen).toBe(false);
+  });
+
   it('opens Channel management from the sidebar', async () => {
     const { container } = renderApp();
     await flush();
@@ -19112,6 +19733,75 @@ describe('App session callbacks', () => {
     expect(
       container.querySelector('[data-testid="split-initial"]')?.textContent,
     ).toBe('session-1');
+  });
+
+  it('submits allow_once for a native structured edit approval accept', async () => {
+    let shellApi: WebShellApi | null = null;
+    const { rerender } = renderApp({
+      hostOwnsEditDiffPreview: true,
+      shellRef: (api) => {
+        shellApi = api;
+      },
+    });
+    await flush();
+
+    // Edit approval options arrive in the wire order built by
+    // toPermissionOptions: allow_always first. The allow_once preference in
+    // respondToPendingPermission is the only thing keeping a single native
+    // Accept from submitting "Allow All Edits".
+    await act(async () => {
+      testState.blocks = [
+        makePendingPermissionBlock({
+          toolName: 'run_shell_command',
+          kind: 'execute',
+          content: [
+            {
+              type: 'diff',
+              path: 'file.ts',
+              oldText: 'before',
+              newText: 'after',
+            },
+          ],
+          options: [
+            {
+              optionId: 'proceed_always',
+              label: 'Allow All Edits',
+              raw: { kind: 'allow_always' },
+            },
+            {
+              optionId: 'proceed_once',
+              label: 'Allow',
+              raw: { kind: 'allow_once' },
+            },
+            {
+              optionId: 'cancel',
+              label: 'Reject',
+              raw: { kind: 'reject_once' },
+            },
+          ],
+        }),
+      ];
+      rerender();
+      await Promise.resolve();
+    });
+    await flush();
+    expect(
+      document.querySelector('[data-testid="approval-overlay"]'),
+    ).not.toBeNull();
+
+    let resolved: boolean | undefined;
+    await act(async () => {
+      resolved = await shellApi?.respondToPendingPermission('req-1', 'allow');
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(resolved).toBe(true);
+    expect(mockSessionActions.submitPermission).toHaveBeenCalledTimes(1);
+    expect(mockSessionActions.submitPermission).toHaveBeenCalledWith(
+      'req-1',
+      'proceed_once',
+    );
   });
 
   it('requests controlled split ids from the external shell ref', async () => {

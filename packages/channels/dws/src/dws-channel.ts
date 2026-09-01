@@ -17,6 +17,7 @@ import {
   type ChannelTaskLifecycleEvent,
   type CreatePairingRequestResult,
   type Envelope,
+  type SessionTarget,
 } from '@qwen-code/channel-base';
 import {
   DwsClient,
@@ -52,7 +53,7 @@ const EVENT_RESTART_DELAY_MS = 2_000;
 const EVENT_RESTART_MAX_DELAY_MS = 5 * 60_000;
 const NO_REPLY_SENTINEL = '[NO_REPLY]';
 const NO_REPLY_SENTINEL_PATTERN = /^\[NO_REPLY\][.!]?$/i;
-const ACK_REACTION_NAME = '暗中观察';
+export const DEFAULT_START_REACTION = '🤔';
 const MAX_INBOUND_REACTION_TARGETS = 1_000;
 const NOTIFICATION_HISTORY_OVERLAP_MS = 5_000;
 const NOTIFICATION_POLL_INTERVAL_MS = 5_000;
@@ -61,6 +62,8 @@ const TODO_CHAT_PREFIX = 'todo:';
 
 interface DwsConfig extends ChannelConfig {
   profile?: unknown;
+  startReaction?: unknown;
+  endReaction?: unknown;
   watchTodos?: unknown;
 }
 
@@ -147,6 +150,12 @@ interface ImSubscriptionState {
   retryTimer?: ReturnType<typeof setTimeout>;
   lastError?: DwsEventProcessError;
   restartAttempts: number;
+}
+
+interface ActiveReaction {
+  target: { conversationId: string; messageId: string };
+  sessionId: string;
+  added: boolean;
 }
 
 function configuredString(value: unknown, field: string): string | undefined {
@@ -496,16 +505,17 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
   private readonly userInstructions?: string;
   private readonly client: DwsClientLike;
   private readonly imStates: ImSubscriptionState[];
+  private readonly startReactionName: string;
+  private readonly endReactionName?: string;
   private readonly watchTodos: boolean;
   private readonly inboundReactionTargets = new Map<
     string,
     { conversationId: string; messageId: string }
   >();
-  private readonly activeReactionKeys = new Set<string>();
-  private readonly sessionReactionKeys = new Map<
-    string,
-    Map<string, { messageId: string; conversationId: string }>
-  >();
+  private readonly activeReactions = new Map<string, ActiveReaction>();
+  private readonly sessionReactionKeys = new Map<string, Set<string>>();
+  private readonly reactionOperations = new Map<string, Promise<void>>();
+  private readonly endReactionKeys = new Set<string>();
   private readonly notifiedSenderPairingNotifications = new Set<string>();
   private readonly processingMessages = new Map<string, Promise<void>>();
   private pollAbortController = new AbortController();
@@ -523,6 +533,10 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     client?: DwsClientLike,
   ) {
     const profile = configuredString(config.profile, 'profile');
+    const startReactionName =
+      configuredString(config.startReaction, 'startReaction') ??
+      DEFAULT_START_REACTION;
+    const endReactionName = configuredString(config.endReaction, 'endReaction');
     const watchTodos = configuredBoolean(config.watchTodos, 'watchTodos');
     if (profile?.includes(',')) {
       throw new Error(
@@ -575,6 +589,8 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       source,
       restartAttempts: 0,
     }));
+    this.startReactionName = startReactionName;
+    this.endReactionName = endReactionName;
     this.watchTodos = watchTodos;
   }
 
@@ -805,17 +821,9 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     this.pollAbortController.abort();
     this.lastTodoPollAt = 0;
     this.todoTargets.clear();
-    for (const reactions of this.sessionReactionKeys.values()) {
-      for (const [key, { conversationId, messageId }] of reactions) {
-        if (!this.activeReactionKeys.delete(key)) continue;
-        void this.client
-          .removeImReaction(conversationId, messageId, ACK_REACTION_NAME)
-          .catch((error) =>
-            this.logReactionFailure('disconnect reaction removal', error),
-          );
-      }
+    for (const key of [...this.activeReactions.keys()]) {
+      this.cleanupReaction(key, 'disconnect reaction removal');
     }
-    this.activeReactionKeys.clear();
     this.sessionReactionKeys.clear();
     this.stopPollLoop();
     for (const state of this.imStates) {
@@ -957,6 +965,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     chatId: string,
     threadId: string | undefined,
     text: string,
+    sourceLabel?: string,
   ): Promise<void> {
     if (!this.connected) {
       throw new Error(`[Channel:${this.name}] DWS channel is disconnected.`);
@@ -970,11 +979,17 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
           `[Channel:${this.name}] DWS todo delivery requires its taskId thread.`,
         );
       }
-      await this.client.addTodoComment(taskId, text);
+      await this.client.addTodoComment(
+        taskId,
+        this.formatMarkdownAttributedText(text, sourceLabel),
+      );
       return;
     }
     if (!this.documentSet.has(chatId)) {
-      await this.sendMessage(chatId, text);
+      await this.sendMessage(
+        chatId,
+        this.formatAttributedText(text, sourceLabel),
+      );
       return;
     }
     if (!threadId) {
@@ -982,15 +997,22 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         `[Channel:${this.name}] DWS document delivery requires a commentKey.`,
       );
     }
-    await this.client.replyToComment(chatId, threadId, text);
+    await this.client.replyToComment(
+      chatId,
+      threadId,
+      this.formatMarkdownAttributedText(text, sourceLabel),
+    );
   }
 
   protected override async sendResponseMessage(
     chatId: string,
     text: string,
     sessionId: string,
+    sourceLabel?: string,
   ): Promise<void> {
     if (isNoReply(text)) return;
+    const label = sourceLabel ?? this.getResponseSourceLabel(sessionId);
+    const markdown = this.formatMarkdownAttributedText(text, label);
     const threadId = this.getResponseThreadId(sessionId);
     const taskId =
       this.todoTargets.get(chatId) ??
@@ -1000,7 +1022,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         throw new Error(`[Channel:${this.name}] DWS channel is disconnected.`);
       }
       try {
-        await this.client.addTodoComment(taskId, text);
+        await this.client.addTodoComment(taskId, markdown);
       } catch (error) {
         if (
           !(error instanceof DwsCommandError) ||
@@ -1024,7 +1046,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         );
       }
       try {
-        await this.client.replyToComment(chatId, threadId, text);
+        await this.client.replyToComment(chatId, threadId, markdown);
       } catch (error) {
         if (
           !(error instanceof DwsCommandError) ||
@@ -1041,23 +1063,36 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     const messageId = this.getResponseMessageId(sessionId);
     const senderId = this.getResponseSenderId(sessionId);
     if (!messageId || !senderId) {
-      await this.sendMessage(chatId, text);
+      await this.sendMessage(chatId, this.formatAttributedText(text, label));
       return;
     }
     const idempotencyKey = stableUuid(
       `${this.name}\0${chatId}\0${messageId}\0${text}`,
     );
     if (this.findImTarget(chatId)?.kind === 'direct') {
-      await this.sendImText(chatId, text, idempotencyKey);
+      await this.sendImText(
+        chatId,
+        this.formatAttributedText(text, label),
+        idempotencyKey,
+      );
       return;
     }
     await this.client.replyToImMessage(
       chatId,
       messageId,
       senderId,
-      text,
+      this.formatAttributedText(text, label),
       idempotencyKey,
     );
+  }
+
+  protected override async pushProactive(
+    target: SessionTarget,
+    text: string,
+    sourceLabel?: string,
+  ): Promise<void> {
+    if (isNoReply(text)) return;
+    await super.pushProactive(target, text, sourceLabel);
   }
 
   protected async pollOnce(): Promise<void> {
@@ -2038,6 +2073,64 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     if (reactions.size === 0) this.sessionReactionKeys.delete(sessionId);
   }
 
+  private releaseActiveReaction(key: string): ActiveReaction | undefined {
+    const reaction = this.activeReactions.get(key);
+    if (!reaction) return undefined;
+    this.activeReactions.delete(key);
+    this.untrackSessionReaction(reaction.sessionId, key);
+    return reaction;
+  }
+
+  private enqueueReactionOperation(
+    key: string,
+    operation: (isLatest: () => boolean) => Promise<void>,
+  ): void {
+    const previous = this.reactionOperations.get(key) ?? Promise.resolve();
+    const next: Promise<void> = previous
+      .catch(() => undefined)
+      .then(() => operation(() => this.reactionOperations.get(key) === next))
+      .catch((error) => this.logReactionFailure('reaction transition', error))
+      .finally(() => {
+        if (this.reactionOperations.get(key) === next) {
+          this.reactionOperations.delete(key);
+        }
+      });
+    this.reactionOperations.set(key, next);
+  }
+
+  private rememberEndReaction(key: string): void {
+    this.endReactionKeys.delete(key);
+    this.endReactionKeys.add(key);
+    if (this.endReactionKeys.size > MAX_INBOUND_REACTION_TARGETS) {
+      const oldest = this.endReactionKeys.values().next().value;
+      if (oldest !== undefined) this.endReactionKeys.delete(oldest);
+    }
+  }
+
+  private async removeStartedReaction(
+    reaction: ActiveReaction,
+    action: string,
+  ): Promise<void> {
+    if (!reaction.added) return;
+    try {
+      await this.client.removeImReaction(
+        reaction.target.conversationId,
+        reaction.target.messageId,
+        this.startReactionName,
+      );
+    } catch (error) {
+      this.logReactionFailure(action, error);
+    }
+  }
+
+  private cleanupReaction(key: string, action: string): void {
+    const reaction = this.releaseActiveReaction(key);
+    if (!reaction) return;
+    this.enqueueReactionOperation(key, () =>
+      this.removeStartedReaction(reaction, action),
+    );
+  }
+
   private startReaction(
     conversationId: string,
     messageId: string | undefined,
@@ -2049,37 +2142,52 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     );
     if (!target) return;
     const key = this.reactionKey(target.conversationId, target.messageId);
-    if (this.activeReactionKeys.has(key)) return;
-    this.activeReactionKeys.add(key);
+    if (this.activeReactions.has(key)) return;
     let reactions = this.sessionReactionKeys.get(sessionId);
     if (!reactions) {
-      reactions = new Map();
+      reactions = new Set();
       this.sessionReactionKeys.set(sessionId, reactions);
     }
-    reactions.set(key, target);
-    void this.client
-      .addImReaction(target.conversationId, target.messageId, ACK_REACTION_NAME)
-      .then(() => {
-        if (!this.activeReactionKeys.has(key)) {
-          void this.client
-            .removeImReaction(
-              target.conversationId,
-              target.messageId,
-              ACK_REACTION_NAME,
-            )
-            .catch((error) =>
-              this.logReactionFailure('late reaction removal', error),
-            );
+    reactions.add(key);
+    const reaction: ActiveReaction = {
+      target,
+      sessionId,
+      added: false,
+    };
+    this.activeReactions.set(key, reaction);
+    this.enqueueReactionOperation(key, async () => {
+      if (this.activeReactions.get(key) !== reaction) return;
+      if (this.endReactionName && this.endReactionKeys.has(key)) {
+        try {
+          await this.client.removeImReaction(
+            target.conversationId,
+            target.messageId,
+            this.endReactionName,
+          );
+          this.endReactionKeys.delete(key);
+          if (this.endReactionName === this.startReactionName) {
+            reaction.added = false;
+          }
+        } catch (error) {
+          this.logReactionFailure('previous end reaction removal', error);
         }
-      })
-      .catch((error) => {
-        this.activeReactionKeys.delete(key);
-        this.untrackSessionReaction(sessionId, key);
-        this.logReactionFailure('reaction add', error);
-      });
+      }
+      if (this.activeReactions.get(key) !== reaction) return;
+      if (reaction.added) return;
+      try {
+        await this.client.addImReaction(
+          target.conversationId,
+          target.messageId,
+          this.startReactionName,
+        );
+        reaction.added = true;
+      } catch (error) {
+        this.logReactionFailure('start reaction add', error);
+      }
+    });
   }
 
-  private stopReaction(
+  private finishReaction(
     conversationId: string,
     messageId: string | undefined,
     sessionId: string,
@@ -2090,15 +2198,39 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     );
     if (!target) return;
     const key = this.reactionKey(target.conversationId, target.messageId);
-    this.untrackSessionReaction(sessionId, key);
-    if (!this.activeReactionKeys.delete(key)) return;
-    void this.client
-      .removeImReaction(
-        target.conversationId,
-        target.messageId,
-        ACK_REACTION_NAME,
-      )
-      .catch((error) => this.logReactionFailure('reaction removal', error));
+    const active = this.activeReactions.get(key);
+    if (!active || active.sessionId !== sessionId) return;
+    const reaction = this.releaseActiveReaction(key);
+    if (!reaction) return;
+    const generation = this.lifecycleGeneration;
+    this.enqueueReactionOperation(key, async (isLatest) => {
+      const replacement = this.activeReactions.get(key);
+      if (replacement) {
+        if (reaction.added) replacement.added = true;
+        return;
+      }
+      await this.removeStartedReaction(reaction, 'start reaction removal');
+      if (
+        !isLatest() ||
+        this.activeReactions.has(key) ||
+        !this.endReactionName ||
+        this.endReactionKeys.has(key) ||
+        !this.connected ||
+        generation !== this.lifecycleGeneration
+      ) {
+        return;
+      }
+      try {
+        await this.client.addImReaction(
+          reaction.target.conversationId,
+          reaction.target.messageId,
+          this.endReactionName,
+        );
+        this.rememberEndReaction(key);
+      } catch (error) {
+        this.logReactionFailure('end reaction add', error);
+      }
+    });
   }
 
   protected override onTaskLifecycle(event: ChannelTaskLifecycleEvent): void {
@@ -2107,7 +2239,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       return;
     }
     if (isTerminalTaskLifecycleType(event.type)) {
-      this.stopReaction(event.chatId, event.messageId, event.sessionId);
+      this.finishReaction(event.chatId, event.messageId, event.sessionId);
     }
   }
 
@@ -2115,13 +2247,8 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     const reactions = this.sessionReactionKeys.get(sessionId);
     if (reactions) {
       this.sessionReactionKeys.delete(sessionId);
-      for (const [key, { messageId, conversationId }] of reactions) {
-        if (!this.activeReactionKeys.delete(key)) continue;
-        void this.client
-          .removeImReaction(conversationId, messageId, ACK_REACTION_NAME)
-          .catch((error) =>
-            this.logReactionFailure('session-death reaction removal', error),
-          );
+      for (const key of reactions) {
+        this.cleanupReaction(key, 'session-death reaction removal');
       }
     }
     super.onSessionDied(sessionId);

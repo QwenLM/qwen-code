@@ -20,6 +20,7 @@ import {
 import {
   ensureNativePayload,
   parseChecksums,
+  uiAccessWorkerPath,
 } from "../scripts/install-native.mjs"
 
 test("release target mapping uses Qwen binary archives", () => {
@@ -35,6 +36,9 @@ test("release target mapping uses Qwen binary archives", () => {
     nativeTarget("win32", "arm64", "1.2.3").archive,
     "cua-driver-rs-1.2.3-windows-arm64-binary.zip",
   )
+  assert.deepEqual(nativeTarget("win32", "x64", "1.2.3").companions, [
+    "qwen-cua-driver-uia.exe",
+  ])
   assert.throws(() => nativeTarget("freebsd", "x64", "1.2.3"))
 })
 
@@ -84,10 +88,10 @@ test("native installer verifies and extracts the matching release archive", asyn
   writeFileSync(join(source, target.library), "sdk-library")
   writeFileSync(join(source, target.runtime), "node-runtime")
   const archive = join(directory, target.archive)
-  await createTar(
-    { cwd: source, file: archive, gzip: true },
-    [target.library, target.runtime],
-  )
+  await createTar({ cwd: source, file: archive, gzip: true }, [
+    target.library,
+    target.runtime,
+  ])
   const archiveBytes = readFileSync(archive)
   const checksum = createHash("sha256").update(archiveBytes).digest("hex")
   const requests = []
@@ -112,10 +116,17 @@ test("native installer verifies and extracts the matching release archive", asyn
     })
     assert.equal(installed, destination)
     assert.equal(hasNativePayload(installed, target), true)
-    assert.equal(readFileSync(join(installed, target.library), "utf8"), "sdk-library")
-    assert.equal(readFileSync(join(installed, target.runtime), "utf8"), "node-runtime")
     assert.equal(
-      JSON.parse(readFileSync(join(installed, "complete.json"), "utf8")).version,
+      readFileSync(join(installed, target.library), "utf8"),
+      "sdk-library",
+    )
+    assert.equal(
+      readFileSync(join(installed, target.runtime), "utf8"),
+      "node-runtime",
+    )
+    assert.equal(
+      JSON.parse(readFileSync(join(installed, "complete.json"), "utf8"))
+        .version,
       version,
     )
     assert.deepEqual(requests, [
@@ -184,4 +195,18 @@ test("checksum parser accepts sha256sum output only", () => {
     [...parseChecksums(`${"a".repeat(64)}  archive.tar.gz\ninvalid\n`)],
     [["archive.tar.gz", "a".repeat(64)]],
   )
+})
+
+test("UIAccess worker uses the versioned secure Windows path", () => {
+  assert.equal(
+    uiAccessWorkerPath("1.2.3", { ProgramFiles: String.raw`C:\Program Files` }),
+    join(
+      String.raw`C:\Program Files`,
+      "Qwen",
+      "CuaDriver",
+      "1.2.3",
+      "qwen-cua-driver-uia.exe",
+    ),
+  )
+  assert.throws(() => uiAccessWorkerPath("1.2.3", {}), /ProgramFiles/u)
 })

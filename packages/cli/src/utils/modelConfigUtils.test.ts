@@ -224,6 +224,34 @@ describe('modelConfigUtils', () => {
       } as Settings;
     }
 
+    it('loads none as an explicit reasoning disable', () => {
+      vi.mocked(resolveModelConfig).mockReturnValue({
+        config: {
+          model: 'qwen3.8-max',
+          apiKey: '',
+          baseUrl: '',
+          reasoning: { effort: 'xhigh' },
+        },
+        sources: {},
+        warnings: [],
+      });
+
+      const result = resolveCliGenerationConfig({
+        argv: {},
+        settings: makeMockSettings({
+          model: { name: 'qwen3.8-max', reasoningEffort: 'none' },
+        }),
+        selectedAuthType: AuthType.USE_OPENAI,
+      });
+
+      expect(result.generationConfig.reasoning).toBe(false);
+      expect(result.warnings).not.toEqual(
+        expect.arrayContaining([
+          expect.stringContaining('Ignoring invalid model.reasoningEffort'),
+        ]),
+      );
+    });
+
     it('should resolve config from argv with highest precedence', () => {
       const argv = {
         model: 'argv-model',
