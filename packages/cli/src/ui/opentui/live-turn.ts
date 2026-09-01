@@ -75,8 +75,6 @@ export function imagePathsToParts(imagePaths: readonly string[]): {
 
 export interface UseOpenTuiLiveTurnOptions {
   config: Config;
-  /** Called whenever the in-flight state flips (drives host.setStreaming). */
-  onStreamingChange?: (streaming: boolean) => void;
 }
 
 export interface OpenTuiLiveTurn {
@@ -123,14 +121,11 @@ export function useOpenTuiLiveTurn(
   const abortRef = useRef<AbortController | null>(null);
 
   const streamingRef = useRef(false);
-  const onStreamingChangeRef = useRef(options.onStreamingChange);
-  onStreamingChangeRef.current = options.onStreamingChange;
 
   const setBusy = useCallback((busy: boolean) => {
     if (streamingRef.current === busy) return;
     streamingRef.current = busy;
     setStreaming(busy);
-    onStreamingChangeRef.current?.(busy);
   }, []);
 
   const apply = useCallback((ev: OpenTuiStreamEvent) => {
