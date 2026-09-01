@@ -1833,9 +1833,10 @@ function readCoreSettingValues(
  * normalized exactly the way boot accepts them (parseApprovalModeValue
  * trims, lowercases, and maps the legacy `auto_edit`/`autoedit` aliases), so
  * reload convergence agrees with the settings file for every boot-accepted
- * spelling. A MISSING key folds to AUTO — the same default loadCliConfig
- * derives when the key is absent — so a key deletion reaches live sessions
- * on reload instead of pinning a stale privileged mode until daemon restart.
+ * spelling. A MISSING or falsy key folds to AUTO — the same default
+ * loadCliConfig derives in either case — so a key deletion reaches live
+ * sessions on reload instead of pinning a stale privileged mode until daemon
+ * restart.
  * A PRESENT but unparseable value returns undefined: boot rejects that file
  * outright (loadCliConfig has no catch around parseApprovalModeValue), so
  * folding it to AUTO would silently escalate the approval gate for every
@@ -1844,7 +1845,7 @@ function readCoreSettingValues(
  * boot entirely; the reload loop converges them on DEFAULT separately.
  */
 function foldReloadApprovalMode(raw: unknown): ApprovalMode | undefined {
-  if (raw === undefined) {
+  if (!raw) {
     return ApprovalMode.AUTO;
   }
   if (typeof raw === 'string') {

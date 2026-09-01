@@ -173,6 +173,7 @@ import {
   readEffectiveSessionWorkflow,
   registerWorkspaceQualifiedSettingsRoutes,
   registerWorkspaceSettingsRoutes,
+  withSessionWorkflowWriteLock,
 } from './routes/workspace-settings.js';
 import { registerUserLanguageRoutes } from './routes/user-language.js';
 import {
@@ -2624,14 +2625,16 @@ export function createServeApp(
             // workspace-scope file can shadow the user write differently per
             // workspace, so the primary's value is not generally correct for
             // them.
-            await runtime.bridge.invokeWorkspaceCommand(
-              SERVE_CONTROL_EXT_METHODS.workspaceSessionWorkflow,
-              {
-                enabled: readEffectiveSessionWorkflow(
-                  runtime.workspaceCwd,
-                  runtime.trusted,
-                ),
-              },
+            await withSessionWorkflowWriteLock(runtime.workspaceCwd, () =>
+              runtime.bridge.invokeWorkspaceCommand(
+                SERVE_CONTROL_EXT_METHODS.workspaceSessionWorkflow,
+                {
+                  enabled: readEffectiveSessionWorkflow(
+                    runtime.workspaceCwd,
+                    runtime.trusted,
+                  ),
+                },
+              ),
             );
           } catch (err) {
             // A draining or dead sibling must not fail the write; its

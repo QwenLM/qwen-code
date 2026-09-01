@@ -7,17 +7,16 @@ import { isSubAgentToolCall } from '../../adapters/toolClassification';
 import {
   getActiveAgents,
   getPlanNodeState,
-  nestedAgentToolsForTool,
   nestedTasksForTool,
   type PlanNodeStatus,
 } from '../messages/PlanExecutionView';
 
 export interface SessionWorkflowProjection {
   todosById: ReadonlyMap<string, TodoItem>;
-  toolsByCallId: ReadonlyMap<string, ACPToolCall>;
+  toolsByTaskId: ReadonlyMap<string, ACPToolCall>;
   toolsByTodo: ReadonlyMap<string, readonly ACPToolCall[]>;
   agentToolsByTodo: ReadonlyMap<string, readonly ACPToolCall[]>;
-  tasksByToolCallId: ReadonlyMap<string, DaemonSessionAgentTaskStatus>;
+  tasksByTool: ReadonlyMap<ACPToolCall, DaemonSessionAgentTaskStatus>;
   states: ReadonlyMap<string, { status: PlanNodeStatus; attention: boolean }>;
   attentionTodos: readonly TodoItem[];
   activeAgents: readonly DaemonSessionAgentTaskStatus[];
@@ -40,10 +39,13 @@ export function workflowTodoId(tool: ACPToolCall): string | undefined {
 function taskForTool(
   tool: ACPToolCall,
   tasks: readonly DaemonSessionTaskStatus[],
+  parentAgentId: string | undefined,
 ): DaemonSessionAgentTaskStatus | undefined {
   return tasks.find(
     (task): task is DaemonSessionAgentTaskStatus =>
-      task.kind === 'agent' && task.toolUseId === tool.callId,
+      task.kind === 'agent' &&
+      task.toolUseId === tool.callId &&
+      (task.parentAgentId ?? undefined) === parentAgentId,
   );
 }
 
@@ -63,19 +65,38 @@ function linkedAgentTasks(
 ): DaemonSessionAgentTaskStatus[] {
   const linked = new Map<string, DaemonSessionAgentTaskStatus>();
   for (const tool of tools) {
-    const root = taskForTool(tool, tasks);
+    const root = taskForTool(tool, tasks, undefined);
     if (root) linked.set(root.id, root);
     for (const { task } of nestedTasksForTool(tool, tasks)) {
       linked.set(task.id, task);
     }
-    for (const { tool: nestedTool, depth } of nestedAgentToolsForTool(tool)) {
-      const task = taskForTool(nestedTool, tasks);
-      if (task) {
-        linked.set(task.id, task.depth == null ? { ...task, depth } : task);
-      }
-    }
   }
   return [...linked.values()];
+}
+
+function linkAgentTools(
+  tools: readonly ACPToolCall[],
+  tasks: readonly DaemonSessionTaskStatus[],
+): {
+  toolsByTaskId: Map<string, ACPToolCall>;
+  tasksByTool: Map<ACPToolCall, DaemonSessionAgentTaskStatus>;
+} {
+  const toolsByTaskId = new Map<string, ACPToolCall>();
+  const tasksByTool = new Map<ACPToolCall, DaemonSessionAgentTaskStatus>();
+  const visit = (tool: ACPToolCall, parentAgentId: string | undefined) => {
+    const task = isSubAgentToolCall(tool)
+      ? taskForTool(tool, tasks, parentAgentId)
+      : undefined;
+    if (task) {
+      toolsByTaskId.set(task.id, tool);
+      tasksByTool.set(tool, task);
+    }
+    for (const child of tool.subTools ?? []) {
+      visit(child, task?.id ?? parentAgentId);
+    }
+  };
+  for (const tool of tools) visit(tool, undefined);
+  return { toolsByTaskId, tasksByTool };
 }
 
 export function buildSessionWorkflowProjection(
@@ -83,10 +104,6 @@ export function buildSessionWorkflowProjection(
   tools: readonly ACPToolCall[],
   tasks: readonly DaemonSessionTaskStatus[],
 ): SessionWorkflowProjection {
-  const allTools = flattenTools(tools);
-  const toolsByCallId = new Map(
-    allTools.map((tool): [string, ACPToolCall] => [tool.callId, tool]),
-  );
   const todosById = new Map(todos.map((todo) => [todo.id, todo]));
   const toolsByTodo = new Map<string, ACPToolCall[]>();
   const agentToolsByTodo = new Map<string, ACPToolCall[]>();
@@ -110,7 +127,12 @@ export function buildSessionWorkflowProjection(
       getPlanNodeState(todo, todosById, toolsByTodo.get(todo.id) ?? [], tasks),
     ]),
   );
-  const agents = linkedAgentTasks(tools, tasks);
+  const { toolsByTaskId, tasksByTool } = linkAgentTools(tools, tasks);
+  const linkedAgents = new Map(
+    linkedAgentTasks(tools, tasks).map((task) => [task.id, task]),
+  );
+  for (const task of tasksByTool.values()) linkedAgents.set(task.id, task);
+  const agents = [...linkedAgents.values()];
   const attentionTodos = todos.filter((todo) => states.get(todo.id)?.attention);
   // The overview strip's exact tally (live tasks plus the transcript
   // fallback for in-flight tool calls with no live daemon task), so the
@@ -145,15 +167,10 @@ export function buildSessionWorkflowProjection(
 
   return {
     todosById,
-    toolsByCallId,
+    toolsByTaskId,
     toolsByTodo,
     agentToolsByTodo,
-    tasksByToolCallId: new Map(
-      agents.flatMap(
-        (task): Array<[string, DaemonSessionAgentTaskStatus]> =>
-          task.toolUseId ? [[task.toolUseId, task]] : [],
-      ),
-    ),
+    tasksByTool,
     states,
     attentionTodos,
     activeAgents,

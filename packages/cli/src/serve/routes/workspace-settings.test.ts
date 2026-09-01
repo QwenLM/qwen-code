@@ -208,6 +208,23 @@ describe('POST /workspace/settings', () => {
     );
   });
 
+  it('still fans out a user write when the primary live push fails', async () => {
+    const { app, updateSessionWorkflow, updateSiblingSessionWorkflows } =
+      makeApp({
+        workspaceSettings: { experimental: { sessionWorkflow: true } },
+      });
+    updateSessionWorkflow.mockRejectedValueOnce(new Error('channel closed'));
+
+    const res = await request(app).post('/workspace/settings').send({
+      scope: 'user',
+      key: 'experimental.sessionWorkflow',
+      value: true,
+    });
+
+    expect(res.status).toBe(500);
+    expect(updateSiblingSessionWorkflows).toHaveBeenCalledOnce();
+  });
+
   it('applies the effective value when a user write is shadowed by workspace', async () => {
     // A user-scoped write persists to the user file but stays shadowed by the
     // workspace value, so live sessions must keep following the merged value.

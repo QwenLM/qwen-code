@@ -7065,10 +7065,12 @@ export class Config {
       /** @deprecated Model origin no longer changes plan-exit approval. */
       enteredByModel?: boolean;
       /**
-       * Set by ExitPlanModeTool for user/leader-approved plan exits. Every
-       * other PLAN → non-PLAN transition (Shift+Tab, /approval-mode, /plan,
-       * ACP setSessionMode, confirm-and-switch) is a manual exit the model
-       * was never told about, and queues a one-shot system reminder.
+       * Set by ExitPlanModeTool for user/leader-approved plan exits. Only the
+       * root Session Config may stamp the session-global workflow revision;
+       * derived agent configs still clear their local plan-exit notice.
+       * Every other PLAN → non-PLAN transition (Shift+Tab, /approval-mode,
+       * /plan, ACP setSessionMode, confirm-and-switch) is a manual exit the
+       * model was never told about, and queues a one-shot system reminder.
        */
       fromApprovedPlanExit?: boolean;
     },
@@ -7123,7 +7125,10 @@ export class Config {
       noticeEvent.kind = options?.fromApprovedPlanExit
         ? 'clear'
         : 'manual-exit';
-      if (options?.fromApprovedPlanExit) {
+      if (
+        options?.fromApprovedPlanExit &&
+        Object.getPrototypeOf(this) === Config.prototype
+      ) {
         this.approveSessionWorkflowPlanRevision();
       }
     }
@@ -7832,10 +7837,7 @@ export class Config {
 
   /**
    * Stamp the bound revision as approved. Runs on the PLAN → non-PLAN
-   * transition of an approved exit_plan_mode. Routing the write through
-   * `setSessionWorkflowPlanRevision` keeps it on the session-global root
-   * Config when `this` is a prototype wrapper whose write-through shim
-   * forwards mutations to the base.
+   * transition of an approved exit_plan_mode on the root Session Config.
    */
   approveSessionWorkflowPlanRevision(): void {
     const revision = this.getSessionWorkflowPlanRevision();

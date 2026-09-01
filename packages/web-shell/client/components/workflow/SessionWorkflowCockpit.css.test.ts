@@ -27,4 +27,11 @@ describe('SessionWorkflowCockpit stylesheet', () => {
     expect(cockpitCss).toMatch(/\.backButton:focus-visible/);
     expect(cockpitCss).toMatch(/\.emptyCockpit\s+button:focus-visible/);
   });
+
+  it('passes the page height to the embedded DAG viewport', () => {
+    expect(cockpitCss).toMatch(/\.canvas\s*\{[^}]*display:\s*flex/);
+    expect(cockpitCss).toMatch(
+      /\.canvas\s*>\s*section\s*\{[^}]*min-height:\s*0[^}]*flex:/,
+    );
+  });
 });

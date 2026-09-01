@@ -120,7 +120,7 @@ export function SessionWorkflowInspector({
         <h3>{t('planExecution.subagents')}</h3>
         {selectedTools.length ? (
           selectedTools.map((tool) => {
-            const task = projection.tasksByToolCallId.get(tool.callId);
+            const task = projection.tasksByTool.get(tool);
             const metrics = task
               ? [
                   task.startTime > 0 ? formatRuntime(task.runtimeMs) : '',
@@ -299,9 +299,7 @@ export function SessionWorkflowInspector({
         </summary>
         <div className={styles.activityList}>
           {projection.activity.slice(0, 6).map((task) => {
-            const tool = task.toolUseId
-              ? projection.toolsByCallId.get(task.toolUseId)
-              : undefined;
+            const tool = projection.toolsByTaskId.get(task.id);
             const at = task.endTime ?? task.startTime;
             const content = (
               <>

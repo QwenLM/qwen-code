@@ -388,6 +388,9 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
           ...(previousPlan.planId ? { planId: previousPlan.planId } : {}),
           todos: finalTodos,
           changes: { created: [], completed: [] },
+          ...(this.config.isSessionWorkflowTodoContextActive?.() === true
+            ? { sessionWorkflow: true }
+            : {}),
           unchanged: true,
         };
 

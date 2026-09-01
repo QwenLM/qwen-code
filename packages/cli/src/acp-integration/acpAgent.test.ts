@@ -26632,9 +26632,9 @@ describe('sessionLanguage multi-session propagation', () => {
     await agentPromise;
   });
 
-  it('folds a removed or invalid approvalMode key to AUTO for live sessions on reload', async () => {
+  it('folds a removed or falsy approvalMode key to AUTO for live sessions on reload', async () => {
     // Deleting tools.approvalMode from the settings file must reach live
-    // sessions: the reload folds a missing/invalid value to AUTO — the same
+    // sessions: the reload folds a missing/falsy value to AUTO — the same
     // default a fresh session derives — instead of skipping it and pinning a
     // stale privileged mode until daemon restart.
     let mergedSettings: Record<string, unknown> = {
@@ -26717,6 +26717,17 @@ describe('sessionLanguage multi-session propagation', () => {
       await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
       expect(setApprovalMode).not.toHaveBeenCalled();
       expect(clearActiveTodoPlanRevision).not.toHaveBeenCalled();
+
+      mergedSettings = { tools: { approvalMode: 'plan' } };
+      await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+      expect(approvalMode).toBe('plan');
+      setApprovalMode.mockClear();
+
+      mergedSettings = { tools: { approvalMode: null } };
+      await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+      expect(setApprovalMode).toHaveBeenCalledWith('auto');
+      expect(approvalMode).toBe('auto');
+      setApprovalMode.mockClear();
 
       // ...and an invalid value is never converged at all: boot rejects an
       // unparseable tools.approvalMode outright, so reload keeps live

@@ -25865,7 +25865,7 @@ describe('Session', () => {
     it.each([
       ['live update', 'live', true],
       ['history replay', 'replay', false],
-      ['failed replacement', 'failed', false],
+      ['failed replacement', 'failed', true],
       ['mode transition', 'cleared', false],
       ['empty plan update', 'empty-entries', false],
       ['plan update without identity', 'missing-meta', false],

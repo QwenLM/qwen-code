@@ -9750,11 +9750,12 @@ export function App({
     // active-session guards, and closing the drawer anyway would drop the
     // interactive workflow surface without delivering the expand action.
     if (!openCockpit()) return;
+    if (artifactPanelFullscreen) setArtifactPanelFullscreen(false);
     if (useFloatingArtifactPanel) {
       keepWorkflowDrawerClosedForCanvasRef.current = true;
       setArtifactPanelOpen(false);
     }
-  }, [openCockpit, useFloatingArtifactPanel]);
+  }, [artifactPanelFullscreen, openCockpit, useFloatingArtifactPanel]);
   useEffect(() => {
     if (mainView !== 'cockpit') {
       keepWorkflowDrawerClosedForCanvasRef.current = false;

@@ -145,10 +145,17 @@
 }
 
 .canvas {
+  display: flex;
   flex: 1 1 auto;
+  flex-direction: column;
   min-height: 0;
   overflow: hidden;
   padding: 18px 24px 24px;
+}
+
+.canvas > section {
+  min-height: 0;
+  flex: 1 1 auto;
 }
 
 .emptyCockpit {

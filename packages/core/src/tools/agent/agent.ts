@@ -2702,7 +2702,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         status: 'running' as const,
         subagentColor: subagentConfig.color,
       };
-      this.setupEventListeners(updateOutput);
+      if (shouldRunInBackground) this.setupEventListeners(updateOutput);
       updateOutput?.(this.currentDisplay);
 
       const backgroundOwnerId = getCurrentAgentId();

@@ -89,4 +89,36 @@ describe('buildSessionWorkflowProjection', () => {
 
     expect(projection.activeAgents).toHaveLength(0);
   });
+
+  it('keeps nested tool links separate when call IDs collide', () => {
+    const childA = agentTool('call-child', 'build');
+    const childB = agentTool('call-child', 'build');
+    const rootA = { ...agentTool('call-root-a', 'build'), subTools: [childA] };
+    const rootB = { ...agentTool('call-root-b', 'build'), subTools: [childB] };
+    const taskA = liveTask({
+      id: 'child-a',
+      toolUseId: 'call-child',
+      parentAgentId: 'root-a',
+    });
+    const taskB = liveTask({
+      id: 'child-b',
+      toolUseId: 'call-child',
+      parentAgentId: 'root-b',
+    });
+    const projection = buildSessionWorkflowProjection(
+      todos,
+      [rootA, rootB],
+      [
+        liveTask({ id: 'root-a', toolUseId: 'call-root-a' }),
+        liveTask({ id: 'root-b', toolUseId: 'call-root-b' }),
+        taskA,
+        taskB,
+      ],
+    );
+
+    expect(projection.tasksByTool.get(childA)).toBe(taskA);
+    expect(projection.tasksByTool.get(childB)).toBe(taskB);
+    expect(projection.toolsByTaskId.get('child-a')).toBe(childA);
+    expect(projection.toolsByTaskId.get('child-b')).toBe(childB);
+  });
 });

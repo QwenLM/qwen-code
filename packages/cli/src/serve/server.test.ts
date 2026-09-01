@@ -32,6 +32,7 @@ import {
   PromptDeadlineExceededError,
   resolvePromptDeadlineMs,
 } from './server.js';
+import { withSessionWorkflowWriteLock } from './routes/workspace-settings.js';
 import {
   invalidateWorkspaceSessionListCache,
   listLiveWorkspaceSessionsForResponse,
@@ -103,7 +104,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import * as qwenCore from '@qwen-code/qwen-code-core';
 import type { DaemonStatusProvider } from '@qwen-code/acp-bridge';
-import { BridgeTimeoutError } from '@qwen-code/acp-bridge/status';
+import { BridgeTimeoutError , SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
 import {
   CancelSentinelCollisionError,
   InvalidClientIdError,
@@ -164,7 +165,6 @@ import type {
   ServeWorkspaceSkillsStatus,
   ServeWorkspaceToolsStatus,
 } from '@qwen-code/acp-bridge/status';
-import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
 import { CAPABILITIES_SCHEMA_VERSION, type ServeOptions } from './types.js';
 import { isValidSessionId } from '../config/config.js';
 import type { DaemonLogger } from './daemon-logger.js';
@@ -4524,7 +4524,24 @@ describe('createServeApp', () => {
         persistSetting: vi.fn(async () => undefined),
       });
 
-      const res = await request(app)
+      let releaseSiblingWrite!: () => void;
+      let siblingWriteStarted!: () => void;
+      const siblingWriteReady = new Promise<void>((resolve) => {
+        siblingWriteStarted = resolve;
+      });
+      const siblingWriteBlocked = new Promise<void>((resolve) => {
+        releaseSiblingWrite = resolve;
+      });
+      const heldSiblingWrite = withSessionWorkflowWriteLock(
+        '/workspace/secondary',
+        async () => {
+          siblingWriteStarted();
+          await siblingWriteBlocked;
+        },
+      );
+      await siblingWriteReady;
+
+      const response = request(app)
         .post('/workspace/settings')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Authorization', 'Bearer secret')
@@ -4532,7 +4549,14 @@ describe('createServeApp', () => {
           scope: 'user',
           key: 'experimental.sessionWorkflow',
           value: true,
-        });
+        })
+        .then((res) => res);
+
+      await vi.waitFor(() => expect(primaryInvoke).toHaveBeenCalled());
+      expect(secondaryInvoke).not.toHaveBeenCalled();
+      releaseSiblingWrite();
+      const res = await response;
+      await heldSiblingWrite;
 
       expect(res.status).toBe(200);
       expect(primaryInvoke).toHaveBeenCalledWith(

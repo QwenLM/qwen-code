@@ -312,7 +312,7 @@ async function withMcpServerMutationLock<T>(
 // lock-ordering cycle. Same promise-chain pattern as
 // withMcpServerMutationLock above.
 const sessionWorkflowWriteQueues = new Map<string, Promise<void>>();
-async function withSessionWorkflowWriteLock<T>(
+export async function withSessionWorkflowWriteLock<T>(
   workspace: string,
   operation: () => Promise<T>,
 ): Promise<T> {
@@ -635,17 +635,25 @@ export function registerWorkspaceSettingsRoutes(
             throw err;
           }
           if (key === 'experimental.sessionWorkflow') {
-            if (
-              !(await updateLiveSessionWorkflow(
-                deps.updateSessionWorkflow,
-                readEffectiveSessionWorkflow(
-                  boundWorkspace,
-                  deps.isWorkspaceTrusted?.() ?? true,
-                ),
+            const livePushSucceeded = await updateLiveSessionWorkflow(
+              deps.updateSessionWorkflow,
+              readEffectiveSessionWorkflow(
                 boundWorkspace,
-                res,
-              ))
-            ) {
+                deps.isWorkspaceTrusted?.() ?? true,
+              ),
+              boundWorkspace,
+              res,
+            );
+            // A user-scope write lands in the global user file, so the gate
+            // flips for every workspace on the host; the primary push above
+            // only reached the primary bridge. Fan the re-derivation out to
+            // the sibling runtimes (best-effort, non-throwing by contract).
+            // A workspace-scope write only touched this workspace's file, so
+            // siblings keep their own value and need no push.
+            if (settingScope === SettingScope.User) {
+              await deps.updateSiblingSessionWorkflows?.();
+            }
+            if (!livePushSucceeded) {
               // The persist above already changed the file; only the live
               // push failed. The caller must still emit the change
               // notification so observers converge on the new disk value.
@@ -657,15 +665,6 @@ export function registerWorkspaceSettingsRoutes(
               if (sendGenerationClosedError(res, err))
                 return 'unchanged_failure';
               throw err;
-            }
-            // A user-scope write lands in the global user file, so the gate
-            // flips for every workspace on the host; the primary push above
-            // only reached the primary bridge. Fan the re-derivation out to
-            // the sibling runtimes (best-effort, non-throwing by contract).
-            // A workspace-scope write only touched this workspace's file, so
-            // siblings keep their own value and need no push.
-            if (settingScope === SettingScope.User) {
-              await deps.updateSiblingSessionWorkflows?.();
             }
           }
           return 'ok';

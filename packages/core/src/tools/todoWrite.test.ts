@@ -794,6 +794,27 @@ describe('TodoWriteTool', () => {
       expect(result.returnDisplay).toMatchObject({ sessionWorkflow: true });
     });
 
+    it('keeps the Session Workflow marker on an unchanged Todo list', async () => {
+      const todos: TodoItem[] = [
+        { id: 'prepare', content: 'Prepare', status: 'pending' },
+      ];
+      mockConfig = {
+        getSessionId: () => 'test-session-123',
+        getHookSystem: () => undefined,
+        isSessionWorkflowTodoContextActive: vi.fn().mockReturnValue(true),
+        setActiveTodoReminder: vi.fn(),
+      } as unknown as Config;
+      tool = new TodoWriteTool(mockConfig);
+      mockFs.readFile.mockResolvedValue(JSON.stringify({ todos }));
+
+      const result = await tool.build({ todos }).execute(mockAbortSignal);
+
+      expect(result.returnDisplay).toMatchObject({
+        unchanged: true,
+        sessionWorkflow: true,
+      });
+    });
+
     it('ends an approved Workflow when a new Todo plan starts', async () => {
       const clearRevision = vi.fn();
       mockConfig = {
