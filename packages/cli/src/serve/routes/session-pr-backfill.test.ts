@@ -1101,6 +1101,92 @@ describe('backfillWorkspaceSessionPrs', () => {
     expect(await fsp.readFile(prPath, 'utf8')).toBe(before);
   });
 
+  it('promotes a fork-layout convention occupant attested by the trusted parent page', async () => {
+    // On a fork checkout the occupant's url is the PARENT repo's PR:
+    // numberToUrl is gated to the fork's key and the remote shape is the
+    // fork's, so only the confirmed parent page can attest the identity —
+    // without that disjunct the promotion never lands in this layout and
+    // the session's own PR stays evictable by every capped writer.
+    await seedSession(SESSION_A);
+    await seedWorktreeSidecar(SESSION_A, 'pr-100', 'worktree-pr-100');
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    await fsp.mkdir(path.dirname(prPath), { recursive: true });
+    await fsp.writeFile(
+      prPath,
+      JSON.stringify({
+        prs: [
+          {
+            number: 100,
+            url: 'https://github.com/parent/repo/pull/100',
+            createdAt: '2026-08-01T00:00:00.000Z',
+            source: 'review',
+          },
+        ],
+      }),
+      'utf8',
+    );
+    fetchRemoteWebUrlMock.mockResolvedValue('https://github.com/me/fork');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [
+        {
+          ...pr(100, 'worktree-pr-100'),
+          url: 'https://github.com/parent/repo/pull/100',
+        },
+      ],
+    });
+    fetchAttributionRepoKeysMock.mockResolvedValue({
+      resolved: 'github.com/me/fork',
+      parent: 'github.com/parent/repo',
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 0, alreadyBound: 1, written: 1 });
+    expect(await readSessionPrs(prPath)).toEqual([
+      {
+        number: 100,
+        url: 'https://github.com/parent/repo/pull/100',
+        createdAt: '2026-08-01T00:00:00.000Z',
+        source: 'worktree',
+      },
+    ]);
+    // A DIVERGENT page must not attest: same shape, but attribution does
+    // not confirm the parent — the occupant stays untouched.
+    await fsp.writeFile(
+      prPath,
+      JSON.stringify({
+        prs: [
+          {
+            number: 100,
+            url: 'https://github.com/stranger/repoB/pull/100',
+            createdAt: '2026-08-01T00:00:00.000Z',
+            source: 'review',
+          },
+        ],
+      }),
+      'utf8',
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [
+        {
+          ...pr(100, 'worktree-pr-100'),
+          url: 'https://github.com/stranger/repoB/pull/100',
+        },
+      ],
+    });
+    fetchAttributionRepoKeysMock.mockResolvedValue({
+      resolved: 'github.com/me/fork',
+    });
+    const divergent = await backfillWorkspaceSessionPrs(runtime);
+    expect(divergent).toMatchObject({ written: 0 });
+    expect((await readSessionPrs(prPath))?.[0]?.source).toBe('review');
+  });
+
   it('never promotes an occupant whose identity this run cannot attest', async () => {
     // A foreign same-numbered occupant sits at the convention number (a
     // divergent-page form or a dialog bind can put it there). With gh

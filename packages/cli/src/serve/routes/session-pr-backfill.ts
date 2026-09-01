@@ -825,9 +825,19 @@ export async function backfillWorkspaceSessionPrs(
           }
           const canonical = canonicalSessionPrUrl(entry.url);
           const resolved = numberToUrl.get(entry.number);
+          // In the fork layout the workspace's own numbers live on the
+          // CONFIRMED parent page: numberToUrl is gated to the fork's key
+          // and the remote shape is the fork's url, so without this
+          // disjunct a parent-bound convention occupant could never be
+          // attested — and never promoted — in that layout. Gated on
+          // pageMapTrusted: a divergent page must not attest anything.
+          const pageUrl = pageUrlByNumber.get(entry.number);
           return (
             (resolved !== undefined &&
               canonical === canonicalSessionPrUrl(resolved)) ||
+            (pageMapTrusted &&
+              pageUrl !== undefined &&
+              canonical === canonicalSessionPrUrl(pageUrl)) ||
             (remote !== undefined &&
               canonical ===
                 canonicalSessionPrUrl(`${remote}/pull/${entry.number}`))
