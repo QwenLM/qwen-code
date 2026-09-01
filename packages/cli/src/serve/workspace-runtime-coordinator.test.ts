@@ -442,8 +442,8 @@ describe('WorkspaceRuntimeCoordinator', () => {
 
   it('repairs a queued MCP mutation rejected by a drain race', async () => {
     const harness = makeRuntime();
+    harness.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 1 });
     const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
-    await coordinator.ensure();
     let releaseMutation!: () => void;
     const mutationGate = new Promise<void>((resolve) => {
       releaseMutation = resolve;
@@ -454,24 +454,30 @@ describe('WorkspaceRuntimeCoordinator', () => {
       await mutationGate;
       return { accepted: true };
     });
-    await vi.waitFor(() => expect(mutationStarted).toHaveBeenCalledOnce());
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(mutationStarted).toHaveBeenCalledOnce();
     const queued = coordinator.runMcpRuntimeMutation(async () => ({
       accepted: true,
     }));
-    const queuedRejected = await expect(queued).rejects.toBeInstanceOf(
-      WorkspaceDrainingError,
-    );
+    let queuedError: unknown;
+    const queuedHandled = queued.catch((error: unknown) => {
+      queuedError = error;
+    });
 
     coordinator.beginDrain();
     releaseMutation();
-    await first;
-    await queuedRejected;
+    await queuedHandled;
+    expect(queuedError).toBeInstanceOf(WorkspaceDrainingError);
+    expect(coordinator.status().capabilities?.mcp?.state).toBe('stale');
     coordinator.cancelDrain();
+    await first;
 
-    await vi.waitFor(() => {
-      expect(harness.reloadWorkspaceMcp).toHaveBeenCalledOnce();
-      expect(coordinator.status().capabilities?.mcp?.state).toBe('ready');
-    });
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(harness.reloadWorkspaceMcp).toHaveBeenCalledOnce();
+    expect(coordinator.status().capabilities?.mcp?.state).toBe('ready');
   });
 
   it('replays MCP reconciliation interrupted while draining', async () => {
