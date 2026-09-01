@@ -14,15 +14,14 @@
           apps (Calculator, modern Notepad, Settings).
 
           Requirements honored by AIS at launch time:
-            1. Authenticode signature                  — required (production: EV cert)
+            1. Valid Authenticode signature            — required
             2. Process launched via ShellExecute       — required (CreateProcess fails)
             3. Binary under a "secure" path OR policy  — \Program Files\, OR HKLM
                EnableSecureUIAPaths=0 set by an admin
 
-          Dev / VM testing: a self-signed cert added to LocalMachine\Root and
-          LocalMachine\TrustedPublisher is enough; EnableSecureUIAPaths=0 lets
-          this run from %LOCALAPPDATA%\Programs\Qwen\qwen-cua-driver\bin\.
-          Prod: signed by Anthropic/trycua EV cert + installed under \Program Files\.
+          Development builds use a separately named local worker. Release
+          builds are signed by Qwen's Windows release certificate and install
+          the worker under \Program Files\Qwen\CuaDriver\<version>\.
         -->
         <requestedExecutionLevel level="asInvoker" uiAccess="true"/>
       </requestedPrivileges>
