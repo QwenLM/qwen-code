@@ -68,7 +68,12 @@ cpSync(grammarSource, path.join(distRuntime, 'tree-sitter-javascript.wasm'));
 // 4. Sanity-check the emit. A stale buildinfo or a misconfigured tsconfig can
 //    make `tsc --build` silently emit nothing, leaving a dist that only has the
 //    copied assets — which then fails at runtime instead of at build time.
-for (const required of ['index.js', 'kernel-manager.js', 'mcp-server.js']) {
+for (const required of [
+  'index.js',
+  'programmatic.js',
+  'kernel-manager.js',
+  'mcp-server.js',
+]) {
   const emitted = path.join(here, 'dist', required);
   if (!existsSync(emitted)) {
     throw new Error(

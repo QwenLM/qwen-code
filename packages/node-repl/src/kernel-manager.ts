@@ -18,6 +18,7 @@ import {
   encodeFrame,
   FrameDecoder,
   type ExecResultMessage,
+  type HostCallMessage,
   type KernelToHostMessage,
   type NodeReplBindingKind,
   type NodeReplModuleRoot,
@@ -30,6 +31,7 @@ const WINDOWS_TASKKILL = `${process.env['SystemRoot'] || 'C:\\Windows'}\\System3
 
 const READY_TIMEOUT_MS = 15_000;
 const ADD_ROOT_TIMEOUT_MS = 10_000;
+const HOST_CANCEL_GRACE_MS = 1_000;
 const TERMINATE_GRACE_MS = 500;
 const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
 const MAX_RAW_TEXT_BYTES = 16 * 1024 * 1024;
@@ -87,12 +89,20 @@ export interface NodeReplExecRequest {
   signal?: AbortSignal;
 }
 
+export interface NodeReplHostCall {
+  capability: string;
+  method: string;
+  args: unknown;
+  signal: AbortSignal;
+}
+
 export interface KernelManagerOptions {
   cwd: string;
   homeDir: string;
   tmpRootDir: string;
   policy: NodeReplSecurityPolicy;
   readableRoots: string[];
+  hostCallDispatcher?: (call: NodeReplHostCall) => Promise<unknown>;
 }
 
 interface InflightExec {
@@ -109,6 +119,8 @@ interface InflightExec {
   droppedStaleFrames: number;
   allowedBindingKinds: Map<string, NodeReplBindingKind>;
   settled: boolean;
+  hostDispatches: Set<Promise<void>>;
+  hostAbortController: AbortController;
   settle: (
     result:
       | ExecResultMessage
@@ -262,6 +274,7 @@ export class NodeReplKernelManager {
     this.disposed = true;
     const inflight = this.inflight;
     if (inflight) {
+      inflight.hostAbortController.abort();
       inflight.settle({
         hostStatus: 'cancelled',
         message: 'The node_repl task was disposed during execution.',
@@ -351,6 +364,8 @@ export class NodeReplKernelManager {
         ]),
       ),
       settled: false,
+      hostDispatches: new Set(),
+      hostAbortController: new AbortController(),
       settle: () => undefined,
     };
     const effectiveTimeout = Math.min(request.timeoutMs, MAX_TIMER_DELAY_MS);
@@ -390,13 +405,26 @@ export class NodeReplKernelManager {
     });
 
     let stopStarted = false;
+    let cancelFallback: NodeJS.Timeout | undefined;
     let requestedStopStatus: 'timeout' | 'cancelled' | null = null;
     const stop = (status: 'timeout' | 'cancelled', message: string) => {
       if (stopStarted || inflight.settled) return;
       stopStarted = true;
       requestedStopStatus = status;
+      inflight.hostAbortController.abort();
       try {
         handle.toKernel.write(encodeFrame({ type: 'cancel', execId }));
+        cancelFallback = setTimeout(() => {
+          if (inflight.settled || inflight.hostDispatches.size === 0) return;
+          void this.invalidateKernel(status)
+            .catch(() => undefined)
+            .finally(() => {
+              inflight.settle({
+                hostStatus: status,
+                message: `${message} A host capability did not acknowledge cancellation within ${HOST_CANCEL_GRACE_MS}ms; the kernel was replaced and its bindings were lost.`,
+              });
+            });
+        }, HOST_CANCEL_GRACE_MS);
       } catch (error) {
         void this.invalidateKernel('crashed')
           .catch(() => undefined)
@@ -444,6 +472,7 @@ export class NodeReplKernelManager {
 
     const terminal = await settled;
     clearTimeout(timeout);
+    if (cancelFallback) clearTimeout(cancelFallback);
     request.signal?.removeEventListener('abort', onAbort);
     if (this.inflight === inflight) this.inflight = null;
     // Flush any partial multi-byte sequence still held by the raw stream
@@ -607,6 +636,7 @@ export class NodeReplKernelManager {
           tmpDir: this.sessionTmpDir,
           moduleRoots: [...this.moduleRoots],
           readableRoots: [...this.readableRoots, this.sessionTmpDir],
+          hostCallEnabled: this.options.hostCallDispatcher !== undefined,
         }),
       );
       await Promise.race([
@@ -683,8 +713,11 @@ export class NodeReplKernelManager {
         }
         this.collectImage(message.execId, message.data, message.mimeType);
         return;
+      case 'hostCall':
+        this.handleHostCall(handle, message as HostCallMessage);
+        return;
       case 'execResult':
-        this.handleExecResult(handle, message as ExecResultMessage);
+        void this.handleExecResult(handle, message as ExecResultMessage);
         return;
       case 'addModuleRootResult': {
         if (
@@ -720,10 +753,10 @@ export class NodeReplKernelManager {
     }
   }
 
-  private handleExecResult(
+  private async handleExecResult(
     handle: KernelHandle,
     message: ExecResultMessage,
-  ): void {
+  ): Promise<void> {
     const inflight = this.inflight;
     if (!inflight || message.execId !== inflight.execId) {
       if (inflight) inflight.droppedStaleFrames++;
@@ -766,7 +799,141 @@ export class NodeReplKernelManager {
     }
     inflight.rawTextTruncated ||= message.rawTextTruncated ?? false;
     inflight.imagesDropped += message.imagesDropped ?? 0;
+    await Promise.allSettled(inflight.hostDispatches);
     inflight.settle(message);
+  }
+
+  private handleHostCall(handle: KernelHandle, message: HostCallMessage): void {
+    const inflight = this.inflight;
+    const dispatcher = this.options.hostCallDispatcher;
+    if (
+      !inflight ||
+      dispatcher === undefined ||
+      message.execId !== inflight.execId ||
+      message.generation !== inflight.generation ||
+      typeof message.callId !== 'string' ||
+      typeof message.capability !== 'string' ||
+      typeof message.method !== 'string'
+    ) {
+      this.handleProtocolError(handle, new Error('invalid host call'));
+      return;
+    }
+
+    const dispatch = this.dispatchHostCall(
+      handle,
+      message,
+      dispatcher,
+      inflight.hostAbortController.signal,
+    );
+    inflight.hostDispatches.add(dispatch);
+    void dispatch.then(
+      () => inflight.hostDispatches.delete(dispatch),
+      (error) => {
+        inflight.hostDispatches.delete(dispatch);
+        this.handleProtocolError(
+          handle,
+          error instanceof Error ? error : new Error(safeErrorMessage(error)),
+        );
+      },
+    );
+  }
+
+  private async dispatchHostCall(
+    handle: KernelHandle,
+    message: HostCallMessage,
+    dispatcher: (call: NodeReplHostCall) => Promise<unknown>,
+    signal: AbortSignal,
+  ): Promise<void> {
+    let response:
+      | { ok: true; result: unknown }
+      | {
+          ok: false;
+          error: {
+            name: string;
+            message: string;
+            code?: string;
+            retryable?: boolean;
+            details?: unknown;
+          };
+        };
+    try {
+      response = {
+        ok: true,
+        result: await dispatcher({
+          capability: message.capability,
+          method: message.method,
+          args: message.args,
+          signal,
+        }),
+      };
+    } catch (error) {
+      const message = safeErrorMessage(error);
+      try {
+        const detail =
+          typeof error === 'object' && error !== null
+            ? (error as Record<string, unknown>)
+            : undefined;
+        response = {
+          ok: false,
+          error: {
+            name: error instanceof Error ? error.name : 'Error',
+            message,
+            ...(typeof detail?.['code'] === 'string'
+              ? { code: detail['code'] }
+              : {}),
+            ...(detail?.['retryable'] === true ? { retryable: true } : {}),
+            ...(typeof detail?.['details'] === 'object' &&
+            detail['details'] !== null
+              ? { details: detail['details'] }
+              : {}),
+          },
+        };
+      } catch {
+        response = { ok: false, error: { name: 'Error', message } };
+      }
+    }
+    if (
+      this.kernel !== handle ||
+      this.disposed ||
+      handle.generation !== message.generation
+    ) {
+      return;
+    }
+    let frame: string;
+    try {
+      frame = encodeFrame({
+        type: 'hostResult',
+        execId: message.execId,
+        generation: message.generation,
+        callId: message.callId,
+        ...response,
+      });
+    } catch {
+      try {
+        frame = encodeFrame({
+          type: 'hostResult',
+          execId: message.execId,
+          generation: message.generation,
+          callId: message.callId,
+          ok: false,
+          error: {
+            name: 'TypeError',
+            message: 'Host result is not serializable.',
+          },
+        });
+      } catch (error) {
+        this.handleProtocolError(
+          handle,
+          error instanceof Error ? error : new Error(safeErrorMessage(error)),
+        );
+        return;
+      }
+    }
+    try {
+      handle.toKernel.write(frame);
+    } catch (error) {
+      this.handleProtocolError(handle, error as Error);
+    }
   }
 
   private collectText(
@@ -887,6 +1054,7 @@ export class NodeReplKernelManager {
     if (this.kernel !== handle) return;
     debugLogger.warn(`[node-repl] protocol error: ${error.message}`);
     const inflight = this.inflight;
+    inflight?.hostAbortController.abort();
     void this.invalidateKernel('crashed')
       .catch(() => undefined)
       .finally(() => {
@@ -913,6 +1081,7 @@ export class NodeReplKernelManager {
     this.advanceGeneration();
     this.rejectPending('node_repl kernel exited');
     const inflight = this.inflight;
+    inflight?.hostAbortController.abort();
     inflight?.settle({
       hostStatus: 'crashed',
       message: `The node_repl kernel exited (code=${String(code)}, signal=${String(signal)}); bindings were lost.`,

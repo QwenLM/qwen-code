@@ -37,6 +37,7 @@ const MAX_TEXT_EVENT_CHARS = 8 * 1024 * 1024;
 const MAX_RAW_TEXT_BYTES = 16 * 1024 * 1024;
 const MAX_RAW_TEXT_EVENTS = 128 * 1024;
 const MAX_ERROR_CHARS = 256 * 1024;
+const MAX_PROTOCOL_FRAME_BYTES = 64 * 1024 * 1024;
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 const MAX_BASE64_IMAGE_CHARS = Math.ceil(MAX_IMAGE_BYTES / 3) * 4;
 const MAX_PERCENT_ENCODED_IMAGE_CHARS = MAX_IMAGE_BYTES * 3;
@@ -66,6 +67,8 @@ let activeExec = null;
 let operationChain = Promise.resolve();
 let shuttingDown = false;
 let pendingCancelExecId = null;
+let nextHostCallId = 1;
+const pendingHostCalls = new Map();
 
 const timers = new Map();
 /** Upper bound on concurrently live sandbox timers (see scheduleTimer). */
@@ -75,10 +78,20 @@ const lateRejections = [];
 const MAX_LATE_REJECTIONS = 32;
 let nextTimerId = 1;
 
+function encodeProtocolFrame(frame) {
+  const line = JSON.stringify(frame);
+  if (Buffer.byteLength(line, 'utf8') + 1 > MAX_PROTOCOL_FRAME_BYTES) {
+    throw new RangeError(
+      `protocol frame exceeds ${MAX_PROTOCOL_FRAME_BYTES} bytes`,
+    );
+  }
+  return `${line}\n`;
+}
+
 function send(frame) {
   if (shuttingDown && frame.type !== 'fatal') return;
   try {
-    protocolOutput.write(`${JSON.stringify(frame)}\n`);
+    protocolOutput.write(encodeProtocolFrame(frame));
   } catch {
     process.exit(0);
   }
@@ -96,6 +109,79 @@ function capText(value, limit = MAX_TEXT_EVENT_CHARS) {
 function currentExecId() {
   const store = asyncContext.getStore();
   return store && typeof store.execId === 'string' ? store.execId : null;
+}
+
+function callHost(capability, method, args) {
+  const execId = currentExecId();
+  if (
+    shuttingDown ||
+    !config?.hostCallEnabled ||
+    !activeExec ||
+    activeExec.execId !== execId
+  ) {
+    return Promise.reject(
+      new Error('Host calls require an active host-enabled node_repl cell'),
+    );
+  }
+  let serializedArgs;
+  try {
+    const json = JSON.stringify(args);
+    if (json === undefined) throw new TypeError('unsupported value');
+    serializedArgs = JSON.parse(json);
+  } catch (error) {
+    return Promise.reject(
+      new TypeError(
+        `Host call arguments must be JSON-serializable: ${describeThrown(error).message}`,
+      ),
+    );
+  }
+  const callId = String(nextHostCallId++);
+  let frame;
+  try {
+    frame = encodeProtocolFrame({
+      type: 'hostCall',
+      execId,
+      generation,
+      callId,
+      capability: String(capability),
+      method: String(method),
+      args: serializedArgs,
+    });
+  } catch (error) {
+    return Promise.reject(
+      new TypeError(
+        `Host call could not cross the protocol boundary: ${describeThrown(error).message}`,
+      ),
+    );
+  }
+  return new Promise((resolve, reject) => {
+    pendingHostCalls.set(callId, { execId, resolve });
+    try {
+      protocolOutput.write(frame);
+    } catch (error) {
+      pendingHostCalls.delete(callId);
+      reject(error);
+    }
+  });
+}
+
+function handleHostResult(message) {
+  const pending = pendingHostCalls.get(message.callId);
+  if (
+    !pending ||
+    pending.execId !== message.execId ||
+    message.generation !== generation
+  ) {
+    return;
+  }
+  pendingHostCalls.delete(message.callId);
+  pending.resolve(
+    JSON.stringify({
+      ok: message.ok === true,
+      result: message.result,
+      error: message.error,
+    }),
+  );
 }
 
 function describeThrown(error) {
@@ -611,6 +697,56 @@ const runtime = {
       throw bridgeError(error);
     }
   },
+  async invokeHost(capability, method, args) {
+    if (!metadata.hostCallEnabled) {
+      throw new intrinsicError(
+        'Host capabilities are not enabled for this node_repl server',
+      );
+    }
+    let envelope;
+    try {
+      const call = bridge.hostCall(
+        intrinsicString(capability),
+        intrinsicString(method),
+        args,
+      );
+      envelope = intrinsicJSONParse(
+        await bridge.currentSignal().waitUntil(call),
+      );
+    } catch (error) {
+      throw bridgeError(error);
+    }
+    if (!envelope || envelope.ok !== true) {
+      const failure = new intrinsicError(
+        intrinsicString(
+          envelope && envelope.error && envelope.error.message
+            ? envelope.error.message
+            : 'Host capability call failed',
+        ),
+      );
+      if (envelope && envelope.error && envelope.error.name) {
+        failure.name = intrinsicString(envelope.error.name);
+      }
+      if (envelope && envelope.error && envelope.error.code) {
+        failure.code = intrinsicString(envelope.error.code);
+        failure.exposedCode = failure.code;
+      }
+      if (envelope && envelope.error && envelope.error.retryable === true) {
+        failure.retryable = true;
+      }
+      if (
+        envelope &&
+        envelope.error &&
+        envelope.error.details &&
+        typeof envelope.error.details === 'object'
+      ) {
+        failure.details = deepFreeze(envelope.error.details);
+        failure.exposedDetails = failure.details;
+      }
+      throw failure;
+    }
+    return envelope.result;
+  },
   getHeapStatus() {
     let raw;
     try {
@@ -742,6 +878,7 @@ function createContext(name) {
     },
     scheduleTimer,
     cancelTimer,
+    hostCall: callHost,
   });
   const bootstrap = vm.compileFunction(
     BOOTSTRAP_SOURCE,
@@ -752,6 +889,7 @@ function createContext(name) {
     cwd: config.cwd,
     homeDir: config.homeDir,
     tmpDir: config.tmpDir,
+    hostCallEnabled: config.hostCallEnabled,
   });
   return context;
 }
@@ -768,6 +906,7 @@ function initialize(message) {
     tmpDir: String(message.tmpDir),
     moduleRoots: [...message.moduleRoots],
     readableRoots: [...message.readableRoots],
+    hostCallEnabled: message.hostCallEnabled === true,
   };
   untrustedContext = createContext('qwen-node-repl-untrusted');
   loader = createModuleLoader({
@@ -839,10 +978,7 @@ function readSuccessfulBindings(module, bindingExports) {
 async function handleExec(message) {
   if (!config || !loader) throw new Error('kernel is not initialized');
   if (activeExec) throw new Error('kernel received overlapping executions');
-  if (
-    pendingCancelExecId !== null &&
-    pendingCancelExecId !== message.execId
-  ) {
+  if (pendingCancelExecId !== null && pendingCancelExecId !== message.execId) {
     pendingCancelExecId = null;
   }
   const expected = sortedBindingDescriptors();
@@ -921,6 +1057,15 @@ async function handleExec(message) {
       void evaluation.catch(() => undefined);
       await Promise.race([evaluation, cancellation]);
       if (activeExec.cancelRequested) throw new CellCancelledError();
+      if (
+        [...pendingHostCalls.values()].some(
+          (pending) => pending.execId === message.execId,
+        )
+      ) {
+        throw new Error(
+          'UNAWAITED_HOST_CALL: await every host capability operation before the node_repl cell returns; a side effect may still occur',
+        );
+      }
       bindings = readSuccessfulBindings(cell.module, message.bindingExports);
     });
     send({
@@ -1037,6 +1182,10 @@ function routeMessage(message) {
     handleCancel(message);
     return;
   }
+  if (message.type === 'hostResult') {
+    handleHostResult(message);
+    return;
+  }
   operationChain = operationChain
     .then(async () => {
       if (message.type === 'init') initialize(message);
@@ -1081,8 +1230,12 @@ protocolInput.on('data', (chunk) => {
   } finally {
     inputScanFrom = drained ? inputBuffer.length : 0;
   }
-  if (inputBufferBytes > 64 * 1024 * 1024) {
-    fatal(new Error('host protocol frame exceeded 67108864 bytes'));
+  if (inputBufferBytes > MAX_PROTOCOL_FRAME_BYTES) {
+    fatal(
+      new Error(
+        `host protocol frame exceeded ${MAX_PROTOCOL_FRAME_BYTES} bytes`,
+      ),
+    );
     inputBuffer = '';
     inputBufferBytes = 0;
     inputScanFrom = 0;

@@ -22,6 +22,10 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
+    "./programmatic": {
+      "types": "./dist/programmatic.d.ts",
+      "import": "./dist/programmatic.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [

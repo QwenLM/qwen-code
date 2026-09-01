@@ -28,6 +28,23 @@ export interface InitMessage {
   tmpDir: string;
   moduleRoots: NodeReplModuleRoot[];
   readableRoots: string[];
+  hostCallEnabled: boolean;
+}
+
+export interface HostResultMessage {
+  type: 'hostResult';
+  execId: string;
+  generation: number;
+  callId: string;
+  ok: boolean;
+  result?: unknown;
+  error?: {
+    name: string;
+    message: string;
+    code?: string;
+    retryable?: boolean;
+    details?: unknown;
+  };
 }
 
 export interface ExecMessage {
@@ -64,6 +81,7 @@ export type HostToKernelMessage =
   | ExecMessage
   | CancelMessage
   | AddModuleRootMessage
+  | HostResultMessage
   | ShutdownMessage;
 
 export interface ReadyMessage {
@@ -111,10 +129,21 @@ export interface FatalMessage {
   message: string;
 }
 
+export interface HostCallMessage {
+  type: 'hostCall';
+  execId: string;
+  generation: number;
+  callId: string;
+  capability: string;
+  method: string;
+  args: unknown;
+}
+
 export type KernelToHostMessage =
   | ReadyMessage
   | TextOutputMessage
   | ImageMessage
+  | HostCallMessage
   | ExecResultMessage
   | AddModuleRootResultMessage
   | FatalMessage;
