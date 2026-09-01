@@ -38,8 +38,12 @@ const cuaReleaseWorkflow = readFileSync(
 const nodeReplPackage = JSON.parse(
   readFileSync('packages/node-repl/package.json', 'utf8'),
 );
+const rootPackageLock = JSON.parse(readFileSync('package-lock.json', 'utf8'));
 const cuaSdkPackage = JSON.parse(
   readFileSync('packages/cua-driver/typescript/package.json', 'utf8'),
+);
+const cuaSdkPackageLock = JSON.parse(
+  readFileSync('packages/cua-driver/typescript/package-lock.json', 'utf8'),
 );
 const cuaInstallScript = readFileSync(
   'packages/cua-driver/scripts/install.sh',
@@ -73,13 +77,18 @@ const liveHostOssWorkflow = readFileSync(
 describe('CUA release workflow', () => {
   it('keeps the Node REPL package independently versioned', () => {
     expect(nodeReplPackage.name).toBe('@qwen-code/node-repl-mcp');
-    expect(nodeReplPackage.version).toBe('0.1.1');
+    expect(nodeReplPackage.version).toBe('0.1.2');
     expect(cuaReleaseWorkflow).toContain(
       "node_repl_version: '${{ steps.release.outputs.node_repl_version }}'",
     );
     expect(cuaReleaseWorkflow).not.toContain(
       'NODE_REPL_VERSION does not match release version',
     );
+    expect(rootPackageLock.packages['packages/node-repl'].version).toBe(
+      nodeReplPackage.version,
+    );
+    expect(cuaSdkPackageLock.version).toBe(cuaSdkPackage.version);
+    expect(cuaSdkPackageLock.packages[''].version).toBe(cuaSdkPackage.version);
   });
 
   it('dry-runs and clean-installs the packed Node REPL MCP server', () => {
@@ -106,6 +115,18 @@ describe('CUA release workflow', () => {
     );
     expect(cuaReleaseWorkflow).toContain(
       'INSTALL_ENTRYPOINT_RS_VERSION=$(sed -nE',
+    );
+  });
+
+  it('requires the signed Windows UIAccess worker in release artifacts', () => {
+    expect(cuaReleaseWorkflow).toMatch(
+      /Build \(release\)[\s\S]*?Sign UIAccess worker[\s\S]*?Get-AuthenticodeSignature[\s\S]*?qwen-cua-driver-uia\.exe[\s\S]*?release artifact contract/,
+    );
+    expect(cuaReleaseWorkflow).toContain(
+      'A Windows signing certificate is required for a CUA release.',
+    );
+    expect(cuaReleaseWorkflow).toContain(
+      '- **Windows**: signed UIAccess worker + native SDK payload',
     );
   });
 
