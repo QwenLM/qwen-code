@@ -11,8 +11,8 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import {
-  useSessionArtifacts,
-  type SessionArtifactsState,
+  useSessionArtifactsWithReadiness,
+  type SessionArtifactsReadinessState,
 } from './useSessionArtifacts';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
@@ -52,7 +52,7 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
 
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;
-let latestState: SessionArtifactsState | undefined;
+let latestState: SessionArtifactsReadinessState | undefined;
 
 function deferred<T>(): Deferred<T> {
   let resolve: ((value: T) => void) | undefined;
@@ -83,7 +83,7 @@ function artifact(id: string): DaemonSessionArtifact {
 }
 
 function TestHost() {
-  latestState = useSessionArtifacts(
+  latestState = useSessionArtifactsWithReadiness(
     sdkMock.activeTurnId,
     sdkMock.activeTurnIsShell,
   );
@@ -171,7 +171,7 @@ describe('useSessionArtifacts', () => {
       initialLoad.resolve({ artifacts: [] });
       await initialLoad.promise;
     });
-    expect(latestState?.ready).toEqual({
+    expect(latestState?.ready).toMatchObject({
       reason: 'restore',
       sequence: 1,
     });
@@ -202,7 +202,7 @@ describe('useSessionArtifacts', () => {
       initialLoad.resolve({ artifacts: [] });
       await initialLoad.promise;
     });
-    expect(latestState?.ready).toEqual({
+    expect(latestState?.ready).toMatchObject({
       reason: 'restore',
       sequence: 1,
     });
@@ -230,7 +230,7 @@ describe('useSessionArtifacts', () => {
       postPromptLoad.resolve({ artifacts: [] });
       await postPromptLoad.promise;
     });
-    expect(latestState?.ready).toEqual({
+    expect(latestState?.ready).toMatchObject({
       reason: 'turn_complete',
       sequence: 2,
       turnId: 'turn-1',
@@ -264,7 +264,7 @@ describe('useSessionArtifacts', () => {
       postPromptLoad.resolve({ artifacts: [] });
       await postPromptLoad.promise;
     });
-    expect(latestState?.ready).toEqual({
+    expect(latestState?.ready).toMatchObject({
       reason: 'turn_complete',
       sequence: 2,
       turnId: 'turn-1',
@@ -295,7 +295,7 @@ describe('useSessionArtifacts', () => {
       postPromptLoad.resolve({ artifacts: [] });
       await postPromptLoad.promise;
     });
-    expect(latestState?.ready).toEqual({
+    expect(latestState?.ready).toMatchObject({
       reason: 'turn_complete',
       sequence: 2,
       turnId: 'current-turn',
@@ -322,7 +322,7 @@ describe('useSessionArtifacts', () => {
       initialLoad.resolve({ artifacts: [] });
       await initialLoad.promise;
     });
-    expect(latestState?.ready).toEqual({
+    expect(latestState?.ready).toMatchObject({
       reason: 'restore',
       sequence: 1,
     });
@@ -354,24 +354,27 @@ describe('useSessionArtifacts', () => {
     await rerenderHookHost();
 
     await act(async () => {
-      secondTurnLoad.resolve({ artifacts: [] });
-      await secondTurnLoad.promise;
+      firstTurnLoad.resolve({ artifacts: [artifact('turn-1-snapshot')] });
+      await firstTurnLoad.promise;
     });
-    expect(latestState?.ready).toEqual({
+    expect(latestState?.ready).toMatchObject({
       reason: 'turn_complete',
       sequence: 2,
       turnId: 'turn-1',
+      artifacts: [artifact('turn-1-snapshot')],
     });
     await consumeReady();
-    expect(latestState?.ready).toEqual({
+    expect(latestState?.ready).toBeNull();
+
+    await act(async () => {
+      secondTurnLoad.resolve({ artifacts: [artifact('turn-2-snapshot')] });
+      await secondTurnLoad.promise;
+    });
+    expect(latestState?.ready).toMatchObject({
       reason: 'turn_complete',
       sequence: 3,
       turnId: 'turn-2',
-    });
-
-    await act(async () => {
-      firstTurnLoad.resolve({ artifacts: [] });
-      await firstTurnLoad.promise;
+      artifacts: [artifact('turn-2-snapshot')],
     });
   });
 
@@ -393,7 +396,7 @@ describe('useSessionArtifacts', () => {
       retryLoad.resolve({ artifacts: [] });
       await retryLoad.promise;
     });
-    expect(latestState?.ready).toEqual({
+    expect(latestState?.ready).toMatchObject({
       reason: 'turn_complete',
       sequence: 2,
       turnId: 'turn-1',
@@ -435,7 +438,7 @@ describe('useSessionArtifacts', () => {
     expect(latestState?.artifacts.map((item) => item.id)).toEqual([
       'from-session-b',
     ]);
-    expect(latestState?.ready).toEqual({
+    expect(latestState?.ready).toMatchObject({
       reason: 'restore',
       sequence: 2,
     });
@@ -544,7 +547,7 @@ describe('useSessionArtifacts', () => {
     expect(latestState?.artifacts.map((item) => item.id)).toEqual([
       'current-artifact',
     ]);
-    expect(latestState?.ready).toEqual({
+    expect(latestState?.ready).toMatchObject({
       reason: 'restore',
       sequence: 1,
     });
@@ -599,7 +602,7 @@ describe('useSessionArtifacts', () => {
     expect(latestState?.artifacts.map((item) => item.id)).toEqual([
       'recovered-artifact',
     ]);
-    expect(latestState?.ready).toEqual({
+    expect(latestState?.ready).toMatchObject({
       reason: 'turn_complete',
       sequence: 2,
       turnId: 'turn-1',

@@ -230,7 +230,7 @@ import {
   projectStreamingTailMessages,
   useMessagesFromBlocks,
 } from './hooks/useMessages';
-import { useSessionArtifacts } from './hooks/useSessionArtifacts';
+import { useSessionArtifactsWithReadiness } from './hooks/useSessionArtifacts';
 import { useShallowMemo, useStableArray } from './hooks/useShallowMemo';
 import {
   I18nProvider,
@@ -3003,7 +3003,10 @@ export function App({
     consumeReady: consumeArtifactsReady,
     loading: artifactsLoading,
     error: artifactsError,
-  } = useSessionArtifacts(activeArtifactTurnId, activeArtifactTurnIsShell);
+  } = useSessionArtifactsWithReadiness(
+    activeArtifactTurnId,
+    activeArtifactTurnIsShell,
+  );
   const [artifactPanelExtraArtifacts, setArtifactPanelExtraArtifacts] =
     useState<DaemonSessionArtifact[]>([]);
   const [paneArtifactSnapshots, setPaneArtifactSnapshots] = useState<
@@ -3146,31 +3149,36 @@ export function App({
       return;
     }
     lastNotifiedArtifactsReadySequenceRef.current = artifactsReady.sequence;
+    const readyArtifactsByTurn = getArtifactsByTurn(
+      displayMessages,
+      artifactsReady.artifacts,
+      connection.workspaceCwd || '',
+    );
     if (artifactsReady.reason === 'turn_complete') {
       onSessionArtifactsReady({
         reason: artifactsReady.reason,
         sessionId,
         turnId: artifactsReady.turnId,
-        artifacts,
-        artifactsByTurn,
+        artifacts: artifactsReady.artifacts,
+        artifactsByTurn: readyArtifactsByTurn,
       });
     } else {
       onSessionArtifactsReady({
         reason: artifactsReady.reason,
         sessionId,
-        artifacts,
-        artifactsByTurn,
+        artifacts: artifactsReady.artifacts,
+        artifactsByTurn: readyArtifactsByTurn,
       });
     }
     consumeArtifactsReady(artifactsReady.sequence);
   }, [
-    artifacts,
-    artifactsByTurn,
     artifactsReady,
     connection.catchingUp,
     connection.loadingTranscript,
     connection.sessionId,
+    connection.workspaceCwd,
     consumeArtifactsReady,
+    displayMessages,
     onSessionArtifactsReady,
   ]);
   const fileChangesByTurn = useMemo(

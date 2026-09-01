@@ -20548,43 +20548,28 @@ describe('App session callbacks', () => {
     });
   });
 
-  it('waits for connection catch-up before reporting artifacts ready', async () => {
-    mockConnection.capabilities = {
-      ...mockConnection.capabilities,
-      features: ['session_artifacts'],
-    };
-    mockConnection.catchingUp = true;
-    const restoreLoad = deferred<{ artifacts: DaemonSessionArtifact[] }>();
-    mockSessionActions.loadArtifacts.mockReturnValueOnce(restoreLoad.promise);
-    const onSessionArtifactsReady = vi.fn();
-    const { rerender } = renderApp({ onSessionArtifactsReady });
-    await act(async () => {
-      restoreLoad.resolve({ artifacts: [] });
-      await restoreLoad.promise;
-    });
-
-    expect(onSessionArtifactsReady).not.toHaveBeenCalled();
-
-    mockConnection.catchingUp = false;
-    rerender();
-    await flush();
-    await flush();
-
-    expect(onSessionArtifactsReady).toHaveBeenCalledOnce();
-    expect(onSessionArtifactsReady.mock.calls[0]?.[0]).toMatchObject({
-      reason: 'restore',
-      sessionId: 'session-1',
-      artifacts: [],
-    });
-  });
-
   it('reports every ready event queued while connection catch-up is active', async () => {
     mockConnection.capabilities = {
       ...mockConnection.capabilities,
       features: ['session_artifacts'],
     };
     mockConnection.catchingUp = true;
-    mockSessionActions.loadArtifacts.mockResolvedValue({ artifacts: [] });
+    const snapshotArtifact = (id: string) =>
+      ({
+        id,
+        kind: 'other',
+        storage: 'managed',
+        source: 'hook',
+        status: 'available',
+        title: id,
+        clientRetained: false,
+        createdAt: '2026-08-28T00:00:00.000Z',
+        updatedAt: '2026-08-28T00:00:00.000Z',
+      }) as DaemonSessionArtifact;
+    mockSessionActions.loadArtifacts
+      .mockResolvedValueOnce({ artifacts: [snapshotArtifact('restore')] })
+      .mockResolvedValueOnce({ artifacts: [snapshotArtifact('turn-1')] })
+      .mockResolvedValueOnce({ artifacts: [snapshotArtifact('turn-2')] });
     const onSessionArtifactsReady = vi.fn();
     const { rerender } = renderApp({ onSessionArtifactsReady });
     await flush();
@@ -20627,6 +20612,11 @@ describe('App session callbacks', () => {
       'turn_complete:user-turn-1',
       'turn_complete:user-turn-2',
     ]);
+    expect(
+      onSessionArtifactsReady.mock.calls.map(([snapshot]) =>
+        snapshot.artifacts.map((artifact) => artifact.id),
+      ),
+    ).toEqual([['restore'], ['turn-1'], ['turn-2']]);
   });
 
   it('reports the user-shell turn id after a shell command settles', async () => {
