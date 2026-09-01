@@ -22,6 +22,7 @@ import {
   splitCompoundCommand,
   splitCompoundCommandSegments,
   projectHeredocBodiesForStateTracking,
+  heredocSafetyForStateTracking,
   buildPermissionRules,
   getRuleDisplayName,
   buildHumanReadableRuleLabel,
@@ -525,20 +526,15 @@ describe('splitCompoundCommand', () => {
     ).toEqual(["python - <<'PY'"]);
   });
 
-  it('keeps every line visible when an opener shares a compound line', async () => {
+  it('strips an inert body but keeps the opener chain and trailing lines', async () => {
+    // cat provably never executes the body, so its lines strip out; the &&
+    // chain on the opener line and the command after the terminator are real
+    // execution and stay visible.
     expect(
       splitCompoundCommand(
         'cat <<EOF && echo hi\nbody; with && ops\nEOF\necho done',
       ),
-    ).toEqual([
-      'cat <<EOF',
-      'echo hi',
-      'body',
-      'with',
-      'ops',
-      'EOF',
-      'echo done',
-    ]);
+    ).toEqual(['cat <<EOF', 'echo hi', 'echo done']);
   });
 
   it('handles the tab-stripping heredoc variant', async () => {
@@ -992,25 +988,29 @@ describe('state-tracking heredoc projection', () => {
 
   it('fails closed on non-identifier delimiters', () => {
     // <<123 is legal shell but beyond what this scanner can prove, so the
-    // whole command is unmodelled and the guard denies rather than tracking a
-    // body it cannot bound.
+    // safety gate marks the command unmodelled and the guard denies rather
+    // than tracking a body it cannot bound; the projection itself just keeps
+    // every line visible.
     const command = 'cat <<123\nbody\n123';
-    expect(projectHeredocBodiesForStateTracking(command)).toBeNull();
+    expect(heredocSafetyForStateTracking(command).safe).toBe(false);
+    expect(projectHeredocBodiesForStateTracking(command)).toBe(command);
   });
 
   it('fails closed on a substitution in the opener', () => {
     // cat << $(X) is a heredoc whose delimiter is computed at runtime; the
-    // body cannot be bounded, so the command is unmodelled.
-    expect(
-      projectHeredocBodiesForStateTracking('cat << $(X)\nbody\nX'),
-    ).toBeNull();
+    // body cannot be bounded, so the command is unmodelled and nothing is
+    // stripped.
+    const command = 'cat << $(X)\nbody\nX';
+    expect(heredocSafetyForStateTracking(command).safe).toBe(false);
+    expect(projectHeredocBodiesForStateTracking(command)).toBe(command);
   });
 
   it('fails closed when the receiver is redefined in the command', () => {
     // A POSIX function definition shadows the receiver, so the body's fate is
     // unprovable even though the opener itself looks ordinary.
     const command = 'cat() { :; }\ncat <<EOF\nbody\nEOF';
-    expect(projectHeredocBodiesForStateTracking(command)).toBeNull();
+    expect(heredocSafetyForStateTracking(command).safe).toBe(false);
+    expect(projectHeredocBodiesForStateTracking(command)).toBe(command);
   });
 
   it('reads a backslash inside single quotes as literal on the opener line', () => {

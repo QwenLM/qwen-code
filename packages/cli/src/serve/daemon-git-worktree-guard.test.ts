@@ -2651,20 +2651,25 @@ it -C ${cmdPath(outsideRepo)} reset --hard`,
     }
   });
 
-  it('denies a heredoc piped into a shell outright', async () => {
-    const guard = createDaemonToolGuard();
+  // Heredocs are bash syntax; on the cmd.exe lane these shapes never execute
+  // as heredocs and the divergent-syntax gate owns what is provable there.
+  it.runIf(bashSemanticsLane)(
+    'denies a heredoc piped into a shell outright',
+    async () => {
+      const guard = createDaemonToolGuard();
 
-    // The body runs as shell code here; nothing about it is provable, so the
-    // guard must fail closed instead of dropping it from view (#9417).
-    await expect(
-      guard(request('cat <<EOF | bash\necho done\nEOF')),
-    ).resolves.toMatchObject({ allowed: false });
-    await expect(
-      guard(request('tee /tmp/s.sh <<EOF\nrm -rf /important\nEOF')),
-    ).resolves.toMatchObject({ allowed: false });
-  });
+      // The body runs as shell code here; nothing about it is provable, so the
+      // guard must fail closed instead of dropping it from view (#9417).
+      await expect(
+        guard(request('cat <<EOF | bash\necho done\nEOF')),
+      ).resolves.toMatchObject({ allowed: false });
+      await expect(
+        guard(request('tee /tmp/s.sh <<EOF\nrm -rf /important\nEOF')),
+      ).resolves.toMatchObject({ allowed: false });
+    },
+  );
 
-  it.each([
+  it.runIf(bashSemanticsLane).each([
     // A shell-fed body is executed code, never stdin data.
     `bash <<'EOF'\ngit reset --hard\nEOF`,
     `sh <<'EOF'\ngit reset --hard\nEOF`,
@@ -2698,19 +2703,22 @@ it -C ${cmdPath(outsideRepo)} reset --hard`,
     });
   });
 
-  it('does not let an LF-only line terminate a CRLF heredoc early', async () => {
-    const guard = createDaemonToolGuard();
+  it.runIf(bashSemanticsLane)(
+    'does not let an LF-only line terminate a CRLF heredoc early',
+    async () => {
+      const guard = createDaemonToolGuard();
 
-    // bash keeps the CR in the delimiter word, so "EOF" without it is body,
-    // not the terminator; the command is unterminated and must fail closed.
-    await expect(
-      guard(request('cat <<EOF\r\nbody\nEOF')),
-    ).resolves.toMatchObject({ allowed: false });
-    // A consistently CRLF command parses fine and stays inert.
-    await expect(
-      guard(request('cat <<EOF\r\nbody\r\nEOF\r')),
-    ).resolves.toMatchObject({ allowed: true });
-  });
+      // bash keeps the CR in the delimiter word, so "EOF" without it is body,
+      // not the terminator; the command is unterminated and must fail closed.
+      await expect(
+        guard(request('cat <<EOF\r\nbody\nEOF')),
+      ).resolves.toMatchObject({ allowed: false });
+      // A consistently CRLF command parses fine and stays inert.
+      await expect(
+        guard(request('cat <<EOF\r\nbody\r\nEOF\r')),
+      ).resolves.toMatchObject({ allowed: true });
+    },
+  );
 
   it('treats an escaped quote as a literal, not a string opener', async () => {
     const guard = createDaemonToolGuard();
