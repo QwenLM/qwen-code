@@ -332,18 +332,6 @@ export function convertLlmToolParametersToOpenAI(
  * Handles both Gemini tools (using 'parameters' field) and MCP tools
  * (using 'parametersJsonSchema' field).
  */
-function containsSchemaId(value: unknown): boolean {
-  if (typeof value !== 'object' || value === null) {
-    return false;
-  }
-  if (Array.isArray(value)) {
-    return value.some(containsSchemaId);
-  }
-  return Object.entries(value).some(
-    ([key, nested]) => key === '$id' || containsSchemaId(nested),
-  );
-}
-
 export async function convertLlmToolsToOpenAI(
   llmTools: ToolListUnion,
   schemaCompliance: SchemaComplianceMode = 'auto',
@@ -388,7 +376,7 @@ export async function convertLlmToolsToOpenAI(
               typeof sourceSchema === 'object' &&
               sourceSchema !== null &&
               !Array.isArray(sourceSchema) &&
-              !containsSchemaId(sourceSchema) &&
+              !('$id' in sourceSchema) &&
               SchemaValidator.compileStrict(sourceSchema) === null;
             parameters = convertSchema(parameters, schemaCompliance);
             // #7315: gateways enforcing OpenAI's structured-output contract
