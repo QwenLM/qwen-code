@@ -21,16 +21,26 @@ set -euo pipefail
 # pins the two together, since a rename that only lands on one side would
 # quietly name no pools at all.
 #
-# One call reports both how many pool legs ran and which of them are stale:
-# a run where the matrix never started (resolve failed) and a run where no leg
-# reported a failure are different reports. The read's own status is captured
-# rather than swallowed — `set -e` does not fire on a command substitution
-# feeding an assignment — because "the jobs API could not be read" sends the
-# operator somewhere else again.
+# One call reports both how many pool legs actually ran and which of them are
+# stale. `skipped` legs are excluded on purpose: when `resolve` fails the whole
+# matrix is skipped, yet the jobs API still lists every leg under its fully
+# expanded name, so counting those would make the "no pool was reached" shape
+# below unreachable and file a pool-level claim about a run where no pool was
+# ever asked to install anything.
+#
+# The read's own status is captured because `set -e` DOES abort on a failing
+# command substitution that feeds an assignment (`x=$(false)` exits 1) — the
+# `|| jobs_status=$?` below is load-bearing, not a belt on top of braces, and
+# "the jobs API could not be read" has to reach the body instead of killing
+# the reporter.
 jobs_status=0
+# The jq filter's `$legs`/`$stale` are jq bindings, not shell expansions.
+# shellcheck disable=SC2016
 jobs_summary="$(
   gh api "repos/${REPO}/actions/runs/${RUN_ID}/jobs" --jq '
-    [ .jobs[] | select(.name | startswith("Update Qwen on ")) ] as $legs
+    [ .jobs[]
+      | select(.name | startswith("Update Qwen on "))
+      | select(.conclusion != "skipped") ] as $legs
     | [ $legs[]
         | select(.conclusion == "failure" or .conclusion == "timed_out")
         | (.name | sub("^Update Qwen on "; "")) ] as $stale
@@ -45,11 +55,16 @@ if (( jobs_status == 0 )); then
   failed="${jobs_summary#*$'\t'}"
 fi
 
-# Three shapes, because they send the operator to three different places.
+# Three shapes, because they send the operator to three different places. The
+# backticks below are literal markdown, not command substitution.
+# shellcheck disable=SC2016
 if (( jobs_status != 0 )); then
-  headline='failed, so at least one ECS pool is still running an older `qwen` than the release it was asked to install.'
-  pools="unknown — this run's job conclusions could not be read"
-  repair='re-run **Update ECS Runner Qwen** through `workflow_dispatch` (an empty version means latest), then read the `Verify version` step of every pool.'
+  # Which shape failed is exactly what could not be read, so this branch must
+  # not assert one: `resolve` may have failed before any pool ran, and naming
+  # `Verify version` steps that never existed is guidance, not information.
+  headline='failed, but the job conclusions for this run could not be read, so which pools are affected is not yet known.'
+  pools='unknown — the job conclusions for this run could not be read'
+  repair='open the run above and check whether the pool matrix started at all — read the `Resolve version` step first when the target version below shows `unresolved`, the `Verify version` step of each pool otherwise — then re-run **Update ECS Runner Qwen** through `workflow_dispatch` (an empty version means latest).'
 elif [[ "${legs}" == '0' ]]; then
   # `needs.resolve.result == 'failure'` also opens this gate, and then no pool
   # was ever asked to install anything: claiming a pool-level state that never
@@ -83,10 +98,13 @@ body_file="${RUNNER_TEMP}/ecs-fleet-update-failure.md"
 # reporter that files into the same label space — see find-marked-issue.sh for
 # why it is matched client-side and why the listing is not a window. The label
 # is applied at creation below, so the dedup key can never be half-written.
+# Degrade rather than abort: a transient 5xx or rate-limit on the lookup must
+# not take the whole report down (`set -e` would kill it here), because a rare
+# duplicate issue costs far less than the silence this job exists to break.
 existing="$(
   MARKER_HTML="${marker_html}" \
     bash "$(dirname "${BASH_SOURCE[0]}")/find-marked-issue.sh"
-)"
+)" || existing=''
 
 # A comment, not a body rewrite: this fails rarely enough that one line per
 # occurrence is the history the operator wants, and it notifies subscribers

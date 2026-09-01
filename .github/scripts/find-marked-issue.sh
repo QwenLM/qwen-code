@@ -38,8 +38,15 @@ gh issue list \
 # `.body // ""`: GitHub types an issue body as `string or null`, and jq's
 # `contains()` errors out (exit 5) on null — one bodyless issue carrying the
 # shared label would otherwise abort the caller before it files anything.
-# `first(...)` rather than `| head -n 1`, so no pipe can turn a match into a
+#
+# `last(...)`, not `first(...)`: the listing is newest-first and the match is a
+# substring, so an issue that merely QUOTES the marker — a bug report about one
+# of these reporters, say — would otherwise outrank the canonical issue forever,
+# and every recurrence would comment on (or, for the image-build caller, rewrite
+# the body of) the wrong issue while the one operators subscribe to goes silent.
+# The oldest open match is the one a reporter opened for itself. `last(...)`
+# also keeps the whole selection inside jq, so no pipe can turn a match into a
 # SIGPIPE under `pipefail`.
 jq -r --arg marker_html "${MARKER_HTML}" \
-  'first(.[] | select((.body // "") | contains($marker_html)) | .number) // empty' \
+  'last(.[] | select((.body // "") | contains($marker_html)) | .number) // empty' \
   "${issues_file}"

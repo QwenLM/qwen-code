@@ -62,6 +62,7 @@ function jobsFixture({
   failed = [],
   timedOut = [],
   succeeded = [],
+  skipped = [],
   resolve = 'success',
 } = {}) {
   return {
@@ -78,6 +79,12 @@ function jobsFixture({
       ...succeeded.map((pool) => ({
         name: `${poolPrefix}${pool}`,
         conclusion: 'success',
+      })),
+      // A skipped matrix leg is still listed by the jobs API, under its fully
+      // expanded name — which is exactly what a `resolve` failure produces.
+      ...skipped.map((pool) => ({
+        name: `${poolPrefix}${pool}`,
+        conclusion: 'skipped',
       })),
       { name: 'Report a stale fleet', conclusion: null },
     ],
@@ -198,6 +205,9 @@ describe('ECS runner qwen update workflow', () => {
     expect(lookupScript).toContain('contains($marker_html)');
     expect(lookupScript).toContain('(.body // "")');
     expect(lookupScript).toContain('--limit 1000');
+    // Oldest match wins: the newest-first listing puts an issue that merely
+    // quotes the marker ahead of the canonical one.
+    expect(lookupScript).toContain('last(.[]');
   });
 });
 
@@ -306,7 +316,12 @@ function runReport({ openIssues = [], jobs = DEFAULT_JOBS, env = {} } = {}) {
         '      esac',
         '    done',
         '    case "$action" in',
-        `      list) jq --argjson limit "$limit" '.[:$limit]' ${join(dir, 'fixture-issues.json')} ;;`,
+        '      list)',
+        '        if [[ -n "${STUB_LIST_FAILS:-}" ]]; then',
+        '          echo "gh: HTTP 502 (api.github.com)" >&2',
+        '          exit 1',
+        '        fi',
+        `        jq --argjson limit "$limit" '.[:$limit]' ${join(dir, 'fixture-issues.json')} ;;`,
         "      create) echo 'https://github.com/o/r/issues/777' ;;",
         '    esac',
         '    ;;',
@@ -470,7 +485,10 @@ describe.skipIf(!replayable)('ECS runner qwen update replay', () => {
     // no pool was ever asked to install anything: pointing the operator at a
     // `Verify version` step that never ran is a 3 AM detour.
     const reported = runReport({
-      jobs: jobsFixture({ resolve: 'failure' }),
+      // The real shape: `resolve` fails, the whole matrix is skipped, and the
+      // jobs API still lists every leg under its fully expanded name. A
+      // fixture with no legs at all would pin a shape the API never produces.
+      jobs: jobsFixture({ resolve: 'failure', skipped: pools }),
       env: { VERSION: '' },
     });
     expect(reported.status).toBe(0);
@@ -486,7 +504,7 @@ describe.skipIf(!replayable)('ECS runner qwen update replay', () => {
     expect(reported.body).not.toContain('`Verify version`');
   });
 
-  it("says so when this run's job conclusions cannot be read", () => {
+  it('says so when the job conclusions for the run cannot be read', () => {
     // A transient jobs-API failure must not be reported as "no pool failed",
     // and must not abort the script under `set -euo pipefail` either — that
     // is the silence this job exists to break.
@@ -494,9 +512,46 @@ describe.skipIf(!replayable)('ECS runner qwen update replay', () => {
     expect(reported.status).toBe(0);
     expect(reported.calls).toContain('gh issue create');
     expect(reported.body).toContain(
-      "Pools left stale: unknown — this run's job conclusions could not be read",
+      'Pools left stale: unknown — the job conclusions for this run could not be read',
     );
-    expect(reported.body).toContain('`Verify version` step of every pool');
+    // Which shape failed is precisely what could not be read, so the body must
+    // not assert one: `resolve` may have failed before any pool ran, and
+    // naming `Verify version` steps that never existed is a 3 AM detour.
+    expect(reported.body).toContain(
+      'check whether the pool matrix started at all',
+    );
+    expect(reported.body).not.toContain(
+      'at least one ECS pool is still running',
+    );
+    expect(reported.body).not.toContain('`Verify version` step of every pool');
+  });
+
+  it('files anyway when the dedup lookup itself fails', () => {
+    // The lookup is the one call whose failure would kill the reporter before
+    // it writes anything: `set -e` aborts on a failing command substitution
+    // feeding an assignment. A rare duplicate issue costs less than silence.
+    const reported = runReport({ env: { STUB_LIST_FAILS: '1' } });
+    expect(reported.status).toBe(0);
+    expect(reported.calls).toContain('gh issue create');
+    expect(reported.calls).toMatch(/gh issue create .*--label scope\/ci-cd/);
+  });
+
+  it('is not hijacked by a newer issue that merely quotes the marker', () => {
+    // The listing is newest-first and the match is a substring, so a bug
+    // report *about* this reporter would otherwise outrank the canonical
+    // issue forever and every recurrence would land on the wrong one.
+    const reported = runReport({
+      openIssues: [
+        {
+          number: 99,
+          body: 'the reporter writes <!-- ecs-fleet-update-failure --> into the body it files',
+        },
+        { number: 42, body: 'stale\n<!-- ecs-fleet-update-failure -->\n' },
+      ],
+    });
+    expect(reported.status).toBe(0);
+    expect(reported.calls).toContain('gh issue comment 42');
+    expect(reported.calls).not.toContain('gh issue comment 99');
   });
 
   it('falls back when the legs ran but none reported a failure', () => {
