@@ -103,7 +103,11 @@ function displayName(
   index: number,
   unnamed: (index: number) => string,
 ) {
-  const name = task.label.replace(/^fork:\s*/i, '').trim();
+  const name = (
+    task.subagentType?.toLowerCase() === 'fork'
+      ? task.label.replace(/^fork:\s*/i, '')
+      : task.label
+  ).trim();
   return name && name.toLowerCase() !== 'agent' ? name : unnamed(index + 1);
 }
 
@@ -153,7 +157,7 @@ export function AgentWorkflow({
       </div>
     );
   }
-  if (error && tasks.length === 0) {
+  if (error) {
     return <div className={styles.empty}>{error}</div>;
   }
   if (tasks.length === 0) {

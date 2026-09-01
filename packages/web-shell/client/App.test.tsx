@@ -2162,6 +2162,41 @@ describe('task activity key', () => {
     expect(panel?.textContent).toContain('Attachments');
   });
 
+  it('retries a failed first attachment listing without flashing empty', async () => {
+    vi.useFakeTimers();
+    mockConnection.capabilities.features = ['session_attachment_list'];
+    mockSessionActions.listAttachments
+      .mockRejectedValueOnce(new Error('temporary failure'))
+      .mockResolvedValueOnce([
+        {
+          type: 'resource',
+          attachmentId: 'notes.txt',
+          mimeType: 'text/plain',
+          size: 5,
+        },
+      ]);
+    const { container } = renderApp();
+    await flush();
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle environment information"]',
+        )
+        ?.click();
+    });
+    await act(async () => vi.advanceTimersByTimeAsync(0));
+
+    expect(
+      container.querySelector('[data-testid="environment-file-list-skeleton"]'),
+    ).not.toBeNull();
+    await act(async () => vi.advanceTimersByTimeAsync(1_000));
+    await act(async () => vi.advanceTimersByTimeAsync(0));
+    await flush();
+
+    expect(mockSessionActions.listAttachments).toHaveBeenCalledTimes(2);
+    expect(container.textContent).toContain('notes.txt');
+  });
+
   it('ignores an environment image result after switching sessions', async () => {
     mockConnection.capabilities.features = ['session_attachment_list'];
     mockSessionActions.listAttachments.mockResolvedValue([
@@ -3717,6 +3752,9 @@ describe('task activity key', () => {
     await flush();
     expect(mockWorkspace.client.sessionTasks).toHaveBeenCalledTimes(1);
     expect(container.querySelector('button[title="npm test"]')).not.toBeNull();
+    expect(mockWorkspace.client.sessionTasks).toHaveBeenCalledWith(
+      'nested-session',
+    );
 
     await act(async () => {
       container
@@ -3725,6 +3763,9 @@ describe('task activity key', () => {
       await Promise.resolve();
     });
     expect(mockWorkspace.client.sessionTasks).toHaveBeenCalledTimes(2);
+    expect(mockWorkspace.client.sessionTasks).toHaveBeenLastCalledWith(
+      'nested-session',
+    );
   });
 
   it('does not restart current-session task restoration on transcript updates', async () => {

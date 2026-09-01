@@ -3831,7 +3831,7 @@ export function App({
     initialEnvironmentPanelOpenBySession,
   );
   const [environmentPanelOpen, setEnvironmentPanelOpen] = useState(() =>
-    logicalSessionKey
+    environmentPanelReachable && logicalSessionKey
       ? (environmentPanelOpenBySessionRef.current[logicalSessionKey] ?? false)
       : false,
   );
@@ -3845,14 +3845,15 @@ export function App({
   const preserveEnvironmentPanelOnArtifactOpenRef = useRef(false);
   useLayoutEffect(() => {
     preserveEnvironmentPanelOnArtifactOpenRef.current = false;
-    const open = logicalSessionKey
-      ? (environmentPanelOpenBySessionRef.current[logicalSessionKey] ?? false)
-      : false;
+    const open =
+      environmentPanelReachable && logicalSessionKey
+        ? (environmentPanelOpenBySessionRef.current[logicalSessionKey] ?? false)
+        : false;
     environmentPanelRestoreRef.current = logicalSessionKey
       ? { sessionKey: logicalSessionKey, open }
       : undefined;
     setEnvironmentPanelOpen(open);
-  }, [logicalSessionKey]);
+  }, [environmentPanelReachable, logicalSessionKey]);
   useEffect(() => {
     if (!logicalSessionKey) return;
     const restore = environmentPanelRestoreRef.current;
@@ -3913,6 +3914,8 @@ export function App({
     sessionKey: '',
     fetchedAt: 0,
   });
+  const attachmentRetryCountRef = useRef(new Map<string, number>());
+  const [attachmentRefreshNonce, setAttachmentRefreshNonce] = useState(0);
   // The attachments panel is fed by the daemon's attachment store, never by
   // parsing transcript blocks. Refetch while the panel is open whenever the
   // transcript moves (a sent message is the only way the store gains
@@ -3937,6 +3940,7 @@ export function App({
       return;
     }
     if (!attachmentsSupported) {
+      attachmentRetryCountRef.current.delete(logicalSessionKey);
       setBoundedMapEntry(
         sessionAttachmentsBySessionRef.current,
         logicalSessionKey,
@@ -3959,6 +3963,7 @@ export function App({
         : ATTACHMENTS_REFRESH_INTERVAL_MS;
     const delay = Math.max(0, ATTACHMENTS_REFRESH_INTERVAL_MS - elapsed);
     let cancelled = false;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
     const timer = setTimeout(() => {
       lastAttachmentsFetchRef.current = {
         sessionKey: logicalSessionKey,
@@ -3968,6 +3973,7 @@ export function App({
       void listing
         .then((attachments) => {
           if (!cancelled && sessionAttachmentsOwner.isCurrent()) {
+            attachmentRetryCountRef.current.delete(logicalSessionKey);
             setBoundedMapEntry(
               sessionAttachmentsBySessionRef.current,
               logicalSessionKey,
@@ -3980,6 +3986,22 @@ export function App({
         .catch(() => {
           if (!cancelled && sessionAttachmentsOwner.isCurrent()) {
             if (firstLoad) {
+              const failures =
+                (attachmentRetryCountRef.current.get(logicalSessionKey) ?? 0) +
+                1;
+              if (failures < 3) {
+                setBoundedMapEntry(
+                  attachmentRetryCountRef.current,
+                  logicalSessionKey,
+                  failures,
+                );
+                retryTimer = setTimeout(
+                  () => setAttachmentRefreshNonce((nonce) => nonce + 1),
+                  ATTACHMENTS_REFRESH_INTERVAL_MS,
+                );
+                return;
+              }
+              attachmentRetryCountRef.current.delete(logicalSessionKey);
               setBoundedMapEntry(
                 sessionAttachmentsBySessionRef.current,
                 logicalSessionKey,
@@ -3994,12 +4016,14 @@ export function App({
     return () => {
       cancelled = true;
       clearTimeout(timer);
+      clearTimeout(retryTimer);
     };
   }, [
     connection.capabilities,
     connection.sessionId,
     connection.loadingTranscript,
     connection.status,
+    attachmentRefreshNonce,
     environmentPanelOpen,
     environmentPanelReachable,
     environmentPanelItems,
@@ -4877,6 +4901,9 @@ export function App({
           const snapshot = await workspace.client.sessionTasks(
             tab.sourceSessionId,
           );
+          if (snapshot.sessionId !== tab.sourceSessionId) {
+            throw new Error(t('rightPanel.savedContentUnavailable'));
+          }
           const task = snapshot.tasks.find(
             (item) => item.kind === tab.targetKind && item.id === tab.taskId,
           );
@@ -5115,9 +5142,9 @@ export function App({
           artifactPanelStateBySessionRef.current.size >
           MAX_ARTIFACT_PANEL_SESSION_STATES
         ) {
-          const oldestSessionId = artifactPanelStateBySessionRef.current
-            .keys()
-            .next().value;
+          const oldestSessionId = Array.from(
+            artifactPanelStateBySessionRef.current.keys(),
+          ).find((sessionId) => sessionId !== nextSessionId);
           if (oldestSessionId) {
             const oldestState =
               artifactPanelStateBySessionRef.current.get(oldestSessionId);
@@ -5439,7 +5466,7 @@ export function App({
       setSelectedReviewPath(null);
       setArtifactPanelExtraArtifacts([]);
       setPaneArtifactSnapshots(new Map());
-      setArtifactPanelWidth(DEFAULT_REVIEW_PANEL_WIDTH);
+      setArtifactPanelWidth(savedState?.width ?? getDefaultReviewPanelWidth());
       setArtifactPanelFullscreen(false);
       void hydrateRestoredAttachmentTab(
         activatedTabs.find((tab) => tab.id === activeTabId),
@@ -5463,6 +5490,7 @@ export function App({
     connection.loadingTranscript,
     connection.sessionId,
     connection.status,
+    getDefaultReviewPanelWidth,
     hydratePendingArtifactPanelTab,
     hydrateRestoredAttachmentTab,
     logicalSessionKey,

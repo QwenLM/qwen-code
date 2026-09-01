@@ -82,4 +82,37 @@ describe('AgentWorkflow', () => {
     expect(container.textContent).toContain('Parent');
     act(() => root.unmount());
   });
+
+  it('shows trace errors even when live agent tasks are available', () => {
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <AgentWorkflow tasks={tasks} error="Workflow failed to load" />
+        </I18nProvider>,
+      );
+    });
+    expect(container.textContent).toContain('Workflow failed to load');
+    act(() => root.unmount());
+  });
+
+  it('keeps a fork-prefixed label for non-fork agents', () => {
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    const nonForkTask: EnvironmentAgentTask = {
+      ...tasks[0],
+      label: 'fork: investigate',
+      subagentType: 'general-purpose',
+    };
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <AgentWorkflow tasks={[nonForkTask]} />
+        </I18nProvider>,
+      );
+    });
+    expect(container.textContent).toContain('fork: investigate');
+    act(() => root.unmount());
+  });
 });
