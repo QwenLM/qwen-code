@@ -21,13 +21,13 @@ import esbuild from 'esbuild';
 import { serveBridgeBinBuildOptions } from '../../scripts/serve-bridge-bin-build-options.js';
 
 const rootDir = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
-const shippedBinPath = join(
-  rootDir,
-  'dist',
-  'daemon-mcp',
-  'serve-bridge',
-  'bin.js',
-);
+// Derived from the manifest rather than restated: against a stale hardcoded
+// path, `existsSync` below would read relocation of the bin output as a
+// clean tree and silently skip the `dist/` case forever.
+const pkg = JSON.parse(readFileSync(join(rootDir, 'package.json'), 'utf8')) as {
+  bin: Record<string, string>;
+};
+const shippedBinPath = join(rootDir, pkg.bin['qwen-serve-mcp']);
 
 /**
  * `qwen-serve-mcp` shipped unstartable in `@qwen-code/sdk@0.1.8`: an esbuild
