@@ -59,6 +59,8 @@ interface CreateServeFeaturesDeps {
   standaloneSessionsAvailable?: () => boolean;
   acpHttpEnabled?: boolean;
   workspaceRuntimeRemovalAvailable?: boolean;
+  nativeDirectoryPickerAvailable?: boolean;
+  workspaceRuntimeAvailable: () => boolean;
   workspaceTrustHotReloadAvailable?: boolean;
   isPrimaryWorkspaceTrusted?: () => boolean;
   env?: Readonly<Record<string, string | undefined>>;
@@ -95,6 +97,8 @@ export function createServeFeatures(
     standaloneSessionsAvailable,
     acpHttpEnabled,
     workspaceRuntimeRemovalAvailable,
+    nativeDirectoryPickerAvailable,
+    workspaceRuntimeAvailable,
     workspaceTrustHotReloadAvailable,
   } = deps;
   const getEnv = deps.getEnv ?? (() => deps.env ?? process.env);
@@ -148,6 +152,8 @@ export function createServeFeatures(
         scratchWorkspaceRegistrationAvailable:
           scratchWorkspaceRegistrationAvailable(),
         workspaceRuntimeRemovalAvailable,
+        nativeDirectoryPickerAvailable,
+        workspaceRuntimeAvailable: workspaceRuntimeAvailable(),
         workspaceTrustHotReloadAvailable,
         acpHttpEnabled: currentAcpHttpEnabled,
         realtimeVoiceEnabled: realtimeVoiceEnabled(),

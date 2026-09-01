@@ -8,6 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { useCallback, useRef, useState } from 'react';
 import type { GoalTurnHost, GoalTurnPermit } from '@qwen-code/qwen-code-core';
 import { isSlashCommand } from '../utils/commandUtils.js';
+import type { PeerQueuedDelivery } from '../../peerMessaging/peer-messaging.js';
 
 export interface QueuedGoalTurn {
   kind: 'goal';
@@ -40,6 +41,7 @@ export interface QueuedPeerSubmission {
    * failed admission restores it so the retry does not re-render it.
    */
   displayed?: boolean;
+  delivery?: PeerQueuedDelivery;
 }
 
 export type QueuedSubmission =
@@ -56,7 +58,11 @@ export interface UseMessageQueueReturn {
     deferUntilIdle?: boolean,
     submittedPrompt?: string,
   ) => void;
-  addPeerMessage: (message: string, displayText: string) => void;
+  addPeerMessage: (
+    message: string,
+    displayText: string,
+    delivery?: PeerQueuedDelivery,
+  ) => void;
   enqueueGoalTurn: (
     input: Parameters<GoalTurnHost['startGoalTurn']>[0],
   ) => void;
@@ -84,6 +90,7 @@ export interface UseMessageQueueReturn {
     message: string,
     displayText: string,
     displayed?: boolean,
+    delivery?: PeerQueuedDelivery,
   ) => void;
   drainQueue: (includeDeferred?: boolean, goalTurnActive?: boolean) => string[];
 }
@@ -101,6 +108,8 @@ interface QueuedMessage {
   peer?: boolean;
   /** Peer-only: its notification was already rendered before a restore. */
   displayed?: boolean;
+  /** Peer-only: frame identity used to re-check its recipient at drain. */
+  delivery?: PeerQueuedDelivery;
 }
 
 export const GOAL_COMMAND_RE = /^\/goal(?:\s|$)/;
@@ -150,7 +159,7 @@ export function useMessageQueue(): UseMessageQueueReturn {
   );
 
   const addPeerMessage = useCallback(
-    (message: string, displayText: string) => {
+    (message: string, displayText: string, delivery?: PeerQueuedDelivery) => {
       const text = message.trim();
       if (!text) return;
       queueRef.current = [
@@ -165,6 +174,7 @@ export function useMessageQueue(): UseMessageQueueReturn {
           deferUntilIdle: true,
           submittedPrompt: displayText,
           peer: true,
+          ...(delivery !== undefined ? { delivery } : {}),
         },
       ];
       setQueuedMessages(queueRef.current);
@@ -278,6 +288,7 @@ export function useMessageQueue(): UseMessageQueueReturn {
           modelText: head.text,
           displayText: head.submittedPrompt ?? head.text,
           ...(head.displayed ? { displayed: true } : {}),
+          ...(head.delivery !== undefined ? { delivery: head.delivery } : {}),
         };
       }
 
@@ -354,7 +365,12 @@ export function useMessageQueue(): UseMessageQueueReturn {
   );
 
   const restorePeerMessage = useCallback(
-    (message: string, displayText: string, displayed = false) => {
+    (
+      message: string,
+      displayText: string,
+      displayed = false,
+      delivery?: PeerQueuedDelivery,
+    ) => {
       const text = message.trim();
       if (!text) return;
       queueRef.current = [
@@ -365,6 +381,7 @@ export function useMessageQueue(): UseMessageQueueReturn {
           submittedPrompt: displayText,
           peer: true,
           ...(displayed ? { displayed: true } : {}),
+          ...(delivery !== undefined ? { delivery } : {}),
         },
         ...queueRef.current,
       ];

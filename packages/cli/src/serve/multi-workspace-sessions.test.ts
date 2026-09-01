@@ -142,7 +142,7 @@ interface FakeBridge extends AcpSessionBridge {
   readonly taskCancelCalls: Array<{
     sessionId: string;
     taskId: string;
-    taskKind: 'agent' | 'shell' | 'monitor';
+    taskKind: 'agent' | 'shell' | 'monitor' | 'workflow';
   }>;
   readonly goalClearCalls: string[];
   readonly continueCalls: Array<{
@@ -304,7 +304,13 @@ async function writeLifecycleFixture(input: {
       sessionId: input.sessionId,
       cwd: SECONDARY_CWD,
       timestamp: '2026-07-08T00:00:00.000Z',
-      prompt: 'orphan lifecycle fixture',
+      // Unique per session id: the qualified and unqualified rows share this
+      // fixture and, for the unarchive case, land in the same project one
+      // after the other. An identical prompt would derive an identical
+      // display name, tripping the (correct, separately tested) unarchive
+      // title-collision guard and appending an unrelated custom_title
+      // record that this test's byte-exact comparison doesn't expect.
+      prompt: `orphan lifecycle fixture ${input.sessionId}`,
       mtime: new Date('2026-07-08T00:00:00.000Z'),
       parentSessionId: '00000000-0000-4000-8000-000000000000',
     });
@@ -538,13 +544,14 @@ function makeBridge(
         limits: {
           maxSessions: 20,
           maxPendingPromptsPerSession: 5,
-          eventRingSize: 8000,
+          eventRingSize: 8_000,
           compactedReplayMaxBytes: 4 * 1024 * 1024,
           maxJournalEvents: 10_000,
           maxJournalBytes: 8 * 1024 * 1024,
           journalGrowth: null,
           channelIdleTimeoutMs: 0,
           sessionIdleTimeoutMs: 1_800_000,
+          sessionPromptSettledCloseGraceMs: 0,
         },
         sessionCount: live.size,
         pendingPermissionCount: 0,
@@ -752,10 +759,26 @@ function makeBridge(
     async cancelSessionTask(
       sessionId: string,
       taskId: string,
-      taskKind: 'agent' | 'shell' | 'monitor',
+      taskKind: 'agent' | 'shell' | 'monitor' | 'workflow',
     ) {
       taskCancelCalls.push({ sessionId, taskId, taskKind });
       return { cancelled: workspaceCwd === SECONDARY_CWD };
+    },
+    async controlSessionWorkflowTask(
+      _sessionId: string,
+      _taskId: string,
+      action:
+        | 'pause'
+        | 'resume'
+        | 'retry'
+        | 'rerun'
+        | 'delete-history'
+        | 'run-saved',
+    ) {
+      return {
+        changed: workspaceCwd === SECONDARY_CWD,
+        status: action === 'pause' ? 'pausing' : 'running',
+      };
     },
     async clearSessionGoal(sessionId: string) {
       goalClearCalls.push(sessionId);
@@ -1126,6 +1149,7 @@ function makeHarness(opts?: {
     undefined,
     {
       workspaceRegistry: registry,
+      daemonEnv: {},
       ...(opts?.daemonLog ? { daemonLog: opts.daemonLog } : {}),
       ...(opts?.liveConversationWorkspace
         ? { liveConversationWorkspace: opts.liveConversationWorkspace }
@@ -1174,27 +1198,31 @@ describe('multi-workspace session dispatch', () => {
     expect(res.body.features).toContain('workspace_archived_session_export');
     expect(res.body.features).toContain('workspace_display_name');
     expect(res.body.workspaces).toEqual([
-      { id: 'primary-id', cwd: PRIMARY_CWD, primary: true, trusted: true },
+      {
+        id: 'primary-id',
+        cwd: PRIMARY_CWD,
+        primary: true,
+        trusted: true,
+        workflowsEnabled: false,
+      },
       {
         id: 'secondary-id',
         cwd: SECONDARY_CWD,
         displayName: 'Secondary workspace',
         primary: false,
         trusted: true,
+        workflowsEnabled: false,
       },
     ]);
     expect(res.body.limits.maxSessionsPerWorkspace).toBe(32);
     expect(res.body.limits.maxTotalSessions).toBeNull();
   });
 
-  it('advertises multi-workspace shell only when effective session shell is enabled', async () => {
+  it('advertises multi-workspace shell on trusted loopback when explicitly enabled', async () => {
     const { app } = makeHarness({
-      serveOptions: { token: 'secret', enableSessionShell: true },
+      serveOptions: { enableSessionShell: true },
     });
-    const res = await request(app)
-      .get('/capabilities')
-      .set('Host', host())
-      .set('Authorization', 'Bearer secret');
+    const res = await request(app).get('/capabilities').set('Host', host());
 
     expect(res.status).toBe(200);
     expect(res.body.features).toContain('session_shell_command');
@@ -1411,16 +1439,15 @@ describe('multi-workspace session dispatch', () => {
     ]);
   });
 
-  it('routes secondary rewind snapshots, rewind, and shell only to the owner bridge', async () => {
+  it('routes trusted-loopback secondary rewind and shell only to the owner bridge', async () => {
     const daemonLog = makeDaemonLog();
     const { app, primaryBridge, secondaryBridge } = makeHarness({
       daemonLog,
-      serveOptions: { token: 'secret', enableSessionShell: true },
+      serveOptions: { enableSessionShell: true },
     });
-    const auth = (test: request.Test) =>
-      test.set('Host', host()).set('Authorization', 'Bearer secret');
+    const local = (test: request.Test) => test.set('Host', host());
 
-    const snapshots = await auth(
+    const snapshots = await local(
       request(app).get(
         '/session/22222222-2222-4222-a222-222222222222/rewind/snapshots',
       ),
@@ -1430,7 +1457,7 @@ describe('multi-workspace session dispatch', () => {
       `${SECONDARY_CWD}-prompt`,
     );
 
-    const rewind = await auth(
+    const rewind = await local(
       request(app).post('/session/22222222-2222-4222-a222-222222222222/rewind'),
     )
       .set('X-Qwen-Client-Id', 'client-2')
@@ -1438,7 +1465,7 @@ describe('multi-workspace session dispatch', () => {
     expect(rewind.status).toBe(200);
     expect(rewind.body.filesChanged).toEqual(['tracked.txt']);
 
-    const shell = await auth(
+    const shell = await local(
       request(app).post('/session/22222222-2222-4222-a222-222222222222/shell'),
     )
       .set('X-Qwen-Client-Id', 'client-2')
@@ -3445,7 +3472,7 @@ describe('multi-workspace session dispatch', () => {
     expect(primaryBridge.removeArtifactCalls).toEqual([]);
   });
 
-  it('preserves mutation auth while leaving language on its existing non-strict gate', async () => {
+  it('executes strict and non-strict secondary mutations on trusted loopback', async () => {
     const { app, primaryBridge, secondaryBridge } = makeHarness();
 
     const responses = await Promise.all([
@@ -3466,7 +3493,7 @@ describe('multi-workspace session dispatch', () => {
         .set('X-Qwen-Client-Id', 'secondary-client'),
     ]);
     expect(responses.map((response) => response.status)).toEqual([
-      401, 401, 401,
+      200, 200, 200,
     ]);
 
     const language = await request(app)
@@ -3480,11 +3507,26 @@ describe('multi-workspace session dispatch', () => {
         params: { language: 'zh', syncOutputLanguage: false },
       },
     ]);
-    for (const bridge of [primaryBridge, secondaryBridge]) {
-      expect(bridge.continueCalls).toEqual([]);
-      expect(bridge.addArtifactCalls).toEqual([]);
-      expect(bridge.removeArtifactCalls).toEqual([]);
-    }
+    expect(primaryBridge.continueCalls).toEqual([]);
+    expect(primaryBridge.addArtifactCalls).toEqual([]);
+    expect(primaryBridge.removeArtifactCalls).toEqual([]);
+    expect(secondaryBridge.continueCalls).toHaveLength(1);
+    expect(secondaryBridge.addArtifactCalls).toHaveLength(1);
+    expect(secondaryBridge.removeArtifactCalls).toHaveLength(1);
+  });
+
+  it('denies secondary continuation in a non-trusted tokenless embed', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness({
+      serveOptions: { hostname: '0.0.0.0' },
+    });
+    const res = await request(app)
+      .post('/session/22222222-2222-4222-a222-222222222222/continue')
+      .send({});
+
+    expect(res.status).toBe(401);
+    expect(res.body.code).toBe('token_required');
+    expect(primaryBridge.continueCalls).toEqual([]);
+    expect(secondaryBridge.continueCalls).toEqual([]);
   });
 
   it('rejects remaining mutations for an untrusted non-primary owner', async () => {

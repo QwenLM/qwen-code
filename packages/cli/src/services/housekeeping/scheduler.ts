@@ -13,6 +13,7 @@ import {
   createDebugLogger,
   getSubagentsRootDir,
   resolveOpenAILogDir,
+  sessionIdContext,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
 import { DEFAULT_OPENAI_LOG_RETENTION_DAYS } from '../../config/settingsSchema.js';
@@ -193,27 +194,29 @@ export function startNonInteractiveOpenAILogHousekeeping(
 ): void {
   if (nonInteractiveStopping) return;
 
-  try {
-    const target = getOpenAILogCleanupTarget(config, settings);
-    if (!target || nonInteractiveJobs.has(target.logDir)) return;
+  sessionIdContext.exit(() => {
+    try {
+      const target = getOpenAILogCleanupTarget(config, settings);
+      if (!target || nonInteractiveJobs.has(target.logDir)) return;
 
-    const markerPath = getOpenAILogsMarkerPath(
-      Storage.getGlobalQwenDir(),
-      target.logDir,
-    );
-    const job: NonInteractiveOpenAILogJob = {
-      target,
-      markerPath,
-      queued: false,
-    };
-    nonInteractiveJobs.set(target.logDir, job);
-    enqueueNonInteractiveJob(job);
-  } catch (err) {
-    debugLogger.error(
-      'failed to start non-interactive OpenAI log cleanup; skipping',
-      err,
-    );
-  }
+      const markerPath = getOpenAILogsMarkerPath(
+        Storage.getGlobalQwenDir(),
+        target.logDir,
+      );
+      const job: NonInteractiveOpenAILogJob = {
+        target,
+        markerPath,
+        queued: false,
+      };
+      nonInteractiveJobs.set(target.logDir, job);
+      enqueueNonInteractiveJob(job);
+    } catch (err) {
+      debugLogger.error(
+        'failed to start non-interactive OpenAI log cleanup; skipping',
+        err,
+      );
+    }
+  });
 }
 
 export function stopNonInteractiveOpenAILogHousekeeping(): Promise<void> {
@@ -269,6 +272,16 @@ async function drainNonInteractiveQueue(): Promise<void> {
     const abortController = new AbortController();
     activeNonInteractiveAbortController = abortController;
 
+    // No sessionIdContext.exit here: every path into this drain — the
+    // start-side kick, the .finally re-kick, and the retry timers — already
+    // runs context-free because startNonInteractiveOpenAILogHousekeeping
+    // exits the context around enqueue and the worker start, and timers
+    // registered inside that scope inherit it. A second wrapper here was
+    // unreachable defensive code no test could pin (recorded in #9930's
+    // round-4 review); the single tested choke point is the start-side
+    // sessionIdContext.exit in startNonInteractiveOpenAILogHousekeeping. Any
+    // NEW way into this drain must enter through that exited scope, or it
+    // will start propagating a session id into process-scoped housekeeping.
     try {
       const result = await runOpenAILogCleanup(
         job.target,

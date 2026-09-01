@@ -19,6 +19,7 @@ import { randomBytes } from 'node:crypto';
 import * as fsPromises from 'node:fs/promises';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { getErrorMessage } from '../../utils/errors.js';
+import { escapeJsonTagCharacters } from '../../utils/formatters.js';
 import { escapeXml } from '../../utils/xml.js';
 import { ApprovalMode } from '../../config/config.js';
 import type {
@@ -79,6 +80,7 @@ import {
 import { buildTeammatePromptAddendum } from './promptAddendum.js';
 import { runWithTeammateIdentity } from './identity.js';
 import type { SubagentManager } from '../../subagents/subagent-manager.js';
+import type { SubagentModelRoute } from '../../subagents/types.js';
 import type { ToolConfig } from '../runtime/agent-types.js';
 import { runOutsideAgentContext } from '../runtime/agent-context.js';
 import { READ_ONLY_INSPECTION_TOOLS } from '../runtime/subagent-plan-tool-policy.js';
@@ -206,6 +208,44 @@ export class TeamManager {
   private readonly teamEventEmitter = new TeamEventEmitter();
 
   /**
+   * Per-TeamManager write queue serializing every roster write
+   * (the success-path write and the failed-spawn compensating
+   * write in `spawnTeammate`). Each queued task snapshots
+   * `teamFile` when it RUNS, not when it is enqueued, so
+   * commits land in call order and a compensating write queued
+   * after a stale snapshot always lands last. Without this, two
+   * unsynchronized writers can reorder — a slow atomic rename
+   * for the stale snapshot landing after the compensating write
+   * — and re-persist exactly the ghost member #10208 removes.
+   */
+  private teamFileWriteQueue: Promise<void> = Promise.resolve();
+
+  /**
+   * Sequence number of roster writes in `persistTeamFile`'s queue:
+   * each queued write increments it synchronously at its snapshot point
+   * when it RUNS. A member's push captures the current value, and only
+   * writes with a higher sequence number snapshot the roster while the
+   * member is in it, so only those can persist the member. The
+   * failed-spawn compensating-write gate compares
+   * `teamFileWritesCommitted` against the captured value (see
+   * `persistTeamFile`). Deliberately monotonic — a rejected write keeps
+   * its number so a later write cannot reuse the value and hide at or
+   * below an earlier member's push watermark (#10297).
+   */
+  private teamFileWritesStarted = 0;
+
+  /**
+   * Sequence number of the most recently committed roster write
+   * (`writeTeamFile` resolved). The queue is serial, so writes commit
+   * in sequence order and this watermark is monotonic. A member pushed
+   * when `teamFileWritesStarted` read N can be on disk only if a write
+   * with a sequence number above N committed, i.e. this watermark
+   * advanced past N — a write that started but rejected persisted
+   * nothing (#10297).
+   */
+  private teamFileWritesCommitted = 0;
+
+  /**
    * Cap on per-agent pending messages. Each message can be up to the
    * `send_message` schema's `maxLength`, and a queue only drains when its
    * recipient goes IDLE — so without a cap a single looping or
@@ -308,6 +348,57 @@ export class TeamManager {
   // ─── Teammate lifecycle ─────────────────────────────────
 
   /**
+   * Queue a team-file write behind any in-flight roster write and
+   * return its promise. The snapshot is taken when the queued task
+   * runs (see `teamFileWriteQueue`), so the last queued write always
+   * commits the newest in-memory state. A rejected write does not
+   * poison the queue — the chain survives for subsequent writes.
+   *
+   * With `onlyIfCommittedAfter`, the queued task writes only if a
+   * roster write with a sequence number above that value committed.
+   * The queue is serial, so by the time the task runs every earlier
+   * write — including any still in flight when the task was queued —
+   * has settled and `teamFileWritesCommitted` is final for the window.
+   * The failed-spawn compensating write uses this: a write that
+   * started inside the failed member's window but rejected persisted
+   * nothing, so there is nothing to repair and the redundant write
+   * (with its misleading ghost-member notice if it failed too) is
+   * skipped (#10297).
+   */
+  private persistTeamFile(options?: {
+    onlyIfCommittedAfter?: number;
+  }): Promise<void> {
+    const write = this.teamFileWriteQueue.then(() => {
+      if (
+        options?.onlyIfCommittedAfter !== undefined &&
+        this.teamFileWritesCommitted <= options.onlyIfCommittedAfter
+      ) {
+        // No write that started inside the failed member's window
+        // committed, so nothing on disk can contain the rolled-back
+        // member — skip the compensating write.
+        return;
+      }
+      // Snapshot point: assign the sequence number and snapshot the
+      // roster synchronously, before any await. `writeTeamFile` awaits
+      // `fs.mkdir` before stringifying its argument, so handing it the
+      // live roster would let a member pushed during that fs hop land
+      // on disk through a write the gate counts as pre-push — the
+      // failed member's compensating write would then be skipped and
+      // the ghost persisted (#10208).
+      const writeSeq = ++this.teamFileWritesStarted;
+      const snapshot = structuredClone(this.teamFile);
+      return writeTeamFile(this.teamFile.name, snapshot).then(() => {
+        // Commit point: advance the watermark only after the write
+        // actually landed. Commits happen in sequence order (the queue
+        // is serial), so the watermark stays monotonic.
+        this.teamFileWritesCommitted = writeSeq;
+      });
+    });
+    this.teamFileWriteQueue = write.catch(() => {});
+    return write;
+  }
+
+  /**
    * Spawn a new teammate. Adds the member to the team file,
    * spawns via backend, and sets up the event bridge.
    */
@@ -318,6 +409,13 @@ export class TeamManager {
       );
     }
 
+    // Normalize the spawn-time model override once: an empty string
+    // means "no override", same as undefined. The guards below used to
+    // mix `??` (nullish) and `!` (falsy), so `model: ''` kept the
+    // empty override for the model while the route guard saw it as
+    // absent — the two halves of the spawn disagreed.
+    const effectiveModel = config.model || undefined;
+
     const name = generateUniqueTeammateName(config.name, this.teamFile.members);
     const agentId = formatAgentId(name, this.teamFile.name);
     const color = assignTeammateColor(this.teamFile.members);
@@ -327,7 +425,7 @@ export class TeamManager {
       agentId,
       name,
       agentType: config.agentType,
-      model: config.model,
+      model: effectiveModel,
       prompt: config.prompt,
       color,
       joinedAt: Date.now(),
@@ -358,6 +456,12 @@ export class TeamManager {
     this.pendingMessages.set(agentId, []);
     this.lastActivityAt.set(agentId, Date.now());
     this.agentIdentities.set(agentId, identity);
+
+    // Roster writes with a sequence number at or below this value
+    // snapshot the roster before this push and cannot persist the
+    // member. The compensating write after a failed spawn skips unless
+    // a write above this watermark committed (see `persistTeamFile`).
+    const writesStartedAtPush = this.teamFileWritesStarted;
 
     let agentSpawned = false;
     let eventBridgeAttached = false;
@@ -394,6 +498,7 @@ export class TeamManager {
       // definition so the teammate behaves like that agent type.
       let subagentPrompt: string | undefined;
       let subagentModel: string | undefined;
+      let subagentModelRoute: SubagentModelRoute | undefined;
       let subagentRunConfig: Record<string, unknown> | undefined;
       let toolConfig: ToolConfig | undefined;
       if (config.agentType && this.subagentManager) {
@@ -409,6 +514,18 @@ export class TeamManager {
         subagentModel = runtimeCfg.modelConfig.model;
         subagentRunConfig = runtimeCfg.runConfig as Record<string, unknown>;
         toolConfig = runtimeCfg.toolConfig;
+        // Resolve the definition's model selector with the runtime context,
+        // the same way the ordinary-subagent path does (#10071).
+        // convertToRuntimeConfig is called without a context, so it keeps
+        // only a bare model ID and cannot resolve `fast`; both the
+        // selector's authType and the resolved model ID are needed below
+        // to give the teammate the definition's provider route instead of
+        // the leader's.
+        subagentModelRoute =
+          this.subagentManager.resolveSubagentModelRoute(subagentConfig);
+        if (subagentModelRoute) {
+          subagentModel = subagentModelRoute.modelId;
+        }
         // Ensure team coordination tools are always available,
         // even when the subagent defines a restricted tool set.
         if (toolConfig) {
@@ -469,6 +586,17 @@ export class TeamManager {
         ? `${basePrompt}\n\n${addendum}`
         : addendum;
 
+      // Reflect the model the teammate will actually run on — including a
+      // model selected by the definition's frontmatter (#10071), not just
+      // an explicit spawn-time override — in the team file and join event.
+      member.model = effectiveModel ?? subagentModel;
+
+      // The definition's resolved route is applied only when the leader
+      // did not override the model at spawn time. Computed once so the
+      // authOverrides build below and the post-spawn route verification
+      // cannot drift apart (#10071).
+      const dedicatedRoute = !effectiveModel ? subagentModelRoute : undefined;
+
       // Build spawn config for the backend.
       const spawnConfig: AgentSpawnConfig = {
         agentId,
@@ -489,12 +617,22 @@ export class TeamManager {
                 '(status: "in_progress"), do the work, report ' +
                 'via send_message(to: "leader"), then mark ' +
                 'completed with task_update.'),
+          // The definition's resolved provider route (#10071). InProcess
+          // backends build a dedicated per-agent ContentGenerator only
+          // when authOverrides.authType is present; without this the
+          // teammate falls back to the leader's generator and streams the
+          // definition's model ID over the leader's route. Skipped when
+          // the leader overrode the model at spawn time — the definition
+          // does not vouch for the route of a model it did not select.
+          authOverrides: dedicatedRoute
+            ? { authType: dedicatedRoute.authType }
+            : undefined,
           runtimeConfig: {
             promptConfig: {
               systemPrompt,
             },
             modelConfig: {
-              model: config.model ?? subagentModel,
+              model: effectiveModel ?? subagentModel,
             },
             runConfig: {
               ...subagentRunConfig,
@@ -529,6 +667,43 @@ export class TeamManager {
         throw new Error(`Teammate "${name}" failed to start: ${reason}`);
       }
 
+      // A healthy spawn is not proof the requested route materialized:
+      // InProcessBackend swallows per-agent ContentGenerator creation
+      // failures into a debug log and falls back to the leader's
+      // generator (#10071). Without this check the teammate would join
+      // while streaming the definition's model ID over the leader's
+      // route — the exact misrouting this PR fixes. Verify the
+      // dedicated generator exists and fail loudly so `rollback` tears
+      // the teammate down, matching the ordinary-subagent path, which
+      // surfaces the same failure as a spawn error.
+      if (dedicatedRoute) {
+        // A backend that omits the accessor cannot prove the route
+        // materialized. Fail loudly with the real cause instead of
+        // treating a missing method like a generator-creation failure
+        // (which would send maintainers hunting for a missing API key)
+        // or, worse, letting the teammate join on the leader's
+        // generator — the silent misrouting this PR fixes (#10071).
+        if (typeof this.backend.getAgentContentGenerator !== 'function') {
+          throw new Error(
+            `Teammate "${name}" failed to start: the active backend ` +
+              `does not support dedicated per-agent ContentGenerators ` +
+              `required by model "${dedicatedRoute.modelId}" ` +
+              `(${dedicatedRoute.authType})`,
+          );
+        }
+        const routeGenerator = this.backend.getAgentContentGenerator(agentId);
+        if (!routeGenerator) {
+          const cause = this.backend.getAgentContentGeneratorError?.(agentId);
+          throw new Error(
+            `Teammate "${name}" failed to start: could not create a ` +
+              `dedicated ContentGenerator for model ` +
+              `"${dedicatedRoute.modelId}" ` +
+              `(${dedicatedRoute.authType})` +
+              (cause ? `: ${cause}` : ''),
+          );
+        }
+      }
+
       this.setupEventBridge(agentId, name);
       eventBridgeAttached = true;
 
@@ -536,9 +711,51 @@ export class TeamManager {
       // EACCES, ...), `rollback` tears down the just-spawned agent
       // and event bridge so we don't leave a running teammate that
       // no team file knows about.
-      await writeTeamFile(this.teamFile.name, this.teamFile);
+      await this.persistTeamFile();
     } catch (err) {
       rollback();
+      // Compensating write: if another concurrent spawn already
+      // persisted this member in config.json, rewrite the file so
+      // persisted membership matches the post-rollback in-memory
+      // state. Best-effort — the original error is more important.
+      // Commit-aware gate (#10297): the queued task runs after every
+      // earlier write has settled and writes only if one with a
+      // sequence number above `writesStartedAtPush` actually committed.
+      // A write that started in the window but rejected persisted
+      // nothing, so compensating it would only add a redundant
+      // best-effort write — and if the disk is still full, a
+      // misleading ghost-member notice on top of the spawn error.
+      try {
+        await this.persistTeamFile({
+          onlyIfCommittedAfter: writesStartedAtPush,
+        });
+      } catch (writeErr) {
+        // Best-effort — the original error takes precedence, but
+        // leave a trail so a resurfaced ghost member can be told
+        // apart from a compensating write that itself failed.
+        debug.warn(
+          `Compensating team-file write after failed spawn of ` +
+            `${agentId} failed: ${getErrorMessage(writeErr)}`,
+        );
+        // Beyond the debug log (which is off in production), surface
+        // the failure to the leader as well, mirroring `fireAndForget`:
+        // the persisted roster may now keep a ghost member (#10208),
+        // and the leader is the only production-visible observer.
+        try {
+          this.leaderMessageCallback?.(
+            `<team_error>Compensating team-file write after failed ` +
+              `spawn of ${agentId} failed: ` +
+              `${getErrorMessage(writeErr)}</team_error>`,
+            `Team roster write after failed spawn of "${name}" failed`,
+          );
+        } catch (cbErr) {
+          const cbMsg = getErrorMessage(cbErr);
+          debug.warn(
+            `Compensating-write failure notice: leader message ` +
+              `callback threw: ${cbMsg}`,
+          );
+        }
+      }
       throw err;
     }
 
@@ -1072,9 +1289,8 @@ export class TeamManager {
       originalRequest: request.originalRequest,
       researchSummary: request.researchSummary,
     };
-    const escapedJson = JSON.stringify(payload, null, 2).replace(
-      /</g,
-      '\\u003c',
+    const escapedJson = escapeJsonTagCharacters(
+      JSON.stringify(payload, null, 2),
     );
     return [
       `<team_plan_approval_request request_id="${escapeXml(requestId)}" from="${escapeXml(request.teammateName)}">`,

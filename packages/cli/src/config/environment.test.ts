@@ -258,6 +258,28 @@ describe('buildRuntimeEnvironment', () => {
     expect(snapshot.effectiveEnv['RUNTIME_DOTENV']).toBeUndefined();
   });
 
+  it('can fail closed without mutating process.env when an env file is unreadable', () => {
+    const workspace = makeWorkspace();
+    fs.mkdirSync(path.join(workspace, '.env'));
+    process.env['RUNTIME_SETTINGS_ONLY'] = 'old';
+
+    const result = reloadEnvironment(
+      testSettings({
+        env: { RUNTIME_SETTINGS_ONLY: 'new' },
+      }),
+      workspace,
+      true,
+      { failClosedOnEnvFileReadError: true },
+    );
+
+    expect(result).toEqual({
+      updatedKeys: [],
+      removedKeys: [],
+      envFileReadFailed: true,
+    });
+    expect(process.env['RUNTIME_SETTINGS_ONLY']).toBe('old');
+  });
+
   it('does not load a distrusted parent .env for a trusted child workspace', () => {
     const parent = makeWorkspace();
     const child = path.join(parent, 'child');
