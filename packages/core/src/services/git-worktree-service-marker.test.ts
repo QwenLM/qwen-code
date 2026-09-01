@@ -7,12 +7,16 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   createWorktreeSessionMarkerExclusive,
   readWorktreeSessionMarkerStrict,
   WORKTREE_SESSION_FILE,
 } from './gitWorktreeService.js';
+
+const execFileAsync = promisify(execFile);
 
 describe('daemon worktree session markers', () => {
   const tempDirs: string[] = [];
@@ -40,6 +44,45 @@ describe('daemon worktree session markers', () => {
       state: 'valid',
       sessionId: 'session-123',
     });
+  });
+
+  it('keeps the marker ignored and unstaged in a linked worktree', async () => {
+    const dir = await tempDir();
+    const repo = path.join(dir, 'repo');
+    const worktree = path.join(dir, 'worktree');
+    await fs.mkdir(repo);
+    await execFileAsync('git', ['init', '-q', '-b', 'main'], { cwd: repo });
+    await execFileAsync('git', ['config', 'user.email', 'test@example.com'], {
+      cwd: repo,
+    });
+    await execFileAsync('git', ['config', 'user.name', 'Test'], { cwd: repo });
+    await fs.writeFile(path.join(repo, 'tracked.txt'), 'tracked');
+    await execFileAsync('git', ['add', '.'], { cwd: repo });
+    await execFileAsync('git', ['commit', '-q', '-m', 'initial'], {
+      cwd: repo,
+    });
+    await execFileAsync(
+      'git',
+      ['worktree', 'add', '-q', '-b', 'task', worktree],
+      {
+        cwd: repo,
+      },
+    );
+
+    await createWorktreeSessionMarkerExclusive(worktree, 'session-123');
+    const exclude = await fs.readFile(
+      path.join(repo, '.git', 'info', 'exclude'),
+      'utf8',
+    );
+    expect(exclude.split(/\r?\n/)).toContain(WORKTREE_SESSION_FILE);
+    await execFileAsync('git', ['add', '-A'], { cwd: worktree });
+
+    const { stdout } = await execFileAsync(
+      'git',
+      ['diff', '--cached', '--name-only'],
+      { cwd: worktree },
+    );
+    expect(stdout).toBe('');
   });
 
   it('distinguishes a missing marker from invalid marker contents', async () => {

@@ -53,10 +53,10 @@ async function addWorktreeSessionMarkerExclude(
   try {
     const { simpleGit } = await loadSimpleGit();
     const wtGit = simpleGit(worktreePath);
-    const gitDir = (await wtGit.revparse(['--git-dir'])).trim();
-    const excludePath = path.isAbsolute(gitDir)
-      ? path.join(gitDir, 'info', 'exclude')
-      : path.join(worktreePath, gitDir, 'info', 'exclude');
+    const commonDir = (await wtGit.revparse(['--git-common-dir'])).trim();
+    const excludePath = path.isAbsolute(commonDir)
+      ? path.join(commonDir, 'info', 'exclude')
+      : path.join(worktreePath, commonDir, 'info', 'exclude');
     await fs.mkdir(path.dirname(excludePath), { recursive: true });
     let existing = '';
     try {
@@ -88,9 +88,9 @@ export async function writeWorktreeSessionMarker(
   // `git add -A` inside it would otherwise add the session id to its
   // first commit. Write a `.git/info/exclude` rule so the marker is
   // ignored without requiring (or modifying) a tracked `.gitignore`.
-  // `.git` inside a worktree is actually a file pointing at
-  // `<repo>/.git/worktrees/<name>/`, so resolve `--git-dir` instead
-  // of joining naively.
+  // Linked worktrees share ignore rules from the repository's common
+  // `info/exclude`, so resolve `--git-common-dir` instead of the
+  // per-worktree administrative directory returned by `--git-dir`.
   await addWorktreeSessionMarkerExclude(worktreePath);
 }
 

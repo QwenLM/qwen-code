@@ -3493,6 +3493,11 @@ export abstract class ChannelBase {
     envelope: Envelope,
     error: unknown,
   ): Promise<void> {
+    if (error instanceof Error && error.cause !== undefined) {
+      process.stderr.write(
+        `[${sanitizeLogText(this.name, 64)}] named-session operation failed: ${this.lifecycleError(error)} | cause: ${this.lifecycleError(error.cause)}\n`,
+      );
+    }
     const message =
       error instanceof Error
         ? sanitizeDisplayText(error.message, 500)

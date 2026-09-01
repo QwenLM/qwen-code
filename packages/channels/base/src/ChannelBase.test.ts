@@ -3632,6 +3632,29 @@ describe('ChannelBase', () => {
   });
 
   describe('slash commands', () => {
+    it('keeps task creation details out of chat while logging the sanitized cause', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      const ch = createChannel({ multiSession: true }, { stateDir });
+      vi.mocked(bridge.newSession).mockRejectedValueOnce(
+        new Error('session secret-session-id\nfailed'),
+      );
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      try {
+        await ch.handleInbound(envelope({ text: '/session new review' }));
+
+        expect(ch.sent.at(-1)?.text).toBe('Could not create task "review".');
+        expect(ch.sent.at(-1)?.text).not.toContain('secret-session-id');
+        expect(stderrSpy).toHaveBeenCalledWith(
+          '[test-chan] named-session operation failed: Could not create task "review". | cause: session secret-session-id\\nfailed\n',
+        );
+      } finally {
+        stderrSpy.mockRestore();
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
     it('keeps named task catalogs isolated by sender without exposing session IDs', async () => {
       const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
       const ch = createChannel(
@@ -4202,7 +4225,7 @@ describe('ChannelBase', () => {
 
         await ch.handleInbound(envelope({ text: '/clear' }));
 
-        expect(ch.sent.at(-1)?.text).toContain('cannot be reset');
+        expect(ch.sent.at(-1)?.text).toContain('cannot be cleared or reset');
         expect(bridge.newSession).not.toHaveBeenCalled();
         expect(bridge.cancelSession).not.toHaveBeenCalled();
         expect(bridge.discardSession).not.toHaveBeenCalled();
