@@ -1052,6 +1052,18 @@ export interface DaemonSessionPrInfo {
   url: string;
   /** Snapshot of the PR's state at last bind/refresh; optional. */
   state?: 'open' | 'merged' | 'closed';
+  /**
+   * Issues the PR closes (its GitHub closing references), derived by the
+   * daemon's refresh sweep; absent until the first sweep after binding.
+   */
+  issues?: DaemonSessionIssueInfo[];
+}
+
+export interface DaemonSessionIssueInfo {
+  number: number;
+  url: string;
+  /** Snapshot of the issue's state at last refresh; optional. */
+  state?: 'open' | 'completed' | 'not_planned';
 }
 
 /** Returned from `POST /session`. */
