@@ -99,6 +99,7 @@ import {
 } from '../utils/stdioHelpers.js';
 import {
   parseDurationSeconds,
+  validateGoalTokenBudget,
   validateMaxToolCalls,
   validateMaxWallTimeSetting,
 } from '../utils/runBudget.js';
@@ -1193,6 +1194,16 @@ function resolveMaxWallTimeSeconds(argv: CliArgs, settings: Settings): number {
   return -1;
 }
 
+function resolveGoalTokenBudget(settings: Settings): number | undefined {
+  const fromSettings: unknown = settings.model?.goalTokenBudget;
+  if (fromSettings === undefined) return undefined;
+  try {
+    return validateGoalTokenBudget(fromSettings);
+  } catch (err) {
+    throw new Error(`settings.json: ${(err as Error).message}`);
+  }
+}
+
 /**
  * Resolves the tool-call budget for a run. Returns the validated count
  * (`-1` = unlimited). Order of precedence: `--max-tool-calls` flag, then
@@ -1364,6 +1375,12 @@ export function buildDisabledSkillNamesProvider(
   return () => resolveSkillSettings(loadedSettings).disabledNames;
 }
 
+export function buildEnabledSkillNamesProvider(
+  loadedSettings: LoadedSettings,
+): () => ReadonlySet<string> {
+  return () => resolveSkillSettings(loadedSettings).enabledNames;
+}
+
 /**
  * Thrown (instead of `process.exit(1)`) when a caller-supplied session id
  * already exists and `throwOnSessionIdConflict` is set. The interactive CLI
@@ -1446,6 +1463,7 @@ export async function loadCliConfig(
       ) => Promise<SessionRestoreProjection | undefined>;
     };
   },
+  enabledSkillNamesProvider?: () => ReadonlySet<string>,
 ): Promise<Config> {
   const provisionalWorkspace = hostPolicy?.provisionalWorkspace === true;
   const debugMode = isDebugMode(argv);
@@ -2103,6 +2121,8 @@ export async function loadCliConfig(
       disabledSlashCommands.length > 0 ? disabledSlashCommands : undefined,
     disabledSkillNamesProvider:
       bareMode || safeMode ? undefined : disabledSkillNamesProvider,
+    enabledSkillNamesProvider:
+      bareMode || safeMode ? undefined : enabledSkillNamesProvider,
     terminalImageRenderSupportProvider: interactive
       ? async () => {
           const { getTerminalImageRenderSupport } = await import(
@@ -2211,6 +2231,7 @@ export async function loadCliConfig(
     sessionTokenLimit: settings.model?.sessionTokenLimit ?? -1,
     maxSessionTurns:
       argv.maxSessionTurns ?? settings.model?.maxSessionTurns ?? -1,
+    goalTokenBudget: resolveGoalTokenBudget(settings),
     maxWallTimeSeconds: resolveMaxWallTimeSeconds(argv, settings),
     maxToolCalls: resolveMaxToolCalls(argv, settings),
     // Undefined flows through to Config's default (5) and clamp logic.

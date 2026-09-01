@@ -40,6 +40,7 @@ import { scrubAndReportInheritedLoaderEnv } from './config/shared-env-keys.js';
 import { QWEN_CODE_SERVE_ENV } from './config/acp-channel-fallback.js';
 import {
   buildDisabledSkillNamesProvider,
+  buildEnabledSkillNamesProvider,
   loadCliConfig,
   parseArguments,
 } from './config/config.js';
@@ -648,6 +649,11 @@ export async function main() {
           projectHooks: settings.getProjectHooks(),
         },
         buildDisabledSkillNamesProvider(settings),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        buildEnabledSkillNamesProvider(settings),
       );
 
       if (!settings.merged.security?.auth?.useExternal) {
@@ -1115,6 +1121,9 @@ export async function main() {
       buildDisabledSkillNamesProvider(settings),
       undefined,
       settingsWatcher,
+      undefined,
+      undefined,
+      buildEnabledSkillNamesProvider(settings),
     );
     markAcpStartup('configConstructionEnd');
     profileCheckpoint('after_load_cli_config');

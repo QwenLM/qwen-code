@@ -18,7 +18,11 @@ import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import type { Config } from '../config/config.js';
 import { getTeamName, resolveActiveTeamName } from '../agents/team/identity.js';
 import { sanitizeName } from '../agents/team/teamHelpers.js';
-import { listTasks } from '../agents/team/tasks.js';
+import {
+  assertValidTaskId,
+  listTasks,
+  normalizeTaskId,
+} from '../agents/team/tasks.js';
 
 export interface TaskListParams {
   status?: 'pending' | 'in_progress' | 'completed';
@@ -42,10 +46,10 @@ class TaskListInvocation extends BaseToolInvocation<
     if (this.params.status) {
       filters.push(`status=${this.params.status}`);
     }
-    if (this.params.owner) {
+    if (this.params.owner?.trim()) {
       filters.push(`owner=${this.params.owner}`);
     }
-    if (this.params.blockedBy) {
+    if (this.params.blockedBy?.trim()) {
       filters.push(`blockedBy=${this.params.blockedBy}`);
     }
     return filters.length > 0
@@ -66,8 +70,12 @@ class TaskListInvocation extends BaseToolInvocation<
       };
     }
 
+    // Blank (empty/whitespace-only) optional filters behave as absent:
+    // the schema marks them optional and `getDescription()` only shows
+    // truthy filter values, so a blank value must not activate a
+    // filter (#9281).
     let ownerFilter: string | undefined;
-    if (this.params.owner !== undefined) {
+    if (this.params.owner !== undefined && this.params.owner.trim() !== '') {
       ownerFilter = sanitizeName(this.params.owner);
       if (!ownerFilter) {
         const msg =
@@ -81,10 +89,38 @@ class TaskListInvocation extends BaseToolInvocation<
       }
     }
 
+    let blockedByFilter: string | undefined;
+    if (this.params.blockedBy?.trim()) {
+      blockedByFilter = normalizeTaskId(this.params.blockedBy);
+      if (blockedByFilter === undefined) {
+        // Non-blank input that normalizes to nothing (e.g. a bare
+        // '#'): fail closed like the owner path instead of
+        // activating a filter that can never match.
+        const msg =
+          'Cannot filter by blockedBy: blockedBy must be a task ID, ' +
+          'optionally prefixed with #.';
+        return {
+          llmContent: msg,
+          returnDisplay: msg,
+          error: { message: msg },
+        };
+      }
+      try {
+        assertValidTaskId(blockedByFilter);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return {
+          llmContent: msg,
+          returnDisplay: msg,
+          error: { message: msg },
+        };
+      }
+    }
+
     const tasks = await listTasks(teamName, {
       status: this.params.status,
       owner: ownerFilter,
-      blockedBy: this.params.blockedBy,
+      blockedBy: blockedByFilter,
     });
 
     if (tasks.length === 0) {

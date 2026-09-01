@@ -660,7 +660,10 @@ export async function start_sandbox(
     containerName = `${imageName}-${randomBytes(4).toString('hex')}`;
     writeStderrLine(`ContainerName (regular): ${containerName}`);
   }
-  args.push('--name', containerName, '--hostname', containerName);
+  args.push('--name', containerName);
+  if (containerName.length <= 64) {
+    args.push('--hostname', containerName);
+  }
 
   // copy QWEN_CODE_TEST_VAR for integration tests
   if (process.env['QWEN_CODE_TEST_VAR']) {

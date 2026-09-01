@@ -2433,7 +2433,7 @@ describe('DingtalkChannel unroutable-message logging', () => {
 describe('DingtalkChannel parsed-message logging', () => {
   it('labels the fallback when a named inbound turn rejects', async () => {
     const channel = createChannel();
-    const error = new Error('agent unavailable');
+    const error = new Error('agent unavailable: secret-token');
     vi.mocked(channel.handleInbound).mockRejectedValueOnce(error);
     Object.assign(channel, { inboundErrorSourceLabelForTest: '[review]' });
     const fetchSpy = vi
@@ -2467,9 +2467,208 @@ describe('DingtalkChannel parsed-message logging', () => {
       const body = JSON.parse(
         String((fetchSpy.mock.calls[0]![1] as RequestInit).body),
       );
+      const reference = body.markdown.text.match(
+        /\*\*Reference:\*\* `([0-9a-f]{8})`/,
+      )?.[1];
+      expect(reference).toBeDefined();
       expect(body.markdown.text).toBe(
-        '\\[review\\]\n\nSorry, something went wrong processing your message.',
+        '\\[review\\]\n\n**Unable to process this message**\n\n' +
+          '**Status:** Service is temporarily unavailable\n' +
+          '**Next step:** Try again in a moment. If it keeps failing, contact the bot administrator.\n' +
+          `**Reference:** \`${reference}\``,
       );
+      expect(body.markdown.text).not.toContain('secret-token');
+      expect(stderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`ref=${reference}`),
+      );
+    } finally {
+      stderrSpy.mockRestore();
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it.each([
+    {
+      name: 'configuration failures',
+      error: Object.assign(new Error('request rejected'), { status: 401 }),
+      rawDetail: 'request rejected',
+      status: 'Bot configuration error',
+      nextStep: 'Contact the bot administrator.',
+    },
+    {
+      name: 'cancelled requests',
+      error: new Error('request aborted'),
+      rawDetail: 'request aborted',
+      status: 'Request was cancelled',
+      nextStep: 'Send the request again if you still need it.',
+    },
+    {
+      name: 'timeouts',
+      error: Object.assign(new Error('request aborted after timeout'), {
+        status: 504,
+      }),
+      rawDetail: 'request aborted after timeout',
+      status: 'Request timed out',
+      nextStep: 'Try again. For a large request, split it into smaller parts.',
+    },
+    {
+      name: 'busy agents',
+      error: Object.assign(new Error('request failed'), {
+        body: 'overloaded',
+      }),
+      rawDetail: 'overloaded',
+      status: 'Service is busy',
+      nextStep: 'Try again in a moment.',
+    },
+    {
+      name: 'unexpected failures',
+      error: new Error('provider failed with secret-marker'),
+      rawDetail: 'secret-marker',
+      status: 'Processing failed',
+      nextStep:
+        'Try again. If it keeps failing, contact the bot administrator.',
+    },
+    {
+      name: 'opaque rejections',
+      error: new Proxy(
+        {},
+        {
+          get() {
+            throw new Error('getter secret-marker');
+          },
+        },
+      ),
+      rawDetail: 'secret-marker',
+      status: 'Processing failed',
+      nextStep:
+        'Try again. If it keeps failing, contact the bot administrator.',
+    },
+    {
+      name: 'authentication keyword failures',
+      error: new Error('authentication failed'),
+      rawDetail: 'authentication failed',
+      status: 'Bot configuration error',
+      nextStep: 'Contact the bot administrator.',
+    },
+    {
+      name: 'timeout keyword failures',
+      error: new Error('request timed out'),
+      rawDetail: 'request timed out',
+      status: 'Request timed out',
+      nextStep: 'Try again. For a large request, split it into smaller parts.',
+    },
+    {
+      name: 'connection refused failures',
+      error: new Error('connect ECONNREFUSED 127.0.0.1:443'),
+      rawDetail: '127.0.0.1',
+      status: 'Service is temporarily unavailable',
+      nextStep:
+        'Try again in a moment. If it keeps failing, contact the bot administrator.',
+    },
+    {
+      name: 'connection timeout failures',
+      error: new Error('connect ETIMEDOUT 10.0.0.1:443'),
+      rawDetail: '10.0.0.1',
+      status: 'Service is temporarily unavailable',
+      nextStep:
+        'Try again in a moment. If it keeps failing, contact the bot administrator.',
+    },
+    {
+      name: 'fetch failures',
+      error: new Error('fetch failed'),
+      rawDetail: 'fetch failed',
+      status: 'Service is temporarily unavailable',
+      nextStep:
+        'Try again in a moment. If it keeps failing, contact the bot administrator.',
+    },
+    {
+      name: 'busy keyword failures',
+      error: new Error('too many requests'),
+      rawDetail: 'too many requests',
+      status: 'Service is busy',
+      nextStep: 'Try again in a moment.',
+    },
+    {
+      name: 'string rejections',
+      error: 'rate limit exceeded',
+      rawDetail: 'rate limit exceeded',
+      status: 'Service is busy',
+      nextStep: 'Try again in a moment.',
+    },
+    {
+      name: 'vanished daemon sessions',
+      error: { status: 404, body: { code: 'session_not_found' } },
+      rawDetail: 'session_not_found',
+      status: 'Service is temporarily unavailable',
+      nextStep:
+        'Try again in a moment. If it keeps failing, contact the bot administrator.',
+    },
+    {
+      name: 'bridge session errors',
+      error: Object.assign(new Error('No session with id "sess-1"'), {
+        name: 'SessionNotFoundError',
+        code: 'session_not_found',
+      }),
+      rawDetail: 'sess-1',
+      status: 'Service is temporarily unavailable',
+      nextStep:
+        'Try again in a moment. If it keeps failing, contact the bot administrator.',
+    },
+    {
+      name: 'agent session errors',
+      error: new Error('Session not found: sess-2'),
+      rawDetail: 'sess-2',
+      status: 'Service is temporarily unavailable',
+      nextStep:
+        'Try again in a moment. If it keeps failing, contact the bot administrator.',
+    },
+    {
+      name: 'rejections with non-string messages',
+      error: Object.assign(new Error('x'), { message: Symbol('boom') }),
+      rawDetail: 'boom',
+      status: 'Processing failed',
+      nextStep:
+        'Try again. If it keeps failing, contact the bot administrator.',
+    },
+  ])('presents $name without exposing raw details', async (testCase) => {
+    const channel = createChannel();
+    vi.mocked(channel.handleInbound).mockRejectedValueOnce(testCase.error);
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}', { status: 200 }));
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const downstream = {
+      data: JSON.stringify({
+        msgId: 'failed-classified-turn',
+        conversationType: '1',
+        conversationId: 'cid123',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        senderNick: 'Alice',
+        senderStaffId: 'staff-1',
+        senderId: 'sender-1',
+        isInAtList: false,
+        text: { content: 'hello' },
+      }),
+      headers: { messageId: 'failed-classified-turn' },
+    } as unknown as DWClientDownStream;
+
+    try {
+      (
+        channel as unknown as { onMessage(d: DWClientDownStream): void }
+      ).onMessage(downstream);
+      await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledOnce());
+
+      const body = JSON.parse(
+        String((fetchSpy.mock.calls[0]![1] as RequestInit).body),
+      );
+      expect(body.markdown.text).toContain(
+        `**Status:** ${testCase.status}\n**Next step:** ${testCase.nextStep}`,
+      );
+      expect(body.markdown.text).not.toContain(testCase.rawDetail);
+      expect(body.markdown.text).toMatch(/\*\*Reference:\*\* `[0-9a-f]{8}`$/);
     } finally {
       stderrSpy.mockRestore();
       fetchSpy.mockRestore();

@@ -10,6 +10,10 @@ import path from 'node:path';
 export default defineConfig({
   resolve: {
     alias: {
+      '@qwen-code/qwen-code-core/noFollowOpen': path.resolve(
+        __dirname,
+        '../core/src/utils/no-follow-open.ts',
+      ),
       '@qwen-code/qwen-code-core/subSessionConstants': path.resolve(
         __dirname,
         '../core/src/tools/sub-session-constants.ts',

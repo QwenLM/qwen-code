@@ -85,6 +85,9 @@ describe('start_sandbox', () => {
     await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(2));
     const args = spawnMock.mock.calls[1]?.[1] as string[];
     const options = spawnMock.mock.calls[1]?.[2];
+    expect(args[args.indexOf('--hostname') + 1]).toBe(
+      args[args.indexOf('--name') + 1],
+    );
     const envFlagIndex = args.indexOf(PRIVATE_ACP_CAPABILITY_ENV);
     expect(args.slice(envFlagIndex - 1, envFlagIndex + 1)).toEqual([
       '--env',
@@ -104,6 +107,46 @@ describe('start_sandbox', () => {
         }),
       }),
     );
+
+    child.emit('close', 0);
+    await expect(result).resolves.toBe(0);
+  });
+
+  it('lets the runtime choose a hostname for image-ID containers', async () => {
+    vi.stubEnv('SANDBOX_SET_UID_GID', 'false');
+    vi.stubEnv('QWEN_CODE_WARNINGS_FILE', '');
+    vi.spyOn(fs, 'existsSync').mockReturnValue(true);
+    vi.spyOn(fs, 'realpathSync').mockImplementation((filePath) =>
+      String(filePath),
+    );
+    execSyncMock.mockReturnValue(Buffer.from(''));
+
+    const imageCheck = Object.assign(new EventEmitter(), {
+      stdout: new EventEmitter(),
+    });
+    const child = new EventEmitter();
+    spawnMock
+      .mockImplementationOnce(() => {
+        queueMicrotask(() => {
+          imageCheck.stdout.emit('data', Buffer.from('image-id'));
+          imageCheck.emit('close', 0);
+        });
+        return imageCheck;
+      })
+      .mockReturnValueOnce(child);
+
+    const result = start_sandbox(
+      { command: 'docker', image: `sha256:${'a'.repeat(64)}` },
+      [],
+      undefined,
+      [process.execPath, '/path/to/cli.js', '--acp'],
+    );
+
+    await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(2));
+    const args = spawnMock.mock.calls[1]?.[1] as string[];
+    const containerName = args[args.indexOf('--name') + 1];
+    expect(containerName.length).toBeGreaterThan(64);
+    expect(args).not.toContain('--hostname');
 
     child.emit('close', 0);
     await expect(result).resolves.toBe(0);
