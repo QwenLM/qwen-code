@@ -655,6 +655,15 @@ describe('SessionRouter', () => {
         },
       ],
       [
+        'persisted without worktree metadata',
+        {
+          sessionId: 'worktree-session',
+          workspaceCwd: '/tmp',
+          hasActivePrompt: false,
+          worktreeState: 'persisted-v1' as const,
+        },
+      ],
+      [
         'workspace root as worktree',
         {
           sessionId: 'worktree-session',
@@ -939,6 +948,67 @@ describe('SessionRouter', () => {
         ),
       ).resolves.toEqual({ loaded: false });
 
+      expect(managedBridge.loadSession).not.toHaveBeenCalled();
+      expect(router.getSessionCwd('worktree-session')).toBe(worktreePath);
+    });
+
+    it('rejects divergent worktree attestation when rebinding a live task', async () => {
+      const worktreePath = '/tmp/worktree-task';
+      const listSessions = vi.fn().mockReturnValue([
+        {
+          sessionId: 'worktree-session',
+          workspaceCwd: '/tmp',
+          hasActivePrompt: false,
+          worktree: {
+            slug: 'task',
+            path: worktreePath,
+            branch: 'task',
+          },
+          worktreeState: 'persisted-v1' as const,
+        },
+      ]);
+      const managedBridge = {
+        ...mockBridge(),
+        listSessions,
+        newSession: vi.fn().mockResolvedValue('worktree-session'),
+      } satisfies ChannelAgentBridge;
+      const router = new SessionRouter(
+        managedBridge,
+        '/tmp',
+        'user',
+        undefined,
+        { recoveryMode: 'lazy' },
+      );
+      const target = {
+        channelName: 'ch',
+        senderId: 'alice',
+        chatId: 'chat1',
+      };
+
+      await router.createManagedSession(target, '/tmp', 'worktree');
+      listSessions.mockReturnValue([
+        {
+          sessionId: 'worktree-session',
+          workspaceCwd: '/tmp',
+          hasActivePrompt: false,
+          worktree: {
+            slug: 'task',
+            path: '/tmp/elsewhere',
+            branch: 'task',
+          },
+          worktreeState: 'persisted-v1' as const,
+        },
+      ]);
+
+      await expect(
+        router.loadManagedSession(
+          'worktree-session',
+          target,
+          '/tmp',
+          worktreePath,
+          'worktree',
+        ),
+      ).rejects.toThrow('did not attest');
       expect(managedBridge.loadSession).not.toHaveBeenCalled();
       expect(router.getSessionCwd('worktree-session')).toBe(worktreePath);
     });

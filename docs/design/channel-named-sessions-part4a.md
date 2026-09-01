@@ -172,8 +172,12 @@ provide one narrow, reusable contract:
    `worktreeState: "persisted-v1"` alongside worktree metadata.
 
 The existing general marker reader and writer keep their current APIs and
-semantics in Part 4A; changing marker adoption/deletion behavior for startup,
-the TUI, tools, agents, or workflow orchestration would widen this delivery.
+marker adoption/deletion/transfer semantics in Part 4A. The only general-writer
+change fixes placement of the best-effort Git ignore rule: it now resolves
+`--git-common-dir` because Git does not honor a linked worktree rule written
+under its per-worktree administrative directory. Changing any other marker
+behavior for startup, the TUI, tools, agents, or workflow orchestration would
+widen this delivery.
 This separation is required because legacy exit paths may allow explicit
 deletion when the existing reader returns `null`; collapsing a new invalid path
 into that value would weaken their guard. The new exclusive creator and strict
@@ -433,24 +437,28 @@ all prior route, target, cwd, selection, and registry state unchanged. If the
 session is already live, the router validates its existing exact session info
 and stored routing cwd before rebinding.
 
-Daemon-side restore-integrity failure is non-destructive. If the load attached
-to an already-live session, detach only this request's client. If this request
-cold-restored a process, call `killSession(..., { requireZeroAttaches: true })`
-to reap it only when nobody else attached. Do not invoke
-`deleteDaemonSessionIfOrphan`: restore failure must retain the transcript,
-sidecar, marker, branch, and worktree for exact repair/retry. If an absent
-sidecar is indistinguishable from an ordinary shared session at the route, the
-Channel bridge/SDK response validator performs the same client detach before it
-rejects the missing attestation.
+For Channel-owned restores, daemon-side restore-integrity failure is
+non-destructive. If the load attached to an already-live session, detach only
+this request's client. If this request cold-restored a process, call
+`killSession(..., { requireZeroAttaches: true })` to reap it only when nobody
+else attached. Do not invoke `deleteDaemonSessionIfOrphan`: restore failure must
+retain the transcript, sidecar, marker, branch, and worktree for exact
+repair/retry. If an absent sidecar is indistinguishable from an ordinary shared
+session at the route, the Channel bridge/SDK response validator performs the
+same client detach before it rejects the missing attestation.
 
 For Channel-owned restores, the daemon route also sets an internal ACP metadata
 flag that suppresses the generic best-effort worktree restore performed by the
-ACP agent. The route then owns the strict sidecar, marker, containment, and
-relocation checks. A persisted ask-user prompt is deferred until those checks
-and any required relocation succeed, then fired exactly once; this prevents the
-prompt from blocking relocation while preserving it on a valid restore. The
-suppression and deferral are not applied to other load and resume callers, which
-retain the existing best-effort behavior.
+ACP agent. That best-effort path clears sidecars it deems invalid, so
+suppressing it is what keeps Channel restore failure non-destructive. The route
+then owns the strict sidecar, marker, containment, and relocation checks. A
+persisted ask-user prompt is deferred until those checks and any required
+relocation succeed, then fired exactly once; this prevents the prompt from
+blocking relocation while preserving it on a valid restore. The suppression
+and deferral are not applied to other load and resume callers. The route's
+strict checks still apply whenever a sidecar survives the generic restore;
+non-Channel callers retain the existing best-effort behavior when that path
+clears or finds no sidecar.
 
 Shared loads retain current behavior. Part 4A does not reinterpret a shared
 task if some independent in-session mechanism later changes its cwd.
@@ -626,14 +634,15 @@ per-response attestation, state that metadata alone is not restart-safety
 proof, and document the exact create/load failure and rollback boundary for all
 SDK callers rather than presenting it as Channel-only behavior.
 
-The core marker change is intentionally limited to two new daemon-only helpers:
-an exclusive creator and a strict reader. The existing general reader/writer
-and all of their production call sites retain their APIs and
-adoption/deletion/transfer semantics. The daemon route change is limited to
-create/load integrity and failed-create rollback. This small cross-package/core
-feature still requires maintainer awareness under the repository triage gate,
-and review must verify that both new helpers remain route-only rather than
-inferring safety from their names.
+The core marker change adds two daemon-only helpers: an exclusive creator and a
+strict reader. The existing general reader/writer and all of their production
+call sites retain their APIs and adoption/deletion/transfer semantics; the
+general writer additionally places its best-effort ignore rule through
+`--git-common-dir`, where Git honors it for linked worktrees. The daemon route
+change is limited to create/load integrity and failed-create rollback. This
+small cross-package/core feature still requires maintainer awareness under the
+repository triage gate, and review must verify that both new helpers remain
+route-only rather than inferring safety from their names.
 
 If implementation requires a new daemon REST route, successful-lifecycle
 worktree cleanup, general marker ownership transfer, registry version, task

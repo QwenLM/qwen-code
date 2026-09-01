@@ -56,11 +56,18 @@ describe('daemon worktree session markers', () => {
       cwd: repo,
     });
     await execFileAsync('git', ['config', 'user.name', 'Test'], { cwd: repo });
-    await fs.writeFile(path.join(repo, 'tracked.txt'), 'tracked');
-    await execFileAsync('git', ['add', '.'], { cwd: repo });
-    await execFileAsync('git', ['commit', '-q', '-m', 'initial'], {
+    await execFileAsync('git', ['config', 'commit.gpgsign', 'false'], {
       cwd: repo,
     });
+    await fs.writeFile(path.join(repo, 'tracked.txt'), 'tracked');
+    await execFileAsync('git', ['add', '.'], { cwd: repo });
+    await execFileAsync(
+      'git',
+      ['commit', '-q', '-m', 'initial', '--no-verify'],
+      {
+        cwd: repo,
+      },
+    );
     await execFileAsync(
       'git',
       ['worktree', 'add', '-q', '-b', 'task', worktree],
