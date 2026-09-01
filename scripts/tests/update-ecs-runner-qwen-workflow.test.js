@@ -21,6 +21,14 @@ const workflow = readFileSync(
   '.github/workflows/update-ecs-runner-qwen.yml',
   'utf8',
 );
+const reportScript = readFileSync(
+  '.github/scripts/ecs-fleet-update-failure-issue.sh',
+  'utf8',
+);
+const lookupScript = readFileSync(
+  '.github/scripts/find-marked-issue.sh',
+  'utf8',
+);
 
 function step(name) {
   const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -37,6 +45,168 @@ function stepBody(name) {
   const body = step(name).match(/run: \|-\n([\s\S]*)$/)?.[1] ?? '';
   return body.replace(/^ {10}/gm, '');
 }
+
+// The pool names and the job-name prefix come out of the workflow, never
+// hand-copied: the failure script filters this run's jobs by that prefix, so a
+// fixture that carries its own copy would agree with the script long after the
+// workflow stopped agreeing with either.
+const updateJobName =
+  workflow.match(/\n {2}update:\n {4}name: '([^']*)'/)?.[1] ?? '';
+const poolPrefix = updateJobName.replace(/\$\{\{.*\}\}$/, '');
+const pools = (workflow.match(/\n\s+runner: \[([^\]]*)\]/)?.[1] ?? '')
+  .split(',')
+  .map((entry) => entry.trim().replace(/^'|'$/g, ''))
+  .filter(Boolean);
+
+function jobsFixture({
+  failed = [],
+  timedOut = [],
+  succeeded = [],
+  resolve = 'success',
+} = {}) {
+  return {
+    jobs: [
+      { name: 'Resolve version', conclusion: resolve },
+      ...failed.map((pool) => ({
+        name: `${poolPrefix}${pool}`,
+        conclusion: 'failure',
+      })),
+      ...timedOut.map((pool) => ({
+        name: `${poolPrefix}${pool}`,
+        conclusion: 'timed_out',
+      })),
+      ...succeeded.map((pool) => ({
+        name: `${poolPrefix}${pool}`,
+        conclusion: 'success',
+      })),
+      { name: 'Report a stale fleet', conclusion: null },
+    ],
+  };
+}
+
+// Two failed pools, one timed out (a pool wedged on a slow npm fetch is the
+// shape that produced the v0.22.3 incident), the rest healthy.
+const STALE_POOLS = pools.slice(0, 3);
+const HEALTHY_POOLS = pools.slice(3);
+const DEFAULT_JOBS = jobsFixture({
+  failed: pools.slice(0, 2),
+  timedOut: pools.slice(2, 3),
+  succeeded: HEALTHY_POOLS,
+});
+
+describe('ECS runner qwen update workflow', () => {
+  it('installs without the selected runner npm prefix', () => {
+    expect(workflow).toContain('cd "${RUNNER_TEMP:?}"');
+    expect(workflow).toContain('sudo env -u NPM_CONFIG_PREFIX npm install -g');
+  });
+
+  it('runs only when this workflow changes on main', () => {
+    expect(workflow).toContain(
+      "  push:\n    branches: ['main']\n    paths: ['.github/workflows/update-ecs-runner-qwen.yml']",
+    );
+  });
+
+  it('annotates a retry and a terminal failure distinctly', () => {
+    // The final attempt must not log a "retrying" warning that never
+    // retries; a sustained failure ends with an explicit exhausted error.
+    expect(workflow).toContain(
+      'echo "::warning::npm install attempt ${attempt} failed; retrying"',
+    );
+    expect(workflow).toContain(
+      'echo "::error::npm install of @qwen-code/qwen-code@${VERSION} failed after 3 attempts"',
+    );
+    expect(workflow).toContain('for attempt in 1 2 3; do');
+    expect(workflow).toContain('if [[ "${attempt}" -lt 3 ]]; then');
+    expect(workflow).toContain('sudo rm -rf "${PKG_DIR}"/.qwen-code-*');
+  });
+
+  it('resolves once on a hosted runner and feeds every pool', () => {
+    // One resolution shared by the matrix is what keeps pools that start
+    // hours apart from installing different versions; it also keeps the
+    // registry wait off the ECS runners.
+    expect(workflow).toContain("    runs-on: 'ubuntu-latest'");
+    expect(workflow).toContain(
+      "      version: '${{ steps.version.outputs.version }}'",
+    );
+    expect(workflow).toContain("    needs: 'resolve'");
+    // All three consumers (install, verify, failure report) read the job
+    // output; a leftover step reference would silently expand to an empty
+    // version and install `@qwen-code/qwen-code@`.
+    const consumers = workflow.match(
+      /VERSION: '\$\{\{ needs\.resolve\.outputs\.version \}\}'/g,
+    );
+    expect(consumers).toHaveLength(3);
+    expect(workflow).not.toContain(
+      "VERSION: '${{ steps.version.outputs.version }}'",
+    );
+  });
+
+  it('reports a failed fleet update only when a pool actually failed', () => {
+    // `cancelled` is routine: the per-pool concurrency group cancels an older
+    // dispatch's pending legs whenever a newer one arrives.
+    const guard = workflow.match(/ {4}if: "\$\{\{ always\(\)[^"]*"/)?.[0] ?? '';
+    expect(guard).toContain("needs.resolve.result == 'failure'");
+    expect(guard).toContain("needs.update.result == 'failure'");
+    expect(guard).not.toContain('cancelled');
+
+    const reporter = workflow.slice(workflow.indexOf('  report_failure:'));
+    // Hosted, so the report does not queue behind the pools it reports on.
+    expect(reporter).toContain("    runs-on: 'ubuntu-latest'");
+    // A job-level permissions block REPLACES the workflow-level one, so the
+    // scope actions/checkout needs has to be spelled out here; without it the
+    // checkout 403s and the job that exists to break the silence never runs.
+    expect(reporter).toContain("      contents: 'read'");
+    expect(reporter).toContain("      actions: 'read'");
+    expect(reporter).toContain("      issues: 'write'");
+    // The script lives in the repo, so the job has to check it out first.
+    expect(reporter).toContain("uses: 'actions/checkout@");
+    expect(reporter).toContain(
+      "run: 'bash .github/scripts/ecs-fleet-update-failure-issue.sh'",
+    );
+    expect(reporter).toContain("          DEDUP_LABEL: 'scope/ci-cd'");
+  });
+
+  it('filters the run jobs by the prefix the matrix job actually uses', () => {
+    // The prefix is a contract between the workflow's `name:` template and the
+    // script's jq filter, with no runtime error when they disagree: a renamed
+    // matrix job makes the filter match nothing, and every issue then reports
+    // no stale pools — dropping the one datum this script exists to provide.
+    expect(updateJobName).toContain('${{ matrix.runner }}');
+    expect(poolPrefix).not.toBe('');
+    expect(pools.length).toBeGreaterThan(0);
+    expect(reportScript).toContain(`startswith("${poolPrefix}")`);
+    expect(reportScript).toContain(`sub("^${poolPrefix}"; "")`);
+  });
+
+  it('shares one dedup lookup with the sibling failure reporter', () => {
+    // Both reporters file a marker-bearing issue into the same `scope/ci-cd`
+    // label space. A guard fixed in one copy and missed in the other makes the
+    // other file duplicates while its own suite stays green.
+    for (const caller of [
+      reportScript,
+      readFileSync('.github/scripts/image-build-failure-issue.sh', 'utf8'),
+    ]) {
+      expect(caller).toContain(
+        'bash "$(dirname "${BASH_SOURCE[0]}")/find-marked-issue.sh"',
+      );
+      expect(caller).toContain('MARKER_HTML="${marker_html}"');
+    }
+    // GitHub search tokenizes these markers apart, so the match must stay
+    // client-side; a null body must not abort the lookup; and the listing is a
+    // ceiling, not a newest-first window an immortal issue can fall out of.
+    expect(lookupScript).not.toContain('--search');
+    expect(lookupScript).toContain('contains($marker_html)');
+    expect(lookupScript).toContain('(.body // "")');
+    expect(lookupScript).toContain('--limit 1000');
+  });
+});
+
+// The replays need POSIX paths, a `:`-joined PATH and extensionless bash
+// stubs, none of which the Windows lane can express; the YAML suite above
+// still runs there. Same gate as
+// scripts/tests/build-and-publish-image-workflow.test.js.
+const replayable =
+  process.platform !== 'win32' && spawnSync('jq', ['--version']).status === 0;
 
 // Runs the 'Resolve version' step body against a stubbed `npm` that 404s for
 // its first `failures` invocations and then reports `version`.
@@ -91,27 +261,20 @@ function runResolve({ failures = 0, version = '0.22.3', env = {} } = {}) {
   }
 }
 
-const JOBS_FIXTURE = {
-  jobs: [
-    { name: 'Resolve version', conclusion: 'success' },
-    { name: 'Update Qwen on ecs-update-sg', conclusion: 'failure' },
-    { name: 'Update Qwen on ecs-update-64c', conclusion: 'failure' },
-    { name: 'Update Qwen on ecs-update-hk-1', conclusion: 'timed_out' },
-    { name: 'Update Qwen on ecs-update-hk-2', conclusion: 'success' },
-    { name: 'Report a stale fleet', conclusion: null },
-  ],
-};
-
 // Runs .github/scripts/ecs-fleet-update-failure-issue.sh against a stubbed
 // `gh`. The stub applies the script's real `--jq` filter with real jq, so the
-// pool-naming expression is exercised rather than mocked away.
-function runReport({ openIssues = [], env = {} } = {}) {
+// pool-naming expression is exercised rather than mocked away, and it honours
+// `--limit` on `issue list` so the dedup window is testable rather than
+// vacuously wide.
+function runReport({ openIssues = [], jobs = DEFAULT_JOBS, env = {} } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'ecs-report-'));
   try {
     const calls = join(dir, 'calls');
     const body = join(dir, 'captured-body.md');
-    writeFileSync(join(dir, 'jobs.json'), JSON.stringify(JOBS_FIXTURE));
-    writeFileSync(join(dir, 'issues.json'), JSON.stringify(openIssues));
+    writeFileSync(join(dir, 'jobs.json'), JSON.stringify(jobs));
+    // Not open-issues.json: the lookup redirects `gh issue list` into
+    // ${RUNNER_TEMP}/open-issues.json, which would truncate this fixture.
+    writeFileSync(join(dir, 'fixture-issues.json'), JSON.stringify(openIssues));
 
     const ghStub = join(dir, 'gh');
     writeFileSync(
@@ -122,6 +285,10 @@ function runReport({ openIssues = [], env = {} } = {}) {
         'sub="$1"; shift',
         'case "$sub" in',
         '  api)',
+        '    if [[ -n "${STUB_API_FAILS:-}" ]]; then',
+        '      echo "gh: HTTP 502 (api.github.com)" >&2',
+        '      exit 1',
+        '    fi',
         '    filter=""',
         '    while [[ $# -gt 0 ]]; do',
         '      if [[ "$1" == "--jq" ]]; then filter="$2"; shift 2; else shift; fi',
@@ -130,11 +297,16 @@ function runReport({ openIssues = [], env = {} } = {}) {
         '    ;;',
         '  issue)',
         '    action="$1"; shift',
+        '    limit=0',
         '    while [[ $# -gt 0 ]]; do',
-        `      if [[ "$1" == "--body-file" ]]; then cp "$2" ${body}; shift 2; else shift; fi`,
+        '      case "$1" in',
+        `        --body-file) cp "$2" ${body}; shift 2 ;;`,
+        '        --limit) limit="$2"; shift 2 ;;',
+        '        *) shift ;;',
+        '      esac',
         '    done',
         '    case "$action" in',
-        `      list) cat ${join(dir, 'issues.json')} ;;`,
+        `      list) jq --argjson limit "$limit" '.[:$limit]' ${join(dir, 'fixture-issues.json')} ;;`,
         "      create) echo 'https://github.com/o/r/issues/777' ;;",
         '    esac',
         '    ;;',
@@ -177,53 +349,7 @@ function runReport({ openIssues = [], env = {} } = {}) {
   }
 }
 
-describe('ECS runner qwen update workflow', () => {
-  it('installs without the selected runner npm prefix', () => {
-    expect(workflow).toContain('cd "${RUNNER_TEMP:?}"');
-    expect(workflow).toContain('sudo env -u NPM_CONFIG_PREFIX npm install -g');
-  });
-
-  it('runs only when this workflow changes on main', () => {
-    expect(workflow).toContain(
-      "  push:\n    branches: ['main']\n    paths: ['.github/workflows/update-ecs-runner-qwen.yml']",
-    );
-  });
-
-  it('annotates a retry and a terminal failure distinctly', () => {
-    // The final attempt must not log a "retrying" warning that never
-    // retries; a sustained failure ends with an explicit exhausted error.
-    expect(workflow).toContain(
-      'echo "::warning::npm install attempt ${attempt} failed; retrying"',
-    );
-    expect(workflow).toContain(
-      'echo "::error::npm install of @qwen-code/qwen-code@${VERSION} failed after 3 attempts"',
-    );
-    expect(workflow).toContain('for attempt in 1 2 3; do');
-    expect(workflow).toContain('if [[ "${attempt}" -lt 3 ]]; then');
-    expect(workflow).toContain('sudo rm -rf "${PKG_DIR}"/.qwen-code-*');
-  });
-
-  it('resolves once on a hosted runner and feeds every pool', () => {
-    // One resolution shared by the matrix is what keeps pools that start
-    // hours apart from installing different versions; it also keeps the
-    // registry wait off the ECS runners.
-    expect(workflow).toContain("    runs-on: 'ubuntu-latest'");
-    expect(workflow).toContain(
-      "      version: '${{ steps.version.outputs.version }}'",
-    );
-    expect(workflow).toContain("    needs: 'resolve'");
-    // All three consumers (install, verify, failure report) read the job
-    // output; a leftover step reference would silently expand to an empty
-    // version and install `@qwen-code/qwen-code@`.
-    const consumers = workflow.match(
-      /VERSION: '\$\{\{ needs\.resolve\.outputs\.version \}\}'/g,
-    );
-    expect(consumers).toHaveLength(3);
-    expect(workflow).not.toContain(
-      "VERSION: '${{ steps.version.outputs.version }}'",
-    );
-  });
-
+describe.skipIf(!replayable)('ECS runner qwen update replay', () => {
   it('waits out npm publish propagation instead of failing the race', () => {
     // `npm publish --provenance` returns before the version is resolvable
     // (~16 minutes for v0.22.3), and release.yml dispatches this workflow as
@@ -252,25 +378,10 @@ describe('ECS runner qwen update workflow', () => {
     );
   });
 
-  it('reports a failed fleet update only when a pool actually failed', () => {
-    // `cancelled` is routine: the per-pool concurrency group cancels an older
-    // dispatch's pending legs whenever a newer one arrives.
-    const guard = workflow.match(/ {4}if: "\$\{\{ always\(\)[^"]*"/)?.[0] ?? '';
-    expect(guard).toContain("needs.resolve.result == 'failure'");
-    expect(guard).toContain("needs.update.result == 'failure'");
-    expect(guard).not.toContain('cancelled');
-
-    const reporter = workflow.slice(workflow.indexOf('  report_failure:'));
-    // Hosted, so the report does not queue behind the pools it reports on.
-    expect(reporter).toContain("    runs-on: 'ubuntu-latest'");
-    expect(reporter).toContain("      actions: 'read'");
-    expect(reporter).toContain("      issues: 'write'");
-    // The script lives in the repo, so the job has to check it out first.
-    expect(reporter).toContain("uses: 'actions/checkout@");
-    expect(reporter).toContain(
-      "run: 'bash .github/scripts/ecs-fleet-update-failure-issue.sh'",
-    );
-    expect(reporter).toContain("          DEDUP_LABEL: 'scope/ci-cd'");
+  it('resolves the latest dist-tag when dispatched without a version', () => {
+    const resolved = runResolve({ env: { INPUT_VERSION: '' } });
+    expect(resolved.status).toBe(0);
+    expect(resolved.output.trim()).toBe('version=0.22.3');
   });
 
   it('files an issue naming the pools left on the old CLI', () => {
@@ -278,9 +389,11 @@ describe('ECS runner qwen update workflow', () => {
     expect(reported.status).toBe(0);
     // Only the failed legs, and without the job-name prefix.
     expect(reported.body).toContain(
-      'Pools left stale: ecs-update-sg, ecs-update-64c, ecs-update-hk-1',
+      `Pools left stale: ${STALE_POOLS.join(', ')}`,
     );
-    expect(reported.body).not.toContain('hk-2');
+    for (const healthy of HEALTHY_POOLS) {
+      expect(reported.body).not.toContain(healthy);
+    }
     expect(reported.body).toContain('Target version: `0.22.3`');
     expect(reported.calls).toContain('gh issue create');
     expect(reported.calls).not.toContain('gh issue comment');
@@ -317,9 +430,83 @@ describe('ECS runner qwen update workflow', () => {
     expect(reported.calls).not.toContain('gh issue comment');
   });
 
-  it('resolves the latest dist-tag when dispatched without a version', () => {
-    const resolved = runResolve({ env: { INPUT_VERSION: '' } });
-    expect(resolved.status).toBe(0);
-    expect(resolved.output.trim()).toBe('version=0.22.3');
+  it('still finds the marker issue once it is no longer a recent one', () => {
+    // This issue is opened once and only ever commented on, so it drifts to
+    // the oldest slot of a newest-first listing while same-label issues keep
+    // being created. Under a 200-issue window it silently falls out and the
+    // next failure files a duplicate.
+    const openIssues = [
+      ...Array.from({ length: 250 }, (_, index) => ({
+        number: 1000 + index,
+        body: `unrelated ci/cd issue ${index}`,
+      })),
+      { number: 42, body: 'stale\n<!-- ecs-fleet-update-failure -->\n' },
+    ];
+    const reported = runReport({ openIssues });
+    expect(reported.status).toBe(0);
+    expect(reported.calls).toContain('gh issue comment 42');
+    expect(reported.calls).not.toContain('gh issue create');
+  });
+
+  it('survives a labeled issue that has no body at all', () => {
+    // GitHub types an issue body as `string or null`; jq's contains() errors
+    // out on null, which would abort the script before anything is filed.
+    const reported = runReport({
+      openIssues: [
+        { number: 9, body: null },
+        { number: 42, body: 'stale\n<!-- ecs-fleet-update-failure -->\n' },
+      ],
+    });
+    expect(reported.status).toBe(0);
+    expect(reported.calls).toContain('gh issue comment 42');
+
+    const first = runReport({ openIssues: [{ number: 9, body: null }] });
+    expect(first.status).toBe(0);
+    expect(first.calls).toContain('gh issue create');
+  });
+
+  it('reports a resolve failure without inventing a pool-level state', () => {
+    // The job gate also fires on `needs.resolve.result == 'failure'`, and then
+    // no pool was ever asked to install anything: pointing the operator at a
+    // `Verify version` step that never ran is a 3 AM detour.
+    const reported = runReport({
+      jobs: jobsFixture({ resolve: 'failure' }),
+      env: { VERSION: '' },
+    });
+    expect(reported.status).toBe(0);
+    expect(reported.calls).toContain('gh issue create');
+    expect(reported.body).toContain(
+      'failed before any pool was asked to install a release',
+    );
+    expect(reported.body).toContain(
+      'Pools left stale: none was reached — the run failed before the pool matrix started',
+    );
+    expect(reported.body).toContain('Target version: `unresolved`');
+    expect(reported.body).toContain('read the `Resolve version` step');
+    expect(reported.body).not.toContain('`Verify version`');
+  });
+
+  it("says so when this run's job conclusions cannot be read", () => {
+    // A transient jobs-API failure must not be reported as "no pool failed",
+    // and must not abort the script under `set -euo pipefail` either — that
+    // is the silence this job exists to break.
+    const reported = runReport({ env: { STUB_API_FAILS: '1' } });
+    expect(reported.status).toBe(0);
+    expect(reported.calls).toContain('gh issue create');
+    expect(reported.body).toContain(
+      "Pools left stale: unknown — this run's job conclusions could not be read",
+    );
+    expect(reported.body).toContain('`Verify version` step of every pool');
+  });
+
+  it('falls back when the legs ran but none reported a failure', () => {
+    const reported = runReport({
+      jobs: jobsFixture({ succeeded: pools }),
+    });
+    expect(reported.status).toBe(0);
+    expect(reported.calls).toContain('gh issue create');
+    expect(reported.body).toContain(
+      'Pools left stale: see the run; no pool reported a conclusion',
+    );
   });
 });

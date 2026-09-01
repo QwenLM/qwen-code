@@ -16,16 +16,52 @@ set -euo pipefail
 
 # Name the pools, not just the run: the operator needs to know which ones are
 # still answering PRs on the old CLI, and a matrix job's per-leg conclusions
-# are not reachable through `needs`.
-failed="$(
+# are not reachable through `needs`. The prefix is the `update` job's
+# `name:` template with `${{ matrix.runner }}` stripped; the workflow suite
+# pins the two together, since a rename that only lands on one side would
+# quietly name no pools at all.
+#
+# One call reports both how many pool legs ran and which of them are stale:
+# a run where the matrix never started (resolve failed) and a run where no leg
+# reported a failure are different reports. The read's own status is captured
+# rather than swallowed — `set -e` does not fire on a command substitution
+# feeding an assignment — because "the jobs API could not be read" sends the
+# operator somewhere else again.
+jobs_status=0
+jobs_summary="$(
   gh api "repos/${REPO}/actions/runs/${RUN_ID}/jobs" --jq '
-    [ .jobs[]
-      | select(.name | startswith("Update Qwen on "))
-      | select(.conclusion == "failure" or .conclusion == "timed_out")
-      | (.name | sub("^Update Qwen on "; "")) ]
-    | join(", ")
+    [ .jobs[] | select(.name | startswith("Update Qwen on ")) ] as $legs
+    | [ $legs[]
+        | select(.conclusion == "failure" or .conclusion == "timed_out")
+        | (.name | sub("^Update Qwen on "; "")) ] as $stale
+    | "\($legs | length)\t\($stale | join(", "))"
   '
-)" || failed=''
+)" || jobs_status=$?
+
+legs=''
+failed=''
+if (( jobs_status == 0 )); then
+  legs="${jobs_summary%%$'\t'*}"
+  failed="${jobs_summary#*$'\t'}"
+fi
+
+# Three shapes, because they send the operator to three different places.
+if (( jobs_status != 0 )); then
+  headline='failed, so at least one ECS pool is still running an older `qwen` than the release it was asked to install.'
+  pools="unknown — this run's job conclusions could not be read"
+  repair='re-run **Update ECS Runner Qwen** through `workflow_dispatch` (an empty version means latest), then read the `Verify version` step of every pool.'
+elif [[ "${legs}" == '0' ]]; then
+  # `needs.resolve.result == 'failure'` also opens this gate, and then no pool
+  # was ever asked to install anything: claiming a pool-level state that never
+  # happened would send a 3 AM operator to pool logs that do not exist.
+  headline='failed before any pool was asked to install a release, so the fleet is still on whatever `qwen` it already had.'
+  pools='none was reached — the run failed before the pool matrix started'
+  repair='read the `Resolve version` step on the run above (a version npm has not published is the usual cause), then re-run **Update ECS Runner Qwen** through `workflow_dispatch` once it resolves.'
+else
+  headline='failed, so at least one ECS pool is still running an older `qwen` than the release it was asked to install.'
+  pools="${failed:-see the run; no pool reported a conclusion}"
+  repair='re-run **Update ECS Runner Qwen** through `workflow_dispatch` (an empty version means latest), then read the `Verify version` step of every pool.'
+fi
 
 marker_html='<!-- ecs-fleet-update-failure -->'
 body_file="${RUNNER_TEMP}/ecs-fleet-update-failure.md"
@@ -35,31 +71,21 @@ body_file="${RUNNER_TEMP}/ecs-fleet-update-failure.md"
 # shellcheck disable=SC2016
 {
   printf '%s\n\n' "${marker_html}"
-  printf '[`Update ECS Runner Qwen`](%s) failed, so at least one ECS pool is still running an older `qwen` than the release it was asked to install.\n\n' "${RUN_URL}"
+  printf '[`Update ECS Runner Qwen`](%s) %s\n\n' "${RUN_URL}" "${headline}"
   printf -- '- Target version: `%s`\n' "${VERSION:-unresolved}"
-  printf -- '- Pools left stale: %s\n' "${failed:-see the run; no pool reported a conclusion}"
+  printf -- '- Pools left stale: %s\n' "${pools}"
   printf -- '- Run: %s\n\n' "${RUN_URL}"
   printf 'Nothing else surfaces this. The review and triage workflows install `qwen` only when `command -v qwen` finds nothing, which on a self-hosted runner is never, so a stale pool keeps reviewing PRs on the old CLI until someone reads a version string.\n\n'
-  printf 'To repair: re-run **Update ECS Runner Qwen** through `workflow_dispatch` (an empty version means latest), then read the `Verify version` step of every pool.\n'
+  printf 'To repair: %s\n' "${repair}"
 } > "${body_file}"
 
-# Dedup by an exact body marker, matched CLIENT-side: GitHub search tokenizes
-# the marker apart, so a search-based lookup never finds what this script
-# files. The label narrows the listing to issues this kind of job owns, and is
-# applied at creation so the dedup key can never be half-written.
-issues_file="${RUNNER_TEMP}/open-issues.json"
-gh issue list \
-  --repo "${REPO}" \
-  --state open \
-  --label "${DEDUP_LABEL}" \
-  --json number,body \
-  --limit 200 \
-  > "${issues_file}"
+# Dedup by an exact body marker; the lookup itself is shared with the sibling
+# reporter that files into the same label space — see find-marked-issue.sh for
+# why it is matched client-side and why the listing is not a window. The label
+# is applied at creation below, so the dedup key can never be half-written.
 existing="$(
-  jq -r --arg marker_html "${marker_html}" \
-    '.[] | select(.body | contains($marker_html)) | .number' \
-    "${issues_file}" \
-  | head -n 1
+  MARKER_HTML="${marker_html}" \
+    bash "$(dirname "${BASH_SOURCE[0]}")/find-marked-issue.sh"
 )"
 
 # A comment, not a body rewrite: this fails rarely enough that one line per

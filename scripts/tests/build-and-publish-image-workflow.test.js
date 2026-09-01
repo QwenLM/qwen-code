@@ -166,15 +166,24 @@ describe('build-and-publish-image workflow', () => {
 
   it('dedups the failure issue by an exact client-side marker match', () => {
     // GitHub search tokenizes the colon out of the marker, so a --search
-    // lookup never finds the issues this job files.
+    // lookup never finds the issues this job files. The lookup itself is
+    // shared with the ECS fleet reporter, which files marker-bearing issues
+    // into the same `scope/ci-cd` label space: a guard applied to one copy
+    // and missed in the other makes the other file duplicates.
     expect(failureIssueJob).toContain(
       'bash .github/scripts/image-build-failure-issue.sh',
     );
-    expect(failureIssueScript).not.toContain('--search');
     expect(failureIssueScript).toContain(
-      'jq -r --arg marker_html "${marker_html}"',
+      'bash "$(dirname "${BASH_SOURCE[0]}")/find-marked-issue.sh"',
     );
-    expect(failureIssueScript).toContain('contains($marker_html)');
+    expect(failureIssueScript).toContain('MARKER_HTML="${marker_html}"');
+    const lookupScript = readFileSync(
+      '.github/scripts/find-marked-issue.sh',
+      'utf8',
+    );
+    expect(lookupScript).not.toContain('--search');
+    expect(lookupScript).toContain('jq -r --arg marker_html "${MARKER_HTML}"');
+    expect(lookupScript).toContain('contains($marker_html)');
   });
 });
 

@@ -142,6 +142,9 @@ jobs:
     runs-on: 'ubuntu-latest'
     timeout-minutes: 5
     permissions:
+      # A job-level block replaces the workflow's, so checkout needs contents
+      # spelled out here even though the job only files an issue.
+      contents: 'read'
       # Read this run's per-pool job conclusions.
       actions: 'read'
       issues: 'write'
