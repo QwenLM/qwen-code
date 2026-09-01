@@ -96,6 +96,23 @@ describe('resolveToolName', () => {
     expect(resolveToolName('mcp__server__tool')).toBe('mcp__server__tool');
     expect(resolveToolName('constructor')).toBe('constructor');
   });
+
+  it('returns Object.prototype-keyed names unchanged (#10400)', async () => {
+    // Keys inherited from Object.prototype must never resolve to the
+    // prototype value (e.g. the `constructor` function): only own
+    // properties of the alias table are aliases (#10400).
+    for (const name of [
+      'toString',
+      'valueOf',
+      'hasOwnProperty',
+      'isPrototypeOf',
+      'propertyIsEnumerable',
+      'toLocaleString',
+      '__proto__',
+    ]) {
+      expect(resolveToolName(name)).toBe(name);
+    }
+  });
 });
 
 // ─── resolveToolName exhaustiveness (#9827) ─────────────────────────────────
@@ -1699,9 +1716,12 @@ function makeConfig(
      * of the permission rules (#10075).
      */
     eagerTools: string[];
+    /** Live folder trust; absent reads as trusted. */
+    isTrustedFolder: () => boolean;
   }> = {},
 ): PermissionManagerConfig {
   return {
+    ...(opts.isTrustedFolder ? { isTrustedFolder: opts.isTrustedFolder } : {}),
     getPermissionsAllow: () => opts.permissionsAllow,
     getPermissionsAsk: () => opts.permissionsAsk,
     getPermissionsDeny: () => opts.permissionsDeny,
@@ -2884,6 +2904,45 @@ describe('PermissionManager', () => {
       );
     });
 
+    it('tolerates Object.prototype-keyed entries without crashing (#10400)', async () => {
+      // Entries named after Object.prototype keys used to read the inherited
+      // prototype value through the plain-object alias table and surface a
+      // non-string toolName, crashing initialize() with
+      // `rule.toolName.startsWith is not a function` (CLI startup crash).
+      // They must behave like any other unknown canonical name: resolve to
+      // themselves as strings, match no registered tool, and never abort
+      // initialization (#10400).
+      pm = new PermissionManager(
+        makeConfig({
+          eagerTools: [
+            'constructor',
+            'toString',
+            'valueOf',
+            'hasOwnProperty',
+            'isPrototypeOf',
+            'propertyIsEnumerable',
+            'toLocaleString',
+            '__proto__',
+            'ReadFile',
+          ],
+        }),
+      );
+      expect(() => pm.initialize()).not.toThrow();
+      expect(pm.isEagerToolAllowListActive()).toBe(true);
+      // The valid entry still works and the prototype-keyed entries do not
+      // disturb the rest of the allowlist.
+      expect(await pm.getToolRegistrationStatus('read_file')).toBe(
+        'registered',
+      );
+      expect(await pm.getToolRegistrationStatus('send_message')).toBe(
+        'deferred',
+      );
+      // The lookup itself must survive a prototype-keyed tool name too.
+      await expect(
+        pm.getToolRegistrationStatus('constructor'),
+      ).resolves.toBeDefined();
+    });
+
     it('malformed entries drop out but still leave the list active', async () => {
       // Deferring more than intended is recoverable (ToolSearch still
       // reaches every tool); silently ignoring a configured list would
@@ -3034,6 +3093,74 @@ describe('PermissionManager', () => {
       pm.addSessionAllowRule('run_shell_command');
       pm.addSessionDenyRule('run_shell_command');
       expect(await pm.evaluate({ toolName: 'run_shell_command' })).toBe('deny');
+    });
+
+    it('a trust-gated allow rule is suspended while the folder is untrusted and restored with trust', async () => {
+      // A project skill's `allowedTools` are repository-controlled: they
+      // auto-approve only while the folder is trusted, re-read at every
+      // decision, so a revocation mid-session takes effect at the next
+      // tool call and a later grant of trust restores the rule — the
+      // second side of the gate applied on the way in.
+      let trusted = true;
+      pm = new PermissionManager(
+        makeConfig({ isTrustedFolder: () => trusted }),
+      );
+      pm.initialize();
+      const call = { toolName: 'run_shell_command', command: 'git commit' };
+      pm.addSessionAllowRule('Bash(git *)', { trustGated: true });
+      pm.addSessionAllowRule('Bash(npm *)'); // the user's own grant
+      expect(await pm.evaluate(call)).toBe('allow');
+
+      trusted = false;
+      expect(await pm.evaluate(call)).toBe('ask');
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: 'npm test',
+        }),
+      ).toBe('allow');
+      // The effective-rules listing agrees with the decision.
+      expect(pm.listRules().some((r) => r.rule.raw === 'Bash(git *)')).toBe(
+        false,
+      );
+
+      trusted = true;
+      expect(await pm.evaluate(call)).toBe('allow');
+    });
+
+    it('an ungated grant of the same raw rule outranks the repo grant — the dedup must not inherit the suspension', async () => {
+      // A project skill grants `Bash(git *)` trust-gated; a user-level
+      // skill later grants the identical raw. The dedup keeps one entry,
+      // and it must carry the WIDER grant: the user's, which no folder
+      // trust suspends. A gated re-arrival (skill reload) stays a skip.
+      let trusted = true;
+      pm = new PermissionManager(
+        makeConfig({ isTrustedFolder: () => trusted }),
+      );
+      pm.initialize();
+      const call = { toolName: 'run_shell_command', command: 'git commit' };
+      pm.addSessionAllowRule('Bash(git *)', { trustGated: true });
+      pm.addSessionAllowRule('Bash(git *)'); // the user-level skill's grant
+      trusted = false;
+      expect(await pm.evaluate(call)).toBe('allow');
+      // Re-adding the gated rule (a reload cycle) neither duplicates nor
+      // re-gates the entry the user now holds.
+      pm.addSessionAllowRule('Bash(git *)', { trustGated: true });
+      expect(await pm.evaluate(call)).toBe('allow');
+      expect(
+        (pm as unknown as { sessionRules: { allow: unknown[] } }).sessionRules
+          .allow,
+      ).toHaveLength(1);
+    });
+
+    it('a trust-gated rule stays in force when the config reports no trust probe', async () => {
+      pm.addSessionAllowRule('Bash(git *)', { trustGated: true });
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: 'git commit',
+        }),
+      ).toBe('allow');
     });
 
     it('addSessionAllowRule deduplicates identical rules', () => {
