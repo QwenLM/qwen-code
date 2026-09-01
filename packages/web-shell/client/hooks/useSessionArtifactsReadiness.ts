@@ -16,19 +16,30 @@ export type SessionArtifactsReadyEvent = PendingReadyEvent & {
 
 type OwnedPendingReadyEvent = PendingReadyEvent & { owner: SessionOwner };
 
+export type SessionArtifactsLoadResult =
+  | {
+      status: 'success';
+      artifacts: readonly DaemonSessionArtifact[];
+    }
+  | { status: 'unavailable' | 'superseded' | 'failed' };
+
 interface UseSessionArtifactsReadinessOptions {
   enabled: boolean;
   owner: SessionOwner;
+  sessionId?: string;
+  deferredSessionId?: string;
   promptStatus: string;
   activeTurnId?: string;
   activeTurnIsShell: boolean;
   artifactsVersion?: number;
-  load: () => Promise<readonly DaemonSessionArtifact[] | null>;
+  load: () => Promise<SessionArtifactsLoadResult>;
 }
 
 export function useSessionArtifactsReadiness({
   enabled,
   owner,
+  sessionId,
+  deferredSessionId,
   promptStatus,
   activeTurnId,
   activeTurnIsShell,
@@ -36,12 +47,16 @@ export function useSessionArtifactsReadiness({
   load,
 }: UseSessionArtifactsReadinessOptions) {
   const sequenceRef = useRef(0);
+  const enabledRef = useRef(enabled);
+  enabledRef.current = enabled;
+  const loadRef = useRef(load);
+  loadRef.current = load;
   const pendingRef = useRef<OwnedPendingReadyEvent[]>([]);
   const drainingOwnerRef = useRef<SessionOwner | undefined>(undefined);
   const [readyQueue, setReadyQueue] = useState<SessionArtifactsReadyEvent[]>(
     [],
   );
-  const previousPromptRef = useRef({ owner, status: promptStatus });
+  const previousPromptRef = useRef({ owner, sessionId, status: promptStatus });
   const previousTurnIdRef = useRef({ owner, turnId: activeTurnId });
   const previousArtifactsVersionRef = useRef(artifactsVersion);
   const activeTurnRef = useRef({
@@ -52,50 +67,78 @@ export function useSessionArtifactsReadiness({
     sawStreaming: false,
   });
 
-  const drain = useCallback(async () => {
-    if (!enabled || drainingOwnerRef.current === owner) return;
-    drainingOwnerRef.current = owner;
+  const drain = useCallback(async (drainOwner: SessionOwner) => {
+    if (!enabledRef.current || drainingOwnerRef.current === drainOwner) return;
+    drainingOwnerRef.current = drainOwner;
     try {
-      while (owner.isCurrent()) {
-        const eventIndex = pendingRef.current.findIndex(
-          (event) => event.owner === owner,
+      while (enabledRef.current && drainOwner.isCurrent()) {
+        const event = pendingRef.current.find(
+          (pending) => pending.owner === drainOwner,
         );
-        if (eventIndex < 0) break;
-        const artifacts = await load();
-        if (!artifacts || !owner.isCurrent()) break;
-        const [event] = pendingRef.current.splice(eventIndex, 1);
         if (!event) break;
-        sequenceRef.current += 1;
+        const attemptedLoad = loadRef.current;
+        const result = await attemptedLoad();
+        if (!enabledRef.current || !drainOwner.isCurrent()) break;
+        if (result.status !== 'success') {
+          if (
+            result.status === 'superseded' ||
+            loadRef.current !== attemptedLoad
+          ) {
+            continue;
+          }
+          break;
+        }
+        const eventIndex = pendingRef.current.indexOf(event);
+        if (eventIndex < 0) continue;
+        pendingRef.current.splice(eventIndex, 1);
+        const sequence = ++sequenceRef.current;
         setReadyQueue((current) => [
           ...current,
           {
             ...event,
-            sequence: sequenceRef.current,
-            artifacts: [...artifacts],
+            sequence,
+            artifacts: [...result.artifacts],
           },
         ]);
       }
     } finally {
-      if (drainingOwnerRef.current === owner) {
+      if (drainingOwnerRef.current === drainOwner) {
         drainingOwnerRef.current = undefined;
       }
     }
-  }, [enabled, load, owner]);
+  }, []);
 
   useEffect(() => {
     pendingRef.current = enabled ? [{ owner, reason: 'restore' }] : [];
     setReadyQueue([]);
-    if (enabled) void drain();
-    else void load();
+    if (enabled) void drain(owner);
+  }, [drain, enabled, owner]);
+
+  useEffect(() => {
+    if (enabled && pendingRef.current.some((event) => event.owner === owner)) {
+      void drain(owner);
+    }
   }, [drain, enabled, load, owner]);
+
+  useEffect(() => {
+    if (!enabled) void load();
+  }, [enabled, load]);
 
   useEffect(() => {
     const previous = previousPromptRef.current;
     const previousTurn = previousTurnIdRef.current;
-    previousPromptRef.current = { owner, status: promptStatus };
+    previousPromptRef.current = { owner, sessionId, status: promptStatus };
     previousTurnIdRef.current = { owner, turnId: activeTurnId };
+    let turn = activeTurnRef.current;
+    const deferredOwnerReplacement =
+      previous.owner !== owner &&
+      previous.sessionId === undefined &&
+      sessionId !== undefined &&
+      deferredSessionId === sessionId &&
+      previous.status !== 'idle' &&
+      turn.owner === previous.owner;
     const settled =
-      previous.owner === owner &&
+      (previous.owner === owner || deferredOwnerReplacement) &&
       previous.status !== 'idle' &&
       promptStatus === 'idle';
     if (!enabled) {
@@ -103,8 +146,9 @@ export function useSessionArtifactsReadiness({
       return;
     }
 
-    let turn = activeTurnRef.current;
-    if (
+    if (deferredOwnerReplacement) {
+      turn = { ...turn, owner };
+    } else if (
       promptStatus !== 'idle' &&
       (previous.owner !== owner || previous.status === 'idle')
     ) {
@@ -164,7 +208,7 @@ export function useSessionArtifactsReadiness({
       sawStreaming: false,
     };
     if (pendingRef.current.some((event) => event.owner === owner)) {
-      void drain();
+      void drain(owner);
     } else {
       void load();
     }
@@ -176,6 +220,8 @@ export function useSessionArtifactsReadiness({
     load,
     owner,
     promptStatus,
+    deferredSessionId,
+    sessionId,
   ]);
 
   useEffect(() => {
@@ -189,7 +235,7 @@ export function useSessionArtifactsReadiness({
       return;
     }
     if (enabled && pendingRef.current.some((event) => event.owner === owner)) {
-      void drain();
+      void drain(owner);
     } else {
       void load();
     }

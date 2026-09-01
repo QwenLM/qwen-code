@@ -2926,6 +2926,7 @@ export function App({
   const contextBodyRef = useRef<HTMLDivElement | null>(null);
   const [contextBodyWidth, setContextBodyWidth] = useState<number | null>(null);
   const currentSessionIdRef = useRef(connection.sessionId);
+  const artifactDeferredSessionIdRef = useRef<string | undefined>(undefined);
   const lastNotifiedSessionIdRef = useRef<string | undefined>(undefined);
   const lastNotifiedWorkspaceIdRef = useRef<string | undefined>(undefined);
   const lastNotifiedWorkspaceCwdRef = useRef<string | undefined>(undefined);
@@ -3006,7 +3007,13 @@ export function App({
   } = useSessionArtifactsWithReadiness(
     activeArtifactTurnId,
     activeArtifactTurnIsShell,
+    artifactDeferredSessionIdRef.current,
   );
+  useEffect(() => {
+    if (connection.sessionId !== undefined) {
+      artifactDeferredSessionIdRef.current = undefined;
+    }
+  }, [connection.sessionId]);
   const [artifactPanelExtraArtifacts, setArtifactPanelExtraArtifacts] =
     useState<DaemonSessionArtifact[]>([]);
   const [paneArtifactSnapshots, setPaneArtifactSnapshots] = useState<
@@ -6377,6 +6384,7 @@ export function App({
           onSessionCreated: onSessionCreatedRef.current,
           onSessionAllocated: (sessionId) => {
             preparingSessionIdRef.current = sessionId;
+            artifactDeferredSessionIdRef.current = sessionId;
             allocatedSessionId = sessionId;
             if (catalogWorkspaceCwd) {
               allocatedSessionCatalogOwnerRef.current = {
@@ -6406,6 +6414,9 @@ export function App({
           }
         });
       } catch (error) {
+        if (artifactDeferredSessionIdRef.current === allocatedSessionId) {
+          artifactDeferredSessionIdRef.current = undefined;
+        }
         if (allocatedSessionId && catalogWorkspaceCwd) {
           sessionCatalogController.invalidateWorkspace(catalogWorkspaceCwd);
         }

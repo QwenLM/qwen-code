@@ -9,6 +9,7 @@ import {
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import {
   useSessionArtifactsReadiness,
+  type SessionArtifactsLoadResult,
   type SessionArtifactsReadyEvent,
 } from './useSessionArtifactsReadiness';
 
@@ -37,12 +38,14 @@ interface SessionArtifactsOptions {
   trackReadiness: boolean;
   activeTurnId?: string;
   activeTurnIsShell: boolean;
+  deferredSessionId?: string;
 }
 
 function useSessionArtifactsInternal({
   trackReadiness,
   activeTurnId,
   activeTurnIsShell,
+  deferredSessionId,
 }: SessionArtifactsOptions): SessionArtifactsReadinessState {
   const actions = useActions();
   const connection = useConnection();
@@ -70,20 +73,28 @@ function useSessionArtifactsInternal({
       loadingOwnerRef.current = undefined;
       setArtifacts([]);
       setLoading(false);
-      return null;
+      return { status: 'unavailable' } satisfies SessionArtifactsLoadResult;
     }
     if (loadedOwnerRef.current !== owner) setArtifacts([]);
     loadingOwnerRef.current = owner;
     setLoading(true);
     try {
       const result = await actions.loadArtifacts();
-      if (requestIdRef.current !== requestId || !owner.isCurrent()) return null;
+      if (requestIdRef.current !== requestId || !owner.isCurrent()) {
+        return { status: 'superseded' } satisfies SessionArtifactsLoadResult;
+      }
       loadedOwnerRef.current = owner;
       setArtifacts(result.artifacts);
-      return result.artifacts;
+      return {
+        status: 'success',
+        artifacts: result.artifacts,
+      } satisfies SessionArtifactsLoadResult;
     } catch {
+      if (requestIdRef.current !== requestId || !owner.isCurrent()) {
+        return { status: 'superseded' } satisfies SessionArtifactsLoadResult;
+      }
       // The artifacts panel treats a failed refresh as an empty error state.
-      return null;
+      return { status: 'failed' } satisfies SessionArtifactsLoadResult;
     } finally {
       if (requestIdRef.current === requestId && owner.isCurrent()) {
         setLoading(false);
@@ -93,6 +104,8 @@ function useSessionArtifactsInternal({
   const readiness = useSessionArtifactsReadiness({
     enabled: trackReadiness && supportsArtifacts,
     owner,
+    sessionId,
+    deferredSessionId,
     promptStatus,
     activeTurnId,
     activeTurnIsShell,
@@ -139,10 +152,12 @@ export function useSessionArtifacts(): SessionArtifactsState {
 export function useSessionArtifactsWithReadiness(
   activeTurnId?: string,
   activeTurnIsShell = false,
+  deferredSessionId?: string,
 ): SessionArtifactsReadinessState {
   return useSessionArtifactsInternal({
     trackReadiness: true,
     activeTurnId,
     activeTurnIsShell,
+    deferredSessionId,
   });
 }

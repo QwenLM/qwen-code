@@ -31,12 +31,13 @@ const sdkMock = vi.hoisted(() => ({
   },
   connection: {
     status: 'connected',
-    sessionId: 'session-a',
+    sessionId: 'session-a' as string | undefined,
     capabilities: { features: ['session_artifacts'] },
   },
   promptStatus: 'idle',
   activeTurnId: undefined as string | undefined,
   activeTurnIsShell: false,
+  deferredSessionId: undefined as string | undefined,
   artifactsVersion: 0,
 }));
 
@@ -86,6 +87,7 @@ function TestHost() {
   latestState = useSessionArtifactsWithReadiness(
     sdkMock.activeTurnId,
     sdkMock.activeTurnIsShell,
+    sdkMock.deferredSessionId,
   );
   return null;
 }
@@ -123,6 +125,7 @@ beforeEach(() => {
   sdkMock.promptStatus = 'idle';
   sdkMock.activeTurnId = undefined;
   sdkMock.activeTurnIsShell = false;
+  sdkMock.deferredSessionId = undefined;
   sdkMock.artifactsVersion = 0;
   sdkMock.ownerVersion = 0;
   sdkMock.ownerGuard.capture.mockImplementation(() => {
@@ -301,6 +304,270 @@ describe('useSessionArtifacts', () => {
       turnId: 'current-turn',
     });
   });
+
+  it('preserves an in-flight turn when deferred creation replaces its owner', async () => {
+    sdkMock.connection = {
+      status: 'connected',
+      sessionId: undefined,
+      capabilities: { features: ['session_artifacts'] },
+    };
+    sdkMock.activeTurnId = 'turn-1';
+    sdkMock.promptStatus = 'streaming';
+    sdkMock.actions.loadArtifacts
+      .mockResolvedValueOnce({ artifacts: [] })
+      .mockResolvedValueOnce({ artifacts: [artifact('turn-1-snapshot')] });
+
+    await renderHookHost();
+    expect(sdkMock.actions.loadArtifacts).not.toHaveBeenCalled();
+
+    sdkMock.connection = {
+      status: 'connected',
+      sessionId: 'session-a',
+      capabilities: { features: ['session_artifacts'] },
+    };
+    sdkMock.ownerVersion += 1;
+    sdkMock.deferredSessionId = 'session-a';
+    sdkMock.promptStatus = 'waiting';
+    await rerenderHookHost();
+    expect(latestState?.ready).toMatchObject({
+      reason: 'restore',
+      sequence: 1,
+    });
+    await consumeReady();
+
+    sdkMock.promptStatus = 'idle';
+    await rerenderHookHost();
+    expect(latestState?.ready).toMatchObject({
+      reason: 'turn_complete',
+      sequence: 2,
+      turnId: 'turn-1',
+      artifacts: [artifact('turn-1-snapshot')],
+    });
+  });
+
+  it('settles an in-flight turn when deferred owner replacement arrives idle', async () => {
+    sdkMock.connection = {
+      status: 'connected',
+      sessionId: undefined,
+      capabilities: { features: ['session_artifacts'] },
+    };
+    sdkMock.activeTurnId = 'turn-1';
+    sdkMock.promptStatus = 'streaming';
+    sdkMock.actions.loadArtifacts.mockResolvedValue({
+      artifacts: [artifact('turn-1-snapshot')],
+    });
+
+    await renderHookHost();
+
+    sdkMock.connection = {
+      status: 'connected',
+      sessionId: 'session-a',
+      capabilities: { features: ['session_artifacts'] },
+    };
+    sdkMock.ownerVersion += 1;
+    sdkMock.deferredSessionId = 'session-a';
+    sdkMock.promptStatus = 'idle';
+    await rerenderHookHost();
+
+    expect(latestState?.ready).toMatchObject({
+      reason: 'restore',
+      sequence: 1,
+    });
+    await consumeReady();
+    expect(latestState?.ready).toMatchObject({
+      reason: 'turn_complete',
+      sequence: 2,
+      turnId: 'turn-1',
+      artifacts: [artifact('turn-1-snapshot')],
+    });
+  });
+
+  it('does not treat an existing session selection as deferred allocation', async () => {
+    sdkMock.connection = {
+      status: 'connected',
+      sessionId: undefined,
+      capabilities: { features: ['session_artifacts'] },
+    };
+    sdkMock.activeTurnId = 'source-turn';
+    sdkMock.promptStatus = 'streaming';
+    sdkMock.actions.loadArtifacts.mockResolvedValue({ artifacts: [] });
+
+    await renderHookHost();
+
+    sdkMock.connection = {
+      status: 'connected',
+      sessionId: 'existing-session',
+      capabilities: { features: ['session_artifacts'] },
+    };
+    sdkMock.ownerVersion += 1;
+    sdkMock.activeTurnId = 'existing-turn';
+    sdkMock.promptStatus = 'idle';
+    await rerenderHookHost();
+
+    expect(latestState?.ready).toMatchObject({
+      reason: 'restore',
+      sequence: 1,
+    });
+    await consumeReady();
+    expect(latestState?.ready).toBeNull();
+  });
+
+  it('does not carry an in-flight turn into another existing session', async () => {
+    sdkMock.actions.loadArtifacts.mockResolvedValue({ artifacts: [] });
+
+    await renderHookHost();
+    await consumeReady();
+
+    sdkMock.activeTurnId = 'session-a-turn';
+    sdkMock.promptStatus = 'streaming';
+    await rerenderHookHost();
+
+    sdkMock.connection = {
+      status: 'connected',
+      sessionId: 'session-b',
+      capabilities: { features: ['session_artifacts'] },
+    };
+    sdkMock.ownerVersion += 1;
+    sdkMock.activeTurnId = 'session-b-turn';
+    sdkMock.promptStatus = 'waiting';
+    await rerenderHookHost();
+    expect(latestState?.ready).toMatchObject({
+      reason: 'restore',
+      sequence: 2,
+    });
+    await consumeReady();
+
+    sdkMock.promptStatus = 'idle';
+    await rerenderHookHost();
+    expect(latestState?.ready).toBeNull();
+  });
+
+  it('keeps the ready queue across same-owner connection churn', async () => {
+    sdkMock.actions.loadArtifacts.mockResolvedValue({ artifacts: [] });
+
+    await renderHookHost();
+    expect(latestState?.ready).toMatchObject({
+      reason: 'restore',
+      sequence: 1,
+    });
+
+    sdkMock.connection = { ...sdkMock.connection, status: 'connecting' };
+    await rerenderHookHost();
+    sdkMock.connection = { ...sdkMock.connection, status: 'connected' };
+    await rerenderHookHost();
+
+    expect(latestState?.ready).toMatchObject({
+      reason: 'restore',
+      sequence: 1,
+    });
+    expect(sdkMock.actions.loadArtifacts).toHaveBeenCalledOnce();
+  });
+
+  it('keeps a pending turn event across same-owner connection churn', async () => {
+    const postPromptLoad = deferred<{
+      artifacts: DaemonSessionArtifact[];
+    }>();
+    sdkMock.actions.loadArtifacts
+      .mockResolvedValueOnce({ artifacts: [] })
+      .mockReturnValueOnce(postPromptLoad.promise);
+
+    await renderHookHost();
+    await consumeReady();
+
+    sdkMock.activeTurnId = 'turn-1';
+    sdkMock.promptStatus = 'streaming';
+    await rerenderHookHost();
+    sdkMock.promptStatus = 'idle';
+    await rerenderHookHost();
+
+    sdkMock.connection = { ...sdkMock.connection, status: 'connecting' };
+    await rerenderHookHost();
+    sdkMock.connection = { ...sdkMock.connection, status: 'connected' };
+    await rerenderHookHost();
+
+    await act(async () => {
+      postPromptLoad.resolve({ artifacts: [artifact('turn-1-snapshot')] });
+      await postPromptLoad.promise;
+    });
+    expect(latestState?.ready).toMatchObject({
+      reason: 'turn_complete',
+      sequence: 2,
+      turnId: 'turn-1',
+      artifacts: [artifact('turn-1-snapshot')],
+    });
+  });
+
+  it('retries a pending turn event after reconnecting', async () => {
+    sdkMock.actions.loadArtifacts.mockResolvedValue({
+      artifacts: [artifact('turn-1-snapshot')],
+    });
+
+    await renderHookHost();
+    await consumeReady();
+
+    sdkMock.activeTurnId = 'turn-1';
+    sdkMock.promptStatus = 'streaming';
+    await rerenderHookHost();
+    sdkMock.connection = { ...sdkMock.connection, status: 'connecting' };
+    sdkMock.promptStatus = 'idle';
+    await rerenderHookHost();
+    expect(latestState?.ready).toBeNull();
+
+    sdkMock.connection = { ...sdkMock.connection, status: 'connected' };
+    await rerenderHookHost();
+
+    expect(latestState?.ready).toMatchObject({
+      reason: 'turn_complete',
+      sequence: 2,
+      turnId: 'turn-1',
+      artifacts: [artifact('turn-1-snapshot')],
+    });
+  });
+
+  it.each(['resolves', 'rejects'] as const)(
+    'retries a pending turn event after its superseded load %s',
+    async (outcome) => {
+      const pendingLoad = deferred<{ artifacts: DaemonSessionArtifact[] }>();
+      const refreshLoad = deferred<{ artifacts: DaemonSessionArtifact[] }>();
+      sdkMock.actions.loadArtifacts
+        .mockResolvedValueOnce({ artifacts: [] })
+        .mockReturnValueOnce(pendingLoad.promise)
+        .mockReturnValueOnce(refreshLoad.promise)
+        .mockResolvedValueOnce({ artifacts: [artifact('turn-1-snapshot')] });
+
+      await renderHookHost();
+      await consumeReady();
+
+      sdkMock.activeTurnId = 'turn-1';
+      sdkMock.promptStatus = 'streaming';
+      await rerenderHookHost();
+      sdkMock.promptStatus = 'idle';
+      await rerenderHookHost();
+
+      await act(async () => {
+        void latestState?.refresh();
+        if (outcome === 'resolves') {
+          pendingLoad.resolve({ artifacts: [artifact('stale-snapshot')] });
+          await pendingLoad.promise;
+        } else {
+          pendingLoad.reject(new Error('superseded load failed'));
+          await pendingLoad.promise.catch(() => undefined);
+        }
+      });
+      expect(sdkMock.actions.loadArtifacts).toHaveBeenCalledTimes(4);
+
+      await act(async () => {
+        refreshLoad.resolve({ artifacts: [artifact('refresh-snapshot')] });
+        await refreshLoad.promise;
+      });
+      expect(latestState?.ready).toMatchObject({
+        reason: 'turn_complete',
+        sequence: 2,
+        turnId: 'turn-1',
+        artifacts: [artifact('turn-1-snapshot')],
+      });
+    },
+  );
 
   it('preserves restore readiness without reporting a failed waiting prompt', async () => {
     const initialLoad = deferred<{ artifacts: DaemonSessionArtifact[] }>();
