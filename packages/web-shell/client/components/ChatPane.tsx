@@ -283,11 +283,14 @@ export function ChatPane({
     () => getTaskActivityKey(messages),
     [messages],
   );
+  const workflowsEnabled =
+    connection.supportedCommands?.workflowsEnabled === true;
   // The activity fact travels beside the key, derived structurally — the
-  // key itself is not parseable back (callId is unconstrained text).
+  // key itself is not parseable back (callId is unconstrained text) — and
+  // gated on the endpoint the hook will actually poll.
   const taskActivityActive = useMemo(
-    () => hasActiveTaskActivity(messages),
-    [messages],
+    () => hasActiveTaskActivity(messages, { workflowsEnabled }),
+    [messages, workflowsEnabled],
   );
   const sessionTasks = useBackgroundTasks(
     connection.sessionId,
@@ -295,7 +298,7 @@ export function ChatPane({
     taskActivityActive,
     connection.status === 'connected',
     0,
-    connection.supportedCommands?.workflowsEnabled === true,
+    workflowsEnabled,
   );
   const transcriptHistory = useTranscriptHistory();
   const store = useTranscriptStore();

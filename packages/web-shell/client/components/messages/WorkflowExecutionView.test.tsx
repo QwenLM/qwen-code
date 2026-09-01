@@ -362,6 +362,68 @@ describe('WorkflowExecutionView', () => {
     expect(architectureEdge.hasAttribute('data-path-emphasis')).toBe(false);
   });
 
+  it('keeps the user selection when the newest approval settles', () => {
+    // Tracking one last-observed id cannot tell "a new approval arrived"
+    // from "the newest was settled and an older one is now last": answering
+    // the newest of two made the next poll re-select the older one's owner
+    // and yank the inspector off the node the user was reading.
+    const task = workflowTask();
+    task.pendingApprovalCount = 2;
+    task.pendingApprovals = [
+      {
+        approvalId: 'wfap-1',
+        subagentId: 'correctness-agent-1',
+        name: 'write_file',
+        description: 'First',
+        at: 1_300,
+      },
+      {
+        approvalId: 'wfap-2',
+        subagentId: 'architecture-agent-1',
+        name: 'write_file',
+        description: 'Second',
+        at: 1_400,
+      },
+    ];
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const render = (next: typeof task) =>
+      act(() => {
+        root.render(
+          <I18nProvider language="en">
+            <WorkflowExecutionView task={next} />
+          </I18nProvider>,
+        );
+      });
+
+    render(task);
+
+    // The user deliberately inspects a node that owns no approval.
+    const manual = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent?.includes('Architecture'));
+    expect(manual).toBeDefined();
+    act(() => manual!.click());
+    expect(
+      container.querySelector('[data-selected-dispatch="dispatch-3"]'),
+    ).not.toBeNull();
+
+    // The newest approval is answered; the next poll delivers only the older
+    // one. That is not a new approval and must not move the selection.
+    const afterSettle = {
+      ...task,
+      pendingApprovalCount: 1,
+      pendingApprovals: [task.pendingApprovals![0]!],
+    };
+    render(afterSettle);
+
+    expect(
+      container.querySelector('[data-selected-dispatch="dispatch-3"]'),
+    ).not.toBeNull();
+  });
+
   it('locates a pending permission on its dispatch without duplicating approval controls', () => {
     const task = workflowTask();
     task.pendingApprovalCount = 1;

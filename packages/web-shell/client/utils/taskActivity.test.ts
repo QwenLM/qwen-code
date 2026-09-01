@@ -43,6 +43,27 @@ describe('hasActiveTaskActivity', () => {
     expect(hasActiveTaskActivity([])).toBe(false);
   });
 
+  it('ignores workflow calls when the workflows endpoint is off', () => {
+    // With the flag off the hook polls getTasks(), which structurally
+    // excludes workflow tasks — so a live workflow call can never show up
+    // in a snapshot and holding activity open on it would make both
+    // polling stop conditions unsatisfiable for the rest of the run.
+    const workflow: ACPToolCall = {
+      callId: 'wf-1',
+      toolName: 'workflow',
+      status: 'in_progress',
+      kind: 'execute',
+    };
+    expect(hasActiveTaskActivity([group(workflow)])).toBe(false);
+    expect(
+      hasActiveTaskActivity([group(workflow)], { workflowsEnabled: true }),
+    ).toBe(true);
+    // Other background kinds are observable through either endpoint.
+    expect(
+      hasActiveTaskActivity([group(monitorCall('m', 'in_progress'))]),
+    ).toBe(true);
+  });
+
   it('walks nested sub-tools, like the key does', () => {
     const parent: ACPToolCall = {
       ...monitorCall('parent', 'completed'),

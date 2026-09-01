@@ -348,7 +348,15 @@ export function WorkflowExecutionView({
   const [comparisonRunId, setComparisonRunId] = useState(
     () => task.sourceRunId ?? '',
   );
-  const latestApprovalIdRef = useRef(task.pendingApprovals?.at(-1)?.approvalId);
+  // Every approval id this view has already reacted to. A single
+  // last-observed id cannot tell "a new approval arrived" from "the newest
+  // was settled and an older one is now last" — answering the newest of two
+  // then made the next poll re-steal the inspector from whatever node the
+  // user had deliberately selected. Seeded with what is pending at mount so
+  // the initial selection is not re-applied on the first tick.
+  const acknowledgedApprovalIdsRef = useRef<Set<string>>(
+    new Set((task.pendingApprovals ?? []).map((a) => a.approvalId)),
+  );
   const lastPhaseVisit = task.phaseVisits.at(-1);
   const activePhaseVisitId =
     lastPhaseVisit?.endedAt === undefined ? lastPhaseVisit?.id : undefined;
@@ -367,6 +375,9 @@ export function WorkflowExecutionView({
     setComparisonRunId(task.sourceRunId ?? '');
     setHoveredDispatchId('');
     setFocusedDispatchId('');
+    acknowledgedApprovalIdsRef.current = new Set(
+      (task.pendingApprovals ?? []).map((approval) => approval.approvalId),
+    );
     // Polling replaces the task object; reset selection only when the run
     // changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -374,8 +385,10 @@ export function WorkflowExecutionView({
 
   useEffect(() => {
     const latest = task.pendingApprovals?.at(-1);
-    if (!latest || latest.approvalId === latestApprovalIdRef.current) return;
-    latestApprovalIdRef.current = latest.approvalId;
+    if (!latest) return;
+    const acknowledged = acknowledgedApprovalIdsRef.current;
+    if (acknowledged.has(latest.approvalId)) return;
+    acknowledged.add(latest.approvalId);
     const owner = task.dispatches.find(
       (dispatch) => dispatch.subagentId === latest.subagentId,
     );

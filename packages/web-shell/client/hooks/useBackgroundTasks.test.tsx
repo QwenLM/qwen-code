@@ -309,6 +309,32 @@ describe('useBackgroundTasks', () => {
     expect(sdkMock.actions.getTasks).toHaveBeenCalledTimes(2);
   });
 
+  it('stops polling when a workflow call is unobservable through the legacy endpoint', async () => {
+    // Flag off: the hook polls getTasks(), which never carries workflow
+    // tasks. Holding activity open on a live workflow call made the
+    // empty-snapshot branch return before the counter and the terminal
+    // branch require !active — neither could fire, so the 3s poll ran for
+    // the rest of the run. The caller now reports the workflow call as
+    // unobservable, and the empty-poll budget ends it.
+    taskActivityKey = 'workflow-call:in_progress';
+    taskActivityActive = false;
+    workflowsEnabled = false;
+    sdkMock.actions.getTasks.mockResolvedValue(snapshot('session-a'));
+
+    await renderHarness();
+    // One tick per act: React flushes the stop between them, where a single
+    // long advance would run every interval before re-rendering once.
+    for (let tick = 0; tick < 8; tick += 1) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+    }
+
+    // The mount call plus one more before the empty-poll budget ends it.
+    expect(sdkMock.actions.getTasks).toHaveBeenCalledTimes(2);
+    expect(sdkMock.actions.getWorkflowTasks).not.toHaveBeenCalled();
+  });
+
   it('resumes polling for a new session after a panel left open in the old one', async () => {
     // Split view keeps the previous session's pane mounted, so switching
     // primary fires no `active: false`, and when that pane's panel finally

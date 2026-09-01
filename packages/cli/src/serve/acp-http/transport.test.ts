@@ -12171,6 +12171,36 @@ describe('ACP WebSocket transport security', () => {
     ws.close();
   });
 
+  it('classifies _qwen/session/saved_workflow as a WS read method', async () => {
+    // Definition reads share a bucket with real mutations if this is
+    // missing from WS_READ_METHODS: ~30 reads a minute (browsing the Saved
+    // tab, reopening details after a timeout) then exhaust the tier and the
+    // user's next pause/stop/cancel is rejected as rate-limited.
+    const tiers: string[] = [];
+    await startServer({
+      checkRate: (_key, tier) => {
+        tiers.push(tier);
+        return true;
+      },
+    });
+    const ws = await wsConnect();
+    await sendRpc(ws, {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: {},
+    });
+    await sendRpc(ws, {
+      jsonrpc: '2.0',
+      id: 2,
+      method: '_qwen/session/saved_workflow',
+      params: { sessionId: 'missing-session', name: 'deep-review' },
+    });
+
+    expect(tiers).toEqual(['read']);
+    ws.close();
+  });
+
   it('classifies _qwen/workspace/trust/request as a WS mutation method', async () => {
     const tiers: string[] = [];
     await startServer({

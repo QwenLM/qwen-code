@@ -24,7 +24,14 @@ function workflowRunIdFromTool(tool: ACPToolCall): string | undefined {
     text.match(/\bRun ID:\s*([^\s]+)/i)?.[1] ??
     text.match(/\bWorkflow\s+([^\s]+)\s+(?:started|—|-)/i)?.[1];
   if (runId) return runId;
-  return typeof tool.args?.resumeFromRunId === 'string'
+  // Only while the call is still live. The argued use is pairing an ACTIVE
+  // resume with its run before live output arrives, where the resumed run
+  // registers under the same id. A TERMINAL call carrying no run identity
+  // in its text is the never-registered case — a compile error or a
+  // cancel-before-start — and returning the SOURCE run there would render
+  // that run's graph as this failed call's detail instead of its error.
+  const active = tool.status === 'pending' || tool.status === 'in_progress';
+  return active && typeof tool.args?.resumeFromRunId === 'string'
     ? tool.args.resumeFromRunId
     : undefined;
 }

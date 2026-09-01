@@ -87,4 +87,35 @@ describe('findWorkflowTaskForTool', () => {
       ),
     ).toBeUndefined();
   });
+
+  it('pairs a live resume with its source run before output arrives', () => {
+    // The argued use of the resumeFromRunId fallback: the resumed run
+    // registers under the same id, so the graph is the right one to show
+    // while the call is still in flight.
+    expect(
+      findWorkflowTaskForTool(
+        tasks,
+        workflowTool({
+          status: 'in_progress',
+          args: { resumeFromRunId: 'wf_expected' },
+        }),
+      )?.id,
+    ).toBe('wf_expected');
+  });
+
+  it('does not pair a resume that never launched with the source run', () => {
+    // A terminal call carrying no run identity in its text is the
+    // never-registered case — a script compile error, or cancelled before
+    // start. Falling back to the SOURCE run there renders that run's graph
+    // as this failed call's detail instead of its actual error text.
+    expect(
+      findWorkflowTaskForTool(
+        tasks,
+        workflowTool({
+          status: 'completed',
+          args: { resumeFromRunId: 'wf_expected' },
+        }),
+      ),
+    ).toBeUndefined();
+  });
 });

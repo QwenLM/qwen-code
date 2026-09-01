@@ -4403,8 +4403,8 @@ export function App({
   // The activity fact travels beside the key, derived structurally — the
   // key itself is not parseable back (callId is unconstrained text).
   const taskActivityActive = useMemo(
-    () => hasActiveTaskActivity(messages),
-    [messages],
+    () => hasActiveTaskActivity(messages, { workflowsEnabled }),
+    [messages, workflowsEnabled],
   );
   const [backgroundTasksRefreshTrigger, setBackgroundTasksRefreshTrigger] =
     useState(0);

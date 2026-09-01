@@ -3,6 +3,7 @@ import {
   backgroundShellTaskId,
   isBackgroundSubAgentToolCall,
 } from '../adapters/toolClassification';
+import { isWorkflowToolName } from '../components/messages/toolFormatting';
 
 function isBackgroundTaskToolCall(tool: ACPToolCall): boolean {
   const name = tool.toolName.toLowerCase();
@@ -60,12 +61,22 @@ export function getTaskActivityKey(messages: readonly Message[]): string {
  * reads as active, which pins both polling stop conditions open for the
  * life of the view.
  */
-export function hasActiveTaskActivity(messages: readonly Message[]): boolean {
+export function hasActiveTaskActivity(
+  messages: readonly Message[],
+  options: { workflowsEnabled?: boolean } = {},
+): boolean {
+  // With the workflows endpoint off, the hook polls `getTasks()`, whose
+  // response structurally excludes workflow tasks — so a live workflow call
+  // could never appear in a snapshot, and holding activity open on it makes
+  // BOTH stop conditions unsatisfiable: the poll then runs every 3s for the
+  // rest of the run (foreground runs cap at 30 minutes). Workflow calls are
+  // simply unobservable in that mode, so they do not count.
+  const countsWorkflows = options.workflowsEnabled === true;
   let active = false;
   forEachBackgroundTaskToolCall(messages, (tool) => {
-    if (tool.status === 'pending' || tool.status === 'in_progress') {
-      active = true;
-    }
+    if (tool.status !== 'pending' && tool.status !== 'in_progress') return;
+    if (!countsWorkflows && isWorkflowToolName(tool.toolName)) return;
+    active = true;
   });
   return active;
 }
