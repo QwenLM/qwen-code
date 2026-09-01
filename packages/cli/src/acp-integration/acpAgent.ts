@@ -95,7 +95,6 @@ import {
   normalizeSnapshotPayload,
   startEventLoopLagMonitor,
   refreshMemoryInstruction,
-  applyReasoningEffort,
   REASONING_EFFORT_TIERS,
   addDaemonRequestAttribute,
   extractDaemonTraceContext,
@@ -245,6 +244,7 @@ import { z } from 'zod';
 import type { CliArgs } from '../config/config.js';
 import {
   buildDisabledSkillNamesProvider,
+  buildEnabledSkillNamesProvider,
   loadCliConfig,
   SessionIdConflictError,
 } from '../config/config.js';
@@ -272,13 +272,21 @@ import {
   type ChildHeapProbe,
 } from './child-heap-probe.js';
 import {
+  applyReasoningSelection,
   buildModelReasoningConfigOption,
   buildModelReasoningConfigPreview,
+  clearReasoningRequestOverrides,
   getModelConfiguration,
+  isReasoningSelectionSupported,
+  PERSIST_REASONING_SELECTION_META_KEY,
+  parseReasoningSelection,
+  resolvePersistedReasoningConfigState,
+  REASONING_SELECTION_PERSISTED_META_KEY,
   REASONING_EFFORT_DEFAULT,
   REASONING_EFFORT_NAMES,
   REASONING_EFFORT_NONE,
   type ModelReasoningConfiguration,
+  type ReasoningSelection,
 } from './model-configuration.js';
 import {
   deleteManagedSkill,
@@ -3413,7 +3421,10 @@ class QwenAgent implements Agent {
   private workspaceMcpDiscoveryConfig: Config | undefined;
   private workspaceMcpDiscoveryPromise: Promise<void> | undefined;
   private workspaceMcpDiscoveryError: string | undefined;
-  private workspaceExtensionStatusRefreshPromise: Promise<void> | undefined;
+  private readonly workspaceExtensionStatusRefreshes = new Map<
+    boolean,
+    Promise<void>
+  >();
   private readonly pendingMcpAuthentications = new Map<
     string,
     PendingMcpAuthentication
@@ -3672,20 +3683,28 @@ class QwenAgent implements Agent {
     return this.workspaceMcpDiscoveryConfig ?? this.config;
   }
 
-  private refreshBootstrapExtensionStatus(): Promise<void> {
-    if (this.workspaceExtensionStatusRefreshPromise) {
-      return this.workspaceExtensionStatusRefreshPromise;
-    }
+  private refreshBootstrapExtensionStatus(skillsOnly = false): Promise<void> {
+    const inFlight = this.workspaceExtensionStatusRefreshes.get(skillsOnly);
+    if (inFlight) return inFlight;
 
     const promise = (async () => {
       const errors: unknown[] = [];
+      if (skillsOnly) {
+        try {
+          this.settings.reloadScopeFromDisk(SettingScope.Workspace);
+        } catch (error) {
+          errors.push(error);
+        }
+      }
       try {
         await this.config.getExtensionManager().refreshCache();
       } catch (error) {
         errors.push(error);
       }
       try {
-        await this.config.getSkillManager()?.refreshCache();
+        await this.config
+          .getSkillManager()
+          ?.refreshCache(skillsOnly ? { throwOnError: true } : undefined);
       } catch (error) {
         errors.push(error);
       }
@@ -3697,10 +3716,10 @@ class QwenAgent implements Agent {
         );
       }
     })();
-    this.workspaceExtensionStatusRefreshPromise = promise;
+    this.workspaceExtensionStatusRefreshes.set(skillsOnly, promise);
     const clear = () => {
-      if (this.workspaceExtensionStatusRefreshPromise === promise) {
-        this.workspaceExtensionStatusRefreshPromise = undefined;
+      if (this.workspaceExtensionStatusRefreshes.get(skillsOnly) === promise) {
+        this.workspaceExtensionStatusRefreshes.delete(skillsOnly);
       }
     };
     void promise.then(clear, clear);
@@ -3813,6 +3832,11 @@ class QwenAgent implements Agent {
             projectHooks: settings.getProjectHooks(),
           },
           buildDisabledSkillNamesProvider(settings),
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          buildEnabledSkillNamesProvider(settings),
         ),
       );
       config.setMcpTransportPool(this.mcpPool);
@@ -4730,7 +4754,11 @@ class QwenAgent implements Agent {
 
     await clearCachedCredentialFile();
     try {
-      await this.config.refreshAuth(method);
+      await this.refreshAuthWithPersistedReasoning(
+        this.config,
+        this.settings,
+        method,
+      );
       this.settings.setValue(
         SettingScope.User,
         'security.auth.selectedType',
@@ -4887,7 +4915,7 @@ class QwenAgent implements Agent {
             initializationDeadline?.signal.throwIfAborted();
             if (!provisionalStandalone) {
               await profiler.time('auth', () =>
-                this.ensureAuthenticated(config),
+                this.ensureAuthenticated(config, settings),
               );
               initializationDeadline?.signal.throwIfAborted();
               profiler.timeSync('file_system_setup', () =>
@@ -5177,7 +5205,9 @@ class QwenAgent implements Agent {
         if (!provisionalStandalone) {
           await profiler.time('restore_session_model', () =>
             restoreSessionModelThenAuthenticate(config, projection, () =>
-              profiler.time('auth', () => this.ensureAuthenticated(config)),
+              profiler.time('auth', () =>
+                this.ensureAuthenticated(config, settings),
+              ),
             ),
           );
           profiler.timeSync('file_system_setup', () =>
@@ -5197,7 +5227,7 @@ class QwenAgent implements Agent {
                         projection,
                         () =>
                           profiler.time('auth', () =>
-                            this.ensureAuthenticated(config),
+                            this.ensureAuthenticated(config, settings),
                           ),
                       ),
                     ),
@@ -5532,7 +5562,9 @@ class QwenAgent implements Agent {
         if (!provisionalStandalone) {
           await profiler.time('restore_session_model', () =>
             restoreSessionModelThenAuthenticate(config, projection, () =>
-              profiler.time('auth', () => this.ensureAuthenticated(config)),
+              profiler.time('auth', () =>
+                this.ensureAuthenticated(config, settings),
+              ),
             ),
           );
           profiler.timeSync('file_system_setup', () =>
@@ -5552,7 +5584,7 @@ class QwenAgent implements Agent {
                         projection,
                         () =>
                           profiler.time('auth', () =>
-                            this.ensureAuthenticated(config),
+                            this.ensureAuthenticated(config, settings),
                           ),
                       ),
                     ),
@@ -5758,74 +5790,114 @@ class QwenAgent implements Agent {
           break;
         }
         case 'reasoning_effort': {
-          const generation = session.getConfig().getContentGeneratorConfig();
-          const thinkingMandatory = generation.thinkingMandatory === true;
-          const modelReasoning = this.getModelReasoningConfiguration(
-            session.getConfig(),
+          const config = session.getConfig();
+          const generation = config.getContentGeneratorConfig();
+          const option = this.buildConfigOptions(config).find(
+            (candidate) => candidate.id === 'reasoning_effort',
           );
-          if (modelReasoning) {
-            const effortValues = modelReasoning.toggleOnly
-              ? undefined
-              : modelReasoning.efforts;
-            const selected =
-              value === REASONING_EFFORT_NONE && !thinkingMandatory
-                ? REASONING_EFFORT_NONE
-                : modelReasoning.toggleOnly
-                  ? value === REASONING_EFFORT_DEFAULT
-                    ? REASONING_EFFORT_DEFAULT
-                    : undefined
-                  : effortValues?.find((effort) => effort === value);
-            if (!selected) {
-              const choices = [
-                ...(thinkingMandatory ? [] : [REASONING_EFFORT_NONE]),
-                ...(effortValues ?? [REASONING_EFFORT_DEFAULT]),
-              ];
-              throw RequestError.invalidParams(
-                undefined,
-                `Unknown reasoning effort: ${value}. Choose one of: ${choices.join(', ')}`,
-              );
-            }
-            if (!modelReasoning.toggleOnly) {
-              for (const source of ['extra_body', 'samplingParams'] as const) {
-                const layer = generation[source];
-                if (!layer) continue;
-                const next = { ...layer };
-                delete next['enable_thinking'];
-                delete next['reasoning_effort'];
-                delete next['thinking_budget'];
-                generation[source] = next;
-              }
-            }
-            if (selected === REASONING_EFFORT_NONE) {
-              generation.reasoning = false;
-            } else if (selected === REASONING_EFFORT_DEFAULT) {
-              generation.reasoning = undefined;
-            } else {
-              const current = generation.reasoning;
-              generation.reasoning = {
-                ...(current || {}),
-                effort: selected,
-              };
-            }
-            break;
-          }
-          const effort =
-            value === REASONING_EFFORT_DEFAULT
-              ? undefined
-              : REASONING_EFFORT_TIERS.find((tier) => tier === value);
-          if (value !== REASONING_EFFORT_DEFAULT && effort === undefined) {
+          const modelReasoning = this.getModelReasoningConfiguration(config);
+          const selected = parseReasoningSelection(value);
+          const choices =
+            option?.options.flatMap((choice) =>
+              'value' in choice
+                ? [choice.value]
+                : choice.options.map((nested) => nested.value),
+            ) ?? [];
+          if (
+            !option ||
+            !selected ||
+            (selected !== REASONING_EFFORT_DEFAULT &&
+              !choices.includes(selected))
+          ) {
+            const allowedChoices = modelReasoning
+              ? choices
+              : [
+                  REASONING_EFFORT_DEFAULT,
+                  ...choices.filter(
+                    (choice) => choice !== REASONING_EFFORT_DEFAULT,
+                  ),
+                ];
             throw RequestError.invalidParams(
               undefined,
-              `Unknown reasoning effort: ${value}. Choose one of: ${REASONING_EFFORT_DEFAULT}, ${REASONING_EFFORT_TIERS.join(', ')}`,
+              option
+                ? `Unknown reasoning effort: ${String(value)}. Choose one of: ${allowedChoices.join(', ')}`
+                : 'Reasoning is not supported by the current model',
             );
           }
-          if (!applyReasoningEffort(session.getConfig(), effort)) {
+
+          const persist =
+            params._meta?.[PERSIST_REASONING_SELECTION_META_KEY] === true;
+          const tierSelected =
+            selected !== REASONING_EFFORT_NONE &&
+            selected !== REASONING_EFFORT_DEFAULT;
+          if (
+            !modelReasoning &&
+            tierSelected &&
+            generation.reasoning === false
+          ) {
             throw RequestError.invalidParams(
               undefined,
               'Reasoning effort cannot be applied while thinking is disabled',
             );
           }
-          break;
+          const defaultReasoning = session.getDefaultReasoningConfig();
+          const previous = {
+            reasoning: generation.reasoning,
+            extra_body: generation.extra_body,
+            samplingParams: generation.samplingParams,
+          };
+          const rebuildable = config
+            .getModelsConfig?.()
+            ?.getGenerationConfig?.();
+          const previousRebuildableReasoning = rebuildable?.reasoning;
+          try {
+            if (modelReasoning && !modelReasoning.toggleOnly) {
+              clearReasoningRequestOverrides(generation);
+            }
+            applyReasoningSelection(config, selected, defaultReasoning);
+            if (!modelReasoning && selected !== REASONING_EFFORT_NONE) {
+              config.setReasoningEffort?.(
+                selected === REASONING_EFFORT_DEFAULT
+                  ? defaultReasoning
+                    ? defaultReasoning.effort
+                    : undefined
+                  : selected,
+              );
+            }
+            const configOptions = this.buildConfigOptions(config);
+            const confirmedValue = configOptions.find(
+              (candidate) => candidate.id === 'reasoning_effort',
+            )?.currentValue;
+            const confirmed =
+              selected === REASONING_EFFORT_DEFAULT
+                ? confirmedValue !== undefined
+                : confirmedValue === selected;
+            if (!confirmed) {
+              throw RequestError.invalidParams(
+                undefined,
+                modelReasoning
+                  ? `Reasoning selection was not applied: ${selected}`
+                  : 'Reasoning effort cannot be applied while thinking is disabled',
+              );
+            }
+            if (persist) {
+              session.persistReasoningSelection(selected);
+            }
+            session.setSessionReasoningSelection(
+              persist ? undefined : selected,
+            );
+            return {
+              configOptions,
+              ...(persist
+                ? { _meta: { [REASONING_SELECTION_PERSISTED_META_KEY]: true } }
+                : {}),
+            };
+          } catch (error) {
+            Object.assign(generation, previous);
+            if (rebuildable)
+              rebuildable.reasoning = previousRebuildableReasoning;
+            throw error;
+          }
         }
         default:
           throw RequestError.invalidParams(
@@ -6973,6 +7045,7 @@ class QwenAgent implements Agent {
           `${skill.level}:${skill.extensionName ?? ''}:${skill.name}`,
           mapSkillConfigToStatus(skill, disablements, {
             disabled: isInactiveExtensionSkill(skill, inactiveSkillRefs),
+            enabled: config.isSkillEnabled(skill),
           }),
         ]),
       );
@@ -7063,14 +7136,18 @@ class QwenAgent implements Agent {
         const configOptions =
           model.isRuntimeModel || modelId.startsWith(ACP_ROUTE_ID_PREFIX)
             ? undefined
-            : buildModelReasoningConfigPreview(model.id, {
-                thinkingMandatory:
+            : buildModelReasoningConfigPreview(
+                model.id,
+                resolvePersistedReasoningConfigState(
+                  model.id,
+                  this.settings.merged.model?.reasoningEffort,
                   config.getResolvedModelConfig?.(
                     model.authType,
                     model.id,
                     model.registryBaseUrl ?? model.baseUrl,
                   )?.generationConfig.thinkingMandatory === true,
-              });
+                ),
+              );
         const providerModel: ServeWorkspaceProviderModel = {
           modelId,
           baseModelId: parseAcpBaseModelId(effectiveModelId),
@@ -8265,7 +8342,12 @@ class QwenAgent implements Agent {
             this.config
               .getModelsConfig()
               .syncAfterAuthRefresh(authType, modelId, baseUrl),
-          refreshAuth: (authType) => this.config.refreshAuth(authType),
+          refreshAuth: (authType) =>
+            this.refreshAuthWithPersistedReasoning(
+              this.config,
+              this.settings,
+              authType,
+            ),
         });
         const effectiveModelId =
           (adapter.getValue('model.name') as string | undefined) ??
@@ -10661,6 +10743,71 @@ class QwenAgent implements Agent {
 
         return { language: resolvedLanguage, outputLanguage, refreshed };
       }
+      case SERVE_CONTROL_EXT_METHODS.userLanguage: {
+        // Sessionless counterpart of `sessionLanguage`. The daemon process
+        // already persisted `general.language` / `general.outputLanguage`
+        // and the global output-language.md before fanning out, so this
+        // handler performs no settings or file writes — doing them here
+        // would race the daemon and sibling runtimes on the shared user
+        // settings file. Project-bound output-language files are left
+        // alone: those sessions keep their override.
+        const language = params['language'];
+        const syncOutputLanguage = params['syncOutputLanguage'] === true;
+
+        const allowedLanguages = [
+          ...SUPPORTED_LANGUAGES.map((l) => l.code),
+          'auto',
+        ];
+        if (
+          typeof language !== 'string' ||
+          !allowedLanguages.includes(language)
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            `Invalid language; must be one of: ${allowedLanguages.join(', ')}`,
+          );
+        }
+
+        try {
+          await setLanguageAsync(language);
+        } catch (err) {
+          debugLogger.warn('setLanguageAsync failed:', err);
+          throw new RequestError(
+            -32603,
+            `Failed to switch UI language: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+
+        const resolvedLanguage = getCurrentLanguage();
+
+        // Pick up what the daemon just persisted so this process stops
+        // serving a stale merged view.
+        this.settings.reloadScopeFromDisk(SettingScope.User);
+
+        // UI-language-only switches do not change the system instruction;
+        // refresh sessions only when the output language moved.
+        let sessions = 0;
+        let failed = 0;
+        if (syncOutputLanguage) {
+          const allSessions = [...this.sessions.values()];
+          const results = await Promise.allSettled(
+            allSessions.map(async (s) => {
+              const cfg = s.getConfig();
+              await cfg.refreshHierarchicalMemory();
+              await cfg.getLlmClient()?.refreshSystemInstruction();
+            }),
+          );
+          sessions = results.length;
+          failed = results.filter((r) => r.status === 'rejected').length;
+          if (failed > 0) {
+            debugLogger.warn(
+              `User language refresh failed for ${failed}/${results.length} session(s)`,
+            );
+          }
+        }
+
+        return { language: resolvedLanguage, sessions, failed };
+      }
       case SERVE_CONTROL_EXT_METHODS.sessionRecap: {
         // Generate a one-sentence "where did I leave off" summary.
         // Best-effort: returns `null` on short history or model failure.
@@ -11575,6 +11722,14 @@ class QwenAgent implements Agent {
       case SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh: {
         const sessionId = params['sessionId'] as string;
         const rawRefreshBootstrap = params['refreshBootstrap'];
+        const rawSkillsOnly = params['skillsOnly'];
+        if (rawSkillsOnly !== undefined && typeof rawSkillsOnly !== 'boolean') {
+          throw RequestError.invalidParams(
+            undefined,
+            'skillsOnly must be a boolean',
+          );
+        }
+        const skillsOnly = rawSkillsOnly === true;
         if (
           rawRefreshBootstrap !== undefined &&
           typeof rawRefreshBootstrap !== 'boolean'
@@ -11595,16 +11750,28 @@ class QwenAgent implements Agent {
             errors.push(error);
           }
         };
+        if (skillsOnly) {
+          await runRefresh(async () => session.reloadSkillSettings());
+        }
         await runRefresh(async () => await extensionManager.refreshCache());
-        await runRefresh(async () => await extensionManager.refreshTools());
+        if (skillsOnly) {
+          await runRefresh(
+            async () =>
+              await config
+                .getSkillManager()
+                ?.refreshCache({ throwOnError: true }),
+          );
+        } else {
+          await runRefresh(async () => await extensionManager.refreshTools());
+        }
         const bootstrapConfig = this.config;
         if (rawRefreshBootstrap !== false && bootstrapConfig !== config) {
           await runRefresh(
-            async () => await this.refreshBootstrapExtensionStatus(),
+            async () => await this.refreshBootstrapExtensionStatus(skillsOnly),
           );
         }
         const discoveryConfig = this.workspaceMcpDiscoveryConfig;
-        if (discoveryConfig && discoveryConfig !== config) {
+        if (!skillsOnly && discoveryConfig && discoveryConfig !== config) {
           const discoveryExtensionManager =
             discoveryConfig.getExtensionManager();
           await runRefresh(
@@ -11617,8 +11784,13 @@ class QwenAgent implements Agent {
         await runRefresh(
           async () => await config.getLlmClient()?.refreshSystemInstruction(),
         );
-        await runRefresh(
-          async () => await session.sendAvailableCommandsUpdate(),
+        await runRefresh(async () =>
+          skillsOnly
+            ? await session.refreshSkillsFromSettings({
+                reloadSettings: false,
+                notifyConfigChanged: false,
+              })
+            : await session.sendAvailableCommandsUpdate(),
         );
         if (errors.length > 0) {
           const details = errors
@@ -12535,6 +12707,7 @@ class QwenAgent implements Agent {
             ) {
               try {
                 await config.switchModel(authType, newModelName);
+                session.reloadReasoningSelection();
               } catch (err) {
                 debugLogger.warn(
                   `reload: switchModel failed for session ${id}: ${err}`,
@@ -12542,12 +12715,21 @@ class QwenAgent implements Agent {
               }
             } else if ((providersChanged || envChanged) && authType) {
               try {
-                await config.refreshAuth(authType);
+                await this.refreshAuthWithPersistedReasoning(
+                  config,
+                  this.settings,
+                  authType,
+                  undefined,
+                  session.getSessionReasoningSelection(),
+                );
+                session.reloadReasoningSelection();
               } catch (err) {
                 debugLogger.warn(
                   `reload: refreshAuth failed for session ${id}: ${err}`,
                 );
               }
+            } else if (changed.has('model')) {
+              session.reloadReasoningSelection();
             }
 
             if (changed.has('tools')) {
@@ -13056,6 +13238,7 @@ class QwenAgent implements Agent {
               : {}),
           }
         : undefined,
+      buildEnabledSkillNamesProvider(settings),
     );
     if (sessionSource) {
       config.setSessionSource(sessionSource.sourceType, sessionSource.sourceId);
@@ -13201,7 +13384,44 @@ class QwenAgent implements Agent {
     }
   }
 
-  private async ensureAuthenticated(config: Config): Promise<void> {
+  private async refreshAuthWithPersistedReasoning(
+    config: Config,
+    settings: LoadedSettings,
+    authType: AuthType,
+    isInitialAuth?: boolean,
+    sessionSelection?: ReasoningSelection,
+  ): Promise<void> {
+    await config.refreshAuth(authType, isInitialAuth);
+    const selection =
+      sessionSelection ??
+      parseReasoningSelection(settings.merged.model?.reasoningEffort);
+    if (!selection || selection === REASONING_EFFORT_DEFAULT) {
+      return;
+    }
+    const generation = config.getContentGeneratorConfig?.();
+    const modelId = generation?.model ?? config.getModel();
+    if (
+      !isReasoningSelectionSupported(
+        modelId,
+        selection,
+        generation?.thinkingMandatory === true,
+      )
+    ) {
+      return;
+    }
+    const modelReasoning = this.getModelReasoningConfiguration(config);
+    if (generation && modelReasoning && !modelReasoning.toggleOnly) {
+      clearReasoningRequestOverrides(generation);
+    }
+    if (selection === REASONING_EFFORT_NONE) {
+      applyReasoningSelection(config, REASONING_EFFORT_NONE);
+    }
+  }
+
+  private async ensureAuthenticated(
+    config: Config,
+    settings: LoadedSettings,
+  ): Promise<void> {
     const selectedType = config.getModelsConfig().getCurrentAuthType();
     if (!selectedType) {
       throw RequestError.authRequired(
@@ -13211,7 +13431,12 @@ class QwenAgent implements Agent {
     }
 
     try {
-      await config.refreshAuth(selectedType, true);
+      await this.refreshAuthWithPersistedReasoning(
+        config,
+        settings,
+        selectedType,
+        true,
+      );
     } catch (e) {
       debugLogger.error(`Authentication failed: ${e}`);
       throw RequestError.authRequired(
@@ -13421,7 +13646,7 @@ class QwenAgent implements Agent {
           if (options.beforeDeferredWorkspaceActivation) {
             await options.beforeDeferredWorkspaceActivation();
           } else {
-            await this.ensureAuthenticated(config);
+            await this.ensureAuthenticated(config, settings);
           }
           this.assertManagedSessionAdmission();
           await config.activateProvisionalWorkspace();
@@ -13497,7 +13722,7 @@ class QwenAgent implements Agent {
             envReload.updatedKeys.length > 0 ||
             envReload.removedKeys.length > 0
           ) {
-            await this.ensureAuthenticated(config);
+            await this.ensureAuthenticated(config, settings);
           }
         }
         if (providerReloadRevision === this.modelProviderReloadRevision) break;
@@ -13682,6 +13907,17 @@ class QwenAgent implements Agent {
       options: configModelOptions,
     };
 
+    if (
+      activeRuntimeSnapshot ||
+      currentModelId.startsWith(ACP_ROUTE_ID_PREFIX) ||
+      !isReasoningSelectionSupported(
+        rawCurrentModelId,
+        REASONING_EFFORT_DEFAULT,
+      )
+    ) {
+      return [modeConfigOption, modelConfigOption];
+    }
+
     const generation = config.getContentGeneratorConfig();
     const modelReasoning = this.getModelReasoningConfiguration(
       config,
@@ -13738,6 +13974,7 @@ class QwenAgent implements Agent {
     const reasoningEnabled =
       generation.reasoning !== false &&
       (!reasoningOverride || !overrideDisablesReasoning);
+    const canDisableReasoning = generation.thinkingMandatory !== true;
     const reasoningEffortConfigOption: SessionConfigOption = (modelReasoning
       ? buildModelReasoningConfigOption(rawCurrentModelId, {
           enabled: reasoningEnabled,
@@ -13750,8 +13987,20 @@ class QwenAgent implements Agent {
       description: 'How hard reasoning-capable models should think',
       category: 'thought_level',
       type: 'select' as const,
-      currentValue: currentModelEffort ?? REASONING_EFFORT_DEFAULT,
+      currentValue:
+        generation.reasoning === false && canDisableReasoning
+          ? REASONING_EFFORT_NONE
+          : (currentModelEffort ?? REASONING_EFFORT_DEFAULT),
       options: [
+        ...(canDisableReasoning
+          ? [
+              {
+                value: REASONING_EFFORT_NONE,
+                name: 'Thinking off',
+                description: 'Disable thinking for this session',
+              },
+            ]
+          : []),
         {
           value: REASONING_EFFORT_DEFAULT,
           name: 'Default',

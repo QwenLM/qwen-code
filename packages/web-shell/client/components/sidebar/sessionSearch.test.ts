@@ -37,6 +37,21 @@ describe('sessionMatchesGitQuery', () => {
     expect(sessionMatchesGitQuery(s, '#9500')).toBe(true);
   });
 
+  it('matches the number of an issue a bound PR closes', () => {
+    const s = session({
+      prs: [
+        {
+          number: 9517,
+          url: 'https://github.com/o/r/pull/9517',
+          issues: [{ number: 7, url: 'https://github.com/o/r/issues/7' }],
+        },
+      ],
+    });
+    expect(sessionMatchesGitQuery(s, '7')).toBe(true);
+    expect(sessionMatchesGitQuery(s, '#7')).toBe(true);
+    expect(sessionMatchesGitQuery(s, '70')).toBe(false);
+  });
+
   it('does not partially match the PR number', () => {
     const s = session({
       prs: [{ number: 9517, url: 'https://github.com/o/r/pull/9517' }],

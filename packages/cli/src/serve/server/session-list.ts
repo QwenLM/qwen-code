@@ -10,7 +10,9 @@ import {
   SessionOrganizationError,
   Storage,
   readWorktreeSession,
+  canonicalSessionPrUrl,
   readSessionPrs,
+  toSessionPrInfo,
   type SessionArchiveState,
   type SessionGroupPresetColor,
   type SessionPr,
@@ -530,36 +532,43 @@ function mergeLiveSessionSummary(
 }
 
 function sidecarToPrInfos(sidecar: readonly SessionPr[]): SessionPrInfo[] {
-  return sidecar.map(({ number, url, state }) => ({
-    number,
-    url,
-    ...(state ? { state } : {}),
-  }));
+  return sidecar.map(toSessionPrInfo);
 }
 
 /**
  * Merges persisted (sidecar-enriched) PR bindings with a live entry's for
  * summary rendering: dedupe by number (live url wins, live-only bindings
- * sort latest). For `state` the persisted sidecar wins: the refresh timer
- * rewrites it there while the live entry is frozen at bind-time.
+ * sort latest). For `state` and `issues` the persisted sidecar wins: the
+ * refresh timer rewrites them there while the live entry is frozen at
+ * bind-time — but only for the same PR (same canonical url), as in every
+ * other merge site: between a cross-repository re-bind's live mutation and
+ * its sidecar write, the stale sidecar still names the other repository's
+ * same-numbered PR, whose snapshot must not attach to the new binding.
  */
 function mergeSummaryPrs(
   persistedPrs: readonly SessionPrInfo[] | undefined,
   livePrs: readonly SessionPrInfo[] | undefined,
 ): SessionPrInfo[] {
   const live = livePrs ?? [];
-  const persistedByNumber = new Map(
-    (persistedPrs ?? []).map((p) => [p.number, p]),
-  );
   return [
     ...(persistedPrs ?? []).filter(
       (p) => !live.some((l) => l.number === p.number),
     ),
     ...live.map((l) => {
-      const persisted = persistedByNumber.get(l.number);
-      return persisted?.state !== undefined && persisted.state !== l.state
-        ? { ...l, state: persisted.state }
-        : l;
+      // Matched by url, not a number-keyed map: a hand-edited sidecar can
+      // hold two same-numbered entries, and a last-wins lookup would let
+      // the foreign one shadow the live binding's own snapshot.
+      const persisted = (persistedPrs ?? []).find(
+        (p) =>
+          p.number === l.number &&
+          canonicalSessionPrUrl(p.url) === canonicalSessionPrUrl(l.url),
+      );
+      if (!persisted) return l;
+      return {
+        ...l,
+        ...(persisted.state ? { state: persisted.state } : {}),
+        ...(persisted.issues ? { issues: persisted.issues } : {}),
+      };
     }),
   ];
 }
