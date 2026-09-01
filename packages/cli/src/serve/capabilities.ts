@@ -328,6 +328,12 @@ export const SERVE_CAPABILITY_REGISTRY = {
   writer_idle_timeout: { since: 'v1' },
   non_blocking_prompt: { since: 'v1' },
   session_language: { since: 'v1' },
+  // Sessionless user-level language sync (`POST /language`) for hosts that
+  // switch language before any session exists (issue #10234). Advertised
+  // CONDITIONALLY with `workspace_settings`: the route persists user-scope
+  // settings, so daemons without settings persistence omit the tag and
+  // return 404.
+  user_language_sync: { since: 'v1' },
   session_rewind: { since: 'v1' },
   workspace_hooks: { since: 'v1' },
   session_hooks: { since: 'v1' },
@@ -372,6 +378,8 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // with a display). Headless hosts omit the tag so clients hide the
   // Browse affordance instead of surfacing a guaranteed picker failure.
   native_directory_picker: { since: 'v1' },
+  // Workspace-owned runtime lifecycle status and explicit on-demand startup.
+  workspace_runtime: { since: 'v1' },
   // Workspace-qualified core REST routes under `/workspaces/:workspace/...`.
   // Covers core file read/write/upload, status/permissions/trust/lifecycle/MCP/tool,
   // memory, workspace agent CRUD, and persisted session organization surfaces.
@@ -395,6 +403,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // projections. This is additive to the legacy primary-workspace
   // `workspace_extensions` contract.
   extension_management_v2: { since: 'v1' },
+  extension_state: { since: 'v1' },
   extension_git_credentials: { since: 'v1' },
   extension_local_path_install: { since: 'v1' },
   // Workspace-qualified, daemon-local persisted transcript paging. The tag is
@@ -518,6 +527,7 @@ export interface AdvertiseFeatureToggles {
   scratchWorkspaceRegistrationAvailable?: boolean;
   workspaceRuntimeRemovalAvailable?: boolean;
   nativeDirectoryPickerAvailable?: boolean;
+  workspaceRuntimeAvailable?: boolean;
   /**
    * Whether the HTTP ACP surface is enabled (default on; opts out via
    * QWEN_SERVE_ACP_HTTP=0). Workspace-qualified ACP is only advertised when on.
@@ -589,6 +599,7 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
       toggles.writerIdleTimeoutMs > 0,
   ],
   ['workspace_settings', (toggles) => toggles.persistSettingAvailable === true],
+  ['user_language_sync', (toggles) => toggles.persistSettingAvailable === true],
   ['workspace_voice', (toggles) => toggles.persistSettingAvailable === true],
   [
     'workspace_voice_transcription',
@@ -659,6 +670,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   [
     'native_directory_picker',
     (toggles) => toggles.nativeDirectoryPickerAvailable === true,
+  ],
+  [
+    'workspace_runtime',
+    (toggles) => toggles.workspaceRuntimeAvailable === true,
   ],
   [
     'workspace_qualified_acp',

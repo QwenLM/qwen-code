@@ -103,8 +103,9 @@
   padding: 0 5px;
 }
 
-/* Keep the icon directly after the folder name. */
-.headerRow:has(.gitPill) .header {
+/* Keep the icon directly after the folder name — unless the header carries
+   session counts, which sit at its right edge and push the icon after them. */
+.headerRow:has(.gitPill) .header:not(:has(.headerCounts)) {
   flex-grow: 0;
 }
 
@@ -177,4 +178,59 @@
   .sessionItemReadOnly:hover .sessionNameInner {
     animation: none;
   }
+}
+
+/* Session counts at the right edge of the folder header. */
+.headerCounts {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  padding-left: 6px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted-foreground);
+}
+
+.headerCount {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.headerCount::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.headerCountRunning {
+  color: var(--success-color, #3fb950);
+}
+
+.headerCountAttention {
+  color: var(--warning-color, #d29922);
+}
+
+.headerCountTotal::before {
+  display: none;
+}
+
+/* Full path under an expanded folder header. */
+.path {
+  padding: 0 8px 2px 30px;
+  overflow: hidden;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 10.5px;
+  line-height: 14px;
+  color: var(--muted-foreground);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.pathCompact {
+  padding-left: 26px;
 }

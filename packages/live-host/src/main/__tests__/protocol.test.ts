@@ -113,7 +113,23 @@ const DAEMON_PROTOCOL_TYPES_URL = new URL(
   import.meta.url,
 );
 
+const QWEN_LIVE_PROTOCOL_TYPES_URL = new URL(
+  '../../../../qwen-live/src/host/types.ts',
+  import.meta.url,
+);
+
 describe('Live Host protocol', () => {
+  it('keeps the qwen-live daemon contract byte-identical to the cli copy', async () => {
+    // PROTOCOL_TYPE_PARITY type-checks against the cli copy only; the
+    // standalone qwen-live daemon validates and emits against its own copy.
+    // Byte-identity keeps a change to either copy from drifting silently.
+    const [cliSource, qwenLiveSource] = await Promise.all([
+      readFile(fileURLToPath(DAEMON_PROTOCOL_TYPES_URL), 'utf8'),
+      readFile(fileURLToPath(QWEN_LIVE_PROTOCOL_TYPES_URL), 'utf8'),
+    ]);
+    assert.equal(qwenLiveSource, cliSource);
+  });
+
   it('stays synchronized with the daemon protocol contract', async () => {
     const source = await readFile(
       fileURLToPath(DAEMON_PROTOCOL_TYPES_URL),
