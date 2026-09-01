@@ -711,6 +711,10 @@ describe('serve fast path argument parsing', () => {
       ['session-reap-interval-ms', ['--session-reap-interval-ms', '1000']],
       ['session-idle-timeout-ms', ['--session-idle-timeout-ms', '1000']],
       [
+        'session-prompt-settled-close-grace-ms',
+        ['--session-prompt-settled-close-grace-ms', '60000'],
+      ],
+      [
         'permission-response-timeout-ms',
         ['--permission-response-timeout-ms', '1000'],
       ],
