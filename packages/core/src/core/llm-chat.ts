@@ -2413,13 +2413,16 @@ export class LlmChat {
           (finalRecord.tokens ? finalRecord : latestRecordWithTokens));
       const reusedEarlierResumeBoundary =
         usageRecord !== undefined && usageRecord !== finalRecord;
-      if (reusedEarlierResumeBoundary) {
+      const resumeBoundaryIsEstimated =
+        reusedEarlierResumeBoundary ||
+        usageRecord?.usageMetadataIsEstimated === true;
+      if (resumeBoundaryIsEstimated) {
         this.lastPromptTokenCountIsEstimated = true;
       }
       this.chatRecordingService?.recordAssistantTurn({
         ...finalRecord,
         tokens: usageRecord?.tokens,
-        usageMetadataIsEstimated: reusedEarlierResumeBoundary,
+        usageMetadataIsEstimated: resumeBoundaryIsEstimated,
         goalTokensAlreadyAccumulated: usageRecord?.goalTokensAlreadyAccumulated,
         message: buildRecordMessageFromHistoryParts(mergedTurn.parts ?? []),
       });
@@ -4415,8 +4418,10 @@ export class LlmChat {
             >[0] = {
               ...previousDeferredRecord.record,
               tokens: activeRecoveryVisibleTokens,
+              usageMetadataIsEstimated: true,
               goalTokensAlreadyAccumulated: undefined,
             };
+            self.lastPromptTokenCountIsEstimated = true;
             if (
               activeRecoveryVisibleTokens &&
               turnGoalContext &&
@@ -5224,6 +5229,19 @@ export class LlmChat {
                     preserveVisibleOutputOnFailure: true,
                     onModelTurnCommitted: (content) => {
                       self.activeRecoveryModelContent = content;
+                      const recoveryRecordStart =
+                        activeRecoveryDeferredRecordCount ??
+                        self.deferredMaxTokensRecords.length;
+                      for (
+                        let index = recoveryRecordStart;
+                        index < self.deferredMaxTokensRecords.length;
+                        index++
+                      ) {
+                        self.deferredMaxTokensRecords[
+                          index
+                        ]!.record.usageMetadataIsEstimated = true;
+                      }
+                      self.lastPromptTokenCountIsEstimated = true;
                     },
                   };
                 },
@@ -5316,6 +5334,9 @@ export class LlmChat {
                   type: StreamEventType.RETRY,
                   isContinuation: true,
                 };
+              }
+              if (isAbortError(recoveryError)) {
+                throw recoveryError;
               }
               // Emit a synthetic finish-reason chunk so the UI gets a
               // terminal signal (Finished event) instead of a partial
@@ -6676,6 +6697,7 @@ export class LlmChat {
     // disagree on suppressed or stripped finish chunks.
     let yieldedFinishReason: FinishReason | undefined;
     let firstObservedTerminalFinishReason: string | undefined;
+    let firstObservedTerminalModelPartIndex: number | undefined;
     const terminalChunks: GenerateContentResponse[] = [];
     const protocolTagDetector = new LeadingProtocolTagLeakDetector();
     let pendingProtocolParts: Part[] = [];
@@ -6716,6 +6738,7 @@ export class LlmChat {
     let terminalDrainTimedOut = false;
     let terminalDrainTimeout: ReturnType<typeof delay> | undefined;
     let providerIterationFailed = false;
+    let postTerminalAbortError: unknown = null;
 
     try {
       for (;;) {
@@ -6761,6 +6784,7 @@ export class LlmChat {
           chunk.candidates = [];
         } else if (incomingFinishReason !== undefined) {
           firstObservedTerminalFinishReason = incomingFinishReason;
+          firstObservedTerminalModelPartIndex = allModelParts.length;
         }
         const preparations = getToolCallPreparations(chunk);
         if (preparations.length > 0) {
@@ -6983,9 +7007,13 @@ export class LlmChat {
     } catch (e) {
       providerIterationFailed = true;
       if (firstObservedTerminalFinishReason !== undefined) {
-        debugLogger.warn(
-          `Provider stream failed after a terminal chunk; keeping the completed turn and ignoring the trailing error: ${e}`,
-        );
+        if (isAbortError(e)) {
+          postTerminalAbortError = e;
+        } else {
+          debugLogger.warn(
+            `Provider stream failed after a terminal chunk; keeping the completed turn and ignoring the trailing error: ${e}`,
+          );
+        }
       } else {
         streamError = e;
       }
@@ -7014,10 +7042,14 @@ export class LlmChat {
           .map((part) => part.text)
           .join('')
           .trim();
+        const hasAbandonedNonTextPart =
+          normalized.consolidatedHistoryParts.some(
+            (part) => !isPlainTextPart(part),
+          );
         if (
           abandonedText ||
           normalized.thoughtContentParts.length > 0 ||
-          hasToolCall
+          hasAbandonedNonTextPart
         ) {
           const modelContent: Content = {
             role: 'model',
@@ -7058,6 +7090,16 @@ export class LlmChat {
         } else {
           await awaitBoundedStreamReturn(returnPromise);
         }
+      }
+    }
+
+    if (postTerminalAbortError !== null && withheldTerminalObserved) {
+      allModelParts.length = firstObservedTerminalModelPartIndex ?? 0;
+      hasToolCall = allModelParts.some(
+        (part) => part.functionCall !== undefined,
+      );
+      if (allModelParts.length === 0) {
+        throw postTerminalAbortError;
       }
     }
 
@@ -7119,8 +7161,6 @@ export class LlmChat {
     const { thoughtContentParts, consolidatedHistoryParts } =
       normalizeStreamedModelParts(allModelParts);
 
-    let contentParts = allModelParts.filter((part) => !part.thought);
-
     let contentText = consolidatedHistoryParts
       .filter((part) => part.text)
       .map((part) => part.text)
@@ -7169,14 +7209,12 @@ export class LlmChat {
           });
         }
         consolidatedHistoryParts.push(...recovery.functionCallParts);
-        // Recompute contentText and contentParts so the JSONL recording
-        // below stays aligned with in-memory history (--resume fidelity).
+        // Recompute contentText after replacing the recovered XML parts.
         contentText = consolidatedHistoryParts
           .filter((part) => part.text)
           .map((part) => part.text)
           .join('')
           .trim();
-        contentParts = consolidatedHistoryParts;
         // Build a synthetic chunk so the agent loop (turn.ts) actually
         // executes the recovered tool calls; yielded after the throw sites.
         const syntheticChunk = {
@@ -7215,7 +7253,13 @@ export class LlmChat {
     // exhausted the quiet completion is accepted rather than failing the
     // run (#9026): some model families legitimately end turns silently
     // after a tool result.
-    const hasAnyContent = contentText || thoughtContentParts.length > 0;
+    const hasNonTextContent = consolidatedHistoryParts.some(
+      (part) => !isPlainTextPart(part) && Object.keys(part).length > 0,
+    );
+    const hasAnyContent =
+      Boolean(contentText) ||
+      thoughtContentParts.length > 0 ||
+      hasNonTextContent;
     const lacksVisibleToolResultProgress =
       isToolResultContinuation &&
       (!contentText || contentText === GEMINI_EMPTY_CONTENT_PLACEHOLDER);
@@ -7356,6 +7400,7 @@ export class LlmChat {
         emptyMaxTokensOwnedByRecovery ||
         thoughtContentParts.length > 0 ||
         contentText ||
+        hasNonTextContent ||
         hasToolCall ||
         usageMetadata)
     ) {
@@ -7365,23 +7410,7 @@ export class LlmChat {
         ChatRecordingService['recordAssistantTurn']
       >[0] = {
         model,
-        message: acceptedQuietToolResultCompletion
-          ? acceptedTurnParts
-          : [
-              ...thoughtContentParts,
-              ...(contentText ? [{ text: contentText }] : []),
-              ...(hasToolCall
-                ? contentParts
-                    .map(redactStructuredOutputArgsForRecording)
-                    .filter(
-                      (
-                        p,
-                      ): p is {
-                        functionCall: NonNullable<Part['functionCall']>;
-                      } => p !== null,
-                    )
-                : []),
-            ],
+        message: buildRecordMessageFromHistoryParts(acceptedTurnParts),
         tokens: recordedUsage,
         contextWindowSize,
         ...(goalContext ? { goalContext: { ...goalContext } } : {}),
@@ -7515,6 +7544,9 @@ export class LlmChat {
       this.deferredMaxTokensRecordTarget ??= modelContent;
     }
     onModelTurnCommitted?.(modelContent);
+    if (postTerminalAbortError !== null) {
+      throw postTerminalAbortError;
+    }
     const bufferedTerminalHasFinishReason = terminalChunks.some((chunk) =>
       Boolean(firstCandidateFinishReason(chunk)),
     );

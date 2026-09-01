@@ -15096,6 +15096,162 @@ describe('LlmChat', async () => {
       expect(recordedText(recordAssistantTurn)).toBe('The answer is 42.');
     });
 
+    it.each([
+      ['inline data', { inlineData: { mimeType: 'image/png', data: 'AAAA' } }],
+      [
+        'executable code',
+        {
+          executableCode: {
+            language: Language.PYTHON,
+            code: 'print(1)',
+          },
+        },
+      ],
+    ] satisfies Array<[string, Part]>)(
+      'keeps abandoned %s output after a terminal chunk',
+      async (_name, nonTextPart) => {
+        const recordAssistantTurn = vi.fn();
+        const recordingChat = chatWithRecorder(recordAssistantTurn);
+        const response = (async function* () {
+          yield makeChunk([nonTextPart], 'STOP');
+          await new Promise<void>(() => undefined);
+        })();
+        const internalChat = recordingChat as unknown as {
+          processStreamResponse(
+            model: string,
+            stream: AsyncGenerator<GenerateContentResponse>,
+            routeKey: string,
+          ): AsyncGenerator<GenerateContentResponse>;
+        };
+        const iterator = internalChat.processStreamResponse(
+          'test-model',
+          response,
+          'test-route',
+        );
+
+        const first = await iterator.next();
+        expect(first.done).toBe(false);
+        expect(first.value?.candidates?.[0]?.finishReason).toBe(
+          FinishReason.STOP,
+        );
+
+        await iterator.return?.(undefined);
+        expect(recordingChat.getHistory().at(-1)?.parts).toEqual([nonTextPart]);
+        expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+        expect(recordAssistantTurn.mock.calls[0]![0].message).toEqual([
+          nonTextPart,
+        ]);
+      },
+    );
+
+    it.each([
+      ['inline data', { inlineData: { mimeType: 'image/png', data: 'AAAA' } }],
+      [
+        'executable code',
+        {
+          executableCode: {
+            language: Language.PYTHON,
+            code: 'print(1)',
+          },
+        },
+      ],
+    ] satisfies Array<[string, Part]>)(
+      'keeps fully consumed %s output after a terminal chunk',
+      async (_name, nonTextPart) => {
+        const recordAssistantTurn = vi.fn();
+        const recordingChat = chatWithRecorder(recordAssistantTurn);
+        const internalChat = recordingChat as unknown as {
+          processStreamResponse(
+            model: string,
+            stream: AsyncGenerator<GenerateContentResponse>,
+            routeKey: string,
+          ): AsyncGenerator<GenerateContentResponse>;
+        };
+
+        for await (const _chunk of internalChat.processStreamResponse(
+          'test-model',
+          makeStream([makeChunk([nonTextPart], 'STOP')]),
+          'test-route',
+        )) {
+          // consume
+        }
+
+        expect(recordingChat.getHistory()).toEqual([
+          { role: 'model', parts: [nonTextPart] },
+        ]);
+        expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+        expect(recordAssistantTurn.mock.calls[0]![0].message).toEqual([
+          nonTextPart,
+        ]);
+      },
+    );
+
+    it('does not persist a buffered terminal turn hidden by an abort', async () => {
+      const recordAssistantTurn = vi.fn();
+      const recordingChat = chatWithRecorder(recordAssistantTurn);
+      const abortError = new DOMException('Aborted', 'AbortError');
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        (async function* () {
+          yield makeChunk([{ text: 'hidden' }], 'MAX_TOKENS');
+          throw abortError;
+        })(),
+      );
+
+      const delivered: StreamEvent[] = [];
+      const stream = await recordingChat.sendMessageStream(
+        'gemini-3-pro',
+        { message: 'essay' },
+        'hidden-terminal-abort',
+      );
+      await expect(
+        (async () => {
+          for await (const event of stream) {
+            delivered.push(event);
+          }
+        })(),
+      ).rejects.toBe(abortError);
+      expect(delivered).toEqual([]);
+      expect(recordingChat.getHistory()).toEqual([
+        { role: 'user', parts: [{ text: 'essay' }] },
+      ]);
+      expect(recordAssistantTurn).not.toHaveBeenCalled();
+    });
+
+    it('surfaces a recovery abort after preserving delivered output', async () => {
+      const recordAssistantTurn = vi.fn();
+      const recordingChat = chatWithRecorder(recordAssistantTurn);
+      const abortError = new DOMException('Aborted', 'AbortError');
+      const streams = [
+        makeStream([makeChunk([{ text: 'Hello' }], 'MAX_TOKENS')]),
+        (async function* () {
+          yield makeChunk([{ text: ' world' }]);
+          yield makeChunk([], 'STOP');
+          throw abortError;
+        })(),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await recordingChat.sendMessageStream(
+        'gemini-3-pro',
+        { message: 'essay' },
+        'recovery-terminal-abort',
+      );
+      await expect(
+        (async () => {
+          for await (const _ of stream) {
+            /* consume */
+          }
+        })(),
+      ).rejects.toBe(abortError);
+
+      expect(recordingChat.getLastModelMessageText()).toBe('Hello world');
+      expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+      expect(recordedText(recordAssistantTurn)).toBe('Hello world');
+    });
+
     it('does not commit an empty STOP when returned before provider EOF', async () => {
       const recordAssistantTurn = vi.fn();
       const recordingChat = chatWithRecorder(recordAssistantTurn);
@@ -20593,10 +20749,12 @@ describe('LlmChat', async () => {
       expect(recordedMessage).toEqual(recordingChat.getHistory().at(-1)?.parts);
     });
 
-    it('keeps final-attempt usage in the merged record for resume accounting', async () => {
+    it('marks final recovery usage estimated for resume accounting', async () => {
       // Goal billing owns per-attempt spend. The single durable assistant
       // record must keep the final request's prompt/total boundary so resume
-      // derives the same output-token baseline as the live chat.
+      // derives the same output-token baseline as the live chat. Its prompt
+      // count includes the synthetic recovery instruction that coalescing
+      // removes, so it is only an estimate for the persisted boundary.
       const recordAssistantTurn = vi.fn();
       const recordGoalTurnUsage = vi.fn();
       const recordingChat = chatWithRecorder(
@@ -20654,18 +20812,24 @@ describe('LlmChat', async () => {
       expect(tokens.candidatesTokenCount).toBe(20);
       expect(tokens.totalTokenCount).toBe(140);
       expect(
+        recordAssistantTurn.mock.calls[0]![0].usageMetadataIsEstimated,
+      ).toBe(true);
+      expect(recordingChat.isLastPromptTokenCountEstimated()).toBe(true);
+      expect(
         getResumeTokenCounts({
           messages: [
             {
               type: 'assistant',
               usageMetadata: tokens,
+              usageMetadataIsEstimated:
+                recordAssistantTurn.mock.calls[0]![0].usageMetadataIsEstimated,
             } as ChatRecord,
           ],
         }),
       ).toEqual({
         promptTokenCount: 120,
         outputTokenCount: 20,
-        isEstimated: false,
+        isEstimated: true,
       });
       expect(recordGoalTurnUsage.mock.calls.map((call) => call[1])).toEqual([
         expect.objectContaining({ totalTokenCount: 110 }),
