@@ -824,6 +824,104 @@ describe('computeApiTruncationIndex', () => {
   });
 });
 
+describe('restored (/restore) history fallback', () => {
+  // /restore loads the checkpoint clientHistory through JSON.stringify,
+  // which drops the Symbol marks from the restored entries, while UI items
+  // keep their string promptIds. The next live prompt then marks its own
+  // entry at push time, producing an unmarked restored prefix plus marked
+  // live suffix. Rewinding to a restored turn must resolve positionally
+  // instead of refusing with the mixed-history -1.
+
+  function userItemWithPromptId(
+    id: number,
+    text: string,
+    promptId: string,
+  ): HistoryItem {
+    const item = userItem(id, text) as HistoryItem & { promptId: string };
+    item.promptId = promptId;
+    return item;
+  }
+
+  it('resolves restored unmarked turns positionally once later sends are marked', () => {
+    const freshContent = userContent('fresh prompt');
+    markApiHistoryPrompt(freshContent, 'session########3');
+    const ui: HistoryItem[] = [
+      userItemWithPromptId(1, 'restored one', 'session########1'),
+      llmItem(2),
+      userItemWithPromptId(3, 'restored two', 'session########2'),
+      llmItem(4),
+      userItemWithPromptId(5, 'fresh prompt', 'session########3'),
+      llmItem(6),
+    ];
+    const api: Content[] = [
+      userContent('restored one'), // unmarked: serialization dropped it
+      modelContent('response 1'),
+      userContent('restored two'), // unmarked: serialization dropped it
+      modelContent('response 2'),
+      freshContent, // marked: live send after the restore
+      modelContent('response 3'),
+    ];
+
+    // Rewinding to the first restored turn keeps nothing.
+    expect(computeApiTruncationIndex(ui, 1, api)).toBe(0);
+    // Rewinding to the second restored turn truncates before its entry.
+    expect(computeApiTruncationIndex(ui, 3, api)).toBe(2);
+    // Rewinding to the live (marked) turn still resolves through identity.
+    expect(computeApiTruncationIndex(ui, 5, api)).toBe(4);
+  });
+
+  it('keeps duplicated identities failing closed', () => {
+    const first = userContent('one');
+    const second = userContent('two');
+    markApiHistoryPrompt(first, 'dup-id');
+    markApiHistoryPrompt(second, 'dup-id');
+    const ui: HistoryItem[] = [
+      userItemWithPromptId(1, 'one', 'dup-id'),
+      llmItem(2),
+    ];
+    const api: Content[] = [
+      first,
+      modelContent('r1'),
+      second,
+      modelContent('r2'),
+    ];
+    expect(computeApiTruncationIndex(ui, 1, api)).toBe(-1);
+  });
+
+  it('refuses to resolve a marked entry positionally in truly mixed history', () => {
+    // The target's id matches nothing, but the positional candidate is
+    // marked with a DIFFERENT identity: that entry is owned by its
+    // identity, so the fallback must not guess it.
+    const markedOther = userContent('claimed by another id');
+    markApiHistoryPrompt(markedOther, 'other-id');
+
+    // First-turn branch: the entry at the truncation boundary is marked.
+    const uiFirst: HistoryItem[] = [
+      userItemWithPromptId(1, 'lost mark', 'lost-id'),
+      llmItem(2),
+    ];
+    expect(
+      computeApiTruncationIndex(uiFirst, 1, [markedOther, modelContent('r')]),
+    ).toBe(-1);
+
+    // Walk branch: the candidate user-text entry mid-history is marked.
+    const uiMid: HistoryItem[] = [
+      userItemWithPromptId(1, 'a', 'id-a'),
+      llmItem(2),
+      userItemWithPromptId(3, 'b', 'id-b'),
+      llmItem(4),
+    ];
+    expect(
+      computeApiTruncationIndex(uiMid, 3, [
+        userContent('a'), // unmarked restored entry
+        modelContent('r1'),
+        markedOther,
+        modelContent('r2'),
+      ]),
+    ).toBe(-1);
+  });
+});
+
 describe('isRealUserTurn', () => {
   it('returns true for normal user prompts', () => {
     expect(isRealUserTurn(userItem(1, 'hello world'))).toBe(true);

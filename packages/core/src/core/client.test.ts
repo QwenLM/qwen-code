@@ -11385,6 +11385,103 @@ Other open files:
         ).toHaveBeenCalledTimes(2);
       });
 
+      it('donates the stripped identity when the retry is sent under a fresh prompt id', async () => {
+        // No first-party Retry surface resends the original prompt id: the
+        // TUI dispatches submitQuery(retryQuery, Retry, undefined, ...) and
+        // submitQuery mints a fresh `sessionId########(N+1)`, which never
+        // equals the stripped orphan's mark. The adoption gate must donate
+        // on the content match alone, otherwise the retried turn lands
+        // unmarked while the UI item keeps the original id and rewind
+        // refuses it as "compressed".
+        const orphanedPrompt: Content = {
+          role: 'user',
+          parts: [{ text: 'my prompt' }],
+        };
+        markApiHistoryPrompt(orphanedPrompt, 'session########3');
+        const mockChat: Partial<LlmChat> = {
+          addHistory: vi.fn(),
+          getHistory: vi.fn().mockReturnValue([]),
+          getHistoryLength: vi.fn().mockReturnValue(0),
+          setHistory: vi.fn(),
+          stripOrphanedUserEntriesFromHistory: vi
+            .fn()
+            .mockReturnValue([orphanedPrompt]),
+          repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
+        };
+        client['chat'] = mockChat as LlmChat;
+
+        mockTurnRunFn.mockImplementation(() =>
+          (async function* () {
+            yield { type: 'content', value: 'retry response' };
+          })(),
+        );
+
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'my prompt' }],
+            new AbortController().signal,
+            'session########4',
+            { type: SendMessageType.Retry },
+          ),
+        );
+        expect(mockTurnConstructorFn.mock.calls.at(-1)?.[3]).toBe(
+          'session########3',
+        );
+      });
+
+      it('matches retry content when the stripped entry carries a trailing hook context part', async () => {
+        // A UserPromptSubmit hook returning additional context appends a
+        // trailing part at push time, while hooks do not fire for Retry: the
+        // stripped entry is [userText, hookContextPart] against the bare
+        // retry [userText]. Tail-anchored matching selected the hook part
+        // and failed; the window match must find the user text anywhere in
+        // the entry (and keep refusing genuinely different content).
+        const orphanedPrompt: Content = {
+          role: 'user',
+          parts: [
+            { text: 'my prompt' },
+            {
+              text: '<qwen:user-prompt-submit-context>\nextra context\n</qwen:user-prompt-submit-context>',
+            },
+          ],
+        };
+        markApiHistoryPrompt(orphanedPrompt, 'prompt-hook-context');
+        const mockChat: Partial<LlmChat> = {
+          addHistory: vi.fn(),
+          getHistory: vi.fn().mockReturnValue([]),
+          getHistoryLength: vi.fn().mockReturnValue(0),
+          setHistory: vi.fn(),
+          stripOrphanedUserEntriesFromHistory: vi
+            .fn()
+            .mockReturnValue([orphanedPrompt]),
+          repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
+        };
+        client['chat'] = mockChat as LlmChat;
+
+        mockTurnRunFn.mockImplementation(() =>
+          (async function* () {
+            yield { type: 'content', value: 'retry response' };
+          })(),
+        );
+
+        for (const [text, expectedIdentity] of [
+          ['my prompt', 'prompt-hook-context'],
+          ['other prompt', undefined],
+        ] as const) {
+          await fromAsync(
+            client.sendMessageStream(
+              [{ text }],
+              new AbortController().signal,
+              'prompt-hook-context-next',
+              { type: SendMessageType.Retry },
+            ),
+          );
+          expect(mockTurnConstructorFn.mock.calls.at(-1)?.[3]).toBe(
+            expectedIdentity,
+          );
+        }
+      });
+
       it('restores stripped retry entries when only a concurrent send pushes', async () => {
         const orphanedPrompt: Content = {
           role: 'user',

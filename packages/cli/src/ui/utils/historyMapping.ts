@@ -156,6 +156,7 @@ export function computeApiTruncationIndex(
   if (compressionIndex !== -1 && targetIndex <= compressionIndex) return -1;
 
   const target = uiHistory[targetIndex]!;
+  let allowRestoredPositionalFallback = false;
   if (isRealUserTurn(target) && target.promptId) {
     const identifiedIndex = findApiHistoryPromptIndex(
       apiHistory,
@@ -163,9 +164,29 @@ export function computeApiTruncationIndex(
     );
     if (identifiedIndex !== -1) return identifiedIndex;
 
-    // A fully serialized history has no Symbol metadata and uses the legacy
-    // positional fallback. Mixed identified history must not guess.
-    if (apiHistory.some(getApiHistoryPromptId)) return -1;
+    let hasMarks = false;
+    let targetIdOccurrences = 0;
+    for (const entry of apiHistory) {
+      const entryId = getApiHistoryPromptId(entry);
+      if (entryId === undefined) continue;
+      hasMarks = true;
+      if (entryId === target.promptId) targetIdOccurrences++;
+    }
+
+    if (hasMarks) {
+      // The target's identity is present but the lookup still failed: it is
+      // duplicated, and the positional walk must never guess between two
+      // entries marked with the same identity. Fail closed.
+      if (targetIdOccurrences > 0) return -1;
+      // Marks exist but none is the target's: the /restore shape. Checkpoint
+      // JSON serialization drops the Symbol marks from restored entries
+      // while later live sends stay marked, so the target's id matches
+      // nothing. Allow the positional walk below, but only accept an
+      // UNMARKED resolution: a marked entry is owned by its identity, and
+      // accepting one positionally would guess across a truly mixed history.
+      // A mark-free history (fully serialized) also falls through, as before.
+      allowRestoredPositionalFallback = true;
+    }
   }
 
   // Count how many UI user turns exist before the target
@@ -197,6 +218,17 @@ export function computeApiTruncationIndex(
     ) {
       return -1;
     }
+    // The restored-history fallback may only resolve to an unmarked entry;
+    // a marked entry is owned by its identity and must not be guessed
+    // positionally.
+    const firstEntry = apiHistory[startIndex];
+    if (
+      allowRestoredPositionalFallback &&
+      firstEntry &&
+      getApiHistoryPromptId(firstEntry) !== undefined
+    ) {
+      return -1;
+    }
     // Rewinding to the first user turn: keep only startup context (if any)
     return startIndex;
   }
@@ -211,6 +243,14 @@ export function computeApiTruncationIndex(
       // The target turn is the (uiUserTurnCount + 1)th real user prompt.
       // We want to truncate right before it.
       if (realUserPromptCount > uiUserTurnCount) {
+        // Same rule as the first-turn branch: the restored-history fallback
+        // never resolves onto a marked entry.
+        if (
+          allowRestoredPositionalFallback &&
+          getApiHistoryPromptId(apiHistory[i]!) !== undefined
+        ) {
+          return -1;
+        }
         return i;
       }
     }
