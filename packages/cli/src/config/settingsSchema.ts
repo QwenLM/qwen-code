@@ -26,6 +26,7 @@ import {
   DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
   DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
   OutputFormat,
+  REASONING_EFFORT_TIERS,
   SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
 } from '@qwen-code/qwen-code-core';
 import type { CustomTheme } from '../ui/themes/theme.js';
@@ -1587,6 +1588,11 @@ const SETTINGS_SCHEMA = {
           { value: 'xhigh', label: 'Extra High' },
           { value: 'max', label: 'Max' },
         ],
+        // WebShell persists none; the TUI keeps its existing tier-only control.
+        jsonSchemaOverride: {
+          type: 'string',
+          enum: ['none', ...REASONING_EFFORT_TIERS],
+        },
       },
       maxSessionTurns: {
         type: 'integer',
@@ -4113,9 +4119,13 @@ type InferSettings<T extends SettingsSchema> = {
   -readonly [K in keyof T]?: T[K] extends { properties: SettingsSchema }
     ? InferSettings<T[K]['properties']>
     : T[K]['type'] extends 'enum'
-      ? T[K]['options'] extends readonly SettingEnumOption[]
-        ? T[K]['options'][number]['value']
-        : T[K]['default']
+      ? T[K] extends {
+          jsonSchemaOverride: { enum: ReadonlyArray<string | number> };
+        }
+        ? T[K]['jsonSchemaOverride']['enum'][number]
+        : T[K]['options'] extends readonly SettingEnumOption[]
+          ? T[K]['options'][number]['value']
+          : T[K]['default']
       : T[K]['default'] extends boolean
         ? boolean
         : T[K]['default'];
