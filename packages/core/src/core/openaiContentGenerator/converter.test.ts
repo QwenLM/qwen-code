@@ -5985,6 +5985,46 @@ describe('OpenAIContentConverter', () => {
       ).toBe(false);
     });
 
+    it('isolates grammar checks for schemas that share a top-level $id', async () => {
+      const sharedId = 'https://qwen-code.test/shared-tool-schema';
+      const makeSchema = () => ({
+        $id: sharedId,
+        type: 'object',
+        properties: {
+          value: { type: 'string', maxLength: 1999 },
+        },
+      });
+      const tools = [
+        {
+          functionDeclarations: [
+            { name: 'first', parametersJsonSchema: makeSchema() },
+            { name: 'second', parametersJsonSchema: makeSchema() },
+          ],
+        },
+      ] as Tool[];
+
+      const result = await converter.convertLlmToolsToOpenAI(tools);
+
+      expect(result.map(({ function: declaration }) => declaration)).toEqual([
+        {
+          name: 'first',
+          description: '',
+          parameters: {
+            type: 'object',
+            properties: { value: { type: 'string' } },
+          },
+        },
+        {
+          name: 'second',
+          description: '',
+          parameters: {
+            type: 'object',
+            properties: { value: { type: 'string' } },
+          },
+        },
+      ]);
+    });
+
     it('should convert Gemini tools with parameters field', async () => {
       const llmTools = [
         {
