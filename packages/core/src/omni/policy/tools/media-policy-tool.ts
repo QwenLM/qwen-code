@@ -69,7 +69,7 @@ export const MEDIA_POLICY_IO_SCHEMA_PROPERTIES = {
   outputDir: {
     type: 'string',
     description:
-      'Absolute path of the directory the output file is written into.',
+      'Absolute path of an existing directory the output file is written into; it is not created automatically.',
   },
 } as const;
 
