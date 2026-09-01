@@ -5,13 +5,13 @@
  */
 
 import type React from 'react';
-import { memo, useMemo, useRef, useCallback } from 'react';
+import { memo, useMemo, useRef, useCallback, useState } from 'react';
 import type { DOMElement } from 'ink';
 import {
   escapeAnsiCtrlCodes,
   sanitizeSensitiveText,
 } from '../utils/textUtils.js';
-import type { HistoryItem } from '../types.js';
+import { ToolCallStatus, type HistoryItem } from '../types.js';
 import {
   UserMessage,
   UserShellMessage,
@@ -189,6 +189,108 @@ const ClickableThinkMessage: React.FC<{
         clickable={clickable}
       />
     </Box>
+  );
+};
+
+function hasRequiredToolInteraction(
+  props: React.ComponentProps<typeof ToolGroupMessage>,
+): boolean {
+  if (props.isUserInitiated) return true;
+  if (
+    props.embeddedShellFocused &&
+    props.toolCalls.some(
+      (tool) =>
+        tool.ptyId === props.activeShellPtyId &&
+        tool.status === ToolCallStatus.Executing,
+    )
+  ) {
+    return true;
+  }
+
+  return props.toolCalls.some((tool) => {
+    if (tool.status === ToolCallStatus.Confirming) return true;
+    const display = tool.resultDisplay;
+    return (
+      typeof display === 'object' &&
+      display !== null &&
+      'type' in display &&
+      display.type === 'task_execution' &&
+      'pendingConfirmation' in display &&
+      display.pendingConfirmation !== undefined
+    );
+  });
+}
+
+export const CollapsibleToolGroupMessage: React.FC<
+  React.ComponentProps<typeof ToolGroupMessage>
+> = (props) => {
+  const settings = useSettings();
+  const [expanded, setExpanded] = useState(false);
+  const ref = useRef<DOMElement>(null);
+  const pressRef = useRef<{ col: number; row: number } | null>(null);
+  const { rows: terminalHeight } = useTerminalSize();
+  const mouseTrackingEnabled = useMouseTrackingEnabled();
+  const clickable =
+    useVirtualViewport(settings.merged.ui?.useTerminalBuffer) &&
+    mouseTrackingEnabled;
+  const collapsed =
+    settings.merged.ui?.showToolCallDetails === false &&
+    !expanded &&
+    !props.fullDetail &&
+    !hasRequiredToolInteraction(props);
+
+  useMouseEvents(
+    useCallback(
+      (event: MouseEvent) => {
+        if (!collapsed || !ref.current) return;
+        if (event.name === 'move') {
+          if (
+            pressRef.current &&
+            (event.col !== pressRef.current.col ||
+              event.row !== pressRef.current.row)
+          ) {
+            pressRef.current = null;
+          }
+          return;
+        }
+        if (event.name !== 'left-press' && event.name !== 'left-release') {
+          pressRef.current = null;
+          return;
+        }
+        const metrics = measureElementPosition(ref.current);
+        const col = event.col - 1;
+        const row = layoutRowForEvent(ref.current, event.row, terminalHeight);
+        const isInside =
+          col >= metrics.x &&
+          col < metrics.x + metrics.width &&
+          row >= metrics.y &&
+          row < metrics.y + metrics.height;
+        if (event.name === 'left-press') {
+          pressRef.current = isInside
+            ? { col: event.col, row: event.row }
+            : null;
+          return;
+        }
+        const press = pressRef.current;
+        pressRef.current = null;
+        if (isInside && press?.col === event.col && press.row === event.row) {
+          setExpanded(true);
+        }
+      },
+      [collapsed, terminalHeight],
+    ),
+    { isActive: collapsed && clickable },
+  );
+
+  if (!collapsed) return <ToolGroupMessage {...props} />;
+
+  return (
+    <ToolGroupMessage
+      {...props}
+      hideDetails
+      expandHint={clickable ? 'click to expand' : 'ctrl+o to expand'}
+      summaryRef={ref}
+    />
   );
 };
 
@@ -400,7 +502,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
         />
       )}
       {itemForDisplay.type === 'tool_group' && (
-        <ToolGroupMessage
+        <CollapsibleToolGroupMessage
           toolCalls={itemForDisplay.tools}
           groupId={itemForDisplay.id}
           availableTerminalHeight={availableTerminalHeight}

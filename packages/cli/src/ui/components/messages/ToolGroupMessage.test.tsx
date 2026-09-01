@@ -178,6 +178,34 @@ describe('<ToolGroupMessage />', () => {
       expect(frame).toContain('MockTool[tool-2]');
     });
 
+    it('renders a one-line summary without tool arguments or results', () => {
+      vi.mocked(ToolMessage).mockClear();
+      const toolCalls = [
+        createToolCall({
+          name: 'exec',
+          description: 'const source = "many lines";',
+          resultDisplay: 'large tool output',
+        }),
+      ];
+
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage
+          {...baseProps}
+          toolCalls={toolCalls}
+          hideDetails
+          expandHint="click to expand"
+        />,
+      );
+
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain('exec');
+      expect(frame).toContain('click to expand');
+      expect(frame).not.toContain('const source');
+      expect(frame).not.toContain('large tool output');
+      expect(ToolMessage).not.toHaveBeenCalled();
+      expect(frame.split('\n')).toHaveLength(1);
+    });
+
     it('renders collapsible tools as summary via CompactToolGroupDisplay', () => {
       const toolCalls = [
         createToolCall({ callId: 'r1', name: 'ReadFile', description: 'a.ts' }),

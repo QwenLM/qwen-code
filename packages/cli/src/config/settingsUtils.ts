@@ -181,6 +181,7 @@ const SETTINGS_DIALOG_ORDER: readonly string[] = [
   'ide.enabled',
   'ui.showLineNumbers',
   'ui.hideTips',
+  'ui.showToolCallDetails',
   'general.terminalBell',
   'ui.enableWelcomeBack',
 

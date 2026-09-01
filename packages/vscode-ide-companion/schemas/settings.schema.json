@@ -465,6 +465,11 @@
           "type": "boolean",
           "default": true
         },
+        "showToolCallDetails": {
+          "description": "Show tool arguments and results inline. Disable to render ordinary tool calls as a one-line summary; click a summary in Virtualized History or press Ctrl+O to expand its details. Approval prompts, user-initiated shell commands, and focused interactive shells remain expanded.",
+          "type": "boolean",
+          "default": true
+        },
         "shellOutputMaxLines": {
           "description": "Max number of shell output lines shown inline. Set to 0 to disable the cap and show full output. The hidden line count is still surfaced via the `+N lines` indicator.",
           "type": "number",
