@@ -85,3 +85,13 @@ describe('unhandled-error exemption on the platform lanes', () => {
     );
   });
 });
+
+describe('bundle-guard timeout ceiling', () => {
+  it('keeps the bundle-guard timeout ceiling in packages/vscode-ide-companion', () => {
+    // The config reads RUNNER_NAME at import time, so the expectation must
+    // come from the same live expression, not an env stubbed after import.
+    expect(vscodeCompanionConfig.test?.testTimeout).toBe(
+      process.env['RUNNER_NAME']?.startsWith('ecs-qwen-') ? 60_000 : 15_000,
+    );
+  });
+});
