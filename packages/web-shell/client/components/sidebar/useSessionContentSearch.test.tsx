@@ -32,23 +32,23 @@ const client = { searchWorkspaceSessions } as unknown as DaemonClient;
 
 function TestHost({
   query,
-  reloadToken = 0,
+  invalidationKey = 0,
 }: {
   query: string;
-  reloadToken?: number;
+  invalidationKey?: number | string;
 }) {
-  captured = useSessionContentSearch(client, '/work/a', query, reloadToken);
+  captured = useSessionContentSearch(client, '/work/a', query, invalidationKey);
   return null;
 }
 
-async function renderHost(query: string, reloadToken = 0) {
+async function renderHost(query: string, invalidationKey: number | string = 0) {
   if (!container) {
     container = document.createElement('div');
     document.body.appendChild(container);
     root = createRoot(container);
   }
   await act(async () => {
-    root?.render(React.createElement(TestHost, { query, reloadToken }));
+    root?.render(React.createElement(TestHost, { query, invalidationKey }));
   });
   if (!captured) throw new Error('hook did not render');
   return captured;
@@ -177,6 +177,39 @@ describe('useSessionContentSearch', () => {
     // render under the new query.
     const changed = await renderHost('qdrant');
     expect(changed.size).toBe(0);
+  });
+
+  it('resets when the query reverts to a previously settled value', async () => {
+    let resolveSecond:
+      | ((result: DaemonSessionSearchResult) => void)
+      | undefined;
+    searchWorkspaceSessions
+      .mockResolvedValueOnce({
+        results: [
+          {
+            session: { sessionId: 's1', workspaceCwd: '/work/a' },
+            snippet: 'hit',
+          },
+        ],
+      })
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveSecond = resolve;
+          }),
+      );
+    await renderHost('qd');
+    await advanceDebounce();
+    expect(captured?.size).toBe(1);
+
+    // Move forward with the request still pending, then revert before any
+    // new resolution: the settled hit for the reverted value must not be
+    // handed straight back.
+    await renderHost('qdrant');
+    await advanceDebounce();
+    expect(resolveSecond).toBeDefined();
+    const reverted = await renderHost('qd');
+    expect(reverted.size).toBe(0);
   });
 
   it('ignores a superseded request resolving after the newer one', async () => {
@@ -372,6 +405,30 @@ describe('useSessionContentSearch', () => {
     // immediately and the refetch observes the session is gone.
     searchWorkspaceSessions.mockResolvedValue({ results: [] });
     const bumped = await renderHost('qdrant', 1);
+    expect(bumped.size).toBe(0);
+    await advanceDebounce();
+
+    expect(searchWorkspaceSessions).toHaveBeenCalledTimes(2);
+    expect(captured?.size).toBe(0);
+  });
+
+  it('invalidates settled hits when the catalog membership key changes', async () => {
+    searchWorkspaceSessions.mockResolvedValue({
+      results: [
+        {
+          session: { sessionId: 's1', workspaceCwd: '/work/a' },
+          snippet: 'hit',
+        },
+      ],
+    });
+    await renderHost('qdrant', '0:a|s1');
+    await advanceDebounce();
+    expect(captured?.size).toBe(1);
+
+    // A poll-observed membership change (no handler token bump): s1 left
+    // the catalog, so the composite key changes and hits blank + refetch.
+    searchWorkspaceSessions.mockResolvedValue({ results: [] });
+    const bumped = await renderHost('qdrant', '0:a');
     expect(bumped.size).toBe(0);
     await advanceDebounce();
 

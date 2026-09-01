@@ -1933,6 +1933,61 @@ describe('WorkspaceSection content search', () => {
 
     expect(container.textContent ?? '').not.toContain('Ghost hit');
   });
+
+  it('drops a hit row when a poll-observed catalog change removes the session', async () => {
+    vi.useFakeTimers();
+    const tick = async (ms: number) => {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(ms);
+      });
+    };
+    const listPage = vi.fn().mockResolvedValue({
+      sessions: [{ sessionId: 's1', displayName: 'Loaded hit' }],
+    });
+    const search = vi.fn().mockResolvedValue({
+      results: [
+        {
+          session: {
+            sessionId: 's1',
+            workspaceCwd: '/tmp/project',
+            displayName: 'Loaded hit',
+          },
+          snippet: 'qdrant excerpt',
+        },
+      ],
+    });
+    const client = {
+      searchWorkspaceSessions: search,
+      workspaceByCwd: vi.fn(() => ({
+        workspaceGit,
+        listWorkspaceSessionsPage: listPage,
+        listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+      })),
+    } as unknown as DaemonClient;
+
+    renderSection({
+      client,
+      expanded: true,
+      searchQuery: 'qdrant',
+      renderSession: renderRow,
+    });
+    await tick(1); // catalog fetch settles
+    await tick(350); // content-search debounce fires
+    await tick(1); // search response settles
+    expect(container.textContent).toContain('Loaded hit');
+    expect(container.textContent).toContain('qdrant excerpt');
+
+    // Another client deletes the session: the next 10s poll drops it from
+    // the catalog — no handler token bump, only the membership change.
+    listPage.mockResolvedValue({ sessions: [] });
+    search.mockResolvedValue({ results: [] });
+    await tick(10_000); // catalog poll
+    await tick(350); // content-search refetch debounce
+    await tick(1);
+
+    expect(search).toHaveBeenCalledTimes(2);
+    expect(container.textContent ?? '').not.toContain('Loaded hit');
+  });
 });
 
 describe('WorkspaceSection overview plumbing', () => {

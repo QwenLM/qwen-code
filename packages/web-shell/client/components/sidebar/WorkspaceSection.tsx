@@ -175,6 +175,12 @@ interface WorkspaceSectionProps {
   excludePinned?: boolean;
   limitSessions?: boolean;
   /**
+   * Whether the sidebar-level Pinned section renders this session. Pinned
+   * rows have one owner: a pinned content-search ghost is kept in this
+   * list only when the Pinned section does not carry it.
+   */
+  isPinnedSectionMember?: (session: DaemonSessionSummary) => boolean;
+  /**
    * Open the working-tree Changes dialog for this workspace. When provided, the
    * folder header shows a live git chip (branch + dirty/ahead-behind state) that
    * fires this on click. Omitted for untrusted workspaces (no git surface).
@@ -221,6 +227,7 @@ export function WorkspaceSection({
   groupActionsDisabled,
   excludePinned = false,
   limitSessions = true,
+  isPinnedSectionMember,
   onOpenGitDiff,
   onOpenCommit,
 }: WorkspaceSectionProps) {
@@ -562,11 +569,23 @@ export function WorkspaceSection({
       ? (liveStats ?? (sessionsActive ? undefined : retainedStats))
       : undefined;
 
+  // Order-insensitive membership key: poll-driven catalog updates change
+  // it only when the session-id set actually changes, so externally
+  // deleted/archived sessions invalidate content-search hits the same way
+  // local-handler token bumps do (without re-firing on every poll tick).
+  const sessionMembershipKey = useMemo(
+    () =>
+      sessions
+        .map((session) => session.sessionId)
+        .sort()
+        .join('|'),
+    [sessions],
+  );
   const contentSearchHits = useSessionContentSearch(
     sessionsEnabled ? client : undefined,
     workspace.cwd,
     searchQuery,
-    reloadToken,
+    `${reloadToken}:${sessionMembershipKey}`,
   );
   const searchedSessions = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
@@ -602,15 +621,23 @@ export function WorkspaceSection({
     if (!excludePinned) return searchedSessions;
     // A pinned content-search hit the loaded catalog doesn't carry must
     // stay visible: loaded pinned rows render via their Pinned section /
-    // group buckets, but that path never sees ghost hits (R2-2).
+    // group buckets, but that path never sees ghost hits (R2-2). Unless
+    // the Pinned section DOES carry it — pinned rows have one owner (R4-1).
     const catalogIds = new Set(sessions.map((session) => session.sessionId));
     return searchedSessions.filter(
       (session) =>
         !session.isPinned ||
         (contentSearchHits.has(session.sessionId) &&
-          !catalogIds.has(session.sessionId)),
+          !catalogIds.has(session.sessionId) &&
+          !isPinnedSectionMember?.(session)),
     );
-  }, [contentSearchHits, excludePinned, searchedSessions, sessions]);
+  }, [
+    contentSearchHits,
+    excludePinned,
+    isPinnedSectionMember,
+    searchedSessions,
+    sessions,
+  ]);
   const directSessions =
     searchActive || showAllSessions || !limitSessions
       ? visibleSessions

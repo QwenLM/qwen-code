@@ -32,7 +32,7 @@ export function useSessionContentSearch(
   client: DaemonClient | undefined,
   workspaceCwd: string | undefined,
   query: string,
-  reloadToken = 0,
+  invalidationKey: number | string = 0,
 ): ReadonlyMap<string, SessionContentSearchHit> {
   // Normalize at render scope: the effect depends on this value, so
   // whitespace-only edits neither blank hits nor re-fetch. The cap drops a
@@ -47,23 +47,29 @@ export function useSessionContentSearch(
     client: DaemonClient | undefined;
     workspaceCwd: string | undefined;
     trimmed: string;
-    reloadToken: number;
+    invalidationKey: number | string;
     hits: ReadonlyMap<string, SessionContentSearchHit>;
-  }>({ client, workspaceCwd, trimmed, reloadToken, hits: EMPTY_HITS });
+  }>({ client, workspaceCwd, trimmed, invalidationKey, hits: EMPTY_HITS });
 
   // Reset during render, not in the passive effect (which runs after
   // paint): the first committed render after a query/workspace/client
   // change must not pair the new key with the previous key's settled hits.
-  // The reload token invalidates settled hits on catalog mutations too —
-  // otherwise a session deleted or archived while a query is active keeps
-  // rendering as a ghost row until the query is edited.
+  // The invalidation key (reload token + catalog membership) also drops
+  // settled hits on catalog mutations — otherwise a session deleted or
+  // archived while a query is active keeps rendering as a ghost row.
   if (
     state.client !== client ||
     state.workspaceCwd !== workspaceCwd ||
     state.trimmed !== trimmed ||
-    state.reloadToken !== reloadToken
+    state.invalidationKey !== invalidationKey
   ) {
-    setState({ client, workspaceCwd, trimmed, reloadToken, hits: EMPTY_HITS });
+    setState({
+      client,
+      workspaceCwd,
+      trimmed,
+      invalidationKey,
+      hits: EMPTY_HITS,
+    });
   }
 
   useEffect(() => {
@@ -87,7 +93,7 @@ export function useSessionContentSearch(
             client,
             workspaceCwd,
             trimmed,
-            reloadToken,
+            invalidationKey,
             hits: new Map(
               result.results.map((match) => [match.session.sessionId, match]),
             ),
@@ -99,7 +105,7 @@ export function useSessionContentSearch(
             client,
             workspaceCwd,
             trimmed,
-            reloadToken,
+            invalidationKey,
             hits: EMPTY_HITS,
           });
         });
@@ -108,12 +114,12 @@ export function useSessionContentSearch(
       clearTimeout(timer);
       controller.abort();
     };
-  }, [client, workspaceCwd, trimmed, reloadToken]);
+  }, [client, workspaceCwd, trimmed, invalidationKey]);
 
   return state.client === client &&
     state.workspaceCwd === workspaceCwd &&
     state.trimmed === trimmed &&
-    state.reloadToken === reloadToken
+    state.invalidationKey === invalidationKey
     ? state.hits
     : EMPTY_HITS;
 }

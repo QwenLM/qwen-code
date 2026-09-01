@@ -312,16 +312,16 @@ describe('SessionService.searchSessionContent', () => {
     // fold yields σ — without unification, Greek text ending in sigma never
     // matches, not even a byte-identical query.
     writeSession(SESSION_A, [userText(SESSION_A, 'a1', 'ΟΔΥΣΣΕΥΣ')]);
+    // Text-side ς (how Greek is normally written) exercises the fold loop's
+    // own normalizeSigma: the uppercase fixture folds to σ without it.
+    writeSession(SESSION_B, [userText(SESSION_B, 'b1', 'οδυσσευς')]);
 
-    await expect(
-      service.searchSessionContent('οδυσσευς'),
-    ).resolves.toHaveLength(1);
-    await expect(
-      service.searchSessionContent('ΟΔΥΣΣΕΥΣ'),
-    ).resolves.toHaveLength(1);
-    await expect(
-      service.searchSessionContent('οδυσσευσ'),
-    ).resolves.toHaveLength(1);
+    for (const query of ['οδυσσευς', 'οδυσσευσ', 'ΟΔΥΣΣΕΥΣ']) {
+      const hits = await service.searchSessionContent(query);
+      expect(hits.map((hit) => hit.sessionId)).toEqual(
+        expect.arrayContaining([SESSION_A, SESSION_B]),
+      );
+    }
   });
 
   it('never splits a surrogate pair at a snippet boundary', async () => {
