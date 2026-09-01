@@ -341,14 +341,19 @@ describe('HooksManagementDialog', () => {
     });
 
     const stopEventIndex = DISPLAY_HOOK_EVENTS.indexOf(HookEventName.Stop);
+    const hookIndexWidth = String(DISPLAY_HOOK_EVENTS.length).length;
     for (let i = 0; i < stopEventIndex; i++) {
       pressKey('down');
       await vi.waitFor(() => {
-        expect(lastFrame()).toContain(`❯  ${i + 2}.`);
+        expect(lastFrame()).toContain(
+          `❯ ${String(i + 2).padStart(hookIndexWidth)}.`,
+        );
       });
     }
     await vi.waitFor(() => {
-      expect(lastFrame()).toContain(`❯  ${stopEventIndex + 1}. Stop`);
+      expect(lastFrame()).toContain(
+        `❯ ${String(stopEventIndex + 1).padStart(hookIndexWidth)}. Stop`,
+      );
     });
     pressKey('return');
     await vi.waitFor(() => {
