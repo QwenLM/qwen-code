@@ -17,6 +17,9 @@ import {
   type DaemonSessionCatalogVersion,
   type DaemonSessionState,
   type DaemonSessionSummary,
+  type DaemonRestoredStandaloneSession,
+  type DaemonStandaloneSession,
+  type DaemonStandaloneSessionSummary,
   type DaemonWorkspaceExtensionsStatus,
   type DaemonWorkspaceFile,
   type DaemonGitHubPullRequestList,
@@ -77,6 +80,12 @@ export interface WebShellDaemonScenario {
   pairingApprovals: Record<string, string[]>;
   pairingGroupApprovals: Record<string, string[]>;
   sessions: DaemonSessionSummary[];
+  standaloneSessions: DaemonStandaloneSessionSummary[];
+  standaloneCreateError?: {
+    status: number;
+    code: string;
+    message: string;
+  };
   sessionGroups: DaemonSessionGroup[];
   sessionCatalogVersion: DaemonSessionCatalogVersion;
   events: DaemonEvent[];
@@ -409,6 +418,8 @@ export function createWebShellDaemonScenario(
     pairingApprovals: overrides.pairingApprovals ?? {},
     pairingGroupApprovals: overrides.pairingGroupApprovals ?? {},
     sessions,
+    standaloneSessions: overrides.standaloneSessions ?? [],
+    standaloneCreateError: overrides.standaloneCreateError,
     sessionGroups: overrides.sessionGroups ?? [],
     sessionCatalogVersion: overrides.sessionCatalogVersion ?? {
       generation: 'web-shell-e2e',
@@ -729,6 +740,10 @@ function isDaemonPath(path: string): boolean {
     /^\/workspaces\/.+\/github\/(prs\/create|default-branch)\/?$/.test(path) ||
     /^\/workspace\/github\/(prs\/create|default-branch)\/?$/.test(path) ||
     path === '/session' ||
+    path === '/standalone/sessions' ||
+    /^\/standalone\/sessions\/[^/]+(?:\/(?:load|resume|repair-directory|metadata|export))?\/?$/.test(
+      path,
+    ) ||
     path === '/goals' ||
     /^\/file\/?$/.test(path) ||
     /^\/session\/[^/]+\/artifacts\/?$/.test(path) ||
@@ -883,6 +898,38 @@ function isDaemonRoute(method: string, path: string): boolean {
     return true;
   }
   if (method === 'POST' && path === '/session') return true;
+  if (
+    path === '/standalone/sessions' &&
+    (method === 'GET' || method === 'POST')
+  ) {
+    return true;
+  }
+  if (
+    method === 'POST' &&
+    /^\/standalone\/sessions\/(archive|unarchive|delete)\/?$/.test(path)
+  ) {
+    return true;
+  }
+  if (
+    method === 'GET' &&
+    /^\/standalone\/sessions\/[^/]+(?:\/export)?\/?$/.test(path)
+  ) {
+    return true;
+  }
+  if (
+    method === 'POST' &&
+    /^\/standalone\/sessions\/[^/]+\/(load|resume|repair-directory)\/?$/.test(
+      path,
+    )
+  ) {
+    return true;
+  }
+  if (
+    method === 'PATCH' &&
+    /^\/standalone\/sessions\/[^/]+\/metadata\/?$/.test(path)
+  ) {
+    return true;
+  }
   if (method === 'GET' && path === '/goals') return true;
   if (
     (method === 'GET' || method === 'POST') &&
@@ -1530,6 +1577,162 @@ async function handleDaemonRoute(
     });
     return;
   }
+  if (path === '/standalone/sessions') {
+    if (method === 'GET') {
+      const archiveState = searchParams.get('archiveState') ?? 'active';
+      await json(route, {
+        sessions: scenario.standaloneSessions.filter((session) =>
+          archiveState === 'archived'
+            ? session.isArchived === true
+            : session.isArchived !== true,
+        ),
+      });
+      return;
+    }
+    if (scenario.standaloneCreateError) {
+      await json(
+        route,
+        {
+          code: scenario.standaloneCreateError.code,
+          message: scenario.standaloneCreateError.message,
+        },
+        scenario.standaloneCreateError.status,
+      );
+      return;
+    }
+    const sessionId = readStringField(body, 'sessionId');
+    if (!sessionId) {
+      await badRequest(route, 'Standalone sessionId is required.');
+      return;
+    }
+    let summary = scenario.standaloneSessions.find(
+      (session) => session.sessionId === sessionId,
+    );
+    if (!summary) {
+      summary = standaloneSummary(scenario, sessionId);
+      scenario.standaloneSessions.unshift(summary);
+    }
+    await json(route, standaloneSessionEnvelope(scenario, summary, false), 201);
+    return;
+  }
+
+  const standaloneBatchMatch = path.match(
+    /^\/standalone\/sessions\/(archive|unarchive|delete)\/?$/,
+  );
+  if (method === 'POST' && standaloneBatchMatch) {
+    const action = standaloneBatchMatch[1];
+    const sessionIds = readStringArrayField(body, 'sessionIds');
+    const found = sessionIds.filter((sessionId) =>
+      scenario.standaloneSessions.some(
+        (session) => session.sessionId === sessionId,
+      ),
+    );
+    const notFound = sessionIds.filter(
+      (sessionId) => !found.includes(sessionId),
+    );
+    if (action === 'delete') {
+      scenario.standaloneSessions = scenario.standaloneSessions.filter(
+        (session) => !found.includes(session.sessionId),
+      );
+      await json(route, {
+        removed: found,
+        notFound,
+        errors: [],
+        fileCleanupPending: [],
+      });
+      return;
+    }
+    const targetArchived = action === 'archive';
+    const changed: string[] = [];
+    const unchanged: string[] = [];
+    scenario.standaloneSessions = scenario.standaloneSessions.map((session) => {
+      if (!found.includes(session.sessionId)) return session;
+      if (Boolean(session.isArchived) === targetArchived) {
+        unchanged.push(session.sessionId);
+        return session;
+      }
+      changed.push(session.sessionId);
+      return { ...session, isArchived: targetArchived, updatedAt: now };
+    });
+    await json(
+      route,
+      action === 'archive'
+        ? {
+            archived: changed,
+            alreadyArchived: unchanged,
+            notFound,
+            errors: [],
+          }
+        : {
+            unarchived: changed,
+            alreadyActive: unchanged,
+            notFound,
+            errors: [],
+          },
+    );
+    return;
+  }
+
+  const standaloneMatch = path.match(
+    /^\/standalone\/sessions\/([^/]+)(?:\/(load|resume|repair-directory|metadata|export))?\/?$/,
+  );
+  if (standaloneMatch) {
+    const sessionId = decodeURIComponent(standaloneMatch[1]);
+    const action = standaloneMatch[2];
+    const index = scenario.standaloneSessions.findIndex(
+      (session) => session.sessionId === sessionId,
+    );
+    const summary = scenario.standaloneSessions[index];
+    if (!summary) {
+      await json(
+        route,
+        {
+          code: 'standalone_session_not_found',
+          message: `Standalone session ${sessionId} was not found.`,
+        },
+        404,
+      );
+      return;
+    }
+    if (method === 'GET' && !action) {
+      await json(route, summary);
+      return;
+    }
+    if (method === 'POST' && (action === 'load' || action === 'resume')) {
+      await json(route, restoredStandaloneSessionEnvelope(scenario, summary));
+      return;
+    }
+    if (method === 'POST' && action === 'repair-directory') {
+      await json(route, {
+        sessionId,
+        projectlessOutputDirectory: standaloneOutputDirectory(sessionId),
+        workingDirectory: { state: 'ready' },
+      });
+      return;
+    }
+    if (method === 'PATCH' && action === 'metadata') {
+      const displayName = readStringField(body, 'displayName') ?? '';
+      scenario.standaloneSessions[index] = {
+        ...summary,
+        displayName,
+        updatedAt: now,
+      };
+      await json(route, { sessionId, displayName });
+      return;
+    }
+    if (method === 'GET' && action === 'export') {
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/html',
+        headers: {
+          'access-control-allow-origin': '*',
+          'content-disposition': `attachment; filename="${sessionId}.html"`,
+        },
+        body: `<p>${summary.displayName ?? sessionId}</p>`,
+      });
+      return;
+    }
+  }
   if (method === 'POST' && path === '/session') {
     await json(route, sessionEnvelope(scenario, { attached: false }));
     return;
@@ -1843,6 +2046,60 @@ function sessionEnvelope(
   };
 }
 
+function standaloneOutputDirectory(sessionId: string): string {
+  return `/tmp/qwen-web-shell-standalone/${sessionId}`;
+}
+
+function standaloneSummary(
+  scenario: WebShellDaemonScenario,
+  sessionId: string,
+): DaemonStandaloneSessionSummary {
+  return {
+    sessionId,
+    workspaceCwd: standaloneOutputDirectory(sessionId),
+    sourceType: 'standalone',
+    context: { kind: 'standalone' },
+    createdAt: now,
+    updatedAt: now,
+    displayName: `Standalone ${scenario.standaloneSessions.length + 1}`,
+    clientCount: 1,
+    hasActivePrompt: false,
+    isArchived: false,
+  };
+}
+
+function standaloneSessionEnvelope(
+  scenario: WebShellDaemonScenario,
+  summary: DaemonStandaloneSessionSummary,
+  attached: boolean,
+): DaemonStandaloneSession {
+  return {
+    sessionId: summary.sessionId,
+    workspaceCwd: summary.workspaceCwd,
+    attached,
+    clientId: scenario.clientId,
+    createdAt: summary.createdAt ?? now,
+    hasActivePrompt: false,
+    sourceType: 'standalone',
+    context: { kind: 'standalone' },
+    projectlessOutputDirectory: standaloneOutputDirectory(summary.sessionId),
+    workingDirectory: { state: 'ready' },
+  };
+}
+
+function restoredStandaloneSessionEnvelope(
+  scenario: WebShellDaemonScenario,
+  summary: DaemonStandaloneSessionSummary,
+): DaemonRestoredStandaloneSession {
+  return {
+    ...standaloneSessionEnvelope(scenario, summary, true),
+    state: { ...scenario.state, displayName: summary.displayName },
+    compactedReplay: [],
+    liveJournal: [],
+    lastEventId: 0,
+  };
+}
+
 function restoredSessionEnvelope(
   scenario: WebShellDaemonScenario,
   sessionId: string,
@@ -1969,6 +2226,13 @@ function readStringField(body: unknown, key: string): string | undefined {
   return typeof value === 'string' && value.trim().length > 0
     ? value
     : undefined;
+}
+
+function readStringArrayField(body: unknown, key: string): string[] {
+  const value = getRecordValue(body, key);
+  return Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === 'string')
+    : [];
 }
 
 function nextRevision(revision: string): string {

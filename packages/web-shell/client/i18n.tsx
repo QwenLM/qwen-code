@@ -615,6 +615,53 @@ const EN: Messages = {
   'common.invalid': 'invalid',
   'common.loading': 'Loading...',
   'common.retry': 'Try again',
+  'session.archived': 'This conversation is archived',
+  'session.archivedDescription':
+    'Unarchive it before opening the conversation.',
+  'session.capabilitiesFailed':
+    'The daemon capabilities could not be loaded. Try again before opening this conversation.',
+  'session.contextConflict':
+    'A standalone or Live conversation link cannot include a workspace target.',
+  'session.loadFailed': 'Failed to load conversation',
+  'session.notFound': 'Conversation not found',
+  'session.notFoundDescription':
+    'This standalone conversation no longer exists.',
+  'session.resolving': 'Opening conversation...',
+  'session.standaloneUnavailable': 'Standalone conversations are unavailable',
+  'session.standaloneUpgradeRequired':
+    'Upgrade the daemon to open standalone conversations.',
+  'session.stillCreating':
+    'The conversation is still being created. Try checking again.',
+  'session.recoveryPending':
+    'Creation may have succeeded, but the result could not be confirmed. Sending is paused to avoid creating a duplicate conversation.',
+  'session.recoveryChecking': 'Checking the reserved conversation ID...',
+  'session.recoveryStillCreating':
+    'The conversation is still being created. Check again in a moment.',
+  'session.recoveryAbsent':
+    'No conversation exists for the reserved ID. You can explicitly start a fresh conversation.',
+  'session.recoveryUnknown':
+    'The creation result is still unknown. Check again before starting another conversation.',
+  'session.recoveryArchived':
+    'The recovered conversation is archived. Unarchive it before opening.',
+  'session.recoveryCheckFailed': 'Failed to check conversation creation',
+  'session.recoveryBlocksAction':
+    'Resolve the pending standalone conversation state before continuing.',
+  'session.checkStatus': 'Check status',
+  'session.retryCreation': 'Start a fresh conversation',
+  'session.directoryRecreated':
+    'The transcript was recovered, but files from the previous private directory were not available.',
+  'session.directoryMissing':
+    "This conversation's private working directory is missing. Repair it before sending another prompt.",
+  'session.directoryCompromised':
+    'This private working directory is unsafe and cannot be repaired automatically. Export the transcript, then delete the conversation.',
+  'session.repair': 'Repair directory',
+  'session.repairing': 'Repairing...',
+  'session.repairFailed': 'Failed to repair the private working directory',
+  'session.repairSucceeded': 'The private working directory was repaired.',
+  'session.unarchive': 'Unarchive',
+  'session.unarchiveFailed': 'Failed to unarchive this conversation.',
+  'session.workspaceActionUnavailable':
+    'This action is available only in project conversations.',
   'common.save': 'save',
   'common.navigate': '↑↓ to navigate',
   'common.next': 'next',
@@ -1486,6 +1533,15 @@ const EN: Messages = {
   'sidebar.archiveRunningDisabled':
     'A running session cannot be archived; archiving would end its turn',
   'sidebar.archivedTitle': 'Archived',
+  'sidebar.recents': 'Recents',
+  'sidebar.noRecents': 'No recent conversations',
+  'sidebar.sessionActions': 'Conversation actions',
+  'sidebar.standaloneLoadFailed': 'Failed to load recent conversations',
+  'sidebar.standaloneActionFailed': 'Conversation action failed',
+  'sidebar.standaloneDeleteConfirm':
+    'Delete this conversation and its private files?',
+  'sidebar.standaloneCleanupPending':
+    'The conversation was deleted. Private file cleanup will finish automatically.',
   'sidebar.archivedEmpty': 'No archived sessions.',
   'sidebar.archiveFailed': 'Failed to archive session',
   'sidebar.unarchiveFailed': 'Failed to restore session',
@@ -3943,6 +3999,43 @@ const ZH: Messages = {
   'common.invalid': '无效',
   'common.loading': '加载中...',
   'common.retry': '重试',
+  'session.archived': '该会话已归档',
+  'session.archivedDescription': '需要先取消归档，才能打开该会话。',
+  'session.capabilitiesFailed': '无法加载 Daemon 能力。请重试后再打开该会话。',
+  'session.contextConflict': 'Standalone 或 Live 会话链接不能同时指定工作区。',
+  'session.loadFailed': '会话加载失败',
+  'session.notFound': '会话不存在',
+  'session.notFoundDescription': '该 Standalone 会话已不存在。',
+  'session.resolving': '正在打开会话...',
+  'session.standaloneUnavailable': 'Standalone 会话不可用',
+  'session.standaloneUpgradeRequired':
+    '请升级 Daemon 后再打开 Standalone 会话。',
+  'session.stillCreating': '会话仍在创建中，请稍后重试。',
+  'session.recoveryPending':
+    '创建可能已成功，但结果尚未确认。为避免重复创建，当前已暂停发送。',
+  'session.recoveryChecking': '正在检查预留的会话 ID...',
+  'session.recoveryStillCreating': '会话仍在创建中，请稍后再次检查。',
+  'session.recoveryAbsent':
+    '预留 ID 对应的会话不存在，可以显式开始一个新会话。',
+  'session.recoveryUnknown': '创建结果仍不确定，请再次检查后再开始其他会话。',
+  'session.recoveryArchived': '恢复到的会话已归档，请先取消归档。',
+  'session.recoveryCheckFailed': '检查会话创建状态失败',
+  'session.recoveryBlocksAction':
+    '请先处理待确认的 Standalone 会话状态，再继续操作。',
+  'session.checkStatus': '检查状态',
+  'session.retryCreation': '开始新会话',
+  'session.directoryRecreated':
+    '会话记录已恢复，但之前私有目录中的文件未能恢复。',
+  'session.directoryMissing': '该会话的私有工作目录缺失，请修复后再发送消息。',
+  'session.directoryCompromised':
+    '该私有工作目录存在安全风险，无法自动修复。请先导出会话记录，再删除该会话。',
+  'session.repair': '修复目录',
+  'session.repairing': '修复中...',
+  'session.repairFailed': '修复私有工作目录失败',
+  'session.repairSucceeded': '私有工作目录已修复。',
+  'session.unarchive': '取消归档',
+  'session.unarchiveFailed': '取消归档失败。',
+  'session.workspaceActionUnavailable': '该操作仅适用于项目会话。',
   'common.save': '保存',
   'common.navigate': '↑↓ 导航',
   'common.next': '下一步',
@@ -4752,6 +4845,14 @@ const ZH: Messages = {
   'sidebar.archiveRunningDisabled':
     '不能归档运行中的会话，归档会终止其当前回合',
   'sidebar.archivedTitle': '已归档',
+  'sidebar.recents': '最近会话',
+  'sidebar.noRecents': '暂无最近会话',
+  'sidebar.sessionActions': '会话操作',
+  'sidebar.standaloneLoadFailed': '最近会话加载失败',
+  'sidebar.standaloneActionFailed': '会话操作失败',
+  'sidebar.standaloneDeleteConfirm': '删除该会话及其私有文件？',
+  'sidebar.standaloneCleanupPending':
+    '会话已删除，私有文件清理将在后台自动完成。',
   'sidebar.archivedEmpty': '没有已归档的会话。',
   'sidebar.archiveFailed': '归档会话失败',
   'sidebar.unarchiveFailed': '恢复会话失败',

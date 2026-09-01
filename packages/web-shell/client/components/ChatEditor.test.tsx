@@ -396,6 +396,8 @@ interface ChatEditorRenderProps {
   onShowContextUsage?: () => void;
   disabled?: boolean;
   atWorkspaceCwd?: string;
+  composerScopeKey?: string;
+  workspaceFeaturesEnabled?: boolean;
   sessionId?: string;
   customization?: WebShellCustomization;
   language?: WebShellLanguage;
@@ -1174,6 +1176,24 @@ describe('ChatEditor git branch toolbar integration', () => {
 });
 
 describe('ChatEditor workspace toolbar integration', () => {
+  it('keeps legacy history fallback for Live but isolates standalone drafts', () => {
+    renderChatEditor({
+      composerScopeKey: 'live',
+      workspaceFeaturesEnabled: false,
+    });
+    expect(
+      latestComposerCoreOptions.current?.disableLegacyHistoryFallback,
+    ).toBe(false);
+
+    renderChatEditor({
+      composerScopeKey: 'standalone',
+      workspaceFeaturesEnabled: false,
+    });
+    expect(
+      latestComposerCoreOptions.current?.disableLegacyHistoryFallback,
+    ).toBe(true);
+  });
+
   it('shows the workspace indicator when the workspace action is visible', () => {
     const container = renderChatEditor({
       workspaceName: 'api',
