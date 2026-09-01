@@ -43,6 +43,7 @@ import {
   TURN_RESULT_TEXT_MAX_CHARS,
   TrustGateError,
   canonicalSessionPrUrl,
+  toSessionPrInfo,
   normalizeTurnResultError,
   normalizeSnapshotPayload,
   ShellExecutionService,
@@ -6811,6 +6812,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       attachments: new SessionAttachmentStore(
         opts.sessionAttachmentsRoot,
         sessionId,
+        opts.sessionAttachmentsFallbackRoot,
       ),
       recordingDegraded: false,
       closing: false,
@@ -10813,6 +10815,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             const branchAttachments = new SessionAttachmentStore(
               opts.sessionAttachmentsRoot,
               result.newSessionId,
+              opts.sessionAttachmentsFallbackRoot,
             );
             try {
               await branchAttachments.copyFrom(entry.attachments);
@@ -11399,7 +11402,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           // omitted state preserves the known one (mirrors the sidecar) —
           // only for the same PR: a different repository's same-numbered
           // PR is a different PR and must not inherit its state.
-          const knownPr = existing.find(
+          const known = existing.find(
             (p) =>
               p.number === bound.number &&
               canonicalSessionPrUrl(p.url) === canonicalSessionPrUrl(bound.url),
@@ -11409,12 +11412,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             {
               number: bound.number,
               url: bound.url,
-              ...((bound.state ?? knownPr?.state)
+              ...((bound.state ?? known?.state)
                 ? {
                     state: (bound.state ??
-                      knownPr?.state) as SessionPrInfo['state'],
+                      known?.state) as SessionPrInfo['state'],
                   }
                 : {}),
+              // The issue snapshot is daemon-derived, never client-bound.
+              ...(known?.issues ? { issues: known.issues } : {}),
             },
           ].slice(-SESSION_PR_LIST_LIMIT);
           markSessionCatalogChanged();
@@ -11455,33 +11460,27 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     seedSessionPrs(sessionId, prs) {
       const entry = byId.get(sessionId);
       if (!entry || (entry.prs && entry.prs.length > 0)) return;
-      entry.prs = prs
-        .map(({ number, url, state }) => ({
-          number,
-          url,
-          ...(state ? { state } : {}),
-        }))
-        .slice(-SESSION_PR_LIST_LIMIT);
+      entry.prs = prs.map(toSessionPrInfo).slice(-SESSION_PR_LIST_LIMIT);
     },
 
     setSessionPrs(sessionId, prs) {
       const entry = byId.get(sessionId);
       if (!entry) return;
-      const next = prs
-        .map(({ number, url, state }) => ({
-          number,
-          url,
-          ...(state ? { state } : {}),
-        }))
-        .slice(-SESSION_PR_LIST_LIMIT);
+      const next = prs.map(toSessionPrInfo).slice(-SESSION_PR_LIST_LIMIT);
       const current = entry.prs ?? [];
+      const sameIssueList = (
+        left: SessionPrInfo['issues'],
+        right: SessionPrInfo['issues'],
+      ): boolean =>
+        JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
       const unchanged =
         current.length === next.length &&
         current.every(
           (p, index) =>
             p.number === next[index]!.number &&
             p.url === next[index]!.url &&
-            p.state === next[index]!.state,
+            p.state === next[index]!.state &&
+            sameIssueList(p.issues, next[index]!.issues),
         );
       entry.prs = next;
       if (unchanged) return;
@@ -12783,7 +12782,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     async deleteSessionAttachments(sessionId, options) {
       const store =
         byId.get(sessionId)?.attachments ??
-        new SessionAttachmentStore(opts.sessionAttachmentsRoot, sessionId);
+        new SessionAttachmentStore(
+          opts.sessionAttachmentsRoot,
+          sessionId,
+          opts.sessionAttachmentsFallbackRoot,
+        );
       await store.delete(options);
     },
 

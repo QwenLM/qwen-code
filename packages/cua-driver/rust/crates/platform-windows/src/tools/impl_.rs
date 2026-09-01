@@ -1210,6 +1210,11 @@ impl Tool for GetWindowStateTool {
     }
 
     async fn invoke(&self, args: Value) -> ToolResult {
+        if let Some(result) =
+            crate::uia_worker::forward_required("get_window_state", args.clone()).await
+        {
+            return result;
+        }
         // Swift error wording 1:1.
         let pid = match args.get("pid").and_then(|v| v.as_i64()) {
             Some(v) => v as u32,
@@ -1224,27 +1229,28 @@ impl Tool for GetWindowStateTool {
                 ),
             };
         // Validate window belongs to pid — Swift's hard error.
-        let windows_for_pid =
-            tokio::task::spawn_blocking(move || crate::win32::list_windows(Some(pid)))
-                .await
-                .unwrap_or_default();
-        if !windows_for_pid.iter().any(|w| w.hwnd == hwnd) {
-            // Check if the window exists under a different pid.
-            let all = tokio::task::spawn_blocking(|| crate::win32::list_windows(None))
-                .await
-                .unwrap_or_default();
-            if let Some(w) = all.iter().find(|w| w.hwnd == hwnd) {
+        // Exact HWND validation must never enter global UIA enumeration. This
+        // Win32 anchor remains available even when the target provider hangs.
+        let target_window = tokio::task::spawn_blocking(move || {
+            crate::win32::windows::find_window_by_pid_and_handle(pid, hwnd)
+        })
+        .await
+        .ok()
+        .flatten();
+        let Some(target_window) = target_window else {
+            if let Some(owner_pid) = crate::win32::windows::window_owner_pid(hwnd) {
                 return ToolResult::error(format!(
-                    "window_id {hwnd} belongs to pid {}, not pid {pid}. Call \
+                    "window_id {hwnd} belongs to pid {owner_pid}, not pid {pid}. Call \
                      `list_windows({{\"pid\": {pid}}})` to get this pid's own windows.",
-                    w.pid
                 ));
             }
             return ToolResult::error(format!(
                 "No window with window_id {hwnd} exists. Call `list_windows({{\"pid\": \
                  {pid}}})` for candidates."
             ));
-        }
+        };
+        let owner_window_id = crate::win32::windows::window_owner_handle(hwnd);
+        let owned_surfaces = crate::win32::windows::visible_owned_windows(hwnd, pid);
         let max_dim = {
             let cfg = self.state.config.read().unwrap();
             cfg.max_image_dimension
@@ -1334,45 +1340,14 @@ impl Tool for GetWindowStateTool {
         } else {
             None
         };
-        let do_tree = true;
         let do_shot = include_screenshot != Some(false) || screenshot_out_file.is_some();
 
         let state = self.state.clone();
         let observation_revisions = state.observation_revisions.clone();
         let revision_request_for_capture = observation_revision_request.clone();
-        let q = query.clone();
+        let tree_query = query.clone();
         let out_file = screenshot_out_file.clone();
-        let blocking = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
-            let tree_result = if do_tree {
-                Some(crate::uia::walk_tree_bounded_with_runtime_ids(
-                    hwnd,
-                    q.as_deref(),
-                    max_elements,
-                    max_depth,
-                    revision_request_for_capture.is_some(),
-                ))
-            } else {
-                None
-            };
-            let observation_revision = match (
-                revision_request_for_capture.as_ref(),
-                observation_session,
-                tree_result.as_ref(),
-            ) {
-                (Some(request), Some(session), Some(tree)) => Some(
-                    observation_revisions
-                        .observe(session, pid, hwnd, max_elements, max_depth, tree, request)
-                        .map_err(anyhow::Error::msg)?,
-                ),
-                _ => None,
-            };
-            // Capture screenshot AND any error message so the response can
-            // surface *why* there's no image (the iconic-window guard from
-            // #1973 / PR #1974 is the load-bearing case: minimized windows
-            // legitimately can't be captured, and the caller needs to know
-            // to call `bring_to_front` instead of retrying).
-            // The previous `Err(_) => None` silently dropped the error and
-            // upstream agents saw an empty response with no signal.
+        let screenshot_task = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
             let (screenshot, screenshot_err) = if do_shot {
                 match crate::capture::screenshot_window_bytes(hwnd) {
                     Ok(raw) => {
@@ -1398,45 +1373,139 @@ impl Tool for GetWindowStateTool {
             } else {
                 (None, None)
             };
-            Ok((
-                tree_result,
-                screenshot,
+            Ok((screenshot, screenshot_err))
+        });
+
+        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        let collect_runtime_ids = revision_request_for_capture.is_some();
+        let mut tree_task = tokio::task::spawn_blocking(move || {
+            crate::uia::walk_tree_bounded_with_progress(
+                hwnd,
+                tree_query.as_deref(),
+                max_elements,
+                max_depth,
+                collect_runtime_ids,
+                &mut |node, line| {
+                    let _ = progress_tx.send((node.depth, node, line));
+                },
+            )
+        });
+        let tree_deadline = tokio::time::sleep(std::time::Duration::from_secs(4));
+        tokio::pin!(tree_deadline);
+        let mut partial_nodes = Vec::new();
+        let mut partial_lines = Vec::new();
+        let (mut tree_result, uia_worker_restart_required) = loop {
+            tokio::select! {
+                joined = &mut tree_task => {
+                    let tree = joined.map_err(|error| anyhow::anyhow!("UIA worker task failed: {error}"));
+                    break (tree, false);
+                }
+                progress = progress_rx.recv() => {
+                    if let Some((depth, node, line)) = progress {
+                        partial_nodes.push(node);
+                        partial_lines.push((depth, line));
+                    }
+                }
+                _ = &mut tree_deadline => {
+                    tree_task.abort();
+                    let partial = crate::uia::partial_tree_result(
+                        partial_nodes,
+                        partial_lines,
+                        query.as_deref(),
+                        "uia_provider_timeout",
+                    );
+                    break (Ok(partial), true);
+                }
+            }
+        };
+
+        let (screenshot_opt, screenshot_err) = match screenshot_task.await {
+            Ok(Ok(result)) => result,
+            Ok(Err(error)) => (None, Some(error.to_string())),
+            Err(error) => (None, Some(format!("screenshot worker failed: {error}"))),
+        };
+        let observation_revision = match (
+            revision_request_for_capture.as_ref(),
+            observation_session,
+            tree_result.as_ref().ok().filter(|tree| tree.complete),
+        ) {
+            (Some(request), Some(session), Some(tree)) => match observation_revisions.observe(
+                session,
+                pid,
+                hwnd,
+                max_elements,
+                max_depth,
+                tree,
+                request,
+            ) {
+                Ok(revision) => Some(revision),
+                Err(error) => {
+                    if let Ok(tree) = tree_result.as_mut() {
+                        crate::uia::settle_node_bindings(&mut tree.nodes, tree.backend, false);
+                    }
+                    return ToolResult::error(error);
+                }
+            },
+            _ => None,
+        };
+        let result = tree_result.map(|tree| {
+            (
+                Some(tree),
+                screenshot_opt,
                 screenshot_err,
                 observation_revision,
-            ))
+                uia_worker_restart_required,
+            )
         });
-        // Timeout: Chrome's UIA provider can block indefinitely on property reads.
-        let result: Result<anyhow::Result<_>, _> =
-            match tokio::time::timeout(std::time::Duration::from_secs(4), blocking).await {
-                Ok(join_result) => join_result.map_err(|e| anyhow::anyhow!("task panic: {e}")),
-                Err(_elapsed) => {
-                    // Surface the target's window class + an actionable hint
-                    // instead of just "UIA provider unresponsive". The class
-                    // points the caller at the right workaround (e.g. SALFRAME
-                    // → screenshot + pixel coords + delivery_mode:"foreground"; UWP
-                    // class → re-call with a depth-limited scan and act by pixel
-                    // off the screenshot if the tree stays unusable).
-                    let class = crate::input::delivery::read_class_name(hwnd);
-                    Err(anyhow::anyhow!(
-                        "get_window_state timed out after 4s (UIA provider unresponsive on \
-                     hwnd 0x{hwnd:x}, class '{class}'). Fallback options: \
-                     (a) re-call this tool with a depth-limited scan \
-                     (`max_elements` / `max_depth`) — if the tree stays unusable, act \
-                     by pixel `click(x, y)` off the screenshot in the response; \
-                     (b) if the target is a transient VCL / message-box dialog, send \
-                     `press_key` with `delivery_mode:\"foreground\"` (SendInput) to fire the \
-                     default accelerator (Esc / Enter / Y / N) without needing the tree."
-                    ))
-                }
-            };
-        let result = result.and_then(|r| r);
 
         match result {
-            Ok((tree_opt, screenshot_opt, screenshot_err, observation_revision)) => {
+            Ok((
+                tree_opt,
+                screenshot_opt,
+                screenshot_err,
+                observation_revision,
+                uia_worker_restart_required,
+            )) => {
                 let mut content = Vec::new();
-                let mut structured = json!({ "window_id": hwnd, "pid": pid });
+                let mut structured = json!({
+                    "window_id": hwnd,
+                    "pid": pid,
+                    "window_surface": {
+                        "title": target_window.title,
+                        "class": crate::input::delivery::read_class_name(hwnd),
+                        "frame": {"x": target_window.x, "y": target_window.y, "w": target_window.width, "h": target_window.height},
+                        "is_on_screen": target_window.is_on_screen,
+                        "minimized": target_window.minimized,
+                        "owner_window_id": owner_window_id,
+                    },
+                    "owned_surfaces": owned_surfaces.iter().map(|surface| json!({
+                        "window_id": surface.hwnd,
+                        "pid": surface.pid,
+                        "title": surface.title,
+                        "class": crate::input::delivery::read_class_name(surface.hwnd),
+                        "frame": {"x": surface.x, "y": surface.y, "w": surface.width, "h": surface.height},
+                        "is_on_screen": surface.is_on_screen,
+                        "minimized": surface.minimized,
+                        "owner_window_id": hwnd,
+                    })).collect::<Vec<_>>(),
+                });
+                if uia_worker_restart_required {
+                    structured["degraded"] = json!(true);
+                    structured["degraded_reason"] = json!(
+                        "uia_provider_timeout: accessibility coverage is partial or unavailable; the screenshot and exact Win32 window surface remain valid."
+                    );
+                    structured["accessibility_coverage"] = json!(if tree_opt
+                        .as_ref()
+                        .is_some_and(|tree| tree.nodes.is_empty())
+                    {
+                        "unavailable"
+                    } else {
+                        "partial"
+                    });
+                    structured["_uia_worker_restart_required"] = json!(true);
+                }
 
-                if let Some(tr) = tree_opt {
+                if let Some(mut tr) = tree_opt {
                     let is_msaa = tr.backend == crate::uia::UiaBackend::Msaa;
                     let count = tr
                         .nodes
@@ -1455,15 +1524,22 @@ impl Tool for GetWindowStateTool {
                     // node whose msaa_role is Some came from the MSAA
                     // walker, so the entire snapshot must Drop via
                     // IAccessible and click must dispatch through MSAA.
-                    if !observation_only {
+                    let bindings_transferred = !observation_only && tr.complete;
+                    if bindings_transferred {
                         if is_msaa {
                             state.element_cache.update_msaa(pid, hwnd, &tr.nodes);
                         } else {
                             state.element_cache.update(pid, hwnd, &tr.nodes);
                         }
                     }
+                    crate::uia::settle_node_bindings(
+                        &mut tr.nodes,
+                        tr.backend,
+                        bindings_transferred,
+                    );
                     structured["element_count"] = json!(count);
                     structured["elements_complete"] = json!(tr.complete);
+                    structured["element_bindings_retained"] = json!(bindings_transferred);
                     structured["tree_markdown"] = json!(selected_tree_markdown);
 
                     // Surface 6: register a snapshot in the global token
@@ -1471,7 +1547,7 @@ impl Tool for GetWindowStateTool {
                     // stores u32 — truncate (HWND fits in 32-bit on
                     // every supported edition; the upper 32 bits are
                     // zero in user-space).
-                    let snapshot_id = (!observation_only).then(|| {
+                    let snapshot_id = (!observation_only && tr.complete).then(|| {
                         cua_driver_core::element_token::global().register_snapshot(
                             pid as i32,
                             hwnd as u32,
@@ -1631,14 +1707,14 @@ impl Tool for GetWindowStateTool {
                     // UIA tree means element_index has nothing to bind to, so the
                     // deliberate move is an element px action — read the screenshot
                     // already in this response and click by pixel (x,y).
-                    if is_msaa {
+                    if !uia_worker_restart_required && is_msaa {
                         structured["degraded"] = json!(true);
                         structured["degraded_reason"] = json!(
                             "msaa_fallback_partial: the UIA provider was unavailable and \
                              Cua Driver used a partial MSAA tree. Treat it as discovery \
                              evidence only; it cannot prove checked state."
                         );
-                    } else if count == 0 {
+                    } else if !uia_worker_restart_required && count == 0 {
                         structured["degraded"] = json!(true);
                         structured["degraded_reason"] = json!(
                             "ax_tree_empty: the UIA walk returned no actionable elements. \
@@ -3126,6 +3202,9 @@ impl Tool for ClickTool {
     }
 
     async fn invoke(&self, args: Value) -> ToolResult {
+        if let Some(result) = crate::uia_worker::forward_required("click", args.clone()).await {
+            return result;
+        }
         use crate::input::delivery::{DeliveryMode, EventKind};
         use crate::uia::cache::SnapshotKind;
         use cua_driver_core::tool_args::ArgsExt;
@@ -4280,6 +4359,9 @@ impl Tool for TypeTextTool {
     }
 
     async fn invoke(&self, args: Value) -> ToolResult {
+        if let Some(result) = crate::uia_worker::forward_required("type_text", args.clone()).await {
+            return result;
+        }
         use crate::input::delivery::{DeliveryMode, EventKind};
         use cua_driver_core::tool_args::ArgsExt;
         let cursor_key = resolve_cursor_key(&args);
@@ -5043,6 +5125,9 @@ impl Tool for PressKeyTool {
     }
 
     async fn invoke(&self, args: Value) -> ToolResult {
+        if let Some(result) = crate::uia_worker::forward_required("press_key", args.clone()).await {
+            return result;
+        }
         use crate::input::delivery::{DeliveryMode, EventKind};
         use cua_driver_core::tool_args::ArgsExt;
         if args.get("scope").and_then(Value::as_str) == Some("desktop")
@@ -5406,6 +5491,9 @@ impl Tool for HotkeyTool {
     }
 
     async fn invoke(&self, args: Value) -> ToolResult {
+        if let Some(result) = crate::uia_worker::forward_required("hotkey", args.clone()).await {
+            return result;
+        }
         use crate::input::delivery::{DeliveryMode, EventKind};
         use cua_driver_core::tool_args::ArgsExt;
         if args.get("scope").and_then(Value::as_str) == Some("desktop")
@@ -5781,6 +5869,11 @@ impl Tool for PerformSecondaryActionTool {
     }
 
     async fn invoke(&self, args: Value) -> ToolResult {
+        if let Some(result) =
+            crate::uia_worker::forward_required("perform_secondary_action", args.clone()).await
+        {
+            return result;
+        }
         use cua_driver_core::tool_args::ArgsExt;
         let pid = match args.require_u32("pid") {
             Ok(pid) => pid,
@@ -5849,14 +5942,52 @@ impl Tool for PerformSecondaryActionTool {
             .with_structured(json!({ "code": "secondary_action_unavailable" }));
         }
 
+        use crate::uia::cache::SnapshotKind;
+        let (kind, _) =
+            match self
+                .state
+                .element_cache
+                .get_element_kind_and_role(pid, hwnd, element_index)
+            {
+                Some(kind) => kind,
+                None => {
+                    return ToolResult::error("element is stale")
+                        .with_structured(json!({ "code": "stale_element_token" }))
+                }
+            };
+        if kind == SnapshotKind::Msaa && action != "invoke" {
+            return ToolResult::error(format!(
+                "MSAA supports only its native default invoke action; '{action}' has no stable semantic dispatch"
+            ))
+            .with_structured(json!({ "code": "secondary_action_unavailable" }));
+        }
+        let transport = match (kind, action.as_str()) {
+            (SnapshotKind::Msaa, _) => {
+                cua_driver_core::action_record::ActionTransport::WindowsMsaaAction
+            }
+            (SnapshotKind::Uia, "invoke") => {
+                cua_driver_core::action_record::ActionTransport::WindowsUiaInvoke
+            }
+            (SnapshotKind::Uia, "toggle") => {
+                cua_driver_core::action_record::ActionTransport::WindowsUiaToggle
+            }
+            (SnapshotKind::Uia, "select") => {
+                cua_driver_core::action_record::ActionTransport::WindowsUiaSelection
+            }
+            (SnapshotKind::Uia, "expand") => {
+                cua_driver_core::action_record::ActionTransport::WindowsUiaExpandCollapse
+            }
+            _ => unreachable!(),
+        };
+        let owned_before = crate::win32::visible_owned_windows(hwnd, pid)
+            .into_iter()
+            .map(|window| window.hwnd)
+            .collect::<std::collections::HashSet<_>>();
         let _no_activate =
             crate::input::NoActivateGuard::arm(windows::Win32::Foundation::HWND(hwnd as *mut _));
         let state = self.state.clone();
-        let dispatch = tokio::task::spawn_blocking(move || -> anyhow::Result<(
-            String,
-            cua_driver_core::action_record::ActionTransport,
-        )> {
-            use crate::uia::cache::SnapshotKind;
+        let action_for_dispatch = action.clone();
+        let mut dispatch = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
             use windows::core::{Interface, VARIANT};
             use windows::Win32::UI::Accessibility::{
                 IAccessible, IUIAutomationElement, IUIAutomationExpandCollapsePattern,
@@ -5869,32 +6000,18 @@ impl Tool for PerformSecondaryActionTool {
                 .element_cache
                 .get_element_retained(pid, hwnd, element_index)
                 .ok_or_else(|| anyhow::anyhow!("element is stale"))?;
-            let (kind, _) = state
-                .element_cache
-                .get_element_kind_and_role(pid, hwnd, element_index)
-                .ok_or_else(|| anyhow::anyhow!("element is stale"))?;
             match kind {
                 SnapshotKind::Msaa => {
-                    if action != "invoke" {
-                        anyhow::bail!(
-                            "MSAA supports only its native default invoke action; '{action}' has no stable semantic dispatch"
-                        );
-                    }
-                    let accessible = unsafe {
-                        IAccessible::from_raw(retained.as_ptr() as *mut _)
-                    };
+                    let accessible = unsafe { IAccessible::from_raw(retained.as_ptr() as *mut _) };
                     let result = unsafe { accessible.accDoDefaultAction(&VARIANT::from(0i32)) };
                     std::mem::forget(accessible);
-                    result.map_err(|error| anyhow::anyhow!("MSAA default action failed: {error}"))?;
-                    Ok((
-                        "msaa_default_action".into(),
-                        cua_driver_core::action_record::ActionTransport::WindowsMsaaAction,
-                    ))
+                    result
+                        .map_err(|error| anyhow::anyhow!("MSAA default action failed: {error}"))?;
+                    Ok("msaa_default_action".into())
                 }
                 SnapshotKind::Uia => {
-                    let element = unsafe {
-                        IUIAutomationElement::from_raw(retained.as_ptr() as *mut _)
-                    };
+                    let element =
+                        unsafe { IUIAutomationElement::from_raw(retained.as_ptr() as *mut _) };
                     if unsafe { element.CurrentIsEnabled() }
                         .map(|value| !value.as_bool())
                         .unwrap_or(true)
@@ -5902,17 +6019,9 @@ impl Tool for PerformSecondaryActionTool {
                         std::mem::forget(element);
                         anyhow::bail!("UIA element is disabled or no longer available");
                     }
-                    let transport = match action.as_str() {
-                        "invoke" => cua_driver_core::action_record::ActionTransport::WindowsUiaInvoke,
-                        "toggle" => cua_driver_core::action_record::ActionTransport::WindowsUiaToggle,
-                        "select" => cua_driver_core::action_record::ActionTransport::WindowsUiaSelection,
-                        "expand" => cua_driver_core::action_record::ActionTransport::WindowsUiaExpandCollapse,
-                        _ => unreachable!(),
-                    };
-                    let result = crate::uia::fg_bypass::run_with_uwp_bypass(
-                        hwnd as isize,
-                        || unsafe {
-                            match action.as_str() {
+                    let result =
+                        crate::uia::fg_bypass::run_with_uwp_bypass(hwnd as isize, || unsafe {
+                            match action_for_dispatch.as_str() {
                                 "invoke" => element
                                     .GetCurrentPattern(UIA_InvokePatternId)?
                                     .cast::<IUIAutomationInvokePattern>()?
@@ -5931,20 +6040,41 @@ impl Tool for PerformSecondaryActionTool {
                                     .Expand(),
                                 _ => unreachable!(),
                             }
-                        },
-                    );
+                        });
                     std::mem::forget(element);
                     result.map_err(|error| {
-                        anyhow::anyhow!("UIA action '{action}' failed: {error}")
+                        anyhow::anyhow!("UIA action '{action_for_dispatch}' failed: {error}")
                     })?;
-                    Ok((format!("uia_{action}"), transport))
+                    Ok(format!("uia_{action_for_dispatch}"))
                 }
             }
-        })
-        .await;
+        });
+
+        enum DispatchOutcome {
+            Returned(Result<String, String>),
+            OpenedOwnedSurface(crate::win32::WindowInfo),
+        }
+        let dispatch = loop {
+            tokio::select! {
+                joined = &mut dispatch => {
+                    break DispatchOutcome::Returned(match joined {
+                        Ok(result) => result.map_err(|error| error.to_string()),
+                        Err(error) => Err(format!("secondary action task failed: {error}")),
+                    });
+                }
+                _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => {
+                    if let Some(surface) = crate::win32::visible_owned_windows(hwnd, pid)
+                        .into_iter()
+                        .find(|window| !owned_before.contains(&window.hwnd))
+                    {
+                        break DispatchOutcome::OpenedOwnedSurface(surface);
+                    }
+                }
+            }
+        };
 
         match dispatch {
-            Ok(Ok((path, transport))) => ToolResult::text(format!(
+            DispatchOutcome::Returned(Ok(path)) => ToolResult::text(format!(
                 "Performed secondary action '{requested}' via {path}."
             ))
             .with_structured(json!({
@@ -5967,9 +6097,34 @@ impl Tool for PerformSecondaryActionTool {
                 .build()
                 .expect("secondary Windows accessibility action record is valid"),
             ),
-            Ok(Err(error)) => ToolResult::error(error.to_string())
+            DispatchOutcome::OpenedOwnedSurface(surface) => ToolResult::text(format!(
+                "Performed secondary action '{requested}'; it opened owned surface HWND 0x{:x}.",
+                surface.hwnd
+            ))
+            .with_structured(json!({
+                "effect": "confirmed",
+                "route": "accessibility",
+                "_uia_worker_restart_required": true
+            }))
+            .with_action_record(
+                cua_driver_core::action_record::ActionExecutionRecord::builder(
+                    cua_driver_core::action_record::ActionEffect::Confirmed,
+                    transport,
+                    cua_driver_core::action_record::RequestedDelivery::Background,
+                )
+                .actual_delivery(cua_driver_core::action_record::ActualDelivery::Background)
+                .evidence(cua_driver_core::action_record::ActionEvidence {
+                    kind: cua_driver_core::action_record::EvidenceKind::WindowChange,
+                    detail: format!(
+                        "the exact advertised action opened owned surface HWND 0x{:x}",
+                        surface.hwnd
+                    ),
+                })
+                .build()
+                .expect("secondary action window-change record is valid"),
+            ),
+            DispatchOutcome::Returned(Err(error)) => ToolResult::error(error)
                 .with_structured(json!({ "code": "secondary_action_unavailable" })),
-            Err(error) => ToolResult::error(format!("secondary action task failed: {error}")),
         }
     }
 }
@@ -6040,6 +6195,9 @@ impl Tool for SetValueTool {
     }
 
     async fn invoke(&self, args: Value) -> ToolResult {
+        if let Some(result) = crate::uia_worker::forward_required("set_value", args.clone()).await {
+            return result;
+        }
         use cua_driver_core::tool_args::ArgsExt;
         let cursor_key = resolve_cursor_key(&args);
         let raw_pid = args.get("pid").and_then(|v| v.as_i64());
@@ -6240,6 +6398,9 @@ impl Tool for ScrollTool {
     }
 
     async fn invoke(&self, args: Value) -> ToolResult {
+        if let Some(result) = crate::uia_worker::forward_required("scroll", args.clone()).await {
+            return result;
+        }
         use crate::input::delivery::{DeliveryMode, EventKind};
         use cua_driver_core::tool_args::ArgsExt;
         // ── Window-less screen-absolute branch (desktop target) ───────────────
@@ -6808,6 +6969,11 @@ impl Tool for DoubleClickTool {
         })
     }
     async fn invoke(&self, args: Value) -> ToolResult {
+        if let Some(result) =
+            crate::uia_worker::forward_required("double_click", args.clone()).await
+        {
+            return result;
+        }
         use crate::input::delivery::{DeliveryMode, EventKind};
         // Swift error wording 1:1.
         let raw_pid = match args.get("pid").and_then(|v| v.as_i64()) {
@@ -7155,6 +7321,10 @@ impl Tool for RightClickTool {
         })
     }
     async fn invoke(&self, args: Value) -> ToolResult {
+        if let Some(result) = crate::uia_worker::forward_required("right_click", args.clone()).await
+        {
+            return result;
+        }
         use crate::input::delivery::{DeliveryMode, EventKind};
         // Swift error wording 1:1.
         let raw_pid = match args.get("pid").and_then(|v| v.as_i64()) {
@@ -7485,6 +7655,9 @@ impl Tool for DragTool {
         })
     }
     async fn invoke(&self, args: Value) -> ToolResult {
+        if let Some(result) = crate::uia_worker::forward_required("drag", args.clone()).await {
+            return result;
+        }
         use crate::input::delivery::{DeliveryMode, EventKind};
         use cua_driver_core::tool_args::ArgsExt;
         let cursor_key = resolve_cursor_key(&args);
@@ -9094,6 +9267,10 @@ impl Tool for InvokeMenuTool {
     }
 
     async fn invoke(&self, args: Value) -> ToolResult {
+        if let Some(result) = crate::uia_worker::forward_required("invoke_menu", args.clone()).await
+        {
+            return result;
+        }
         use cua_driver_core::action_record::{
             ActionEffect, ActionEvidence, ActionExecutionRecord, ActionTransport, ActualDelivery,
             EvidenceKind, RequestedDelivery,
@@ -9391,6 +9568,11 @@ impl Tool for BringToFrontTool {
     }
 
     async fn invoke(&self, args: Value) -> ToolResult {
+        if let Some(result) =
+            crate::uia_worker::forward_required("bring_to_front", args.clone()).await
+        {
+            return result;
+        }
         use cua_driver_core::tool_args::ArgsExt;
         let pid = match args.require_u32("pid") {
             Ok(v) => v,

@@ -23,6 +23,7 @@ import {
   WorkspaceMemoryWriteTimeoutError,
   writeWorkspaceContextFile,
   readSessionPrs,
+  toSessionPrInfo,
   upsertSessionPr,
   type SessionArchiveState,
   type SubagentLevel,
@@ -3102,11 +3103,7 @@ export class AcpDispatcher {
                         : {}),
                     },
                   )
-                ).map(({ number, url, state }) => ({
-                  number,
-                  url,
-                  ...(state ? { state } : {}),
-                }));
+                ).map(toSessionPrInfo);
                 // Reconcile the live entry to the authoritative persisted
                 // list: the bridge merge capped positionally while the
                 // sidecar caps by provenance authority — past the cap the

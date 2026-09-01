@@ -11,7 +11,9 @@ import {
   SessionOrganizationError,
   Storage,
   readWorktreeSession,
+  canonicalSessionPrUrl,
   readSessionPrs,
+  toSessionPrInfo,
   type SessionArchiveState,
   type SessionGroupPresetColor,
   type SessionPr,
@@ -536,11 +538,7 @@ function mergeLiveSessionSummary(
 }
 
 function sidecarToPrInfos(sidecar: readonly SessionPr[]): SessionPrInfo[] {
-  return sidecar.map(({ number, url, state }) => ({
-    number,
-    url,
-    ...(state ? { state } : {}),
-  }));
+  return sidecar.map(toSessionPrInfo);
 }
 
 /**
@@ -550,16 +548,20 @@ function sidecarToPrInfos(sidecar: readonly SessionPr[]): SessionPrInfo[] {
  * merged order; the live entry overlays fresher volatile data onto it.
  * Positional concatenation (persisted-only before live) breaks that order
  * whenever a persisted-only binding is NEWER than a live one — exactly what
- * a shell-hook write lands after a GitDialog bind. For `state` the sidecar
- * wins: the refresh timer rewrites it there, while the live entry is frozen
- * at bind-time. A binding present only in the live entry was either bound
- * this daemon lifetime and has not landed in the sidecar yet (the newest
- * binding), or was EVICTED from the sidecar: the sidecar-only writers (the
- * shell hook, backfill) never touch the live entry, and its cap drops the
- * weakest binding (lowest provenance, oldest within a rank) once it
- * overflows. Eviction only happens at the cap, so below it a live-only
- * entry is genuinely the newest; at the cap it is an evicted binding and
- * must not be re-appended as the session's latest.
+ * a shell-hook write lands after a GitDialog bind. For `state` and `issues`
+ * the persisted sidecar wins: the refresh timer rewrites them there, while
+ * the live entry is frozen at bind-time — and only for the same PR (same
+ * canonical url), whose live spelling (a query, a trailing slash) is kept.
+ * A same-numbered entry at a DIFFERENT canonical url is another PR: the
+ * sidecar-only writers (the shell hook, backfill) re-bind without touching
+ * the live entry, so the persisted binding wins wholesale and no stale live
+ * field survives; when a hand-edited sidecar holds two same-numbered
+ * entries, the live binding attaches to the url-matched one. A binding
+ * present only in the live entry was either bound this daemon lifetime and
+ * has not landed in the sidecar yet (the newest binding), or was EVICTED
+ * from the sidecar once it overflowed; eviction only happens at the cap, so
+ * below it a live-only entry is genuinely the newest and at the cap it must
+ * not be re-appended as the session's latest.
  */
 function mergeSummaryPrs(
   persistedPrs: readonly SessionPrInfo[] | undefined,
@@ -569,20 +571,37 @@ function mergeSummaryPrs(
   const persisted = persistedPrs ?? [];
   const liveByNumber = new Map(live.map((l) => [l.number, l]));
   const persistedNumbers = new Set(persisted.map((p) => p.number));
-  const ordered = persisted.map((p) => {
+  const consumedLive = new Set<number>();
+  const ordered: SessionPrInfo[] = [];
+  for (const p of persisted) {
     const liveEntry = liveByNumber.get(p.number);
-    if (!liveEntry) return p;
-    // The sidecar is the append-only binding-time record: when a
-    // sidecar-only writer (the shell hook, backfill) re-binds a number to
-    // ANOTHER repo, the persisted url wins over the stale live one — the
-    // same number in another repository is another PR. State follows the
-    // url it was resolved for: the persisted state belongs to the persisted
-    // url; a live state survives only when it was stamped for that same url.
-    const mergedEntry = { ...liveEntry, url: p.url };
-    if (p.state !== undefined) mergedEntry.state = p.state;
-    else if (p.url !== liveEntry.url) delete mergedEntry.state;
-    return mergedEntry;
-  });
+    if (!liveEntry) {
+      ordered.push(p);
+      continue;
+    }
+    const samePr =
+      canonicalSessionPrUrl(p.url) === canonicalSessionPrUrl(liveEntry.url);
+    // Matched by url, not a number-keyed map: a hand-edited sidecar can
+    // hold two same-numbered entries, and the live binding must attach to
+    // its own entry, not whichever one comes last.
+    const matchedTwinExists = persisted.some(
+      (q) =>
+        q.number === p.number &&
+        canonicalSessionPrUrl(q.url) === canonicalSessionPrUrl(liveEntry.url),
+    );
+    if (!samePr && matchedTwinExists) continue;
+    if (consumedLive.has(p.number)) continue;
+    consumedLive.add(p.number);
+    ordered.push(
+      samePr
+        ? {
+            ...liveEntry,
+            ...(p.state ? { state: p.state } : {}),
+            ...(p.issues ? { issues: p.issues } : {}),
+          }
+        : p,
+    );
+  }
   for (const liveEntry of live) {
     // Gate on the PERSISTED size: eviction only happens at the cap, so
     // below it a live-only entry is genuinely the newest binding and must

@@ -10,6 +10,7 @@ import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
 import { isNodeError } from '../utils/errors.js';
 import { atomicWriteJSON } from '../utils/atomicFileWrite.js';
+import { SESSION_PR_ISSUE_LIST_LIMIT } from '../utils/github-pr-issues.js';
 
 /**
  * Persisted GitHub pull request binding for a session. Written by the daemon
@@ -33,6 +34,12 @@ export interface SessionPr {
    * entries persisted before provenance was recorded.
    */
   source?: SessionPrSource;
+  /**
+   * Issues the PR closes (GitHub's closing references), snapshotted by the
+   * daemon timer — never bound by clients. Absent until the first refresh
+   * after binding; an empty array means "fetched, none".
+   */
+  issues?: SessionPrIssue[];
 }
 
 export type SessionPrState = 'open' | 'merged' | 'closed';
@@ -43,6 +50,15 @@ export type SessionPrState = 'open' | 'merged' | 'closed';
  * a `/review` command names a PR it merely looked at.
  */
 export type SessionPrSource = 'create' | 'worktree' | 'review';
+
+export interface SessionPrIssue {
+  number: number;
+  url: string;
+  /** Snapshot at last refresh; `not_planned` covers GitHub's "duplicate" too. */
+  state?: SessionPrIssueState;
+}
+
+export type SessionPrIssueState = 'open' | 'completed' | 'not_planned';
 
 /** Bound on the persisted PR list; oldest bindings are dropped beyond it. */
 export const SESSION_PR_LIST_LIMIT = 10;
@@ -68,13 +84,33 @@ function hasControlCharacter(value: string): boolean {
  * bounded, and free of control characters (the bridge interpolates it into
  * a stderr audit line, where a control character would forge log lines).
  * Every writer that persists a caller-supplied url must apply it: the
- * reader fails the WHOLE list closed on one invalid entry.
+ * reader fails the WHOLE list closed on one invalid entry. PR and issue
+ * urls share the rule.
  */
 export function isValidSessionPrUrl(url: string): boolean {
   return (
     url.length <= SESSION_PR_URL_MAX_LENGTH &&
     /^https?:\/\//i.test(url) &&
     !hasControlCharacter(url)
+  );
+}
+
+function isValidBindingUrl(value: unknown): value is string {
+  return typeof value === 'string' && isValidSessionPrUrl(value);
+}
+
+function isValidSessionPrIssue(value: unknown): value is SessionPrIssue {
+  if (value === null || typeof value !== 'object') return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v['number'] === 'number' &&
+    Number.isInteger(v['number']) &&
+    v['number'] > 0 &&
+    isValidBindingUrl(v['url']) &&
+    (v['state'] === undefined ||
+      v['state'] === 'open' ||
+      v['state'] === 'completed' ||
+      v['state'] === 'not_planned')
   );
 }
 
@@ -86,8 +122,7 @@ function isValidSessionPr(value: unknown): value is SessionPr {
     typeof v['number'] === 'number' &&
     Number.isInteger(v['number']) &&
     v['number'] > 0 &&
-    typeof v['url'] === 'string' &&
-    isValidSessionPrUrl(v['url']) &&
+    isValidBindingUrl(v['url']) &&
     typeof v['createdAt'] === 'string' &&
     (v['state'] === undefined ||
       v['state'] === 'open' ||
@@ -96,7 +131,11 @@ function isValidSessionPr(value: unknown): value is SessionPr {
     (v['source'] === undefined ||
       v['source'] === 'create' ||
       v['source'] === 'worktree' ||
-      v['source'] === 'review')
+      v['source'] === 'review') &&
+    (v['issues'] === undefined ||
+      (Array.isArray(v['issues']) &&
+        v['issues'].length <= SESSION_PR_ISSUE_LIST_LIMIT &&
+        v['issues'].every(isValidSessionPrIssue)))
   );
 }
 
@@ -323,6 +362,25 @@ export function ghPrCreateInlineEnv(
 }
 
 /**
+ * Wire projection of a binding: drops the sidecar-only `createdAt` and omits
+ * absent optionals, so responses, events, and live bridge entries all carry
+ * the same shape.
+ */
+export function toSessionPrInfo({
+  number,
+  url,
+  state,
+  issues,
+}: Omit<SessionPr, 'createdAt'>): Omit<SessionPr, 'createdAt'> {
+  return {
+    number,
+    url,
+    ...(state ? { state } : {}),
+    ...(issues ? { issues } : {}),
+  };
+}
+
+/**
  * Union two binding lists, deduping by PR number and keeping each number's
  * freshest entry (by createdAt), ordered by binding time and capped. Used
  * when an archive-state move finds both halves of a split pair: the sidecar
@@ -527,7 +585,9 @@ export function canonicalSessionPrUrl(url: string): string {
  *
  * Entries the read-side shape check would reject are declined here: the
  * reader fails the WHOLE list closed, so persisting one poisoned entry would
- * erase every earlier binding until the next successful write.
+ * erase every earlier binding until the next successful write. The issue
+ * snapshot is kept on the same-PR condition: only the refresh sweep
+ * writes it.
  */
 export function upsertSessionPr(
   filePath: string,
@@ -566,6 +626,7 @@ export function upsertSessionPr(
       createdAt: new Date().toISOString(),
       ...(state ? { state } : {}),
       ...(source ? { source } : {}),
+      ...(known?.issues ? { issues: known.issues } : {}),
     };
     if (!isValidSessionPr(entry)) return existing;
     const next = capSessionPrListByAuthority([
@@ -687,21 +748,40 @@ export function upsertSessionPrs(
   });
 }
 
+function sameIssues(
+  left: readonly SessionPrIssue[] | undefined,
+  right: readonly SessionPrIssue[] | undefined,
+): boolean {
+  if (left === undefined || right === undefined) return left === right;
+  return (
+    left.length === right.length &&
+    left.every(
+      (issue, index) =>
+        issue.number === right[index]!.number &&
+        issue.url === right[index]!.url &&
+        issue.state === right[index]!.state,
+    )
+  );
+}
+
 /**
- * Rewrites bound PR states in place — order and createdAt are preserved, so
- * a refresh sweep never reshuffles the badge's "latest" entry. Each stamp
- * carries the URL the state was resolved under; an entry whose canonical
- * url no longer matches was re-bound to another PR during the sweep's gh
- * window and is skipped — stamping by bare number across that window would
- * write the stale repo's state onto the new binding. Returns the number of
- * entries actually rewritten; 0 when the sidecar is absent/invalid or
- * nothing changed (no write then). `assertCanCommit` runs inside the
- * mutation queue right before the irreversible write commit; a throw
- * aborts the write.
+ * Rewrites bound PR snapshots (`state`, `issues`) in place — order and
+ * createdAt are preserved, so a refresh sweep never reshuffles the badge's
+ * "latest" entry. A fetched snapshot applies only when its url matches the
+ * entry's: the map is keyed by number, but a binding may point at any
+ * repository, and a same-numbered PR of a different repo is a different PR.
+ * An omitted `state` or `issues` leaves that field alone (the two come from
+ * different queries, and either may miss a PR). Returns the number of
+ * entries rewritten; 0 when the sidecar is absent/invalid or nothing changed
+ * (no write then). `assertCanCommit` runs inside the mutation queue right
+ * before the irreversible write commit; a throw aborts the write.
  */
 export function updateSessionPrStates(
   filePath: string,
-  states: ReadonlyMap<number, { state: SessionPrState; url: string }>,
+  states: ReadonlyMap<
+    number,
+    { state?: SessionPrState; url: string; issues?: SessionPrIssue[] }
+  >,
   options: { assertCanCommit?: () => void } = {},
 ): Promise<number> {
   return enqueuePrMutation(filePath, async () => {
@@ -709,17 +789,24 @@ export function updateSessionPrStates(
     if (!existing) return 0;
     let changed = 0;
     const next = existing.map((entry) => {
-      const stamped = states.get(entry.number);
+      const fetched = states.get(entry.number);
       if (
-        stamped === undefined ||
-        canonicalSessionPrUrl(stamped.url) !==
-          canonicalSessionPrUrl(entry.url) ||
-        stamped.state === entry.state
+        fetched === undefined ||
+        canonicalSessionPrUrl(fetched.url) !== canonicalSessionPrUrl(entry.url)
       ) {
         return entry;
       }
+      const state = fetched.state ?? entry.state;
+      const issues = fetched.issues ?? entry.issues;
+      if (state === entry.state && sameIssues(issues, entry.issues)) {
+        return entry;
+      }
       changed += 1;
-      return { ...entry, state: stamped.state };
+      return {
+        ...entry,
+        ...(state ? { state } : {}),
+        ...(issues ? { issues } : {}),
+      };
     });
     if (changed === 0) return 0;
     await writeSessionPrs(filePath, next, options);

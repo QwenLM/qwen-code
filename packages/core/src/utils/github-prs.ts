@@ -233,7 +233,8 @@ function runGhPrList(
   });
 }
 
-function ghErrorMessage(
+/** Shared by the sibling `gh` wrappers (PR issues); stays thin on purpose. */
+export function ghErrorMessage(
   error: unknown,
   commandLabel = 'gh pr list',
   timeoutMs = GH_TIMEOUT_MS,

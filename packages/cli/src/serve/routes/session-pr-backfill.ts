@@ -20,6 +20,7 @@ import {
   replaceSessionPrs,
   repoKeyFromWebUrl,
   sessionPrSourceAuthority,
+  toSessionPrInfo,
   type SessionArchiveState,
   type SessionPr,
   type SessionPrSource,
@@ -890,11 +891,7 @@ export async function backfillWorkspaceSessionPrs(
           assertGenerationOpen();
           runtime.bridge.setSessionPrs?.(
             candidate.sessionId,
-            fresh.map(({ number, url, state }) => ({
-              number,
-              url,
-              ...(state ? { state } : {}),
-            })),
+            fresh.map(toSessionPrInfo),
           );
           return null;
         });
