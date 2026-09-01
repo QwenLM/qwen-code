@@ -771,6 +771,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'writer_idle_timeout',
   'non_blocking_prompt',
   'session_language',
+  'user_language_sync',
   'session_rewind',
   'workspace_hooks',
   'session_hooks',
@@ -3013,7 +3014,11 @@ describe('createServeApp', () => {
           );
           continue;
         }
-        if (feature === 'workspace_settings' || feature === 'workspace_voice') {
+        if (
+          feature === 'workspace_settings' ||
+          feature === 'workspace_voice' ||
+          feature === 'user_language_sync'
+        ) {
           expect(predicate({ persistSettingAvailable: true })).toBe(true);
           expect(predicate({ persistSettingAvailable: false })).toBe(false);
           expect(predicate({})).toBe(false);
@@ -22373,6 +22378,69 @@ describe('createServeApp', () => {
         .send({ language: 'zh' });
       expect(res.status).toBe(500);
       expect(res.body).toMatchObject({ error: expect.any(String) });
+    });
+  });
+
+  describe('POST /language', () => {
+    it('accepts a client id known only to a secondary runtime', async () => {
+      const primaryBridge = Object.assign(fakeBridge(), {
+        setUserLanguage: vi.fn().mockResolvedValue({
+          language: 'zh',
+          sessions: 0,
+          failed: 0,
+        }),
+      });
+      const secondaryBridge = Object.assign(
+        fakeBridge({ knownClientIds: ['secondary-client'] }),
+        {
+          setUserLanguage: vi.fn().mockResolvedValue({
+            language: 'zh',
+            sessions: 0,
+            failed: 0,
+          }),
+        },
+      );
+      const workspaceRegistry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'primary-id',
+          workspaceCwd: WS_BOUND,
+          primary: true,
+          bridge: primaryBridge,
+        }),
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'secondary-id',
+          workspaceCwd: '/workspace/secondary',
+          primary: false,
+          bridge: secondaryBridge,
+        }),
+      ]);
+      const app = createServeApp(baseOpts, undefined, {
+        bridge: primaryBridge,
+        workspaceRegistry,
+        persistSetting: vi.fn().mockResolvedValue(undefined),
+      });
+
+      const res = await request(app)
+        .post('/language')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('X-Qwen-Client-Id', 'secondary-client')
+        .send({ language: 'zh' });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({ language: 'zh' });
+    });
+
+    it('is not registered when settings persistence is unavailable', async () => {
+      const app = createServeApp(baseOpts, undefined, {
+        bridge: fakeBridge(),
+      });
+
+      const res = await request(app)
+        .post('/language')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ language: 'zh' });
+
+      expect(res.status).toBe(404);
     });
   });
 

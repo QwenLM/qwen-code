@@ -328,6 +328,12 @@ export const SERVE_CAPABILITY_REGISTRY = {
   writer_idle_timeout: { since: 'v1' },
   non_blocking_prompt: { since: 'v1' },
   session_language: { since: 'v1' },
+  // Sessionless user-level language sync (`POST /language`) for hosts that
+  // switch language before any session exists (issue #10234). Advertised
+  // CONDITIONALLY with `workspace_settings`: the route persists user-scope
+  // settings, so daemons without settings persistence omit the tag and
+  // return 404.
+  user_language_sync: { since: 'v1' },
   session_rewind: { since: 'v1' },
   workspace_hooks: { since: 'v1' },
   session_hooks: { since: 'v1' },
@@ -593,6 +599,7 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
       toggles.writerIdleTimeoutMs > 0,
   ],
   ['workspace_settings', (toggles) => toggles.persistSettingAvailable === true],
+  ['user_language_sync', (toggles) => toggles.persistSettingAvailable === true],
   ['workspace_voice', (toggles) => toggles.persistSettingAvailable === true],
   [
     'workspace_voice_transcription',

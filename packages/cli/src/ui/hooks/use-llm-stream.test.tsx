@@ -13590,6 +13590,47 @@ describe('useLlmStream', () => {
       ]);
     });
 
+    // Issue #10380: 413-driven compactions fire below the token threshold;
+    // the notice must attribute the compaction to the request-body limit,
+    // not to an input token limit the request never approached.
+    it('attributes the notice to the request-body limit for payload-overflow compactions', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerLlmEventType.ChatCompressed,
+            value: {
+              originalTokenCount: 100,
+              newTokenCount: 50,
+              triggerReason: 'payload_overflow',
+            },
+          };
+          yield {
+            type: ServerLlmEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('test payload overflow compression');
+      });
+
+      const infoItems = mockAddItem.mock.calls
+        .map(([item]) => item as HistoryItem)
+        .filter((item) => item.type === 'info');
+      expect(infoItems).toEqual([
+        expect.objectContaining({
+          text: expect.stringContaining(
+            'exceeded the endpoint request-body limit',
+          ),
+        }),
+      ]);
+      expect((infoItems[0] as HistoryItem).text).not.toContain(
+        'approached the input token limit',
+      );
+    });
+
     it('renders unknown counts when the auto-compaction event value is null', async () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
