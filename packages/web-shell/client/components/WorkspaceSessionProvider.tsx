@@ -2,12 +2,17 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { WifiOffIcon } from 'lucide-react';
 import {
   DaemonSessionProvider,
-  useConnection,
   useWorkspace,
   useWorkspaceActions,
-} from '@qwen-code/webui/daemon-react-sdk';
-import type { DaemonConnectionState } from '@qwen-code/webui/daemon-react-sdk';
-import type { DaemonWorkspaceCapability } from '@qwen-code/sdk/daemon';
+  type DaemonProductSessionContext,
+} from '@qwen-code/web-shell/daemon-react-sdk';
+import {
+  isStandaloneSessionNotFoundError,
+  STANDALONE_SESSIONS_CAPABILITY,
+  type DaemonStandaloneSessionLookup,
+  type DaemonStandaloneSessionSummary,
+  type DaemonWorkspaceCapability,
+} from '@qwen-code/sdk/daemon';
 import { App, type WebShellProps } from '../App';
 import {
   WEB_SHELL_HISTORY_PAGE_SIZE,
@@ -16,22 +21,11 @@ import {
 import { getTranslator, normalizeLanguage } from '../i18n';
 import { Spinner } from './ui/spinner';
 import { WorkspaceUnavailableState } from './WorkspaceUnavailableState';
-const CLIENT_IDENTITY_FEATURE = 'client_identity';
-type CommittedSessionTarget = { sessionId: string; workspaceCwd?: string };
-function SessionStateObserver({
-  onChange,
-}: {
-  onChange: (connection: DaemonConnectionState) => void;
-}) {
-  const connection = useConnection();
-  useEffect(() => onChange(connection), [connection, onChange]);
-  return null;
-}
-
 interface WorkspaceSessionProviderProps {
   sessionId?: string;
   workspaceId?: string;
   workspaceCwd?: string;
+  sessionContext?: DaemonProductSessionContext;
   lockWorkspaceCwd?: string;
   clientId?: string;
   restartSseOnPrompt?: boolean;
@@ -39,10 +33,85 @@ interface WorkspaceSessionProviderProps {
   webShellProps: WebShellProps;
 }
 
-export function WorkspaceSessionProvider({
+export function WorkspaceSessionProvider(props: WorkspaceSessionProviderProps) {
+  const {
+    sessionId,
+    workspaceId,
+    workspaceCwd,
+    sessionContext,
+    lockWorkspaceCwd,
+    clientId,
+    restartSseOnPrompt,
+    historyPageSize = WEB_SHELL_HISTORY_PAGE_SIZE,
+    webShellProps,
+  } = props;
+  const onSessionIdChange = webShellProps.onSessionIdChange;
+  const attachedStandaloneSessionIdRef = useRef<string | undefined>(undefined);
+  const handleSessionIdChange = useCallback<
+    NonNullable<WebShellProps['onSessionIdChange']>
+  >(
+    (nextSessionId, nextWorkspaceId, nextWorkspaceCwd, nextSessionContext) => {
+      attachedStandaloneSessionIdRef.current =
+        nextSessionContext?.kind === 'standalone' ? nextSessionId : undefined;
+      onSessionIdChange?.(
+        nextSessionId,
+        nextWorkspaceId,
+        nextWorkspaceCwd,
+        nextSessionContext,
+      );
+    },
+    [onSessionIdChange],
+  );
+  if (
+    sessionContext?.kind !== 'standalone' ||
+    (attachedStandaloneSessionIdRef.current !== undefined &&
+      attachedStandaloneSessionIdRef.current !== sessionId)
+  ) {
+    attachedStandaloneSessionIdRef.current = undefined;
+  }
+  const t = getTranslator(normalizeLanguage(webShellProps.language));
+  const contextConflictsWithWorkspace =
+    sessionContext?.kind !== undefined &&
+    sessionContext.kind !== 'workspace' &&
+    Boolean(lockWorkspaceCwd || workspaceCwd || workspaceId);
+
+  if (contextConflictsWithWorkspace) {
+    return (
+      <WorkspaceUnavailableState
+        title={t('session.loadFailed')}
+        description={t('session.contextConflict')}
+        theme={webShellProps.theme}
+        icon={<WifiOffIcon />}
+      />
+    );
+  }
+
+  if (sessionContext?.kind === 'standalone') {
+    return (
+      <StandaloneSessionGate
+        sessionId={sessionId}
+        attachedSessionId={attachedStandaloneSessionIdRef.current}
+        clientId={clientId}
+        restartSseOnPrompt={restartSseOnPrompt}
+        historyPageSize={historyPageSize}
+        webShellProps={{
+          ...webShellProps,
+          onSessionIdChange: onSessionIdChange
+            ? handleSessionIdChange
+            : undefined,
+        }}
+      />
+    );
+  }
+
+  return <WorkspaceSessionProviderWorkspace {...props} />;
+}
+
+function WorkspaceSessionProviderWorkspace({
   sessionId,
   workspaceId,
   workspaceCwd,
+  sessionContext,
   lockWorkspaceCwd,
   clientId,
   restartSseOnPrompt,
@@ -66,12 +135,14 @@ export function WorkspaceSessionProvider({
   >(undefined);
   useEffect(
     () => setUsePrimaryNewSession(false),
-    [sessionId, lockWorkspaceCwd, workspaceCwd, workspaceId],
+    [sessionContext, sessionId, lockWorkspaceCwd, workspaceCwd, workspaceId],
   );
   const effectiveSessionId = usePrimaryNewSession ? undefined : sessionId;
   const effectiveWorkspaceCwd = usePrimaryNewSession
     ? undefined
-    : (lockWorkspaceCwd ?? workspaceCwd);
+    : (lockWorkspaceCwd ??
+      workspaceCwd ??
+      (sessionContext?.kind === 'workspace' ? sessionContext.cwd : undefined));
   const effectiveWorkspaceId = effectiveWorkspaceCwd ? undefined : workspaceId;
   const pathWorkspace = useMemo(() => {
     const listedWorkspace = workspace.capabilities?.workspaces?.find(
@@ -104,168 +175,10 @@ export function WorkspaceSessionProvider({
     : workspace.capabilities?.workspaces?.find(
         (entry) => entry.id === effectiveWorkspaceId,
       );
-  const desiredWorkspace =
-    targetWorkspace ??
-    (!effectiveWorkspaceCwd && !effectiveWorkspaceId
-      ? workspace.capabilities?.workspaces?.find(
-          (entry) =>
-            entry.primary || entry.cwd === workspace.capabilities?.workspaceCwd,
-        )
-      : undefined);
   const t = useMemo(
     () => getTranslator(normalizeLanguage(webShellProps.language)),
     [webShellProps.language],
   );
-  const onSessionIdChange = webShellProps.onSessionIdChange;
-  const transactionalRef = useRef<boolean | undefined>(undefined);
-  if (workspace.capabilities) {
-    transactionalRef.current = workspace.capabilities.features.includes(
-      CLIENT_IDENTITY_FEATURE,
-    );
-  }
-  const transactional = transactionalRef.current === true;
-  const desiredKey = `${effectiveSessionId ?? ''}\0${effectiveWorkspaceCwd ?? effectiveWorkspaceId ?? ''}`;
-  const [, setCommittedTarget] = useState<CommittedSessionTarget>();
-  const committedTargetRef = useRef<CommittedSessionTarget | undefined>(
-    undefined,
-  );
-  const pendingHostCommitKeyRef = useRef<string | undefined>(undefined);
-  if (
-    pendingHostCommitKeyRef.current !== undefined &&
-    pendingHostCommitKeyRef.current !== desiredKey
-  ) {
-    pendingHostCommitKeyRef.current = undefined;
-  }
-  const installCommittedTarget = useCallback(
-    (target: CommittedSessionTarget) => {
-      committedTargetRef.current = target;
-      setCommittedTarget(target);
-    },
-    [],
-  );
-  const commitTarget = useCallback(
-    (target: CommittedSessionTarget) => {
-      pendingHostCommitKeyRef.current =
-        target.sessionId !== effectiveSessionId ||
-        target.workspaceCwd !== desiredWorkspace?.cwd
-          ? desiredKey
-          : undefined;
-      installCommittedTarget(target);
-    },
-    [
-      desiredKey,
-      desiredWorkspace?.cwd,
-      effectiveSessionId,
-      installCommittedTarget,
-    ],
-  );
-  const canKeepCommitted =
-    transactional && committedTargetRef.current !== undefined;
-  const desiredTargetResolved =
-    (!effectiveWorkspaceCwd && !effectiveWorkspaceId) ||
-    targetWorkspace !== undefined;
-  const failureLatchRef = useRef<string | undefined>(undefined);
-  const desiredTargetFailed =
-    workspace.status === 'error' ||
-    (!desiredTargetResolved &&
-      ((lockWorkspaceCwd !== undefined &&
-        registrationErrorCwd === lockWorkspaceCwd) ||
-        (workspace.capabilities !== undefined && !lockWorkspaceCwd)));
-  const desiredTargetReady = desiredTargetResolved && !desiredTargetFailed;
-  const controlledTargetUncommitted =
-    effectiveSessionId !== undefined &&
-    pendingHostCommitKeyRef.current !== desiredKey &&
-    (effectiveSessionId !== committedTargetRef.current?.sessionId ||
-      desiredWorkspace?.cwd !== committedTargetRef.current?.workspaceCwd);
-  const desiredTargetPending =
-    canKeepCommitted &&
-    failureLatchRef.current !== desiredKey &&
-    !desiredTargetFailed &&
-    (!desiredTargetReady || controlledTargetUncommitted);
-  const reportCommittedTarget = useCallback(() => {
-    const committed = committedTargetRef.current;
-    if (!committed) return;
-    const workspaceId = workspace.capabilities?.workspaces?.find(
-      (entry) => entry.cwd === committed.workspaceCwd,
-    )?.id;
-    onSessionIdChange?.(
-      committed.sessionId,
-      workspaceId,
-      committed.workspaceCwd,
-    );
-  }, [onSessionIdChange, workspace.capabilities?.workspaces]);
-  const observeSessionState = useCallback(
-    (connection: DaemonConnectionState) => {
-      if (
-        transactional &&
-        connection.status === 'connected' &&
-        connection.sessionId
-      ) {
-        installCommittedTarget({
-          sessionId: connection.sessionId,
-          workspaceCwd: connection.workspaceCwd,
-        });
-      }
-      const transition = connection.sessionTransition;
-      if (
-        transition?.phase === 'failed' &&
-        transition.targetSessionId === effectiveSessionId &&
-        transition.targetWorkspaceCwd === desiredWorkspace?.cwd &&
-        failureLatchRef.current !== desiredKey
-      ) {
-        failureLatchRef.current = desiredKey;
-        reportCommittedTarget();
-      }
-    },
-    [
-      desiredKey,
-      effectiveSessionId,
-      installCommittedTarget,
-      reportCommittedTarget,
-      desiredWorkspace?.cwd,
-      transactional,
-    ],
-  );
-
-  useEffect(() => {
-    if (!canKeepCommitted || desiredTargetReady) {
-      if (failureLatchRef.current !== desiredKey) {
-        failureLatchRef.current = undefined;
-      }
-      return;
-    }
-    if (!desiredTargetFailed || failureLatchRef.current === desiredKey) return;
-    failureLatchRef.current = desiredKey;
-    reportCommittedTarget();
-  }, [
-    canKeepCommitted,
-    desiredKey,
-    desiredTargetFailed,
-    desiredTargetReady,
-    reportCommittedTarget,
-  ]);
-  const keepCommittedTarget =
-    canKeepCommitted &&
-    (!desiredTargetReady || pendingHostCommitKeyRef.current === desiredKey);
-  const providerSessionId = keepCommittedTarget
-    ? committedTargetRef.current!.sessionId
-    : effectiveSessionId;
-  const providerWorkspaceCwd = keepCommittedTarget
-    ? committedTargetRef.current!.workspaceCwd
-    : desiredWorkspace?.cwd;
-  const visibleWorkspaceCwd = canKeepCommitted
-    ? committedTargetRef.current!.workspaceCwd
-    : desiredWorkspace?.cwd;
-  const visibleWorkspace =
-    (desiredWorkspace?.cwd === visibleWorkspaceCwd
-      ? desiredWorkspace
-      : undefined) ??
-    workspace.capabilities?.workspaces?.find(
-      (entry) => entry.cwd === visibleWorkspaceCwd,
-    ) ??
-    (registeredLockedWorkspace?.cwd === visibleWorkspaceCwd
-      ? registeredLockedWorkspace
-      : undefined);
 
   useEffect(() => {
     if (!lockWorkspaceCwd || !workspace.capabilities || pathWorkspace) return;
@@ -322,8 +235,7 @@ export function WorkspaceSessionProvider({
 
   if (
     (effectiveWorkspaceCwd || effectiveWorkspaceId) &&
-    workspace.status === 'error' &&
-    !canKeepCommitted
+    workspace.status === 'error'
   ) {
     return (
       <WorkspaceUnavailableState
@@ -340,8 +252,7 @@ export function WorkspaceSessionProvider({
   }
   if (
     (effectiveWorkspaceCwd || effectiveWorkspaceId) &&
-    !workspace.capabilities &&
-    !canKeepCommitted
+    !workspace.capabilities
   ) {
     return (
       <div
@@ -356,11 +267,7 @@ export function WorkspaceSessionProvider({
       </div>
     );
   }
-  if (
-    lockWorkspaceCwd &&
-    registrationErrorCwd === lockWorkspaceCwd &&
-    !canKeepCommitted
-  ) {
+  if (lockWorkspaceCwd && registrationErrorCwd === lockWorkspaceCwd) {
     return (
       <WorkspaceUnavailableState
         title={t('workspace.loadFailed')}
@@ -375,7 +282,7 @@ export function WorkspaceSessionProvider({
       />
     );
   }
-  if (lockWorkspaceCwd && !targetWorkspace && !canKeepCommitted) {
+  if (lockWorkspaceCwd && !targetWorkspace) {
     return (
       <div
         data-web-shell-root
@@ -389,11 +296,7 @@ export function WorkspaceSessionProvider({
       </div>
     );
   }
-  if (
-    (effectiveWorkspaceCwd || effectiveWorkspaceId) &&
-    !targetWorkspace &&
-    !canKeepCommitted
-  ) {
+  if ((effectiveWorkspaceCwd || effectiveWorkspaceId) && !targetWorkspace) {
     return (
       <WorkspaceUnavailableState
         title={t('workspace.notFound')}
@@ -410,34 +313,316 @@ export function WorkspaceSessionProvider({
 
   return (
     <DaemonSessionProvider
-      key={
-        transactionalRef.current !== false
-          ? 'transactional-main-session'
-          : `${targetWorkspace?.id ?? effectiveWorkspaceId ?? 'primary'}:${effectiveSessionId ?? 'new'}`
+      key="main-session"
+      sessionId={effectiveSessionId}
+      sessionContext={
+        usePrimaryNewSession
+          ? undefined
+          : (sessionContext ??
+            (targetWorkspace
+              ? { kind: 'workspace', cwd: targetWorkspace.cwd }
+              : undefined))
       }
-      sessionId={providerSessionId}
-      workspaceCwd={providerWorkspaceCwd}
+      workspaceCwd={
+        sessionContext?.kind === 'workspace' || !sessionContext
+          ? targetWorkspace?.cwd
+          : undefined
+      }
       clientId={clientId}
       historyPageSize={historyPageSize}
       subagentTranscriptMode="summary"
       maxBlocks={WEB_SHELL_MAX_TRANSCRIPT_BLOCKS}
       suppressOwnUserEcho
       restartEventStreamOnPrompt={restartSseOnPrompt}
-      onSessionTransitionCommit={commitTarget}
     >
-      <SessionStateObserver onChange={observeSessionState} />
       <App
         {...webShellProps}
-        desiredSessionTargetPending={desiredTargetPending}
         historyPageSize={historyPageSize}
         restartSseOnPrompt={restartSseOnPrompt}
         initialSelectedWorkspaceCwd={
-          !lockWorkspaceCwd ? visibleWorkspaceCwd : undefined
+          !lockWorkspaceCwd && targetWorkspace ? targetWorkspace.cwd : undefined
         }
-        lockedWorkspaceCwd={lockWorkspaceCwd ? visibleWorkspaceCwd : undefined}
+        lockedWorkspaceCwd={lockWorkspaceCwd ? targetWorkspace?.cwd : undefined}
         lockedWorkspaceCapability={
-          lockWorkspaceCwd ? visibleWorkspace : undefined
+          lockWorkspaceCwd ? targetWorkspace : undefined
         }
+      />
+    </DaemonSessionProvider>
+  );
+}
+
+const STANDALONE_LOOKUP_DELAYS_MS = [250, 500, 1000, 2000, 4000, 4000];
+
+type StandaloneResolution =
+  | { status: 'loading' }
+  | { status: 'ready' }
+  | { status: 'archived'; lookup: DaemonStandaloneSessionSummary }
+  | { status: 'not-found' }
+  | { status: 'still-creating' }
+  | { status: 'error'; error: Error };
+
+function StandaloneSessionGate({
+  sessionId,
+  attachedSessionId,
+  clientId,
+  restartSseOnPrompt,
+  historyPageSize,
+  webShellProps,
+}: {
+  sessionId?: string;
+  attachedSessionId?: string;
+  clientId?: string;
+  restartSseOnPrompt?: boolean;
+  historyPageSize: number;
+  webShellProps: WebShellProps;
+}) {
+  const workspace = useWorkspace();
+  const [attempt, setAttempt] = useState(0);
+  const [resolution, setResolution] = useState<StandaloneResolution>(() =>
+    sessionId ? { status: 'loading' } : { status: 'ready' },
+  );
+  const [resolutionSessionId, setResolutionSessionId] = useState(sessionId);
+  const resolutionGenerationRef = useRef(0);
+  const t = useMemo(
+    () => getTranslator(normalizeLanguage(webShellProps.language)),
+    [webShellProps.language],
+  );
+
+  const standaloneSupported =
+    workspace.capabilities?.features?.includes(
+      STANDALONE_SESSIONS_CAPABILITY,
+    ) === true;
+
+  useEffect(() => {
+    if (!standaloneSupported) return;
+    const generation = resolutionGenerationRef.current + 1;
+    resolutionGenerationRef.current = generation;
+    setResolutionSessionId(sessionId);
+    const resolveSession = async () => {
+      if (!sessionId) {
+        if (resolutionGenerationRef.current === generation) {
+          setResolution({ status: 'ready' });
+        }
+        return;
+      }
+
+      if (attachedSessionId === sessionId) {
+        if (resolutionGenerationRef.current === generation) {
+          setResolution({ status: 'ready' });
+        }
+        return;
+      }
+
+      if (resolutionGenerationRef.current === generation) {
+        setResolution({ status: 'loading' });
+      }
+      for (let index = 0; ; index += 1) {
+        let lookup: DaemonStandaloneSessionLookup;
+        try {
+          lookup = await workspace.client.getStandaloneSession(sessionId);
+        } catch (error) {
+          if (resolutionGenerationRef.current !== generation) return;
+          if (isStandaloneSessionNotFoundError(error)) {
+            setResolution({ status: 'not-found' });
+            return;
+          }
+          setResolution({
+            status: 'error',
+            error: error instanceof Error ? error : new Error(String(error)),
+          });
+          return;
+        }
+
+        if (resolutionGenerationRef.current !== generation) return;
+
+        if (!('state' in lookup)) {
+          setResolution(
+            lookup.isArchived
+              ? { status: 'archived', lookup }
+              : { status: 'ready' },
+          );
+          return;
+        }
+        const delay = STANDALONE_LOOKUP_DELAYS_MS[index];
+        if (delay === undefined) {
+          setResolution({ status: 'still-creating' });
+          return;
+        }
+        await new Promise<void>((resolve) => window.setTimeout(resolve, delay));
+        if (resolutionGenerationRef.current !== generation) return;
+      }
+    };
+    void resolveSession();
+    return () => {
+      if (resolutionGenerationRef.current === generation) {
+        resolutionGenerationRef.current += 1;
+      }
+    };
+  }, [
+    attempt,
+    attachedSessionId,
+    sessionId,
+    standaloneSupported,
+    workspace.client,
+  ]);
+
+  const capabilities = workspace.capabilities;
+  if (workspace.status === 'error') {
+    return (
+      <WorkspaceUnavailableState
+        title={t('session.loadFailed')}
+        description={t('session.capabilitiesFailed')}
+        actionLabel={t('common.retry')}
+        theme={webShellProps.theme}
+        icon={<WifiOffIcon />}
+        onAction={() => {
+          void workspace.refreshCapabilities?.().catch(() => {});
+        }}
+      />
+    );
+  }
+  if (!capabilities) {
+    return (
+      <div
+        data-web-shell-root
+        data-web-shell-shadcn
+        className={`flex min-h-32 w-full items-center justify-center gap-2 text-sm text-muted-foreground ${webShellProps.theme === 'dark' ? 'dark' : ''}`}
+        role="status"
+        aria-live="polite"
+      >
+        <Spinner />
+        <span>{t('common.loading')}</span>
+      </div>
+    );
+  }
+  if (!standaloneSupported) {
+    return (
+      <WorkspaceUnavailableState
+        title={t('session.standaloneUnavailable')}
+        description={t('session.standaloneUpgradeRequired')}
+        theme={webShellProps.theme}
+        icon={<WifiOffIcon />}
+      />
+    );
+  }
+  if (
+    (resolutionSessionId !== sessionId && attachedSessionId !== sessionId) ||
+    resolution.status === 'loading'
+  ) {
+    return (
+      <div
+        data-web-shell-root
+        data-web-shell-shadcn
+        className={`flex min-h-32 w-full items-center justify-center gap-2 text-sm text-muted-foreground ${webShellProps.theme === 'dark' ? 'dark' : ''}`}
+        role="status"
+        aria-live="polite"
+      >
+        <Spinner />
+        <span>{t('session.resolving')}</span>
+      </div>
+    );
+  }
+  if (resolution.status === 'not-found') {
+    return (
+      <WorkspaceUnavailableState
+        title={t('session.notFound')}
+        description={t('session.notFoundDescription')}
+        actionLabel={
+          webShellProps.onSessionIdChange ? t('session.new') : undefined
+        }
+        theme={webShellProps.theme}
+        icon={<WifiOffIcon />}
+        onAction={
+          webShellProps.onSessionIdChange
+            ? () => {
+                webShellProps.onSessionIdChange?.(
+                  undefined,
+                  undefined,
+                  undefined,
+                  { kind: 'standalone' },
+                );
+              }
+            : undefined
+        }
+      />
+    );
+  }
+  if (resolution.status === 'error' || resolution.status === 'still-creating') {
+    return (
+      <WorkspaceUnavailableState
+        title={t('session.loadFailed')}
+        description={
+          resolution.status === 'still-creating'
+            ? t('session.stillCreating')
+            : resolution.error.message
+        }
+        actionLabel={t('common.retry')}
+        theme={webShellProps.theme}
+        icon={<WifiOffIcon />}
+        onAction={() => setAttempt((current) => current + 1)}
+      />
+    );
+  }
+  if (resolution.status === 'archived') {
+    return (
+      <WorkspaceUnavailableState
+        title={t('session.archived')}
+        description={t('session.archivedDescription')}
+        actionLabel={t('session.unarchive')}
+        theme={webShellProps.theme}
+        onAction={() => {
+          const requestedSessionId = sessionId!;
+          const normalizedSessionId = requestedSessionId.toLowerCase();
+          const generation = resolutionGenerationRef.current;
+          void workspace.client
+            .unarchiveStandaloneSessions([requestedSessionId])
+            .then((result) => {
+              if (resolutionGenerationRef.current !== generation) return;
+              if (
+                result.unarchived.includes(normalizedSessionId) ||
+                result.alreadyActive.includes(normalizedSessionId)
+              ) {
+                setResolution({ status: 'ready' });
+                return;
+              }
+              if (result.notFound?.includes(normalizedSessionId)) {
+                setResolution({ status: 'not-found' });
+                return;
+              }
+              const failure = result.errors.find(
+                (entry) => entry.sessionId === normalizedSessionId,
+              );
+              throw new Error(failure?.message ?? t('session.unarchiveFailed'));
+            })
+            .catch((error: unknown) => {
+              if (resolutionGenerationRef.current !== generation) return;
+              setResolution({
+                status: 'error',
+                error:
+                  error instanceof Error ? error : new Error(String(error)),
+              });
+            });
+        }}
+      />
+    );
+  }
+
+  return (
+    <DaemonSessionProvider
+      key="main-session"
+      sessionId={sessionId}
+      sessionContext={{ kind: 'standalone' }}
+      clientId={clientId}
+      historyPageSize={historyPageSize}
+      subagentTranscriptMode="summary"
+      maxBlocks={WEB_SHELL_MAX_TRANSCRIPT_BLOCKS}
+      suppressOwnUserEcho
+      restartEventStreamOnPrompt={restartSseOnPrompt}
+    >
+      <App
+        {...webShellProps}
+        historyPageSize={historyPageSize}
+        restartSseOnPrompt={restartSseOnPrompt}
       />
     </DaemonSessionProvider>
   );

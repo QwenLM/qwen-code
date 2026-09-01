@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import type { DaemonWorkspaceActions } from '@qwen-code/webui/daemon-react-sdk';
+import type { DaemonWorkspaceActions } from '@qwen-code/web-shell/daemon-react-sdk';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../../i18n';
 import { CodeReviewArtifactDetail } from './CodeReviewArtifactDetail';
@@ -34,6 +34,7 @@ const reviewDocument = {
       shortSummary: 'Cross-workspace overwrite',
       failureScenario:
         'Open workspace B and submit a request from workspace A.',
+      witness: 'BASE: overwrote workspace B / PR: refused — probe flipped',
       suggestedFix: 'Resolve the runtime before writing.',
       category: 'security',
       locations: [{ file: 'src/write.ts', line: 42, anchor: 'writeFile()' }],
@@ -136,6 +137,13 @@ describe('CodeReviewArtifactDetail', () => {
     expect(container.textContent).toContain('coverage');
     expect(container.textContent).toContain('Source: test');
     expect(container.textContent).toContain('Failure scenario');
+    // The executed evidence is the field the witness rule exists to deliver
+    // to the author; parsing it and dropping it from display was the measured
+    // gap (PR 9065 review R1-3).
+    expect(container.textContent).toContain('Witness');
+    expect(container.textContent).toContain(
+      'BASE: overwrote workspace B / PR: refused — probe flipped',
+    );
     expect(container.textContent).toContain('Suggested fix');
     expect(container.textContent).toContain(
       'skipped — Outside the reviewed diff.',
@@ -633,5 +641,36 @@ describe('CodeReviewArtifactDetail', () => {
     expect(container.querySelector('[role="alert"]')?.textContent).toContain(
       'truncated',
     );
+  });
+
+  it('routes evidence link clicks through the desktop opener', async () => {
+    const invoke = vi.fn().mockResolvedValue(undefined);
+    (window as { __TAURI__?: unknown }).__TAURI__ = { core: { invoke } };
+    try {
+      const { container } = renderWith(JSON.stringify(reviewDocument));
+      await flush();
+
+      const link = Array.from(container.querySelectorAll('a')).find(
+        (anchor) =>
+          anchor.getAttribute('href') === 'https://example.com/evidence.png',
+      );
+      expect(link).toBeDefined();
+
+      const event = new MouseEvent('click', {
+        bubbles: true,
+        cancelable: true,
+        button: 0,
+      });
+      act(() => {
+        link!.dispatchEvent(event);
+      });
+
+      expect(event.defaultPrevented).toBe(true);
+      expect(invoke).toHaveBeenCalledWith('plugin:opener|open_url', {
+        url: 'https://example.com/evidence.png',
+      });
+    } finally {
+      delete (window as { __TAURI__?: unknown }).__TAURI__;
+    }
   });
 });

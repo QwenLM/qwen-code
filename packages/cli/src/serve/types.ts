@@ -57,8 +57,6 @@ export interface ChannelWebhookConfigSource {
 export interface ServeOptions {
   hostname: string;
   port: number;
-  /** Fail instead of retrying the next port when the requested port is busy. */
-  strictPort?: boolean;
   /**
    * Bearer token required on every request. Optional when bound to loopback
    * (developer convenience); required when bound beyond loopback (boot fails
@@ -127,17 +125,28 @@ export interface ServeOptions {
    */
   compactedReplayMaxBytes?: number;
   /**
-   * Per-session cap on replay entries retained in the in-flight live journal.
-   * Compatible text/thought chunks share bounded entries. Threaded into
-   * `BridgeOptions.maxJournalEvents`. Defaults to 10 000. Must be a positive
-   * safe integer.
+   * Per-session BASELINE cap on replay entries retained in the in-flight
+   * live journal. Compatible text/thought chunks share bounded entries.
+   * Threaded into `BridgeOptions.maxJournalEvents`. Defaults to 10 000.
+   * Must be a positive safe integer.
+   *
+   * Growth semantics: leaving BOTH this and `maxJournalBytes` unset enables
+   * adaptive growth — the daemon raises a breaching session's caps within a
+   * pool derived from the memory budget. Pinning either one fixes both
+   * dimensions at the configured baselines and disables growth entirely.
    */
   maxJournalEvents?: number;
   /**
-   * Per-session source-event byte cap on the in-flight live journal.
-   * Truncation drops whole entries, so the retained tail can be much smaller
-   * than the cap. Threaded into `BridgeOptions.maxJournalBytes`. Defaults to
-   * 8 MiB. Must be a positive safe integer.
+   * Per-session BASELINE source-event byte cap on the in-flight live
+   * journal. Truncation drops whole entries, so the retained tail can be
+   * much smaller than the cap. Threaded into `BridgeOptions.maxJournalBytes`.
+   * Defaults to 8 MiB. Must be a positive safe integer.
+   *
+   * Growth semantics: leaving BOTH this and `maxJournalEvents` unset
+   * enables adaptive growth — the daemon raises a breaching session's caps
+   * within a pool derived from the memory budget. Pinning either one fixes
+   * both dimensions at the configured baselines and disables growth
+   * entirely.
    */
   maxJournalBytes?: number;
   /**
@@ -181,7 +190,8 @@ export interface ServeOptions {
   requireAuth?: boolean;
   /**
    * Opt in to direct session shell execution. The effective policy also
-   * requires a configured bearer token and a session-bound client id.
+   * requires either a configured bearer token or trusted-loopback mode, plus
+   * a session-bound client id.
    */
   enableSessionShell?: boolean;
   /**
@@ -311,12 +321,19 @@ export interface ServeOptions {
    * Per-SSE-connection idle deadline.
    */
   writerIdleTimeoutMs?: number;
-  /** Non-negative ms to keep ACP child alive after last session closes. 0 = immediate kill (default). */
+  /** ACP child auto-reap delay. Keepalive windows may extend it. */
   channelIdleTimeoutMs?: number;
   /** Session reaper scan interval in ms. 0 = disabled. Default: 60000. */
   sessionReapIntervalMs?: number;
   /** Session idle timeout in ms. 0 = disabled. Default: 1800000 (30 min). */
   sessionIdleTimeoutMs?: number;
+  /**
+   * Grace period after a prompt settles before an otherwise-idle session may
+   * be auto-closed, in ms. 0 = disabled (original behavior). Set to a value
+   * greater than the client's max SSE poll interval to prevent session rebuilds
+   * for poll-based clients. Default: 0.
+   */
+  sessionPromptSettledCloseGraceMs?: number;
   /**
    * ACP child request timeout, including the `initialize` handshake,
    * in ms. Must be a positive
@@ -330,9 +347,9 @@ export interface ServeOptions {
    */
   sessionRestoreTimeoutMs?: number;
   /**
-   * Wall-clock timeout in ms for a single human permission /
-   * ask_user_question response in daemon (ACP) mode. 0 = disabled
-   * (wait forever). Default: 300000 (5 min).
+   * Wall-clock timeout in ms for a human permission or `ask_user_question`
+   * response in daemon mode. 0 = disabled. Default: 0 (wait until an explicit
+   * decision or session lifecycle cancellation).
    */
   permissionResponseTimeoutMs?: number;
   /**
@@ -367,6 +384,11 @@ export interface ServeOptions {
   cdpTunnelOverWs?: boolean;
   /** Forward the experimental LSP opt-in to spawned ACP children. */
   experimentalLsp?: boolean;
+  /**
+   * When true, load/resume re-hangs a trailing unanswered ask_user_question.
+   * Default false. Forwarded to spawned ACP children.
+   */
+  restoreAskUserQuestion?: boolean;
   /**
    * Experimental: channels to host in a daemon-managed worker process.
    * Omitted means plain daemon mode with no channel worker.
@@ -427,6 +449,7 @@ export interface CapabilitiesEnvelope {
     displayName?: string;
     primary: boolean;
     trusted: boolean;
+    workflowsEnabled?: boolean;
     removable?: boolean;
     kind?: 'live';
   }>;
@@ -546,6 +569,11 @@ export interface ServeAuthProviderInstallResult {
   modelId?: string;
   baseUrl?: string;
   message: string;
+  runtimeSync?: ServeModelProviderRuntimeSyncResult;
+}
+
+export interface ServeModelProviderRuntimeSyncResult {
+  status: 'applied' | 'deferred' | 'failed';
 }
 
 export const CAPABILITIES_SCHEMA_VERSION = 1 as const;

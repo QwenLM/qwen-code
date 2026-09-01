@@ -81,6 +81,8 @@ Use the same `qwen --continue -p "<control>"` pattern for the other operations:
 | `/goal resume`                       | Resume an eligible Goal and start headless Goal work.                                    |
 | `/goal clear`                        | Clear the Goal without confirmation or a model call.                                     |
 
+A Goal is only as good as its completion condition. See [Goals](./goals.md) for what the verifier can and cannot judge, and use `qwen -p "/goal-draft <intent>"` to have the objective drafted before you set it.
+
 Runtime-scheduled Goal continuation segments do not count against `--max-session-turns`, but real user prompts still do. Explicit `--max-wall-time` and `--max-tool-calls` budgets continue to apply; exceeding either pauses active Goal work before the run exits with the budget-specific error.
 
 With `--output-format stream-json`, each Goal status change emits a `stream_event` whose `event.type` is `goal_state`. This canonical state event is emitted even without `--include-partial-messages`. When partial messages are enabled, the older `active_goal` event follows as a compatibility projection; automation should treat `goal_state` as authoritative.
@@ -116,6 +118,20 @@ qwen -p "Summarize this repository" \
   --system-prompt "You are a migration planner." \
   --append-system-prompt "Return exactly three bullets."
 ```
+
+### Choose an Output Style
+
+Use `--output-style` to pick one of the built-in output styles for this run. A style is a named block of instructions layered onto the built-in prompt that changes how the answer is written — `Concise` leads with the result and drops preamble and narration, `Proactive` starts working instead of proposing, `Explanatory` adds short notes about the codebase along the way. It overrides the `general.outputStyle` setting; `default` selects no style.
+
+```bash
+qwen -p "Why does the build fail on Windows?" --output-style Concise
+```
+
+> [!note]
+>
+> - `Learning` asks you to write part of the code and waits for a reply, so it is skipped in headless runs.
+> - An unknown style name prints a warning and the run continues with the default style.
+> - `--output-style` has no effect when `--system-prompt` or `QWEN_SYSTEM_MD` replaces the built-in prompt — a style is only layered onto the built-in prompt.
 
 > [!note]
 >
@@ -249,7 +265,7 @@ qwen -p "Explain Docker" --output-format json > docker-explanation.json
 qwen -p "Add more details" >> docker-explanation.txt
 
 # Pipe to other tools
-qwen -p "What is Kubernetes?" --output-format json | jq '.response'
+qwen -p "What is Kubernetes?" --output-format json | jq -r '.[-1].result'
 qwen -p "Explain microservices" | wc -w
 qwen -p "List programming languages" | grep -i "python"
 
@@ -270,6 +286,7 @@ Key command-line options for headless usage:
 | `--include-partial-messages` | Include partial messages in stream-json output                                                                                                                                                                                                                                                                                                                                                                                 | `qwen -p "query" --output-format stream-json --include-partial-messages` |
 | `--system-prompt`            | Override the main session system prompt for this run                                                                                                                                                                                                                                                                                                                                                                           | `qwen -p "query" --system-prompt "You are a terse reviewer."`            |
 | `--append-system-prompt`     | Append extra instructions to the main session system prompt for this run                                                                                                                                                                                                                                                                                                                                                       | `qwen -p "query" --append-system-prompt "Focus on concrete findings."`   |
+| `--output-style`             | Output style for this run (`Concise`, `Proactive`, `Explanatory`, `Learning`, or `default` for none); overrides `general.outputStyle`                                                                                                                                                                                                                                                                                          | `qwen -p "query" --output-style Concise`                                 |
 | `--debug`, `-d`              | Enable debug mode                                                                                                                                                                                                                                                                                                                                                                                                              | `qwen -p "query" --debug`                                                |
 | `--safe-mode`                | Disable all customizations — context files, hooks, extensions, skills, MCP servers, custom subagents (only built-in subagents load), permission rules, settings-sourced approval mode overrides, memory features, and sandbox settings — to isolate problems; the CLI flags `--yolo` and `--approval-mode` still take effect. See [Troubleshooting](../support/troubleshooting). Also settable via `QWEN_CODE_SAFE_MODE=true`. | `qwen -p "query" --safe-mode`                                            |
 | `--model`, `-m`              | Model to use for this run                                                                                                                                                                                                                                                                                                                                                                                                      | `qwen -p "query" --model qwen3-coder-plus`                               |
@@ -325,14 +342,14 @@ cat src/auth.py | qwen -p "Review this authentication code for security issues" 
 
 ```bash
 result=$(git diff --cached | qwen -p "Write a concise commit message for these changes" --output-format json)
-echo "$result" | jq -r '.response'
+echo "$result" | jq -r '.[-1].result'
 ```
 
 ### API documentation
 
 ```bash
 result=$(cat api/routes.js | qwen -p "Generate OpenAPI spec for these routes" --output-format json)
-echo "$result" | jq -r '.response' > openapi.json
+echo "$result" | jq -r '.[-1].result' > openapi.json
 ```
 
 ### Batch code analysis
@@ -341,7 +358,7 @@ echo "$result" | jq -r '.response' > openapi.json
 for file in src/*.py; do
     echo "Analyzing $file..."
     result=$(cat "$file" | qwen -p "Find potential bugs and suggest improvements" --output-format json)
-    echo "$result" | jq -r '.response' > "reports/$(basename "$file").analysis"
+    echo "$result" | jq -r '.[-1].result' > "reports/$(basename "$file").analysis"
     echo "Completed analysis for $(basename "$file")" >> reports/progress.log
 done
 ```
@@ -350,7 +367,7 @@ done
 
 ```bash
 result=$(git diff origin/main...HEAD | qwen -p "Review these changes for bugs, security issues, and code quality" --output-format json)
-echo "$result" | jq -r '.response' > pr-review.json
+echo "$result" | jq -r '.[-1].result' > pr-review.json
 ```
 
 ### Log analysis
@@ -363,7 +380,7 @@ grep "ERROR" /var/log/app.log | tail -20 | qwen -p "Analyze these errors and sug
 
 ```bash
 result=$(git log --oneline v1.0.0..HEAD | qwen -p "Generate release notes from these commits" --output-format json)
-response=$(echo "$result" | jq -r '.response')
+response=$(echo "$result" | jq -r '.[-1].result')
 echo "$response"
 echo "$response" >> CHANGELOG.md
 ```
@@ -372,12 +389,12 @@ echo "$response" >> CHANGELOG.md
 
 ```bash
 result=$(qwen -p "Explain this database schema" --include-directories db --output-format json)
-total_tokens=$(echo "$result" | jq -r '.stats.models // {} | to_entries | map(.value.tokens.total) | add // 0')
-models_used=$(echo "$result" | jq -r '.stats.models // {} | keys | join(", ") | if . == "" then "none" else . end')
-tool_calls=$(echo "$result" | jq -r '.stats.tools.totalCalls // 0')
-tools_used=$(echo "$result" | jq -r '.stats.tools.byName // {} | keys | join(", ") | if . == "" then "none" else . end')
+total_tokens=$(echo "$result" | jq -r '.[-1].stats.models // {} | to_entries | map(.value.tokens.total) | add // 0')
+models_used=$(echo "$result" | jq -r '.[-1].stats.models // {} | keys | join(", ") | if . == "" then "none" else . end')
+tool_calls=$(echo "$result" | jq -r '.[-1].stats.tools.totalCalls // 0')
+tools_used=$(echo "$result" | jq -r '.[-1].stats.tools.byName // {} | keys | join(", ") | if . == "" then "none" else . end')
 echo "$(date): $total_tokens tokens, $tool_calls tool calls ($tools_used) used with models: $models_used" >> usage.log
-echo "$result" | jq -r '.response' > schema-docs.md
+echo "$result" | jq -r '.[-1].result' > schema-docs.md
 echo "Recent usage trends:"
 tail -5 usage.log
 ```

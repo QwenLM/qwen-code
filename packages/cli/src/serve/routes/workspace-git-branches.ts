@@ -12,35 +12,40 @@ import {
   gitCreateBranch,
   gitPush,
   gitPull,
+  GitPullFailure,
   gitCommit,
   isValidRefName,
   isValidCheckoutRef,
 } from '@qwen-code/qwen-code-core';
 import type { SendBridgeError } from '../server/error-response.js';
 import { safeBody } from '../server/request-helpers.js';
-import type {
-  WorkspaceRegistry,
-  WorkspaceRuntime,
-} from '../workspace-registry.js';
+import type { WorkspaceRegistry } from '../workspace-registry.js';
 import {
-  requireTrustedWorkspaceRuntime,
   resolveContainedCwd,
   resolveContainedCwdOrFail,
-  resolveWorkspaceRuntimeFromParam,
+  resolveTrustedRuntime,
   sendGenerationClosedError,
   sendUntrustedWorkspaceResponse,
 } from '../workspace-route-runtime.js';
 
 const GIT_ERROR_MESSAGE_MAX = 512;
 
-function resolveTrustedRuntime(
-  registry: WorkspaceRegistry,
-  req: Request,
-  res: Response,
-): WorkspaceRuntime | null {
-  const runtime = resolveWorkspaceRuntimeFromParam(registry, req, res);
-  if (!runtime) return null;
-  return requireTrustedWorkspaceRuntime(runtime, res) ? runtime : null;
+// Redact the workspace path and the git root (which may be an ancestor of
+// cwd when the workspace is a sub-directory or a symlink), then cap the
+// length once, on every response — including the unclassified 500
+// fall-through. Raw git output embeds absolute paths (e.g. a wedged
+// `.git/index.lock`) that must never reach the client.
+function redactGitPaths(detail: string, cwd: string): string {
+  const gitRoot = findGitRoot(cwd);
+  let message = detail.split(cwd).join('<workspace>');
+  if (gitRoot && gitRoot !== cwd) {
+    message = message.split(gitRoot).join('<workspace>');
+  }
+  return message;
+}
+
+function redactGitMessage(detail: string, cwd: string): string {
+  return redactGitPaths(detail, cwd).slice(0, GIT_ERROR_MESSAGE_MAX);
 }
 
 function sendGitError(
@@ -63,17 +68,7 @@ function sendGitError(
     detail = err instanceof Error ? err.message : String(err);
   }
 
-  // Redact the workspace path and the git root (which may be an ancestor
-  // of cwd when the workspace is a sub-directory or a symlink), then cap the
-  // length once, on every response — including the unclassified 500
-  // fall-through. Raw git output embeds absolute paths (e.g. a wedged
-  // `.git/index.lock`) that must never reach the client.
-  const gitRoot = findGitRoot(cwd);
-  let message = detail.split(cwd).join('<workspace>');
-  if (gitRoot && gitRoot !== cwd) {
-    message = message.split(gitRoot).join('<workspace>');
-  }
-  message = message.slice(0, GIT_ERROR_MESSAGE_MAX);
+  const message = redactGitMessage(detail, cwd);
 
   if (
     /not a git repository/i.test(message) ||
@@ -270,12 +265,46 @@ async function handlePull(
     });
     return;
   }
+  if (body['stash'] !== undefined && typeof body['stash'] !== 'boolean') {
+    res
+      .status(400)
+      .json({ error: 'invalid_stash', message: 'stash must be a boolean' });
+    return;
+  }
+  if (body['force'] !== undefined && typeof body['force'] !== 'boolean') {
+    res
+      .status(400)
+      .json({ error: 'invalid_force', message: 'force must be a boolean' });
+    return;
+  }
   const rebase = body['rebase'] === true;
   const fetchOnly = body['fetchOnly'] === true;
+  const stash = body['stash'] === true;
+  const force = body['force'] === true;
+  if (stash && force) {
+    res.status(400).json({
+      error: 'invalid_stash_force',
+      message: 'stash and force are mutually exclusive',
+    });
+    return;
+  }
   try {
-    const result = await gitPull(cwd, { rebase, fetchOnly }, env);
-    res.status(200).json(result);
+    const result = await gitPull(cwd, { rebase, fetchOnly, stash, force }, env);
+    // A successful stash pull can still carry git's notice about a failed
+    // restore, which embeds absolute paths like any other git output.
+    res
+      .status(200)
+      .json({ ...result, output: redactGitPaths(result.output, cwd) });
   } catch (err) {
+    if (err instanceof GitPullFailure) {
+      // A typed refusal or a failure the core already recovered from: the
+      // repository is in a known state and the code tells the client what
+      // it can offer next.
+      res
+        .status(409)
+        .json({ error: err.code, message: redactGitMessage(err.message, cwd) });
+      return;
+    }
     sendGitError(res, err, route, sendBridgeError, cwd);
   }
 }

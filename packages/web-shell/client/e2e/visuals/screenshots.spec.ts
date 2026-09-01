@@ -4,12 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { expect, test } from '@playwright/test';
+import { devices, expect, test } from '@playwright/test';
 import type { DaemonEvent } from '@qwen-code/sdk/daemon';
 import {
   assistantTextEvent,
   createWebShellDaemonScenario,
   permissionRequestEvent,
+  toolCallEvent,
   turnCompleteEvent,
   userTextEvent,
 } from '../utils/mockDaemon';
@@ -29,6 +30,26 @@ import {
 const THEMES: readonly VisualTheme[] = ['dark', 'light'];
 
 test.use({ viewport: { ...VISUAL_VIEWPORT } });
+
+function createTerminalTurnErrorScenario(sessionId: string) {
+  return createWebShellDaemonScenario({
+    sessionId,
+    events: [
+      userTextEvent('Summarize the current workspace.', { id: 1 }),
+      {
+        id: 2,
+        v: 1,
+        type: 'turn_error',
+        data: {
+          sessionId,
+          message:
+            'The model provider closed the response stream before the answer finished. Retry the request or copy these details when reporting the failure.',
+          promptId: 'prompt-turn-error-visual',
+        },
+      },
+    ],
+  });
+}
 
 for (const theme of THEMES) {
   test.describe(`web-shell screenshots (${theme})`, () => {
@@ -63,6 +84,78 @@ for (const theme of THEMES) {
       await captureScreenshot(page, `session-transcript-${theme}`);
     });
 
+    test(`terminal turn error`, async ({ browser, page }, testInfo) => {
+      const baseURL = resolveBaseURL(testInfo);
+      const scenario = createTerminalTurnErrorScenario(
+        'turn-error-copy-visual',
+      );
+      const daemon = await installScenario(page, scenario, baseURL);
+      await gotoSession(page, scenario, daemon, theme);
+
+      const errorRow = page
+        .locator('[data-web-shell-message-row]')
+        .filter({ hasText: 'The model provider closed the response stream' });
+      const copyButton = errorRow.getByRole('button', {
+        name: 'Copy',
+        exact: true,
+      });
+      const actions = errorRow.locator('[data-web-shell-message-actions]');
+      await expect(actions).toHaveCSS('opacity', '0');
+      await copyButton.focus();
+      await expect(actions).toHaveCSS('opacity', '1');
+      await copyButton.evaluate((button) => button.blur());
+      await expect(actions).toHaveCSS('opacity', '0');
+      await errorRow.hover();
+      await expect(actions).toHaveCSS('opacity', '1');
+      await captureScreenshot(page, `terminal-turn-error-copy-${theme}`);
+
+      await page.setViewportSize({ width: 720, height: 800 });
+      await page.mouse.move(0, 0);
+      await expect(actions).toHaveCSS('opacity', '0');
+      await errorRow.hover();
+      await expect(actions).toHaveCSS('opacity', '1');
+      await captureScreenshot(page, `terminal-turn-error-copy-narrow-${theme}`);
+
+      const touchContext = await browser.newContext({
+        ...devices['Pixel 7'],
+        baseURL,
+      });
+      try {
+        const touchPage = await touchContext.newPage();
+        const touchScenario = createTerminalTurnErrorScenario(
+          'turn-error-copy-touch-visual',
+        );
+        const touchDaemon = await installScenario(
+          touchPage,
+          touchScenario,
+          baseURL,
+        );
+        await gotoSession(touchPage, touchScenario, touchDaemon, theme);
+        expect(
+          await touchPage.evaluate(
+            () => window.matchMedia('(hover: none)').matches,
+          ),
+        ).toBe(true);
+        const touchErrorRow = touchPage
+          .locator('[data-web-shell-message-row]')
+          .filter({ hasText: 'The model provider closed the response stream' });
+        const touchCopyButton = touchErrorRow.getByRole('button', {
+          name: 'Copy',
+          exact: true,
+        });
+        await expect(
+          touchErrorRow.locator('[data-web-shell-message-actions]'),
+        ).toHaveCSS('opacity', '1');
+        await expect(touchCopyButton).toBeVisible();
+        await captureScreenshot(
+          touchPage,
+          `terminal-turn-error-copy-touch-${theme}`,
+        );
+      } finally {
+        await touchContext.close();
+      }
+    });
+
     test(`parallel agents group`, async ({ page }, testInfo) => {
       // The group renders only when a turn carries two or more background
       // Agent tool calls; seed both as completed so the rows are static and
@@ -71,22 +164,13 @@ for (const theme of THEMES) {
         id: number,
         toolCallId: string,
         description: string,
-      ): DaemonEvent => ({
-        id,
-        v: 1,
-        type: 'session_update',
-        data: {
-          update: {
-            sessionUpdate: 'tool_call',
-            toolCallId,
-            toolName: 'Agent',
-            title: 'Agent',
-            kind: 'other',
-            status: 'completed',
-            rawInput: { description, run_in_background: true },
-          },
-        },
-      });
+      ): DaemonEvent =>
+        toolCallEvent(
+          toolCallId,
+          'Agent',
+          { description, run_in_background: true },
+          { id },
+        );
       const scenario = createWebShellDaemonScenario({
         events: [
           userTextEvent('Split the migration across parallel agents.', {
@@ -261,6 +345,51 @@ for (const theme of THEMES) {
                 required: true,
                 envResolvable: true,
               },
+              {
+                key: 'senderPolicy',
+                label: 'Sender Policy',
+                kind: 'enum',
+                required: true,
+                default: 'allowlist',
+                options: [
+                  { value: 'pairing', label: 'Pairing' },
+                  { value: 'allowlist', label: 'Allowlist' },
+                  { value: 'open', label: 'Open' },
+                ],
+              },
+              {
+                key: 'allowedUsers',
+                label: 'Allowed Users',
+                kind: 'string-list',
+              },
+              {
+                key: 'groupPolicy',
+                label: 'Group Policy',
+                kind: 'enum',
+                required: true,
+                default: 'disabled',
+                options: [
+                  { value: 'disabled', label: 'Disabled' },
+                  { value: 'pairing', label: 'Pairing' },
+                  { value: 'allowlist', label: 'Allowlist' },
+                  { value: 'open', label: 'Open' },
+                ],
+              },
+              {
+                key: 'sessionScope',
+                label: 'Session Scope',
+                kind: 'enum',
+                required: true,
+                default: 'user',
+                options: [
+                  { value: 'user', label: 'Per user and chat' },
+                  {
+                    value: 'chat_thread',
+                    label: 'Per chat and thread',
+                  },
+                  { value: 'single', label: 'One shared session' },
+                ],
+              },
             ],
           },
           {
@@ -324,6 +453,8 @@ for (const theme of THEMES) {
                 type: 'dingtalk',
                 clientId: 'ding-visual-app',
                 senderPolicy: 'pairing',
+                groupPolicy: 'disabled',
+                sessionScope: 'user',
               },
               secrets: {
                 clientSecret: { present: true, source: 'literal' },
@@ -784,7 +915,12 @@ for (const theme of THEMES) {
       // per-workspace fetch. Wait for the loaded session's row before capturing
       // so the async load has settled — otherwise the row list races the
       // screenshot and the capture differs between runs.
-      await expect(sidebar.getByText(primarySessionName)).toBeVisible();
+      await expect(
+        sidebar.getByRole('button', {
+          name: primarySessionName,
+          exact: true,
+        }),
+      ).toBeVisible();
       await captureScreenshot(page, `workspace-sidebar-${theme}`);
     });
 
@@ -933,6 +1069,8 @@ for (const theme of THEMES) {
             shortSummary: 'timeout treated as success',
             failureScenario:
               'When `review run` times out, the CLI still prints a verdict as if the review completed.',
+            witness:
+              'Probe: forced a 1ms timeout — BASE prints "Verdict: Approve", PR exits 1 with "review incomplete" — flipped.',
             suggestedFix:
               'Fail closed when timedOut is true instead of reporting the verdict.',
             category: 'correctness',
@@ -989,26 +1127,12 @@ for (const theme of THEMES) {
         },
         events: [
           userTextEvent('Review my changes and save the report.', { id: 1 }),
-          {
-            id: 2,
-            v: 1,
-            type: 'session_update',
-            data: {
-              update: {
-                sessionUpdate: 'tool_call',
-                toolCallId: 'call-record-review',
-                toolName: 'record_artifact',
-                title: 'record_artifact',
-                kind: 'other',
-                status: 'completed',
-                rawInput: {
-                  title: 'Code review result',
-                  workspacePath: reviewPath,
-                },
-                rawOutput: { recorded: true },
-              },
-            },
-          },
+          toolCallEvent(
+            'call-record-review',
+            'record_artifact',
+            { title: 'Code review result', workspacePath: reviewPath },
+            { id: 2, rawOutput: { recorded: true } },
+          ),
           assistantTextEvent('Review saved to the workspace.', { id: 3 }),
           turnCompleteEvent('prompt-review', { id: 4 }),
         ],
@@ -1057,6 +1181,10 @@ for (const theme of THEMES) {
           'Review verdict is reported even when the child process times out',
         ),
       ).toBeVisible();
+      // The witness row — the executed evidence the witness rule delivers to
+      // the author; gating the shot on it keeps this scenario a coverage
+      // witness for the field, not just for the card.
+      await expect(page.getByText('forced a 1ms timeout')).toBeVisible();
       await captureScreenshot(page, `code-review-artifact-${theme}`);
 
       // Fullscreen is only reachable once the panel is open; without
@@ -1108,26 +1236,12 @@ for (const theme of THEMES) {
         },
         events: [
           userTextEvent('Open the saved report.', { id: 1 }),
-          {
-            id: 2,
-            v: 1,
-            type: 'session_update',
-            data: {
-              update: {
-                sessionUpdate: 'tool_call',
-                toolCallId: 'call-record-report',
-                toolName: 'record_artifact',
-                title: 'record_artifact',
-                kind: 'other',
-                status: 'completed',
-                rawInput: {
-                  title: 'Summary report',
-                  workspacePath: reportPath,
-                },
-                rawOutput: { recorded: true },
-              },
-            },
-          },
+          toolCallEvent(
+            'call-record-report',
+            'record_artifact',
+            { title: 'Summary report', workspacePath: reportPath },
+            { id: 2, rawOutput: { recorded: true } },
+          ),
           assistantTextEvent('Report saved to the workspace.', { id: 3 }),
           turnCompleteEvent('prompt-drawer', { id: 4 }),
         ],

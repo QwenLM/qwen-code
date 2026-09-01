@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { isTaskExecutionMode } from '@qwen-code/sdk/daemon';
 import type {
   DaemonInputAnnotation,
   DaemonTranscriptBlock,
@@ -22,7 +23,11 @@ import type {
   DaemonMessageTodoItem,
   DaemonUserMessage,
 } from './messageTypes.js';
-import { isTodoWriteToolName } from '../utils/todos.js';
+import {
+  isSubAgentToolCall,
+  projectTerminalBackgroundAgentTool,
+} from './toolClassification.js';
+import { parseTodoItemsFromEntries } from '../utils/todos.js';
 
 interface PermissionToolInfo {
   title?: string;
@@ -44,8 +49,8 @@ type ExtendedDaemonTextTranscriptBlock = DaemonTextTranscriptBlock & {
 interface TranscriptMessageLabels {
   promptCancelled?: string;
   branchSuccess?: (name: string) => string;
-  midTurnInserted?: (message: string) => string;
   modelStreamInterrupted?: string;
+  loopDetected?: string;
 }
 
 interface TranscriptMessageOptions {
@@ -80,32 +85,6 @@ function collectBackgroundAgentTaskUpdates(
     });
   }
   return updates;
-}
-
-function applyBackgroundAgentTaskUpdate(
-  tool: DaemonMessageToolCall,
-  update: BackgroundAgentTaskUpdate | undefined,
-): void {
-  if (!update) return;
-  switch (update.status) {
-    case 'completed':
-      tool.status = 'completed';
-      tool.endTime = update.endTime;
-      break;
-    case 'failed':
-      tool.status = 'failed';
-      tool.endTime = update.endTime;
-      break;
-    case 'cancelled':
-    case 'canceled':
-      tool.status = 'completed';
-      tool.endTime = update.endTime;
-      tool.rawOutput = {
-        ...(getRecord(tool.rawOutput) ?? {}),
-        status: 'cancelled',
-      };
-      break;
-  }
 }
 
 function isIgnoredWebShellStatus(text: string): boolean {
@@ -191,10 +170,21 @@ function isUnrecognizedDaemonDebug(
   );
 }
 
+// Resubmitting a prompt the daemon stopped for loop protection tends to
+// re-loop, so no retry affordance is offered for these turn errors.
+export function isRetryableTurnErrorKind(
+  errorKind: string | undefined,
+): boolean {
+  return errorKind !== 'loop_detected';
+}
+
 function getErrorDisplayText(
   block: DaemonStatusTranscriptBlock,
   labels?: TranscriptMessageLabels,
 ): string {
+  if (block.errorKind === 'loop_detected') {
+    return labels?.loopDetected ?? block.text;
+  }
   if (
     block.errorKind === 'model_stream_interrupted' ||
     // Older daemons emit this turn_error before they know about errorKind.
@@ -234,15 +224,99 @@ function getSessionBranchDisplayName(data: unknown): string | null {
     : null;
 }
 
-function getMidTurnInjectedText(data: unknown): string | null {
-  if (!data || typeof data !== 'object') return null;
-  const messages = (data as { messages?: unknown }).messages;
-  if (!Array.isArray(messages)) return null;
-  const text = messages
-    .filter((message): message is string => typeof message === 'string')
-    .join('\n')
-    .trim();
-  return text || null;
+/**
+ * Extract image content blocks from mid-turn injected message items.
+ * Returns an array of {data, mimeType} objects for rendering in the transcript.
+ */
+function getMidTurnInjectedImages(
+  data: unknown,
+): Array<{ data: string; mimeType: string }> | undefined {
+  if (!data || typeof data !== 'object') return undefined;
+  const items = (data as { items?: unknown }).items;
+  if (!Array.isArray(items) || items.length === 0) return undefined;
+
+  const images: Array<{ data: string; mimeType: string }> = [];
+  for (const item of items) {
+    if (!item || typeof item !== 'object') continue;
+    const content = (item as { content?: unknown }).content;
+    if (!Array.isArray(content)) continue;
+
+    for (const block of content) {
+      if (!block || typeof block !== 'object') continue;
+      const type = (block as { type?: unknown }).type;
+      const blockData = (block as { data?: unknown }).data;
+      const mimeType = (block as { mimeType?: unknown }).mimeType;
+
+      if (
+        type === 'image' &&
+        typeof blockData === 'string' &&
+        typeof mimeType === 'string'
+      ) {
+        images.push({ data: blockData, mimeType });
+      }
+    }
+  }
+
+  return images.length > 0 ? images : undefined;
+}
+
+function getMidTurnInjectedFiles(
+  data: unknown,
+): Array<{ name: string; mimeType: string; attachmentId: string }> | undefined {
+  if (!data || typeof data !== 'object') return undefined;
+  const items = (data as { items?: unknown }).items;
+  if (!Array.isArray(items)) return undefined;
+  const files = items.flatMap((item) => {
+    if (!item || typeof item !== 'object') return [];
+    const content = (item as { content?: unknown }).content;
+    if (!Array.isArray(content)) return [];
+    return content.flatMap((block) => {
+      if (!block || typeof block !== 'object') return [];
+      const record = block as Record<string, unknown>;
+      return record['type'] === 'resource' &&
+        typeof record['attachmentId'] === 'string'
+        ? [
+            {
+              name: record['attachmentId'],
+              attachmentId: record['attachmentId'],
+              mimeType:
+                typeof record['mimeType'] === 'string'
+                  ? record['mimeType']
+                  : 'application/octet-stream',
+            },
+          ]
+        : [];
+    });
+  });
+  return files.length > 0 ? files : undefined;
+}
+
+/**
+ * Collect text content blocks from mid-turn injected message items. The
+ * degraded-media drain echo ships an empty `messages` array whose items carry
+ * only the unavailability notice, so the echo text can be empty while the
+ * items still hold renderable text.
+ */
+function getMidTurnInjectedItemText(data: unknown): string | undefined {
+  if (!data || typeof data !== 'object') return undefined;
+  const items = (data as { items?: unknown }).items;
+  if (!Array.isArray(items) || items.length === 0) return undefined;
+
+  const texts: string[] = [];
+  for (const item of items) {
+    if (!item || typeof item !== 'object') continue;
+    const content = (item as { content?: unknown }).content;
+    if (!Array.isArray(content)) continue;
+
+    for (const block of content) {
+      if (!block || typeof block !== 'object') continue;
+      if ((block as { type?: unknown }).type !== 'text') continue;
+      const text = (block as { text?: unknown }).text;
+      if (typeof text === 'string' && text.length > 0) texts.push(text);
+    }
+  }
+
+  return texts.length > 0 ? texts.join('\n') : undefined;
 }
 
 function isBackgroundNotificationBlock(
@@ -261,29 +335,6 @@ function getBackgroundNotificationData(
 
 function isTextBlockEmpty(block: DaemonTextTranscriptBlock): boolean {
   return block.text.length === 0;
-}
-
-function parseDaemonTodoItemsFromEntries(
-  entries: readonly unknown[],
-): DaemonMessageTodoItem[] | undefined {
-  const todos = entries.flatMap((entry, index): DaemonMessageTodoItem[] => {
-    const item = getRecord(entry);
-    const content = getString(item, 'content');
-    if (!content) return [];
-    const id = getString(item, 'id') ?? `plan-${index}`;
-    return [
-      {
-        id,
-        content,
-        status: getTodoStatus(getString(item, 'status')),
-        ...(() => {
-          const priority = getTodoPriority(getString(item, 'priority'));
-          return priority ? { priority } : {};
-        })(),
-      },
-    ];
-  });
-  return todos.length > 0 ? todos : undefined;
 }
 
 /**
@@ -369,6 +420,31 @@ export function transcriptBlocksToDaemonMessages(
         const inputAnnotations = Array.isArray(meta?.inputAnnotations)
           ? (meta.inputAnnotations as DaemonInputAnnotation[])
           : undefined;
+        const images = textBlock.images?.map((img) => ({
+          data: img.data,
+          mimeType: img.mimeType || 'image/*',
+        }));
+        const files = textBlock.files?.map((file) => ({
+          name: file.name,
+          mimeType: file.mimeType || 'text/plain',
+          ...(file.data !== undefined ? { data: file.data } : {}),
+          ...(file.text !== undefined ? { text: file.text } : {}),
+          ...(file.attachmentId ? { attachmentId: file.attachmentId } : {}),
+        }));
+        if (source === 'mid_turn_message_injected') {
+          messages.push({
+            id: block.id,
+            role: 'system',
+            content: textBlock.text,
+            variant: 'info',
+            source,
+            timestamp: blockTime,
+            ...(images && images.length > 0 ? { images } : {}),
+            ...(files && files.length > 0 ? { files } : {}),
+          });
+          needsNewContentMessage = true;
+          break;
+        }
         const msg: DaemonUserMessage = {
           id: block.id,
           role: 'user',
@@ -378,12 +454,10 @@ export function transcriptBlocksToDaemonMessages(
           ...(inputAnnotations ? { inputAnnotations } : {}),
         };
         // Attach images if present
-        if (textBlock.images && textBlock.images.length > 0) {
-          msg.images = textBlock.images.map((img) => ({
-            data: img.data,
-            mimeType: img.mimeType || 'image/*',
-          }));
+        if (images && images.length > 0) {
+          msg.images = images;
         }
+        if (files && files.length > 0) msg.files = files;
         messages.push(msg);
         break;
       }
@@ -405,6 +479,24 @@ export function transcriptBlocksToDaemonMessages(
           });
           break;
         }
+        const meta = getRecord(textBlock.meta);
+        if (meta?.['source'] === 'vision_bridge_notice') {
+          currentAssistantIdx = null;
+          currentThinkingIdx = null;
+          needsNewContentMessage = true;
+          messages.push({
+            id: block.id,
+            role: 'system',
+            content: textBlock.text,
+            variant: 'info',
+            source: 'vision_bridge_notice',
+            ...(meta['visionBridgeNotice'] !== undefined
+              ? { data: meta['visionBridgeNotice'] }
+              : {}),
+            timestamp: blockTime,
+          });
+          break;
+        }
         if (!textBlock.text && !textBlock.usage) break;
 
         const parentSubAgent = textBlock.parentToolCallId
@@ -421,6 +513,7 @@ export function transcriptBlocksToDaemonMessages(
           let hasTerminal = false;
           let readyCount = 0;
           let errorCount = 0;
+          let lastAssistantSegmentIndex: number | null = null;
           for (const seg of insightSegments) {
             if (seg.kind === 'insight') {
               if (seg.data.type === 'insight_progress') {
@@ -450,7 +543,17 @@ export function transcriptBlocksToDaemonMessages(
                 timestamp: blockTime,
               });
               currentAssistantIdx = messages.length - 1;
+              lastAssistantSegmentIndex = currentAssistantIdx;
               currentThinkingIdx = null;
+            }
+          }
+          if (textBlock.branchRecordId && lastAssistantSegmentIndex !== null) {
+            const assistant = messages[lastAssistantSegmentIndex];
+            if (assistant?.role === 'assistant') {
+              messages[lastAssistantSegmentIndex] = {
+                ...assistant,
+                branchRecordId: textBlock.branchRecordId,
+              };
             }
           }
           if (lastProgress && !hasTerminal) {
@@ -482,6 +585,9 @@ export function transcriptBlocksToDaemonMessages(
             ...target,
             content: target.content + textBlock.text,
             isStreaming: textBlock.streaming,
+            ...(textBlock.branchRecordId
+              ? { branchRecordId: textBlock.branchRecordId }
+              : {}),
             ...(usage ? { usage } : {}),
           };
           needsNewContentMessage = false;
@@ -493,6 +599,9 @@ export function transcriptBlocksToDaemonMessages(
             content: textBlock.text,
             isStreaming: textBlock.streaming,
             timestamp: blockTime,
+            ...(textBlock.branchRecordId
+              ? { branchRecordId: textBlock.branchRecordId }
+              : {}),
             ...(textBlock.usage ? { usage: textBlock.usage } : {}),
           });
           currentAssistantIdx = messages.length - 1;
@@ -502,6 +611,9 @@ export function transcriptBlocksToDaemonMessages(
           const usage = mergeAssistantUsage(target.usage, textBlock.usage);
           messages[currentAssistantIdx!] = {
             ...target,
+            ...(textBlock.branchRecordId
+              ? { branchRecordId: textBlock.branchRecordId }
+              : {}),
             ...(usage ? { usage } : {}),
           };
         }
@@ -545,10 +657,14 @@ export function transcriptBlocksToDaemonMessages(
 
       case 'tool': {
         const toolBlock = block as DaemonToolTranscriptBlock;
-        const toolCall = daemonToolBlockToToolCall(toolBlock);
-        applyBackgroundAgentTaskUpdate(
-          toolCall,
-          backgroundAgentTaskUpdates.get(toolCall.callId),
+        const projectedToolCall = daemonToolBlockToToolCall(toolBlock);
+        const backgroundAgentUpdate = backgroundAgentTaskUpdates.get(
+          projectedToolCall.callId,
+        );
+        const toolCall = projectTerminalBackgroundAgentTool(
+          projectedToolCall,
+          backgroundAgentUpdate?.status,
+          backgroundAgentUpdate?.endTime,
         );
         const permissionInfo = permissionToolInfoByCallId.get(toolCall.callId);
         if (permissionInfo?.title) {
@@ -723,20 +839,45 @@ export function transcriptBlocksToDaemonMessages(
       case 'debug': {
         const statusBlock = block;
         if (isUnrecognizedDaemonDebug(statusBlock)) break;
+        // Mid-turn injected echoes are user content, not daemon diagnostics:
+        // run them past no filter, or an injected message that merely starts
+        // like a status line ("Model switched: …") or plan JSON would be
+        // dropped or misrendered.
+        if (statusBlock.source === 'mid_turn_message_injected') {
+          const midTurnInjectedImages = getMidTurnInjectedImages(
+            statusBlock.data,
+          );
+          const midTurnInjectedFiles = getMidTurnInjectedFiles(
+            statusBlock.data,
+          );
+          messages.push({
+            id: block.id,
+            role: 'system',
+            content:
+              statusBlock.text.length > 0
+                ? statusBlock.text
+                : (getMidTurnInjectedItemText(statusBlock.data) ??
+                  statusBlock.text),
+            variant: 'info',
+            timestamp: blockTime,
+            source: statusBlock.source,
+            ...(statusBlock.data !== undefined
+              ? { data: statusBlock.data }
+              : {}),
+            ...(midTurnInjectedImages ? { images: midTurnInjectedImages } : {}),
+            ...(midTurnInjectedFiles ? { files: midTurnInjectedFiles } : {}),
+          });
+          needsNewContentMessage = true;
+          break;
+        }
         const branchDisplayName =
           statusBlock.source === 'session_branched'
             ? getSessionBranchDisplayName(statusBlock.data)
             : null;
-        const midTurnInsertedText =
-          statusBlock.source === 'mid_turn_message_injected'
-            ? getMidTurnInjectedText(statusBlock.data)
-            : null;
         const text =
           branchDisplayName && options.labels?.branchSuccess
             ? options.labels.branchSuccess(branchDisplayName)
-            : midTurnInsertedText && options.labels?.midTurnInserted
-              ? options.labels.midTurnInserted(midTurnInsertedText)
-              : statusBlock.text;
+            : statusBlock.text;
         if (isIgnoredWebShellStatus(text)) break;
         const todos = parsePlanTodos(text);
         if (todos) {
@@ -775,7 +916,9 @@ export function transcriptBlocksToDaemonMessages(
           role: 'system',
           content: getErrorDisplayText(errorBlock, options.labels),
           variant: 'error',
-          retryable: errorBlock.source === 'turn_error',
+          retryable:
+            errorBlock.source === 'turn_error' &&
+            isRetryableTurnErrorKind(errorKind),
           timestamp: blockTime,
           ...(errorBlock.source ? { source: errorBlock.source } : {}),
           ...getErrorMessageData(errorBlock.data, errorKind),
@@ -834,11 +977,8 @@ function appendToolCallMessage(
   //
   // Synthetic raw-shell groups (pushed by the `shell` block fallback) use the
   // bare block id without the `tg-` prefix and never absorb real tool calls.
-  // Sub-agent calls and todo_write updates each stand alone in their own group
-  // box instead of being crammed in with the tools around them: an agent renders
-  // an expandable panel, and a todo update is its own collapsible checklist.
-  const isStandalone = (t: DaemonMessageToolCall) =>
-    isSubAgentToolCall(t) || isTodoWriteToolName(t.toolName);
+  // TodoWrite merges like any other tool.
+  const isStandalone = (t: DaemonMessageToolCall) => isSubAgentToolCall(t);
   const last = messages[messages.length - 1];
   if (
     last &&
@@ -898,27 +1038,12 @@ function mergeToolCall(
   target.endTime = source.endTime ?? target.endTime;
   target.rawOutput = source.rawOutput ?? target.rawOutput;
   target.args = source.args ?? target.args;
+  target.executionMode = source.executionMode ?? target.executionMode;
   target.locations = source.locations ?? target.locations;
 }
 
 function isTerminalToolStatus(status: DaemonMessageToolCallStatus): boolean {
   return status === 'completed' || status === 'failed';
-}
-
-function isSubAgentToolCall(tool: DaemonMessageToolCall): boolean {
-  const name = tool.toolName.toLowerCase();
-  if (name === 'agent' || name === 'task') return true;
-  if (tool.subTools || tool.subContent) return true;
-  if (isTaskExecutionRaw(tool.rawOutput)) return true;
-  return Boolean(tool.args?.subagent_type);
-}
-
-function isTaskExecutionRaw(raw: unknown): boolean {
-  return (
-    !!raw &&
-    typeof raw === 'object' &&
-    (raw as Record<string, unknown>).type === 'task_execution'
-  );
 }
 
 function parsePlanTodos(text: string): DaemonMessageTodoItem[] | undefined {
@@ -938,7 +1063,8 @@ function parsePlanTodos(text: string): DaemonMessageTodoItem[] | undefined {
     ) {
       return undefined;
     }
-    return parseDaemonTodoItemsFromEntries(record['entries']);
+    const todos = parseTodoItemsFromEntries(record['entries']);
+    return todos.length > 0 ? todos : undefined;
   } catch {
     return undefined;
   }
@@ -959,28 +1085,13 @@ function getString(
   return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
-function getTodoStatus(
-  value: string | undefined,
-): DaemonMessageTodoItem['status'] {
-  return value === 'completed' || value === 'in_progress' || value === 'pending'
-    ? value
-    : 'pending';
-}
-
-function getTodoPriority(
-  value: string | undefined,
-): DaemonMessageTodoItem['priority'] | undefined {
-  return value === 'high' || value === 'medium' || value === 'low'
-    ? value
-    : undefined;
-}
-
 function daemonToolBlockToToolCall(
   block: DaemonToolTranscriptBlock,
 ): DaemonMessageToolCall {
   const rawOutput = getToolRawOutput(block);
+  const executionMode = getRecord(rawOutput)?.['executionMode'];
   const isBackgroundAgent = isBackgroundAgentBlock(block, rawOutput);
-  const content = normalizeToolContent(block.content);
+  const content = normalizeToolContent(block);
   const statusMap: Record<string, DaemonMessageToolCallStatus> = {
     running: 'in_progress',
     pending: 'pending',
@@ -1009,6 +1120,9 @@ function daemonToolBlockToToolCall(
     kind: inferToolKind(block.toolName, block.toolKind),
     rawOutput,
     args: block.rawInput as Record<string, unknown> | undefined,
+    executionMode: isTaskExecutionMode(executionMode)
+      ? executionMode
+      : undefined,
     parentToolCallId: block.parentToolCallId,
     startTime: block.createdAt,
     endTime: isComplete && !isBackgroundAgent ? block.updatedAt : undefined,
@@ -1151,10 +1265,22 @@ function getToolRawOutput(block: DaemonToolTranscriptBlock): unknown {
   };
 }
 
+// The transcript store uses copy-on-write: an unchanged tool keeps its block
+// identity across frames. Keying by the block, rather than its content array,
+// also handles callers that replace a block while reusing its content array.
+const normalizedToolContentCache = new WeakMap<
+  DaemonToolTranscriptBlock,
+  readonly DaemonMessageToolCallContent[]
+>();
+
 function normalizeToolContent(
-  value: unknown,
-): DaemonMessageToolCallContent[] | undefined {
+  block: DaemonToolTranscriptBlock,
+): readonly DaemonMessageToolCallContent[] | undefined {
+  const value = block.content;
   if (!Array.isArray(value)) return undefined;
+
+  const cached = normalizedToolContentCache.get(block);
+  if (cached !== undefined) return cached;
 
   const content = value.flatMap((entry): DaemonMessageToolCallContent[] => {
     const item = getRecord(entry);
@@ -1201,7 +1327,10 @@ function normalizeToolContent(
     return [];
   });
 
-  return content.length > 0 ? content : undefined;
+  if (content.length === 0) return undefined;
+  const frozen = Object.freeze(content);
+  normalizedToolContentCache.set(block, frozen);
+  return frozen;
 }
 
 function isAskUserQuestionBlock(block: DaemonToolTranscriptBlock): boolean {

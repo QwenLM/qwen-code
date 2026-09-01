@@ -19,7 +19,10 @@ export default defineConfig({
         ? [
             ...configDefaults.exclude,
             'scripts/tests/pr-self-report-label.test.js',
+            // Bash-driven workflow suites cannot run on Windows; pure
+            // YAML-parse workflow suites still do.
             'scripts/tests/qwen-*-workflow.test.js',
+            'scripts/tests/serve-ab-workflow.test.js',
           ]
         : [...configDefaults.exclude],
     setupFiles: ['scripts/tests/test-setup.ts'],
@@ -34,11 +37,12 @@ export default defineConfig({
       provider: 'v8',
       reporter: ['text', 'lcov'],
     },
-    poolOptions: {
-      threads: {
-        minThreads: 8,
-        maxThreads: 16,
-      },
-    },
+    // No poolOptions override: the fixed 8-16 worker floor it used to carry
+    // oversubscribes the 3-core macOS runners. Vitest's default scales with
+    // the host cores, which is what every other suite in this repository
+    // uses.
+    //
+    // RPC-timeout exemption; see scripts/tests/unit-vitest-configs.test.ts.
+    dangerouslyIgnoreUnhandledErrors: process.platform !== 'linux',
   },
 });

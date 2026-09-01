@@ -512,7 +512,9 @@ function setupAcpTest(
       },
     });
 
-    const { sendRequest, cleanup, stderr } = setupAcpTest(rig);
+    const { sendRequest, cleanup, stderr } = setupAcpTest(rig, {
+      env: { OPENAI_MODEL: 'qwen3-coder-plus' },
+    });
 
     try {
       // Initialize
@@ -546,13 +548,7 @@ function setupAcpTest(
       const initialReasoningOption = newSession.configOptions.find(
         (opt) => opt.id === 'reasoning_effort',
       );
-      expect(initialReasoningOption).toMatchObject({
-        category: 'thought_level',
-        currentValue: 'default',
-      });
-      expect(
-        initialReasoningOption?.options.map((option) => option.value),
-      ).toEqual(['default', 'low', 'medium', 'high', 'xhigh', 'max']);
+      expect(initialReasoningOption).toBeUndefined();
 
       // Test: Set mode using set_config_option
       const setModeResult = (await sendRequest('session/set_config_option', {
@@ -616,11 +612,22 @@ function setupAcpTest(
       );
       expect(updatedModelOption).toBeDefined();
       expect(updatedModelOption!.currentValue).toBe(openaiModel!.modelId);
-      expect(
-        setModelResult.configOptions.find(
-          (opt) => opt.id === 'reasoning_effort',
-        )?.currentValue,
-      ).toBe('default');
+      const reasoningOption = setModelResult.configOptions.find(
+        (opt) => opt.id === 'reasoning_effort',
+      );
+      expect(reasoningOption).toMatchObject({
+        category: 'thought_level',
+        currentValue: 'default',
+      });
+      expect(reasoningOption?.options.map((option) => option.value)).toEqual([
+        'none',
+        'default',
+        'low',
+        'medium',
+        'high',
+        'xhigh',
+        'max',
+      ]);
 
       const setReasoningResult = (await sendRequest(
         'session/set_config_option',
@@ -664,7 +671,7 @@ function setupAcpTest(
         response: {
           code: -32602,
           message:
-            'Invalid params: Unknown reasoning effort: ultra. Choose one of: default, low, medium, high, xhigh, max',
+            'Invalid params: Unknown reasoning effort: ultra. Choose one of: default, none, low, medium, high, xhigh, max',
         },
       });
     } catch (e) {
@@ -748,8 +755,15 @@ function setupAcpTest(
       })) as { sessionId: string };
       expect(newSession.sessionId).toBeTruthy();
 
-      // Wait for available_commands_update to be received
-      await delay(1000);
+      await rig.poll(
+        () =>
+          sessionUpdates.some(
+            (update) =>
+              update.update?.sessionUpdate === 'available_commands_update',
+          ),
+        5000,
+        100,
+      );
 
       // Verify available_commands_update is received
       const commandsUpdate = sessionUpdates.find(
@@ -1126,6 +1140,84 @@ function setupAcpTest(
     } catch (e) {
       if (stderr.length) console.error('Agent stderr:', stderr.join(''));
       throw e;
+    } finally {
+      await cleanup();
+      await fakeServer.close();
+    }
+  });
+
+  it('injects managed auto-memory into the first ACP model request', async () => {
+    const marker = 'ACP-MEMORY-ZEPHYR-4207';
+    const prompt = 'What is the ACP zephyr codeword?';
+    const fakeServer = await startFakeOpenAIServer(async ({ body }) => {
+      // Keep the model selector outside the initial Recall budget. The
+      // deterministic match must still reach the main streamed request.
+      if (body['stream'] !== true) await delay(250);
+      return { content: 'done' };
+    });
+    const rig = new TestRig();
+    await rig.setup('acp managed auto-memory recall', {
+      settings: {
+        memory: {
+          enableManagedAutoMemory: true,
+          enableManagedAutoDream: false,
+        },
+      },
+    });
+    const memoryDir = join(rig.testDir!, '.qwen', 'memory', 'project');
+    mkdirSync(memoryDir, { recursive: true });
+    writeFileSync(
+      join(memoryDir, 'acp-zephyr.md'),
+      [
+        '---',
+        'type: project',
+        'name: ACP Zephyr Codeword',
+        `description: The ACP zephyr codeword is ${marker}.`,
+        '---',
+        '',
+        `The ACP zephyr codeword is ${marker}.`,
+      ].join('\n'),
+      'utf8',
+    );
+
+    const { sendRequest, cleanup, stderr } = setupAcpTest(rig, {
+      env: {
+        OPENAI_API_KEY: 'fake-key',
+        OPENAI_BASE_URL: fakeServer.baseUrl,
+        OPENAI_MODEL: 'fake-model',
+        QWEN_MODEL: 'fake-model',
+        QWEN_CODE_MEMORY_LOCAL: '1',
+        NO_PROXY: '127.0.0.1,localhost',
+        no_proxy: '127.0.0.1,localhost',
+      },
+    });
+
+    try {
+      await sendRequest('initialize', {
+        protocolVersion: 1,
+        clientCapabilities: { fs: { readTextFile: true, writeTextFile: true } },
+      });
+      await sendRequest('authenticate', { methodId: 'openai' });
+      const newSession = (await sendRequest('session/new', {
+        cwd: rig.testDir!,
+        mcpServers: [],
+      })) as { sessionId: string };
+
+      await sendRequest('session/prompt', {
+        sessionId: newSession.sessionId,
+        prompt: [{ type: 'text', text: prompt }],
+      });
+
+      const mainRequest = fakeServer.requests.find(
+        ({ body }) =>
+          body['stream'] === true &&
+          JSON.stringify(body['messages']).includes(prompt),
+      );
+      expect(mainRequest).toBeDefined();
+      expect(JSON.stringify(mainRequest?.body['messages'])).toContain(marker);
+    } catch (error) {
+      if (stderr.length) console.error('Agent stderr:', stderr.join(''));
+      throw error;
     } finally {
       await cleanup();
       await fakeServer.close();

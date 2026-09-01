@@ -1,5 +1,8 @@
 import { type ReactNode } from 'react';
-import { DaemonWorkspaceProvider } from '@qwen-code/webui/daemon-react-sdk';
+import {
+  DaemonWorkspaceProvider,
+  type DaemonProductSessionContext,
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import { App, type WebShellProps } from './App';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { RootErrorFallback } from './components/RootErrorFallback';
@@ -7,6 +10,7 @@ import { WorkspaceSessionProvider } from './components/WorkspaceSessionProvider'
 import { normalizeLanguage, type WebShellLanguage } from './i18n';
 export { WebShellTranscript } from './components/WebShellTranscript';
 export type { WebShellTranscriptProps } from './components/WebShellTranscript';
+export * from './daemon-react-sdk';
 
 export interface WebShellWithProvidersProps extends WebShellProps {
   /** Daemon API base URL. Defaults to the browser origin when omitted. */
@@ -19,6 +23,8 @@ export interface WebShellWithProvidersProps extends WebShellProps {
   workspaceId?: string;
   /** Registered daemon workspace path for the session. Takes precedence over workspaceId. */
   workspaceCwd?: string;
+  /** Explicit product context. Use standalone without workspaceId/workspaceCwd. */
+  sessionContext?: DaemonProductSessionContext;
   /**
    * Workspace path to lock this shell to. Missing paths are registered
    * persistently before rendering. Takes precedence over workspaceCwd and workspaceId.
@@ -26,7 +32,11 @@ export interface WebShellWithProvidersProps extends WebShellProps {
   lockWorkspaceCwd?: string;
   /** Client identity to reuse when attaching to an externally created session. */
   clientId?: string;
-  /** Restart the SSE event stream after each accepted prompt. Disabled by default. */
+  /**
+   * Restart a live SSE event stream after each accepted prompt. Disabled by
+   * default. A stream that is already down is always rebuilt immediately on
+   * prompt admission, regardless of this flag.
+   */
   restartSseOnPrompt?: boolean;
   /** Persisted transcript records requested per page. Defaults to 100; valid range is 1–500. */
   historyPageSize?: number;
@@ -66,7 +76,7 @@ function RootBoundary({
 
 /**
  * Low-level UI component. Requires ancestor `DaemonWorkspaceProvider` and
- * `DaemonSessionProvider` from `@qwen-code/webui/daemon-react-sdk`. The consumer
+ * `DaemonSessionProvider` from `@qwen-code/web-shell`. The consumer
  * owns those providers, so this boundary covers only what we render (`App`).
  */
 export function WebShell(props: WebShellProps) {
@@ -91,6 +101,7 @@ export function WebShellWithProviders(props: WebShellWithProvidersProps) {
     sessionId,
     workspaceId,
     workspaceCwd,
+    sessionContext,
     lockWorkspaceCwd,
     clientId,
     restartSseOnPrompt,
@@ -112,6 +123,7 @@ export function WebShellWithProviders(props: WebShellWithProvidersProps) {
           sessionId={sessionId}
           workspaceId={workspaceId}
           workspaceCwd={workspaceCwd}
+          sessionContext={sessionContext}
           lockWorkspaceCwd={lockWorkspaceCwd}
           clientId={clientId}
           restartSseOnPrompt={restartSseOnPrompt}
@@ -149,6 +161,9 @@ export type {
   WebShellSidebarSessionActionsOptions,
   WebShellSidebarSessionActionItem,
   WebShellSidebarSessionInlineActionItem,
+  WebShellSidebarWorkspaceOverviewOptions,
+  WorkspaceManagementTarget,
+  WorkspaceOverviewItem,
 } from './components/sidebar/WebShellSidebar';
 export type { WebShellLanguage } from './i18n';
 export type { WebShellTheme } from './themeContext';
@@ -219,6 +234,8 @@ export type {
   WebShellAgentTask,
   WebShellShellTask,
   WebShellMonitorTask,
+  WebShellPreparedSubmit,
+  WebShellSubmitSnapshot,
   WebShellModelInfo,
   WebShellSkillInfo,
 } from './customization';

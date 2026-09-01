@@ -5,12 +5,17 @@
  */
 
 import type {
+  DaemonBranchPoint,
   DaemonEvent,
   DaemonErrorKind,
   DaemonMcpTransport,
   DaemonSessionArtifactChange,
+  DaemonSessionPrInfo,
+  DaemonSkillToggleMutation,
   PermissionOutcome,
+  PromptContentBlock,
 } from './types.js';
+import { isDaemonSessionPrInfo } from './session-pr.js';
 // Single source of truth: the daemon publisher owns the wire literal in
 // acp-bridge's dependency-free `daemonEventTypes` module. We re-export it so the
 // validator/reducer below, and the browser consumer via `@qwen-code/sdk/daemon`,
@@ -293,6 +298,7 @@ export interface DaemonSessionClosedData {
 export interface DaemonSessionMetadataUpdatedData {
   sessionId: string;
   displayName?: string;
+  prs?: DaemonSessionPrInfo[];
   [key: string]: unknown;
 }
 
@@ -305,15 +311,21 @@ export interface DaemonArtifactChangedData {
 /**
  * `mid_turn_message_injected` payload. Emitted when the daemon drains
  * browser-queued mid-turn messages into the running turn (web-shell mid-turn
- * drain). It is a transient dedupe signal, not a transcript item: consumers
- * move these messages out of their pending queue so they aren't resent as the
- * next turn. They are not rendered from this event — the message already reached
- * the model mid-turn, and the persisted transcript shows it on reload.
+ * drain). Consumers move these messages out of their pending queue so they
+ * aren't resent as the next turn; UI adapters may also render the attached
+ * text/media as the immediate mid-turn echo.
  */
 export interface DaemonMidTurnMessageInjectedData {
   sessionId: string;
   messages: string[];
   messageIds?: string[];
+  /**
+   * Parallel array to `messages` — one entry per drained message. Each entry
+   * may carry image content blocks the daemon attached to the
+   * original queued payload, so the browser echo renderer can show them
+   * alongside the message text. Older daemons omit this field.
+   */
+  items?: Array<{ content?: PromptContentBlock[] }>;
   /**
    * Present only on events from older daemons. New daemons publish one
    * session-wide batch and clients reconcile it by message id.
@@ -663,6 +675,14 @@ export interface DaemonToolToggledData {
   [key: string]: unknown;
 }
 
+export interface DaemonSettingsChangedData {
+  key: string;
+  value?: unknown;
+  scope?: string;
+  mutation?: DaemonSkillToggleMutation;
+  [key: string]: unknown;
+}
+
 export interface DaemonTrustChangeRequestedData {
   workspaceCwd: string;
   desiredState: 'trusted' | 'untrusted';
@@ -814,6 +834,7 @@ export interface DaemonTurnCompleteData {
   sessionId: string;
   stopReason: string;
   promptId?: string;
+  branchPoint?: DaemonBranchPoint;
   [key: string]: unknown;
 }
 
@@ -822,6 +843,7 @@ export interface DaemonTurnErrorData {
   message: string;
   code?: string;
   errorKind?: DaemonErrorKind | (string & {});
+  loopType?: string;
   promptId?: string;
   [key: string]: unknown;
 }
@@ -1070,7 +1092,7 @@ export type DaemonToolToggledEvent = DaemonEventEnvelope<
 >;
 export type DaemonSettingsChangedEvent = DaemonEventEnvelope<
   'settings_changed',
-  Record<string, unknown>
+  DaemonSettingsChangedData
 >;
 export type DaemonTrustChangeRequestedEvent = DaemonEventEnvelope<
   'trust_change_requested',
@@ -1100,6 +1122,7 @@ export interface DaemonSettingsReloadedData {
   sessionsRefreshed?: string[];
   sessionsSkipped?: string[];
   childError?: string;
+  runtimeEnvironmentApplied?: boolean;
   [key: string]: unknown;
 }
 export type DaemonSettingsReloadedEvent = DaemonEventEnvelope<
@@ -1737,11 +1760,8 @@ export function asKnownDaemonEvent(
         ? (event as DaemonToolToggledEvent)
         : undefined;
     case 'settings_changed':
-      return event.data != null && typeof event.data === 'object'
-        ? (event as DaemonEventEnvelope<
-            'settings_changed',
-            Record<string, unknown>
-          >)
+      return isSettingsChangedData(event.data)
+        ? (event as DaemonSettingsChangedEvent)
         : undefined;
     case 'trust_change_requested':
       return isTrustChangeRequestedData(event.data)
@@ -2633,10 +2653,17 @@ function isSessionClosedData(value: unknown): value is DaemonSessionClosedData {
 function isSessionMetadataUpdatedData(
   value: unknown,
 ): value is DaemonSessionMetadataUpdatedData {
+  if (
+    !isRecord(value) ||
+    !isNonEmptyString(value['sessionId']) ||
+    !isOptionalStringOrNull(value['displayName'])
+  ) {
+    return false;
+  }
+  const prs = value['prs'];
   return (
-    isRecord(value) &&
-    isNonEmptyString(value['sessionId']) &&
-    isOptionalStringOrNull(value['displayName'])
+    prs === undefined ||
+    (Array.isArray(prs) && prs.every(isDaemonSessionPrInfo))
   );
 }
 
@@ -2993,6 +3020,43 @@ function isToolToggledData(value: unknown): value is DaemonToolToggledData {
     isRecord(value) &&
     isNonEmptyString(value['toolName']) &&
     typeof value['enabled'] === 'boolean'
+  );
+}
+
+function isDaemonSkillToggleMutation(
+  value: unknown,
+): value is DaemonSkillToggleMutation {
+  if (!isRecord(value)) return false;
+  const activation = value['activation'];
+  const skills = value['skills'];
+  return (
+    isNonEmptyString(value['id']) &&
+    value['kind'] === 'skill_toggle' &&
+    Array.isArray(skills) &&
+    skills.length > 0 &&
+    skills.every(
+      (skill) =>
+        isRecord(skill) &&
+        isNonEmptyString(skill['name']) &&
+        typeof skill['enabled'] === 'boolean',
+    ) &&
+    (activation === 'applied' ||
+      activation === 'deferred' ||
+      activation === 'partial') &&
+    isFiniteNumber(value['sessionsRefreshed']) &&
+    isFiniteNumber(value['sessionsFailed'])
+  );
+}
+
+export function isSettingsChangedData(
+  value: unknown,
+): value is DaemonSettingsChangedData {
+  return (
+    isRecord(value) &&
+    isNonEmptyString(value['key']) &&
+    (value['scope'] === undefined || typeof value['scope'] === 'string') &&
+    (value['mutation'] === undefined ||
+      isDaemonSkillToggleMutation(value['mutation']))
   );
 }
 

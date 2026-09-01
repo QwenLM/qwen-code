@@ -2,6 +2,11 @@
 
 import { act, createRef } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import type {
+  DaemonWorkspaceGitStatus,
+  ReasoningSelection,
+} from '@qwen-code/sdk/daemon';
+import type { DaemonReasoningControls } from '@qwen-code/web-shell/daemon-react-sdk';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   WebShellCustomizationProvider,
@@ -10,12 +15,12 @@ import {
   type WebShellComposerTag,
   type WebShellCustomization,
 } from '../customization';
-import { I18nProvider } from '../i18n';
+import { I18nProvider, type WebShellLanguage } from '../i18n';
 import type {
   MobileComposerBackend,
   SlashMenuState,
 } from '../hooks/useComposerCore';
-import type { UseDaemonFollowupSuggestionReturn } from '@qwen-code/webui/daemon-react-sdk';
+import type { AtMentionWorkspaceActions } from '../hooks/useAtMentionSources';
 import { ChatEditor, type ComposerToolbarAction } from './ChatEditor';
 import { WebShellPortalRootContext } from '../portalRoot';
 
@@ -26,13 +31,45 @@ Element.prototype.scrollIntoView = vi.fn();
 const mockComposerCoreState = vi.hoisted(() => ({
   composerTags: [] as WebShellComposerTag[],
   pastedImages: [] as Array<{ data: string; media_type: string }>,
+  pastedFiles: [] as Array<{
+    name: string;
+    media_type: string;
+    text: string;
+    size?: number;
+  }>,
   removeTopTag: vi.fn(),
 }));
 
+// Stand in for the branch picker so the tests can assert what the composer
+// hands it (the git status behind its action hints) without driving Radix.
+vi.mock('./BranchPickerPopover', async () => {
+  const { createElement } = await import('react');
+  return {
+    BranchPickerPopover: ({
+      children,
+      status,
+    }: {
+      children?: unknown;
+      status?: { operation?: string; unstaged?: number };
+    }) =>
+      createElement(
+        'div',
+        {
+          'data-testid': 'branch-picker',
+          'data-status-operation': status?.operation ?? undefined,
+          'data-status-unstaged': status?.unstaged ?? undefined,
+        },
+        children,
+      ),
+  };
+});
+
 // Mock useWorkspace so BranchPickerPopover can render without a real provider.
-vi.mock('@qwen-code/webui/daemon-react-sdk', async (importOriginal) => {
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', async (importOriginal) => {
   const actual =
-    await importOriginal<typeof import('@qwen-code/webui/daemon-react-sdk')>();
+    await importOriginal<
+      typeof import('@qwen-code/web-shell/daemon-react-sdk')
+    >();
   return {
     ...actual,
     useWorkspace: () => ({
@@ -97,15 +134,22 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', async (importOriginal) => {
 });
 
 const composerCoreState = vi.hoisted(() => ({
+  viewRef: { current: null } as { current: unknown },
+  workspaceActionsRef: { current: undefined } as {
+    current: AtMentionWorkspaceActions | undefined;
+  },
+  getText: vi.fn(() => ''),
+  setText: vi.fn(),
+  insertText: vi.fn(),
   slashMenu: null as SlashMenuState | null,
   focus: vi.fn(),
   closeSlashMenu: vi.fn(),
   mobileComposer: null as unknown,
   openHistorySearch: vi.fn(),
   imageDropCapture: vi.fn(),
+  ingestFiles: vi.fn(),
   clearImageDragState: vi.fn(),
   addTags: vi.fn(),
-  shellMode: false,
   imageDragActive: false,
   onFileUploadRequest: undefined as
     | ((targetDir: string, restoreQuery?: () => void) => void)
@@ -150,39 +194,49 @@ Object.defineProperty(window, 'matchMedia', {
   })),
 });
 
+const latestComposerCoreOptions = vi.hoisted(() => ({
+  current: null as Record<string, unknown> | null,
+}));
+
 vi.mock('../hooks/useComposerCore', async (importOriginal) => {
   const React = await import('react');
   const actual =
     await importOriginal<typeof import('../hooks/useComposerCore')>();
   return {
     ...actual,
-    useComposerCore: (options?: {
-      onFileUploadRequest?: (
-        targetDir: string,
-        restoreQuery?: () => void,
-      ) => void;
-      workspaceUploadBusy?: boolean;
-    }) => {
+    useComposerCore: (
+      options?: Record<string, unknown> & {
+        onFileUploadRequest?: (
+          targetDir: string,
+          restoreQuery?: () => void,
+        ) => void;
+        workspaceUploadBusy?: boolean;
+      },
+    ) => {
+      latestComposerCoreOptions.current = options ?? null;
       composerCoreState.onFileUploadRequest = options?.onFileUploadRequest;
       composerCoreState.workspaceUploadBusy =
         options?.workspaceUploadBusy ?? false;
       return {
         containerRef: React.createRef<HTMLDivElement>(),
-        viewRef: { current: null },
+        viewRef: composerCoreState.viewRef,
+        workspaceActionsRef: composerCoreState.workspaceActionsRef,
         mobileComposer: composerCoreState.mobileComposer,
         focus: composerCoreState.focus,
         submitText: vi.fn(),
         clearText: vi.fn(),
-        getText: vi.fn(() => ''),
+        getText: composerCoreState.getText,
         hasInput: vi.fn(() => false),
         hasAttachments:
           mockComposerCoreState.pastedImages.length > 0 ||
+          mockComposerCoreState.pastedFiles.length > 0 ||
           mockComposerCoreState.composerTags.length > 0,
         hasContent: false,
         canSubmit: false,
         pendingImageBatchCount: 0,
         imageDragActive: composerCoreState.imageDragActive,
         clearImageDragState: composerCoreState.clearImageDragState,
+        ingestFiles: composerCoreState.ingestFiles,
         imageTransferHandlers: {
           onDropCapture: composerCoreState.imageDropCapture,
         },
@@ -197,21 +251,24 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
           submit: vi.fn(),
           hasAttachments: () =>
             mockComposerCoreState.pastedImages.length > 0 ||
+            mockComposerCoreState.pastedFiles.length > 0 ||
             mockComposerCoreState.composerTags.length > 0,
         },
         pastedImages: mockComposerCoreState.pastedImages,
         removeImage: vi.fn(),
+        pastedFiles: mockComposerCoreState.pastedFiles,
+        removeFile: vi.fn(),
         composerTags: mockComposerCoreState.composerTags,
         removeTopTag: mockComposerCoreState.removeTopTag,
         addTags: composerCoreState.addTags,
         removeInlineTags: vi.fn(),
-        insertText: vi.fn(),
-        setText: vi.fn(),
+        insertText: composerCoreState.insertText,
+        setText: composerCoreState.setText,
         submit: vi.fn(),
         clear: vi.fn(),
         retryLast: vi.fn(),
         replaceEditorText: vi.fn(),
-        shellMode: composerCoreState.shellMode,
+        shellMode: false,
         setShellMode: vi.fn(),
         toggleShellMode: vi.fn(),
         currentMode: 'default',
@@ -269,12 +326,6 @@ vi.mock('../live/LiveVoiceButton', () => ({
   LiveVoiceButton: () => <span data-testid="live-voice-button" />,
 }));
 
-vi.mock('./SpecularComposerEffect', () => ({
-  SpecularComposerEffect: () => (
-    <span data-web-shell-composer-specular aria-hidden="true" />
-  ),
-}));
-
 const mounted: Array<{
   root: Root;
   container: HTMLDivElement;
@@ -283,14 +334,19 @@ const mounted: Array<{
 
 afterEach(() => {
   composerCoreState.slashMenu = null;
-  composerCoreState.shellMode = false;
+  composerCoreState.viewRef.current = null;
+  composerCoreState.getText.mockReset().mockReturnValue('');
+  composerCoreState.setText.mockReset();
+  composerCoreState.insertText.mockReset();
   composerCoreState.focus.mockReset();
   composerCoreState.closeSlashMenu.mockReset();
   composerCoreState.mobileComposer = null;
   composerCoreState.openHistorySearch.mockReset();
   composerCoreState.imageDropCapture.mockReset();
+  composerCoreState.ingestFiles.mockReset();
   composerCoreState.clearImageDragState.mockReset();
   composerCoreState.addTags.mockReset();
+  composerCoreState.workspaceActionsRef.current = undefined;
   composerCoreState.imageDragActive = false;
   composerCoreState.onFileUploadRequest = undefined;
   voiceButtonState.onActiveChange = undefined;
@@ -301,14 +357,22 @@ afterEach(() => {
   }
   mockComposerCoreState.composerTags = [];
   mockComposerCoreState.pastedImages = [];
+  mockComposerCoreState.pastedFiles = [];
   mockComposerCoreState.removeTopTag.mockReset();
-  vi.useRealTimers();
+  latestComposerCoreOptions.current = null;
 });
 
 interface ChatEditorRenderProps {
   composerTags?: WebShellComposerTag[];
   pastedImages?: Array<{ data: string; media_type: string }>;
+  pastedFiles?: Array<{
+    name: string;
+    media_type: string;
+    text: string;
+    size?: number;
+  }>;
   gitBranch?: string;
+  gitStatus?: DaemonWorkspaceGitStatus;
   workspaceName?: string;
   workspaceTitle?: string;
   visibleToolbarActions?: readonly ComposerToolbarAction[];
@@ -322,16 +386,26 @@ interface ChatEditorRenderProps {
   onSelectModel?: (model: string) => void;
   onAttachmentsChange?: (hasAttachments: boolean) => void;
   onImagePreview?: (src: string, alt?: string) => void;
+  onAttachmentPreview?: (file: {
+    name: string;
+    text?: string;
+    workspacePath?: string;
+  }) => void;
   tokenCount?: number;
   contextWindow?: number;
   onShowContextUsage?: () => void;
-  placeholderText?: string;
-  animatePlaceholder?: boolean;
   disabled?: boolean;
   atWorkspaceCwd?: string;
+  composerScopeKey?: string;
+  workspaceFeaturesEnabled?: boolean;
   sessionId?: string;
-  followupState?: UseDaemonFollowupSuggestionReturn['followupState'];
   customization?: WebShellCustomization;
+  builtinAtProviders?: WebShellCustomization['builtinAtProviders'];
+  atProviders?: WebShellCustomization['atProviders'];
+  skills?: Array<{ name: string; description: string }>;
+  language?: WebShellLanguage;
+  reasoning?: DaemonReasoningControls;
+  onSelectReasoningEffort?: (value: ReasoningSelection) => Promise<void> | void;
 }
 
 function renderChatEditorInto(
@@ -342,9 +416,11 @@ function renderChatEditorInto(
   const {
     composerTags,
     pastedImages,
+    pastedFiles,
     customization,
     renderComposerTagTooltip,
     onComposerTagClick,
+    language = 'en',
     ...chatEditorProps
   } = props;
   if (composerTags) {
@@ -352,6 +428,9 @@ function renderChatEditorInto(
   }
   if (pastedImages) {
     mockComposerCoreState.pastedImages = pastedImages;
+  }
+  if (pastedFiles) {
+    mockComposerCoreState.pastedFiles = pastedFiles;
   }
 
   act(() => {
@@ -364,7 +443,7 @@ function renderChatEditorInto(
             onComposerTagClick,
           }}
         >
-          <I18nProvider language="en">
+          <I18nProvider language={language}>
             <ChatEditor
               onSubmit={() => undefined}
               commands={[]}
@@ -423,6 +502,372 @@ describe('ChatEditor voice toolbar integration', () => {
     expect(
       hidden.querySelector('[data-testid="live-voice-button"]'),
     ).toBeNull();
+  });
+});
+
+describe('ChatEditor add menu (+)', () => {
+  const trigger = (container: HTMLElement) =>
+    container.querySelector<HTMLButtonElement>(
+      '[data-testid="composer-add-menu-trigger"]',
+    );
+
+  it('renders at the front of the toolbar when addMenu is opted in', () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['addMenu', 'approvalMode', 'voice'],
+    });
+    const button = trigger(container);
+    expect(button).not.toBeNull();
+    const leading = container.querySelector(
+      '[data-web-shell-toolbar-leading]',
+    )!;
+    expect(leading.contains(button)).toBe(true);
+    const modeButton = container.querySelector('[data-web-shell-mode-button]')!;
+    expect(
+      button!.compareDocumentPosition(modeButton) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it('does not render when addMenu is not in the toolbar list', () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['approvalMode', 'voice'],
+    });
+    expect(trigger(container)).toBeNull();
+  });
+
+  it('stays off by default when the host passes no toolbar list', () => {
+    const container = renderChatEditor({});
+    expect(trigger(container)).toBeNull();
+  });
+
+  it('discards a pending file picker when the composer owner changes', async () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['addMenu'],
+      sessionId: 'session-a',
+    });
+    const portalRoot = await openAddSubmenu(
+      container,
+      'composer-add-menu-file',
+    );
+    await act(async () => {
+      portalRoot
+        .querySelector<HTMLElement>(
+          '[data-testid="composer-add-menu-file-attach"]',
+        )!
+        .dispatchEvent(new MouseEvent('click', { bubbles: true, button: 0 }));
+    });
+    const staleInput = container.querySelector<HTMLInputElement>(
+      'input[type="file"]:not([data-web-shell-upload-input])',
+    )!;
+
+    rerenderChatEditor(container, {
+      visibleToolbarActions: ['addMenu'],
+      sessionId: 'session-b',
+    });
+    expect(staleInput.isConnected).toBe(false);
+
+    Object.defineProperty(staleInput, 'files', {
+      value: [new File(['hello'], 'note.txt', { type: 'text/plain' })],
+      configurable: true,
+    });
+    await act(async () => {
+      staleInput.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    expect(composerCoreState.ingestFiles).not.toHaveBeenCalled();
+  });
+
+  it('discards a pending file picker when file ingestion is disabled', async () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['addMenu'],
+      customization: { fileUploadEnabled: true },
+    });
+    const portalRoot = await openAddSubmenu(
+      container,
+      'composer-add-menu-file',
+    );
+    await act(async () => {
+      portalRoot
+        .querySelector<HTMLElement>(
+          '[data-testid="composer-add-menu-file-attach"]',
+        )!
+        .dispatchEvent(new MouseEvent('click', { bubbles: true, button: 0 }));
+    });
+    const staleInput = container.querySelector<HTMLInputElement>(
+      'input[type="file"]:not([data-web-shell-upload-input])',
+    )!;
+
+    composerCoreState.focus.mockClear();
+    rerenderChatEditor(container, {
+      visibleToolbarActions: ['addMenu'],
+      customization: { fileUploadEnabled: false },
+    });
+    expect(staleInput.isConnected).toBe(false);
+    expect(composerCoreState.focus).toHaveBeenCalled();
+
+    Object.defineProperty(staleInput, 'files', {
+      value: [new File(['hello'], 'note.txt', { type: 'text/plain' })],
+      configurable: true,
+    });
+    await act(async () => {
+      staleInput.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    expect(composerCoreState.ingestFiles).not.toHaveBeenCalled();
+  });
+
+  it('closes an open add menu when the composer becomes disabled', async () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['addMenu'],
+    });
+    await openAddSubmenu(container, 'composer-add-menu-file');
+
+    rerenderChatEditor(container, {
+      visibleToolbarActions: ['addMenu'],
+      disabled: true,
+    });
+
+    const portalRoot = mounted.find(
+      (entry) => entry.container === container,
+    )!.portalRoot;
+    expect(
+      portalRoot.querySelector('[data-testid="composer-add-menu-file"]'),
+    ).toBeNull();
+  });
+
+  it('closes an open add menu when a workspace capability disappears', async () => {
+    composerCoreState.workspaceActionsRef.current = {
+      loadExtensionsStatus: vi.fn().mockResolvedValue({
+        extensions: [
+          {
+            name: 'reviewer',
+            description: 'Reviews code',
+            isActive: true,
+          },
+        ],
+      }),
+    };
+    const container = renderChatEditor({
+      visibleToolbarActions: ['addMenu'],
+    });
+    const portalRoot = await openAddSubmenu(
+      container,
+      'composer-add-menu-extensions',
+    );
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    expect(
+      portalRoot.querySelector(
+        '[data-testid="composer-add-menu-extensions-item"]',
+      ),
+    ).not.toBeNull();
+
+    composerCoreState.workspaceActionsRef.current = undefined;
+    composerCoreState.focus.mockClear();
+    rerenderChatEditor(container, { visibleToolbarActions: ['addMenu'] });
+
+    expect(
+      portalRoot.querySelector(
+        '[data-testid="composer-add-menu-extensions-item"]',
+      ),
+    ).toBeNull();
+    expect(composerCoreState.focus).toHaveBeenCalled();
+  });
+
+  async function openAddSubmenu(container: HTMLDivElement, testId: string) {
+    const portalRoot = mounted.find(
+      (entry) => entry.container === container,
+    )!.portalRoot;
+    await act(async () => {
+      trigger(container)!.dispatchEvent(
+        new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
+      );
+    });
+    await act(async () => {
+      portalRoot
+        .querySelector<HTMLElement>(`[data-testid="${testId}"]`)!
+        .dispatchEvent(new MouseEvent('click', { bubbles: true, button: 0 }));
+    });
+    return portalRoot;
+  }
+
+  it('routes add-menu attachments through the composer file lane', async () => {
+    const container = renderChatEditor({ visibleToolbarActions: ['addMenu'] });
+    const portalRoot = await openAddSubmenu(
+      container,
+      'composer-add-menu-file',
+    );
+    await act(async () => {
+      portalRoot
+        .querySelector<HTMLElement>(
+          '[data-testid="composer-add-menu-file-attach"]',
+        )!
+        .dispatchEvent(new MouseEvent('click', { bubbles: true, button: 0 }));
+    });
+    const file = new File(['hello'], 'note.txt', { type: 'text/plain' });
+    const input =
+      container.querySelector<HTMLInputElement>('input[type=file]')!;
+    Object.defineProperty(input, 'files', {
+      value: [file],
+      configurable: true,
+    });
+    await act(async () => {
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+
+    expect(composerCoreState.ingestFiles).toHaveBeenCalledWith([file]);
+    expect(composerCoreState.focus).toHaveBeenCalled();
+  });
+
+  it('refocuses the composer when the add-menu file picker is canceled', async () => {
+    const container = renderChatEditor({ visibleToolbarActions: ['addMenu'] });
+    const portalRoot = await openAddSubmenu(
+      container,
+      'composer-add-menu-file',
+    );
+    await act(async () => {
+      portalRoot
+        .querySelector<HTMLElement>(
+          '[data-testid="composer-add-menu-file-attach"]',
+        )!
+        .dispatchEvent(new MouseEvent('click', { bubbles: true, button: 0 }));
+    });
+    const input =
+      container.querySelector<HTMLInputElement>('input[type=file]')!;
+    composerCoreState.focus.mockClear();
+    await act(async () => {
+      input.dispatchEvent(new Event('cancel'));
+    });
+
+    expect(composerCoreState.ingestFiles).not.toHaveBeenCalled();
+    expect(composerCoreState.focus).toHaveBeenCalled();
+  });
+
+  it('routes add-menu references through the inline tag lane', async () => {
+    let docLength = 0;
+    const dispatch = vi.fn();
+    composerCoreState.viewRef.current = {
+      state: {
+        doc: {
+          get length() {
+            return docLength;
+          },
+        },
+      },
+      dispatch,
+    };
+    composerCoreState.addTags.mockImplementation(() => {
+      docLength = 14;
+    });
+    composerCoreState.workspaceActionsRef.current = {
+      globWorkspace: vi.fn().mockResolvedValue({ matches: ['src/index.ts'] }),
+    };
+    const container = renderChatEditor({ visibleToolbarActions: ['addMenu'] });
+    const portalRoot = await openAddSubmenu(
+      container,
+      'composer-add-menu-reference-file',
+    );
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    await act(async () => {
+      portalRoot
+        .querySelector<HTMLElement>(
+          '[data-testid="composer-add-menu-reference-file-item"]',
+        )!
+        .dispatchEvent(new MouseEvent('click', { bubbles: true, button: 0 }));
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+
+    expect(composerCoreState.addTags).toHaveBeenCalledWith(
+      [expect.objectContaining({ kind: 'file', serialized: '@src/index.ts' })],
+      { placement: 'inline', position: 'end' },
+    );
+    expect(dispatch).toHaveBeenCalledWith({
+      selection: { anchor: 14 },
+      scrollIntoView: true,
+    });
+    expect(composerCoreState.focus).toHaveBeenCalled();
+  });
+
+  async function selectReviewSkill(container: HTMLDivElement) {
+    const portalRoot = await openAddSubmenu(
+      container,
+      'composer-add-menu-skills',
+    );
+    const skill = portalRoot.querySelector<HTMLElement>(
+      '[data-testid="composer-add-menu-skills-item"]',
+    )!;
+    await act(async () => {
+      skill.dispatchEvent(
+        new MouseEvent('click', { bubbles: true, button: 0 }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+  }
+
+  it('prepends a skill without replacing the desktop draft', async () => {
+    const dispatch = vi.fn();
+    const focus = vi.fn();
+    composerCoreState.viewRef.current = {
+      state: { doc: { toString: () => 'existing draft' } },
+      dispatch,
+      focus,
+    };
+    const container = renderChatEditor({
+      visibleToolbarActions: ['addMenu'],
+      skills: [{ name: 'review', description: '' }],
+    });
+
+    await selectReviewSkill(container);
+
+    expect(dispatch).toHaveBeenCalledWith({
+      changes: { from: 0, to: 0, insert: '/review ' },
+      selection: { anchor: 8 },
+      scrollIntoView: true,
+    });
+    expect(focus).toHaveBeenCalled();
+  });
+
+  it('refocuses the desktop editor when the skill is already prepended', async () => {
+    const dispatch = vi.fn();
+    const focus = vi.fn();
+    composerCoreState.viewRef.current = {
+      state: { doc: { toString: () => '/review existing draft' } },
+      dispatch,
+      focus,
+    };
+    const container = renderChatEditor({
+      visibleToolbarActions: ['addMenu'],
+      skills: [{ name: 'review', description: '' }],
+    });
+
+    await selectReviewSkill(container);
+
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(composerCoreState.focus).toHaveBeenCalled();
+  });
+
+  it('prepends a skill through the textarea backend on touch', async () => {
+    composerCoreState.mobileComposer = {
+      textareaRef: createRef<HTMLTextAreaElement>(),
+      value: 'existing draft',
+      onChange: vi.fn(),
+      onBlur: vi.fn(),
+      placeholder: '',
+    } satisfies MobileComposerBackend;
+    composerCoreState.getText.mockReturnValue('existing draft');
+    const container = renderChatEditor({
+      visibleToolbarActions: ['addMenu'],
+      skills: [{ name: 'review', description: '' }],
+    });
+
+    await selectReviewSkill(container);
+
+    expect(composerCoreState.insertText).toHaveBeenCalledWith('/review ');
+    expect(composerCoreState.setText).not.toHaveBeenCalled();
+    expect(
+      container.querySelector<HTMLTextAreaElement>('textarea')!.selectionStart,
+    ).toBe(0);
   });
 });
 
@@ -505,17 +950,16 @@ describe('ChatEditor context usage ring', () => {
     });
 
     expect(document.body.textContent).toContain('53.6k / 1.0M tokens (5.4%)');
-    // The arrow must be the Radix-positioned element: a pseudo-element pinned
-    // to the content center stops pointing at the trigger once collision
-    // avoidance shifts the content near the viewport edge. jsdom has no
-    // layout, so pin the positioning classes the rendered arrow depends on —
-    // a shadcn regeneration that drops them would detach the arrow visually
-    // while an existence check stayed green.
-    const arrowClass = document
-      .querySelector('[data-slot="tooltip-arrow"]')
-      ?.getAttribute('class');
-    expect(arrowClass).toContain('rotate-45');
-    expect(arrowClass).toContain('translate-y-[calc(-50%_-_2px)]');
+    const arrow = document.querySelector<SVGElement>(
+      '[data-slot="tooltip-arrow"]',
+    );
+    expect(arrow?.querySelectorAll('path')).toHaveLength(2);
+    expect(arrow?.style.transform).toBe(
+      'translateY(var(--floating-arrow-offset))',
+    );
+    expect(
+      arrow?.closest('[data-slot="tooltip-content"]')?.getAttribute('class'),
+    ).toContain('[--floating-arrow-offset:-1px]');
   });
 
   it('escalates the arc color at the /context panel thresholds', () => {
@@ -548,163 +992,6 @@ describe('ChatEditor context usage ring', () => {
     expect(button.getAttribute('aria-label')).toBe('150.0% context used');
     const arc = button.querySelectorAll('circle')[1];
     expect(arc.getAttribute('stroke-dashoffset')).toBe('0');
-  });
-});
-
-describe('ChatEditor animation layers', () => {
-  it('mounts the inert specular layer without replacing composer controls', () => {
-    const container = renderChatEditor({});
-
-    expect(
-      container.querySelector('[data-web-shell-composer-specular]'),
-    ).not.toBeNull();
-    expect(
-      container.querySelector('[data-web-shell-composer-editor]'),
-    ).not.toBeNull();
-    expect(
-      container.querySelector('[data-web-shell-composer-submit]'),
-    ).not.toBeNull();
-  });
-
-  it('keeps the typewriter visible through automatic focus', () => {
-    const container = renderChatEditor({});
-    const editor = container.querySelector<HTMLElement>(
-      '[data-web-shell-composer-editor]',
-    );
-    const outside = document.createElement('button');
-    container.appendChild(outside);
-    editor!.tabIndex = 0;
-
-    act(() => editor!.focus());
-    expect(container.querySelector('[data-typewriter-visible]')).not.toBeNull();
-
-    act(() => {
-      editor!.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
-    });
-    expect(container.querySelector('[data-typewriter-visible]')).toBeNull();
-
-    act(() => outside.focus());
-    expect(container.querySelector('[data-typewriter-visible]')).not.toBeNull();
-  });
-
-  it('plays the typewriter twice and then keeps the completed text', () => {
-    vi.useFakeTimers();
-    const container = renderChatEditor({ placeholderText: 'abc' });
-    const typewriter = () =>
-      container.querySelector('[data-web-shell-composer-typewriter]');
-
-    expect(typewriter()?.textContent).toBe('_');
-
-    act(() => vi.advanceTimersByTime(3 * 45));
-    expect(typewriter()?.textContent).toBe('abc_');
-
-    act(() => vi.advanceTimersByTime(3000));
-    expect(typewriter()?.textContent).toBe('_');
-
-    act(() => vi.advanceTimersByTime(3 * 45));
-    expect(typewriter()?.textContent).toBe('abc_');
-
-    act(() => vi.advanceTimersByTime(3001));
-    expect(typewriter()?.textContent).toBe('abc_');
-  });
-
-  it('does not mount the typewriter for an empty placeholder', () => {
-    const container = renderChatEditor({ placeholderText: '' });
-
-    expect(
-      container.querySelector('[data-web-shell-composer-typewriter]'),
-    ).toBeNull();
-    expect(container.querySelector('[data-typewriter-visible]')).toBeNull();
-  });
-
-  it('does not mount the typewriter when placeholder animation is disabled', () => {
-    const container = renderChatEditor({
-      placeholderText: 'abc',
-      animatePlaceholder: false,
-    });
-
-    expect(
-      container.querySelector('[data-web-shell-composer-typewriter]'),
-    ).toBeNull();
-    expect(container.querySelector('[data-typewriter-visible]')).toBeNull();
-  });
-
-  it('shows the full placeholder without a caret under prefers-reduced-motion', () => {
-    const originalMatchMedia = window.matchMedia;
-    window.matchMedia = vi.fn(
-      (query: string) =>
-        ({
-          matches: query === '(prefers-reduced-motion: reduce)',
-          media: query,
-          addEventListener: vi.fn(),
-          removeEventListener: vi.fn(),
-        }) as MediaQueryList,
-    );
-    try {
-      const container = renderChatEditor({ placeholderText: 'abc' });
-      const typewriter = container.querySelector(
-        '[data-web-shell-composer-typewriter]',
-      );
-
-      expect(typewriter?.textContent).toBe('abc');
-    } finally {
-      window.matchMedia = originalMatchMedia;
-    }
-  });
-
-  it('replays the typewriter sequence after the empty editor loses focus', () => {
-    vi.useFakeTimers();
-    const container = renderChatEditor({ placeholderText: 'abc' });
-    const editor = container.querySelector<HTMLElement>(
-      '[data-web-shell-composer-editor]',
-    );
-    const outside = document.createElement('button');
-    container.appendChild(outside);
-    editor!.tabIndex = 0;
-    const typewriter = () =>
-      container.querySelector('[data-web-shell-composer-typewriter]');
-
-    act(() => editor!.focus());
-    act(() => {
-      editor!.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
-    });
-    expect(typewriter()).toBeNull();
-
-    act(() => outside.focus());
-    expect(typewriter()?.textContent).toBe('_');
-
-    act(() => vi.advanceTimersByTime(3 * 45));
-    expect(typewriter()?.textContent).toBe('abc_');
-  });
-
-  it('hides the typewriter when disabled, in shell mode, or during a followup', () => {
-    const typewriterOf = (container: HTMLElement) =>
-      container.querySelector('[data-web-shell-composer-typewriter]');
-
-    expect(
-      typewriterOf(renderChatEditor({ placeholderText: 'abc' })),
-    ).not.toBeNull();
-
-    expect(
-      typewriterOf(
-        renderChatEditor({ placeholderText: 'abc', disabled: true }),
-      ),
-    ).toBeNull();
-
-    composerCoreState.shellMode = true;
-    expect(
-      typewriterOf(renderChatEditor({ placeholderText: 'abc' })),
-    ).toBeNull();
-    composerCoreState.shellMode = false;
-
-    expect(
-      typewriterOf(
-        renderChatEditor({
-          placeholderText: 'abc',
-          followupState: { suggestion: 'next', isVisible: true, shownAt: 0 },
-        }),
-      ),
-    ).toBeNull();
   });
 });
 
@@ -754,8 +1041,51 @@ describe('ChatEditor attachment reporting', () => {
     });
     const img = container.querySelector('img');
     expect(img).not.toBeNull();
+    const imageStrip = container.querySelector(
+      '[data-web-shell-composer-images]',
+    );
+    const editor = container.querySelector('[data-web-shell-composer-editor]');
+    expect(imageStrip?.parentElement).toBe(
+      editor?.parentElement?.parentElement,
+    );
     act(() => img!.click());
     expect(onImagePreview).toHaveBeenCalledWith('data:image/png;base64,abc');
+  });
+
+  it('opens a text attachment preview when its chip is clicked', () => {
+    const onAttachmentPreview = vi.fn();
+    const container = renderChatEditor({
+      pastedFiles: [
+        {
+          name: 'notes.txt',
+          text: 'hello attachment',
+          media_type: 'text/plain',
+          size: 16,
+        },
+      ],
+      onAttachmentPreview,
+    });
+
+    act(() => {
+      (
+        container.querySelector(
+          'button[class*="fileChipPreview"]',
+        ) as HTMLElement
+      ).click();
+    });
+
+    expect(onAttachmentPreview).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: 'notes.txt',
+        text: 'hello attachment',
+      }),
+    );
+    expect(container.textContent).not.toContain('16 B');
+    expect(
+      container
+        .querySelector('[class*="fileChip"]')
+        ?.querySelectorAll('button'),
+    ).toHaveLength(2);
   });
 });
 
@@ -809,6 +1139,25 @@ describe('ChatEditor git branch toolbar integration', () => {
     ).not.toBeNull();
   });
 
+  it('hands the workspace git status to the branch picker for its action hints', () => {
+    const container = renderChatEditor({
+      gitBranch: 'feature/web-shell',
+      gitStatus: {
+        v: 2,
+        workspaceCwd: '/repo',
+        branch: 'feature/web-shell',
+        operation: 'rebase',
+        unstaged: 4,
+        computedAt: 1,
+      },
+      visibleToolbarActions: ['gitBranch'],
+    });
+
+    const picker = container.querySelector('[data-testid="branch-picker"]');
+    expect(picker?.getAttribute('data-status-operation')).toBe('rebase');
+    expect(picker?.getAttribute('data-status-unstaged')).toBe('4');
+  });
+
   it('hides the git branch indicator without a branch or visible action', () => {
     expect(
       renderChatEditor({
@@ -825,6 +1174,24 @@ describe('ChatEditor git branch toolbar integration', () => {
 });
 
 describe('ChatEditor workspace toolbar integration', () => {
+  it('keeps legacy history fallback for Live but isolates standalone drafts', () => {
+    renderChatEditor({
+      composerScopeKey: 'live',
+      workspaceFeaturesEnabled: false,
+    });
+    expect(
+      latestComposerCoreOptions.current?.disableLegacyHistoryFallback,
+    ).toBe(false);
+
+    renderChatEditor({
+      composerScopeKey: 'standalone',
+      workspaceFeaturesEnabled: false,
+    });
+    expect(
+      latestComposerCoreOptions.current?.disableLegacyHistoryFallback,
+    ).toBe(true);
+  });
+
   it('shows the workspace indicator when the workspace action is visible', () => {
     const container = renderChatEditor({
       workspaceName: 'api',
@@ -886,6 +1253,55 @@ describe('ChatEditor workspace toolbar integration', () => {
     expect(
       ws!.compareDocumentPosition(git!) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
+  });
+});
+
+describe('ChatEditor file tag preview', () => {
+  it('opens an inserted file tag in the attachment preview', () => {
+    const onAttachmentPreview = vi.fn();
+    const onComposerTagClick = vi.fn();
+    renderChatEditor({ onAttachmentPreview, onComposerTagClick });
+    const onFileTagClick = latestComposerCoreOptions.current?.[
+      'onFileTagClick'
+    ] as ((info: { tag: WebShellComposerTag }) => void) | undefined;
+    const info = {
+      tag: {
+        id: 'file:docs/notes.md',
+        kind: 'file',
+        value: 'docs/notes.md',
+        serialized: '@docs/notes.md',
+      } satisfies WebShellComposerTag,
+    };
+
+    act(() => onFileTagClick?.(info));
+
+    expect(onAttachmentPreview).toHaveBeenCalledWith({
+      name: 'notes.md',
+      workspacePath: 'docs/notes.md',
+    });
+    expect(onComposerTagClick).toHaveBeenCalledWith(info);
+  });
+
+  it('does not preview an inserted directory tag', () => {
+    const onAttachmentPreview = vi.fn();
+    renderChatEditor({ onAttachmentPreview });
+    const onFileTagClick = latestComposerCoreOptions.current?.[
+      'onFileTagClick'
+    ] as ((info: { tag: WebShellComposerTag }) => void) | undefined;
+
+    act(() =>
+      onFileTagClick?.({
+        tag: {
+          id: 'file:@docs/',
+          kind: 'file',
+          value: 'docs',
+          metadata: { fileKind: 'directory' },
+          serialized: '@docs/',
+        },
+      }),
+    );
+
+    expect(onAttachmentPreview).not.toHaveBeenCalled();
   });
 });
 
@@ -1140,6 +1556,17 @@ describe('ChatEditor toolbar popovers', () => {
         },
       });
 
+      const toolbarLeading = document.querySelector(
+        '[data-web-shell-toolbar-leading]',
+      )!;
+      expect(observed.has(toolbarLeading)).toBe(false);
+      expect(observed.has(toolbarLeading.parentElement!)).toBe(true);
+      for (const measurement of document.querySelectorAll(
+        '[data-toolbar-measure]',
+      )) {
+        expect(observed.has(measurement)).toBe(true);
+      }
+
       expect(
         observed.has(document.querySelector('[data-test-toolbar-start]')!),
       ).toBe(true);
@@ -1151,6 +1578,75 @@ describe('ChatEditor toolbar popovers', () => {
       ).toBe(true);
     } finally {
       globalThis.ResizeObserver = originalResizeObserver;
+    }
+  });
+
+  it('remeasures the toolbar when addMenu visibility changes', () => {
+    const originalResizeObserver = globalThis.ResizeObserver;
+    let observers = 0;
+    globalThis.ResizeObserver = class ResizeObserverMock {
+      constructor(_callback: ResizeObserverCallback) {
+        observers += 1;
+      }
+
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    };
+
+    try {
+      const container = renderChatEditor({
+        visibleToolbarActions: ['approvalMode'],
+      });
+      const before = observers;
+      rerenderChatEditor(container, {
+        visibleToolbarActions: ['addMenu', 'approvalMode'],
+      });
+      expect(observers).toBeGreaterThan(before);
+    } finally {
+      globalThis.ResizeObserver = originalResizeObserver;
+    }
+  });
+
+  it('does not synchronously loop when toolbar measurements alternate', () => {
+    let leadingWidthReads = 0;
+    const bounds = vi
+      .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+      .mockImplementation(function () {
+        if (this.matches('[data-toolbar-measure="mode:expanded"]')) {
+          return { width: 50 } as DOMRect;
+        }
+        if (this.matches('[data-toolbar-measure="mode:collapsed"]')) {
+          return { width: 10 } as DOMRect;
+        }
+        if (
+          !this.hasAttribute('data-web-shell-toolbar-leading') &&
+          this.querySelector('[data-web-shell-toolbar-leading]')
+        ) {
+          return { width: 100 } as DOMRect;
+        }
+        return { width: 0 } as DOMRect;
+      });
+    const scrollWidth = vi
+      .spyOn(HTMLElement.prototype, 'scrollWidth', 'get')
+      .mockImplementation(function () {
+        if (!this.hasAttribute('data-web-shell-toolbar-leading')) return 0;
+        leadingWidthReads += 1;
+        const modeButton = this.querySelector('[data-web-shell-mode-button]');
+        const expanded = Array.from(
+          modeButton?.querySelectorAll('span') ?? [],
+        ).some((span) => Boolean(span.textContent?.trim()));
+        return expanded ? 101 : 50;
+      });
+
+    try {
+      expect(() =>
+        renderChatEditor({ visibleToolbarActions: ['approvalMode'] }),
+      ).not.toThrow();
+      expect(leadingWidthReads).toBe(1);
+    } finally {
+      bounds.mockRestore();
+      scrollWidth.mockRestore();
     }
   });
 
@@ -1195,6 +1691,76 @@ describe('ChatEditor toolbar popovers', () => {
     act(() => options[0]?.click());
 
     expect(onSelectModel).toHaveBeenCalledWith('qwen-max');
+  });
+
+  it('localizes every fixed effort tier after a runtime language change', () => {
+    const props: ChatEditorRenderProps = {
+      visibleToolbarActions: ['model'],
+      currentModel: 'reasoning-model',
+      availableModels: [{ id: 'reasoning-model', label: 'Reasoning Model' }],
+      reasoning: {
+        enabled: true,
+        effort: 'max',
+        efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+      },
+    };
+    const container = renderChatEditor(props);
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-model-button]')
+        ?.click();
+    });
+    let controls = document.querySelector('[data-web-shell-model-reasoning]');
+    expect(controls?.textContent).toContain('High');
+    expect(controls?.textContent).toContain('Max');
+    expect(controls?.textContent).not.toContain('reasoning.effort.');
+
+    act(() => {
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+      );
+    });
+    rerenderChatEditor(container, { ...props, language: 'zh-CN' });
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-model-button]')
+        ?.click();
+    });
+    controls = document.querySelector('[data-web-shell-model-reasoning]');
+    expect(controls?.textContent).toContain('高');
+    expect(controls?.textContent).toContain('最高');
+    expect(controls?.textContent).not.toContain('High');
+    expect(controls?.textContent).not.toContain('reasoning.effort.');
+  });
+
+  it('renders an unknown provider default as Thinking without a Default effort', () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['model'],
+      currentModel: 'reasoning-model',
+      availableModels: [{ id: 'reasoning-model', label: 'Reasoning Model' }],
+      reasoning: {
+        enabled: true,
+        effort: 'default',
+        efforts: ['low', 'max'],
+      },
+    });
+
+    const modelButton = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-model-button]',
+    );
+    expect(modelButton?.textContent).toContain('Thinking');
+    expect(modelButton?.textContent).not.toContain('Default');
+    expect(modelButton?.textContent).not.toContain('reasoning.effort.');
+
+    act(() => modelButton?.click());
+    const controls = document.querySelector('[data-web-shell-model-reasoning]');
+    expect(controls?.textContent).not.toContain('Default');
+    expect(
+      Array.from(
+        controls?.querySelectorAll('[data-web-shell-effort]') ?? [],
+      ).every((button) => button.getAttribute('aria-pressed') === 'false'),
+    ).toBe(true);
   });
 
   it('displays the model label instead of an opaque route id', () => {
@@ -1459,6 +2025,63 @@ describe('ChatEditor mobile composer quick actions', () => {
   });
 });
 
+describe('ChatEditor at mention context fallback', () => {
+  const tablesProvider = {
+    id: 'tables',
+    label: 'Tables',
+    async search() {
+      return [];
+    },
+  };
+  const hostFilesProvider = {
+    id: 'files-host',
+    label: 'Host files',
+    async search() {
+      return [];
+    },
+  };
+
+  it('uses customization atProviders when ChatEditor props omit them', () => {
+    const contextProviders = [tablesProvider];
+    renderChatEditor({
+      customization: { atProviders: contextProviders },
+    });
+    expect(latestComposerCoreOptions.current?.atProviders).toBe(
+      contextProviders,
+    );
+  });
+
+  it('prefers explicit atProviders props over customization', () => {
+    const contextProviders = [tablesProvider];
+    const propProviders = [hostFilesProvider];
+    renderChatEditor({
+      customization: { atProviders: contextProviders },
+      atProviders: propProviders,
+    });
+    expect(latestComposerCoreOptions.current?.atProviders).toBe(propProviders);
+  });
+
+  it('uses customization builtinAtProviders when ChatEditor props omit them', () => {
+    const builtinAtProviders = { exclude: ['extensions'] as const };
+    renderChatEditor({
+      customization: { builtinAtProviders },
+    });
+    expect(latestComposerCoreOptions.current?.builtinAtProviders).toBe(
+      builtinAtProviders,
+    );
+  });
+
+  it('prefers explicit builtinAtProviders props over customization', () => {
+    renderChatEditor({
+      customization: { builtinAtProviders: { exclude: ['extensions'] } },
+      builtinAtProviders: { exclude: ['files'] },
+    });
+    expect(latestComposerCoreOptions.current?.builtinAtProviders).toEqual({
+      exclude: ['files'],
+    });
+  });
+});
+
 describe('ChatEditor file upload gating', () => {
   const makeWorkspace = (
     features: string[],
@@ -1500,6 +2123,14 @@ describe('ChatEditor file upload gating', () => {
     return event;
   };
 
+  const chooseDropAction = (action: 'cancel' | 'reference' | 'upload') => {
+    const button = document.querySelector<HTMLButtonElement>(
+      `[data-web-shell-drop-choice-dialog] [data-drop-action="${action}"]`,
+    );
+    expect(button).not.toBeNull();
+    act(() => button?.click());
+  };
+
   afterEach(() => {
     uploadWorkspaceState.current = undefined;
   });
@@ -1519,6 +2150,220 @@ describe('ChatEditor file upload gating', () => {
     });
     expect(container.querySelector('[data-web-shell-upload-input]')).toBeNull();
     expect(composerCoreState.onFileUploadRequest).toBeUndefined();
+  });
+
+  it('fileUploadEnabled={false} disables file drag-and-drop in the composer core', () => {
+    uploadWorkspaceState.current = makeWorkspace(['workspace_file_upload']);
+    renderChatEditor({ customization: { fileUploadEnabled: false } });
+    expect(latestComposerCoreOptions.current?.fileDragEnabled).toBe(false);
+  });
+
+  it('enables file drag-and-drop in the composer core by default', () => {
+    uploadWorkspaceState.current = makeWorkspace(['workspace_file_upload']);
+    renderChatEditor({});
+    expect(latestComposerCoreOptions.current?.fileDragEnabled).toBe(true);
+  });
+
+  it('fileUploadEnabled={false} ingests nothing on file drop', () => {
+    const workspace = makeWorkspace(['workspace_file_upload']);
+    uploadWorkspaceState.current = workspace;
+    composerCoreState.imageDropCapture.mockImplementation((event: Event) => {
+      event.preventDefault();
+      event.stopPropagation();
+    });
+    const container = renderChatEditor({
+      customization: { fileUploadEnabled: false },
+    });
+    const editor = container.querySelector('[data-web-shell-composer-editor]')!;
+    const drop = dispatchDrag(
+      editor,
+      'drop',
+      ['Files'],
+      [new File(['abc'], 'notes.txt')],
+    );
+    // Cancelled so the browser cannot navigate to the dropped file, but no
+    // lane — upload or inline image/text — reacts.
+    expect(drop.defaultPrevented).toBe(true);
+    expect(composerCoreState.imageDropCapture).not.toHaveBeenCalled();
+    expect(workspace.client.uploadWorkspaceFile).not.toHaveBeenCalled();
+    expect(composerCoreState.addTags).not.toHaveBeenCalled();
+    expect(container.querySelector('[data-web-shell-upload-strip]')).toBeNull();
+  });
+
+  it('asks whether dropped files should be referenced or uploaded', () => {
+    const workspace = makeWorkspace(['workspace_file_upload']);
+    uploadWorkspaceState.current = workspace;
+    const container = renderChatEditor({});
+    const editor = container.querySelector('[data-web-shell-composer-editor]')!;
+    const files = [new File(['png'], 'photo.png', { type: 'image/png' })];
+
+    dispatchDrag(editor, 'drop', ['Files'], files);
+
+    expect(
+      document.querySelector('[data-web-shell-drop-choice-dialog]'),
+    ).not.toBeNull();
+    expect(composerCoreState.ingestFiles).not.toHaveBeenCalled();
+    expect(workspace.client.uploadWorkspaceFile).not.toHaveBeenCalled();
+
+    chooseDropAction('reference');
+    expect(composerCoreState.ingestFiles).toHaveBeenCalledWith(files);
+    expect(workspace.client.uploadWorkspaceFile).not.toHaveBeenCalled();
+  });
+
+  it('keeps the first drop while its choice dialog is open', () => {
+    const workspace = makeWorkspace(['workspace_file_upload']);
+    uploadWorkspaceState.current = workspace;
+    const container = renderChatEditor({});
+    const editor = container.querySelector('[data-web-shell-composer-editor]')!;
+    const firstFiles = [new File(['a'], 'first.txt')];
+
+    dispatchDrag(editor, 'drop', ['Files'], firstFiles);
+    dispatchDrag(editor, 'drop', ['Files'], [new File(['b'], 'second.txt')]);
+    chooseDropAction('reference');
+
+    expect(composerCoreState.ingestFiles).toHaveBeenCalledTimes(1);
+    expect(composerCoreState.ingestFiles).toHaveBeenCalledWith(firstFiles);
+  });
+
+  it('cancels a dropped-file choice without ingesting or uploading', () => {
+    const workspace = makeWorkspace(['workspace_file_upload']);
+    uploadWorkspaceState.current = workspace;
+    const container = renderChatEditor({});
+    const editor = container.querySelector('[data-web-shell-composer-editor]')!;
+
+    dispatchDrag(editor, 'drop', ['Files'], [new File(['x'], 'notes.txt')]);
+    chooseDropAction('cancel');
+
+    expect(composerCoreState.ingestFiles).not.toHaveBeenCalled();
+    expect(workspace.client.uploadWorkspaceFile).not.toHaveBeenCalled();
+  });
+
+  it('closes a dropped-file choice when the session target changes', () => {
+    const workspace = makeWorkspace(['workspace_file_upload']);
+    uploadWorkspaceState.current = workspace;
+    const container = renderChatEditor({ sessionId: 'session-a' });
+    const editor = container.querySelector('[data-web-shell-composer-editor]')!;
+
+    dispatchDrag(editor, 'drop', ['Files'], [new File(['x'], 'notes.txt')]);
+    expect(
+      document.querySelector('[data-web-shell-drop-choice-dialog]'),
+    ).not.toBeNull();
+
+    rerenderChatEditor(container, { sessionId: 'session-b' });
+
+    expect(
+      document.querySelector('[data-web-shell-drop-choice-dialog]'),
+    ).toBeNull();
+    expect(composerCoreState.ingestFiles).not.toHaveBeenCalled();
+    expect(workspace.client.uploadWorkspaceFile).not.toHaveBeenCalled();
+  });
+
+  it('lets an arbitrary file be referenced', () => {
+    const workspace = makeWorkspace(['workspace_file_upload']);
+    workspace.client.uploadWorkspaceFile.mockResolvedValue({
+      kind: 'file_upload',
+      path: 'uploaded-file',
+      sizeBytes: 3,
+      hash: `sha256:${'a'.repeat(64)}`,
+    });
+    uploadWorkspaceState.current = workspace;
+    const container = renderChatEditor({});
+    const editor = container.querySelector('[data-web-shell-composer-editor]')!;
+
+    dispatchDrag(
+      editor,
+      'drop',
+      ['Files'],
+      [new File(['pdf'], 'report.pdf', { type: 'application/pdf' })],
+    );
+
+    expect(
+      document.querySelector('[data-web-shell-drop-choice-dialog]'),
+    ).not.toBeNull();
+    chooseDropAction('reference');
+    expect(composerCoreState.ingestFiles).toHaveBeenCalledWith([
+      expect.objectContaining({ name: 'report.pdf' }),
+    ]);
+    expect(workspace.client.uploadWorkspaceFile).not.toHaveBeenCalled();
+  });
+
+  it('lets the attachment ingestion path decide whether a large file can be referenced', () => {
+    const workspace = makeWorkspace(['workspace_file_upload']);
+    uploadWorkspaceState.current = workspace;
+    const container = renderChatEditor({});
+    const editor = container.querySelector('[data-web-shell-composer-editor]')!;
+    const files = [
+      new File([new Uint8Array(512 * 1024 + 1)], 'large.txt', {
+        type: 'text/plain',
+      }),
+    ];
+
+    dispatchDrag(editor, 'drop', ['Files'], files);
+
+    expect(
+      document.querySelector<HTMLButtonElement>(
+        '[data-drop-action="reference"]',
+      )?.disabled,
+    ).toBe(false);
+    expect(workspace.client.uploadWorkspaceFile).not.toHaveBeenCalled();
+
+    chooseDropAction('reference');
+    expect(composerCoreState.ingestFiles).toHaveBeenCalledWith(files);
+  });
+
+  it('uploads dropped files into the configured directory', async () => {
+    const workspace = makeWorkspace(['workspace_file_upload']);
+    workspace.client.uploadWorkspaceFile.mockResolvedValue({
+      kind: 'file_upload',
+      path: 'uploads/notes.txt',
+      sizeBytes: 3,
+      hash: `sha256:${'b'.repeat(64)}`,
+    });
+    uploadWorkspaceState.current = workspace;
+    const container = renderChatEditor({
+      customization: { fileUploadDirectory: 'uploads' },
+    });
+    const editor = container.querySelector('[data-web-shell-composer-editor]')!;
+    dispatchDrag(editor, 'drop', ['Files'], [new File(['abc'], 'notes.txt')]);
+    chooseDropAction('upload');
+    await act(async () => {});
+
+    expect(workspace.client.uploadWorkspaceFile).toHaveBeenCalledTimes(1);
+    expect(workspace.client.uploadWorkspaceFile.mock.calls[0][0].path).toBe(
+      'uploads/notes.txt',
+    );
+    // The directory flows through the whole chain: request path, server
+    // response, and the inserted @reference.
+    expect(composerCoreState.addTags).toHaveBeenCalledWith(
+      [
+        expect.objectContaining({
+          kind: 'file',
+          value: 'uploads/notes.txt',
+        }),
+      ],
+      { placement: 'inline', position: 'end' },
+    );
+  });
+
+  it('uploads dropped files to the workspace root by default', async () => {
+    const workspace = makeWorkspace(['workspace_file_upload']);
+    workspace.client.uploadWorkspaceFile.mockResolvedValue({
+      kind: 'file_upload',
+      path: 'notes.txt',
+      sizeBytes: 3,
+      hash: `sha256:${'d'.repeat(64)}`,
+    });
+    uploadWorkspaceState.current = workspace;
+    const container = renderChatEditor({});
+    const editor = container.querySelector('[data-web-shell-composer-editor]')!;
+    dispatchDrag(editor, 'drop', ['Files'], [new File(['abc'], 'notes.txt')]);
+    chooseDropAction('upload');
+    await act(async () => {});
+
+    expect(workspace.client.uploadWorkspaceFile).toHaveBeenCalledTimes(1);
+    expect(workspace.client.uploadWorkspaceFile.mock.calls[0][0].path).toBe(
+      'notes.txt',
+    );
   });
 
   it('fileUploadEnabled={true} still requires the capability (AND, not override)', () => {
@@ -1682,7 +2527,7 @@ describe('ChatEditor file upload gating', () => {
     expect(container.querySelector('[data-web-shell-upload-strip]')).toBeNull();
   });
 
-  it('routes mixed image-and-file drops to the upload path', async () => {
+  it('lets every file in a mixed batch be referenced', () => {
     const workspace = makeWorkspace(['workspace_file_upload']);
     uploadWorkspaceState.current = workspace;
     const container = renderChatEditor({});
@@ -1694,17 +2539,21 @@ describe('ChatEditor file upload gating', () => {
       [
         new File(['png'], 'photo.png', { type: 'image/png' }),
         new File(['csv'], 'data.csv', { type: 'text/csv' }),
+        new File(['pdf'], 'report.pdf', { type: 'application/pdf' }),
       ],
     );
     expect(drop.defaultPrevented).toBe(true);
     expect(composerCoreState.imageDropCapture).not.toHaveBeenCalled();
     expect(
-      container.querySelector('[data-web-shell-upload-strip]'),
+      document.querySelector('[data-web-shell-drop-choice-dialog]'),
     ).not.toBeNull();
-    await act(async () => {});
-    // Both dropped files enter the upload batch — image-media files are not
-    // filtered out of mixed drops.
-    expect(workspace.client.uploadWorkspaceFile).toHaveBeenCalledTimes(2);
+    chooseDropAction('reference');
+    expect(composerCoreState.ingestFiles).toHaveBeenCalledWith([
+      expect.objectContaining({ name: 'photo.png' }),
+      expect.objectContaining({ name: 'data.csv' }),
+      expect.objectContaining({ name: 'report.pdf' }),
+    ]);
+    expect(workspace.client.uploadWorkspaceFile).not.toHaveBeenCalled();
   });
 
   it('intercepts file drops before the editor and renders status above it', () => {
@@ -1723,6 +2572,7 @@ describe('ChatEditor file upload gating', () => {
       ['Files'],
       [new File(['xx'], 'large.txt')],
     );
+    chooseDropAction('upload');
 
     const strip = container.querySelector('[data-web-shell-upload-strip]');
     expect(drop.defaultPrevented).toBe(true);
@@ -1746,6 +2596,7 @@ describe('ChatEditor file upload gating', () => {
     const container = renderChatEditor({});
     const editor = container.querySelector('[data-web-shell-composer-editor]')!;
     dispatchDrag(editor, 'drop', ['Files'], [new File(['xx'], 'large.txt')]);
+    chooseDropAction('upload');
     const strip = container.querySelector('[data-web-shell-upload-strip]')!;
     expect(strip).not.toBeNull();
 
@@ -1764,6 +2615,7 @@ describe('ChatEditor file upload gating', () => {
   });
 
   it('uploads picker selections into the captured directory and inserts a tag', async () => {
+    const onAttachmentPreview = vi.fn();
     const workspace = makeWorkspace(['workspace_file_upload']);
     workspace.client.uploadWorkspaceFile.mockResolvedValue({
       kind: 'file_upload',
@@ -1772,7 +2624,7 @@ describe('ChatEditor file upload gating', () => {
       hash: `sha256:${'a'.repeat(64)}`,
     });
     uploadWorkspaceState.current = workspace;
-    const container = renderChatEditor({});
+    const container = renderChatEditor({ onAttachmentPreview });
     const input = container.querySelector<HTMLInputElement>(
       '[data-web-shell-upload-input]',
     )!;
@@ -1818,6 +2670,17 @@ describe('ChatEditor file upload gating', () => {
       ],
       { placement: 'inline', position: 'end' },
     );
+    act(() => {
+      container
+        .querySelector<HTMLElement>(
+          '[data-status="done"] button[class*="uploadRowPreview"]',
+        )
+        ?.click();
+    });
+    expect(onAttachmentPreview).toHaveBeenCalledWith({
+      name: 'notes.txt',
+      workspacePath: 'docs/notes.txt',
+    });
   });
 
   it('restores the removed mention when the upload picker is canceled', () => {
@@ -1913,7 +2776,7 @@ describe('ChatEditor file upload gating', () => {
     expect(workspace.client.uploadWorkspaceFile).not.toHaveBeenCalled();
   });
 
-  it('keeps supported image drops on the image attachment path', () => {
+  it('does not infer reference intent from an image file type', () => {
     const workspace = makeWorkspace(['workspace_file_upload']);
     uploadWorkspaceState.current = workspace;
     composerCoreState.imageDropCapture.mockImplementation((event: Event) => {
@@ -1930,7 +2793,10 @@ describe('ChatEditor file upload gating', () => {
     );
 
     expect(drop.defaultPrevented).toBe(true);
-    expect(composerCoreState.imageDropCapture).toHaveBeenCalledTimes(1);
+    expect(composerCoreState.imageDropCapture).not.toHaveBeenCalled();
+    expect(
+      document.querySelector('[data-web-shell-drop-choice-dialog]'),
+    ).not.toBeNull();
     expect(workspace.client.uploadWorkspaceFile).not.toHaveBeenCalled();
   });
 
@@ -1947,6 +2813,7 @@ describe('ChatEditor file upload gating', () => {
     const editor = container.querySelector('[data-web-shell-composer-editor]')!;
 
     dispatchDrag(editor, 'drop', ['Files'], [new File(['abc'], 'report.txt')]);
+    chooseDropAction('upload');
     await act(async () => {});
 
     expect(composerCoreState.addTags).toHaveBeenCalledWith(
@@ -1980,6 +2847,7 @@ describe('ChatEditor file upload gating', () => {
     const editor = container.querySelector('[data-web-shell-composer-editor]')!;
 
     dispatchDrag(editor, 'drop', ['Files'], [new File(['abc'], 'report.txt')]);
+    chooseDropAction('upload');
     await act(async () => {});
 
     const row = container.querySelector(
@@ -2017,6 +2885,7 @@ describe('ChatEditor file upload gating', () => {
       ['Files'],
       [oversized, new File(['ok'], 'small.txt')],
     );
+    chooseDropAction('upload');
     await act(async () => {});
 
     const strip = container.querySelector('[data-web-shell-upload-strip]');
@@ -2049,6 +2918,7 @@ describe('ChatEditor file upload gating', () => {
       [folder, file],
       [{ file: folder, isDirectory: true }, { file }],
     );
+    chooseDropAction('upload');
     await act(async () => {});
 
     expect(drop.defaultPrevented).toBe(true);
@@ -2093,6 +2963,7 @@ describe('ChatEditor file upload gating', () => {
     expect(composerCoreState.workspaceUploadBusy).toBe(false);
 
     dispatchDrag(editor, 'drop', ['Files'], [new File(['abc'], 'notes.txt')]);
+    chooseDropAction('upload');
     await act(async () => {});
     expect(workspace.client.uploadWorkspaceFile).toHaveBeenCalledTimes(1);
     expect(composerCoreState.workspaceUploadBusy).toBe(true);
@@ -2121,6 +2992,7 @@ describe('ChatEditor file upload gating', () => {
     const editor = container.querySelector('[data-web-shell-composer-editor]')!;
 
     dispatchDrag(editor, 'drop', ['Files'], [new File(['abc'], 'notes.txt')]);
+    chooseDropAction('upload');
     await act(async () => {});
     expect(workspace.client.uploadWorkspaceFile).toHaveBeenCalledTimes(1);
     expect(
@@ -2251,6 +3123,7 @@ describe('ChatEditor file upload gating', () => {
         ['Files'],
         [new File(['abc'], 'report.txt')],
       );
+      chooseDropAction('upload');
       await act(async () => {});
 
       expect(workspaceByCwd).toHaveBeenCalledWith('/secondary');

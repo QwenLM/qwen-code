@@ -284,9 +284,22 @@ function makeBridge(): ChannelAgentBridge {
 
 class TestWeComChannel extends WeComChannel {
   readonly envelopes: Envelope[] = [];
+  readonly preflightedInbound = vi.fn();
+
+  protected override async processPreflightedInbound(
+    envelope: Envelope,
+    process: () => Promise<void> = () => this.processInbound(envelope),
+  ): Promise<void> {
+    this.preflightedInbound(envelope);
+    await super.processPreflightedInbound(envelope, process);
+  }
 
   protected override async processInbound(envelope: Envelope): Promise<void> {
     this.envelopes.push(envelope);
+  }
+
+  sendAttributed(chatId: string, text: string, sourceLabel: string) {
+    return this.sendThreadMessage(chatId, undefined, text, sourceLabel);
   }
 }
 
@@ -428,6 +441,30 @@ describe('WeComChannel', () => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
     rmSync(join(tmpdir(), 'channel-files'), { recursive: true, force: true });
+  });
+
+  it('shares attachment routing across senders in chat_thread scope', () => {
+    const channel = new WeComChannel(
+      'bot',
+      makeConfig({ sessionScope: 'chat_thread' }),
+      makeBridge(),
+    );
+    const routeKey = (
+      channel as unknown as {
+        attachmentRouteKey(
+          senderId: string,
+          chatId: string,
+          threadId?: string,
+        ): string;
+      }
+    ).attachmentRouteKey.bind(channel);
+
+    expect(routeKey('alice', 'chat-1', 'topic-1')).toBe(
+      routeKey('bob', 'chat-1', 'topic-1'),
+    );
+    expect(routeKey('alice', 'chat-1', 'topic-1')).not.toBe(
+      routeKey('alice', 'chat-2', 'topic-1'),
+    );
   });
 
   it('requires botId and secret', () => {
@@ -1946,6 +1983,7 @@ describe('WeComChannel', () => {
 
     client.emit('message.image', payload);
     await vi.waitFor(() => expect(mocks.lookup).toHaveBeenCalledTimes(1));
+    expect(channel.preflightedInbound).toHaveBeenCalledTimes(1);
     inspectable.disconnectGeneration += 1;
     releaseLookup?.([{ address: '93.184.216.34', family: 4 }]);
     await vi.waitFor(() =>
@@ -4041,6 +4079,53 @@ describe('WeComChannel', () => {
     expect(first.markdown.content + second.markdown.content).toBe(
       'a'.repeat(3900),
     );
+  });
+
+  it('extracts media first and repeats an escaped label within every byte-limited chunk', async () => {
+    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+    const sourceLabel = '[review_*]';
+
+    await channel.sendAttributed(
+      'chat-1',
+      Array.from(
+        { length: 80 },
+        (_, index) => `paragraph ${index}: ${'x'.repeat(80)}`,
+      ).join('\n'),
+      sourceLabel,
+    );
+
+    const chunks = client.sendMessage.mock.calls.map((call) => {
+      const message = call[1] as { markdown: { content: string } };
+      return message.markdown.content;
+    });
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) {
+      expect(chunk.startsWith('\\[review\\_\\*\\]\n')).toBe(true);
+      expect(Buffer.byteLength(chunk, 'utf8')).toBeLessThanOrEqual(3800);
+    }
+  });
+
+  it('keeps attributed fenced-code openings line-leading in every chunk', async () => {
+    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+
+    await channel.sendAttributed(
+      'chat-1',
+      `\`\`\`text\n${'x'.repeat(3900)}\n\`\`\``,
+      '[review]',
+    );
+
+    const chunks = client.sendMessage.mock.calls.map((call) => {
+      const message = call[1] as { markdown: { content: string } };
+      return message.markdown.content;
+    });
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) {
+      expect(chunk).toMatch(/^\\\[review\\\]\n(?:```|~~~)/u);
+    }
   });
 
   it('splits long markdown responses without array-copying the remaining line', async () => {

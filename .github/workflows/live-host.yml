@@ -5,11 +5,13 @@ on:
     paths:
       - '.github/workflows/live-host.yml'
       - '.github/workflows/live-host-release.yml'
+      - 'packages/cli/src/serve/conversations/**'
       - 'packages/cli/src/serve/live/**'
-      - 'packages/desktop/apps/live-host/**'
-      - 'packages/desktop/bun.lock'
-      - 'packages/desktop/package.json'
-      - 'packages/desktop/scripts/bump-live-host-version.ts'
+      - 'packages/live-host/**'
+      # The protocol parity test couples the qwen-live host copies into
+      # this lane; without the path filter a qwen-live-only PR skips it
+      # and the first red lands in the merge queue instead.
+      - 'packages/qwen-live/src/host/**'
       - 'packages/sdk-typescript/src/daemon/types.ts'
   merge_group:
   workflow_dispatch:
@@ -35,29 +37,24 @@ jobs:
         with:
           node-version-file: '.nvmrc'
 
-      - name: 'Set up Bun'
-        uses: 'oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6' # v2
-        with:
-          bun-version: '1.3.9'
-
-      - name: 'Install desktop dependencies'
-        working-directory: 'packages/desktop'
-        run: 'bun install --frozen-lockfile'
+      - name: 'Install dependencies'
+        working-directory: 'packages/live-host'
+        run: 'npm ci'
 
       - name: 'Typecheck Live Host'
-        working-directory: 'packages/desktop'
-        run: 'bun run live-host:typecheck'
+        working-directory: 'packages/live-host'
+        run: 'npm run typecheck'
 
       - name: 'Test Live Host'
-        working-directory: 'packages/desktop'
-        run: 'bun run live-host:test'
+        working-directory: 'packages/live-host'
+        run: 'npm test'
 
       - name: 'Build Live Host'
-        working-directory: 'packages/desktop'
-        run: 'bun run live-host:build'
+        working-directory: 'packages/live-host'
+        run: 'npm run build'
 
       - name: 'Package unsigned Live Host app'
-        working-directory: 'packages/desktop/apps/live-host'
+        working-directory: 'packages/live-host'
         run: |
           set -euo pipefail
 
@@ -67,7 +64,7 @@ jobs:
             *) echo "::error::Unsupported runner architecture: $(uname -m)"; exit 1 ;;
           esac
 
-          CSC_IDENTITY_AUTO_DISCOVERY=false bunx electron-builder --config electron-builder.yml --mac dir "$builder_arch"
+          CSC_IDENTITY_AUTO_DISCOVERY=false npx electron-builder --config electron-builder.yml --mac dir "$builder_arch"
 
           app="$(find release -type d -name 'Qwen Live Host.app' -print -quit)"
           if [ -z "$app" ]; then
@@ -78,7 +75,7 @@ jobs:
           test -x "$app/Contents/MacOS/Qwen Live Host"
           test -f "$app/Contents/Resources/app.asar"
 
-          asar_entries="$(node ../../node_modules/@electron/asar/bin/asar.mjs list "$app/Contents/Resources/app.asar")"
+          asar_entries="$(npx --no-install asar list "$app/Contents/Resources/app.asar")"
           if printf '%s\n' "$asar_entries" | grep -Eiq '(^|/)(native/|.*command[-_]?monitor|.*commandtap)'; then
             echo '::error::Packaged app.asar contains a removed keyboard monitor or native helper.'
             exit 1
@@ -93,7 +90,7 @@ jobs:
           extracted_asar="$(mktemp -d)"
           packaged_entitlements="$(mktemp)"
           trap 'rm -rf "$extracted_asar"; rm -f "$packaged_entitlements"' EXIT
-          node ../../node_modules/@electron/asar/bin/asar.mjs extract "$app/Contents/Resources/app.asar" "$extracted_asar"
+          npx --no-install asar extract "$app/Contents/Resources/app.asar" "$extracted_asar"
           test -d "$extracted_asar/dist"
           if grep -RIEq 'openWebShellWindow|web-shell-security|host\.open_session|inputMonitoring|installUrl|loadURL\(|@modelcontextprotocol|node:child_process' "$extracted_asar/dist"; then
             echo '::error::Packaged app contains a forbidden external backend, process launcher, WebShell window, or Input Monitoring path.'

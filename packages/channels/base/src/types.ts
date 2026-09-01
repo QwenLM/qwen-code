@@ -59,7 +59,10 @@ export interface ChannelConfig {
   clientSecret?: string;
   senderPolicy: SenderPolicy;
   allowedUsers: string[];
+  /** Channel routing scope. `thread` is retained for existing configurations only. */
   sessionScope: SessionScope;
+  /** Retain an owner-scoped catalog of named sessions in daemon-managed mode. */
+  multiSession?: boolean;
   cwd: string;
   approvalMode?: string;
   instructions?: string;
@@ -231,6 +234,7 @@ export interface ChannelUserInputRequestContext {
   runId: string;
   owner: ChannelPromptOwner;
   target: SessionTarget;
+  sourceLabel?: string;
   precedingSegmentId?: string;
   questions: ChannelUserQuestion[];
   submitOptionId: string;
@@ -245,6 +249,7 @@ export interface ChannelOutputSegmentContext {
   segmentId: string;
   owner: ChannelPromptOwner;
   target: SessionTarget;
+  sourceLabel?: string;
   messageId?: string;
 }
 
@@ -516,7 +521,10 @@ export interface ChannelPlugin {
   /** Serializable metadata for safe configuration management. */
   management?: ChannelManagementDescriptor;
 
-  /** Default session scope for this channel type (applied when config omits sessionScope). */
+  /**
+   * Default Channel routing scope (applied when config omits sessionScope).
+   * `thread` is retained for existing configurations only.
+   */
   defaultSessionScope?: SessionScope;
 
   /** Create a channel adapter instance. */

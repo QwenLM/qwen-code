@@ -26,7 +26,7 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import { createSessionRootContext } from './tracer.js';
 import { getCurrentSessionId, setSessionContext } from './session-context.js';
 import { setShellTracePropagation } from './trace-context.js';
-import { endInteractionSpan } from './session-tracing.js';
+import { endAllInteractionSpans } from './session-tracing.js';
 import { emitSessionEnd, emitSessionStart } from './session-events.js';
 
 function createTelemetryDiagLogger(): DiagLogger {
@@ -178,7 +178,7 @@ export function shutdownTelemetry(): Promise<void> {
       telemetryShutdownPromise = undefined;
       return;
     }
-    endInteractionSpan('cancelled');
+    endAllInteractionSpans('cancelled');
     const currentSessionId = getCurrentSessionId();
     if (currentSessionId) {
       emitSessionEnd(currentSessionId);

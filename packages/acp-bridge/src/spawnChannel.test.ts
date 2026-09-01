@@ -32,7 +32,7 @@
  * Each branch listed below is now regression-guarded by an assertion.
  */
 
-import { EventEmitter } from 'node:events';
+import { EventEmitter, getEventListeners } from 'node:events';
 import type { ChildProcess } from 'node:child_process';
 import { PassThrough } from 'node:stream';
 import { ClientSideConnection } from '@agentclientprotocol/sdk';
@@ -41,12 +41,18 @@ import { createChildHeapPolicy } from './child-heap-policy.js';
 import { resolveDaemonMemoryBudget } from './daemon-memory-budget.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const mockSpawn = vi.hoisted(() => vi.fn());
+const { mockExecFile, mockSpawn, mockSpawnSync } = vi.hoisted(() => ({
+  mockExecFile: vi.fn(),
+  mockSpawn: vi.fn(),
+  mockSpawnSync: vi.fn(),
+}));
 vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>();
   return {
     ...actual,
+    execFile: mockExecFile,
     spawn: mockSpawn,
+    spawnSync: mockSpawnSync,
   };
 });
 
@@ -59,15 +65,65 @@ import {
 } from './spawnChannel.js';
 
 function createFakeChildProcess(): ChildProcess {
-  return Object.assign(new EventEmitter(), {
+  const child = Object.assign(new EventEmitter(), {
     stdin: new PassThrough(),
     stdout: new PassThrough(),
     stderr: new PassThrough(),
     pid: 12345,
     exitCode: null,
     signalCode: null,
-    kill: vi.fn(() => true),
-  }) as unknown as ChildProcess;
+    kill: vi.fn(),
+  });
+  child.kill.mockImplementation((signal?: NodeJS.Signals | number) => {
+    const signalCode = typeof signal === 'string' ? signal : 'SIGTERM';
+    child.emit('exit', null, signalCode);
+    return true;
+  });
+  return child as unknown as ChildProcess;
+}
+
+beforeEach(() => {
+  mockExecFile.mockImplementation((...args: unknown[]) => {
+    const callback = args[3] as (
+      error: Error | null,
+      stdout: string,
+      stderr: string,
+    ) => void;
+    callback(
+      Object.assign(new Error('mock process lookup failure'), {
+        code: 'ENOENT',
+      }),
+      '',
+      '',
+    );
+    return new EventEmitter();
+  });
+  mockSpawnSync.mockReturnValue({
+    error: Object.assign(new Error('mock process lookup failure'), {
+      code: 'ENOENT',
+    }),
+    status: null,
+    stderr: '',
+    stdout: '',
+  });
+  vi.spyOn(process, 'kill').mockImplementation(((pid: number) => {
+    if (pid < 0) {
+      throw Object.assign(new Error('missing fake process group'), {
+        code: 'ESRCH',
+      });
+    }
+    return true;
+  }) as typeof process.kill);
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  mockExecFile.mockReset();
+  mockSpawnSync.mockReset();
+});
+
+function expectedTreeFallbackSignal(): NodeJS.Signals {
+  return process.platform === 'win32' ? 'SIGKILL' : 'SIGTERM';
 }
 
 describe('createSpawnChannelFactory env policy', () => {
@@ -131,8 +187,14 @@ describe('createSpawnChannelFactory env policy', () => {
     });
 
     const spawnOptions = mockSpawn.mock.calls[0]?.[2] as
-      | { env?: NodeJS.ProcessEnv }
+      | {
+          detached?: boolean;
+          env?: NodeJS.ProcessEnv;
+          windowsHide?: boolean;
+        }
       | undefined;
+    expect(spawnOptions?.windowsHide).toBe(true);
+    expect(spawnOptions?.detached).toBe(process.platform !== 'win32');
     expect(spawnOptions?.env).not.toHaveProperty('QWEN_CODE_SIMPLE');
     expect(spawnOptions?.env).not.toHaveProperty('QWEN_SERVER_TOKEN');
     expect(spawnOptions?.env).not.toHaveProperty(
@@ -151,6 +213,33 @@ describe('createSpawnChannelFactory env policy', () => {
       | { env?: NodeJS.ProcessEnv }
       | undefined;
     expect(spawnOptions?.env?.['QWEN_CODE_SERVE']).toBe('1');
+  });
+
+  it('attaches the spawned ACP child as an owned process tree', async () => {
+    const child = createFakeChildProcess();
+    mockSpawn.mockReturnValue(child);
+    const registry = new ProcessRegistry();
+    const reserve = registry.reserve.bind(registry);
+    let attachmentOptions:
+      | Parameters<ReturnType<ProcessRegistry['reserve']>['attach']>[1]
+      | undefined;
+    vi.spyOn(registry, 'reserve').mockImplementation(() => {
+      const reservation = reserve();
+      const attach = reservation.attach.bind(reservation);
+      vi.spyOn(reservation, 'attach').mockImplementation(
+        (attachedChild, options) => {
+          attachmentOptions = options;
+          return attach(attachedChild, options);
+        },
+      );
+      return reservation;
+    });
+
+    await createSpawnChannelFactory({ processRegistry: registry })(
+      '/tmp/project',
+    );
+
+    expect(attachmentOptions).toEqual({ ownsProcessTree: true });
   });
 
   it('passes optional child args after --acp', async () => {
@@ -248,7 +337,9 @@ describe('createSpawnChannelFactory env policy', () => {
     await expect(channel.transportFailed).resolves.toMatchObject({
       code: 'ndjson_frame_too_large',
     });
-    await vi.waitFor(() => expect(child.kill).toHaveBeenCalledWith('SIGTERM'));
+    await vi.waitFor(() =>
+      expect(child.kill).toHaveBeenCalledWith(expectedTreeFallbackSignal()),
+    );
     reader.releaseLock();
   });
 
@@ -310,7 +401,9 @@ describe('createSpawnChannelFactory env policy', () => {
       code: 'ndjson_unexpected_eof',
     });
     await expect(connection.closed).resolves.toBeUndefined();
-    await vi.waitFor(() => expect(child.kill).toHaveBeenCalledWith('SIGTERM'));
+    await vi.waitFor(() =>
+      expect(child.kill).toHaveBeenCalledWith(expectedTreeFallbackSignal()),
+    );
   });
 
   it('terminates the tracked child when outbound serialization fails', async () => {
@@ -334,7 +427,9 @@ describe('createSpawnChannelFactory env policy', () => {
     await expect(writer.write(cyclic as never)).rejects.toBeInstanceOf(
       TypeError,
     );
-    await vi.waitFor(() => expect(child.kill).toHaveBeenCalledWith('SIGTERM'));
+    await vi.waitFor(() =>
+      expect(child.kill).toHaveBeenCalledWith(expectedTreeFallbackSignal()),
+    );
     writer.releaseLock();
   });
 
@@ -373,7 +468,9 @@ describe('createSpawnChannelFactory env policy', () => {
     await expect(channel.transportFailed).resolves.toMatchObject({
       code: 'ndjson_queue_limit_exceeded',
     });
-    await vi.waitFor(() => expect(child.kill).toHaveBeenCalledWith('SIGTERM'));
+    await vi.waitFor(() =>
+      expect(child.kill).toHaveBeenCalledWith(expectedTreeFallbackSignal()),
+    );
     writer.releaseLock();
   });
 
@@ -410,6 +507,28 @@ describe('createSpawnChannelFactory env policy', () => {
       channel.transportGuard?.reservePreparedResponse(response),
     ).toThrow('NDJSON decoded queue is full');
     expect(elementReads).toBeLessThan(1_000);
+    await expect(channel.transportFailed).resolves.toMatchObject({
+      code: 'ndjson_queue_limit_exceeded',
+    });
+  });
+
+  it('charges JSON string escaping before admitting prepared responses', async () => {
+    const child = createFakeChildProcess();
+    mockSpawn.mockReturnValue(child);
+    const channel = await createSpawnChannelFactory({
+      pipeLimits: {
+        maxFrameBytes: 64_000,
+        maxQueuedMessages: 2,
+        maxQueuedBytes: 6_000,
+      },
+    })('/tmp/project');
+    const response = {
+      content: '\u0001'.repeat(700),
+    };
+
+    expect(() =>
+      channel.transportGuard?.reservePreparedResponse(response),
+    ).toThrow('NDJSON decoded queue is full');
     await expect(channel.transportFailed).resolves.toMatchObject({
       code: 'ndjson_queue_limit_exceeded',
     });
@@ -464,6 +583,38 @@ describe('createSpawnChannelFactory env policy', () => {
       exitCode: 1,
       signalCode: null,
     });
+  });
+
+  it('force-kills the child when the startup signal aborts after spawn', async () => {
+    const child = createFakeChildProcess();
+    mockSpawn.mockReturnValue(child);
+    const controller = new AbortController();
+
+    const channel = await createSpawnChannelFactory()(
+      '/tmp/project',
+      undefined,
+      controller.signal,
+    );
+
+    expect(getEventListeners(controller.signal, 'abort')).toHaveLength(1);
+    controller.abort();
+    expect(child.kill).toHaveBeenCalledWith('SIGKILL');
+
+    await expect(channel.exited).resolves.toEqual({
+      exitCode: null,
+      signalCode: 'SIGKILL',
+    });
+    expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0);
+  });
+
+  it('rejects without spawning when the signal is already aborted', async () => {
+    const controller = new AbortController();
+    controller.abort(new Error('startup cancelled'));
+
+    await expect(
+      createSpawnChannelFactory()('/tmp/project', undefined, controller.signal),
+    ).rejects.toThrow('startup cancelled');
+    expect(mockSpawn).not.toHaveBeenCalled();
   });
 });
 

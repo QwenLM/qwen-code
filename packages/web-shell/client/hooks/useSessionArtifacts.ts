@@ -5,10 +5,16 @@ import {
   usePromptStatus,
   useDaemonSessionOwnerGuard,
   useWorkspaceEventSignals,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 
 const SESSION_ARTIFACTS_FEATURE = 'session_artifacts';
+
+// A stable empty array for sessions whose artifact list cannot load (e.g. a
+// subagent session without an artifacts endpoint). Returning a fresh literal
+// here would change `artifacts` identity every render and re-run every
+// consumer effect that depends on it, which cascades into an update loop.
+const EMPTY_ARTIFACTS: DaemonSessionArtifact[] = [];
 
 export interface SessionArtifactsState {
   artifacts: DaemonSessionArtifact[];
@@ -104,7 +110,8 @@ export function useSessionArtifacts(): SessionArtifactsState {
     [artifacts, owner],
   );
 
-  const visibleArtifacts = loadedOwnerRef.current === owner ? artifacts : [];
+  const visibleArtifacts =
+    loadedOwnerRef.current === owner ? artifacts : EMPTY_ARTIFACTS;
   return {
     artifacts: visibleArtifacts,
     artifactById,

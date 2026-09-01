@@ -34,6 +34,8 @@ export interface SessionReplaySnapshot {
   degraded?: true;
 }
 
+export type LiveReplayMode = 'full' | 'summary';
+
 export interface CompactionEngine {
   /**
    * `byteLength` is the serialized size the bus already computed for the
@@ -43,8 +45,20 @@ export interface CompactionEngine {
    */
   ingest(event: BridgeEvent, byteLength?: number): void;
   seedReplayEvents(events: BridgeEvent[]): void;
-  snapshot(): SessionReplaySnapshot;
+  snapshot(liveReplayMode?: LiveReplayMode): SessionReplaySnapshot;
+  /**
+   * In-flight journal only — events ingested since the last turn
+   * boundary — without flattening the compacted replay window. Optional:
+   * consumers fall back to `snapshot()` semantics when absent.
+   */
+  liveJournalSnapshot?(liveReplayMode?: LiveReplayMode): BridgeEvent[];
   close(): void;
+  /**
+   * Current live-journal caps — may exceed the configured baseline when
+   * adaptive growth raised them mid-turn. Optional: engines without a
+   * journal concept simply omit it.
+   */
+  journalLimits?(): { maxEvents: number; maxBytes: number };
 }
 
 export const EVENT_SCHEMA_VERSION = 1 as const;
@@ -179,13 +193,11 @@ export const DEFAULT_REPLAY_BUDGET_BYTES = 4 * DEFAULT_MAX_QUEUED_BYTES;
  * can emit hundreds of frames (test plan reports 13 for a short
  * turn, real workloads can be 10× that or more once tool-call /
  * thought streams pile up). 1000 was the original default and could
- * be exhausted by a moderate turn before the client reconnected;
- * 8000 matches the target set for chatty Stage 1
- * sessions, with ~30–60× headroom over a typical-but-busy turn at
- * the cost of a few hundred KB of RAM per session. Operators can
- * override per-daemon via `qwen serve --event-ring-size <n>`.
+ * be exhausted by a moderate turn before the client reconnected.
+ * 8000 is the current daemon design target; operators with very
+ * long agentic turns can raise it via `qwen serve --event-ring-size <n>`.
  */
-export const DEFAULT_RING_SIZE = 8000;
+export const DEFAULT_RING_SIZE = 8_000;
 /**
  * Fraction of the frame and byte caps at which a `slow_client_warning`
  * synthetic frame is force-pushed to the at-risk subscriber. The warning
@@ -388,12 +400,41 @@ export class EventBus {
     this.onCompactionError = opts.onCompactionError;
   }
 
-  snapshotReplay(): SessionReplaySnapshot | undefined {
-    const snapshot = this.compactionEngine?.snapshot();
+  snapshotReplay(
+    liveReplayMode: LiveReplayMode = 'full',
+  ): SessionReplaySnapshot | undefined {
+    const snapshot = this.compactionEngine?.snapshot(liveReplayMode);
     if (snapshot && this.compactionDegraded) {
       return { ...snapshot, degraded: true };
     }
     return snapshot;
+  }
+
+  /**
+   * Events ingested since the last turn boundary (the boundary itself is
+   * folded into the replay window), without flattening that window.
+   * Undefined when no compaction engine is wired or it exposes no journal
+   * snapshot.
+   */
+  liveJournalSnapshot(
+    liveReplayMode: LiveReplayMode = 'full',
+  ): BridgeEvent[] | undefined {
+    return this.compactionEngine?.liveJournalSnapshot?.(liveReplayMode);
+  }
+
+  /**
+   * The engine's current live-journal caps — may have grown past the
+   * configured baseline under adaptive growth. Read by the bridge's
+   * growth policy to account granted headroom across its live sessions
+   * and by daemon status for the per-session effective limits.
+   */
+  journalLimits(): { maxEvents: number; maxBytes: number } | undefined {
+    return this.compactionEngine?.journalLimits?.();
+  }
+
+  /** The byte half of `journalLimits()`; the growth-policy hot path. */
+  journalLimitBytes(): number | undefined {
+    return this.journalLimits()?.maxBytes;
   }
 
   private markCompactionDegraded(err: unknown): void {

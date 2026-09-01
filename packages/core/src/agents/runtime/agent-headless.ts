@@ -16,7 +16,7 @@
 
 import type { Content, FunctionDeclaration } from '@google/genai';
 import type { Config } from '../../config/config.js';
-import type { GeminiChat } from '../../core/geminiChat.js';
+import type { LlmChat } from '../../core/llm-chat.js';
 import type { RuntimeContentGeneratorView } from './agent-context.js';
 import { createChildAbortController } from '../../utils/abortController.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
@@ -139,7 +139,9 @@ export class AgentHeadless {
   private readonly core: AgentCore;
   private finalText: string = '';
   private terminateMode: AgentTerminateMode = AgentTerminateMode.ERROR;
-  private chat?: GeminiChat;
+  // Which loop detector fired when terminateMode is LOOP_DETECTED (#9450).
+  private loopType: string | null = null;
+  private chat?: LlmChat;
   private toolsList?: FunctionDeclaration[];
   private executing = false;
   private hasStartedReasoning = false;
@@ -164,6 +166,10 @@ export class AgentHeadless {
    * @param toolConfig - Optional configuration for tools available to the subagent.
    * @param eventEmitter - Optional event emitter for streaming events to UI.
    * @param hooks - Optional lifecycle hooks.
+   * @param runtimeView - Optional runtime view override.
+   * @param taskName - Optional business/task name for local per-invocation
+   *   usage labels.
+   * @param subagentId - Optional stable invocation id.
    */
   static async create(
     name: string,
@@ -175,6 +181,8 @@ export class AgentHeadless {
     eventEmitter?: AgentEventEmitter,
     hooks?: AgentHooks,
     runtimeView?: RuntimeContentGeneratorView,
+    taskName?: string,
+    subagentId?: string,
   ): Promise<AgentHeadless> {
     const core = new AgentCore(
       name,
@@ -186,6 +194,8 @@ export class AgentHeadless {
       eventEmitter,
       hooks,
       runtimeView,
+      taskName,
+      subagentId,
     );
     return new AgentHeadless(core);
   }
@@ -217,6 +227,10 @@ export class AgentHeadless {
     this.executing = true;
     this.finalText = '';
     this.terminateMode = AgentTerminateMode.ERROR;
+    // A re-executed instance (stop-hook continuation, resident turns) must
+    // not carry the previous run's loop attribution into an ERROR/FINISH
+    // spread; the field is only meaningful for a LOOP_DETECTED stop.
+    this.loopType = null;
     const resetStats = options.resetStats !== false;
     if (resetStats) {
       this.core.resetExecutionStats();
@@ -377,6 +391,7 @@ export class AgentHeadless {
 
         this.finalText = result.text;
         this.terminateMode = result.terminateMode ?? AgentTerminateMode.GOAL;
+        this.loopType = result.loopType ?? null;
       } catch (error) {
         debugLogger.error('Error during subagent execution:', error);
         this.terminateMode = AgentTerminateMode.ERROR;
@@ -394,6 +409,7 @@ export class AgentHeadless {
         this.core.eventEmitter?.emit(AgentEventType.FINISH, {
           subagentId: this.core.subagentId,
           terminateReason: this.terminateMode,
+          ...(this.loopType ? { loopType: this.loopType } : {}),
           timestamp: Date.now(),
           rounds: summary.rounds,
           totalDurationMs: summary.totalDurationMs,
@@ -412,6 +428,7 @@ export class AgentHeadless {
             : 'failed',
           {
             terminate_reason: this.terminateMode,
+            ...(this.loopType ? { loop_type: this.loopType } : {}),
             result: this.finalText,
             execution_summary: this.core.stats.formatCompact(
               'Subagent execution completed',

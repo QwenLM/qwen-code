@@ -185,6 +185,26 @@ describe('BackgroundShellRegistry', () => {
   });
 
   describe('callbacks', () => {
+    it('clears the status callback only when identities match', () => {
+      const reg = new BackgroundShellRegistry();
+      const installed = vi.fn();
+      const replacement = vi.fn();
+
+      reg.setStatusChangeCallback(installed);
+      reg.clearStatusChangeCallback(replacement);
+      reg.register(makeEntry({ shellId: 'a' }));
+      expect(installed).toHaveBeenCalledOnce();
+
+      reg.setStatusChangeCallback(replacement);
+      reg.clearStatusChangeCallback(installed);
+      reg.register(makeEntry({ shellId: 'b' }));
+      expect(replacement).toHaveBeenCalledOnce();
+
+      reg.clearStatusChangeCallback(replacement);
+      reg.register(makeEntry({ shellId: 'c' }));
+      expect(replacement).toHaveBeenCalledOnce();
+    });
+
     it('fires register callback synchronously when an entry is added', () => {
       const reg = new BackgroundShellRegistry();
       const seen: string[] = [];
@@ -269,7 +289,7 @@ describe('BackgroundShellRegistry', () => {
     });
 
     it('setNotificationCallback(undefined) clears the callback', () => {
-      // useGeminiStream's cleanup relies on this contract to avoid
+      // useLlmStream's cleanup relies on this contract to avoid
       // leaked callbacks firing into torn-down React state on unmount.
       // If a future refactor breaks the clearing path, stale callbacks
       // would fire silently — no test would catch it without this guard.
@@ -539,6 +559,51 @@ describe('BackgroundShellRegistry', () => {
       expect(modelText).toContain('<output-tail error="unreadable"');
     });
 
+    const itNoSymlink = process.platform === 'win32' ? it.skip : it;
+
+    itNoSymlink(
+      'does not follow symlinked output files when O_NOFOLLOW is unavailable (Windows flag set)',
+      async () => {
+        // Cross-product the test above misses: Windows has no O_NOFOLLOW
+        // (the constant is `undefined` and `| (O_NOFOLLOW ?? 0)` collapses
+        // to a plain open), so stub the constant away and pin that the
+        // compensating check still refuses to read through the link (#8227).
+        const dir = makeTempDir();
+        const secretPath = join(dir, 'secret.txt');
+        const outputPath = join(dir, 'shell.output');
+        writeFileSync(secretPath, 'secret credentials');
+        symlinkSync(secretPath, outputPath);
+
+        vi.resetModules();
+        vi.doMock('node:fs', async (importOriginal) => {
+          const actual = await importOriginal<typeof import('node:fs')>();
+          const modified = {
+            ...actual,
+            constants: { ...actual.constants, O_NOFOLLOW: undefined },
+          };
+          return { ...modified, default: modified };
+        });
+
+        try {
+          const { BackgroundShellRegistry: RegistryWithoutNoFollow } =
+            await import('./backgroundShellRegistry.js');
+          const reg = new RegistryWithoutNoFollow();
+          const callback = vi.fn();
+          reg.setNotificationCallback(callback);
+          reg.register(makeEntry({ shellId: 'a', outputPath }));
+
+          reg.complete('a', 0, 2000);
+
+          const [, modelText] = callback.mock.calls[0];
+          expect(modelText).not.toContain('secret credentials');
+          expect(modelText).toContain('<output-tail error="unreadable"');
+        } finally {
+          vi.doUnmock('node:fs');
+          vi.resetModules();
+        }
+      },
+    );
+
     it('skips output-tail when the output file does not exist', () => {
       // Guards the catch branch in `readOutputTail`. If the try/catch
       // ever regresses to throwing, `complete()` would propagate the
@@ -673,6 +738,11 @@ describe('BackgroundShellRegistry', () => {
       expect(e.status).toBe('running');
       expect(e.endTime).toBeUndefined();
       expect(ac.signal.aborted).toBe(true);
+      expect(reg.hasRunningEntries()).toBe(true);
+
+      reg.cancel('a', 2000);
+
+      expect(reg.hasRunningEntries()).toBe(false);
     });
 
     it('is a no-op on a terminal entry', () => {

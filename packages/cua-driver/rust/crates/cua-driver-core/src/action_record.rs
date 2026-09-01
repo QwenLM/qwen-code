@@ -539,6 +539,269 @@ impl ActionExecutionRecord {
             "detail": self.detail,
         })
     }
+
+    /// Restore the exact internal record sent over an authenticated private
+    /// worker hop. This is not a public wire contract: the ordinary MCP/SDK
+    /// boundary still publishes only [`Self::public_result`]. Keeping the
+    /// codec explicit prevents a blanket serde derive from accidentally
+    /// exposing the internal truth layer through `ToolResult`.
+    #[doc(hidden)]
+    pub fn from_private_json(value: &serde_json::Value) -> Result<Self, String> {
+        let required = |key: &str| {
+            value
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| format!("private action record missing {key}"))
+        };
+        let effect = parse_effect_name(required("effect")?)?;
+        let transport = parse_transport_name(required("transport")?)?;
+        let requested_delivery = parse_requested_delivery_name(required("requested_delivery")?)?;
+        let actual_delivery = value
+            .get("actual_delivery")
+            .filter(|entry| !entry.is_null())
+            .map(|entry| {
+                entry
+                    .as_str()
+                    .ok_or_else(|| "private action record has invalid actual_delivery".to_owned())
+                    .and_then(parse_actual_delivery_name)
+            })
+            .transpose()?;
+        let delivered_count = value
+            .get("delivered_count")
+            .filter(|entry| !entry.is_null())
+            .map(|entry| {
+                entry
+                    .as_u64()
+                    .and_then(|count| u32::try_from(count).ok())
+                    .ok_or_else(|| "private action record has invalid delivered_count".to_owned())
+            })
+            .transpose()?;
+        let detail = value
+            .get("detail")
+            .filter(|entry| !entry.is_null())
+            .map(|entry| {
+                entry
+                    .as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| "private action record has invalid detail".to_owned())
+            })
+            .transpose()?;
+
+        let attempts = value
+            .get("attempts")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| "private action record missing attempts".to_owned())?
+            .iter()
+            .map(|attempt| {
+                Ok(ActionAttempt {
+                    transport: parse_transport_name(
+                        attempt
+                            .get("transport")
+                            .and_then(serde_json::Value::as_str)
+                            .ok_or_else(|| "private action attempt missing transport".to_owned())?,
+                    )?,
+                    delivery: parse_actual_delivery_name(
+                        attempt
+                            .get("delivery")
+                            .and_then(serde_json::Value::as_str)
+                            .ok_or_else(|| "private action attempt missing delivery".to_owned())?,
+                    )?,
+                    detail: optional_private_string(attempt, "detail")?,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let fallbacks = value
+            .get("fallbacks")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| "private action record missing fallbacks".to_owned())?
+            .iter()
+            .map(|fallback| {
+                Ok(ActionFallback {
+                    from: parse_transport_name(
+                        fallback
+                            .get("from")
+                            .and_then(serde_json::Value::as_str)
+                            .ok_or_else(|| "private action fallback missing from".to_owned())?,
+                    )?,
+                    to: parse_transport_name(
+                        fallback
+                            .get("to")
+                            .and_then(serde_json::Value::as_str)
+                            .ok_or_else(|| "private action fallback missing to".to_owned())?,
+                    )?,
+                    reason: fallback
+                        .get("reason")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| "private action fallback missing reason".to_owned())?
+                        .to_owned(),
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let evidence = value
+            .get("evidence")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| "private action record missing evidence".to_owned())?
+            .iter()
+            .map(|evidence| {
+                Ok(ActionEvidence {
+                    kind: parse_evidence_kind_name(
+                        evidence
+                            .get("kind")
+                            .and_then(serde_json::Value::as_str)
+                            .ok_or_else(|| "private action evidence missing kind".to_owned())?,
+                    )?,
+                    detail: evidence
+                        .get("detail")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| "private action evidence missing detail".to_owned())?
+                        .to_owned(),
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let escalation = value
+            .get("escalation")
+            .filter(|entry| !entry.is_null())
+            .map(|escalation| {
+                Ok::<ActionEscalation, String>(ActionEscalation {
+                    kind: parse_escalation_kind_name(
+                        escalation
+                            .get("kind")
+                            .and_then(serde_json::Value::as_str)
+                            .ok_or_else(|| "private action escalation missing kind".to_owned())?,
+                    )?,
+                    detail: optional_private_string(escalation, "detail")?,
+                })
+            })
+            .transpose()?;
+
+        let record = Self {
+            effect,
+            transport,
+            requested_delivery,
+            actual_delivery,
+            attempts,
+            fallbacks,
+            evidence,
+            escalation,
+            delivered_count,
+            detail,
+        };
+        record
+            .validate()
+            .map_err(|error| format!("invalid private action record: {error:?}"))?;
+        Ok(record)
+    }
+}
+
+fn optional_private_string(value: &serde_json::Value, key: &str) -> Result<Option<String>, String> {
+    value
+        .get(key)
+        .filter(|entry| !entry.is_null())
+        .map(|entry| {
+            entry
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| format!("private action record has invalid {key}"))
+        })
+        .transpose()
+}
+
+fn parse_effect_name(value: &str) -> Result<ActionEffect, String> {
+    match value {
+        "confirmed" => Ok(ActionEffect::Confirmed),
+        "partial" => Ok(ActionEffect::Partial),
+        "unverifiable" => Ok(ActionEffect::Unverifiable),
+        "suspected_noop" => Ok(ActionEffect::SuspectedNoop),
+        "refused" => Ok(ActionEffect::Refused),
+        _ => Err(format!("unknown private action effect {value}")),
+    }
+}
+
+fn parse_requested_delivery_name(value: &str) -> Result<RequestedDelivery, String> {
+    match value {
+        "background" => Ok(RequestedDelivery::Background),
+        "foreground" => Ok(RequestedDelivery::Foreground),
+        "not_applicable" => Ok(RequestedDelivery::NotApplicable),
+        _ => Err(format!("unknown private requested delivery {value}")),
+    }
+}
+
+fn parse_actual_delivery_name(value: &str) -> Result<ActualDelivery, String> {
+    match value {
+        "background" => Ok(ActualDelivery::Background),
+        "foreground" => Ok(ActualDelivery::Foreground),
+        "not_applicable" => Ok(ActualDelivery::NotApplicable),
+        "unknown" => Ok(ActualDelivery::Unknown),
+        _ => Err(format!("unknown private actual delivery {value}")),
+    }
+}
+
+fn parse_transport_name(value: &str) -> Result<ActionTransport, String> {
+    let transport = match value {
+        "agent_cursor_overlay" => ActionTransport::AgentCursorOverlay,
+        "macos_ax_action" => ActionTransport::MacosAxAction,
+        "macos_ax_value" => ActionTransport::MacosAxValue,
+        "macos_ax_window_frame" => ActionTransport::MacosAxWindowFrame,
+        "macos_cg_event_pid" => ActionTransport::MacosCgEventPid,
+        "macos_cg_event_hid" => ActionTransport::MacosCgEventHid,
+        "windows_uia_invoke" => ActionTransport::WindowsUiaInvoke,
+        "windows_uia_toggle" => ActionTransport::WindowsUiaToggle,
+        "windows_uia_selection" => ActionTransport::WindowsUiaSelection,
+        "windows_uia_expand_collapse" => ActionTransport::WindowsUiaExpandCollapse,
+        "windows_uia_value" => ActionTransport::WindowsUiaValue,
+        "windows_uia_range_value" => ActionTransport::WindowsUiaRangeValue,
+        "windows_uia_scroll" => ActionTransport::WindowsUiaScroll,
+        "windows_msaa_action" => ActionTransport::WindowsMsaaAction,
+        "windows_post_message" => ActionTransport::WindowsPostMessage,
+        "windows_targeted_injection" => ActionTransport::WindowsTargetedInjection,
+        "windows_send_input" => ActionTransport::WindowsSendInput,
+        "windows_set_cursor_pos" => ActionTransport::WindowsSetCursorPos,
+        "windows_shell_execute" => ActionTransport::WindowsShellExecute,
+        "windows_set_window_pos" => ActionTransport::WindowsSetWindowPos,
+        "linux_at_spi_action" => ActionTransport::LinuxAtSpiAction,
+        "linux_at_spi_value" => ActionTransport::LinuxAtSpiValue,
+        "linux_pty" => ActionTransport::LinuxPty,
+        "linux_x_send_event" => ActionTransport::LinuxXSendEvent,
+        "linux_x_test" => ActionTransport::LinuxXTest,
+        "linux_libei" => ActionTransport::LinuxLibei,
+        "linux_wayland_virtual_pointer" => ActionTransport::LinuxWaylandVirtualPointer,
+        "linux_cua_compositor_inject" => ActionTransport::LinuxCuaCompositorInject,
+        "linux_x11_configure_window" => ActionTransport::LinuxX11ConfigureWindow,
+        "browser_cdp_input_mouse" => ActionTransport::BrowserCdpInputMouse,
+        "browser_cdp_input_key" => ActionTransport::BrowserCdpInputKey,
+        "browser_cdp_runtime_function" => ActionTransport::BrowserCdpRuntimeFunction,
+        _ => return Err(format!("unknown private action transport {value}")),
+    };
+    Ok(transport)
+}
+
+fn parse_evidence_kind_name(value: &str) -> Result<EvidenceKind, String> {
+    match value {
+        "accessibility_readback" => Ok(EvidenceKind::AccessibilityReadback),
+        "browser_readback" => Ok(EvidenceKind::BrowserReadback),
+        "value_readback" => Ok(EvidenceKind::ValueReadback),
+        "window_change" => Ok(EvidenceKind::WindowChange),
+        "native_api_result" => Ok(EvidenceKind::NativeApiResult),
+        "screenshot_comparison" => Ok(EvidenceKind::ScreenshotComparison),
+        "event_receipt" => Ok(EvidenceKind::EventReceipt),
+        "operator_observation" => Ok(EvidenceKind::OperatorObservation),
+        _ => Err(format!("unknown private action evidence kind {value}")),
+    }
+}
+
+fn parse_escalation_kind_name(value: &str) -> Result<EscalationKind, String> {
+    match value {
+        "activate_target" => Ok(EscalationKind::ActivateTarget),
+        "retry_with_pixel_target" => Ok(EscalationKind::RetryWithPixelTarget),
+        "retry_with_page_action" => Ok(EscalationKind::RetryWithPageAction),
+        "refresh_page_state" => Ok(EscalationKind::RefreshPageState),
+        "request_permission" => Ok(EscalationKind::RequestPermission),
+        "elevate_access" => Ok(EscalationKind::ElevateAccess),
+        "expand_capture_scope" => Ok(EscalationKind::ExpandCaptureScope),
+        "prepare_session" => Ok(EscalationKind::PrepareSession),
+        "retry_with_foreground_delivery" => Ok(EscalationKind::RetryWithForegroundDelivery),
+        _ => Err(format!("unknown private action escalation kind {value}")),
+    }
 }
 
 pub fn is_action_tool(tool_name: &str) -> bool {
@@ -1191,6 +1454,40 @@ mod tests {
     }
 
     #[test]
+    fn private_worker_codec_round_trips_the_internal_record() {
+        let record = ActionExecutionRecord::builder(
+            ActionEffect::Unverifiable,
+            ActionTransport::WindowsUiaExpandCollapse,
+            RequestedDelivery::Background,
+        )
+        .actual_delivery(ActualDelivery::Background)
+        .attempt(ActionAttempt {
+            transport: ActionTransport::WindowsUiaInvoke,
+            delivery: ActualDelivery::Background,
+            detail: Some("invoke was unavailable".to_owned()),
+        })
+        .fallback(ActionFallback {
+            from: ActionTransport::WindowsUiaInvoke,
+            to: ActionTransport::WindowsUiaExpandCollapse,
+            reason: "advertised expand action".to_owned(),
+        })
+        .evidence(ActionEvidence {
+            kind: EvidenceKind::NativeApiResult,
+            detail: "Expand returned success".to_owned(),
+        })
+        .escalation(ActionEscalation {
+            kind: EscalationKind::RefreshPageState,
+            detail: Some("observe the expanded menu".to_owned()),
+        })
+        .detail("private UIAccess worker result")
+        .build()
+        .unwrap();
+
+        let restored = ActionExecutionRecord::from_private_json(&record.debug_json()).unwrap();
+        assert_eq!(restored, record);
+    }
+
+    #[test]
     fn confirmed_requires_evidence() {
         assert_eq!(
             ActionExecutionRecord::new(
@@ -1818,6 +2115,47 @@ mod tests {
                 .is_some(),
                 "legacy path {path} must normalize before the breaking cutover"
             );
+        }
+    }
+
+    #[test]
+    fn every_legacy_text_only_action_is_conservatively_unverifiable() {
+        let tools = [
+            "click",
+            "double_click",
+            "right_click",
+            "scroll",
+            "drag",
+            "mouse_drag",
+            "parallel_mouse_drag",
+            "move_cursor",
+            "mouse_button_down",
+            "mouse_button_up",
+            "type_text",
+            "type_text_chars",
+            "press_key",
+            "hotkey",
+            "set_value",
+            "browser_click",
+            "browser_pointer",
+            "browser_type",
+        ];
+
+        for tool in tools {
+            let record = ActionExecutionRecord::from_legacy(
+                tool,
+                &serde_json::json!({}),
+                &serde_json::Value::Null,
+            )
+            .unwrap_or_else(|| panic!("legacy text-only action {tool} must normalize"));
+            assert_eq!(
+                record.effect,
+                ActionEffect::Unverifiable,
+                "legacy text-only action {tool} must never imply confirmation"
+            );
+            record
+                .public_result()
+                .unwrap_or_else(|error| panic!("{tool} must publish: {error:?}"));
         }
     }
 }

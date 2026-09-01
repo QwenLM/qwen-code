@@ -226,6 +226,37 @@ describe('SystemController', () => {
     });
   });
 
+  describe('initialize MCP configuration', () => {
+    it('preserves explicit automatic version negotiation', async () => {
+      const context = createContext();
+      const controller = new SystemController(
+        context,
+        createRegistry(),
+        'SystemController',
+      );
+
+      await controller.handleRequest(
+        {
+          subtype: 'initialize',
+          mcpServers: {
+            automatic: {
+              command: 'node',
+              versionNegotiation: 'auto',
+            },
+          },
+        },
+        'mcp-1',
+      );
+
+      expect(context.config.addMcpServers).toHaveBeenCalledWith({
+        automatic: expect.objectContaining({
+          command: 'node',
+          versionNegotiation: 'auto',
+        }),
+      });
+    });
+  });
+
   describe('continue_last_turn', () => {
     it('delegates to the session callback and merges its payload', async () => {
       const onContinueLastTurn = vi.fn().mockResolvedValue({

@@ -1859,7 +1859,7 @@ System prompt 3`);
     it('should list subagents from both levels', async () => {
       const subagents = await manager.listSubagents();
 
-      expect(subagents).toHaveLength(6); // agent1 (project takes precedence), agent2, agent3, general-purpose, Explore, statusline-setup (built-in)
+      expect(subagents).toHaveLength(7); // agent1 (project takes precedence), agent2, agent3, general-purpose, Explore, statusline-setup, review-agent (built-in)
       expect(subagents.map((s) => s.name)).toEqual([
         'agent1',
         'agent2',
@@ -1867,6 +1867,7 @@ System prompt 3`);
         'general-purpose',
         'Explore',
         'statusline-setup',
+        'review-agent',
       ]);
     });
 
@@ -1899,6 +1900,7 @@ System prompt 3`);
         'agent3',
         'Explore',
         'general-purpose',
+        'review-agent',
         'statusline-setup',
       ]);
     });
@@ -1911,11 +1913,12 @@ System prompt 3`);
 
       const subagents = await manager.listSubagents();
 
-      expect(subagents).toHaveLength(3); // Only built-in agents remain
+      expect(subagents).toHaveLength(4); // Only built-in agents remain
       expect(subagents.map((s) => s.name)).toEqual([
         'general-purpose',
         'Explore',
         'statusline-setup',
+        'review-agent',
       ]);
       expect(subagents.every((s) => s.level === 'builtin')).toBe(true);
     });
@@ -1927,11 +1930,12 @@ System prompt 3`);
 
       const subagents = await manager.listSubagents();
 
-      expect(subagents).toHaveLength(3); // Only built-in agents remain
+      expect(subagents).toHaveLength(4); // Only built-in agents remain
       expect(subagents.map((s) => s.name)).toEqual([
         'general-purpose',
         'Explore',
         'statusline-setup',
+        'review-agent',
       ]);
       expect(subagents.every((s) => s.level === 'builtin')).toBe(true);
     });
@@ -2403,8 +2407,8 @@ bad`);
         const { runtimeContext, runtimeView } = destructureAgentHeadlessCall(
           mockAgentHeadlessCreate.mock.calls[0],
         );
-        // Subagents always get an `Object.create(parent)` wrapper for
-        // FileReadCache isolation — distinct instance, prototype === parent.
+        // Subagents always get a derived wrapper for child-local state.
+        // It remains a distinct instance whose prototype is the parent.
         expect(runtimeContext).not.toBe(mockConfig);
         expect(Object.getPrototypeOf(runtimeContext)).toBe(mockConfig);
         expect(runtimeView).toBeDefined();
@@ -2570,6 +2574,62 @@ bad`);
         await result.dispose();
 
         expect(unregisterSpy).toHaveBeenCalledTimes(1);
+      });
+
+      it('does not register hooks for a project-level subagent in an untrusted folder', async () => {
+        const addAgentHooksSpy = vi.fn().mockReturnValue(vi.fn());
+        vi.spyOn(mockConfig, 'getHookSystem').mockReturnValue({
+          getRegistry: () => ({ addAgentHooks: addAgentHooksSpy }),
+        } as unknown as ReturnType<Config['getHookSystem']>);
+        vi.spyOn(mockConfig, 'isTrustedFolder').mockReturnValue(false);
+
+        const result = await manager.createAgentHeadless(
+          {
+            ...baseConfig,
+            level: 'project',
+            hooks: {
+              PreToolUse: [
+                {
+                  matcher: 'Bash',
+                  hooks: [{ type: 'command', command: 'echo' }],
+                },
+              ],
+            },
+          },
+          mockConfig,
+        );
+
+        expect(addAgentHooksSpy).not.toHaveBeenCalled();
+        // The agent itself is still created — only the hooks are gated.
+        expect(result).toHaveProperty('subagent');
+        await result.dispose();
+      });
+
+      it('registers hooks for a project-level subagent in a trusted folder', async () => {
+        const addAgentHooksSpy = vi.fn().mockReturnValue(vi.fn());
+        vi.spyOn(mockConfig, 'getHookSystem').mockReturnValue({
+          getRegistry: () => ({ addAgentHooks: addAgentHooksSpy }),
+        } as unknown as ReturnType<Config['getHookSystem']>);
+        vi.spyOn(mockConfig, 'isTrustedFolder').mockReturnValue(true);
+
+        const result = await manager.createAgentHeadless(
+          {
+            ...baseConfig,
+            level: 'project',
+            hooks: {
+              PreToolUse: [
+                {
+                  matcher: 'Bash',
+                  hooks: [{ type: 'command', command: 'echo' }],
+                },
+              ],
+            },
+          },
+          mockConfig,
+        );
+
+        expect(addAgentHooksSpy).toHaveBeenCalledTimes(1);
+        await result.dispose();
       });
 
       it('dispose unregisters even when execute() never runs (early-exit leak fix)', async () => {

@@ -1,5 +1,7 @@
 import {
+  Fragment,
   memo,
+  useCallback,
   useContext,
   useEffect,
   useMemo,
@@ -12,6 +14,7 @@ import type {
   PermissionRequest,
   TodoItem,
 } from '../../adapters/types';
+import type { SessionContentGenerator } from './AssistantMessage';
 import {
   hasActiveAgents,
   isBackgroundSubAgentToolCall,
@@ -21,6 +24,7 @@ import {
 // from this module). Safe only while both modules dereference each
 // other's exports at render time — never in top-level code.
 import { SubAgentPanel } from './tools/SubAgentPanel';
+import { ParallelAgentsGroup } from './tools/ParallelAgentsGroup';
 import { DiffView } from './tools/DiffView';
 import { parseAnsi, hasAnsi } from '../../utils/ansi';
 import {
@@ -32,6 +36,7 @@ import { useSubagentDetails } from '../../subagentDetailsContext';
 import { useMonitorDetails } from '../../monitorDetailsContext';
 import { TodoEventSummary, TodoFullList } from './TodoView';
 import { Markdown } from './Markdown';
+import { ThinkingDoneIcon, ThinkingTranslateButton } from './AssistantMessage';
 import {
   formatDurationMs,
   formatElapsed,
@@ -60,7 +65,7 @@ import {
 } from './toolFormatting';
 import { useI18n } from '../../i18n';
 import { useTranscriptRenderMode } from '../../transcriptRenderMode';
-import { TodoTimelineContext } from '../../App';
+import { TodoTimelineContext } from '../../WebShellContexts';
 import {
   type ToolHeaderExtraRenderInfo,
   type ToolHeaderKind,
@@ -68,12 +73,26 @@ import {
 } from '../../customization';
 import flashStyles from '../MessageLocateFlash.module.css';
 import styles from './tools/ToolChrome.module.css';
+import { getMcpAppDisplay, McpApp } from './McpApp';
 
 interface ToolGroupProps {
   tools: ACPToolCall[];
+  compactSummary?: boolean;
+  /**
+   * Thinking aggregated with the tools in this summary (compact mode), in
+   * the original order. Streaming entries drive the "Thinking…" summary;
+   * each entry renders as a click-to-expand row.
+   */
+  thoughts?: Array<{
+    content: string;
+    isStreaming?: boolean;
+    beforeToolCallId?: string;
+  }>;
   pendingApproval?: PermissionRequest | null;
   workspaceCwd?: string;
   isLocateFlashing?: boolean;
+  /** Powers the translate action on completed thinking rows (zh-CN). */
+  generateContent?: SessionContentGenerator;
 }
 
 function openMonitorDetailsOnce(
@@ -98,31 +117,6 @@ function openMonitorDetailsOnce(
     });
 }
 
-export function hasExpandableContent(tool: ACPToolCall): boolean {
-  const name = tool.toolName.toLowerCase();
-  if (isAskUserQuestionToolName(tool.toolName)) return !!extractText(tool);
-  // write_file shows content from args even before completion
-  if (name === 'write_file' || name === 'writefile') {
-    return !!getWriteContent(tool) || hasEditContent(tool);
-  }
-  if (tool.status !== 'completed' && tool.status !== 'failed') return false;
-  if (isShellToolName(name)) {
-    const text = extractText(tool);
-    return !!text && text.trim().length > 0 && text.split('\n').length > 1;
-  }
-  if (isSkillToolName(name)) {
-    return !!getFirstToolContentText(tool);
-  }
-  if (name === 'edit' || name === 'write' || name === 'editfile') {
-    return hasEditContent(tool);
-  }
-  if (name === 'read' || name === 'read_file' || name === 'readfile') {
-    const text = extractText(tool);
-    return !!text && text.split('\n').length > 3;
-  }
-  return false;
-}
-
 // Tools whose expanded row renders a kind-specific detail view (shell output /
 // diff / file content / Q&A). Must stay in sync with the renderers in
 // ToolLine's lineDetail block below. Tools NOT in this set have nothing extra
@@ -145,13 +139,17 @@ function hasDetailView(tool: ACPToolCall): boolean {
   );
 }
 
-function hasDiffContent(tool: ACPToolCall): boolean {
-  if (tool.content?.some((b) => b.type === 'diff')) return true;
-  return !!getRawFileDiff(tool);
-}
-
-function hasEditContent(tool: ACPToolCall): boolean {
-  return hasDiffContent(tool) || !!extractText(tool);
+function isEditToolName(toolName: string): boolean {
+  // Like every other is*ToolName helper, normalize case here so callers can
+  // pass the raw wire name.
+  const name = toolName.toLowerCase();
+  return (
+    name === 'edit' ||
+    name === 'editfile' ||
+    name === 'write' ||
+    name === 'write_file' ||
+    name === 'writefile'
+  );
 }
 
 export function extractDiff(tool: ACPToolCall): string {
@@ -332,7 +330,10 @@ export function fencedCodeBlock(language: string, code: string): string {
 
 function ExpandedEditContent({ tool }: { tool: ACPToolCall }) {
   const diff = useMemo(() => extractDiff(tool), [tool]);
-  const text = useMemo(() => extractText(tool) || '', [tool]);
+  const text = useMemo(
+    () => (tool.content ? extractText(tool) || '' : ''),
+    [tool],
+  );
   if (!diff && !text) return null;
   return (
     <div className={styles.expandedEdit}>
@@ -348,34 +349,26 @@ function ExpandedEditContent({ tool }: { tool: ACPToolCall }) {
 function ToolExpandedCard({
   title,
   detail,
+  status,
   children,
 }: {
   title: string;
   detail?: string;
+  status?: ACPToolCall['status'];
   children?: ReactNode;
 }) {
   return (
     <div className={styles.expandedCard}>
       <div className={styles.expandedCardHeader}>
-        <span className={styles.expandedCardTitle}>{title}</span>
+        <span className={styles.expandedCardTitleRow}>
+          {status && <StatusIcon status={status} />}
+          <span className={styles.expandedCardTitle}>{title}</span>
+        </span>
         {detail && <span className={styles.expandedCardDetail}>{detail}</span>}
       </div>
       {children && <div className={styles.expandedCardBody}>{children}</div>}
     </div>
   );
-}
-
-function getWriteContent(tool: ACPToolCall): string {
-  if (tool.args?.content) return tool.args.content as string;
-  if (tool.args?.new_string) return tool.args.new_string as string;
-  const text = extractText(tool);
-  if (text) return text;
-  if (tool.rawOutput && typeof tool.rawOutput === 'object') {
-    const raw = tool.rawOutput as Record<string, unknown>;
-    if (typeof raw.content === 'string') return raw.content;
-    if (typeof raw.newContent === 'string') return raw.newContent;
-  }
-  return '';
 }
 
 // Collapsed by default: the diff of this todo_write call (just-completed and
@@ -397,7 +390,7 @@ function TodoToolBody({
   const timeline = useContext(TodoTimelineContext);
   const events = timeline.get(tool.callId)?.events ?? [];
   return expanded ? (
-    <ToolExpandedCard title={title}>
+    <ToolExpandedCard title={title} status={tool.status}>
       <div className={styles.todoBody}>
         <TodoFullList todos={todos} />
       </div>
@@ -415,7 +408,6 @@ interface ToolLineProps {
   workspaceCwd?: string;
   summaryOnly?: boolean;
   forceExpanded?: boolean;
-  forceExpandable?: boolean;
   hideHeader?: boolean;
   hideCollapsedOutput?: boolean;
 }
@@ -594,6 +586,7 @@ export function formatToolGroupSummary(
   tools: ACPToolCall[],
   t: ReturnType<typeof useI18n>['t'],
   workspaceCwd?: string,
+  summarizeAgents = false,
 ): string {
   if (hasActiveAgents(tools)) {
     const foregroundActiveTools = tools.filter(
@@ -620,7 +613,7 @@ export function formatToolGroupSummary(
     });
   }
 
-  const summary = formatCompletedToolSummary(tools, t);
+  const summary = formatCompletedToolSummary(tools, t, summarizeAgents);
   if (summary) return summary;
 
   return t('toolGroup.summary', {
@@ -716,7 +709,19 @@ function SingleToolSummary({
 function formatCompletedToolSummary(
   tools: ACPToolCall[],
   t: ReturnType<typeof useI18n>['t'],
+  summarizeAgents: boolean,
 ): string {
+  const agents = summarizeAgents ? tools.filter(isSubAgentToolCall).length : 0;
+  if (agents > 0) {
+    const otherTools = tools.length - agents;
+    return [
+      t('toolGroup.summary.ranAgents', { count: agents }),
+      otherTools ? t('toolGroup.summary', { count: otherTools }) : '',
+    ]
+      .filter(Boolean)
+      .join(' · ');
+  }
+
   let edited = 0;
   let commands = 0;
   let read = 0;
@@ -972,7 +977,6 @@ function areToolLinePropsEqual(
   if (prev.workspaceCwd !== next.workspaceCwd) return false;
   if (prev.summaryOnly !== next.summaryOnly) return false;
   if (prev.forceExpanded !== next.forceExpanded) return false;
-  if (prev.forceExpandable !== next.forceExpandable) return false;
   if (prev.hideHeader !== next.hideHeader) return false;
   if (prev.hideCollapsedOutput !== next.hideCollapsedOutput) return false;
   const a = prev.tool;
@@ -1072,7 +1076,6 @@ export const ToolLine = memo(function ToolLine({
   workspaceCwd,
   summaryOnly = false,
   forceExpanded = false,
-  forceExpandable = false,
   hideHeader = false,
   hideCollapsedOutput = false,
 }: ToolLineProps) {
@@ -1080,11 +1083,24 @@ export const ToolLine = memo(function ToolLine({
   const transcriptRenderMode = useTranscriptRenderMode();
   const subagentDetails = useSubagentDetails();
   const monitorDetails = useMonitorDetails();
+  const { hostOwnsEditDiffPreview } = useWebShellCustomization();
   const monitorDetailsAvailable = monitorDetails !== undefined;
+  const mcpApp = getMcpAppDisplay(tool.rawOutput);
+  const isForcedExpanded = forceExpanded || Boolean(mcpApp);
+  const hasApproval = approval?.toolCallId === tool.callId;
+  const isHostOwnedEditApproval = Boolean(
+    hostOwnsEditDiffPreview &&
+      hasApproval &&
+      approval?.hasDiffPreview &&
+      isEditToolName(approval?.toolName ?? tool.toolName),
+  );
+  const locksPendingEditApproval = isHostOwnedEditApproval;
   const [monitorDetailsUnavailable, setMonitorDetailsUnavailable] =
     useState(false);
   const [expanded, setExpanded] = useState(
-    () => forceExpanded || shouldAutoExpand(tool),
+    () =>
+      isForcedExpanded ||
+      (!summaryOnly && shouldAutoExpand(tool) && !locksPendingEditApproval),
   );
   const monitorDetailsRequestRef = useRef<object | null>(null);
   // Set once the user explicitly toggles this row, so auto-collapse-on-
@@ -1093,27 +1109,44 @@ export const ToolLine = memo(function ToolLine({
 
   useEffect(
     () => {
-      setExpanded(forceExpanded || shouldAutoExpand(tool));
+      setExpanded(
+        isForcedExpanded ||
+          (!summaryOnly && shouldAutoExpand(tool) && !locksPendingEditApproval),
+      );
       setMonitorDetailsUnavailable(false);
       monitorDetailsRequestRef.current = null;
       // A new tool identity resets the manual latch.
       userToggledRef.current = false;
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [forceExpanded, monitorDetailsAvailable, tool.callId, tool.toolName],
+    [
+      isForcedExpanded,
+      locksPendingEditApproval,
+      monitorDetailsAvailable,
+      summaryOnly,
+      tool.callId,
+      tool.toolName,
+    ],
   );
   const isAgent = isSubAgentToolCall(tool);
-  const hasApproval = approval && approval.toolCallId === tool.callId;
   const hasSubToolApproval =
     !hasApproval &&
     approval?.toolCallId &&
     isAgent &&
     toolContainsCallId(tool, approval.toolCallId);
+  const waitingForApproval = Boolean(
+    isHostOwnedEditApproval ||
+      (hostOwnsEditDiffPreview &&
+        hasSubToolApproval &&
+        approval?.hasDiffPreview &&
+        isEditToolName(approval.toolName ?? '')),
+  );
   const isRunningTool = isActiveToolStatus(tool.status);
   const showsLiveElapsed =
     isRunningTool &&
     !isShellToolName(tool.toolName) &&
-    !isWebFetchToolName(tool.toolName);
+    !isWebFetchToolName(tool.toolName) &&
+    !waitingForApproval;
   const now = useSharedNow(showsLiveElapsed);
 
   // Collapse a regular tool to its one-line summary once it completes
@@ -1123,14 +1156,14 @@ export const ToolLine = memo(function ToolLine({
   // error output remains visible.
   useEffect(() => {
     if (
-      !forceExpanded &&
+      !isForcedExpanded &&
       !isAgent &&
       tool.status === 'completed' &&
       !userToggledRef.current
     ) {
       setExpanded(false);
     }
-  }, [forceExpanded, isAgent, tool.status]);
+  }, [isForcedExpanded, isAgent, tool.status]);
 
   if (isAgent) {
     const info = getAgentDisplayInfo(tool, now);
@@ -1147,7 +1180,7 @@ export const ToolLine = memo(function ToolLine({
           : t('subagent.running');
     const runningMeta = [
       progressLabel,
-      isBackground && !isComplete ? '' : info.elapsed,
+      isBackground && !isComplete ? '' : waitingForApproval ? '' : info.elapsed,
     ]
       .filter(Boolean)
       .join(' · ');
@@ -1161,36 +1194,59 @@ export const ToolLine = memo(function ToolLine({
     ]
       .filter(Boolean)
       .join(' · ');
-    const showExpanded =
-      forceExpanded || expanded || !!hasApproval || !!hasSubToolApproval;
+    const showExpanded = forceExpanded || expanded || !!hasSubToolApproval;
+    // While the agent's own launch approval is pending there is nothing to
+    // show yet — keep the row compact and non-openable; the approval dialog
+    // is the single source of interaction.
+    const approvalPending = !!hasApproval;
     const panel = (
-      <SubAgentPanel tool={tool} hideHeader defaultExpanded inline />
+      <SubAgentPanel
+        tool={tool}
+        approval={hostOwnsEditDiffPreview ? approval : undefined}
+        hideHeader
+        defaultExpanded
+        inline
+      />
     );
     if (subagentDetails && !hideHeader) {
+      const rowContent = (
+        <>
+          <AgentIcon />
+          <StatusIcon status={isComplete ? info.status : tool.status} />
+          <span className={styles.lineName}>{displayName}</span>
+          <ToolHeaderExtra
+            info={{
+              kind: 'agent',
+              tool,
+              displayName,
+              description: info.description
+                ? truncateText(info.description, 60)
+                : '',
+              elapsed: isComplete ? completeMeta : runningMeta,
+              workspaceCwd,
+            }}
+          />
+        </>
+      );
       return (
         <div className={styles.line}>
-          <button
-            type="button"
-            className={`${styles.lineMain} ${styles.lineExpandable} ${styles.lineButton}`}
-            onClick={() => subagentDetails.onOpen(tool)}
-          >
-            <AgentIcon />
-            <StatusIcon status={isComplete ? info.status : tool.status} />
-            <span className={styles.lineName}>{displayName}</span>
-            <ToolHeaderExtra
-              info={{
-                kind: 'agent',
-                tool,
-                displayName,
-                description: info.description
-                  ? truncateText(info.description, 60)
-                  : '',
-                elapsed: isComplete ? completeMeta : runningMeta,
-                workspaceCwd,
-              }}
-            />
-            <span className={styles.lineChevronRight} aria-hidden="true" />
-          </button>
+          {approvalPending ? (
+            <div
+              className={`${styles.lineMain} ${styles.lineButton}`}
+              aria-disabled="true"
+            >
+              {rowContent}
+            </div>
+          ) : (
+            <button
+              type="button"
+              className={`${styles.lineMain} ${styles.lineExpandable} ${styles.lineButton}`}
+              onClick={() => subagentDetails.onOpen(tool)}
+            >
+              {rowContent}
+              <span className={styles.lineChevronRight} aria-hidden="true" />
+            </button>
+          )}
         </div>
       );
     }
@@ -1198,8 +1254,10 @@ export const ToolLine = memo(function ToolLine({
       <div className={styles.line}>
         {!hideHeader && (
           <div
-            className={`${styles.lineMain} ${styles.lineExpandable}`}
-            onClick={() => setExpanded(!expanded)}
+            className={`${styles.lineMain} ${
+              approvalPending ? '' : styles.lineExpandable
+            }`}
+            onClick={approvalPending ? undefined : () => setExpanded(!expanded)}
           >
             <AgentIcon />
             <StatusIcon status={isComplete ? info.status : tool.status} />
@@ -1216,12 +1274,14 @@ export const ToolLine = memo(function ToolLine({
                 workspaceCwd,
               }}
             />
-            <span
-              className={
-                expanded ? styles.lineChevronDown : styles.lineChevronRight
-              }
-              aria-hidden="true"
-            />
+            {!approvalPending && (
+              <span
+                className={
+                  expanded ? styles.lineChevronDown : styles.lineChevronRight
+                }
+                aria-hidden="true"
+              />
+            )}
           </div>
         )}
         {showExpanded && (
@@ -1245,7 +1305,9 @@ export const ToolLine = memo(function ToolLine({
     : fullDescription;
   const displayName = localizeToolDisplayName(tool.toolName, t);
   const elapsed =
-    isShellToolName(tool.toolName) || isWebFetchToolName(tool.toolName)
+    waitingForApproval ||
+    isShellToolName(tool.toolName) ||
+    isWebFetchToolName(tool.toolName)
       ? ''
       : formatElapsed(tool.startTime, isRunningTool ? now : tool.endTime);
 
@@ -1268,21 +1330,22 @@ export const ToolLine = memo(function ToolLine({
     name === 'search' ||
     name === 'glob';
   const isRead = name === 'read' || name === 'read_file' || name === 'readfile';
-  // A row expands when it has a todo list to reveal, detail output
-  // (bash/diff/read content), or a description long enough to be ellipsised.
+  // Every regular tool row expands on demand. Content controls only what the
+  // expanded card shows, never whether the user can open or close it —
+  // except while an opted-in host owns this pending Edit's diff preview.
   // When a long description is expanded we move it out of the header into a
   // wrapped block below, so the header drops its single-line copy.
   const descExpandable = !isTodo && isDescriptionExpandable(description);
-  const expandable =
-    !forceExpanded &&
-    (forceExpandable ||
-      (isTodo ? hasTodoList : hasExpandableContent(tool) || descExpandable));
+  const expandable = !isForcedExpanded && !locksPendingEditApproval;
   const interactive = opensMonitorDetails || expandable;
+  const toggleExpanded = () => {
+    userToggledRef.current = true;
+    setExpanded((value) => !value);
+  };
   const fallbackToMonitorInline = () => {
     setMonitorDetailsUnavailable(true);
     if (!expandable) return;
-    userToggledRef.current = true;
-    setExpanded((value) => !value);
+    toggleExpanded();
   };
   const tryOpenMonitorDetails = () => {
     if (!monitorDetails) return;
@@ -1301,8 +1364,9 @@ export const ToolLine = memo(function ToolLine({
   const hideDescriptionInHeader =
     showDescriptionInDetail && !isShell && !isSearch && !isRead;
   const expandedCardDetail = fullDescription;
+  // Contentless tools still get a titled card when the user opens them.
   const showExpandedSummaryPanel =
-    !isTodo && expanded && !detailView && (showDescriptionInDetail || result);
+    expanded && !detailView && (!isTodo || (!hasTodoList && !result));
 
   return (
     <div className={styles.line}>
@@ -1344,8 +1408,7 @@ export const ToolLine = memo(function ToolLine({
                     tryOpenMonitorDetails();
                     return;
                   }
-                  userToggledRef.current = true;
-                  setExpanded((value) => !value);
+                  toggleExpanded();
                 }
               : undefined
           }
@@ -1358,8 +1421,7 @@ export const ToolLine = memo(function ToolLine({
                     tryOpenMonitorDetails();
                     return;
                   }
-                  userToggledRef.current = true;
-                  setExpanded((value) => !value);
+                  toggleExpanded();
                 }
               : undefined
           }
@@ -1397,7 +1459,8 @@ export const ToolLine = memo(function ToolLine({
           )}
         </div>
       )}
-      {(!summaryOnly || expanded) && isTodo && hasTodoList && (
+      {mcpApp && (!summaryOnly || expanded) && <McpApp display={mcpApp} />}
+      {!mcpApp && (!summaryOnly || expanded) && isTodo && hasTodoList && (
         <TodoToolBody
           tool={tool}
           todos={todoItems!}
@@ -1407,13 +1470,21 @@ export const ToolLine = memo(function ToolLine({
       )}
       {/* Todo tool whose payload couldn't be parsed (e.g. malformed args):
           fall back to the raw result summary so the row isn't blank. */}
-      {(!summaryOnly || expanded) && isTodo && !hasTodoList && result && (
-        <div className={styles.lineOutput}>
-          {renderWithSessionLinks(result, transcriptRenderMode)}
-        </div>
-      )}
-      {showExpandedSummaryPanel && (
-        <ToolExpandedCard title={displayName} detail={expandedCardDetail}>
+      {!mcpApp &&
+        (!summaryOnly || expanded) &&
+        isTodo &&
+        !hasTodoList &&
+        result && (
+          <div className={styles.lineOutput}>
+            {renderWithSessionLinks(result, transcriptRenderMode)}
+          </div>
+        )}
+      {!mcpApp && showExpandedSummaryPanel && (
+        <ToolExpandedCard
+          title={displayName}
+          detail={expandedCardDetail}
+          status={tool.status}
+        >
           {result && (
             <div
               className={`${styles.lineOutput} ${styles.expandedLineOutput}`}
@@ -1423,7 +1494,8 @@ export const ToolLine = memo(function ToolLine({
           )}
         </ToolExpandedCard>
       )}
-      {!isTodo &&
+      {!mcpApp &&
+        !isTodo &&
         !hideCollapsedOutput &&
         result &&
         !showExpandedSummaryPanel &&
@@ -1439,7 +1511,7 @@ export const ToolLine = memo(function ToolLine({
             {renderWithSessionLinks(result, transcriptRenderMode)}
           </div>
         )}
-      {!isTodo && expanded && detailView && (
+      {!mcpApp && !isTodo && expanded && detailView && (
         <div
           className={
             useMarkdownDetail
@@ -1448,9 +1520,15 @@ export const ToolLine = memo(function ToolLine({
           }
         >
           {isRead ? (
-            <ExpandedReadContent tool={tool} />
+            <ToolExpandedCard title={displayName} status={tool.status}>
+              <ExpandedReadContent tool={tool} />
+            </ToolExpandedCard>
           ) : (
-            <ToolExpandedCard title={displayName} detail={expandedCardDetail}>
+            <ToolExpandedCard
+              title={displayName}
+              detail={expandedCardDetail}
+              status={tool.status}
+            >
               {isShellToolName(name) && <ExpandedBashOutput tool={tool} />}
               {(name === 'write_file' || name === 'writefile') && (
                 <ExpandedEditContent tool={tool} />
@@ -1470,11 +1548,114 @@ export const ToolLine = memo(function ToolLine({
   );
 }, areToolLinePropsEqual);
 
+interface ThoughtLineHeaderProps {
+  isStreaming?: boolean;
+  expanded: boolean;
+  /**
+   * Thought content for the zh-CN translate button. Omitted while streaming —
+   * the button is hidden then — so streamed content growth does not defeat the
+   * header's memo boundary.
+   */
+  translateContent?: string;
+  generateContent?: SessionContentGenerator;
+  onToggle: () => void;
+}
+
+const ThoughtLineHeader = memo(function ThoughtLineHeader({
+  isStreaming,
+  expanded,
+  translateContent,
+  generateContent,
+  onToggle,
+}: ThoughtLineHeaderProps) {
+  const { language, t } = useI18n();
+  return (
+    <div
+      className={`${styles.chatSummaryThoughtHeader}${
+        expanded ? ` ${styles.chatSummaryThoughtHeaderExpanded}` : ''
+      }`}
+      onClick={(event) => {
+        if (event.currentTarget.contains(event.target as Node)) {
+          onToggle();
+        }
+      }}
+    >
+      <button
+        type="button"
+        className={styles.chatSummaryThoughtSummary}
+        data-testid="compact-thinking-summary"
+        aria-expanded={expanded}
+        title={t(expanded ? 'thinking.collapse' : 'thinking.expand')}
+      >
+        <span className={styles.chatSummaryThoughtIcon} aria-hidden="true">
+          <ThinkingDoneIcon />
+        </span>
+        <span
+          className={`${styles.chatSummaryThoughtLabel}${
+            isStreaming ? ` ${styles.chatSummaryThoughtLabelActive}` : ''
+          }`}
+        >
+          {t(isStreaming ? 'thinking.running' : 'thinking.done')}
+        </span>
+      </button>
+      {language === 'zh-CN' &&
+        translateContent !== undefined &&
+        generateContent && (
+          <ThinkingTranslateButton
+            content={translateContent}
+            generateContent={generateContent}
+            className={styles.chatSummaryThoughtTranslate}
+          />
+        )}
+      <span
+        className={
+          expanded
+            ? styles.chatSummaryThoughtChevronDown
+            : styles.chatSummaryThoughtChevronRight
+        }
+        aria-hidden="true"
+      />
+    </div>
+  );
+});
+
+const ThoughtLine = memo(function ThoughtLine({
+  content,
+  isStreaming,
+  generateContent,
+}: {
+  content: string;
+  isStreaming?: boolean;
+  generateContent?: SessionContentGenerator;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const handleToggle = useCallback(() => setExpanded((value) => !value), []);
+  return (
+    <div className={styles.chatSummaryThought}>
+      <ThoughtLineHeader
+        isStreaming={isStreaming}
+        expanded={expanded}
+        translateContent={isStreaming ? undefined : content}
+        generateContent={generateContent}
+        onToggle={handleToggle}
+      />
+      {expanded && (
+        <div className={styles.chatSummaryThoughtContent}>
+          <Markdown content={content} source="thinking" />
+        </div>
+      )}
+    </div>
+  );
+});
+
 export const ToolGroup = memo(function ToolGroup({
   tools,
+  compactSummary = false,
+  thoughts,
   pendingApproval,
   workspaceCwd,
   isLocateFlashing = false,
+  generateContent,
 }: ToolGroupProps) {
   const { t } = useI18n();
   const subagentDetails = useSubagentDetails();
@@ -1485,38 +1666,74 @@ export const ToolGroup = memo(function ToolGroup({
   const [chatExpanded, setChatExpanded] = useState(false);
   const monitorDetailsRequestRef = useRef<object | null>(null);
   const hasRunningTool = hasActiveAgents(tools);
-  const hasFailedTool = tools.some((tool) => tool.status === 'failed');
   const activeTool =
     tools.find(
       (tool) =>
         isActiveToolStatus(tool.status) && !isBackgroundSubAgentToolCall(tool),
     ) ?? (tools.length > 0 ? getActiveTool(tools) : undefined);
+  // Single-tool identity stays available for the compact summary and the
+  // subagent/monitor drawer shortcut even when thoughts are folded in; only
+  // the force-expanded content dump is suppressed for thought groups.
   const singleTool = tools.length === 1 ? tools[0] : undefined;
+  const compactToolLines = !!thoughts?.length;
   const singleSubagent =
     singleTool && isSubAgentToolCall(singleTool) ? singleTool : undefined;
   const singleMonitor =
     singleTool && singleTool.toolName.toLowerCase() === 'monitor'
       ? singleTool
       : undefined;
+  const singleMcpApp = singleTool
+    ? getMcpAppDisplay(singleTool.rawOutput)
+    : undefined;
+  const singleMcpAppResourceUri = singleMcpApp?.resourceUri;
+  const hasMcpApp = tools.some((tool) => getMcpAppDisplay(tool.rawOutput));
   const hasForegroundActiveTool = tools.some(
     (tool) =>
       isActiveToolStatus(tool.status) && !isBackgroundSubAgentToolCall(tool),
   );
-  const animateSummary = hasRunningTool && hasForegroundActiveTool;
-  const opensSubagentDetails = Boolean(singleSubagent && subagentDetails);
+  const streamingThought = thoughts?.find((thought) => thought.isStreaming);
+  const animateSummary =
+    hasRunningTool && hasForegroundActiveTool
+      ? true
+      : streamingThought !== undefined;
+  const opensSubagentDetails = Boolean(
+    !compactSummary && singleSubagent && subagentDetails,
+  );
   const opensMonitorDetails = Boolean(
-    singleMonitor && monitorDetailsAvailable && !monitorDetailsUnavailable,
+    !compactSummary &&
+      singleMonitor &&
+      monitorDetailsAvailable &&
+      !monitorDetailsUnavailable,
   );
   const opensToolDetails = opensSubagentDetails || opensMonitorDetails;
   const summaryIconTool = hasRunningTool ? (activeTool ?? tools[0]) : tools[0];
   const hasApprovalTool =
     pendingApproval?.toolCallId &&
     tools.some((t) => toolContainsCallId(t, pendingApproval.toolCallId!));
+  const parallelAgentsByFirstCallId = new Map<string, ACPToolCall[]>();
+  const groupedAgentCallIds = new Set<string>();
+  for (let i = 0; compactSummary && i < tools.length; i++) {
+    if (!isSubAgentToolCall(tools[i])) continue;
+    let end = i + 1;
+    while (end < tools.length && isSubAgentToolCall(tools[end])) end++;
+    if (end - i >= 2) {
+      const agents = tools.slice(i, end);
+      parallelAgentsByFirstCallId.set(agents[0].callId, agents);
+      for (const agent of agents.slice(1))
+        groupedAgentCallIds.add(agent.callId);
+    }
+    i = end - 1;
+  }
   useEffect(() => {
     setMonitorDetailsUnavailable(false);
     setChatExpanded(false);
     monitorDetailsRequestRef.current = null;
   }, [monitorDetailsAvailable, singleMonitor?.callId]);
+  useEffect(() => {
+    if (singleMcpAppResourceUri || hasMcpApp) {
+      setChatExpanded(true);
+    }
+  }, [singleMcpAppResourceUri, hasMcpApp]);
 
   const tryOpenMonitorDetails = () => {
     if (!singleMonitor || !monitorDetails) return;
@@ -1537,7 +1754,7 @@ export const ToolGroup = memo(function ToolGroup({
           type="button"
           className={styles.chatSummary}
           onClick={() => {
-            if (singleSubagent && subagentDetails) {
+            if (opensSubagentDetails && singleSubagent && subagentDetails) {
               subagentDetails.onOpen(singleSubagent);
               return;
             }
@@ -1557,13 +1774,14 @@ export const ToolGroup = memo(function ToolGroup({
           }
         >
           <span className={styles.chatSummaryIcon} aria-hidden="true">
-            {summaryIconTool ? (
+            {streamingThought ? (
+              <ThinkingDoneIcon />
+            ) : summaryIconTool ? (
               <ToolSummaryIcon tool={summaryIconTool} />
             ) : (
               <ToolGroupIcon />
             )}
           </span>
-          {hasFailedTool && <StatusIcon status="failed" />}
           <span
             className={
               animateSummary
@@ -1571,13 +1789,15 @@ export const ToolGroup = memo(function ToolGroup({
                 : styles.chatSummaryText
             }
           >
-            {singleTool ? (
+            {streamingThought ? (
+              t('thinking.running')
+            ) : singleTool ? (
               <SingleToolSummary
                 tool={singleTool}
                 workspaceCwd={workspaceCwd}
               />
             ) : (
-              formatToolGroupSummary(tools, t, workspaceCwd)
+              formatToolGroupSummary(tools, t, workspaceCwd, compactSummary)
             )}
           </span>
           <span
@@ -1587,29 +1807,88 @@ export const ToolGroup = memo(function ToolGroup({
             aria-hidden="true"
           />
         </button>
-        <div
-          className={
-            chatExpanded
-              ? styles.chatSummaryContentClip
-              : `${styles.chatSummaryContentClip} ${styles.chatSummaryContentCollapsed}`
-          }
-        >
-          <div className={styles.chatSummaryContentInner}>
-            <div className={`${styles.group} ${styles.chatSummaryGroup}`}>
-              {tools.map((tool) => (
-                <ToolLine
-                  key={tool.callId}
-                  tool={tool}
-                  approval={pendingApproval}
-                  workspaceCwd={workspaceCwd}
-                  summaryOnly={!singleTool}
-                  forceExpanded={!!singleTool}
-                  hideHeader={!!singleTool}
-                />
-              ))}
+        {(chatExpanded || hasMcpApp) && (
+          <div
+            className={styles.chatSummaryContentClip}
+            style={chatExpanded ? undefined : { display: 'none' }}
+          >
+            <div className={styles.chatSummaryContentInner}>
+              <div className={`${styles.group} ${styles.chatSummaryGroup}`}>
+                {tools.map((tool) => {
+                  if (groupedAgentCallIds.has(tool.callId)) return null;
+                  const parallelAgents = parallelAgentsByFirstCallId.get(
+                    tool.callId,
+                  );
+                  return (
+                    <Fragment key={tool.callId}>
+                      {thoughts
+                        ?.filter(
+                          (thought) => thought.beforeToolCallId === tool.callId,
+                        )
+                        .map((thought, index) => (
+                          <ThoughtLine
+                            key={`thought-${tool.callId}-${index}`}
+                            content={thought.content}
+                            isStreaming={thought.isStreaming}
+                            generateContent={generateContent}
+                          />
+                        ))}
+                      {parallelAgents ? (
+                        <>
+                          <div
+                            className={styles.chatSummaryParallelAgents}
+                            data-testid="compact-parallel-agents"
+                          >
+                            <ParallelAgentsGroup
+                              agents={parallelAgents}
+                              pendingApproval={pendingApproval}
+                            />
+                          </div>
+                          {parallelAgents
+                            .slice(1)
+                            .flatMap((agent) =>
+                              thoughts
+                                ?.filter(
+                                  (thought) =>
+                                    thought.beforeToolCallId === agent.callId,
+                                )
+                                .map((thought, index) => (
+                                  <ThoughtLine
+                                    key={`thought-${agent.callId}-${index}`}
+                                    content={thought.content}
+                                    isStreaming={thought.isStreaming}
+                                    generateContent={generateContent}
+                                  />
+                                )),
+                            )}
+                        </>
+                      ) : (
+                        <ToolLine
+                          tool={tool}
+                          approval={pendingApproval}
+                          workspaceCwd={workspaceCwd}
+                          summaryOnly={!singleTool || compactToolLines}
+                          forceExpanded={!!singleTool && !compactToolLines}
+                          hideHeader={!!singleTool && !compactToolLines}
+                        />
+                      )}
+                    </Fragment>
+                  );
+                })}
+                {thoughts
+                  ?.filter((thought) => thought.beforeToolCallId === undefined)
+                  .map((thought, index) => (
+                    <ThoughtLine
+                      key={`thought-trailing-${index}`}
+                      content={thought.content}
+                      isStreaming={thought.isStreaming}
+                      generateContent={generateContent}
+                    />
+                  ))}
+              </div>
             </div>
           </div>
-        </div>
+        )}
       </div>
     );
   }

@@ -1,5 +1,7 @@
 dist/
 node_modules/
+.native/
 src/native/*.dylib
 src/native/*.so
 src/native/*.dll
+computer-use/SKILL.md

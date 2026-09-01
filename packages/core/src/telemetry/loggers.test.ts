@@ -16,7 +16,7 @@ import type {
 } from '../index.js';
 import {
   AuthType,
-  GeminiClient,
+  LlmClient,
   ToolConfirmationOutcome,
   ToolErrorType,
   ToolRegistry,
@@ -120,6 +120,7 @@ import { runWithChatRecordingSuppressed } from '../utils/chat-recording-suppress
 describe('loggers', () => {
   const mockLogger = {
     emit: vi.fn(),
+    enabled: vi.fn().mockReturnValue(true),
   };
   const mockUiEvent = {
     addEvent: vi.fn(),
@@ -743,6 +744,57 @@ describe('loggers', () => {
       ).toHaveBeenCalledWith(mockConfig, event);
     });
 
+    it('uses the request session snapshot when provided', () => {
+      const event = new ApiResponseEvent(
+        'test-response-id',
+        'test-model',
+        100,
+        'prompt-id',
+      );
+
+      logApiResponse(mockConfig, event, 'request-session-id');
+
+      expect(mockLogger.emit).toHaveBeenCalledWith(
+        expect.objectContaining({
+          attributes: expect.objectContaining({
+            'session.id': 'request-session-id',
+          }),
+        }),
+      );
+    });
+
+    it('keeps task identity local to UI telemetry', () => {
+      const event = new ApiResponseEvent(
+        'test-response-id',
+        'test-model',
+        100,
+        'prompt-id',
+        undefined,
+        undefined,
+        undefined,
+        'general-purpose',
+      );
+
+      logApiResponse(mockConfig, event, undefined, {
+        id: 'general-purpose-12345678',
+        type: 'general-purpose',
+        taskName: 'inspect customer records',
+      });
+
+      expect(mockUiEvent.addEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          subagent_name: 'general-purpose',
+          subagent_id: 'general-purpose-12345678',
+          subagent_task_name: 'inspect customer records',
+        }),
+        'test-session-id',
+      );
+      const attributes = mockLogger.emit.mock.calls[0]![0].attributes;
+      expect(attributes.subagent_name).toBe('general-purpose');
+      expect(attributes).not.toHaveProperty('subagent_id');
+      expect(attributes).not.toHaveProperty('subagent_task_name');
+    });
+
     it.each([
       'prompt_suggestion',
       'forked_query',
@@ -843,6 +895,29 @@ describe('loggers', () => {
       logApiResponse(configWithRecording, event);
 
       expect(mockRecordUiTelemetryEvent).toHaveBeenCalled();
+    });
+
+    it('uses the request session snapshot when provided', () => {
+      const event = new ApiErrorEvent({
+        model: 'test-model',
+        durationMs: 100,
+        promptId: 'user_query',
+        errorMessage: 'test error',
+      });
+
+      logApiError(
+        makeFakeConfig({ sessionId: 'current-session-id' }),
+        event,
+        'request-session-id',
+      );
+
+      expect(mockLogger.emit).toHaveBeenCalledWith(
+        expect.objectContaining({
+          attributes: expect.objectContaining({
+            'session.id': 'request-session-id',
+          }),
+        }),
+      );
     });
 
     it('suppresses chatRecordingService writes inside hidden runs', () => {
@@ -990,6 +1065,20 @@ describe('loggers', () => {
           prompt_id: 'prompt-id-6',
         },
       });
+    });
+
+    it('uses the request session snapshot when provided', () => {
+      const event = new ApiRequestEvent('test-model', 'prompt-id');
+
+      logApiRequest(mockConfig, event, 'request-session-id');
+
+      expect(mockLogger.emit).toHaveBeenCalledWith(
+        expect.objectContaining({
+          attributes: expect.objectContaining({
+            'session.id': 'request-session-id',
+          }),
+        }),
+      );
     });
   });
 
@@ -1159,7 +1248,7 @@ describe('loggers', () => {
     const cfg1 = {
       getSessionId: () => 'test-session-id',
       getTargetDir: () => 'target-dir',
-      getGeminiClient: () => mockGeminiClient,
+      getLlmClient: () => mockLlmClient,
     } as Config;
     const cfg2 = {
       getSessionId: () => 'test-session-id',
@@ -1189,11 +1278,11 @@ describe('loggers', () => {
       getUserMemory: () => 'user-memory',
     } as unknown as Config;
 
-    const mockGeminiClient = new GeminiClient(cfg2);
+    const mockLlmClient = new LlmClient(cfg2);
     const mockConfig = {
       getSessionId: () => 'test-session-id',
       getTargetDir: () => 'target-dir',
-      getGeminiClient: () => mockGeminiClient,
+      getLlmClient: () => mockLlmClient,
       getUsageStatisticsEnabled: () => true,
       getTelemetryEnabled: () => true,
       getTelemetryLogPromptsEnabled: () => true,

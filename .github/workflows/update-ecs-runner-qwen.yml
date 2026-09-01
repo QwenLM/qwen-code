@@ -18,12 +18,64 @@ permissions:
   contents: 'read'
 
 jobs:
+  # Resolving on a hosted runner, once, keeps the registry wait below off the
+  # ECS pools (which queue behind real review/triage work) and guarantees every
+  # pool installs the SAME version even when their jobs start hours apart.
+  resolve:
+    name: 'Resolve version'
+    if: "${{ github.repository == 'QwenLM/qwen-code' }}"
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 30
+    outputs:
+      version: '${{ steps.version.outputs.version }}'
+    steps:
+      - name: 'Resolve version'
+        id: 'version'
+        env:
+          INPUT_VERSION: '${{ inputs.version || github.event.client_payload.version }}'
+          # npm publishes asynchronously: `npm publish --provenance` returns
+          # "Your package is being processed and may take a few minutes to
+          # become available", and release.yml dispatches this workflow as soon
+          # as it returns. For v0.22.3 the gap was ~16 minutes (published
+          # 17:14Z, resolvable 17:30Z), so the single un-retried `npm view` this
+          # step used to run 404'd on 3 of the 4 pools and left the fleet split
+          # across two CLI versions until a maintainer noticed. Wait the
+          # registry out rather than losing the race.
+          RESOLVE_TIMEOUT_SECONDS: '1500'
+          RESOLVE_INTERVAL_SECONDS: '30'
+        run: |-
+          set -euo pipefail
+          specifier="@qwen-code/qwen-code@${INPUT_VERSION#v}"
+          if [[ "${specifier}" == '@qwen-code/qwen-code@' ]]; then
+            specifier='@qwen-code/qwen-code@latest'
+          fi
+          # Per-attempt stderr is held back so ~50 identical 404 blocks do not
+          # bury the log; the last one is replayed when the wait gives up.
+          err_log="$(mktemp)"
+          deadline=$(( SECONDS + RESOLVE_TIMEOUT_SECONDS ))
+          while :; do
+            version="$(npm view "${specifier}" version 2>"${err_log}" | tail -n 1)" || true
+            if [[ -n "${version}" ]]; then
+              break
+            fi
+            if (( SECONDS >= deadline )); then
+              cat "${err_log}" >&2
+              echo "::error::No published qwen version matches '${INPUT_VERSION:-latest}' after ${RESOLVE_TIMEOUT_SECONDS}s."
+              exit 1
+            fi
+            echo "'${specifier}' is not on the registry yet; retrying in ${RESOLVE_INTERVAL_SECONDS}s."
+            sleep "${RESOLVE_INTERVAL_SECONDS}"
+          done
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "Resolved qwen version: ${version}"
+
   update:
     name: 'Update Qwen on ${{ matrix.runner }}'
+    needs: 'resolve'
     if: "${{ github.repository == 'QwenLM/qwen-code' }}"
     strategy:
       matrix:
-        runner: ['ecs-update-sg', 'ecs-update-64c', 'ecs-update-hk-1', 'ecs-update-hk-2']
+        runner: ['ecs-update-hk-1', 'ecs-update-hk-2', 'ecs-update-hk-3', 'ecs-update-hk-4', 'ecs-update-hk-5']
       fail-fast: false
     runs-on: ['self-hosted', 'linux', 'x64', '${{ matrix.runner }}']
     concurrency:
@@ -31,27 +83,9 @@ jobs:
       cancel-in-progress: false
     timeout-minutes: 10
     steps:
-      - name: 'Resolve version'
-        id: 'version'
-        env:
-          INPUT_VERSION: '${{ inputs.version || github.event.client_payload.version }}'
-        run: |-
-          set -euo pipefail
-          specifier="@qwen-code/qwen-code@${INPUT_VERSION#v}"
-          if [[ "${specifier}" == '@qwen-code/qwen-code@' ]]; then
-            specifier='@qwen-code/qwen-code@latest'
-          fi
-          version="$(npm view "${specifier}" version | tail -n 1)" || true
-          if [[ -z "${version}" ]]; then
-            echo "::error::No published qwen version matches '${INPUT_VERSION:-latest}'."
-            exit 1
-          fi
-          echo "version=${version}" >> "${GITHUB_OUTPUT}"
-          echo "Resolved qwen version: ${version}"
-
       - name: 'Update qwen'
         env:
-          VERSION: '${{ steps.version.outputs.version }}'
+          VERSION: '${{ needs.resolve.outputs.version }}'
         run: |-
           set -euo pipefail
           # The runner service resolves the system-wide qwen binary. Do not
@@ -80,7 +114,7 @@ jobs:
 
       - name: 'Verify version'
         env:
-          VERSION: '${{ steps.version.outputs.version }}'
+          VERSION: '${{ needs.resolve.outputs.version }}'
         run: |-
           set -euo pipefail
           qwen_path="$(command -v qwen)"

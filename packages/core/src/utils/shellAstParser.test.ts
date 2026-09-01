@@ -49,6 +49,28 @@ describe('isShellCommandReadOnlyAST', () => {
     expect(await isShellCommandReadOnlyAST('echo $(touch file)')).toBe(false);
   });
 
+  it('rejects the two substitution forms from issue #8582', async () => {
+    for (const command of [
+      'echo "$\\\n(touch /tmp/pwned)"',
+      'echo "${one="$"}${two="$one(touch /tmp/pwned)"}${two@P}"',
+    ]) {
+      expect(await isShellCommandReadOnlyAST(command)).toBe(false);
+      expect(await classifyShellCommandSafety(command)).toBe('unknown');
+    }
+  });
+
+  it('keeps literal twins of issue #8582 read-only', async () => {
+    for (const command of [
+      'echo "\\$\\\n(touch /tmp/pwned)"',
+      'echo "$$\\\n(touch /tmp/pwned)"',
+      "echo '$\\\n(touch /tmp/pwned)'",
+      "echo '${two@P}'",
+      'echo "${two@Q}"',
+    ]) {
+      expect(await isShellCommandReadOnlyAST(command)).toBe(true);
+    }
+  });
+
   describe('repository-local Git config (#8575)', () => {
     const tempDirs: string[] = [];
     const createRepo = (): string => {
@@ -488,6 +510,8 @@ describe('isShellCommandReadOnlyAST', () => {
 // =========================================================================
 
 describe('classifyShellCommandSafety', () => {
+  const maxClassificationCpuMs = 1000;
+
   it.each([
     'ls -la',
     'git status --short',
@@ -886,20 +910,23 @@ describe('classifyShellCommandSafety', () => {
     expect(await classifyShellCommandSafety(command)).toBe('unknown');
   });
 
-  it('classifies deeply nested redirected substitutions without repeated traversal', async () => {
+  it('classifies deeply nested redirected substitutions within the CPU budget', async () => {
     const commands = ['git status', 'git status'];
     for (let depth = 0; depth < 20; depth++) {
       commands[0] = `echo $(${commands[0]}) < /dev/null`;
       commands[1] = `< <(${commands[1]}) cat`;
     }
-    const startedAt = performance.now();
+    const startedCpuUsage = process.cpuUsage();
     await expect(
       Promise.all(commands.map(classifyShellCommandSafety)),
     ).resolves.toEqual(['unknown', 'unknown']);
-    expect(performance.now() - startedAt).toBeLessThan(1000);
+    const cpuUsage = process.cpuUsage(startedCpuUsage);
+    expect((cpuUsage.user + cpuUsage.system) / 1000).toBeLessThan(
+      maxClassificationCpuMs,
+    );
   });
 
-  it('classifies adversarial rule inputs in bounded time', async () => {
+  it('classifies adversarial rule inputs within the CPU budget', async () => {
     const backslashes = '\\'.repeat(10_000);
     const repeatedSed = 'p;'.repeat(10_000);
     const repeatedPrint = 'print value; '.repeat(10_000);
@@ -913,7 +940,7 @@ describe('classifyShellCommandSafety', () => {
       `find . ${repeatedFindExec}`,
       `git status ${unmatchedBraces}`,
     ];
-    const startedAt = performance.now();
+    const startedCpuUsage = process.cpuUsage();
     await expect(
       Promise.all(commands.map(classifyShellCommandSafety)),
     ).resolves.toEqual([
@@ -924,7 +951,10 @@ describe('classifyShellCommandSafety', () => {
       'unknown',
       'read-only',
     ]);
-    expect(performance.now() - startedAt).toBeLessThan(1000);
+    const cpuUsage = process.cpuUsage(startedCpuUsage);
+    expect((cpuUsage.user + cpuUsage.system) / 1000).toBeLessThan(
+      maxClassificationCpuMs,
+    );
   });
 });
 

@@ -3,6 +3,8 @@
 import { act, type ReactNode, useEffect } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { DaemonHttpError } from '@qwen-code/sdk/daemon';
+import type { WebShellProps } from '../App';
 
 const mocks = vi.hoisted(() => ({
   connection: {
@@ -23,13 +25,15 @@ const mocks = vi.hoisted(() => ({
     refreshCapabilities: vi.fn(async () => undefined),
   } as Record<string, unknown>,
   addWorkspace: vi.fn(),
+  getStandaloneSession: vi.fn(),
+  unarchiveStandaloneSessions: vi.fn(),
   providerMounts: 0,
   providerUnmounts: 0,
   providerProps: [] as Array<Record<string, unknown>>,
   appProps: [] as Array<Record<string, unknown>>,
 }));
 
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   DaemonSessionProvider: ({
     children,
     ...props
@@ -59,7 +63,7 @@ vi.mock('../App', () => ({
 
 import { WorkspaceSessionProvider } from './WorkspaceSessionProvider';
 
-describe('WorkspaceSessionProvider transactional targets', () => {
+describe('WorkspaceSessionProvider targets', () => {
   let container: HTMLDivElement;
   let root: Root;
 
@@ -82,6 +86,12 @@ describe('WorkspaceSessionProvider transactional targets', () => {
       refreshCapabilities: vi.fn(async () => undefined),
     };
     mocks.addWorkspace.mockReset();
+    mocks.getStandaloneSession.mockReset();
+    mocks.unarchiveStandaloneSessions.mockReset();
+    mocks.workspace.client = {
+      getStandaloneSession: mocks.getStandaloneSession,
+      unarchiveStandaloneSessions: mocks.unarchiveStandaloneSessions,
+    };
     mocks.providerMounts = 0;
     mocks.providerUnmounts = 0;
     mocks.providerProps = [];
@@ -113,7 +123,7 @@ describe('WorkspaceSessionProvider transactional targets', () => {
     return onSessionIdChange;
   }
 
-  it('keeps the modern provider mounted until the desired target commits', async () => {
+  it('updates the provider immediately without remounting for a different target', async () => {
     const onSessionIdChange = await renderTarget('session-a', '/work/a');
     expect(mocks.providerMounts).toBe(1);
     expect(container.textContent).toBe('/work/a');
@@ -125,78 +135,31 @@ describe('WorkspaceSessionProvider transactional targets', () => {
       sessionId: 'session-b',
       workspaceCwd: '/work/b',
     });
-    expect(mocks.appProps.at(-1)).toMatchObject({
-      desiredSessionTargetPending: true,
-      initialSelectedWorkspaceCwd: '/work/a',
-    });
-
-    await act(async () => {
-      const commit = mocks.providerProps.at(-1)?.[
-        'onSessionTransitionCommit'
-      ] as (target: { sessionId: string; workspaceCwd: string }) => void;
-      commit({ sessionId: 'session-b', workspaceCwd: '/work/b' });
-    });
     expect(container.textContent).toBe('/work/b');
-    expect(mocks.providerProps.at(-1)).toMatchObject({
-      sessionId: 'session-b',
-      workspaceCwd: '/work/b',
-    });
     expect(mocks.appProps.at(-1)).toMatchObject({
-      desiredSessionTargetPending: false,
+      initialSelectedWorkspaceCwd: '/work/b',
     });
-    const appReport = mocks.appProps.at(-1)?.['onSessionIdChange'] as (
-      sessionId: string,
-      workspaceId: string,
-      workspaceCwd: string,
-    ) => void;
-    appReport('session-b', 'b', '/work/b');
-    expect(onSessionIdChange).toHaveBeenCalledTimes(1);
-    expect(onSessionIdChange).toHaveBeenCalledWith('session-b', 'b', '/work/b');
   });
 
-  it('keeps one modern provider and updates the write gate during rapid props', async () => {
+  it('keeps one provider during rapid prop changes', async () => {
     const onSessionIdChange = await renderTarget('session-a', '/work/a');
 
     await renderTarget('session-b', '/work/b', onSessionIdChange);
-    expect(mocks.appProps.at(-1)).toMatchObject({
-      desiredSessionTargetPending: true,
-    });
-
     await renderTarget('session-a', '/work/a', onSessionIdChange);
-    expect(mocks.providerMounts).toBe(1);
-    expect(mocks.providerUnmounts).toBe(0);
     expect(mocks.providerProps.at(-1)).toMatchObject({
       sessionId: 'session-a',
       workspaceCwd: '/work/a',
     });
-    expect(mocks.appProps.at(-1)).toMatchObject({
-      desiredSessionTargetPending: false,
-      initialSelectedWorkspaceCwd: '/work/a',
-    });
-
     await renderTarget('session-b', '/work/b', onSessionIdChange);
     expect(mocks.providerMounts).toBe(1);
     expect(mocks.providerUnmounts).toBe(0);
-    expect(mocks.appProps.at(-1)).toMatchObject({
-      desiredSessionTargetPending: true,
-    });
   });
 
-  it('does not feed stale host props back after an action-driven commit', async () => {
+  it('passes session changes from the app to the host', async () => {
     const onSessionIdChange = await renderTarget('session-a', '/work/a');
-
-    await act(async () => {
-      const commit = mocks.providerProps.at(-1)?.[
-        'onSessionTransitionCommit'
-      ] as (target: { sessionId: string; workspaceCwd: string }) => void;
-      commit({ sessionId: 'session-b', workspaceCwd: '/work/b' });
-    });
-
-    expect(mocks.providerProps.at(-1)).toMatchObject({
-      sessionId: 'session-b',
-      workspaceCwd: '/work/b',
-    });
-    expect(onSessionIdChange).not.toHaveBeenCalled();
+    expect(mocks.providerProps.at(-1)).not.toHaveProperty(
+      'transactionalSessionSwitching',
+    );
     const appReport = mocks.appProps.at(-1)?.['onSessionIdChange'] as (
       sessionId: string,
       workspaceId: string,
@@ -204,9 +167,73 @@ describe('WorkspaceSessionProvider transactional targets', () => {
     ) => void;
     appReport('session-b', 'b', '/work/b');
     expect(onSessionIdChange).toHaveBeenCalledWith('session-b', 'b', '/work/b');
+    expect(onSessionIdChange).toHaveBeenCalledOnce();
   });
 
-  it('keeps the committed app visible while a workspace target is unresolved', async () => {
+  it('preserves an explicit workspace context for provider conflict checks', async () => {
+    await act(async () => {
+      root.render(
+        <WorkspaceSessionProvider
+          sessionId="session-b"
+          workspaceCwd="/work/b"
+          sessionContext={{ kind: 'workspace', cwd: '/work/a' }}
+          webShellProps={{}}
+        />,
+      );
+    });
+
+    expect(mocks.providerProps.at(-1)).toMatchObject({
+      sessionId: 'session-b',
+      sessionContext: { kind: 'workspace', cwd: '/work/a' },
+      workspaceCwd: '/work/b',
+    });
+  });
+
+  it('resolves an explicit workspace context through the workspace gate', async () => {
+    await act(async () => {
+      root.render(
+        <WorkspaceSessionProvider
+          sessionId="session-b"
+          sessionContext={{ kind: 'workspace', cwd: '/work/b' }}
+          webShellProps={{}}
+        />,
+      );
+    });
+
+    expect(mocks.providerProps.at(-1)).toMatchObject({
+      sessionId: 'session-b',
+      sessionContext: { kind: 'workspace', cwd: '/work/b' },
+      workspaceCwd: '/work/b',
+    });
+    expect(mocks.appProps.at(-1)).toMatchObject({
+      initialSelectedWorkspaceCwd: '/work/b',
+    });
+  });
+
+  it('drops an unavailable explicit context for a primary new session', async () => {
+    await act(async () => {
+      root.render(
+        <WorkspaceSessionProvider
+          sessionId="session-missing"
+          sessionContext={{ kind: 'workspace', cwd: '/work/missing' }}
+          webShellProps={{}}
+        />,
+      );
+    });
+
+    const startFresh = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'New session',
+    );
+    await act(async () => startFresh?.click());
+
+    expect(mocks.providerProps.at(-1)).toMatchObject({
+      sessionId: undefined,
+      sessionContext: undefined,
+      workspaceCwd: undefined,
+    });
+  });
+
+  it('does not keep the previous app visible while a target is unresolved', async () => {
     const onSessionIdChange = await renderTarget('session-a', '/work/a');
     mocks.workspace = {
       ...mocks.workspace,
@@ -214,18 +241,11 @@ describe('WorkspaceSessionProvider transactional targets', () => {
     };
 
     await renderTarget('session-b', '/work/missing', onSessionIdChange);
-    expect(mocks.providerMounts).toBe(1);
-    expect(container.textContent).toBe('/work/a');
-    expect(mocks.providerProps.at(-1)).toMatchObject({
-      sessionId: 'session-a',
-      workspaceCwd: '/work/a',
-    });
-    expect(mocks.appProps.at(-1)).toMatchObject({
-      desiredSessionTargetPending: true,
-    });
+    expect(mocks.providerUnmounts).toBe(1);
+    expect(container.textContent).not.toContain('/work/a');
   });
 
-  it('unblocks the committed session after workspace resolution fails', async () => {
+  it('shows the target workspace error without restoring the previous app', async () => {
     const onSessionIdChange = await renderTarget('session-a', '/work/a');
     onSessionIdChange.mockClear();
     mocks.workspace = {
@@ -240,16 +260,12 @@ describe('WorkspaceSessionProvider transactional targets', () => {
 
     await renderTarget('session-b', '/work/missing', onSessionIdChange);
 
-    expect(mocks.providerMounts).toBe(1);
-    expect(container.textContent).toBe('/work/a');
-    expect(mocks.appProps.at(-1)).toMatchObject({
-      desiredSessionTargetPending: false,
-    });
-    expect(onSessionIdChange).toHaveBeenCalledTimes(1);
-    expect(onSessionIdChange).toHaveBeenCalledWith('session-a', 'a', '/work/a');
+    expect(container.textContent).not.toContain('/work/a');
+    expect(container.textContent).toContain('Failed to load workspace');
+    expect(onSessionIdChange).not.toHaveBeenCalled();
 
     await renderTarget('session-b', '/work/missing', onSessionIdChange);
-    expect(onSessionIdChange).toHaveBeenCalledTimes(1);
+    expect(onSessionIdChange).not.toHaveBeenCalled();
   });
 
   it('does not preserve a target that never connected', async () => {
@@ -270,75 +286,7 @@ describe('WorkspaceSessionProvider transactional targets', () => {
     expect(container.textContent).not.toContain('/work/a');
   });
 
-  it('rolls a still-current controlled target back after restore failure', async () => {
-    const onSessionIdChange = await renderTarget('session-a', '/work/a');
-    onSessionIdChange.mockClear();
-    await renderTarget('session-b', '/work/b', onSessionIdChange);
-    mocks.connection = {
-      status: 'connected',
-      sessionId: 'session-a',
-      workspaceCwd: '/work/a',
-      sessionTransition: {
-        phase: 'failed',
-        operation: 'load',
-        origin: 'controlled',
-        targetSessionId: 'session-b',
-        targetWorkspaceCwd: '/work/b',
-      },
-    };
-    await renderTarget('session-b', '/work/b', onSessionIdChange);
-    expect(onSessionIdChange).toHaveBeenCalledTimes(1);
-    expect(onSessionIdChange).toHaveBeenCalledWith('session-a', 'a', '/work/a');
-    expect(mocks.appProps.at(-1)).toMatchObject({
-      desiredSessionTargetPending: false,
-    });
-  });
-
-  it('rolls back a primary-workspace target when workspace props are omitted', async () => {
-    const onSessionIdChange = vi.fn();
-    await act(async () => {
-      root.render(
-        <WorkspaceSessionProvider
-          sessionId="session-a"
-          webShellProps={{ onSessionIdChange }}
-        />,
-      );
-    });
-    onSessionIdChange.mockClear();
-
-    await act(async () => {
-      root.render(
-        <WorkspaceSessionProvider
-          sessionId="session-b"
-          webShellProps={{ onSessionIdChange }}
-        />,
-      );
-    });
-    mocks.connection = {
-      status: 'connected',
-      sessionId: 'session-a',
-      workspaceCwd: '/work/a',
-      sessionTransition: {
-        phase: 'failed',
-        operation: 'load',
-        origin: 'controlled',
-        targetSessionId: 'session-b',
-        targetWorkspaceCwd: '/work/a',
-      },
-    };
-    await act(async () => {
-      root.render(
-        <WorkspaceSessionProvider
-          sessionId="session-b"
-          webShellProps={{ onSessionIdChange }}
-        />,
-      );
-    });
-
-    expect(onSessionIdChange).toHaveBeenCalledWith('session-a', 'a', '/work/a');
-  });
-
-  it('preserves keyed remounts for legacy daemons', async () => {
+  it('keeps one provider for legacy daemons', async () => {
     mocks.workspace = {
       ...mocks.workspace,
       capabilities: {
@@ -352,8 +300,8 @@ describe('WorkspaceSessionProvider transactional targets', () => {
     };
     const onSessionIdChange = await renderTarget('session-a', '/work/a');
     await renderTarget('session-b', '/work/b', onSessionIdChange);
-    expect(mocks.providerMounts).toBe(2);
-    expect(mocks.providerUnmounts).toBe(1);
+    expect(mocks.providerMounts).toBe(1);
+    expect(mocks.providerUnmounts).toBe(0);
     expect(mocks.appProps.at(-1)).toMatchObject({
       initialSelectedWorkspaceCwd: '/work/b',
     });
@@ -384,5 +332,502 @@ describe('WorkspaceSessionProvider transactional targets', () => {
 
     expect(mocks.providerMounts).toBe(1);
     expect(mocks.providerUnmounts).toBe(0);
+  });
+
+  it('exact-checks a standalone deep link before mounting its provider', async () => {
+    mocks.workspace = {
+      ...mocks.workspace,
+      capabilities: {
+        workspaceCwd: '/work/a',
+        features: ['standalone_sessions_v1'],
+        workspaces: [{ id: 'a', cwd: '/work/a', primary: true, trusted: true }],
+      },
+      client: {
+        getStandaloneSession: mocks.getStandaloneSession,
+        unarchiveStandaloneSessions: mocks.unarchiveStandaloneSessions,
+      },
+    };
+    mocks.getStandaloneSession.mockResolvedValue({
+      sessionId: 'standalone-a',
+      workspaceCwd: '/internal/conversations/standalone-a',
+      sourceType: 'standalone',
+      context: { kind: 'standalone' },
+      isArchived: false,
+    });
+
+    await act(async () => {
+      root.render(
+        <WorkspaceSessionProvider
+          sessionId="standalone-a"
+          sessionContext={{ kind: 'standalone' }}
+          webShellProps={{}}
+        />,
+      );
+    });
+    await act(async () => {
+      await vi.waitFor(() =>
+        expect(mocks.getStandaloneSession).toHaveBeenCalledWith('standalone-a'),
+      );
+    });
+    await act(async () => Promise.resolve());
+
+    expect(mocks.providerMounts).toBe(1);
+    expect(mocks.providerProps.at(-1)).toMatchObject({
+      sessionId: 'standalone-a',
+      sessionContext: { kind: 'standalone' },
+    });
+    expect(mocks.providerProps.at(-1)).not.toHaveProperty('workspaceCwd');
+  });
+
+  it('never calls a standalone route when the capability is absent', async () => {
+    mocks.workspace = {
+      ...mocks.workspace,
+      capabilities: {
+        workspaceCwd: '/work/a',
+        features: [],
+        workspaces: [{ id: 'a', cwd: '/work/a', primary: true, trusted: true }],
+      },
+      client: {
+        getStandaloneSession: mocks.getStandaloneSession,
+        unarchiveStandaloneSessions: mocks.unarchiveStandaloneSessions,
+      },
+    };
+
+    await act(async () => {
+      root.render(
+        <WorkspaceSessionProvider
+          sessionId="standalone-a"
+          sessionContext={{ kind: 'standalone' }}
+          webShellProps={{}}
+        />,
+      );
+    });
+
+    expect(mocks.getStandaloneSession).not.toHaveBeenCalled();
+    expect(mocks.providerMounts).toBe(0);
+    expect(container.textContent).toContain(
+      'Standalone conversations are unavailable',
+    );
+  });
+
+  it('offers a standalone draft when an exact deep link is missing', async () => {
+    const onSessionIdChange = vi.fn();
+    mocks.workspace = {
+      ...mocks.workspace,
+      capabilities: {
+        workspaceCwd: '/work/a',
+        features: ['standalone_sessions_v1'],
+        workspaces: [{ id: 'a', cwd: '/work/a', primary: true, trusted: true }],
+      },
+      client: {
+        getStandaloneSession: mocks.getStandaloneSession,
+        unarchiveStandaloneSessions: mocks.unarchiveStandaloneSessions,
+      },
+    };
+    mocks.getStandaloneSession.mockRejectedValue(
+      new DaemonHttpError(
+        404,
+        { code: 'standalone_session_not_found' },
+        'not found',
+      ),
+    );
+
+    await act(async () => {
+      root.render(
+        <WorkspaceSessionProvider
+          sessionId="standalone-missing"
+          sessionContext={{ kind: 'standalone' }}
+          webShellProps={{ onSessionIdChange }}
+        />,
+      );
+    });
+    await act(async () => {
+      await vi.waitFor(() =>
+        expect(container.textContent).toContain('Conversation not found'),
+      );
+    });
+
+    const startFresh = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'New session',
+    );
+    await act(async () => startFresh?.click());
+
+    expect(onSessionIdChange).toHaveBeenCalledWith(
+      undefined,
+      undefined,
+      undefined,
+      { kind: 'standalone' },
+    );
+    expect(mocks.providerMounts).toBe(0);
+  });
+
+  it('requires an explicit successful unarchive before mounting an archived deep link', async () => {
+    mocks.workspace = {
+      ...mocks.workspace,
+      capabilities: {
+        workspaceCwd: '/work/a',
+        features: ['standalone_sessions_v1'],
+        workspaces: [{ id: 'a', cwd: '/work/a', primary: true, trusted: true }],
+      },
+      client: {
+        getStandaloneSession: mocks.getStandaloneSession,
+        unarchiveStandaloneSessions: mocks.unarchiveStandaloneSessions,
+      },
+    };
+    mocks.getStandaloneSession.mockResolvedValue({
+      sessionId: 'standalone-a',
+      workspaceCwd: '/internal/conversations/standalone-a',
+      sourceType: 'standalone',
+      context: { kind: 'standalone' },
+      isArchived: true,
+    });
+    mocks.unarchiveStandaloneSessions.mockResolvedValue({
+      unarchived: ['standalone-a'],
+      alreadyActive: [],
+      resolvedConflicts: [],
+      notFound: [],
+      errors: [],
+    });
+
+    await act(async () => {
+      root.render(
+        <WorkspaceSessionProvider
+          sessionId="standalone-a"
+          sessionContext={{ kind: 'standalone' }}
+          webShellProps={{}}
+        />,
+      );
+    });
+    await act(async () => {
+      await vi.waitFor(() =>
+        expect(container.textContent).toContain(
+          'This conversation is archived',
+        ),
+      );
+    });
+    expect(mocks.providerMounts).toBe(0);
+
+    const unarchive = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Unarchive',
+    );
+    await act(async () => unarchive?.click());
+
+    expect(mocks.unarchiveStandaloneSessions).toHaveBeenCalledWith([
+      'standalone-a',
+    ]);
+    expect(mocks.providerMounts).toBe(1);
+  });
+
+  it('accepts normalized daemon ids when unarchiving a mixed-case deep link', async () => {
+    mocks.workspace = {
+      ...mocks.workspace,
+      capabilities: {
+        workspaceCwd: '/work/a',
+        features: ['standalone_sessions_v1'],
+        workspaces: [{ id: 'a', cwd: '/work/a', primary: true, trusted: true }],
+      },
+      client: {
+        getStandaloneSession: mocks.getStandaloneSession,
+        unarchiveStandaloneSessions: mocks.unarchiveStandaloneSessions,
+      },
+    };
+    mocks.getStandaloneSession.mockResolvedValue({
+      sessionId: 'standalone-a',
+      sourceType: 'standalone',
+      context: { kind: 'standalone' },
+      isArchived: true,
+    });
+    mocks.unarchiveStandaloneSessions.mockResolvedValue({
+      unarchived: ['standalone-a'],
+      alreadyActive: [],
+      resolvedConflicts: [],
+      notFound: [],
+      errors: [],
+    });
+
+    await act(async () => {
+      root.render(
+        <WorkspaceSessionProvider
+          sessionId="Standalone-A"
+          sessionContext={{ kind: 'standalone' }}
+          webShellProps={{}}
+        />,
+      );
+    });
+    await vi.waitFor(() =>
+      expect(container.textContent).toContain('This conversation is archived'),
+    );
+    const unarchive = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Unarchive',
+    );
+
+    await act(async () => unarchive?.click());
+
+    expect(mocks.unarchiveStandaloneSessions).toHaveBeenCalledWith([
+      'Standalone-A',
+    ]);
+    expect(mocks.providerMounts).toBe(1);
+  });
+
+  it('ignores a stale unarchive result after navigating to another standalone session', async () => {
+    let resolveUnarchive!: (value: {
+      unarchived: string[];
+      alreadyActive: string[];
+      resolvedConflicts: string[];
+      notFound: string[];
+      errors: Array<{ sessionId: string; message: string }>;
+    }) => void;
+    let resolveNextLookup!: (value: {
+      sessionId: string;
+      sourceType: 'standalone';
+      context: { kind: 'standalone' };
+      isArchived: boolean;
+    }) => void;
+    const unarchivePromise = new Promise<
+      Parameters<typeof resolveUnarchive>[0]
+    >((resolve) => {
+      resolveUnarchive = resolve;
+    });
+    const nextLookupPromise = new Promise<
+      Parameters<typeof resolveNextLookup>[0]
+    >((resolve) => {
+      resolveNextLookup = resolve;
+    });
+    mocks.workspace = {
+      ...mocks.workspace,
+      capabilities: {
+        workspaceCwd: '/work/a',
+        features: ['standalone_sessions_v1'],
+        workspaces: [{ id: 'a', cwd: '/work/a', primary: true, trusted: true }],
+      },
+      client: {
+        getStandaloneSession: mocks.getStandaloneSession,
+        unarchiveStandaloneSessions: mocks.unarchiveStandaloneSessions,
+      },
+    };
+    mocks.getStandaloneSession.mockImplementation((requestedSessionId) =>
+      requestedSessionId === 'standalone-a'
+        ? Promise.resolve({
+            sessionId: 'standalone-a',
+            sourceType: 'standalone',
+            context: { kind: 'standalone' },
+            isArchived: true,
+          })
+        : nextLookupPromise,
+    );
+    mocks.unarchiveStandaloneSessions.mockReturnValue(unarchivePromise);
+
+    await act(async () => {
+      root.render(
+        <WorkspaceSessionProvider
+          sessionId="standalone-a"
+          sessionContext={{ kind: 'standalone' }}
+          webShellProps={{}}
+        />,
+      );
+    });
+    await vi.waitFor(() =>
+      expect(container.textContent).toContain('This conversation is archived'),
+    );
+    const unarchive = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Unarchive',
+    );
+    act(() => unarchive?.click());
+
+    await act(async () => {
+      root.render(
+        <WorkspaceSessionProvider
+          sessionId="standalone-b"
+          sessionContext={{ kind: 'standalone' }}
+          webShellProps={{}}
+        />,
+      );
+    });
+    await vi.waitFor(() =>
+      expect(mocks.getStandaloneSession).toHaveBeenCalledWith('standalone-b'),
+    );
+    await act(async () => {
+      resolveUnarchive({
+        unarchived: ['standalone-a'],
+        alreadyActive: [],
+        resolvedConflicts: [],
+        notFound: [],
+        errors: [],
+      });
+      await unarchivePromise;
+    });
+
+    expect(container.textContent).toContain('Opening conversation');
+    expect(mocks.providerMounts).toBe(0);
+
+    await act(async () => {
+      resolveNextLookup({
+        sessionId: 'standalone-b',
+        sourceType: 'standalone',
+        context: { kind: 'standalone' },
+        isArchived: true,
+      });
+      await nextLookupPromise;
+    });
+    await vi.waitFor(() =>
+      expect(container.textContent).toContain('This conversation is archived'),
+    );
+    expect(mocks.providerMounts).toBe(0);
+  });
+
+  it('shows not found when an archived deep link disappears during unarchive', async () => {
+    mocks.workspace = {
+      ...mocks.workspace,
+      capabilities: {
+        workspaceCwd: '/work/a',
+        features: ['standalone_sessions_v1'],
+        workspaces: [{ id: 'a', cwd: '/work/a', primary: true, trusted: true }],
+      },
+      client: {
+        getStandaloneSession: mocks.getStandaloneSession,
+        unarchiveStandaloneSessions: mocks.unarchiveStandaloneSessions,
+      },
+    };
+    mocks.getStandaloneSession.mockResolvedValue({
+      sessionId: 'standalone-a',
+      sourceType: 'standalone',
+      context: { kind: 'standalone' },
+      isArchived: true,
+    });
+    mocks.unarchiveStandaloneSessions.mockResolvedValue({
+      unarchived: [],
+      alreadyActive: [],
+      notFound: ['standalone-a'],
+      errors: [],
+    });
+
+    await act(async () => {
+      root.render(
+        <WorkspaceSessionProvider
+          sessionId="standalone-a"
+          sessionContext={{ kind: 'standalone' }}
+          webShellProps={{}}
+        />,
+      );
+    });
+    await vi.waitFor(() =>
+      expect(container.textContent).toContain('This conversation is archived'),
+    );
+    const unarchive = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Unarchive',
+    );
+
+    await act(async () => unarchive?.click());
+
+    expect(container.textContent).toContain('Conversation not found');
+    expect(mocks.providerMounts).toBe(0);
+  });
+
+  it('keeps a resolved standalone provider mounted across language and capability refreshes', async () => {
+    mocks.workspace = {
+      ...mocks.workspace,
+      capabilities: {
+        workspaceCwd: '/work/a',
+        features: ['standalone_sessions_v1'],
+      },
+    };
+    mocks.getStandaloneSession.mockResolvedValue({
+      sessionId: 'standalone-a',
+      sourceType: 'standalone',
+      context: { kind: 'standalone' },
+      isArchived: false,
+    });
+    await act(async () => {
+      root.render(
+        <WorkspaceSessionProvider
+          sessionId="standalone-a"
+          sessionContext={{ kind: 'standalone' }}
+          webShellProps={{ language: 'en' }}
+        />,
+      );
+    });
+    await vi.waitFor(() => expect(mocks.providerMounts).toBe(1));
+
+    mocks.workspace = {
+      ...mocks.workspace,
+      capabilities: {
+        workspaceCwd: '/work/a',
+        features: ['standalone_sessions_v1'],
+      },
+    };
+    await act(async () => {
+      root.render(
+        <WorkspaceSessionProvider
+          sessionId="standalone-a"
+          sessionContext={{ kind: 'standalone' }}
+          webShellProps={{ language: 'zh-CN' }}
+        />,
+      );
+    });
+
+    expect(mocks.getStandaloneSession).toHaveBeenCalledOnce();
+    expect(mocks.providerMounts).toBe(1);
+    expect(mocks.providerUnmounts).toBe(0);
+  });
+
+  it('trusts a standalone session id reported by the mounted App', async () => {
+    const onSessionIdChange = vi.fn();
+    mocks.workspace = {
+      ...mocks.workspace,
+      capabilities: {
+        workspaceCwd: '/work/a',
+        features: ['standalone_sessions_v1'],
+      },
+    };
+    await act(async () => {
+      root.render(
+        <WorkspaceSessionProvider
+          sessionContext={{ kind: 'standalone' }}
+          webShellProps={{ onSessionIdChange }}
+        />,
+      );
+    });
+    expect(mocks.providerMounts).toBe(1);
+    const reportedChange = mocks.appProps.at(-1)?.['onSessionIdChange'] as
+      | NonNullable<WebShellProps['onSessionIdChange']>
+      | undefined;
+    act(() => {
+      reportedChange?.('standalone-created', undefined, undefined, {
+        kind: 'standalone',
+      });
+    });
+    await act(async () => {
+      root.render(
+        <WorkspaceSessionProvider
+          sessionId="standalone-created"
+          sessionContext={{ kind: 'standalone' }}
+          webShellProps={{ onSessionIdChange }}
+        />,
+      );
+    });
+
+    expect(onSessionIdChange).toHaveBeenCalled();
+    expect(mocks.getStandaloneSession).not.toHaveBeenCalled();
+    expect(mocks.providerMounts).toBe(1);
+    expect(mocks.providerUnmounts).toBe(0);
+  });
+
+  it('rejects conflicting standalone and workspace targets', async () => {
+    await act(async () => {
+      root.render(
+        <WorkspaceSessionProvider
+          sessionId="standalone-a"
+          workspaceId="a"
+          sessionContext={{ kind: 'standalone' }}
+          webShellProps={{}}
+        />,
+      );
+    });
+
+    expect(mocks.getStandaloneSession).not.toHaveBeenCalled();
+    expect(mocks.providerMounts).toBe(0);
+    expect(container.textContent).toContain(
+      'A standalone or Live conversation link cannot include a workspace target.',
+    );
   });
 });

@@ -8,7 +8,12 @@ import type { PermissionManager } from '../permissions/permission-manager.js';
 import type { Config } from '../config/config.js';
 import type { SkillManager } from '../skills/skill-manager.js';
 import type { SkillConfig, SkillLevel } from '../skills/types.js';
+import type { ToolRegistry } from './tool-registry.js';
+import { ToolNames } from './tool-names.js';
 import { escapeXml } from '../utils/xml.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('SKILL');
 
 /**
  * Builds the LLM-facing content string when a skill body is injected.
@@ -50,6 +55,8 @@ export interface CollectedAvailableSkills {
   pendingConditionalSkillNames: Set<string>;
   /** Model-invocable commands, deduped against file-based skill names. */
   modelInvocableCommands: ReadonlyArray<{ name: string; description: string }>;
+  /** File-based skills hidden from model invocation. */
+  hiddenSkillNames?: Set<string>;
   /** Normalized entries, ready for `renderAvailableSkillsBlock`. */
   entries: AvailableSkillEntry[];
 }
@@ -135,14 +142,16 @@ async function collectAvailableSkillEntriesUncached(
   // matching file path this session. Keeps the listing small in large monorepos
   // where most conditional skills are not yet relevant.
   const allSkills = await skillManager.listSkills();
-  const disabledNames = config.getDisabledSkillNames();
-  const isDisabled = (name: string) => disabledNames.has(name.toLowerCase());
+  const isEnabled = (skill: SkillConfig) => config.isSkillEnabled(skill);
 
   const availableSkills = allSkills.filter(
     (s) =>
       !s.disableModelInvocation &&
       skillManager.isSkillActive(s) &&
-      !isDisabled(s.name),
+      isEnabled(s),
+  );
+  const hiddenSkillNames = new Set(
+    allSkills.filter((s) => s.disableModelInvocation).map((s) => s.name),
   );
 
   // Track still-pending conditional skills so validation can emit a distinct
@@ -156,7 +165,7 @@ async function collectAvailableSkillEntriesUncached(
           s.paths &&
           s.paths.length > 0 &&
           !skillManager.isSkillActive(s) &&
-          !isDisabled(s.name),
+          isEnabled(s),
       )
       .map((s) => s.name),
   );
@@ -172,7 +181,7 @@ async function collectAvailableSkillEntriesUncached(
   const allCommands = provider ? provider() : [];
   const fileBasedSkillNames = new Set(
     allSkills
-      .filter((s) => !s.disableModelInvocation && !isDisabled(s.name))
+      .filter((s) => !s.disableModelInvocation && isEnabled(s))
       .map((s) => s.name),
   );
   const modelInvocableCommands = allCommands.filter(
@@ -196,6 +205,7 @@ async function collectAvailableSkillEntriesUncached(
     availableSkills,
     pendingConditionalSkillNames,
     modelInvocableCommands,
+    hiddenSkillNames,
     entries,
   };
 }
@@ -256,6 +266,22 @@ ${escapeXml(entry.description)}
 }
 
 /**
+ * Whether a skill's side effects — `allowedTools` session allow rules and
+ * frontmatter hooks — may be applied. A project skill is discovered from
+ * `<repo>/.qwen/skills/` regardless of folder trust because its body only
+ * influences the model, but its side effects grant tool approvals or run
+ * repo-supplied commands, so they need a trusted folder: the same gate
+ * `Config.getProjectHooks()` applies to settings-file hooks. User, extension
+ * and bundled skills are not repo-controlled and are unaffected.
+ */
+export function canApplySkillSideEffects(
+  skill: Pick<SkillConfig, 'level'>,
+  config: Pick<Config, 'isTrustedFolder'>,
+): boolean {
+  return skill.level !== 'project' || config.isTrustedFolder();
+}
+
+/**
  * Grants a skill's `allowedTools` as session-scoped permission allow rules.
  *
  * Each entry is a permission rule string in the same syntax as `settings.json`
@@ -264,16 +290,59 @@ ${escapeXml(entry.description)}
  * auto-approved for the rest of the session instead of prompting. This is an
  * additive grant only — it never hides or restricts the tools the model sees.
  *
+ * Caveat under an active `settings.tools.eager` allowlist (#9827): the grant
+ * flips the runtime permission predicate, but it can never promote a deferred
+ * tool into the eager model request — the registry is built once in
+ * `Config.initialize`, so such a tool stays deferred (still registered and
+ * loadable via `tool_search`). An eager-by-default tool omitted by
+ * `tools.eager` needs its name added plus a restart; a tool deferred by
+ * default needs `tools.visible` instead. `permissions.allow` itself never
+ * gates registration (#10075).
+ *
  * No-ops when there is no permission manager or nothing to grant.
+ *
+ * `trustGated` marks the grants as repository-controlled: a project skill's
+ * rules are honoured only while the folder is trusted, re-checked at every
+ * permission decision, so a trust revoked mid-session suspends them without
+ * a restart. Pass `skill.level === 'project'`.
  */
 export function applySkillAllowedTools(
   permissionManager: PermissionManager | null | undefined,
   allowedTools: string[] | undefined,
+  options?: { trustGated?: boolean },
 ): void {
   if (!permissionManager || !allowedTools?.length) {
     return;
   }
   for (const rule of allowedTools) {
-    permissionManager.addSessionAllowRule(rule);
+    permissionManager.addSessionAllowRule(rule, {
+      trustGated: options?.trustGated === true,
+    });
+  }
+}
+
+/**
+ * Conservatively drop ALL loaded-skill tracking after a destructive
+ * history rewrite (compaction, truncation, orphan stripping). The rewrite
+ * may have removed a skill body; the dedup guard must not leave that
+ * skill permanently unreloadable behind "already loaded in context".
+ * Over-clearing is the safe direction: a still-resident body costs at
+ * most one duplicate injection on the next invoke, while a stale entry
+ * makes the body unrecoverable until session restart.
+ *
+ * Duck-typed (mirroring `clearCommand`'s existing `clearLoadedSkills`
+ * call) so history-rewrite sites don't need a runtime import of the
+ * SkillTool class.
+ */
+export function clearLoadedSkillTracking(
+  toolRegistry: ToolRegistry | undefined,
+  logTag: string,
+): void {
+  const tool = toolRegistry?.getTool(ToolNames.SKILL);
+  if (tool && 'clearLoadedSkills' in tool) {
+    (tool as { clearLoadedSkills(): void }).clearLoadedSkills();
+    debugLogger.debug(
+      `[SKILL_TRACKING] conservatively cleared loaded-skill tracking after ${logTag}`,
+    );
   }
 }

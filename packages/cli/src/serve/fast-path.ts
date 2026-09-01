@@ -10,7 +10,7 @@ import {
   isValidMemoryBudgetMb,
   memoryBudgetRangeError,
 } from '@qwen-code/acp-bridge/daemonMemoryBudget';
-import { normalizeServeFastPathArgv } from './fast-path-argv.js';
+import { normalizeServeFastPathArgv } from '../utils/serve-fast-path-argv.js';
 import type { ServeFastPathSettings } from './fast-path-settings.js';
 import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
 import type { ServeOptions } from './types.js';
@@ -21,6 +21,7 @@ type McpBudgetMode = NonNullable<ServeOptions['mcpBudgetMode']>;
 interface ParsedServeFastPath {
   kind: 'serve';
   open: boolean;
+  openWithAuth: boolean;
   httpBridge: boolean;
   options: ServeOptions;
 }
@@ -56,6 +57,7 @@ const NUMBER_OPTIONS = new Map<
   ['sessionRestoreTimeoutMs', 'session-restore-timeout-ms'],
   ['sessionReapIntervalMs', 'session-reap-interval-ms'],
   ['sessionIdleTimeoutMs', 'session-idle-timeout-ms'],
+  ['sessionPromptSettledCloseGraceMs', 'session-prompt-settled-close-grace-ms'],
   ['permissionResponseTimeoutMs', 'permission-response-timeout-ms'],
   ['rateLimitPrompt', 'rate-limit-prompt'],
   ['rateLimitMutation', 'rate-limit-mutation'],
@@ -76,15 +78,17 @@ const STRING_OPTION_BY_FLAG = new Map<string, keyof ServeOptions>([
 
 const BOOLEAN_OPTION_BY_FLAG = new Map<
   string,
-  keyof ServeOptions | 'open' | 'http-bridge'
+  keyof ServeOptions | 'open' | 'open-with-auth' | 'http-bridge'
 >([
   ['require-auth', 'requireAuth'],
   ['enable-session-shell', 'enableSessionShell'],
   ['web', 'serveWebShell'],
   ['open', 'open'],
+  ['open-with-auth', 'open-with-auth'],
   ['http-bridge', 'http-bridge'],
   ['allow-private-auth-base-url', 'allowPrivateAuthBaseUrl'],
   ['experimental-lsp', 'experimentalLsp'],
+  ['restore-ask-user-question', 'restoreAskUserQuestion'],
   ['rate-limit', 'rateLimit'],
 ]);
 
@@ -335,6 +339,7 @@ export function parseServeFastPathArgs(
     port: 4170,
   };
   let open = false;
+  let openWithAuth = false;
   let httpBridge = true;
   let mcpBudgetModeRaw: string | undefined;
   let mcpClientBudget: number | undefined;
@@ -364,6 +369,8 @@ export function parseServeFastPathArgs(
       }
       if (booleanTarget === 'open') {
         open = value;
+      } else if (booleanTarget === 'open-with-auth') {
+        openWithAuth = value;
       } else if (booleanTarget === 'http-bridge') {
         httpBridge = value;
       } else {
@@ -482,12 +489,19 @@ export function parseServeFastPathArgs(
     options.rateLimit = explicitRateLimit;
   }
   applyRateLimitEnvDefaults(options, env);
-  return { kind: 'serve', open, httpBridge, options };
+  return {
+    kind: 'serve',
+    open: open || openWithAuth,
+    openWithAuth,
+    httpBridge,
+    options,
+  };
 }
 
 async function maybeOpenWebShellBrowser(
   handle: RunHandle,
   open: boolean,
+  openWithAuth: boolean,
 ): Promise<void> {
   if (!open) return;
   try {
@@ -498,7 +512,7 @@ async function maybeOpenWebShellBrowser(
   const { maybeOpenWebShellBrowser: openBrowser } = await import(
     '../commands/serve.js'
   );
-  await openBrowser(handle, true);
+  await openBrowser(handle, true, openWithAuth);
 }
 
 function emitHeadlessYoloWarning(
@@ -582,6 +596,18 @@ export async function tryRunServeFastPath(
 
   writeServeWarnings(parsed);
 
+  if (parsed.openWithAuth) {
+    try {
+      const { applyOpenWithAuth } = await import('./open-with-auth.js');
+      applyOpenWithAuth(parsed.options);
+    } catch (err) {
+      writeStderrLine(
+        `qwen serve: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      process.exit(1);
+    }
+  }
+
   const { runQwenServe } = await import('./run-qwen-serve.js');
   let handle: RunHandle;
   try {
@@ -595,7 +621,7 @@ export async function tryRunServeFastPath(
     } catch {
       // Keep the warning best-effort, matching the yargs serve handler.
     }
-    await maybeOpenWebShellBrowser(handle, parsed.open);
+    await maybeOpenWebShellBrowser(handle, parsed.open, parsed.openWithAuth);
   } catch (err) {
     writeStderrLine(
       `qwen serve: ${err instanceof Error ? err.message : String(err)}`,

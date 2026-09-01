@@ -72,6 +72,7 @@ export function isSyntheticHistoryItem(
     case 'gemini_content':
     case 'tool_group':
     case 'btw':
+    case 'advisor':
     case 'memory_saved':
     case 'about':
     case 'help':

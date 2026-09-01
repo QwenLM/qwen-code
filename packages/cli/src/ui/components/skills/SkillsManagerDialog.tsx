@@ -31,7 +31,6 @@ import type { LoadedSettings } from '../../../config/settings.js';
 import { SettingScope } from '../../../config/settings.js';
 import {
   computeWorkspaceSkillListUpdates,
-  resolveSkillSettings,
   skillSettingStrings,
 } from '../../../config/skill-settings.js';
 import { t } from '../../../i18n/index.js';
@@ -148,15 +147,11 @@ export function SkillsManagerDialog({
   const [skills, setSkills] = useState<SkillConfig[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [query, setQuery] = useState('');
-  // Capture the workspace and higher-scope disabled lists once at mount.
+  // Capture the higher-scope disabled lists once at mount.
   // The dialog is short-lived and these are derived from the *current*
   // settings snapshot at open time — using `useMemo` keyed on `settings`
   // would re-derive on every parent re-render and could thrash the
   // `selectedKeys` derivation below.
-  const initialResolved = useMemo(
-    () => resolveSkillSettings(settings),
-    [settings],
-  );
   const higher = useMemo(() => buildHigherDisabled(settings), [settings]);
 
   const skillManager = config?.getSkillManager() ?? null;
@@ -201,12 +196,10 @@ export function SkillsManagerDialog({
     () =>
       new Set(
         unlockedSkills
-          .filter(
-            (skill) => !initialResolved.disabledNames.has(lower(skill.name)),
-          )
+          .filter((skill) => config?.isSkillEnabled(skill) ?? true)
           .map((skill) => skill.name),
       ),
-    [initialResolved, unlockedSkills],
+    [config, unlockedSkills],
   );
 
   // Initial selection: every effectively enabled, unlocked skill.
@@ -302,19 +295,14 @@ export function SkillsManagerDialog({
       settings,
       SettingScope.Workspace,
     ).filter((name): name is string => typeof name === 'string');
-    const lockedNames = new Set(lockedSkills.map((skill) => lower(skill.name)));
     const { disabled, enabled, disabledChanged, enabledChanged } =
       computeWorkspaceSkillListUpdates(
         workspaceDisabled,
-        lockedNames,
         skillSettingStrings(settings, SettingScope.Workspace, 'enabled'),
         unlockedSkills.map((skill) => ({
           name: skill.name,
           wasEnabled: initialSelectedKeys.has(skill.name),
           isEnabled: selected.has(skill.name),
-          defaultDisabled:
-            initialResolved.defaultDisabledNames.has(lower(skill.name)) &&
-            !initialResolved.enabledNames.has(lower(skill.name)),
         })),
       );
     if (!disabledChanged && !enabledChanged) return 'ok';
@@ -388,9 +376,7 @@ export function SkillsManagerDialog({
     return 'ok';
   }, [
     addItem,
-    initialResolved,
     initialSelectedKeys,
-    lockedSkills,
     reloadCommands,
     selectedKeys,
     settings,

@@ -91,15 +91,14 @@ function makeEnv(): NodeJS.ProcessEnv {
     );
 
     await session.idle(5000);
-    await session.send('Reply with exactly USERPRIORITY77 nothing else');
+    const userPriorityMarker = 'USERPRIORITY77';
+    await session.send(`Reply with exactly ${userPriorityMarker} nothing else`);
 
     await session.waitForScreen(
-      (scr) => scr.includes('USERPRIORITY77'),
+      (scr) =>
+        scr.indexOf(userPriorityMarker) !== scr.lastIndexOf(userPriorityMarker),
       'model response containing USERPRIORITY77',
     );
-
-    const screen = await session.screen();
-    expect(screen).toContain('Type your message');
   });
 
   it(

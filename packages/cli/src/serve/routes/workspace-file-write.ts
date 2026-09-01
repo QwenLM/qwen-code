@@ -377,6 +377,13 @@ export function registerWorkspaceQualifiedFileWriteRoutes(
 const MAX_CONCURRENT_UPLOADS = 4;
 const MAX_UPLOAD_FILENAME_BYTES = 255;
 const NUMBERED_CANDIDATE_CAP = 1000;
+/**
+ * Cap on the number of path components an upload may create recursively
+ * (the missing parent directory is materialized by `mkdir -p` before the
+ * body is buffered, so a single request must not be able to spin up an
+ * unbounded directory tree ahead of the concurrency gate).
+ */
+const MAX_UPLOAD_DIR_DEPTH = 64;
 
 interface UploadGateLease {
   handlerStarted: boolean;
@@ -607,6 +614,17 @@ function fileUploadAdmission(
           sendParseError(res, ROUTE, '`path` must name a file');
           return;
         }
+        // The missing parent directory is created recursively before the
+        // body is buffered; bound how much tree a single request may
+        // materialize ahead of the concurrency gate.
+        if (dir.split('/').filter(Boolean).length > MAX_UPLOAD_DIR_DEPTH) {
+          sendParseError(
+            res,
+            ROUTE,
+            `directory path exceeds ${MAX_UPLOAD_DIR_DEPTH} components`,
+          );
+          return;
+        }
         // Reject statically detectable bad names before taking a gate slot
         // and buffering the body; fs.resolve would throw on them anyway.
         if (queryPath.includes('\0')) {
@@ -658,10 +676,13 @@ function fileUploadAdmission(
           dirStat = await fs.stat(resolvedDir);
         } catch (err) {
           if (isFsError(err) && err.kind === 'path_not_found') {
-            sendParseError(res, ROUTE, 'parent directory does not exist');
-            return;
+            // The target directory may not exist yet (e.g. a configured
+            // drop folder); create it, including missing parents.
+            await fs.mkdir(resolvedDir, { recursive: true });
+            dirStat = await fs.stat(resolvedDir);
+          } else {
+            throw err;
           }
-          throw err;
         }
         if (dirStat.kind !== 'directory') {
           sendParseError(res, ROUTE, 'parent path is not a directory');

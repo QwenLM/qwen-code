@@ -40,6 +40,11 @@ describe('PROJECT_ENV_HARDCODED_EXCLUSIONS', () => {
     );
   });
 
+  it('excludes QWEN_CODE_WARNINGS_FILE so a project .env cannot redirect temp warnings', () => {
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
+      'QWEN_CODE_WARNINGS_FILE',
+    );
+  });
   it('keeps ACP repeated-tool-failure rollout policy operator-owned', () => {
     expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
       ENV_ACP_REPEATED_TOOL_FAILURE_GUARD,
@@ -84,6 +89,30 @@ describe('PROJECT_ENV_HARDCODED_EXCLUSIONS', () => {
   // session children, reopening the #8653 vector.
   it('excludes DEV so a project .env cannot spoof the dev harness', () => {
     expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain('DEV');
+  });
+
+  // QWEN_SERVE_NEW_FILE_MODE sets the daemon-wide creation mode for
+  // agent-written NEW files. A project `.env` flipping it to `system` would
+  // silently widen file visibility (0600 -> umask-derived) for every
+  // workspace with no warning, so the fail-closed posture stays an operator
+  // decision made in the daemon's launch env or a home `.env`.
+  it('excludes QWEN_SERVE_NEW_FILE_MODE so a project .env cannot widen new-file mode', () => {
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
+      'QWEN_SERVE_NEW_FILE_MODE',
+    );
+  });
+
+  // QWEN_SERVE_SESSION_ATTACHMENTS_ROOT is the daemon-wide attachment
+  // storage location. A project `.env` redirecting it would capture uploads
+  // for every workspace the daemon serves (and serve back tampered bytes on
+  // reads), so only the daemon's launch env or a home `.env` may set it.
+  it('excludes QWEN_SERVE_SESSION_ATTACHMENTS_ROOT so a project .env cannot redirect attachment storage', () => {
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
+      'QWEN_SERVE_SESSION_ATTACHMENTS_ROOT',
+    );
+    expect(
+      isHardcodedProjectEnvExclusion('qwen_serve_session_attachments_root'),
+    ).toBe(true);
   });
 
   // The non-Node TLS trust-anchor vars reach the same MITM outcome as

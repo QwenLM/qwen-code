@@ -72,7 +72,12 @@ function makeSystemMessage(id: string): Message {
   return { id, role: 'system', content: 'heads up', variant: 'error' };
 }
 
-function makeBackgroundNotification(id: string, toolUseId?: string): Message {
+function makeBackgroundNotification(
+  id: string,
+  toolUseId?: string,
+  status = 'completed',
+  timestamp?: number,
+): Message {
   return {
     id,
     role: 'system',
@@ -81,9 +86,40 @@ function makeBackgroundNotification(id: string, toolUseId?: string): Message {
     source: 'background_notification',
     data: {
       kind: 'agent',
-      status: 'completed',
+      status,
       ...(toolUseId ? { toolUseId } : {}),
     },
+    ...(timestamp !== undefined ? { timestamp } : {}),
+  };
+}
+
+function makeBackgroundShellToolGroup(
+  id: string,
+  taskId: string,
+): Extract<Message, { role: 'tool_group' }> {
+  return {
+    id,
+    role: 'tool_group',
+    tools: [
+      {
+        callId: `call-${id}`,
+        toolName: 'shell',
+        status: 'completed',
+        args: { command: 'npm test', is_background: true },
+        rawOutput: `Background shell ${taskId} started.`,
+      },
+    ],
+  };
+}
+
+function makeBackgroundShellNotification(id: string, taskId: string): Message {
+  return {
+    id,
+    role: 'system',
+    content: 'Background shell completed.',
+    variant: 'info',
+    source: 'background_notification',
+    data: { kind: 'shell', taskId, status: 'completed' },
   };
 }
 
@@ -318,6 +354,80 @@ describe('groupParallelAgents', () => {
         'call-a2',
       ]);
     }
+  });
+
+  it('normalizes matched terminal agent notifications before grouping', () => {
+    const items = groupParallelAgents([
+      makeBackgroundAgentToolGroup('a1'),
+      makeBackgroundAgentToolGroup('a2'),
+      makeBackgroundNotification('done-a1', 'call-a1'),
+      makeBackgroundNotification('done-a2', 'call-a2'),
+    ]);
+
+    expect(items[0]).toMatchObject({
+      type: 'parallel_agents',
+      agents: [{ status: 'completed' }, { status: 'completed' }],
+    });
+  });
+
+  it.each([
+    ['failed', 'failed', 'background'],
+    ['cancelled', 'completed', 'cancelled'],
+    ['canceled', 'completed', 'cancelled'],
+  ] as const)(
+    'normalizes a %s agent notification before grouping',
+    (notificationStatus, toolStatus, rawStatus) => {
+      const items = groupParallelAgents([
+        makeBackgroundAgentToolGroup('a1'),
+        makeBackgroundNotification(
+          'done-a1',
+          'call-a1',
+          notificationStatus,
+          1_234,
+        ),
+      ]);
+
+      expect(items[0]).toMatchObject({
+        type: 'message',
+        message: {
+          role: 'tool_group',
+          tools: [
+            {
+              status: toolStatus,
+              endTime: 1_234,
+              rawOutput: {
+                type: 'task_execution',
+                taskDescription: 'task a1',
+                status: rawStatus,
+              },
+            },
+          ],
+        },
+      });
+    },
+  );
+
+  it('does not normalize an explicitly non-terminal agent notification', () => {
+    const items = groupParallelAgents([
+      makeBackgroundAgentToolGroup('a1'),
+      {
+        id: 'running-a1',
+        role: 'system',
+        content: 'Background agent is still running.',
+        variant: 'info',
+        source: 'background_notification',
+        data: {
+          kind: 'agent',
+          status: 'in_progress',
+          toolUseId: 'call-a1',
+        },
+      },
+    ]);
+
+    expect(items[0]).toMatchObject({
+      type: 'message',
+      message: { role: 'tool_group', tools: [{ status: 'pending' }] },
+    });
   });
 
   it('preserves background thought narration when it is not between launches', () => {
@@ -1100,7 +1210,10 @@ function collapseItems(
     isResponding: boolean;
     pendingApprovalCallId: string | null;
     backgroundSummaryGraceActive: boolean;
+    waitForUnmatchedAgentCompletions: boolean;
+    terminalBackgroundShellTaskIds: ReadonlySet<string>;
     automaticallyExpandedAgentKeys: ReadonlySet<string>;
+    paginatedExpanded: ReadonlySet<string>;
     enabled: boolean;
   }> = {},
 ): DisplayItem[] {
@@ -1109,7 +1222,11 @@ function collapseItems(
     isResponding: opts.isResponding ?? false,
     pendingApprovalCallId: opts.pendingApprovalCallId ?? null,
     backgroundSummaryGraceActive: opts.backgroundSummaryGraceActive ?? true,
+    waitForUnmatchedAgentCompletions:
+      opts.waitForUnmatchedAgentCompletions ?? true,
+    terminalBackgroundShellTaskIds: opts.terminalBackgroundShellTaskIds,
     automaticallyExpandedAgentKeys: opts.automaticallyExpandedAgentKeys,
+    paginatedExpanded: opts.paginatedExpanded,
     enabled: opts.enabled ?? true,
   });
 }
@@ -1155,6 +1272,80 @@ describe('applyTurnCollapse', () => {
     expect(collapseOf(out, 1)).toBeUndefined();
   });
 
+  it('folds vision bridge notices and restores them when expanded', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      {
+        id: 'vision-notice',
+        role: 'system',
+        content: 'Vision bridge cancelled.',
+        variant: 'info',
+        source: 'vision_bridge_notice',
+      },
+      makeAssistantMessage('a1'),
+    ]);
+
+    const collapsed = collapseItems(items);
+    expect(rowIds(collapsed)).toEqual(['u1', 'tc-u1', 'a1']);
+    expect(collapseOf(collapsed, 0)).toMatchObject({
+      collapsed: true,
+      hiddenCount: 1,
+    });
+
+    const expanded = collapseItems(items, {
+      overrides: new Map([['u1', true]]),
+    });
+    expect(rowIds(expanded)).toEqual(['u1', 'tc-u1', 'vision-notice', 'a1']);
+    expect(collapseOf(expanded, 0)).toMatchObject({
+      collapsed: false,
+      hiddenCount: 1,
+    });
+  });
+
+  it('keeps a turn expanded when its tail was shown before pagination completed its head', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makeMultiToolGroup('g1'),
+      makeAssistantMessage('a1'),
+      makeUserMessage('u2'),
+      makeMultiToolGroup('g2'),
+      makeAssistantMessage('a2'),
+    ]);
+    const out = collapseItems(items, {
+      paginatedExpanded: new Set(['u1']),
+    });
+    // The pagination-completed turn stays open (its steps are visible); the
+    // following complete turn still collapses as usual.
+    expect(rowIds(out)).toEqual([
+      'u1',
+      'tc-u1',
+      'g1',
+      'a1',
+      'u2',
+      'tc-u2',
+      'a2',
+    ]);
+    expect(collapseOf(out, 0)).toMatchObject({
+      collapsed: false,
+      hiddenCount: 1,
+    });
+    expect(collapseOf(out, 4)).toMatchObject({ collapsed: true });
+  });
+
+  it('lets an explicit user toggle override the pagination keep-open', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makeMultiToolGroup('g1'),
+      makeAssistantMessage('a1'),
+    ]);
+    const out = collapseItems(items, {
+      paginatedExpanded: new Set(['u1']),
+      overrides: new Map([['u1', false]]),
+    });
+    expect(rowIds(out)).toEqual(['u1', 'tc-u1', 'a1']);
+    expect(collapseOf(out, 0)).toMatchObject({ collapsed: true });
+  });
+
   it('keeps every row but still tags the head when the turn is expanded', () => {
     const items = groupParallelAgents([
       makeUserMessage('u1'),
@@ -1171,6 +1362,39 @@ describe('applyTurnCollapse', () => {
       hiddenCount: 1,
       toolCallCount: 2,
     });
+  });
+
+  it('keeps a completed turn with an MCP App expanded by default', () => {
+    const appToolGroup: Extract<Message, { role: 'tool_group' }> = {
+      id: 'g1',
+      role: 'tool_group',
+      tools: [
+        {
+          callId: 'call-app',
+          toolName: 'mcp__demo__dashboard',
+          status: 'completed',
+          rawOutput: {
+            type: 'mcp_app',
+            serverName: 'demo',
+            resourceUri: 'ui://demo/dashboard',
+            html: '<main>Dashboard</main>',
+            toolResult: { content: [] },
+            toolArguments: {},
+            fallbackText: 'Dashboard ready',
+          },
+        },
+      ],
+    };
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      appToolGroup,
+      makeAssistantMessage('a1'),
+    ]);
+
+    const out = collapseItems(items);
+
+    expect(rowIds(out)).toEqual(['u1', 'tc-u1', 'g1', 'a1']);
+    expect(collapseOf(out, 0)?.collapsed).toBe(false);
   });
 
   it('keeps narration followed by a tool visible when expanded', () => {
@@ -1773,6 +1997,31 @@ describe('applyTurnCollapse', () => {
     expect(currentTurn?.liveStartedAt).toBe(2_000);
   });
 
+  it('collapses the latest turn once the unmatched-completion grace expires', () => {
+    const items = groupParallelAgents([
+      { ...makeUserMessage('u1'), timestamp: 1_000 },
+      makeBackgroundAgentToolGroup('a1', 'completed'),
+      makeBackgroundAgentToolGroup('a2', 'completed'),
+      makeAssistantMessage('launched'),
+      makeBackgroundNotification('notification-a1', 'call-a1'),
+    ]);
+
+    // While the grace window is active the unmatched sibling keeps the turn
+    // open.
+    const held = collapseOf(collapseItems(items), 'u1');
+    expect(held?.collapsed).toBe(false);
+    expect(held?.liveStartedAt).toBe(1_000);
+
+    // Once the grace expires the turn collapses even though the final
+    // narration precedes the notification.
+    const released = collapseOf(
+      collapseItems(items, { waitForUnmatchedAgentCompletions: false }),
+      'u1',
+    );
+    expect(released?.collapsed).toBe(true);
+    expect(released?.liveStartedAt).toBeUndefined();
+  });
+
   it('releases a background summary wait when its grace period expires', () => {
     const items = groupParallelAgents([
       { ...makeUserMessage('u1'), timestamp: 1_000 },
@@ -1869,6 +2118,107 @@ describe('applyTurnCollapse', () => {
       'ans2',
     ]);
     expect(collapseOf(out, 'u2')?.collapsed).toBe(true);
+  });
+
+  it('keeps a completed turn open while its background shell is running', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makeBackgroundShellToolGroup('shell', 'bg_1234abcd'),
+      makeAssistantMessage('launched'),
+    ]);
+
+    const turn = collapseOf(collapseItems(items), 'u1');
+    expect(turn?.collapsed).toBe(false);
+    expect(turn?.liveStartedAt).toBeUndefined();
+  });
+
+  it('uses a terminal task snapshot when the shell notification is missing', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makeBackgroundShellToolGroup('shell', 'bg_1234abcd'),
+      makeAssistantMessage('launched'),
+    ]);
+
+    const out = collapseItems(items, {
+      terminalBackgroundShellTaskIds: new Set(['bg_1234abcd']),
+    });
+
+    expect(collapseOf(out, 'u1')?.collapsed).toBe(true);
+  });
+
+  it('releases the launch turn when its background shell notification arrives', () => {
+    const running = [
+      makeUserMessage('u1'),
+      makeBackgroundShellToolGroup('shell', 'bg_1234abcd'),
+      makeAssistantMessage('launched'),
+    ];
+    const notified = [
+      ...running,
+      makeBackgroundShellNotification('shell-done', 'bg_1234abcd'),
+    ];
+    const summarized = [...notified, makeAssistantMessage('summary')];
+
+    expect(
+      collapseOf(collapseItems(groupParallelAgents(running)), 'u1')?.collapsed,
+    ).toBe(false);
+    expect(
+      collapseOf(collapseItems(groupParallelAgents(notified)), 'u1')?.collapsed,
+    ).toBe(false);
+    expect(
+      collapseOf(collapseItems(groupParallelAgents(summarized)), 'u1')
+        ?.collapsed,
+    ).toBe(true);
+  });
+
+  it('matches a shell completion back to its original turn', () => {
+    const running = [
+      makeUserMessage('u1'),
+      makeBackgroundShellToolGroup('shell', 'bg_1234abcd'),
+      makeAssistantMessage('launched'),
+      makeUserMessage('u2'),
+      makeMultiToolGroup('other'),
+      makeAssistantMessage('other-answer'),
+    ];
+    const completed = [
+      ...running,
+      makeBackgroundShellNotification('shell-done', 'bg_1234abcd'),
+      makeAssistantMessage('summary'),
+    ];
+
+    const before = collapseItems(groupParallelAgents(running));
+    expect(collapseOf(before, 'u1')?.collapsed).toBe(false);
+    expect(collapseOf(before, 'u2')?.collapsed).toBe(true);
+
+    const after = collapseItems(groupParallelAgents(completed));
+    expect(collapseOf(after, 'u1')?.collapsed).toBe(true);
+    expect(collapseOf(after, 'u2')?.collapsed).toBe(true);
+  });
+
+  it('ignores malformed background shell notifications', () => {
+    const running = [
+      makeUserMessage('u1'),
+      makeBackgroundShellToolGroup('shell', 'bg_1234abcd'),
+      makeAssistantMessage('launched'),
+    ];
+    const malformed = [
+      {
+        ...makeBackgroundShellNotification('bad-data', 'bg_1234abcd'),
+        data: 'oops',
+      },
+      {
+        ...makeBackgroundShellNotification('bad-kind', 'bg_1234abcd'),
+        data: { kind: 'agent', taskId: 'bg_1234abcd' },
+      },
+      {
+        ...makeBackgroundShellNotification('bad-task-id', 'bg_1234abcd'),
+        data: { kind: 'shell', taskId: 42 },
+      },
+    ];
+
+    for (const notification of malformed) {
+      const items = groupParallelAgents([...running, notification]);
+      expect(collapseOf(collapseItems(items), 'u1')?.collapsed).toBe(false);
+    }
   });
 
   it('still allows manually collapsing a turn with no final answer', () => {
@@ -2012,22 +2362,22 @@ describe('applyTurnCollapse', () => {
     expect(collapseOf(out, 0)?.hiddenCount).toBe(1);
   });
 
-  it('hides mid-turn injected debug rows with collapsed tool steps', () => {
+  it('keeps mid-turn injected user messages visible with collapsed tool steps', () => {
     const items = groupParallelAgents([
       makeUserMessage('u1'),
       makeMultiToolGroup('g1'),
       {
         id: 's1',
         role: 'system',
-        content: '已插入消息：hi',
+        content: 'hi',
         variant: 'info',
         source: 'mid_turn_message_injected',
       },
       makeAssistantMessage('a1'),
     ]);
     const out = collapseItems(items);
-    expect(rowIds(out)).toEqual(['u1', 'tc-u1', 'a1']);
-    expect(collapseOf(out, 0)?.hiddenCount).toBe(2);
+    expect(rowIds(out)).toEqual(['u1', 'tc-u1', 's1', 'a1']);
+    expect(collapseOf(out, 0)?.hiddenCount).toBe(1);
   });
 
   it('does not collapse a turn whose only response is a system row', () => {
