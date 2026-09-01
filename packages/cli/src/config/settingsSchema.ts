@@ -433,6 +433,19 @@ const SETTINGS_SCHEMA = {
         description: 'The preferred editor to open files in.',
         showInDialog: true,
       },
+      outputStyle: {
+        type: 'string',
+        label: 'Output Style',
+        category: 'General',
+        // Read once in `loadCliConfig` and frozen into `Config`; nothing
+        // applies a mid-session change, so the restart hint is the honest
+        // answer. Same as `general.outputLanguage`.
+        requiresRestart: true,
+        default: undefined as string | undefined,
+        description:
+          'Name of the output style that shapes how responses are written, for example "Concise" or "Explanatory". Leave unset for the default style.',
+        showInDialog: false,
+      },
       vimMode: {
         type: 'boolean',
         label: 'Vim Mode',
@@ -3167,7 +3180,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: [] as string[],
         description:
-          'Whitelist of URL patterns for HTTP hooks. Supports * wildcard. If empty, all URLs are allowed (subject to SSRF protection).',
+          'Whitelist of URL patterns for HTTP hooks. Supports * wildcard. If empty, all URLs are allowed (subject to SSRF protection). A value in Workspace settings is honored only when no User, System, or SystemDefaults scope sets one, so a cloned repository can narrow but never replace your whitelist.',
         showInDialog: false,
         items: {
           type: 'string',
