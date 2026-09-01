@@ -564,6 +564,7 @@ export function useQueuedPrompts({
   const syncServerQueuedPrompts = useCallback(
     (serverQueued: DaemonPendingPromptSummary[], targetSessionId: string) => {
       const next = queuedPromptsRef.current.filter((p) => {
+        if (p.isEditing || p.isRemoving) return true;
         const promptId = p.serverPromptId ?? p.midTurnMessageId;
         if (promptId && settledServerPromptIdsRef.current.has(promptId)) {
           return false;
@@ -599,6 +600,12 @@ export function useQueuedPrompts({
           !contentHasDegradedMedia(serverPrompt.content) &&
           !contentHasUnhydratedMedia(serverPrompt.content);
         if (existingIndex !== -1) {
+          if (
+            next[existingIndex]!.isEditing ||
+            next[existingIndex]!.isRemoving
+          ) {
+            continue;
+          }
           if (hasDisplayedPrompt) {
             next.splice(existingIndex, 1);
             continue;
@@ -1302,7 +1309,9 @@ export function useQueuedPrompts({
         if (!shouldAppendLocalUserMessage) {
           displayedServerPromptIdsRef.current.add(promptId);
         }
-        removeDaemonOwnedPrompt(promptId);
+        if (displayedServerPromptIdsRef.current.has(promptId)) {
+          removeDaemonOwnedPrompt(promptId);
+        }
         void refreshPendingPrompts();
       } else if (event.type === 'turn_complete') {
         hideSettledServerPrompt(promptId);

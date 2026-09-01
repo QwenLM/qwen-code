@@ -633,6 +633,15 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
     });
     const removal = deferred<{ removed: boolean }>();
     sdkMock.actions.removeMidTurnMessage.mockReturnValueOnce(removal.promise);
+    sdkMock.actions.getPendingPrompts.mockResolvedValue({
+      pendingPrompts: [
+        {
+          promptId: 'm-removing',
+          text: 'remove me',
+          state: 'running',
+        },
+      ],
+    });
     const harness = createHarness();
     try {
       await harness.render({ streamingState: 'responding' });
@@ -664,6 +673,108 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
         await Promise.resolve();
       });
 
+      expect(harness.reportError).toHaveBeenCalledOnce();
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('keeps a row visible when editing loses a race with prompt start', async () => {
+    sdkMock.actions.getMidTurnMessages.mockResolvedValue({
+      messages: [{ messageId: 'm-editing', text: 'edit me' }],
+      settledMessageIds: [],
+      promotedMessageIds: [],
+    });
+    const removal = deferred<{ removed: boolean }>();
+    sdkMock.actions.removeMidTurnMessage.mockReturnValueOnce(removal.promise);
+    sdkMock.actions.getPendingPrompts.mockResolvedValue({
+      pendingPrompts: [
+        {
+          promptId: 'm-editing',
+          text: 'edit me',
+          state: 'running',
+        },
+      ],
+    });
+    const harness = createHarness();
+    try {
+      await harness.render({ streamingState: 'responding' });
+      const row = harness.result().queuedPrompts[0]!;
+      await act(async () => {
+        void harness.result().editQueuedPrompt(row.id);
+        await Promise.resolve();
+      });
+      expect(harness.result().queuedPrompts[0]?.isEditing).toBe(true);
+
+      await act(async () => {
+        sdkMock.publishPendingEvents([
+          {
+            type: 'pending_prompt_started',
+            originatorClientId: 'client-before-reload',
+            data: {
+              sessionId: 'session-a',
+              promptId: 'm-editing',
+              text: 'edit me',
+            },
+          },
+        ]);
+        await Promise.resolve();
+      });
+      expect(harness.result().queuedPrompts).toHaveLength(1);
+
+      await act(async () => {
+        removal.resolve({ removed: false });
+        await Promise.resolve();
+      });
+
+      expect(harness.reportError).toHaveBeenCalledOnce();
+      expect(harness.editor.setText).not.toHaveBeenCalled();
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('drops a settled server row after its pending action finishes', async () => {
+    sdkMock.actions.getPendingPrompts.mockResolvedValue({
+      pendingPrompts: [
+        {
+          promptId: 'p-settled-action',
+          text: 'already started',
+          state: 'queued',
+        },
+      ],
+    });
+    const removal = deferred<{ removed: boolean }>();
+    sdkMock.actions.removePendingPrompt.mockReturnValueOnce(removal.promise);
+    const harness = createHarness();
+    try {
+      await harness.render({ streamingState: 'responding' });
+      const row = harness.result().queuedPrompts[0]!;
+      await act(async () => {
+        harness.result().removeQueuedPrompt(row.id);
+        await Promise.resolve();
+      });
+      expect(harness.result().queuedPrompts[0]?.isRemoving).toBe(true);
+
+      await act(async () => {
+        sdkMock.publishPendingEvents([
+          {
+            type: 'turn_complete',
+            data: {
+              sessionId: 'session-a',
+              promptId: 'p-settled-action',
+            },
+          },
+        ]);
+      });
+      expect(harness.result().queuedPrompts).toHaveLength(1);
+
+      await act(async () => {
+        removal.resolve({ removed: false });
+        await Promise.resolve();
+      });
+
+      expect(harness.result().queuedPrompts).toEqual([]);
       expect(harness.reportError).toHaveBeenCalledOnce();
     } finally {
       await harness.dispose();
@@ -4423,6 +4534,55 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
         payloadCompleteness: 'summary-only',
         images: [{ data: 'aW1n', media_type: 'image/png' }],
       });
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('keeps an own-client summary-only row when its prompt starts', async () => {
+    sdkMock.actions.getPendingPrompts.mockResolvedValue({
+      pendingPrompts: [
+        {
+          promptId: 'p-summary-started',
+          text: 'look at both',
+          content: [
+            { type: 'image', data: 'aW1n', mimeType: 'image/png' },
+            {
+              type: 'image',
+              attachmentId: 'media-2',
+              mimeType: 'image/png',
+              size: 3,
+            },
+          ],
+          queuedAt: Date.now(),
+          state: 'queued' as const,
+        },
+      ],
+    });
+    const harness = createHarness();
+    try {
+      await harness.render({ streamingState: 'responding' });
+      expect(harness.result().queuedPrompts[0]?.payloadCompleteness).toBe(
+        'summary-only',
+      );
+
+      await act(async () => {
+        sdkMock.publishPendingEvents([
+          {
+            type: 'pending_prompt_started',
+            originatorClientId: CLIENT_ID,
+            data: {
+              sessionId: 'session-a',
+              promptId: 'p-summary-started',
+              text: 'look at both',
+            },
+          },
+        ]);
+        await Promise.resolve();
+      });
+
+      expect(harness.result().queuedPrompts).toHaveLength(1);
+      expect(harness.store.appendLocalUserMessage).not.toHaveBeenCalled();
     } finally {
       await harness.dispose();
     }
