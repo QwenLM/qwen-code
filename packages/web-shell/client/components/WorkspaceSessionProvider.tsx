@@ -571,26 +571,31 @@ function StandaloneSessionGate({
         actionLabel={t('session.unarchive')}
         theme={webShellProps.theme}
         onAction={() => {
+          const requestedSessionId = sessionId!;
+          const normalizedSessionId = requestedSessionId.toLowerCase();
+          const generation = resolutionGenerationRef.current;
           void workspace.client
-            .unarchiveStandaloneSessions([sessionId!])
+            .unarchiveStandaloneSessions([requestedSessionId])
             .then((result) => {
+              if (resolutionGenerationRef.current !== generation) return;
               if (
-                result.unarchived.includes(sessionId!) ||
-                result.alreadyActive.includes(sessionId!)
+                result.unarchived.includes(normalizedSessionId) ||
+                result.alreadyActive.includes(normalizedSessionId)
               ) {
                 setResolution({ status: 'ready' });
                 return;
               }
-              if (result.notFound?.includes(sessionId!)) {
+              if (result.notFound?.includes(normalizedSessionId)) {
                 setResolution({ status: 'not-found' });
                 return;
               }
               const failure = result.errors.find(
-                (entry) => entry.sessionId === sessionId,
+                (entry) => entry.sessionId === normalizedSessionId,
               );
               throw new Error(failure?.message ?? t('session.unarchiveFailed'));
             })
             .catch((error: unknown) => {
+              if (resolutionGenerationRef.current !== generation) return;
               setResolution({
                 status: 'error',
                 error:

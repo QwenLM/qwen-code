@@ -2719,7 +2719,13 @@ export function App({
   }, [gitModeIntent]);
 
   useEffect(() => {
-    if (!workspace.capabilities || !selectedWorkspaceCwd) return;
+    if (
+      !workspace.capabilities ||
+      !selectedWorkspaceCwd ||
+      !workspaceContextActive
+    ) {
+      return;
+    }
     const selected = ordinaryWorkspaces.find(
       (entry) => entry.cwd === selectedWorkspaceCwd,
     );
@@ -2740,6 +2746,7 @@ export function App({
     selectedWorkspaceCwd,
     setPendingSessionContext,
     workspace.capabilities,
+    workspaceContextActive,
   ]);
   // The workspace the chip's status was last fetched for. On a workspace switch
   // we clear the status immediately so the chip never shows the previous repo's
@@ -9265,8 +9272,9 @@ export function App({
           setGitModeIntent({ mode: 'current' });
           try {
             await workspace.client.startLive('new');
-            return true;
+            return sessionOpenInvocationRef.current === invocation;
           } catch (error) {
+            if (sessionOpenInvocationRef.current !== invocation) return false;
             reportError(error, 'Failed to start a new Live chat');
             return false;
           }
@@ -9740,6 +9748,7 @@ export function App({
     const token = newSessionSuggestionSubmitTokenRef.current + 1;
     newSessionSuggestionSubmitTokenRef.current = token;
     const mode =
+      !lockedWorkspaceCwd &&
       (pendingSessionContextRef.current ?? connectionRef.current.sessionContext)
         ?.kind === 'live'
         ? 'live'
@@ -9779,6 +9788,7 @@ export function App({
     dismissNewSessionSuggestion,
     flushPendingNewSessionSuggestionSubmit,
     isStartingNewSessionSuggestion,
+    lockedWorkspaceCwd,
     newSessionSuggestion,
     onSessionIdChange,
     suppressNewSessionSuggestion,

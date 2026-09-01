@@ -518,6 +518,163 @@ describe('WorkspaceSessionProvider targets', () => {
     expect(mocks.providerMounts).toBe(1);
   });
 
+  it('accepts normalized daemon ids when unarchiving a mixed-case deep link', async () => {
+    mocks.workspace = {
+      ...mocks.workspace,
+      capabilities: {
+        workspaceCwd: '/work/a',
+        features: ['standalone_sessions_v1'],
+        workspaces: [{ id: 'a', cwd: '/work/a', primary: true, trusted: true }],
+      },
+      client: {
+        getStandaloneSession: mocks.getStandaloneSession,
+        unarchiveStandaloneSessions: mocks.unarchiveStandaloneSessions,
+      },
+    };
+    mocks.getStandaloneSession.mockResolvedValue({
+      sessionId: 'standalone-a',
+      sourceType: 'standalone',
+      context: { kind: 'standalone' },
+      isArchived: true,
+    });
+    mocks.unarchiveStandaloneSessions.mockResolvedValue({
+      unarchived: ['standalone-a'],
+      alreadyActive: [],
+      resolvedConflicts: [],
+      notFound: [],
+      errors: [],
+    });
+
+    await act(async () => {
+      root.render(
+        <WorkspaceSessionProvider
+          sessionId="Standalone-A"
+          sessionContext={{ kind: 'standalone' }}
+          webShellProps={{}}
+        />,
+      );
+    });
+    await vi.waitFor(() =>
+      expect(container.textContent).toContain('This conversation is archived'),
+    );
+    const unarchive = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Unarchive',
+    );
+
+    await act(async () => unarchive?.click());
+
+    expect(mocks.unarchiveStandaloneSessions).toHaveBeenCalledWith([
+      'Standalone-A',
+    ]);
+    expect(mocks.providerMounts).toBe(1);
+  });
+
+  it('ignores a stale unarchive result after navigating to another standalone session', async () => {
+    let resolveUnarchive!: (value: {
+      unarchived: string[];
+      alreadyActive: string[];
+      resolvedConflicts: string[];
+      notFound: string[];
+      errors: Array<{ sessionId: string; message: string }>;
+    }) => void;
+    let resolveNextLookup!: (value: {
+      sessionId: string;
+      sourceType: 'standalone';
+      context: { kind: 'standalone' };
+      isArchived: boolean;
+    }) => void;
+    const unarchivePromise = new Promise<
+      Parameters<typeof resolveUnarchive>[0]
+    >((resolve) => {
+      resolveUnarchive = resolve;
+    });
+    const nextLookupPromise = new Promise<
+      Parameters<typeof resolveNextLookup>[0]
+    >((resolve) => {
+      resolveNextLookup = resolve;
+    });
+    mocks.workspace = {
+      ...mocks.workspace,
+      capabilities: {
+        workspaceCwd: '/work/a',
+        features: ['standalone_sessions_v1'],
+        workspaces: [{ id: 'a', cwd: '/work/a', primary: true, trusted: true }],
+      },
+      client: {
+        getStandaloneSession: mocks.getStandaloneSession,
+        unarchiveStandaloneSessions: mocks.unarchiveStandaloneSessions,
+      },
+    };
+    mocks.getStandaloneSession.mockImplementation((requestedSessionId) =>
+      requestedSessionId === 'standalone-a'
+        ? Promise.resolve({
+            sessionId: 'standalone-a',
+            sourceType: 'standalone',
+            context: { kind: 'standalone' },
+            isArchived: true,
+          })
+        : nextLookupPromise,
+    );
+    mocks.unarchiveStandaloneSessions.mockReturnValue(unarchivePromise);
+
+    await act(async () => {
+      root.render(
+        <WorkspaceSessionProvider
+          sessionId="standalone-a"
+          sessionContext={{ kind: 'standalone' }}
+          webShellProps={{}}
+        />,
+      );
+    });
+    await vi.waitFor(() =>
+      expect(container.textContent).toContain('This conversation is archived'),
+    );
+    const unarchive = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Unarchive',
+    );
+    act(() => unarchive?.click());
+
+    await act(async () => {
+      root.render(
+        <WorkspaceSessionProvider
+          sessionId="standalone-b"
+          sessionContext={{ kind: 'standalone' }}
+          webShellProps={{}}
+        />,
+      );
+    });
+    await vi.waitFor(() =>
+      expect(mocks.getStandaloneSession).toHaveBeenCalledWith('standalone-b'),
+    );
+    await act(async () => {
+      resolveUnarchive({
+        unarchived: ['standalone-a'],
+        alreadyActive: [],
+        resolvedConflicts: [],
+        notFound: [],
+        errors: [],
+      });
+      await unarchivePromise;
+    });
+
+    expect(container.textContent).toContain('Opening conversation');
+    expect(mocks.providerMounts).toBe(0);
+
+    await act(async () => {
+      resolveNextLookup({
+        sessionId: 'standalone-b',
+        sourceType: 'standalone',
+        context: { kind: 'standalone' },
+        isArchived: true,
+      });
+      await nextLookupPromise;
+    });
+    await vi.waitFor(() =>
+      expect(container.textContent).toContain('This conversation is archived'),
+    );
+    expect(mocks.providerMounts).toBe(0);
+  });
+
   it('shows not found when an archived deep link disappears during unarchive', async () => {
     mocks.workspace = {
       ...mocks.workspace,
