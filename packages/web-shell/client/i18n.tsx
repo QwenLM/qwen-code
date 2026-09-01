@@ -3403,6 +3403,7 @@ const ZH: Messages = {
   'toolName.todo_write': '任务清单',
   'toolName.get_goal': '目标',
   'toolName.update_goal': '更新目标',
+  'toolName.propose_goal': '提议目标',
   'toolName.save_memory': '保存记忆',
   'toolName.agent': '智能体',
   'toolName.skill': '查看技能',
