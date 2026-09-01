@@ -32,6 +32,7 @@ import {
   PromptDeadlineExceededError,
   resolvePromptDeadlineMs,
 } from './server.js';
+import { withSessionWorkflowWriteLock } from './routes/workspace-settings.js';
 import {
   invalidateWorkspaceSessionListCache,
   listLiveWorkspaceSessionsForResponse,
@@ -103,7 +104,10 @@ import {
 } from '@qwen-code/qwen-code-core';
 import * as qwenCore from '@qwen-code/qwen-code-core';
 import type { DaemonStatusProvider } from '@qwen-code/acp-bridge';
-import { BridgeTimeoutError } from '@qwen-code/acp-bridge/status';
+import {
+  BridgeTimeoutError,
+  SERVE_CONTROL_EXT_METHODS,
+} from '@qwen-code/acp-bridge/status';
 import {
   CancelSentinelCollisionError,
   InvalidClientIdError,
@@ -4486,6 +4490,86 @@ describe('createServeApp', () => {
       expect(after.status).toBe(200);
       expect(after.body.features).toContain('multi_workspace_sessions');
       expect(after.body.workspaces).toHaveLength(2);
+    });
+
+    it('fans a user-scope Session Workflow write out to sibling workspace bridges (R6-4)', async () => {
+      // A user-scope write persists to the global user file and flips the
+      // gate for every workspace, but each runtime owns its own bridge. The
+      // legacy route's push must reach the sibling runtimes too, not just
+      // the primary.
+      const primaryInvoke = vi.fn().mockResolvedValue(undefined);
+      const secondaryInvoke = vi.fn().mockResolvedValue(undefined);
+      const primaryBridge = {
+        ...fakeBridge(),
+        invokeWorkspaceCommand: primaryInvoke,
+        publishWorkspaceEvent: vi.fn(),
+      } as unknown as AcpSessionBridge;
+      const secondaryBridge = {
+        invokeWorkspaceCommand: secondaryInvoke,
+      } as unknown as AcpSessionBridge;
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'primary-id',
+          workspaceCwd: WS_BOUND,
+          primary: true,
+          bridge: primaryBridge,
+        }),
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'secondary-id',
+          workspaceCwd: '/workspace/secondary',
+          primary: false,
+          bridge: secondaryBridge,
+        }),
+      ]);
+      const app = createServeApp({ ...baseOpts, token: 'secret' }, undefined, {
+        bridge: primaryBridge,
+        workspaceRegistry: registry,
+        persistSetting: vi.fn(async () => undefined),
+      });
+
+      let releaseSiblingWrite!: () => void;
+      let siblingWriteStarted!: () => void;
+      const siblingWriteReady = new Promise<void>((resolve) => {
+        siblingWriteStarted = resolve;
+      });
+      const siblingWriteBlocked = new Promise<void>((resolve) => {
+        releaseSiblingWrite = resolve;
+      });
+      const heldSiblingWrite = withSessionWorkflowWriteLock(
+        '/workspace/secondary',
+        async () => {
+          siblingWriteStarted();
+          await siblingWriteBlocked;
+        },
+      );
+      await siblingWriteReady;
+
+      const response = request(app)
+        .post('/workspace/settings')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .send({
+          scope: 'user',
+          key: 'experimental.sessionWorkflow',
+          value: true,
+        })
+        .then((res) => res);
+
+      await vi.waitFor(() => expect(primaryInvoke).toHaveBeenCalled());
+      expect(secondaryInvoke).not.toHaveBeenCalled();
+      releaseSiblingWrite();
+      const res = await response;
+      await heldSiblingWrite;
+
+      expect(res.status).toBe(200);
+      expect(primaryInvoke).toHaveBeenCalledWith(
+        SERVE_CONTROL_EXT_METHODS.workspaceSessionWorkflow,
+        { enabled: expect.any(Boolean) },
+      );
+      expect(secondaryInvoke).toHaveBeenCalledWith(
+        SERVE_CONTROL_EXT_METHODS.workspaceSessionWorkflow,
+        { enabled: expect.any(Boolean) },
+      );
     });
 
     it('classifies the daemon-owned Live runtime without exposing provenance', async () => {

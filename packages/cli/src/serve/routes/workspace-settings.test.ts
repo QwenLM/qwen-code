@@ -11,7 +11,7 @@ import {
   registerWorkspaceQualifiedSettingsRoutes,
   registerWorkspaceSettingsRoutes,
 } from './workspace-settings.js';
-import { loadSettings } from '../../config/settings.js';
+import { loadSettings, type SettingScope } from '../../config/settings.js';
 import { WorkspaceGenerationClosedError } from '../workspace-registry.js';
 
 vi.mock('../../config/settings.js', async (importOriginal) => {
@@ -33,15 +33,49 @@ function makeApp(
   overrides: {
     captureGenerationAssertion?: () => (() => void) | undefined;
     afterPersist?: () => void;
+    userSettings?: Record<string, unknown>;
+    workspaceSettings?: Record<string, unknown>;
   } = {},
 ) {
   const app = express();
   app.use(express.json());
 
+  // The route derives the live Session Workflow value from the post-write
+  // merged settings, so tests that exercise it seed the scopes `loadSettings`
+  // should report. Only applied when seeded, so tests that install their own
+  // `loadSettings` mock after makeApp() keep control of it.
+  if (overrides.userSettings || overrides.workspaceSettings) {
+    const user = structuredClone(overrides.userSettings ?? {});
+    const workspace = structuredClone(overrides.workspaceSettings ?? {});
+    // Mirror the real precedence (workspace over user), merging one level deep
+    // so sibling keys under `experimental` are not lost.
+    const merged: Record<string, unknown> = { ...user };
+    for (const [key, value] of Object.entries(workspace)) {
+      const base = merged[key];
+      merged[key] =
+        base &&
+        typeof base === 'object' &&
+        !Array.isArray(base) &&
+        value &&
+        typeof value === 'object' &&
+        !Array.isArray(value)
+          ? { ...(base as object), ...(value as object) }
+          : value;
+    }
+    vi.mocked(loadSettings).mockReturnValue({
+      merged,
+      user: { settings: user },
+      workspace: { settings: workspace },
+      forScope: vi.fn().mockReturnValue({ settings: {} }),
+    } as never);
+  }
+
   const persistSetting = vi.fn(async () => {
     overrides.afterPersist?.();
   });
+  const updateSessionWorkflow = vi.fn().mockResolvedValue(undefined);
   const broadcastSettingsChanged = vi.fn();
+  const updateSiblingSessionWorkflows = vi.fn().mockResolvedValue(undefined);
 
   registerWorkspaceSettingsRoutes(app, {
     boundWorkspace: '/workspace',
@@ -49,20 +83,39 @@ function makeApp(
     safeBody: (req) =>
       req.body && typeof req.body === 'object' ? req.body : {},
     persistSetting,
+    updateSessionWorkflow,
+    updateSiblingSessionWorkflows,
     broadcastSettingsChanged,
     parseAndValidateClientId: () => undefined,
     captureGenerationAssertion: overrides.captureGenerationAssertion,
     includeLiveVoice: true,
   });
 
-  return { app, persistSetting, broadcastSettingsChanged };
+  return {
+    app,
+    persistSetting,
+    updateSessionWorkflow,
+    updateSiblingSessionWorkflows,
+    broadcastSettingsChanged,
+  };
 }
 
 /** Minimal registry for the workspace-qualified routes: one active, trusted entry. */
-function makeQualifiedApp() {
+function makeQualifiedApp(
+  overrides: {
+    invokeWorkspaceCommand?: (
+      method: string,
+      params: Record<string, unknown>,
+    ) => Promise<unknown>;
+  } = {},
+) {
   const app = express();
   app.use(express.json());
   const persistSetting = vi.fn(async () => {});
+  const invokeWorkspaceCommand =
+    overrides.invokeWorkspaceCommand ?? vi.fn().mockResolvedValue(undefined);
+  const publishWorkspaceEvent = vi.fn();
+  const invalidateServeFeaturesCache = vi.fn();
   const registry = {
     getEntryByWorkspaceId: (selector: string) =>
       selector === 'primary'
@@ -72,7 +125,10 @@ function makeQualifiedApp() {
               runtime: {
                 trusted: true,
                 workspaceCwd: '/workspace',
-                bridge: {},
+                bridge: {
+                  invokeWorkspaceCommand,
+                  publishWorkspaceEvent,
+                },
                 generationGuard: undefined,
               },
             },
@@ -88,13 +144,241 @@ function makeQualifiedApp() {
     workspaceRegistry: registry as unknown as Parameters<
       typeof registerWorkspaceQualifiedSettingsRoutes
     >[1]['workspaceRegistry'],
-    invalidateServeFeaturesCache: () => {},
+    invalidateServeFeaturesCache,
   });
 
-  return { app, persistSetting };
+  return {
+    app,
+    persistSetting,
+    invokeWorkspaceCommand,
+    publishWorkspaceEvent,
+    invalidateServeFeaturesCache,
+  };
 }
 
 describe('POST /workspace/settings', () => {
+  it('updates live sessions when Session Workflow changes', async () => {
+    // Seeded as the post-write state: the route reads back the effective value.
+    const { app, updateSessionWorkflow } = makeApp({
+      workspaceSettings: { experimental: { sessionWorkflow: true } },
+    });
+
+    const res = await request(app).post('/workspace/settings').send({
+      scope: 'workspace',
+      key: 'experimental.sessionWorkflow',
+      value: true,
+    });
+
+    expect(res.status).toBe(200);
+    expect(updateSessionWorkflow).toHaveBeenCalledWith(true);
+  });
+
+  it('still broadcasts when the live Session Workflow push fails after persist', async () => {
+    // The persist succeeded (the file now carries the new value) but the
+    // push to live sessions failed with a generic transport error (bridge
+    // channel closed, push timeout — anything that is not
+    // SessionNotFoundError). The requester gets the 500, but every other
+    // observer must still hear about the disk change instead of staying
+    // stale until the next write or daemon restart.
+    const {
+      app,
+      updateSessionWorkflow,
+      broadcastSettingsChanged,
+      persistSetting,
+    } = makeApp({
+      workspaceSettings: { experimental: { sessionWorkflow: true } },
+    });
+    updateSessionWorkflow.mockRejectedValueOnce(new Error('channel closed'));
+
+    const res = await request(app).post('/workspace/settings').send({
+      scope: 'workspace',
+      key: 'experimental.sessionWorkflow',
+      value: true,
+    });
+
+    expect(res.status).toBe(500);
+    expect(res.body).toMatchObject({ code: 'runtime_update_error' });
+    expect(persistSetting).toHaveBeenCalledTimes(1);
+    expect(updateSessionWorkflow).toHaveBeenCalledWith(true);
+    expect(broadcastSettingsChanged).toHaveBeenCalledWith(
+      'experimental.sessionWorkflow',
+      true,
+      'workspace',
+      undefined,
+    );
+  });
+
+  it('still fans out a user write when the primary live push fails', async () => {
+    const { app, updateSessionWorkflow, updateSiblingSessionWorkflows } =
+      makeApp({
+        workspaceSettings: { experimental: { sessionWorkflow: true } },
+      });
+    updateSessionWorkflow.mockRejectedValueOnce(new Error('channel closed'));
+
+    const res = await request(app).post('/workspace/settings').send({
+      scope: 'user',
+      key: 'experimental.sessionWorkflow',
+      value: true,
+    });
+
+    expect(res.status).toBe(500);
+    expect(updateSiblingSessionWorkflows).toHaveBeenCalledOnce();
+  });
+
+  it('applies the effective value when a user write is shadowed by workspace', async () => {
+    // A user-scoped write persists to the user file but stays shadowed by the
+    // workspace value, so live sessions must keep following the merged value.
+    const { app, updateSessionWorkflow, persistSetting } = makeApp({
+      workspaceSettings: { experimental: { sessionWorkflow: true } },
+    });
+
+    const res = await request(app).post('/workspace/settings').send({
+      scope: 'user',
+      key: 'experimental.sessionWorkflow',
+      value: false,
+    });
+
+    expect(res.status).toBe(200);
+    expect(persistSetting).toHaveBeenCalled();
+    expect(updateSessionWorkflow).toHaveBeenCalledWith(true);
+    expect(updateSessionWorkflow).not.toHaveBeenCalledWith(false);
+  });
+
+  it('fans a user-scope Session Workflow write out to sibling workspaces', async () => {
+    // A user-scope write lands in the global user file and flips the gate
+    // for every workspace; the route must fan the re-derivation out to the
+    // non-primary runtimes after the primary push succeeds.
+    const { app, updateSiblingSessionWorkflows } = makeApp({
+      workspaceSettings: { experimental: { sessionWorkflow: true } },
+    });
+
+    const res = await request(app).post('/workspace/settings').send({
+      scope: 'user',
+      key: 'experimental.sessionWorkflow',
+      value: true,
+    });
+
+    expect(res.status).toBe(200);
+    expect(updateSiblingSessionWorkflows).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not fan out a workspace-scope Session Workflow write', async () => {
+    // A workspace-scope write only touches this workspace's file; siblings
+    // keep their own value, so no fan-out may fire.
+    const { app, updateSiblingSessionWorkflows } = makeApp({
+      workspaceSettings: { experimental: { sessionWorkflow: true } },
+    });
+
+    const res = await request(app).post('/workspace/settings').send({
+      scope: 'workspace',
+      key: 'experimental.sessionWorkflow',
+      value: true,
+    });
+
+    expect(res.status).toBe(200);
+    expect(updateSiblingSessionWorkflows).not.toHaveBeenCalled();
+  });
+
+  it('holds a second Session Workflow write until the first write finished its live push', async () => {
+    // The daemon-side settings lock only covers the persist; the readback +
+    // live push happen after it. The route must serialize the whole
+    // persist → readback → push critical section per workspace, otherwise a
+    // second write's persist + push can overtake the first write's push and
+    // live sessions end on a value that contradicts the file.
+    const app = express();
+    app.use(express.json());
+
+    let diskValue = false;
+    vi.mocked(loadSettings).mockImplementation(
+      () =>
+        ({
+          get merged() {
+            return { experimental: { sessionWorkflow: diskValue } };
+          },
+          user: { settings: {} },
+          workspace: { settings: {} },
+          forScope: vi.fn().mockReturnValue({ settings: {} }),
+        }) as never,
+    );
+
+    let releaseFirstPush: (() => void) | undefined;
+    const firstPushBlocked = new Promise<void>((resolve) => {
+      releaseFirstPush = resolve;
+    });
+    const persistedValues: boolean[] = [];
+    const persistSetting = vi.fn(
+      async (
+        _workspace: string,
+        _scope: SettingScope,
+        _key: string,
+        value: unknown,
+      ) => {
+        persistedValues.push(value === true);
+        diskValue = value === true;
+      },
+    );
+    const pushedValues: boolean[] = [];
+    const updateSessionWorkflow = vi.fn(async (enabled: boolean) => {
+      if (pushedValues.length === 0) {
+        // Hold the first live push; the second write must not be able to
+        // start its persist while this push is still in flight.
+        await firstPushBlocked;
+      }
+      pushedValues.push(enabled);
+    });
+
+    registerWorkspaceSettingsRoutes(app, {
+      boundWorkspace: '/workspace',
+      mutate: () => (_req, _res, next) => next(),
+      safeBody: (req) =>
+        req.body && typeof req.body === 'object' ? req.body : {},
+      persistSetting,
+      updateSessionWorkflow,
+      broadcastSettingsChanged: vi.fn(),
+      parseAndValidateClientId: () => undefined,
+    });
+
+    // supertest requests are lazy until consumed; `.then()` both starts the
+    // request and yields a plain promise we can await later.
+    const first = request(app)
+      .post('/workspace/settings')
+      .send({
+        scope: 'workspace',
+        key: 'experimental.sessionWorkflow',
+        value: false,
+      })
+      .then((res) => res);
+    await vi.waitFor(() =>
+      expect(updateSessionWorkflow).toHaveBeenCalledTimes(1),
+    );
+
+    const second = request(app)
+      .post('/workspace/settings')
+      .send({
+        scope: 'workspace',
+        key: 'experimental.sessionWorkflow',
+        value: true,
+      })
+      .then((res) => res);
+    // Give the second request time to reach the route handler. Without the
+    // write-chain it would persist (and push) right here, overtaking the
+    // first write's in-flight push.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(persistSetting).toHaveBeenCalledTimes(1);
+
+    releaseFirstPush!();
+    const [firstRes, secondRes] = await Promise.all([first, second]);
+    expect(firstRes.status).toBe(200);
+    expect(secondRes.status).toBe(200);
+
+    // Persists, readbacks, and pushes all serialized in request order: each
+    // push carries its own post-write effective value and the final disk
+    // state (true) is the final pushed state.
+    expect(persistedValues).toEqual([false, true]);
+    expect(pushedValues).toEqual([false, true]);
+    expect(diskValue).toBe(true);
+  });
+
   it('exposes the Live shortcut as user-global and rejects generic writes', async () => {
     vi.mocked(loadSettings).mockReturnValue({
       merged: { experimental: { liveVoice: { shortcut: 'Command+W' } } },
@@ -567,5 +851,53 @@ describe('POST /workspaces/:workspace/settings', () => {
     expect(res.status).toBe(400);
     expect(res.body).toMatchObject({ code: 'workspace_restricted_setting' });
     expect(persistSetting).not.toHaveBeenCalled();
+  });
+
+  it('still publishes settings_changed when the live Session Workflow push fails after persist', async () => {
+    // Same contract as the legacy route: the on-disk value changed, so the
+    // qualified route must invalidate the serve-features cache and publish
+    // settings_changed even though the requester got the push-failure 500.
+    vi.mocked(loadSettings).mockReturnValue({
+      merged: { experimental: { sessionWorkflow: true } },
+      user: { settings: {} },
+      workspace: { settings: {} },
+      forScope: vi.fn().mockReturnValue({ settings: {} }),
+    } as never);
+    const {
+      app,
+      persistSetting,
+      invokeWorkspaceCommand,
+      publishWorkspaceEvent,
+      invalidateServeFeaturesCache,
+    } = makeQualifiedApp({
+      invokeWorkspaceCommand: vi
+        .fn()
+        .mockRejectedValue(new Error('bridge channel closed')),
+    });
+
+    const res = await request(app).post('/workspaces/primary/settings').send({
+      scope: 'workspace',
+      key: 'experimental.sessionWorkflow',
+      value: true,
+    });
+
+    expect(res.status).toBe(500);
+    expect(res.body).toMatchObject({ code: 'runtime_update_error' });
+    expect(persistSetting).toHaveBeenCalledTimes(1);
+    expect(invokeWorkspaceCommand).toHaveBeenCalledWith(
+      'qwen/control/workspace/session-workflow',
+      { enabled: true },
+    );
+    expect(invalidateServeFeaturesCache).toHaveBeenCalledTimes(1);
+    expect(publishWorkspaceEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'settings_changed',
+        data: {
+          key: 'experimental.sessionWorkflow',
+          value: true,
+          scope: 'workspace',
+        },
+      }),
+    );
   });
 });
