@@ -13274,6 +13274,63 @@ describe('createServeApp', () => {
       }
     });
 
+    it('persists the canonical worktree path returned by relocation', async () => {
+      const createdPath = `${WS_BOUND}/.qwen/worktrees/my-task-link`;
+      const canonicalPath = `${WS_BOUND}/.qwen/worktrees/my-task`;
+      const bridge = fakeBridge({
+        changeSessionCwdImpl: async (sessionId) => ({
+          sessionId,
+          previousCwd: WS_BOUND,
+          newCwd: canonicalPath,
+          warnings: [],
+        }),
+      });
+      const createMarker = vi.fn().mockResolvedValue(undefined);
+      const writeSidecar = vi.fn().mockResolvedValue(undefined);
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      mockWt.impl = () => ({
+        isGitRepository: () => Promise.resolve(true),
+        getCurrentBranch: () => Promise.resolve('main'),
+        createUserWorktree: () =>
+          Promise.resolve({
+            success: true,
+            worktree: {
+              path: createdPath,
+              branch: 'worktree-my-task',
+            },
+          }),
+      });
+      mockWt.realpath = (candidate) =>
+        candidate === createdPath ? canonicalPath : candidate;
+      mockWt.createMarker = createMarker;
+      mockWt.writeSidecar = writeSidecar;
+
+      try {
+        const res = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ worktree: { slug: 'my-task' } });
+
+        expect(res.status).toBe(200);
+        expect(res.body.worktree.path).toBe(canonicalPath);
+        expect(bridge.changeSessionCwdCalls[0]?.path).toBe(createdPath);
+        expect(createMarker).toHaveBeenCalledWith(canonicalPath, 'fake-0');
+        expect(writeSidecar).toHaveBeenCalledWith(
+          expect.stringMatching(/fake-0\.worktree\.json$/),
+          expect.objectContaining({ worktreePath: canonicalPath }),
+        );
+      } finally {
+        mockWt.createMarker = undefined;
+        mockWt.writeSidecar = undefined;
+        mockWt.realpath = undefined;
+        mockWt.impl = undefined;
+      }
+    });
+
     it('authorizes both workspace and repository worktree roots on create', async () => {
       const repoRoot = '/work';
       const worktreePath = `${repoRoot}/.qwen/worktrees/my-task`;
@@ -13464,6 +13521,7 @@ describe('createServeApp', () => {
 
           expect(res.status).toBe(500);
           expect(res.body.code).toBe('worktree_persistence_failed');
+          expect(bridge.changeSessionCwdCalls).toHaveLength(1);
           expect(bridge.killCalls).toEqual([
             {
               sessionId: 'fake-0',
@@ -13514,6 +13572,7 @@ describe('createServeApp', () => {
 
         expect(res.status).toBe(500);
         expect(res.body.code).toBe('worktree_persistence_failed');
+        expect(bridge.changeSessionCwdCalls).toHaveLength(1);
         expect(bridge.killCalls).toEqual([
           {
             sessionId: 'fake-0',
@@ -13565,6 +13624,7 @@ describe('createServeApp', () => {
 
         expect(res.status).toBe(500);
         expect(res.body.code).toBe('worktree_persistence_failed');
+        expect(bridge.changeSessionCwdCalls).toHaveLength(1);
         expect(removed).toEqual([]);
       } finally {
         mockWt.writeSidecar = undefined;
@@ -14805,6 +14865,9 @@ describe('createServeApp', () => {
         expect(bridge.loadCalls[0]).not.toHaveProperty(
           'deferRestoreAskUserQuestionPrompt',
         );
+        expect(
+          bridge.fireDeferredRestoreAskUserQuestionPromptCalls,
+        ).toHaveLength(0);
       } finally {
         readCreationMetadata.mockRestore();
       }
@@ -14836,6 +14899,9 @@ describe('createServeApp', () => {
         expect(bridge.loadCalls[0]).not.toHaveProperty(
           'deferRestoreAskUserQuestionPrompt',
         );
+        expect(
+          bridge.fireDeferredRestoreAskUserQuestionPromptCalls,
+        ).toHaveLength(0);
       } finally {
         readCreationMetadata.mockRestore();
       }
@@ -16036,6 +16102,7 @@ describe('createServeApp', () => {
           worktreePath: `${WS_BOUND}/.qwen/worktrees/my-task`,
           worktreeBranch: 'worktree-my-task',
           originalCwd: WS_BOUND,
+          workspaceCwd: WS_BOUND,
           originalBranch: 'main',
           originalHeadCommit: 'abc123',
         });
@@ -16098,7 +16165,7 @@ describe('createServeApp', () => {
 
         expect(res.status).toBe(200);
         expect(res.body.worktree).toMatchObject({ path: worktreePath });
-        expect(res.body.worktreeState).toBe('persisted-v1');
+        expect(res.body.worktreeState).toBeUndefined();
         expect(bridge.changeSessionCwdCalls[0]?.allowedRoots).toEqual([
           `${WS_BOUND}/.qwen/worktrees`,
           `${repoRoot}/.qwen/worktrees`,
@@ -16129,6 +16196,9 @@ describe('createServeApp', () => {
         undefined,
         { bridge },
       );
+      const readCreationMetadata = vi
+        .spyOn(SessionService.prototype, 'readCreationMetadata')
+        .mockResolvedValue({ sourceType: 'channel', sourceId: 'telegram' });
       mockWt.realpath = (p) => p;
       mockWt.readMarker = () =>
         Promise.resolve({ state: 'valid', sessionId: 'wt-session' });
@@ -16149,7 +16219,10 @@ describe('createServeApp', () => {
           .send({ cwd: WS_BOUND });
 
         expect(res.status).toBe(200);
-        expect(res.body.worktreeState).toBe('persisted-v1');
+        expect(res.body.worktreeState).toBeUndefined();
+        expect(bridge.loadCalls[0]).not.toHaveProperty(
+          'suppressWorktreeContextRestore',
+        );
         expect(bridge.changeSessionCwdCalls).toHaveLength(0);
         expect(bridge.detachCalls).toHaveLength(0);
         expect(bridge.setSessionWorktreeCalls).toHaveLength(1);
@@ -16157,6 +16230,52 @@ describe('createServeApp', () => {
         mockWt.readSidecar = undefined;
         mockWt.readMarker = undefined;
         mockWt.realpath = undefined;
+        readCreationMetadata.mockRestore();
+      }
+    });
+
+    it('keeps a Channel restore compatible when generic cleanup removes a stale legacy sidecar', async () => {
+      const bridge = fakeBridge();
+      const readCreationMetadata = vi
+        .spyOn(SessionService.prototype, 'readCreationMetadata')
+        .mockResolvedValue({ sourceType: 'channel', sourceId: 'telegram' });
+      const sidecar = {
+        slug: 'stale-task',
+        worktreePath: `${WS_BOUND}/.qwen/worktrees/stale-task`,
+        worktreeBranch: 'worktree-stale-task',
+        originalCwd: WS_BOUND,
+        originalBranch: 'main',
+        originalHeadCommit: 'abc123',
+      };
+      let sidecarReads = 0;
+      mockWt.readSidecarStrict = () =>
+        Promise.resolve(
+          sidecarReads++ === 0
+            ? { state: 'valid', session: sidecar }
+            : { state: 'missing' },
+        );
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      try {
+        const res = await request(app)
+          .post('/session/stale-session/load')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ cwd: WS_BOUND });
+
+        expect(res.status).toBe(200);
+        expect(res.body.worktree).toBeUndefined();
+        expect(res.body.worktreeState).toBeUndefined();
+        expect(bridge.loadCalls[0]).not.toHaveProperty(
+          'suppressWorktreeContextRestore',
+        );
+        expect(sidecarReads).toBe(2);
+      } finally {
+        mockWt.readSidecarStrict = undefined;
+        readCreationMetadata.mockRestore();
       }
     });
 
@@ -16276,6 +16395,65 @@ describe('createServeApp', () => {
       }
     });
 
+    it('fails closed when a detached active route-owned session reports another cwd', async () => {
+      const worktreePath = `${WS_BOUND}/.qwen/worktrees/my-task`;
+      const bridge = fakeBridge({
+        loadImpl: async (req) => ({
+          sessionId: req.sessionId,
+          workspaceCwd: req.workspaceCwd,
+          currentCwd: WS_BOUND,
+          attached: false,
+          clientId: 'restored-client',
+          state: {},
+          hasActivePrompt: true,
+        }),
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const readCreationMetadata = vi
+        .spyOn(SessionService.prototype, 'readCreationMetadata')
+        .mockResolvedValue({ sourceType: 'channel', sourceId: 'telegram' });
+      mockWt.realpath = (candidate) => candidate;
+      mockWt.readMarker = () =>
+        Promise.resolve({ state: 'valid', sessionId: 'wt-session' });
+      mockWt.readSidecar = () =>
+        Promise.resolve({
+          slug: 'my-task',
+          worktreePath,
+          worktreeBranch: 'worktree-my-task',
+          originalCwd: WS_BOUND,
+          workspaceCwd: WS_BOUND,
+          originalBranch: 'main',
+          originalHeadCommit: 'abc123',
+        });
+
+      try {
+        const res = await request(app)
+          .post('/session/wt-session/load')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ cwd: WS_BOUND });
+
+        expect(res.status).toBe(500);
+        expect(res.body.error).toBe('Active session is outside its worktree');
+        expect(bridge.changeSessionCwdCalls).toHaveLength(0);
+        expect(bridge.setSessionWorktreeCalls).toHaveLength(0);
+        expect(bridge.killCalls).toEqual([
+          {
+            sessionId: 'wt-session',
+            opts: { requireZeroAttaches: true },
+          },
+        ]);
+      } finally {
+        mockWt.readSidecar = undefined;
+        mockWt.readMarker = undefined;
+        mockWt.realpath = undefined;
+        readCreationMetadata.mockRestore();
+      }
+    });
+
     it('relocates a cold Channel restore before firing its deferred question', async () => {
       const worktreePath = `${WS_BOUND}/.qwen/worktrees/my-task`;
       let relocated = false;
@@ -16386,7 +16564,7 @@ describe('createServeApp', () => {
       }
     });
 
-    it('fails closed when a legacy sidecar names a foreign original workspace', async () => {
+    it('does not attest a legacy sidecar from another workspace', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(
         { ...baseOpts, workspace: WS_BOUND },
@@ -16412,7 +16590,8 @@ describe('createServeApp', () => {
           .set('Host', `127.0.0.1:${baseOpts.port}`)
           .send({ cwd: WS_BOUND });
 
-        expect(res.status).toBe(500);
+        expect(res.status).toBe(200);
+        expect(res.body.worktreeState).toBeUndefined();
         expect(bridge.changeSessionCwdCalls).toHaveLength(0);
         expect(bridge.setSessionWorktreeCalls).toHaveLength(0);
       } finally {
@@ -16461,10 +16640,15 @@ describe('createServeApp', () => {
             .set('Host', `127.0.0.1:${baseOpts.port}`)
             .send({ cwd: WS_BOUND });
 
-          expect(res.status).toBe(500);
-          expect(res.body.error).toBe(
-            'Worktree sidecar workspace is missing or inaccessible',
-          );
+          expect(res.status).toBe(field === 'workspaceCwd' ? 500 : 200);
+          if (field === 'workspaceCwd') {
+            expect(res.body.error).toBe(
+              'Worktree sidecar workspace is missing or inaccessible',
+            );
+          } else {
+            expect(res.body.worktree).toBeUndefined();
+            expect(res.body.worktreeState).toBeUndefined();
+          }
           expect(JSON.stringify(res.body)).not.toContain(missingPath);
           expect(bridge.changeSessionCwdCalls).toHaveLength(0);
           expect(bridge.setSessionWorktreeCalls).toHaveLength(0);
@@ -16585,6 +16769,7 @@ describe('createServeApp', () => {
           worktreePath: `${WS_BOUND}/.qwen/worktrees/my-task`,
           worktreeBranch: 'worktree-my-task',
           originalCwd: WS_BOUND,
+          workspaceCwd: WS_BOUND,
           originalBranch: 'main',
           originalHeadCommit: 'abc123',
         });
@@ -16635,6 +16820,7 @@ describe('createServeApp', () => {
           worktreePath: `${WS_BOUND}/.qwen/worktrees/my-task`,
           worktreeBranch: 'worktree-my-task',
           originalCwd: WS_BOUND,
+          workspaceCwd: WS_BOUND,
           originalBranch: 'main',
           originalHeadCommit: 'abc123',
         });
@@ -16677,6 +16863,7 @@ describe('createServeApp', () => {
           worktreePath: `${WS_BOUND}/.qwen/worktrees/dead-task`,
           worktreeBranch: 'worktree-dead-task',
           originalCwd: WS_BOUND,
+          workspaceCwd: WS_BOUND,
           originalBranch: 'main',
           originalHeadCommit: 'abc123',
         });
@@ -16726,6 +16913,7 @@ describe('createServeApp', () => {
           worktreePath: `${WS_BOUND}/.qwen/worktrees/my-task`,
           worktreeBranch: 'worktree-my-task',
           originalCwd: WS_BOUND,
+          workspaceCwd: WS_BOUND,
           originalBranch: 'main',
           originalHeadCommit: 'abc123',
         });
@@ -16769,6 +16957,7 @@ describe('createServeApp', () => {
           worktreePath,
           worktreeBranch: 'worktree-missing-task',
           originalCwd: WS_BOUND,
+          workspaceCwd: WS_BOUND,
           originalBranch: 'main',
           originalHeadCommit: 'abc123',
         });
@@ -16804,6 +16993,7 @@ describe('createServeApp', () => {
           worktreePath: '/etc/passwd',
           worktreeBranch: 'worktree-escape',
           originalCwd: WS_BOUND,
+          workspaceCwd: WS_BOUND,
           originalBranch: 'main',
           originalHeadCommit: 'abc123',
         });

@@ -954,6 +954,7 @@ describe('SessionRouter', () => {
 
     it('rejects divergent worktree attestation when rebinding a live task', async () => {
       const worktreePath = '/tmp/worktree-task';
+      const discardSession = vi.fn().mockResolvedValue(undefined);
       const listSessions = vi.fn().mockReturnValue([
         {
           sessionId: 'worktree-session',
@@ -969,6 +970,7 @@ describe('SessionRouter', () => {
       ]);
       const managedBridge = {
         ...mockBridge(),
+        discardSession,
         listSessions,
         newSession: vi.fn().mockResolvedValue('worktree-session'),
       } satisfies ChannelAgentBridge;
@@ -1010,6 +1012,7 @@ describe('SessionRouter', () => {
         ),
       ).rejects.toThrow('did not attest');
       expect(managedBridge.loadSession).not.toHaveBeenCalled();
+      expect(discardSession).not.toHaveBeenCalled();
       expect(router.getSessionCwd('worktree-session')).toBe(worktreePath);
     });
 

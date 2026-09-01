@@ -447,21 +447,23 @@ repair/retry. If an absent sidecar is indistinguishable from an ordinary shared
 session at the route, the Channel bridge/SDK response validator performs the
 same client detach before it rejects the missing attestation.
 
-For Channel-owned restores, the daemon route also sets an internal ACP metadata
-flag that suppresses the generic best-effort worktree restore performed by the
-ACP agent. That best-effort path clears sidecars it deems invalid, so
-suppressing it is what keeps Channel restore failure non-destructive. The route
-then owns the strict sidecar, marker, containment, and relocation checks. A
-persisted ask-user prompt is deferred until those checks and any required
-relocation succeed, then fired exactly once; this prevents the prompt from
-blocking relocation while preserving it on a valid restore. The suppression
-and deferral are not applied to other load and resume callers. The route's
-strict checks still apply whenever a sidecar survives the generic restore;
-non-Channel callers retain the existing best-effort behavior when that path
-clears or finds no sidecar.
+For Channel-owned restores with a Part 4A sidecar, or with sidecar state whose
+ownership cannot be classified safely, the daemon route sets an internal ACP
+metadata flag that suppresses the generic best-effort worktree restore
+performed by the ACP agent. That best-effort path clears sidecars it deems
+invalid, so suppressing it is what keeps Channel restore failure
+non-destructive. The route then owns the strict sidecar, marker, containment,
+and relocation checks. A persisted ask-user prompt is deferred until those
+checks and any required relocation succeed, then fired exactly once; this
+prevents the prompt from blocking relocation while preserving it on a valid
+restore. A structurally valid legacy sidecar without the Part 4A `workspaceCwd`
+attestation keeps the pre-existing generic best-effort restore behavior and may
+return worktree metadata without `worktreeState`. It is never upgraded to
+Part 4A isolation. The suppression and deferral are not applied to other load
+and resume callers.
 
-Shared loads retain current behavior. Part 4A does not reinterpret a shared
-task if some independent in-session mechanism later changes its cwd.
+Shared loads otherwise retain current behavior. Part 4A does not reinterpret a
+shared task if some independent in-session mechanism later changes its cwd.
 
 ## Creation flow and failure ordering
 

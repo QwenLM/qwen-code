@@ -3752,8 +3752,22 @@ export function registerSessionRoutes(
                 ? {}
                 : restoreSource),
             };
-            suppressWorktreeContextRestore =
+            const isChannelRestore =
               restoreRequestMetadata.sourceType === 'channel';
+            if (
+              isChannelRestore &&
+              runtime.provenance !== 'live-conversation'
+            ) {
+              const sidecarBeforeRestore = await readWorktreeSessionStrict(
+                sessionService.getWorktreeSessionPath(restoredStorageSessionId),
+              );
+              suppressWorktreeContextRestore = !(
+                sidecarBeforeRestore.state === 'valid' &&
+                sidecarBeforeRestore.session.workspaceCwd === undefined
+              );
+            } else {
+              suppressWorktreeContextRestore = isChannelRestore;
+            }
             deferRestoreAskUserQuestionPrompt =
               suppressWorktreeContextRestore &&
               runtime.bridge.fireDeferredRestoreAskUserQuestionPrompt !==
@@ -3952,7 +3966,86 @@ export function registerSessionRoutes(
             runtime,
           ).getWorktreeSessionPath(restoredStorageSessionId);
           const sidecarResult = await readWorktreeSessionStrict(sidecarPath);
-          if (sidecarResult.state !== 'missing') {
+          if (
+            sidecarResult.state === 'valid' &&
+            sidecarResult.session.workspaceCwd === undefined
+          ) {
+            const sidecar = sidecarResult.session;
+            let realTarget: string | undefined;
+            let candidateRoots: string[] = [];
+            try {
+              const workspaceRoots = [fs.realpathSync(workspaceCwd)];
+              let repoTop: string | null = null;
+              try {
+                repoTop = await new GitWorktreeService(
+                  workspaceCwd,
+                ).getRepoTopLevel();
+              } catch {
+                // Not a git repo or getRepoTopLevel unavailable.
+              }
+              if (repoTop) {
+                const realRepoTop = fs.realpathSync(repoTop);
+                if (!workspaceRoots.includes(realRepoTop)) {
+                  workspaceRoots.push(realRepoTop);
+                }
+              }
+              const realOriginalCwd = fs.realpathSync(sidecar.originalCwd);
+              if (!workspaceRoots.includes(realOriginalCwd)) {
+                throw new Error('legacy sidecar belongs to another workspace');
+              }
+              candidateRoots = workspaceRoots.map((root) =>
+                path.join(root, '.qwen', 'worktrees'),
+              );
+              realTarget = fs.realpathSync(sidecar.worktreePath);
+              const contained = candidateRoots.some((root) => {
+                try {
+                  const realRoot = fs.realpathSync(root);
+                  const relative = path.relative(realRoot, realTarget!);
+                  return (
+                    !relative.startsWith('..') && !path.isAbsolute(relative)
+                  );
+                } catch {
+                  return false;
+                }
+              });
+              if (!contained) {
+                realTarget = undefined;
+              }
+            } catch {
+              realTarget = undefined;
+            }
+            if (!realTarget) {
+              daemonLog?.warn('worktree sidecar path failed containment', {
+                sessionId,
+                path: sidecar.worktreePath,
+              });
+            } else {
+              const worktree = {
+                slug: sidecar.slug,
+                path: realTarget,
+                branch: sidecar.worktreeBranch,
+              };
+              try {
+                if (!session.hasActivePrompt) {
+                  await runtime.bridge.changeSessionCwd(sessionId, {
+                    path: worktree.path,
+                    allowedRoots: candidateRoots,
+                  });
+                }
+                runtime.bridge.setSessionWorktree(sessionId, worktree);
+                session.worktree = worktree;
+              } catch (restoreErr) {
+                daemonLog?.warn('worktree restore failed on load/resume', {
+                  sessionId,
+                  worktreePath: worktree.path,
+                  error:
+                    restoreErr instanceof Error
+                      ? restoreErr.message
+                      : String(restoreErr),
+                });
+              }
+            }
+          } else if (sidecarResult.state !== 'missing') {
             try {
               if (sidecarResult.state !== 'valid') {
                 throw new Error('Worktree sidecar is missing or invalid');
@@ -4044,10 +4137,7 @@ export function registerSessionRoutes(
                 runtime.bridge.setSessionWorktree(sessionId, worktree);
                 session.worktree = worktree;
               } else if (session.hasActivePrompt) {
-                if (
-                  sidecar.workspaceCwd !== undefined &&
-                  session.currentCwd !== realTarget
-                ) {
+                if (session.currentCwd !== realTarget) {
                   throw new Error('Active session is outside its worktree');
                 }
               } else {
