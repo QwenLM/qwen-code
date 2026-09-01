@@ -449,6 +449,9 @@ describe('AcpBridge', () => {
   });
 
   it('closes a new session when applying its approval mode fails', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
     const bridge = new AcpBridge({
       cliEntryPath: '/tmp/qwen',
       cwd: '/tmp',
@@ -462,13 +465,22 @@ describe('AcpBridge', () => {
       setSessionMode: vi.fn().mockRejectedValue(modeError),
     } as TestableAcpBridge['connection'];
 
-    await expect(
-      bridge.newSession('/tmp', { approvalMode: 'yolo' }),
-    ).rejects.toBe(modeError);
+    let output = '';
+    try {
+      await expect(
+        bridge.newSession('/tmp', { approvalMode: 'yolo' }),
+      ).rejects.toBe(modeError);
+      output = stderr.mock.calls.join('');
+    } finally {
+      stderr.mockRestore();
+    }
 
     expect(extMethod).toHaveBeenCalledWith('qwen/control/session/close', {
       sessionId: 's-1',
     });
+    expect(output).toContain(
+      '[AcpBridge] Failed to close session s-1 after approval mode error: close failed',
+    );
     expect(bridge.knownSessionIds.size).toBe(0);
     expect(bridge.sessionBindingTokens.size).toBe(0);
   });

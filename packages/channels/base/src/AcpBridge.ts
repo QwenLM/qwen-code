@@ -238,7 +238,11 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     } catch (error) {
       await conn
         .extMethod('qwen/control/session/close', { sessionId })
-        .catch(() => undefined);
+        .catch((closeError: unknown) => {
+          process.stderr.write(
+            `[AcpBridge] Failed to close session ${sanitizeLogText(sessionId, 128)} after approval mode error: ${sanitizeLogText(closeError instanceof Error ? closeError.message : String(closeError), 512)}\n`,
+          );
+        });
       throw error;
     }
   }
