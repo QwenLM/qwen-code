@@ -1068,6 +1068,7 @@ import {
   updateOutputLanguageFile,
   writeOutputLanguageAndRegisterPath,
 } from '../i18n/languageUtils.js';
+import { getCurrentLanguage, setLanguageAsync } from '../i18n/index.js';
 import { buildAuthMethods } from './authMethods.js';
 import {
   ACTIVE_WORK_HEARTBEAT_META_KEY,
@@ -25056,6 +25057,8 @@ describe('sessionLanguage multi-session propagation', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(setLanguageAsync).mockReset().mockResolvedValue(undefined);
+    vi.mocked(getCurrentLanguage).mockReturnValue('zh');
     mockConnectionState.reset();
     capturedAgentFactory = undefined;
 
@@ -26398,6 +26401,257 @@ describe('sessionLanguage multi-session propagation', () => {
     expect(cfg.refreshHierarchicalMemory).not.toHaveBeenCalled();
     expect(cfg.getLlmClient().refreshSystemInstruction).toHaveBeenCalledOnce();
     expect(sendAvailableCommandsUpdate).toHaveBeenCalledOnce();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('userLanguage: accepts auto without any session and performs no writes', async () => {
+    const settings = {
+      merged: { mcpServers: {} },
+      reloadScopeFromDisk: vi.fn(),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+
+    const agentPromise = runAcpAgent(
+      makeConfig() as unknown as Config,
+      settings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+
+    vi.mocked(updateOutputLanguageFile).mockClear();
+    vi.mocked(writeOutputLanguageAndRegisterPath).mockClear();
+
+    const result = await agent.extMethod('qwen/control/user/language', {
+      language: 'auto',
+      syncOutputLanguage: true,
+    });
+
+    // Zero sessions is a success, and the daemon process owns persistence:
+    // the runtime must not write settings or output-language files itself.
+    expect(result).toEqual({ language: 'zh', sessions: 0, failed: 0 });
+    expect(vi.mocked(setLanguageAsync)).toHaveBeenCalledWith('auto');
+    expect(settings.reloadScopeFromDisk).toHaveBeenCalledWith(
+      SettingScope.User,
+    );
+    expect(vi.mocked(updateOutputLanguageFile)).not.toHaveBeenCalled();
+    expect(
+      vi.mocked(writeOutputLanguageAndRegisterPath),
+    ).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('userLanguage: wraps UI-language switch failures', async () => {
+    const settings = {
+      merged: { mcpServers: {} },
+      reloadScopeFromDisk: vi.fn(),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+    vi.mocked(setLanguageAsync).mockRejectedValueOnce(new Error('i18n down'));
+
+    const agentPromise = runAcpAgent(
+      makeConfig() as unknown as Config,
+      settings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+
+    await expect(
+      agent.extMethod('qwen/control/user/language', { language: 'zh' }),
+    ).rejects.toMatchObject({ code: -32603 });
+    expect(settings.reloadScopeFromDisk).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('userLanguage: refreshes sessions without rewriting project-bound files', async () => {
+    const cfgA = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('s-a'),
+      getOutputLanguageFilePath: vi
+        .fn()
+        .mockReturnValue('/proj-a/.qwen/output-language.md'),
+    });
+    const cfgB = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('s-b'),
+      getOutputLanguageFilePath: vi.fn().mockReturnValue(undefined),
+      refreshHierarchicalMemory: vi
+        .fn()
+        .mockRejectedValue(new Error('refresh failed')),
+    });
+
+    const sessionConfigs = [cfgA, cfgB];
+    let sessionIdx = 0;
+
+    const settings = {
+      merged: { mcpServers: {} },
+      reloadScopeFromDisk: vi.fn(),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    vi.mocked(loadCliConfig).mockImplementation(
+      async () => sessionConfigs[sessionIdx]! as unknown as Config,
+    );
+    vi.mocked(Session).mockImplementation(() => {
+      const cfg = sessionConfigs[sessionIdx]!;
+      const id = (cfg.getSessionId as ReturnType<typeof vi.fn>)();
+      sessionIdx++;
+      return {
+        getId: vi.fn().mockReturnValue(id),
+        shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
+        getConfig: vi.fn().mockReturnValue(cfg),
+        sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+        installRewriter: vi.fn(),
+        installGoalTerminalObserver: vi.fn(),
+        startCronScheduler: vi.fn(),
+        dispose: vi.fn(),
+      } as unknown as InstanceType<typeof Session>;
+    });
+    vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
+      availableCommands: [],
+      availableSkills: [],
+    });
+
+    const agentPromise = runAcpAgent(
+      makeConfig() as unknown as Config,
+      settings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+
+    await agent.newSession({ cwd: '/proj-a', mcpServers: [] });
+    await agent.newSession({ cwd: '/proj-b', mcpServers: [] });
+
+    vi.mocked(updateOutputLanguageFile).mockClear();
+    vi.mocked(writeOutputLanguageAndRegisterPath).mockClear();
+
+    const result = await agent.extMethod('qwen/control/user/language', {
+      language: 'zh',
+      syncOutputLanguage: true,
+    });
+
+    expect(result).toEqual({ language: 'zh', sessions: 2, failed: 1 });
+    expect(cfgA.refreshHierarchicalMemory).toHaveBeenCalled();
+    expect(cfgB.refreshHierarchicalMemory).toHaveBeenCalled();
+    expect(cfgA.getLlmClient().refreshSystemInstruction).toHaveBeenCalled();
+    expect(cfgB.getLlmClient().refreshSystemInstruction).not.toHaveBeenCalled();
+    // Unlike the session-scoped route, project-bound output-language files
+    // stay untouched: cfgA keeps its project override.
+    expect(vi.mocked(updateOutputLanguageFile)).not.toHaveBeenCalled();
+    expect(
+      vi.mocked(writeOutputLanguageAndRegisterPath),
+    ).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('userLanguage: skips the session refresh when syncOutputLanguage is false', async () => {
+    const cfgA = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('s-a'),
+    });
+
+    const settings = {
+      merged: { mcpServers: {} },
+      reloadScopeFromDisk: vi.fn(),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    vi.mocked(loadCliConfig).mockResolvedValue(cfgA as unknown as Config);
+    vi.mocked(Session).mockImplementation(
+      () =>
+        ({
+          getId: vi.fn().mockReturnValue('s-a'),
+          shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
+          getConfig: vi.fn().mockReturnValue(cfgA),
+          sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+          installRewriter: vi.fn(),
+          installGoalTerminalObserver: vi.fn(),
+          startCronScheduler: vi.fn(),
+          dispose: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+    vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
+      availableCommands: [],
+      availableSkills: [],
+    });
+
+    const agentPromise = runAcpAgent(
+      makeConfig() as unknown as Config,
+      settings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+
+    await agent.newSession({ cwd: '/proj-a', mcpServers: [] });
+    vi.mocked(cfgA.refreshHierarchicalMemory).mockClear();
+
+    const result = await agent.extMethod('qwen/control/user/language', {
+      language: 'en',
+    });
+
+    expect(result).toEqual({ language: 'zh', sessions: 0, failed: 0 });
+    expect(vi.mocked(setLanguageAsync)).toHaveBeenCalledWith('en');
+    expect(cfgA.refreshHierarchicalMemory).not.toHaveBeenCalled();
+    expect(settings.reloadScopeFromDisk).toHaveBeenCalledWith(
+      SettingScope.User,
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('userLanguage: rejects an unknown language code', async () => {
+    const settings = {
+      merged: { mcpServers: {} },
+      reloadScopeFromDisk: vi.fn(),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+
+    const agentPromise = runAcpAgent(
+      makeConfig() as unknown as Config,
+      settings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+
+    await expect(
+      agent.extMethod('qwen/control/user/language', { language: 'xx' }),
+    ).rejects.toThrow('Invalid language');
+    expect(settings.reloadScopeFromDisk).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;

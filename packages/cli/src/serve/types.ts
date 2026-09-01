@@ -328,6 +328,13 @@ export interface ServeOptions {
   /** Session idle timeout in ms. 0 = disabled. Default: 1800000 (30 min). */
   sessionIdleTimeoutMs?: number;
   /**
+   * Grace period after a prompt settles before an otherwise-idle session may
+   * be auto-closed, in ms. 0 = disabled (original behavior). Set to a value
+   * greater than the client's max SSE poll interval to prevent session rebuilds
+   * for poll-based clients. Default: 0.
+   */
+  sessionPromptSettledCloseGraceMs?: number;
+  /**
    * ACP child request timeout, including the `initialize` handshake,
    * in ms. Must be a positive
    * integer. Default: 10000 (10 s).
