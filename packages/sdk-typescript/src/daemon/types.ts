@@ -1462,6 +1462,26 @@ export interface DaemonSessionListPage {
   truncated?: boolean;
 }
 
+/** One content-search hit: the matching session plus an excerpt of the match. */
+export interface DaemonSessionSearchMatch {
+  session: DaemonSessionSummary;
+  /** Short single-line excerpt of the first matching message. */
+  snippet: string;
+}
+
+export interface DaemonSessionSearchResult {
+  results: DaemonSessionSearchMatch[];
+}
+
+export interface DaemonSessionSearchOptions {
+  /**
+   * Maximum matching sessions to return; the server rejects values outside
+   * 1–50 with 400 `invalid_search_max_results`.
+   */
+  maxResults?: number;
+  signal?: AbortSignal;
+}
+
 export interface DaemonSessionCatalogVersion {
   generation: string;
   revision: number;
@@ -2981,8 +3001,18 @@ export interface SetModelResult {
 }
 
 /** Returned from `POST /session/:id/config-option`. */
+export type ReasoningSelection =
+  | 'none'
+  | 'default'
+  | 'low'
+  | 'medium'
+  | 'high'
+  | 'xhigh'
+  | 'max';
+
 export interface DaemonSessionConfigOptionResult {
   configOptions: unknown[];
+  persisted: boolean;
 }
 
 /** Returned from `POST /session/:id/language`. */

@@ -6,6 +6,7 @@ import type { ReactNode } from 'react';
 import type {
   DaemonClient,
   DaemonSessionGroupCatalog,
+  DaemonSessionSearchResult,
   DaemonSessionSummary,
   DaemonWorkspaceCapability,
   DaemonWorkspaceGitStatus,
@@ -147,7 +148,12 @@ function renderSection(
     excludePinned: boolean;
     searchQuery: string;
     gitBranchWanted: boolean;
-    compact: boolean;
+    renderSession: (
+      session: DaemonSessionSummary,
+      options?: { searchSnippet?: string | undefined },
+    ) => ReactNode;
+    onOpenPathLocally: (cwd: string) => Promise<void>;
+    onOpenTerminalLocally: (cwd: string) => Promise<void>;
   }> = {},
 ): void {
   act(() => {
@@ -174,9 +180,12 @@ function renderSection(
           sourceType={overrides.sourceType}
           channelGroupingEnabled={overrides.channelGroupingEnabled}
           ungroupedLabel="Ungrouped"
-          renderSession={(session: DaemonSessionSummary): ReactNode => (
-            <div key={session.sessionId}>{session.displayName}</div>
-          )}
+          renderSession={
+            overrides.renderSession ??
+            ((session: DaemonSessionSummary): ReactNode => (
+              <div key={session.sessionId}>{session.displayName}</div>
+            ))
+          }
           onOpenGitDiff={overrides.onOpenGitDiff}
           overviewEnabled={overrides.overviewEnabled}
           renderHeader={overrides.renderHeader}
@@ -184,7 +193,8 @@ function renderSection(
           sessionStats={overrides.sessionStats}
           renderSessions={overrides.renderSessions}
           gitBranchWanted={overrides.gitBranchWanted}
-          compact={overrides.compact}
+          onOpenPathLocally={overrides.onOpenPathLocally}
+          onOpenTerminalLocally={overrides.onOpenTerminalLocally}
         />
       </I18nProvider>,
     );
@@ -224,6 +234,36 @@ async function flush(): Promise<void> {
 
 function gitChip(): HTMLElement | null {
   return container.querySelector<HTMLElement>('[data-web-shell-git-branch]');
+}
+
+/** Open the workspace hover popover (300 ms delay) and return its dialog. */
+async function openDetailsDialog(): Promise<HTMLElement> {
+  vi.useFakeTimers();
+  const headerRow = container.querySelector<HTMLElement>(
+    '[class*="headerRow"]',
+  );
+  await act(async () => {
+    headerRow?.dispatchEvent(new Event('pointerover', { bubbles: true }));
+    vi.advanceTimersByTime(300);
+    await Promise.resolve();
+  });
+  vi.useRealTimers();
+  const dialog = document.querySelector<HTMLElement>('[role="dialog"]');
+  expect(dialog).not.toBeNull();
+  return dialog!;
+}
+
+function sessionCounts(): HTMLElement | null {
+  return document.querySelector<HTMLElement>(
+    '[data-web-shell-workspace-sessions]',
+  );
+}
+
+function sessionCount(kind: 'Running' | 'Attention' | 'Total'): string | null {
+  return (
+    sessionCounts()?.querySelector<HTMLElement>(`[class*="Count${kind}"]`)
+      ?.textContent ?? null
+  );
 }
 
 beforeEach(() => {
@@ -1216,22 +1256,19 @@ describe('WorkspaceSection overview', () => {
     await flush();
     expect(client.workspaceMcp).not.toHaveBeenCalled();
     expect(
-      container.querySelector('[data-web-shell-workspace-path]'),
+      document.querySelector('[data-web-shell-workspace-path]'),
     ).toBeNull();
     expect(
-      container.querySelector('[data-web-shell-workspace-overview]'),
+      document.querySelector('[data-web-shell-workspace-overview]'),
     ).toBeNull();
 
-    // Control arm: the default header renders the path and chips and fetches.
+    // Control arm: the default header consumes the snapshot and fetches.
     renderSection({ client, expanded: true, overviewEnabled: true });
     await flush();
     expect(client.workspaceMcp).toHaveBeenCalledTimes(1);
-    expect(
-      container.querySelector('[data-web-shell-workspace-path]')?.textContent,
-    ).toBe('/tmp/project');
   });
 
-  it('renders no path or chips for a synthetic workspace without a real cwd', async () => {
+  it('fetches nothing and shows no path for a synthetic workspace without a real cwd', async () => {
     const client = makeOverviewClient();
     renderSection({
       client,
@@ -1242,10 +1279,10 @@ describe('WorkspaceSection overview', () => {
     await flush();
     expect(client.workspaceMcp).not.toHaveBeenCalled();
     expect(
-      container.querySelector('[data-web-shell-workspace-path]'),
+      document.querySelector('[data-web-shell-workspace-path]'),
     ).toBeNull();
     expect(
-      container.querySelector('[data-web-shell-workspace-overview]'),
+      document.querySelector('[data-web-shell-workspace-overview]'),
     ).toBeNull();
   });
 
@@ -1267,12 +1304,9 @@ describe('WorkspaceSection overview', () => {
     };
     renderSection({ client, workspace, expanded: true, overviewEnabled: true });
     await flush();
-    const counts = () =>
-      container.querySelector<HTMLElement>('[class*="headerCounts"]');
-    expect(counts()?.textContent).toBe('12');
-    expect(
-      counts()?.querySelector('[class*="headerCountRunning"]')?.textContent,
-    ).toBe('1');
+    await openDetailsDialog();
+    expect(sessionCount('Total')).toBe('2');
+    expect(sessionCount('Running')).toBe('1');
 
     renderSection({
       client,
@@ -1281,22 +1315,19 @@ describe('WorkspaceSection overview', () => {
       overviewEnabled: true,
     });
     await flush();
-    expect(
-      container.querySelector('[data-web-shell-workspace-path]'),
-    ).toBeNull();
-    expect(counts()?.textContent).toBe('12');
+    expect(sessionCount('Total')).toBe('2');
   });
 
-  it('shows no counts, path or chips when the overview is disabled', async () => {
+  it('shows no counts or path when the overview is disabled', async () => {
     const client = makeOverviewClient([
       { sessionId: 'a', workspaceCwd: '/tmp/project', hasActivePrompt: true },
     ]);
     renderSection({ client, expanded: true });
     await flush();
     expect(client.workspaceMcp).not.toHaveBeenCalled();
-    expect(container.querySelector('[class*="headerCounts"]')).toBeNull();
+    expect(sessionCounts()).toBeNull();
     expect(
-      container.querySelector('[data-web-shell-workspace-path]'),
+      document.querySelector('[data-web-shell-workspace-path]'),
     ).toBeNull();
   });
 });
@@ -1330,8 +1361,6 @@ describe('WorkspaceSection counts across a source switch', () => {
       })),
     } as unknown as DaemonClient;
     const workspace = { ...trustedWorkspace, id: 'other', cwd: '/tmp/other' };
-    const counts = () =>
-      container.querySelector<HTMLElement>('[class*="headerCounts"]');
 
     renderSection({
       client,
@@ -1341,10 +1370,12 @@ describe('WorkspaceSection counts across a source switch', () => {
       sourceType: 'default',
     });
     await flush();
-    expect(counts()?.textContent).toBe('13');
+    await openDetailsDialog();
+    expect(sessionCount('Total')).toBe('3');
+    expect(sessionCount('Running')).toBe('1');
 
     // The channel query starts without a page: stale default counts above an
-    // empty channel list would mislead, so the header shows none.
+    // empty channel list would mislead, so the popover shows none.
     renderSection({
       client,
       workspace,
@@ -1353,7 +1384,7 @@ describe('WorkspaceSection counts across a source switch', () => {
       sourceType: 'channel',
     });
     await flush();
-    expect(counts()).toBeNull();
+    expect(sessionCounts()).toBeNull();
 
     resolveChannel({
       sessions: [
@@ -1361,7 +1392,7 @@ describe('WorkspaceSection counts across a source switch', () => {
       ] as DaemonSessionSummary[],
     });
     await flush();
-    expect(counts()?.textContent).toBe('1');
+    expect(sessionCount('Total')).toBe('1');
 
     // Collapsing keeps the last counts of the active source.
     renderSection({
@@ -1372,7 +1403,53 @@ describe('WorkspaceSection counts across a source switch', () => {
       sourceType: 'channel',
     });
     await flush();
-    expect(counts()?.textContent).toBe('1');
+    expect(sessionCount('Total')).toBe('1');
+  });
+});
+
+describe('WorkspaceSection local-open gates', () => {
+  it('shows the open-locally buttons only for a trusted workspace with a real path', async () => {
+    const onOpenPathLocally = vi.fn().mockResolvedValue(undefined);
+    const onOpenTerminalLocally = vi.fn().mockResolvedValue(undefined);
+    renderSection({
+      client: makeOverviewClient(),
+      expanded: true,
+      overviewEnabled: true,
+      onOpenPathLocally,
+      onOpenTerminalLocally,
+    });
+    await flush();
+    const details = await openDetailsDialog();
+    const folderButton = details.querySelector(
+      '[data-web-shell-open-workspace-folder]',
+    );
+    expect(folderButton).not.toBeNull();
+    expect(
+      details.querySelector('[data-web-shell-open-workspace-terminal]'),
+    ).not.toBeNull();
+    await act(async () => {
+      folderButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await Promise.resolve();
+    });
+    expect(onOpenPathLocally).toHaveBeenCalledWith('/tmp/project');
+
+    // Untrusted rows get no local-open surface.
+    renderSection({
+      client: makeOverviewClient(),
+      workspace: untrustedWorkspace,
+      expanded: true,
+      overviewEnabled: true,
+      onOpenPathLocally,
+      onOpenTerminalLocally,
+    });
+    await flush();
+    const lockedDetails = await openDetailsDialog();
+    expect(
+      lockedDetails.querySelector('[data-web-shell-open-workspace-folder]'),
+    ).toBeNull();
+    expect(
+      lockedDetails.querySelector('[data-web-shell-open-workspace-terminal]'),
+    ).toBeNull();
   });
 });
 
@@ -1388,7 +1465,7 @@ describe('WorkspaceSection overview gates', () => {
     await flush();
     expect(client.workspaceMcp).not.toHaveBeenCalled();
     expect(
-      container.querySelector('[data-web-shell-workspace-overview]'),
+      document.querySelector('[data-web-shell-workspace-overview]'),
     ).toBeNull();
   });
 
@@ -1429,8 +1506,6 @@ describe('WorkspaceSection overview gates', () => {
 
   it('shows no counts while parent-owned stats are loading', async () => {
     const client = makeOverviewClient();
-    const counts = () =>
-      container.querySelector<HTMLElement>('[class*="headerCounts"]');
     // Production wiring for the primary row: the sidebar lists its sessions
     // itself, so the section renders none and owns no catalog query.
     renderSection({
@@ -1441,18 +1516,13 @@ describe('WorkspaceSection overview gates', () => {
       sessionStats: { total: 4, running: 1, attention: 2, truncated: true },
     });
     await flush();
-    expect(counts()?.textContent).toBe('214+');
-    expect(
-      counts()?.querySelector('[class*="headerCountAttention"]')?.textContent,
-    ).toBe('2');
-    expect(
-      counts()?.querySelector('[class*="headerCountTotal"]')?.textContent,
-    ).toBe('4+');
-    expect(
-      counts()
-        ?.querySelector('[class*="headerCountTotal"]')
-        ?.getAttribute('aria-label'),
-    ).toBe('4+ sessions');
+    await openDetailsDialog();
+    expect(sessionCount('Attention')).toBe('2');
+    expect(sessionCount('Running')).toBe('1');
+    expect(sessionCount('Total')).toBe('4+');
+    expect(sessionCounts()?.getAttribute('aria-label')).toBe(
+      '2 sessions waiting for you · 1 running session · 4+ sessions',
+    );
     // A source switch: the sidebar has no page for the new source yet, and
     // the retained counts must not fill the gap.
     renderSection({
@@ -1463,7 +1533,7 @@ describe('WorkspaceSection overview gates', () => {
       sessionStats: null,
     });
     await flush();
-    expect(counts()).toBeNull();
+    expect(sessionCounts()).toBeNull();
   });
 
   it('passes the overview snapshot to the header actions', async () => {
@@ -1506,8 +1576,6 @@ describe('WorkspaceSection retained counts across a source switch', () => {
       })),
     } as unknown as DaemonClient;
     const workspace = { ...trustedWorkspace, id: 'other', cwd: '/tmp/other' };
-    const counts = () =>
-      container.querySelector<HTMLElement>('[class*="headerCounts"]');
     const render = (expanded: boolean, sourceType: string) =>
       renderSection({
         client,
@@ -1519,19 +1587,20 @@ describe('WorkspaceSection retained counts across a source switch', () => {
 
     render(true, 'default');
     await flush();
-    expect(counts()?.textContent).toBe('3');
+    await openDetailsDialog();
+    expect(sessionCount('Total')).toBe('3');
     render(false, 'default');
     await flush();
-    expect(counts()?.textContent).toBe('3');
+    expect(sessionCount('Total')).toBe('3');
     // The global source switches while the row stays collapsed: the default
     // source's counts no longer describe the active source.
     render(false, 'channel');
     await flush();
-    expect(counts()).toBeNull();
+    expect(sessionCounts()).toBeNull();
     // Switching back restores the counts that source still owns.
     render(false, 'default');
     await flush();
-    expect(counts()?.textContent).toBe('3');
+    expect(sessionCount('Total')).toBe('3');
   });
 });
 
@@ -1730,6 +1799,258 @@ describe('WorkspaceSection pinned group members (issue #10391)', () => {
   });
 });
 
+describe('WorkspaceSection content search', () => {
+  function makeSearchClient(input: {
+    sessions: Array<Partial<DaemonSessionSummary>>;
+    searchResults: DaemonSessionSearchResult;
+  }): DaemonClient & {
+    searchWorkspaceSessions: ReturnType<typeof vi.fn>;
+  } {
+    const searchWorkspaceSessions = vi
+      .fn()
+      .mockResolvedValue(input.searchResults);
+    const client = {
+      searchWorkspaceSessions,
+      workspaceByCwd: vi.fn(() => ({
+        workspaceGit,
+        listWorkspaceSessionsPage: vi
+          .fn()
+          .mockResolvedValue({ sessions: input.sessions }),
+        listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+      })),
+    };
+    return client as unknown as DaemonClient & {
+      searchWorkspaceSessions: ReturnType<typeof vi.fn>;
+    };
+  }
+
+  // The content search debounces 300ms before hitting the daemon.
+  async function advanceSearchDebounce(): Promise<void> {
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 350));
+    });
+  }
+
+  const renderRow = (
+    session: DaemonSessionSummary,
+    options?: { searchSnippet?: string | undefined },
+  ): ReactNode => (
+    <div key={session.sessionId}>
+      {session.displayName}
+      {options?.searchSnippet ? `|${options.searchSnippet}` : ''}
+    </div>
+  );
+
+  it('merges content hits not in the loaded catalog and forwards the snippet', async () => {
+    const client = makeSearchClient({
+      sessions: [{ sessionId: 'loaded', displayName: 'Loaded session' }],
+      searchResults: {
+        results: [
+          {
+            session: {
+              sessionId: 'ghost-hit',
+              workspaceCwd: '/tmp/project',
+              displayName: 'Ghost hit',
+            },
+            snippet: 'qdrant excerpt',
+          },
+        ],
+      },
+    });
+    renderSection({
+      client,
+      expanded: true,
+      searchQuery: 'qdrant',
+      renderSession: renderRow,
+    });
+    await flush();
+    await advanceSearchDebounce();
+    await flush();
+
+    expect(client.searchWorkspaceSessions).toHaveBeenCalledWith(
+      '/tmp/project',
+      'qdrant',
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    // The content hit renders with its snippet even though the loaded
+    // catalog page doesn't carry the session; the non-matching loaded
+    // session is filtered out.
+    expect(container.textContent).toContain('Ghost hit');
+    expect(container.textContent).toContain('qdrant excerpt');
+    expect(container.textContent ?? '').not.toContain('Loaded session');
+  });
+
+  it('keeps the catalog entry for a content hit already listed locally', async () => {
+    const client = makeSearchClient({
+      sessions: [{ sessionId: 'loaded-hit', displayName: 'Loaded hit' }],
+      searchResults: {
+        results: [
+          {
+            session: {
+              sessionId: 'loaded-hit',
+              workspaceCwd: '/tmp/project',
+              displayName: 'Stale search name',
+            },
+            snippet: 'qdrant excerpt',
+          },
+        ],
+      },
+    });
+    renderSection({
+      client,
+      expanded: true,
+      searchQuery: 'qdrant',
+      renderSession: renderRow,
+    });
+    await flush();
+    await advanceSearchDebounce();
+    await flush();
+
+    expect(container.textContent).toContain('Loaded hit');
+    expect(container.textContent).toContain('qdrant excerpt');
+    expect(container.textContent ?? '').not.toContain('Stale search name');
+  });
+
+  it('renders a pinned ghost hit instead of dropping it with excludePinned', async () => {
+    const client = makeSearchClient({
+      sessions: [],
+      searchResults: {
+        results: [
+          {
+            session: {
+              sessionId: 'pinned-ghost',
+              workspaceCwd: '/tmp/project',
+              displayName: 'Pinned ghost',
+              isPinned: true,
+            },
+            snippet: 'qdrant excerpt',
+          },
+        ],
+      },
+    });
+    renderSection({
+      client,
+      expanded: true,
+      searchQuery: 'qdrant',
+      excludePinned: true,
+      renderSession: renderRow,
+    });
+    await flush();
+    await advanceSearchDebounce();
+    await flush();
+
+    // The pinned page never carries this ghost, so excluding it like a
+    // loaded pinned row would render the matching session nowhere (R2-2).
+    expect(container.textContent).toContain('Pinned ghost');
+    expect(container.textContent).toContain('qdrant excerpt');
+  });
+
+  it('drops a hit row after its session is deleted while the query stays active', async () => {
+    const listPage = vi.fn().mockResolvedValue({ sessions: [] });
+    const search = vi.fn().mockResolvedValue({
+      results: [
+        {
+          session: {
+            sessionId: 'ghost',
+            workspaceCwd: '/tmp/project',
+            displayName: 'Ghost hit',
+          },
+          snippet: 'qdrant excerpt',
+        },
+      ],
+    });
+    const client = {
+      searchWorkspaceSessions: search,
+      workspaceByCwd: vi.fn(() => ({
+        workspaceGit,
+        listWorkspaceSessionsPage: listPage,
+        listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+      })),
+    } as unknown as DaemonClient;
+    renderSection({
+      client,
+      expanded: true,
+      searchQuery: 'qdrant',
+      renderSession: renderRow,
+      reloadToken: 0,
+    });
+    await flush();
+    await advanceSearchDebounce();
+    await flush();
+    expect(container.textContent).toContain('Ghost hit');
+
+    // The session is deleted: catalog and transcript are gone and the
+    // reload token bumps — the settled hit must not resurrect it.
+    search.mockResolvedValue({ results: [] });
+    renderSection({
+      client,
+      expanded: true,
+      searchQuery: 'qdrant',
+      renderSession: renderRow,
+      reloadToken: 1,
+    });
+    await advanceSearchDebounce();
+    await flush();
+
+    expect(container.textContent ?? '').not.toContain('Ghost hit');
+  });
+
+  it('drops a hit row when a poll-observed catalog change removes the session', async () => {
+    vi.useFakeTimers();
+    const tick = async (ms: number) => {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(ms);
+      });
+    };
+    const listPage = vi.fn().mockResolvedValue({
+      sessions: [{ sessionId: 's1', displayName: 'Loaded hit' }],
+    });
+    const search = vi.fn().mockResolvedValue({
+      results: [
+        {
+          session: {
+            sessionId: 's1',
+            workspaceCwd: '/tmp/project',
+            displayName: 'Loaded hit',
+          },
+          snippet: 'qdrant excerpt',
+        },
+      ],
+    });
+    const client = {
+      searchWorkspaceSessions: search,
+      workspaceByCwd: vi.fn(() => ({
+        workspaceGit,
+        listWorkspaceSessionsPage: listPage,
+        listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+      })),
+    } as unknown as DaemonClient;
+
+    renderSection({
+      client,
+      expanded: true,
+      searchQuery: 'qdrant',
+      renderSession: renderRow,
+    });
+    await tick(1); // catalog fetch settles
+    await tick(350); // content-search debounce fires
+    await tick(1); // search response settles
+    expect(container.textContent).toContain('Loaded hit');
+    expect(container.textContent).toContain('qdrant excerpt');
+
+    // Another client deletes the session: the next 10s poll drops it from
+    // the catalog — no handler token bump, only the membership change.
+    listPage.mockResolvedValue({ sessions: [] });
+    search.mockResolvedValue({ results: [] });
+    await tick(10_000); // catalog poll
+    await tick(350); // content-search refetch debounce
+    await tick(1);
+
+    expect(search).toHaveBeenCalledTimes(2);
+    expect(container.textContent ?? '').not.toContain('Loaded hit');
+  });
+});
+
 describe('WorkspaceSection overview plumbing', () => {
   it('still fetches for a custom header when header actions consume the snapshot', async () => {
     const client = makeOverviewClient();
@@ -1749,27 +2070,8 @@ describe('WorkspaceSection overview plumbing', () => {
     ).toBe(true);
     // The path and chips stay hidden under a custom header.
     expect(
-      container.querySelector('[data-web-shell-workspace-overview]'),
+      document.querySelector('[data-web-shell-workspace-overview]'),
     ).toBeNull();
-  });
-
-  it('passes compact mode through to the path and chips', async () => {
-    renderSection({
-      client: makeOverviewClient(),
-      expanded: true,
-      overviewEnabled: true,
-      compact: true,
-    });
-    await flush();
-    await flush();
-    const path = container.querySelector<HTMLElement>(
-      '[data-web-shell-workspace-path]',
-    );
-    expect(path?.className).toMatch(/pathCompact/);
-    expect(
-      container.querySelectorAll('[data-web-shell-workspace-overview]').length,
-    ).toBeGreaterThan(0);
-    expect(container.querySelector('[class*="chipLabel"]')).toBeNull();
   });
 
   it('keeps the last snapshot for the header actions while collapsed', async () => {
@@ -1850,8 +2152,7 @@ describe('WorkspaceSection overview plumbing', () => {
       overviewEnabled: true,
     });
     await flush();
-    expect(
-      container.querySelector('[class*="headerCountTotal"]')?.textContent,
-    ).toBe('3+');
+    await openDetailsDialog();
+    expect(sessionCount('Total')).toBe('3+');
   });
 });

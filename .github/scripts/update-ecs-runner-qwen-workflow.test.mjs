@@ -136,12 +136,13 @@ describe('ECS runner qwen update workflow', () => {
       ),
     );
     assert.ok(workflow.includes("    needs: 'resolve'"));
-    // Both consumers read the job output; a leftover step reference would
-    // silently expand to an empty version and install `@qwen-code/qwen-code@`.
+    // All three consumers (install, verify, failure report) read the job
+    // output; a leftover step reference would silently expand to an empty
+    // version and install `@qwen-code/qwen-code@`.
     const consumers = workflow.match(
       /VERSION: '\$\{\{ needs\.resolve\.outputs\.version \}\}'/g,
     );
-    assert.equal(consumers?.length, 2);
+    assert.equal(consumers?.length, 3);
     assert.ok(
       !workflow.includes("VERSION: '${{ steps.version.outputs.version }}'"),
     );
