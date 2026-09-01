@@ -463,7 +463,7 @@ describe('createSpawnChannelFactory env policy', () => {
     ).not.toThrow();
     expect(() =>
       channel.transportGuard?.reservePreparedResponse(third),
-    ).toThrow('NDJSON decoded queue is full');
+    ).toThrow('NDJSON prepared_response queue limit exceeded');
 
     await expect(channel.transportFailed).resolves.toMatchObject({
       code: 'ndjson_queue_limit_exceeded',
@@ -505,7 +505,7 @@ describe('createSpawnChannelFactory env policy', () => {
 
     expect(() =>
       channel.transportGuard?.reservePreparedResponse(response),
-    ).toThrow('NDJSON decoded queue is full');
+    ).toThrow('NDJSON prepared_response queue limit exceeded');
     expect(elementReads).toBeLessThan(1_000);
     await expect(channel.transportFailed).resolves.toMatchObject({
       code: 'ndjson_queue_limit_exceeded',
@@ -528,7 +528,7 @@ describe('createSpawnChannelFactory env policy', () => {
 
     expect(() =>
       channel.transportGuard?.reservePreparedResponse(response),
-    ).toThrow('NDJSON decoded queue is full');
+    ).toThrow('NDJSON prepared_response queue limit exceeded');
     await expect(channel.transportFailed).resolves.toMatchObject({
       code: 'ndjson_queue_limit_exceeded',
     });
