@@ -40,13 +40,21 @@ export interface DraftedComment {
 // the leading strip, the marker-only test, and the ledger's title read all
 // project this same shape.
 //
-// The comment alternative admits exactly ONE parse per comment — the inner
-// loop cannot cross a `-->` — so a `RESIDUE*[:：]` quantification stays
-// linear when the colon is absent. The lazy `[\s\S]*?(?:-->|$)` form let
-// one token stretch across the comments after it, giving a residue run 2^N
-// decompositions and hanging `stripSeverityPrefix` on residue-led drafts
-// with no colon (#9940 review R14-1).
-const INVISIBLE_RESIDUE = String.raw`(?:\s|<!--(?:(?!-->)[\s\S])*(?:-->|$)|\p{Cf})`;
+// The token admits exactly ONE parse per residue run, so a
+// `RESIDUE*[:：]` quantification stays linear when the colon is absent —
+// otherwise the failed colon makes the engine enumerate every
+// decomposition of the run, and `stripSeverityPrefix` (every stamped
+// GitHub submit, every attribution-off post) wedges synchronously on a
+// draft its own gates accept. Both ambiguities are closed: the comment
+// alternative's inner loop cannot cross a `-->` (the lazy
+// `[\s\S]*?(?:-->|$)` form let one token stretch across the comments
+// after it — #9940 review R14-1), and whitespace and format characters
+// share ONE class, because `\s` and `\p{Cf}` overlap — U+FEFF is in
+// both, the only such codepoint, and as two alternatives it gave a FEFF
+// run the same 2^N decompositions (#9940 review R18-1). The merged class
+// accepts the identical codepoint set: a character matches it once or
+// not at all.
+const INVISIBLE_RESIDUE = String.raw`(?:[\s\p{Cf}]|<!--(?:(?!-->)[\s\S])*(?:-->|$))`;
 
 /** Leading residue — stripped before classifying and re-stripping. */
 export const LEADING_INVISIBLE_RE = new RegExp(`^${INVISIBLE_RESIDUE}+`, 'u');

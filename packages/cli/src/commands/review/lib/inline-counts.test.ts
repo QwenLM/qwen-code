@@ -113,6 +113,28 @@ describe('stripSeverityPrefix — the attribution-off posted shape', () => {
     expect(stripped).toBe('<!-- x -->'.repeat(64) + ' claim');
   });
 
+  it('a Cf-led draft with NO colon strips in bounded time too — the residue class is unambiguous (#9940 review, round 18)', () => {
+    // The sibling ambiguity of the cell above, in the character half of
+    // the token: `\s` and `\p{Cf}` both match U+FEFF (the only codepoint
+    // in both), so as two ALTERNATIVES a FEFF run had the same 2^N
+    // decompositions and the colon-less draft wedged the submit — the
+    // R14-1 cell exercises comment runs only and stayed green. One
+    // merged class matches each character exactly one way; the accepted
+    // codepoint set is unchanged, so a FEFF run is still residue.
+    const body = '**[Critical]** ' + '\uFEFF'.repeat(64) + ' claim';
+    const t0 = performance.now();
+    const stripped = stripSeverityPrefix(body);
+    expect(performance.now() - t0).toBeLessThan(1000);
+    expect(stripped).toBe('\uFEFF'.repeat(64) + ' claim');
+    // Still residue everywhere else the shared token is read: leading
+    // FEFF must not defeat the carried-id anchor, and the two
+    // marker-strip fixpoints must keep agreeing on it.
+    const carried = '**[Critical]**\uFEFF:\uFEFFR1-2: claim';
+    expect(stripSeverityPrefix(carried)).toBe('R1-2: claim');
+    expect(stripSeverityPrefix(carried)).toBe(markerStrippedBody(carried));
+    expect(severityOf({ body: '\uFEFF**[Critical]** x' })).toBe('critical');
+  });
+
   it('a marker-only body strips to the empty string — the submit gate refuses it first', () => {
     expect(stripSeverityPrefix('**[Critical]**')).toBe('');
     expect(stripSeverityPrefix('**[Suggestion]**\n')).toBe('');
