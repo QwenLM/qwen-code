@@ -492,6 +492,9 @@ const runPublishStep = ({ uploadSucceeds, script = publishStep() }) => {
     mkdirSync(scriptDir, { recursive: true });
     mkdirSync(runnerTemp);
     mkdirSync(bin);
+    // Force ESM scope onto the extensionless `gh` stub so a `require()`
+    // regression in it is caught here on every host (#10736).
+    writeFileSync(join(bin, 'package.json'), '{"type":"module"}\n');
     writeFileSync(join(workspace, 'visuals', 'pr.txt'), '7\n');
     writeFileSync(
       join(workspace, 'visuals', 'screenshots', 'home-light.png'),
