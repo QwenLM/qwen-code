@@ -5,6 +5,7 @@
  */
 
 import {
+  type ModelProposedGoalsMode,
   ApprovalMode,
   APPROVAL_MODES,
   type AuthType,
@@ -1294,6 +1295,17 @@ export class SessionIdConflictError extends Error {
 }
 
 /**
+ * `goals.modelProposed` reaches core as a closed enum. Anything else in the
+ * settings file (a typo, an older value) falls back to the default rather
+ * than smuggling an unknown mode through.
+ */
+export function normalizeModelProposedGoals(
+  value: unknown,
+): ModelProposedGoalsMode | undefined {
+  return value === 'alwaysAsk' || value === 'disabled' ? value : undefined;
+}
+
+/**
  * Resolves the output style for this session. `--output-style` wins over
  * `general.outputStyle`; an unset, empty, or `default` value means no style.
  * An unknown name is reported and the session falls back to the default
@@ -2318,6 +2330,9 @@ export async function loadCliConfig(
     useRipgrep: settings.tools?.useRipgrep,
     useBuiltinRipgrep: settings.tools?.useBuiltinRipgrep,
     workflowsEnabled: settings.tools?.workflowsEnabled,
+    modelProposedGoals: normalizeModelProposedGoals(
+      settings.goals?.modelProposed,
+    ),
     shouldUseNodePtyShell: settings.tools?.shell?.enableInteractiveShell,
     shellDefaultTimeoutMs: settings.tools?.shell?.defaultTimeoutMs,
     shellHeartbeatIntervalMs: settings.tools?.shell?.heartbeatIntervalMs,
