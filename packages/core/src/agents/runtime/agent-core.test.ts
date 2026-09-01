@@ -719,6 +719,82 @@ describe('AgentCore approval response deduplication', () => {
     expect(capturedPredicate?.(ToolNames.TOOL_CALL)).toBe(true);
   });
 
+  it('folds the per-agent disallowedTools blocklist into the bridged-target re-check', async () => {
+    // R6-8: the tool_call bridge resolves around the declaration list, so
+    // the disallowedTools blocklist prepareTools applies to declarations
+    // must be re-checked at invocation level — symmetrically to the
+    // execution allowlist above. Without this fold a subagent configured
+    // with disallowedTools: ['mcp__slack'] could bridge-execute
+    // mcp__slack__post_message even though prepareTools filtered it out of
+    // the declarations. Mutation check: removing the blocklist fold from
+    // isToolExecutionAllowed turns this test red.
+    const config = {
+      getToolRegistry: vi.fn().mockReturnValue({
+        getTool: vi.fn(),
+      }),
+      getDebugLogger: vi
+        .fn()
+        .mockReturnValue({ debug: vi.fn(), error: vi.fn() }),
+      getToolOutputBatchBudget: vi
+        .fn()
+        .mockReturnValue(Number.POSITIVE_INFINITY),
+      getToolResultBytesWritten: vi.fn().mockReturnValue(0),
+      getSessionId: vi.fn().mockReturnValue('blocklist-session'),
+    } as unknown as Config;
+    const core = new AgentCore(
+      'blocklist-agent',
+      config,
+      { systemPrompt: '' },
+      { model: 'test-model' },
+      { max_turns: 1 },
+      {
+        tools: ['*'],
+        disallowedTools: ['mcp__slack', ToolNames.TODO_WRITE],
+      },
+    );
+
+    let capturedPredicate: ((name: string) => boolean) | undefined;
+    const scheduleSpy = vi
+      .spyOn(CoreToolScheduler.prototype, 'schedule')
+      .mockImplementation(async function (this: CoreToolScheduler) {
+        capturedPredicate = (
+          this as unknown as {
+            isToolExecutionAllowed?: (name: string) => boolean;
+          }
+        ).isToolExecutionAllowed;
+      });
+    const abortController = new AbortController();
+
+    const processing = core.processFunctionCalls(
+      [
+        {
+          id: 'call-blocklist',
+          name: ToolNames.TOOL_CALL,
+          args: { name: 'mcp__slack__post_message', arguments: {} },
+        },
+      ],
+      abortController,
+      'prompt-blocklist',
+      1,
+      [{ name: ToolNames.TOOL_CALL } as FunctionDeclaration],
+    );
+    await vi.waitFor(() => expect(scheduleSpy).toHaveBeenCalledOnce());
+    abortController.abort();
+    await processing;
+    scheduleSpy.mockRestore();
+
+    expect(capturedPredicate).toBeDefined();
+    // Server-level MCP pattern blocks every tool of that server…
+    expect(capturedPredicate?.('mcp__slack__post_message')).toBe(false);
+    expect(capturedPredicate?.('mcp__slack')).toBe(false);
+    // …without touching other servers.
+    expect(capturedPredicate?.('mcp__github__create_issue')).toBe(true);
+    // Exact-match blocklisting for non-MCP tools.
+    expect(capturedPredicate?.(ToolNames.TODO_WRITE)).toBe(false);
+    expect(capturedPredicate?.('read_file')).toBe(true);
+    expect(capturedPredicate?.(ToolNames.TOOL_CALL)).toBe(true);
+  });
+
   it('retries only a transiently failed listener', async () => {
     const { core, errorSpy } = buildApprovalCore();
     const deliveryError = new Error('approval listener failed');

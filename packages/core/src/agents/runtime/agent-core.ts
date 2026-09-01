@@ -1455,7 +1455,33 @@ export class AgentCore {
     );
   }
 
+  /**
+   * The per-agent `toolConfig.disallowedTools` blocklist, mirroring
+   * prepareTools()'s declaration-level filter with the exact same match
+   * semantics (MCP server-level patterns via matchesMcpPattern, exact match
+   * otherwise). Re-checked at invocation level because the tool_call bridge
+   * makes invocation independent of declaration — a direct call to an
+   * undeclared (blocklisted) tool synthesizes "Tool not found", but a
+   * bridged call resolves around the declaration list, so the blocklist
+   * must be enforced here too, symmetrically to the execution allowlist
+   * re-check (round-6 review, R6-8).
+   */
+  private isToolDisallowedByAgentConfig(toolName: string): boolean {
+    const disallowed = this.toolConfig?.disallowedTools;
+    if (!disallowed?.length) {
+      return false;
+    }
+    return disallowed.some((pattern) =>
+      toolName.startsWith('mcp__')
+        ? matchesMcpPattern(pattern, toolName)
+        : pattern === toolName,
+    );
+  }
+
   private isToolExecutionAllowed(toolName: string): boolean {
+    if (this.isToolDisallowedByAgentConfig(toolName)) {
+      return false;
+    }
     if (this.executionAllowedTools === undefined) {
       return true;
     }

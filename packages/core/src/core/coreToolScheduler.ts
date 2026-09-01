@@ -2350,9 +2350,12 @@ export class CoreToolScheduler {
     }
 
     // The pre-schedule gates checked the wrapper name (`tool_call`), which is
-    // always declared and allowed; re-check the owner's execution allowlist
-    // against the resolved target so the bridge cannot smuggle a call past
-    // it (e.g. a fork whose allowlist lists `tool_call` but not the target).
+    // always declared and allowed; re-check the owner's tool policy against
+    // the resolved target — the execution allowlist AND the per-agent
+    // disallowedTools blocklist, both folded into the owner-supplied
+    // predicate — so the bridge cannot smuggle a call past either (e.g. a
+    // fork whose allowlist lists `tool_call` but not the target, or a
+    // subagent whose disallowedTools blocklists it; round-6 review, R6-8).
     if (
       this.isToolExecutionAllowed &&
       !this.isToolExecutionAllowed(resolution.tool.name)
@@ -2361,7 +2364,7 @@ export class CoreToolScheduler {
         ...request,
         bridgeResolutionError: {
           error: new Error(
-            `Tool "${resolution.tool.name}" is not allowed by this agent's execution allowlist.`,
+            `Tool "${resolution.tool.name}" is not permitted by this agent's tool policy (execution allowlist or disallowedTools blocklist).`,
           ),
           type: ToolErrorType.EXECUTION_DENIED,
         },

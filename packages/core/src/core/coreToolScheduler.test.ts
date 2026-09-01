@@ -1290,7 +1290,7 @@ describe('CoreToolScheduler', () => {
     if (completed.status === 'error') {
       expect(completed.response.errorType).toBe(ToolErrorType.EXECUTION_DENIED);
       expect(completed.response.error?.message).toContain(
-        "is not allowed by this agent's execution allowlist",
+        "is not permitted by this agent's tool policy",
       );
       expect(completed.response.responseParts[0]?.functionResponse?.name).toBe(
         ToolNames.TOOL_CALL,
