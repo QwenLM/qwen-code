@@ -5977,6 +5977,41 @@ describe('OpenAIContentConverter', () => {
       ]);
     });
 
+    it('should suppress a replayed Qwen3 snapshot beyond the detection window', () => {
+      const context = withQwen3TaggedThinkingStreamParser();
+      const block = `<thinking>${'x'.repeat(1200)}</thinking>answer`;
+
+      converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ reasoning_content: 'step 1' }),
+        context,
+      );
+      for (let offset = 0; offset < block.length; offset += 100) {
+        converter.convertOpenAIChunkToLlm(
+          openAIStreamChunk({ content: block.slice(offset, offset + 100) }),
+          context,
+        );
+      }
+
+      const replay = converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ content: block }),
+        context,
+      );
+      const rewind = converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ content: block.slice(0, -1) }),
+        context,
+      );
+      const extension = converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ content: `${block}!` }),
+        context,
+      );
+
+      expect(replay.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(rewind.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(extension.candidates?.[0]?.content?.parts).toEqual([
+        { text: '!' },
+      ]);
+    });
+
     it('should preserve repeated short blocks for eager tagged parsing', () => {
       const context = withTaggedThinkingStreamParser();
       const block = '<think>x</think>';
