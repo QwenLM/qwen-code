@@ -9,7 +9,20 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import readline from 'node:readline';
-import { collectSessionMetadata, toHtml } from '@qwen-code/qwen-code/export';
+
+async function loadExportApi() {
+  try {
+    return await import('@qwen-code/qwen-code/export');
+  } catch (error) {
+    if (error instanceof Error && error.code === 'ERR_MODULE_NOT_FOUND') {
+      console.error(
+        'export API unavailable — run npm install && npm run build in the repository root',
+      );
+      process.exit(1);
+    }
+    throw error;
+  }
+}
 
 const exportConfig = {};
 
@@ -100,7 +113,7 @@ function startTimeFor(records) {
     : new Date().toISOString();
 }
 
-async function buildProductSessionData(records) {
+async function buildProductSessionData(records, collectSessionMetadata) {
   const conversation = {
     sessionId: records[0]?.sessionId ?? 'unknown-session',
     startTime: startTimeFor(records),
@@ -131,6 +144,7 @@ function defaultOutPath(inputPath) {
 }
 
 async function main() {
+  const { collectSessionMetadata, toHtml } = await loadExportApi();
   const { input, output } = parseArgs(process.argv);
   if (!input) printUsage(1);
 
@@ -148,7 +162,7 @@ async function main() {
         'Unrecognized JSONL format (expected ChatRecord-per-line).',
       );
     }
-    sessionData = await buildProductSessionData(records);
+    sessionData = await buildProductSessionData(records, collectSessionMetadata);
   }
 
   const html = toHtml(sessionData, records);

@@ -8,6 +8,7 @@ import type {
   DaemonUserShellTranscriptBlock,
 } from '@qwen-code/sdk/daemon';
 import { extractTodosFromToolCall } from '../utils/todos.js';
+import { groupParallelAgents } from './parallelAgentGrouping.js';
 import { transcriptBlocksToDaemonMessages } from './transcriptToMessages.js';
 
 function textBlock(
@@ -1678,6 +1679,52 @@ describe('transcriptBlocksToDaemonMessages', () => {
       role: 'assistant',
       content: 'waiting for agents',
     });
+  });
+
+  it('keeps foreground subagent launches separate from intervening thinking in safe projection', () => {
+    const messages = transcriptBlocksToDaemonMessages(
+      [
+        toolBlock('agent-fg-1', 'agent-fg-call-1', 'completed', 1, {
+          toolName: 'agent',
+          rawInput: undefined,
+          rawOutput: undefined,
+          preview: {
+            kind: 'subagent_delegation',
+            agentName: 'reviewer',
+            task: 'Review A',
+          },
+        }),
+        textBlock('thought-between', 'thought', 'thinking between agents', 2),
+        toolBlock('agent-fg-2', 'agent-fg-call-2', 'completed', 3, {
+          toolName: 'agent',
+          rawInput: undefined,
+          rawOutput: undefined,
+          preview: {
+            kind: 'subagent_delegation',
+            agentName: 'reviewer',
+            task: 'Review B',
+          },
+        }),
+      ],
+      { safeToolProjection: true },
+    );
+
+    const items = groupParallelAgents(messages);
+
+    expect(items).toHaveLength(3);
+    expect(items[0]).toMatchObject({
+      type: 'message',
+      message: { role: 'tool_group' },
+    });
+    expect(items[1]).toMatchObject({
+      type: 'message',
+      message: { role: 'thinking', content: 'thinking between agents' },
+    });
+    expect(items[2]).toMatchObject({
+      type: 'message',
+      message: { role: 'tool_group' },
+    });
+    expect(items.some((item) => item.type === 'parallel_agents')).toBe(false);
   });
 
   it('keeps unparented assistant text in the main transcript', () => {

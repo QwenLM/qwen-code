@@ -212,6 +212,37 @@ describe('ExportTranscriptDocumentV1', () => {
     expect(text).not.toContain('Users\\.\\alice');
   });
 
+  it('redacts delimiter-wrapped, URL-adjacent, and URL-query home path entrances', () => {
+    const document = createExportTranscriptDocumentV1(
+      [
+        record('bypass-entrances', null, {
+          message: {
+            role: 'user',
+            parts: [
+              {
+                text: [
+                  'see /home/"alice"/notes',
+                  "(https://evil)/home/alice/x",
+                  "curl 'http://127.0.0.1:3000/open?file=/home/alice/doc.md'",
+                  'see /home/alice/notes',
+                ].join('\n'),
+              },
+            ],
+          },
+        }),
+      ],
+      sessionData,
+      EXPORT_OPTIONS,
+    );
+    const text =
+      document.blocks[0]?.kind === 'user' ? document.blocks[0].text : '';
+
+    expect(text).toContain('[home]');
+    expect(text).not.toContain('alice');
+    expect(text).not.toContain('/home/');
+    expect(text).not.toContain('%2Fhome');
+  });
+
   it.each(['/Users/./bob', '/home/../home/alice', 'C:\\Users\\.\\alice'])(
     'redacts a structured home root with dot segments: %s',
     (cwd) => {
@@ -385,6 +416,27 @@ describe('ExportTranscriptDocumentV1', () => {
     expect(text).not.toContain(encodedHomePath);
     expect(text).not.toContain('%2FUsers%2Fbob');
     expect(document.metadata.repository).toBe(encodedHomePath);
+  });
+
+  it('redacts nested home layouts in projectName', () => {
+    for (const cwd of ['/usr/home/alice', '/export/home/alice', '\\server\\home\\alice']) {
+      const document = createExportTranscriptDocumentV1(
+        [
+          record('nested-home', null, {
+            message: {
+              role: 'user',
+              parts: [{ text: 'nested home probe' }],
+            },
+          }),
+        ],
+        {
+          ...sessionData,
+          metadata: { ...sessionData.metadata, cwd },
+        },
+        EXPORT_OPTIONS,
+      );
+      expect(document.metadata.projectName).toBe('[home]');
+    }
   });
 
   it('fails closed when encoded home paths exceed the decode-pass limit', () => {

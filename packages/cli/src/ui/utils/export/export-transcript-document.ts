@@ -1877,13 +1877,12 @@ function safePath(value: string): string {
     }
     components.push(component);
   }
-  const rootIndex = /^[A-Za-z]:$/.test(components[0] ?? '') ? 1 : 0;
-  if (
-    /^(?:Users|home)$/i.test(components[rootIndex] ?? '') &&
-    components[rootIndex + 1] !== undefined
-  ) {
+  const homeIndex = components.findIndex((component) =>
+    /^(?:Users|home)$/i.test(component),
+  );
+  if (homeIndex !== -1 && components[homeIndex + 1] !== undefined) {
     const homeBasename = components.at(-1);
-    if (components.length === rootIndex + 2) return '[home]';
+    if (components.length === homeIndex + 2) return '[home]';
     return homeBasename && homeBasename !== '.' && homeBasename !== '..'
       ? homeBasename
       : '[path]';
@@ -1900,12 +1899,14 @@ function isSafeExportPath(value: unknown): value is string {
   );
 }
 
+const EXPORT_URL_PATTERN =
+  /\b(?:https?:\/\/[^/\s<>"'\x60()?#]*(?:\/[^\s<>"'\x60?#]*)?|data:image\/[A-Za-z0-9.+-]+;base64,[^\s<>"'\x60]+)/gi;
+
 function redactHomePaths(value: string): string {
   return redactHomePathStructures(value);
 }
 function redactHomePathStructures(value: string): string {
-  const urlPattern =
-    /\b(?:https?:\/\/|data:image\/[A-Za-z0-9.+-]+;base64,)[^\s<>"'\x60]+/gi;
+  const urlPattern = EXPORT_URL_PATTERN;
   let result = '';
   let cursor = 0;
   for (const match of value.matchAll(urlPattern)) {
@@ -1939,11 +1940,11 @@ function redactNonHttpHomePathStructures(value: string): string {
 function redactRawHomePathStructures(value: string): string {
   return value
     .replace(
-      /file:\/+(?:[^/\s]+\/)?(?:[A-Za-z]:\/)?(?:\.\/|\/)*(?:home|Users)\/(?:\.\/|\/)*[^/\\\s<>"'\x60,;:|()]+/gi,
+      /file:\/+(?:[^/\s]+\/)?(?:[A-Za-z]:\/)?(?:\.\/|\/)*(?:home|Users)\/(?:\.\/|\/)*[^/\\\s<>\x60,;:|()]+/gi,
       'file://[home]',
     )
     .replace(
-      /(?:[A-Za-z]:)?(?:[\\/](?:\.[\\/]|[\\/])*)+(?:home|Users)[\\/](?:\.[\\/]|[\\/])*[^/\\\s<>"'\x60,;:|()]+/gi,
+      /(?:[A-Za-z]:)?(?:[\\/](?:\.[\\/]|[\\/])*)+(?:home|Users)[\\/](?:\.[\\/]|[\\/])*[^/\\\s<>\x60,;:|()]+/gi,
       '[home]',
     );
 }
@@ -1952,8 +1953,7 @@ function containsUnredactedHomePath(
   value: string,
   checkPercentEncoding: boolean,
 ): boolean {
-  const urlPattern =
-    /\b(?:https?:\/\/|data:image\/[A-Za-z0-9.+-]+;base64,)[^\s<>"'\x60]+/gi;
+  const urlPattern = EXPORT_URL_PATTERN;
   let cursor = 0;
   for (const match of value.matchAll(urlPattern)) {
     if (
@@ -2007,10 +2007,10 @@ function decodePrintablePercentEscapes(value: string): string {
 function containsRawHomePath(value: string): boolean {
   const normalized = value.replaceAll('\\', '/');
   return (
-    /file:\/+(?:[^/\s]+\/)?(?:[A-Za-z]:\/)?(?:\.\/|\/)*(?:home|Users)\/(?:\.\/|\/)*[^/\\\s<>"'\x60,;:|()]+/i.test(
+    /file:\/+(?:[^/\s]+\/)?(?:[A-Za-z]:\/)?(?:\.\/|\/)*(?:home|Users)\/(?:\.\/|\/)*[^/\\\s<>\x60,;:|()]+/i.test(
       value,
     ) ||
-    /(?:[A-Za-z]:)?(?:\/(?:\.\/|\/)*)+(?:home|Users)\/(?:\.\/|\/)*[^/\\\s<>"'\x60,;:|()]+/i.test(
+    /(?:[A-Za-z]:)?(?:\/(?:\.\/|\/)*)+(?:home|Users)\/(?:\.\/|\/)*[^/\\\s<>\x60,;:|()]+/i.test(
       normalized,
     )
   );

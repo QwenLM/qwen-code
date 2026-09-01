@@ -1217,7 +1217,11 @@ function daemonToolBlockToToolCall(
   safeToolProjection: boolean,
 ): DaemonMessageToolCall {
   const rawOutput = getToolRawOutput(block, safeToolProjection);
-  const executionMode = getRecord(rawOutput)?.['executionMode'];
+  const executionMode = safeToolProjection
+    ? block.background === true
+      ? 'background'
+      : 'foreground'
+    : getRecord(rawOutput)?.['executionMode'];
   const isBackgroundAgent = isBackgroundAgentBlock(block, rawOutput);
   const content = safeToolProjection ? undefined : normalizeToolContent(block);
   const statusMap: Record<string, DaemonMessageToolCallStatus> = {
