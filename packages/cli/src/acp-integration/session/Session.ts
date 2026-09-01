@@ -2130,6 +2130,7 @@ export class Session implements SessionContext {
 
   // Implement SessionContext interface
   readonly sessionId: string;
+  private sessionReasoningSelection?: ReasoningSelection;
 
   constructor(
     id: string,
@@ -10278,6 +10279,16 @@ export class Session implements SessionContext {
     });
   }
 
+  setSessionReasoningSelection(
+    selection: ReasoningSelection | undefined,
+  ): void {
+    this.sessionReasoningSelection = selection;
+  }
+
+  getSessionReasoningSelection(): ReasoningSelection | undefined {
+    return this.sessionReasoningSelection;
+  }
+
   persistReasoningSelection(selection: ReasoningSelection): void {
     if (this.requiresManagedConversationBinding) {
       throw RequestError.invalidParams(
@@ -10336,9 +10347,12 @@ export class Session implements SessionContext {
     options: { persist: boolean },
   ): void {
     const rawSelection = this.settings.merged.model?.reasoningEffort;
-    if (rawSelection === undefined) return;
+    const hasSessionSelection = this.sessionReasoningSelection !== undefined;
+    if (!hasSessionSelection && rawSelection === undefined) return;
 
-    const selection = parseReasoningSelection(rawSelection);
+    const selection = hasSessionSelection
+      ? this.sessionReasoningSelection
+      : parseReasoningSelection(rawSelection);
     const generation = this.config.getContentGeneratorConfig?.();
     const thinkingMandatory = generation?.thinkingMandatory === true;
     const supported =
@@ -10346,7 +10360,12 @@ export class Session implements SessionContext {
       selection !== REASONING_EFFORT_DEFAULT &&
       isReasoningSelectionSupported(modelId, selection, thinkingMandatory);
 
-    if (!supported && options.persist) {
+    const appliesSessionDefault =
+      hasSessionSelection && selection === REASONING_EFFORT_DEFAULT;
+    if (hasSessionSelection && !supported && !appliesSessionDefault) {
+      this.sessionReasoningSelection = undefined;
+    }
+    if (!hasSessionSelection && !supported && options.persist) {
       try {
         this.persistReasoningSelection(REASONING_EFFORT_DEFAULT);
       } catch (error) {
@@ -10368,7 +10387,7 @@ export class Session implements SessionContext {
     }
     applyReasoningSelection(
       this.config,
-      supported ? selection : REASONING_EFFORT_DEFAULT,
+      supported || appliesSessionDefault ? selection : REASONING_EFFORT_DEFAULT,
       this.getDefaultReasoningConfig(),
     );
   }

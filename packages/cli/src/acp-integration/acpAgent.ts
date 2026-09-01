@@ -285,6 +285,7 @@ import {
   REASONING_EFFORT_NAMES,
   REASONING_EFFORT_NONE,
   type ModelReasoningConfiguration,
+  type ReasoningSelection,
 } from './model-configuration.js';
 import {
   deleteManagedSkill,
@@ -5865,6 +5866,9 @@ class QwenAgent implements Agent {
             if (persist) {
               session.persistReasoningSelection(selected);
             }
+            session.setSessionReasoningSelection(
+              persist ? undefined : selected,
+            );
             return {
               configOptions,
               ...(persist
@@ -12607,7 +12611,10 @@ class QwenAgent implements Agent {
                   config,
                   this.settings,
                   authType,
+                  undefined,
+                  session.getSessionReasoningSelection(),
                 );
+                session.reloadReasoningSelection();
               } catch (err) {
                 debugLogger.warn(
                   `reload: refreshAuth failed for session ${id}: ${err}`,
@@ -13271,11 +13278,12 @@ class QwenAgent implements Agent {
     settings: LoadedSettings,
     authType: AuthType,
     isInitialAuth?: boolean,
+    sessionSelection?: ReasoningSelection,
   ): Promise<void> {
     await config.refreshAuth(authType, isInitialAuth);
-    const selection = parseReasoningSelection(
-      settings.merged.model?.reasoningEffort,
-    );
+    const selection =
+      sessionSelection ??
+      parseReasoningSelection(settings.merged.model?.reasoningEffort);
     if (!selection || selection === REASONING_EFFORT_DEFAULT) {
       return;
     }

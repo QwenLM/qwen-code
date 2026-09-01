@@ -6432,6 +6432,71 @@ describe('Session', () => {
       },
     );
 
+    it.each([
+      ['low', { effort: 'low' }, true],
+      ['none', false, true],
+      ['default', undefined, false],
+    ] as const)(
+      'reconciles session-only reasoning %s after a model rebuild',
+      async (selection, expectedReasoning, clearsOverrides) => {
+        const samplingParams = {
+          enable_thinking: false,
+          temperature: 0.2,
+        };
+        const live: Partial<ContentGeneratorConfig> & { model: string } = {
+          model: currentModel,
+          reasoning:
+            selection === 'none'
+              ? false
+              : selection === 'default'
+                ? undefined
+                : { effort: selection },
+        };
+        const rebuildable: Partial<ContentGeneratorConfig> = {};
+        vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue(
+          live as ReturnType<Config['getContentGeneratorConfig']>,
+        );
+        Object.assign(mockConfig, {
+          getModelsConfig: vi.fn(() => ({
+            getGenerationConfig: () => rebuildable,
+          })),
+        });
+        session.setSessionReasoningSelection(selection);
+        switchModelSpy.mockImplementation(async (authType, nextModelId) => {
+          currentAuthType = authType;
+          currentModel = nextModelId;
+          Object.assign(live, {
+            model: nextModelId,
+            reasoning: undefined,
+            samplingParams,
+          });
+          Object.assign(rebuildable, {
+            model: nextModelId,
+            reasoning: undefined,
+            samplingParams,
+          });
+        });
+
+        await session.setModel({
+          sessionId: 'test-session-id',
+          modelId: `qwen3.8-max(${AuthType.USE_OPENAI})`,
+        });
+
+        expect(live.reasoning).toEqual(expectedReasoning);
+        expect(live.samplingParams).toEqual(
+          clearsOverrides ? { temperature: 0.2 } : samplingParams,
+        );
+        expect(rebuildable.samplingParams).toEqual(samplingParams);
+        expect(mockSettings.setValue).not.toHaveBeenCalledWith(
+          expect.anything(),
+          'model.reasoningEffort',
+          expect.anything(),
+          expect.anything(),
+          expect.anything(),
+        );
+      },
+    );
+
     it('retains a compatible preference when switching to a runtime snapshot', async () => {
       const state = installReasoningPreference('low');
       const snapshotId = `$runtime|${AuthType.USE_OPENAI}|qwen3.8-max`;
