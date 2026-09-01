@@ -320,6 +320,7 @@ export function TasksStatusMessage({
   manageActiveEvent = true,
   keyboardShortcuts = true,
   syncSnapshot = false,
+  includeWorkflows = false,
   taskView = 'all',
   emptyLabel,
   onWorkflowRunStarted,
@@ -335,6 +336,7 @@ export function TasksStatusMessage({
   manageActiveEvent?: boolean;
   keyboardShortcuts?: boolean;
   syncSnapshot?: boolean;
+  includeWorkflows?: boolean;
   taskView?: TasksStatusView;
   emptyLabel?: string;
   onWorkflowRunStarted?: () => void;
@@ -347,13 +349,14 @@ export function TasksStatusMessage({
 }) {
   const { t } = useI18n();
   const actions = useActions();
-  const includeWorkflows =
+  const shouldIncludeWorkflows =
     taskView !== 'all' ||
+    includeWorkflows ||
     message.snapshot.tasks.some((task) => task.kind === 'workflow');
   const loadTasks = useCallback(
     async (): Promise<DaemonSessionWorkflowTasksStatus> =>
-      includeWorkflows ? actions.getWorkflowTasks() : actions.getTasks(),
-    [actions, includeWorkflows],
+      shouldIncludeWorkflows ? actions.getWorkflowTasks() : actions.getTasks(),
+    [actions, shouldIncludeWorkflows],
   );
   const [allTasks, setAllTasks] = useState(message.snapshot.tasks);
   const tasks = useMemo(

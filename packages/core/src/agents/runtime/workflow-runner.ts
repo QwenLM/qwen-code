@@ -178,6 +178,7 @@ export class WorkflowRunner {
           : undefined;
       script = loaded?.script ?? options.script ?? '';
       scriptPath = loaded?.scriptPath ?? options.scriptPath;
+      const workflowName = options.workflowName ?? loaded?.savedWorkflowName;
 
       try {
         compileWorkflowScript(script);
@@ -232,9 +233,7 @@ export class WorkflowRunner {
         {
           runId,
           toolUseId: options.toolUseId,
-          ...(options.workflowName
-            ? { workflowName: options.workflowName }
-            : {}),
+          ...(workflowName ? { workflowName } : {}),
           meta: null,
           status: 'running',
           startTime: Date.now(),

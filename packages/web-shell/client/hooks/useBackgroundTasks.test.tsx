@@ -335,6 +335,57 @@ describe('useBackgroundTasks', () => {
     expect(sdkMock.actions.getWorkflowTasks).not.toHaveBeenCalled();
   });
 
+  it('rearms polling when task activity becomes active', async () => {
+    taskActivityKey = 'workflow-call:stable';
+    taskActivityActive = false;
+    sdkMock.actions.getTasks.mockResolvedValue(snapshot('session-a'));
+    await renderHarness();
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
+    expect(sdkMock.actions.getTasks).toHaveBeenCalledTimes(2);
+
+    taskActivityActive = true;
+    await rerenderHarness();
+
+    expect(sdkMock.actions.getTasks).toHaveBeenCalledTimes(3);
+  });
+
+  it('rearms polling on the workflow endpoint when workflows become enabled', async () => {
+    taskActivityKey = 'workflow-call:stable';
+    sdkMock.actions.getTasks.mockResolvedValue(snapshot('session-a'));
+    sdkMock.actions.getWorkflowTasks.mockResolvedValue(
+      workflowSnapshot('session-a', [
+        {
+          kind: 'workflow',
+          id: 'wf-rearmed',
+          label: 'Rearmed workflow',
+          description: 'Rearmed workflow',
+          status: 'running',
+          startTime: Date.now(),
+          runtimeMs: 1,
+          isBackgrounded: false,
+          currentPhase: null,
+          phaseVisits: [],
+          dispatches: [],
+          agentsDispatched: 0,
+          agentsCompleted: 0,
+          tokensSpent: 0,
+          tokenBudgetTotal: null,
+          recentLogs: [],
+          pendingApprovalCount: 0,
+        },
+      ]),
+    );
+    await renderHarness();
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
+    expect(sdkMock.actions.getTasks).toHaveBeenCalledTimes(2);
+
+    workflowsEnabled = true;
+    await rerenderHarness();
+
+    expect(sdkMock.actions.getWorkflowTasks).toHaveBeenCalledOnce();
+    expect(latestTasks.map((task) => task.id)).toEqual(['wf-rearmed']);
+  });
+
   it('resumes polling for a new session after a panel left open in the old one', async () => {
     // Split view keeps the previous session's pane mounted, so switching
     // primary fires no `active: false`, and when that pane's panel finally
@@ -375,6 +426,27 @@ describe('useBackgroundTasks', () => {
     expect(sdkMock.actions.getTasks.mock.calls.length).toBeGreaterThan(0);
     // `monitor()` stamps startTime from the clock, so compare identity.
     expect(latestTasks.map((task) => task.id)).toEqual(['monitor-b']);
+  });
+
+  it('keeps same-session polling paused across an attachment change', async () => {
+    sdkMock.actions.getTasks.mockResolvedValue(
+      snapshot('session-a', [monitor('monitor-a', 'running')]),
+    );
+    await renderHarness();
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent(TASKS_STATUS_ACTIVE_EVENT, {
+          detail: { active: true, sessionId: 'session-a' },
+        }),
+      );
+    });
+    sdkMock.actions.getTasks.mockClear();
+
+    sdkMock.ownerVersion += 1;
+    await rerenderHarness();
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
+
+    expect(sdkMock.actions.getTasks).not.toHaveBeenCalled();
   });
 
   it('keeps polling after a transient task refresh failure', async () => {

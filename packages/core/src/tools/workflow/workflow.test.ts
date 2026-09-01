@@ -984,6 +984,7 @@ await agent('scan package.json')
       const entries = registry.list();
       expect(entries).toHaveLength(1);
       expect(entries[0].scriptPath).toBe(scriptPath);
+      expect(entries[0].workflowName).toBe('greet');
     } finally {
       await fs.rm(projectDir, { recursive: true, force: true });
     }

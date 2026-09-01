@@ -145,6 +145,7 @@ function renderPanel(
     embedded?: boolean;
     keyboardShortcuts?: boolean;
     syncSnapshot?: boolean;
+    includeWorkflows?: boolean;
     taskView?: 'all' | 'workflow-active' | 'workflow-history';
     sessionId?: string;
     onTasksChange?: (snapshot: DaemonSessionWorkflowTasksStatus) => void;
@@ -173,6 +174,7 @@ function renderPanel(
           embedded={options.embedded}
           keyboardShortcuts={options.keyboardShortcuts}
           syncSnapshot={options.syncSnapshot}
+          includeWorkflows={options.includeWorkflows}
           taskView={options.taskView}
           manageActiveEvent={false}
           planTodos={options.planTodos}
@@ -187,6 +189,22 @@ function renderPanel(
   });
   return container;
 }
+
+it('keeps polling workflow tasks when an enabled panel opens empty', async () => {
+  vi.useFakeTimers();
+  getWorkflowTasksMock.mockResolvedValue({
+    v: 1,
+    sessionId: 'session-1',
+    now: 13_000,
+    tasks: [workflowTask()],
+  });
+  renderPanel([], { includeWorkflows: true });
+
+  await act(async () => vi.advanceTimersByTimeAsync(3_000));
+
+  expect(getWorkflowTasksMock).toHaveBeenCalledOnce();
+  expect(getTasksMock).not.toHaveBeenCalled();
+});
 
 describe('TasksStatusMessage monitor details', () => {
   it('opens an embedded monitor in the right-panel callback', () => {

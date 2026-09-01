@@ -5881,6 +5881,7 @@ export function App({
   }, [showChat]);
   const openWorkflows = useCallback(() => {
     if (!workspaceContextActive || !workflowsEnabled) return;
+    splitClassificationGenerationRef.current += 1;
     setActivePanel(null);
     showChat();
     setMainView('workflows');
@@ -13778,6 +13779,7 @@ export function App({
                 message={tasksDialogMessage}
                 embedded
                 manageActiveEvent={false}
+                includeWorkflows={workflowsEnabled}
                 onClose={() => setTasksDialogMessage(null)}
                 planTodos={sessionWorkflowEnabled ? floatingTodos : []}
                 agentTools={

@@ -51,21 +51,29 @@ export function useBackgroundTasks(
     setTasks([]);
     setPollingActive(false);
     emptyPollsRef.current = 0;
-    // The pause latch belongs to the session it was raised for. Split view
-    // keeps the previous session's pane mounted, so switching primary never
-    // fires the panel's `active: false` — and when that pane's panel does
-    // close, its event carries the OLD sessionId and is filtered out here.
-    // Without this reset the new session's polling would stay blocked for
-    // good: the guard below outranks every refreshTrigger bump.
-    setTasksPanelActive(false);
   }, [connected, owner, sessionId]);
+
+  useEffect(() => {
+    // The pause latch belongs to the session, not the transport attachment.
+    // Preserve it across reconnects while the same panel stays mounted, but
+    // release it when this hook starts observing another session.
+    setTasksPanelActive(false);
+  }, [sessionId]);
 
   useEffect(() => {
     if (!connected || !sessionId || (!taskActivityKey && refreshTrigger === 0))
       return;
     emptyPollsRef.current = 0;
     setPollingActive(true);
-  }, [connected, owner, refreshTrigger, sessionId, taskActivityKey]);
+  }, [
+    connected,
+    owner,
+    refreshTrigger,
+    sessionId,
+    taskActivityActive,
+    taskActivityKey,
+    workflowsEnabled,
+  ]);
 
   useEffect(() => {
     if (tasksPanelActive) return;
