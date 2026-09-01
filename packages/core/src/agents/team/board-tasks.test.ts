@@ -13,6 +13,7 @@ import {
   completeBoardTask,
   createBoardTask,
   listBoardTasks,
+  pruneBoardTasks,
 } from './board-tasks.js';
 import { getCollectionDir } from './board-lock.js';
 
@@ -170,5 +171,42 @@ describe('board tasks', () => {
         createBoardTask({ board, createdBy: 'author', subject: 'unsafe' }),
       ).rejects.toThrow('Invalid board name');
     }
+  });
+
+  it('prunes only completed tasks, keyed on updatedAt', async () => {
+    const done = await createBoardTask({
+      board: 'demo',
+      createdBy: 'author',
+      subject: 'done',
+    });
+    const pending = await createBoardTask({
+      board: 'demo',
+      createdBy: 'author',
+      subject: 'pending',
+    });
+    const claimed = await createBoardTask({
+      board: 'demo',
+      createdBy: 'author',
+      subject: 'claimed',
+    });
+    await claimBoardTask('demo', done.id, 'worker');
+    await completeBoardTask('demo', done.id, 'worker');
+    await claimBoardTask('demo', claimed.id, 'worker');
+
+    // Nothing is old enough yet.
+    const completed = (await listBoardTasks('demo')).find(
+      (task) => task.id === done.id,
+    );
+    expect(completed?.status).toBe('completed');
+    await expect(pruneBoardTasks('demo', 60_000)).resolves.toEqual([]);
+
+    // Past the window: only the completed task goes.
+    await expect(
+      pruneBoardTasks('demo', 0, (completed?.updatedAt ?? 0) + 1),
+    ).resolves.toEqual([done.id]);
+    const remaining = await listBoardTasks('demo');
+    expect(remaining.map((task) => task.id).sort()).toEqual(
+      [pending.id, claimed.id].sort(),
+    );
   });
 });
