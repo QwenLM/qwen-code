@@ -84,6 +84,12 @@ export interface OpenTuiAppProps {
   onTranscriptReset?: (events: OpenTuiStreamEvent[]) => void;
   /** Vim-mode toggle owner (VimModeProvider in the entry layer). */
   onToggleVim?: () => Promise<boolean>;
+  /**
+   * Reserved slot for the update-notification banner (parity gap G-3). Holds
+   * the same shape as ink's `updateInfo.message`; the update-check wiring
+   * that populates it lands with a later batch, so the layout stays fixed.
+   */
+  updateNotice?: string | null;
   availableTerminalHeight?: number;
 }
 
@@ -100,6 +106,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     onQuit,
     onTranscriptReset,
     onToggleVim,
+    updateNotice,
   } = props;
 
   const [dialog, setDialog] = useState<OpenTuiDialogRequest | null>(null);
@@ -270,6 +277,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     <OpenTuiErrorBoundary>
       <box flexDirection="column" flexGrow={1} flexShrink={0}>
         {renderMain ? renderMain() : null}
+        {!dialog && updateNotice ? <text>{updateNotice}</text> : null}
         {noticeText ? <text>{noticeText}</text> : null}
         {dialog ? (
           <OpenTuiDialogMount

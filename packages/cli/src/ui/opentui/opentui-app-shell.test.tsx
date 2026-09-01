@@ -187,6 +187,27 @@ describe('OpenTuiApp shell wiring', () => {
     expect(screen.getByText('input-prompt')).toBeTruthy();
   });
 
+  it('reserves the update-notification slot, hidden while a dialog is open', async () => {
+    renderApp({ updateNotice: 'Update available: v1.2.3' });
+    await settle();
+    expect(screen.getByText('Update available: v1.2.3')).toBeTruthy();
+
+    // A dialog opening must hide the banner (ink parity: !dialogsVisible).
+    mocks.state.handleResult = {
+      kind: 'open_dialog',
+      request: { dialog: 'help' },
+    } satisfies OpenTuiDispatchOutcome;
+    await submit('/help');
+    expect(screen.getByText('dialog:help')).toBeTruthy();
+    expect(screen.queryByText('Update available: v1.2.3')).toBeNull();
+
+    const onClose = mocks.state.dialogProps?.['onClose'] as () => void;
+    await act(async () => {
+      onClose();
+    });
+    expect(screen.getByText('Update available: v1.2.3')).toBeTruthy();
+  });
+
   it('routes an open_dialog outcome to the dialog mount and closes it', async () => {
     renderApp();
     await settle();
