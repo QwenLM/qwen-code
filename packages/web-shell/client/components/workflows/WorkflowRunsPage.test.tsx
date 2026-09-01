@@ -15,22 +15,29 @@ const {
   actionsMock,
   connectionMock,
   getTasksMock,
+  getWorkflowTasksMock,
   refreshCommandsMock,
   runSavedWorkflowMock,
   readSavedWorkflowMock,
 } = vi.hoisted(() => {
+  // Two distinct mocks on purpose: aliasing them hid which route the page
+  // binds, and the legacy getTasks route returns no workflow tasks at all
+  // (buildSessionTasksStatus without includeWorkflows), so a flip to it
+  // empties every tab in production while the suite stays green.
   const getTasks = vi.fn();
+  const getWorkflowTasks = vi.fn();
   const refreshCommands = vi.fn();
   const runSavedWorkflow = vi.fn();
   const readSavedWorkflow = vi.fn();
   return {
     getTasksMock: getTasks,
+    getWorkflowTasksMock: getWorkflowTasks,
     refreshCommandsMock: refreshCommands,
     runSavedWorkflowMock: runSavedWorkflow,
     readSavedWorkflowMock: readSavedWorkflow,
     actionsMock: {
       getTasks,
-      getWorkflowTasks: getTasks,
+      getWorkflowTasks,
       refreshCommands,
       runSavedWorkflow,
       readSavedWorkflow,
@@ -77,6 +84,7 @@ afterEach(() => {
   connectionMock.sessionId = 'session-1';
   connectionMock.supportedCommands.savedWorkflows = [];
   getTasksMock.mockReset();
+  getWorkflowTasksMock.mockReset();
   refreshCommandsMock.mockReset();
   runSavedWorkflowMock.mockReset();
   readSavedWorkflowMock.mockReset();
@@ -157,7 +165,7 @@ async function mountPage() {
 }
 
 async function renderPage(snapshot: DaemonSessionWorkflowTasksStatus) {
-  getTasksMock.mockResolvedValue(snapshot);
+  getWorkflowTasksMock.mockResolvedValue(snapshot);
   refreshCommandsMock.mockResolvedValue(undefined);
   runSavedWorkflowMock.mockResolvedValue({ started: true });
   return mountPage();
@@ -202,11 +210,18 @@ describe('WorkflowRunsPage', () => {
       tasks: [],
     });
 
-    expect(container.textContent).not.toContain('Dynamic workflow traces');
-    expect(container.textContent).not.toContain('replay completed runs');
+    // The tab body itself has to be on screen — the toolbar alone renders
+    // whether or not the page opened directly onto the tabs, and the two
+    // strings this used to guard exist nowhere in the repo, so they could
+    // never fail.
+    expect(container.textContent).toContain('No reusable workflows saved yet');
     expect(
       container.querySelector('button[aria-label="Refresh"]'),
     ).not.toBeNull();
+    // The page must read the workflow-aware route: the legacy one returns
+    // no workflow tasks at all, which empties every tab.
+    expect(getWorkflowTasksMock).toHaveBeenCalled();
+    expect(getTasksMock).not.toHaveBeenCalled();
   });
 
   it('loads the page when only the auxiliary commands refresh fails', async () => {
@@ -215,7 +230,7 @@ describe('WorkflowRunsPage', () => {
     // and hid all three tabs behind the failure banner, so a persistently
     // failing refresh made the page unusable while task status worked. It
     // reports itself through its own notice before throwing.
-    getTasksMock.mockResolvedValue({
+    getWorkflowTasksMock.mockResolvedValue({
       v: 1,
       sessionId: 'session-1',
       now: 10_000,
@@ -228,20 +243,20 @@ describe('WorkflowRunsPage', () => {
 
     expect(container.textContent).not.toContain('Failed to load workflow runs');
     expect(container.textContent).toContain('Running1');
-    expect(getTasksMock).toHaveBeenCalledTimes(1);
+    expect(getWorkflowTasksMock).toHaveBeenCalledTimes(1);
   });
 
   it("drops the previous session's load failure when the session changes", async () => {
     // reload clears loadError only on success, so without a reset the old
     // session's banner renders over the new one — indefinitely if the new
     // session's load hangs.
-    getTasksMock.mockRejectedValueOnce(new Error('boom'));
+    getWorkflowTasksMock.mockRejectedValueOnce(new Error('boom'));
     refreshCommandsMock.mockResolvedValue(undefined);
     const container = await mountPage();
     expect(container.textContent).toContain('Failed to load workflow runs');
 
     // Session B's load never settles.
-    getTasksMock.mockReturnValue(new Promise(() => {}));
+    getWorkflowTasksMock.mockReturnValue(new Promise(() => {}));
     connectionMock.sessionId = 'session-2';
     connectionMock.supportedCommands.sessionId = 'session-2';
     const root = mounted.at(-1)!.root;
@@ -309,16 +324,19 @@ describe('WorkflowRunsPage', () => {
       { name: 'deep-review', source: 'project' },
       { name: 'release-check', source: 'user' },
     ];
-    runSavedWorkflowMock.mockResolvedValue({
-      started: true,
-      taskId: 'workflow-started',
-      status: 'running',
-    });
     const container = await renderPage({
       v: 1,
       sessionId: 'session-1',
       now: 10_000,
       tasks: [workflowTask('workflow-started', 'deep-review')],
+    });
+    // After renderPage, which resets this mock to a bare { started: true }
+    // — programming it earlier meant the taskId/status payload never
+    // reached the component.
+    runSavedWorkflowMock.mockResolvedValue({
+      started: true,
+      taskId: 'workflow-started',
+      status: 'running',
     });
 
     expect(container.textContent).toContain('/deep-review');
@@ -514,11 +532,16 @@ describe('WorkflowRunsPage', () => {
     const runButton = container.querySelector<HTMLButtonElement>(
       'button[aria-label="Run deep-review"]',
     );
+    // Without these the optional-chained click no-ops when the button is
+    // missing and every assertion below passes vacuously — the test would
+    // certify a guard it never exercised.
+    expect(runButton).not.toBeNull();
     act(() => runButton?.click());
+    expect(runSavedWorkflowMock).toHaveBeenCalledTimes(1);
 
     connectionMock.sessionId = 'session-2';
     connectionMock.supportedCommands.sessionId = 'session-2';
-    getTasksMock.mockResolvedValue({
+    getWorkflowTasksMock.mockResolvedValue({
       v: 1,
       sessionId: 'session-2',
       now: 11_000,
@@ -537,8 +560,12 @@ describe('WorkflowRunsPage', () => {
       await Promise.resolve();
     });
 
+    // Resolve the stale start as a FAILURE: the banner is only reachable
+    // through `!started` or the catch, so resolving it green left the whole
+    // error path unexercised. The guard's job is to keep that failure off
+    // the session the user switched to.
     await act(async () => {
-      resolveStart({ started: true });
+      resolveStart({ started: false });
       await Promise.resolve();
     });
 
@@ -546,8 +573,11 @@ describe('WorkflowRunsPage', () => {
       container.querySelectorAll<HTMLButtonElement>('button'),
     ).find((button) => button.textContent?.includes('Saved'));
     expect(savedTab?.getAttribute('aria-selected')).toBe('true');
+    // The rendered copy is 'The saved workflow could not be started.' —
+    // toContain is case-sensitive, and the capitalised form this used to
+    // check appears nowhere, so it passed even with the banner up.
     expect(container.textContent).not.toContain(
-      'Workflow could not be started',
+      'The saved workflow could not be started',
     );
   });
 
@@ -564,6 +594,7 @@ describe('WorkflowRunsPage', () => {
       'Open a session in this project to view its workflow runs.',
     );
     expect(container.textContent).not.toContain('Failed to load');
+    expect(getWorkflowTasksMock).not.toHaveBeenCalled();
     expect(getTasksMock).not.toHaveBeenCalled();
   });
 
@@ -576,7 +607,7 @@ describe('WorkflowRunsPage', () => {
     });
     await selectTab(container, 'Running');
 
-    getTasksMock.mockResolvedValue({
+    getWorkflowTasksMock.mockResolvedValue({
       v: 1,
       sessionId: 'session-1',
       now: 11_000,
@@ -611,7 +642,7 @@ describe('WorkflowRunsPage', () => {
       resolveSessionA = resolve;
     });
     connectionMock.sessionId = 'session-a';
-    getTasksMock
+    getWorkflowTasksMock
       .mockReturnValueOnce(pendingSessionA)
       .mockResolvedValueOnce(sessionB);
     refreshCommandsMock.mockResolvedValue(undefined);
