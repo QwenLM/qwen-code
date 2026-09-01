@@ -11,12 +11,22 @@ import { Box } from 'ink';
 
 // Capture launches of the external editor so the full-plan viewer (#7001)
 // can be asserted without spawning a real editor process.
-const { launchEditorMock } = vi.hoisted(() => ({
+const { launchEditorMock, isEditorAvailableMock } = vi.hoisted(() => ({
   launchEditorMock: vi.fn((_filePath: string) => Promise.resolve()),
+  isEditorAvailableMock: vi.fn((editor: string | undefined) => Boolean(editor)),
 }));
 vi.mock('../../hooks/useLaunchEditor.js', () => ({
   useLaunchEditor: () => launchEditorMock,
 }));
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual = await importOriginal<
+    typeof import('@qwen-code/qwen-code-core')
+  >();
+  return {
+    ...actual,
+    isEditorAvailable: isEditorAvailableMock,
+  };
+});
 
 import { ToolConfirmationMessage } from './ToolConfirmationMessage.js';
 import type {
