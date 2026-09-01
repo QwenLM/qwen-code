@@ -6,12 +6,61 @@ import express, {
 import request from 'supertest';
 import { describe, expect, it, vi } from 'vitest';
 import { sendBridgeError } from '../server/error-response.js';
-import type { WorkspaceRuntime } from '../workspace-registry.js';
+import {
+  createWorkspaceRegistry,
+  type WorkspaceRuntime,
+} from '../workspace-registry.js';
 import { WorkspaceSkillManagementError } from '../workspace-skill-management.js';
-import type { WorkspaceSkillBatchToggleResult } from '../workspace-service/types.js';
-import { registerWorkspaceSkillsRoutes } from './workspace-skills.js';
+import type {
+  WorkspaceSkillBatchToggleResult,
+  WorkspaceSkillToggleResult,
+} from '../workspace-service/types.js';
+import {
+  registerWorkspaceQualifiedSkillsRoutes,
+  registerWorkspaceSkillsRoutes,
+} from './workspace-skills.js';
 
-function createHarness() {
+function createHarness(trusted = true, runtimeLive = false) {
+  const configStatus = {
+    v: 1 as const,
+    workspaceCwd: '/workspace',
+    initialized: true,
+    skills: [
+      {
+        kind: 'skill' as const,
+        status: 'ok' as const,
+        name: 'configured',
+        description: 'Configured Skill',
+        level: 'project' as const,
+        modelInvocable: true,
+      },
+      {
+        kind: 'skill' as const,
+        status: 'ok' as const,
+        name: 'configured',
+        description: 'Configured user Skill',
+        level: 'user' as const,
+        modelInvocable: true,
+        installedPath: '/global/skills/configured/SKILL.md',
+      },
+    ],
+  };
+  const runtimeStatus = {
+    v: 1 as const,
+    workspaceCwd: '/workspace',
+    initialized: true,
+    runtimeEpoch: 2,
+    skills: [{ name: 'runtime', level: 'extension' }],
+  };
+  const getWorkspaceSkillsConfigStatus = vi
+    .fn()
+    .mockResolvedValue(configStatus);
+  const getWorkspaceSkillsRuntimeStatus = vi
+    .fn()
+    .mockResolvedValue(runtimeStatus);
+  const getSkillsConfigStatus = vi.fn().mockResolvedValue(configStatus);
+  const invalidateSkillsConfigStatus = vi.fn();
+  const invalidateWorkspaceSkillsStatus = vi.fn();
   const installWorkspaceSkill = vi.fn().mockResolvedValue({
     skillName: 'demo-skill',
     scope: 'workspace',
@@ -23,11 +72,15 @@ function createHarness() {
     deleted: true,
   });
   const setWorkspaceSkillEnabled = vi.fn(
-    async (_ctx: unknown, skillName: string, enabled: boolean) => ({
+    async (
+      _ctx: unknown,
+      skillName: string,
+      enabled: boolean,
+    ): Promise<WorkspaceSkillToggleResult> => ({
       skillName: skillName.toLowerCase(),
       enabled,
       changed: true,
-      activation: 'applied' as const,
+      activation: 'applied',
       sessionsRefreshed: 1,
       sessionsFailed: 0,
     }),
@@ -50,26 +103,65 @@ function createHarness() {
       errors: [],
     }),
   );
+  const bridge = {
+    knownClientIds: () => new Set(['client-1']),
+    getWorkspaceRuntimeLifecycleSnapshot: () => ({
+      state: runtimeLive ? ('idle' as const) : ('cold' as const),
+      runtimeLive,
+      runtimeEpoch: runtimeLive ? 1 : 0,
+      activeWork: false,
+    }),
+  };
+  const runtime = {
+    workspaceId: 'workspace-1',
+    workspaceCwd: '/workspace',
+    primary: true,
+    trusted,
+    bridge,
+    workspaceService: {
+      getWorkspaceSkillsConfigStatus,
+      getWorkspaceSkillsRuntimeStatus,
+      invalidateWorkspaceSkillsStatus,
+      installWorkspaceSkill,
+      deleteWorkspaceSkill,
+      setWorkspaceSkillEnabled,
+      setWorkspaceSkillsEnabled,
+    },
+  } as unknown as WorkspaceRuntime;
+  const workspaceRegistry = createWorkspaceRegistry([runtime]);
   const app = express();
   app.use(express.json({ limit: '10mb' }));
-  registerWorkspaceSkillsRoutes(app, {
-    workspaceRuntime: {
-      workspaceCwd: '/workspace',
-      trusted: true,
-      workspaceService: {
-        installWorkspaceSkill,
-        deleteWorkspaceSkill,
-        setWorkspaceSkillEnabled,
-        setWorkspaceSkillsEnabled,
-      },
-    } as unknown as WorkspaceRuntime,
+  const routeDeps = {
     mutate: () => (_req: Request, _res: Response, next: NextFunction) => next(),
-    safeBody: (req) => req.body as Record<string, unknown>,
+    safeBody: (req: Request) => req.body as Record<string, unknown>,
     sendBridgeError,
+    getSkillsConfigStatus,
+    invalidateSkillsConfigStatus,
+  };
+  registerWorkspaceSkillsRoutes(app, {
+    ...routeDeps,
+    workspaceRuntime: runtime,
+    workspaceRegistry,
+    installSkillConfig: (workspaceCwd, request) =>
+      installWorkspaceSkill(workspaceCwd, request),
+    deleteSkillConfig: (workspaceCwd, scope, skillName, installedPath) =>
+      deleteWorkspaceSkill(workspaceCwd, skillName, scope, installedPath),
     parseAndValidateClientId: () => 'client-1',
+  });
+  registerWorkspaceQualifiedSkillsRoutes(app, {
+    ...routeDeps,
+    workspaceRegistry,
   });
   return {
     app,
+    runtime,
+    workspaceRegistry,
+    configStatus,
+    runtimeStatus,
+    getWorkspaceSkillsConfigStatus,
+    getWorkspaceSkillsRuntimeStatus,
+    getSkillsConfigStatus,
+    invalidateSkillsConfigStatus,
     installWorkspaceSkill,
     deleteWorkspaceSkill,
     setWorkspaceSkillEnabled,
@@ -78,6 +170,211 @@ function createHarness() {
 }
 
 describe('workspace Skill management routes', () => {
+  it('keeps config reads daemon-local and runtime reads explicit', async () => {
+    const harness = createHarness();
+
+    const config = await request(harness.app).get('/workspace/config/skills');
+    expect(config.status).toBe(200);
+    expect(config.body).toEqual(harness.configStatus);
+    expect(harness.getWorkspaceSkillsConfigStatus).not.toHaveBeenCalled();
+    expect(harness.getSkillsConfigStatus).toHaveBeenCalledWith(
+      '/workspace',
+      true,
+    );
+    expect(harness.getWorkspaceSkillsRuntimeStatus).not.toHaveBeenCalled();
+
+    const runtime = await request(harness.app).get('/workspace/runtime/skills');
+    expect(runtime.status).toBe(200);
+    expect(runtime.body).toEqual(harness.runtimeStatus);
+    expect(harness.getWorkspaceSkillsRuntimeStatus).toHaveBeenCalledOnce();
+  });
+
+  it('keeps global config reads and writes independent of primary trust', async () => {
+    const harness = createHarness(false);
+    const body = {
+      name: 'demo-skill',
+      scope: 'global',
+      source: { type: 'folder', path: '/tmp/demo-skill' },
+    };
+
+    const config = await request(harness.app).get('/workspace/config/skills');
+    const install = await request(harness.app)
+      .post('/workspace/config/skills/install')
+      .send(body);
+    const remove = await request(harness.app).delete(
+      '/workspace/config/skills/configured?scope=global',
+    );
+
+    expect(config.status).toBe(200);
+    expect(install.status).toBe(200);
+    expect(remove.status).toBe(200);
+    expect(harness.getSkillsConfigStatus).toHaveBeenCalledWith(
+      '/workspace',
+      false,
+    );
+    expect(harness.installWorkspaceSkill).toHaveBeenCalledWith(
+      '/workspace',
+      body,
+    );
+    expect(harness.deleteWorkspaceSkill).toHaveBeenCalledWith(
+      '/workspace',
+      'configured',
+      'global',
+      '/global/skills/configured/SKILL.md',
+    );
+  });
+
+  it('reads qualified config for untrusted and transitioning workspaces', async () => {
+    const untrusted = createHarness(false);
+    const first = await request(untrusted.app).get(
+      '/workspaces/workspace-1/config/skills',
+    );
+    untrusted.workspaceRegistry.beginReplacement(
+      untrusted.workspaceRegistry.primaryEntry,
+      'next-policy',
+    );
+    const transitioning = await request(untrusted.app).get(
+      '/workspaces/workspace-1/config/skills',
+    );
+    const globalInstall = await request(untrusted.app)
+      .post('/workspace/config/skills/install')
+      .send({
+        name: 'global-during-replacement',
+        scope: 'global',
+        source: { type: 'folder', path: '/tmp/global-during-replacement' },
+      });
+
+    expect(first.status).toBe(200);
+    expect(transitioning.status).toBe(200);
+    expect(globalInstall.status).toBe(200);
+    expect(untrusted.getSkillsConfigStatus).toHaveBeenCalledWith(
+      '/workspace',
+      false,
+    );
+  });
+
+  it('preserves qualified no-op activation and client identity', async () => {
+    const harness = createHarness(true, true);
+    harness.setWorkspaceSkillEnabled.mockResolvedValueOnce({
+      skillName: 'configured',
+      enabled: false,
+      changed: false,
+      activation: 'applied',
+      sessionsRefreshed: 0,
+      sessionsFailed: 0,
+    });
+
+    const response = await request(harness.app)
+      .post('/workspaces/workspace-1/config/skills/configured/enable')
+      .set('X-Qwen-Client-Id', 'client-1')
+      .send({ enabled: false });
+
+    expect(response.status).toBe(200);
+    expect(response.body.activation).toBe('applied');
+    expect(harness.setWorkspaceSkillEnabled).toHaveBeenCalledWith(
+      expect.objectContaining({ originatorClientId: 'client-1' }),
+      'configured',
+      false,
+      { refreshRuntime: false },
+    );
+  });
+
+  it('reports a live qualified toggle as reconciling', async () => {
+    const harness = createHarness(true, true);
+
+    const response = await request(harness.app)
+      .post('/workspaces/workspace-1/config/skills/configured/enable')
+      .set('X-Qwen-Client-Id', 'client-1')
+      .send({ enabled: false });
+
+    expect(response.status).toBe(200);
+    expect(response.body.activation).toBe('reconciling');
+  });
+
+  it('returns a structured error for qualified config writes on a legacy bridge', async () => {
+    const harness = createHarness();
+    Reflect.deleteProperty(
+      harness.runtime.bridge,
+      'getWorkspaceRuntimeLifecycleSnapshot',
+    );
+
+    const response = await request(harness.app)
+      .post('/workspaces/workspace-1/config/skills/install')
+      .send({
+        name: 'demo-skill',
+        scope: 'workspace',
+        source: { type: 'folder', path: '/tmp/demo-skill' },
+      });
+
+    expect(response.status).toBe(501);
+    expect(response.body.code).toBe('workspace_runtime_not_supported');
+    expect(harness.installWorkspaceSkill).not.toHaveBeenCalled();
+  });
+
+  it('rejects wrong scopes and untrusted qualified config writes', async () => {
+    const harness = createHarness();
+    const wrongScope = await request(harness.app)
+      .post('/workspaces/workspace-1/config/skills/install')
+      .send({
+        name: 'demo-skill',
+        scope: 'global',
+        source: { type: 'folder', path: '/tmp/demo-skill' },
+      });
+    const untrusted = createHarness(false);
+    const trustRejected = await request(untrusted.app)
+      .post('/workspaces/workspace-1/config/skills/install')
+      .send({
+        name: 'demo-skill',
+        scope: 'workspace',
+        source: { type: 'folder', path: '/tmp/demo-skill' },
+      });
+
+    expect(wrongScope.status).toBe(400);
+    expect(wrongScope.body.code).toBe('global_scope_requires_singular_owner');
+    expect(trustRejected.status).toBe(403);
+    expect(trustRejected.body.code).toBe('untrusted_workspace');
+  });
+
+  it('commits global config without using the legacy runtime refresh', async () => {
+    const harness = createHarness();
+    harness.workspaceRegistry.add({
+      ...harness.runtime,
+      workspaceId: 'workspace-2',
+      workspaceCwd: '/workspace-2',
+      primary: false,
+    });
+    const body = {
+      name: 'demo-skill',
+      scope: 'global',
+      source: { type: 'folder', path: '/tmp/demo-skill' },
+    };
+
+    const response = await request(harness.app)
+      .post('/workspace/config/skills/install')
+      .send(body);
+
+    expect(response.status).toBe(200);
+    expect(response.body.activation).toBe('deferred');
+    expect(harness.installWorkspaceSkill).toHaveBeenCalledWith(
+      '/workspace',
+      body,
+    );
+    expect(harness.invalidateSkillsConfigStatus).toHaveBeenCalledWith(
+      '/workspace',
+    );
+    expect(harness.invalidateSkillsConfigStatus).toHaveBeenCalledWith(
+      '/workspace-2',
+    );
+
+    const wrongOwner = await request(harness.app)
+      .post('/workspace/config/skills/install')
+      .send({ ...body, scope: 'workspace' });
+    expect(wrongOwner.status).toBe(400);
+    expect(wrongOwner.body.code).toBe(
+      'workspace_scope_requires_qualified_workspace',
+    );
+  });
+
   it('forwards an install request to the workspace service', async () => {
     const harness = createHarness();
     const body = {

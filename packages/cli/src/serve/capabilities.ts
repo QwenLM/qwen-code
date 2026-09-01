@@ -85,6 +85,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   permission_vote: { since: 'v1' },
   workspace_mcp: { since: 'v1' },
   workspace_skills: { since: 'v1' },
+  workspace_skills_config_runtime: { since: 'v1' },
   workspace_providers: { since: 'v1' },
   workspace_acp_preheat: { since: 'v1' },
   workspace_acp_status: { since: 'v1' },
@@ -673,6 +674,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   ],
   [
     'workspace_runtime',
+    (toggles) => toggles.workspaceRuntimeAvailable === true,
+  ],
+  [
+    'workspace_skills_config_runtime',
     (toggles) => toggles.workspaceRuntimeAvailable === true,
   ],
   [

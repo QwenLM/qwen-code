@@ -32036,6 +32036,32 @@ describe('preheat', () => {
     await bridge.shutdown();
   });
 
+  it('tags live Skills status with its runtime epoch', async () => {
+    const handle = makeChannel({
+      extMethodImpl: async (method) =>
+        method === SERVE_STATUS_EXT_METHODS.workspaceSkills
+          ? {
+              v: 1,
+              workspaceCwd: WS_A,
+              initialized: true,
+              skills: [],
+            }
+          : {},
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+
+    await bridge.preheat();
+
+    await expect(
+      bridge.queryWorkspaceStatus(
+        SERVE_STATUS_EXT_METHODS.workspaceSkills,
+        () => ({ initialized: false, skills: [] }),
+      ),
+    ).resolves.toMatchObject({ initialized: true, runtimeEpoch: 1 });
+
+    await bridge.shutdown();
+  });
+
   it('reaps an idle-timeout-zero channel whose session is removed mid-initialization', async () => {
     const handle = makeChannel({
       extMethodImpl: (method) => {

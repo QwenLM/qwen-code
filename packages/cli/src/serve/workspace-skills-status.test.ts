@@ -251,6 +251,31 @@ describe('createWorkspaceSkillsStatusProvider', () => {
     await fsp.rm(workspace, { recursive: true, force: true });
   });
 
+  it('can inventory inert workspace Skill manifests without trusting settings', async () => {
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-skills-untrusted-config-'),
+    );
+    const skillDir = path.join(workspace, '.qwen', 'skills', 'local-skill');
+    await fsp.mkdir(skillDir, { recursive: true });
+    await fsp.writeFile(
+      path.join(skillDir, 'SKILL.md'),
+      '---\nname: local-skill\ndescription: Local Skill\n---\nInstructions',
+    );
+    const provider = createWorkspaceSkillsStatusProvider({
+      workspaceTrusted: false,
+      includeUntrustedSkills: true,
+    });
+
+    const status = await provider(workspace);
+
+    expect(status.skills).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: 'local-skill', level: 'project' }),
+      ]),
+    );
+    await fsp.rm(workspace, { recursive: true, force: true });
+  });
+
   it('does not consume corruption recovery state while reading disabled skills', async () => {
     vi.spyOn(SkillManager.prototype, 'listSkills').mockResolvedValueOnce([]);
     const qwenHome = await fsp.mkdtemp(

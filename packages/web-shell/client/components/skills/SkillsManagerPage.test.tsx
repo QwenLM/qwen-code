@@ -20,7 +20,9 @@ const { skillsState, workspaceState } = vi.hoisted(() => ({
       skills: [] as DaemonWorkspaceSkillStatus[],
       loading: false,
       error: undefined,
+      ensureRuntime: vi.fn().mockResolvedValue(undefined),
       reload: vi.fn(),
+      reloadConfig: vi.fn(),
       setEnabled: vi.fn(),
       install: vi.fn(),
       remove: vi.fn(),
@@ -36,7 +38,11 @@ const { skillsState, workspaceState } = vi.hoisted(() => ({
 }));
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
-  useSkills: () => skillsState.current,
+  useConnection: () => ({ clientId: 'client-1' }),
+  useSkills: () => ({
+    ...skillsState.current,
+    configStatus: { skills: skillsState.current.skills },
+  }),
   useWorkspace: () => workspaceState.current,
 }));
 
@@ -114,7 +120,9 @@ beforeEach(() => {
   skillsState.current.skills = [];
   skillsState.current.loading = false;
   skillsState.current.error = undefined;
+  skillsState.current.ensureRuntime.mockClear();
   skillsState.current.reload.mockReset();
+  skillsState.current.reloadConfig.mockReset();
   skillsState.current.setEnabled.mockReset().mockResolvedValue({
     changed: true,
   });
@@ -181,7 +189,7 @@ describe('SkillsManagerPage', () => {
       disabledReason: undefined,
     };
     skillsState.current.skills = [disabledSkill];
-    skillsState.current.reload.mockResolvedValue({
+    skillsState.current.reloadConfig.mockResolvedValue({
       v: 1,
       workspaceCwd: '/workspace/demo',
       initialized: true,
@@ -196,6 +204,7 @@ describe('SkillsManagerPage', () => {
     expect(skillsState.current.setEnabled).toHaveBeenCalledWith(
       disabledSkill.name,
       true,
+      { clientId: 'client-1' },
     );
   });
 
@@ -215,7 +224,7 @@ describe('SkillsManagerPage', () => {
       disabledReason: undefined,
     };
     skillsState.current.skills = [disabledSkill];
-    skillsState.current.reload.mockResolvedValue({
+    skillsState.current.reloadConfig.mockResolvedValue({
       v: 1,
       workspaceCwd: '/workspace/demo',
       initialized: true,
@@ -288,7 +297,7 @@ describe('SkillsManagerPage', () => {
     async ({ skill, changed, notice }) => {
       skillsState.current.skills = [skill];
       skillsState.current.setEnabled.mockResolvedValueOnce({ changed });
-      skillsState.current.reload.mockResolvedValue({
+      skillsState.current.reloadConfig.mockResolvedValue({
         v: 1,
         workspaceCwd: '/workspace/demo',
         initialized: true,
@@ -305,8 +314,9 @@ describe('SkillsManagerPage', () => {
       expect(skillsState.current.setEnabled).toHaveBeenCalledWith(
         skill.name,
         true,
+        { clientId: 'client-1' },
       );
-      expect(skillsState.current.reload).toHaveBeenCalledTimes(1);
+      expect(skillsState.current.reloadConfig).toHaveBeenCalledTimes(1);
       skillsState.current.skills = [{ ...skill }];
       await renderPage();
       expect(container.textContent).toContain(notice);

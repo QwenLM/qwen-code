@@ -3042,6 +3042,7 @@ function isDaemonSkillToggleMutation(
     ) &&
     (activation === 'applied' ||
       activation === 'deferred' ||
+      activation === 'reconciling' ||
       activation === 'partial') &&
     isFiniteNumber(value['sessionsRefreshed']) &&
     isFiniteNumber(value['sessionsFailed'])

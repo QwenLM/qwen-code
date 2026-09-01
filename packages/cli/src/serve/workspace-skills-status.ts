@@ -46,6 +46,8 @@ export interface WorkspaceSkillsStatusProvider {
 
 export interface WorkspaceSkillsStatusProviderOptions {
   workspaceTrusted?: boolean;
+  /** Read inert on-disk Skill manifests without loading workspace settings. */
+  includeUntrustedSkills?: boolean;
 }
 
 const VALID_SKILL_LEVELS: ReadonlySet<string> = new Set<SkillLevel>([
@@ -79,15 +81,15 @@ export function createWorkspaceSkillsStatusProvider(
   // Reuse one SkillManager per workspace so repeat queries hit its in-memory
   // skills cache instead of re-scanning (and re-parsing frontmatter / compiling
   // globs for) every level on each call. This is a best-effort pre-child
-  // fallback, so the slight staleness — a skill added on disk mid-run is not
-  // picked up until the daemon restarts — is acceptable: the live child
-  // re-lists authoritatively once a session exists.
+  // fallback, so slight staleness between explicit invalidation points is
+  // acceptable: the live child re-lists authoritatively once a session exists.
   const managers = new Map<string, SkillManager>();
   const provider = ((workspaceCwd: string) =>
     buildWorkspaceSkillsStatus(
       workspaceCwd,
       managers,
       options.workspaceTrusted ?? true,
+      options.includeUntrustedSkills ?? false,
     )) as WorkspaceSkillsStatusProvider;
   provider.invalidate = (workspaceCwd) => managers.delete(workspaceCwd);
   return provider;
@@ -97,6 +99,7 @@ async function buildWorkspaceSkillsStatus(
   workspaceCwd: string,
   managers: Map<string, SkillManager>,
   workspaceTrusted: boolean,
+  includeUntrustedSkills: boolean,
 ): Promise<ServeWorkspaceSkillsStatus> {
   try {
     const settings = loadSettings(workspaceCwd, {
@@ -125,7 +128,8 @@ async function buildWorkspaceSkillsStatus(
         // Honor the safe-mode env the same way `Config` does when no explicit
         // flag is passed, so an operator running in safe mode gets the same
         // bundled-only listing the child would produce.
-        isSafeMode: () => !workspaceTrusted || isSafeModeEnv(),
+        isSafeMode: () =>
+          (!workspaceTrusted && !includeUntrustedSkills) || isSafeModeEnv(),
         // Bare mode is the interactive `--bare` CLI flag; the daemon never runs
         // bare, so it is always off here.
         getBareMode: () => false,

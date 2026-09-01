@@ -299,6 +299,19 @@ export function createDaemonWorkspaceService(
     workspaceSkillsStatusProvider?.invalidate?.(boundWorkspace);
   };
 
+  const getWorkspaceSkillsConfigStatus = async () => {
+    if (workspaceSkillsStatusProvider) {
+      try {
+        return await workspaceSkillsStatusProvider(boundWorkspace);
+      } catch (err) {
+        writeStderrLine(
+          `qwen serve: getWorkspaceSkillsConfigStatus local provider failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+    return createIdleWorkspaceSkillsStatus(boundWorkspace);
+  };
+
   const readWorkspaceSkillsStatus = async (
     generation: number,
   ): Promise<ServeWorkspaceSkillsStatus> => {
@@ -441,6 +454,17 @@ export function createDaemonWorkspaceService(
       // so `/rev` stops autocompleting `/review`. `initialized` cleanly
       // separates a real child answer (always `true`) from the placeholder.
       return getWorkspaceSkillsStatus();
+    },
+
+    async getWorkspaceSkillsRuntimeStatus(_ctx: WorkspaceRequestContext) {
+      return queryWorkspaceStatus(
+        SERVE_STATUS_EXT_METHODS.workspaceSkills,
+        () => createIdleWorkspaceSkillsStatus(boundWorkspace),
+      );
+    },
+
+    async getWorkspaceSkillsConfigStatus(_ctx: WorkspaceRequestContext) {
+      return getWorkspaceSkillsConfigStatus();
     },
 
     async getWorkspaceProvidersStatus(_ctx: WorkspaceRequestContext) {
@@ -816,6 +840,7 @@ export function createDaemonWorkspaceService(
       ctx: WorkspaceRequestContext,
       requestedSkillName: string,
       enabled: boolean,
+      opts?: { refreshRuntime?: boolean },
     ): Promise<WorkspaceSkillToggleResult> {
       assertActiveGeneration();
       const skillName = requestedSkillName.trim();
@@ -827,15 +852,18 @@ export function createDaemonWorkspaceService(
       );
       assertActiveGeneration();
       const channelLive = isChannelLive?.() ?? false;
+      const refreshRuntime = opts?.refreshRuntime !== false;
       let activation: WorkspaceSkillToggleResult['activation'] = channelLive
-        ? 'applied'
+        ? persisted.changed && !refreshRuntime
+          ? 'reconciling'
+          : 'applied'
         : 'deferred';
       let sessionsRefreshed = 0;
       let sessionsFailed = 0;
 
       if (persisted.changed) {
         invalidateWorkspaceSkillsSnapshot();
-        if (channelLive) {
+        if (channelLive && refreshRuntime) {
           try {
             const refreshed =
               await invokeWorkspaceCommand<ServeWorkspaceSkillsRefreshResult>(
@@ -1014,6 +1042,7 @@ export function createDaemonWorkspaceService(
     async installWorkspaceSkill(
       _ctx: WorkspaceRequestContext,
       request: WorkspaceSkillInstallRequest,
+      opts?: { refreshRuntime?: boolean },
     ): Promise<WorkspaceSkillMutationResult> {
       assertActiveGeneration();
       const result = await installWorkspaceSkill(
@@ -1023,7 +1052,8 @@ export function createDaemonWorkspaceService(
         assertGenerationOpen,
       );
       assertActiveGeneration();
-      await refreshWorkspaceSkillsAfterMutation();
+      if (opts?.refreshRuntime === false) invalidateWorkspaceSkillsSnapshot();
+      else await refreshWorkspaceSkillsAfterMutation();
       assertActiveGeneration();
       return result;
     },
@@ -1032,10 +1062,14 @@ export function createDaemonWorkspaceService(
       _ctx: WorkspaceRequestContext,
       requestedSkillName: string,
       scope: WorkspaceSkillScope,
+      opts?: { refreshRuntime?: boolean },
     ): Promise<WorkspaceSkillMutationResult> {
       assertActiveGeneration();
       const normalizedName = requestedSkillName.trim().toLowerCase();
-      const status = await getWorkspaceSkillsStatus();
+      const status =
+        opts?.refreshRuntime === false
+          ? await getWorkspaceSkillsConfigStatus()
+          : await getWorkspaceSkillsStatus();
       const skill = status.skills.find(
         (candidate) => candidate.name.trim().toLowerCase() === normalizedName,
       );
@@ -1056,7 +1090,8 @@ export function createDaemonWorkspaceService(
         assertGenerationOpen,
       );
       assertActiveGeneration();
-      await refreshWorkspaceSkillsAfterMutation();
+      if (opts?.refreshRuntime === false) invalidateWorkspaceSkillsSnapshot();
+      else await refreshWorkspaceSkillsAfterMutation();
       assertActiveGeneration();
       return result;
     },
