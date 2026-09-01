@@ -947,9 +947,9 @@ describe('ToolRegistry', () => {
         'hidden_by_allowlist',
       );
       expect(registry.isDeferredAndHidden('hidden_by_allowlist')).toBe(false);
-      expect(registry.getDeferredToolSummary().map((t) => t.name)).not.toContain(
-        'hidden_by_allowlist',
-      );
+      expect(
+        registry.getDeferredToolSummary().map((t) => t.name),
+      ).not.toContain('hidden_by_allowlist');
     });
 
     it('reveals the schema once ToolSearch loads the tool', async () => {
