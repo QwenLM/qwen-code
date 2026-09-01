@@ -21,6 +21,7 @@ import {
 } from 'lucide-react';
 import type { WebShellEnvironmentPanelItem } from '../../customization';
 import { useI18n } from '../../i18n';
+import { isComposerTask } from '../../utils/composerTasks';
 import { BranchPickerPopover } from '../BranchPickerPopover';
 import styles from './EnvironmentPanel.module.css';
 
@@ -137,7 +138,9 @@ export function EnvironmentPanel({
     tasks.filter(
       (task): task is DaemonSessionAgentTaskStatus => task.kind === 'agent',
     );
-  const backgroundTasks = tasks.filter((task) => task.kind !== 'agent');
+  // Live background state only — retained workflow runs belong to history,
+  // not to this session's Tasks section.
+  const backgroundTasks = tasks.filter(isComposerTask);
   const [environmentExpanded, setEnvironmentExpanded] = useState(true);
   const [agentsExpanded, setAgentsExpanded] = useState(false);
   const [tasksExpanded, setTasksExpanded] = useState(false);

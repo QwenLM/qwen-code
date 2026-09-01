@@ -63,7 +63,10 @@ import {
   isExitPlanApprovalRequest,
 } from '../utils/todos';
 import { findMonitorTaskForTool } from '../utils/monitorTasks';
-import { getTaskActivityKey } from '../utils/taskActivity';
+import {
+  getTaskActivityKey,
+  hasActiveTaskActivity,
+} from '../utils/taskActivity';
 import { invokeSlashCommandHandler } from '../utils/slash-command-action';
 import { parseWebShellGoalCommand } from '../utils/goalCondition';
 import { buildGoalControlRequest } from '../utils/goalControlRequest';
@@ -280,9 +283,16 @@ export function ChatPane({
     () => getTaskActivityKey(messages),
     [messages],
   );
+  // The activity fact travels beside the key, derived structurally — the
+  // key itself is not parseable back (callId is unconstrained text).
+  const taskActivityActive = useMemo(
+    () => hasActiveTaskActivity(messages),
+    [messages],
+  );
   const sessionTasks = useBackgroundTasks(
     connection.sessionId,
     taskActivityKey,
+    taskActivityActive,
     connection.status === 'connected',
     0,
     connection.supportedCommands?.workflowsEnabled === true,

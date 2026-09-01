@@ -43,6 +43,8 @@ let root: Root | null = null;
 let container: HTMLDivElement | null = null;
 let sessionId: string | undefined = 'session-a';
 let taskActivityKey = 'monitor:running';
+/** The activity fact the transcript walk would report for the key above. */
+let taskActivityActive = false;
 let refreshTrigger = 0;
 let workflowsEnabled = false;
 let latestTasks: DaemonSessionTaskWithWorkflowStatus[] = [];
@@ -103,6 +105,7 @@ function Harness() {
   latestTasks = useBackgroundTasks(
     sessionId,
     taskActivityKey,
+    taskActivityActive,
     true,
     refreshTrigger,
     workflowsEnabled,
@@ -129,6 +132,7 @@ beforeEach(() => {
   vi.useFakeTimers();
   sessionId = 'session-a';
   taskActivityKey = 'monitor:running';
+  taskActivityActive = false;
   refreshTrigger = 0;
   workflowsEnabled = false;
   latestTasks = [];
@@ -193,6 +197,7 @@ afterEach(async () => {
 describe('useBackgroundTasks', () => {
   it('keeps polling while an active workflow is waiting to register', async () => {
     taskActivityKey = 'workflow-call:in_progress';
+    taskActivityActive = true;
     workflowsEnabled = true;
     const runningWorkflow = {
       kind: 'workflow' as const,
@@ -229,6 +234,7 @@ describe('useBackgroundTasks', () => {
 
   it('keeps polling past a terminal snapshot while workflow activity is live', async () => {
     taskActivityKey = 'workflow-call:in_progress';
+    taskActivityActive = true;
     workflowsEnabled = true;
     const terminalWorkflow = {
       kind: 'workflow' as const,
@@ -303,6 +309,48 @@ describe('useBackgroundTasks', () => {
     expect(sdkMock.actions.getTasks).toHaveBeenCalledTimes(2);
   });
 
+  it('resumes polling for a new session after a panel left open in the old one', async () => {
+    // Split view keeps the previous session's pane mounted, so switching
+    // primary fires no `active: false`, and when that pane's panel finally
+    // closes its event carries the OLD sessionId and is filtered out. With
+    // the latch never reset, the new session's polling stays blocked for
+    // good — the guard outranks every refreshTrigger bump.
+    sdkMock.actions.getTasks.mockResolvedValue(
+      snapshot('session-a', [monitor('monitor-a', 'running')]),
+    );
+    await renderHarness();
+
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent(TASKS_STATUS_ACTIVE_EVENT, {
+          detail: { active: true, sessionId: 'session-a' },
+        }),
+      );
+    });
+
+    sdkMock.actions.getTasks.mockClear();
+    sdkMock.actions.getTasks.mockResolvedValue(
+      snapshot('session-b', [monitor('monitor-b', 'running')]),
+    );
+    sessionId = 'session-b';
+    await rerenderHarness();
+
+    // The stale pane's panel closes only now, naming the session it was
+    // opened in.
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent(TASKS_STATUS_ACTIVE_EVENT, {
+          detail: { active: false, sessionId: 'session-a' },
+        }),
+      );
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+
+    expect(sdkMock.actions.getTasks.mock.calls.length).toBeGreaterThan(0);
+    // `monitor()` stamps startTime from the clock, so compare identity.
+    expect(latestTasks.map((task) => task.id)).toEqual(['monitor-b']);
+  });
+
   it('keeps polling after a transient task refresh failure', async () => {
     const runningMonitor = monitor('monitor-a', 'running');
     sdkMock.actions.getTasks
@@ -339,6 +387,7 @@ describe('useBackgroundTasks', () => {
 
   it('starts polling when an out-of-band task triggers a refresh', async () => {
     taskActivityKey = '';
+    taskActivityActive = false;
     const runningFork = {
       kind: 'agent' as const,
       id: 'fork-agent-1',

@@ -74,7 +74,11 @@ import { SubagentDetailsProvider } from './subagentDetailsContext';
 import { MonitorDetailsProvider } from './monitorDetailsContext';
 import { WorkflowDetailsProvider } from './workflowDetailsContext';
 import { findMonitorTaskForTool } from './utils/monitorTasks';
-import { getTaskActivityKey } from './utils/taskActivity';
+import { isComposerTask } from './utils/composerTasks';
+import {
+  getTaskActivityKey,
+  hasActiveTaskActivity,
+} from './utils/taskActivity';
 import { extractVoiceModels, type VoiceModelOption } from './voice/voiceModels';
 import {
   loadVoiceProviders,
@@ -4396,11 +4400,18 @@ export function App({
     () => getTaskActivityKey(messages),
     [messages],
   );
+  // The activity fact travels beside the key, derived structurally — the
+  // key itself is not parseable back (callId is unconstrained text).
+  const taskActivityActive = useMemo(
+    () => hasActiveTaskActivity(messages),
+    [messages],
+  );
   const [backgroundTasksRefreshTrigger, setBackgroundTasksRefreshTrigger] =
     useState(0);
   const sessionTasks = useBackgroundTasks(
     connection.sessionId,
     taskActivityKey,
+    taskActivityActive,
     connection.status === 'connected',
     backgroundTasksRefreshTrigger,
     workflowsEnabled,
@@ -4449,7 +4460,9 @@ export function App({
     onAgentTasksChange(environmentAgentTasks);
   }, [environmentAgentTasks, onAgentTasksChange]);
   const backgroundTasks = useMemo(
-    () => sessionTasks.filter((task) => task.kind !== 'agent'),
+    // Same rule as the status-bar pill: live background state only, never
+    // the project's retained workflow history.
+    () => sessionTasks.filter(isComposerTask),
     [sessionTasks],
   );
   const monitorDetailsSessionIdRef = useRef(connection.sessionId);

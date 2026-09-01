@@ -934,7 +934,15 @@ export function TasksStatusMessage({
                     activateTask();
                   }}
                   onFocus={() => {
-                    if (!embedded) setSelectedTaskId(task.id);
+                    // Embedded rows are focusable too, and the global
+                    // shortcuts (`x` to cancel) act on the SELECTION — so
+                    // without this the user can Tab to one row and cancel
+                    // another. Not while a row is expanded: focus moving
+                    // into the detail must not re-target the selection
+                    // (pinned by the "focus does not expand" case).
+                    if (!embedded || step !== 'detail') {
+                      setSelectedTaskId(task.id);
+                    }
                   }}
                   onMouseEnter={() => {
                     if (!embedded) setSelectedTaskId(task.id);

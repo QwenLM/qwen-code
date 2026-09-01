@@ -10,10 +10,6 @@ import { isSessionDisconnectedError } from '../utils/sessionErrors';
 const TASKS_POLL_INTERVAL_MS = 3000;
 const MAX_EMPTY_TASK_POLLS = 2;
 
-function hasActiveTaskActivity(taskActivityKey: string): boolean {
-  return /:(?:pending|in_progress)(?:\||$)/.test(taskActivityKey);
-}
-
 function hasActiveTask(
   tasks: readonly DaemonSessionTaskWithWorkflowStatus[],
 ): boolean {
@@ -28,6 +24,12 @@ function hasActiveTask(
 export function useBackgroundTasks(
   sessionId: string | undefined,
   taskActivityKey: string,
+  /**
+   * Whether any background task tool call is still running. Passed in as a
+   * fact rather than re-parsed out of `taskActivityKey`, whose rendering is
+   * not injective (callId is unconstrained text).
+   */
+  taskActivityActive: boolean,
   connected: boolean,
   refreshTrigger = 0,
   workflowsEnabled = false,
@@ -49,6 +51,13 @@ export function useBackgroundTasks(
     setTasks([]);
     setPollingActive(false);
     emptyPollsRef.current = 0;
+    // The pause latch belongs to the session it was raised for. Split view
+    // keeps the previous session's pane mounted, so switching primary never
+    // fires the panel's `active: false` — and when that pane's panel does
+    // close, its event carries the OLD sessionId and is filtered out here.
+    // Without this reset the new session's polling would stay blocked for
+    // good: the guard below outranks every refreshTrigger bump.
+    setTasksPanelActive(false);
   }, [connected, owner, sessionId]);
 
   useEffect(() => {
@@ -79,7 +88,7 @@ export function useBackgroundTasks(
             return;
           setTasks(snapshot.tasks);
           if (snapshot.tasks.length === 0) {
-            if (hasActiveTaskActivity(taskActivityKey)) return;
+            if (taskActivityActive) return;
             emptyPollsRef.current += 1;
             if (emptyPollsRef.current >= MAX_EMPTY_TASK_POLLS) {
               setPollingActive(false);
@@ -87,10 +96,7 @@ export function useBackgroundTasks(
             return;
           }
           emptyPollsRef.current = 0;
-          if (
-            !hasActiveTask(snapshot.tasks) &&
-            !hasActiveTaskActivity(taskActivityKey)
-          ) {
+          if (!hasActiveTask(snapshot.tasks) && !taskActivityActive) {
             setPollingActive(false);
           }
         })
@@ -121,6 +127,7 @@ export function useBackgroundTasks(
     owner,
     pollingActive,
     sessionId,
+    taskActivityActive,
     taskActivityKey,
     tasksPanelActive,
     workflowsEnabled,

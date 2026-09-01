@@ -417,6 +417,37 @@ describe('TasksStatusMessage workflow details', () => {
     expect(onTasksChange).not.toHaveBeenCalled();
   });
 
+  it('cancels the row the user focused, not the one selection started on', async () => {
+    // Rows became focusable in this PR while `x` still routes to the
+    // SELECTED task, so without syncing selection on focus the two cursors
+    // diverge: Tab to task B, press x, and task A — which the user never
+    // pointed at — is the one that stops.
+    const taskA = workflowTask({ id: 'workflow-a', label: 'run-a' });
+    const taskB = workflowTask({ id: 'workflow-b', label: 'run-b' });
+    cancelTaskMock.mockResolvedValue({ cancelled: true });
+    const container = renderPanel([taskA, taskB], {
+      embedded: true,
+      keyboardShortcuts: true,
+      taskView: 'workflow-active',
+    });
+    const findRow = (label: string) =>
+      Array.from(
+        container.querySelectorAll<HTMLElement>('[role="button"]'),
+      ).find((candidate) => candidate.textContent?.includes(label));
+
+    // The global keydown listener attaches after a 50 ms guard delay.
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 200));
+    });
+    act(() => findRow('run-b')?.focus());
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 200));
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'x' }));
+    });
+
+    expect(cancelTaskMock).toHaveBeenCalledWith('workflow-b', 'workflow');
+  });
+
   it('opens the live graph and stops the workflow through the task API', async () => {
     const task = workflowTask();
     cancelTaskMock.mockResolvedValue({ cancelled: true });

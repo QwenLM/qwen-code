@@ -1863,7 +1863,15 @@ export const ToolGroup = memo(function ToolGroup({
         {(chatExpanded || hasMcpApp || hasWorkflow) && (
           <div
             aria-hidden={!chatExpanded}
-            inert={!chatExpanded ? true : undefined}
+            // Set on the DOM node, not as a JSX prop: react-dom 18 — inside
+            // this package's supported peer range — has no `inert` property
+            // entry and drops a boolean on an unknown attribute, so the
+            // collapsed content (which stays mounted) would keep its
+            // focusable ToolLine rows while aria-hidden hid them from
+            // assistive tech. Same pattern as ParallelAgentsGroup.
+            ref={(element) => {
+              element?.toggleAttribute('inert', !chatExpanded);
+            }}
             className={
               chatExpanded
                 ? styles.chatSummaryContentClip

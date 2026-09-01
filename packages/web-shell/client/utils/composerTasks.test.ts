@@ -75,4 +75,29 @@ describe('isComposerTask', () => {
       expect(isComposerTask(task)).toBe(expected);
     }
   });
+
+  it('excludes retained workflow history', () => {
+    // getWorkflowTasks() merges the project's saved runs into the same
+    // list. Counting them would make the status-bar pill announce the
+    // whole retained history ("30 tasks done") the first time polling runs
+    // in a session, with no way for the user to clear it.
+    const historical: DaemonSessionTaskWithWorkflowStatus = {
+      ...base,
+      status: 'completed',
+      kind: 'workflow',
+      isHistorical: true,
+      isBackgrounded: false,
+      currentPhase: null,
+      phaseVisits: [],
+      dispatches: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      recentLogs: [],
+      pendingApprovalCount: 0,
+    };
+    expect(isComposerTask(historical)).toBe(false);
+    expect(isComposerTask({ ...historical, isHistorical: false })).toBe(true);
+  });
 });
