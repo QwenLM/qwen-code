@@ -6,6 +6,10 @@ export type DingtalkPresentationPhase =
   | 'searching'
   | 'running'
   | 'editing'
+  | 'deleting'
+  | 'moving'
+  | 'fetching'
+  | 'switching'
   | 'working'
   | 'retrying'
   | 'replying';
@@ -19,6 +23,10 @@ export const DINGTALK_PRESENTATION_PHASE_LABELS: Record<
   searching: '🔎 Searching',
   running: '🖥️ Running',
   editing: '🛠️ Editing',
+  deleting: '🗑️ Deleting',
+  moving: '📦 Moving',
+  fetching: '🌐 Fetching',
+  switching: '🔄 Switching mode',
   working: '🛠️ Working',
   retrying: '⚠️ Retrying',
   replying: '✍️ Replying',
@@ -33,6 +41,10 @@ const DINGTALK_ZH_PRESENTATION_PHASE_LABELS: Record<
   searching: '🔎 搜索中',
   running: '🖥️ 执行中',
   editing: '🛠️ 编辑中',
+  deleting: '🗑️ 删除中',
+  moving: '📦 移动中',
+  fetching: '🌐 获取中',
+  switching: '🔄 切换模式中',
   working: '🛠️ 处理中',
   retrying: '⚠️ 重试中',
   replying: '✍️ 回复中',
@@ -55,11 +67,34 @@ export function presentationPhaseLabel(
 }
 
 function toolPresentationPhase(kind: string): DingtalkPresentationPhase {
-  if (/read/iu.test(kind)) return 'reading';
-  if (/search|browser|web/iu.test(kind)) return 'searching';
-  if (/shell|exec|command|run/iu.test(kind)) return 'running';
-  if (/edit|write|patch/iu.test(kind)) return 'editing';
-  return 'working';
+  switch (kind.trim().toLowerCase()) {
+    case 'read':
+      return 'reading';
+    case 'edit':
+      return 'editing';
+    case 'delete':
+      return 'deleting';
+    case 'move':
+      return 'moving';
+    case 'search':
+      return 'searching';
+    case 'execute':
+      return 'running';
+    case 'think':
+      return 'thinking';
+    case 'fetch':
+      return 'fetching';
+    case 'switch_mode':
+      return 'switching';
+    case 'other':
+      return 'working';
+    default:
+      if (/read/iu.test(kind)) return 'reading';
+      if (/search|browser|web/iu.test(kind)) return 'searching';
+      if (/shell|exec|command|run/iu.test(kind)) return 'running';
+      if (/edit|write|patch/iu.test(kind)) return 'editing';
+      return 'working';
+  }
 }
 
 export function lifecyclePresentationPhase(

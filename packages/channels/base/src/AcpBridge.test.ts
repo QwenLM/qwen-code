@@ -859,6 +859,42 @@ describe('AcpBridge', () => {
     );
   });
 
+  it('forwards standard initial ACP tool kinds unchanged', () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    const toolCall = vi.fn();
+    bridge.on('toolCall', toolCall);
+
+    const kinds = [
+      'read',
+      'edit',
+      'delete',
+      'move',
+      'search',
+      'execute',
+      'think',
+      'fetch',
+      'switch_mode',
+      'other',
+    ];
+    for (const kind of kinds) {
+      bridge.handleSessionUpdate({
+        sessionId: 'session-1',
+        update: {
+          sessionUpdate: 'tool_call',
+          toolCallId: `tool-${kind}`,
+          kind,
+          title: kind,
+          status: 'in_progress',
+        },
+      });
+    }
+
+    expect(toolCall.mock.calls.map(([event]) => event.kind)).toEqual(kinds);
+  });
+
   it('preserves text when tool calls are not pending', async () => {
     const bridge = new AcpBridge({
       cliEntryPath: '/tmp/qwen',
