@@ -3719,6 +3719,51 @@ describe('Settings Loading and Merging', () => {
     });
   });
 
+  describe('goals.modelProposed scope handling', () => {
+    it('is listed as workspace-restricted', () => {
+      expect(WORKSPACE_RESTRICTED_SETTING_KEYS).toContain(
+        'goals.modelProposed',
+      );
+    });
+
+    it('honors goals.modelProposed from user scope', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({ goals: { modelProposed: 'disabled' } });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.goals?.modelProposed).toBe('disabled');
+    });
+
+    it('strips goals.modelProposed from workspace scope and warns', () => {
+      // A repository must not be able to switch on a tool that asks the
+      // user to start an autonomous loop; the default is the user's call.
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({ goals: { modelProposed: 'disabled' } });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      // The workspace key was dropped before merging (merged settings do not
+      // materialise schema defaults, so nothing set means undefined, and the
+      // core default of alwaysAsk applies downstream).
+      expect(settings.merged.goals?.modelProposed).toBeUndefined();
+      const warnings = getSettingsWarnings(settings);
+      expect(warnings.some((w) => w.includes('goals.modelProposed'))).toBe(
+        true,
+      );
+    });
+  });
+
   describe('cross-session settings scope handling', () => {
     it('should honor the cross-session keys from user scope', () => {
       (mockFsExistsSync as Mock).mockReturnValue(true);
