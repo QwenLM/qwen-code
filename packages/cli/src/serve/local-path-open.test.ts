@@ -567,6 +567,25 @@ describe('spawn helper contracts', () => {
     expect(child.kill).toHaveBeenCalled();
   });
 
+  it('does not fall back when a spawned wt.exe stalls and is killed by the hang guard', async () => {
+    setPlatform('win32');
+    const child = { once: vi.fn(), kill: vi.fn(), unref: vi.fn() };
+    spawnMock.mockReturnValue(child);
+
+    // The hang guard fired — wt.exe exists, it just never exited; launching
+    // the PowerShell fallback here would open a second terminal.
+    await expect(openTerminalLocally(existingDir, 5)).rejects.toBeInstanceOf(
+      LocalPathOpenUnavailableError,
+    );
+    expect(child.kill).toHaveBeenCalled();
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+    expect(spawnMock).not.toHaveBeenCalledWith(
+      'powershell.exe',
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
   it('kills and rejects a hung terminal spawn', async () => {
     setPlatform('linux');
     vi.stubEnv('PATH', gnomeTerminalDir);

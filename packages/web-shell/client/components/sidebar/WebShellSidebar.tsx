@@ -5810,9 +5810,7 @@ export function WebShellSidebar({
                                       !ws.primary &&
                                       ws.removable === true;
                                     if (!ws.trusted && !canRemove) return null;
-                                    const wsCwd = ws.primary
-                                      ? undefined
-                                      : ws.cwd;
+                                    const wsCwd = ws.cwd;
                                     const realPath = isAbsolutePath(ws.cwd);
                                     // A display name persists only for registration-backed
                                     // rows; the daemon's bound (primary) workspace has no
@@ -6018,9 +6016,16 @@ export function WebShellSidebar({
                                             onPointerDownOutside={
                                               handleSessionMenuPointerDownOutside
                                             }
-                                            onCloseAutoFocus={
-                                              handleSessionMenuCloseAutoFocus
-                                            }
+                                            onCloseAutoFocus={(event) => {
+                                              // Radix restores focus to the
+                                              // trigger, which lives inside the
+                                              // details popover's focus-open
+                                              // anchor — without suppression the
+                                              // popover reopens 300 ms after
+                                              // every menu close and never
+                                              // closes.
+                                              event.preventDefault();
+                                            }}
                                           />
                                         )}
                                       </div>

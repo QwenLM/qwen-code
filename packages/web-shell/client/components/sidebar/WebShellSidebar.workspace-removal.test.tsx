@@ -3583,6 +3583,48 @@ describe('WebShellSidebar workspace removal', () => {
     expect(rows[0]?.textContent).toBe('MCP1/1');
   });
 
+  it('does not reopen the details popover after a workspace menu selection', async () => {
+    renderSidebar();
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const header = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button[aria-expanded]'),
+    ).find((button) => button.textContent?.includes('other'));
+    expect(header).toBeDefined();
+
+    // Hover opens the workspace details popover (300 ms delay, real timers
+    // so Radix's focus-restore rAF behaves like production).
+    await act(async () => {
+      header!.dispatchEvent(new Event('pointerover', { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 350));
+    });
+    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+
+    // Open the workspace menu (this closes the popover) and pick an item.
+    await act(async () => {
+      click(workspaceAction('/tmp/other')!);
+      await Promise.resolve();
+    });
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    const item = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((element) => element.textContent === 'Copy path');
+    expect(item).toBeDefined();
+    await act(async () => {
+      click(item!);
+      await Promise.resolve();
+    });
+
+    // Radix restoring focus to the trigger inside the focus-open anchor must
+    // not reopen the details popover 300 ms later.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 450));
+    });
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+  });
+
   it('counts the registered workspaces next to the Projects label', () => {
     renderSidebar();
     const badge = container.querySelector<HTMLElement>(

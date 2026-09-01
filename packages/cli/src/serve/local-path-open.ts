@@ -31,6 +31,11 @@ function linuxTerminalCandidates(
 
 export class LocalPathOpenUnavailableError extends Error {}
 
+// A spawned launcher that never exited within the timeout and was killed —
+// distinct from a spawn-level failure, so the wt.exe fallback does not treat
+// a stalled-but-running terminal as "wt.exe missing" and double-open.
+class SpawnHangError extends Error {}
+
 interface MacOsSessionUids {
   readonly processUid?: number;
   readonly consoleUid?: number;
@@ -220,7 +225,11 @@ async function spawnWindowsTerminal(
 ): Promise<void> {
   try {
     await spawnAndIgnoreExitCode('wt.exe', ['-d', path], { timeoutMs });
-  } catch {
+  } catch (error) {
+    // A wt.exe that spawned but stalled is killed by the hang guard; the
+    // fallback would then double-open, so only a spawn-level failure (wt.exe
+    // absent) falls back.
+    if (error instanceof SpawnHangError) throw error;
     // The directory travels as the child's working directory, never through
     // a parsed command line: cmd.exe `start` disagrees with CreateProcess
     // quoting, and any `cd /d "<path>"` form re-exposes cmd's %VAR%
@@ -288,7 +297,9 @@ function spawnAndIgnoreExitCode(
     });
     const timer = setTimeout(() => {
       child.kill();
-      reject(new Error(`${command} did not exit within ${timeoutMs}ms`));
+      reject(
+        new SpawnHangError(`${command} did not exit within ${timeoutMs}ms`),
+      );
     }, timeoutMs);
     child.once('error', (error) => {
       clearTimeout(timer);
@@ -316,7 +327,9 @@ function spawnLongLived(
     });
     const timer = setTimeout(() => {
       child.kill();
-      reject(new Error(`${command} did not spawn within ${timeoutMs}ms`));
+      reject(
+        new SpawnHangError(`${command} did not spawn within ${timeoutMs}ms`),
+      );
     }, timeoutMs);
     child.once('error', (error) => {
       clearTimeout(timer);
