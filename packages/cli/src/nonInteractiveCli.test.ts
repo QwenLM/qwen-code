@@ -4894,6 +4894,47 @@ describe('runNonInteractive', () => {
     expect(errorOutput).toContain('Incorrect API key provided');
   });
 
+  it('fails stream-json runs when the model stream emits an API error', async () => {
+    (mockConfig.getOutputFormat as Mock).mockReturnValue(
+      OutputFormat.STREAM_JSON,
+    );
+    setupMetricsMock();
+    const apiErrorEvent: ServerLlmStreamEvent = {
+      type: LlmEventType.Error,
+      value: {
+        error: {
+          message: '429 Too Many Requests',
+          status: 429,
+        },
+      },
+    };
+    mockLlmClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([apiErrorEvent]),
+    );
+
+    await expect(
+      runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Test input',
+        'prompt-id-stream-api-error',
+      ),
+    ).rejects.toBeInstanceOf(AlreadyReportedError);
+
+    const messages = processStdoutSpy.mock.calls
+      .map((call) => String(call[0]).trim())
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as { [key: string]: unknown });
+    const results = messages.filter((message) => message['type'] === 'result');
+
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({
+      subtype: 'error_during_execution',
+      is_error: true,
+      error: { message: expect.stringContaining('429 Too Many Requests') },
+    });
+  });
+
   it('does not double-wrap or double-format an API error in non-interactive mode', async () => {
     // Regression test for the bug where a 4xx error event flowed through
     // both the stream handler and handleError, each calling

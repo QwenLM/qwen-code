@@ -2418,19 +2418,17 @@ export async function runNonInteractive(
             }
             loopDetected = true;
           }
-          if (
-            outputFormat === OutputFormat.TEXT &&
-            event.type === LlmEventType.Error
-          ) {
+          if (event.type === LlmEventType.Error) {
             const errorText = parseAndFormatApiError(
               event.value.error,
               config.getContentGeneratorConfig()?.authType,
             );
-            process.stderr.write(`${errorText}\n`);
-            // We have already formatted and written the message; mark the
-            // throw so the top-level handleError doesn't reformat (which
-            // would yield "[API Error: [API Error: ...]]") or print it a
-            // second time. Exit code stays 1 — same as before.
+            if (outputFormat === OutputFormat.TEXT) {
+              process.stderr.write(`${errorText}\n`);
+            }
+            // The adapter has already captured the formatted error in JSON
+            // modes, while text mode wrote it above. Mark the throw so the
+            // terminal error result is emitted without formatting it again.
             throw new AlreadyReportedError(errorText);
           }
         }
@@ -2734,18 +2732,15 @@ export async function runNonInteractive(
                   }
                   loopDetected = true;
                 }
-                if (
-                  outputFormat === OutputFormat.TEXT &&
-                  event.type === LlmEventType.Error
-                ) {
+                if (event.type === LlmEventType.Error) {
                   const errorText = parseAndFormatApiError(
                     event.value.error,
                     config.getContentGeneratorConfig()?.authType,
                   );
-                  process.stderr.write(`${errorText}\n`);
-                  // See the matching note in the first stream loop above —
-                  // we mark the throw so handleError doesn't reformat or
-                  // reprint downstream.
+                  if (outputFormat === OutputFormat.TEXT) {
+                    process.stderr.write(`${errorText}\n`);
+                  }
+                  // See the matching main-stream branch above.
                   throw new AlreadyReportedError(errorText);
                 }
               }
