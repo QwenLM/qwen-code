@@ -111,7 +111,9 @@ Daemon-managed Channels can retain several named conversations for the same user
 
 The catalog is private to the exact channel, chat, and sender. Task names use 1–32 ASCII letters, numbers, underscores, or hyphens, and are unique case-insensitively. Up to eight tasks may be open; closing a task detaches it without deleting its transcript, so selecting it later reopens the exact conversation. Session IDs are never accepted by or shown in chat commands.
 
-Part 2 uses one selected task at a time and a shared working directory. Creating a task or switching away from the selected task is rejected while that task is still running or waiting for permission, and a busy task cannot be closed. Concurrent running-task switching, named cancellation, and task labels are planned for Part 3; per-task worktrees are planned for Part 4. Channel memory remains scoped to the chat rather than to a named task.
+Named results identify their originating task: direct chats use `[task]`, while group chats use `[sender · task]`. Named text permission prompts also show the exact request ID and the corresponding `/approve <id>`, `/approve-always <id>`, and `/deny <id>` commands. The label is presentation-only and is not stored in the model transcript.
+
+One task remains selected to receive the next normal message, but other named tasks may keep running concurrently in the shared working directory. Creating or selecting another task does not cancel or retarget earlier work, and late results retain their originating task label. A busy task cannot be closed, but its active prompt can be cancelled with `/session cancel [<name>]` through the existing Channel cancellation behavior. Independently queued turns are not cancelled, but in `collect` dispatch mode any follow-ups buffered behind the cancelled prompt are discarded by that existing behavior. Media preparation is not targeted. Bare permission commands apply only to the selected task, while an explicit request ID can answer an owned inactive task. Per-task worktrees are planned for Part 4. Channel memory remains scoped to the chat rather than to a named task.
 
 This mode is unavailable in standalone `qwen channel start`, with webhooks, with non-zero channel or group `groupHistoryLimit`, or with Channel loops. If an enabled loop already exists for that channel, the daemon worker refuses to start until the loop is disabled.
 
@@ -492,7 +494,7 @@ Channels support slash commands. These are handled locally (no agent round-trip)
 - `/session new <name>` — Create and select a shared-workspace task
 - `/session new <name> --worktree` — Recognized but deferred to Part 4
 - `/session use <name>` — Select an open task or reopen a closed task
-- `/session cancel [<name>]` — Recognized but deferred to Part 3. Wait for the selected task to finish before switching; Telegram users can use `/cancel` for the selected task
+- `/session cancel [<name>]` — Cancel the selected task's active prompt, or name another owned task; independently queued turns are not cancelled, but `collect`-mode follow-ups buffered behind the cancelled prompt are discarded by the existing cancellation behavior; media preparation is not targeted
 - `/session close <name>` — Close a task without deleting its transcript
 - `/loop add "<cron>" <prompt>` — Create a persistent scheduled channel loop
 - `/loop list` — List loops for the current chat

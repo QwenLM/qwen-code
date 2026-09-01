@@ -2712,10 +2712,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               currentMode: currentMode ?? current.currentMode,
               reasoning:
                 configSnapshotCurrent && context !== undefined
-                  ? mapSessionContextReasoning(
-                      context,
-                      current.reasoning?.effort,
-                    )
+                  ? mapSessionContextReasoning(context)
                   : current.reasoning,
               displayName:
                 getSessionDisplayName(activeSession.state) ??
@@ -2724,7 +2721,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 ? (sessionContextWindow ?? current.contextWindow)
                 : current.contextWindow,
               providers: activeWorkspaceScoped
-                ? (providers ?? current.providers)
+                ? configSnapshotCurrent
+                  ? (providers ?? current.providers)
+                  : current.providers
                 : undefined,
               supportedCommands: supportedCommands ?? current.supportedCommands,
               context: configSnapshotCurrent

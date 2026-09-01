@@ -32,6 +32,7 @@ import {
   type DaemonSessionActions,
   type DaemonSessionNotice,
   type DaemonSessionOwnerSnapshot,
+  type DaemonReasoningControls,
   type DaemonStreamingState,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import {
@@ -53,10 +54,12 @@ import type {
   DaemonWorkspaceCapability,
   DaemonWorkspaceGitStatus,
   GoalSnapshotV2,
+  ReasoningSelection,
 } from '@qwen-code/sdk/daemon';
 
 import { isGoalGateBlocked as isGoalGateBlockedFor } from './utils/goalGate';
 import { type SessionGitIntent } from './components/GitModePopover';
+import { gitModeIntentMustReset } from './utils/gitModeIntent';
 import { LocalControlQrButton } from './components/LocalControlQrButton';
 import {
   SESSION_LIST_PAGE_SIZE,
@@ -205,6 +208,7 @@ import {
   WebShellSidebar,
   type WebShellSidebarBranding,
   type WebShellSidebarFooterOptions,
+  type WebShellSidebarWorkspaceOverviewOptions,
   type WebShellSidebarLockedWorkspace,
   type WebShellSidebarPrimaryNavOptions,
   type WebShellSidebarSessionActionsOptions,
@@ -939,6 +943,11 @@ export interface WebShellSidebarOptions {
   footer?: false | WebShellSidebarFooterOptions;
   /** Customize the workspace row shown when lockWorkspaceCwd is active. */
   lockedWorkspace?: WebShellSidebarLockedWorkspace;
+  /**
+   * Session counts, full path and facet chips (MCP, skills, …) on workspace
+   * rows. Pass `false` to keep plain folder headers.
+   */
+  workspaceOverview?: false | WebShellSidebarWorkspaceOverviewOptions;
 }
 
 export type SessionChangeEvent =
@@ -957,6 +966,11 @@ export interface WebShellApi {
   createNewSession: () => Promise<boolean>;
   /** Open the right panel with a new side-task draft. */
   createSideTask: () => boolean;
+  /** Resolve the visible approval, optionally binding it to an exact request. */
+  respondToPendingPermission?: {
+    (decision: 'allow' | 'reject'): Promise<boolean>;
+    (requestId: string, decision: 'allow' | 'reject'): Promise<boolean>;
+  };
 }
 
 export type WebShellComposerPlaceholderState = ComposerPlaceholderState;
@@ -1037,6 +1051,8 @@ export interface WebShellProps {
   onFileReviewOpen?: (
     request: Extract<TurnOutputOpenRequest, { kind: 'review' }>,
   ) => void;
+  /** Open a workspace file in the embedding host instead of WebShell preview. */
+  onWorkspaceFileOpen?: (path: string) => void;
   /** Open a completed Insight report in a host-native surface. */
   onInsightReportOpen?: (path: string) => void;
   /**
@@ -1185,6 +1201,8 @@ export interface WebShellProps {
   bottomStatusItems?: readonly WebShellBottomStatusItem[];
   /** Collapse thinking blocks to 5 lines with a click-to-expand toggle. */
   compactThinking?: boolean;
+  /** Let the host own pending Edit diff previews instead of the inline tool row. */
+  hostOwnsEditDiffPreview?: boolean;
   /** Auto-collapse completed turns to just the prompt and final answer, with a per-turn toggle. Defaults to true. */
   collapseCompletedTurns?: boolean;
   /** Markdown table rendering mode. Defaults to basic. */
@@ -1259,9 +1277,24 @@ type SessionActionsWithCreate = {
 
 type PendingReasoningIntent = {
   modelId: string;
-  value: string;
-  effort: string;
+  value: ReasoningSelection;
 };
+
+function getReasoningSelection(
+  reasoning: DaemonReasoningControls,
+): ReasoningSelection {
+  if (!reasoning.enabled) return 'none';
+  return reasoning.effort === 'none' ? 'default' : reasoning.effort;
+}
+
+function reasoningPreviewSupports(
+  reasoning: DaemonReasoningControls,
+  value: ReasoningSelection,
+): boolean {
+  if (value === 'none') return reasoning.canDisable !== false;
+  if (value === 'default') return true;
+  return reasoning.efforts.includes(value);
+}
 
 const emptyComposerApi: WebShellComposerApi = {
   focus: () => {},
@@ -1317,6 +1350,7 @@ function resolveSidebarOptions(sidebar: WebShellProps['sidebar']): {
   sessionActions?: WebShellSidebarSessionActionsOptions;
   footer?: false | WebShellSidebarFooterOptions;
   lockedWorkspace?: WebShellSidebarLockedWorkspace;
+  workspaceOverview?: false | WebShellSidebarWorkspaceOverviewOptions;
 } {
   if (sidebar === true) {
     return {
@@ -1345,6 +1379,7 @@ function resolveSidebarOptions(sidebar: WebShellProps['sidebar']): {
     sessionActions: sidebar.sessionActions,
     footer: sidebar.footer,
     lockedWorkspace: sidebar.lockedWorkspace,
+    workspaceOverview: sidebar.workspaceOverview,
   };
 }
 
@@ -2065,6 +2100,7 @@ export function App({
   renderPaneHeaderActions,
   onRightPanelOpen,
   onFileReviewOpen,
+  onWorkspaceFileOpen,
   onInsightReportOpen,
   messageTurnOutputs,
   shellRef,
@@ -2081,6 +2117,7 @@ export function App({
   composerToolbarAdditionalActions,
   composerPlaceholders,
   compactThinking = false,
+  hostOwnsEditDiffPreview = false,
   collapseCompletedTurns = true,
   markdownTableMode = 'basic',
   virtualScrollThreshold,
@@ -2342,6 +2379,10 @@ export function App({
       fileUploadEnabled,
       fileUploadDirectory,
     ],
+  );
+  const mainChatCustomization = useMemo(
+    () => ({ ...customization, hostOwnsEditDiffPreview }),
+    [customization, hostOwnsEditDiffPreview],
   );
   const CustomFooter = renderFooter;
   const CustomComposerHeader = renderComposerHeader;
@@ -3726,6 +3767,15 @@ export function App({
       workspaceCwd = connection.workspaceCwd,
       sourceSessionId = connection.sessionId,
     ) => {
+      if (
+        onWorkspaceFileOpen &&
+        file.workspacePath &&
+        file.text === undefined &&
+        file.data === undefined
+      ) {
+        onWorkspaceFileOpen(file.workspacePath);
+        return;
+      }
       const open = (resolvedFile: AttachmentPreviewRequest) => {
         const workspacePath = resolvedFile.workspacePath ?? resolvedFile.name;
         const workspaceId = resolveArtifactWorkspaceOwner(
@@ -3816,6 +3866,7 @@ export function App({
       connection.workspaceCwd,
       connection.sessionId,
       getDefaultReviewPanelWidth,
+      onWorkspaceFileOpen,
       pushToast,
       sessionActions,
       sessionOwnerGuard,
@@ -5982,6 +6033,40 @@ export function App({
   );
   const connectionRef = useRef(connection);
   connectionRef.current = connection;
+  const selectWelcomeModel = useCallback(
+    (modelId: string) => {
+      const models = connectionRef.current.models;
+      const reasoningIntent = pendingReasoningIntentRef.current;
+      const sourceReasoningIntent =
+        reasoningIntent?.modelId === currentModelRef.current
+          ? reasoningIntent
+          : undefined;
+      const sourceReasoningPreview = models?.find(
+        (model) => model.id === currentModelRef.current,
+      )?.reasoningPreview;
+      const sourceReasoningSelection =
+        sourceReasoningIntent?.value ??
+        (sourceReasoningPreview
+          ? getReasoningSelection(sourceReasoningPreview)
+          : undefined);
+      const reasoningPreview = models?.find(
+        (model) => model.id === modelId,
+      )?.reasoningPreview;
+      const keepReasoningIntent =
+        sourceReasoningSelection &&
+        reasoningPreview &&
+        reasoningPreviewSupports(reasoningPreview, sourceReasoningSelection);
+      setPendingReasoningIntent(
+        sourceReasoningIntent && keepReasoningIntent
+          ? { modelId, value: sourceReasoningIntent.value }
+          : sourceReasoningSelection && !keepReasoningIntent
+            ? { modelId, value: 'default' }
+            : undefined,
+      );
+      setPendingModel(modelId);
+    },
+    [setPendingModel, setPendingReasoningIntent],
+  );
   /**
    * Whether a local action must be held back because a Goal owns the session.
    * Reads the latest connection through the ref so callers get the gate as of
@@ -6200,9 +6285,7 @@ export function App({
         reasoningIntent &&
         reasoningIntent.modelId === modelId &&
         reasoningPreview &&
-        (reasoningIntent.value === 'none'
-          ? reasoningPreview.canDisable !== false
-          : reasoningPreview.efforts.includes(reasoningIntent.value))
+        reasoningPreviewSupports(reasoningPreview, reasoningIntent.value)
           ? reasoningIntent.value
           : undefined;
       const modeId =
@@ -6725,7 +6808,10 @@ export function App({
       pendingReasoningIntent.value === 'none' &&
       welcomeReasoningPreview?.canDisable === false
     ) {
-      setPendingReasoningIntent(undefined);
+      setPendingReasoningIntent({
+        modelId: currentModel,
+        value: 'default',
+      });
     }
   }, [
     currentModel,
@@ -6736,9 +6822,10 @@ export function App({
   const validPendingReasoningIntent =
     pendingReasoningIntent?.modelId === currentModel &&
     welcomeReasoningPreview &&
-    (pendingReasoningIntent.value === 'none'
-      ? welcomeReasoningPreview.canDisable !== false
-      : welcomeReasoningPreview.efforts.includes(pendingReasoningIntent.value))
+    reasoningPreviewSupports(
+      welcomeReasoningPreview,
+      pendingReasoningIntent.value,
+    )
       ? pendingReasoningIntent
       : undefined;
   const displayedReasoning = hasAuthoritativeReasoningContext
@@ -6750,8 +6837,11 @@ export function App({
             ? validPendingReasoningIntent.value !== 'none'
             : welcomeReasoningPreview.enabled,
           effort:
-            validPendingReasoningIntent?.effort ??
-            welcomeReasoningPreview.effort,
+            validPendingReasoningIntent?.value === 'none' ||
+            validPendingReasoningIntent?.value === 'default'
+              ? (welcomeReasoningPreview.defaultEffort ?? 'default')
+              : (validPendingReasoningIntent?.value ??
+                welcomeReasoningPreview.effort),
         }
       : undefined;
   // The workspace the Changes dialog reads — the same active workspace the
@@ -6760,17 +6850,39 @@ export function App({
   const gitDiffWorkspaceCwd = isKnownLiveWorkspaceCwd(activeWorkspaceCwd)
     ? undefined
     : activeWorkspaceCwd;
+  const activeWorkspaceTrusted = ordinaryWorkspaces.find(
+    (entry) => entry.cwd === activeWorkspaceCwd,
+  )?.trusted;
   const gitModeEligible = Boolean(
     !connection.sessionId &&
-      ordinaryWorkspaces.find((entry) => entry.cwd === activeWorkspaceCwd)
-        ?.trusted &&
+      activeWorkspaceTrusted &&
       selectedWorkspaceGitStatus?.branch,
   );
+  // An armed branch/worktree intent survives a transient status gap (a
+  // failed poll round, a refetch still in flight); only a definitive answer
+  // clears it. The chip stays hidden meanwhile because it keys on
+  // `gitModeEligible`.
+  // The status is keyed by workspace: right after a draft re-target the
+  // state still holds the previous workspace's answer (the git-status effect
+  // clears it only after this commit), and a definitive no-branch answer for
+  // the workspace being left must not clear an intent armed for the new one.
+  // Same cwd-keying as the `git_status_changed` mirror effect above.
+  const gitModeIntentInvalid = gitModeIntentMustReset({
+    sessionId: connection.sessionId,
+    workspaceTrusted: activeWorkspaceTrusted,
+    gitStatus:
+      selectedWorkspaceGitStatus?.workspaceCwd === activeWorkspaceCwd
+        ? selectedWorkspaceGitStatus
+        : undefined,
+  });
+  // Re-run on intent changes as well: an intent set while a session already
+  // exists (or the workspace is untrusted / not a repo) has nothing to apply
+  // to and must not survive into the next draft.
   useEffect(() => {
-    if (!gitModeEligible) {
+    if (gitModeIntentInvalid && gitModeIntent.mode !== 'current') {
       setGitModeIntent({ mode: 'current' });
     }
-  }, [gitModeEligible]);
+  }, [gitModeIntentInvalid, gitModeIntent]);
   const handleOpenGitDiff = useCallback(() => {
     if (!gitDiffWorkspaceCwd) return;
     setGitDialog({
@@ -6799,7 +6911,8 @@ export function App({
     modelDialogMode !== null ||
     showApprovalModeDialog ||
     tasksDialogMessage !== null ||
-    mcpDialogMessage !== null ||
+    // mcpDialogMessage survives closing the Plugins panel; MCP surfaces are
+    // already blocked by activePanel below, so including it would lock chat.
     showMemoryDialog ||
     showAuthDialog ||
     showAddWorkspaceDialog ||
@@ -8641,16 +8754,33 @@ export function App({
   const createNewSession = useCallback(
     async (
       workspaceCwd?: string,
-      /** Preserve the current full-page view and/or active panel while clearing. */
-      opts?: { keepView?: boolean; keepPanel?: boolean },
+      opts?: {
+        /** Preserve the current full-page view and/or active panel while clearing. */
+        keepView?: boolean;
+        keepPanel?: boolean;
+        /**
+         * Git mode the new draft starts with. Set here, in the same
+         * synchronous step that resets the previous intent, so the very
+         * first prompt — even one submitted while the clear is still in
+         * flight — sees it, and no later arm can land on a draft that has
+         * since been re-targeted or turned into a session.
+         */
+        gitIntent?: SessionGitIntent;
+      },
     ) => {
       const targetWorkspaceCwd = lockedWorkspaceCwd ?? workspaceCwd;
       composerSourceVersionRef.current += 1;
       selectedWorkspaceCwdRef.current = targetWorkspaceCwd;
       setSelectedWorkspaceCwd(targetWorkspaceCwd);
       // Starting a fresh chat drops any pending git mode intent so it never
-      // leaks into the next created session.
-      setGitModeIntent({ mode: 'current' });
+      // leaks into the next created session; a caller-supplied intent takes
+      // its place. The ref is written too so a prompt admitted before the
+      // next render reads the same answer.
+      const nextGitIntent: SessionGitIntent = opts?.gitIntent ?? {
+        mode: 'current',
+      };
+      gitModeIntentRef.current = nextGitIntent;
+      setGitModeIntent(nextGitIntent);
       // Close the drawer before awaiting so a failed createSession() doesn't leave
       // it stuck open with the page scroll still locked, matching loadSidebarSession.
       closeMobileDrawer();
@@ -8724,9 +8854,17 @@ export function App({
           await createNewSession(workspaceCwd);
           return;
         }
+        // The composer picker fires for its checked row too; re-selecting
+        // the draft's own workspace changes nothing and must keep an armed
+        // intent. Compared before the ref is overwritten below. `undefined`
+        // is the primary selection on both sides.
+        const sameTarget = workspaceCwd === selectedWorkspaceCwdRef.current;
         composerSourceVersionRef.current += 1;
         selectedWorkspaceCwdRef.current = workspaceCwd;
         setSelectedWorkspaceCwd(workspaceCwd);
+        // The intent was armed for the previous draft workspace; a switch
+        // must not carry a branch/worktree request over to another repo.
+        if (!sameTarget) setGitModeIntent({ mode: 'current' });
       } finally {
         if (workspaceSwitchTokenRef.current === token) {
           workspaceSwitchTokenRef.current = null;
@@ -9063,6 +9201,56 @@ export function App({
     editorRef.current?.focus();
   }, [dismissNewSessionSuggestion, newSessionSuggestion]);
 
+  const respondToPendingPermission = useCallback(
+    async (
+      requestIdOrDecision: string,
+      exactDecision?: 'allow' | 'reject',
+    ): Promise<boolean> => {
+      const request = pendingApprovalRef.current;
+      const decision = exactDecision ?? requestIdOrDecision;
+      if (
+        !request ||
+        isAskUserPermission(request) ||
+        (decision !== 'allow' && decision !== 'reject')
+      ) {
+        return false;
+      }
+      const requestId = exactDecision ? requestIdOrDecision : undefined;
+      if (
+        requestId !== undefined &&
+        (!requestId ||
+          request.id !== requestId ||
+          !hostOwnsEditDiffPreview ||
+          request.hasDiffPreview !== true)
+      ) {
+        return false;
+      }
+      const preferredKind = decision === 'allow' ? 'allow_once' : 'reject_once';
+      const fallbackKind =
+        decision === 'allow' ? 'allow_always' : 'reject_always';
+      const option = requestId
+        ? request.options.find((candidate) => candidate.kind === preferredKind)
+        : (request.options.find(
+            (candidate) => candidate.kind === preferredKind,
+          ) ??
+          request.options.find(
+            (candidate) => candidate.kind === fallbackKind,
+          ) ??
+          request.options.find((candidate) => {
+            const id = candidate.id.toLowerCase();
+            return decision === 'allow'
+              ? id.includes('allow') || id.includes('proceed')
+              : id.includes('reject') || id.includes('cancel');
+          }));
+      if (!option) {
+        return false;
+      }
+      await sessionActions.submitPermission(request.id, option.id);
+      return true;
+    },
+    [hostOwnsEditDiffPreview, sessionActions],
+  );
+
   const shellApi = useMemo<WebShellApi>(
     () => ({
       openSplitView: () => {
@@ -9076,6 +9264,7 @@ export function App({
       openSessionDrawer,
       createNewSession: () => createNewSession(),
       createSideTask,
+      respondToPendingPermission,
     }),
     [
       closeMobileDrawer,
@@ -9084,6 +9273,7 @@ export function App({
       openPanel,
       openSessionDrawer,
       requestOpenSplitView,
+      respondToPendingPermission,
     ],
   );
   useEffect(() => {
@@ -10169,7 +10359,7 @@ export function App({
             }
             if (modelArg) {
               if (!connectionRef.current.sessionId) {
-                setPendingModel(modelArg);
+                selectWelcomeModel(modelArg);
                 return true;
               }
               const owner = sessionOwnerGuard.capture();
@@ -10865,6 +11055,7 @@ export function App({
       resumeChatBottomFollow,
       selectedLanguage,
       setPendingModel,
+      selectWelcomeModel,
       setPendingMode,
       setWorkspaceSetting,
       openVoiceModelPicker,
@@ -11427,7 +11618,7 @@ export function App({
     (modelId: string) => {
       if (sessionWriteBlocked) return;
       if (!connectionRef.current.sessionId) {
-        setPendingModel(modelId);
+        selectWelcomeModel(modelId);
         return;
       }
       // Drive the shared busy flag so the model-management rows disable while a
@@ -11468,18 +11659,21 @@ export function App({
       sessionActions,
       sessionOwnerGuard,
       setPendingModel,
+      selectWelcomeModel,
       store,
       t,
     ],
   );
 
   const handleReasoningEffort = useCallback(
-    (value: string) => {
+    (value: ReasoningSelection) => {
       if (sessionWriteBlocked || !connectionRef.current.sessionId) {
         return Promise.resolve();
       }
       return sessionActions
-        .setReasoningEffort(value)
+        .setReasoningEffort(value, {
+          persist: connectionRef.current.sessionContext?.kind !== 'standalone',
+        })
         .catch((error: unknown) =>
           reportError(error, t('reasoning.updateFailed')),
         );
@@ -11488,7 +11682,7 @@ export function App({
   );
 
   const handleWelcomeReasoningEffort = useCallback(
-    (value: string) => {
+    (value: ReasoningSelection) => {
       const activeConnection = connectionRef.current;
       if (
         sessionWriteBlockedRef.current ||
@@ -11502,23 +11696,17 @@ export function App({
         (model) => model.id === modelId,
       )?.reasoningPreview;
       if (!preview) return;
-      const previous = pendingReasoningIntentRef.current;
       if (value === 'none') {
         if (preview.canDisable === false) return;
-        const previousEffort =
-          previous?.modelId === modelId &&
-          preview.efforts.includes(previous.effort)
-            ? previous.effort
-            : preview.effort;
-        setPendingReasoningIntent({
-          modelId,
-          value,
-          effort: previousEffort,
-        });
+        setPendingReasoningIntent({ modelId, value });
+        return;
+      }
+      if (value === 'default') {
+        setPendingReasoningIntent({ modelId, value });
         return;
       }
       if (!preview.efforts.includes(value)) return;
-      setPendingReasoningIntent({ modelId, value, effort: value });
+      setPendingReasoningIntent({ modelId, value });
     },
     [setPendingReasoningIntent],
   );
@@ -12617,7 +12805,11 @@ export function App({
                   mobileOpen={mobileDrawerOpen}
                   onMobileClose={closeMobileDrawer}
                   selectedWorkspaceCwd={selectedWorkspaceCwd}
-                  onSelectWorkspace={setSelectedWorkspaceCwd}
+                  onSelectWorkspace={(workspaceCwd) => {
+                    setSelectedWorkspaceCwd(workspaceCwd);
+                    // Same one-shot rule as the composer's own selector.
+                    setGitModeIntent({ mode: 'current' });
+                  }}
                   onOpenGitDiff={(workspaceCwd) =>
                     setGitDialog({
                       workspaceCwd,
@@ -12650,6 +12842,20 @@ export function App({
                   workspaces={workspaces}
                   lockedWorkspaceCwd={lockedWorkspaceCwd}
                   lockedWorkspace={sidebarOptions.lockedWorkspace}
+                  workspaceOverview={sidebarOptions.workspaceOverview}
+                  onOpenWorkspaceManagement={(target) => {
+                    closeMobileDrawer();
+                    openPanel(target);
+                  }}
+                  onNewWorktreeSession={(workspaceCwd) =>
+                    // The intent travels with the draft it belongs to: set
+                    // inside createNewSession's synchronous step, it is what
+                    // the first prompt reads, and any later session start or
+                    // workspace switch resets it like any other intent.
+                    createNewSession(workspaceCwd, {
+                      gitIntent: { mode: 'worktree' },
+                    })
+                  }
                   branding={sidebarOptions.branding}
                   primaryNav={sidebarOptions.primaryNav}
                   showSessionSourceSwitch={
@@ -13415,7 +13621,7 @@ export function App({
                       : styles.chatSubtree
                   }
                 >
-                  <WebShellCustomizationProvider value={customization}>
+                  <WebShellCustomizationProvider value={mainChatCustomization}>
                       <TodoContextsProvider
                         timeline={todoTimeline}
                         details={todoDetails}

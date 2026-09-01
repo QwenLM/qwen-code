@@ -23,6 +23,9 @@ import {
   type DaemonWorkspaceGitStatus,
   type DaemonWorkspaceMcpResourcesStatus,
   type DaemonWorkspaceMcpStatus,
+  type WorkspaceExtensionProjection,
+  type DaemonWorkspaceHooksStatus,
+  type DaemonWorkspaceMemoryStatus,
   type DaemonWorkspaceMcpToolsStatus,
   type DaemonWorkspaceProvidersStatus,
   type DaemonWorkspaceSettingsStatus,
@@ -60,6 +63,14 @@ export interface WebShellDaemonScenario {
   extensions: DaemonWorkspaceExtensionsStatus;
   extensionOperations: ExtensionActiveOperations;
   extensionUpdateCheck: ExtensionUpdateCheckResponse;
+  mcp: DaemonWorkspaceMcpStatus;
+  /**
+   * Per-workspace overrides for the sidebar overview facets, keyed by the
+   * workspace cwd the qualified route names. Unlisted workspaces answer the
+   * scenario-level `mcp` / `skills` and empty daemon-side facets, so a spec
+   * can give a secondary workspace counts that differ from the primary's.
+   */
+  workspaceOverviews: Record<string, WorkspaceOverviewOverrides>;
   channelTypes: DaemonChannelTypeCatalog;
   channels: DaemonChannelsSnapshot;
   pairingRequests: Record<string, DaemonChannelPairingRequest[]>;
@@ -71,6 +82,7 @@ export interface WebShellDaemonScenario {
   events: DaemonEvent[];
   state: DaemonSessionState;
   contextDelayMs?: number;
+  providersDelayMs?: number;
   /** Artifact list returned by `GET /session/:id/artifacts`. */
   artifacts: DaemonSessionArtifact[];
   /** File contents served by `GET /file?path=...`, keyed by requested path. */
@@ -117,6 +129,14 @@ export interface MockDaemonController {
   configOptionRequests(): DaemonRequestRecord[];
 }
 
+export interface WorkspaceOverviewOverrides {
+  mcp?: Partial<DaemonWorkspaceMcpStatus>;
+  skills?: Partial<DaemonWorkspaceSkillsStatus>;
+  extensions?: Partial<WorkspaceExtensionProjection>;
+  memory?: Partial<DaemonWorkspaceMemoryStatus>;
+  hooks?: Partial<DaemonWorkspaceHooksStatus>;
+}
+
 type ScenarioOverrides = Partial<
   Omit<
     WebShellDaemonScenario,
@@ -128,6 +148,8 @@ type ScenarioOverrides = Partial<
     | 'extensions'
     | 'extensionOperations'
     | 'extensionUpdateCheck'
+    | 'mcp'
+    | 'workspaceOverviews'
     | 'channelTypes'
     | 'channels'
     | 'pairingRequests'
@@ -147,6 +169,8 @@ type ScenarioOverrides = Partial<
   extensions?: Partial<DaemonWorkspaceExtensionsStatus>;
   extensionOperations?: Partial<ExtensionActiveOperations>;
   extensionUpdateCheck?: Partial<ExtensionUpdateCheckResponse>;
+  mcp?: Partial<DaemonWorkspaceMcpStatus>;
+  workspaceOverviews?: Record<string, WorkspaceOverviewOverrides>;
   channelTypes?: DaemonChannelTypeCatalog;
   channels?: DaemonChannelsSnapshot;
   pairingRequests?: Record<string, DaemonChannelPairingRequest[]>;
@@ -328,6 +352,19 @@ export function createWebShellDaemonScenario(
     ...(overrides.extensionUpdateCheck ?? {}),
   };
 
+  const mcp: DaemonWorkspaceMcpStatus = {
+    v: 1,
+    workspaceCwd,
+    initialized: true,
+    discoveryState: 'completed',
+    servers: [],
+    errors: [],
+    clientCount: 0,
+    budgetMode: 'off',
+    budgets: [],
+    ...(overrides.mcp ?? {}),
+  };
+
   const sessions = overrides.sessions ?? [
     {
       sessionId,
@@ -364,6 +401,8 @@ export function createWebShellDaemonScenario(
     extensions,
     extensionOperations,
     extensionUpdateCheck,
+    mcp,
+    workspaceOverviews: overrides.workspaceOverviews ?? {},
     channelTypes: overrides.channelTypes ?? [],
     channels: overrides.channels ?? { revision: '1', instances: {} },
     pairingRequests: overrides.pairingRequests ?? {},
@@ -378,6 +417,7 @@ export function createWebShellDaemonScenario(
     events: overrides.events ?? [],
     state,
     contextDelayMs: overrides.contextDelayMs,
+    providersDelayMs: overrides.providersDelayMs,
     artifacts: overrides.artifacts ?? [],
     workspaceFiles: overrides.workspaceFiles ?? {},
     gitStatus: overrides.gitStatus,
@@ -663,6 +703,7 @@ function isDaemonPath(path: string): boolean {
     path === '/workspace/voice' ||
     /^\/workspaces\/[^/]+\/(voice|providers|settings)\/?$/.test(path) ||
     /^\/workspaces\/[^/]+\/skills\/?$/.test(path) ||
+    /^\/workspaces\/[^/]+\/(mcp|extensions|memory|hooks)\/?$/.test(path) ||
     /^\/workspace\/mcp\/[^/]+\/tools\/?$/.test(path) ||
     /^\/workspace\/mcp\/[^/]+\/resources\/?$/.test(path) ||
     /^\/workspaces\/[^/]+\/channel-types\/?$/.test(path) ||
@@ -744,6 +785,12 @@ function isDaemonRoute(method: string, path: string): boolean {
     return true;
   }
   if (method === 'GET' && /^\/workspaces\/[^/]+\/skills\/?$/.test(path)) {
+    return true;
+  }
+  if (
+    method === 'GET' &&
+    /^\/workspaces\/[^/]+\/(mcp|extensions|memory|hooks)\/?$/.test(path)
+  ) {
     return true;
   }
   if (method === 'GET' && /^\/workspace\/mcp\/[^/]+\/tools\/?$/.test(path)) {
@@ -905,15 +952,75 @@ async function handleDaemonRoute(
     return;
   }
   if (method === 'GET' && path === '/workspace/providers') {
-    await json(route, scenario.providers);
+    const providers = scenario.providers;
+    if (scenario.providersDelayMs) {
+      await new Promise((resolve) =>
+        setTimeout(resolve, scenario.providersDelayMs),
+      );
+    }
+    await json(route, providers);
     return;
   }
   if (method === 'GET' && path === '/workspace/skills') {
     await json(route, scenario.skills);
     return;
   }
-  if (method === 'GET' && /^\/workspaces\/[^/]+\/skills\/?$/.test(path)) {
-    await json(route, scenario.skills);
+  // Sidebar workspace overview facets, keyed by the workspace the route
+  // names so two workspaces can answer differently. The qualified extensions
+  // route answers with the workspace projection, not the manager's status
+  // document.
+  const overviewMatch = path.match(
+    /^\/workspaces\/([^/]+)\/(mcp|skills|extensions|memory|hooks)\/?$/,
+  );
+  if (method === 'GET' && overviewMatch) {
+    const workspaceCwd = decodeURIComponent(overviewMatch[1] ?? '');
+    const facet = overviewMatch[2];
+    const overrides = scenario.workspaceOverviews[workspaceCwd] ?? {};
+    if (facet === 'mcp') {
+      await json(route, {
+        ...workspaceMcp(scenario),
+        workspaceCwd,
+        ...(overrides.mcp ?? {}),
+      });
+    } else if (facet === 'skills') {
+      await json(route, {
+        ...scenario.skills,
+        workspaceCwd,
+        ...(overrides.skills ?? {}),
+      });
+    } else if (facet === 'extensions') {
+      await json(route, {
+        v: 1,
+        workspaceId: workspaceCwd,
+        workspaceCwd,
+        trusted: true,
+        desiredGeneration: 0,
+        appliedGeneration: 0,
+        extensions: [],
+        ...(overrides.extensions ?? {}),
+      });
+    } else if (facet === 'memory') {
+      await json(route, {
+        v: 1,
+        workspaceCwd,
+        initialized: true,
+        files: [],
+        totalBytes: 0,
+        fileCount: 0,
+        ruleCount: 0,
+        ...(overrides.memory ?? {}),
+      });
+    } else {
+      await json(route, {
+        v: 1,
+        workspaceCwd,
+        initialized: true,
+        disabled: false,
+        hooks: [],
+        events: {},
+        ...(overrides.hooks ?? {}),
+      });
+    }
     return;
   }
   if (method === 'GET' && path === '/workspace/settings') {
@@ -977,7 +1084,13 @@ async function handleDaemonRoute(
     return;
   }
   if (method === 'GET' && /^\/workspaces\/[^/]+\/providers\/?$/.test(path)) {
-    await json(route, scenario.providers);
+    const providers = scenario.providers;
+    if (scenario.providersDelayMs) {
+      await new Promise((resolve) =>
+        setTimeout(resolve, scenario.providersDelayMs),
+      );
+    }
+    await json(route, providers);
     return;
   }
   if (method === 'GET' && /^\/workspaces\/[^/]+\/settings\/?$/.test(path)) {
@@ -1606,7 +1719,12 @@ async function handleDaemonRoute(
     if (action === 'config-option') {
       const configId = readStringField(body, 'configId');
       const value = readStringField(body, 'value');
-      if (configId !== 'reasoning_effort' || !value) {
+      const persist = getRecordValue(body, 'persist');
+      if (
+        configId !== 'reasoning_effort' ||
+        !value ||
+        (persist !== undefined && typeof persist !== 'boolean')
+      ) {
         await badRequest(route, 'Invalid config-option request.');
         return;
       }
@@ -1619,23 +1737,37 @@ async function handleDaemonRoute(
       const allowedValues = isRecord(reasoningOption)
         ? reasoningOption['options']
         : undefined;
+      const reasoningMeta = isRecord(reasoningOption)
+        ? getRecordValue(reasoningOption, '_meta')
+        : undefined;
+      const qwenReasoningMeta = isRecord(reasoningMeta)
+        ? getRecordValue(reasoningMeta, 'qwenCode/reasoning')
+        : undefined;
+      const defaultEffort = isRecord(qwenReasoningMeta)
+        ? readStringField(qwenReasoningMeta, 'defaultEffort')
+        : undefined;
+      const selectedValue =
+        value === 'default' && defaultEffort ? defaultEffort : value;
       if (
         !Array.isArray(allowedValues) ||
-        !allowedValues.some(
-          (option) =>
-            isRecord(option) && readStringField(option, 'value') === value,
-        )
+        ((value !== 'default' || !defaultEffort) &&
+          !allowedValues.some((option) => {
+            return (
+              isRecord(option) &&
+              readStringField(option, 'value') === selectedValue
+            );
+          }))
       ) {
         await badRequest(route, 'Unsupported config-option value.');
         return;
       }
       const configOptions = currentConfigOptions.map((option) =>
         isRecord(option) && option['id'] === configId
-          ? { ...option, currentValue: value }
+          ? { ...option, currentValue: selectedValue }
           : option,
       );
       scenario.state.configOptions = configOptions;
-      await json(route, { configOptions });
+      await json(route, { configOptions, persisted: persist === true });
       return;
     }
     if (action === 'approval-mode') {
@@ -1863,17 +1995,7 @@ function isRecord(body: unknown): body is Record<string, unknown> {
 function workspaceMcp(
   scenario: WebShellDaemonScenario,
 ): DaemonWorkspaceMcpStatus {
-  return {
-    v: 1,
-    workspaceCwd: scenario.workspaceCwd,
-    initialized: true,
-    discoveryState: 'completed',
-    servers: [],
-    errors: [],
-    clientCount: 0,
-    budgetMode: 'off',
-    budgets: [],
-  };
+  return scenario.mcp;
 }
 
 function workspaceMcpTools(
