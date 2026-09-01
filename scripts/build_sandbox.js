@@ -54,6 +54,11 @@ const argv = yargs(hideBin(process.argv))
     type: 'string',
     description:
       'Path to write the final image URI. Used for CI/CD pipeline integration.',
+  })
+  .option('prune', {
+    type: 'boolean',
+    default: true,
+    description: 'prune dangling images after the build',
   }).argv;
 
 let sandboxCommand;
@@ -171,4 +176,6 @@ function buildImage(imageName, dockerfile) {
 
 buildImage(image, dockerFile);
 
-execSync(`${sandboxCommand} image prune -f`, { stdio: 'ignore' });
+if (argv.prune) {
+  execSync(`${sandboxCommand} image prune -f`, { stdio: 'ignore' });
+}

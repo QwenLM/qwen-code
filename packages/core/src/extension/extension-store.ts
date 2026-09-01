@@ -28,6 +28,7 @@ export interface ExtensionPolicy {
   preserveActivationOnNextInstall?: true;
   defaultActivation: ExtensionActivation;
   workspaceOverrides: Record<string, WorkspaceActivation>;
+  skillWorkspaceOverrides?: Record<string, Record<string, boolean>>;
   legacyPathRules?: string[];
   /** Out-of-band link grant: set only by commitArtifact during a CLI link
    *  install. The loader trusts link-mode (symlinks, `..`) only when this
@@ -313,6 +314,19 @@ function parseState(
           activation === 'disabled' ||
           activation === 'inherit',
       ) &&
+      (parsed.skillWorkspaceOverrides === undefined ||
+        (parsed.skillWorkspaceOverrides !== null &&
+          typeof parsed.skillWorkspaceOverrides === 'object' &&
+          !Array.isArray(parsed.skillWorkspaceOverrides) &&
+          Object.values(parsed.skillWorkspaceOverrides).every(
+            (states) =>
+              states !== null &&
+              typeof states === 'object' &&
+              !Array.isArray(states) &&
+              Object.values(states).every(
+                (enabled) => typeof enabled === 'boolean',
+              ),
+          ))) &&
       (parsed.legacyPathRules === undefined ||
         (Array.isArray(parsed.legacyPathRules) &&
           parsed.legacyPathRules.every((rule) => typeof rule === 'string')))
@@ -1012,6 +1026,45 @@ export class ExtensionStore {
     return await this.mutate(identity, (policy) => {
       policy.workspaceOverrides[canonicalizeWorkspacePath(workspacePath)] =
         activation;
+    });
+  }
+
+  getSkillWorkspaceOverride(
+    snapshot: ExtensionStoreSnapshot,
+    extensionId: string,
+    workspacePath: string,
+    skillName: string,
+  ): boolean | null {
+    const states =
+      snapshot.extensions[extensionId]?.skillWorkspaceOverrides?.[
+        canonicalizeWorkspacePath(workspacePath)
+      ];
+    const name = skillName.trim().toLowerCase();
+    return states && Object.hasOwn(states, name) ? states[name]! : null;
+  }
+
+  async setSkillWorkspaceOverrides(
+    identity: ExtensionIdentity,
+    workspacePath: string,
+    states: Readonly<Record<string, boolean>>,
+    expectedArtifactGeneration: number,
+    beforeCommit?: () => void,
+  ): Promise<ExtensionStoreSnapshot> {
+    const workspace = canonicalizeWorkspacePath(workspacePath);
+    return await this.mutate(identity, (policy) => {
+      if ((policy.artifactGeneration ?? 0) !== expectedArtifactGeneration) {
+        throw new ExtensionConflictError(
+          `Extension "${identity.name}" changed while its skill states were being prepared.`,
+        );
+      }
+      beforeCommit?.();
+      policy.skillWorkspaceOverrides = {
+        ...policy.skillWorkspaceOverrides,
+        [workspace]: {
+          ...policy.skillWorkspaceOverrides?.[workspace],
+          ...states,
+        },
+      };
     });
   }
 
