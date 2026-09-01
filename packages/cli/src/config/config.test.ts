@@ -8,6 +8,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
+  GOAL_DEFAULT_TOKEN_BUDGET,
+  GOAL_TOKEN_BUDGET_CAP,
   ToolNames,
   DEFAULT_QWEN_MODEL,
   OutputFormat,
@@ -1263,6 +1265,56 @@ describe('loadCliConfig', () => {
       const config = await loadCliConfig(settings, argv);
 
       expect(config.getUsageStatisticsEnabled()).toBe(expected);
+    });
+  });
+
+  describe('model.goalTokenBudget', () => {
+    it('carries the setting into the Goal budget grant', async () => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+
+      const config = await loadCliConfig(
+        { model: { goalTokenBudget: 1_234 } },
+        argv,
+      );
+
+      expect(config.getGoalTokenBudgetGrant()).toBe(1_234);
+    });
+
+    it('uses -1 as the unlimited sentinel', async () => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+
+      const config = await loadCliConfig(
+        { model: { goalTokenBudget: -1 } },
+        argv,
+      );
+
+      expect(config.getGoalTokenBudgetGrant()).toBe(Number.POSITIVE_INFINITY);
+    });
+
+    it.each([
+      0,
+      -2,
+      1.5,
+      GOAL_TOKEN_BUDGET_CAP + 1,
+      '5000' as unknown as number,
+    ])('rejects invalid settings value %s at startup', async (value) => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+
+      await expect(
+        loadCliConfig({ model: { goalTokenBudget: value } }, argv),
+      ).rejects.toThrow(/settings\.json: model\.goalTokenBudget/);
+    });
+
+    it('arms the built-in default when the setting is unset', async () => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+
+      const config = await loadCliConfig({}, argv);
+
+      expect(config.getGoalTokenBudgetGrant()).toBe(GOAL_DEFAULT_TOKEN_BUDGET);
     });
   });
 

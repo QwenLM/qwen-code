@@ -71,7 +71,9 @@ import {
   getCustomSystemPrompt,
   getPlanModeSystemReminder,
   resolveInteractionMode,
+  resolveMainSessionOutputStyle,
 } from './prompts.js';
+import { getOutputStyleTurnReminder } from './output-styles.js';
 import {
   CompressionStatus,
   LlmEventType,
@@ -129,6 +131,7 @@ import {
   getDirectoryContextString,
   getInitialChatHistory,
   getStartupContextLength,
+  wrapSystemReminder,
   type AgentAvailabilityEntry,
 } from './environmentContext.js';
 import {
@@ -371,7 +374,11 @@ export function getMainSessionBaseSystemPrompt(
         config.getModel(),
         undefined,
         resolveInteractionMode(config),
-        config.getOutputStyle(),
+        // The prompt and the per-turn reminder must agree on which style is
+        // in force, so both read it from the same resolver rather than from
+        // `getOutputStyle()` directly — a prompt override carries no style
+        // section, and a session must not be reminded of one it lacks.
+        resolveMainSessionOutputStyle(config),
       );
 }
 
@@ -3646,6 +3653,16 @@ export class LlmClient {
           }
         }
 
+        // Remind the model of the style its system prompt carries: the
+        // section sits in the cached prompt and fades over a long
+        // conversation without a nudge next to the newest user text.
+        const outputStyle = resolveMainSessionOutputStyle(this.config);
+        if (outputStyle) {
+          systemReminders.push(
+            wrapSystemReminder(getOutputStyleTurnReminder(outputStyle)),
+          );
+        }
+
         const userQueryMemory =
           messageType === SendMessageType.UserQuery
             ? await this.consumeManagedAutoMemoryRecall('initial')
@@ -3696,6 +3713,43 @@ export class LlmClient {
       }
 
       if (messageType === SendMessageType.ToolResult) {
+        // Record executed tool results for stateful read tools (task_list)
+        // so the loop guards can distinguish productive re-polling — the
+        // shared task board changed between identical calls — from a stuck
+        // loop (issue #9450). A detection here (the result-aware global
+        // duplicate count) halts the turn exactly like the event-loop
+        // guards below.
+        for (const part of requestToSend) {
+          if (
+            typeof part !== 'object' ||
+            part === null ||
+            !('functionResponse' in part)
+          ) {
+            continue;
+          }
+          const functionResponseId = (part as Part).functionResponse?.id;
+          if (!functionResponseId) continue;
+          if (
+            this.loopDetector.recordToolResultByCallId(functionResponseId, [
+              part as Part,
+            ])
+          ) {
+            for (const goalEvent of await finalizeInterruptedGoalTurn()) {
+              yield goalEvent;
+            }
+            const loopType = this.loopDetector.getLastLoopType();
+            yield {
+              type: LlmEventType.LoopDetected,
+              ...(loopType && { value: { loopType } }),
+            };
+            await arenaAgentClient?.reportError('Loop detected');
+            this.lastApiCompletionTimestamp = Date.now();
+            endCurrentInteraction('error', 'loop detected', 'loop_detected');
+            this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
+            this.fireLoopDetectedStopFailure(loopType);
+            return turn;
+          }
+        }
         const toolResultMemory =
           await this.consumeManagedAutoMemoryRecall('tool_result');
         if (toolResultMemory?.prompt) {
@@ -3794,6 +3848,15 @@ export class LlmClient {
       const resultStream = turn.run(model, requestToSend, signal);
       let didUpdateIdeContextState = false;
       let steerInputSettled = false;
+      // callIds already fed to the loop guards this attempt. Mirrors the
+      // execution-side dedup (coreToolScheduler.dedupeRequestsByCallId / the
+      // interactive duplicate-call-id suppression), which collapses
+      // provider-duplicate emissions into one executed call and one result:
+      // feeding the guards once per call id keeps request counts and result
+      // evidence on the same population (main-session twin of the agent-core
+      // fix, issue #9450). Id-less requests are never deduped. Cleared on
+      // retry/fallback alongside the attempt's accumulated state.
+      const loopGuardFedCallIds = new Set<string>();
       try {
         for await (const event of resultStream) {
           if (!steerInputSettled) {
@@ -3813,6 +3876,7 @@ export class LlmClient {
             event.type === LlmEventType.ModelFallback
           ) {
             hasToolCalls = false;
+            loopGuardFedCallIds.clear();
             agentOutput.restartAttempt(
               event.type === LlmEventType.Retry &&
                 event.isContinuation === true,
@@ -3832,11 +3896,28 @@ export class LlmClient {
             didUpdateIdeContextState = true;
           }
 
+          // A provider-duplicate emission of an already-fed call id executes
+          // once (the schedulers collapse it), so feed the loop guards once —
+          // counting both emissions would leave the request counters one ahead
+          // of the executed result evidence and fail-safe-halt a productive
+          // stateful poller (issue #9450). The event itself still flows to
+          // consumers below; only the guard feed is deduped.
+          let duplicateLoopGuardRequest = false;
+          if (event.type === LlmEventType.ToolCallRequest) {
+            const fedCallId = event.value.callId;
+            if (fedCallId) {
+              duplicateLoopGuardRequest = loopGuardFedCallIds.has(fedCallId);
+              loopGuardFedCallIds.add(fedCallId);
+            }
+          }
+
           // Always-on safety checks (consecutive-identical tool-call guard,
           // shell inspection stagnation, and per-turn tool-call cap). These fire
           // before the skipLoopDetection gate so they cannot be bypassed by
           // configuration.
-          const alwaysOnLoop = this.loopDetector.checkAlwaysOnSafeties(event);
+          const alwaysOnLoop =
+            !duplicateLoopGuardRequest &&
+            this.loopDetector.checkAlwaysOnSafeties(event);
           if (alwaysOnLoop) {
             // Drop every tool call collected before the guard fired so the run
             // halts here instead of spawning a continuation that re-trips it.
@@ -3874,6 +3955,7 @@ export class LlmClient {
           // relaxes the heuristics (see nonInteractiveCli.ts).
           const skipLoopDetection = this.config.getSkipLoopDetection();
           const heuristicLoop =
+            !duplicateLoopGuardRequest &&
             !skipLoopDetection &&
             this.loopDetector.addAndCheckHeuristicLoops(event);
           if (heuristicLoop) {
