@@ -133,6 +133,12 @@ describe('SessionService', () => {
     // return; tests that need recovery semantics override this explicitly.
     vi.mocked(jsonl.read).mockResolvedValue([]);
     vi.mocked(jsonl.readLines).mockResolvedValue([]);
+    vi.mocked(jsonl.readLinesWithIntegrity).mockImplementation(
+      async (filePath, count, options) => ({
+        records: await jsonl.readLines(filePath, count, options),
+        complete: true,
+      }),
+    );
     vi.mocked(jsonl.parseLineTolerant).mockReturnValue([]);
     vi.mocked(readRuntimeStatus).mockResolvedValue(null);
 
@@ -235,6 +241,74 @@ describe('SessionService', () => {
     cwd: '/test/project/root',
     version: '1.0.0',
   };
+
+  const goalStateRecord = (objective: string): ChatRecord => ({
+    ...recordA1,
+    type: 'system',
+    subtype: 'goal_state',
+    message: undefined,
+    systemPayload: {
+      v: 2,
+      cause: 'create',
+      snapshot: {
+        v: 2,
+        activity: 'idle',
+        goal: {
+          goalId: 'goal-1',
+          revision: 1,
+          objective,
+          status: 'active',
+          evidenceCursor: { recordId: null },
+          turnCount: 0,
+          activeTimeMs: 0,
+          tokensUsed: 0,
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      },
+    },
+  });
+
+  // `/goal clear` persists `goal: null` (plus a `clearedGoal` order that
+  // carries ids only) — the record has no objective anywhere on it.
+  const clearedGoalStateRecord = (): ChatRecord => ({
+    ...recordA1,
+    type: 'system',
+    subtype: 'goal_state',
+    message: undefined,
+    systemPayload: {
+      v: 2,
+      cause: 'clear',
+      snapshot: {
+        v: 2,
+        activity: 'idle',
+        goal: null,
+        clearedGoal: { goalId: 'goal-1', revision: 1, updatedAt: 1 },
+      },
+    },
+  });
+
+  // Pre-v2 sessions carry no `goal_state` line at all: their Goal lives in a
+  // `/goal` slash-command result. Shape mirrors goal-persistence.test.ts.
+  const legacyGoalRecord = (condition: string): ChatRecord => ({
+    ...recordA1,
+    type: 'system',
+    subtype: 'slash_command',
+    message: undefined,
+    systemPayload: {
+      phase: 'result',
+      rawCommand: `/goal ${condition}`,
+      outputHistoryItems: [
+        {
+          type: 'goal_status',
+          kind: 'checking',
+          condition,
+          iterations: 1,
+          setAt: 42,
+        },
+      ],
+    },
+  });
 
   describe('listSessions', () => {
     it('should return empty list when no sessions exist', async () => {
@@ -662,6 +736,110 @@ describe('SessionService', () => {
       const result = await sessionService.listSessions();
 
       expect(result.items[0].prompt).toBe('later prompt');
+    });
+
+    it('should expose the Goal objective for sessions without a prompt', async () => {
+      readdirSyncSpy.mockReturnValue([
+        `${sessionIdA}.jsonl`,
+      ] as unknown as Array<fs.Dirent<Buffer>>);
+      statSyncSpy.mockReturnValue({
+        mtimeMs: Date.now(),
+        isFile: () => true,
+      } as fs.Stats);
+      vi.mocked(jsonl.readLines).mockResolvedValue([
+        goalStateRecord('Ship the requested change'),
+      ]);
+
+      const result = await sessionService.listSessions();
+
+      expect(result.items[0].prompt).toBe('');
+      expect(result.items[0].goalObjective).toBe('Ship the requested change');
+    });
+
+    it('should recover a legacy Goal objective from the records', async () => {
+      // No `goal_state` line exists in a pre-v2 transcript, so the file scan
+      // cannot match and this mapping is the only thing keeping these
+      // sessions out of `(empty prompt)`.
+      readdirSyncSpy.mockReturnValue([
+        `${sessionIdA}.jsonl`,
+      ] as unknown as Array<fs.Dirent<Buffer>>);
+      statSyncSpy.mockReturnValue({
+        mtimeMs: Date.now(),
+        isFile: () => true,
+      } as fs.Stats);
+      vi.mocked(jsonl.readLines).mockResolvedValue([
+        legacyGoalRecord('Ship the legacy change'),
+      ]);
+
+      const result = await sessionService.listSessions();
+
+      expect(result.items[0].goalObjective).toBe('Ship the legacy change');
+    });
+
+    it('should not label a session that already has a prompt', async () => {
+      // Without this guard the objective also enters the picker's search
+      // haystack, so stale goal text starts matching unrelated queries.
+      readdirSyncSpy.mockReturnValue([
+        `${sessionIdA}.jsonl`,
+      ] as unknown as Array<fs.Dirent<Buffer>>);
+      statSyncSpy.mockReturnValue({
+        mtimeMs: Date.now(),
+        isFile: () => true,
+      } as fs.Stats);
+      vi.mocked(jsonl.readLines).mockResolvedValue([
+        recordA1,
+        goalStateRecord('Ship the requested change'),
+      ]);
+
+      const result = await sessionService.listSessions();
+
+      expect(result.items[0].prompt).not.toBe('');
+      expect(result.items[0].goalObjective).toBeUndefined();
+    });
+
+    it('should not label a session that already has a custom title', async () => {
+      readdirSyncSpy.mockReturnValue([
+        `${sessionIdA}.jsonl`,
+      ] as unknown as Array<fs.Dirent<Buffer>>);
+      statSyncSpy.mockReturnValue({
+        mtimeMs: Date.now(),
+        isFile: () => true,
+      } as fs.Stats);
+      vi.mocked(jsonl.readLines).mockResolvedValue([
+        goalStateRecord('Ship the requested change'),
+      ]);
+      type TitleReader = {
+        readSessionTitleInfoFromFile: (filePath: string) => {
+          title?: string;
+          source?: string;
+        };
+      };
+      vi.spyOn(
+        sessionService as unknown as TitleReader,
+        'readSessionTitleInfoFromFile',
+      ).mockReturnValue({ title: 'Renamed session' });
+
+      const result = await sessionService.listSessions();
+
+      expect(result.items[0].goalObjective).toBeUndefined();
+    });
+
+    it('should not label a session whose Goal was cleared', async () => {
+      readdirSyncSpy.mockReturnValue([
+        `${sessionIdA}.jsonl`,
+      ] as unknown as Array<fs.Dirent<Buffer>>);
+      statSyncSpy.mockReturnValue({
+        mtimeMs: Date.now(),
+        isFile: () => true,
+      } as fs.Stats);
+      vi.mocked(jsonl.readLines).mockResolvedValue([
+        goalStateRecord('Write the release notes'),
+        clearedGoalStateRecord(),
+      ]);
+
+      const result = await sessionService.listSessions();
+
+      expect(result.items[0].goalObjective).toBeUndefined();
     });
 
     it('should NOT populate messageCount during listing', async () => {
@@ -7477,15 +7655,409 @@ describe('SessionService', () => {
       return file;
     };
 
+    const writeRawSession = (sessionId: string, content: string) => {
+      const file = realPath.join(getChatsDir(), `${sessionId}.jsonl`);
+      fs.writeFileSync(file, content);
+      return file;
+    };
+
     const findItem = (
       items: Array<{
         sessionId: string;
         parentSessionId?: string;
         sourceType?: string;
         sourceId?: string;
+        goalObjective?: string;
       }>,
       sessionId: string,
     ) => items.find((item) => item.sessionId === sessionId);
+
+    const goalStateLine = (
+      sessionId: string,
+      objective: string | null,
+      uuid = 'g1',
+    ) => ({
+      uuid,
+      parentUuid: null,
+      sessionId,
+      type: 'system',
+      subtype: 'goal_state',
+      timestamp: '2026-04-22T00:00:03.000Z',
+      cwd,
+      version: 'test',
+      systemPayload: {
+        v: 2,
+        cause: objective === null ? 'clear' : 'create',
+        snapshot: {
+          v: 2,
+          activity: 'idle',
+          goal:
+            objective === null
+              ? null
+              : {
+                  goalId: 'goal-1',
+                  revision: 1,
+                  objective,
+                  status: 'active',
+                  evidenceCursor: { recordId: null },
+                  turnCount: 0,
+                  activeTimeMs: 0,
+                  tokensUsed: 0,
+                  createdAt: 1,
+                  updatedAt: 1,
+                },
+          ...(objective === null
+            ? { clearedGoal: { goalId: 'goal-1', revision: 1, updatedAt: 1 } }
+            : {}),
+        },
+      },
+    });
+
+    const legacyGoalLine = (
+      sessionId: string,
+      condition: string,
+      kind: 'checking' | 'aborted' = 'checking',
+      uuid = 'legacy-goal',
+    ) => ({
+      uuid,
+      parentUuid: null,
+      sessionId,
+      type: 'system',
+      subtype: 'slash_command',
+      timestamp: '2026-04-22T00:00:03.000Z',
+      cwd,
+      version: 'test',
+      systemPayload: {
+        phase: 'result',
+        rawCommand: kind === 'checking' ? `/goal ${condition}` : '/goal',
+        outputHistoryItems: [
+          {
+            type: 'goal_status',
+            kind,
+            condition,
+            ...(kind === 'checking' ? { iterations: 1, setAt: 42 } : {}),
+          },
+        ],
+      },
+    });
+
+    const fillerLines = (sessionId: string, bytes: number) =>
+      Array.from({ length: Math.ceil(bytes / 400) }, (_, i) => ({
+        uuid: `f${i}`,
+        parentUuid: null,
+        sessionId,
+        type: 'system',
+        subtype: 'note',
+        timestamp: '2026-04-22T00:00:04.000Z',
+        cwd,
+        version: 'test',
+        systemPayload: { text: 'x'.repeat(350) },
+      }));
+
+    // Short complete fixtures answer from parsed records before the scan runs.
+    // The long and truncated fixtures below drive the real tail-window scan
+    // and pin the production marker (`"subtype":"goal_state"`) and field name.
+    it('labels a prompt-less session with its Goal objective', async () => {
+      const sessionId = '21111111-1111-4111-8111-111111111111';
+      writeSession(sessionId, [
+        goalStateLine(sessionId, 'Ship the requested change'),
+      ]);
+
+      const result = await service.listSessions();
+
+      expect(findItem(result.items, sessionId)).toMatchObject({
+        prompt: '',
+        goalObjective: 'Ship the requested change',
+      });
+    });
+
+    it('recovers a legacy Goal from a complete record prefix', async () => {
+      const sessionId = '28888888-8888-4888-8888-888888888888';
+      const objective = '😀'.repeat(250);
+      writeSession(sessionId, [legacyGoalLine(sessionId, objective)]);
+
+      const result = await service.listSessions();
+
+      expect(findItem(result.items, sessionId)?.goalObjective).toBe(
+        `${'😀'.repeat(200)}...`,
+      );
+    });
+
+    it('reads the Goal record through the file scan, not the parsed records', async () => {
+      // The goal_state record sits past the ten-line parsed prefix, so the
+      // tail-window scan is the only thing that can answer. This pins the
+      // production marker and field name independently of parsed records.
+      const sessionId = '27777777-7777-4777-8777-777777777777';
+      const objective = '😀'.repeat(250);
+      writeSession(sessionId, [
+        ...fillerLines(sessionId, 6 * 1024),
+        goalStateLine(sessionId, objective),
+      ]);
+
+      const result = await service.listSessions();
+
+      expect(findItem(result.items, sessionId)?.goalObjective).toBe(
+        `${'😀'.repeat(200)}...`,
+      );
+    });
+
+    it('does not resurrect an objective the user cleared', async () => {
+      // The clear record carries `goal: null` and no objective at all, so a
+      // "last objective on any goal_state line" read would answer with the
+      // create record's objective instead.
+      const sessionId = '22222222-2222-4222-8222-222222222222';
+      writeSession(sessionId, [
+        goalStateLine(sessionId, 'Write the release notes'),
+        goalStateLine(sessionId, null, 'g2'),
+      ]);
+
+      const result = await service.listSessions();
+
+      expect(findItem(result.items, sessionId)?.goalObjective).toBeUndefined();
+      const item = await service.getSessionListItem(sessionId);
+      expect(item?.goalObjective).toBeUndefined();
+    });
+
+    it.each([
+      ['short', ''],
+      ['larger than the tail window', 'x'.repeat(70 * 1024)],
+      ['ending at a colon', null],
+    ])(
+      'does not resurrect a clear glued after a %s torn record',
+      async (_name, tornContent) => {
+        const sessionId = '22222222-1111-4222-8222-111111111111';
+        const create = JSON.stringify(
+          goalStateLine(sessionId, 'Write the release notes'),
+        );
+        const clear = JSON.stringify(goalStateLine(sessionId, null, 'g2'));
+        const torn =
+          tornContent === null
+            ? '{"type":"system","subtype":"note","systemPayload":'
+            : JSON.stringify({
+                uuid: 'torn',
+                parentUuid: null,
+                sessionId,
+                type: 'system',
+                subtype: 'note',
+                timestamp: '2026-04-22T00:00:04.000Z',
+                cwd,
+                version: 'test',
+                systemPayload: { text: tornContent },
+              }).slice(0, -3);
+        const file = writeRawSession(sessionId, `${create}${torn}${clear}\n`);
+        const actualJsonl = await vi.importActual<
+          typeof import('../utils/jsonl-utils.js')
+        >('../utils/jsonl-utils.js');
+        vi.mocked(jsonl._recoverObjectsFromLine).mockImplementation(
+          actualJsonl._recoverObjectsFromLine,
+        );
+        vi.mocked(jsonl.readLinesWithIntegrity).mockImplementation(
+          actualJsonl.readLinesWithIntegrity,
+        );
+
+        await expect(
+          jsonl.readLinesWithIntegrity(file, 10),
+        ).resolves.toMatchObject({ complete: false });
+
+        const result = await service.listSessions();
+
+        expect(
+          findItem(result.items, sessionId)?.goalObjective,
+        ).toBeUndefined();
+        await expect(
+          service.getSessionListItem(sessionId),
+        ).resolves.toMatchObject({ goalObjective: undefined });
+      },
+    );
+
+    it('ignores a nested Goal marker in a non-Goal record', async () => {
+      const sessionId = '22222222-3333-4222-8222-333333333333';
+      const records: Array<Record<string, unknown>> = fillerLines(
+        sessionId,
+        9 * 400,
+      ).slice(0, 9);
+      records.push({
+        uuid: 'nested-marker',
+        parentUuid: null,
+        sessionId,
+        type: 'assistant',
+        timestamp: '2026-04-22T00:00:05.000Z',
+        cwd,
+        version: 'test',
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                name: 'persist',
+                args: {
+                  type: 'system',
+                  subtype: 'goal_state',
+                  objective: 'injected',
+                },
+              },
+            },
+          ],
+        },
+      });
+      writeSession(sessionId, records);
+
+      const result = await service.listSessions();
+
+      expect(findItem(result.items, sessionId)?.goalObjective).toBeUndefined();
+      await expect(
+        service.getSessionListItem(sessionId),
+      ).resolves.toMatchObject({ goalObjective: undefined });
+    });
+
+    it.each([
+      ['first array element', false],
+      ['comma-positioned array element', true],
+    ])(
+      'does not label a session from a payload-bearing Goal in a torn %s',
+      async (_name, withPrefix) => {
+        const sessionId = '22222222-4444-4222-8222-444444444444';
+        const clear = goalStateLine(sessionId, null);
+        const nestedGoal = goalStateLine(sessionId, 'injected', 'nested-goal');
+        const containing = JSON.stringify({
+          type: 'assistant',
+          parts: [
+            ...(withPrefix ? [{ type: 'text', text: 'before' }] : []),
+            nestedGoal,
+          ],
+        });
+        const nestedJson = JSON.stringify(nestedGoal);
+        const torn = containing.slice(
+          0,
+          containing.indexOf(nestedJson) + nestedJson.length,
+        );
+        const file = writeRawSession(
+          sessionId,
+          `${JSON.stringify(clear)}\n${torn}\n`,
+        );
+        const actualJsonl = await vi.importActual<
+          typeof import('../utils/jsonl-utils.js')
+        >('../utils/jsonl-utils.js');
+        vi.mocked(jsonl._recoverObjectsFromLine).mockImplementation(
+          actualJsonl._recoverObjectsFromLine,
+        );
+        vi.mocked(jsonl.readLinesWithIntegrity).mockImplementation(
+          actualJsonl.readLinesWithIntegrity,
+        );
+
+        await expect(
+          jsonl.readLinesWithIntegrity(file, 10),
+        ).resolves.toMatchObject({ complete: false });
+
+        const result = await service.listSessions();
+
+        expect(
+          findItem(result.items, sessionId)?.goalObjective,
+        ).toBeUndefined();
+        await expect(
+          service.getSessionListItem(sessionId),
+        ).resolves.toMatchObject({ goalObjective: undefined });
+      },
+    );
+
+    it('does not resurrect a legacy Goal cleared past the record window', async () => {
+      const sessionId = '29999999-9999-4999-8999-999999999999';
+      const objective = 'Ship the legacy change';
+      writeSession(sessionId, [
+        legacyGoalLine(sessionId, objective),
+        ...fillerLines(sessionId, 6 * 1024),
+        legacyGoalLine(sessionId, objective, 'aborted', 'legacy-clear'),
+      ]);
+
+      const result = await service.listSessions();
+
+      expect(findItem(result.items, sessionId)?.goalObjective).toBeUndefined();
+      const item = await service.getSessionListItem(sessionId);
+      expect(item?.goalObjective).toBeUndefined();
+    });
+
+    it('reads the clear record when it sits at the end of a long transcript', async () => {
+      const sessionId = '23333333-3333-4333-8333-333333333333';
+      writeSession(sessionId, [
+        goalStateLine(sessionId, 'Write the migration guide'),
+        ...fillerLines(sessionId, 200 * 1024),
+        goalStateLine(sessionId, null, 'g2'),
+      ]);
+
+      const result = await service.listSessions();
+
+      expect(findItem(result.items, sessionId)?.goalObjective).toBeUndefined();
+    });
+
+    it('labels nothing when the Goal records fell out of the tail window', async () => {
+      // The clear record sits past the ten-line parsed prefix AND past the
+      // tail window, so the only reachable evidence is the stale create record
+      // at the head of the file.
+      const sessionId = '24444444-4444-4444-8444-444444444444';
+      writeSession(sessionId, [
+        goalStateLine(sessionId, 'Write the migration guide'),
+        ...fillerLines(sessionId, 8 * 1024),
+        goalStateLine(sessionId, null, 'g2'),
+        ...fillerLines(sessionId, 200 * 1024),
+      ]);
+
+      const result = await service.listSessions();
+
+      expect(findItem(result.items, sessionId)?.goalObjective).toBeUndefined();
+    });
+
+    it('uses complete parsed records when a few large records exceed the tail window', async () => {
+      const sessionId = '29999999-1111-4111-8111-111111111111';
+      const largeNote = (uuid: string) => ({
+        uuid,
+        parentUuid: null,
+        sessionId,
+        type: 'system',
+        subtype: 'note',
+        timestamp: '2026-04-22T00:00:04.000Z',
+        cwd,
+        version: 'test',
+        systemPayload: { text: 'x'.repeat(30 * 1024) },
+      });
+      writeSession(sessionId, [
+        goalStateLine(sessionId, 'Ship the requested change'),
+        largeNote('n1'),
+        largeNote('n2'),
+        largeNote('n3'),
+      ]);
+
+      const result = await service.listSessions();
+
+      expect(findItem(result.items, sessionId)?.goalObjective).toBe(
+        'Ship the requested change',
+      );
+      await expect(
+        service.getSessionListItem(sessionId),
+      ).resolves.toMatchObject({ goalObjective: 'Ship the requested change' });
+    });
+
+    it('exposes the Goal objective through the single-session read path', async () => {
+      const sessionId = '25555555-5555-4555-8555-555555555555';
+      writeSession(sessionId, [
+        goalStateLine(sessionId, 'Ship the requested change'),
+      ]);
+
+      await expect(
+        service.getSessionListItem(sessionId),
+      ).resolves.toMatchObject({ goalObjective: 'Ship the requested change' });
+    });
+
+    it('leaves the single-session read path unlabelled when a prompt exists', async () => {
+      const sessionId = '26666666-6666-4666-8666-666666666666';
+      writeSession(sessionId, [
+        userLine(sessionId, 'a real prompt'),
+        goalStateLine(sessionId, 'Ship the requested change'),
+      ]);
+
+      const item = await service.getSessionListItem(sessionId);
+      expect(item?.prompt).toBe('a real prompt');
+      expect(item?.goalObjective).toBeUndefined();
+    });
 
     it('rehydrates parentSessionId from a parent_session record', async () => {
       const sessionId = '11111111-1111-1111-1111-111111111111';

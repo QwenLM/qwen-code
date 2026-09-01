@@ -206,6 +206,26 @@ describe('prepareNodeReplCell', () => {
     expect(prepared.source).not.toContain('_result_export');
   });
 
+  it('guards every explicit and implicit async continuation', async () => {
+    const prepared = await prepareNodeReplCell(
+      [
+        'const first = await load();',
+        'async function nested() { return await loadAgain(); }',
+        'for await (const item of stream) { nodeRepl.write(item); }',
+      ].join('\n'),
+      { previousBindings: [], cellId: 'async-guards' },
+    );
+    expect(prepared.source).toContain(
+      'await nodeRepl.signal.guardAwait(load())',
+    );
+    expect(prepared.source).toContain(
+      'return await nodeRepl.signal.guardAwait(loadAgain())',
+    );
+    expect(prepared.source).toContain(
+      'for await (const item of nodeRepl.signal.guardAsyncIterable(stream))',
+    );
+  });
+
   it('keeps user-exported declarations local to their cell', async () => {
     const prepared = await prepareNodeReplCell(
       [
