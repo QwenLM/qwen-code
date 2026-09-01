@@ -51,6 +51,13 @@ export interface DwsImMessage {
   eventTime?: number;
 }
 
+export interface DwsImDispatch {
+  admitted: Promise<void>;
+  completed: Promise<void>;
+}
+
+export type DwsImMessageResult = void | Promise<void> | DwsImDispatch;
+
 export interface DwsTodoTask {
   taskId: string;
   title: string;
@@ -69,7 +76,7 @@ export interface DwsClientLike {
   assertAuthenticated(signal?: AbortSignal): Promise<DwsIdentity>;
   subscribeToIm(
     source: DwsImSource,
-    onMessage: (message: DwsImMessage) => void | Promise<void>,
+    onMessage: (message: DwsImMessage) => DwsImMessageResult,
     onError: (error: Error) => void,
   ): Promise<DwsEventSubscription>;
   sendImMessage(
@@ -750,7 +757,7 @@ export class DwsClient implements DwsClientLike {
 
   async subscribeToIm(
     source: DwsImSource,
-    onMessage: (message: DwsImMessage) => void | Promise<void>,
+    onMessage: (message: DwsImMessage) => DwsImMessageResult,
     onError: (error: Error) => void,
   ): Promise<DwsEventSubscription> {
     const args = [
@@ -767,7 +774,24 @@ export class DwsClient implements DwsClientLike {
     return this.eventStarter(
       this.executable,
       args,
-      async (line) => onMessage(parseDwsImEvent(line)),
+      (line) => {
+        const message = parseDwsImEvent(line);
+        const result = onMessage(message);
+        if (!result || !('admitted' in result)) return result;
+        if (source.kind !== 'direct') return result.completed;
+        const reportError = (error: unknown): void => {
+          try {
+            onError(error instanceof Error ? error : new Error(String(error)));
+          } catch {
+            return;
+          }
+        };
+        void result.admitted.then(
+          () => result.completed.catch(reportError),
+          () => undefined,
+        );
+        return result.admitted;
+      },
       onError,
     );
   }

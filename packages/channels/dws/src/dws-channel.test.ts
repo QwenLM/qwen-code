@@ -22,6 +22,7 @@ import {
   type DwsClientLike,
   type DwsCommandRunner,
   type DwsIdentity,
+  type DwsImMessageResult,
   type DwsImMessage,
   type DwsImSource,
   type DwsImTarget,
@@ -152,7 +153,7 @@ class FakeSubscription implements DwsEventSubscription {
 
 interface FakeStream {
   source: DwsImSource;
-  onMessage: (message: DwsImMessage) => void | Promise<void>;
+  onMessage: (message: DwsImMessage) => DwsImMessageResult;
   onError: (error: Error) => void;
   subscription: FakeSubscription;
 }
@@ -227,7 +228,7 @@ class FakeDwsClient implements DwsClientLike {
 
   async subscribeToIm(
     source: DwsImSource,
-    onMessage: (message: DwsImMessage) => void | Promise<void>,
+    onMessage: (message: DwsImMessage) => DwsImMessageResult,
     onError: (error: Error) => void,
   ): Promise<DwsEventSubscription> {
     const subscription = new FakeSubscription();
@@ -238,7 +239,9 @@ class FakeDwsClient implements DwsClientLike {
   async emit(sourceIndex: number, event: DwsImMessage): Promise<void> {
     const stream = this.streams[sourceIndex];
     if (!stream) throw new Error(`Missing fake stream ${sourceIndex}.`);
-    await stream.onMessage(event);
+    const result = stream.onMessage(event);
+    if (result && 'completed' in result) await result.completed;
+    else await result;
   }
 }
 
@@ -319,6 +322,36 @@ class TestableDwsChannel extends DwsChannel {
 
   mentionWatermark(): number | undefined {
     return this.cursor.mentionWatermark;
+  }
+
+  pendingMessageIds(): string[] {
+    return (this.cursor.pendingMessages ?? []).map(
+      ({ message }) => message.messageId,
+    );
+  }
+
+  seedPendingMessages(count: number): void {
+    this.cursor.pendingMessages = Array.from(
+      { length: count },
+      (_unused, index) => ({
+        source: { kind: 'direct' } as const,
+        message: message(
+          'user_im_message_receive_o2o_all',
+          `parked-${index}`,
+          `request ${index}`,
+          { conversationId: 'conversation-capacity' },
+        ),
+      }),
+    );
+    this.saveCursor();
+  }
+
+  releasePendingMessage(conversationId: string, messageId: string): void {
+    const removePendingMessage = (
+      this as unknown as { removePendingMessage(key: string): void }
+    ).removePendingMessage.bind(this);
+    removePendingMessage(`${conversationId}\0${messageId}`);
+    this.saveCursor();
   }
 
   resolveSession(): Promise<string> {
@@ -1318,6 +1351,131 @@ describe('DwsChannel', () => {
     );
   });
 
+  it('does not let one direct conversation block another', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    let releaseFirst!: () => void;
+    const firstBlocked = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let releaseSecond!: () => void;
+    const secondBlocked = new Promise<void>((resolve) => {
+      releaseSecond = resolve;
+    });
+    const started: string[] = [];
+    channel.inboundHandler = async (envelope) => {
+      started.push(envelope.messageId);
+      if (envelope.messageId === 'conversation-a') await firstBlocked;
+      if (envelope.messageId === 'conversation-b') await secondBlocked;
+      channel.inbound.push(envelope);
+    };
+
+    const firstDelivery = client.emit(
+      1,
+      message(
+        'user_im_message_receive_o2o_all',
+        'conversation-a',
+        'first request',
+        { conversationId: 'conversation-a' },
+      ),
+    );
+    await vi.waitFor(() => expect(started).toEqual(['conversation-a']));
+    expect(channel.pendingMessageIds()).toEqual(['conversation-a']);
+
+    const secondDelivery = client.emit(
+      1,
+      message(
+        'user_im_message_receive_o2o_all',
+        'conversation-b',
+        'second request',
+        { conversationId: 'conversation-b' },
+      ),
+    );
+
+    await vi.waitFor(() =>
+      expect(started).toEqual(['conversation-a', 'conversation-b']),
+    );
+    expect(channel.pendingMessageIds()).toEqual([
+      'conversation-a',
+      'conversation-b',
+    ]);
+    releaseFirst();
+    releaseSecond();
+    await Promise.all([firstDelivery, secondDelivery]);
+    await vi.waitFor(() => expect(channel.inbound).toHaveLength(2));
+    expect(channel.pendingMessageIds()).toEqual([]);
+  });
+
+  it('preserves direct-message order within one conversation', async () => {
+    const client = new FakeDwsClient();
+    const { bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({ dispatchMode: 'followup' }),
+    );
+    let releaseFirst!: () => void;
+    const firstBlocked = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let promptCount = 0;
+    (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      promptCount += 1;
+      if (promptCount === 1) await firstBlocked;
+      return 'response';
+    });
+
+    const firstDelivery = client.emit(
+      1,
+      message(
+        'user_im_message_receive_o2o_all',
+        'conversation-a-1',
+        'first request',
+        { conversationId: 'conversation-a' },
+      ),
+    );
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+    const secondDelivery = client.emit(
+      1,
+      message(
+        'user_im_message_receive_o2o_all',
+        'conversation-a-2',
+        'second request',
+        { conversationId: 'conversation-a' },
+      ),
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(bridge.prompt).toHaveBeenCalledOnce();
+    releaseFirst();
+    await Promise.all([firstDelivery, secondDelivery]);
+    expect(bridge.prompt).toHaveBeenCalledTimes(2);
+  });
+
+  it('applies backpressure instead of evicting an admitted message', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    channel.seedPendingMessages(5_000);
+
+    const delivery = client.emit(
+      1,
+      message('user_im_message_receive_o2o_all', 'new-request', 'request', {
+        conversationId: 'conversation-new',
+      }),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(channel.inbound).toEqual([]);
+    expect(channel.pendingMessageIds()).toHaveLength(5_000);
+    expect(channel.pendingMessageIds()[0]).toBe('parked-0');
+    expect(channel.pendingMessageIds()).not.toContain('new-request');
+
+    channel.releasePendingMessage('conversation-capacity', 'parked-0');
+    await delivery;
+    expect(channel.inbound.map(({ messageId }) => messageId)).toEqual([
+      'new-request',
+    ]);
+    expect(channel.pendingMessageIds()).toHaveLength(4_999);
+  });
+
   it('turns a document mention notification into a document task and replies to its comment', async () => {
     const client = new FakeDwsClient();
     const channel = await readyChannel(client);
@@ -1828,6 +1986,42 @@ describe('DwsChannel', () => {
     ]);
   });
 
+  it('admits a direct-message history page without waiting for a turn', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    let releaseFirst!: () => void;
+    const firstBlocked = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const started: string[] = [];
+    channel.inboundHandler = async (envelope) => {
+      started.push(envelope.messageId);
+      if (envelope.messageId === 'history-a') await firstBlocked;
+      channel.inbound.push(envelope);
+    };
+    const before = channel.notificationWatermark();
+    const eventTime = Date.now();
+    client.directMessages = [
+      message('user_im_message_receive_o2o_all', 'history-a', 'first request', {
+        conversationId: 'conversation-a',
+        eventTime,
+      }),
+      message(
+        'user_im_message_receive_o2o_all',
+        'history-b',
+        'second request',
+        { conversationId: 'conversation-b', eventTime },
+      ),
+    ];
+
+    await channel.poll();
+
+    await vi.waitFor(() => expect(started).toEqual(['history-a', 'history-b']));
+    expect(channel.notificationWatermark()).toBeGreaterThanOrEqual(before!);
+    releaseFirst();
+    await vi.waitFor(() => expect(channel.inbound).toHaveLength(2));
+  });
+
   // R1-7: every history window re-opens at `watermark - 5s`, so every
   // live-dispatched direct message is re-fetched by a later poll. The
   // processed-key guard is the only thing standing between that refetch and
@@ -1916,20 +2110,21 @@ describe('DwsChannel', () => {
 
       await channel.poll();
 
-      expect(channel.inboundAttempts).toBe(2);
+      await vi.waitFor(() => expect(channel.inboundAttempts).toBe(2));
       const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
       expect(logged).toContain('DWS message turn failed (attempt 1/5)');
-      expect(logged).toContain('parked for retry');
       expect(logged).not.toContain('failed to poll DWS direct-message history');
 
       channel.inboundError = undefined;
       await channel.poll();
 
-      expect(channel.inboundAttempts).toBe(4);
-      expect(channel.inbound.map((envelope) => envelope.messageId)).toEqual([
-        'failing-first',
-        'waiting-second',
-      ]);
+      await vi.waitFor(() => expect(channel.inboundAttempts).toBe(4));
+      await vi.waitFor(() =>
+        expect(channel.inbound.map((envelope) => envelope.messageId)).toEqual([
+          'failing-first',
+          'waiting-second',
+        ]),
+      );
     } finally {
       stderr.mockRestore();
     }

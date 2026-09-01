@@ -23,6 +23,7 @@ import {
   DwsClient,
   DwsCommandError,
   type DwsClientLike,
+  type DwsImDispatch,
   type DwsImMessage,
   type DwsImSource,
   type DwsImTarget,
@@ -518,6 +519,8 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
   private readonly endReactionKeys = new Set<string>();
   private readonly notifiedSenderPairingNotifications = new Set<string>();
   private readonly processingMessages = new Map<string, Promise<void>>();
+  private readonly queuedDirectMessages = new Map<string, Promise<void>>();
+  private readonly pendingMessageCapacityWaiters = new Set<() => void>();
   private pollAbortController = new AbortController();
   private lifecycleGeneration = 0;
   private connectionStartedAt = 0;
@@ -825,6 +828,9 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       this.cleanupReaction(key, 'disconnect reaction removal');
     }
     this.sessionReactionKeys.clear();
+    this.queuedDirectMessages.clear();
+    for (const resolve of this.pendingMessageCapacityWaiters) resolve();
+    this.pendingMessageCapacityWaiters.clear();
     this.stopPollLoop();
     for (const state of this.imStates) {
       if (state.retryTimer) clearTimeout(state.retryTimer);
@@ -1124,7 +1130,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       );
       for (const message of mentions.messages) {
         if (signal.aborted || !this.connected) return;
-        await this.handleImMessage({ kind: 'at' }, message, true);
+        await this.receiveImMessage({ kind: 'at' }, message, true);
       }
       if (mentions.nextCursor) {
         this.cursor.mentionCheckpoint = {
@@ -1172,7 +1178,10 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         // shared retry budget twice per poll.
         if (this.hasPendingMessage(key)) continue;
         try {
-          await this.handleImMessage({ kind: 'direct' }, message, true);
+          const dispatch = this.receiveDirectMessage(message, true);
+          await (parseDocumentMentionNotification(message.content.trim())
+            ? dispatch.completed
+            : dispatch.admitted);
         } catch (error) {
           // A failed plain direct message was just parked for replay, so the
           // page can keep moving. An unparked failure — a document
@@ -1370,7 +1379,9 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       (message) => {
         state.lastError = undefined;
         state.restartAttempts = 0;
-        return this.handleImMessage(state.source, message);
+        return state.source.kind === 'direct'
+          ? this.receiveDirectMessage(message)
+          : this.receiveImMessage(state.source, message);
       },
       (error) => {
         if (error instanceof DwsEventProcessError) state.lastError = error;
@@ -1493,11 +1504,15 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     );
   }
 
-  private async handleImMessage(
+  private async receiveImMessage(
     source: DwsImSource,
     message: DwsImMessage,
     fromHistory = false,
   ): Promise<void> {
+    if (source.kind === 'direct') {
+      await this.receiveDirectMessage(message, fromHistory).completed;
+      return;
+    }
     if (!this.connected) return;
     if (this.isSelfMessage(message)) {
       this.markProcessedMessage(messageKey(message));
@@ -1509,11 +1524,57 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       message.eventTime !== undefined &&
       message.eventTime < this.connectionStartedAt - 5_000
     ) {
-      if (source.kind !== 'direct') {
-        this.markProcessedMessage(messageKey(message));
-        this.saveCursor();
-        return;
-      }
+      this.markProcessedMessage(messageKey(message));
+      this.saveCursor();
+      return;
+    }
+    if (
+      source.kind === 'group-all' &&
+      (this.config.groups[message.conversationId]?.requireMention ??
+        this.config.groups['*']?.requireMention ??
+        true)
+    ) {
+      return;
+    }
+    if (
+      (source.kind === 'group' || source.kind === 'group-all') &&
+      this.config.groupPolicy === 'pairing' &&
+      !this.groupGate.isGroupApproved(message.conversationId)
+    ) {
+      return;
+    }
+    await this.dispatchImMessage(source, message, messageKey(message));
+  }
+
+  private receiveDirectMessage(
+    message: DwsImMessage,
+    fromHistory = false,
+  ): DwsImDispatch {
+    const admission = this.admitReceivedDirectMessage(message, fromHistory);
+    const completed = admission.then(({ completion }) => completion);
+    void completed.catch(() => undefined);
+    return {
+      admitted: admission.then(() => undefined),
+      completed,
+    };
+  }
+
+  private async admitReceivedDirectMessage(
+    message: DwsImMessage,
+    fromHistory: boolean,
+  ): Promise<{ completion: Promise<void> }> {
+    if (!this.connected) return { completion: Promise.resolve() };
+    const key = messageKey(message);
+    if (this.isSelfMessage(message)) {
+      this.markProcessedMessage(key);
+      this.saveCursor();
+      return { completion: Promise.resolve() };
+    }
+    if (
+      !fromHistory &&
+      message.eventTime !== undefined &&
+      message.eventTime < this.connectionStartedAt - 5_000
+    ) {
       // A replayed direct message is left UNMARKED on purpose, for history
       // polling to pick up. That only works if polling will ever look
       // that far back: on a fresh cursor `notificationWatermark` starts at
@@ -1540,24 +1601,63 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         `[Channel:${this.name}] parked a stale direct message for history polling and pulled the watermark back to ${message.eventTime}: ${sanitizeLogText(message.messageId, 120)}\n`,
       );
       this.saveCursor();
-      return;
+      return { completion: Promise.resolve() };
     }
-    if (
-      source.kind === 'group-all' &&
-      (this.config.groups[message.conversationId]?.requireMention ??
-        this.config.groups['*']?.requireMention ??
-        true)
-    ) {
-      return;
+    return this.admitDirectMessage({ kind: 'direct' }, message, key);
+  }
+
+  private async admitDirectMessage(
+    source: Extract<PersistedPendingMessage['source'], { kind: 'direct' }>,
+    message: DwsImMessage,
+    key: string,
+  ): Promise<{ completion: Promise<void> }> {
+    if (this.cursor.processedMessages.includes(key)) {
+      this.removePendingMessage(key);
+      return { completion: Promise.resolve() };
     }
-    if (
-      (source.kind === 'group' || source.kind === 'group-all') &&
-      this.config.groupPolicy === 'pairing' &&
-      !this.groupGate.isGroupApproved(message.conversationId)
-    ) {
-      return;
+    if (!this.hasPendingMessage(key)) {
+      if (!(await this.rememberPendingMessage(source, message))) {
+        return { completion: Promise.resolve() };
+      }
+      this.saveCursor();
     }
-    const key = messageKey(message);
+    return { completion: this.scheduleDirectMessage(source, message, key) };
+  }
+
+  private scheduleDirectMessage(
+    source: Extract<PersistedPendingMessage['source'], { kind: 'direct' }>,
+    message: DwsImMessage,
+    key: string,
+  ): Promise<void> {
+    const queued = this.queuedDirectMessages.get(key);
+    if (queued) return queued;
+    if (this.cursor.processedMessages.includes(key)) return Promise.resolve();
+    const generation = this.lifecycleGeneration;
+    const task = Promise.resolve().then(async () => {
+      try {
+        if (!this.connected || generation !== this.lifecycleGeneration) return;
+        await this.dispatchImMessage(source, message, key);
+      } finally {
+        if (this.queuedDirectMessages.get(key) === task) {
+          this.queuedDirectMessages.delete(key);
+        }
+      }
+    });
+    this.queuedDirectMessages.set(key, task);
+    void task.catch((error: unknown) => {
+      this.logImError(
+        source,
+        error instanceof Error ? error : new Error(String(error)),
+      );
+    });
+    return task;
+  }
+
+  private async dispatchImMessage(
+    source: DwsImSource,
+    message: DwsImMessage,
+    key: string,
+  ): Promise<void> {
     let waitedOnInFlight = false;
     let inFlightError: unknown;
     while (true) {
@@ -1580,6 +1680,13 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     this.processingMessages.set(key, task);
     try {
       await task;
+      if (
+        this.cursor.processedMessages.includes(key) &&
+        this.hasPendingMessage(key)
+      ) {
+        this.removePendingMessage(key);
+        this.saveCursor();
+      }
     } finally {
       if (this.processingMessages.get(key) === task) {
         this.processingMessages.delete(key);
@@ -1651,7 +1758,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         // Direct-message history may be unavailable, and ambient group
         // messages have no history fallback. `at` messages need no parking:
         // the pinned mention checkpoint re-fetches them.
-        this.rememberPendingMessage(source, message);
+        await this.rememberPendingMessage(source, message);
       }
       // Under budget the throw propagates exactly as before, so redelivery
       // and concurrent-duplicate retry keep their contracts. Once the budget
@@ -1738,30 +1845,41 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     );
   }
 
-  private rememberPendingMessage(
+  private async rememberPendingMessage(
     source: PersistedPendingMessage['source'],
     message: DwsImMessage,
-  ): void {
+  ): Promise<boolean> {
     const key = messageKey(message);
-    if (this.hasPendingMessage(key)) return;
-    const pending = this.cursor.pendingMessages ?? [];
-    while (pending.length >= MAX_PROCESSED_ITEMS) {
-      const dropped = pending.shift();
-      if (!dropped) break;
-      this.clearInboundFailure(messageKey(dropped.message));
-      process.stderr.write(
-        `[Channel:${this.name}] dropping the oldest pending DWS message ` +
-          `because the retry queue reached ${MAX_PROCESSED_ITEMS}.\n`,
-      );
+    if (this.hasPendingMessage(key)) return true;
+    const generation = this.lifecycleGeneration;
+    while (
+      this.connected &&
+      generation === this.lifecycleGeneration &&
+      (this.cursor.pendingMessages?.length ?? 0) >= MAX_PROCESSED_ITEMS
+    ) {
+      await new Promise<void>((resolve) => {
+        this.pendingMessageCapacityWaiters.add(resolve);
+      });
     }
+    if (!this.connected || generation !== this.lifecycleGeneration) {
+      return false;
+    }
+    if (this.hasPendingMessage(key)) return true;
+    const pending = this.cursor.pendingMessages ?? [];
     pending.push({ source, message });
     this.cursor.pendingMessages = pending;
+    return true;
   }
 
   private removePendingMessage(key: string): void {
-    this.cursor.pendingMessages = (this.cursor.pendingMessages ?? []).filter(
-      (pending) => messageKey(pending.message) !== key,
+    const pending = this.cursor.pendingMessages ?? [];
+    const remaining = pending.filter(
+      (item) => messageKey(item.message) !== key,
     );
+    this.cursor.pendingMessages = remaining;
+    if (remaining.length === pending.length) return;
+    for (const resolve of this.pendingMessageCapacityWaiters) resolve();
+    this.pendingMessageCapacityWaiters.clear();
   }
 
   private async processDocumentNotification(
@@ -1901,8 +2019,31 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     for (const pending of [...(this.cursor.pendingMessages ?? [])]) {
       if (signal.aborted || !this.connected) return;
       const key = messageKey(pending.message);
+      if (pending.source.kind === 'direct') {
+        const alreadyQueued = this.queuedDirectMessages.has(key);
+        const completion = this.scheduleDirectMessage(
+          pending.source,
+          pending.message,
+          key,
+        );
+        if (
+          !alreadyQueued &&
+          parseDocumentMentionNotification(pending.message.content.trim()) !==
+            undefined
+        ) {
+          try {
+            await completion;
+          } catch (error) {
+            if (signal.aborted || !this.connected) return;
+            process.stderr.write(
+              `[Channel:${this.name}] pending DWS message remains degraded: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 300)}\n`,
+            );
+          }
+        }
+        continue;
+      }
       try {
-        await this.handleImMessage(pending.source, pending.message, true);
+        await this.receiveImMessage(pending.source, pending.message, true);
         this.removePendingMessage(key);
         this.saveCursor();
       } catch (error) {
