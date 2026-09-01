@@ -1070,7 +1070,8 @@ export abstract class ChannelBase {
     response: ChannelUserInputResponse,
   ): Promise<boolean> {
     if (pending.responsePromise) {
-      return pending.responsePromise;
+      await pending.responsePromise;
+      return false;
     }
     if (
       this.pendingPermissions.get(pending.requestId) !== pending ||
@@ -3054,7 +3055,7 @@ export abstract class ChannelBase {
     const alwaysOption = this.approvalAlwaysOption(pending);
     const denyLabel = this.permissionOptionLabel(
       this.denialOption(pending),
-      'deny',
+      copy.deny.toLocaleLowerCase(this.locale),
     );
     const requestSuffix = pending.taskName ? ` ${pending.requestId}` : '';
     const replyPadding = pending.taskName

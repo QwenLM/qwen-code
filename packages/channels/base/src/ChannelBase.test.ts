@@ -1996,7 +1996,7 @@ describe('ChannelBase', () => {
       const second = context.respond('deny');
 
       await expect(first).resolves.toBe(true);
-      await expect(second).resolves.toBe(true);
+      await expect(second).resolves.toBe(false);
       expect(respondToPermissionMock()).toHaveBeenCalledOnce();
       expect(respondToPermissionMock()).toHaveBeenCalledWith(
         'req-native-response',
@@ -2035,6 +2035,9 @@ describe('ChannelBase', () => {
       expect(respondToPermissionMock()).toHaveBeenCalledWith(
         'req-card-command-race',
         { outcome: { outcome: 'selected', optionId: 'proceed_once' } },
+      );
+      expect(ch.sent.at(-1)?.text).toBe(
+        'Permission request is no longer pending.',
       );
 
       await active.finish();
@@ -2141,7 +2144,7 @@ describe('ChannelBase', () => {
       await active.finish();
     });
 
-    it('uses one response promise and emits one typed user input settlement', async () => {
+    it('accepts one response and emits one typed user input settlement', async () => {
       const ch = createChannel();
       ch.userInputPresentationResult = { kind: 'presented' };
       const active = await startActiveSession(ch);
@@ -2168,7 +2171,7 @@ describe('ChannelBase', () => {
       const second = context.respond(response);
 
       await expect(first).resolves.toBe(true);
-      await expect(second).resolves.toBe(true);
+      await expect(second).resolves.toBe(false);
       expect(respondToPermissionMock()).toHaveBeenCalledTimes(1);
       expect(settled).toHaveBeenCalledOnce();
       expect(settled).toHaveBeenCalledWith('resolved_outside_presenter');
@@ -2409,6 +2412,38 @@ describe('ChannelBase', () => {
       emitPermission(sessionId, 'req-other');
       await ch.handleInbound(envelope({ text: '/approve' }));
       expect(ch.sent.at(-1)?.text).toContain('- req-empty-labels: Tool use');
+    });
+
+    it('localizes empty permission label fallbacks for Chinese channels', async () => {
+      const ch = createChannel({}, { locale: 'zh' });
+      const sessionId = await startSession(ch);
+      (bridge as unknown as EventEmitter).emit('permissionRequest', {
+        requestId: 'req-empty-zh-labels',
+        sessionId,
+        request: {
+          toolCall: {
+            toolCallId: 'tool-empty-zh-labels',
+            kind: 'shell',
+            title: 'Run tool',
+            rawInput: {},
+          },
+          options: [
+            {
+              optionId: 'proceed_once',
+              kind: 'allow_once',
+              name: '\u0000\n',
+            },
+            {
+              optionId: 'cancel',
+              kind: 'reject_once',
+              name: '\u0000\n',
+            },
+          ],
+        },
+      });
+
+      expect(ch.sent.at(-1)?.text).toContain('/approve        仅允许本次');
+      expect(ch.sent.at(-1)?.text).toContain('/deny           拒绝');
     });
 
     it('summarizes permission parameters with shape markers and overflow', async () => {
