@@ -22,7 +22,16 @@
  *   re-expansion that `--directory` makes necessary.
  */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest';
 import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
@@ -56,6 +65,8 @@ describe('GitWorktreeService.createUserWorktree() — .worktreeinclude', () => {
   // sibling name collides with any concurrent run on the same host.
   let repoParent: string;
   let repoRoot: string;
+  /** Holds the one-time template repo every case is copied from. */
+  let templateParent: string;
 
   /** Writes `.worktreeinclude` at the repo root. */
   const writeInclude = (...lines: string[]) =>
@@ -88,6 +99,32 @@ describe('GitWorktreeService.createUserWorktree() — .worktreeinclude', () => {
   const git = (...args: string[]) =>
     execFileSync('git', args, { cwd: repoRoot, encoding: 'utf8' });
 
+  // Every case wants the same starting point: an initialized repo with one
+  // commit. Building it per case costs six git subprocesses × 30 cases on
+  // a lane that already runs several jobs per host, so it is built once
+  // and copied. A freshly initialized repo stores no absolute paths (no
+  // remotes, no worktrees, no hooksPath), so the copy is portable.
+  beforeAll(async () => {
+    templateParent = await fs.realpath(
+      await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-wt-include-tpl-')),
+    );
+    const tpl = path.join(templateParent, 'repo');
+    await fs.mkdir(tpl);
+    const g = (...args: string[]) =>
+      execFileSync('git', args, { cwd: tpl, encoding: 'utf8' });
+    g('init', '-q', '-b', 'main');
+    g('config', 'user.email', 't@e.com');
+    g('config', 'user.name', 't');
+    g('config', 'commit.gpgsign', 'false');
+    await fs.writeFile(path.join(tpl, 'README.md'), 'hi\n');
+    g('add', '.');
+    g('commit', '-q', '-m', 'init', '--no-verify');
+  });
+
+  afterAll(async () => {
+    await fs.rm(templateParent, { recursive: true, force: true });
+  });
+
   beforeEach(async () => {
     mockDebugLogger.warn.mockClear();
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-wt-include-'));
@@ -95,14 +132,9 @@ describe('GitWorktreeService.createUserWorktree() — .worktreeinclude', () => {
     // line up with what GitWorktreeService produces internally.
     repoParent = await fs.realpath(dir);
     repoRoot = path.join(repoParent, 'repo');
-    await fs.mkdir(repoRoot);
-    git('init', '-q', '-b', 'main');
-    git('config', 'user.email', 't@e.com');
-    git('config', 'user.name', 't');
-    git('config', 'commit.gpgsign', 'false');
-    await fs.writeFile(path.join(repoRoot, 'README.md'), 'hi\n');
-    git('add', '.');
-    git('commit', '-q', '-m', 'init', '--no-verify');
+    await fs.cp(path.join(templateParent, 'repo'), repoRoot, {
+      recursive: true,
+    });
   });
 
   afterEach(async () => {
