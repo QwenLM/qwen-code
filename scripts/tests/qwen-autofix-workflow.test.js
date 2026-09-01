@@ -8963,6 +8963,17 @@ exit 1
       'AUTOFIX_VITEST_FLAGS="${VITEST_LOAD_CLAMPS[*]}"',
     );
     expect(reviewVerificationRunner).toContain('export AUTOFIX_VITEST_FLAGS');
+    // ...and the array definition sits above its consumers: `set -eo
+    // pipefail` without `-u` expands a not-yet-set array to zero words, so
+    // a definition moved below them silently empties every clamp while the
+    // position-blind toContains above stay green.
+    expect(
+      reviewVerificationRunner.indexOf('VITEST_LOAD_CLAMPS=('),
+    ).toBeLessThan(
+      reviewVerificationRunner.indexOf(
+        'AUTOFIX_VITEST_FLAGS="${VITEST_LOAD_CLAMPS[*]}"',
+      ),
+    );
     // ...and above the contracts call: run_check_no_ab spawns a child bash
     // that inherits exported variables only, so an export missing or moved
     // below the call leaves the drift leg at vitest's 5s default.
@@ -8972,6 +8983,17 @@ exit 1
       reviewVerificationRunner.indexOf(
         'bash "${RUNNER_TEMP}/check-autofix-contracts.sh"',
       ),
+    );
+    // ...and the unset stays below the contracts call: the child inherits
+    // the export at spawn time, so an unset moved above the call (or
+    // deleted) strips the clamps from the drift leg while every
+    // establish-side pin above stays green.
+    expect(
+      reviewVerificationRunner.indexOf(
+        'bash "${RUNNER_TEMP}/check-autofix-contracts.sh"',
+      ),
+    ).toBeLessThan(
+      reviewVerificationRunner.indexOf('unset AUTOFIX_VITEST_FLAGS'),
     );
     // The check sits BEFORE the no-commit/no-op exits: a no-op audit round
     // whose verdict is sound with nothing left to fix still needs the artifact.
