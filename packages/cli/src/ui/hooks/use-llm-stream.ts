@@ -2350,7 +2350,9 @@ export const useLlmStream = (
       const reasonClause =
         eventValue?.triggerReason === 'image_overflow'
           ? `accumulated enough tool screenshots to trigger compaction for ${activeModel}`
-          : `approached the input token limit for ${activeModel}`;
+          : eventValue?.triggerReason === 'payload_overflow'
+            ? `exceeded the endpoint request-body limit for ${activeModel}`
+            : `approached the input token limit for ${activeModel}`;
       const warningSuffix = eventValue?.warning
         ? `\n⚠️ ${eventValue.warning}`
         : '';

@@ -426,6 +426,12 @@ describe('platform lanes — the retired sensitivity classifier', () => {
 });
 
 describe('GitHub helper tests', () => {
+  it('includes the disk-pressure contract suite', () => {
+    expect(ci.env.HELPER_TESTS).toContain(
+      '.github/scripts/ci-disk-pressure.test.mjs',
+    );
+  });
+
   it('runs every invocation serially', () => {
     const helperSteps = Object.values(ci.jobs)
       .flatMap((job) => job.steps ?? [])

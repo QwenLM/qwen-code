@@ -371,6 +371,7 @@ export {
   type RestoreSessionRequest,
   type SetModelResult,
   type SetSessionLanguageResult,
+  type SetUserLanguageResult,
   type SessionMetadataResult,
   type SubscribeOptions,
 } from './daemon/index.js';
