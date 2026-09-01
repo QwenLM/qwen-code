@@ -70,14 +70,20 @@ async function startReleaseFixture(directory) {
     });
     process.on("SIGTERM", () => server.close(() => process.exit(0)));
   `
-  const child = spawn(process.execPath, ["--input-type=module", "--eval", source], {
-    env: { ...process.env, CUA_SDK_RELEASE_FIXTURE_DIR: directory },
-    stdio: ["ignore", "inherit", "inherit", "ipc"],
-  })
+  const child = spawn(
+    process.execPath,
+    ["--input-type=module", "--eval", source],
+    {
+      env: { ...process.env, CUA_SDK_RELEASE_FIXTURE_DIR: directory },
+      stdio: ["ignore", "inherit", "inherit", "ipc"],
+    },
+  )
   const port = await new Promise((resolvePort, reject) => {
     child.once("error", reject)
     child.once("exit", (code) =>
-      reject(new Error(`release fixture exited before ready with status ${code}`)),
+      reject(
+        new Error(`release fixture exited before ready with status ${code}`),
+      ),
     )
     child.once("message", (message) => {
       if (
@@ -106,9 +112,7 @@ function run(command, args, options = {}) {
   })
   if (result.error) throw result.error
   if (result.status !== 0) {
-    const detail = options.capture
-      ? `\n${result.stderr || result.stdout}`
-      : ""
+    const detail = options.capture ? `\n${result.stderr || result.stdout}` : ""
     throw new Error(`${command} exited with status ${result.status}${detail}`)
   }
   return result.stdout
@@ -120,7 +124,10 @@ const manifest = JSON.parse(
 if (manifest.name !== "@qwen-code/cua-sdk") {
   throw new Error(`unexpected package name ${manifest.name}`)
 }
-const rustVersion = readFileSync(join(driverRoot, "rust", "VERSION"), "utf8").trim()
+const rustVersion = readFileSync(
+  join(driverRoot, "rust", "VERSION"),
+  "utf8",
+).trim()
 if (manifest.version !== rustVersion) {
   throw new Error(
     `SDK version ${manifest.version} does not match driver version ${rustVersion}`,
@@ -130,17 +137,17 @@ if (!existsSync(nativeDirectory)) {
   throw new Error(`native directory does not exist: ${nativeDirectory}`)
 }
 if (releaseDirectory && !existsSync(releaseDirectory)) {
-  throw new Error(`release fixture directory does not exist: ${releaseDirectory}`)
+  throw new Error(
+    `release fixture directory does not exist: ${releaseDirectory}`,
+  )
 }
 
 mkdirSync(outputDirectory, { recursive: true })
 run("npm", ["run", "build"])
 const packOutput = JSON.parse(
-  run(
-    "npm",
-    ["pack", ".", "--pack-destination", outputDirectory, "--json"],
-    { capture: true },
-  ),
+  run("npm", ["pack", ".", "--pack-destination", outputDirectory, "--json"], {
+    capture: true,
+  }),
 )
 if (!Array.isArray(packOutput) || packOutput.length !== 1) {
   throw new Error("npm pack did not produce exactly one package")
@@ -159,6 +166,7 @@ for (const required of [
   "dist/native-assets.js",
   "computer-use/index.js",
   "computer-use/index.d.ts",
+  "computer-use/SKILL.md",
   "scripts/install-native.mjs",
 ]) {
   if (!packedPaths.includes(required)) {
@@ -169,13 +177,19 @@ const bundledNative = packedPaths.find((path) =>
   /\.(?:dll|dylib|node|so)$/u.test(path),
 )
 if (bundledNative) {
-  throw new Error(`SDK tarball must not bundle native payload: ${bundledNative}`)
+  throw new Error(
+    `SDK tarball must not bundle native payload: ${bundledNative}`,
+  )
 }
 
 const tarball = join(outputDirectory, packed.filename)
-const tarballs = readdirSync(outputDirectory).filter((name) => name.endsWith(".tgz"))
+const tarballs = readdirSync(outputDirectory).filter((name) =>
+  name.endsWith(".tgz"),
+)
 if (tarballs.length !== 1 || tarballs[0] !== packed.filename) {
-  throw new Error(`expected exactly one SDK tarball, found ${tarballs.join(", ")}`)
+  throw new Error(
+    `expected exactly one SDK tarball, found ${tarballs.join(", ")}`,
+  )
 }
 run("npm", [
   "publish",
