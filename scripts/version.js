@@ -77,6 +77,9 @@ const mem0ManifestPath = resolve(
 const mem0Manifest = readJson(mem0ManifestPath);
 mem0Manifest.version = newVersion;
 writeJson(mem0ManifestPath, mem0Manifest);
+run(
+  'npx prettier --experimental-cli --write integrations/external-context-mem0/qwen-extension.json',
+);
 
 // 6. Update the sandboxImageUri in the root package.json
 const rootPackageJson = readJson(rootPackageJsonPath);

@@ -74,9 +74,15 @@ describe('package scripts', () => {
     expect(versionScript).toContain(
       "'integrations/external-context-mem0/qwen-extension.json'",
     );
+    expect(versionScript).toContain(
+      'const mem0Manifest = readJson(mem0ManifestPath);',
+    );
     expect(versionScript).toContain('mem0Manifest.version = newVersion');
     expect(versionScript).toContain(
       'writeJson(mem0ManifestPath, mem0Manifest);',
+    );
+    expect(versionScript).toContain(
+      "'npx prettier --experimental-cli --write integrations/external-context-mem0/qwen-extension.json'",
     );
   });
 
