@@ -375,9 +375,15 @@ export function updateConnectionFromDaemonEvent(
     case 'session_metadata_updated': {
       const data = getRecord(event.data);
       if (Object.prototype.hasOwnProperty.call(data ?? {}, 'displayName')) {
+        const displayName = getString(data, 'displayName');
+        const titleSource = getString(data, 'titleSource');
         setConnection((current) => ({
           ...current,
-          displayName: getString(data, 'displayName'),
+          displayName,
+          titleSource:
+            displayName && (titleSource === 'manual' || titleSource === 'auto')
+              ? titleSource
+              : undefined,
         }));
       }
       break;

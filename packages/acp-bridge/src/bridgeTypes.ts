@@ -711,6 +711,7 @@ export interface BridgeSessionSummary {
   createdAt: string;
   updatedAt?: string;
   displayName?: string;
+  titleSource?: 'manual' | 'auto';
   /** Id of the session that spawned this one (via `create_sub_session`), or
    * absent for a top-level session. Lets a UI link a sub-session back to its
    * parent. Immutable — set when the session is created. */

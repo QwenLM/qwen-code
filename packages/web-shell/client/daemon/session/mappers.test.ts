@@ -77,6 +77,29 @@ const turnComplete: DaemonEvent = {
   data: { stopReason: 'end_turn' },
 };
 
+describe('session title metadata', () => {
+  it('keeps manual provenance with a renamed session', () => {
+    expect(
+      applyEvent(
+        { status: 'connected' },
+        {
+          id: 1,
+          v: 1,
+          type: 'session_metadata_updated',
+          data: {
+            sessionId: 'session-1',
+            displayName: 'Bug hunt',
+            titleSource: 'manual',
+          },
+        },
+      ),
+    ).toMatchObject({
+      displayName: 'Bug hunt',
+      titleSource: 'manual',
+    });
+  });
+});
+
 describe('mapReasoningControls', () => {
   it('maps toggle-only reasoning without exposing an effort list', () => {
     expect(

@@ -2795,6 +2795,8 @@ export function App({
   const [currentSessionSummary, setCurrentSessionSummary] = useState<
     DaemonSessionSummary | undefined
   >(undefined);
+  const currentSessionSummaryRef = useRef(currentSessionSummary);
+  currentSessionSummaryRef.current = currentSessionSummary;
   // Tracks the logical session from the latest effect run. In-flight fetches
   // compare their captured key against this ref on resolve: a match means
   // the response is still relevant and may set OR clear the worktree state;
@@ -2911,6 +2913,7 @@ export function App({
             setSessionStatusDisplayName(
               listedSession?.displayName ?? summary.displayName,
             );
+            setCurrentSessionSummary(listedSession ?? summary);
           })
           .catch(() => undefined);
       })
@@ -6633,6 +6636,9 @@ export function App({
   const createSessionPromiseRef = useRef<Promise<string | undefined> | null>(
     null,
   );
+  const pendingManualTitleRef = useRef<{ displayName: string } | undefined>(
+    undefined,
+  );
   const preparingSessionIdRef = useRef<string | null>(null);
   useEffect(() => {
     if (
@@ -6692,6 +6698,7 @@ export function App({
       return Promise.resolve(undefined);
     }
     if (currentSessionId) return Promise.resolve(undefined);
+    const pendingManualTitle = pendingManualTitleRef.current;
     const promise = (async () => {
       let allocatedSessionId: string | undefined;
       const modelId =
@@ -6779,7 +6786,17 @@ export function App({
               ? { name: gitModeIntentRef.current.name }
               : undefined,
           sessionSourceType: sessionSourceTypeRef.current,
-          onSessionCreated: onSessionCreatedRef.current,
+          onSessionCreated: async (sessionId) => {
+            if (
+              pendingManualTitle &&
+              pendingManualTitleRef.current === pendingManualTitle
+            ) {
+              await sessionActions.renameSession(
+                pendingManualTitle.displayName,
+              );
+            }
+            await onSessionCreatedRef.current?.(sessionId);
+          },
           onSessionAllocated: (sessionId) => {
             preparingSessionIdRef.current = sessionId;
             allocatedSessionId = sessionId;
@@ -6796,6 +6813,9 @@ export function App({
           },
           getCurrentSessionId: () => connectionRef.current.sessionId,
         }).then((result) => {
+          if (pendingManualTitleRef.current === pendingManualTitle) {
+            pendingManualTitleRef.current = undefined;
+          }
           if (result.worktree) {
             setSessionWorktree(result.worktree);
           }
@@ -9395,6 +9415,7 @@ export function App({
          * prompt sees it even while the clear is still in flight.
          */
         gitIntent?: SessionGitIntent;
+        carryManualTitle?: string;
       },
     ) => {
       if (
@@ -9404,6 +9425,9 @@ export function App({
         pushToast('warning', t('session.recoveryBlocksAction'));
         return false;
       }
+      pendingManualTitleRef.current = opts?.carryManualTitle
+        ? { displayName: opts.carryManualTitle }
+        : undefined;
       splitClassificationGenerationRef.current += 1;
       const invocation = ++sessionOpenInvocationRef.current;
       let nextContext: DaemonProductSessionContext | undefined;
@@ -9423,6 +9447,7 @@ export function App({
               }
             : undefined);
         if (nextContext?.kind === 'live') {
+          pendingManualTitleRef.current = undefined;
           gitModeIntentRef.current = { mode: 'current' };
           setGitModeIntent({ mode: 'current' });
           try {
@@ -9587,6 +9612,7 @@ export function App({
         // intent. Compared before the ref is overwritten below. `undefined`
         // is the primary selection on both sides.
         const sameTarget = workspaceCwd === selectedWorkspaceCwdRef.current;
+        if (!sameTarget) pendingManualTitleRef.current = undefined;
         composerSourceVersionRef.current += 1;
         selectedWorkspaceCwdRef.current = workspaceCwd;
         setSelectedWorkspaceCwd(workspaceCwd);
@@ -10080,6 +10106,7 @@ export function App({
       workspaceCwd?: string,
       sessionContext?: DaemonProductSessionContext,
     ) => {
+      pendingManualTitleRef.current = undefined;
       splitClassificationGenerationRef.current += 1;
       const invocation = ++sessionOpenInvocationRef.current;
       const previousPendingContext = pendingSessionContextRef.current;
@@ -11846,7 +11873,23 @@ export function App({
             return true;
           }
           if (cmd === 'clear') {
-            void createNewSession({ kind: 'inherit' });
+            const current = connectionRef.current;
+            const summary = currentSessionSummaryRef.current;
+            const carryManualTitle = current.sessionId
+              ? current.titleSource === 'manual'
+                ? current.displayName
+                : current.titleSource === undefined &&
+                    summary?.sessionId === current.sessionId &&
+                    summary.titleSource === 'manual'
+                  ? summary.displayName
+                  : current.titleSource === undefined
+                    ? pendingManualTitleRef.current?.displayName
+                    : undefined
+              : pendingManualTitleRef.current?.displayName;
+            void createNewSession(
+              { kind: 'inherit' },
+              carryManualTitle?.trim() ? { carryManualTitle } : undefined,
+            );
             return true;
           }
           if (cmd === 'new' || cmd === 'reset') {
@@ -11854,6 +11897,7 @@ export function App({
             return true;
           }
           if (cmd === 'rename') {
+            pendingManualTitleRef.current = undefined;
             const renameArg = parseRenameArgument(text.slice(match[0].length));
             if (renameArg.type === 'auto' || renameArg.type === 'delegate') {
               if (commandBlocked) {

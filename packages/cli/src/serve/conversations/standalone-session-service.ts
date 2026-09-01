@@ -377,6 +377,9 @@ function toStandaloneSummary(
     createdAt: item.startTime,
     updatedAt: new Date(item.mtime).toISOString(),
     ...(displayName ? { displayName } : {}),
+    ...(item.customTitle && item.titleSource
+      ? { titleSource: item.titleSource }
+      : {}),
     sourceType: STANDALONE_SESSION_SOURCE_TYPE,
     context: { kind: 'standalone' },
     ...(source.metadata.parentSessionId !== undefined

@@ -31,6 +31,7 @@ describe('getConnectionAfterSessionClear', () => {
         sessionId: 'session-a',
         clientId: 'client-a',
         displayName: 'Session A',
+        titleSource: 'manual',
         tokenCount: 42,
         goalState: { v: 2, goal: null, activity: 'idle' },
         commands: [commandInfo('old-command')],
@@ -58,6 +59,7 @@ describe('getConnectionAfterSessionClear', () => {
     expect(next).not.toHaveProperty('sessionId');
     expect(next).not.toHaveProperty('clientId');
     expect(next).not.toHaveProperty('displayName');
+    expect(next).not.toHaveProperty('titleSource');
     expect(next).not.toHaveProperty('tokenCount');
     expect(next).not.toHaveProperty('goalState');
     expect(next).not.toHaveProperty('supportedCommands');

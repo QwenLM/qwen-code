@@ -15927,6 +15927,8 @@ describe('createServeApp', () => {
       timestamp: string;
       prompt: string;
       mtime: Date;
+      customTitle?: string;
+      titleSource?: 'manual' | 'auto';
       state?: 'active' | 'archived';
       parentSessionId?: string;
       sourceType?: string;
@@ -15950,6 +15952,21 @@ describe('createServeApp', () => {
         cwd: input.cwd,
       };
       const lines = [JSON.stringify(record)];
+      if (input.customTitle !== undefined) {
+        lines.push(
+          JSON.stringify({
+            ...record,
+            uuid: `${input.sessionId}-title-1`,
+            parentUuid: record.uuid,
+            type: 'system',
+            subtype: 'custom_title',
+            systemPayload: {
+              customTitle: input.customTitle,
+              ...(input.titleSource ? { titleSource: input.titleSource } : {}),
+            },
+          }),
+        );
+      }
       if (input.parentSessionId !== undefined) {
         // Mirror ChatRecordingService.recordParentSession: a single
         // `parent_session` system record near the head of the transcript that
@@ -16229,6 +16246,8 @@ describe('createServeApp', () => {
         timestamp: '2026-05-17T12:00:00.000Z',
         prompt: 'stored only prompt',
         mtime: new Date('2026-05-17T12:10:00.000Z'),
+        customTitle: 'Manual title',
+        titleSource: 'manual',
       });
       await writeStoredSession({
         sessionId: liveAndStoredId,
@@ -16267,7 +16286,8 @@ describe('createServeApp', () => {
           expect.objectContaining({
             sessionId: storedOnlyId,
             workspaceCwd: WS_BOUND,
-            displayName: 'stored only prompt',
+            displayName: 'Manual title',
+            titleSource: 'manual',
             clientCount: 0,
             hasActivePrompt: false,
           }),
