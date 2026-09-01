@@ -225,7 +225,7 @@ class ClipVideoInvocation extends BaseMediaPolicyToolInvocation<ClipVideoParams>
       const endText = endSec !== undefined ? formatSeconds(endSec) : '结尾';
       const spanText =
         endSec !== undefined ? ` ${formatSeconds(endSec - startSec)}` : '';
-      const disclosure = `原 ${original} → 片段 [${formatSeconds(startSec)}–${endText}]${spanText}，保留画面与原有音轨，片段外内容全部丢弃`;
+      const disclosure = `原 ${original} → 片段 [${formatSeconds(startSec)}–${endText}]${spanText}，保留画面，源音轨如存在则一并保留，片段外内容全部丢弃`;
 
       const success = mediaPolicyToolSuccess({
         outputDir: this.params.outputDir,

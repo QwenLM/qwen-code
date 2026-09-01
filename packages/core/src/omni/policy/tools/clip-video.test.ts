@@ -149,7 +149,7 @@ describe('OmniClipVideoTool', () => {
         sizeBytes: OUTPUT_SIZE,
         metadata: {
           omniDisclosure:
-            '原 63s → 片段 [10s–25s] 15s，保留画面与原有音轨，片段外内容全部丢弃',
+            '原 63s → 片段 [10s–25s] 15s，保留画面，源音轨如存在则一并保留，片段外内容全部丢弃',
           omniRole: 'clip',
         },
       },
@@ -162,7 +162,7 @@ describe('OmniClipVideoTool', () => {
     const args = mocks.runFfmpeg.mock.calls[0][0] as string[];
     expect(args).not.toContain('-t');
     expect(result.artifacts?.[0]?.metadata?.['omniDisclosure']).toBe(
-      '原 63s → 片段 [10s–63s] 53s，保留画面与原有音轨，片段外内容全部丢弃',
+      '原 63s → 片段 [10s–63s] 53s，保留画面，源音轨如存在则一并保留，片段外内容全部丢弃',
     );
   });
 
@@ -170,7 +170,7 @@ describe('OmniClipVideoTool', () => {
     probe({ durationMs: 63_000 });
     const { result } = await run({ startSec: 50, durationSec: 100 });
     expect(result.artifacts?.[0]?.metadata?.['omniDisclosure']).toBe(
-      '原 63s → 片段 [50s–63s] 13s，保留画面与原有音轨，片段外内容全部丢弃',
+      '原 63s → 片段 [50s–63s] 13s，保留画面，源音轨如存在则一并保留，片段外内容全部丢弃',
     );
   });
 
@@ -178,7 +178,7 @@ describe('OmniClipVideoTool', () => {
     probe({});
     const { result } = await run({ startSec: 10, durationSec: 15 });
     expect(result.artifacts?.[0]?.metadata?.['omniDisclosure']).toBe(
-      '原 未知时长 → 片段 [10s–25s] 15s，保留画面与原有音轨，片段外内容全部丢弃',
+      '原 未知时长 → 片段 [10s–25s] 15s，保留画面，源音轨如存在则一并保留，片段外内容全部丢弃',
     );
   });
 
