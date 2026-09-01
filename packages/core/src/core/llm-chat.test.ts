@@ -16982,16 +16982,24 @@ describe('LlmChat', async () => {
       expect(compressSpy.mock.calls[0][1].originalTokenCount).not.toBe(
         adjustedAfterFast,
       );
+      expect(compressSpy).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ originalTokenCountIsEstimated: true }),
+      );
       expect(info.originalTokenCountIsEstimated).toBe(true);
     });
 
     it('reports an authoritative original count when the API count is fresh', async () => {
-      mockCompressionService('compressed');
+      const compressSpy = mockCompressionService('compressed');
       chat.setHistory([userMsg('a'), modelMsg('b')]);
       chat.seedResumeTokenCounts(5000, 0, false);
 
       const info = await chat.tryCompress('p-authoritative-original', true);
 
+      expect(compressSpy).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ originalTokenCountIsEstimated: false }),
+      );
       expect(info.originalTokenCountIsEstimated).toBe(false);
     });
 
