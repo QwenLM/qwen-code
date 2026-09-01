@@ -20,6 +20,11 @@
 
 import { randomBytes } from 'node:crypto';
 import {
+  clearInheritedPeerMessagingEnv,
+  MESSAGING_SOCKET_ENV,
+  MESSAGING_TOKEN_ENV,
+} from './env.js';
+import {
   type ApprovalMode,
   createDebugLogger,
   formatPeerDisplay,
@@ -48,13 +53,11 @@ export interface PeerQueuedDelivery {
   toSessionId?: string;
 }
 
-/**
- * Where child processes of this session find its inbox, so a script or
- * hook it runs can inject a message back into it (through the same
- * inbound gate as any peer). Cleared when the inbox closes.
- */
-export const MESSAGING_SOCKET_ENV = 'QWEN_CODE_MESSAGING_SOCKET';
-export const MESSAGING_TOKEN_ENV = 'QWEN_CODE_MESSAGING_TOKEN';
+export {
+  clearInheritedPeerMessagingEnv,
+  MESSAGING_SOCKET_ENV,
+  MESSAGING_TOKEN_ENV,
+} from './env.js';
 
 /**
  * Submit an already-formatted message into the session's input queue.
@@ -204,6 +207,14 @@ export class PeerMessaging {
     messaging.settleSentMessage =
       options.settleSentMessage ?? settleSentPeerMessage;
     messaging.reassertSessionRecord = options.reassertSessionRecord ?? null;
+
+    // Any pair still in the environment at this point was inherited from an
+    // ancestor session, and every exit below this line other than a bound
+    // inbox must leave nothing for children to pick up. Dropped before the
+    // bind rather than on each failure branch so a future early return
+    // cannot reintroduce the leak; the success path re-exports this
+    // session's own pair once the socket is accepting.
+    clearInheritedPeerMessagingEnv();
 
     const ipcToken = options.ipcToken ?? randomBytes(32).toString('hex');
     const inbox = await startPeerInbox({

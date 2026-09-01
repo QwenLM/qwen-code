@@ -852,9 +852,13 @@ or hook the session runs can send a message back into it:
 ```bash
 { printf '%s\n' \
     '{"msgV":1,"type":"auth","token":"'"$QWEN_CODE_MESSAGING_TOKEN"'"}' \
-    '{"msgV":1,"msgId":"note-1","type":"user","priority":"next","message":{"role":"user","content":"build finished"}}'; \
+    '{"msgV":1,"msgId":"'"$(uuidgen)"'","type":"user","priority":"next","message":{"role":"user","content":"build finished"}}'; \
 } | socat - UNIX-CONNECT:"$QWEN_CODE_MESSAGING_SOCKET"
 ```
+
+Give every injection a fresh `msgId`. The receiving gate remembers the
+ids it has already settled, so a hook that reuses one is delivered the
+first time and silently deduplicated on every run after that.
 
 An injected message goes through the same inbound gate as one from
 another session: it is marked as not coming from the user, and

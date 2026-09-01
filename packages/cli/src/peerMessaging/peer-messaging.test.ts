@@ -24,6 +24,7 @@ import {
   sendPeerFrame,
   startPeerInbox,
   trackSentPeerMessageForTest,
+  type InboundPolicy,
   type PeerFrame,
   type PeerInbox,
 } from '@qwen-code/qwen-code-core';
@@ -121,6 +122,7 @@ async function start(
       status: string,
     ) => { address: string; previous: 'pending' | 'held' } | undefined;
     reassertSessionRecord?: () => Promise<void>;
+    getPolicySetting?: () => InboundPolicy | undefined;
   } = {},
 ): Promise<{
   messaging: PeerMessaging;
@@ -1103,6 +1105,32 @@ describe.skipIf(isWindows)('inbox auth wiring', () => {
     expect(process.env[MESSAGING_TOKEN_ENV]).toBeUndefined();
   });
 
+  it('drops an inherited address and token when the inbox never binds', async () => {
+    // A session that binds no inbox of its own must not hand an ancestor's
+    // capability to its children: a hook following the documented injection
+    // pattern would authenticate to the ANCESTOR's inbox and land its
+    // message in the wrong session's context, reporting success.
+    process.env[MESSAGING_SOCKET_ENV] = '/inherited/ancestor.sock';
+    process.env[MESSAGING_TOKEN_ENV] = 'inherited-ancestor-token';
+
+    // A regular file where the socket's parent directory should be: the
+    // inbox cannot create the directory, so it never binds.
+    const blocker = path.join(tmpDir, 'not-a-dir');
+    await fs.writeFile(blocker, '');
+
+    const started = await PeerMessaging.start({
+      socketPath: path.join(blocker, 'self.sock'),
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPolicySetting: () => undefined,
+      updateSessionRegistryIpcPath: async () => {},
+      ipcToken: TEST_TOKEN,
+    });
+
+    expect(started).toBeNull();
+    expect(process.env[MESSAGING_SOCKET_ENV]).toBeUndefined();
+    expect(process.env[MESSAGING_TOKEN_ENV]).toBeUndefined();
+  });
+
   it('authenticates receipts with the reply token the frame offered', async () => {
     // The sender's inbox requires its own token; a receipt can only land
     // if it carries the replyToken from the original frame.
@@ -1142,5 +1170,66 @@ describe.skipIf(isWindows)('inbox auth wiring', () => {
     await send(m.socketPath!, withoutToken);
     await settle();
     expect(receipts).toHaveLength(1);
+  });
+
+  it('authenticates a held receipt, not only the misaddressed one', async () => {
+    // The gate's own reportStatus path — held/denied/delivered — is the one
+    // a real peer meets first. Without the replyToken the hold signal never
+    // reaches the sender's token-required inbox and its ledger sits on
+    // 'pending' forever, with nothing to show the user.
+    const SENDER_TOKEN = 'held-sender-token';
+    const sender = await startPeerInbox({
+      socketPath: path.join(tmpDir, 'socks', 'sender.sock'),
+      requiredToken: SENDER_TOKEN,
+      onFrame: (frame) => receipts.push(frame),
+    });
+    if (!sender) throw new Error('sender inbox failed to start');
+    senderInbox = sender;
+
+    // Policy 'hold' parks the message and reports it back.
+    const { messaging: m } = await start(ApprovalMode.DEFAULT, {
+      getPolicySetting: () => 'hold',
+    });
+    const frame = buildUserFrame({
+      content: 'please review',
+      from: sender.socketPath,
+      replyToken: SENDER_TOKEN,
+    });
+    await send(m.socketPath!, frame);
+    await settle();
+
+    expect(m.getHeld()).toHaveLength(1);
+    expect(receipts).toMatchObject([
+      { type: 'control', status: 'held', origMsgId: frame.msgId },
+    ]);
+  });
+
+  it('generates a 64-hex inbox token when none is injected', async () => {
+    // Every other test injects the token through the seam, so the default
+    // is the one branch that ships to users: a constant or truncated value
+    // here would hand every session the same guessable capability.
+    const published: Array<[string | undefined, string | undefined]> = [];
+    const started = await PeerMessaging.start({
+      socketPath: path.join(tmpDir, 'socks', 'generated.sock'),
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPolicySetting: () => undefined,
+      updateSessionRegistryIpcPath: async (ipcPath, ipcToken) => {
+        published.push([ipcPath, ipcToken]);
+      },
+    });
+    if (!started) throw new Error('peer messaging failed to start');
+    messaging = started;
+
+    const token = published[0][1];
+    expect(token).toMatch(/^[0-9a-f]{64}$/);
+    expect(process.env[MESSAGING_TOKEN_ENV]).toBe(token);
+
+    // And it is the token the inbox actually requires.
+    await sendPeerFrame(
+      started.socketPath!,
+      buildUserFrame({ content: 'with the generated token' }),
+      { authToken: token },
+    );
+    await settle();
   });
 });

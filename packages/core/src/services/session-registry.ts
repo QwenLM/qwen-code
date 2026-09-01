@@ -147,8 +147,11 @@ export interface SessionRegistryRecord {
    * any frame is read. Published here because the record is 0600: being
    * able to read the token is the same capability as being able to
    * discover the socket at all, so senders get both in one read. Absent
-   * on records written before the field existed — such an inbox cannot
-   * be authenticated to and refuses frames.
+   * on records written before the field existed: such an inbox requires
+   * no token and admits every connection, so a newer sender reaches it by
+   * simply not leading with an auth line. The reverse direction is the
+   * lossy one — a pre-token sender never authenticates, so a token-
+   * requiring inbox drops what it sends.
    */
   ipcToken?: string;
 }
