@@ -40,6 +40,7 @@ import {
   createDebugLogger,
   isDebugLogFileEnabled,
   registerSession,
+  SessionEndReason,
   type Config,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -362,6 +363,18 @@ export async function startOpenTuiUI(
       }
     } catch {
       // Best-effort: a hint must never block or break exit.
+    }
+  });
+
+  // SessionEnd hook parity (ink AppContainer registers the same cleanup):
+  // user-configured SessionEnd hooks must fire on exit from this entry too.
+  registerCleanup(async () => {
+    try {
+      await config
+        .getHookSystem()
+        ?.fireSessionEndEvent(SessionEndReason.PromptInputExit);
+    } catch (err) {
+      debugLogger.error(`SessionEnd hook failed: ${err}`);
     }
   });
 
