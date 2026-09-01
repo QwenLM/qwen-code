@@ -7302,8 +7302,14 @@ describe('stage 1-pre duplicate gate', () => {
   });
 
   it('reads large default-branch files through the raw contents response', () => {
-    expect(section).toContain('application/vnd.github.raw+json');
-    expect(section).toContain('subsumption is unverified: never close');
+    expect(section).toContain(
+      'gh api -H "Accept: application/vnd.github.raw+json"',
+    );
+    expect(section).toContain("'$value | @uri'");
+    expect(section).toContain('--method GET');
+    expect(section).toContain('-f ref="$DEFAULT_BRANCH"');
+    expect(section).toContain('A 404 from this encoded-path request');
+    expect(section).toContain('unverified: never close');
     expect(section).not.toContain('gh pr diff');
   });
 
