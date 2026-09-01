@@ -79,6 +79,16 @@ function readNumber(
     : undefined;
 }
 
+function readNonNegativeNumber(
+  settings: Record<string, unknown>,
+  key: string,
+): number | undefined {
+  const value = settings[key];
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? value
+    : undefined;
+}
+
 /** Matcher for the frames of ONE source, derived from the name template
  * so the lister can never pick up a sibling video's frames out of a
  * shared outputDir. */
@@ -315,7 +325,7 @@ class ExtractKeyframesInvocation extends BaseMediaPolicyToolInvocation<ExtractKe
     );
     const sceneThreshold =
       this.params.sceneThreshold ??
-      readNumber(settings, 'sceneThreshold') ??
+      readNonNegativeNumber(settings, 'sceneThreshold') ??
       EXTRACT_KEYFRAMES_DEFAULTS.sceneThreshold;
     const maxDimension =
       this.params.maxDimension ??
@@ -329,7 +339,8 @@ class ExtractKeyframesInvocation extends BaseMediaPolicyToolInvocation<ExtractKe
       this.params.fps ??
       readNumber(settings, 'fps') ??
       EXTRACT_KEYFRAMES_DEFAULTS.fps;
-    const startSec = this.params.startSec ?? readNumber(settings, 'startSec');
+    const startSec =
+      this.params.startSec ?? readNonNegativeNumber(settings, 'startSec');
     const endSec = this.params.endSec ?? readNumber(settings, 'endSec');
     const frameTokenBudget = this.params.frameTokenBudget ?? readTier(settings);
     try {

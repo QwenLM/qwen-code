@@ -47,15 +47,7 @@ export const DEFAULT_CLIP_SOFT_BUDGET = 3;
 
 /** Fixed-call default encode parameters (mapping doc §6.1): clip is a
  * time-axis cut, NOT a degradation — crf 23 preserves quality; lowering
- * resolution/bit rate is omni_downscale_video's job.
- *
- * The clip is encoded VIDEO-ONLY (`-an`). A clip is a "look closer" excerpt
- * for visual detail; the source's dialogue is already captured once by the
- * full-audio transcript at ingest. Keeping an audio track made every clip
- * read re-run the extract-audio → downsample → transcribe chain on a redundant
- * 15–20s slice (each clip is ingested as a fresh media root that does not
- * inherit the parent's `hasTranscript`), which dominated raw token cost on
- * multi-clip trajectories. Dropping it removes that re-transcription entirely. */
+ * resolution/bit rate is omni_downscale_video's job. */
 export const CLIP_VIDEO_DEFAULTS = {
   crf: 23,
   preset: 'veryfast',
@@ -66,6 +58,8 @@ export interface ClipVideoParams extends MediaPolicyIoParams {
   startSec?: number;
   /** Clip duration in seconds (default: to the end of the video). */
   durationSec?: number;
+  /** Number of clips before the model receives a soft stop reminder. */
+  softClipBudget?: number;
 }
 
 const TUNABLE_SCHEMA_PROPERTIES = {
@@ -79,16 +73,20 @@ const TUNABLE_SCHEMA_PROPERTIES = {
     description: 'Clip duration in seconds. Default: from startSec to the end.',
     exclusiveMinimum: 0,
   },
+  softClipBudget: {
+    type: 'number',
+    description:
+      'Positive integer clip count that triggers the soft stop reminder. Default 3.',
+    minimum: 1,
+    multipleOf: 1,
+  },
 } as const;
 
 const DESCRIPTOR: MediaPolicyToolDescriptor = {
   kind: 'media_policy',
-  // '2': outputs now carry `metadata.omniRole: 'clip'`, which memory maps
-  // to `partial` coverage. Pre-'2' cache entries and recorded executions
-  // hold role-less outputs whose coverage was derived as `complete`;
-  // sharing a version would let them converge onto the same fingerprint
-  // and keep reporting a temporal excerpt as complete footage.
-  version: '2',
+  // '3': clips retain their source audio. Pre-'3' cached clips are
+  // video-only and cannot be reused under the new media contract.
+  version: '3',
   inputMediaTypes: ['video'],
   outputs: [
     {
@@ -104,6 +102,7 @@ const DESCRIPTOR: MediaPolicyToolDescriptor = {
     properties: TUNABLE_SCHEMA_PROPERTIES,
     additionalProperties: false,
   },
+  operatorOnlyParams: ['softClipBudget'],
 };
 
 /** "12s" / "12.4s" — seconds with at most one decimal. */
@@ -195,10 +194,10 @@ class ClipVideoInvocation extends BaseMediaPolicyToolInvocation<ClipVideoParams>
           String(CLIP_VIDEO_DEFAULTS.crf),
           '-preset',
           CLIP_VIDEO_DEFAULTS.preset,
-          // Video-only: drop the audio track so a clip read never re-runs the
-          // extract-audio → transcribe chain (the full transcript already
-          // covers this span). See CLIP_VIDEO_DEFAULTS.
-          '-an',
+          '-c:a',
+          'aac',
+          '-b:a',
+          '128k',
           '-movflags',
           '+faststart',
           outputPath,
@@ -226,7 +225,7 @@ class ClipVideoInvocation extends BaseMediaPolicyToolInvocation<ClipVideoParams>
       const endText = endSec !== undefined ? formatSeconds(endSec) : '结尾';
       const spanText =
         endSec !== undefined ? ` ${formatSeconds(endSec - startSec)}` : '';
-      const disclosure = `原 ${original} → 片段 [${formatSeconds(startSec)}–${endText}]${spanText}，仅画面（无音轨，对白见完整转写），片段外内容全部丢弃`;
+      const disclosure = `原 ${original} → 片段 [${formatSeconds(startSec)}–${endText}]${spanText}，保留画面，源音轨如存在则一并保留，片段外内容全部丢弃`;
 
       const success = mediaPolicyToolSuccess({
         outputDir: this.params.outputDir,
@@ -359,7 +358,7 @@ export class OmniClipVideoTool extends BaseMediaPolicyTool<ClipVideoParams> {
     return new ClipVideoInvocation(
       params,
       resolvePolicyToolTimeoutMs(this.configView, this.name),
-      this.resolveSoftBudget(),
+      params.softClipBudget ?? this.resolveSoftBudget(),
     );
   }
 
