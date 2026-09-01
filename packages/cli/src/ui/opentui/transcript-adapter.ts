@@ -62,7 +62,11 @@ export function transcribeSession(
     if (!t) continue;
     let o: SessionLine & {
       subtype?: string;
-      systemPayload?: { phase?: string; rawCommand?: string };
+      systemPayload?: {
+        phase?: string;
+        rawCommand?: string;
+        hiddenInvocation?: boolean;
+      };
       toolCallResult?: {
         callId?: string;
         status?: string;
@@ -91,7 +95,8 @@ export function transcribeSession(
       if (
         o.subtype === 'slash_command' &&
         o.systemPayload?.phase === 'invocation' &&
-        o.systemPayload?.rawCommand
+        o.systemPayload?.rawCommand &&
+        !o.systemPayload?.hiddenInvocation
       ) {
         const cmd = o.systemPayload.rawCommand;
         events.push({ type: 'user', text: cmd });
@@ -123,7 +128,7 @@ export function transcribeSession(
         type: 'tool-end',
         id,
         success: ok,
-        summary: ok ? 'ok' : 'error',
+        summary: ok ? 'ok' : status === 'cancelled' ? 'cancelled' : 'error',
       });
       continue;
     }

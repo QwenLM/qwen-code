@@ -270,7 +270,12 @@ export async function* livePromptEvents(
             modelOverride: options.modelOverride,
           }
         : undefined
-      : { type: SendMessageType.ToolResult };
+      : {
+          type: SendMessageType.ToolResult,
+          ...(options?.modelOverride
+            ? { modelOverride: options.modelOverride }
+            : {}),
+        };
     first = false;
     const pending: Array<{ callId: string; name: string; args?: unknown }> = [];
     const stream = client.sendMessageStream(
