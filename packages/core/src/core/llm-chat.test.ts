@@ -15252,6 +15252,74 @@ describe('LlmChat', async () => {
       expect(recordedText(recordAssistantTurn)).toBe('Hello world');
     });
 
+    it('does not duplicate an escalated turn after a terminal abort', async () => {
+      const recordAssistantTurn = vi.fn();
+      const recordingChat = chatWithRecorder(recordAssistantTurn);
+      const abortError = new DOMException('Aborted', 'AbortError');
+      const streams = [
+        makeStream([makeChunk([{ text: 'discarded' }], 'MAX_TOKENS')]),
+        (async function* () {
+          yield makeChunk([{ text: 'visible escalation' }]);
+          yield makeChunk([], 'STOP');
+          throw abortError;
+        })(),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await recordingChat.sendMessageStream(
+        'gemini-pro',
+        { message: 'essay' },
+        'escalation-terminal-abort',
+      );
+      await expect(
+        (async () => {
+          for await (const _event of stream) {
+            // consume
+          }
+        })(),
+      ).rejects.toBe(abortError);
+
+      expect(recordingChat.getHistory().map((entry) => entry.role)).toEqual([
+        'user',
+        'model',
+      ]);
+      expect(recordingChat.getLastModelMessageText()).toBe(
+        'visible escalation',
+      );
+      expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+      expect(recordedText(recordAssistantTurn)).toBe('visible escalation');
+    });
+
+    it('does not preserve an empty-object recovery chunk as visible output', async () => {
+      vi.useFakeTimers();
+      try {
+        let callIndex = 0;
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockImplementation(async () => {
+          callIndex++;
+          return callIndex === 1
+            ? makeStream([makeChunk([{ text: 'partial' }], 'MAX_TOKENS')])
+            : makeStream([makeChunk([{} as Part])]);
+        });
+
+        const stream = await chat.sendMessageStream(
+          'gemini-3-pro',
+          { message: 'essay' },
+          'empty-object-recovery-output',
+        );
+        await collectStreamWithFakeTimers(stream, 25_000);
+
+        expect(callIndex).toBe(6);
+        expect(chat.getHistory().at(-1)?.parts).toEqual([{ text: 'partial' }]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('does not commit an empty STOP when returned before provider EOF', async () => {
       const recordAssistantTurn = vi.fn();
       const recordingChat = chatWithRecorder(recordAssistantTurn);
@@ -15336,6 +15404,99 @@ describe('LlmChat', async () => {
         FinishReason.STOP,
       );
       await iterator.return?.(undefined);
+    });
+
+    it('persists a tool-result STOP when disposed during terminal drain', async () => {
+      const recordAssistantTurn = vi.fn();
+      const recordingChat = chatWithRecorder(recordAssistantTurn);
+      recordingChat.setHistory([
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'tool-stop-dispose',
+                name: 'read_file',
+                response: { output: 'data' },
+              },
+            },
+          ],
+        },
+      ]);
+      const response = (async function* () {
+        yield makeChunk([{ text: 'done' }], 'STOP');
+        await new Promise<void>(() => undefined);
+      })();
+      const internalChat = recordingChat as unknown as {
+        processStreamResponse(
+          model: string,
+          stream: AsyncGenerator<GenerateContentResponse>,
+          routeKey: string,
+        ): AsyncGenerator<GenerateContentResponse>;
+      };
+      const iterator = internalChat.processStreamResponse(
+        'test-model',
+        response,
+        'test-route',
+      );
+
+      const content = await iterator.next();
+      expect(content.value?.candidates?.[0]?.content?.parts?.[0]?.text).toBe(
+        'done',
+      );
+      await iterator.return?.(undefined);
+
+      expect(recordingChat.getLastModelMessageText()).toBe('done');
+      expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+      expect(recordedText(recordAssistantTurn)).toBe('done');
+    });
+
+    it('keeps yielded tool-result terminal text after a trailing abort', async () => {
+      const recordAssistantTurn = vi.fn();
+      const recordingChat = chatWithRecorder(recordAssistantTurn);
+      const abortError = new DOMException('Aborted', 'AbortError');
+      recordingChat.setHistory([
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'tool-stop-abort',
+                name: 'read_file',
+                response: { output: 'data' },
+              },
+            },
+          ],
+        },
+      ]);
+      const response = (async function* () {
+        yield makeChunk([{ text: 'Part 1' }]);
+        yield makeChunk([{ text: 'Part 2' }], 'STOP');
+        throw abortError;
+      })();
+      const internalChat = recordingChat as unknown as {
+        processStreamResponse(
+          model: string,
+          stream: AsyncGenerator<GenerateContentResponse>,
+          routeKey: string,
+        ): AsyncGenerator<GenerateContentResponse>;
+      };
+
+      await expect(
+        (async () => {
+          for await (const _chunk of internalChat.processStreamResponse(
+            'test-model',
+            response,
+            'test-route',
+          )) {
+            // consume
+          }
+        })(),
+      ).rejects.toBe(abortError);
+
+      expect(recordingChat.getLastModelMessageText()).toBe('Part 1Part 2');
+      expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+      expect(recordedText(recordAssistantTurn)).toBe('Part 1Part 2');
     });
 
     it('bounds the recovery terminal drain when provider EOF never arrives', async () => {
@@ -20270,9 +20431,16 @@ describe('LlmChat', async () => {
         { thought: true, thoughtSignature: 'sig-2' },
       ];
       vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
-        makeStream([
-          makeChunk([...wireThoughtParts, { text: 'Answer.' }], 'STOP'),
-        ]),
+        makeStream(
+          wireThoughtParts.map((part, index) =>
+            makeChunk(
+              index === wireThoughtParts.length - 1
+                ? [part, { text: 'Answer.' }]
+                : [part],
+              index === wireThoughtParts.length - 1 ? 'STOP' : undefined,
+            ),
+          ),
+        ),
       );
 
       const stream = await recordingChat.sendMessageStream(
@@ -20301,6 +20469,32 @@ describe('LlmChat', async () => {
       expect(recordAssistantTurn.mock.calls[0]![0].message).toEqual(
         recordingChat.getHistory().at(-1)?.parts,
       );
+    });
+
+    it('keeps consecutive signed thought blocks separate', async () => {
+      const recordingChat = chatWithRecorder(vi.fn());
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        makeStream([
+          makeChunk([{ text: 'First', thought: true, thoughtSignature: 's1' }]),
+          makeChunk([{ thought: true, thoughtSignature: 's2' }]),
+          makeChunk([{ text: 'Answer.' }], 'STOP'),
+        ]),
+      );
+
+      const stream = await recordingChat.sendMessageStream(
+        'gemini-3-pro',
+        { message: 'think twice' },
+        'prompt-consecutive-signed-thoughts',
+      );
+      for await (const _event of stream) {
+        // consume
+      }
+
+      expect(recordingChat.getHistory().at(-1)?.parts).toEqual([
+        { text: 'First', thought: true, thoughtSignature: 's1' },
+        { text: '', thought: true, thoughtSignature: 's2' },
+        { text: 'Answer.' },
+      ]);
     });
 
     it('preserves metadata while consolidating thought and text fragments', async () => {

@@ -344,6 +344,7 @@ function buildThoughtContentParts(parts: readonly Part[]): Part[] {
   const result: Part[] = [];
   let text = '';
   let signature = '';
+  let signatureArrivedWithText = false;
   let partMetadata: Record<string, unknown> | undefined;
   const flush = () => {
     const thoughtText = signature ? text : text.trim();
@@ -359,6 +360,7 @@ function buildThoughtContentParts(parts: readonly Part[]): Part[] {
     }
     text = '';
     signature = '';
+    signatureArrivedWithText = false;
     partMetadata = undefined;
   };
 
@@ -369,12 +371,16 @@ function buildThoughtContentParts(parts: readonly Part[]): Part[] {
     }
     const partText = typeof part.text === 'string' ? part.text : '';
     const partSignature = part.thoughtSignature ?? '';
-    if (partText && (signature || (partSignature && text))) {
+    if (
+      (partSignature && signature && signatureArrivedWithText) ||
+      (partText && (signature || (partSignature && text)))
+    ) {
       flush();
     }
     text += partText;
     if (partSignature) {
       signature += partSignature;
+      signatureArrivedWithText ||= Boolean(partText);
     }
     if (part.partMetadata) {
       partMetadata = { ...partMetadata, ...part.partMetadata };
@@ -616,7 +622,9 @@ function hasDisplayableStreamOutput(
 ): boolean {
   const candidate = response.candidates?.[0];
   return (
-    hasNonThoughtCandidateParts(response) ||
+    candidate?.content?.parts?.some(
+      (part) => !part.thought && Object.keys(part).length > 0,
+    ) === true ||
     candidate?.citationMetadata?.citations?.some(
       (citation) => citation.uri !== undefined,
     ) === true
@@ -4765,7 +4773,11 @@ export class LlmChat {
               | undefined;
             let escalatedAttemptCommitted = false;
             abandonEscalatedAttempt = () => {
-              if (escalatedAttemptCommitted) {
+              if (
+                escalatedAttemptCommitted ||
+                (escalatedCommittedModelContent !== undefined &&
+                  self.history.includes(escalatedCommittedModelContent))
+              ) {
                 return;
               }
               if (
@@ -7023,7 +7035,8 @@ export class LlmChat {
         !streamFinished &&
         !providerIterationFailed &&
         firstObservedTerminalFinishReason !== undefined &&
-        !withheldTerminalObserved &&
+        (!withheldTerminalObserved || recordDeferral !== 'always') &&
+        !terminalDrainTimedOut &&
         this.historyMutationVersion === streamHistoryMutationVersion
       ) {
         const normalized = normalizeStreamedModelParts(allModelParts);
@@ -7093,7 +7106,7 @@ export class LlmChat {
       }
     }
 
-    if (postTerminalAbortError !== null && withheldTerminalObserved) {
+    if (postTerminalAbortError !== null && terminalChunks.length > 0) {
       allModelParts.length = firstObservedTerminalModelPartIndex ?? 0;
       hasToolCall = allModelParts.some(
         (part) => part.functionCall !== undefined,
