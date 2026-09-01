@@ -3132,6 +3132,56 @@ describe('Server Config (config.ts)', () => {
       );
     });
 
+    it('parks one approved proposal and hands it to the client once', () => {
+      const config = new Config({ ...baseParams, chatRecording: true });
+
+      expect(
+        config.setPendingGoalProposal({
+          objective: 'first',
+          turnKey: 'turn-1',
+        }),
+      ).toBe(true);
+      expect(
+        config.setPendingGoalProposal({
+          objective: 'second',
+          turnKey: 'turn-1',
+        }),
+      ).toBe(false);
+      expect(config.hasPendingGoalProposal()).toBe(true);
+      expect(config.takePendingGoalProposal('turn-2')).toBeUndefined();
+      expect(config.hasPendingGoalProposal()).toBe(true);
+      expect(config.takePendingGoalProposal('turn-1')).toEqual({
+        objective: 'first',
+        turnKey: 'turn-1',
+      });
+      expect(config.hasPendingGoalProposal()).toBe(false);
+      expect(config.takePendingGoalProposal()).toBeUndefined();
+
+      expect(
+        config.setPendingGoalProposal({
+          objective: 'explicitly cleared',
+          turnKey: 'turn-3',
+        }),
+      ).toBe(true);
+      expect(config.takePendingGoalProposal()).toEqual({
+        objective: 'explicitly cleared',
+        turnKey: 'turn-3',
+      });
+      expect(config.hasPendingGoalProposal()).toBe(false);
+    });
+
+    it('clears a parked proposal when the session Goal runtime is replaced', () => {
+      const config = new Config({ ...baseParams, chatRecording: true });
+      config.setPendingGoalProposal({
+        objective: 'stale approval',
+        turnKey: 'turn-1',
+      });
+
+      config.startNewSession('replacement-session');
+
+      expect(config.takePendingGoalProposal()).toBeUndefined();
+    });
+
     it('restores the complete resumed-session Goal before exposing readiness', async () => {
       const config = new Config({
         ...baseParams,
@@ -5071,6 +5121,68 @@ describe('Server Config (config.ts)', () => {
       expect(registeredNames).not.toContain(ToolNames.EXIT_PLAN_MODE);
     });
 
+    it('registers propose_goal beside the Goal worker tools in interactive sessions', async () => {
+      const config = new Config({ ...baseParams, interactive: true });
+      await config.initialize();
+
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).toContain(ToolNames.GET_GOAL);
+      expect(registeredNames).toContain(ToolNames.UPDATE_GOAL);
+      expect(registeredNames).toContain(ToolNames.PROPOSE_GOAL);
+    });
+    it.each([
+      ['ACP', { experimentalZedIntegration: true, interactive: true }],
+      [
+        'stream-json',
+        { inputFormat: InputFormat.STREAM_JSON, interactive: true },
+      ],
+    ] as const)(
+      'does not register propose_goal without a turn-boundary settlement path in %s sessions',
+      async (_mode, params) => {
+        const config = new Config({ ...baseParams, ...params });
+        await config.initialize();
+
+        const registeredNames = (
+          ToolRegistry.prototype.registerFactory as Mock
+        ).mock.calls.map((call) => call[0]);
+        expect(registeredNames).toContain(ToolNames.GET_GOAL);
+        expect(registeredNames).toContain(ToolNames.UPDATE_GOAL);
+        expect(registeredNames).not.toContain(ToolNames.PROPOSE_GOAL);
+      },
+    );
+    it('does not register propose_goal when goals.modelProposed is disabled', async () => {
+      const config = new Config({
+        ...baseParams,
+        interactive: true,
+        modelProposedGoals: 'disabled',
+      });
+      await config.initialize();
+
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(config.getModelProposedGoals()).toBe('disabled');
+      expect(registeredNames).toContain(ToolNames.GET_GOAL);
+      expect(registeredNames).not.toContain(ToolNames.PROPOSE_GOAL);
+    });
+    it('does not register propose_goal in plain headless sessions', async () => {
+      const config = new Config({
+        ...baseParams,
+        interactive: false,
+        experimentalZedIntegration: false,
+        inputFormat: InputFormat.TEXT,
+      });
+      await config.initialize();
+
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(config.getModelProposedGoals()).toBe('alwaysAsk');
+      expect(registeredNames).toContain(ToolNames.GET_GOAL);
+      expect(registeredNames).not.toContain(ToolNames.PROPOSE_GOAL);
+    });
     it('does not register user-interaction tools in plain headless sessions', async () => {
       const config = new Config({
         ...baseParams,

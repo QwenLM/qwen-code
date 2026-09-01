@@ -82,6 +82,7 @@ export interface WebShellDaemonScenario {
   events: DaemonEvent[];
   state: DaemonSessionState;
   contextDelayMs?: number;
+  providersDelayMs?: number;
   /** Artifact list returned by `GET /session/:id/artifacts`. */
   artifacts: DaemonSessionArtifact[];
   /** File contents served by `GET /file?path=...`, keyed by requested path. */
@@ -416,6 +417,7 @@ export function createWebShellDaemonScenario(
     events: overrides.events ?? [],
     state,
     contextDelayMs: overrides.contextDelayMs,
+    providersDelayMs: overrides.providersDelayMs,
     artifacts: overrides.artifacts ?? [],
     workspaceFiles: overrides.workspaceFiles ?? {},
     gitStatus: overrides.gitStatus,
@@ -950,7 +952,13 @@ async function handleDaemonRoute(
     return;
   }
   if (method === 'GET' && path === '/workspace/providers') {
-    await json(route, scenario.providers);
+    const providers = scenario.providers;
+    if (scenario.providersDelayMs) {
+      await new Promise((resolve) =>
+        setTimeout(resolve, scenario.providersDelayMs),
+      );
+    }
+    await json(route, providers);
     return;
   }
   if (method === 'GET' && path === '/workspace/skills') {
@@ -1076,7 +1084,13 @@ async function handleDaemonRoute(
     return;
   }
   if (method === 'GET' && /^\/workspaces\/[^/]+\/providers\/?$/.test(path)) {
-    await json(route, scenario.providers);
+    const providers = scenario.providers;
+    if (scenario.providersDelayMs) {
+      await new Promise((resolve) =>
+        setTimeout(resolve, scenario.providersDelayMs),
+      );
+    }
+    await json(route, providers);
     return;
   }
   if (method === 'GET' && /^\/workspaces\/[^/]+\/settings\/?$/.test(path)) {
@@ -1705,7 +1719,12 @@ async function handleDaemonRoute(
     if (action === 'config-option') {
       const configId = readStringField(body, 'configId');
       const value = readStringField(body, 'value');
-      if (configId !== 'reasoning_effort' || !value) {
+      const persist = getRecordValue(body, 'persist');
+      if (
+        configId !== 'reasoning_effort' ||
+        !value ||
+        (persist !== undefined && typeof persist !== 'boolean')
+      ) {
         await badRequest(route, 'Invalid config-option request.');
         return;
       }
@@ -1718,23 +1737,37 @@ async function handleDaemonRoute(
       const allowedValues = isRecord(reasoningOption)
         ? reasoningOption['options']
         : undefined;
+      const reasoningMeta = isRecord(reasoningOption)
+        ? getRecordValue(reasoningOption, '_meta')
+        : undefined;
+      const qwenReasoningMeta = isRecord(reasoningMeta)
+        ? getRecordValue(reasoningMeta, 'qwenCode/reasoning')
+        : undefined;
+      const defaultEffort = isRecord(qwenReasoningMeta)
+        ? readStringField(qwenReasoningMeta, 'defaultEffort')
+        : undefined;
+      const selectedValue =
+        value === 'default' && defaultEffort ? defaultEffort : value;
       if (
         !Array.isArray(allowedValues) ||
-        !allowedValues.some(
-          (option) =>
-            isRecord(option) && readStringField(option, 'value') === value,
-        )
+        ((value !== 'default' || !defaultEffort) &&
+          !allowedValues.some((option) => {
+            return (
+              isRecord(option) &&
+              readStringField(option, 'value') === selectedValue
+            );
+          }))
       ) {
         await badRequest(route, 'Unsupported config-option value.');
         return;
       }
       const configOptions = currentConfigOptions.map((option) =>
         isRecord(option) && option['id'] === configId
-          ? { ...option, currentValue: value }
+          ? { ...option, currentValue: selectedValue }
           : option,
       );
       scenario.state.configOptions = configOptions;
-      await json(route, { configOptions });
+      await json(route, { configOptions, persisted: persist === true });
       return;
     }
     if (action === 'approval-mode') {
