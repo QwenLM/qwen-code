@@ -65,10 +65,13 @@ import {
   type AutoMemoryStorageScope,
 } from './forget.js';
 import {
+  resolveRelevantAutoMemoryPromptFromDocuments,
   resolveRelevantAutoMemoryPromptForQuery,
+  scanRelevantAutoMemoryDocuments,
   type RelevantAutoMemoryPromptResult,
   type ResolveRelevantAutoMemoryPromptOptions,
 } from './recall.js';
+import type { ScannedAutoMemoryDocument } from './scan.js';
 import { getManagedAutoMemoryStatus } from './status.js';
 import {
   buildManagedAutoMemoryPrompt,
@@ -411,6 +414,10 @@ async function releaseDreamLock(projectRoot: string): Promise<void> {
  * `config.getMemoryManager()`. Tests pass a fresh `new MemoryManager()`.
  */
 export class MemoryManager {
+  private readonly recallSnapshots = new Map<
+    string,
+    ScannedAutoMemoryDocument[]
+  >();
   // ── Task records ────────────────────────────────────────────────────────────
   private readonly tasks = new Map<string, MemoryTaskRecord>();
   // ── Subscribers (useSyncExternalStore / custom listeners) ────────────────
@@ -1388,12 +1395,25 @@ export class MemoryManager {
 
   // ─── Recall ───────────────────────────────────────────────────────────────────
 
+  async refreshRecallSnapshot(projectRoot: string): Promise<void> {
+    const documents = await scanRelevantAutoMemoryDocuments(projectRoot);
+    this.recallSnapshots.set(projectRoot, documents);
+  }
+
   /** Select and format relevant memory for the given query. */
   recall(
     projectRoot: string,
     query: string,
     options: ResolveRelevantAutoMemoryPromptOptions = {},
   ): Promise<RelevantAutoMemoryPromptResult> {
+    const snapshot = this.recallSnapshots.get(projectRoot);
+    if (snapshot) {
+      return resolveRelevantAutoMemoryPromptFromDocuments(
+        query,
+        snapshot,
+        options,
+      );
+    }
     return resolveRelevantAutoMemoryPromptForQuery(projectRoot, query, options);
   }
 

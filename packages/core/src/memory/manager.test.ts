@@ -13,6 +13,7 @@ import { ensureAutoMemoryScaffold } from './store.js';
 import {
   getAutoMemoryMetadataPath,
   getAutoMemoryConsolidationLockPath,
+  getAutoMemoryRoot,
   clearAutoMemoryRootCache,
 } from './paths.js';
 import type { Config } from '../config/config.js';
@@ -64,6 +65,68 @@ describe('MemoryManager', () => {
   describe('globalMemoryManager', () => {
     it('is a MemoryManager instance', () => {
       expect(globalMemoryManager).toBeInstanceOf(MemoryManager);
+    });
+  });
+
+  describe('recall()', () => {
+    let tempDir: string;
+    let projectRoot: string;
+    let originalMemoryLocal: string | undefined;
+    let originalMemoryBaseDir: string | undefined;
+
+    beforeEach(async () => {
+      originalMemoryLocal = process.env['QWEN_CODE_MEMORY_LOCAL'];
+      originalMemoryBaseDir = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+      process.env['QWEN_CODE_MEMORY_LOCAL'] = '1';
+      tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mgr-recall-'));
+      process.env['QWEN_CODE_MEMORY_BASE_DIR'] = path.join(tempDir, 'runtime');
+      clearAutoMemoryRootCache();
+      projectRoot = path.join(tempDir, 'project');
+      const memoryRoot = getAutoMemoryRoot(projectRoot);
+      await fs.mkdir(memoryRoot, { recursive: true });
+      await fs.writeFile(
+        path.join(memoryRoot, 'acp-zephyr.md'),
+        [
+          '---',
+          'type: project',
+          'name: ACP Zephyr Codeword',
+          'description: The ACP zephyr codeword is ACP-MEMORY-ZEPHYR-4207.',
+          '---',
+          '',
+          'The ACP zephyr codeword is ACP-MEMORY-ZEPHYR-4207.',
+        ].join('\n'),
+      );
+    });
+
+    afterEach(async () => {
+      if (originalMemoryLocal === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_LOCAL'] = originalMemoryLocal;
+      }
+      if (originalMemoryBaseDir === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_BASE_DIR'] = originalMemoryBaseDir;
+      }
+      clearAutoMemoryRootCache();
+      await fs.rm(tempDir, { recursive: true, force: true });
+    });
+
+    it('recalls from a preloaded snapshot without reading the live files', async () => {
+      const mgr = new MemoryManager();
+      await mgr.refreshRecallSnapshot(projectRoot);
+      await fs.rm(getAutoMemoryRoot(projectRoot), {
+        recursive: true,
+        force: true,
+      });
+
+      const result = await mgr.recall(
+        projectRoot,
+        'What is the ACP zephyr codeword?',
+      );
+
+      expect(result.prompt).toContain('ACP-MEMORY-ZEPHYR-4207');
     });
   });
 
