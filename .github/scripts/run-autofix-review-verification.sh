@@ -564,6 +564,34 @@ if git diff --name-only "origin/main...${BRANCH}" \
     npm run build --workspace packages/core
 fi
 
+# Load clamps for every vitest this gate launches.
+#
+# The gate runs through an env -i allowlist that (deliberately) drops
+# RUNNER_NAME, so the vitest configs' ECS clamps — keyed on a runner name
+# starting `ecs-qwen-` — silently deactivate in here: 15s timeouts,
+# unbounded workers and coverage on, on a host shared with up to 20 other
+# autofix jobs. Under pool saturation that produced both false rejections
+# (73 load-induced timeouts charged to a round on #10171) and gate deaths
+# past the step's 60-minute cap that discarded verified fixes (#10171
+# rounds 1/2/5-7, #10543 x5). Passing the values explicitly takes the
+# verdict off env plumbing at the vitest-config layer; coverage is off
+# because nothing in the gate or the report path consumes it, and its
+# collection was the bulk of the overrun.
+#
+# Known residual, NOT covered here: a handful of test files set their own
+# ceiling with a runtime `vi.setConfig` keyed on the same RUNNER_NAME
+# (workspace-registration-store, update, server-default-bridge-wiring,
+# clipboardUtils, worktreeStartup). A runtime setConfig outranks the CLI,
+# so those keep their non-ECS ceilings in here. Closing that needs a gate
+# sentinel on both env -i allowlists and a change in each file — a
+# separate slice.
+VITEST_LOAD_CLAMPS=(
+  --maxWorkers=25%
+  --testTimeout=60000
+  --hookTimeout=60000
+  --coverage.enabled=false
+)
+
 # Settings-schema freshness is a STRUCTURAL guard, checked BEFORE the
 # no-op/unchanged return: on a stale-schema PR the agent can wrongly
 # write no-action.md, and without this the no-op path would report the
@@ -581,8 +609,16 @@ fi
 run_check_no_ab 'settings schema is stale on the agent-committed fix' \
   bash "${RUNNER_TEMP}/check-settings-schema.sh"
 CHANGED_FILES="$(git diff --name-only "origin/main...${BRANCH}")"
+# The contracts check launches a web-shell vitest inside this same env -i
+# child, and web-shell's config sets no timeouts and no RUNNER_NAME branch
+# — so the drift test runs at vitest's 5s default on the same saturating
+# host. Hand the shared script our clamps; the issue-fix gate and
+# repo-hygiene's docker leg call it without them and accept that default.
+AUTOFIX_VITEST_FLAGS="${VITEST_LOAD_CLAMPS[*]}"
+export AUTOFIX_VITEST_FLAGS
 run_check_no_ab 'cross-package contract verification failed' \
   bash "${RUNNER_TEMP}/check-autofix-contracts.sh" <<< "${CHANGED_FILES}"
+unset AUTOFIX_VITEST_FLAGS
 assert_verification_tree
 
 if git diff --quiet "origin/${BRANCH}...${BRANCH}"; then
@@ -1937,7 +1973,7 @@ else
     # npm exits 1 there with "No workspaces found".) Their rejections stay
     # charged to the round, where the repair agent can act.
     run_check_no_ab "tests failed in ${p}" \
-      npm run test --workspace "${p}" --if-present -- --changed origin/main --passWithNoTests
+      npm run test --workspace "${p}" --if-present -- --changed origin/main --passWithNoTests "${VITEST_LOAD_CLAMPS[@]}"
   done
 fi
 
@@ -1985,7 +2021,7 @@ bite_runner_default() {
   # $1 = workspace dir, rest = test paths relative to the workspace.
   local ws="${1}"
   shift
-  strip_runner_channels npm run test --workspace "${ws}" --if-present -- "$@"
+  strip_runner_channels npm run test --workspace "${ws}" --if-present -- "${VITEST_LOAD_CLAMPS[@]}" "$@"
 }
 mapfile -d '' -t BITE_FILES < <(git diff --name-only -z --no-renames --diff-filter=AM "${ROUND_RANGE}" \
   -- ':(glob)**/*.test.*' ':(glob)**/*.spec.*' ':(exclude,glob)**/__snapshots__/**' \

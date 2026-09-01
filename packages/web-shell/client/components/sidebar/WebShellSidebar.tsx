@@ -82,7 +82,7 @@ import {
   DropdownMenuTrigger,
 } from '../ui/dropdown-menu';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
-import { formatRelativeTime } from '../../utils/formatRelativeTime';
+import { formatDateTime } from '../../utils/formatDateTime';
 import { DialogShell } from '../dialogs/DialogShell';
 import { useWorkspaceRemoval } from '../workspaces/useWorkspaceRemoval';
 import { WorkspaceRemovalDialog } from '../workspaces/WorkspaceRemovalDialog';
@@ -96,6 +96,7 @@ import {
   type WorkspaceOverviewItem,
 } from './workspaceOverviewModel';
 import { writeClipboardText } from '../../utils/clipboard';
+import { isLocalDaemon } from '../../config/daemon';
 import {
   mergeSessionContentHits,
   sessionMatchesGitQuery,
@@ -1415,6 +1416,16 @@ export function WebShellSidebar({
       'dynamic_workspace_registration',
     ),
   );
+  // Host-local affordance: the daemon opens the folder on ITS host, so the
+  // button is only honest when the browser sits on that same machine.
+  const localOpenEnabled =
+    Boolean(
+      connection.capabilities?.features?.includes('workspace_local_open'),
+    ) && isLocalDaemon();
+  const localTerminalEnabled =
+    Boolean(
+      connection.capabilities?.features?.includes('workspace_local_terminal'),
+    ) && isLocalDaemon();
   const workspaceOverviewEnabled = workspaceOverview !== false;
   const workspaceOverviewItems =
     workspaceOverview === false
@@ -2510,6 +2521,32 @@ export function WebShellSidebar({
       });
     },
     [onError, t],
+  );
+
+  const openWorkspaceFolderLocally = useCallback(
+    async (cwd: string): Promise<void> => {
+      try {
+        await workspace.client.workspaceByCwd(cwd).openLocally();
+      } catch (error) {
+        onError(error, t('sidebar.openWorkspaceFolderFailed'));
+        // Rethrow so the hover popover keeps its idle icon on a failure the
+        // toast already reported.
+        throw error;
+      }
+    },
+    [onError, t, workspace.client],
+  );
+
+  const openWorkspaceTerminalLocally = useCallback(
+    async (cwd: string): Promise<void> => {
+      try {
+        await workspace.client.workspaceByCwd(cwd).openTerminalLocally();
+      } catch (error) {
+        onError(error, t('sidebar.openWorkspaceTerminalFailed'));
+        throw error;
+      }
+    },
+    [onError, t, workspace.client],
   );
 
   const reloadWorkspaceRuntime = useCallback(
@@ -4013,7 +4050,8 @@ export function WebShellSidebar({
       const sessionIdentity = getIdentityForSession(session);
       const label = getSessionLabel(session);
       const stamp = session.updatedAt || session.createdAt;
-      const time = stamp ? formatRelativeTime(stamp, t) : '';
+      // Rows stay text-only; the precise date lives in the hover popover.
+      const time = stamp ? formatDateTime(stamp) : '';
       const busy = busySessionIds.has(sessionIdentity);
       const exporting = exportingSessionIds.has(sessionIdentity);
       const completedUnread =
@@ -4281,6 +4319,18 @@ export function WebShellSidebar({
                   Boolean(scheduledTaskIcon) && styles.sessionStatusDotOverlay,
                 )}
                 data-web-shell-session-completed-unread
+                aria-hidden="true"
+              />
+            ) : null}
+            {session.hasActivePrompt &&
+            !scheduledTaskIcon &&
+            !completedUnread ? (
+              <span
+                className={cx(
+                  styles.sessionStatusDot,
+                  styles.sessionStatusDotRunning,
+                )}
+                data-web-shell-session-running
                 aria-hidden="true"
               />
             ) : null}
@@ -5590,7 +5640,16 @@ export function WebShellSidebar({
                             )}
                             overviewEnabled={workspaceOverviewEnabled}
                             overviewItems={workspaceOverviewItems}
-                            compact={footerTight}
+                            onOpenPathLocally={
+                              localOpenEnabled
+                                ? openWorkspaceFolderLocally
+                                : undefined
+                            }
+                            onOpenTerminalLocally={
+                              localTerminalEnabled
+                                ? openWorkspaceTerminalLocally
+                                : undefined
+                            }
                             gitBranchWanted={
                               Boolean(onNewWorktreeSession) &&
                               !lockedWorkspaceCwd
@@ -5646,6 +5705,28 @@ export function WebShellSidebar({
                                               copyWorkspacePath(ws),
                                           }
                                         : {}),
+                                      ...(localOpenEnabled &&
+                                      ws.trusted &&
+                                      realPath
+                                        ? {
+                                            openFolder: () => {
+                                              void openWorkspaceFolderLocally(
+                                                ws.cwd,
+                                              ).catch(() => undefined);
+                                            },
+                                          }
+                                        : {}),
+                                      ...(localTerminalEnabled &&
+                                      ws.trusted &&
+                                      realPath
+                                        ? {
+                                            openTerminal: () => {
+                                              void openWorkspaceTerminalLocally(
+                                                ws.cwd,
+                                              ).catch(() => undefined);
+                                            },
+                                          }
+                                        : {}),
                                       ...(ws.trusted
                                         ? {
                                             newSession: () =>
@@ -5687,10 +5768,22 @@ export function WebShellSidebar({
                                           }
                                         : {}),
                                     };
+                                    // The section caps the folder name so the
+                                    // git chip never slides under this overlay;
+                                    // the count drives the cap's width. The
+                                    // menu trigger is absent under a lock.
+                                    const headerActionCount =
+                                      (ws.trusted
+                                        ? 1 +
+                                          Number(canOrganizeWorkspace(ws.cwd))
+                                        : 0) + (lockedWorkspaceCwd ? 0 : 1);
                                     return (
                                       <div
                                         className={
                                           styles.workspaceHeaderActions
+                                        }
+                                        data-workspace-action-count={
+                                          headerActionCount
                                         }
                                         style={{
                                           visibility:
@@ -5786,9 +5879,16 @@ export function WebShellSidebar({
                                             onPointerDownOutside={
                                               handleSessionMenuPointerDownOutside
                                             }
-                                            onCloseAutoFocus={
-                                              handleSessionMenuCloseAutoFocus
-                                            }
+                                            onCloseAutoFocus={(event) => {
+                                              // Radix restores focus to the
+                                              // trigger, which lives inside the
+                                              // details popover's focus-open
+                                              // anchor — without suppression the
+                                              // popover reopens 300 ms after
+                                              // every menu close and never
+                                              // closes.
+                                              event.preventDefault();
+                                            }}
                                           />
                                         )}
                                       </div>
