@@ -1609,6 +1609,43 @@ describe('runChannelDaemonWorker', () => {
     );
   });
 
+  it('enables worktree persistence only when the daemon advertises it', async () => {
+    const sdk = createSdk();
+    sdk.client.capabilities.mockResolvedValueOnce({
+      v: 1,
+      mode: 'http-bridge',
+      features: ['session_worktree_persistence_v1'],
+      modelServices: [],
+      workspaceCwd: '/workspace',
+    });
+
+    await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      loadDaemonSdk: async () => sdk,
+    });
+
+    expect(mockDaemonChannelBridge).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionWorktreePersistence: true }),
+    );
+  });
+
+  it('keeps worktree persistence off when the daemon omits the capability', async () => {
+    const sdk = createSdk();
+
+    await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      loadDaemonSdk: async () => sdk,
+    });
+
+    expect(mockDaemonChannelBridge).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionWorktreePersistence: false }),
+    );
+  });
+
   it('fails fast for unknown selected channel names', async () => {
     const sdk = createSdk();
 

@@ -14262,6 +14262,80 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('defers a tracked restore prompt until the daemon integrity gate admits it', async () => {
+      const handle = makeChannel({
+        promptImpl: () => new Promise(() => undefined),
+        loadSessionImpl: () => ({
+          configOptions: [],
+          _meta: { 'qwen.daemon.restoreAskUserQuestion': true },
+        }),
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        restoreAskUserQuestion: true,
+      });
+
+      const restored = await bridge.loadSession({
+        sessionId: 'persisted-auq-deferred',
+        workspaceCwd: WS_A,
+        clientId: 'client-1',
+        deferRestoreAskUserQuestionPrompt: true,
+      });
+
+      expect(restored.hasActivePrompt).toBe(false);
+      expect(handle.agent.promptCalls).toHaveLength(0);
+      expect(
+        bridge.fireDeferredRestoreAskUserQuestionPrompt?.(
+          restored.sessionId,
+          restored.clientId,
+        ),
+      ).toBe(true);
+      await vi.waitFor(() => {
+        expect(handle.agent.promptCalls).toHaveLength(1);
+      });
+      expect(
+        bridge.fireDeferredRestoreAskUserQuestionPrompt?.(
+          restored.sessionId,
+          restored.clientId,
+        ),
+      ).toBe(false);
+      await bridge.shutdown();
+    });
+
+    it('discards a deferred restore prompt rejected by the daemon integrity gate', async () => {
+      const handle = makeChannel({
+        promptImpl: () => new Promise(() => undefined),
+        loadSessionImpl: () => ({
+          configOptions: [],
+          _meta: { 'qwen.daemon.restoreAskUserQuestion': true },
+        }),
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        restoreAskUserQuestion: true,
+      });
+
+      const restored = await bridge.loadSession({
+        sessionId: 'persisted-auq-discarded',
+        workspaceCwd: WS_A,
+        clientId: 'client-1',
+        deferRestoreAskUserQuestionPrompt: true,
+      });
+
+      bridge.discardDeferredRestoreAskUserQuestionPrompt?.(
+        restored.sessionId,
+        restored.clientId,
+      );
+      expect(
+        bridge.fireDeferredRestoreAskUserQuestionPrompt?.(
+          restored.sessionId,
+          restored.clientId,
+        ),
+      ).toBe(false);
+      expect(handle.agent.promptCalls).toHaveLength(0);
+      await bridge.shutdown();
+    });
+
     it('does not fire a restore prompt without an attached client', async () => {
       const handle = makeChannel({
         promptImpl: () => ({ stopReason: 'end_turn' }),

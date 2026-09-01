@@ -163,16 +163,115 @@ describe('readWorktreeSessionStrict', () => {
     const readFileSpy = vi.spyOn(prototype, 'readFile');
     await probe.close();
 
-    await expect(readWorktreeSessionStrict(filePath)).resolves.toMatchObject({
-      state: 'valid',
-    });
-    expect(readFileSpy).not.toHaveBeenCalled();
-    expect(readSpy).toHaveBeenCalledWith(
-      expect.any(Buffer),
-      0,
-      64 * 1024 + 1,
-      0,
-    );
+    try {
+      await expect(readWorktreeSessionStrict(filePath)).resolves.toMatchObject({
+        state: 'valid',
+      });
+      expect(readFileSpy).not.toHaveBeenCalled();
+      expect(readSpy).toHaveBeenCalledWith(
+        expect.any(Buffer),
+        0,
+        64 * 1024 + 1,
+        0,
+      );
+    } finally {
+      readSpy.mockRestore();
+      readFileSpy.mockRestore();
+    }
+  });
+
+  it('rejects a sidecar whose opened identity differs from its path', async () => {
+    await fs.writeFile(filePath, JSON.stringify(sample), 'utf8');
+    const probe = await fs.open(filePath, 'r');
+    const prototype = Object.getPrototypeOf(probe) as typeof probe;
+    const originalStat = prototype.stat;
+    await probe.close();
+    const statSpy = vi
+      .spyOn(prototype, 'stat')
+      .mockImplementationOnce(async function (this: typeof probe) {
+        const stats = await originalStat.call(this);
+        return Object.assign(stats, {
+          ino: typeof stats.ino === 'bigint' ? stats.ino + 1n : stats.ino + 1,
+        });
+      });
+
+    try {
+      await expect(readWorktreeSessionStrict(filePath)).resolves.toEqual({
+        state: 'invalid',
+        reason: 'sidecar identity changed before read',
+      });
+    } finally {
+      statSpy.mockRestore();
+    }
+  });
+
+  it('rejects a sidecar whose opened identity changes during the read', async () => {
+    await fs.writeFile(filePath, JSON.stringify(sample), 'utf8');
+    const probe = await fs.open(filePath, 'r');
+    const prototype = Object.getPrototypeOf(probe) as typeof probe;
+    const originalStat = prototype.stat;
+    await probe.close();
+    let statCalls = 0;
+    const statSpy = vi
+      .spyOn(prototype, 'stat')
+      .mockImplementation(async function (this: typeof probe) {
+        const stats = await originalStat.call(this);
+        statCalls++;
+        return statCalls === 2
+          ? Object.assign(stats, {
+              ino:
+                typeof stats.ino === 'bigint' ? stats.ino + 1n : stats.ino + 1,
+            })
+          : stats;
+      });
+
+    try {
+      await expect(readWorktreeSessionStrict(filePath)).resolves.toEqual({
+        state: 'invalid',
+        reason: 'sidecar identity changed during read',
+      });
+    } finally {
+      statSpy.mockRestore();
+    }
+  });
+
+  it('distinguishes a sidecar that disappears during the read', async () => {
+    await fs.writeFile(filePath, JSON.stringify(sample), 'utf8');
+    const probe = await fs.open(filePath, 'r');
+    const prototype = Object.getPrototypeOf(probe) as typeof probe;
+    const originalRead = prototype.read;
+    await probe.close();
+    let removed = false;
+    const readSpy = vi
+      .spyOn(prototype, 'read')
+      .mockImplementation(async function (
+        this: typeof probe,
+        buffer: Buffer,
+        offset: number,
+        length: number,
+        position: number,
+      ) {
+        const result = await originalRead.call(this, {
+          buffer,
+          offset,
+          length,
+          position,
+        });
+        if (!removed) {
+          removed = true;
+          await fs.unlink(filePath);
+        }
+        return result;
+      } as typeof prototype.read);
+
+    try {
+      await expect(readWorktreeSessionStrict(filePath)).resolves.toEqual({
+        state: 'invalid',
+        reason: 'sidecar disappeared during read',
+      });
+    } finally {
+      readSpy.mockRestore();
+    }
   });
 
   it('continues reading a stable sidecar after a short read', async () => {

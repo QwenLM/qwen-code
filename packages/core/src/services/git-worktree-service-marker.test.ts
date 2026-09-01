@@ -102,12 +102,17 @@ describe('daemon worktree session markers', () => {
     const readFileSpy = vi.spyOn(prototype, 'readFile');
     await probe.close();
 
-    await expect(readWorktreeSessionMarkerStrict(dir)).resolves.toEqual({
-      state: 'valid',
-      sessionId: 'owner',
-    });
-    expect(readFileSpy).not.toHaveBeenCalled();
-    expect(readSpy).toHaveBeenCalledWith(expect.any(Buffer), 0, 513, 0);
+    try {
+      await expect(readWorktreeSessionMarkerStrict(dir)).resolves.toEqual({
+        state: 'valid',
+        sessionId: 'owner',
+      });
+      expect(readFileSpy).not.toHaveBeenCalled();
+      expect(readSpy).toHaveBeenCalledWith(expect.any(Buffer), 0, 513, 0);
+    } finally {
+      readSpy.mockRestore();
+      readFileSpy.mockRestore();
+    }
   });
 
   it('continues reading a stable marker after a short read', async () => {

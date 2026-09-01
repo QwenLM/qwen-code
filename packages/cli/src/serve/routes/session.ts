@@ -3679,6 +3679,8 @@ export function registerSessionRoutes(
         }
       }
       let restoredStorageSessionId = sessionId;
+      let suppressWorktreeContextRestore = false;
+      let deferRestoreAskUserQuestionPrompt = false;
       try {
         // The coordinator canonicalizes lock keys (every case variant of a
         // caller id contends on one key), so the request spelling alone
@@ -3750,6 +3752,14 @@ export function registerSessionRoutes(
                 ? {}
                 : restoreSource),
             };
+            suppressWorktreeContextRestore =
+              restoreRequestMetadata.sourceType === 'channel';
+            deferRestoreAskUserQuestionPrompt =
+              suppressWorktreeContextRestore &&
+              runtime.bridge.fireDeferredRestoreAskUserQuestionPrompt !==
+                undefined &&
+              runtime.bridge.discardDeferredRestoreAskUserQuestionPrompt !==
+                undefined;
             assertRuntimeGenerationOpen?.();
             if (isInternalWorkspaceRuntime(runtime)) {
               sessionIdReservation = requestedSessionIdAdmission.reserveRestore(
@@ -3780,7 +3790,14 @@ export function registerSessionRoutes(
                 ? await runtime.bridge.loadSession({
                     sessionId,
                     workspaceCwd,
-                    suppressWorktreeContextRestore: true,
+                    ...(suppressWorktreeContextRestore
+                      ? {
+                          suppressWorktreeContextRestore: true,
+                          ...(deferRestoreAskUserQuestionPrompt
+                            ? { deferRestoreAskUserQuestionPrompt: true }
+                            : {}),
+                        }
+                      : {}),
                     historyReplay: 'response',
                     ...(historyPageSize !== undefined
                       ? { historyPageSize }
@@ -3793,7 +3810,14 @@ export function registerSessionRoutes(
                 : await runtime.bridge.resumeSession({
                     sessionId,
                     workspaceCwd,
-                    suppressWorktreeContextRestore: true,
+                    ...(suppressWorktreeContextRestore
+                      ? {
+                          suppressWorktreeContextRestore: true,
+                          ...(deferRestoreAskUserQuestionPrompt
+                            ? { deferRestoreAskUserQuestionPrompt: true }
+                            : {}),
+                        }
+                      : {}),
                     ...(clientId !== undefined ? { clientId } : {}),
                     ...(approvalMode !== undefined ? { approvalMode } : {}),
                     ...restoreRequestMetadata,
@@ -3889,6 +3913,12 @@ export function registerSessionRoutes(
           },
         );
         const cleanupRestoredSession = async (): Promise<void> => {
+          if (deferRestoreAskUserQuestionPrompt) {
+            runtime.bridge.discardDeferredRestoreAskUserQuestionPrompt?.(
+              session.sessionId,
+              session.clientId,
+            );
+          }
           if (session.attached) {
             await runtime.bridge
               .detachClient(session.sessionId, session.clientId)
@@ -3922,7 +3952,7 @@ export function registerSessionRoutes(
             runtime,
           ).getWorktreeSessionPath(restoredStorageSessionId);
           const sidecarResult = await readWorktreeSessionStrict(sidecarPath);
-          if (sidecarResult.state !== 'missing' || session.worktree) {
+          if (sidecarResult.state !== 'missing') {
             try {
               if (sidecarResult.state !== 'valid') {
                 throw new Error('Worktree sidecar is missing or invalid');
@@ -3958,7 +3988,12 @@ export function registerSessionRoutes(
               const candidateRoots = workspaceRoots.map((root) =>
                 path.join(root, '.qwen', 'worktrees'),
               );
-              const realTarget = fs.realpathSync(sidecar.worktreePath);
+              let realTarget: string;
+              try {
+                realTarget = fs.realpathSync(sidecar.worktreePath);
+              } catch {
+                throw new Error('Worktree checkout is missing or inaccessible');
+              }
               const contained = candidateRoots.some((root) => {
                 try {
                   const realRoot = fs.realpathSync(root);
@@ -3982,23 +4017,19 @@ export function registerSessionRoutes(
               ) {
                 throw new Error('Worktree marker ownership is invalid');
               }
-              if (
-                session.worktree &&
-                (session.worktree.path !== realTarget ||
-                  session.worktree.slug !== sidecar.slug ||
-                  session.worktree.branch !== sidecar.worktreeBranch)
-              ) {
-                throw new Error(
-                  'Live worktree metadata changed during restore',
-                );
-              }
               const worktree = {
                 slug: sidecar.slug,
                 path: realTarget,
                 branch: sidecar.worktreeBranch,
               };
-              if (session.hasActivePrompt) {
-                if (session.currentCwd !== realTarget) {
+              const hasLivePrompt =
+                session.hasActivePrompt &&
+                (session.attached || session.currentCwd !== undefined);
+              if (hasLivePrompt) {
+                if (
+                  sidecar.workspaceCwd !== undefined &&
+                  session.currentCwd !== realTarget
+                ) {
                   throw new Error('Active session is outside its worktree');
                 }
               } else {
@@ -4030,6 +4061,20 @@ export function registerSessionRoutes(
               throw restoreErr;
             }
           }
+        }
+        if (!res.writable) {
+          await cleanupRestoredSession();
+          return;
+        }
+        assertRuntimeGenerationOpen?.();
+        if (
+          deferRestoreAskUserQuestionPrompt &&
+          runtime.bridge.fireDeferredRestoreAskUserQuestionPrompt?.(
+            session.sessionId,
+            session.clientId,
+          )
+        ) {
+          session.hasActivePrompt = true;
         }
         try {
           assertRuntimeGenerationOpen?.();

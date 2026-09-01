@@ -479,7 +479,7 @@ export class NamedSessionManager {
       if (!task || task.status !== 'open') return undefined;
       if (task.isolation === 'worktree') {
         throw new Error(
-          `Task "${task.name}" uses a worktree and cannot be reset in Part 4A. Continue using the task or close it. Its files were not changed.`,
+          `Task "${task.name}" uses a worktree and cannot be cleared or reset yet. Continue using the task or close it. Its files were not changed.`,
         );
       }
       const timestamp = this.nextTimestamp(owner);

@@ -744,7 +744,9 @@ describe('NamedSessionManager', () => {
     await named.create(alice, 'feature', 'worktree');
     vi.mocked(bridge.newSession).mockClear();
 
-    await expect(named.reset(alice)).rejects.toThrow('cannot be reset');
+    await expect(named.reset(alice)).rejects.toThrow(
+      'cannot be cleared or reset yet',
+    );
     expect(bridge.newSession).not.toHaveBeenCalled();
   });
 

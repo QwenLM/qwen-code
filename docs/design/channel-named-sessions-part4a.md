@@ -255,8 +255,8 @@ When the selected task is a worktree task, `/clear`, `/new`, and `/reset`
 return an actionable error such as:
 
 ```text
-Task "feature-a" uses a worktree and cannot be reset in Part 4A. Continue using
-the task or close it. Its files were not changed.
+Task "feature-a" uses a worktree and cannot be cleared or reset yet. Continue
+using the task or close it. Its files were not changed.
 ```
 
 The rejection occurs inside the manager's serialized reset operation before a
@@ -443,12 +443,14 @@ sidecar is indistinguishable from an ordinary shared session at the route, the
 Channel bridge/SDK response validator performs the same client detach before it
 rejects the missing attestation.
 
-The daemon restore route also sets an internal ACP metadata flag that suppresses
-the generic best-effort worktree restore performed by the ACP agent. The route
-then owns the strict sidecar, marker, containment, and relocation checks. This
-prevents the generic restore path from deleting an invalid sidecar before the
-daemon can apply the non-destructive failure contract above. Non-daemon load and
-resume callers retain the existing best-effort behavior.
+For Channel-owned restores, the daemon route also sets an internal ACP metadata
+flag that suppresses the generic best-effort worktree restore performed by the
+ACP agent. The route then owns the strict sidecar, marker, containment, and
+relocation checks. A persisted ask-user prompt is deferred until those checks
+and any required relocation succeed, then fired exactly once; this prevents the
+prompt from blocking relocation while preserving it on a valid restore. The
+suppression and deferral are not applied to other load and resume callers, which
+retain the existing best-effort behavior.
 
 Shared loads retain current behavior. Part 4A does not reinterpret a shared
 task if some independent in-session mechanism later changes its cwd.

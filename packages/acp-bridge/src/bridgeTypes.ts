@@ -264,6 +264,8 @@ export interface BridgeRestoreSessionRequest {
   sourceId?: string;
   /** Internal daemon route owns strict worktree sidecar validation. */
   suppressWorktreeContextRestore?: boolean;
+  /** Delay ask_user_question recovery until daemon route validation finishes. */
+  deferRestoreAskUserQuestionPrompt?: boolean;
 }
 
 /** Internal daemon-only restore surface for a managed standalone session. */
@@ -1483,6 +1485,18 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   setSessionWorktree(
     sessionId: string,
     worktree: { slug: string; path: string; branch: string },
+  ): void;
+
+  /** Admit a restore question deferred by the daemon's integrity gate. */
+  fireDeferredRestoreAskUserQuestionPrompt?(
+    sessionId: string,
+    clientId: string | undefined,
+  ): boolean;
+
+  /** Drop a restore question rejected by the daemon's integrity gate. */
+  discardDeferredRestoreAskUserQuestionPrompt?(
+    sessionId: string,
+    clientId: string | undefined,
   ): void;
 
   /**
