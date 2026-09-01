@@ -198,6 +198,7 @@ describe('detectManifest', () => {
     writeClaude('marketplace.json', {
       plugins: [{ name: 'selected', source: './' }],
     });
+    writeClaude('plugin.json', { name: 'standalone', version: '1.0.0' });
     expect(detectManifest(root, 'selected')).toEqual({
       source: 'Claude',
       kind: 'marketplace',
@@ -459,6 +460,40 @@ describe('convertCompatibleExtension', () => {
       originSource: 'QwenCode',
       externalContent: false,
     });
+  });
+
+  it('keeps hooks from the Claude manifest when both Claude and Gemini declare one', async () => {
+    fs.mkdirSync(path.join(root, '.claude-plugin'), { recursive: true });
+    fs.mkdirSync(path.join(root, 'claude-hooks'), { recursive: true });
+    fs.writeFileSync(
+      path.join(root, 'claude-hooks', 'hooks.json'),
+      '{}',
+      'utf-8',
+    );
+    fs.writeFileSync(
+      path.join(root, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({
+        name: 'dual',
+        version: '1.0.0',
+        hooks: './claude-hooks/hooks.json',
+      }),
+      'utf-8',
+    );
+    fs.writeFileSync(
+      path.join(root, 'gemini-extension.json'),
+      JSON.stringify({ name: 'gemini', version: '1.0.0' }),
+      'utf-8',
+    );
+    const result = await convertCompatibleExtension(root);
+    expect(result.originSource).toBe('Claude');
+    const converted = JSON.parse(
+      fs.readFileSync(
+        path.join(result.extensionDir, 'qwen-extension.json'),
+        'utf-8',
+      ),
+    );
+    expect(converted.hooks).toBe('./claude-hooks/hooks.json');
+    trackConvertedDir(result);
   });
 
   it('converts a Claude standalone plugin', async () => {

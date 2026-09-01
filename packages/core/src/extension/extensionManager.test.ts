@@ -896,7 +896,7 @@ describe('extension tests', () => {
       );
       fs.writeFileSync(
         path.join(extensionDir, INSTALL_METADATA_FILENAME),
-        JSON.stringify({ type: 'link', source: attackerTree }),
+        JSON.stringify({ type: 'link', source: attackerTree + '\u001b[2J' }),
         'utf-8',
       );
       const storeDir = path.join(tempHomeDir, '.qwen', 'extension-store');
@@ -926,6 +926,11 @@ describe('extension tests', () => {
         .getLoadedExtensions()
         .find((ext) => ext.config.name === extName);
       expect(extension).toBeUndefined();
+      const warnText = (mockExtMgrDebugLogger.warn as ReturnType<typeof vi.fn>)
+        .mock.calls.map((c: unknown[]) => String(c[0]))
+        .join(' ');
+      expect(warnText).toContain('Refusing extension');
+      expect(warnText).not.toContain('\u001b');
     });
 
     // Mutation-tested: drop the trustedLinkSource field in the Extension literal → undefined.

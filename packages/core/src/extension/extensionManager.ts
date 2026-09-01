@@ -1678,7 +1678,7 @@ export class ExtensionManager {
         installMetadata.source !== context.trustedLinkSource
       ) {
         debugLogger.warn(
-          `Refusing extension ${extensionDir}: in-band source "${installMetadata.source}" does not match trusted link source "${context.trustedLinkSource}"`,
+          `Refusing extension ${stripAnsiAndControl(extensionDir)}: in-band source "${stripAnsiAndControl(installMetadata.source)}" does not match trusted link source "${stripAnsiAndControl(context.trustedLinkSource as string)}"`,
         );
         return null;
       }

@@ -298,7 +298,8 @@ function parseState(
           parsed.artifactGeneration >= 0)) &&
       (parsed.linkedSource === undefined ||
         (typeof parsed.linkedSource === 'string' &&
-          parsed.linkedSource.length > 0)) &&
+          parsed.linkedSource.length > 0 &&
+          !/[\u0000-\u001f\u007f]/.test(parsed.linkedSource))) &&
       (parsed.declarationOnly === undefined ||
         parsed.declarationOnly === true) &&
       (parsed.preserveActivationOnNextInstall === undefined ||

@@ -140,6 +140,24 @@ describe('readExtensionManifest', () => {
         name: 'shared',
         version: '1.0.0',
       });
+      // Legitimate in-package symlinks (e.g. git's link farm) must be accepted by strict mode.
+      const inPkgDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-in-'));
+      try {
+        fs.writeFileSync(
+          path.join(inPkgDir, 'plugin.real.json'),
+          '{"name":"linked"}',
+          'utf-8',
+        );
+        fs.symlinkSync(
+          path.join(inPkgDir, 'plugin.real.json'),
+          path.join(inPkgDir, 'plugin.json'),
+        );
+        expect(readExtensionManifest(inPkgDir, 'plugin.json')).toEqual({
+          name: 'linked',
+        });
+      } finally {
+        fs.rmSync(inPkgDir, { recursive: true, force: true });
+      }
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
       fs.rmSync(outside, { recursive: true, force: true });
@@ -317,7 +335,13 @@ describe('readExtraJsonFile', () => {
   it('returns null for a missing file', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));
     try {
-      expect(readExtraJsonFile(dir, 'nope.json')).toBeNull();
+      const reasons: string[] = [];
+      expect(
+        readExtraJsonFile(dir, 'nope.json', false, (reason) =>
+          reasons.push(reason),
+        ),
+      ).toBeNull();
+      expect(reasons).toEqual(['missing']);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
@@ -423,7 +447,13 @@ describe('readExtraJsonFile', () => {
       const secret = path.join(outside, 'hooks.json');
       fs.writeFileSync(secret, '{}', 'utf-8');
       fs.symlinkSync(secret, path.join(dir, 'hooks.json'));
-      expect(readExtraJsonFile(dir, 'hooks.json')).toBeNull();
+      const reasons: string[] = [];
+      expect(
+        readExtraJsonFile(dir, 'hooks.json', false, (reason) =>
+          reasons.push(reason),
+        ),
+      ).toBeNull();
+      expect(reasons).toEqual(['confinement-threw']);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
       fs.rmSync(outside, { recursive: true, force: true });

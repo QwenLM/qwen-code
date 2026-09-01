@@ -1506,6 +1506,29 @@ describe('ExtensionStore', () => {
       ExtensionStoreCorruptError,
     );
     expect(fs.existsSync(path.join(storeDir, 'state.json'))).toBe(true);
+
+    const id = 'a1'.repeat(32);
+    await fsp.writeFile(
+      path.join(storeDir, 'state.json'),
+      JSON.stringify({
+        version: 2,
+        generation: 1,
+        legacyProjectionHash: '0'.repeat(64),
+        extensions: {
+          [id]: {
+            name: 'demo',
+            artifactDirectory: 'demo',
+            defaultActivation: 'enabled',
+            workspaceOverrides: {},
+            linkedSource: 'evil\u001b[2J',
+          },
+        },
+      }),
+    );
+    const store2 = makeStore();
+    await expect(store2.readSnapshot()).rejects.toBeInstanceOf(
+      ExtensionStoreCorruptError,
+    );
   });
 
   it('rejects an artifact directory that resolves to the extensions root', async () => {
