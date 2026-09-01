@@ -441,6 +441,50 @@ describe('GitHub helper tests', () => {
       expect(String(step.run), step.name).toContain('--test-concurrency=1');
     }
   });
+
+  it('keeps the dependency-free fast lane off npm-package suites', () => {
+    // The github_ci_only helper step runs before ANY dependency install (the
+    // setup-node and `npm ci` steps are gated on the full profile), so every
+    // suite it lists must import node: builtins only. These 8 suites import
+    // the `yaml` npm package; letting the fast lane run the full list made an
+    // ECS-updater-only fork PR fail closed with ERR_MODULE_NOT_FOUND on a
+    // fresh hosted runner (#10548 review R6-1). The full-profile helper step
+    // still runs every suite, and the merge queue's full run re-checks what
+    // the fast lane skips, so nothing escapes CI.
+    const depFree = String(ci.env.HELPER_TESTS_DEP_FREE).trim();
+    const fullSuites = String(ci.env.HELPER_TESTS).trim().split(/\s+/);
+    expect(depFree).not.toBe('');
+    expect(depFree).not.toBe('undefined');
+    const depFreeSuites = depFree.split(/\s+/);
+    for (const suite of depFreeSuites) {
+      expect(fullSuites, suite).toContain(suite);
+    }
+    const yamlSuites = [
+      '.github/scripts/classify-release-notes.test.mjs',
+      '.github/scripts/resolve-sandbox-image.test.mjs',
+      '.github/scripts/qwen-triage-workflow.test.mjs',
+      '.github/scripts/assign-issue-owner.test.mjs',
+      '.github/scripts/auto-minimize-spam.test.mjs',
+      '.github/scripts/ci-runner-routing.test.mjs',
+      '.github/scripts/assign-pr-owner.test.mjs',
+      '.github/scripts/ci-disk-pressure.test.mjs',
+    ];
+    for (const suite of yamlSuites) {
+      expect(depFreeSuites, suite).not.toContain(suite);
+      expect(fullSuites, suite).toContain(suite);
+    }
+    // The fast lane must consume the dep-free list, not the full one: if the
+    // lane goes back to env.HELPER_TESTS this regression returns.
+    const fastLaneSteps = Object.values(ci.jobs)
+      .flatMap((job) => job.steps ?? [])
+      .filter((step) =>
+        String(step.run ?? '').includes('env.HELPER_TESTS_DEP_FREE'),
+      );
+    expect(fastLaneSteps).toHaveLength(1);
+    expect(
+      String(fastLaneSteps[0].run).replaceAll('HELPER_TESTS_DEP_FREE', ''),
+    ).not.toContain('env.HELPER_TESTS');
+  });
 });
 
 describe('platform lanes — a failing nightly is visible', () => {
