@@ -419,6 +419,48 @@ function isSourceItem(node: Parser.SyntaxNode): boolean {
   return node.type !== 'comment' && node.type !== 'hash_bang_line';
 }
 
+function cancellationGuardEdits(root: Parser.SyntaxNode): Edit[] {
+  const edits: Edit[] = [];
+  const pending = [root];
+  while (pending.length > 0) {
+    const node = pending.pop()!;
+    if (node.type === 'await_expression') {
+      const awaited = node.namedChildren[0];
+      if (awaited) {
+        edits.push({
+          start: awaited.startIndex,
+          end: awaited.startIndex,
+          text: 'nodeRepl.signal.guardAwait(',
+        });
+        edits.push({
+          start: awaited.endIndex,
+          end: awaited.endIndex,
+          text: ')',
+        });
+      }
+    } else if (
+      node.type === 'for_in_statement' &&
+      /^for\s+await\b/.test(node.text)
+    ) {
+      const iterable = node.childForFieldName('right');
+      if (iterable) {
+        edits.push({
+          start: iterable.startIndex,
+          end: iterable.startIndex,
+          text: 'nodeRepl.signal.guardAsyncIterable(',
+        });
+        edits.push({
+          start: iterable.endIndex,
+          end: iterable.endIndex,
+          text: ')',
+        });
+      }
+    }
+    for (const child of node.namedChildren) pending.push(child);
+  }
+  return edits;
+}
+
 export async function prepareNodeReplCell(
   code: string,
   options: PrepareNodeReplCellOptions,
@@ -552,7 +594,11 @@ export async function prepareNodeReplCell(
       ),
     ].join('');
 
-    const edits: Edit[] = [];
+    // Guard every user-authored async suspension point. Cancelling a cell must
+    // prevent its continuation from resuming later even when the awaited value
+    // itself cannot be cancelled. Explicit terminal barriers registered by an
+    // API through signal.waitUntil are still drained by the kernel.
+    const edits = cancellationGuardEdits(root);
     const activeBindings = new Map(previousBindingsByName);
     // `var` declarations hoist to the top of module scope and exist (as
     // undefined) before their declaring statement runs. Seed them up front so a
