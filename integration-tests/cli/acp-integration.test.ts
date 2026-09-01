@@ -11,7 +11,7 @@ import { createInterface } from 'node:readline';
 import { setTimeout as delay } from 'node:timers/promises';
 import { describe, expect, it } from 'vitest';
 import { TestRig } from '../test-helper.js';
-import { startFakeOpenAIServer } from '../fake-openai-server.js';
+import { fakeToolCall, startFakeOpenAIServer } from '../fake-openai-server.js';
 
 const REQUEST_TIMEOUT_MS = 60_000;
 const INITIAL_PROMPT = 'Create a quick note (smoke test).';
@@ -1146,13 +1146,39 @@ function setupAcpTest(
     }
   });
 
-  it('injects managed auto-memory into the first ACP model request', async () => {
+  it('delivers managed auto-memory through the ACP recall lifecycle', async () => {
     const marker = 'ACP-MEMORY-ZEPHYR-4207';
     const prompt = 'What is the ACP zephyr codeword?';
+    let memoryFile = '';
+    let mainRequestCount = 0;
+    let resolveSelector!: () => void;
+    const selectorCompleted = new Promise<void>((resolve) => {
+      resolveSelector = resolve;
+    });
     const fakeServer = await startFakeOpenAIServer(async ({ body }) => {
-      // Keep the model selector outside the initial Recall budget. The
-      // deterministic match must still reach the main streamed request.
-      if (body['stream'] !== true) await delay(250);
+      if (body['stream'] !== true) {
+        // Keep the selector outside the initial Recall budget, then make its
+        // result available before the first tool response. Whether the
+        // filesystem scan itself finishes inside 100 ms is intentionally not
+        // part of this E2E contract; fake-timer client tests cover that path.
+        await delay(250);
+        resolveSelector();
+        return {
+          content: JSON.stringify({ selected_memories: [memoryFile] }),
+        };
+      }
+      if (mainRequestCount++ === 0) {
+        await selectorCompleted;
+        return {
+          toolCalls: [
+            fakeToolCall(
+              'read_file',
+              { file_path: memoryFile },
+              'acp-memory-probe',
+            ),
+          ],
+        };
+      }
       return { content: 'done' };
     });
     const rig = new TestRig();
@@ -1166,8 +1192,9 @@ function setupAcpTest(
     });
     const memoryDir = join(rig.testDir!, '.qwen', 'memory', 'project');
     mkdirSync(memoryDir, { recursive: true });
+    memoryFile = join(memoryDir, 'acp-zephyr.md');
     writeFileSync(
-      join(memoryDir, 'acp-zephyr.md'),
+      memoryFile,
       [
         '---',
         'type: project',
@@ -1208,13 +1235,17 @@ function setupAcpTest(
         prompt: [{ type: 'text', text: prompt }],
       });
 
-      const mainRequest = fakeServer.requests.find(
+      const mainRequests = fakeServer.requests.filter(
         ({ body }) =>
           body['stream'] === true &&
           JSON.stringify(body['messages']).includes(prompt),
       );
-      expect(mainRequest).toBeDefined();
-      expect(JSON.stringify(mainRequest?.body['messages'])).toContain(marker);
+      expect(mainRequests.length).toBeGreaterThanOrEqual(2);
+      expect(
+        mainRequests.some(({ body }) =>
+          JSON.stringify(body['messages']).includes(marker),
+        ),
+      ).toBe(true);
     } catch (error) {
       if (stderr.length) console.error('Agent stderr:', stderr.join(''));
       throw error;

@@ -382,31 +382,6 @@ export interface RelevantAutoMemoryPromptResult {
   strategy: 'none' | 'heuristic' | 'model';
 }
 
-export async function scanRelevantAutoMemoryDocuments(
-  projectRoot: string,
-): Promise<ScannedAutoMemoryDocument[]> {
-  // User-level scan is best-effort: a read failure (EACCES, ELOOP) on
-  // `~/.qwen/memories/` must not cancel the project-level scan, otherwise
-  // recall returns nothing at all for the rest of the session. Project-
-  // level scan failures still bubble — they're the only mandatory side.
-  const [projectDocs, userDocs] = await Promise.all([
-    scanAllAutoMemoryTopicDocuments(projectRoot),
-    scanAllUserAutoMemoryTopicDocuments().catch((error: unknown) => {
-      debugLogger.warn(
-        `User-level auto-memory scan failed; project-level recall continues: ${error instanceof Error ? error.message : String(error)}`,
-      );
-      return [];
-    }),
-  ]);
-
-  // Project-level docs come first so that, once score and mtime have tied in
-  // `selectRelevantAutoMemoryDocuments`, the stable sort leaves project
-  // memory ahead of user memory — the "project shadows user" precedence. The
-  // model selector ranks by its own judgement, so this ordering is advisory
-  // there, not enforced.
-  return [...projectDocs, ...userDocs];
-}
-
 function filterExcludedAutoMemoryDocuments(
   docs: ScannedAutoMemoryDocument[],
   excludedFilePaths?: Iterable<string>,
@@ -423,14 +398,32 @@ function filterExcludedAutoMemoryDocuments(
   return docs.filter((doc) => !excluded.has(doc.filePath));
 }
 
-export async function resolveRelevantAutoMemoryPromptFromDocuments(
+export async function resolveRelevantAutoMemoryPromptForQuery(
+  projectRoot: string,
   query: string,
-  scannedDocs: ScannedAutoMemoryDocument[],
   options: ResolveRelevantAutoMemoryPromptOptions = {},
-  startedAt = Date.now(),
 ): Promise<RelevantAutoMemoryPromptResult> {
+  const t0 = Date.now();
+  // User-level scan is best-effort: a read failure (EACCES, ELOOP) on
+  // `~/.qwen/memories/` must not cancel the project-level scan, otherwise
+  // recall returns nothing at all for the rest of the session. Project-
+  // level scan failures still bubble — they're the only mandatory side.
+  const [projectDocs, userDocs] = await Promise.all([
+    scanAllAutoMemoryTopicDocuments(projectRoot),
+    scanAllUserAutoMemoryTopicDocuments().catch((error: unknown) => {
+      debugLogger.warn(
+        `User-level auto-memory scan failed; project-level recall continues: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return [];
+    }),
+  ]);
+  // Project-level docs come first so that, once score and mtime have tied in
+  // `selectRelevantAutoMemoryDocuments`, the stable sort leaves project
+  // memory ahead of user memory — the "project shadows user" precedence. The
+  // model selector ranks by its own judgement, so this ordering is advisory
+  // there, not enforced.
   const docs = filterExcludedAutoMemoryDocuments(
-    scannedDocs,
+    [...projectDocs, ...userDocs],
     options.excludedFilePaths,
   );
   const limit = options.limit ?? MAX_RELEVANT_DOCS;
@@ -444,7 +437,7 @@ export async function resolveRelevantAutoMemoryPromptFromDocuments(
           docs_scanned: docs.length,
           docs_selected: 0,
           strategy: 'none',
-          duration_ms: Date.now() - startedAt,
+          duration_ms: Date.now() - t0,
         }),
       );
     }
@@ -496,7 +489,7 @@ export async function resolveRelevantAutoMemoryPromptFromDocuments(
             docs_scanned: docs.length,
             docs_selected: selectedDocs.length,
             strategy,
-            duration_ms: Date.now() - startedAt,
+            duration_ms: Date.now() - t0,
           }),
         );
       }
@@ -564,7 +557,7 @@ export async function resolveRelevantAutoMemoryPromptFromDocuments(
         docs_scanned: docs.length,
         docs_selected: selectedDocs.length,
         strategy,
-        duration_ms: Date.now() - startedAt,
+        duration_ms: Date.now() - t0,
       }),
     );
   }
@@ -573,21 +566,6 @@ export async function resolveRelevantAutoMemoryPromptFromDocuments(
     selectedDocs,
     strategy,
   };
-}
-
-export async function resolveRelevantAutoMemoryPromptForQuery(
-  projectRoot: string,
-  query: string,
-  options: ResolveRelevantAutoMemoryPromptOptions = {},
-): Promise<RelevantAutoMemoryPromptResult> {
-  const startedAt = Date.now();
-  const docs = await scanRelevantAutoMemoryDocuments(projectRoot);
-  return resolveRelevantAutoMemoryPromptFromDocuments(
-    query,
-    docs,
-    options,
-    startedAt,
-  );
 }
 
 export async function buildRelevantAutoMemoryPromptForQuery(

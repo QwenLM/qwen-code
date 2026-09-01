@@ -6965,9 +6965,6 @@ describe('Server Config (config.ts)', () => {
 
   it('refreshHierarchicalMemory should build the managed auto-memory prompt when present', async () => {
     const config = new Config(baseParams);
-    const refreshRecallSnapshot = vi
-      .spyOn(config.getMemoryManager(), 'refreshRecallSnapshot')
-      .mockResolvedValue();
 
     vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
       memoryContent: '--- Context from: QWEN.md ---\nProject rules',
@@ -6993,7 +6990,6 @@ describe('Server Config (config.ts)', () => {
     expect(config.getAutoMemoryPrompt()).toContain(
       '[Project Memory](project.md)',
     );
-    expect(refreshRecallSnapshot).toHaveBeenCalledWith(config.getProjectRoot());
   });
 
   it('refreshHierarchicalMemory seeds the FileReadCache for project and user MEMORY.md indexes', async (ctx) => {

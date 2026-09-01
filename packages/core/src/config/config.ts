@@ -4016,14 +4016,6 @@ export class Config {
         await Promise.all([
           readAutoMemoryIndexWithStats(this.getProjectRoot()),
           readUserAutoMemoryIndexWithStats().catch(() => null),
-          this.memoryManager
-            .refreshRecallSnapshot(this.getProjectRoot())
-            .catch((error: unknown) => {
-              this.debugLogger.warn(
-                'Auto-memory recall snapshot refresh failed; recall will scan on demand.',
-                error,
-              );
-            }),
         ]);
       this.recordAutoMemoryIndexRead(
         getAutoMemoryIndexPath(this.getProjectRoot()),
