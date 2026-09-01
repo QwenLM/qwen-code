@@ -10,6 +10,7 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   buildRuntimeEnvironment,
+  getHomeEnvFallbackVars,
   loadEnvironment,
   reloadEnvironment,
   resetEnvironmentTrackingForTesting,
@@ -305,6 +306,30 @@ describe('buildRuntimeEnvironment', () => {
 
     expect(snapshot.envFilePaths).not.toContain(path.join(parent, '.env'));
     expect(snapshot.effectiveEnv['QWEN_SERVER_TOKEN']).toBeUndefined();
+  });
+});
+
+describe('getHomeEnvFallbackVars', () => {
+  it('preserves case-insensitive lookup in captured Windows environments', () => {
+    const home = process.env['HOME']!;
+    const qwenDir = path.join(home, SETTINGS_DIRECTORY_NAME);
+    fs.mkdirSync(qwenDir, { recursive: true });
+    fs.writeFileSync(path.join(qwenDir, '.env'), 'PATH=from-home-env');
+    fs.writeFileSync(path.join(home, '.env'), 'PARENT_ONLY=from-parent-env');
+    const platformSpy = vi
+      .spyOn(process, 'platform', 'get')
+      .mockReturnValue('win32');
+
+    try {
+      expect(
+        getHomeEnvFallbackVars(undefined, {
+          Path: 'from-system',
+          qwen_home: 'C:\\qwen',
+        }),
+      ).toEqual({});
+    } finally {
+      platformSpy.mockRestore();
+    }
   });
 });
 

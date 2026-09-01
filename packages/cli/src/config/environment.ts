@@ -9,6 +9,7 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import * as dotenv from 'dotenv';
 import { getErrorMessage, QWEN_DIR, Storage } from '@qwen-code/qwen-code-core';
+import { lookupEnvValue } from '@qwen-code/qwen-code-core/envVarResolver';
 import { isWorkspaceTrusted } from './trustedFolders.js';
 import {
   DEFAULT_EXCLUDED_ENV_VARS,
@@ -228,7 +229,7 @@ export function getHomeEnvFallbackVars(
   // from a shared home .env. getUserLevelEnvPaths() always includes ~/.env
   // because loadEnvironment() populates process.env independently — the two
   // scopes are intentionally different.
-  if (!environment['QWEN_HOME']) {
+  if (!lookupEnvValue(environment, 'QWEN_HOME')) {
     candidates.push(path.join(path.dirname(globalQwenDir), '.env'));
   }
 
@@ -240,7 +241,10 @@ export function getHomeEnvFallbackVars(
     try {
       const parsed = dotenv.parse(fs.readFileSync(candidate, 'utf-8'));
       for (const key in parsed) {
-        if (Object.hasOwn(parsed, key) && !Object.hasOwn(environment, key)) {
+        if (
+          Object.hasOwn(parsed, key) &&
+          lookupEnvValue(environment, key) === undefined
+        ) {
           result[key] ??= parsed[key]!;
         }
       }

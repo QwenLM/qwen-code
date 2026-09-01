@@ -6,6 +6,22 @@
 
 import { isInternalSecretEnvVar } from './sanitize-child-env.js';
 
+export function lookupEnvValue(
+  environment: Readonly<NodeJS.ProcessEnv>,
+  key: string,
+): string | undefined {
+  const exactValue = environment[key];
+  if (exactValue !== undefined || process.platform !== 'win32') {
+    return exactValue;
+  }
+
+  const normalizedKey = key.toLowerCase();
+  const matchingKey = Object.keys(environment).find(
+    (candidate) => candidate.toLowerCase() === normalizedKey,
+  );
+  return matchingKey === undefined ? undefined : environment[matchingKey];
+}
+
 /**
  * Resolves environment variables in a string.
  * Replaces $VAR_NAME and ${VAR_NAME} with their corresponding environment variable values.
@@ -37,11 +53,15 @@ export function resolveEnvVarsInString(
     if (isInternalSecretEnvVar(varName)) {
       return match;
     }
-    if (customEnv && typeof customEnv[varName] === 'string') {
-      return customEnv[varName];
+    const customValue = customEnv
+      ? lookupEnvValue(customEnv, varName)
+      : undefined;
+    if (typeof customValue === 'string') {
+      return customValue;
     }
-    if (typeof environment[varName] === 'string') {
-      return environment[varName]!;
+    const environmentValue = lookupEnvValue(environment, varName);
+    if (typeof environmentValue === 'string') {
+      return environmentValue;
     }
     return match;
   });

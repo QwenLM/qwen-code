@@ -155,29 +155,32 @@ describe('project runtime settings', () => {
     ).toBeUndefined();
   });
 
-  it('keeps a failed migration persistence queued for a later retry', () => {
-    const workspace = path.join(tempDir, 'workspace');
-    fs.mkdirSync(workspace, { recursive: true });
-    const settingsPath = new Storage(workspace).getWorkspaceSettingsPath();
-    fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
-    fs.writeFileSync(settingsPath, JSON.stringify({ theme: 'dark' }));
-    const loaded = loadSettings(workspace, {
-      consumeCorruptionEnvVars: false,
-      readOnly: true,
-      skipLoadEnvironment: true,
-      workspaceTrusted: true,
-    });
-    const settingsDir = path.dirname(settingsPath);
-    fs.chmodSync(settingsDir, 0o500);
-    try {
-      expect(() => loaded.persistInMemoryMigrations()).not.toThrow();
-      expect(loaded.migratedInMemoryScopes.has(SettingScope.Workspace)).toBe(
-        true,
-      );
-    } finally {
-      fs.chmodSync(settingsDir, 0o700);
-    }
-  });
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'keeps a failed migration persistence queued for a later retry',
+    () => {
+      const workspace = path.join(tempDir, 'workspace');
+      fs.mkdirSync(workspace, { recursive: true });
+      const settingsPath = new Storage(workspace).getWorkspaceSettingsPath();
+      fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+      fs.writeFileSync(settingsPath, JSON.stringify({ theme: 'dark' }));
+      const loaded = loadSettings(workspace, {
+        consumeCorruptionEnvVars: false,
+        readOnly: true,
+        skipLoadEnvironment: true,
+        workspaceTrusted: true,
+      });
+      const settingsDir = path.dirname(settingsPath);
+      fs.chmodSync(settingsDir, 0o500);
+      try {
+        expect(() => loaded.persistInMemoryMigrations()).not.toThrow();
+        expect(loaded.migratedInMemoryScopes.has(SettingScope.Workspace)).toBe(
+          true,
+        );
+      } finally {
+        fs.chmodSync(settingsDir, 0o700);
+      }
+    },
+  );
 
   it('replaces workspace state without changing the LoadedSettings identity', () => {
     const current = new LoadedSettings(

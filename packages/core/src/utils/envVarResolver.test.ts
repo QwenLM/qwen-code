@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   resolveEnvVarsInString,
   resolveEnvVarsInObject,
@@ -111,6 +111,39 @@ describe('resolveEnvVarsInString', () => {
     const result = resolveEnvVarsInString('$DEFINED and $UNDEFINED mixed');
 
     expect(result).toBe('value and $UNDEFINED mixed');
+  });
+
+  it('preserves case-insensitive lookup in captured Windows environments', () => {
+    const platformSpy = vi
+      .spyOn(process, 'platform', 'get')
+      .mockReturnValue('win32');
+    try {
+      const environment = { Path: 'C:\\Windows\\System32' };
+
+      expect(
+        resolveEnvVarsInString('${PATH}|${path}', undefined, environment),
+      ).toBe('C:\\Windows\\System32|C:\\Windows\\System32');
+      expect(
+        resolveEnvVarsInString('$PATH', { path: 'from-custom' }, environment),
+      ).toBe('from-custom');
+    } finally {
+      platformSpy.mockRestore();
+    }
+  });
+
+  it('keeps captured environment lookup case-sensitive outside Windows', () => {
+    const platformSpy = vi
+      .spyOn(process, 'platform', 'get')
+      .mockReturnValue('linux');
+    try {
+      expect(
+        resolveEnvVarsInString('$PATH', undefined, {
+          Path: '/usr/local/bin',
+        }),
+      ).toBe('$PATH');
+    } finally {
+      platformSpy.mockRestore();
+    }
   });
 });
 
