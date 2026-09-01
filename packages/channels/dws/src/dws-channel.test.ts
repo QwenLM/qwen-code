@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   PairingStore,
   type ChannelAgentBridge,
+  type ChannelBaseOptions,
   type ChannelConfig,
   type Envelope,
 } from '@qwen-code/channel-base';
@@ -61,6 +62,23 @@ function makeBridge(): ChannelAgentBridge {
     off: vi.fn(),
     emit: vi.fn(),
   } as unknown as ChannelAgentBridge;
+}
+
+function makeChannelMemory(): NonNullable<ChannelBaseOptions['channelMemory']> {
+  return {
+    readChannelMemory: vi.fn().mockResolvedValue(''),
+    listChannelMemoryEntries: vi.fn().mockResolvedValue([]),
+    addChannelMemoryEntries: vi.fn().mockResolvedValue({
+      changed: false,
+      added: [],
+      duplicateIds: [],
+    }),
+    updateChannelMemoryEntry: vi.fn().mockResolvedValue({ changed: false }),
+    removeChannelMemoryEntries: vi
+      .fn()
+      .mockResolvedValue({ changed: false, removed: [] }),
+    clearChannelMemory: vi.fn().mockResolvedValue({ changed: false }),
+  };
 }
 
 function message(
@@ -342,7 +360,7 @@ class TestableDwsChannel extends DwsChannel {
     );
   }
 
-  seedPendingMessages(count: number): void {
+  seedPendingMessages(count: number, separateConversations = false): void {
     this.cursor.pendingMessages = Array.from(
       { length: count },
       (_unused, index) => ({
@@ -351,7 +369,11 @@ class TestableDwsChannel extends DwsChannel {
           'user_im_message_receive_o2o_all',
           `parked-${index}`,
           `request ${index}`,
-          { conversationId: 'conversation-capacity' },
+          {
+            conversationId: separateConversations
+              ? `conversation-capacity-${index}`
+              : 'conversation-capacity',
+          },
         ),
       }),
     );
@@ -398,6 +420,30 @@ class TestableDwsChannel extends DwsChannel {
 
   inboundFailures(): unknown[] {
     return this.cursor.inboundFailures ?? [];
+  }
+
+  pendingMessageCapacityWaiterCount(): number {
+    return (
+      this as unknown as {
+        pendingMessageCapacityWaiters: Set<() => void>;
+      }
+    ).pendingMessageCapacityWaiters.size;
+  }
+
+  queuedDirectMessage(key: string): Promise<void> | undefined {
+    return (
+      this as unknown as {
+        queuedDirectMessages: Map<string, Promise<void>>;
+      }
+    ).queuedDirectMessages.get(key);
+  }
+
+  replaceQueuedDirectMessage(key: string, task: Promise<void>): void {
+    (
+      this as unknown as {
+        queuedDirectMessages: Map<string, Promise<void>>;
+      }
+    ).queuedDirectMessages.set(key, task);
   }
 }
 
@@ -500,9 +546,10 @@ async function readyPolicyChannel(
   client: FakeDwsClient,
   config = makeConfig(),
   name = 'policy-dws',
+  options?: ChannelBaseOptions,
 ): Promise<{ channel: PolicyDwsChannel; bridge: ChannelAgentBridge }> {
   const bridge = makeBridge();
-  const channel = new PolicyDwsChannel(name, config, bridge, undefined, client);
+  const channel = new PolicyDwsChannel(name, config, bridge, options, client);
   channels.push(channel);
   await channel.connect();
   return { channel, bridge };
@@ -1475,6 +1522,210 @@ describe('DwsChannel', () => {
     expect(bridge.prompt).toHaveBeenCalledTimes(2);
   });
 
+  it('preserves followup order while the first message is classified', async () => {
+    const client = new FakeDwsClient();
+    let finishClassification!: (result: {
+      intent: 'none';
+      confidence: number;
+    }) => void;
+    const classification = new Promise<{
+      intent: 'none';
+      confidence: number;
+    }>((resolve) => {
+      finishClassification = resolve;
+    });
+    const memoryIntentClassifier = {
+      classifyChannelMemoryIntent: vi
+        .fn()
+        .mockReturnValueOnce(classification)
+        .mockResolvedValue({ intent: 'none', confidence: 0.9 }),
+    };
+    const { bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({ dispatchMode: 'followup' }),
+      'classified-order-dws',
+      {
+        channelMemory: makeChannelMemory(),
+        memoryIntentClassifier,
+      },
+    );
+
+    const firstDelivery = client.emit(
+      1,
+      message(
+        'user_im_message_receive_o2o_all',
+        'classified-first',
+        'remember this please',
+        { conversationId: 'conversation-a' },
+      ),
+    );
+    await vi.waitFor(() =>
+      expect(
+        memoryIntentClassifier.classifyChannelMemoryIntent,
+      ).toHaveBeenCalledOnce(),
+    );
+    const secondDelivery = client.emit(
+      1,
+      message(
+        'user_im_message_receive_o2o_all',
+        'classified-second',
+        'what time is it',
+        { conversationId: 'conversation-a' },
+      ),
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(bridge.prompt).not.toHaveBeenCalled();
+    finishClassification({ intent: 'none', confidence: 0.9 });
+    await Promise.all([firstDelivery, secondDelivery]);
+    expect(
+      (bridge.prompt as ReturnType<typeof vi.fn>).mock.calls.map(
+        (call) => call[1] as string,
+      ),
+    ).toEqual([
+      expect.stringContaining('remember this please'),
+      expect.stringContaining('what time is it'),
+    ]);
+  });
+
+  it('caps concurrent direct-message replay dispatches', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    channel.seedPendingMessages(25, true);
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    channel.inboundHandler = async (envelope) => {
+      await blocked;
+      channel.inbound.push(envelope);
+    };
+
+    await channel.poll();
+    await vi.waitFor(() => expect(channel.inboundAttempts).toBe(16));
+    expect(channel.inboundAttempts).toBeLessThan(25);
+
+    release();
+    await vi.waitFor(() => expect(channel.pendingMessageIds()).toHaveLength(9));
+  });
+
+  it('clears queued direct messages when disconnected', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    channel.inboundHandler = async () => blocked;
+    const event = message(
+      'user_im_message_receive_o2o_all',
+      'disconnect-queued',
+      'request',
+    );
+    const key = `${event.conversationId}\0${event.messageId}`;
+
+    const delivery = client.emit(1, event);
+    await vi.waitFor(() =>
+      expect(channel.queuedDirectMessage(key)).toBeDefined(),
+    );
+    channel.disconnect();
+
+    expect(channel.queuedDirectMessage(key)).toBeUndefined();
+    release();
+    await delivery;
+  });
+
+  it('releases capacity-blocked admission when disconnected', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    channel.seedPendingMessages(5_000);
+
+    const delivery = client.emit(
+      1,
+      message(
+        'user_im_message_receive_o2o_all',
+        'disconnect-capacity',
+        'request',
+      ),
+    );
+    await vi.waitFor(() =>
+      expect(channel.pendingMessageCapacityWaiterCount()).toBe(1),
+    );
+    channel.disconnect();
+
+    await delivery;
+    expect(channel.pendingMessageCapacityWaiterCount()).toBe(0);
+  });
+
+  it('does not let an older task delete a replacement queue entry', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    channel.inboundHandler = async () => blocked;
+    const event = message(
+      'user_im_message_receive_o2o_all',
+      'replaced-queue-entry',
+      'request',
+    );
+    const key = `${event.conversationId}\0${event.messageId}`;
+    const delivery = client.emit(1, event);
+    await vi.waitFor(() =>
+      expect(channel.queuedDirectMessage(key)).toBeDefined(),
+    );
+    const replacement = new Promise<void>(() => undefined);
+    channel.replaceQueuedDirectMessage(key, replacement);
+
+    release();
+    await delivery;
+
+    expect(channel.queuedDirectMessage(key)).toBe(replacement);
+  });
+
+  it('reports one stream error for a failed live direct turn', async () => {
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      const client = new FakeDwsClient();
+      const channel = await readyChannel(client);
+      channel.inboundError = new Error('agent unavailable');
+      const stream = client.streams[1]!;
+      const result = stream.onMessage(
+        message(
+          'user_im_message_receive_o2o_all',
+          'single-live-error',
+          'request',
+        ),
+      );
+      if (!result || !('completed' in result)) {
+        throw new Error('Expected a detached direct-message dispatch.');
+      }
+      const admissionSucceeded = result.admitted.then(
+        () => true,
+        () => false,
+      );
+      void result.completed.catch(async (error: unknown) => {
+        if (await admissionSucceeded) {
+          stream.onError(
+            error instanceof Error ? error : new Error(String(error)),
+          );
+        }
+      });
+
+      await result.admitted;
+      await expect(result.completed).rejects.toThrow('agent unavailable');
+      await vi.waitFor(() => {
+        const errors = stderr.mock.calls
+          .map((call) => String(call[0]))
+          .filter((line) => line.includes('DWS direct messages stream error'));
+        expect(errors).toHaveLength(1);
+      });
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
   it('applies backpressure instead of evicting an admitted message', async () => {
     const client = new FakeDwsClient();
     const channel = await readyChannel(client);
@@ -1499,6 +1750,68 @@ describe('DwsChannel', () => {
       'new-request',
     ]);
     expect(channel.pendingMessageIds()).toHaveLength(4_999);
+  });
+
+  it('does not advance direct history past admission released by disconnect', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    const initialWatermark = channel.notificationWatermark()!;
+    channel.seedPendingMessages(5_000, true);
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    channel.inboundHandler = async (envelope) => {
+      await blocked;
+      channel.inbound.push(envelope);
+    };
+    const victim = message(
+      'user_im_message_receive_o2o_all',
+      'history-capacity-victim',
+      'request',
+      {
+        conversationId: 'history-victim',
+        eventTime: initialWatermark - 1_000,
+      },
+    );
+    client.directMessages = [victim];
+    const now = vi
+      .spyOn(Date, 'now')
+      .mockReturnValue(initialWatermark + 10_000);
+    try {
+      const poll = channel.poll();
+      await vi.waitFor(() =>
+        expect(channel.pendingMessageCapacityWaiterCount()).toBe(1),
+      );
+      channel.disconnect();
+      await poll;
+
+      expect(channel.notificationWatermark()).toBe(initialWatermark);
+
+      release();
+      await vi.waitFor(() =>
+        expect(channel.pendingMessageIds()).toHaveLength(4_984),
+      );
+      channel.inboundHandler = async (envelope) => {
+        channel.inbound.push(envelope);
+      };
+      client.listDirectMessages.mockClear();
+      await channel.connect();
+      await channel.poll();
+      await vi.waitFor(() =>
+        expect(
+          channel.inbound.some(
+            ({ messageId }) => messageId === 'history-capacity-victim',
+          ),
+        ).toBe(true),
+      );
+      expect(client.listDirectMessages.mock.calls[0]![0]).toBeLessThanOrEqual(
+        victim.eventTime!,
+      );
+    } finally {
+      release();
+      now.mockRestore();
+    }
   });
 
   it('does not acknowledge admission when cursor persistence fails', async () => {
@@ -4982,6 +5295,99 @@ describe('DwsChannel', () => {
     // And the watermark is free to move again, so the query window stops
     // growing and newer mentions are no longer starved behind this one.
     expect(channel.mentionWatermark()).toBeGreaterThan(0);
+  });
+
+  it('retains a failed ambient message when its parking save fails', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(
+      client,
+      makeConfig({ groups: { '*': { requireMention: false } } }),
+    );
+    channel.inboundError = new Error('agent unavailable');
+    channel.nextCursorSaveError = new Error('disk unavailable');
+    const event = message(
+      'user_im_message_receive_group_all',
+      'ambient-save-failure',
+      'please retry this group request',
+      { conversationId: 'cid-group' },
+    );
+
+    await expect(client.emit(1, event)).rejects.toThrow('agent unavailable');
+    expect(channel.pendingMessageIds()).toEqual(['ambient-save-failure']);
+    expect(channel.inboundFailures()).toEqual([
+      expect.objectContaining({ attempts: 1 }),
+    ]);
+
+    channel.inboundError = undefined;
+    await channel.poll();
+    expect(channel.inbound).toEqual([
+      expect.objectContaining({ messageId: 'ambient-save-failure' }),
+    ]);
+  });
+
+  it('keeps failed ambient parking behind the pending-message cap', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(
+      client,
+      makeConfig({ groups: { '*': { requireMention: false } } }),
+    );
+    channel.seedPendingMessages(5_000);
+    channel.inboundError = new Error('agent unavailable');
+    const event = message(
+      'user_im_message_receive_group_all',
+      'ambient-at-capacity',
+      'please retry this group request',
+      { conversationId: 'cid-group' },
+    );
+
+    const delivery = client.emit(1, event);
+    const failedDelivery =
+      expect(delivery).rejects.toThrow('agent unavailable');
+    await vi.waitFor(() =>
+      expect(channel.pendingMessageCapacityWaiterCount()).toBe(1),
+    );
+    expect(channel.pendingMessageIds()).toHaveLength(5_000);
+    expect(channel.pendingMessageIds()).not.toContain('ambient-at-capacity');
+
+    channel.releasePendingMessage('conversation-capacity', 'parked-0');
+    await failedDelivery;
+    expect(channel.pendingMessageIds()).toHaveLength(5_000);
+    expect(channel.pendingMessageIds()).toContain('ambient-at-capacity');
+  });
+
+  it('retains a failed ambient message across a disconnect', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(
+      client,
+      makeConfig({ groups: { '*': { requireMention: false } } }),
+    );
+    let rejectTurn!: (error: Error) => void;
+    const turn = new Promise<void>((_resolve, reject) => {
+      rejectTurn = reject;
+    });
+    channel.inboundHandler = async () => turn;
+    const event = message(
+      'user_im_message_receive_group_all',
+      'ambient-disconnect',
+      'please retry this group request',
+      { conversationId: 'cid-group' },
+    );
+
+    const delivery = client.emit(1, event);
+    await vi.waitFor(() => expect(channel.inboundAttempts).toBe(1));
+    channel.disconnect();
+    rejectTurn(new Error('agent unavailable'));
+    await expect(delivery).rejects.toThrow('agent unavailable');
+    expect(channel.pendingMessageIds()).toEqual(['ambient-disconnect']);
+
+    channel.inboundHandler = async (envelope) => {
+      channel.inbound.push(envelope);
+    };
+    await channel.connect();
+    await channel.poll();
+    expect(channel.inbound).toEqual([
+      expect.objectContaining({ messageId: 'ambient-disconnect' }),
+    ]);
   });
 
   it('replays a failed ambient group message after restart', async () => {

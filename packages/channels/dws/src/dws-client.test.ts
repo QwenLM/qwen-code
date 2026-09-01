@@ -554,6 +554,49 @@ describe('DwsClient', () => {
     );
   });
 
+  it('does not report completion after direct admission fails', async () => {
+    let onLine!: (line: string) => void | Promise<void>;
+    const eventStarter = vi.fn<DwsEventProcessStarter>(
+      async (_executable, _args, lineHandler) => {
+        onLine = lineHandler;
+        return subscription();
+      },
+    );
+    const client = new DwsClient(
+      { executable: '/opt/dws' },
+      vi.fn(),
+      eventStarter,
+    );
+    const onError = vi.fn();
+
+    await client.subscribeToIm(
+      { kind: 'direct' },
+      vi.fn(
+        (): DwsImDispatch => ({
+          admitted: Promise.reject(new Error('admission failed')),
+          completed: Promise.reject(new Error('completion failed')),
+        }),
+      ),
+      onError,
+    );
+
+    await expect(
+      onLine(
+        json({
+          type: 'user_im_message_receive_o2o_all',
+          event_id: 'event-1',
+          message_id: 'message-1',
+          conversation_id: 'conversation-a',
+          content: 'request',
+          sender_open_dingtalk_id: 'user-a',
+          sender: 'User A',
+        }),
+      ),
+    ).rejects.toThrow('admission failed');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(onError).not.toHaveBeenCalled();
+  });
+
   it('observes completion failure while direct admission is pending', async () => {
     let onLine!: (line: string) => void | Promise<void>;
     const eventStarter = vi.fn<DwsEventProcessStarter>(
