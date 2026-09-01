@@ -10738,6 +10738,71 @@ class QwenAgent implements Agent {
 
         return { language: resolvedLanguage, outputLanguage, refreshed };
       }
+      case SERVE_CONTROL_EXT_METHODS.userLanguage: {
+        // Sessionless counterpart of `sessionLanguage`. The daemon process
+        // already persisted `general.language` / `general.outputLanguage`
+        // and the global output-language.md before fanning out, so this
+        // handler performs no settings or file writes — doing them here
+        // would race the daemon and sibling runtimes on the shared user
+        // settings file. Project-bound output-language files are left
+        // alone: those sessions keep their override.
+        const language = params['language'];
+        const syncOutputLanguage = params['syncOutputLanguage'] === true;
+
+        const allowedLanguages = [
+          ...SUPPORTED_LANGUAGES.map((l) => l.code),
+          'auto',
+        ];
+        if (
+          typeof language !== 'string' ||
+          !allowedLanguages.includes(language)
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            `Invalid language; must be one of: ${allowedLanguages.join(', ')}`,
+          );
+        }
+
+        try {
+          await setLanguageAsync(language);
+        } catch (err) {
+          debugLogger.warn('setLanguageAsync failed:', err);
+          throw new RequestError(
+            -32603,
+            `Failed to switch UI language: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+
+        const resolvedLanguage = getCurrentLanguage();
+
+        // Pick up what the daemon just persisted so this process stops
+        // serving a stale merged view.
+        this.settings.reloadScopeFromDisk(SettingScope.User);
+
+        // UI-language-only switches do not change the system instruction;
+        // refresh sessions only when the output language moved.
+        let sessions = 0;
+        let failed = 0;
+        if (syncOutputLanguage) {
+          const allSessions = [...this.sessions.values()];
+          const results = await Promise.allSettled(
+            allSessions.map(async (s) => {
+              const cfg = s.getConfig();
+              await cfg.refreshHierarchicalMemory();
+              await cfg.getLlmClient()?.refreshSystemInstruction();
+            }),
+          );
+          sessions = results.length;
+          failed = results.filter((r) => r.status === 'rejected').length;
+          if (failed > 0) {
+            debugLogger.warn(
+              `User language refresh failed for ${failed}/${results.length} session(s)`,
+            );
+          }
+        }
+
+        return { language: resolvedLanguage, sessions, failed };
+      }
       case SERVE_CONTROL_EXT_METHODS.sessionRecap: {
         // Generate a one-sentence "where did I leave off" summary.
         // Best-effort: returns `null` on short history or model failure.

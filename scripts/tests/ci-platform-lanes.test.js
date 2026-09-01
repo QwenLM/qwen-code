@@ -72,7 +72,7 @@ const timeoutMinutesOn = (job, ubuntuRunner) => {
 };
 
 it('keeps the shared Linux test lane above its contention budget on ECS', () => {
-  expect(timeoutMinutesOn('test', ECS_RUNNER)).toBe(90);
+  expect(timeoutMinutesOn('test', ECS_RUNNER)).toBe(120);
 });
 
 it('keeps the shared Linux test lane on its pre-contention ceiling when hosted', () => {
@@ -426,6 +426,12 @@ describe('platform lanes — the retired sensitivity classifier', () => {
 });
 
 describe('GitHub helper tests', () => {
+  it('includes the disk-pressure contract suite', () => {
+    expect(ci.env.HELPER_TESTS).toContain(
+      '.github/scripts/ci-disk-pressure.test.mjs',
+    );
+  });
+
   it('runs every invocation serially', () => {
     const helperSteps = Object.values(ci.jobs)
       .flatMap((job) => job.steps ?? [])

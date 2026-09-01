@@ -49,6 +49,8 @@ const EN = {
   'session.createFailed': 'Failed to create a new session.',
   'session.loadError': 'Failed to load the Qwen Code session.',
   'session.switchTimeout': 'The conversation switch timed out. Try again.',
+  'permission.voteNotApplied':
+    'The approval decision could not be applied. It may have been resolved elsewhere.',
   'group.today': 'Today',
   'group.yesterday': 'Yesterday',
   'group.thisWeek': 'This Week',
@@ -129,6 +131,7 @@ const ZH: Record<ChromeStringKey, string> = {
   'session.createFailed': '创建新会话失败。',
   'session.loadError': '加载 Qwen Code 会话失败。',
   'session.switchTimeout': '会话切换超时，请重试。',
+  'permission.voteNotApplied': '审批决定未能应用，请求可能已在其他地方处理。',
   'group.today': '今天',
   'group.yesterday': '昨天',
   'group.thisWeek': '本周',

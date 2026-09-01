@@ -135,6 +135,7 @@ import type {
   PromptResult,
   SetModelResult,
   SetSessionLanguageResult,
+  SetUserLanguageResult,
   SessionMetadataResult,
   DaemonApprovalMode,
   DaemonApprovalModeResult,
@@ -5135,6 +5136,30 @@ export class DaemonClient {
   }
 
   /**
+   * Sessionless user-level language sync (`POST /language`). Succeeds with
+   * zero sessions, so hosts can switch language before creating one.
+   * Pre-flight `caps.features.includes('user_language_sync')` — daemons that
+   * predate the route or were built without settings persistence 404.
+   */
+  async setUserLanguage(
+    language: string,
+    opts?: { syncOutputLanguage?: boolean; clientId?: string },
+  ): Promise<SetUserLanguageResult> {
+    return await this.jsonRequest<SetUserLanguageResult>(
+      '/language',
+      'POST /language',
+      {
+        method: 'POST',
+        body: {
+          language,
+          syncOutputLanguage: opts?.syncOutputLanguage ?? false,
+        },
+        clientId: opts?.clientId,
+      },
+    );
+  }
+
+  /**
    * Send a prompt to the agent. Supports both blocking (legacy 200)
    * and non-blocking (202 + SSE `turn_complete`) daemon responses.
    *
@@ -5877,7 +5902,10 @@ export class DaemonClient {
    */
   async updateSessionMetadata(
     sessionId: string,
-    metadata: { displayName?: string; pr?: DaemonSessionPrInfo },
+    metadata: {
+      displayName?: string;
+      pr?: Omit<DaemonSessionPrInfo, 'issues'>;
+    },
     clientId?: string,
   ): Promise<SessionMetadataResult> {
     return await this.fetchWithTimeout(
@@ -6684,7 +6712,10 @@ export class WorkspaceDaemonClient {
 
   updateSessionMetadata(
     sessionId: string,
-    metadata: { displayName?: string; pr?: DaemonSessionPrInfo },
+    metadata: {
+      displayName?: string;
+      pr?: Omit<DaemonSessionPrInfo, 'issues'>;
+    },
     clientId?: string,
   ): Promise<SessionMetadataResult> {
     return this.client.workspaceJsonRequest<SessionMetadataResult>(

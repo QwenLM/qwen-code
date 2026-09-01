@@ -89,6 +89,8 @@ import {
   Storage,
   TrustGateError,
   readSessionPrs,
+  updateSessionPrStates,
+  writeSessionPrs,
   upsertSessionPr,
   type Extension,
   type ExtensionInstallMetadata,
@@ -101,6 +103,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import * as qwenCore from '@qwen-code/qwen-code-core';
 import type { DaemonStatusProvider } from '@qwen-code/acp-bridge';
+import { BridgeTimeoutError } from '@qwen-code/acp-bridge/status';
 import {
   CancelSentinelCollisionError,
   InvalidClientIdError,
@@ -775,6 +778,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'writer_idle_timeout',
   'non_blocking_prompt',
   'session_language',
+  'user_language_sync',
   'session_rewind',
   'workspace_hooks',
   'session_hooks',
@@ -3080,7 +3084,11 @@ describe('createServeApp', () => {
           );
           continue;
         }
-        if (feature === 'workspace_settings' || feature === 'workspace_voice') {
+        if (
+          feature === 'workspace_settings' ||
+          feature === 'workspace_voice' ||
+          feature === 'user_language_sync'
+        ) {
           expect(predicate({ persistSettingAvailable: true })).toBe(true);
           expect(predicate({ persistSettingAvailable: false })).toBe(false);
           expect(predicate({})).toBe(false);
@@ -11829,6 +11837,105 @@ describe('createServeApp', () => {
   });
 
   describe('POST /session', () => {
+    it('returns a typed safe-retry error when channel initialization times out', async () => {
+      const bridge = fakeBridge({
+        spawnImpl: async () => {
+          throw new BridgeTimeoutError('initialize', 10_000);
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+
+      const res = await request(app)
+        .post('/session')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ cwd: WS_BOUND });
+
+      expect(res.status).toBe(504);
+      expect(res.headers['retry-after']).toBe('5');
+      expect(res.body).toEqual({
+        error: 'AcpSessionBridge initialize timed out after 10000ms',
+        code: 'init_timeout',
+        errorKind: 'init_timeout',
+        retryable: true,
+        sideEffectPossible: false,
+        phase: 'channel.initialize',
+        timeoutMs: 10_000,
+      });
+    });
+
+    it('does not promise sideEffectPossible:false when a branch body mutated git first', async () => {
+      // The safe-retry contract is scoped to plain creation: a `branch`
+      // body runs createBranch (moving the shared HEAD) BEFORE the channel
+      // initialize handshake, and the rollback on failure is best-effort.
+      // The init-timeout response must not tell a contract-trusting client
+      // that no side effect is possible.
+      const bridge = fakeBridge({
+        spawnImpl: async () => {
+          throw new BridgeTimeoutError('initialize', 10_000);
+        },
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      mockWt.impl = () => ({
+        isGitRepository: () => Promise.resolve(true),
+        getCurrentBranch: () => Promise.resolve('main'),
+      });
+      mockBranchOps.branchExists = () => Promise.resolve(false);
+      mockBranchOps.isDirtyTree = () => Promise.resolve(false);
+      mockBranchOps.getHeadCommit = () => Promise.resolve('a'.repeat(40));
+
+      try {
+        const res = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ cwd: WS_BOUND, branch: { name: 'feat/x' } });
+
+        expect(res.status).toBe(504);
+        expect(res.headers['retry-after']).toBeUndefined();
+        expect(res.body.code).toBe('init_timeout');
+        expect(res.body.phase).toBe('channel.initialize');
+        expect(res.body.timeoutMs).toBe(10_000);
+        expect(res.body.retryable).toBeUndefined();
+        expect(res.body.sideEffectPossible).toBeUndefined();
+      } finally {
+        mockWt.impl = undefined;
+        mockBranchOps.branchExists = undefined;
+        mockBranchOps.isDirtyTree = undefined;
+        mockBranchOps.getHeadCommit = undefined;
+      }
+    });
+
+    it('maps the newSession dispatch timeout to its own retryable init_timeout contract', async () => {
+      // `newSession` is the label on the dispatch that follows a successful
+      // initialize: a timeout there leaves the session-creation outcome
+      // ambiguous, but the daemon still classifies it as `init_timeout`
+      // with a budget-derived Retry-After so fail-closed clients can back
+      // off without treating it as an unrecoverable server error.
+      const bridge = fakeBridge({
+        spawnImpl: async () => {
+          throw new BridgeTimeoutError('newSession', 10_000);
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+
+      const res = await request(app)
+        .post('/session')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ cwd: WS_BOUND });
+
+      expect(res.status).toBe(504);
+      expect(res.headers['retry-after']).toBe('10');
+      expect(res.body.code).toBe('init_timeout');
+      expect(res.body.errorKind).toBe('init_timeout');
+      expect(res.body.retryable).toBe(true);
+      expect(res.body.timeoutMs).toBe(10_000);
+      expect(res.body.phase).toBeUndefined();
+      expect(res.body.sideEffectPossible).toBeUndefined();
+    });
+
     it('200 when cwd is omitted (falls back to bound workspace, #3803 §02)', async () => {
       // Legacy primary compatibility: clients may omit `cwd`, in which case
       // the route falls back to `opts.workspace ?? process.cwd()`.
@@ -16746,6 +16853,18 @@ describe('createServeApp', () => {
         url: 'https://github.com/o/r/pull/9517',
         state: 'merged',
       });
+      // The issue snapshot is likewise sweep-written and sidecar-only.
+      const issues = [
+        {
+          number: 7,
+          url: 'https://github.com/o/r/issues/7',
+          state: 'completed' as const,
+        },
+      ];
+      await updateSessionPrStates(
+        sidecarPath,
+        new Map([[9517, { url: 'https://github.com/o/r/pull/9517', issues }]]),
+      );
       // The TTL cache would otherwise keep serving a scan taken before this
       // test's sidecar write.
       invalidateWorkspaceSessionListCache({
@@ -16780,6 +16899,190 @@ describe('createServeApp', () => {
           number: 9517,
           url: 'https://github.com/o/r/pull/9517',
           state: 'merged',
+          issues,
+        },
+      ]);
+    });
+
+    it('does not attach the sidecar snapshot to a live re-bind of another repository', async () => {
+      // Both bind paths mutate the live entry before the sidecar write, so a
+      // list built in that window still reads the previous binding's
+      // sidecar; matched by number alone, repo-a's issues would ride onto
+      // repo-b's same-numbered PR.
+      const id = '550e8400-e29b-41d4-a716-44665544a006';
+      await writeStoredSession({
+        sessionId: id,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:00:00.000Z',
+        prompt: 'stored prompt',
+        mtime: new Date('2026-05-17T12:00:05.000Z'),
+      });
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(id, 'active');
+      await fsp.rm(sidecarPath, { force: true });
+      await upsertSessionPr(sidecarPath, {
+        number: 42,
+        url: 'https://github.com/repo-a/o/pull/42',
+        state: 'merged',
+      });
+      await updateSessionPrStates(
+        sidecarPath,
+        new Map([
+          [
+            42,
+            {
+              url: 'https://github.com/repo-a/o/pull/42',
+              issues: [
+                { number: 7, url: 'https://github.com/repo-a/o/issues/7' },
+              ],
+            },
+          ],
+        ]),
+      );
+      invalidateWorkspaceSessionListCache({
+        runtimeBaseDir: new Storage(WS_BOUND).getRuntimeBaseDir(),
+        workspaceCwd: WS_BOUND,
+        archiveStates: ['active'],
+      });
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: id,
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+            prs: [{ number: 42, url: 'https://github.com/repo-b/o/pull/42' }],
+          },
+        ],
+      });
+
+      const result = await listWorkspaceSessionsForResponse(bridge, WS_BOUND);
+
+      const merged = result.sessions.find((s) => s.sessionId === id);
+      expect(merged?.prs).toEqual([
+        { number: 42, url: 'https://github.com/repo-b/o/pull/42' },
+      ]);
+    });
+
+    it('inherits the sidecar snapshot across a canonical-equal url spelling', async () => {
+      // The live entry may spell the same PR with a query or trailing
+      // slash; the gate compares canonical urls, not bytes.
+      const id = '550e8400-e29b-41d4-a716-44665544a008';
+      await writeStoredSession({
+        sessionId: id,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:00:00.000Z',
+        prompt: 'stored prompt',
+        mtime: new Date('2026-05-17T12:00:05.000Z'),
+      });
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(id, 'active');
+      const issues = [{ number: 7, url: 'https://github.com/o/r/issues/7' }];
+      await writeSessionPrs(sidecarPath, [
+        {
+          number: 9517,
+          url: 'https://github.com/o/r/pull/9517',
+          createdAt: '2026-05-17T12:00:01.000Z',
+          state: 'merged',
+          issues,
+        },
+      ]);
+      invalidateWorkspaceSessionListCache({
+        runtimeBaseDir: new Storage(WS_BOUND).getRuntimeBaseDir(),
+        workspaceCwd: WS_BOUND,
+        archiveStates: ['active'],
+      });
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: id,
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+            prs: [
+              {
+                number: 9517,
+                url: 'https://github.com/o/r/pull/9517?v=2',
+                state: 'open' as const,
+              },
+            ],
+          },
+        ],
+      });
+
+      const result = await listWorkspaceSessionsForResponse(bridge, WS_BOUND);
+
+      const merged = result.sessions.find((s) => s.sessionId === id);
+      expect(merged?.prs).toEqual([
+        {
+          number: 9517,
+          url: 'https://github.com/o/r/pull/9517?v=2',
+          state: 'merged',
+          issues,
+        },
+      ]);
+    });
+
+    it('attaches the snapshot of the url-matched entry, not a same-numbered duplicate', async () => {
+      // A hand-edited sidecar can hold two entries with one number (the
+      // reader validates shape, not uniqueness); the live binding must find
+      // its own entry by url, not whichever one comes last.
+      const id = '550e8400-e29b-41d4-a716-44665544a007';
+      await writeStoredSession({
+        sessionId: id,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:00:00.000Z',
+        prompt: 'stored prompt',
+        mtime: new Date('2026-05-17T12:00:05.000Z'),
+      });
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(id, 'active');
+      const issues = [
+        { number: 7, url: 'https://github.com/repo-a/o/issues/7' },
+      ];
+      await writeSessionPrs(sidecarPath, [
+        {
+          number: 42,
+          url: 'https://github.com/repo-a/o/pull/42',
+          createdAt: '2026-05-17T12:00:01.000Z',
+          state: 'merged',
+          issues,
+        },
+        {
+          number: 42,
+          url: 'https://github.com/repo-b/o/pull/42',
+          createdAt: '2026-05-17T12:00:02.000Z',
+        },
+      ]);
+      invalidateWorkspaceSessionListCache({
+        runtimeBaseDir: new Storage(WS_BOUND).getRuntimeBaseDir(),
+        workspaceCwd: WS_BOUND,
+        archiveStates: ['active'],
+      });
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: id,
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+            prs: [{ number: 42, url: 'https://github.com/repo-a/o/pull/42' }],
+          },
+        ],
+      });
+
+      const result = await listWorkspaceSessionsForResponse(bridge, WS_BOUND);
+
+      const merged = result.sessions.find((s) => s.sessionId === id);
+      expect(merged?.prs).toEqual([
+        {
+          number: 42,
+          url: 'https://github.com/repo-a/o/pull/42',
+          state: 'merged',
+          issues,
         },
       ]);
     });
@@ -22418,6 +22721,69 @@ describe('createServeApp', () => {
         .send({ language: 'zh' });
       expect(res.status).toBe(500);
       expect(res.body).toMatchObject({ error: expect.any(String) });
+    });
+  });
+
+  describe('POST /language', () => {
+    it('accepts a client id known only to a secondary runtime', async () => {
+      const primaryBridge = Object.assign(fakeBridge(), {
+        setUserLanguage: vi.fn().mockResolvedValue({
+          language: 'zh',
+          sessions: 0,
+          failed: 0,
+        }),
+      });
+      const secondaryBridge = Object.assign(
+        fakeBridge({ knownClientIds: ['secondary-client'] }),
+        {
+          setUserLanguage: vi.fn().mockResolvedValue({
+            language: 'zh',
+            sessions: 0,
+            failed: 0,
+          }),
+        },
+      );
+      const workspaceRegistry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'primary-id',
+          workspaceCwd: WS_BOUND,
+          primary: true,
+          bridge: primaryBridge,
+        }),
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'secondary-id',
+          workspaceCwd: '/workspace/secondary',
+          primary: false,
+          bridge: secondaryBridge,
+        }),
+      ]);
+      const app = createServeApp(baseOpts, undefined, {
+        bridge: primaryBridge,
+        workspaceRegistry,
+        persistSetting: vi.fn().mockResolvedValue(undefined),
+      });
+
+      const res = await request(app)
+        .post('/language')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('X-Qwen-Client-Id', 'secondary-client')
+        .send({ language: 'zh' });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({ language: 'zh' });
+    });
+
+    it('is not registered when settings persistence is unavailable', async () => {
+      const app = createServeApp(baseOpts, undefined, {
+        bridge: fakeBridge(),
+      });
+
+      const res = await request(app)
+        .post('/language')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ language: 'zh' });
+
+      expect(res.status).toBe(404);
     });
   });
 

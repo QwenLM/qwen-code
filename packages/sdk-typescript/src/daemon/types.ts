@@ -709,6 +709,12 @@ export interface DaemonStatusReport {
     writerIdleTimeoutMs: number | null;
     channelIdleTimeoutMs: number;
     sessionIdleTimeoutMs: number;
+    /**
+     * Grace period after a prompt settles before an otherwise-idle session may
+     * be auto-closed, in ms. `0` means the feature is disabled and the session
+     * closes immediately. Additive — older daemons omit this field.
+     */
+    sessionPromptSettledCloseGraceMs?: number;
     acpConnectionCap: number | null;
     acpPreAttachMaxFramesPerStream?: number | null;
     acpPreAttachMaxFramesPerConnection?: number | null;
@@ -1046,6 +1052,18 @@ export interface DaemonSessionPrInfo {
   url: string;
   /** Snapshot of the PR's state at last bind/refresh; optional. */
   state?: 'open' | 'merged' | 'closed';
+  /**
+   * Issues the PR closes (its GitHub closing references), derived by the
+   * daemon's refresh sweep; absent until the first sweep after binding.
+   */
+  issues?: DaemonSessionIssueInfo[];
+}
+
+export interface DaemonSessionIssueInfo {
+  number: number;
+  url: string;
+  /** Snapshot of the issue's state at last refresh; optional. */
+  state?: 'open' | 'completed' | 'not_planned';
 }
 
 /** Returned from `POST /session`. */
@@ -2989,6 +3007,25 @@ export interface SetSessionLanguageResult {
   language: string;
   outputLanguage: string | null;
   refreshed: boolean;
+}
+
+/**
+ * Returned from `POST /language` (capability `user_language_sync`). The
+ * sessionless user-level sync succeeds with zero sessions; the `refresh`
+ * summary reports the best-effort runtime fan-out.
+ */
+export interface SetUserLanguageResult {
+  language: string;
+  /** Resolved output language, or `null` when `syncOutputLanguage` was false. */
+  outputLanguage: string | null;
+  refresh: {
+    /** Runtimes that applied the switch over a live channel. */
+    runtimes: number;
+    /** Sessions attempted (per-session failures are counted in `failed`). */
+    sessions: number;
+    /** Session-level refresh failures plus failed runtimes. */
+    failed: number;
+  };
 }
 
 /**
