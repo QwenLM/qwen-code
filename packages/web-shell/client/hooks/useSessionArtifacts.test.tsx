@@ -278,6 +278,39 @@ describe('useSessionArtifacts', () => {
     });
   });
 
+  it.each([
+    {
+      name: 'keeps the first id when a follow-up is queued',
+      initialId: undefined,
+      activeIds: ['turn-1', 'queued-turn-2'],
+    },
+    {
+      name: 'reuses the original id for a retry',
+      initialId: 'turn-1',
+      activeIds: [],
+    },
+  ])('$name', async ({ initialId, activeIds }) => {
+    sdkMock.activeTurnId = initialId;
+    sdkMock.actions.loadArtifacts.mockResolvedValue({ artifacts: [] });
+    await renderHookHost();
+    await consumeReady();
+
+    sdkMock.promptStatus = 'streaming';
+    await rerenderHookHost();
+    for (const turnId of activeIds) {
+      sdkMock.activeTurnId = turnId;
+      await rerenderHookHost();
+    }
+    sdkMock.promptStatus = 'idle';
+    await rerenderHookHost();
+
+    expect(latestState?.ready).toMatchObject({
+      reason: 'turn_complete',
+      sequence: 2,
+      turnId: 'turn-1',
+    });
+  });
+
   it('preserves an in-flight turn when deferred creation replaces its owner', async () => {
     sdkMock.connection = {
       status: 'connected',
