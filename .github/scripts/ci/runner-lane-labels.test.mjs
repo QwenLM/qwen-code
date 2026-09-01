@@ -80,10 +80,10 @@ const PLATFORM_LABELS = new Set(['self-hosted', 'linux', 'x64', 'windows']);
 // `ecs-update-*` registration per host). Valid beside self-hosted, but they
 // are not lanes: nothing routes ordinary work to them, so they are accepted
 // without feeding the referenced-lane accounting.
-const MAINTENANCE_LABEL = /^ecs-update-/i;
+const MAINTENANCE_LABEL = /^ecs-update-[A-Za-z0-9-]+$/i;
 
 // GitHub-hosted runner images; outside this guard's jurisdiction.
-const HOSTED_LABEL = /^(ubuntu|windows|macos)-/i;
+const HOSTED_LABEL = /^(ubuntu|windows|macos)-[A-Za-z0-9._-]+$/i;
 
 const workflowFiles = readdirSync(workflowsDir)
   .filter((name) => name.endsWith('.yml') || name.endsWith('.yaml'))
@@ -103,25 +103,16 @@ const workflowFiles = readdirSync(workflowsDir)
 function runnerSetAssignments(text) {
   return [
     ...text.matchAll(
-      /^\s*[A-Za-z_][A-Za-z0-9_]*=(['"])(\[[^\n]*?\])\1\s*(?:#.*)?$/gm,
+      /^\s*([A-Za-z_][A-Za-z0-9_]*)=(['"])(\[[^\n]*?\])\2\s*(?:#.*)?$/gm,
     ),
-  ].map((m) => m[2]);
+  ].map((m) => ({ name: m[1], raw: m[3] }));
 }
 
-// Extracts the JSON-ish label arrays embedded in a GitHub expression, e.g.
-// both arms of
-//   ${{ cond && fromJSON('["self-hosted", "linux", "x64", "ecs-qwen"]')
-//            || fromJSON('["ubuntu-latest"]') }}
-// Returns null when the expression embeds no array at all.
-function embeddedArrays(expr) {
-  const groups = [...expr.matchAll(/\[[^[\]]*\]/g)].map((m) => m[0]);
-  if (groups.length === 0) {
-    return null;
-  }
-  return groups.map((g) => {
-    const tokens = [...g.matchAll(/["']([^"']+)["']/g)].map((m) => m[1]);
-    return { raw: g, tokens };
-  });
+// Quoted labels inside a bracketed literal. `*` (not `+`): an empty ""
+// label must surface as an empty token and fail the set rules the way the
+// direct-array spelling does, not vanish from the set.
+function bracketTokens(raw) {
+  return [...raw.matchAll(/["']([^"']*)["']/g)].map((m) => m[1]);
 }
 
 // Splits a GitHub expression body on top-level `||`, then takes the LAST
@@ -130,7 +121,10 @@ function embeddedArrays(expr) {
 // preceding `&&` operands are conditions (whose quoted scalars, e.g. the
 // `!= 'true'` comparisons in ci.yml's classify_pr, are operands of the
 // condition, not labels, and must not be judged). Quote state honors the
-// GitHub-expression `''` escape; parens/brackets nest.
+// GitHub-expression `''` escape; parens/brackets nest. For each || part
+// every operand that can BE the value is judged; stripping a parenthesized
+// value's parens re-exposes top-level operators, so recurse until each arm
+// is operator-free.
 function valueArms(body) {
   const parts = [[]];
   let depth = 0;
@@ -179,11 +173,6 @@ function valueArms(body) {
     }
   }
   arms.push(current);
-  // For each || part every operand that can BE the value is judged: the
-  // last && operand always, and for a parenthesized (a || b) value, both
-  // alternatives — GitHub's truthy-first || can route either. Stripping
-  // the parens re-exposes top-level operators, so recurse until each arm
-  // is operator-free.
   const out = [];
   for (const ops of arms) {
     let v = ops[ops.length - 1].trim();
@@ -281,6 +270,27 @@ function laneTestPlan(file, text) {
   // A full set of concrete labels, ready for the registry rules.
   function checkSet(labels, origin) {
     const lc = labels.map((l) => String(l).toLowerCase());
+    // An empty set matches no runner (and classified nothing) — vouching it
+    // would contradict the fail-closed contract outright.
+    if (lc.length === 0) {
+      problem(
+        `${file}: ${origin} is an empty label set`,
+        `an empty label set matches no runner; the job queues forever ` +
+          `with no error.`,
+      );
+      return;
+    }
+    // A label containing a comma or a quote can never match a registered
+    // label; it is one unmatchable string, whatever prefix it starts with.
+    const unmatchable = labels.filter((l) => /[,'"]/.test(String(l)));
+    if (unmatchable.length > 0) {
+      problem(
+        `${file}: ${origin} has an unmatchable label`,
+        `[${unmatchable.join('; ')}] can never match a runner label — ` +
+          `the job queues forever with no error.`,
+      );
+      return;
+    }
     // GitHub routes a self-hosted job only to runners carrying EVERY listed
     // label, and no runner carries two operating systems — a copy-edit that
     // adds the new OS label without removing the old produces a set no
@@ -419,55 +429,107 @@ function laneTestPlan(file, text) {
           }
           const call = arm.match(/^fromJSON\(([\s\S]*)\)$/);
           if (call) {
-            // The whole arm is one fromJSON(...) call. Judge every literal
-            // array inside it — both the routing conditionals' arms and the
-            // `needs.… || '["ubuntu-latest"]'` consumer shape, whose
-            // indirection is checked at its assembly site (pick_runner scan).
-            // No exemptions: condition operands never reach this loop (the
-            // arm split excludes them), so an all-caps array HERE is a lane
-            // request and is judged like any other.
-            const arrays = embeddedArrays(call[1]);
-            if (arrays === null) {
-              problem(
-                `${file}: ${origin} has an array-less fromJSON arm`,
-                `'${arm}' builds the runner set from no literal array this ` +
-                  `guard can read — it fails closed.`,
-              );
-              continue;
-            }
-            // An indirect operand beside the literals (the
-            // `needs.…outputs.… || '["ubuntu-latest"]'` consumer shape) is
-            // vouched only by the producer assignment the assembly scan
-            // found in this same file. Accepting it on faith would let a
-            // producer written in any shape the scan cannot read ship an
-            // unregistered lane behind a green guard.
-            const residue = stripQuotesAndParens(
-              call[1].replace(/\[[^[\]]*\]/g, ''),
-            ).replace(/\|\||&&|\s/g, '');
-            if (
-              /[A-Za-z_]/.test(residue) &&
-              selfHostedAssemblies.length === 0
-            ) {
-              problem(
-                `${file}: ${origin} consumes a runner set with no checkable producer`,
-                `'${arm}' reads an indirect operand, but this file has no ` +
-                  `runner-set assignment the assembly scan can vouch for — ` +
-                  `the lane behind the indirection is unchecked, so the ` +
-                  `guard fails closed. Assemble the set as a whole-line ` +
-                  `VAR='["…"]' assignment (single or double quotes).`,
-              );
-              continue;
-            }
-            for (const { raw, tokens } of arrays) {
-              if (tokens.length === 0) {
-                problem(
-                  `${file}: ${origin} embeds an unquoted array`,
-                  `${raw} inside the expression has no quoted labels the ` +
-                    `guard can read.`,
-                );
+            // Classify every operand fromJSON can evaluate — the || parts
+            // of the call body, parens stripped by valueArms. Each operand
+            // must be one of: a quoted array literal (judged as a label
+            // set), a needs-output reference RESOLVED BY NAME to a producer
+            // assignment in this file, or a matrix./env. reference resolved
+            // to its in-file value. Anything else — format(), toJSON(), a
+            // reference the scan cannot resolve — fails closed. Judging by
+            // name (not "some assembly exists") is the point: a producer
+            // written in a shape the scan cannot read must turn the
+            // consumer red, not ride on an unrelated assembly.
+            for (const operand of valueArms(call[1])) {
+              const lit =
+                operand.match(/^'((?:[^']|'')*)'$/) ??
+                operand.match(/^"([^"]*)"$/);
+              if (lit) {
+                const inner = lit[1].replaceAll("''", "'").trim();
+                if (!inner.startsWith('[') || !inner.endsWith(']')) {
+                  problem(
+                    `${file}: ${origin} feeds fromJSON a non-array literal`,
+                    `'${inner}' is not a JSON label array — fromJSON of ` +
+                      `this cannot be a runner set the guard can vouch for.`,
+                  );
+                  continue;
+                }
+                const tokens = bracketTokens(inner);
+                if (tokens.length === 0 && inner.slice(1, -1).trim() !== '') {
+                  problem(
+                    `${file}: ${origin} embeds an unquoted array`,
+                    `${inner} has no quoted labels the guard can read.`,
+                  );
+                  continue;
+                }
+                checkSet(tokens, `${origin} → ${inner}`);
                 continue;
               }
-              checkSet(tokens, `${origin} → ${raw}`);
+              const needsRef = operand.match(
+                /^needs\.[A-Za-z0-9_-]+\.outputs\.([A-Za-z0-9_-]+)$/,
+              );
+              if (needsRef) {
+                const producers = assemblies.filter(
+                  (a) => a.name === needsRef[1],
+                );
+                if (producers.length === 0) {
+                  problem(
+                    `${file}: ${origin} consumes a runner set with no checkable producer`,
+                    `'${operand}' reads output '${needsRef[1]}', but this ` +
+                      `file has no whole-line ${needsRef[1]}='["…"]' ` +
+                      `assignment the assembly scan can vouch for — the ` +
+                      `lane behind the indirection is unchecked, so the ` +
+                      `guard fails closed.`,
+                  );
+                  continue;
+                }
+                for (const a of producers) {
+                  judgeAssembly(a, ` (consumed by ${origin})`);
+                }
+                continue;
+              }
+              const opRef =
+                operand.match(/^matrix\.([A-Za-z0-9_-]+)$/) ??
+                operand.match(/^env\.([A-Za-z0-9_-]+)$/);
+              if (opRef) {
+                const resolved = operand.startsWith('matrix.')
+                  ? matrixValues(job, opRef[1])
+                  : (() => {
+                      const v = envValue(doc, job, opRef[1]);
+                      return v === null ? null : [v];
+                    })();
+                if (resolved === null) {
+                  problem(
+                    `${file}: ${origin} is an unresolvable expression`,
+                    `'${operand}' resolves to nothing defined in this file ` +
+                      `— the guard cannot vouch for the operand, so it ` +
+                      `fails closed.`,
+                  );
+                  continue;
+                }
+                for (const v of resolved) {
+                  if (Array.isArray(v)) {
+                    checkSet(v, `${origin} (${operand})`);
+                  } else if (String(v).trim().startsWith('[')) {
+                    checkSet(
+                      bracketTokens(String(v)),
+                      `${origin} (${operand} = ${v})`,
+                    );
+                  } else {
+                    problem(
+                      `${file}: ${origin} feeds fromJSON a non-array value`,
+                      `'${operand}' resolves to '${v}', which is not a ` +
+                        `JSON label array.`,
+                    );
+                  }
+                }
+                continue;
+              }
+              problem(
+                `${file}: ${origin} has an unreadable fromJSON operand`,
+                `'${operand}' is neither a quoted array literal, a ` +
+                  `needs-output reference, nor a matrix./env. reference ` +
+                  `this guard can resolve — it fails closed.`,
+              );
             }
             continue;
           }
@@ -533,13 +595,21 @@ function laneTestPlan(file, text) {
     return null;
   }
 
-  // Computed up front so a consumer arm (fromJSON over an indirect operand)
-  // can require a checkable producer in the same file.
-  const selfHostedAssemblies = runnerSetAssignments(text).filter((raw) =>
-    [...raw.matchAll(/["']([^"']+)["']/g)].some(
-      (m) => m[1].toLowerCase() === 'self-hosted',
-    ),
-  );
+  // Computed up front so a consumer arm (fromJSON over a needs-output
+  // operand) can resolve the referenced output NAME to a producing
+  // assignment in this same file. Assemblies carrying self-hosted are
+  // always judged; a hosted-only or empty assembly is judged when (and
+  // only when) a consumer names it — an unconsumed hosted assignment in
+  // some script is not this guard's jurisdiction.
+  const assemblies = runnerSetAssignments(text);
+  const judgedAssemblies = new Set();
+  function judgeAssembly(a, why) {
+    if (judgedAssemblies.has(a)) {
+      return;
+    }
+    judgedAssemblies.add(a);
+    checkSet(bracketTokens(a.raw), `runner-set assignment ${a.raw}${why}`);
+  }
 
   let doc;
   try {
@@ -571,9 +641,10 @@ function laneTestPlan(file, text) {
     checkValue(runsOn, job, `jobs.${jobName}.runs-on`);
   }
 
-  for (const raw of selfHostedAssemblies) {
-    const tokens = [...raw.matchAll(/["']([^"']+)["']/g)].map((m) => m[1]);
-    checkSet(tokens, `runner-set assignment ${raw}`);
+  for (const a of assemblies) {
+    if (bracketTokens(a.raw).some((l) => l.toLowerCase() === 'self-hosted')) {
+      judgeAssembly(a, '');
+    }
   }
 
   return { problems, lanes, oks };
@@ -619,11 +690,14 @@ describe('self-hosted runs-on labels', () => {
 
   it('the pick_runner assembly in ci.yml still matches the scanned shape', () => {
     const text = readFileSync(join(workflowsDir, 'ci.yml'), 'utf8');
-    const selfHosted = runnerSetAssignments(text).filter((raw) =>
-      /self-hosted/i.test(raw),
+    const selfHosted = runnerSetAssignments(text).filter((a) =>
+      /self-hosted/i.test(a.raw),
     );
+    assert.ok(selfHosted.length >= 2);
+    // The consumers read `ubuntu_runner`; the scan must see the producer
+    // under that exact name or the by-name resolution is checking nothing.
     assert.ok(
-      selfHosted.length >= 2,
+      selfHosted.every((a) => a.name === 'ubuntu_runner'),
       `expected the two pick_runner assignments to match the assignment ` +
         `scan; found ${selfHosted.length}. If they were re-quoted or ` +
         `reshaped, update runnerSetAssignments so the main CI routing lane ` +
@@ -838,6 +912,94 @@ describe('laneTestPlan fail-closed behavior', () => {
     assert.match(blob(problems[0]), /not a registered lane/);
   });
 
+  // R7 pins. The consumer vouch is BY NAME: an assembly under a different
+  // variable cannot vouch for the consumed output.
+  const unrelatedProducer = `    steps:\n      - run: |-\n          gpu_runner='["self-hosted", "linux", "x64", "ecs-qwen"]'\n`;
+
+  it('fails closed when only an unrelated-name assembly exists', () => {
+    const { problems } = laneTestPlan(
+      'probe.yml',
+      wrap(consumer, unrelatedProducer),
+    );
+    assert.equal(problems.length, 1);
+    assert.match(blob(problems[0]), /no checkable producer/);
+  });
+
+  it('strips operand parens before classifying (no gate bypass)', () => {
+    const { problems } = laneTestPlan(
+      'probe.yml',
+      wrap(
+        `'\${{ fromJSON((needs.classify_pr.outputs.ubuntu_runner) || ''["ubuntu-latest"]'') }}'`,
+      ),
+    );
+    assert.equal(problems.length, 1);
+    assert.match(blob(problems[0]), /no checkable producer/);
+  });
+
+  it('resolves an env operand and judges its lane', () => {
+    const { problems } = laneTestPlan(
+      'probe.yml',
+      `env:\n  RUNNER_SET: '["self-hosted", "linux", "x64", "ecs-invented"]'\n` +
+        wrap(
+          `'\${{ fromJSON(env.RUNNER_SET || ''["ubuntu-latest"]'') }}'`,
+          unrelatedProducer,
+        ),
+    );
+    assert.equal(problems.length, 1);
+    assert.match(blob(problems[0]), /not a registered lane/);
+  });
+
+  it('fails closed on a computed fromJSON operand', () => {
+    const { problems } = laneTestPlan(
+      'probe.yml',
+      wrap(
+        `'\${{ fromJSON(format(''["self-hosted", {0}, "x64", "ecs-qwen"]'', ''"linux"'')) }}'`,
+        unrelatedProducer,
+      ),
+    );
+    assert.equal(problems.length, 1);
+    assert.match(blob(problems[0]), /unreadable fromJSON operand/);
+  });
+
+  // R7-1: prefix exemptions are end-anchored; a comma'd string is one
+  // unmatchable label, never an exemption.
+  it("catches a comma'd hosted scalar", () => {
+    const { problems } = laneTestPlan('probe.yml', wrap(`ubuntu-latest, evil`));
+    assert.equal(problems.length, 1);
+    assert.match(blob(problems[0]), /single non-hosted label/);
+  });
+
+  it("catches a comma'd hosted array element", () => {
+    const { problems } = laneTestPlan(
+      'probe.yml',
+      wrap(`['ubuntu-latest, evil']`),
+    );
+    assert.equal(problems.length, 1);
+    assert.match(blob(problems[0]), /unmatchable label/);
+  });
+
+  it("catches a comma'd maintenance label", () => {
+    const { problems } = laneTestPlan(
+      'probe.yml',
+      wrap(`['self-hosted', 'linux', 'x64', 'ecs-update-sg, evil']`),
+    );
+    assert.equal(problems.length, 1);
+    assert.match(blob(problems[0]), /unmatchable label/);
+  });
+
+  // RA-3: an empty "" label must fail like the direct-array spelling does,
+  // not vanish from the extracted set.
+  it('keeps an empty-string label visible in a fromJSON arm', () => {
+    const { problems } = laneTestPlan(
+      'probe.yml',
+      wrap(
+        `'\${{ fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen", ""]'') }}'`,
+      ),
+    );
+    assert.equal(problems.length, 1);
+    assert.match(blob(problems[0]), /exactly one lane/);
+  });
+
   // R6-2: no runner carries two operating systems; a set demanding both can
   // match no machine and queues forever. Lane is registered on purpose so
   // only the exclusivity check can catch it.
@@ -902,6 +1064,7 @@ describe('laneTestPlan fail-closed behavior', () => {
       `prefix-\${{ matrix.runner }}`,
       /mixes text and expression/,
     ],
+    ['empty flow sequence', `[]`, /empty label set/],
   ];
   for (const [name, runsOn, message] of refused) {
     it(`refuses to vouch for a ${name}`, () => {
