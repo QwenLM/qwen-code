@@ -3,6 +3,7 @@ import path from 'node:path';
 import lockfile from 'proper-lockfile';
 
 const RETRY_DELAYS_MS = [10, 20, 30, 40, 50] as const;
+const STALE_LOCK_MS = 10_000;
 const sleepState = new Int32Array(new SharedArrayBuffer(4));
 
 function sleepSync(ms: number): void {
@@ -26,16 +27,22 @@ export function withChannelPidfileLock<T>(
     try {
       release = lockfile.lockSync(filePath, {
         realpath: false,
-        stale: 10_000,
-        update: 2_000,
+        stale: STALE_LOCK_MS,
       });
       break;
     } catch (error) {
-      if (
-        (error as NodeJS.ErrnoException).code !== 'ELOCKED' ||
-        attempt >= RETRY_DELAYS_MS.length
-      ) {
+      const lockError = error as NodeJS.ErrnoException;
+      if (lockError.code !== 'ELOCKED') {
         throw error;
+      }
+      if (attempt >= RETRY_DELAYS_MS.length) {
+        throw Object.assign(
+          new Error(
+            `Channel pidfile lock ${filePath}.lock is held; an abandoned lock recovers automatically after ${STALE_LOCK_MS / 1000} seconds.`,
+            { cause: error },
+          ),
+          { code: 'ELOCKED' },
+        );
       }
       sleepSync(RETRY_DELAYS_MS[attempt]!);
     }

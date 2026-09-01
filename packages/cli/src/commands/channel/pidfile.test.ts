@@ -23,7 +23,8 @@ const pidfileLock = vi.hoisted(() => ({
   failures: 0,
 }));
 const processIdentity = vi.hoisted(() => ({
-  currentToken: 'boot-id:current-start',
+  currentToken: 'boot-id:current-start' as string | null,
+  tokenReads: [] as Array<string | null>,
 }));
 
 vi.mock('node:fs', () => {
@@ -117,14 +118,24 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   Storage: {
     getGlobalQwenDir: () => mockGlobalQwenDir,
   },
-  readProcStartToken: () => processIdentity.currentToken,
+  readProcStartToken: () =>
+    processIdentity.tokenReads.length > 0
+      ? processIdentity.tokenReads.shift()!
+      : processIdentity.currentToken,
   isSameProcess: (pid: number, procStart: string | null | undefined) => {
+    if (!Number.isInteger(pid) || pid <= 0) return false;
     try {
       process.kill(pid, 0);
     } catch {
       return false;
     }
-    return procStart == null || procStart === processIdentity.currentToken;
+    const currentToken =
+      processIdentity.tokenReads.length > 0
+        ? processIdentity.tokenReads.shift()!
+        : processIdentity.currentToken;
+    return (
+      procStart == null || currentToken == null || procStart === currentToken
+    );
   },
 }));
 
@@ -139,8 +150,9 @@ import {
   waitForExit,
 } from './pidfile.js';
 
-// We need to mock process.kill for isProcessAlive / signalService
+// We need to mock process.kill for isSameProcess / signalService.
 const originalKill = process.kill;
+const originalPlatform = process.platform;
 
 function getPidFilePath() {
   return join(mockGlobalQwenDir, 'channels', 'service.pid');
@@ -157,11 +169,13 @@ beforeEach(() => {
   pidfileLock.release.mockClear();
   pidfileLock.failures = 0;
   processIdentity.currentToken = 'boot-id:current-start';
+  processIdentity.tokenReads.length = 0;
 });
 
 afterEach(() => {
   vi.useRealTimers();
   process.kill = originalKill;
+  Object.defineProperty(process, 'platform', { value: originalPlatform });
 });
 
 describe('writeServiceInfo + readServiceInfo', () => {
@@ -181,6 +195,39 @@ describe('writeServiceInfo + readServiceInfo', () => {
     expect(JSON.parse(fsStore[getPidFilePath()]!)).toMatchObject({
       procStart: 'boot-id:current-start',
     });
+  });
+
+  it('retries a transient Linux process-token read before writing', () => {
+    Object.defineProperty(process, 'platform', { value: 'linux' });
+    processIdentity.tokenReads.push(null, 'boot-id:recovered-start');
+
+    writeServiceInfo(['dingtalk']);
+
+    expect(JSON.parse(fsStore[getPidFilePath()]!)).toMatchObject({
+      procStart: 'boot-id:recovered-start',
+    });
+  });
+
+  it('refuses to write an impersonable Linux pidfile', () => {
+    Object.defineProperty(process, 'platform', { value: 'linux' });
+    processIdentity.tokenReads.push(null, null);
+
+    expect(() => writeServiceInfo(['dingtalk'])).toThrow('process start token');
+    expect(getPidFilePath() in fsStore).toBe(false);
+  });
+
+  it('keeps the tokenless fallback on non-Linux platforms', () => {
+    Object.defineProperty(process, 'platform', { value: 'darwin' });
+    processIdentity.currentToken = null;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    process.kill = vi.fn(() => true) as any;
+
+    writeServiceInfo(['dingtalk']);
+
+    expect(JSON.parse(fsStore[getPidFilePath()]!)).toMatchObject({
+      procStart: null,
+    });
+    expect(readServiceInfo()).toMatchObject({ procStart: null });
   });
 
   it('cleans up a pidfile when the live PID belongs to a different process incarnation', () => {
@@ -336,6 +383,46 @@ describe('writeServiceInfo + readServiceInfo', () => {
       procStart: 'boot-id:current-start',
     });
     expect(fsFds.openedFlags).toContain(2 | 0x20000);
+  });
+
+  it('preserves the reservation token when serve metadata changes', () => {
+    processIdentity.currentToken = 'boot-id:original-start';
+    reserveServeServiceInfo({ channels: ['dingtalk'], servePid: 4321 });
+    processIdentity.currentToken = 'boot-id:recycled-start';
+
+    writeServeServiceInfo({
+      channels: ['dingtalk'],
+      servePid: 4321,
+      workerPid: 8765,
+    });
+
+    expect(JSON.parse(fsStore[getPidFilePath()]!)).toMatchObject({
+      procStart: 'boot-id:original-start',
+      workerPid: 8765,
+    });
+  });
+
+  it('retries before backfilling a legacy Linux serve reservation', () => {
+    Object.defineProperty(process, 'platform', { value: 'linux' });
+    fsStore[getPidFilePath()] = JSON.stringify({
+      owner: 'serve',
+      pid: 4321,
+      servePid: 4321,
+      startedAt: '2026-08-26T08:35:25.541Z',
+      channels: ['dingtalk'],
+    });
+    processIdentity.tokenReads.push(null, 'boot-id:recovered-start');
+
+    writeServeServiceInfo({
+      channels: ['dingtalk'],
+      servePid: 4321,
+      workerPid: 8765,
+    });
+
+    expect(JSON.parse(fsStore[getPidFilePath()]!)).toMatchObject({
+      procStart: 'boot-id:recovered-start',
+      workerPid: 8765,
+    });
   });
 
   it('preserves the serve reservation start time when worker metadata changes', () => {
@@ -523,6 +610,18 @@ describe('writeServiceInfo + readServiceInfo', () => {
       { pid: 1234, startedAt: new Date().toISOString(), channels: [42] },
       {
         pid: 1234,
+        procStart: 42,
+        startedAt: new Date().toISOString(),
+        channels: ['telegram'],
+      },
+      {
+        pid: 1234,
+        procStart: {},
+        startedAt: new Date().toISOString(),
+        channels: ['telegram'],
+      },
+      {
+        pid: 1234,
         startedAt: new Date().toISOString(),
         channels: [],
         workers: 'invalid',
@@ -590,6 +689,19 @@ describe('removeServiceInfo', () => {
 
   it('is a no-op when no PID file exists', () => {
     expect(() => removeServiceInfo()).not.toThrow();
+  });
+
+  it('removes only the pidfile matching the expected service identity', () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    process.kill = vi.fn(() => true) as any;
+    writeServiceInfo(['dingtalk']);
+    const info = readServiceInfo()!;
+
+    removeServiceInfo({ ...info, startedAt: '2026-01-01T00:00:00.000Z' });
+    expect(getPidFilePath() in fsStore).toBe(true);
+
+    removeServiceInfo(info);
+    expect(getPidFilePath() in fsStore).toBe(false);
   });
 });
 
@@ -675,8 +787,16 @@ describe('signalService', () => {
     process.kill = vi.fn(() => true) as any;
 
     expect(signalService(1234, 'SIGKILL', 'boot-id:old-start')).toBe(false);
-    expect(process.kill).toHaveBeenCalledTimes(1);
-    expect(process.kill).toHaveBeenCalledWith(1234, 0);
+    expect(process.kill).not.toHaveBeenCalled();
+  });
+
+  it('does not signal when the current process token is unreadable', () => {
+    processIdentity.currentToken = null;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    process.kill = vi.fn(() => true) as any;
+
+    expect(signalService(1234, 'SIGKILL', 'boot-id:old-start')).toBe(false);
+    expect(process.kill).not.toHaveBeenCalled();
   });
 });
 

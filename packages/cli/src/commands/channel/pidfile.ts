@@ -155,25 +155,11 @@ function unlinkPidFile(filePath: string): boolean {
 
 /**
  * Serialize all pidfile readers and writers. `proper-lockfile` uses an atomic
- * lock directory and recovers abandoned locks after their heartbeat is stale.
+ * lock directory and recovers abandoned locks after their acquisition is stale.
  */
 function withPidFileLock<T>(operation: (filePath: string) => T): T {
   const filePath = pidFilePath();
   return withChannelPidfileLock(filePath, () => operation(filePath));
-}
-
-/** Check if a process is alive. */
-function isProcessAlive(pid: number): boolean {
-  if (!isValidPid(pid)) {
-    return false;
-  }
-
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 /**
@@ -230,12 +216,25 @@ function fileExistsError(message: string): NodeJS.ErrnoException {
   return err;
 }
 
+function readPidfileProcessToken(pid: number): string | null {
+  let procStart = readProcStartToken(pid);
+  if (process.platform !== 'linux' || procStart !== null) return procStart;
+
+  // Linux token reads can fail transiently under file-descriptor pressure.
+  procStart = readProcStartToken(pid);
+  if (procStart !== null) return procStart;
+
+  throw new Error(
+    `Unable to read the process start token for PID ${pid}; refusing to write an impersonable Channel pidfile.`,
+  );
+}
+
 /** Write PID file with current standalone channel process info. */
 export function writeServiceInfo(channels: string[]): void {
   const info: ServiceInfo = {
     owner: 'channel',
     pid: process.pid,
-    procStart: readProcStartToken(process.pid),
+    procStart: readPidfileProcessToken(process.pid),
     startedAt: new Date().toISOString(),
     channels,
   };
@@ -275,7 +274,10 @@ export function writeServeServiceInfo({
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
         writeInfo(
-          buildInfo(new Date().toISOString(), readProcStartToken(servePid)),
+          buildInfo(
+            new Date().toISOString(),
+            readPidfileProcessToken(servePid),
+          ),
           'wx',
         );
         return;
@@ -303,7 +305,7 @@ export function writeServeServiceInfo({
       }
       const info = buildInfo(
         existing.startedAt,
-        existing.procStart ?? readProcStartToken(servePid),
+        existing.procStart ?? readPidfileProcessToken(servePid),
       );
       ftruncateSync(fd, 0);
       writeSync(fd, JSON.stringify(info, null, 2), 0, 'utf-8');
@@ -323,7 +325,7 @@ export function reserveServeServiceInfo({
   const info: ServiceInfo = {
     owner: 'serve',
     pid: servePid,
-    procStart: readProcStartToken(servePid),
+    procStart: readPidfileProcessToken(servePid),
     startedAt: new Date().toISOString(),
     channels,
     servePid,
@@ -398,7 +400,7 @@ export function signalService(
     return false;
   }
 
-  if (procStart != null && !isSameProcess(pid, procStart)) return false;
+  if (procStart != null && readProcStartToken(pid) !== procStart) return false;
 
   try {
     process.kill(pid, signal);
@@ -418,8 +420,7 @@ export async function waitForExit(
   pollMs: number = 200,
   procStart?: string | null,
 ): Promise<boolean> {
-  const isOriginalProcessAlive = () =>
-    procStart == null ? isProcessAlive(pid) : isSameProcess(pid, procStart);
+  const isOriginalProcessAlive = () => isSameProcess(pid, procStart);
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     if (!isOriginalProcessAlive()) return true;
