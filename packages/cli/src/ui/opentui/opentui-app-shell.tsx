@@ -39,8 +39,7 @@ import {
   useSyncExternalStore,
   type ReactNode,
 } from 'react';
-import type { Config, Logger } from '@qwen-code/qwen-code-core';
-import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core';
+import type { Config, Logger, ApprovalMode } from '@qwen-code/qwen-code-core';
 import type { PartListUnion } from '@google/genai';
 import type { LoadedSettings } from '../../config/settings.js';
 import type { ExtensionRefreshState } from '../../config/extension-refresh-state.js';
@@ -51,6 +50,7 @@ import type { OpenTuiRuntime } from './opentui-runtime.js';
 import type { OpenTuiDialogRequest } from './commands-registry.js';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
 import type { ShellConfirmationResolution } from './commands-context.js';
+import type { WaitingCallInfo } from './live-session.js';
 import { OpenTuiAppHost } from './opentui-host.js';
 import { OpenTuiSlashGateway } from './slash-gateway.js';
 import {
@@ -60,6 +60,11 @@ import {
 import { OpenTuiErrorBoundary } from './opentui-error-boundary.js';
 import { OpenTuiDialogMount } from './opentui-dialog-mount.js';
 import { OpenTuiInputPrompt } from './input-prompt.js';
+import {
+  OpenTuiActionConfirmation,
+  OpenTuiShellConfirmation,
+  OpenTuiToolConfirmation,
+} from './dialogs-confirm.js';
 
 export interface OpenTuiAppProps {
   config: Config;
@@ -106,7 +111,47 @@ export interface OpenTuiAppProps {
    */
   updateNotice?: string | null;
   availableTerminalHeight?: number;
+
+  // --- Batch 6: live-turn + confirmation wiring ---------------------------
+  /** A live model turn is in flight (composer Esc interrupts, footer spins). */
+  streaming?: boolean;
+  /** Aborts the in-flight turn (Esc while streaming). */
+  onInterrupt?: () => void;
+  approvalMode?: ApprovalMode;
+  /** Mid-turn queued prompts (composer badge + Esc pop-back). */
+  queueLength?: number;
+  onPopQueue?: () => string | null;
+  /**
+   * Scheduler calls parked in `awaiting_approval`. The shell renders the
+   * first one as a modal dialog; settlement flows through the call's own
+   * `onConfirm` and is reported back via {@link onToolCallSettled}.
+   */
+  waitingToolCalls?: readonly WaitingCallInfo[];
+  /** Drops a waiting call after its dialog settled. */
+  onToolCallSettled?: (callId: string) => void;
+  /** U-10 parity: the entry logs/echoes render crashes (error boundary). */
+  onRenderError?: (error: Error) => void;
+  /** Entry-owned composer buffer handle (early-input injection). */
+  composerHandle?: {
+    current: { getText: () => string; setText: (text: string) => void } | null;
+  };
 }
+
+interface ShellModal {
+  kind: 'shell';
+  id: number;
+  commands: readonly string[];
+  resolve: (resolution: ShellConfirmationResolution) => void;
+}
+
+interface ActionModal {
+  kind: 'action';
+  id: number;
+  prompt: ReactNode;
+  resolve: (confirmed: boolean) => void;
+}
+
+type ConfirmationModal = ShellModal | ActionModal;
 
 export function OpenTuiApp(props: OpenTuiAppProps) {
   const {
@@ -123,6 +168,14 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     onStartNewSession,
     onToggleVim,
     updateNotice,
+    streaming,
+    onInterrupt,
+    approvalMode,
+    queueLength,
+    onPopQueue,
+    waitingToolCalls,
+    onToolCallSettled,
+    onRenderError,
   } = props;
 
   const [dialog, setDialog] = useState<OpenTuiDialogRequest | null>(null);
@@ -133,19 +186,56 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
 
   const notify = useCallback((text: string) => setNoticeText(text), []);
 
-  // Neither confirmation renderer exists in this batch, so the bridge denies
-  // every request outright: a pending promise here would hang the dispatcher's
-  // `run()` (and the gateway's busy flag) for the rest of the session.
+  // Modal confirmation bridge (Batch 6): presentShell/presentAction enqueue
+  // a dialog and hand back the promise that its resolution settles. Both
+  // functions stay referentially stable (U-8) — they only touch setState and
+  // a sequence ref, never per-render state.
+  const [modals, setModals] = useState<readonly ConfirmationModal[]>([]);
+  const modalSeq = useRef(0);
   const confirmations = useMemo(
     () => ({
-      presentShell: () =>
-        Promise.resolve<ShellConfirmationResolution>({
-          outcome: ToolConfirmationOutcome.Cancel,
+      presentShell: (commandsToRun: readonly string[]) =>
+        new Promise<ShellConfirmationResolution>((resolve) => {
+          modalSeq.current += 1;
+          setModals((prev) => [
+            ...prev,
+            {
+              kind: 'shell',
+              id: modalSeq.current,
+              commands: commandsToRun,
+              resolve,
+            },
+          ]);
         }),
-      presentAction: () => Promise.resolve(false),
+      presentAction: (prompt: ReactNode) =>
+        new Promise<boolean>((resolve) => {
+          modalSeq.current += 1;
+          setModals((prev) => [
+            ...prev,
+            { kind: 'action', id: modalSeq.current, prompt, resolve },
+          ]);
+        }),
     }),
     [],
   );
+
+  const activeModal = modals[0] ?? null;
+  const closeShellModal = useCallback(
+    (modal: ShellModal, resolution: ShellConfirmationResolution) => {
+      setModals((prev) => prev.filter((m) => m.id !== modal.id));
+      modal.resolve(resolution);
+    },
+    [],
+  );
+  const closeActionModal = useCallback(
+    (modal: ActionModal, confirmed: boolean) => {
+      setModals((prev) => prev.filter((m) => m.id !== modal.id));
+      modal.resolve(confirmed);
+    },
+    [],
+  );
+
+  const activeToolCall = waitingToolCalls?.[0] ?? null;
 
   const transcript = useMemo(
     () => ({
@@ -189,6 +279,12 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     useCallback((cb) => host.subscribe(cb), [host]),
     useCallback(() => host.getVersion(), [host]),
   );
+
+  // Mirror the live-turn state onto the host so command gating (isIdle)
+  // reflects an in-flight model turn, not just dispatcher processing.
+  useEffect(() => {
+    host.setStreaming(!!streaming);
+  }, [host, streaming]);
 
   const gateway = useMemo(() => new OpenTuiSlashGateway(), []);
   const reloadRef = useRef<(() => void | Promise<void>) | null>(null);
@@ -285,12 +381,41 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   );
 
   return (
-    <OpenTuiErrorBoundary>
+    <OpenTuiErrorBoundary
+      recordForExitEcho
+      onError={(error) => onRenderError?.(error)}
+    >
       <box flexDirection="column" flexGrow={1} flexShrink={0}>
         {renderMain ? renderMain() : null}
-        {!dialog && updateNotice ? <text>{updateNotice}</text> : null}
+        {!dialog && !activeModal && !activeToolCall && updateNotice ? (
+          <text>{updateNotice}</text>
+        ) : null}
         {noticeText ? <text>{noticeText}</text> : null}
-        {dialog ? (
+        {activeToolCall ? (
+          <OpenTuiToolConfirmation
+            key={activeToolCall.callId}
+            call={activeToolCall}
+            onSettled={() => onToolCallSettled?.(activeToolCall.callId)}
+          />
+        ) : activeModal ? (
+          activeModal.kind === 'shell' ? (
+            <OpenTuiShellConfirmation
+              key={`shell-${activeModal.id}`}
+              commands={activeModal.commands}
+              onResolve={(resolution) =>
+                closeShellModal(activeModal, resolution)
+              }
+            />
+          ) : (
+            <OpenTuiActionConfirmation
+              key={`action-${activeModal.id}`}
+              prompt={activeModal.prompt}
+              onResolve={(confirmed) =>
+                closeActionModal(activeModal, confirmed)
+              }
+            />
+          )
+        ) : dialog ? (
           <OpenTuiDialogMount
             key={dialog.dialog}
             request={dialog}
@@ -311,6 +436,12 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
             userMessages={userMessages}
             config={config}
             focus
+            streaming={streaming}
+            onInterrupt={onInterrupt}
+            approvalMode={approvalMode}
+            queueLength={queueLength}
+            onPopQueue={onPopQueue}
+            composerHandle={props.composerHandle}
           />
         )}
       </box>

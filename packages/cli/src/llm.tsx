@@ -1198,6 +1198,33 @@ export async function main() {
       // startInteractiveUI) and so the first paint uses the refined theme
       // when the probe finishes in time.
       await themeAutoDetectionComplete;
+      // Renderer dispatch for the ink→OpenTUI migration: QWEN_TUI_RENDERER
+      // selects the experimental backend only on a runtime that can drive it;
+      // every other case — including a failed renderer probe inside the entry —
+      // falls through to ink, which stays the default renderer.
+      const { selectTuiRenderer } = await import(
+        './ui/opentui/renderer-selection.js'
+      );
+      if (selectTuiRenderer().renderer === 'opentui') {
+        const { startOpenTuiUI } = await import(
+          './ui/opentui/start-opentui-ui.js'
+        );
+        const started = await startOpenTuiUI(
+          config,
+          settings,
+          startupWarnings,
+          process.cwd(),
+          initializationResult!,
+          {
+            postRenderConnectIde: deferIdeConnection,
+            extensionRefreshState,
+          },
+        );
+        if (started) {
+          clearCorruptionEnvVars();
+          return;
+        }
+      }
       const { startInteractiveUI } = await import('./ui/startInteractiveUI.js');
       await startInteractiveUI(
         config,
