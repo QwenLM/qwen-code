@@ -553,6 +553,31 @@ describe('createDaemonSessionFactory', () => {
 });
 
 describe('createDaemonChannelBridgeFacade', () => {
+  it('forwards BTW independently of shell support', async () => {
+    const btw = vi.fn().mockResolvedValue({
+      sessionId: 'session-1',
+      answer: 'side answer',
+    });
+    const bridge = {
+      availableCommands: [],
+      on: mockBridgeOn,
+      off: mockBridgeOff,
+      newSession: mockBridgeNewSession,
+      loadSession: mockBridgeLoadSession,
+      prompt: mockBridgePrompt,
+      btw,
+      cancelSession: mockBridgeCancelSession,
+    };
+    const facade = createDaemonChannelBridgeFacade(bridge, {
+      exposeShellCommand: false,
+    });
+
+    await facade.btw?.('session-1', 'question');
+
+    expect(btw).toHaveBeenCalledWith('session-1', 'question');
+    expect('shellCommand' in facade).toBe(false);
+  });
+
   it('omits shellCommand when the daemon does not advertise shell support', () => {
     const bridge = mockDaemonChannelBridge.mock.results[0]?.value ?? {
       availableCommands: [],

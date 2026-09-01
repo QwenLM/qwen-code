@@ -250,6 +250,10 @@ export function createDaemonChannelBridgeFacade(
     cancelSession: bridge.cancelSession.bind(bridge),
   };
 
+  if (bridge.btw) {
+    facade.btw = bridge.btw.bind(bridge);
+  }
+
   if (bridge.respondToPermission) {
     facade.respondToPermission = bridge.respondToPermission.bind(bridge);
   }
