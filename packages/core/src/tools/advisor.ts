@@ -73,7 +73,6 @@ function parseReview(
   ] as const;
   if (
     !value ||
-    Object.keys(value).length !== fields.length ||
     fields.some(
       (field) => typeof value[field] !== 'string' || !value[field].trim(),
     )

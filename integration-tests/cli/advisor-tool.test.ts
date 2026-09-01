@@ -257,11 +257,7 @@ describe('native Advisor tool', () => {
       ),
     ).toBe(true);
     expect(advisorRequests).toHaveLength(1);
-    expect(
-      toolNames(advisorRequests[0]!).every(
-        (name) => name === 'respond_in_schema',
-      ),
-    ).toBe(true);
+    expect(toolNames(advisorRequests[0]!)).toEqual(['respond_in_schema']);
 
     const advisorText = requestText(advisorRequests[0]!);
     const evidenceText = messages(advisorRequests[0]!)
