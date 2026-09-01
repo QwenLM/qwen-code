@@ -479,8 +479,118 @@ describe('EmbeddedApp host wiring', () => {
         oldText: 'header\nconst value = 1;\nfooter',
         newText: 'header\nconst value = 2;\nfooter',
         source: 'web-shell',
+        requestId: 'req-write',
       },
     });
+    expect(postMessagesOfType('webShellPermissionState').at(-1)).toEqual({
+      type: 'webShellPermissionState',
+      data: { pending: true, requestId: 'req-write' },
+    });
+  });
+
+  it('keeps host permission ownership in sync while pending stays true', async () => {
+    const props = await renderApp();
+    const onTranscriptChange = callback<(blocks: unknown[]) => void>(
+      props,
+      'onTranscriptChange',
+    );
+    const permissionBlock = (id: string, path: string) => ({
+      id,
+      kind: 'permission',
+      requestId: id,
+      title: path,
+      options: [],
+      preview: { kind: 'key_value', rows: [] },
+      toolCall: {
+        content: [{ type: 'diff', path, oldText: 'old', newText: 'new' }],
+      },
+    });
+
+    await act(async () => {
+      onTranscriptChange([
+        permissionBlock('req-a', '/workspace/a.ts'),
+        permissionBlock('req-b', '/workspace/b.ts'),
+      ]);
+      await Promise.resolve();
+    });
+
+    expect(postMessagesOfType('webShellPermissionState').at(-1)).toEqual({
+      type: 'webShellPermissionState',
+      data: { pending: true, requestId: 'req-a' },
+    });
+
+    await act(async () => {
+      onTranscriptChange([
+        { ...permissionBlock('req-a', '/workspace/a.ts'), resolved: true },
+        permissionBlock('req-b', '/workspace/b.ts'),
+      ]);
+      await Promise.resolve();
+    });
+
+    // Pending stays true, but ownership moves to the remaining request so a
+    // stale accept cannot vote on the wrong approval.
+    expect(postMessagesOfType('webShellPermissionState').at(-1)).toEqual({
+      type: 'webShellPermissionState',
+      data: { pending: true, requestId: 'req-b' },
+    });
+  });
+
+  it('posts pending: false when pending permission diffs are torn down', async () => {
+    const props = await renderApp();
+    const onTranscriptChange = callback<(blocks: unknown[]) => void>(
+      props,
+      'onTranscriptChange',
+    );
+
+    await act(async () => {
+      onTranscriptChange([
+        {
+          id: 'perm-a',
+          kind: 'permission',
+          requestId: 'req-a',
+          title: 'update a.ts',
+          options: [],
+          preview: { kind: 'key_value', rows: [] },
+          toolCall: {
+            content: [
+              {
+                type: 'diff',
+                path: '/workspace/a.ts',
+                oldText: 'old',
+                newText: 'new',
+              },
+            ],
+          },
+        },
+      ]);
+      await Promise.resolve();
+    });
+
+    expect(postMessagesOfType('webShellPermissionState').at(-1)).toEqual({
+      type: 'webShellPermissionState',
+      data: { pending: true, requestId: 'req-a' },
+    });
+
+    // Closing the host tab/view unmounts the app. The teardown must tell
+    // the extension the pending set is gone; otherwise the vote gate stays
+    // open for an approval the user can no longer see.
+    const { container, root } = mounted.splice(mounted.length - 1, 1)[0];
+    await act(async () => {
+      root.unmount();
+      await Promise.resolve();
+    });
+    container.remove();
+
+    expect(postMessagesOfType('webShellPermissionState').at(-1)).toEqual({
+      type: 'webShellPermissionState',
+      data: { pending: false },
+    });
+    expect(postMessagesOfType('closeDiff')).toEqual([
+      {
+        type: 'closeDiff',
+        data: { path: '/workspace/a.ts', requestId: 'req-a' },
+      },
+    ]);
   });
 
   it('routes auth and session-change host actions to the extension', async () => {
@@ -591,20 +701,169 @@ describe('EmbeddedApp host wiring', () => {
         await Promise.resolve();
       });
 
-      expect(container.textContent).toContain('Loading conversation…');
+      expect(
+        container.querySelector(
+          '[role="status"][aria-label="Loading conversation…"]',
+        ),
+      ).not.toBeNull();
 
-      // A retriable connection failure that never settles must not lock the
-      // panel behind the overlay forever.
+      // A retriable connection failure that never settles must not leave the
+      // header loading state active forever.
       await act(async () => {
         await vi.advanceTimersByTimeAsync(15_000);
       });
 
-      expect(container.textContent).not.toContain('Loading conversation…');
+      expect(
+        container.querySelector(
+          '[role="status"][aria-label="Loading conversation…"]',
+        ),
+      ).toBeNull();
       expect(container.textContent).toContain(
         'The conversation switch timed out. Try again.',
       );
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('web shell permission decision messages', () => {
+  function installShellApi(
+    api: Record<string, unknown>,
+  ): Record<string, unknown> {
+    const props = mocks.embeddedProps.current;
+    expect(props).not.toBeNull();
+    const shellRef = (props as CapturedProps)['shellRef'] as {
+      current: unknown;
+    };
+    expect(shellRef).toBeTruthy();
+    shellRef.current = api;
+    return api;
+  }
+
+  async function setPendingPermission(
+    props: CapturedProps,
+    requestId = 'req-1',
+  ) {
+    const onTranscriptChange = callback<(blocks: unknown[]) => void>(
+      props,
+      'onTranscriptChange',
+    );
+    await act(async () => {
+      onTranscriptChange([
+        {
+          id: 'permission-1',
+          kind: 'permission',
+          requestId,
+          title: 'Edit fixture.txt',
+          resolved: false,
+          options: [],
+          preview: { kind: 'key_value', rows: [] },
+          toolCall: {
+            content: [
+              {
+                type: 'diff',
+                path: '/workspace/fixture.txt',
+                oldText: 'before',
+                newText: 'after',
+              },
+            ],
+          },
+        },
+      ]);
+      await Promise.resolve();
+    });
+  }
+
+  async function dispatchDecision(
+    decision: string,
+    source: Window | null,
+    requestId = 'req-1',
+  ) {
+    await act(async () => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'webShellPermissionDecision',
+            data: { decision, requestId },
+          },
+          source,
+        }),
+      );
+      await Promise.resolve();
+    });
+  }
+
+  it('forwards host-relayed decisions to the web shell', async () => {
+    const props = await renderApp();
+    const respondToPendingPermission = vi.fn().mockResolvedValue(true);
+    installShellApi({ respondToPendingPermission });
+    await setPendingPermission(props);
+
+    // Extension-host messages arrive via the webview preload frame, i.e.
+    // with this frame's parent as their source.
+    await dispatchDecision('allow', window.parent);
+
+    expect(respondToPendingPermission).toHaveBeenCalledWith('req-1', 'allow');
+  });
+
+  it('ignores decisions posted by a nested iframe window', async () => {
+    const props = await renderApp();
+    const respondToPendingPermission = vi.fn().mockResolvedValue(true);
+    installShellApi({ respondToPendingPermission });
+    await setPendingPermission(props);
+
+    // MCP apps and artifact previews run in scriptable sandboxed iframes
+    // inside this webview; they can postMessage to this window and must
+    // not be able to vote on the pending approval, even when they know the
+    // active request id. Their source is their own child window, not the
+    // preload parent frame.
+    const iframe = document.createElement('iframe');
+    document.body.appendChild(iframe);
+    try {
+      const childWindow = iframe.contentWindow;
+      expect(childWindow).not.toBeNull();
+      await dispatchDecision('allow', childWindow as Window);
+      await dispatchDecision('reject', childWindow as Window);
+    } finally {
+      iframe.remove();
+    }
+
+    expect(respondToPendingPermission).not.toHaveBeenCalled();
+  });
+
+  it('ignores decisions delivered without a source window', async () => {
+    const props = await renderApp();
+    const respondToPendingPermission = vi.fn().mockResolvedValue(true);
+    installShellApi({ respondToPendingPermission });
+    await setPendingPermission(props);
+
+    // Fail closed on synthetic deliveries: real host messages always carry
+    // the preload frame as their source.
+    await dispatchDecision('allow', null);
+
+    expect(respondToPendingPermission).not.toHaveBeenCalled();
+  });
+
+  it('surfaces a notice when the shell resolves the vote to false', async () => {
+    const props = await renderApp();
+    const respondToPendingPermission = vi.fn().mockResolvedValue(false);
+    installShellApi({ respondToPendingPermission });
+    await setPendingPermission(props);
+    const { container } = mounted[mounted.length - 1];
+
+    await dispatchDecision('allow', window.parent);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(respondToPendingPermission).toHaveBeenCalledWith('req-1', 'allow');
+    // A resolved `false` must not die silently: it covers both the benign
+    // race (the approval was resolved elsewhere one tick earlier) and hung
+    // votes (e.g. while catching up after a session switch). Notify the
+    // user without the hard-error state reset of `handleShellError`.
+    expect(container.textContent).toContain(
+      'The approval decision could not be applied.',
+    );
   });
 });

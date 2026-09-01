@@ -1,37 +1,87 @@
 # Mem0 External Context Extension
 
-This package is the retrieval-only Extension defined by the
-[Configurable Mem0 Provider Extension](../../docs/design/external-context-mem0-extension.md)
-proposal. It implements the External Context MCP Profile v1 server, validates
-administrator-owned instance configuration and closed dialect definitions, and
-contains a bounded HTTP request engine.
+This package provides a retrieval-only External Context MCP Profile v1 server
+for administrator-configured Mem0-compatible HTTP services. It validates a
+closed dialect grammar and uses a bounded HTTP request engine; it does not ship
+provider presets or provider-specific configuration.
 
-This PR1 package intentionally ships no live provider preset. Its built-in
-preset registry is empty, so the process fails closed with an unknown-preset
-configuration error. Verified Mem0 Platform and PolarDB presets are staged for
-PR2. Do not install this intermediate package as a usable provider Extension.
+## Configuration
 
-## Configuration contract
+Set `QWEN_EXTERNAL_CONTEXT_MEM0_CONFIG` in the Extension process environment to
+the absolute path of an administrator-owned instance JSON file. The instance
+file must conform to
+[`schemas/instance-config.schema.json`](./schemas/instance-config.schema.json)
+and reference a separate dialect JSON file by absolute `dialectPath`:
 
-`QWEN_EXTERNAL_CONTEXT_MEM0_CONFIG` must contain the absolute path of an
-instance JSON file conforming to
-[`schemas/instance-config.schema.json`](./schemas/instance-config.schema.json).
-The instance selects one immutable built-in preset and binds its endpoint,
-credential environment-variable name, scope, and timeout. Credential values
-never belong in the instance file.
+```json
+{
+  "schemaVersion": 2,
+  "dialectPath": "/etc/qwen/external-context/memory.dialect.json",
+  "endpoint": {
+    "origin": "https://memory.example.com",
+    "basePath": "",
+    "allowInsecureHttp": false
+  },
+  "credentialEnv": "MEMORY_API_KEY",
+  "scope": {
+    "userId": "repository-memory"
+  },
+  "timeoutMs": 5000
+}
+```
 
-Preset authors must conform to
-[`schemas/dialect.schema.json`](./schemas/dialect.schema.json). The schema and
-semantic validator intentionally support only the bounded request and response
+The dialect file must conform to
+[`schemas/dialect.schema.json`](./schemas/dialect.schema.json). This synthetic
+example describes one supported shape without identifying a provider:
+
+```json
+{
+  "dialectVersion": 1,
+  "id": "organization-memory-v1",
+  "auth": "authorization-bearer",
+  "search": {
+    "method": "POST",
+    "path": "/memories/search",
+    "queryLocation": "json",
+    "userIdLocation": "json.filters",
+    "agentIdLocation": "omit",
+    "appIdLocation": "omit",
+    "limitField": "limit"
+  },
+  "response": {
+    "collection": "results",
+    "idField": "id",
+    "contentField": "memory",
+    "titleField": "omit",
+    "uriField": "omit",
+    "scoreField": "score",
+    "updatedAtField": "omit"
+  }
+}
+```
+
+The administrator controls both files and the process environment. Production
+deployments should keep them outside ordinary workspaces and supply the
+instance path through a system environment, controlled launcher, or pinned MCP
+configuration. `dialectPath` is never resolved relative to the instance file,
+expanded from environment variables, or loaded from a URL.
+
+The credential value must exist only in the environment variable named by
+`credentialEnv`; neither JSON file may contain it. Both files are limited to
+64 KiB and are read once when the Extension starts. Restart the Extension after
+changing either file.
+
+The schema intentionally supports only the bounded request and response
 grammar recorded in the design. Protocols that require arbitrary templates,
-headers, JSONPath, redirects, or executable transformations must use a separate
-MCP Extension.
+headers, JSONPath, redirects, executable transformations, or write operations
+must use a separate MCP Extension.
 
 ## Development
 
 ```bash
 npm run test --workspace=@qwen-code/external-context-mem0
 npm run typecheck --workspace=@qwen-code/external-context-mem0
+npm run lint --workspace=@qwen-code/external-context-mem0
 npm run build --workspace=@qwen-code/external-context-mem0
 ```
 
