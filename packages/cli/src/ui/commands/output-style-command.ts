@@ -12,6 +12,7 @@ import type {
 } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
+import { resolveMainSessionOutputStyle } from '@qwen-code/qwen-code-core';
 import {
   applyOutputStyleSelection,
   OUTPUT_STYLE_LIST,
@@ -47,6 +48,14 @@ export const outputStyleCommand: SlashCommand = {
       };
     }
 
+    if (config.getBareMode() || config.isSafeMode()) {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: t('Output styles are unavailable in --bare and --safe-mode.'),
+      };
+    }
+
     const args = context.invocation?.args?.trim() || actionArgs.trim();
 
     // No argument: open the interactive picker, or (non-interactive/ACP)
@@ -55,7 +64,7 @@ export const outputStyleCommand: SlashCommand = {
       if (context.executionMode === 'interactive') {
         return { type: 'dialog', dialog: 'output-style' };
       }
-      const current = config.getOutputStyle();
+      const current = resolveMainSessionOutputStyle(config);
       return {
         type: 'message',
         messageType: 'info',
@@ -91,10 +100,24 @@ export const outputStyleCommand: SlashCommand = {
       };
     }
 
-    return {
-      type: 'message',
-      messageType: 'info',
-      content: await applyOutputStyleSelection(config, settings, style),
-    };
+    try {
+      return {
+        type: 'message',
+        messageType: 'info',
+        content: await applyOutputStyleSelection(config, settings, style, {
+          allowWorkspaceSettingsWrite:
+            context.executionPolicy?.allowWorkspaceSettingsWrite,
+        }),
+      };
+    } catch (error) {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: t('Failed to set "{{key}}": {{error}}', {
+          key: 'general.outputStyle',
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      };
+    }
   },
 };

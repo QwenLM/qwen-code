@@ -8,6 +8,7 @@ import { useState, useCallback } from 'react';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
+import { t } from '../../i18n/index.js';
 import { MessageType, type HistoryItemWithoutId } from '../types.js';
 import {
   applyOutputStyleSelection,
@@ -69,6 +70,22 @@ export const useOutputStyleCommand = (
           }
         } catch (error) {
           debugLogger.warn('Failed to apply output style:', error);
+          if (addItem) {
+            const feedbackItem: HistoryItemWithoutId & Record<string, unknown> =
+              {
+                type: MessageType.ERROR,
+                text: t('Failed to set "{{key}}": {{error}}', {
+                  key: 'general.outputStyle',
+                  error: error instanceof Error ? error.message : String(error),
+                }),
+              };
+            addItem(feedbackItem, Date.now());
+            config.getChatRecordingService?.()?.recordSlashCommand({
+              phase: 'result',
+              rawCommand: '/output-style',
+              outputHistoryItems: [feedbackItem],
+            });
+          }
         }
       })();
     },

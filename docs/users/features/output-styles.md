@@ -21,7 +21,7 @@ Run `/output-style` to open a picker, or set one directly:
 /output-style default   # back to no style
 ```
 
-The change applies to the running session immediately — the system prompt is rebuilt in place, so the next turn already answers in the new style — and it is persisted to your user settings (`general.outputStyle`) for future sessions. Style names are case-insensitive.
+The change applies to the running session immediately — the system prompt is rebuilt in place, so the next turn already answers in the new style — and it is persisted for future sessions. If a trusted project setting currently owns `general.outputStyle`, the command updates that project setting; otherwise it updates your user setting. Style names are case-insensitive.
 
 You can also set the style without the command:
 
@@ -32,7 +32,7 @@ You can also set the style without the command:
 
 - A style layers onto the built-in prompt. When `--system-prompt` or `QWEN_SYSTEM_MD` replaces the prompt entirely, the style (and its per-turn reminder) is not applied.
 - Styles apply to the main conversation only; subagents run their own system prompts.
-- `--bare` and `--safe-mode` ignore the setting.
+- `--bare` and `--safe-mode` ignore the setting and do not allow `/output-style` changes.
 - Changing the style mid-session invalidates the cached prompt prefix once; after that, caching works as usual.
 
 Styles adjust tone and workflow, not knowledge or permissions. For project conventions the model should always know, use context files (`QWEN.md`); for a one-off addition to the prompt, use `--append-system-prompt`.

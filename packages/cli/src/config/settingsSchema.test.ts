@@ -222,9 +222,7 @@ describe('SettingsSchema', () => {
       expect(outputStyle.type).toBe('string');
       expect(outputStyle.category).toBe('General');
       expect(outputStyle.default).toBe(undefined);
-      // `/output-style` rebuilds the system instruction in place, so an edit
-      // takes effect without a restart.
-      expect(outputStyle.requiresRestart).toBe(false);
+      expect(outputStyle.requiresRestart).toBe(true);
     });
 
     it('should have plansDirectory setting in schema', () => {

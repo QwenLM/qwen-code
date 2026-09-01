@@ -68,7 +68,7 @@ export function OutputStyleDialog({
         {'> '}
         {t('Output Style')}{' '}
         <Text color={theme.text.secondary}>
-          {t('(applies now and persists to user settings)')}
+          {t('(applies now and persists to settings)')}
         </Text>
       </Text>
       <Box height={1} />

@@ -437,9 +437,9 @@ const SETTINGS_SCHEMA = {
         type: 'string',
         label: 'Output Style',
         category: 'General',
-        // `/output-style` applies a change to the running session (it rebuilds
-        // the system instruction in place), so no restart is needed.
-        requiresRestart: false,
+        // Generic settings edits do not rebuild the running system instruction;
+        // `/output-style` owns the separate live-update path.
+        requiresRestart: true,
         default: undefined as string | undefined,
         description:
           'Name of the output style that shapes how responses are written, for example "Concise" or "Explanatory". Leave unset for the default style. Change it with /output-style.',

@@ -6,6 +6,7 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type { Config, OutputStyleDefinition } from '@qwen-code/qwen-code-core';
+import { getBuiltInOutputStyle } from '@qwen-code/qwen-code-core';
 import { type CommandContext } from './types.js';
 import { outputStyleCommand } from './output-style-command.js';
 import { SettingScope } from '../../config/settings.js';
@@ -43,6 +44,8 @@ describe('outputStyleCommand', () => {
           getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
           getInputFormat: vi.fn().mockReturnValue('text'),
           isInteractive: vi.fn().mockReturnValue(true),
+          getBareMode: vi.fn().mockReturnValue(false),
+          isSafeMode: vi.fn().mockReturnValue(false),
         } as unknown as Config,
         settings: {
           setValue,
@@ -81,6 +84,8 @@ describe('outputStyleCommand', () => {
       SettingScope.User,
       'general.outputStyle',
       'Concise',
+      undefined,
+      { throwOnWriteFailure: true },
     );
     expect(res).toMatchObject({ messageType: 'info' });
     expect((res as { content: string }).content).toContain(
@@ -96,6 +101,8 @@ describe('outputStyleCommand', () => {
       SettingScope.User,
       'general.outputStyle',
       'default',
+      undefined,
+      { throwOnWriteFailure: true },
     );
     expect((res as { content: string }).content).toContain(
       'Output style cleared',
@@ -131,6 +138,8 @@ describe('outputStyleCommand', () => {
       SettingScope.User,
       'general.outputStyle',
       'Proactive',
+      undefined,
+      { throwOnWriteFailure: true },
     );
     expect(res).toMatchObject({ messageType: 'info' });
   });
@@ -143,4 +152,113 @@ describe('outputStyleCommand', () => {
       '[Concise|Proactive|Explanatory|Learning|default]',
     );
   });
+
+  it('persists back to a trusted workspace that owns the setting', async () => {
+    context.services.settings = {
+      setValue,
+      isTrusted: true,
+      user: { settings: {} },
+      workspace: { settings: { general: { outputStyle: 'Concise' } } },
+    } as never;
+
+    await outputStyleCommand.action!(context, 'Learning');
+
+    expect(setValue).toHaveBeenCalledWith(
+      SettingScope.Workspace,
+      'general.outputStyle',
+      'Learning',
+      undefined,
+      { throwOnWriteFailure: true },
+    );
+  });
+
+  it('honors a policy that forbids workspace settings writes', async () => {
+    context.services.settings = {
+      setValue,
+      isTrusted: true,
+      user: { settings: {} },
+      workspace: { settings: { general: { outputStyle: 'Concise' } } },
+    } as never;
+    context.executionPolicy = {
+      allowSessionReset: false,
+      allowWorkspaceSettingsWrite: false,
+      persistModelSelection: false,
+      blockedBuiltinCommandNames: [],
+    };
+
+    const res = await outputStyleCommand.action!(context, 'Learning');
+
+    expect(res).toMatchObject({ type: 'message', messageType: 'error' });
+    expect(setValue).not.toHaveBeenCalled();
+    expect(setOutputStyle).not.toHaveBeenCalled();
+  });
+
+  it('reports why Learning is skipped in a headless run', async () => {
+    (
+      context.services.config as unknown as {
+        isInteractive: ReturnType<typeof vi.fn>;
+      }
+    ).isInteractive = vi.fn().mockReturnValue(false);
+
+    const res = await outputStyleCommand.action!(context, 'Learning');
+
+    expect((res as { content: string }).content).toContain(
+      'Learning is skipped in headless runs',
+    );
+    expect((res as { content: string }).content).not.toContain(
+      'system prompt is replaced',
+    );
+  });
+
+  it('reports the effective default style in a headless Learning run', async () => {
+    setOutputStyle(getBuiltInOutputStyle('Learning'));
+    (
+      context.services.config as unknown as {
+        isInteractive: ReturnType<typeof vi.fn>;
+      }
+    ).isInteractive = vi.fn().mockReturnValue(false);
+
+    const res = await outputStyleCommand.action!(
+      { ...context, executionMode: 'non_interactive' },
+      '',
+    );
+
+    expect((res as { content: string }).content).toContain(
+      'Output style: default.',
+    );
+    expect((res as { content: string }).content).not.toContain(
+      'Current output style: Learning',
+    );
+  });
+
+  it('reports persistence failure without changing the running style', async () => {
+    setValue.mockImplementation(() => {
+      throw new Error('disk full');
+    });
+
+    const res = await outputStyleCommand.action!(context, 'Concise');
+
+    expect(res).toMatchObject({ type: 'message', messageType: 'error' });
+    expect((res as { content: string }).content).toContain('Failed to set');
+    expect(setOutputStyle).not.toHaveBeenCalled();
+    expect(refreshSystemInstruction).not.toHaveBeenCalled();
+  });
+
+  it.each(['getBareMode', 'isSafeMode'] as const)(
+    'rejects changes when %s is active',
+    async (mode) => {
+      (
+        context.services.config as unknown as Record<
+          typeof mode,
+          ReturnType<typeof vi.fn>
+        >
+      )[mode] = vi.fn().mockReturnValue(true);
+
+      const res = await outputStyleCommand.action!(context, 'Concise');
+
+      expect(res).toMatchObject({ type: 'message', messageType: 'error' });
+      expect(setOutputStyle).not.toHaveBeenCalled();
+      expect(setValue).not.toHaveBeenCalled();
+    },
+  );
 });

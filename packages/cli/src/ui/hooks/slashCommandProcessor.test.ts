@@ -820,7 +820,7 @@ describe('useSlashCommandProcessor', () => {
       },
     );
 
-    it.each(['/effort', '/model', '/stats', '/statusline'])(
+    it.each(['/effort', '/model', '/output-style', '/stats', '/statusline'])(
       'hides the invocation for the bare %s picker',
       async (input) => {
         const [name] = input.slice(1).split(' ');
@@ -986,6 +986,7 @@ describe('useSlashCommandProcessor', () => {
     it.each([
       ['/effort high', 'effort'],
       ['/model qwen3-max', 'model'],
+      ['/output-style Concise', 'output-style'],
       ['/statusline make it compact', 'statusline'],
       ['/stats export', 'stats export'],
     ])(

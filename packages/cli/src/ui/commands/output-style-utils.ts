@@ -9,6 +9,7 @@ import {
   BUILT_IN_OUTPUT_STYLES,
   createDebugLogger,
   getBuiltInOutputStyle,
+  isSystemMdActive,
   resolveMainSessionOutputStyle,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -37,10 +38,8 @@ export function resolveOutputStyleChoice(
 }
 
 /**
- * Applies an output style to the running session and persists it to user
- * settings. `undefined` selects the default style; the persisted value is the
- * literal `default` rather than a deleted key, so a workspace-level setting
- * cannot silently resurface on the next start.
+ * Applies an output style to the running session and persists it. `undefined`
+ * selects the default style.
  *
  * Returns the feedback message to show in-chat.
  */
@@ -48,7 +47,36 @@ export async function applyOutputStyleSelection(
   config: Config,
   settings: LoadedSettings,
   style: OutputStyleDefinition | undefined,
+  options: { allowWorkspaceSettingsWrite?: boolean } = {},
 ): Promise<string> {
+  if (config.getBareMode() || config.isSafeMode()) {
+    throw new Error(
+      t('Output styles are unavailable in --bare and --safe-mode.'),
+    );
+  }
+
+  const workspaceOwnsOutputStyle =
+    settings.isTrusted &&
+    Object.prototype.hasOwnProperty.call(
+      settings.workspace.settings.general ?? {},
+      'outputStyle',
+    );
+  if (
+    workspaceOwnsOutputStyle &&
+    options.allowWorkspaceSettingsWrite === false
+  ) {
+    throw new Error(
+      t('Project output style settings are not available in this session.'),
+    );
+  }
+  settings.setValue(
+    workspaceOwnsOutputStyle ? SettingScope.Workspace : SettingScope.User,
+    'general.outputStyle',
+    style ? style.name : 'default',
+    undefined,
+    { throwOnWriteFailure: true },
+  );
+
   config.setOutputStyle(style);
   try {
     // The style lives in the stable layer of an already-bound system
@@ -60,24 +88,17 @@ export async function applyOutputStyleSelection(
       error,
     );
   }
-  try {
-    settings.setValue(
-      SettingScope.User,
-      'general.outputStyle',
-      style ? style.name : 'default',
-    );
-  } catch (error) {
-    debugLogger.warn('Failed to save output style setting:', error);
-  }
-
   if (!style) {
     return t('Output style cleared; responses use the default style.');
   }
   let message = t('Output style set to {{name}}.', { name: style.name });
   if (!resolveMainSessionOutputStyle(config)) {
-    message += ` ${t(
-      'It is saved but has no effect in this session because the system prompt is replaced (--system-prompt or QWEN_SYSTEM_MD).',
-    )}`;
+    message +=
+      config.getSystemPrompt() || isSystemMdActive()
+        ? ` ${t(
+            'It is saved but has no effect in this session because the system prompt is replaced (--system-prompt or QWEN_SYSTEM_MD).',
+          )}`
+        : ` ${t('It is saved but Learning is skipped in headless runs.')}`;
   }
   return message;
 }

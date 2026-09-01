@@ -63,4 +63,12 @@ describe('OutputStyleDialog', () => {
 
     expect(onSelect).not.toHaveBeenCalled();
   });
+
+  it('pre-selects the active style', () => {
+    const { lastFrame } = renderWithProviders(
+      <OutputStyleDialog onSelect={vi.fn()} currentStyleName="Concise" />,
+    );
+
+    expect(lastFrame()).toContain('› 2. Concise');
+  });
 });

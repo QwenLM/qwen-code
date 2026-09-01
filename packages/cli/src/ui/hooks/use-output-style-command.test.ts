@@ -15,6 +15,7 @@ describe('useOutputStyleCommand', () => {
   let refreshSystemInstruction: ReturnType<typeof vi.fn>;
   let setValue: ReturnType<typeof vi.fn>;
   let addItem: ReturnType<typeof vi.fn>;
+  let recordSlashCommand: ReturnType<typeof vi.fn>;
   let config: Config;
   let settings: LoadedSettings;
 
@@ -23,6 +24,7 @@ describe('useOutputStyleCommand', () => {
     refreshSystemInstruction = vi.fn().mockResolvedValue(undefined);
     setValue = vi.fn();
     addItem = vi.fn();
+    recordSlashCommand = vi.fn();
     config = {
       setOutputStyle,
       getOutputStyle: vi.fn().mockReturnValue(undefined),
@@ -31,6 +33,9 @@ describe('useOutputStyleCommand', () => {
       getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
       getInputFormat: vi.fn().mockReturnValue('text'),
       isInteractive: vi.fn().mockReturnValue(true),
+      getBareMode: vi.fn().mockReturnValue(false),
+      isSafeMode: vi.fn().mockReturnValue(false),
+      getChatRecordingService: vi.fn(() => ({ recordSlashCommand })),
     } as unknown as Config;
     settings = {
       setValue,
@@ -66,6 +71,8 @@ describe('useOutputStyleCommand', () => {
       expect.anything(),
       'general.outputStyle',
       'Concise',
+      undefined,
+      { throwOnWriteFailure: true },
     );
     expect(addItem).toHaveBeenCalledWith(
       expect.objectContaining({ type: 'info' }),
@@ -87,6 +94,8 @@ describe('useOutputStyleCommand', () => {
       expect.anything(),
       'general.outputStyle',
       'default',
+      undefined,
+      { throwOnWriteFailure: true },
     );
     expect(result.current.isOutputStyleDialogOpen).toBe(false);
   });
@@ -102,5 +111,40 @@ describe('useOutputStyleCommand', () => {
     expect(setOutputStyle).not.toHaveBeenCalled();
     expect(setValue).not.toHaveBeenCalled();
     expect(result.current.isOutputStyleDialogOpen).toBe(false);
+  });
+
+  it('records the feedback row for session replay', async () => {
+    const { result } = renderHook(() =>
+      useOutputStyleCommand(settings, config, addItem),
+    );
+
+    await act(async () => result.current.handleOutputStyleSelect('Concise'));
+
+    const [item] = addItem.mock.calls[0];
+    expect(recordSlashCommand).toHaveBeenCalledWith({
+      phase: 'result',
+      rawCommand: '/output-style',
+      outputHistoryItems: [item],
+    });
+  });
+
+  it('reports persistence failures in chat without applying the style', async () => {
+    setValue.mockImplementation(() => {
+      throw new Error('read-only settings');
+    });
+    const { result } = renderHook(() =>
+      useOutputStyleCommand(settings, config, addItem),
+    );
+
+    await act(async () => result.current.handleOutputStyleSelect('Concise'));
+
+    expect(setOutputStyle).not.toHaveBeenCalled();
+    expect(addItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'error',
+        text: expect.stringContaining('read-only settings'),
+      }),
+      expect.any(Number),
+    );
   });
 });
