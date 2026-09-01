@@ -12289,6 +12289,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       expect.objectContaining({
         toolInvocationGuard: expect.any(Function),
       }),
+      expect.anything(),
       expect.any(Function),
     );
 
