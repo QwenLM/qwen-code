@@ -187,6 +187,19 @@ export function assertValidTaskId(taskId: string): void {
   }
 }
 
+/**
+ * Normalize a model-supplied task-ID reference: trim surrounding
+ * whitespace and strip one leading `#` (the rendered display form,
+ * e.g. `#1`). Returns `undefined` when nothing remains, so callers
+ * can treat blank references as absent instead of forwarding `''`
+ * to filters that activate on `!== undefined`. The result must
+ * still pass `assertValidTaskId` before use.
+ */
+export function normalizeTaskId(raw: string): string | undefined {
+  const id = raw.trim().replace(/^#/, '');
+  return id === '' ? undefined : id;
+}
+
 /** Path to a single task file. */
 export function getTaskPath(teamName: string, taskId: string): string {
   assertValidTaskId(taskId);
