@@ -497,9 +497,16 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
           mode={request.mode}
           onClose={onClose}
           notify={notify}
-          // Composer control is an entry-layer seam: the dialog offers
-          // "edit as input" only when this is supplied.
-          onFillInput={props.fillInput}
+          // Enter in the model picker starts an arena session by writing the
+          // command into the composer, which the entry layer owns. Without that
+          // owner the selection would vanish behind a closed dialog, so say so.
+          onFillInput={(text) => {
+            if (props.fillInput) props.fillInput(text);
+            else
+              notify(
+                'The composer is not wired, so the arena command is lost.',
+              );
+          }}
         />
       );
 

@@ -7,15 +7,19 @@
 /**
  * Routing tests for OpenTuiDialogMount (Batch 5 slice 2). The mount is the
  * exhaustive `request.dialog -> dialog component` switch; every child dialog is
- * stubbed to a text marker so these tests assert only the wiring:
+ * stubbed to a text marker that also records the props it received, so the
+ * wiring is observable without booting a renderer:
  *
  *  - each of the 24 OpenTuiDialogRequest kinds renders its own dialog marker;
+ *  - the callbacks the mount hands a dialog do the real thing — persist through
+ *    the data helpers, reach the composer owner, or report a seam this shell
+ *    does not wire rather than closing over a no-op;
  *  - the help request routes to HelpOverlay and drives tab/scroll keys through
  *    the mount's own useKeyboard handler;
  *  - an unknown dialog kind hits the never-default and throws.
  *
- * Child-dialog internals (data builders, callbacks, selection semantics) are
- * covered by their own suites; the fake renderer never boots here.
+ * Child-dialog internals (data builders, selection semantics) are covered by
+ * their own suites; the fake renderer never boots here.
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -185,6 +189,7 @@ function mount(
   overrides: {
     notify?: (text: string) => void;
     onClose?: () => void;
+    fillInput?: (text: string) => void;
   } = {},
 ) {
   return render(
@@ -196,6 +201,7 @@ function mount(
       commands={[]}
       onClose={overrides.onClose ?? (() => {})}
       notify={overrides.notify ?? (() => {})}
+      fillInput={overrides.fillInput}
     />,
   );
 }
@@ -276,6 +282,27 @@ describe('OpenTuiDialogMount routing', () => {
     dialogProp('settings', 'onSelect')('ui.theme', undefined);
     expect(notices).toEqual([
       "'ui.theme' opens a dialog this shell does not mount.",
+    ]);
+  });
+
+  it('sends the arena start command through the composer owner', () => {
+    const fillInput = vi.fn();
+    mount({ dialog: 'arena', mode: 'start' }, { fillInput });
+    dialogProp('arena', 'onFillInput')('/arena start --models a:b ');
+    expect(fillInput).toHaveBeenCalledWith('/arena start --models a:b ');
+  });
+
+  it('reports an arena start when no composer owner is wired', () => {
+    const notices: string[] = [];
+    // The picker closes right after this callback, so without a report the
+    // user's model selection would vanish with it.
+    mount(
+      { dialog: 'arena', mode: 'start' },
+      { notify: (t) => notices.push(t) },
+    );
+    dialogProp('arena', 'onFillInput')('/arena start --models a:b ');
+    expect(notices).toEqual([
+      'The composer is not wired, so the arena command is lost.',
     ]);
   });
 
