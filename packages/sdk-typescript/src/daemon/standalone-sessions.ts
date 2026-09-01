@@ -5,15 +5,24 @@
  */
 
 import { DaemonHttpError } from './DaemonHttpError.js';
+import { DAEMON_APPROVAL_MODES, DAEMON_ERROR_KINDS } from './types.js';
 import type {
   DaemonApprovalMode,
   DaemonRestoredSession,
   DaemonSession,
   DaemonSessionArchiveState,
   DaemonSessionSummary,
+  DaemonWorkspaceProvidersStatus,
 } from './types.js';
 
 export const STANDALONE_SESSIONS_CAPABILITY = 'standalone_sessions_v1';
+export const STANDALONE_SESSION_OPTIONS_CAPABILITY =
+  'standalone_session_options_v1';
+
+export type DaemonStandaloneSessionOptions = Omit<
+  DaemonWorkspaceProvidersStatus,
+  'workspaceCwd' | 'acpChannelLive'
+>;
 
 export interface CreateStandaloneSessionOptions {
   sessionId?: string;
@@ -227,6 +236,171 @@ function validateStandaloneFields(value: JsonRecord, route: string): void {
   validateContext(value, route);
   requireString(value, 'projectlessOutputDirectory', route);
   validateWorkingDirectory(value['workingDirectory'], route);
+}
+
+function validateOptionalString(
+  value: JsonRecord,
+  field: string,
+  route: string,
+): void {
+  if (value[field] !== undefined && typeof value[field] !== 'string') {
+    throw new DaemonStandaloneProtocolError(route, `expected ${field} string`);
+  }
+}
+
+function validateStatusCell(value: JsonRecord, route: string): void {
+  requireString(value, 'kind', route);
+  if (
+    !['ok', 'warning', 'error', 'disabled', 'not_started', 'unknown'].includes(
+      String(value['status']),
+    )
+  ) {
+    throw new DaemonStandaloneProtocolError(route, 'invalid status');
+  }
+  for (const field of ['error', 'hint']) {
+    validateOptionalString(value, field, route);
+  }
+  if (
+    value['errorKind'] !== undefined &&
+    !DAEMON_ERROR_KINDS.includes(
+      value['errorKind'] as (typeof DAEMON_ERROR_KINDS)[number],
+    )
+  ) {
+    throw new DaemonStandaloneProtocolError(route, 'invalid errorKind');
+  }
+}
+
+function validateProviderModel(value: unknown, route: string): void {
+  const model = asRecord(value, route, 'provider model');
+  requireString(model, 'modelId', route);
+  requireString(model, 'baseModelId', route);
+  requireString(model, 'name', route, true);
+  if (
+    model['description'] !== undefined &&
+    model['description'] !== null &&
+    typeof model['description'] !== 'string'
+  ) {
+    throw new DaemonStandaloneProtocolError(route, 'invalid description');
+  }
+  if (
+    model['contextLimit'] !== undefined &&
+    (typeof model['contextLimit'] !== 'number' ||
+      !Number.isFinite(model['contextLimit']) ||
+      model['contextLimit'] <= 0)
+  ) {
+    throw new DaemonStandaloneProtocolError(route, 'invalid contextLimit');
+  }
+  for (const field of ['baseUrl', 'envKey']) {
+    validateOptionalString(model, field, route);
+  }
+  for (const field of ['isCurrent', 'isRuntime']) {
+    if (typeof model[field] !== 'boolean') {
+      throw new DaemonStandaloneProtocolError(
+        route,
+        `expected ${field} boolean`,
+      );
+    }
+  }
+  if (model['modalities'] !== undefined) {
+    const modalities = asRecord(model['modalities'], route, 'modalities');
+    for (const field of ['image', 'pdf', 'audio', 'video']) {
+      if (
+        modalities[field] !== undefined &&
+        typeof modalities[field] !== 'boolean'
+      ) {
+        throw new DaemonStandaloneProtocolError(
+          route,
+          `expected modalities.${field} boolean`,
+        );
+      }
+    }
+  }
+  if (
+    model['configOptions'] !== undefined &&
+    !Array.isArray(model['configOptions'])
+  ) {
+    throw new DaemonStandaloneProtocolError(route, 'expected configOptions[]');
+  }
+}
+
+export function parseStandaloneSessionOptions(
+  value: unknown,
+  route: string,
+): DaemonStandaloneSessionOptions {
+  const options = asRecord(value, route);
+  if (
+    options['workspaceCwd'] !== undefined ||
+    options['acpChannelLive'] !== undefined
+  ) {
+    throw new DaemonStandaloneProtocolError(
+      route,
+      'standalone options exposed workspace internals',
+    );
+  }
+  if (options['v'] !== 1) {
+    throw new DaemonStandaloneProtocolError(route, 'expected v=1');
+  }
+  if (typeof options['initialized'] !== 'boolean') {
+    throw new DaemonStandaloneProtocolError(
+      route,
+      'expected initialized boolean',
+    );
+  }
+  if (options['current'] !== undefined) {
+    const current = asRecord(options['current'], route, 'current');
+    for (const field of [
+      'authType',
+      'modelId',
+      'baseUrl',
+      'fastModelId',
+      'visionModelId',
+    ]) {
+      validateOptionalString(current, field, route);
+    }
+  }
+  if (
+    options['approvalMode'] !== undefined &&
+    !DAEMON_APPROVAL_MODES.includes(
+      options['approvalMode'] as DaemonApprovalMode,
+    )
+  ) {
+    throw new DaemonStandaloneProtocolError(route, 'invalid approvalMode');
+  }
+  if (!Array.isArray(options['providers'])) {
+    throw new DaemonStandaloneProtocolError(route, 'expected providers[]');
+  }
+  for (const value of options['providers']) {
+    const provider = asRecord(value, route, 'provider');
+    validateStatusCell(provider, route);
+    if (provider['kind'] !== 'model_provider') {
+      throw new DaemonStandaloneProtocolError(
+        route,
+        'expected model_provider kind',
+      );
+    }
+    requireString(provider, 'authType', route);
+    if (typeof provider['current'] !== 'boolean') {
+      throw new DaemonStandaloneProtocolError(
+        route,
+        'expected provider current boolean',
+      );
+    }
+    if (!Array.isArray(provider['models'])) {
+      throw new DaemonStandaloneProtocolError(route, 'expected models[]');
+    }
+    for (const model of provider['models']) {
+      validateProviderModel(model, route);
+    }
+  }
+  if (options['errors'] !== undefined) {
+    if (!Array.isArray(options['errors'])) {
+      throw new DaemonStandaloneProtocolError(route, 'expected errors[]');
+    }
+    for (const value of options['errors']) {
+      validateStatusCell(asRecord(value, route, 'error'), route);
+    }
+  }
+  return options as unknown as DaemonStandaloneSessionOptions;
 }
 
 export function parseStandaloneSession(

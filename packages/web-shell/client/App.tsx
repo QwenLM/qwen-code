@@ -11537,6 +11537,14 @@ export function App({
                   reportError(error, t('model.switch'));
                 });
             } else {
+              if (
+                !connectionRef.current.sessionId &&
+                effectiveSessionContext?.kind === 'standalone' &&
+                (connectionRef.current.models?.length ?? 0) === 0
+              ) {
+                pushToast('info', t('model.unavailable'));
+                return true;
+              }
               setModelDialogMode('main');
             }
             return true;
@@ -13294,18 +13302,27 @@ export function App({
   const visibleComposerToolbarActions = useMemo<
     readonly ComposerToolbarAction[]
   >(() => {
-    if (composerToolbarActions) return composerToolbarActions;
     const defaults =
       isChatEmptyState || !environmentGitReplacementEnabled
         ? DEFAULT_EMPTY_COMPOSER_TOOLBAR_ACTIONS
         : DEFAULT_COMPOSER_TOOLBAR_ACTIONS;
-    return composerToolbarAdditionalActions?.length
-      ? [...defaults, ...composerToolbarAdditionalActions]
-      : defaults;
+    const configured =
+      composerToolbarActions ??
+      (composerToolbarAdditionalActions?.length
+        ? [...defaults, ...composerToolbarAdditionalActions]
+        : defaults);
+    return !connection.sessionId &&
+      effectiveSessionContext?.kind === 'standalone' &&
+      availableModels.length === 0
+      ? configured.filter((action) => action !== 'model')
+      : configured;
   }, [
+    availableModels.length,
     composerToolbarActions,
     composerToolbarAdditionalActions,
+    connection.sessionId,
     environmentGitReplacementEnabled,
+    effectiveSessionContext?.kind,
     isChatEmptyState,
   ]);
   const useMobileWelcomeMiddleLayout =
@@ -15813,7 +15830,13 @@ export function App({
                             setShowApprovalModeDialog((v) => !v)
                           }
                           onSelectModel={() =>
-                            setModelDialogMode((v) => (v ? null : 'main'))
+                            !connection.sessionId &&
+                            effectiveSessionContext?.kind === 'standalone' &&
+                            availableModels.length === 0
+                              ? pushToast('info', t('model.unavailable'))
+                              : setModelDialogMode((v) =>
+                                  v ? null : 'main',
+                                )
                           }
                           onShowContext={() =>
                             showContextUsage('/context', false)

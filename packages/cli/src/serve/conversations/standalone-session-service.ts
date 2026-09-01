@@ -20,6 +20,7 @@ import type {
   BridgeSessionSummary,
   BridgeStandaloneRestoreSessionRequest,
 } from '@qwen-code/acp-bridge/bridgeTypes';
+import type { ServeWorkspaceProvidersStatus } from '@qwen-code/acp-bridge/status';
 import { STANDALONE_SESSION_SOURCE_TYPE } from '@qwen-code/acp-bridge/sessionSource';
 import {
   readSessionPrs,
@@ -117,6 +118,11 @@ export interface CreatedStandaloneSession {
   projectlessOutputDirectory: string;
   workingDirectory: { state: 'ready' };
 }
+
+export type StandaloneSessionOptions = Omit<
+  ServeWorkspaceProvidersStatus,
+  'workspaceCwd' | 'acpChannelLive'
+>;
 
 export interface StandaloneSessionDirectoryResult {
   sessionId: string;
@@ -482,6 +488,38 @@ export class StandaloneSessionService {
   private terminal = false;
 
   constructor(private readonly options: StandaloneSessionServiceOptions) {}
+
+  async getOptions(): Promise<StandaloneSessionOptions> {
+    const runtime = await this.options.ensureRuntime();
+    return this.options.runRuntimeActivity(runtime, async () => {
+      this.options.assertRuntimeCurrent(runtime);
+      await this.options.workspace.assertExactRoot(runtime.workspaceCwd);
+      this.options.assertRuntimeCurrent(runtime);
+      const status = await runtime.workspaceService.getWorkspaceProvidersStatus(
+        {
+          route: 'GET /standalone/session-options',
+          workspaceCwd: runtime.workspaceCwd,
+        },
+      );
+      this.options.assertRuntimeCurrent(runtime);
+      if (status.workspaceCwd !== runtime.workspaceCwd) {
+        throw new ConversationRuntimeOwnershipError(
+          'conversation_runtime_ownership_compromised',
+          false,
+        );
+      }
+      return {
+        v: status.v,
+        initialized: status.initialized,
+        ...(status.current !== undefined ? { current: status.current } : {}),
+        ...(status.approvalMode !== undefined
+          ? { approvalMode: status.approvalMode }
+          : {}),
+        providers: status.providers,
+        ...(status.errors !== undefined ? { errors: status.errors } : {}),
+      };
+    });
+  }
 
   freezeForTerminalQuarantine(runtime: WorkspaceRuntime): void {
     this.terminal = true;

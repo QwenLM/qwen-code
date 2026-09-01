@@ -12,6 +12,7 @@ type PromptSessionActions = {
   createSession: (options?: {
     workspaceCwd?: string;
     sessionContext?: DaemonProductSessionContext;
+    modelServiceId?: string;
     approvalMode?: DaemonApprovalMode;
     sourceType?: string;
     worktree?: { slug?: string };
@@ -76,7 +77,9 @@ export async function createAndAttachSessionForPrompt({
   // saving a follow-up round-trip. Approval mode is fail-closed at spawn: if the
   // requested mode can't be applied the session is not created (this call
   // rejects), rather than silently running in a different mode than requested.
-  // The model, by contrast, stays a best-effort follow-up below.
+  // Standalone also seeds the selected model atomically because its create
+  // route already owns model selection and must not silently fall back after a
+  // failed best-effort switch.
   const approvalMode =
     modeId && isDaemonApprovalMode(modeId) ? modeId : undefined;
   const {
@@ -87,6 +90,7 @@ export async function createAndAttachSessionForPrompt({
     sessionContext?.kind === 'standalone'
       ? {
           sessionContext,
+          ...(modelId ? { modelServiceId: modelId } : {}),
           ...(approvalMode ? { approvalMode } : {}),
         }
       : {
@@ -144,7 +148,7 @@ export async function createAndAttachSessionForPrompt({
     // The model is normally best-effort because the composer may already match
     // the daemon. An explicit model-bound reasoning choice is different: it
     // must never be applied after a failed switch to an unknown model.
-    if (modelId) {
+    if (modelId && sessionContext?.kind !== 'standalone') {
       preparationStep = 'set model for new session';
       try {
         await sessionActions.setModel(modelId);
@@ -156,7 +160,7 @@ export async function createAndAttachSessionForPrompt({
     if (reasoningEffort) {
       preparationStep = 'set reasoning effort';
       await sessionActions.setReasoningEffort(reasoningEffort, {
-        persist: true,
+        persist: sessionContext?.kind !== 'standalone',
       });
     }
   } catch (error) {

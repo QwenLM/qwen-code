@@ -71,6 +71,8 @@ describe('createAndAttachSessionForPrompt', () => {
 
     await prepareSession({
       sessionActions: actions,
+      modelId: 'qwen3.8-max(USE_OPENAI)',
+      reasoningEffort: 'high',
       modeId: 'yolo',
       workspaceCwd: '/must-not-leak',
       sessionContext: { kind: 'standalone' },
@@ -81,7 +83,12 @@ describe('createAndAttachSessionForPrompt', () => {
 
     expect(actions.createSession).toHaveBeenCalledWith({
       sessionContext: { kind: 'standalone' },
+      modelServiceId: 'qwen3.8-max(USE_OPENAI)',
       approvalMode: 'yolo',
+    });
+    expect(actions.setModel).not.toHaveBeenCalled();
+    expect(actions.setReasoningEffort).toHaveBeenCalledWith('high', {
+      persist: false,
     });
   });
 

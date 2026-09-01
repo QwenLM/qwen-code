@@ -712,7 +712,11 @@ const EXPECTED_REGISTERED_FEATURES = [
       return [feature, 'scheduled_task_session_reuse'];
     }
     if (feature === 'session_export') {
-      return [feature, 'standalone_sessions_v1'];
+      return [
+        feature,
+        'standalone_sessions_v1',
+        'standalone_session_options_v1',
+      ];
     }
     return [feature];
   }).filter(
@@ -2939,7 +2943,10 @@ describe('createServeApp', () => {
           );
           continue;
         }
-        if (feature === 'standalone_sessions_v1') {
+        if (
+          feature === 'standalone_sessions_v1' ||
+          feature === 'standalone_session_options_v1'
+        ) {
           expect(predicate({ standaloneSessionsAvailable: true })).toBe(true);
           expect(predicate({ standaloneSessionsAvailable: false })).toBe(false);
           expect(predicate({})).toBe(false);
@@ -36955,6 +36962,9 @@ describe('Live conversation runtime lifecycle', () => {
     expect(partialCapabilities.body.features).not.toContain(
       'standalone_sessions_v1',
     );
+    expect(partialCapabilities.body.features).not.toContain(
+      'standalone_session_options_v1',
+    );
 
     const complete = setupLiveRuntime();
     const completeRoute = await supertest(complete.app)
@@ -36967,6 +36977,9 @@ describe('Live conversation runtime lifecycle', () => {
     expect(completeRoute.status).toBe(400);
     expect(completeCapabilities.body.features).toContain(
       'standalone_sessions_v1',
+    );
+    expect(completeCapabilities.body.features).toContain(
+      'standalone_session_options_v1',
     );
   });
 

@@ -10976,6 +10976,30 @@ describe('App session callbacks', () => {
     );
   });
 
+  it('hides the empty model picker until standalone options are available', async () => {
+    mockConnection.sessionId = undefined;
+    mockConnection.sessionContext = { kind: 'standalone' };
+    mockConnection.models = undefined;
+    const { rerender } = renderApp();
+    await flush();
+
+    expect(
+      testState.latestChatEditorProps?.visibleToolbarActions,
+    ).not.toContain('model');
+
+    act(() => {
+      mockConnection.models = [
+        { id: 'qwen3.8-max(USE_OPENAI)', label: 'Qwen 3.8 Max' },
+      ];
+      rerender();
+    });
+    await flush();
+
+    expect(testState.latestChatEditorProps?.visibleToolbarActions).toContain(
+      'model',
+    );
+  });
+
   it('keeps a newer standalone draft when an older session load fails', async () => {
     const load = deferred<void>();
     mockConnection.sessionContext = { kind: 'workspace', cwd: '/tmp/project' };
@@ -25308,8 +25332,10 @@ describe('App session callbacks', () => {
 
     expect(mockSessionActions.createSession).toHaveBeenCalledWith({
       sessionContext: { kind: 'standalone' },
+      modelServiceId: 'qwen',
       approvalMode: 'default',
     });
+    expect(mockSessionActions.setModel).not.toHaveBeenCalled();
     await vi.waitFor(() => {
       expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
         'first standalone prompt',

@@ -135,6 +135,7 @@ interface MockClient {
   workspaceProviders: () => Promise<unknown>;
   listWorkspaceSessions: () => Promise<unknown[]>;
   listStandaloneSessions: () => Promise<unknown[]>;
+  getStandaloneSessionOptions: () => Promise<unknown>;
   closeSession: () => Promise<void>;
   setSessionApprovalMode: () => Promise<{ mode: string }>;
   workspaceMcp: () => Promise<unknown>;
@@ -190,6 +191,7 @@ const sdkMocks = vi.hoisted(() => {
   const workspaceProviders = vi.fn();
   const listWorkspaceSessions = vi.fn();
   const listStandaloneSessions = vi.fn();
+  const getStandaloneSessionOptions = vi.fn();
   const closeSession = vi.fn();
   const setSessionApprovalMode = vi.fn();
   const workspaceMcp = vi.fn();
@@ -227,6 +229,7 @@ const sdkMocks = vi.hoisted(() => {
     workspaceProviders = workspaceProviders;
     listWorkspaceSessions = listWorkspaceSessions;
     listStandaloneSessions = listStandaloneSessions;
+    getStandaloneSessionOptions = getStandaloneSessionOptions;
     closeSession = closeSession;
     setSessionApprovalMode = setSessionApprovalMode;
     workspaceMcp = workspaceMcp;
@@ -311,6 +314,7 @@ const sdkMocks = vi.hoisted(() => {
     workspaceProviders,
     workspaceSkills,
     listStandaloneSessions,
+    getStandaloneSessionOptions,
     workspaceAcpStatus,
     workspaceAcpPreheat,
     workspaceGit,
@@ -342,6 +346,12 @@ const sdkMocks = vi.hoisted(() => {
       listWorkspaceSessions.mockResolvedValue([]);
       listStandaloneSessions.mockReset();
       listStandaloneSessions.mockResolvedValue([]);
+      getStandaloneSessionOptions.mockReset();
+      getStandaloneSessionOptions.mockResolvedValue({
+        v: 1,
+        initialized: true,
+        providers: [],
+      });
       closeSession.mockReset();
       closeSession.mockResolvedValue(undefined);
       setSessionApprovalMode.mockReset();
@@ -466,6 +476,7 @@ vi.mock('@qwen-code/sdk/daemon', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@qwen-code/sdk/daemon')>();
   return {
     ...actual,
+    STANDALONE_SESSION_OPTIONS_CAPABILITY: 'standalone_session_options_v1',
     DaemonClient: sdkMocks.MockDaemonClient,
     DaemonSessionClient: sdkMocks.MockDaemonSessionClient,
   };
@@ -1115,6 +1126,170 @@ describe('DaemonSessionProvider', () => {
     ).not.toHaveBeenCalled();
   });
 
+  it('hydrates models for a deferred standalone session without creating it', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/primary',
+      features: ['standalone_sessions_v1', 'standalone_session_options_v1'],
+    });
+    sdkMocks.getStandaloneSessionOptions.mockResolvedValue({
+      v: 1,
+      initialized: true,
+      current: {
+        authType: 'USE_OPENAI',
+        modelId: 'qwen3.8-max(USE_OPENAI)',
+      },
+      approvalMode: 'default',
+      providers: [
+        {
+          kind: 'model_provider',
+          status: 'ok',
+          authType: 'USE_OPENAI',
+          models: [
+            {
+              modelId: 'qwen3.8-max(USE_OPENAI)',
+              name: 'Qwen 3.8 Max',
+              isCurrent: true,
+              contextLimit: 65_536,
+            },
+          ],
+        },
+      ],
+    });
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: undefined,
+      sessionContext: { kind: 'standalone' },
+    });
+    await act(async () => {
+      await vi.waitFor(() =>
+        expect(connection).toMatchObject({
+          status: 'connected',
+          sessionContext: { kind: 'standalone' },
+          currentModel: 'qwen3.8-max(USE_OPENAI)',
+          currentMode: 'default',
+          contextWindow: 65_536,
+        }),
+      );
+    });
+
+    expect(connection?.models).toEqual([
+      expect.objectContaining({
+        id: 'qwen3.8-max(USE_OPENAI)',
+        label: 'Qwen 3.8 Max',
+        contextWindow: 65_536,
+      }),
+    ]);
+    expect(connection?.workspaceCwd).toBeUndefined();
+    expect(connection?.providers).toBeUndefined();
+    expect(sdkMocks.getStandaloneSessionOptions).toHaveBeenCalledOnce();
+    expect(sdkMocks.workspaceProviders).not.toHaveBeenCalled();
+    expect(sdkMocks.workspaceSkills).not.toHaveBeenCalled();
+    expect(sdkMocks.workspaceByCwd).not.toHaveBeenCalled();
+    expect(
+      sdkMocks.MockDaemonSessionClient.createStandalone,
+    ).not.toHaveBeenCalled();
+  });
+
+  it('keeps a standalone draft usable when its options request fails', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/primary',
+      features: ['standalone_sessions_v1', 'standalone_session_options_v1'],
+    });
+    sdkMocks.getStandaloneSessionOptions.mockRejectedValue(
+      new Error('options unavailable'),
+    );
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: undefined,
+      sessionContext: { kind: 'standalone' },
+    });
+    await act(async () => {
+      await vi.waitFor(() => expect(connection?.status).toBe('connected'));
+    });
+
+    expect(connection?.models).toBeUndefined();
+    expect(sdkMocks.getStandaloneSessionOptions).toHaveBeenCalledOnce();
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('standalone session options failed'),
+      expect.any(Error),
+    );
+    warn.mockRestore();
+  });
+
+  it('does not publish stale standalone options after switching contexts', async () => {
+    const options = createDeferred<{
+      v: 1;
+      initialized: true;
+      providers: never[];
+    }>();
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/primary',
+      features: ['standalone_sessions_v1', 'standalone_session_options_v1'],
+    });
+    sdkMocks.getStandaloneSessionOptions.mockReturnValue(options.promise);
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: undefined,
+      sessionContext: { kind: 'standalone' },
+    });
+    await vi.waitFor(() =>
+      expect(sdkMocks.getStandaloneSessionOptions).toHaveBeenCalledOnce(),
+    );
+
+    act(() => {
+      root?.render(
+        <DaemonSessionProvider
+          baseUrl="http://127.0.0.1:4170"
+          autoConnect
+          sessionContext={{ kind: 'workspace', cwd: '/primary' }}
+        >
+          <Harness />
+        </DaemonSessionProvider>,
+      );
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+    await act(async () => {
+      options.resolve({ v: 1, initialized: true, providers: [] });
+      await flushPromises();
+    });
+    await act(async () => {
+      await vi.waitFor(() =>
+        expect(connection).toMatchObject({
+          status: 'connected',
+          sessionContext: { kind: 'workspace', cwd: '/primary' },
+          workspaceCwd: '/primary',
+        }),
+      );
+    });
+
+    expect(connection?.currentModel).toBeUndefined();
+    expect(sdkMocks.workspaceProviders).toHaveBeenCalled();
+  });
+
   it('does not reconnect for an equivalent inline session context', async () => {
     sdkMocks.capabilities.mockResolvedValue({
       workspaceCwd: '/primary',
@@ -1402,13 +1577,17 @@ describe('DaemonSessionProvider', () => {
       sessionContext: { kind: 'standalone' },
     });
     await act(async () => {
-      await actions?.newSession();
+      await actions?.createSession({
+        modelServiceId: 'qwen3.8-max(USE_OPENAI)',
+      });
       await vi.waitFor(() => expect(connection?.status).toBe('connected'));
     });
 
     expect(
       sdkMocks.MockDaemonSessionClient.createStandalone,
-    ).toHaveBeenCalledOnce();
+    ).toHaveBeenCalledWith(expect.anything(), {
+      modelServiceId: 'qwen3.8-max(USE_OPENAI)',
+    });
     expect(
       sdkMocks.MockDaemonSessionClient.createOrAttach,
     ).not.toHaveBeenCalled();
