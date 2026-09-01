@@ -27,6 +27,23 @@ import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+// Hoisted so vi.mock can consume it. Two cases below assert on what was
+// NOT logged: a rejection warning is the observable proof that an
+// enumeration ran at all.
+const { mockDebugLogger } = vi.hoisted(() => ({
+  mockDebugLogger: {
+    isEnabled: vi.fn().mockReturnValue(true),
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  },
+}));
+vi.mock('../utils/debugLogger.js', () => ({
+  createDebugLogger: () => mockDebugLogger,
+  isDebugLogFileEnabled: () => false,
+}));
+
 import { GitWorktreeService } from './gitWorktreeService.js';
 
 describe('GitWorktreeService.createUserWorktree() — .worktreeinclude', () => {
@@ -64,10 +81,15 @@ describe('GitWorktreeService.createUserWorktree() — .worktreeinclude', () => {
       .then(() => true)
       .catch(() => false);
 
+  /** All warn output as one string, for "this never ran" assertions. */
+  const warnText = () =>
+    mockDebugLogger.warn.mock.calls.map((c) => c.join(' ')).join('\n');
+
   const git = (...args: string[]) =>
     execFileSync('git', args, { cwd: repoRoot, encoding: 'utf8' });
 
   beforeEach(async () => {
+    mockDebugLogger.warn.mockClear();
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-wt-include-'));
     // Resolve symlinks (macOS /var → /private/var) so path comparisons
     // line up with what GitWorktreeService produces internally.
@@ -185,6 +207,12 @@ describe('GitWorktreeService.createUserWorktree() — .worktreeinclude', () => {
     await write('secret.key', 'TRACKED');
     git('add', 'secret.key');
     git('commit', '-q', '-m', 'add tracked', '--no-verify');
+    // Diverge the main-tree copy so a wrongly-permitted overwrite would
+    // be visible. With both sides identical the assertion below cannot
+    // tell a correct skip from a copy that clobbered the file. The file
+    // stays tracked (no re-add, no ignore rule), so it remains outside
+    // the `--others --ignored` candidate set either way.
+    await write('secret.key', 'LOCAL-EDIT\n');
     await writeInclude('*.key', 'secret.key');
 
     const service = new GitWorktreeService(repoRoot);
@@ -373,6 +401,260 @@ describe('GitWorktreeService.createUserWorktree() — .worktreeinclude', () => {
     expect(result.success).toBe(true);
 
     expect(await exists(path.join(result.worktree!.path, '.env'))).toBe(true);
+  });
+
+  // ── Regression coverage for review round 1 ──────────────────────────
+
+  it('expands a collapsed directory for a separator-less pattern (R1-1)', async () => {
+    // Gitignore semantics let a slash-less pattern match at any depth, so
+    // `.env` must reach `secrets/.env` even though pass 1 collapses the
+    // whole directory to a single `secrets/` entry that the matcher does
+    // not itself match.
+    await writeGitignore('secrets/');
+    await write('secrets/.env', 'NESTED');
+    await writeInclude('.env');
+
+    const service = new GitWorktreeService(repoRoot);
+    const result = await service.createUserWorktree('r1-sepless', 'main');
+    expect(result.success).toBe(true);
+
+    expect(
+      await fs.readFile(
+        path.join(result.worktree!.path, 'secrets', '.env'),
+        'utf8',
+      ),
+    ).toBe('NESTED');
+  });
+
+  it('expands a collapsed directory for a leading-wildcard pattern (R1-1)', async () => {
+    // `*.pem` has no literal head at all, so a prefix test would never
+    // select the collapsed `.secrets/` for expansion.
+    await writeGitignore('.secrets/');
+    await write('.secrets/dev.pem', 'PEM');
+    // `**/*.pem` contains a separator, so the separator-less rule does not
+    // fire; its literal head is empty, which is the case under test.
+    await writeInclude('**/*.pem');
+
+    const service = new GitWorktreeService(repoRoot);
+    const result = await service.createUserWorktree('r1-wildcard', 'main');
+    expect(result.success).toBe(true);
+
+    expect(
+      await fs.readFile(
+        path.join(result.worktree!.path, '.secrets', 'dev.pem'),
+        'utf8',
+      ),
+    ).toBe('PEM');
+  });
+
+  it('expands a collapsed directory nested deeper than the pattern head (R1-1)', async () => {
+    // The collapsed entry is `vendor/cache/`, the pattern head is
+    // `vendor/` — the containment runs the other way, so testing only
+    // `head.startsWith(entry)` would miss it.
+    await writeGitignore('cache/');
+    // `vendor/` must hold a tracked file, otherwise git lists it as an
+    // untracked directory too and the parent alone would cover the
+    // expansion — leaving the case under test unexercised.
+    await write('vendor/keep.txt', 'KEEP');
+    git('add', 'vendor/keep.txt');
+    git('commit', '-q', '-m', 'track vendor', '--no-verify');
+    await write('vendor/cache/lib.bin', 'BIN');
+    await writeInclude('vendor/**/*.bin');
+
+    const service = new GitWorktreeService(repoRoot);
+    const result = await service.createUserWorktree('r1-deeper', 'main');
+    expect(result.success).toBe(true);
+
+    expect(
+      await fs.readFile(
+        path.join(result.worktree!.path, 'vendor', 'cache', 'lib.bin'),
+        'utf8',
+      ),
+    ).toBe('BIN');
+  });
+
+  it('copies a non-ASCII filename under git default quotePath (R1-2)', async () => {
+    // With `core.quotePath` at its default, git octal-escapes non-ASCII
+    // names, which match no pattern and name no file on disk.
+    git('config', 'core.quotepath', 'true');
+    await writeGitignore('*.env');
+    await write('配置.env', 'CJK');
+    await writeInclude('*.env');
+
+    const service = new GitWorktreeService(repoRoot);
+    const result = await service.createUserWorktree('r1-nonascii', 'main');
+    expect(result.success).toBe(true);
+
+    expect(
+      await fs.readFile(path.join(result.worktree!.path, '配置.env'), 'utf8'),
+    ).toBe('CJK');
+  });
+
+  it('survives a .worktreeinclude that is a directory (R1-3)', async () => {
+    // The fail-open read guard is the only thing keeping an unreadable
+    // opt-in file from failing a creation whose worktree is already on
+    // disk. `mkdir` is the CI-robust way to force a non-ENOENT error.
+    await fs.mkdir(path.join(repoRoot, '.worktreeinclude'));
+
+    const service = new GitWorktreeService(repoRoot);
+    const result = await service.createUserWorktree('r1-eisdir', 'main');
+    expect(result.success).toBe(true);
+    expect(result.worktree).toBeDefined();
+  });
+
+  it('skips an embedded git repository rather than copying it (R1-9)', async () => {
+    // Git stops at a nested repository and emits it as a `dir/` entry
+    // even from the scoped pass, so the copy loop's file-only invariant
+    // needs the trailing-slash guard on both passes.
+    await writeGitignore('.local/');
+    await write('.local/plain.txt', 'PLAIN');
+    const embedded = path.join(repoRoot, '.local', 'vendor', 'lib');
+    await fs.mkdir(embedded, { recursive: true });
+    execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: embedded });
+    await writeInclude('.local/');
+
+    const service = new GitWorktreeService(repoRoot);
+    const result = await service.createUserWorktree('r1-embedded', 'main');
+    expect(result.success).toBe(true);
+
+    const wt = result.worktree!.path;
+    // The ordinary sibling still copied...
+    expect(
+      await fs.readFile(path.join(wt, '.local', 'plain.txt'), 'utf8'),
+    ).toBe('PLAIN');
+    // ...and the embedded repo left no half-made directory behind.
+    expect(await exists(path.join(wt, '.local', 'vendor'))).toBe(false);
+  });
+
+  it('does not enumerate the .qwen tree for a broad pattern (R1-10)', async () => {
+    // `.qwen` holds the worktrees directory, so expanding it would list
+    // every worktree the user has accumulated only to reject each one.
+    await write('.qwen/worktrees/w1/.env', 'OTHER');
+    await writeGitignore('.qwen/');
+    await writeInclude('.qwen/**', '**');
+
+    const service = new GitWorktreeService(repoRoot);
+    const result = await service.createUserWorktree('r1-qwen', 'main');
+    expect(result.success).toBe(true);
+    expect(await exists(path.join(result.worktree!.path, '.qwen'))).toBe(false);
+
+    // The per-entry gate would reject these anyway; what this pins is
+    // that they never got enumerated in the first place. A rejection
+    // warning naming the .qwen tree is proof the expansion ran.
+    expect(warnText()).not.toContain('.qwen tree is CLI-managed');
+  });
+
+  it('ignores an over-cap .worktreeinclude without failing creation (R1-12)', async () => {
+    // Committed, hence lower-trust: an unbounded pattern list is a denial
+    // of service against creation, and the cap must fail open.
+    await writeGitignore('.env');
+    await write('.env', 'E');
+    await fs.writeFile(
+      path.join(repoRoot, '.worktreeinclude'),
+      Array.from({ length: 10_001 }, (_, i) => `pattern-${i}`).join('\n'),
+    );
+
+    const started = Date.now();
+    const service = new GitWorktreeService(repoRoot);
+    const result = await service.createUserWorktree('r1-cap', 'main');
+    expect(result.success).toBe(true);
+    // The whole file is dropped, so nothing is copied and the run is not
+    // stalled by compiling ten thousand rules per candidate.
+    expect(await exists(path.join(result.worktree!.path, '.env'))).toBe(false);
+    expect(Date.now() - started).toBeLessThan(20_000);
+    // The dropped-whole behavior has to be observable, otherwise an
+    // uncapped run that simply matches nothing looks identical.
+    expect(warnText()).toContain('over the 10000 cap');
+  });
+
+  it('expands a directory whose name looks like pathspec magic (R1-14)', async () => {
+    // Git parses a leading `:(...)` in a pathspec as a magic signature,
+    // so feeding its own listing back unescaped fatals the scoped pass
+    // and drops every collapsed directory, benign ones included.
+    await writeGitignore(':(trap)/', '.local/');
+    await write(':(trap)/trap.env', 'TRAP');
+    await write('.local/benign.txt', 'BENIGN');
+    await writeInclude(':(trap)/', '.local/');
+
+    const service = new GitWorktreeService(repoRoot);
+    const result = await service.createUserWorktree('r1-pathspec', 'main');
+    expect(result.success).toBe(true);
+
+    const wt = result.worktree!.path;
+    // The benign directory must survive the trap's presence.
+    expect(
+      await fs.readFile(path.join(wt, '.local', 'benign.txt'), 'utf8'),
+    ).toBe('BENIGN');
+    expect(
+      await fs.readFile(path.join(wt, ':(trap)', 'trap.env'), 'utf8'),
+    ).toBe('TRAP');
+  });
+
+  it('does not enumerate a directory the symlink pass just linked (R1-17)', async () => {
+    // The linked tree now resolves into the main repo, so every file
+    // under it would clear the source gates and then die at the
+    // dest-parent containment check — one warning each, copying nothing.
+    await writeGitignore('vendor/');
+    await write('vendor/pkg/index.js', 'JS');
+    await writeInclude('vendor/**');
+
+    const service = new GitWorktreeService(repoRoot);
+    const result = await service.createUserWorktree('r1-linked', 'main', {
+      symlinkDirectories: ['vendor'],
+    });
+    expect(result.success).toBe(true);
+
+    const dest = path.join(result.worktree!.path, 'vendor');
+    // Still a symlink — the copy pass contributed nothing here.
+    expect((await fs.lstat(dest)).isSymbolicLink()).toBe(true);
+    // And it got there without resolving every file underneath only to
+    // reject each at the dest-parent containment check.
+    expect(warnText()).not.toContain('escapes worktree root');
+  });
+
+  it('skips entries under a nested linked directory found by pass 2 (R1-17)', async () => {
+    // The linked dir sits below a collapsed one, so pass 1 keeps `a/`
+    // (it neither equals nor starts with `a/b/`), pass 2 expands it, and
+    // only the prefix test can drop the entries under the link.
+    await writeGitignore('a/');
+    await write('a/b/pkg.js', 'JS');
+    await write('a/loose.txt', 'LOOSE');
+    await writeInclude('a/**');
+
+    const service = new GitWorktreeService(repoRoot);
+    const result = await service.createUserWorktree('r1-nested-link', 'main', {
+      symlinkDirectories: ['a/b'],
+    });
+    expect(result.success).toBe(true);
+
+    const wt = result.worktree!.path;
+    expect((await fs.lstat(path.join(wt, 'a', 'b'))).isSymbolicLink()).toBe(
+      true,
+    );
+    // The sibling outside the link still copied...
+    expect(await fs.readFile(path.join(wt, 'a', 'loose.txt'), 'utf8')).toBe(
+      'LOOSE',
+    );
+    // ...and nothing under the link was resolved just to be rejected.
+    expect(warnText()).not.toContain('escapes worktree root');
+  });
+
+  it('still copies a configured directory the symlink pass failed to link (R1-17)', async () => {
+    // The skip must consult links actually created, not the configured
+    // list: an entry that failed to link is a legitimate copy target.
+    await writeGitignore('vendor/');
+    await write('vendor/pkg/index.js', 'JS');
+    // `..` is rejected by the shared gates, so nothing gets linked.
+    await writeInclude('vendor/**');
+
+    const service = new GitWorktreeService(repoRoot);
+    const result = await service.createUserWorktree('r1-unlinked', 'main', {
+      symlinkDirectories: ['../escape'],
+    });
+    expect(result.success).toBe(true);
+
+    const dest = path.join(result.worktree!.path, 'vendor', 'pkg', 'index.js');
+    expect(await fs.readFile(dest, 'utf8')).toBe('JS');
   });
 
   it('handles multiple patterns — some matching, some not', async () => {

@@ -248,7 +248,7 @@ appsettings.Development.json
 .local/
 ```
 
-One pattern per line, in **gitignore syntax** — `#` starts a comment, blank lines and surrounding whitespace are ignored, and globs (`*.pem`, `certs/**`) work the way they do in `.gitignore`. A pattern that fails to compile is dropped with a warning instead of failing the run.
+One pattern per line, in **gitignore syntax** — `#` starts a comment, blank lines and surrounding whitespace are ignored, and globs (`*.pem`, `certs/**`) work the way they do in `.gitignore`. A pattern the matcher cannot parse simply matches nothing — it is never an error, and it does not affect the other lines.
 
 Only files git **actually ignores** are candidates. A pattern that matches a tracked file, or an untracked file that no `.gitignore` rule covers, selects nothing — tracked files already arrive in the worktree through `git worktree add`, and the gap this closes is the ignored ones. Symbolic links are skipped rather than copied.
 
@@ -271,15 +271,17 @@ Reach for a copy when an agent editing the file inside the worktree must not tou
 
 Entries are validated against the same guards as `worktree.symlinkDirectories`, and rejections never abort worktree creation:
 
-- The candidate set comes from `git ls-files --others --ignored`, so a pattern can only ever select files git already lists. `.git` internals, tracked files and anything outside the repository are unreachable by construction.
+- The candidate set comes from `git ls-files --others --ignored --exclude-standard`, so a pattern can only ever select files git already lists. `.git` internals, tracked files and anything outside the repository are unreachable by construction.
 - Selected paths are additionally checked to resolve inside the repo root and outside `.git` / `.qwen`, as defense in depth.
 - **Symbolic links are skipped**, neither reproduced nor dereferenced.
 - **A pattern matching nothing is harmless** — no error, no failed creation.
+- A directory already linked in by `worktree.symlinkDirectories` is skipped rather than walked, since its contents resolve back into the main repo.
+- The file itself is capped at 1 MB and 10,000 patterns. Past either limit it is ignored whole, with a warning — worktree creation still succeeds.
 - **Existing destinations are never overwritten.** A tracked file that git already placed in the worktree wins over a copy, and so does a symlink from `worktree.symlinkDirectories` — the symlink pass runs first, so a path listed in both stays a symlink.
 
 Rejections and skips are recorded in the debug log (`DEBUG=1`); worktree creation itself still succeeds.
 
-Applies to ALL worktree-creation paths: `--worktree` flag, `enter_worktree` tool, and `agent isolation: "worktree"`.
+Applies to ALL worktree-creation paths: the `--worktree` flag, the `enter_worktree` tool, `agent isolation: "worktree"`, and worktree sessions created through `qwen serve`.
 
 ## Tool Reference
 

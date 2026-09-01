@@ -360,7 +360,7 @@ git fetch origin pull/<N>/head
 
 #### D-4：`.worktreeinclude` 文件（复制 gitignore 文件）
 
-**格式：** 仓库根目录的 `.worktreeinclude`，每行一个 **gitignore 风格 pattern**，`#` 开头为注释，空行与首尾空白忽略。语法与 Claude Code 的同名文件一致（二者均使用 npm `ignore` 包编译），无法编译的 pattern 记 warn 后按"不匹配任何东西"处理，不影响其余行。
+**格式：** 仓库根目录的 `.worktreeinclude`，每行一个 **gitignore 风格 pattern**，`#` 开头为注释，空行与首尾空白忽略。语法与 Claude Code 的同名文件一致（二者均使用 npm `ignore` 包编译）。`ignore@7` 的 `add()` 对任何字符串输入都不抛异常，因此无法解析的 pattern 只是匹配不到任何内容，既不报错也不影响其余行。文件本身限制在 1 MB / 10000 条 pattern 以内，超出则整体忽略并记 warn —— 该文件提交在仓库中属低信任输入，而每条 pattern 的匹配开销按候选文件数计，无上限即构成对 worktree 创建的拒绝服务。
 
 ```text
 # .worktreeinclude
@@ -384,6 +384,10 @@ agent 在 worktree 内改 `.env` 不得污染开发者的主 checkout —— 这
 
 - **候选集是 `git ls-files --others --ignored --exclude-standard`**，即 git 实际忽略的文件。这一点承担双重作用：其一，tracked 文件本就由 `git worktree add` 带入 worktree，本功能要补的正是被忽略的那部分；其二，它给 pattern 划定了边界 —— `.worktreeinclude` 提交在仓库里，但任何 pattern 都只能从 git 已列出的集合里选，`.git` 内部、tracked 文件、仓库外路径根本不在候选集中。`--directory` 会把完全被忽略的目录折叠成单条 `dir/`，故对候选目录再跑一次带路径限定的 `ls-files` 展开（与上游同样的两遍结构）。
 - 符号链接直接跳过，既不复制为链接也不解引用（与上游一致）。
+- 两遍 `ls-files` 均固定 `-c core.quotepath=false`，否则 git 默认会把非 ASCII 路径按八进制转义输出，导致这类文件永远匹配不上、被静默丢弃（`gitDiff.ts`、`filesearch/crawler.ts` 已有同样的固定）。第二遍的目录 pathspec 加 `:(literal)` 前缀并分批传入：前者防止名为 `:(...)` 的合法目录名被 git 当作 pathspec magic 而 fatal 掉整批，后者防止超大仓库触及 argv 上限后静默丢弃全部折叠目录。
+- 判断哪些折叠目录需要展开时刻意「宁可多展开」：gitignore 语义下无分隔符的 pattern 可在任意深度匹配（`.env` 匹配 `secrets/.env`），前导通配的 pattern 更没有字面前缀可用。多展开一次的代价只是一次随后被丢弃的列举，漏展开则是静默丢文件。
+- 已被符号链接那一遍链接进去的目录会被跳过，否则其内容会解析回主仓库，逐个文件通过来源校验后再死在目标父目录的包含检查上。该跳过集必须取自「实际成功创建的链接」，而非配置项原始列表 —— 链接失败的条目仍是合法的复制目标。
+- `.qwen` 子树在匹配与展开之前就被预过滤掉。逐条校验本来就会拒绝它，提前过滤是因为该树包含 `.qwen/worktrees`，否则一条宽泛的 pattern 会强制列举用户已积累的每一个 worktree，只为逐个 warn 拒绝。
 - 由 `GitWorktreeService` 自行从 `sourceRepoPath` 读取，**不经 `createUserWorktree` 的 options 传参** —— 该文件属于仓库而非用户配置，所有创建路径（`--worktree`、`enter_worktree`、agent `isolation`、`qwen serve`）自动生效，无需改动任何调用点。
 - 校验复用 D-2 的 `resolveWorktreeEntry()`（由 `symlinkConfiguredDirectories` 抽出共享）：绝对路径、`..` 段、逃出 repo root、落入 `.git` / `.qwen` 一律拒绝；stat 后再以 realpath 复跑一遍全部检查，防止提交进仓库的符号链接绕过词法检查。
 - **信任级别低于 D-2。** `.worktreeinclude` 提交在仓库里，内容来自任何能推送者（包括用户不信任的 clone），而 `symlinkDirectories` 出自用户自己的 settings。因此校验门按前者标定，不得为后者放松。

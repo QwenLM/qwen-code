@@ -32,6 +32,22 @@ const debugLogger = createDebugLogger('GIT_WORKTREE_SERVICE');
  */
 const WORKTREE_INCLUDE_FILE = '.worktreeinclude';
 
+/**
+ * Caps on the committed `.worktreeinclude`. It is lower-trust input and
+ * every pattern is re-evaluated per candidate, so an unbounded file is a
+ * denial of service against worktree creation — see
+ * `readWorktreeIncludePatterns`. Generous next to any legitimate file.
+ */
+const WORKTREE_INCLUDE_MAX_BYTES = 1024 * 1024;
+const WORKTREE_INCLUDE_MAX_PATTERNS = 10_000;
+
+/**
+ * How many directory pathspecs to hand one scoped `git ls-files`. Keeps
+ * the argv well under every platform's limit; a repo with more collapsed
+ * ignored directories than this is listed across several calls.
+ */
+const WORKTREE_INCLUDE_PATHSPEC_BATCH = 1000;
+
 /** Prefix applied to every general-purpose worktree branch. */
 export const WORKTREE_BRANCH_PREFIX = 'worktree-';
 
@@ -1745,14 +1761,16 @@ export class GitWorktreeService {
       // run tests / builds without a fresh install. Same fail-open
       // policy as hooksPath — failures log and continue.
       const symlinkPaths = options?.symlinkDirectories ?? [];
+      let linkedDirs: ReadonlySet<string> = new Set<string>();
       if (symlinkPaths.length > 0) {
-        await this.symlinkConfiguredDirectories(
+        linkedDirs = await this.symlinkConfiguredDirectories(
           worktreePath,
           symlinkPaths,
         ).catch((error) => {
           debugLogger.warn(
             `createUserWorktree: symlinkConfiguredDirectories failed for ${slug}: ${error}`,
           );
+          return new Set<string>();
         });
       }
 
@@ -1767,7 +1785,7 @@ export class GitWorktreeService {
       // fail-open policy: failures log and continue.
       const includePatterns = await this.readWorktreeIncludePatterns();
       if (includePatterns.length > 0) {
-        await this.resolveIncludedFiles(includePatterns)
+        await this.resolveIncludedFiles(includePatterns, linkedDirs)
           .then((files) =>
             files.length > 0
               ? this.copyIncludedPaths(worktreePath, files)
@@ -2149,14 +2167,25 @@ export class GitWorktreeService {
    * - **Other I/O errors**: warn log, continue to the next entry.
    *
    * Mirrors claude-code's `symlinkDirectories` helper (utils/worktree.ts).
+   *
+   * Returns the repo-relative, slash-terminated paths it actually linked,
+   * for the copy pass to skip.
    */
   private async symlinkConfiguredDirectories(
     worktreePath: string,
     configured: readonly string[],
-  ): Promise<void> {
+  ): Promise<Set<string>> {
     const logPrefix = 'symlinkConfiguredDirectories';
+    // Repo-relative paths of the links this pass actually created. The
+    // copy pass consults it to avoid enumerating a tree that is now a
+    // link into the main repo — see `resolveIncludedFiles`. It must
+    // record only successful links, never the raw configured list: this
+    // loop is fail-open per entry, and an entry that did NOT link (a
+    // rejected path, an occupied destination) is still a legitimate
+    // copy target.
+    const linked = new Set<string>();
     const ctx = await this.buildWorktreeEntryContext(worktreePath, logPrefix);
-    if (!ctx) return;
+    if (!ctx) return linked;
 
     for (const raw of configured) {
       const resolved = await this.resolveWorktreeEntry(raw, ctx, logPrefix);
@@ -2185,6 +2214,9 @@ export class GitWorktreeService {
         // `sourceAbs` so the new link is one-hop and doesn't preserve
         // the chain we just validated.
         await fs.symlink(realSource, destAbs, symlinkType);
+        // Normalize to the POSIX, slash-terminated form `git ls-files`
+        // emits for directories, so the copy pass can compare directly.
+        linked.add(raw.split(path.sep).join('/').replace(/\/*$/, '') + '/');
         debugLogger.debug(
           `${logPrefix}: linked ${destAbs} → ${realSource} (${symlinkType})`,
         );
@@ -2200,6 +2232,7 @@ export class GitWorktreeService {
         }
       }
     }
+    return linked;
   }
 
   /**
@@ -2207,19 +2240,37 @@ export class GitWorktreeService {
    *
    * Format matches the convention the file already has in other agent
    * CLIs: gitignore-style patterns, one per line, `#` starts a comment,
-   * blank lines and surrounding whitespace ignored. Compilation and
-   * matching happen in `resolveIncludedFiles`; this method only strips
-   * the file down to candidate pattern strings.
+   * blank lines and surrounding whitespace ignored. Matching happens in
+   * `resolveIncludedFiles`; this method only strips the file down to
+   * candidate pattern strings.
+   *
+   * Bounded on both bytes and lines. The file is committed, so its
+   * content comes from anyone who can push — and every line becomes a
+   * compiled matcher rule whose cost is paid on every candidate. An
+   * unbounded file is a denial of service against worktree creation:
+   * past a few hundred thousand rules the matcher exhausts the V8 heap,
+   * and that abort is not a catchable exception, so the fail-open
+   * `.catch` around this pass could not save the run. Over-cap input is
+   * dropped whole rather than truncated — a half-applied pattern list is
+   * a silently wrong answer, and refusing keeps the fail-open contract.
    *
    * A missing file is the overwhelmingly common case and returns `[]`
    * silently. Any other read error warns and returns `[]`: the worktree
-   * is already on disk, so an unreadable opt-in file must not abort
-   * creation.
+   * is already on disk by the time this runs, so an unreadable or
+   * oversized opt-in file must never abort creation.
    */
   private async readWorktreeIncludePatterns(): Promise<string[]> {
     const filePath = path.join(this.sourceRepoPath, WORKTREE_INCLUDE_FILE);
     let content: string;
     try {
+      const stat = await fs.stat(filePath);
+      if (stat.size > WORKTREE_INCLUDE_MAX_BYTES) {
+        debugLogger.warn(
+          `readWorktreeIncludePatterns: ${filePath} is ${stat.size} bytes, ` +
+            `over the ${WORKTREE_INCLUDE_MAX_BYTES}-byte cap; ignoring the file`,
+        );
+        return [];
+      }
       content = await fs.readFile(filePath, 'utf8');
     } catch (error) {
       if (!isNodeError(error) || error.code !== 'ENOENT') {
@@ -2229,10 +2280,18 @@ export class GitWorktreeService {
       }
       return [];
     }
-    return content
+    const patterns = content
       .split(/\r?\n/)
       .map((line) => line.trim())
       .filter((line) => line.length > 0 && !line.startsWith('#'));
+    if (patterns.length > WORKTREE_INCLUDE_MAX_PATTERNS) {
+      debugLogger.warn(
+        `readWorktreeIncludePatterns: ${filePath} has ${patterns.length} patterns, ` +
+          `over the ${WORKTREE_INCLUDE_MAX_PATTERNS} cap; ignoring the file`,
+      );
+      return [];
+    }
+    return patterns;
   }
 
   /**
@@ -2256,21 +2315,45 @@ export class GitWorktreeService {
    *
    * `--directory` collapses a fully-ignored directory into a single
    * `dir/` entry, so a pattern naming a path inside one would match
-   * nothing. Candidate directories are therefore re-expanded with a
-   * second, scoped `ls-files` call — the same two-pass shape the
-   * convention uses elsewhere.
+   * nothing against the first listing. Candidate directories are
+   * therefore re-expanded with a second, scoped `ls-files` call.
    *
-   * Uncompilable patterns are dropped with a warning rather than failing
-   * the run, so one bad line cannot cost a user their whole file.
+   * Deciding WHICH collapsed directories to re-expand cannot be done by
+   * asking the matcher about the directory itself: gitignore semantics
+   * let a separator-less pattern (`.env`) match at any depth, and a
+   * leading-wildcard pattern (`*.pem`) has no literal prefix at all. The
+   * predicate below therefore errs toward expanding — a needless
+   * expansion costs one scoped listing whose entries the matcher then
+   * discards, while a missed one silently drops files the user asked
+   * for.
    */
-  private async resolveIncludedFiles(patterns: string[]): Promise<string[]> {
+  private async resolveIncludedFiles(
+    patterns: string[],
+    linkedDirs: ReadonlySet<string> = new Set(),
+  ): Promise<string[]> {
     const lsIgnored = async (scope: string[]): Promise<string[]> => {
+      // `core.quotepath=false` stops git octal-escaping non-ASCII bytes
+      // in the paths it prints. Without it a name like `配置.env` comes
+      // back as `"\351\205\215..."`, which matches no pattern and names
+      // no file on disk, so it would be silently dropped. Pinned the
+      // same way `gitDiff.ts` and `filesearch/crawler.ts` already do.
+      // (`-z` would also solve it but needs Git >= 2.36, which this file
+      // deliberately does not require.)
       const args = [
+        '-c',
+        'core.quotepath=false',
         'ls-files',
         '--others',
         '--ignored',
         '--exclude-standard',
-        ...(scope.length > 0 ? ['--', ...scope] : ['--directory']),
+        // `:(literal)` disables pathspec magic. Git parses a leading
+        // `:(...)` in a pathspec as a magic signature, so a legitimately
+        // named ignored directory such as `:(trap)/` — fed back here from
+        // git's own listing — would fatal the entire call and silently
+        // drop every collapsed directory, benign ones included.
+        ...(scope.length > 0
+          ? ['--', ...scope.map((dir) => `:(literal)${dir}`)]
+          : ['--directory']),
       ];
       try {
         const raw = await (await this.getGit()).raw(args);
@@ -2283,46 +2366,83 @@ export class GitWorktreeService {
       }
     };
 
-    const candidates = await lsIgnored([]);
+    /**
+     * True for a repo-relative entry the copy pass could never use, so
+     * it is dropped before matching or expansion rather than after.
+     *
+     * `.qwen` is CLI-managed and `resolveWorktreeEntry` rejects it
+     * anyway; the point of filtering early is that the whole tree
+     * includes `.qwen/worktrees`, so a broad committed pattern would
+     * otherwise force an enumeration of every worktree the user has
+     * accumulated, purely to warn-reject each result. Root-anchored
+     * only, matching the gate it mirrors — a nested `sub/.qwen/foo` is
+     * legitimate and must not be dropped.
+     *
+     * A directory the symlink pass just linked is skipped for the same
+     * reason: its contents now resolve through the link into the main
+     * repo, so every file under it would pass the source gates and then
+     * die at the dest-parent containment check, one warning at a time.
+     */
+    const unusable = (entry: string): boolean => {
+      if (entry === '.qwen' || entry.startsWith('.qwen/')) return true;
+      // `dir` is slash-terminated, so this covers both the collapsed
+      // entry for the link itself and anything pass 2 finds beneath it.
+      for (const dir of linkedDirs) {
+        if (entry.startsWith(dir)) return true;
+      }
+      return false;
+    };
+
+    const candidates = (await lsIgnored([])).filter((e) => !unusable(e));
     if (candidates.length === 0) return [];
 
-    const matcher = ignore();
-    for (const pattern of patterns) {
-      try {
-        matcher.add(pattern);
-      } catch (error) {
-        debugLogger.warn(
-          `resolveIncludedFiles: gitignore-style pattern failed to compile, ` +
-            `treating it as matching nothing: "${pattern}" (${error})`,
-        );
-      }
-    }
+    // `ignore@7` never throws from `add()` for any string, so there is
+    // no compile-failure branch to handle: an unparseable pattern simply
+    // matches nothing, and the remaining patterns are unaffected.
+    const matcher = ignore().add(patterns);
 
     const files = candidates.filter(
       (entry) => !entry.endsWith('/') && matcher.ignores(entry),
     );
 
-    // A collapsed `dir/` entry is worth expanding when a pattern could
-    // plausibly select something under it. `ignores()` on the directory
-    // itself answers the common `.local/` and `.local` forms; beyond that
-    // we fall back to a literal prefix test on each pattern, so
-    // `.local/certs/*.pem` still reaches into a collapsed `.local/`.
+    // Which collapsed `dir/` entries are worth a scoped listing. See the
+    // JSDoc: this deliberately over-selects rather than risk a miss.
     const dirs = candidates.filter((entry) => {
       if (!entry.endsWith('/')) return false;
       const withoutSlash = entry.slice(0, -1);
       if (matcher.ignores(withoutSlash) || matcher.ignores(entry)) return true;
       return patterns.some((pattern) => {
         const rooted = pattern.startsWith('/') ? pattern.slice(1) : pattern;
-        // The literal head of the pattern, up to its first wildcard.
+        // A pattern with no separator matches at any depth under
+        // gitignore rules (`.env` matches `secrets/.env`), so every
+        // collapsed directory is a possible home for it.
+        if (!rooted.replace(/\/+$/, '').includes('/')) return true;
         const wildcardAt = rooted.search(/[*?[]/);
         const head = wildcardAt === -1 ? rooted : rooted.slice(0, wildcardAt);
-        return head.length > 0 && head.startsWith(entry);
+        // Expand when either side prefixes the other: `vendor/cache/` is
+        // worth listing for `vendor/**/*.bin` just as `vendor/` is for
+        // `vendor/cache/x`. A pattern with no literal head at all
+        // (`**/*.pem`) yields the empty string, which prefixes every
+        // entry — so it expands everything, as it must.
+        return head.startsWith(entry) || entry.startsWith(head);
       });
     });
 
     if (dirs.length > 0) {
-      for (const entry of await lsIgnored(dirs)) {
-        if (matcher.ignores(entry)) files.push(entry);
+      // Chunk the pathspecs. A repo with tens of thousands of collapsed
+      // ignored directories would otherwise blow the OS argv limit, and
+      // the resulting E2BIG is caught above — which would silently drop
+      // every collapsed directory's contents while reporting success.
+      for (let i = 0; i < dirs.length; i += WORKTREE_INCLUDE_PATHSPEC_BATCH) {
+        const batch = dirs.slice(i, i + WORKTREE_INCLUDE_PATHSPEC_BATCH);
+        for (const entry of await lsIgnored(batch)) {
+          // The scoped pass collapses too: git stops at an embedded
+          // repository and emits it as `dir/`. Those must not reach the
+          // copy loop, which handles files only.
+          if (entry.endsWith('/')) continue;
+          if (unusable(entry)) continue;
+          if (matcher.ignores(entry)) files.push(entry);
+        }
       }
     }
 
