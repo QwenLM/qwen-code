@@ -22,8 +22,17 @@ const env = {
   QWEN_SKIP_NOTICE_GENERATION: '1',
 };
 
+// A spread of process.env is an ordinary object: on Windows the path
+// variable canonically arrives as `Path`, so a case-sensitive `env.PATH`
+// read misses it and corepack is never found.
+function pathValue() {
+  if (process.platform !== 'win32') return env.PATH ?? '';
+  const key = Object.keys(env).find((name) => name.toUpperCase() === 'PATH');
+  return (key !== undefined ? env[key] : env.PATH) ?? '';
+}
+
 function findOnPath(command) {
-  for (const entry of (env.PATH ?? '').split(delimiter)) {
+  for (const entry of pathValue().split(delimiter)) {
     const directory = entry.replace(/^"(.*)"$/, '$1');
     const candidate = resolve(directory || '.', command);
     if (existsSync(candidate)) return candidate;
