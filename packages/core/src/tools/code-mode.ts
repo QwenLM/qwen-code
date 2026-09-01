@@ -250,11 +250,13 @@ Available globals:
 - image(imageUrlOrItem: string | ImageContent): append an image from a base64 data URL or Qwen MCP ImageContent. To return a nested MCP image, pass an item such as image(result.content[0]).
 - audio(dataUrl: string): append audio from a base64 data URL with an audio MIME type.
 - generatedImage(result: CodeModeToolResult): append the image and saved-path hint returned by Qwen's built-in image_gen tool, for example generatedImage(await tools.image_gen({ prompt: '...' })).
+- setTimeout(callback: () => void, delayMs?: number): schedule a callback to run later and return a timeout id. Pending timeouts do not keep exec alive by themselves; await an explicit promise if you need to wait for one.
+- clearTimeout(timeoutId?: number): cancel a timeout created by setTimeout.
 - exit(): finish immediately.
 
 Media helpers share a limit of ${CODE_MODE_MAX_MEDIA_ITEMS} items and ${CODE_MODE_MAX_MEDIA_BYTES / (1024 * 1024)} MiB of decoded base64 data per exec call.
 
-There is no Node.js, process, require, filesystem, network, import, console, timer, WebAssembly, Atomics, or persistent state. Static and dynamic imports are unsupported. Every exec call gets a new runtime.
+There is no Node.js, process, require, filesystem, network, import, console, WebAssembly, Atomics, or persistent state. Static and dynamic imports are unsupported. Every exec call gets a new runtime.
 
 type ImageContent = { type: 'image'; data: string; mimeType: string };
 type CodeModeToolResult = { callId: string; name: string; status: 'success'; output: string; content?: ImageContent[] };

@@ -28,6 +28,8 @@ import {
 
 const MEMORY_LIMIT_BYTES = 64 * 1024 * 1024;
 const STACK_LIMIT_BYTES = 1024 * 1024;
+const MAX_LIVE_TIMERS = 1024;
+const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
 
 function write(message: HostMessage): void {
   process.stdout.write(encodeFrame(message));
@@ -212,12 +214,17 @@ async function execute(message: ExecuteMessage): Promise<void> {
   runtime.setInterruptHandler(() => !cpuPaused && Date.now() >= cpuDeadline);
   const vm = runtime.newContext();
   const pending = new Map<string, QuickJSDeferredPromise>();
+  const timers = new Map<
+    number,
+    { handle: ReturnType<typeof setTimeout>; callback: QuickJSHandle }
+  >();
   let output = '';
   const content: CodeModeContentItem[] = [];
   let mediaBytes = 0;
   let mediaItems = 0;
   const toolNames = message.tools.map((tool) => tool.jsName);
   let nextId = 0;
+  let nextTimerId = 1;
 
   const pauseCpuBudget = (): void => {
     if (cpuPaused) return;
@@ -232,7 +239,7 @@ async function execute(message: ExecuteMessage): Promise<void> {
   const executePendingJobs = (): void => {
     resumeCpuBudget();
     const jobs = runtime.executePendingJobs();
-    if (pending.size > 0) pauseCpuBudget();
+    if (pending.size > 0 || timers.size > 0) pauseCpuBudget();
     if (jobs.error) {
       const dumped = jobs.error.context.dump(jobs.error);
       jobs.error.dispose();
@@ -268,6 +275,34 @@ async function execute(message: ExecuteMessage): Promise<void> {
     rejectHostFailure(
       error instanceof Error ? error : new Error(errorMessage(error)),
     );
+  };
+
+  const clearTimer = (timerId: number): void => {
+    const timer = timers.get(timerId);
+    if (!timer) return;
+    timers.delete(timerId);
+    clearTimeout(timer.handle);
+    timer.callback.dispose();
+  };
+  const fireTimer = (timerId: number): void => {
+    const timer = timers.get(timerId);
+    if (!timer) return;
+    timers.delete(timerId);
+    resumeCpuBudget();
+    try {
+      const called = vm.callFunction(timer.callback, vm.undefined);
+      if (called.error) {
+        const dumped = vm.dump(called.error);
+        called.error.dispose();
+        throw new Error(errorMessage(dumped));
+      }
+      called.value.dispose();
+      executePendingJobs();
+    } catch (error) {
+      failHost(error);
+    } finally {
+      timer.callback.dispose();
+    }
   };
 
   const settleTool = (toolResult: ToolResultMessage): void => {
@@ -358,6 +393,44 @@ async function execute(message: ExecuteMessage): Promise<void> {
     vm.setProp(vm.global, '__appendGeneratedImage', appendGeneratedImage);
     appendGeneratedImage.dispose();
 
+    const setTimeoutHelper = vm.newFunction(
+      '__setTimeout',
+      (callbackHandle, delayHandle) => {
+        if (!callbackHandle || vm.typeof(callbackHandle) !== 'function') {
+          throw new TypeError('setTimeout expects a function callback.');
+        }
+        if (timers.size >= MAX_LIVE_TIMERS) {
+          throw new Error(
+            `Code mode supports at most ${MAX_LIVE_TIMERS} live timers.`,
+          );
+        }
+        const delayValue = delayHandle ? vm.getNumber(delayHandle) : 0;
+        const delayMs =
+          Number.isFinite(delayValue) && delayValue > 0
+            ? Math.min(Math.trunc(delayValue), MAX_TIMER_DELAY_MS)
+            : 0;
+        const timerId = nextTimerId++;
+        const callback = callbackHandle.dup();
+        const handle = setTimeout(() => fireTimer(timerId), delayMs);
+        timers.set(timerId, { handle, callback });
+        return vm.newNumber(timerId);
+      },
+    );
+    vm.setProp(vm.global, '__setTimeout', setTimeoutHelper);
+    setTimeoutHelper.dispose();
+
+    const clearTimeoutHelper = vm.newFunction(
+      '__clearTimeout',
+      (timerIdHandle) => {
+        if (!timerIdHandle) return;
+        const timerId = vm.getNumber(timerIdHandle);
+        if (!Number.isFinite(timerId) || timerId <= 0) return;
+        clearTimer(Math.trunc(timerId));
+      },
+    );
+    vm.setProp(vm.global, '__clearTimeout', clearTimeoutHelper);
+    clearTimeoutHelper.dispose();
+
     const toolEntries = toolNames
       .map(
         (name) =>
@@ -371,11 +444,15 @@ async function execute(message: ExecuteMessage): Promise<void> {
       const hostImage = globalThis.__append_image;
       const hostAudio = globalThis.__append_audio;
       const hostGeneratedImage = globalThis.__appendGeneratedImage;
+      const hostSetTimeout = globalThis.__setTimeout;
+      const hostClearTimeout = globalThis.__clearTimeout;
       delete globalThis.__callTool;
       delete globalThis.__appendText;
       delete globalThis.__append_image;
       delete globalThis.__append_audio;
       delete globalThis.__appendGeneratedImage;
+      delete globalThis.__setTimeout;
+      delete globalThis.__clearTimeout;
       const toolTarget = Object.freeze(Object.assign(Object.create(null), {${toolEntries}}));
       const tools = Object.freeze(new Proxy(toolTarget, {
         get(target, property) {
@@ -388,6 +465,8 @@ async function execute(message: ExecuteMessage): Promise<void> {
       const image = (value) => hostImage(value);
       const audio = (value) => hostAudio(value);
       const generatedImage = (value) => hostGeneratedImage(value);
+      const setTimeout = (callback, delayMs) => hostSetTimeout(callback, delayMs);
+      const clearTimeout = (timeoutId) => hostClearTimeout(timeoutId);
       const exit = () => { throw Object.freeze({ __codeModeExit: true }); };
       Object.defineProperties(globalThis, {
         tools: { value: tools, writable: false, configurable: false },
@@ -396,9 +475,11 @@ async function execute(message: ExecuteMessage): Promise<void> {
         image: { value: image, writable: false, configurable: false },
         audio: { value: audio, writable: false, configurable: false },
         generatedImage: { value: generatedImage, writable: false, configurable: false },
+        setTimeout: { value: setTimeout, writable: false, configurable: false },
+        clearTimeout: { value: clearTimeout, writable: false, configurable: false },
         exit: { value: exit, writable: false, configurable: false },
       });
-      for (const name of ['process','require','module','Buffer','console','fetch','XMLHttpRequest','WebSocket','setTimeout','setInterval','setImmediate','queueMicrotask','Atomics','SharedArrayBuffer','WebAssembly']) {
+      for (const name of ['process','require','module','Buffer','console','fetch','XMLHttpRequest','WebSocket','setInterval','setImmediate','queueMicrotask','Atomics','SharedArrayBuffer','WebAssembly']) {
         try { delete globalThis[name]; } catch {}
       }
     })()`,
@@ -451,6 +532,7 @@ async function execute(message: ExecuteMessage): Promise<void> {
     });
   } finally {
     process.stdin.off('data', onData);
+    for (const timerId of [...timers.keys()]) clearTimer(timerId);
     for (const deferred of pending.values()) deferred.dispose();
     vm.dispose();
     runtime.dispose();

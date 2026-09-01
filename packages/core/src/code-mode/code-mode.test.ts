@@ -178,6 +178,15 @@ describe('CodeModeOnly exposure', () => {
     );
     expect(buildExecDescription(first)).toContain('ImageContent');
     expect(buildExecDescription(first)).toContain('generatedImage');
+    expect(buildExecDescription(first)).toContain(
+      'setTimeout(callback: () => void, delayMs?: number)',
+    );
+    expect(buildExecDescription(first)).toContain(
+      'Pending timeouts do not keep exec alive by themselves',
+    );
+    expect(buildExecDescription(first)).toContain(
+      'clearTimeout(timeoutId?: number)',
+    );
   });
 
   it('expands deferred tool schemas because nothing can reveal them later', () => {
@@ -688,11 +697,89 @@ describe('isolated code mode host', () => {
     expect(result.output).toBe('before');
   });
 
-  it('does not expose Node, network, timers, console, or WebAssembly', async () => {
+  it('supports cancellable one-shot timers', async () => {
+    const result = await executeCodeMode(
+      `const cancelled = setTimeout(() => text('cancelled'), 0);
+      clearTimeout(cancelled);
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      text('timer done');
+      return [typeof setTimeout, typeof clearTimeout];`,
+      plan(),
+      runtime(async () => {
+        throw new Error('unused');
+      }),
+      new AbortController().signal,
+    );
+
+    expect(result.output).toBe('timer done');
+    expect(result.value).toEqual(['function', 'function']);
+  });
+
+  it('does not keep exec alive for an unawaited timer', async () => {
+    const result = await executeCodeMode(
+      `setTimeout(() => text('late'), 60_000);
+      text('done');`,
+      plan(),
+      runtime(async () => {
+        throw new Error('unused');
+      }),
+      new AbortController().signal,
+      { timeoutMs: 25 },
+    );
+
+    expect(result.output).toBe('done');
+  });
+
+  it('does not charge timer wait time against the guest CPU budget', async () => {
+    const result = await executeCodeMode(
+      `await new Promise((resolve) => setTimeout(resolve, 100));
+      text('done');`,
+      plan(),
+      runtime(async () => {
+        throw new Error('unused');
+      }),
+      new AbortController().signal,
+      { timeoutMs: 50 },
+    );
+
+    expect(result.output).toBe('done');
+  });
+
+  it('surfaces errors thrown by timer callbacks', async () => {
+    await expect(
+      executeCodeMode(
+        `await new Promise(() => {
+          setTimeout(() => { throw new Error('timer failure'); }, 0);
+        });`,
+        plan(),
+        runtime(async () => {
+          throw new Error('unused');
+        }),
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow('timer failure');
+  });
+
+  it('bounds the number of live timers', async () => {
+    await expect(
+      executeCodeMode(
+        `for (let i = 0; i < 1025; i++) {
+          setTimeout(() => {}, 60_000);
+        }`,
+        plan(),
+        runtime(async () => {
+          throw new Error('unused');
+        }),
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow('at most 1024 live timers');
+  });
+
+  it('does not expose Node, network, console, or WebAssembly', async () => {
     const result = await executeCodeMode(
       `return [
-        typeof process, typeof require, typeof fetch, typeof setTimeout,
-        typeof console, typeof WebAssembly, typeof SharedArrayBuffer,
+        typeof process, typeof require, typeof fetch, typeof console,
+        typeof WebAssembly, typeof SharedArrayBuffer,
       ];`,
       plan(),
       runtime(async () => {
@@ -700,7 +787,7 @@ describe('isolated code mode host', () => {
       }),
       new AbortController().signal,
     );
-    expect(result.value).toEqual(Array(7).fill('undefined'));
+    expect(result.value).toEqual(Array(6).fill('undefined'));
 
     await expect(
       executeCodeMode(
