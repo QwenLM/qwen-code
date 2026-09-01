@@ -158,4 +158,50 @@ describe('DescriptionInput', () => {
     );
     expect(onNext).not.toHaveBeenCalled();
   });
+
+  it('stores generated content and advances when generation resolves while mounted', async () => {
+    let resolveGeneration!: (
+      value: Awaited<ReturnType<typeof subagentGenerator>>,
+    ) => void;
+    vi.mocked(subagentGenerator).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveGeneration = resolve;
+        }),
+    );
+    const dispatch = vi.fn<(action: WizardAction) => void>();
+    const onNext = vi.fn();
+
+    act(() => {
+      renderWithProviders(
+        <DescriptionInput
+          state={baseState}
+          dispatch={dispatch}
+          onNext={onNext}
+          onPrevious={vi.fn()}
+          onCancel={vi.fn()}
+          config={{} as Config}
+        />,
+      );
+    });
+
+    act(() => {
+      void textInputMock.props?.onSubmit?.('Review code changes');
+    });
+    await act(async () => {
+      resolveGeneration({
+        name: 'reviewer',
+        description: 'Reviews code changes',
+        systemPrompt: 'Review the code.',
+      });
+    });
+
+    expect(dispatch).toHaveBeenCalledWith({
+      type: 'SET_GENERATED_CONTENT',
+      name: 'reviewer',
+      description: 'Reviews code changes',
+      systemPrompt: 'Review the code.',
+    });
+    expect(onNext).toHaveBeenCalledTimes(1);
+  });
 });
