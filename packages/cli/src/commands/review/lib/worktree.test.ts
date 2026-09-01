@@ -34,6 +34,7 @@ import { isolateHostGitConfig } from './test-utils.js';
 import {
   MAX_SCREEN_CANDIDATES,
   MAX_SCREEN_KEYS,
+  carriesReplacementChar,
   discardWorktree,
   exposeDependencies,
   localFilterCommands,
@@ -2020,37 +2021,25 @@ describe('localFilterCommands', () => {
     expect(screen.keys[0]).toMatch(/^filter\..*\.smudge$/);
   });
 
-  // Linux only: macOS and Windows reject a filename carrying an invalid UTF-8
-  // byte outright (EILSEQ on mkdir), so the fixture cannot be built there.
-  it.skipIf(process.platform !== 'linux')(
-    'refuses a repository whose path carries an invalid UTF-8 byte',
-    () => {
-      // `encoding: 'utf8'` transcodes the byte to U+FFFD, so every candidate
-      // built from the answer names a file that does not exist and the admin
-      // readdir hits ENOENT — the branch treated as ordinary. Unmeasured is
-      // not clean; the residue walker fails the same shape closed.
-      const base = mkdtempSync(join(tmpdir(), 'qwen-badbyte-'));
-      try {
-        const holder = Buffer.concat([
-          Buffer.from(join(base, 'n')),
-          Buffer.from([0xff]),
-          Buffer.from('d'),
-        ]);
-        mkdirSync(holder);
-        const asPath = holder.toString('binary');
-        initRepo(asPath);
-        execFileSync('git', ['config', 'filter.evil.smudge', 'cat'], {
-          cwd: asPath,
-        });
-
-        const screen = localFilterCommands(asPath);
-
-        expect(screen.stopped).toBe('unreadable');
-      } finally {
-        rmSync(base, { recursive: true, force: true });
-      }
-    },
-  );
+  it('treats a transcoded rev-parse answer as unmeasured', () => {
+    // `encoding: 'utf8'` turns an invalid byte in the repository path into
+    // U+FFFD, so every candidate built from the answer names a file that does
+    // not exist, the admin readdir hits ENOENT — the branch treated as the
+    // ordinary "no linked worktrees" case — and the screen would answer clean
+    // over whatever the real path holds. Unmeasured is not clean; the residue
+    // walker in this file fails the same shape closed.
+    //
+    // Pinned at this level deliberately. The end-to-end fixture cannot be
+    // built from Node: a path carrying an invalid byte does not survive
+    // `Buffer`→`string`, and `cwd` accepts only a string, so the repository
+    // cannot be created and then addressed from a test. (Attempting it is how
+    // this test got written the first time — the round-trip re-encoded 0xFF as
+    // 0xC3 0xBF and git failed with ENOENT on a path that did not exist.)
+    expect(carriesReplacementChar('/tmp/plain/path')).toBe(false);
+    expect(carriesReplacementChar('')).toBe(false);
+    expect(carriesReplacementChar('/tmp/n\uFFFDd/repo')).toBe(true);
+    expect(carriesReplacementChar('\uFFFD')).toBe(true);
+  });
 
   it('refuses rather than hanging when an include names a FIFO', () => {
     // git follows includes at startup, so the very first `rev-parse` blocks on

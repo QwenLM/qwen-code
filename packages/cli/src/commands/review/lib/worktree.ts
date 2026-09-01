@@ -743,8 +743,17 @@ function revParsePath(cwd: string, ...flags: string[]): string | null {
   return r.stdout.endsWith('\n') ? r.stdout.slice(0, -1) : r.stdout;
 }
 
-/** True when a transcode replaced bytes this screen would otherwise resolve. */
-function carriesReplacementChar(value: string): boolean {
+/**
+ * True when a transcode replaced bytes this screen would otherwise resolve.
+ *
+ * Exported for its own test: the end-to-end fixture cannot be built from Node.
+ * A path holding an invalid UTF-8 byte survives neither `Buffer`→`string` nor
+ * the `cwd` option, which takes a string only — so the repository that would
+ * produce such a rev-parse answer cannot be created and then addressed from a
+ * test. The rule this function states is pinned here instead, and its two call
+ * sites are one `if` each.
+ */
+export function carriesReplacementChar(value: string): boolean {
   return value.includes('\uFFFD');
 }
 
