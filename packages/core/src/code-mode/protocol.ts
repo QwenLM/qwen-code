@@ -64,10 +64,42 @@ export interface ErrorMessage {
 
 export type HostMessage = ToolCallMessage | CompleteMessage | ErrorMessage;
 
+function hasBoundedImageContent(message: ParentMessage | HostMessage): boolean {
+  if (message.type !== 'tool_result') return false;
+  const content = message.result?.content;
+  if (
+    !Array.isArray(content) ||
+    content.length === 0 ||
+    content.length > CODE_MODE_MAX_MEDIA_ITEMS
+  ) {
+    return false;
+  }
+  let decodedBytes = 0;
+  for (const item of content) {
+    if (
+      item?.type !== 'image' ||
+      typeof item.mimeType !== 'string' ||
+      !item.mimeType.toLowerCase().startsWith('image/') ||
+      typeof item.data !== 'string' ||
+      item.data.length === 0
+    ) {
+      return false;
+    }
+    const padding = item.data.endsWith('==')
+      ? 2
+      : item.data.endsWith('=')
+        ? 1
+        : 0;
+    decodedBytes += Math.floor((item.data.length * 3) / 4) - padding;
+    if (decodedBytes > CODE_MODE_MAX_MEDIA_BYTES) return false;
+  }
+  return true;
+}
+
 function maxFrameBytes(message: ParentMessage | HostMessage): number {
-  return message.type === 'complete'
-    ? CODE_MODE_MAX_FRAME_BYTES
-    : CODE_MODE_MAX_CONTROL_FRAME_BYTES;
+  if (message.type === 'complete') return CODE_MODE_MAX_FRAME_BYTES;
+  if (hasBoundedImageContent(message)) return CODE_MODE_MAX_FRAME_BYTES;
+  return CODE_MODE_MAX_CONTROL_FRAME_BYTES;
 }
 
 export function encodeFrame(message: ParentMessage | HostMessage): Buffer {

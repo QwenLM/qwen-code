@@ -28627,7 +28627,15 @@ describe('Session', () => {
       const nestedExecute = vi.fn().mockImplementation(async () => {
         expect(core.getToolCallRuntime()).toBeUndefined();
         return {
-          llmContent: 'nested ACP output',
+          llmContent: [
+            { text: 'nested ACP output' },
+            {
+              inlineData: {
+                mimeType: 'image/png',
+                data: 'QUJD',
+              },
+            },
+          ],
           returnDisplay: 'nested ACP output',
         };
       });
@@ -28664,6 +28672,9 @@ describe('Session', () => {
               { path: '/tmp/example.txt' },
               signal,
             );
+            expect(nested.content).toEqual([
+              { type: 'image', mimeType: 'image/png', data: 'QUJD' },
+            ]);
             return {
               llmContent: nested.output,
               returnDisplay: nested.output,

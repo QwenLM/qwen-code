@@ -19,9 +19,11 @@ import {
 import { executeCodeMode } from './host-client.js';
 import {
   CODE_MODE_MAX_CONTROL_FRAME_BYTES,
+  CODE_MODE_MAX_FRAME_BYTES,
   encodeFrame,
   FrameDecoder,
   type HostMessage,
+  type ParentMessage,
 } from './protocol.js';
 import type { ToolCallRuntimeContext } from './tool-call-runtime.js';
 
@@ -166,7 +168,8 @@ describe('CodeModeOnly exposure', () => {
     expect(buildExecDescription(first)).toContain(
       'tools.a_tool(args: Record<string, unknown>)',
     );
-    expect(buildExecDescription(first)).toContain('base64 data URL');
+    expect(buildExecDescription(first)).toContain('ImageContent');
+    expect(buildExecDescription(first)).toContain('generatedImage');
   });
 });
 
@@ -178,15 +181,44 @@ describe('code mode protocol', () => {
       output: '',
       content: [{ type: 'image', mimeType: 'image/png', data }],
     };
+    const toolResult: ParentMessage = {
+      type: 'tool_result',
+      id: 'large-media-result',
+      ok: true,
+      result: {
+        callId: 'image-gen',
+        name: 'image_gen',
+        status: 'success',
+        output: 'generated',
+        content: [{ type: 'image', mimeType: 'image/png', data }],
+      },
+    };
 
     const frame = encodeFrame(complete);
     expect(new FrameDecoder<HostMessage>().push(frame)).toEqual([complete]);
+    const toolResultFrame = encodeFrame(toolResult);
+    expect(new FrameDecoder<ParentMessage>().push(toolResultFrame)).toEqual([
+      toolResult,
+    ]);
     expect(() =>
       encodeFrame({
         type: 'tool_call',
         id: 'large-control',
         name: 'probe',
         args: { data },
+      }),
+    ).toThrow('frame exceeds the size limit');
+    expect(() =>
+      encodeFrame({
+        type: 'tool_result',
+        id: 'large-text-result',
+        ok: true,
+        result: {
+          callId: 'large-text',
+          name: 'probe',
+          status: 'success',
+          output: data,
+        },
       }),
     ).toThrow('frame exceeds the size limit');
   });
@@ -365,7 +397,7 @@ describe('isolated code mode host', () => {
     expect(result.output).toBe('abc');
   });
 
-  it('bounds return values and nested tool content', async () => {
+  it('bounds return values and oversized nested tool content', async () => {
     const result = await executeCodeMode(
       `const nested = await tools.large({});
       text(typeof nested.content);
@@ -379,7 +411,13 @@ describe('isolated code mode host', () => {
           name,
           status: 'success',
           output: 'ok',
-          content: 'n'.repeat(600_000),
+          content: [
+            {
+              type: 'image',
+              mimeType: 'image/png',
+              data: 'A'.repeat(CODE_MODE_MAX_FRAME_BYTES + 1),
+            },
+          ],
         };
       }),
       new AbortController().signal,
@@ -409,6 +447,112 @@ describe('isolated code mode host', () => {
     expect(result.content).toEqual([
       { type: 'image', mimeType: 'image/png', data },
     ]);
+  });
+
+  it('accepts Qwen MCP ImageContent in image()', async () => {
+    const result = await executeCodeMode(
+      `image({
+        type: 'image',
+        mimeType: 'image/png',
+        data: 'QUJD',
+      });`,
+      plan(),
+      runtime(async () => {
+        throw new Error('unused');
+      }),
+      new AbortController().signal,
+    );
+
+    expect(result.content).toEqual([
+      { type: 'image', mimeType: 'image/png', data: 'QUJD' },
+    ]);
+  });
+
+  it('accepts the Qwen image_gen result in generatedImage()', async () => {
+    const result = await executeCodeMode(
+      `generatedImage({
+        callId: 'image-gen',
+        name: 'image_gen',
+        status: 'success',
+        output: 'Generated image saved to /workspace/generated.png.',
+        content: [{
+          type: 'image',
+          mimeType: 'image/png',
+          data: 'QUJD',
+        }],
+      });`,
+      plan(),
+      runtime(async () => {
+        throw new Error('unused');
+      }),
+      new AbortController().signal,
+    );
+
+    expect(result).toEqual({
+      output: 'Generated image saved to /workspace/generated.png.',
+      content: [{ type: 'image', mimeType: 'image/png', data: 'QUJD' }],
+    });
+  });
+
+  it('preserves generated images larger than the control frame limit', async () => {
+    const data = 'QUJD'.repeat(350_000);
+    const result = await executeCodeMode(
+      `const generated = await tools.image_gen({ prompt: 'large poster' });
+      generatedImage(generated);`,
+      plan('image_gen'),
+      runtime(async (name) => ({
+        callId: 'large-image-gen',
+        name,
+        status: 'success',
+        output: 'Generated image saved to /workspace/large.png.',
+        content: [{ type: 'image', mimeType: 'image/png', data }],
+      })),
+      new AbortController().signal,
+    );
+
+    expect(result.output).toBe(
+      'Generated image saved to /workspace/large.png.',
+    );
+    expect(result.content).toEqual([
+      { type: 'image', mimeType: 'image/png', data },
+    ]);
+  });
+
+  it('rejects malformed Qwen media helper inputs', async () => {
+    const noTools = runtime(async () => {
+      throw new Error('unused');
+    });
+
+    await expect(
+      executeCodeMode(
+        `image({
+          type: 'image',
+          mimeType: 'audio/wav',
+          data: 'QUJD',
+        });`,
+        plan(),
+        noTools,
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow('Qwen MCP ImageContent');
+    await expect(
+      executeCodeMode(
+        `generatedImage({
+          callId: 'other',
+          name: 'other_tool',
+          status: 'success',
+          output: 'not an image generator',
+          content: [{
+            type: 'image',
+            mimeType: 'image/png',
+            data: 'QUJD',
+          }],
+        });`,
+        plan(),
+        noTools,
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow('tools.image_gen()');
   });
 
   it('rejects image output that is not a base64 data URL', async () => {

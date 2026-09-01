@@ -73,6 +73,143 @@ describe('CodeModeOnly scheduler dispatch', () => {
     expect(JSON.stringify(functionResponse)).not.toContain('Media output:');
   }, 10_000);
 
+  it('normalizes a nested MCP image for image(result.content[0])', async () => {
+    const config = makeFakeConfig({
+      codeModeOnly: true,
+      approvalMode: ApprovalMode.DEFAULT,
+      targetDir: '/tmp',
+      cwd: '/tmp',
+    });
+    const registry = new ToolRegistry(config);
+    vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+    registry.registerTool(new ExecTool(config));
+    registry.registerTool(
+      new MockTool({
+        name: 'mcp_screenshot',
+        kind: Kind.Read,
+        params: { type: 'object', additionalProperties: false },
+        execute: async () => ({
+          llmContent: [
+            { text: 'MCP screenshot' },
+            {
+              inlineData: {
+                mimeType: 'image/png',
+                data: TINY_PNG_BASE64,
+              },
+            },
+          ],
+          returnDisplay: 'MCP screenshot',
+        }),
+      }),
+    );
+    const completed = vi.fn();
+    const scheduler = new CoreToolScheduler({
+      config,
+      onAllToolCallsComplete: async (calls) => completed(calls),
+      onToolCallsUpdate: vi.fn(),
+      getPreferredEditor: () => undefined,
+      onEditorClose: vi.fn(),
+    });
+
+    await scheduler.schedule(
+      {
+        callId: 'exec-mcp-image',
+        name: 'exec',
+        args: {
+          source: `const result = await tools.mcp_screenshot({});
+            image(result.content[0]);`,
+        },
+        isClientInitiated: false,
+        prompt_id: 'prompt-mcp-image',
+      },
+      new AbortController().signal,
+    );
+
+    const functionResponse =
+      completed.mock.calls[0]?.[0][0].response.responseParts[0]
+        .functionResponse;
+    expect(functionResponse?.parts).toEqual([
+      {
+        inlineData: {
+          mimeType: 'image/png',
+          data: TINY_PNG_BASE64,
+        },
+      },
+    ]);
+  }, 10_000);
+
+  it('passes the Qwen image_gen result to generatedImage()', async () => {
+    const config = makeFakeConfig({
+      codeModeOnly: true,
+      approvalMode: ApprovalMode.DEFAULT,
+      targetDir: '/tmp',
+      cwd: '/tmp',
+    });
+    const registry = new ToolRegistry(config);
+    vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+    registry.registerTool(new ExecTool(config));
+    registry.registerTool(
+      new MockTool({
+        name: 'image_gen',
+        kind: Kind.Read,
+        params: {
+          type: 'object',
+          properties: { prompt: { type: 'string' } },
+          required: ['prompt'],
+        },
+        execute: async () => ({
+          llmContent: [
+            { text: 'Generated image saved to /tmp/generated.png.' },
+            {
+              inlineData: {
+                mimeType: 'image/png',
+                data: TINY_PNG_BASE64,
+              },
+            },
+          ],
+          returnDisplay: 'Generated image saved to /tmp/generated.png.',
+        }),
+      }),
+    );
+    const completed = vi.fn();
+    const scheduler = new CoreToolScheduler({
+      config,
+      onAllToolCallsComplete: async (calls) => completed(calls),
+      onToolCallsUpdate: vi.fn(),
+      getPreferredEditor: () => undefined,
+      onEditorClose: vi.fn(),
+    });
+
+    await scheduler.schedule(
+      {
+        callId: 'exec-generated-image',
+        name: 'exec',
+        args: {
+          source: `const result = await tools.image_gen({ prompt: 'poster' });
+            generatedImage(result);`,
+        },
+        isClientInitiated: false,
+        prompt_id: 'prompt-generated-image',
+      },
+      new AbortController().signal,
+    );
+
+    const functionResponse =
+      completed.mock.calls[0]?.[0][0].response.responseParts[0]
+        .functionResponse;
+    expect(functionResponse?.response?.['output']).toBe(
+      'Generated image saved to /tmp/generated.png.',
+    );
+    expect(functionResponse?.parts).toEqual([
+      {
+        inlineData: {
+          mimeType: 'image/png',
+          data: TINY_PNG_BASE64,
+        },
+      },
+    ]);
+  }, 10_000);
+
   it('awaits a nested tool without self-queue deadlock and reports the real name', async () => {
     const config = makeFakeConfig({
       codeModeOnly: true,

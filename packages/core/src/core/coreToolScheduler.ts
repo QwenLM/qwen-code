@@ -207,6 +207,7 @@ import { evaluateToolInvocationGuard } from './tool-invocation-guard.js';
 import { goalTurnContext } from '../goals/goal-turn-context.js';
 import { goalToolResultProvenance } from '../goals/goal-tool-result-provenance.js';
 import {
+  extractCodeModeImageContent,
   runWithoutToolCallRuntime,
   runWithToolCallRuntime,
   type CodeModeToolResult,
@@ -1540,12 +1541,15 @@ export class CoreToolScheduler {
           if (!resolver) continue;
           this.nestedResolvers.delete(call.request.callId);
           if (call.status === 'success') {
+            const content = extractCodeModeImageContent(
+              call.response.responseParts,
+            );
             resolver.resolve({
               callId: call.request.callId,
               name: call.request.name,
               status: 'success',
               output: extractCodeModeToolOutput(call.response.responseParts),
-              content: call.response.responseParts,
+              ...(content ? { content } : {}),
             });
           } else {
             resolver.reject(

@@ -722,9 +722,11 @@ export { MessageBus } from './confirmation-bus/message-bus.js';
 export { makeFakeConfig } from './test-utils/config.js';
 export * from './test-utils/index.js';
 export {
+  extractCodeModeImageContent,
   getToolCallRuntime,
   runWithoutToolCallRuntime,
   runWithToolCallRuntime,
+  type CodeModeImageContent,
   type CodeModeToolResult,
   type ToolCallRuntimeContext,
 } from './code-mode/tool-call-runtime.js';

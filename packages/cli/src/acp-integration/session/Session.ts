@@ -182,6 +182,7 @@ import {
   sessionIdContext,
   promptIdContext,
   todoWorkChainContext,
+  extractCodeModeImageContent,
   runWithoutToolCallRuntime,
   runWithToolCallRuntime,
   isCodeModeToolCallAllowed,
@@ -12638,6 +12639,7 @@ export class Session implements SessionContext {
                     }
                     const nestedOutput =
                       response?.['output'] ?? response?.['content'] ?? '';
+                    const content = extractCodeModeImageContent(nestedParts);
                     return {
                       callId: nestedCallId,
                       name: nestedName,
@@ -12646,7 +12648,7 @@ export class Session implements SessionContext {
                         typeof nestedOutput === 'string'
                           ? nestedOutput
                           : JSON.stringify(nestedOutput),
-                      content: nestedParts,
+                      ...(content ? { content } : {}),
                     };
                   });
                   dispatchTail = next.then(

@@ -97,30 +97,35 @@ function boundedValue(value: unknown, maxChars: number): unknown {
   return (prefix + serialized).slice(0, maxChars);
 }
 
-function normalizeMedia(
+interface NormalizedMedia {
+  type: 'image' | 'audio';
+  mimeType: string;
+  data: string;
+  bytes: number;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function normalizeBase64Media(
   kind: 'image' | 'audio',
-  value: unknown,
-): { type: 'image' | 'audio'; mimeType: string; data: string; bytes: number } {
-  if (typeof value !== 'string') {
-    throw new Error(`${kind}() expects a base64 data URL.`);
+  mimeTypeValue: unknown,
+  dataValue: unknown,
+): NormalizedMedia | undefined {
+  if (typeof mimeTypeValue !== 'string' || typeof dataValue !== 'string') {
+    return undefined;
   }
-  const match =
-    /^data:([a-z0-9][a-z0-9.+-]*\/[a-z0-9][a-z0-9.+-]*);base64,([A-Za-z0-9+/]+={0,2})$/i.exec(
-      value,
-    );
-  const mimeType = match?.[1]?.toLowerCase();
-  const data = match?.[2];
-  const hasPadding = data?.endsWith('=') ?? false;
+  const mimeType = mimeTypeValue.toLowerCase();
+  const data = dataValue;
+  const hasPadding = data.endsWith('=');
   if (
-    !mimeType ||
-    !data ||
     !mimeType.startsWith(`${kind}/`) ||
+    !/^[A-Za-z0-9+/]+={0,2}$/.test(data) ||
     data.length % 4 === 1 ||
     (hasPadding && data.length % 4 !== 0)
   ) {
-    throw new Error(
-      `${kind}() expects a base64 data URL with a ${kind} MIME type.`,
-    );
+    return undefined;
   }
   const padding = data.endsWith('==') ? 2 : data.endsWith('=') ? 1 : 0;
   return {
@@ -128,6 +133,60 @@ function normalizeMedia(
     mimeType,
     data,
     bytes: Math.floor((data.length * 3) / 4) - padding,
+  };
+}
+
+function normalizeMedia(
+  kind: 'image' | 'audio',
+  value: unknown,
+): NormalizedMedia {
+  if (kind === 'image' && isRecord(value) && value['type'] === 'image') {
+    const media = normalizeBase64Media(kind, value['mimeType'], value['data']);
+    if (media) return media;
+    throw new Error(
+      'image() expects Qwen MCP ImageContent with base64 data and an image MIME type.',
+    );
+  }
+  if (typeof value !== 'string') {
+    throw new Error(
+      kind === 'image'
+        ? 'image() expects a base64 data URL or Qwen MCP ImageContent.'
+        : 'audio() expects a base64 data URL.',
+    );
+  }
+  const match =
+    /^data:([a-z0-9][a-z0-9.+-]*\/[a-z0-9][a-z0-9.+-]*);base64,([A-Za-z0-9+/]+={0,2})$/i.exec(
+      value,
+    );
+  const media = normalizeBase64Media(kind, match?.[1], match?.[2]);
+  if (!media) {
+    throw new Error(
+      `${kind}() expects a base64 data URL with a ${kind} MIME type.`,
+    );
+  }
+  return media;
+}
+
+function normalizeGeneratedImage(value: unknown): {
+  images: NormalizedMedia[];
+  outputHint: string;
+} {
+  if (
+    !isRecord(value) ||
+    typeof value['callId'] !== 'string' ||
+    value['name'] !== 'image_gen' ||
+    value['status'] !== 'success' ||
+    typeof value['output'] !== 'string' ||
+    !Array.isArray(value['content']) ||
+    value['content'].length === 0
+  ) {
+    throw new Error(
+      'generatedImage() expects the successful result returned by tools.image_gen().',
+    );
+  }
+  return {
+    images: value['content'].map((item) => normalizeMedia('image', item)),
+    outputHint: value['output'],
   };
 }
 
@@ -179,6 +238,23 @@ async function execute(message: ExecuteMessage): Promise<void> {
       jobs.error.dispose();
       throw new Error(errorMessage(dumped));
     }
+  };
+
+  const appendMedia = (items: NormalizedMedia[]): void => {
+    if (mediaItems + items.length > CODE_MODE_MAX_MEDIA_ITEMS) {
+      throw new Error(
+        `Code mode supports at most ${CODE_MODE_MAX_MEDIA_ITEMS} media outputs.`,
+      );
+    }
+    const addedBytes = items.reduce((sum, item) => sum + item.bytes, 0);
+    if (mediaBytes + addedBytes > CODE_MODE_MAX_MEDIA_BYTES) {
+      throw new Error(
+        `Code mode media output exceeds the ${CODE_MODE_MAX_MEDIA_BYTES / (1024 * 1024)}MB limit.`,
+      );
+    }
+    mediaBytes += addedBytes;
+    mediaItems += items.length;
+    for (const { bytes: _bytes, ...item } of items) content.push(item);
   };
 
   let rejectHostFailure!: (reason: Error) => void;
@@ -259,26 +335,28 @@ async function execute(message: ExecuteMessage): Promise<void> {
     appendText.dispose();
 
     for (const kind of ['image', 'audio'] as const) {
-      const appendMedia = vm.newFunction(`__append_${kind}`, (valueHandle) => {
-        if (mediaItems >= CODE_MODE_MAX_MEDIA_ITEMS) {
-          throw new Error(
-            `Code mode supports at most ${CODE_MODE_MAX_MEDIA_ITEMS} media outputs.`,
-          );
-        }
-        const media = normalizeMedia(kind, vm.dump(valueHandle));
-        if (mediaBytes + media.bytes > CODE_MODE_MAX_MEDIA_BYTES) {
-          throw new Error(
-            `Code mode media output exceeds the ${CODE_MODE_MAX_MEDIA_BYTES / (1024 * 1024)}MB limit.`,
-          );
-        }
-        mediaBytes += media.bytes;
-        mediaItems++;
-        const { bytes: _bytes, ...item } = media;
-        content.push(item);
-      });
-      vm.setProp(vm.global, `__append_${kind}`, appendMedia);
-      appendMedia.dispose();
+      const appendMediaHelper = vm.newFunction(
+        `__append_${kind}`,
+        (valueHandle) => {
+          appendMedia([normalizeMedia(kind, vm.dump(valueHandle))]);
+        },
+      );
+      vm.setProp(vm.global, `__append_${kind}`, appendMediaHelper);
+      appendMediaHelper.dispose();
     }
+
+    const appendGeneratedImage = vm.newFunction(
+      '__appendGeneratedImage',
+      (valueHandle) => {
+        const generated = normalizeGeneratedImage(vm.dump(valueHandle));
+        appendMedia(generated.images);
+        if (generated.outputHint) {
+          output = appendBounded(output, generated.outputHint, maxOutputChars);
+        }
+      },
+    );
+    vm.setProp(vm.global, '__appendGeneratedImage', appendGeneratedImage);
+    appendGeneratedImage.dispose();
 
     const toolEntries = toolNames
       .map(
@@ -292,10 +370,12 @@ async function execute(message: ExecuteMessage): Promise<void> {
       const hostText = globalThis.__appendText;
       const hostImage = globalThis.__append_image;
       const hostAudio = globalThis.__append_audio;
+      const hostGeneratedImage = globalThis.__appendGeneratedImage;
       delete globalThis.__callTool;
       delete globalThis.__appendText;
       delete globalThis.__append_image;
       delete globalThis.__append_audio;
+      delete globalThis.__appendGeneratedImage;
       const toolTarget = Object.freeze(Object.assign(Object.create(null), {${toolEntries}}));
       const tools = Object.freeze(new Proxy(toolTarget, {
         get(target, property) {
@@ -307,6 +387,7 @@ async function execute(message: ExecuteMessage): Promise<void> {
       const text = (value) => hostText(value);
       const image = (value) => hostImage(value);
       const audio = (value) => hostAudio(value);
+      const generatedImage = (value) => hostGeneratedImage(value);
       const exit = () => { throw Object.freeze({ __codeModeExit: true }); };
       Object.defineProperties(globalThis, {
         tools: { value: tools, writable: false, configurable: false },
@@ -314,6 +395,7 @@ async function execute(message: ExecuteMessage): Promise<void> {
         text: { value: text, writable: false, configurable: false },
         image: { value: image, writable: false, configurable: false },
         audio: { value: audio, writable: false, configurable: false },
+        generatedImage: { value: generatedImage, writable: false, configurable: false },
         exit: { value: exit, writable: false, configurable: false },
       });
       for (const name of ['process','require','module','Buffer','console','fetch','XMLHttpRequest','WebSocket','setTimeout','setInterval','setImmediate','queueMicrotask','Atomics','SharedArrayBuffer','WebAssembly']) {

@@ -16,7 +16,6 @@ import type {
   ToolCallRuntimeContext,
 } from './tool-call-runtime.js';
 import {
-  CODE_MODE_MAX_CONTROL_FRAME_BYTES,
   CODE_MODE_MAX_OUTPUT_CHARS,
   CODE_MODE_MAX_SOURCE_CHARS,
   CODE_MODE_TIMEOUT_MS,
@@ -80,18 +79,17 @@ function terminate(child: ChildProcessWithoutNullStreams): void {
   child.kill('SIGKILL');
 }
 
-function boundedToolResult(result: CodeModeToolResult): CodeModeToolResult {
+function boundedToolResult(
+  id: string,
+  result: CodeModeToolResult,
+): CodeModeToolResult {
   const bounded = {
     ...result,
     output: result.output.slice(0, CODE_MODE_MAX_OUTPUT_CHARS),
   };
   try {
-    if (
-      Buffer.byteLength(JSON.stringify(bounded)) <=
-      CODE_MODE_MAX_CONTROL_FRAME_BYTES / 2
-    ) {
-      return bounded;
-    }
+    encodeFrame({ type: 'tool_result', id, ok: true, result: bounded });
+    return bounded;
   } catch {
     // Fall through to the text-only representation.
   }
@@ -227,7 +225,7 @@ export async function executeCodeMode(
               type: 'tool_result',
               id: message.id,
               ok: true,
-              result: boundedToolResult(result),
+              result: boundedToolResult(message.id, result),
             }),
           )
           .catch((error) =>

@@ -5,13 +5,47 @@
  */
 
 import { AsyncLocalStorage } from 'node:async_hooks';
+import type { FunctionResponsePart, Part } from '@google/genai';
+
+export interface CodeModeImageContent {
+  type: 'image';
+  mimeType: string;
+  data: string;
+}
 
 export interface CodeModeToolResult {
   callId: string;
   name: string;
   status: 'success';
   output: string;
-  content?: unknown;
+  content?: CodeModeImageContent[];
+}
+
+export function extractCodeModeImageContent(
+  parts: Part[],
+): CodeModeImageContent[] | undefined {
+  const content: CodeModeImageContent[] = [];
+  const appendImage = (part: Part | FunctionResponsePart): void => {
+    const inlineData = part.inlineData;
+    if (
+      inlineData?.mimeType?.toLowerCase().startsWith('image/') &&
+      inlineData.data
+    ) {
+      content.push({
+        type: 'image',
+        mimeType: inlineData.mimeType,
+        data: inlineData.data,
+      });
+    }
+  };
+
+  for (const part of parts) {
+    appendImage(part);
+    for (const nested of part.functionResponse?.parts ?? []) {
+      appendImage(nested);
+    }
+  }
+  return content.length > 0 ? content : undefined;
 }
 
 export interface ToolCallRuntimeContext {

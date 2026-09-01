@@ -5,6 +5,10 @@
  */
 
 import type { FunctionDeclaration } from '@google/genai';
+import {
+  CODE_MODE_MAX_MEDIA_BYTES,
+  CODE_MODE_MAX_MEDIA_ITEMS,
+} from '../code-mode/protocol.js';
 import type { AnyDeclarativeTool } from './tools.js';
 import { ToolNames } from './tool-names.js';
 
@@ -226,18 +230,23 @@ export function buildExecDescription(plan: CodeModeBindingPlan): string {
 
   return `Execute JavaScript in a fresh isolated runtime and wait for it to finish.
 
-Use async/await and call registered tools through tools.<name>(args). Calls use the same validation, permissions, approvals, hooks, telemetry, cancellation, concurrency, and output limits as direct tool calls. Tool calls can be composed with Promise.all. The exec tool, direct control tools, tool_search, and tool_call are not callable through tools.
+Use async/await and call registered tools through tools.<name>(args). Calls use the same validation, permissions, approvals, hooks, telemetry, cancellation, concurrency, and output limits as direct tool calls. Tool calls can be composed with Promise.all. Await every tool promise; unawaited calls are cancelled when the script finishes. The exec tool, direct control tools, tool_search, and tool_call are not callable through tools.
 
 Available globals:
 - tools: the code-mode-callable tool functions declared below.
 - ALL_TOOLS: frozen metadata for every function in tools.
-- text(value): append bounded text output.
-- image(dataUrl), audio(dataUrl): append a base64 data URL as multimodal output.
+- text(value): append bounded text output. Non-string values are JSON-stringified when possible.
+- image(imageUrlOrItem: string | ImageContent): append an image from a base64 data URL or Qwen MCP ImageContent. To return a nested MCP image, pass an item such as image(result.content[0]).
+- audio(dataUrl: string): append audio from a base64 data URL with an audio MIME type.
+- generatedImage(result: CodeModeToolResult): append the image and saved-path hint returned by Qwen's built-in image_gen tool, for example generatedImage(await tools.image_gen({ prompt: '...' })).
 - exit(): finish immediately.
+
+Media helpers share a limit of ${CODE_MODE_MAX_MEDIA_ITEMS} items and ${CODE_MODE_MAX_MEDIA_BYTES / (1024 * 1024)} MiB of decoded base64 data per exec call.
 
 There is no Node.js, process, require, filesystem, network, import, console, timer, WebAssembly, Atomics, or persistent state. Static and dynamic imports are unsupported. Every exec call gets a new runtime.
 
-type CodeModeToolResult = { callId: string; name: string; status: 'success'; output: string; content?: unknown };
+type ImageContent = { type: 'image'; data: string; mimeType: string };
+type CodeModeToolResult = { callId: string; name: string; status: 'success'; output: string; content?: ImageContent[] };
 ${declarations || '// No ordinary tools are available in this context.'}
 
 const ALL_TOOLS = ${JSON.stringify(allTools)} as const;
