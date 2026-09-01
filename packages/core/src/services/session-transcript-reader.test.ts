@@ -904,9 +904,6 @@ describe('SessionTranscriptReader', () => {
     expect(projection?.runtime.recording.turnParentUuids).toEqual(
       expectedTurnState.turnParentUuids,
     );
-    expect(projection?.runtime.recording.turnPromptIds).toEqual(
-      expectedTurnState.turnPromptIds,
-    );
     expect(projection?.runtime.initialTurn).toBe(expectedTurnState.initialTurn);
     expect(projection?.runtime.backgroundNotificationTaskIds).toEqual(
       expectedTurnState.backgroundNotificationTaskIds,

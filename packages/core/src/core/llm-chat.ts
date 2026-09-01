@@ -70,7 +70,6 @@ import {
 } from '../telemetry/loggers.js';
 import { subagentNameContext } from '../utils/subagentNameContext.js';
 import { type ChatRecordingService } from '../services/chatRecordingService.js';
-import { markApiHistoryPrompt } from '../services/session-api-history.js';
 import {
   ChatCompressionService,
   computeThresholds,
@@ -134,6 +133,7 @@ import {
 } from './tool-call-preparation.js';
 import { InvalidStreamError } from './invalid-stream-error.js';
 import type { GoalTurnPermit } from '../goals/goal-protocol.js';
+import { markApiHistoryPrompt } from '../services/session-api-history.js';
 
 export { InvalidStreamError };
 
@@ -449,7 +449,7 @@ export type StreamEvent =
 export interface LlmChatSendOptions {
   /** Skip only the configured model fallback chain for this request. */
   disableModelFallbacks?: boolean;
-  /** Stable identity for a real user turn; omitted from provider payloads. */
+  /** Internal identity for the user prompt added to model history. */
   promptId?: string;
 }
 

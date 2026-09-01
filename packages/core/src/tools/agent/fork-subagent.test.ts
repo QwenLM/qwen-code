@@ -7,7 +7,6 @@
 import type { Content } from '@google/genai';
 import { describe, expect, it } from 'vitest';
 import { ToolNames } from '../tool-names.js';
-import { markApiHistoryPrompt } from '../../services/session-api-history.js';
 import {
   buildForkedMessages,
   FORK_PLACEHOLDER_RESULT,
@@ -148,115 +147,6 @@ describe('selectForkHistory', () => {
         1,
       ),
     ).toEqual([secondUser, secondModel]);
-  });
-
-  it('uses stable identities instead of classifying user-shaped entries', () => {
-    // A structural media-clear replacement inside an identified session
-    // keeps its promptId mark (microcompaction rebuilds entries as
-    // { ...content, parts }, preserving marks), so it stays an identified
-    // turn and does not force the positional fallback.
-    const identifiedFirst = structuredClone(firstUser);
-    const identifiedSecond = structuredClone(secondUser);
-    const placeholder: Content = {
-      role: 'user',
-      parts: [{ text: '[Old inline media cleared: image/png]' }],
-    };
-    markApiHistoryPrompt(identifiedFirst, 'prompt-1');
-    markApiHistoryPrompt(placeholder, 'prompt-media');
-    markApiHistoryPrompt(identifiedSecond, 'prompt-2');
-
-    expect(
-      selectForkHistory(
-        [
-          startup,
-          identifiedFirst,
-          firstModel,
-          placeholder,
-          identifiedSecond,
-          secondModel,
-        ],
-        2,
-      ),
-    ).toEqual([
-      // selectForkHistory structuredClones its result, which drops the
-      // symbol-keyed identity by design.
-      {
-        role: 'user',
-        parts: [{ text: '[Old inline media cleared: image/png]' }],
-      },
-      secondUser,
-      secondModel,
-    ]);
-  });
-
-  it('counts a cleared media-only legacy turn in the positional fallback', () => {
-    // An UNMARKED placeholder-only entry can only be a microcompaction-
-    // cleared media-only turn from before stable identities: marks survive
-    // the rebuild, so nothing structural arrives unmarked. isRealUserTurn
-    // counted the media-only turn before the clear, so its placeholder must
-    // keep forcing the positional enumeration — skipping it would flip the
-    // session to identified mode and silently drop the legacy boundary
-    // (here: a 2-entry window instead of the 4-entry positional one).
-    const legacyCleared: Content = {
-      role: 'user',
-      parts: [{ text: '[Old inline media cleared: image/png]' }],
-    };
-    const identifiedNew = structuredClone(secondUser);
-    markApiHistoryPrompt(identifiedNew, 'prompt-new');
-
-    expect(
-      selectForkHistory(
-        [
-          startup,
-          legacyCleared,
-          firstModel,
-          identifiedNew,
-          { role: 'model', parts: [{ text: 'new answer' }] },
-        ],
-        2,
-      ),
-    ).toEqual([
-      {
-        role: 'user',
-        parts: [{ text: '[Old inline media cleared: image/png]' }],
-      },
-      firstModel,
-      // selectForkHistory structuredClones its result, which drops the
-      // symbol-keyed identity by design.
-      { role: 'user', parts: [{ text: 'second question' }] },
-      { role: 'model', parts: [{ text: 'new answer' }] },
-    ]);
-  });
-
-  it('falls back to positional turns when identity coverage is partial', () => {
-    // A session resumed from before stable identities existed rebuilds its
-    // legacy entries unmarked; the first new prompt lands marked. Slicing
-    // from the marked indexes alone would hand the fork only post-resume
-    // turns and silently drop the requested legacy context.
-    const identifiedNew = structuredClone(secondUser);
-    markApiHistoryPrompt(identifiedNew, 'prompt-new');
-
-    expect(
-      selectForkHistory(
-        [
-          startup,
-          firstUser,
-          firstModel,
-          secondUser,
-          secondModel,
-          identifiedNew,
-          { role: 'model', parts: [{ text: 'new answer' }] },
-        ],
-        2,
-      ),
-    ).toEqual([
-      secondUser,
-      secondModel,
-      // selectForkHistory structuredClones its result, which drops the
-      // symbol-keyed identity by design.
-      { role: 'user', parts: [{ text: 'second question' }] },
-      { role: 'model', parts: [{ text: 'new answer' }] },
-    ]);
   });
 
   it('keeps all available context when fewer turns exist than requested', () => {

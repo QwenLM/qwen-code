@@ -200,7 +200,12 @@ describe('Turn', () => {
       getHistoryTailShallow: mockGetHistoryTailShallow,
       maybeIncludeSchemaDepthContext: mockMaybeIncludeSchemaDepthContext,
     };
-    turn = new Turn(mockChatInstance as unknown as LlmChat, 'prompt-id-1');
+    turn = new Turn(
+      mockChatInstance as unknown as LlmChat,
+      'prompt-id-1',
+      undefined,
+      'stable-prompt-id',
+    );
     mockGetHistory.mockReturnValue([]);
     mockGetHistoryLength.mockReturnValue(0);
     mockGetHistoryTailShallow.mockReturnValue([]);
@@ -253,41 +258,13 @@ describe('Turn', () => {
         },
         'prompt-id-1',
         undefined,
-        undefined,
+        { promptId: 'stable-prompt-id' },
       );
 
       expect(events).toEqual([
         { type: LlmEventType.Content, value: 'Hello' },
         { type: LlmEventType.Content, value: ' world' },
       ]);
-    });
-
-    it('passes the stable user-turn identity independently of the interaction id', async () => {
-      const identifiedTurn = new Turn(
-        mockChatInstance as unknown as LlmChat,
-        'interaction-prompt-id',
-        undefined,
-        'stable-user-turn-id',
-      );
-
-      for await (const _ of identifiedTurn.run(
-        'test-model',
-        [{ text: 'Hi' }],
-        new AbortController().signal,
-      )) {
-        // Drain the stream.
-      }
-
-      expect(mockSendMessageStream).toHaveBeenCalledWith(
-        'test-model',
-        {
-          message: [{ text: 'Hi' }],
-          config: { abortSignal: expect.any(AbortSignal) },
-        },
-        'interaction-prompt-id',
-        undefined,
-        { promptId: 'stable-user-turn-id' },
-      );
     });
 
     it('should preserve ordered image parts in content events', async () => {

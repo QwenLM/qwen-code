@@ -317,8 +317,6 @@ export interface ChatRecord {
     | 'goal_runtime'
     | 'realtime_message'
     | 'turn_result';
-  /** Stable identity shared by the UI and API representation of a user turn. */
-  promptId?: string;
   /** Explicit source classification used by Goal evidence validation. */
   provenance?: ChatRecordProvenance;
   /** Goal identity and logical turn that owned this model-facing record. */
@@ -329,6 +327,8 @@ export interface ChatRecord {
   version: string;
   /** Current git branch, if available */
   gitBranch?: string;
+  /** Stable identity shared with the visible user turn and API history. */
+  promptId?: string;
 
   // Content field - raw API format for history reconstruction
 
@@ -499,7 +499,7 @@ export interface ChatCompressionRecordPayload {
    * resume reconstruction.
    */
   compressedHistory: Content[];
-  /** Stable prompt identities aligned with compressedHistory by index. */
+  /** Prompt identities parallel to compressedHistory. */
   promptIds?: Array<string | null>;
 }
 
@@ -868,23 +868,12 @@ export interface BranchCheckpointCursor {
 export interface ChatRecordingRestoreState {
   lastCompletedUuid: string;
   turnParentUuids: Array<string | null>;
-  turnPromptIds?: Array<string | undefined>;
   customTitle?: string;
   titleSource?: TitleSource;
   parentSessionId?: string;
   sourceType?: string;
   sourceId?: string;
   sessionModel?: SessionModelRecordPayload;
-}
-
-export interface ChatRecordingRewindCheckpoint {
-  lastRecordUuid: string | null;
-  activeBranchRecords: ChatRecord[];
-  activeBranchBaseUuid: string | null;
-  pendingBranchToolCalls: BranchToolCallIdentity[];
-  turnParentUuids: Array<string | null>;
-  turnPromptIds: Array<string | undefined>;
-  userDisplayTextsForTitle: Array<string | undefined>;
 }
 
 /**
@@ -935,7 +924,6 @@ export class ChatRecordingService {
    * record).
    */
   private turnParentUuids: Array<string | null> = [];
-  private turnPromptIds: Array<string | undefined> = [];
   private chatsDirEnsured = false;
   private cachedConversationFile: string | undefined;
   /** Session identity pinned by `pinSessionIdentity` at rotation time. */
@@ -1223,9 +1211,6 @@ export class ChatRecordingService {
     this.lastPersistedRecordUuid = state.lastCompletedUuid;
     this.activeBranchBaseUuid = state.lastCompletedUuid;
     this.turnParentUuids = [...state.turnParentUuids];
-    this.turnPromptIds = state.turnPromptIds
-      ? [...state.turnPromptIds]
-      : state.turnParentUuids.map(() => undefined);
     this.currentCustomTitle = state.customTitle;
     this.currentTitleSource = state.titleSource;
     this.currentParentSessionId = state.parentSessionId;
@@ -1905,13 +1890,12 @@ export class ChatRecordingService {
     try {
       this.trackUserDisplayTextForTitle(promptPayload?.displayText);
       this.turnParentUuids.push(this.lastRecordUuid);
-      this.turnPromptIds.push(promptId);
       const record: ChatRecord = {
         ...this.createBaseRecord('user'),
         ...(goalContext ? { goalContext: copyGoalContext(goalContext) } : {}),
-        ...(promptId ? { promptId } : {}),
         message: createUserContent(message),
         ...(promptPayload ? { systemPayload: promptPayload } : {}),
+        ...(promptId ? { promptId } : {}),
       };
       this.appendRecord(record);
     } catch (error) {
@@ -1919,111 +1903,8 @@ export class ChatRecordingService {
     }
   }
 
-  /**
-   * Retires the turn boundary `recordUserMessage` just appended for
-   * `promptId`, keeping the boundary space aligned with the positional
-   * history when that prompt is dropped before its content ever reaches
-   * API history (e.g. the session-token-limit stop records and snapshots
-   * the prompt, then discards the message without sending — R8-13). A
-   * leaked boundary permanently fails the strict legacy pairing gates
-   * closed (boundaries = turns + 1) until /clear.
-   *
-   * No-op unless the NEWEST boundary belongs to `promptId`: retiring
-   * anything older would shift every later slot — the same desync this
-   * repairs. The appended transcript record stays on the active branch —
-   * a later `/resume` reconstructs the dropped message as a positional
-   * turn WITH its boundary, so the stores stay pairable there too.
-   */
-  retireTurnBoundary(promptId: string): boolean {
-    if (!promptId || this.turnPromptIds.at(-1) !== promptId) {
-      return false;
-    }
-    // recordUserMessage appends the title display text, the parent uuid
-    // and the prompt id together; retire them together so rewindRecording's
-    // projection math (boundaries minus display texts) stays aligned. Pop
-    // the display text only while the lists are in lockstep — a resumed
-    // session can legitimately carry fewer display texts than boundaries,
-    // and popping then would remove a DIFFERENT turn's title text.
-    const displayTextsInLockstep =
-      this.userDisplayTextsForTitle.length === this.turnParentUuids.length;
-    this.turnParentUuids.pop();
-    this.turnPromptIds.pop();
-    if (displayTextsInLockstep) {
-      this.userDisplayTextsForTitle.pop();
-    }
-    return true;
-  }
-
   getUserDisplayTextsForTitle(): ReadonlyArray<string | undefined> {
     return this.userDisplayTextsForTitle;
-  }
-
-  getRewindableTurnPromptIds(): ReadonlyArray<string | undefined> {
-    return [...this.turnPromptIds];
-  }
-
-  captureRewindCheckpoint(): ChatRecordingRewindCheckpoint {
-    return {
-      lastRecordUuid: this.lastRecordUuid,
-      activeBranchRecords: [...this.activeBranchRecords],
-      activeBranchBaseUuid: this.activeBranchBaseUuid,
-      pendingBranchToolCalls: [...this.pendingBranchToolCalls],
-      turnParentUuids: [...this.turnParentUuids],
-      turnPromptIds: [...this.turnPromptIds],
-      userDisplayTextsForTitle: [...this.userDisplayTextsForTitle],
-    };
-  }
-
-  restoreRewindCheckpoint(
-    checkpoint: ChatRecordingRewindCheckpoint,
-    survivingFileHistorySnapshots?: FileHistorySnapshot[],
-    legacyPromptIds = false,
-  ): void {
-    this.lastRecordUuid = checkpoint.lastRecordUuid;
-    this.activeBranchRecords = [...checkpoint.activeBranchRecords];
-    this.activeBranchBaseUuid = checkpoint.activeBranchBaseUuid;
-    this.pendingBranchToolCalls = [...checkpoint.pendingBranchToolCalls];
-    this.turnParentUuids = [...checkpoint.turnParentUuids];
-    this.turnPromptIds = legacyPromptIds
-      ? checkpoint.turnPromptIds.map(() => undefined)
-      : [...checkpoint.turnPromptIds];
-    this.userDisplayTextsForTitle.splice(
-      0,
-      this.userDisplayTextsForTitle.length,
-      ...checkpoint.userDisplayTextsForTitle,
-    );
-    this.lastAttributionSnapshotJson = undefined;
-    const record: ChatRecord = {
-      ...this.createBaseRecord('system'),
-      type: 'system',
-      subtype: 'rewind',
-      systemPayload: { truncatedCount: 0 },
-    };
-    this.appendRecord(record);
-
-    // Last-wins session_model may now sit on the abandoned branch: a model
-    // switch between the rewind and this restore appends to the post-rewind
-    // tail the checkpoint rolls back, while the in-memory binding keeps the
-    // new model. Mirror rewindRecording's re-append so cold restore still
-    // sees the model Config is on — an in-process re-set never heals the
-    // transcript (sessionModelPayloadsEqual dedupes it away without
-    // writing).
-    if (this.currentSessionModel) {
-      this.appendRecord({
-        ...this.createBaseRecord('system'),
-        type: 'system',
-        subtype: 'session_model',
-        systemPayload: this.currentSessionModel,
-      });
-    }
-
-    if (survivingFileHistorySnapshots?.length) {
-      this.recordFileHistorySnapshotBatch(survivingFileHistorySnapshots);
-    }
-  }
-
-  useLegacyTurnPromptIds(): void {
-    this.turnPromptIds = this.turnPromptIds.map(() => undefined);
   }
 
   recordGoalRuntimeMessage(
@@ -2581,7 +2462,6 @@ export class ChatRecordingService {
       );
       // Trim future boundaries — they no longer exist in the active branch.
       this.turnParentUuids = this.turnParentUuids.slice(0, targetTurnIndex);
-      this.turnPromptIds = this.turnPromptIds.slice(0, targetTurnIndex);
       // The previous attribution snapshot now sits on the abandoned
       // branch — clear the dedup key so the next snapshot lands on the
       // active branch and `/resume` can find it. Without this, a
@@ -2627,7 +2507,6 @@ export class ChatRecordingService {
    */
   rebuildTurnBoundaries(messages: ChatRecord[]): void {
     this.turnParentUuids = [];
-    this.turnPromptIds = [];
     this.activeBranchRecords = [...messages];
     this.activeBranchBaseUuid = messages[0]?.parentUuid ?? null;
     this.pendingBranchToolCalls = collectPendingBranchToolCalls(messages);
@@ -2645,7 +2524,6 @@ export class ChatRecordingService {
         // Reconstructed histories can start mid-chain; the persisted edge is
         // the source of truth, not the previous item in this sliced list.
         this.turnParentUuids.push(record.parentUuid ?? null);
-        this.turnPromptIds.push(record.promptId);
       }
     }
     // Ensure lastRecordUuid points to the end of the reconstructed chain.

@@ -23,7 +23,7 @@ import {
 } from './chatRecordingService.js';
 import { MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS } from '../utils/toolResultDisplayCompaction.js';
 import * as jsonl from '../utils/jsonl-utils.js';
-import type { Part } from '@google/genai';
+import type { Content, Part } from '@google/genai';
 import type { FileDiff } from '../tools/tools.js';
 import {
   deserializeSnapshots,
@@ -36,17 +36,13 @@ import {
   SessionWriterUnavailableError,
   type SessionWriterLease,
 } from './session-writer-lease.js';
-import {
-  buildApiHistoryFromConversation,
-  getApiHistoryPromptId,
-  markApiHistoryPrompt,
-} from './session-api-history.js';
 import type {
   GoalStateRecordPayloadV2,
   GoalTurnPermit,
 } from '../goals/goal-protocol.js';
 import type { ToolResultBoundaryObservation } from '../tools/tool-result-boundary-diagnostics.js';
 import { CompressionStatus } from '../core/turn.js';
+import { markApiHistoryPrompt } from './session-api-history.js';
 
 function branchTestRecord(
   uuid: string,
@@ -217,6 +213,27 @@ describe('ChatRecordingService', () => {
       expect(record.gitBranch).toBe('main');
       expect(record.provenance).toBe('real_user');
       expect(record.promptId).toBe('prompt-1');
+    });
+
+    it('preserves prompt identities in compression checkpoints', async () => {
+      const content: Content = {
+        role: 'user',
+        parts: [{ text: 'prompt' }],
+      };
+      markApiHistoryPrompt(content, 'prompt-1');
+
+      chatRecordingService.recordChatCompression({
+        info: {
+          originalTokenCount: 10,
+          newTokenCount: 5,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+        compressedHistory: [content],
+      });
+      await chatRecordingService.flush();
+
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(record.systemPayload).toMatchObject({ promptIds: ['prompt-1'] });
     });
 
     it('preserves model-bound parts and records clean display text', async () => {
@@ -501,97 +518,6 @@ describe('ChatRecordingService', () => {
           },
         },
       });
-    });
-  });
-
-  describe('retireTurnBoundary', () => {
-    it('pops the newest boundary when the promptId matches', () => {
-      chatRecordingService.recordUserMessage(
-        [{ text: 'first' }],
-        undefined,
-        { displayText: 'first', hookContext: '' },
-        'prompt-1',
-      );
-      chatRecordingService.recordUserMessage(
-        [{ text: 'second' }],
-        undefined,
-        { displayText: 'second', hookContext: '' },
-        'prompt-2',
-      );
-      expect(chatRecordingService.getRewindableTurnPromptIds()).toEqual([
-        'prompt-1',
-        'prompt-2',
-      ]);
-
-      expect(chatRecordingService.retireTurnBoundary('prompt-2')).toBe(true);
-
-      // The newest boundary and its title display text are retired together,
-      // keeping the boundary space aligned with the positional turns after a
-      // prompt is dropped before its content ever reaches API history.
-      expect(chatRecordingService.getRewindableTurnPromptIds()).toEqual([
-        'prompt-1',
-      ]);
-      expect(chatRecordingService.getUserDisplayTextsForTitle()).toEqual([
-        'first',
-      ]);
-    });
-
-    it('is a no-op unless the newest boundary owns the promptId', () => {
-      chatRecordingService.recordUserMessage(
-        [{ text: 'first' }],
-        undefined,
-        { displayText: 'first', hookContext: '' },
-        'prompt-1',
-      );
-      chatRecordingService.recordUserMessage(
-        [{ text: 'second' }],
-        undefined,
-        { displayText: 'second', hookContext: '' },
-        'prompt-2',
-      );
-
-      // Retiring an older (or unknown/empty) boundary would shift every later
-      // slot — the same desync a leaked boundary creates — so it must refuse.
-      expect(chatRecordingService.retireTurnBoundary('prompt-1')).toBe(false);
-      expect(chatRecordingService.retireTurnBoundary('prompt-missing')).toBe(
-        false,
-      );
-      expect(chatRecordingService.retireTurnBoundary('')).toBe(false);
-
-      expect(chatRecordingService.getRewindableTurnPromptIds()).toEqual([
-        'prompt-1',
-        'prompt-2',
-      ]);
-      expect(chatRecordingService.getUserDisplayTextsForTitle()).toEqual([
-        'first',
-        'second',
-      ]);
-    });
-
-    it('keeps the next recorded turn paired after a retirement', () => {
-      chatRecordingService.recordUserMessage(
-        [{ text: 'dropped' }],
-        undefined,
-        { displayText: 'dropped', hookContext: '' },
-        'prompt-dropped',
-      );
-      expect(chatRecordingService.retireTurnBoundary('prompt-dropped')).toBe(
-        true,
-      );
-
-      chatRecordingService.recordUserMessage(
-        [{ text: 'next' }],
-        undefined,
-        { displayText: 'next', hookContext: '' },
-        'prompt-next',
-      );
-
-      expect(chatRecordingService.getRewindableTurnPromptIds()).toEqual([
-        'prompt-next',
-      ]);
-      expect(chatRecordingService.getUserDisplayTextsForTitle()).toEqual([
-        'next',
-      ]);
     });
   });
 
@@ -1420,7 +1346,6 @@ describe('ChatRecordingService', () => {
           sessionId: 'test-session-id',
           timestamp: '2026-06-27T00:00:00.000Z',
           type: 'user',
-          promptId: 'prompt-1',
           cwd: '/test/project/root',
           version: '1.0.0',
           message: { role: 'user', parts: [{ text: 'first turn' }] },
@@ -1465,7 +1390,6 @@ describe('ChatRecordingService', () => {
           sessionId: 'test-session-id',
           timestamp: '2026-06-27T00:00:04.000Z',
           type: 'user',
-          promptId: 'prompt-2',
           cwd: '/test/project/root',
           version: '1.0.0',
           message: { role: 'user', parts: [{ text: 'second turn' }] },
@@ -1475,14 +1399,7 @@ describe('ChatRecordingService', () => {
       // The Goal runtime continuation is not a turn boundary, so turn index 1
       // is the second REAL user turn (user-2), re-rooting at assistant-2. Were
       // the continuation counted, index 1 would re-root at assistant-1.
-      expect(chatRecordingService.getRewindableTurnPromptIds()).toEqual([
-        'prompt-1',
-        'prompt-2',
-      ]);
       chatRecordingService.rewindRecording(1, { truncatedCount: 3 });
-      expect(chatRecordingService.getRewindableTurnPromptIds()).toEqual([
-        'prompt-1',
-      ]);
       await chatRecordingService.flush();
 
       const records = vi
@@ -1490,80 +1407,6 @@ describe('ChatRecordingService', () => {
         .mock.calls.map((call) => call[1] as ChatRecord);
       const rewind = records.find((record) => record.subtype === 'rewind');
       expect(rewind?.parentUuid).toBe('assistant-2');
-    });
-
-    it('restores the active recording branch after a failed rewind consumer', async () => {
-      chatRecordingService.rebuildTurnBoundaries([
-        {
-          uuid: 'user-1',
-          parentUuid: null,
-          sessionId: 'test-session-id',
-          timestamp: '2026-06-27T00:00:00.000Z',
-          type: 'user',
-          promptId: 'prompt-1',
-          cwd: '/test/project/root',
-          version: '1.0.0',
-          message: { role: 'user', parts: [{ text: 'first turn' }] },
-        },
-        {
-          uuid: 'assistant-1',
-          parentUuid: 'user-1',
-          sessionId: 'test-session-id',
-          timestamp: '2026-06-27T00:00:01.000Z',
-          type: 'assistant',
-          cwd: '/test/project/root',
-          version: '1.0.0',
-          message: { role: 'model', parts: [{ text: 'first reply' }] },
-          model: 'gemini-pro',
-        },
-        {
-          uuid: 'user-2',
-          parentUuid: 'assistant-1',
-          sessionId: 'test-session-id',
-          timestamp: '2026-06-27T00:00:02.000Z',
-          type: 'user',
-          promptId: 'prompt-2',
-          cwd: '/test/project/root',
-          version: '1.0.0',
-          message: { role: 'user', parts: [{ text: 'second turn' }] },
-        },
-        {
-          uuid: 'assistant-2',
-          parentUuid: 'user-2',
-          sessionId: 'test-session-id',
-          timestamp: '2026-06-27T00:00:03.000Z',
-          type: 'assistant',
-          cwd: '/test/project/root',
-          version: '1.0.0',
-          message: { role: 'model', parts: [{ text: 'second reply' }] },
-          model: 'gemini-pro',
-        },
-      ]);
-      const checkpoint = chatRecordingService.captureRewindCheckpoint();
-
-      chatRecordingService.rewindRecording(1, { truncatedCount: 2 });
-      chatRecordingService.restoreRewindCheckpoint(checkpoint);
-      chatRecordingService.recordUserMessage(
-        [{ text: 'replacement turn' }],
-        undefined,
-        undefined,
-        'prompt-3',
-      );
-
-      expect(chatRecordingService.getRewindableTurnPromptIds()).toEqual([
-        'prompt-1',
-        'prompt-2',
-        'prompt-3',
-      ]);
-      await chatRecordingService.flush();
-      const records = vi
-        .mocked(jsonl.writeLine)
-        .mock.calls.map((call) => call[1] as ChatRecord);
-      const rollback = records.filter(
-        (record) => record.subtype === 'rewind',
-      )[1];
-      expect(rollback?.parentUuid).toBe('assistant-2');
-      expect(records.at(-1)?.parentUuid).toBe(rollback?.uuid);
     });
 
     it('restores a rebuilt persisted tail after a failed append', async () => {
@@ -2693,38 +2536,6 @@ describe('ChatRecordingService', () => {
     });
   });
 
-  describe('recordChatCompression', () => {
-    it('preserves prompt identities through persistence and resume', async () => {
-      const compressedHistory = [
-        { role: 'user' as const, parts: [{ text: 'question' }] },
-        { role: 'model' as const, parts: [{ text: 'answer' }] },
-      ];
-      markApiHistoryPrompt(compressedHistory[0]!, 'prompt-1');
-
-      chatRecordingService.recordChatCompression({
-        info: {
-          originalTokenCount: 100,
-          newTokenCount: 50,
-          compressionStatus: CompressionStatus.COMPRESSED,
-        },
-        compressedHistory,
-      });
-      await chatRecordingService.flush();
-
-      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
-      const persistedRecord = JSON.parse(JSON.stringify(record)) as ChatRecord;
-      const restored = buildApiHistoryFromConversation({
-        messages: [persistedRecord],
-      });
-
-      expect(restored.map(getApiHistoryPromptId)).toEqual([
-        'prompt-1',
-        undefined,
-      ]);
-      expect(JSON.stringify(restored)).not.toContain('prompt-1');
-    });
-  });
-
   describe('flush', () => {
     it('resolves immediately on a service with no enqueued writes', async () => {
       // The writeChain starts as Promise.resolve(), so flush() on a fresh
@@ -2959,52 +2770,6 @@ describe('ChatRecordingService', () => {
       vi.mocked(jsonl.writeLine).mockClear();
 
       chatRecordingService.rewindRecording(1, { truncatedCount: 1 });
-      await chatRecordingService.flush();
-
-      const written = vi
-        .mocked(jsonl.writeLine)
-        .mock.calls.map((call) => call[1] as ChatRecord);
-      expect(written.map((record) => record.subtype)).toEqual([
-        'rewind',
-        'session_model',
-      ]);
-      expect(written[1]?.parentUuid).toBe(written[0]?.uuid);
-      expect(written[1]?.systemPayload).toEqual({
-        modelId: 'qwen3-coder-flash',
-        authType: 'openai',
-      });
-
-      vi.mocked(jsonl.writeLine).mockClear();
-      await expect(
-        chatRecordingService.recordSessionModel({
-          modelId: 'qwen3-coder-flash',
-          authType: 'openai',
-        }),
-      ).resolves.toBe(true);
-      expect(jsonl.writeLine).not.toHaveBeenCalled();
-    });
-
-    it('re-anchors the live session model after a checkpoint restore', async () => {
-      chatRecordingService.recordUserMessage([{ text: 'first' }]);
-      await chatRecordingService.recordSessionModel({
-        modelId: 'qwen3-coder-plus',
-        authType: 'openai',
-      });
-      chatRecordingService.recordUserMessage([{ text: 'second' }]);
-      const checkpoint = chatRecordingService.captureRewindCheckpoint();
-
-      // A model switch between the rewind and the restore lands on the
-      // post-rewind tail the checkpoint is about to roll back. The restore
-      // must re-append the live binding — the abandoned branch keeps the
-      // stale M1 record, and an in-process re-set is deduped away
-      // (sessionModelPayloadsEqual) so it never heals the transcript.
-      await chatRecordingService.recordSessionModel({
-        modelId: 'qwen3-coder-flash',
-        authType: 'openai',
-      });
-      vi.mocked(jsonl.writeLine).mockClear();
-
-      chatRecordingService.restoreRewindCheckpoint(checkpoint);
       await chatRecordingService.flush();
 
       const written = vi

@@ -29,26 +29,6 @@ export function getApiHistoryPromptId(content: Content): string | undefined {
   return (content as IdentifiedContent)[API_HISTORY_PROMPT_ID];
 }
 
-export function getApiHistoryPromptIndexes(
-  history: readonly Content[],
-): number[] | undefined {
-  const seen = new Set<string>();
-  const indexes: number[] = [];
-
-  for (let index = 0; index < history.length; index++) {
-    const content = history[index]!;
-    const promptId = getApiHistoryPromptId(content);
-    if (!promptId) continue;
-    if (seen.has(promptId)) {
-      return undefined;
-    }
-    seen.add(promptId);
-    indexes.push(index);
-  }
-
-  return indexes;
-}
-
 export function findApiHistoryPromptIndex(
   history: readonly Content[],
   promptId: string,

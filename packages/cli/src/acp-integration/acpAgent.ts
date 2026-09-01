@@ -8700,26 +8700,23 @@ class QwenAgent implements Agent {
         }
         const fhs = session.getConfig().getFileHistoryService();
         const snapshots = fhs.getSnapshots();
-        const snapshotByPromptId = new Map(
-          snapshots.map((snapshot) => [snapshot.promptId, snapshot]),
-        );
+        const rewindableTurnCount = session.getRewindableUserTurnCount();
         const prefix = (sessionId as string) + '########';
         const results = await Promise.all(
-          session
-            .getRewindableSnapshotTargets()
+          snapshots
+            .map((s, idx) => ({ s, idx }))
             .filter(
-              ({ promptId }) =>
-                promptId.startsWith(prefix) &&
-                /^\d+$/.test(promptId.slice(prefix.length)) &&
-                snapshotByPromptId.has(promptId),
+              ({ s }) =>
+                s.promptId.startsWith(prefix) &&
+                /^\d+$/.test(s.promptId.slice(prefix.length)),
             )
-            .map(async ({ promptId, turnIndex }) => {
-              const snapshot = snapshotByPromptId.get(promptId)!;
-              const stats = await fhs.getDiffStats(promptId);
+            .filter(({ idx }) => idx < rewindableTurnCount)
+            .map(async ({ s, idx }) => {
+              const stats = await fhs.getDiffStats(s.promptId);
               return {
-                promptId,
-                turnIndex,
-                timestamp: snapshot.timestamp.toISOString(),
+                promptId: s.promptId,
+                turnIndex: idx,
+                timestamp: s.timestamp.toISOString(),
                 diffStats: {
                   filesChanged: stats?.filesChanged?.length ?? 0,
                   insertions: stats?.insertions ?? 0,
@@ -11749,17 +11746,13 @@ class QwenAgent implements Agent {
         }
         const promptId =
           typeof rawPromptId === 'string' ? rawPromptId : undefined;
-        const turnIndex: number | undefined = params['targetTurnIndex'] as
+        let turnIndex: number | undefined = params['targetTurnIndex'] as
           | number
           | undefined;
         const resolveFromPromptId =
           promptId !== undefined &&
           (turnIndex === undefined || turnIndex === null);
-        if (promptId !== undefined) {
-          // Validate the format even when the numeric target resolves the
-          // rewind: a request carrying both parameters must not ride a
-          // malformed promptId silently into the file-history lookup (and
-          // the conversation rewind ignores it only after this gate).
+        if (resolveFromPromptId) {
           const prefix = sessionId + '########';
           if (!promptId.startsWith(prefix)) {
             throw new RequestError(-32602, 'Invalid promptId format', {
@@ -11774,11 +11767,7 @@ class QwenAgent implements Agent {
               { errorKind: 'invalid_rewind_target' },
             );
           }
-        }
-        if (
-          !resolveFromPromptId &&
-          (!Number.isInteger(turnIndex) || (turnIndex as number) < 0)
-        ) {
+        } else if (!Number.isInteger(turnIndex) || (turnIndex as number) < 0) {
           throw RequestError.invalidParams(
             undefined,
             'Invalid or missing targetTurnIndex',
@@ -11786,16 +11775,34 @@ class QwenAgent implements Agent {
         }
 
         return await this.runExclusiveHistoryMutation(sessionId, async () => {
+          if (resolveFromPromptId) {
+            // Derive turnIndex from the snapshot's position in the array,
+            // NOT from the promptId suffix. Session.turn is monotonic and
+            // does not reset on rewind, so after a rewind cycle the suffix
+            // no longer matches the turn's position in the current history.
+            const fhs = session.getConfig().getFileHistoryService();
+            const snapshots = fhs.getSnapshots();
+            const snapshotIdx = snapshots.findIndex(
+              (s) => s.promptId === promptId,
+            );
+            if (snapshotIdx < 0) {
+              throw new RequestError(
+                -32602,
+                'Snapshot not found for the given promptId',
+                { errorKind: 'invalid_rewind_target' },
+              );
+            }
+            turnIndex = snapshotIdx;
+          }
+
           const rewindFiles = params['rewindFiles'] !== false;
           const historyBeforeRewind = session.captureHistorySnapshot();
-          const historyBeforeRewindPromptIds =
-            session.captureHistoryPromptIds(historyBeforeRewind);
           let rewindResult;
           let releaseHistoryMutation: () => void;
           try {
-            rewindResult = resolveFromPromptId
-              ? session.rewindToPrompt(promptId as string, { rewindFiles })
-              : session.rewindToTurn(turnIndex as number, { rewindFiles });
+            rewindResult = session.rewindToTurn(turnIndex as number, {
+              rewindFiles,
+            });
             releaseHistoryMutation = session.beginHistoryMutation();
           } catch (err) {
             if (err instanceof RequestError) {
@@ -11808,9 +11815,11 @@ class QwenAgent implements Agent {
                   errorKind: 'session_busy',
                 });
               }
-              throw new RequestError(err.code, msg, {
-                errorKind: 'invalid_rewind_target',
-              });
+              if (msg.includes('compressed or does not exist')) {
+                throw new RequestError(err.code, msg, {
+                  errorKind: 'invalid_rewind_target',
+                });
+              }
             }
             throw err;
           }
@@ -11818,48 +11827,16 @@ class QwenAgent implements Agent {
           try {
             let filesChanged: string[] = [];
             let filesFailed: string[] = [];
-            // Numeric rewinds (the VS Code companion's message-edit flow
-            // sends only targetTurnIndex) resolve the target's identity
-            // inside the session — key the file rewind and the
-            // consumed-boundary drop on the RESOLVED identity so both arms
-            // run them. A request carrying BOTH parameters follows the
-            // numeric target for the conversation; keying the file rewind
-            // on the raw client promptId would roll files back to a
-            // different turn than the conversation truncates to, and the
-            // boundary drop would then consume the wrong snapshot.
-            // promptId-only rewinds stamp the requested id, so the two
-            // sources agree in that arm. Without the drop the live store
-            // keeps the boundary while the conversation keeps one fewer
-            // turn, the strict legacy pairing gate fails every later
-            // rewind closed, and file rewind becomes one-shot until a
-            // session reload.
-            const fileRewindPromptId = resolveFromPromptId
-              ? promptId
-              : rewindResult.promptId;
-            if (rewindFiles && fileRewindPromptId) {
+            if (rewindFiles && promptId) {
               const fhs = session.getConfig().getFileHistoryService();
               try {
-                const fileResult = await fhs.rewind(fileRewindPromptId, true);
+                const fileResult = await fhs.rewind(promptId, true);
                 filesChanged = fileResult.filesChanged;
                 filesFailed = fileResult.filesFailed;
-                if (fileResult.filesFailed.length === 0) {
-                  // The rewind consumed the target's boundary snapshot: the
-                  // workspace files now sit AT it while the truncated
-                  // conversation keeps one fewer turn, leaving the store
-                  // permanently one snapshot ahead. Every legacy pairing
-                  // gate would then fail closed, making file rewind
-                  // one-shot. Drop the consumed boundary (last entry after
-                  // rewind's own truncation) so snapshot-i <-> turn-i
-                  // realigns and the next rewind works.
-                  const surviving = fhs.getSnapshots();
-                  if (surviving.length > 0) {
-                    fhs.restoreFromSnapshots(surviving.slice(0, -1));
-                  }
-                }
               } catch (err) {
                 const reason = err instanceof Error ? err.message : String(err);
                 debugLogger.error(
-                  `[ACP] File-history rewind failed for session=${sessionId} promptId=${fileRewindPromptId}: ${reason}`,
+                  `[ACP] File-history rewind failed for session=${sessionId} promptId=${promptId}: ${reason}`,
                 );
                 filesFailed = [`file-history-rewind: ${reason}`];
               }
@@ -11905,7 +11882,6 @@ class QwenAgent implements Agent {
             return {
               success: true,
               historyBeforeRewind,
-              historyBeforeRewindPromptIds,
               ...rewindResult,
               filesChanged,
               filesFailed,
@@ -11994,7 +11970,6 @@ class QwenAgent implements Agent {
       case 'restoreSessionHistory': {
         const sessionId = params['sessionId'] as string;
         const history = params['history'];
-        const promptIds = params['promptIds'];
         if (!sessionId || !SESSION_ID_RE.test(sessionId)) {
           throw RequestError.invalidParams(
             undefined,
@@ -12007,21 +11982,6 @@ class QwenAgent implements Agent {
             'Invalid or missing history',
           );
         }
-        if (
-          promptIds !== undefined &&
-          (!Array.isArray(promptIds) ||
-            promptIds.length !== history.length ||
-            promptIds.some(
-              (promptId) =>
-                promptId !== null &&
-                (typeof promptId !== 'string' || promptId.length === 0),
-            ))
-        ) {
-          throw RequestError.invalidParams(
-            undefined,
-            'promptIds must match history and contain non-empty strings or null',
-          );
-        }
         const session = this.sessions.get(sessionId);
         if (!session) {
           throw RequestError.invalidParams(
@@ -12030,10 +11990,7 @@ class QwenAgent implements Agent {
           );
         }
 
-        session.restoreHistory(
-          history as Content[],
-          promptIds as Array<string | null> | undefined,
-        );
+        session.restoreHistory(history as Content[]);
         return { success: true };
       }
       case 'getAccountInfo': {

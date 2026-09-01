@@ -398,18 +398,14 @@ export class QwenAgentManager {
     await this.connection.sendPrompt(message);
   }
 
-  async rewindSession(targetTurnIndex: number): Promise<{
-    historyBeforeRewind?: unknown[];
-    historyBeforeRewindPromptIds?: Array<string | null>;
-  }> {
+  async rewindSession(
+    targetTurnIndex: number,
+  ): Promise<{ historyBeforeRewind?: unknown[] }> {
     return this.connection.rewindSession(targetTurnIndex);
   }
 
-  async restoreSessionHistory(
-    history: unknown[],
-    promptIds?: Array<string | null>,
-  ): Promise<void> {
-    await this.connection.restoreSessionHistory(history, promptIds);
+  async restoreSessionHistory(history: unknown[]): Promise<void> {
+    await this.connection.restoreSessionHistory(history);
   }
 
   /**

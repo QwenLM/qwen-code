@@ -296,7 +296,6 @@ describe('LlmClient Goal admission', () => {
       permit,
     );
     expect(turnMocks.constructors[0]?.[2]).toEqual(permit);
-    expect(turnMocks.constructors[0]?.[3]).toBeUndefined();
     expect(order).toEqual(['flush', 'peek', 'begin:queued-user', 'finish']);
     expect(nextSpeakerMocks.check).not.toHaveBeenCalled();
     expect(unsubscribeGoalState).toHaveBeenCalledOnce();
@@ -392,7 +391,6 @@ describe('LlmClient Goal admission', () => {
     );
     expect(recorder.recordGoalRuntimeMessage).not.toHaveBeenCalled();
     expect(turnMocks.constructors[0]?.[2]).toEqual(permit);
-    expect(turnMocks.constructors[0]?.[3]).toBe('real-user-key');
   });
 
   it('keeps real-user accounting when UserQuery receives a hidden automatic permit', async () => {

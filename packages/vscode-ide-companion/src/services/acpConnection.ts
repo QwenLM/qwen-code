@@ -492,10 +492,9 @@ export class AcpConnection {
     return response;
   }
 
-  async rewindSession(targetTurnIndex: number): Promise<{
-    historyBeforeRewind?: unknown[];
-    historyBeforeRewindPromptIds?: Array<string | null>;
-  }> {
+  async rewindSession(
+    targetTurnIndex: number,
+  ): Promise<{ historyBeforeRewind?: unknown[] }> {
     const conn = this.ensureConnection();
     if (!this.sessionId) {
       throw new Error('No active ACP session');
@@ -505,16 +504,10 @@ export class AcpConnection {
       sessionId: this.sessionId,
       targetTurnIndex,
       cwd: this.workingDir,
-    })) as {
-      historyBeforeRewind?: unknown[];
-      historyBeforeRewindPromptIds?: Array<string | null>;
-    };
+    })) as { historyBeforeRewind?: unknown[] };
   }
 
-  async restoreSessionHistory(
-    history: unknown[],
-    promptIds?: Array<string | null>,
-  ): Promise<void> {
+  async restoreSessionHistory(history: unknown[]): Promise<void> {
     const conn = this.ensureConnection();
     if (!this.sessionId) {
       throw new Error('No active ACP session');
@@ -523,7 +516,6 @@ export class AcpConnection {
     await conn.extMethod('restoreSessionHistory', {
       sessionId: this.sessionId,
       history,
-      promptIds,
       cwd: this.workingDir,
     });
   }

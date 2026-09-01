@@ -21,7 +21,6 @@ import * as jsonl from '../utils/jsonl-utils.js';
 import type { HistoryGap } from '../utils/conversation-chain.js';
 import { prepareTranscriptRecords } from '../utils/transcript-records.js';
 import type {
-  ChatCompressionRecordPayload,
   ChatRecord,
   FileHistorySnapshotRecordPayload,
   TitleSource,
@@ -80,7 +79,6 @@ export {
   buildApiHistoryFromConversation,
   findApiHistoryPromptIndex,
   getApiHistoryPromptId,
-  getApiHistoryPromptIndexes,
   markApiHistoryPrompt,
   type BuildApiHistoryOptions,
 } from './session-api-history.js';
@@ -3542,15 +3540,6 @@ export class SessionService {
         const next: ChatRecord = {
           ...record,
           sessionId: newSessionId,
-          ...(record.promptId
-            ? {
-                promptId: remapPromptId(
-                  record.promptId,
-                  sourceSessionId,
-                  newSessionId,
-                ),
-              }
-            : {}),
           cwd: this.projectRoot,
           systemPayload,
           parentUuid:
@@ -4040,21 +4029,14 @@ function remapSnapshotPromptId(
   sourceSessionId: string,
   newSessionId: string,
 ): FileHistorySnapshot {
+  const sourcePrefix = `${sourceSessionId}########`;
+  if (!snapshot.promptId.startsWith(sourcePrefix)) {
+    return snapshot;
+  }
   return {
     ...snapshot,
-    promptId: remapPromptId(snapshot.promptId, sourceSessionId, newSessionId),
+    promptId: `${newSessionId}########${snapshot.promptId.slice(sourcePrefix.length)}`,
   };
-}
-
-function remapPromptId(
-  promptId: string,
-  sourceSessionId: string,
-  newSessionId: string,
-): string {
-  const sourcePrefix = `${sourceSessionId}########`;
-  return promptId.startsWith(sourcePrefix)
-    ? `${newSessionId}########${promptId.slice(sourcePrefix.length)}`
-    : promptId;
 }
 
 function remapFileHistorySnapshotPayload(
@@ -4091,20 +4073,6 @@ function remapSystemPayloadForFork(
       sourceSessionId,
       newSessionId,
     );
-  }
-  if (record.subtype === 'chat_compression') {
-    const payload = record.systemPayload as
-      | ChatCompressionRecordPayload
-      | undefined;
-    if (!payload?.promptIds) return record.systemPayload;
-    return {
-      ...payload,
-      promptIds: payload.promptIds.map((promptId) =>
-        typeof promptId === 'string'
-          ? remapPromptId(promptId, sourceSessionId, newSessionId)
-          : null,
-      ),
-    };
   }
   if (record.subtype === 'ui_telemetry') {
     const payload = record.systemPayload as

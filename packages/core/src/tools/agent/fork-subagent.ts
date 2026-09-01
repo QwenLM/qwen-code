@@ -8,10 +8,6 @@ import {
   getStartupContextLength,
   isSystemReminderContent,
 } from '../../core/environmentContext.js';
-import {
-  getApiHistoryPromptId,
-  getApiHistoryPromptIndexes,
-} from '../../services/session-api-history.js';
 
 export const FORK_SUBAGENT_TYPE = 'fork';
 
@@ -241,47 +237,15 @@ export function selectForkHistory(
     const syntheticPrefixLength = getStartupContextLength(history, {
       includeCompressed: true,
     });
-    const identifiedTurns = getApiHistoryPromptIndexes(history);
-    const realUserTurnIndexes =
-      identifiedTurns?.filter((index) => index >= syntheticPrefixLength) ?? [];
-    // Partial identity coverage: a session resumed from before stable
-    // identities existed gains one marked entry as soon as a new prompt
-    // lands. Slicing from the marked indexes alone would silently drop
-    // every older (unmarked) turn from the fork window, so while any
-    // identity-less real user turn exists, fall back to the positional
-    // enumeration — the same guard Session.#getRewindTurnProjection keeps,
-    // minus its placeholder-ONLY exception: isRealUserTurn counts
-    // media-only entries as real turns (the Session twin never did), so an
-    // UNMARKED placeholder-only entry is a microcompaction-cleared
-    // media-only LEGACY turn and must force the positional fallback —
-    // skipping it would flip the window to identified mode and silently
-    // drop the legacy boundary. Marked placeholders (true structural
-    // replacements; microcompaction rebuilds entries with their marks
-    // preserved) are already skipped by the promptId check above.
-    let hasUnmarkedRealUserTurn = false;
-    if (identifiedTurns !== undefined && realUserTurnIndexes.length > 0) {
-      for (let index = syntheticPrefixLength; index < history.length; index++) {
-        const content = history[index]!;
-        if (!isRealUserTurn(content) || getApiHistoryPromptId(content)) {
-          continue;
-        }
-        hasUnmarkedRealUserTurn = true;
-        break;
-      }
-    }
-    if (identifiedTurns === undefined) {
-      selected = [];
-    } else if (realUserTurnIndexes.length === 0 || hasUnmarkedRealUserTurn) {
-      realUserTurnIndexes.length = 0;
-      for (let index = syntheticPrefixLength; index < history.length; index++) {
-        const content = history[index]!;
-        if (isRealUserTurn(content)) {
-          realUserTurnIndexes.push(index);
-        }
+    const realUserTurnIndexes: number[] = [];
+    for (let index = syntheticPrefixLength; index < history.length; index++) {
+      const content = history[index]!;
+      if (isRealUserTurn(content)) {
+        realUserTurnIndexes.push(index);
       }
     }
 
-    if (identifiedTurns === undefined || realUserTurnIndexes.length === 0) {
+    if (realUserTurnIndexes.length === 0) {
       selected = [];
     } else {
       selected = history.slice(

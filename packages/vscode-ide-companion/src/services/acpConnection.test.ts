@@ -138,30 +138,6 @@ describe('AcpConnection readTextFile error mapping', () => {
   });
 });
 
-describe('AcpConnection session history restore', () => {
-  it('sends the parallel prompt ids with the history', async () => {
-    const extMethod = vi.fn().mockResolvedValue({});
-    const conn = createConnection({
-      child: createMockChild(),
-      sdkConnection: { extMethod },
-      sessionId: 'session-1',
-    }) as unknown as AcpConnection;
-    const history = [{ role: 'user', parts: [{ text: 'first' }] }];
-    const promptIds = ['prompt-1'];
-
-    await conn.restoreSessionHistory(history, promptIds);
-
-    expect(extMethod).toHaveBeenCalledWith(
-      'restoreSessionHistory',
-      expect.objectContaining({
-        sessionId: 'session-1',
-        history,
-        promptIds,
-      }),
-    );
-  });
-});
-
 describe('AcpConnection.isConnected', () => {
   it('returns true when child is alive', () => {
     const conn = createConnection({

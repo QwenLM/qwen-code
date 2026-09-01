@@ -501,12 +501,7 @@ describe('Session', () => {
     recordNotificationStrict: ReturnType<typeof vi.fn>;
     recordRealtimeConversation: ReturnType<typeof vi.fn>;
     recordFileHistorySnapshot: ReturnType<typeof vi.fn>;
-    retireTurnBoundary: ReturnType<typeof vi.fn>;
     rewindRecording: ReturnType<typeof vi.fn>;
-    captureRewindCheckpoint: ReturnType<typeof vi.fn>;
-    restoreRewindCheckpoint: ReturnType<typeof vi.fn>;
-    useLegacyTurnPromptIds: ReturnType<typeof vi.fn>;
-    getRewindableTurnPromptIds: ReturnType<typeof vi.fn>;
     setTitleRecordedCallback: ReturnType<typeof vi.fn>;
     getBranchCheckpointCursor: ReturnType<typeof vi.fn>;
     recordBranchCheckpointTransaction: ReturnType<typeof vi.fn>;
@@ -516,7 +511,6 @@ describe('Session', () => {
   let mockFileHistoryService: {
     makeSnapshot: ReturnType<typeof vi.fn>;
     getSnapshots: ReturnType<typeof vi.fn>;
-    isEnabled: ReturnType<typeof vi.fn>;
     restoreFromSnapshots: ReturnType<typeof vi.fn>;
     rewind: ReturnType<typeof vi.fn>;
   };
@@ -837,12 +831,7 @@ describe('Session', () => {
       recordNotificationStrict: vi.fn().mockResolvedValue(undefined),
       recordRealtimeConversation: vi.fn().mockResolvedValue(undefined),
       recordFileHistorySnapshot: vi.fn(),
-      retireTurnBoundary: vi.fn().mockReturnValue(true),
       rewindRecording: vi.fn(),
-      captureRewindCheckpoint: vi.fn().mockReturnValue({}),
-      restoreRewindCheckpoint: vi.fn(),
-      useLegacyTurnPromptIds: vi.fn(),
-      getRewindableTurnPromptIds: vi.fn().mockReturnValue([]),
       setTitleRecordedCallback: vi.fn(),
       getBranchCheckpointCursor: vi.fn().mockReturnValue({
         recordId: null,
@@ -877,7 +866,6 @@ describe('Session', () => {
     mockFileHistoryService = {
       makeSnapshot: vi.fn().mockResolvedValue(undefined),
       getSnapshots: vi.fn().mockReturnValue([]),
-      isEnabled: vi.fn().mockReturnValue(false),
       restoreFromSnapshots: vi.fn(),
       rewind: vi.fn(),
     };
@@ -2819,630 +2807,6 @@ describe('Session', () => {
     expect(textParts(retryCall.message)).toContain(reminder);
   });
 
-  it('reuses the stripped ACP retry identity without recording a duplicate turn', async () => {
-    const orphan: Content = {
-      role: 'user',
-      parts: [{ text: 'failed prompt' }],
-    };
-    core.markApiHistoryPrompt(orphan, 'original-prompt');
-    mockChat.stripOrphanedUserEntriesFromHistory = vi
-      .fn()
-      .mockReturnValue([orphan]);
-    mockChat.sendMessageStream = vi.fn().mockResolvedValue(createEmptyStream());
-
-    await session.prompt({
-      sessionId: 'test-session-id',
-      prompt: [{ type: 'text', text: 'failed prompt' }],
-      _meta: { 'qwen.daemon.retry': true },
-    } as PromptRequest);
-
-    expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
-      'qwen3-code-plus',
-      expect.any(Object),
-      'test-session-id########1',
-      undefined,
-      { promptId: 'original-prompt' },
-    );
-    expect(mockChatRecordingService.recordUserMessage).not.toHaveBeenCalled();
-    expect(mockFileHistoryService.makeSnapshot).not.toHaveBeenCalled();
-    expect(
-      mockChatRecordingService.recordFileHistorySnapshot,
-    ).not.toHaveBeenCalled();
-  });
-
-  it('fails closed on a mixed marked/unmarked retry strip and records a fresh turn', async () => {
-    // A failed UserQuery leaves a marked orphan; an unrelated unmarked
-    // orphan stacks on top. The marked identity must NOT be donated to the
-    // different resent content.
-    const markedOrphan: Content = {
-      role: 'user',
-      parts: [{ text: 'failed prompt' }],
-    };
-    core.markApiHistoryPrompt(markedOrphan, 'original-prompt');
-    const unmarkedOrphan: Content = {
-      role: 'user',
-      parts: [{ text: 'notification text' }],
-    };
-    mockChat.stripOrphanedUserEntriesFromHistory = vi
-      .fn()
-      .mockReturnValue([markedOrphan, unmarkedOrphan]);
-    mockChat.sendMessageStream = vi.fn().mockResolvedValue(createEmptyStream());
-
-    await session.prompt({
-      sessionId: 'test-session-id',
-      prompt: [{ type: 'text', text: 'notification text' }],
-      _meta: { 'qwen.daemon.retry': true },
-    } as PromptRequest);
-
-    expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledTimes(1);
-    expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
-      'notification text',
-      undefined,
-      undefined,
-      'test-session-id########1',
-    );
-    expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
-      'qwen3-code-plus',
-      expect.any(Object),
-      'test-session-id########1',
-      undefined,
-      { promptId: 'test-session-id########1' },
-    );
-  });
-
-  it('records and marks an orphan-less retry with the fresh promptId', async () => {
-    // The original send failed before any user content was pushed, so the
-    // strip finds nothing: the resend must not commit unmarked.
-    mockChat.stripOrphanedUserEntriesFromHistory = vi.fn().mockReturnValue([]);
-    mockChat.sendMessageStream = vi.fn().mockResolvedValue(createEmptyStream());
-
-    await session.prompt({
-      sessionId: 'test-session-id',
-      prompt: [{ type: 'text', text: 'token-limit retry' }],
-      _meta: { 'qwen.daemon.retry': true },
-    } as PromptRequest);
-
-    expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledTimes(1);
-    expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
-      'token-limit retry',
-      undefined,
-      undefined,
-      'test-session-id########1',
-    );
-    expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
-      'qwen3-code-plus',
-      expect.any(Object),
-      'test-session-id########1',
-      undefined,
-      { promptId: 'test-session-id########1' },
-    );
-  });
-
-  it('fails closed when a retry strips multiple marked orphans', async () => {
-    // The retried prompt matches NEITHER stripped orphan, so no identity
-    // may be adopted from the mixed strip — the resend records fresh.
-    // (A retry matching the LAST orphan adopts it instead; see the
-    // 'adopts the matching last orphan' test below.)
-    const orphanA: Content = {
-      role: 'user',
-      parts: [{ text: 'first failed prompt' }],
-    };
-    core.markApiHistoryPrompt(orphanA, 'original-a');
-    const orphanB: Content = {
-      role: 'user',
-      parts: [{ text: 'second failed prompt' }],
-    };
-    core.markApiHistoryPrompt(orphanB, 'original-b');
-    mockChat.stripOrphanedUserEntriesFromHistory = vi
-      .fn()
-      .mockReturnValue([orphanA, orphanB]);
-    mockChat.sendMessageStream = vi.fn().mockResolvedValue(createEmptyStream());
-
-    await session.prompt({
-      sessionId: 'test-session-id',
-      prompt: [{ type: 'text', text: 'a third prompt, matching neither' }],
-      _meta: { 'qwen.daemon.retry': true },
-    } as PromptRequest);
-
-    expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledTimes(1);
-    expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
-      'a third prompt, matching neither',
-      undefined,
-      undefined,
-      'test-session-id########1',
-    );
-    expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
-      'qwen3-code-plus',
-      expect.any(Object),
-      'test-session-id########1',
-      undefined,
-      { promptId: 'test-session-id########1' },
-    );
-  });
-
-  it('restores the stripped orphan when a retry send throws before re-pushing it', async () => {
-    // A retry strips the failed attempt's orphan before resending. If the
-    // resend throws before the user content is pushed (the same data-loss
-    // window continuations guard), the orphan must come back into history —
-    // otherwise the live session loses the entry while its record stays in
-    // the transcript and positional turns fall below recording boundaries.
-    const orphan: Content = {
-      role: 'user',
-      parts: [{ text: 'failed prompt' }],
-    };
-    core.markApiHistoryPrompt(orphan, 'original-prompt');
-    mockChat.stripOrphanedUserEntriesFromHistory = vi
-      .fn()
-      .mockReturnValue([orphan]);
-    mockChat.sendMessageStream = vi
-      .fn()
-      .mockRejectedValue(new Error('hard-rescue stop'));
-
-    await expect(
-      session.prompt({
-        sessionId: 'test-session-id',
-        prompt: [{ type: 'text', text: 'failed prompt' }],
-        _meta: { 'qwen.daemon.retry': true },
-      } as PromptRequest),
-    ).rejects.toThrow('hard-rescue stop');
-
-    expect(mockChat.stripOrphanedUserEntriesFromHistory).toHaveBeenCalled();
-    const restored = vi
-      .mocked(mockChat.addHistory)
-      .mock.calls.map((call) => call[0])
-      .find((entry) => core.getApiHistoryPromptId(entry) === 'original-prompt');
-    expect(restored).toBeDefined();
-    expect(restored).toEqual(
-      expect.objectContaining({
-        role: 'user',
-        parts: expect.arrayContaining([
-          expect.objectContaining({ text: 'failed prompt' }),
-        ]),
-      }),
-    );
-  });
-
-  it('does not restore the stripped orphan when the retry resend lands', async () => {
-    // The resend pushes the user content, advancing the push counter past
-    // the strip-time snapshot — the push-count gate must skip the restore
-    // so the resent turn is not duplicated.
-    const orphan: Content = {
-      role: 'user',
-      parts: [{ text: 'failed prompt' }],
-    };
-    core.markApiHistoryPrompt(orphan, 'original-prompt');
-    mockChat.stripOrphanedUserEntriesFromHistory = vi
-      .fn()
-      .mockReturnValue([orphan]);
-    let userContentPushCount = 0;
-    (
-      mockChat as unknown as {
-        getUserContentPushCount: () => number;
-      }
-    ).getUserContentPushCount = vi.fn(() => userContentPushCount);
-    mockChat.sendMessageStream = vi.fn().mockImplementation(async () => {
-      userContentPushCount += 1;
-      return createEmptyStream();
-    });
-
-    await session.prompt({
-      sessionId: 'test-session-id',
-      prompt: [{ type: 'text', text: 'failed prompt' }],
-      _meta: { 'qwen.daemon.retry': true },
-    } as PromptRequest);
-
-    const restored = vi
-      .mocked(mockChat.addHistory)
-      .mock.calls.map((call) => call[0])
-      .find((entry) => core.getApiHistoryPromptId(entry) === 'original-prompt');
-    expect(restored).toBeUndefined();
-  });
-
-  it('preserves the retried prompt on the session-token-limit null-stream return', async () => {
-    // A retry resend that hits the session token limit before any push
-    // returns a graceful null stream. The push-count-gated catch never
-    // runs on that RETURN path, so the preserve call is the resend's only
-    // restore site: the full prompt (not just functionResponse parts)
-    // must land back in history, or the prompt entry vanishes from live
-    // API history while its transcript record stays.
-    mockChat.stripOrphanedUserEntriesFromHistory = vi.fn().mockReturnValue([]);
-    mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
-    mockLlmClient.tryCompressChat.mockResolvedValue({
-      originalTokenCount: 999,
-      newTokenCount: 999,
-      compressionStatus: core.CompressionStatus.NOOP,
-    });
-
-    const result = await session.prompt({
-      sessionId: 'test-session-id',
-      prompt: [{ type: 'text', text: 'token-limit retry' }],
-      _meta: { 'qwen.daemon.retry': true },
-    } as PromptRequest);
-
-    expect(result).toEqual({ stopReason: 'max_tokens' });
-    expect(mockChat.addHistory).toHaveBeenCalledWith(
-      expect.objectContaining({
-        role: 'user',
-        parts: expect.arrayContaining([
-          expect.objectContaining({ text: 'token-limit retry' }),
-        ]),
-      }),
-    );
-    const restored = vi.mocked(mockChat.addHistory).mock.calls[0]![0];
-    expect(core.getApiHistoryPromptId(restored)).toBe(
-      'test-session-id########1',
-    );
-  });
-
-  it('gates the orphan restore on the send chat instance across a compression swap', async () => {
-    // R10-7: the restore gate must compare push counters on the SAME chat
-    // instance. Compression during the resend swaps in a fresh chat whose
-    // counter starts at 0; the resend pushes there (0→1) and the stream
-    // throws. A gate re-reading the CURRENT chat but comparing against the
-    // PRE-compression snapshot (1 <= 1) double-restores the orphan on top
-    // of the landed resend.
-    const orphan: Content = {
-      role: 'user',
-      parts: [{ text: 'failed prompt' }],
-    };
-    core.markApiHistoryPrompt(orphan, 'original-prompt');
-    // The failed first attempt already pushed on the pre-compression chat.
-    (
-      mockChat as unknown as { getUserContentPushCount: () => number }
-    ).getUserContentPushCount = vi.fn(() => 1);
-    mockChat.stripOrphanedUserEntriesFromHistory = vi
-      .fn()
-      .mockReturnValue([orphan]);
-
-    // tryCompressChat swaps the live chat before the resend sends.
-    let compressedPushCount = 0;
-    const compressedChat = {
-      sendMessageStream: vi.fn().mockImplementation(async () => {
-        compressedPushCount += 1;
-        throw new Error('transient API error');
-      }),
-      addHistory: vi.fn(),
-      getUserContentPushCount: vi.fn(() => compressedPushCount),
-    } as unknown as LlmChat;
-    mockLlmClient.tryCompressChat = vi.fn().mockImplementation(async () => {
-      vi.mocked(mockLlmClient.getChat).mockReturnValue(compressedChat);
-      return {
-        originalTokenCount: 1000,
-        newTokenCount: 500,
-        compressionStatus: core.CompressionStatus.COMPRESSED,
-      };
-    });
-
-    await expect(
-      session.prompt({
-        sessionId: 'test-session-id',
-        prompt: [{ type: 'text', text: 'failed prompt' }],
-        _meta: { 'qwen.daemon.retry': true },
-      } as PromptRequest),
-    ).rejects.toThrow('transient API error');
-
-    // The resend pushed on the compressed chat...
-    expect(compressedChat.sendMessageStream).toHaveBeenCalledTimes(1);
-    expect(compressedPushCount).toBe(1);
-    // ...so the orphan must NOT be restored on top of it — neither on the
-    // send chat nor on the pre-compression one.
-    expect(compressedChat.addHistory).not.toHaveBeenCalled();
-    expect(mockChat.addHistory).not.toHaveBeenCalled();
-  });
-
-  it('restores the adopted orphan when a hook blocks the retry resend before the send loop', async () => {
-    // R10-8: the push-count-gated catch sits INSIDE the send-loop try, but
-    // a UserPromptSubmit block returns BEFORE that try — an adopted retry
-    // whose resent prompt is blocked would leak the stripped orphan
-    // permanently (its record stays, its live entry is gone). The pre-send
-    // wrapper must re-add it on the way out.
-    const orphan: Content = {
-      role: 'user',
-      parts: [{ text: 'failed prompt' }],
-    };
-    core.markApiHistoryPrompt(orphan, 'original-prompt');
-    mockChat.stripOrphanedUserEntriesFromHistory = vi
-      .fn()
-      .mockReturnValue([orphan]);
-    const messageBus = {
-      request: vi.fn().mockResolvedValue({
-        success: true,
-        output: { decision: 'block', reason: 'Blocked by hook' },
-      }),
-    };
-    mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
-    mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
-    mockConfig.hasHooksForEvent = vi.fn().mockReturnValue(true);
-    mockChat.sendMessageStream = vi.fn();
-
-    const result = await session.prompt({
-      sessionId: 'test-session-id',
-      prompt: [{ type: 'text', text: 'failed prompt' }],
-      _meta: { 'qwen.daemon.retry': true },
-    } as PromptRequest);
-
-    expect(result.stopReason).toBe('end_turn');
-    expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
-    // The stripped orphan came back despite never reaching the send loop.
-    expect(mockChat.addHistory).toHaveBeenCalledWith(
-      expect.objectContaining({
-        role: 'user',
-        parts: expect.arrayContaining([
-          expect.objectContaining({ text: 'failed prompt' }),
-        ]),
-      }),
-    );
-    const restored = vi
-      .mocked(mockChat.addHistory)
-      .mock.calls.map((call) => call[0])
-      .find((entry) => core.getApiHistoryPromptId(entry) === 'original-prompt');
-    expect(restored).toBeDefined();
-  });
-
-  it('does not restore the stripped orphan into a chat swapped by a retried /clear', async () => {
-    // R13-19: a locally-handled /clear inside the pre-send region swaps in
-    // a fresh LlmChat (clearCommand → resetChat → startChat). The
-    // push-count gate alone would pass on the FRESH chat (its counter
-    // starts at 0) and re-inject the orphan into the cleared session —
-    // the model would see stale content after 'Context cleared'. The
-    // restore must be skipped when the instance was swapped.
-    const orphan: Content = {
-      role: 'user',
-      parts: [{ text: 'failed prompt' }],
-    };
-    core.markApiHistoryPrompt(orphan, 'original-prompt');
-    mockChat.stripOrphanedUserEntriesFromHistory = vi
-      .fn()
-      .mockReturnValue([orphan]);
-    const clearedChat = {
-      addHistory: vi.fn(),
-      getUserContentPushCount: vi.fn(() => 0),
-      sendMessageStream: vi.fn(),
-    } as unknown as LlmChat;
-    vi.mocked(
-      nonInteractiveCliCommands.handleSlashCommand,
-    ).mockImplementationOnce(async () => {
-      // /clear swaps the live chat before the local return.
-      vi.mocked(mockLlmClient.getChat).mockReturnValue(clearedChat);
-      return {
-        type: 'message',
-        messageType: 'info',
-        content: 'Conversation cleared.',
-      };
-    });
-
-    const result = await session.prompt({
-      sessionId: 'test-session-id',
-      prompt: [{ type: 'text', text: '/clear' }],
-      _meta: { 'qwen.daemon.retry': true },
-    } as PromptRequest);
-
-    expect(result.stopReason).toBe('end_turn');
-    // Neither the cleared session nor the abandoned chat gets the orphan.
-    expect(clearedChat.addHistory).not.toHaveBeenCalled();
-    expect(mockChat.addHistory).not.toHaveBeenCalled();
-  });
-
-  it('re-adds every stripped entry a no-adoption retry does not re-push', async () => {
-    // Two stacked failed attempts leave two marked orphans; the retry
-    // strips BOTH and fails closed on adoption (length !== 1). The resend
-    // re-pushes only the retried prompt — on send success nothing else
-    // re-adds the stripped entries (the push-count-gated catch covers
-    // throws alone), so they must be restored at strip time or they vanish
-    // from live history while their records and snapshots stay. The retry
-    // targets a DIFFERENT prompt than either orphan here, so nothing is
-    // held back from the re-add.
-    const orphanA: Content = {
-      role: 'user',
-      parts: [{ text: 'first failed prompt' }],
-    };
-    core.markApiHistoryPrompt(orphanA, 'original-a');
-    const orphanB: Content = {
-      role: 'user',
-      parts: [{ text: 'second failed prompt' }],
-    };
-    core.markApiHistoryPrompt(orphanB, 'original-b');
-    mockChat.stripOrphanedUserEntriesFromHistory = vi
-      .fn()
-      .mockReturnValue([orphanA, orphanB]);
-    mockChat.sendMessageStream = vi.fn().mockResolvedValue(createEmptyStream());
-
-    await session.prompt({
-      sessionId: 'test-session-id',
-      prompt: [{ type: 'text', text: 'a fresh prompt, not a failed one' }],
-      _meta: { 'qwen.daemon.retry': true },
-    } as PromptRequest);
-
-    // Both stripped entries come back, in their original order, and the
-    // resend's fresh record stays a single boundary.
-    const readdedIds = vi
-      .mocked(mockChat.addHistory)
-      .mock.calls.map((call) => core.getApiHistoryPromptId(call[0]));
-    expect(readdedIds).toEqual(['original-a', 'original-b']);
-    expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledTimes(1);
-    expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
-      'qwen3-code-plus',
-      expect.any(Object),
-      'test-session-id########1',
-      undefined,
-      { promptId: 'test-session-id########1' },
-    );
-  });
-
-  it('adopts the matching last orphan a multi-orphan retry re-pushes instead of duplicating it', async () => {
-    // R10-6: the user retries prompt P whose failed first attempt is the
-    // LAST trailing orphan (an earlier failed prompt A precedes it). The
-    // strip pops [A, P] and fails the single-orphan adoption gate, but
-    // re-adding BOTH and then pushing the resend would hand the model the
-    // retried prompt twice back-to-back. The content-matching last orphan
-    // is dropped from the re-add and adopted like the single-orphan case:
-    // the resend reuses its identity and record instead of landing a
-    // fresh turn.
-    const orphanA: Content = {
-      role: 'user',
-      parts: [{ text: 'first failed prompt' }],
-    };
-    core.markApiHistoryPrompt(orphanA, 'original-a');
-    const orphanB: Content = {
-      role: 'user',
-      parts: [{ text: 'second failed prompt' }],
-    };
-    core.markApiHistoryPrompt(orphanB, 'original-b');
-    mockChat.stripOrphanedUserEntriesFromHistory = vi
-      .fn()
-      .mockReturnValue([orphanA, orphanB]);
-    mockChat.sendMessageStream = vi.fn().mockResolvedValue(createEmptyStream());
-
-    await session.prompt({
-      sessionId: 'test-session-id',
-      prompt: [{ type: 'text', text: 'second failed prompt' }],
-      _meta: { 'qwen.daemon.retry': true },
-    } as PromptRequest);
-
-    // Only the earlier orphan is re-added; the matching last one comes
-    // back through the resend itself, under its OWN identity.
-    const readdedIds = vi
-      .mocked(mockChat.addHistory)
-      .mock.calls.map((call) => core.getApiHistoryPromptId(call[0]));
-    expect(readdedIds).toEqual(['original-a']);
-    // Adoption skips the fresh record — the original attempt's record is
-    // reused.
-    expect(mockChatRecordingService.recordUserMessage).not.toHaveBeenCalled();
-    expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
-      'qwen3-code-plus',
-      expect.any(Object),
-      'test-session-id########1',
-      undefined,
-      { promptId: 'original-b' },
-    );
-  });
-
-  it('drops a matching UNMARKED last orphan a no-adoption retry re-pushes fresh', async () => {
-    // R10-6 twin: a resumed pre-identity session's orphan carries no
-    // promptId, so the single-orphan adoption gate fails on the marking
-    // even when the strip pops exactly the retried prompt. The resend
-    // still re-pushes that same content fresh — the stripped copy must
-    // NOT be re-added on top of it (the duplication is the bug either
-    // way), and the resend records a fresh boundary under the new id.
-    const orphan: Content = {
-      role: 'user',
-      parts: [{ text: 'resumed legacy prompt' }],
-    };
-    mockChat.stripOrphanedUserEntriesFromHistory = vi
-      .fn()
-      .mockReturnValue([orphan]);
-    mockChat.sendMessageStream = vi.fn().mockResolvedValue(createEmptyStream());
-
-    await session.prompt({
-      sessionId: 'test-session-id',
-      prompt: [{ type: 'text', text: 'resumed legacy prompt' }],
-      _meta: { 'qwen.daemon.retry': true },
-    } as PromptRequest);
-
-    const readdedIds = vi
-      .mocked(mockChat.addHistory)
-      .mock.calls.map((call) => core.getApiHistoryPromptId(call[0]));
-    expect(readdedIds).toEqual([]);
-    expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledTimes(1);
-    expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
-      'qwen3-code-plus',
-      expect.any(Object),
-      'test-session-id########1',
-      undefined,
-      { promptId: 'test-session-id########1' },
-    );
-  });
-
-  it('restores a matching unmarked last orphan when the retry exits before the push', async () => {
-    // R13-6: the R10-6 arm drops the matched last orphan from the re-add
-    // because the resend re-pushes it. When it is UNMARKED there is no
-    // identity to adopt, but the entry must still be handed to the
-    // push-count-gated restore pair — otherwise any pre-push exit (hook
-    // block, locally-handled slash, resolve throw) loses it permanently
-    // from live history while its record stays.
-    const orphanA: Content = {
-      role: 'user',
-      parts: [{ text: 'first failed prompt' }],
-    };
-    core.markApiHistoryPrompt(orphanA, 'original-a');
-    const orphanB: Content = {
-      role: 'user',
-      parts: [{ text: 'second failed prompt' }],
-    };
-    mockChat.stripOrphanedUserEntriesFromHistory = vi
-      .fn()
-      .mockReturnValue([orphanA, orphanB]);
-    const messageBus = {
-      request: vi.fn().mockResolvedValue({
-        success: true,
-        output: { decision: 'block', reason: 'Blocked by hook' },
-      }),
-    };
-    mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
-    mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
-    mockConfig.hasHooksForEvent = vi.fn().mockReturnValue(true);
-    mockChat.sendMessageStream = vi.fn();
-
-    const result = await session.prompt({
-      sessionId: 'test-session-id',
-      prompt: [{ type: 'text', text: 'second failed prompt' }],
-      _meta: { 'qwen.daemon.retry': true },
-    } as PromptRequest);
-
-    expect(result.stopReason).toBe('end_turn');
-    expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
-    // orphanA is re-added at strip time; orphanB (unmarked, matched,
-    // dropped from the re-add) comes back through the pre-send finally.
-    const readded = vi
-      .mocked(mockChat.addHistory)
-      .mock.calls.map((call) => call[0]);
-    expect(readded).toHaveLength(2);
-    expect(core.getApiHistoryPromptId(readded[0]!)).toBe('original-a');
-    expect(readded[1]!.parts).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ text: 'second failed prompt' }),
-      ]),
-    );
-    // No adoption without a marking — the resend recorded a fresh boundary.
-    expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledTimes(1);
-  });
-
-  it('adopts the matching textless media orphan instead of duplicating it', async () => {
-    const orphanA: Content = {
-      role: 'user',
-      parts: [{ text: 'first failed prompt' }],
-    };
-    core.markApiHistoryPrompt(orphanA, 'original-a');
-    const orphanB: Content = {
-      role: 'user',
-      parts: [{ inlineData: { mimeType: 'image/png', data: 'QUJD' } }],
-    };
-    core.markApiHistoryPrompt(orphanB, 'original-b');
-    mockChat.stripOrphanedUserEntriesFromHistory = vi
-      .fn()
-      .mockReturnValue([orphanA, orphanB]);
-    mockChat.sendMessageStream = vi.fn().mockResolvedValue(createEmptyStream());
-
-    await session.prompt({
-      sessionId: 'test-session-id',
-      prompt: [{ type: 'image', mimeType: 'image/png', data: 'QUJD' }],
-      _meta: { 'qwen.daemon.retry': true },
-    } as PromptRequest);
-
-    const readdedIds = vi
-      .mocked(mockChat.addHistory)
-      .mock.calls.map((call) => core.getApiHistoryPromptId(call[0]));
-    expect(readdedIds).toEqual(['original-a']);
-    expect(mockChatRecordingService.recordUserMessage).not.toHaveBeenCalled();
-    expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
-      'qwen3-code-plus',
-      expect.any(Object),
-      'test-session-id########1',
-      undefined,
-      { promptId: 'original-b' },
-    );
-  });
-
   it('continues active Todo context for related automatic turns', async () => {
     mockChat.sendMessageStream = vi
       .fn()
@@ -5173,15 +4537,9 @@ describe('Session', () => {
 
     it('preserves the orphaned turn when a continuation send fails (no data loss)', async () => {
       // An interrupted prompt: an orphaned user turn the model never answered.
-      const orphan: Content = {
-        role: 'user',
-        parts: [{ text: 'unanswered' }],
-      };
-      core.markApiHistoryPrompt(orphan, 'original-prompt');
-      mockChat.getHistory = vi.fn().mockReturnValue([orphan]);
-      mockChat.stripOrphanedUserEntriesFromHistory = vi
+      mockChat.getHistory = vi
         .fn()
-        .mockReturnValue([orphan]);
+        .mockReturnValue([{ role: 'user', parts: [{ text: 'unanswered' }] }]);
       // Force the continuation send to fail NON-cancelled (session token limit)
       // so it hits the `!responseStream` branch — the data-loss window.
       mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
@@ -5209,77 +4567,6 @@ describe('Session', () => {
             expect.objectContaining({ text: 'unanswered' }),
           ]),
         }),
-      );
-      const restored = vi.mocked(mockChat.addHistory).mock.calls[0]![0];
-      expect(core.getApiHistoryPromptId(restored)).toBe('original-prompt');
-    });
-
-    it('reuses the interrupted prompt identity only for the continuation send', async () => {
-      const orphan: Content = {
-        role: 'user',
-        parts: [{ text: 'unanswered' }],
-      };
-      core.markApiHistoryPrompt(orphan, 'original-prompt');
-      mockChat.getHistory = vi.fn().mockReturnValue([orphan]);
-      mockChat.stripOrphanedUserEntriesFromHistory = vi
-        .fn()
-        .mockReturnValue([orphan]);
-      mockChat.sendMessageStream = vi
-        .fn()
-        .mockResolvedValue(createEmptyStream());
-
-      await session.prompt({
-        prompt: [],
-        sessionId: 'test-session-id',
-        _meta: { 'qwen.daemon.continueLastTurn': true },
-      } as unknown as Parameters<typeof session.prompt>[0]);
-
-      expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
-        'qwen3-code-plus',
-        expect.any(Object),
-        'test-session-id########1',
-        undefined,
-        { promptId: 'original-prompt' },
-      );
-      expect(mockFileHistoryService.makeSnapshot).not.toHaveBeenCalled();
-      expect(
-        mockChatRecordingService.recordFileHistorySnapshot,
-      ).not.toHaveBeenCalled();
-    });
-
-    it('does not reuse an identity from multiple continuation entries', async () => {
-      const firstOrphan: Content = {
-        role: 'user',
-        parts: [{ text: 'first orphan part' }],
-      };
-      const secondOrphan: Content = {
-        role: 'user',
-        parts: [{ text: 'second orphan part' }],
-      };
-      core.markApiHistoryPrompt(firstOrphan, 'original-prompt');
-      core.markApiHistoryPrompt(secondOrphan, 'original-prompt');
-      mockChat.getHistory = vi
-        .fn()
-        .mockReturnValue([firstOrphan, secondOrphan]);
-      mockChat.stripOrphanedUserEntriesFromHistory = vi
-        .fn()
-        .mockReturnValue([firstOrphan, secondOrphan]);
-      mockChat.sendMessageStream = vi
-        .fn()
-        .mockResolvedValue(createEmptyStream());
-
-      await session.prompt({
-        prompt: [],
-        sessionId: 'test-session-id',
-        _meta: { 'qwen.daemon.continueLastTurn': true },
-      } as unknown as Parameters<typeof session.prompt>[0]);
-
-      expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
-        'qwen3-code-plus',
-        expect.any(Object),
-        'test-session-id########1',
-        undefined,
-        undefined,
       );
     });
 
@@ -6283,12 +5570,6 @@ describe('Session', () => {
       ];
       vi.mocked(mockChat.getHistory).mockReturnValue(history);
       vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
-      // Aligned boundaries for the two positional turns (the strict gate
-      // refuses any divergence, zero included).
-      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
-        undefined,
-        undefined,
-      ]);
       mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
       await session.sendUpdate({
         sessionUpdate: 'plan',
@@ -6326,10 +5607,6 @@ describe('Session', () => {
       ];
       vi.mocked(mockChat.getHistory).mockReturnValue(history);
       vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
-      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
-        undefined,
-        undefined,
-      ]);
       vi.mocked(mockFileHistoryService.getSnapshots).mockReturnValue([
         {
           promptId: 'p1',
@@ -6352,159 +5629,6 @@ describe('Session', () => {
       );
     });
 
-    it('truncates an aligned legacy snapshot store with a conversation-only rewind', () => {
-      // The Web Shell RewindDialog's only rewind action is conversation-only
-      // (rewindFiles: false). Leaving the truncated turns' snapshots behind
-      // would permanently install the exact surplus the alignment gate
-      // treats as unrecoverable: every later file rewind throws and
-      // getRewindableSnapshotTargets returns [] until /clear or an undo.
-      // The store must truncate to the surviving prefix with the
-      // conversation (file contents are not rolled back), keeping
-      // snapshot-i <-> turn-i pairing sound and the next rewind reachable.
-      const history: Content[] = [
-        { role: 'user', parts: [{ text: 'first' }] },
-        { role: 'model', parts: [{ text: 'first reply' }] },
-        { role: 'user', parts: [{ text: 'second' }] },
-        { role: 'model', parts: [{ text: 'second reply' }] },
-      ];
-      vi.mocked(mockChat.getHistory).mockReturnValue(history);
-      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
-      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
-        undefined,
-        undefined,
-      ]);
-      mockFileHistoryService.isEnabled.mockReturnValue(true);
-      const snap = (promptId: string, minutes: number) => ({
-        promptId,
-        timestamp: new Date(`2026-06-13T00:0${minutes}:00.000Z`),
-        trackedFileBackups: {},
-      });
-      mockFileHistoryService.getSnapshots.mockReturnValue([
-        snap('snap-0', 0),
-        snap('snap-1', 1),
-      ]);
-
-      expect(session.rewindToTurn(1, { rewindFiles: false })).toEqual({
-        targetTurnIndex: 1,
-        apiTruncateIndex: 2,
-        promptId: 'snap-1',
-      });
-      expect(mockChat.truncateHistory).toHaveBeenCalledWith(2);
-      // Files are NOT rolled back (no FileHistoryService.rewind here), but
-      // the store settles at the surviving 1-turn prefix, boundary dropped,
-      // and the transcript re-records that same settled batch.
-      expect(mockFileHistoryService.restoreFromSnapshots).toHaveBeenCalledWith([
-        snap('snap-0', 0),
-      ]);
-      expect(mockChatRecordingService.rewindRecording).toHaveBeenCalledWith(
-        1,
-        { truncatedCount: 2 },
-        [snap('snap-0', 0)],
-      );
-
-      // Terminal state: 1 snapshot <-> 1 surviving turn <-> 1 boundary —
-      // the next rewind is reachable again instead of failing closed forever.
-      const truncatedHistory = history.slice(0, 2);
-      vi.mocked(mockChat.getHistory).mockReturnValue(truncatedHistory);
-      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(truncatedHistory);
-      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
-        undefined,
-      ]);
-      mockFileHistoryService.getSnapshots.mockReturnValue([snap('snap-0', 0)]);
-
-      expect(session.getRewindableSnapshotTargets()).toEqual([
-        { promptId: 'snap-0', turnIndex: 0 },
-      ]);
-      expect(session.rewindToTurn(0)).toEqual({
-        targetTurnIndex: 0,
-        apiTruncateIndex: 0,
-        promptId: 'snap-0',
-      });
-    });
-
-    it('refuses a conversation-only rewind on a misaligned legacy snapshot store', () => {
-      // Conversation-only (rewindFiles: false — the Web Shell RewindDialog's
-      // only action) is not a safe fallback for a misaligned store:
-      // truncating the conversation while every shifted snapshot stays
-      // behind launders the deficit into a count-equal, mispaired zip the
-      // later gates bless — the next file rewind would then restore a
-      // wrong turn's file state with success:true. Fail closed like the
-      // file surface does.
-      const history: Content[] = [
-        { role: 'user', parts: [{ text: 'first' }] },
-        { role: 'model', parts: [{ text: 'first reply' }] },
-        { role: 'user', parts: [{ text: 'second' }] },
-        { role: 'model', parts: [{ text: 'second reply' }] },
-      ];
-      vi.mocked(mockChat.getHistory).mockReturnValue(history);
-      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
-      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
-        undefined,
-        undefined,
-      ]);
-      mockFileHistoryService.isEnabled.mockReturnValue(true);
-      // Deficit: the resumed legacy prefix's second turn owns no snapshot.
-      mockFileHistoryService.getSnapshots.mockReturnValue([
-        {
-          promptId: 'snap-0',
-          timestamp: new Date('2026-06-13T00:00:00.000Z'),
-          trackedFileBackups: {},
-        },
-      ]);
-
-      expect(() => session.rewindToTurn(1, { rewindFiles: false })).toThrow(
-        'Its legacy file snapshot pairing is missing or ambiguous',
-      );
-      expect(mockChat.truncateHistory).not.toHaveBeenCalled();
-      expect(
-        mockFileHistoryService.restoreFromSnapshots,
-      ).not.toHaveBeenCalled();
-    });
-
-    it('counts media-only prompts in the legacy positional rewind space', () => {
-      // A media-only prompt pushes a recording boundary (recordUserMessage)
-      // and a turn-start snapshot (#snapshotTurnStart) exactly like a text
-      // prompt, so the positional enumeration must count it too: skipping
-      // it strands a permanent +1 surplus that fails every later legacy
-      // rewind closed until /clear.
-      const history: Content[] = [
-        {
-          role: 'user',
-          parts: [{ inlineData: { mimeType: 'image/png', data: 'QUJD' } }],
-        },
-        { role: 'model', parts: [{ text: 'image reply' }] },
-        { role: 'user', parts: [{ text: 'second' }] },
-        { role: 'model', parts: [{ text: 'second reply' }] },
-      ];
-      vi.mocked(mockChat.getHistory).mockReturnValue(history);
-      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
-      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
-        undefined,
-        undefined,
-      ]);
-      mockFileHistoryService.isEnabled.mockReturnValue(true);
-      const snap = (promptId: string, minutes: number) => ({
-        promptId,
-        timestamp: new Date(`2026-06-13T00:0${minutes}:00.000Z`),
-        trackedFileBackups: {},
-      });
-      mockFileHistoryService.getSnapshots.mockReturnValue([
-        snap('snap-0', 0),
-        snap('snap-1', 1),
-      ]);
-
-      expect(session.getRewindableSnapshotTargets()).toEqual([
-        { promptId: 'snap-0', turnIndex: 0 },
-        { promptId: 'snap-1', turnIndex: 1 },
-      ]);
-      expect(session.rewindToTurn(1)).toEqual({
-        targetTurnIndex: 1,
-        apiTruncateIndex: 2,
-        promptId: 'snap-1',
-      });
-      expect(mockChat.truncateHistory).toHaveBeenCalledWith(2);
-    });
-
     it('preserves startup context when rewinding to the first user turn', () => {
       const history: Content[] = [
         {
@@ -6520,9 +5644,6 @@ describe('Session', () => {
       ];
       vi.mocked(mockChat.getHistory).mockReturnValue(history);
       vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
-      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
-        undefined,
-      ]);
 
       const result = session.rewindToTurn(0);
 
@@ -6585,10 +5706,6 @@ describe('Session', () => {
       ];
       vi.mocked(mockChat.getHistory).mockReturnValue(history);
       vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
-      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
-        undefined,
-        undefined,
-      ]);
 
       const result = session.rewindToTurn(1);
 
@@ -6620,10 +5737,6 @@ describe('Session', () => {
       ];
       vi.mocked(mockChat.getHistory).mockReturnValue(history);
       vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
-      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
-        undefined,
-        undefined,
-      ]);
 
       expect(session.getRewindableUserTurnCount()).toBe(2);
       expect(session.rewindToTurn(1)).toEqual({
@@ -6664,798 +5777,6 @@ describe('Session', () => {
       vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
 
       expect(session.getRewindableUserTurnCount()).toBe(1);
-    });
-
-    it('keeps identity-less legacy turns rewindable after a marked prompt lands', () => {
-      // Resuming a session recorded before stable identities existed and
-      // sending one new prompt must not collapse the rewind target space to
-      // just the new turn: the older unmarked turns keep positional rewind.
-      const history: Content[] = [
-        { role: 'user', parts: [{ text: 'legacy one' }] },
-        { role: 'model', parts: [{ text: 'legacy reply one' }] },
-        { role: 'user', parts: [{ text: 'legacy two' }] },
-        { role: 'model', parts: [{ text: 'legacy reply two' }] },
-        { role: 'user', parts: [{ text: 'new prompt' }] },
-      ];
-      core.markApiHistoryPrompt(history[4]!, 'prompt-new');
-      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
-      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
-        undefined,
-        undefined,
-        'prompt-new',
-      ]);
-      mockFileHistoryService.isEnabled.mockReturnValue(true);
-      mockFileHistoryService.getSnapshots.mockReturnValue([
-        {
-          promptId: 'snap-0',
-          timestamp: new Date('2026-06-13T00:00:00.000Z'),
-          trackedFileBackups: {},
-        },
-        {
-          promptId: 'snap-1',
-          timestamp: new Date('2026-06-13T00:01:00.000Z'),
-          trackedFileBackups: {},
-        },
-        {
-          promptId: 'prompt-new',
-          timestamp: new Date('2026-06-13T00:02:00.000Z'),
-          trackedFileBackups: {},
-        },
-      ]);
-
-      expect(session.getRewindableUserTurnCount()).toBe(3);
-      expect(session.getRewindableSnapshotTargets()).toEqual([
-        { promptId: 'snap-0', turnIndex: 0 },
-        { promptId: 'snap-1', turnIndex: 1 },
-        { promptId: 'prompt-new', turnIndex: 2 },
-      ]);
-      expect(session.rewindToTurn(0)).toEqual({
-        targetTurnIndex: 0,
-        apiTruncateIndex: 0,
-        promptId: 'snap-0',
-      });
-      expect(mockChat.truncateHistory).toHaveBeenCalledWith(0);
-    });
-
-    it('uses stable identities instead of classifying user-shaped entries', () => {
-      // A structural media-clear replacement inside an identified session
-      // keeps its promptId mark (microcompaction rebuilds entries as
-      // { ...content, parts }, preserving marks), so it stays an
-      // identified turn and does not force the positional fallback.
-      const history: Content[] = [
-        { role: 'user', parts: [{ text: 'first' }] },
-        { role: 'model', parts: [{ text: 'first reply' }] },
-        {
-          role: 'user',
-          parts: [{ text: '[Old inline media cleared: image/png]' }],
-        },
-        { role: 'model', parts: [{ text: 'media reply' }] },
-        { role: 'user', parts: [{ text: 'second' }] },
-      ];
-      core.markApiHistoryPrompt(history[0]!, 'prompt-1');
-      core.markApiHistoryPrompt(history[2]!, 'prompt-media');
-      core.markApiHistoryPrompt(history[4]!, 'prompt-2');
-      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
-      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
-        'prompt-1',
-        undefined,
-        'prompt-media',
-        'prompt-2',
-      ]);
-      mockFileHistoryService.isEnabled.mockReturnValue(true);
-      mockFileHistoryService.getSnapshots.mockReturnValue([
-        {
-          promptId: 'prompt-1',
-          timestamp: new Date('2026-06-13T00:00:00.000Z'),
-          trackedFileBackups: {},
-        },
-        {
-          promptId: 'goal-runtime',
-          timestamp: new Date('2026-06-13T00:01:00.000Z'),
-          trackedFileBackups: {},
-        },
-        {
-          promptId: 'prompt-media',
-          timestamp: new Date('2026-06-13T00:02:00.000Z'),
-          trackedFileBackups: {},
-        },
-        {
-          promptId: 'prompt-2',
-          timestamp: new Date('2026-06-13T00:03:00.000Z'),
-          trackedFileBackups: {},
-        },
-      ]);
-
-      expect(session.getRewindableUserTurnCount()).toBe(3);
-      // Advertised turnIndexes are POSITIONAL (the client's numeric index
-      // space); the recording ordinal (3 for prompt-2, whose boundary sits
-      // behind the goal-runtime snapshot and the undefined slot) is only
-      // the internal rewindRecording key.
-      expect(session.getRewindableSnapshotTargets()).toEqual([
-        { promptId: 'prompt-1', turnIndex: 0 },
-        { promptId: 'prompt-media', turnIndex: 1 },
-        { promptId: 'prompt-2', turnIndex: 2 },
-      ]);
-      expect(session.rewindToTurn(2)).toEqual({
-        targetTurnIndex: 2,
-        apiTruncateIndex: 4,
-        promptId: 'prompt-2',
-      });
-      expect(mockFileHistoryService.restoreFromSnapshots).toHaveBeenCalledWith(
-        mockFileHistoryService.getSnapshots(),
-      );
-      // The batch re-recorded into the transcript excludes the target's
-      // boundary snapshot: the conversation keeps one fewer turn than the
-      // surviving prefix holds, and a resume rebuilding the store from this
-      // batch must see the aligned shape (the agent drops the boundary from
-      // the live store once the files sit AT it). The re-root itself uses
-      // the recording ordinal (3), not the positional index.
-      expect(mockChatRecordingService.rewindRecording).toHaveBeenCalledWith(
-        3,
-        { truncatedCount: 1 },
-        mockFileHistoryService.getSnapshots().slice(0, 3),
-      );
-    });
-
-    it('counts a cleared media-only legacy turn in the positional fallback', () => {
-      // An UNMARKED placeholder-only entry can only be a media-only turn
-      // from before stable identities that microcompaction cleared: marks
-      // survive the rebuild, so nothing structural arrives unmarked.
-      // #isUserTextContent counts the placeholder (the media-only prompt
-      // created a file-history snapshot), so skipping it in the coverage
-      // loop would flip the session to identified mode and silently drop
-      // the legacy turn from the target space even though its snapshot
-      // still exists — pre-diff the positional walk rewound to it.
-      const history: Content[] = [
-        {
-          role: 'user',
-          parts: [{ text: '[Old inline media cleared: image/png]' }],
-        },
-        { role: 'model', parts: [{ text: 'legacy reply' }] },
-        { role: 'user', parts: [{ text: 'new prompt' }] },
-        { role: 'model', parts: [{ text: 'new reply' }] },
-      ];
-      core.markApiHistoryPrompt(history[2]!, 'prompt-new');
-      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
-      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
-        undefined,
-        'prompt-new',
-      ]);
-      mockFileHistoryService.isEnabled.mockReturnValue(true);
-      const snap = (promptId: string, minutes: number) => ({
-        promptId,
-        timestamp: new Date(`2026-06-13T00:0${minutes}:00.000Z`),
-        trackedFileBackups: {},
-      });
-      mockFileHistoryService.getSnapshots.mockReturnValue([
-        snap('snap-0', 0),
-        snap('prompt-new', 1),
-      ]);
-
-      expect(session.getRewindableUserTurnCount()).toBe(2);
-      expect(session.getRewindableSnapshotTargets()).toEqual([
-        { promptId: 'snap-0', turnIndex: 0 },
-        { promptId: 'prompt-new', turnIndex: 1 },
-      ]);
-      expect(session.rewindToTurn(0)).toEqual({
-        targetTurnIndex: 0,
-        apiTruncateIndex: 0,
-        promptId: 'snap-0',
-      });
-      expect(mockChat.truncateHistory).toHaveBeenCalledWith(0);
-    });
-
-    it('counts a legacy turn whose text only starts with the media-clear prefix', () => {
-      // Only a complete '[Old inline media cleared: ...]' placeholder is
-      // structural; a genuine user prompt that merely starts with the
-      // prefix must keep counting as a legacy turn and trigger the
-      // positional fallback.
-      const history: Content[] = [
-        {
-          role: 'user',
-          parts: [
-            {
-              text: '[Old inline media cleared: image/png] what does this mean?',
-            },
-          ],
-        },
-        { role: 'model', parts: [{ text: 'legacy reply' }] },
-        { role: 'user', parts: [{ text: 'new prompt' }] },
-      ];
-      core.markApiHistoryPrompt(history[2]!, 'prompt-new');
-      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
-      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
-        undefined,
-        'prompt-new',
-      ]);
-      mockFileHistoryService.isEnabled.mockReturnValue(true);
-      mockFileHistoryService.getSnapshots.mockReturnValue([
-        {
-          promptId: 'snap-0',
-          timestamp: new Date('2026-06-13T00:00:00.000Z'),
-          trackedFileBackups: {},
-        },
-        {
-          promptId: 'prompt-new',
-          timestamp: new Date('2026-06-13T00:01:00.000Z'),
-          trackedFileBackups: {},
-        },
-      ]);
-
-      expect(session.getRewindableUserTurnCount()).toBe(2);
-      expect(session.getRewindableSnapshotTargets()).toEqual([
-        { promptId: 'snap-0', turnIndex: 0 },
-        { promptId: 'prompt-new', turnIndex: 1 },
-      ]);
-    });
-
-    it('counts a legacy turn that mixes genuine text with a media-clear placeholder', () => {
-      // Microcompaction rebuilds entries as { ...content, parts: newParts }
-      // and preserves sibling text parts, so an entry mixing real text with
-      // a placeholder is a genuine legacy turn — only placeholder-ONLY
-      // entries are structural and may be skipped by the partial-coverage
-      // loop.
-      const history: Content[] = [
-        {
-          role: 'user',
-          parts: [
-            { text: 'describe this' },
-            { text: '[Old inline media cleared: image/png]' },
-          ],
-        },
-        { role: 'model', parts: [{ text: 'legacy reply' }] },
-        { role: 'user', parts: [{ text: 'new prompt' }] },
-      ];
-      core.markApiHistoryPrompt(history[2]!, 'prompt-new');
-      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
-      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
-        undefined,
-        'prompt-new',
-      ]);
-
-      expect(session.getRewindableUserTurnCount()).toBe(2);
-    });
-
-    it('fails closed on legacy snapshot pairing when turns lack snapshots', () => {
-      // A resumed legacy prefix carries no snapshots, so zipping snapshot
-      // indexes against positional turn indexes past the prefix would land
-      // on the wrong turn's boundary — refuse the pairing instead. Both
-      // entry points must agree: truncating the conversation while silently
-      // skipping the file restore reports a success the workspace did not
-      // earn, so rewindToTurn fail-closes exactly like rewindToPrompt.
-      const history: Content[] = [
-        { role: 'user', parts: [{ text: 'legacy one' }] },
-        { role: 'model', parts: [{ text: 'legacy reply one' }] },
-        { role: 'user', parts: [{ text: 'new prompt' }] },
-        { role: 'model', parts: [{ text: 'new reply' }] },
-      ];
-      core.markApiHistoryPrompt(history[2]!, 'prompt-new');
-      vi.mocked(mockChat.getHistory).mockReturnValue(history);
-      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
-      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
-        undefined,
-        'prompt-new',
-      ]);
-      mockFileHistoryService.isEnabled.mockReturnValue(true);
-      mockFileHistoryService.getSnapshots.mockReturnValue([
-        {
-          promptId: 'prompt-new',
-          timestamp: new Date('2026-06-13T00:00:00.000Z'),
-          trackedFileBackups: {},
-        },
-      ]);
-
-      expect(session.getRewindableSnapshotTargets()).toEqual([]);
-      expect(() => session.rewindToPrompt('prompt-new')).toThrow(
-        'Cannot rewind to the requested prompt',
-      );
-      expect(() => session.rewindToTurn(1)).toThrow(
-        'Cannot rewind to the requested turn',
-      );
-      expect(
-        mockFileHistoryService.restoreFromSnapshots,
-      ).not.toHaveBeenCalled();
-      expect(mockChat.truncateHistory).not.toHaveBeenCalled();
-    });
-
-    it('fails closed on legacy snapshot pairing when snapshots outnumber turns', () => {
-      // Chat compression removes turns from the API history but never
-      // prunes file-history snapshots, so a compressed legacy session
-      // carries more snapshots than positional turns. The positional zip
-      // would mispair every surviving turn by the compressed count
-      // (advertising compressed-away snapshots as the visible turns) —
-      // refuse the pairing in the surplus direction too.
-      const history: Content[] = [
-        { role: 'user', parts: [{ text: 'surviving one' }] },
-        { role: 'model', parts: [{ text: 'surviving reply one' }] },
-        { role: 'user', parts: [{ text: 'new prompt' }] },
-        { role: 'model', parts: [{ text: 'new reply' }] },
-      ];
-      core.markApiHistoryPrompt(history[2]!, 'prompt-new');
-      vi.mocked(mockChat.getHistory).mockReturnValue(history);
-      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
-      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
-        undefined,
-        'prompt-new',
-      ]);
-      mockFileHistoryService.isEnabled.mockReturnValue(true);
-      mockFileHistoryService.getSnapshots.mockReturnValue([
-        {
-          promptId: 'compressed-away-0',
-          timestamp: new Date('2026-06-13T00:00:00.000Z'),
-          trackedFileBackups: {},
-        },
-        {
-          promptId: 'compressed-away-1',
-          timestamp: new Date('2026-06-13T00:01:00.000Z'),
-          trackedFileBackups: {},
-        },
-        {
-          promptId: 'snap-surviving',
-          timestamp: new Date('2026-06-13T00:02:00.000Z'),
-          trackedFileBackups: {},
-        },
-        {
-          promptId: 'prompt-new',
-          timestamp: new Date('2026-06-13T00:03:00.000Z'),
-          trackedFileBackups: {},
-        },
-      ]);
-
-      expect(session.getRewindableSnapshotTargets()).toEqual([]);
-      expect(() => session.rewindToPrompt('prompt-new')).toThrow(
-        'Cannot rewind to the requested prompt',
-      );
-      // A compressed-away snapshot's positional index still lands inside the
-      // surviving turn range — the zip would pair it with the WRONG turn.
-      expect(() => session.rewindToPrompt('compressed-away-0')).toThrow(
-        'Cannot rewind to the requested prompt',
-      );
-      expect(() => session.rewindToTurn(1)).toThrow(
-        'Cannot rewind to the requested turn',
-      );
-      expect(
-        mockFileHistoryService.restoreFromSnapshots,
-      ).not.toHaveBeenCalled();
-      expect(mockChat.truncateHistory).not.toHaveBeenCalled();
-    });
-
-    it('keeps legacy file rewind repeatable by dropping the consumed boundary', () => {
-      // The rewind path itself used to create a +1 snapshot surplus: it
-      // kept the target's boundary snapshot (k+1 snapshots) while the
-      // conversation kept k turns, and the strict alignment gates then
-      // treated that self-produced shape as corruption — every later
-      // file-rewind failed. The batch re-recorded into the transcript must
-      // exclude the boundary, and once the store settles back to the
-      // aligned shape (the agent drops the boundary after applying it) the
-      // next rewind must work again.
-      const history: Content[] = [
-        { role: 'user', parts: [{ text: 'legacy one' }] },
-        { role: 'model', parts: [{ text: 'legacy reply one' }] },
-        { role: 'user', parts: [{ text: 'legacy two' }] },
-        { role: 'model', parts: [{ text: 'legacy reply two' }] },
-        { role: 'user', parts: [{ text: 'legacy three' }] },
-        { role: 'model', parts: [{ text: 'legacy reply three' }] },
-      ];
-      vi.mocked(mockChat.getHistory).mockReturnValue(history);
-      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
-      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
-        undefined,
-        undefined,
-        undefined,
-      ]);
-      mockFileHistoryService.isEnabled.mockReturnValue(true);
-      const snap = (promptId: string, minutes: number) => ({
-        promptId,
-        timestamp: new Date(`2026-06-13T00:0${minutes}:00.000Z`),
-        trackedFileBackups: {},
-      });
-      mockFileHistoryService.getSnapshots.mockReturnValue([
-        snap('snap-0', 0),
-        snap('snap-1', 1),
-        snap('snap-2', 2),
-      ]);
-
-      // First rewind succeeds and keeps the boundary in the live store so
-      // the file rewind can still find and apply it...
-      expect(session.rewindToTurn(1)).toEqual({
-        targetTurnIndex: 1,
-        apiTruncateIndex: 2,
-        promptId: 'snap-1',
-      });
-      expect(mockFileHistoryService.restoreFromSnapshots).toHaveBeenCalledWith([
-        snap('snap-0', 0),
-        snap('snap-1', 1),
-      ]);
-      // ...but the batch re-recorded into the transcript excludes the
-      // consumed boundary, so a resume rebuilds an aligned store.
-      expect(mockChatRecordingService.rewindRecording).toHaveBeenCalledWith(
-        1,
-        { truncatedCount: 4 },
-        [snap('snap-0', 0)],
-      );
-
-      // Terminal state after the file rewind applied and the agent dropped
-      // the consumed boundary: 1 snapshot <-> 1 surviving turn, aligned.
-      const truncatedHistory = history.slice(0, 2);
-      vi.mocked(mockChat.getHistory).mockReturnValue(truncatedHistory);
-      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(truncatedHistory);
-      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
-        undefined,
-      ]);
-      mockFileHistoryService.getSnapshots.mockReturnValue([snap('snap-0', 0)]);
-
-      // The second rewind is reachable again.
-      expect(session.getRewindableSnapshotTargets()).toEqual([
-        { promptId: 'snap-0', turnIndex: 0 },
-      ]);
-      expect(session.rewindToTurn(0)).toEqual({
-        targetTurnIndex: 0,
-        apiTruncateIndex: 0,
-        promptId: 'snap-0',
-      });
-    });
-
-    it('fails closed on every target when automatic turns desync turns from recording boundaries', () => {
-      // Cron/notification/goal-runtime turns push user-text API entries
-      // (counted positionally, snapshotted since R5-2) but record with
-      // subtypes that push NO turnParentUuids boundary, so an interleaved
-      // automatic turn leaves fewer boundaries than positional turns. The
-      // deficit shifts EVERY boundary lookup: rewindRecording(i) re-roots
-      // to a LATER turn's parent (the rewound turn resurrects on resume)
-      // and ordinal 0 re-roots to the first real prompt's parent — one
-      // boundary early even for the target "before" the automatic turn.
-      // The pre-strict-gate shape rewound those targets and reported
-      // success while orphaning records onto the dead branch; fail closed
-      // on the count mismatch itself and advertise nothing.
-      const history: Content[] = [
-        { role: 'user', parts: [{ text: 'first' }] },
-        { role: 'model', parts: [{ text: 'first reply' }] },
-        { role: 'user', parts: [{ text: 'background notification' }] },
-        { role: 'model', parts: [{ text: 'notification reply' }] },
-        { role: 'user', parts: [{ text: 'second' }] },
-        { role: 'model', parts: [{ text: 'second reply' }] },
-      ];
-      vi.mocked(mockChat.getHistory).mockReturnValue(history);
-      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
-      // Only the two real prompts pushed boundaries: 2 boundaries for 3
-      // positional turns.
-      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
-        undefined,
-        undefined,
-      ]);
-      mockFileHistoryService.isEnabled.mockReturnValue(true);
-      const snap = (promptId: string, minutes: number) => ({
-        promptId,
-        timestamp: new Date(`2026-06-13T00:0${minutes}:00.000Z`),
-        trackedFileBackups: {},
-      });
-      mockFileHistoryService.getSnapshots.mockReturnValue([
-        snap('snap-0', 0),
-        snap('snap-1', 1),
-        snap('snap-2', 2),
-      ]);
-
-      // No target is advertised while the counts diverge...
-      expect(session.getRewindableSnapshotTargets()).toEqual([]);
-      // ...and every entry point refuses instead of re-rooting the
-      // recording to a shifted parent.
-      expect(() => session.rewindToTurn(0)).toThrow(
-        'Its recording boundary pairing is missing or ambiguous',
-      );
-      expect(() => session.rewindToTurn(2)).toThrow(
-        'Its recording boundary pairing is missing or ambiguous',
-      );
-      expect(() => session.rewindToPrompt('snap-2')).toThrow(
-        'Its recording boundary pairing is missing or ambiguous',
-      );
-      expect(mockChat.truncateHistory).not.toHaveBeenCalled();
-      expect(mockChatRecordingService.rewindRecording).not.toHaveBeenCalled();
-    });
-
-    it('fails closed when recording boundaries outnumber positional turns', () => {
-      // Surplus direction: locally-handled slash commands (/help) and
-      // hook-blocked prompts push a turnParentUuids boundary via
-      // recordUserMessage BEFORE their early returns but create no
-      // positional turn or snapshot. The extra boundary shifts every later
-      // lookup one early — rewindRecording would re-root onto the previous
-      // turn's parent and orphan the rewound turn's records onto the dead
-      // branch — so fail closed in the surplus direction too.
-      const history: Content[] = [
-        { role: 'user', parts: [{ text: 'first' }] },
-        { role: 'model', parts: [{ text: 'first reply' }] },
-        { role: 'user', parts: [{ text: 'second' }] },
-        { role: 'model', parts: [{ text: 'second reply' }] },
-      ];
-      vi.mocked(mockChat.getHistory).mockReturnValue(history);
-      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
-      // Two positional turns, three boundaries (one pushed by a
-      // locally-handled command that never became a turn).
-      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
-        undefined,
-        undefined,
-        undefined,
-      ]);
-      mockFileHistoryService.isEnabled.mockReturnValue(true);
-      const snap = (promptId: string, minutes: number) => ({
-        promptId,
-        timestamp: new Date(`2026-06-13T00:0${minutes}:00.000Z`),
-        trackedFileBackups: {},
-      });
-      mockFileHistoryService.getSnapshots.mockReturnValue([
-        snap('snap-0', 0),
-        snap('snap-1', 1),
-      ]);
-
-      expect(session.getRewindableSnapshotTargets()).toEqual([]);
-      expect(() => session.rewindToTurn(0)).toThrow(
-        'Its recording boundary pairing is missing or ambiguous',
-      );
-      expect(() => session.rewindToTurn(1)).toThrow(
-        'Its recording boundary pairing is missing or ambiguous',
-      );
-      expect(mockChat.truncateHistory).not.toHaveBeenCalled();
-      expect(mockChatRecordingService.rewindRecording).not.toHaveBeenCalled();
-    });
-
-    it('fails closed when positional turns exist but no recording boundaries were ever pushed', () => {
-      // A session whose positional turns are ALL automatic subtypes
-      // (cron/loop, notification, goal-runtime) has full transcript data
-      // and aligned snapshots but ZERO recording boundaries — none of
-      // those subtypes pushes a turnParentUuids entry. The zero-boundary
-      // escape used to treat that as "no turn data to pair against" and
-      // let the rewind through, re-rooting the transcript chain at a
-      // null parent: success reported, and the next resume loses every
-      // surviving turn. Zero boundaries with turns present is a
-      // divergence like any other; fail closed.
-      const history: Content[] = [
-        { role: 'user', parts: [{ text: 'cron tick one' }] },
-        { role: 'model', parts: [{ text: 'cron reply one' }] },
-        { role: 'user', parts: [{ text: 'cron tick two' }] },
-        { role: 'model', parts: [{ text: 'cron reply two' }] },
-      ];
-      vi.mocked(mockChat.getHistory).mockReturnValue(history);
-      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
-      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([]);
-      mockFileHistoryService.isEnabled.mockReturnValue(true);
-      const snap = (promptId: string, minutes: number) => ({
-        promptId,
-        timestamp: new Date(`2026-06-13T00:0${minutes}:00.000Z`),
-        trackedFileBackups: {},
-      });
-      mockFileHistoryService.getSnapshots.mockReturnValue([
-        snap('snap-0', 0),
-        snap('snap-1', 1),
-      ]);
-
-      expect(session.getRewindableSnapshotTargets()).toEqual([]);
-      expect(() => session.rewindToTurn(0)).toThrow(
-        'Its recording boundary pairing is missing or ambiguous',
-      );
-      expect(() => session.rewindToTurn(1)).toThrow(
-        'Its recording boundary pairing is missing or ambiguous',
-      );
-      expect(() => session.rewindToPrompt('snap-1')).toThrow(
-        'Its recording boundary pairing is missing or ambiguous',
-      );
-      expect(mockChat.truncateHistory).not.toHaveBeenCalled();
-      expect(mockChatRecordingService.rewindRecording).not.toHaveBeenCalled();
-    });
-
-    it('still rewinds with zero boundaries when recording is disabled', () => {
-      // The zero-boundary escape exists for recordings that carry no turn
-      // data at all (recording disabled): there is nothing to mispair and
-      // no rewindRecording to re-root, so the rewind proceeds. Only a
-      // PRESENT recording with zero boundaries fails closed.
-      const history: Content[] = [
-        { role: 'user', parts: [{ text: 'first' }] },
-        { role: 'model', parts: [{ text: 'reply' }] },
-      ];
-      vi.mocked(mockChat.getHistory).mockReturnValue(history);
-      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
-      vi.mocked(mockConfig.getChatRecordingService).mockImplementation(
-        () => undefined as never,
-      );
-      mockFileHistoryService.isEnabled.mockReturnValue(false);
-
-      expect(session.rewindToTurn(0)).toEqual({
-        targetTurnIndex: 0,
-        apiTruncateIndex: 0,
-      });
-      expect(mockChat.truncateHistory).toHaveBeenCalledWith(0);
-    });
-
-    it('does not fall back to positional rewinds when recorder identities are missing from API history', () => {
-      const history: Content[] = [
-        { role: 'user', parts: [{ text: 'unidentified prompt' }] },
-        { role: 'model', parts: [{ text: 'reply' }] },
-      ];
-      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
-      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
-        'prompt-1',
-      ]);
-
-      expect(session.getRewindableUserTurnCount()).toBe(0);
-      expect(session.getRewindableSnapshotTargets()).toEqual([]);
-      expect(() => session.rewindToTurn(0)).toThrow(
-        'Cannot rewind to the requested turn',
-      );
-      expect(mockChat.truncateHistory).not.toHaveBeenCalled();
-    });
-
-    it('fails closed a file rewind whose identified target owns no snapshot', () => {
-      // A target whose snapshot is missing used to proceed with
-      // survivingSnapshots undefined: the conversation truncated while the
-      // snapshot store stayed untouched, and the agent's
-      // FileHistoryService.rewind then threw 'The selected snapshot was
-      // not found' — leaving the session half-rewound (conversation back,
-      // files forward) behind success:true. The legacy arm fail-closes the
-      // identical shape; refuse it here too.
-      const history: Content[] = [
-        { role: 'user', parts: [{ text: 'first' }] },
-        { role: 'model', parts: [{ text: 'first reply' }] },
-      ];
-      core.markApiHistoryPrompt(history[0]!, 'prompt-1');
-      vi.mocked(mockChat.getHistory).mockReturnValue(history);
-      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
-      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
-        'prompt-1',
-      ]);
-      mockFileHistoryService.isEnabled.mockReturnValue(true);
-      mockFileHistoryService.getSnapshots.mockReturnValue([]);
-
-      expect(() => session.rewindToPrompt('prompt-1')).toThrow(
-        'Its file snapshot is missing',
-      );
-      expect(() => session.rewindToTurn(0)).toThrow(
-        'Its file snapshot is missing',
-      );
-      expect(mockChat.truncateHistory).not.toHaveBeenCalled();
-      expect(
-        mockFileHistoryService.restoreFromSnapshots,
-      ).not.toHaveBeenCalled();
-      expect(mockChatRecordingService.rewindRecording).not.toHaveBeenCalled();
-    });
-
-    it('still rewinds conversation-only when the matching file snapshot is missing', () => {
-      // Conversation-only rewinds (the Web Shell RewindDialog's only
-      // rewind action) never enter the file arm, so a snapshot-less
-      // identified target keeps working there.
-      const history: Content[] = [
-        { role: 'user', parts: [{ text: 'first' }] },
-        { role: 'model', parts: [{ text: 'first reply' }] },
-      ];
-      core.markApiHistoryPrompt(history[0]!, 'prompt-1');
-      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
-      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
-        'prompt-1',
-      ]);
-      mockFileHistoryService.isEnabled.mockReturnValue(true);
-      mockFileHistoryService.getSnapshots.mockReturnValue([]);
-
-      expect(
-        session.rewindToPrompt('prompt-1', { rewindFiles: false }),
-      ).toEqual({
-        targetTurnIndex: 0,
-        apiTruncateIndex: 0,
-        promptId: 'prompt-1',
-      });
-      expect(
-        mockFileHistoryService.restoreFromSnapshots,
-      ).not.toHaveBeenCalled();
-      expect(mockChatRecordingService.rewindRecording).toHaveBeenCalledWith(
-        0,
-        { truncatedCount: 2 },
-        undefined,
-      );
-    });
-
-    it('keeps numeric identified rewinds positional when a recording boundary is missing', () => {
-      // A client's numeric targetTurnIndex addresses the POSITIONAL visible
-      // turn space in both modes; recordingTurnIndex is only the internal
-      // rewindRecording key. The old shape matched the recording ordinal,
-      // which silently re-addressed index 0 from the boundary-less first
-      // turn to the joined second one — rewinding a different turn than
-      // the client named. Positionally, the boundary-less turn fails
-      // closed on its own missing recording identity, and the joined turn
-      // is reachable at its visible index while still re-rooting the
-      // recording through its true ordinal (0).
-      const history: Content[] = [
-        { role: 'user', parts: [{ text: 'unjoined first' }] },
-        { role: 'model', parts: [{ text: 'first reply' }] },
-        { role: 'user', parts: [{ text: 'joined second' }] },
-      ];
-      core.markApiHistoryPrompt(history[0]!, 'prompt-a');
-      core.markApiHistoryPrompt(history[2]!, 'prompt-b');
-      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
-      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
-        'prompt-b',
-      ]);
-      mockFileHistoryService.isEnabled.mockReturnValue(true);
-      const snap = (promptId: string, minutes: number) => ({
-        promptId,
-        timestamp: new Date(`2026-06-13T00:0${minutes}:00.000Z`),
-        trackedFileBackups: {},
-      });
-      mockFileHistoryService.getSnapshots.mockReturnValue([
-        snap('prompt-a', 0),
-        snap('prompt-b', 1),
-      ]);
-
-      // The boundary-less turn is not advertised...
-      expect(session.getRewindableSnapshotTargets()).toEqual([
-        { promptId: 'prompt-b', turnIndex: 1 },
-      ]);
-      // ...and a numeric rewind onto it fails closed instead of landing on
-      // a different turn...
-      expect(() => session.rewindToTurn(0)).toThrow(
-        'Its recording identity is missing or ambiguous',
-      );
-      expect(mockChat.truncateHistory).not.toHaveBeenCalled();
-      // ...while the joined turn resolves by its POSITIONAL index.
-      expect(session.rewindToTurn(1)).toEqual({
-        targetTurnIndex: 1,
-        apiTruncateIndex: 2,
-        promptId: 'prompt-b',
-      });
-      expect(mockChat.truncateHistory).toHaveBeenCalledWith(2);
-      expect(mockChatRecordingService.rewindRecording).toHaveBeenCalledWith(
-        0,
-        { truncatedCount: 1 },
-        [snap('prompt-a', 0)],
-      );
-    });
-
-    it('keeps numeric identified rewinds positional after compression prunes turns', () => {
-      // Compression removes turns from the API history but never prunes
-      // turnParentUuids, so the recording ordinal space diverges from the
-      // visible turns. The numeric index must stay positional: the sole
-      // surviving turn is advertised and rewindable at index 0 (not at its
-      // recording ordinal 2), and the ordinal is only used internally to
-      // re-root the transcript.
-      const history: Content[] = [
-        { role: 'user', parts: [{ text: 'surviving third' }] },
-      ];
-      core.markApiHistoryPrompt(history[0]!, 'prompt-c');
-      vi.mocked(mockChat.getHistory).mockReturnValue(history);
-      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
-      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
-        'prompt-a',
-        'prompt-b',
-        'prompt-c',
-      ]);
-      mockFileHistoryService.isEnabled.mockReturnValue(true);
-      const snap = (promptId: string, minutes: number) => ({
-        promptId,
-        timestamp: new Date(`2026-06-13T00:0${minutes}:00.000Z`),
-        trackedFileBackups: {},
-      });
-      const snapshots = [
-        snap('prompt-a', 0),
-        snap('prompt-b', 1),
-        snap('prompt-c', 2),
-      ];
-      mockFileHistoryService.getSnapshots.mockReturnValue(snapshots);
-
-      expect(session.getRewindableUserTurnCount()).toBe(1);
-      expect(session.getRewindableSnapshotTargets()).toEqual([
-        { promptId: 'prompt-c', turnIndex: 0 },
-      ]);
-      expect(session.rewindToTurn(0)).toEqual({
-        targetTurnIndex: 0,
-        apiTruncateIndex: 0,
-        promptId: 'prompt-c',
-      });
-      expect(mockChat.truncateHistory).toHaveBeenCalledWith(0);
-      expect(mockChatRecordingService.rewindRecording).toHaveBeenCalledWith(
-        2,
-        { truncatedCount: 1 },
-        snapshots.slice(0, 2),
-      );
-      // The recording ordinal is not a valid client-facing address.
-      expect(() => session.rewindToTurn(2)).toThrow(
-        'Cannot rewind to the requested turn',
-      );
     });
 
     it('rejects unreachable user turns', () => {
@@ -7562,360 +5883,14 @@ describe('Session', () => {
         { role: 'user', parts: [{ text: 'first' }] },
         { role: 'model', parts: [{ text: 'first reply' }] },
       ];
-      core.markApiHistoryPrompt(history[0]!, 'prompt-1');
       vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
-      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
-        'prompt-1',
-      ]);
-      mockFileHistoryService.getSnapshots.mockReturnValue([]);
 
       const snapshot = session.captureHistorySnapshot();
-      const promptIds = session.captureHistoryPromptIds(snapshot);
-      const wireHistory = JSON.parse(JSON.stringify(snapshot)) as Content[];
-
-      // Identified restores require a live rewind checkpoint; rewind first
-      // so the undo below is admissible.
-      session.rewindToPrompt('prompt-1', { rewindFiles: false });
-      vi.mocked(mockChat.getHistoryShallow).mockReturnValue([]);
-      session.restoreHistory(wireHistory, promptIds);
+      session.restoreHistory(snapshot);
 
       expect(snapshot).toEqual(history);
-      const restored = vi.mocked(mockChat.setHistory).mock.calls[0]![0];
-      expect(JSON.parse(JSON.stringify(restored))).toEqual(wireHistory);
-      expect(core.getApiHistoryPromptId(restored[0]!)).toBe('prompt-1');
-      expect(core.getApiHistoryPromptId(restored[1]!)).toBeUndefined();
+      expect(mockChat.setHistory).toHaveBeenCalledWith(history);
       expect(mockChat.getHistory).not.toHaveBeenCalled();
-    });
-
-    it('restores the recording and file snapshot checkpoint after a rewind', () => {
-      const history: Content[] = [
-        { role: 'user', parts: [{ text: 'first' }] },
-        { role: 'model', parts: [{ text: 'first reply' }] },
-      ];
-      core.markApiHistoryPrompt(history[0]!, 'prompt-1');
-      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
-      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
-        'prompt-1',
-      ]);
-      const snapshots = [
-        {
-          promptId: 'prompt-1',
-          timestamp: new Date('2026-06-13T00:00:00.000Z'),
-          trackedFileBackups: {},
-        },
-      ];
-      mockFileHistoryService.getSnapshots.mockReturnValue(snapshots);
-
-      session.rewindToPrompt('prompt-1', { rewindFiles: false });
-      // The rewind truncated history to the (empty) prefix; the undo is
-      // only admissible while the session still sits at that state.
-      vi.mocked(mockChat.getHistoryShallow).mockReturnValue([]);
-      session.restoreHistory(history, ['prompt-1', null]);
-
-      expect(mockFileHistoryService.restoreFromSnapshots).toHaveBeenCalledWith(
-        snapshots,
-      );
-      expect(
-        mockChatRecordingService.restoreRewindCheckpoint,
-      ).toHaveBeenCalledWith({}, snapshots, false);
-    });
-
-    it('restores a non-empty post-rewind prefix while the session sits at it', () => {
-      const history: Content[] = [
-        { role: 'user', parts: [{ text: 'first' }] },
-        { role: 'model', parts: [{ text: 'first reply' }] },
-        { role: 'user', parts: [{ text: 'second' }] },
-        { role: 'model', parts: [{ text: 'second reply' }] },
-      ];
-      core.markApiHistoryPrompt(history[0]!, 'prompt-1');
-      core.markApiHistoryPrompt(history[2]!, 'prompt-2');
-      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
-      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
-        'prompt-1',
-        'prompt-2',
-      ]);
-      const snapshots = [
-        {
-          promptId: 'prompt-1',
-          timestamp: new Date('2026-06-13T00:00:00.000Z'),
-          trackedFileBackups: {},
-        },
-        {
-          promptId: 'prompt-2',
-          timestamp: new Date('2026-06-13T00:01:00.000Z'),
-          trackedFileBackups: {},
-        },
-      ];
-      mockFileHistoryService.getSnapshots.mockReturnValue(snapshots);
-
-      session.rewindToTurn(1);
-      // The rewind kept the first turn; nothing has landed since.
-      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(
-        history.slice(0, 2),
-      );
-      session.restoreHistory(history, ['prompt-1', null, 'prompt-2', null]);
-
-      expect(mockFileHistoryService.restoreFromSnapshots).toHaveBeenCalledWith(
-        snapshots,
-      );
-      expect(
-        mockChatRecordingService.restoreRewindCheckpoint,
-      ).toHaveBeenCalledWith({}, snapshots, false);
-    });
-
-    it('rejects a stale rewind checkpoint after the session advances past the rewind', () => {
-      // The undo pair the client still holds matches the checkpoint's
-      // pre-rewind capture even after a later turn completes, so the pair
-      // check alone cannot detect the stale undo. Applying the rollback
-      // would truncate the conversation, snapshot store and recording
-      // across the intervening turn while workspace files keep its edits —
-      // refuse instead of silently diverging.
-      const history: Content[] = [
-        { role: 'user', parts: [{ text: 'first' }] },
-        { role: 'model', parts: [{ text: 'first reply' }] },
-        { role: 'user', parts: [{ text: 'second' }] },
-        { role: 'model', parts: [{ text: 'second reply' }] },
-      ];
-      core.markApiHistoryPrompt(history[0]!, 'prompt-1');
-      core.markApiHistoryPrompt(history[2]!, 'prompt-2');
-      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
-      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
-        'prompt-1',
-        'prompt-2',
-      ]);
-      const snapshots = [
-        {
-          promptId: 'prompt-1',
-          timestamp: new Date('2026-06-13T00:00:00.000Z'),
-          trackedFileBackups: {},
-        },
-        {
-          promptId: 'prompt-2',
-          timestamp: new Date('2026-06-13T00:01:00.000Z'),
-          trackedFileBackups: {},
-        },
-      ];
-      mockFileHistoryService.getSnapshots.mockReturnValue(snapshots);
-
-      session.rewindToTurn(1);
-      // The rewind itself mutates stores; the assertions below isolate the
-      // stale restore attempt.
-      vi.mocked(mockFileHistoryService.restoreFromSnapshots).mockClear();
-      vi.mocked(mockChatRecordingService.restoreRewindCheckpoint).mockClear();
-      vi.mocked(mockChat.setHistory).mockClear();
-
-      // A new turn completes after the rewind: the truncated prefix plus
-      // one more marked user turn and its reply.
-      const advancedEntry: Content = {
-        role: 'user',
-        parts: [{ text: 'third' }],
-      };
-      core.markApiHistoryPrompt(advancedEntry, 'prompt-3');
-      vi.mocked(mockChat.getHistoryShallow).mockReturnValue([
-        ...history.slice(0, 2),
-        advancedEntry,
-        { role: 'model', parts: [{ text: 'third reply' }] },
-      ]);
-
-      expect(() =>
-        session.restoreHistory(history, ['prompt-1', null, 'prompt-2', null]),
-      ).toThrow('stale rewind checkpoint');
-      // No mutation landed: neither the history replacement nor the store
-      // rollback ran.
-      expect(mockChat.setHistory).not.toHaveBeenCalled();
-      expect(
-        mockFileHistoryService.restoreFromSnapshots,
-      ).not.toHaveBeenCalled();
-      expect(
-        mockChatRecordingService.restoreRewindCheckpoint,
-      ).not.toHaveBeenCalled();
-    });
-
-    it('drops the rewind checkpoint when compression rewrites the chat', async () => {
-      // R13-18: summarizing compression is a whole-history replacement that
-      // REMOVES user entries. The staleness fingerprint is add-only, and in
-      // an all-unmarked session the count lands back at the checkpoint's
-      // with every comparison null===null — a replayed undo pair would
-      // apply the pre-rewind rollback across whatever landed. Drop the
-      // checkpoint when compression fires so the undo fails closed.
-      const history: Content[] = [
-        { role: 'user', parts: [{ text: 'first' }] },
-        { role: 'model', parts: [{ text: 'first reply' }] },
-        { role: 'user', parts: [{ text: 'second' }] },
-        { role: 'model', parts: [{ text: 'second reply' }] },
-      ];
-      core.markApiHistoryPrompt(history[0]!, 'prompt-1');
-      core.markApiHistoryPrompt(history[2]!, 'prompt-2');
-      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
-      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
-        'prompt-1',
-        'prompt-2',
-      ]);
-      mockFileHistoryService.getSnapshots.mockReturnValue([
-        {
-          promptId: 'prompt-1',
-          timestamp: new Date('2026-06-13T00:00:00.000Z'),
-          trackedFileBackups: {},
-        },
-        {
-          promptId: 'prompt-2',
-          timestamp: new Date('2026-06-13T00:01:00.000Z'),
-          trackedFileBackups: {},
-        },
-      ]);
-
-      session.rewindToTurn(1);
-
-      // The resend after the rewind triggers compression.
-      mockChat.sendMessageStream = vi
-        .fn()
-        .mockResolvedValue(createEmptyStream());
-      mockLlmClient.tryCompressChat = vi.fn().mockResolvedValue({
-        originalTokenCount: 1000,
-        newTokenCount: 500,
-        compressionStatus: core.CompressionStatus.COMPRESSED,
-      });
-      await session.prompt({
-        sessionId: 'test-session-id',
-        prompt: [{ type: 'text', text: 'next prompt' }],
-      } as PromptRequest);
-
-      // The undo pair the client still holds must now fail closed — the
-      // checkpoint is gone, not merely stale.
-      expect(() =>
-        session.restoreHistory(history, ['prompt-1', null, 'prompt-2', null]),
-      ).toThrow('without a live rewind checkpoint');
-      expect(mockChat.setHistory).not.toHaveBeenCalled();
-    });
-
-    it('drops the rewind checkpoint when a new session is rebound', () => {
-      // /clear swaps in fresh recording/file-history services; the
-      // checkpoint captured the old services' state, and a later
-      // restoreSessionHistory carrying the still-held pair must not apply
-      // session-1's rollback to session-2's recorder.
-      const history: Content[] = [
-        { role: 'user', parts: [{ text: 'first' }] },
-        { role: 'model', parts: [{ text: 'first reply' }] },
-      ];
-      core.markApiHistoryPrompt(history[0]!, 'prompt-1');
-      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
-      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
-        'prompt-1',
-      ]);
-      mockFileHistoryService.getSnapshots.mockReturnValue([
-        {
-          promptId: 'prompt-1',
-          timestamp: new Date('2026-06-13T00:00:00.000Z'),
-          trackedFileBackups: {},
-        },
-      ]);
-
-      session.rewindToPrompt('prompt-1', { rewindFiles: false });
-      session.rebindGoalRuntimeForNewSession();
-
-      // The checkpoint drop must fail the identified restore closed:
-      // session-1's rollback context is gone, and applying the still-held
-      // pair would resurrect the cleared conversation over the fresh
-      // session while transcript and files keep the new state.
-      expect(() => session.restoreHistory(history, ['prompt-1', null])).toThrow(
-        'without a live rewind checkpoint',
-      );
-
-      expect(mockChat.setHistory).not.toHaveBeenCalled();
-      expect(
-        mockChatRecordingService.restoreRewindCheckpoint,
-      ).not.toHaveBeenCalled();
-      expect(
-        mockFileHistoryService.restoreFromSnapshots,
-      ).not.toHaveBeenCalled();
-    });
-
-    it('rejects an identified restore when no rewind checkpoint is live', () => {
-      // A restoreSessionHistory carrying promptIds is the undo half of a
-      // rewind. On a cold session (fresh process, restart, /clear) the
-      // daemon holds no rollback context, and every staleness guard in
-      // restoreHistory is gated on the checkpoint — applying the blob
-      // would resurrect foreign turns over the live session while
-      // transcript, snapshots and files keep their state. Fail closed.
-      const history: Content[] = [
-        { role: 'user', parts: [{ text: 'first' }] },
-        { role: 'model', parts: [{ text: 'first reply' }] },
-      ];
-      core.markApiHistoryPrompt(history[0]!, 'prompt-1');
-      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
-
-      expect(() => session.restoreHistory(history, ['prompt-1', null])).toThrow(
-        'without a live rewind checkpoint',
-      );
-      expect(mockChat.setHistory).not.toHaveBeenCalled();
-    });
-
-    it('rejects a replayed pair after the rewind checkpoint was consumed', () => {
-      // rewind -> undo consumes the checkpoint. If the client reissues the
-      // SAME pair afterwards (stale UI state, or an idempotency retry of a
-      // lost response while the session stays in-process), no guard is
-      // left to detect it — the pre-rewind blob would apply over the
-      // advanced session and silently drop the landed turn from live
-      // history while transcript/snapshots/files keep it. Fail closed.
-      const history: Content[] = [
-        { role: 'user', parts: [{ text: 'first' }] },
-        { role: 'model', parts: [{ text: 'first reply' }] },
-        { role: 'user', parts: [{ text: 'second' }] },
-        { role: 'model', parts: [{ text: 'second reply' }] },
-      ];
-      core.markApiHistoryPrompt(history[0]!, 'prompt-1');
-      core.markApiHistoryPrompt(history[2]!, 'prompt-2');
-      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
-      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
-        'prompt-1',
-        'prompt-2',
-      ]);
-      mockFileHistoryService.getSnapshots.mockReturnValue([
-        {
-          promptId: 'prompt-1',
-          timestamp: new Date('2026-06-13T00:00:00.000Z'),
-          trackedFileBackups: {},
-        },
-        {
-          promptId: 'prompt-2',
-          timestamp: new Date('2026-06-13T00:01:00.000Z'),
-          trackedFileBackups: {},
-        },
-      ]);
-
-      session.rewindToTurn(1);
-      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(
-        history.slice(0, 2),
-      );
-      session.restoreHistory(history, ['prompt-1', null, 'prompt-2', null]);
-      expect(mockChat.setHistory).toHaveBeenCalledTimes(1);
-
-      // A marked turn lands after the undo; the session has advanced.
-      const advancedEntry: Content = {
-        role: 'user',
-        parts: [{ text: 'third' }],
-      };
-      core.markApiHistoryPrompt(advancedEntry, 'prompt-3');
-      vi.mocked(mockChat.getHistoryShallow).mockReturnValue([
-        ...history.slice(0, 2),
-        advancedEntry,
-        { role: 'model', parts: [{ text: 'third reply' }] },
-      ]);
-
-      expect(() =>
-        session.restoreHistory(history, ['prompt-1', null, 'prompt-2', null]),
-      ).toThrow('without a live rewind checkpoint');
-      expect(mockChat.setHistory).toHaveBeenCalledTimes(1);
-    });
-
-    it('uses legacy recording identities when restored history omits prompt ids', () => {
-      session.restoreHistory([
-        { role: 'user', parts: [{ text: 'legacy prompt' }] },
-      ]);
-
-      expect(
-        mockChatRecordingService.useLegacyTurnPromptIds,
-      ).toHaveBeenCalled();
     });
 
     it('clears the active Todo plan revision when restoring history', async () => {
@@ -10322,9 +8297,6 @@ describe('Session', () => {
 
       expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
         '原始语音文本',
-        undefined,
-        undefined,
-        'test-session-id########1',
       );
       expect(textParts(firstSentMessage())).toEqual([
         '<realtime_delegation>trusted model input</realtime_delegation>',
@@ -10375,7 +8347,6 @@ describe('Session', () => {
           hookContext: '',
           attachmentReferences: [imageReference, fileReference],
         },
-        'test-session-id########1',
       );
     });
 
@@ -10402,7 +8373,6 @@ describe('Session', () => {
         'describe these',
         undefined,
         expect.objectContaining({ attachmentReferences }),
-        'test-session-id########1',
       );
     });
 
@@ -10431,7 +8401,6 @@ describe('Session', () => {
         expect.objectContaining({
           attachmentReferences: [attachmentReference],
         }),
-        'test-session-id########1',
       );
     });
 
@@ -10551,261 +8520,6 @@ describe('Session', () => {
       expect(
         mockChatRecordingService.recordFileHistorySnapshot,
       ).toHaveBeenCalledWith(latestSnapshot);
-    });
-
-    it('snapshots automatic cron and notification turns to keep legacy rewind aligned', async () => {
-      // Background-notification and cron/loop turns pass #isUserTextContent
-      // and therefore count as positional rewindable turns, but they bypass
-      // prompt(). Without a turn-start snapshot the legacy snapshot↔turn
-      // zip desyncs from the first automatic turn onward — rewind then
-      // truncates the conversation while restoring nothing (or a wrong
-      // slice) for the turns that follow.
-      let cronCallback: ((job: { prompt: string }) => void) | undefined;
-      const scheduler = {
-        size: 1,
-        hasPendingWork: true,
-        start: vi.fn((callback: (job: { prompt: string }) => void) => {
-          cronCallback = callback;
-        }),
-        stop: vi.fn(),
-        getExitSummary: vi.fn().mockReturnValue(undefined),
-      };
-      mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
-      mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
-      mockChat.sendMessageStream = vi
-        .fn()
-        .mockResolvedValue(createEmptyStream());
-      const internals = session as unknown as {
-        cronCompletion: Promise<void> | null;
-        notificationCompletion: Promise<void> | null;
-      };
-
-      await session.prompt({
-        sessionId: 'test-session-id',
-        prompt: [{ type: 'text', text: 'root prompt' }],
-      });
-      expect(mockFileHistoryService.makeSnapshot).toHaveBeenCalledTimes(1);
-      expect(mockFileHistoryService.makeSnapshot).toHaveBeenLastCalledWith(
-        'test-session-id########1',
-      );
-
-      cronCallback?.({ prompt: 'scheduled prompt' });
-      await vi.waitFor(() => {
-        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
-      });
-      await vi.waitFor(() => {
-        expect(internals.cronCompletion).toBeNull();
-      });
-      expect(mockFileHistoryService.makeSnapshot).toHaveBeenCalledTimes(2);
-      expect(mockFileHistoryService.makeSnapshot).toHaveBeenLastCalledWith(
-        expect.stringMatching(/^test-session-id########cron/),
-      );
-
-      const backgroundCallback = mockBackgroundTaskRegistry
-        .setNotificationCallback.mock.calls[0][0] as (
-        displayText: string,
-        modelText: string,
-        meta: { agentId: string; status: string; toolUseId?: string },
-      ) => void;
-      backgroundCallback('done', '<task-notification />', {
-        agentId: 'agent-1',
-        status: 'completed',
-      });
-      await vi.waitFor(() => {
-        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(3);
-      });
-      await vi.waitFor(() => {
-        expect(internals.notificationCompletion).toBeNull();
-      });
-      expect(mockFileHistoryService.makeSnapshot).toHaveBeenCalledTimes(3);
-      expect(mockFileHistoryService.makeSnapshot).toHaveBeenLastCalledWith(
-        expect.stringMatching(/^test-session-id########notification/),
-      );
-    });
-
-    it('creates no snapshot when a cron turn is dropped by the session token limit', async () => {
-      // R8-12: a tick whose send is dropped by the sessionTokenLimit check
-      // never materializes a positional turn or a recording boundary, so a
-      // pre-send turn-start snapshot would stay a permanent phantom —
-      // snapshots = turns + 1 forever, and the strict legacy pairing gates
-      // fail closed on the divergence until /clear. The snapshot is taken
-      // lazily right before the first send that actually leaves, so a
-      // never-sent tick snapshots nothing.
-      let cronCallback: ((job: { prompt: string }) => void) | undefined;
-      const scheduler = {
-        size: 1,
-        hasPendingWork: true,
-        start: vi.fn((callback: (job: { prompt: string }) => void) => {
-          cronCallback = callback;
-        }),
-        stop: vi.fn(),
-        disable: vi.fn(),
-        getExitSummary: vi.fn().mockReturnValue(undefined),
-      };
-      mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
-      mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
-      mockChat.sendMessageStream = vi
-        .fn()
-        .mockResolvedValue(createEmptyStream());
-      const internals = session as unknown as {
-        cronCompletion: Promise<void> | null;
-      };
-
-      await session.prompt({
-        sessionId: 'test-session-id',
-        prompt: [{ type: 'text', text: 'root prompt' }],
-      });
-      expect(mockFileHistoryService.makeSnapshot).toHaveBeenCalledTimes(1);
-
-      // The next send (the cron tick) exceeds the session token limit and is
-      // dropped before it can reach the model.
-      mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
-      mockLlmClient.tryCompressChat.mockResolvedValue({
-        originalTokenCount: 999,
-        newTokenCount: 999,
-        compressionStatus: core.CompressionStatus.NOOP,
-      });
-
-      cronCallback?.({ prompt: 'scheduled prompt' });
-      // The token-limit breaker (disable) is the observable proof that the
-      // tick ran through the drop path; cronCompletion alone can be observed
-      // null before the drain even starts.
-      await vi.waitFor(() => {
-        expect(scheduler.disable).toHaveBeenCalled();
-      });
-      await vi.waitFor(() => {
-        expect(internals.cronCompletion).toBeNull();
-      });
-
-      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
-      expect(mockFileHistoryService.makeSnapshot).toHaveBeenCalledTimes(1);
-      expect(mockFileHistoryService.makeSnapshot).not.toHaveBeenCalledWith(
-        expect.stringMatching(/########cron/),
-      );
-    });
-
-    it('creates no snapshot when a notification turn is dropped by the session token limit', async () => {
-      // R8-12 twin for the background-notification path: a dropped send
-      // materializes neither a positional turn nor a snapshot.
-      mockChat.sendMessageStream = vi
-        .fn()
-        .mockResolvedValue(createEmptyStream());
-      const internals = session as unknown as {
-        notificationCompletion: Promise<void> | null;
-      };
-
-      await session.prompt({
-        sessionId: 'test-session-id',
-        prompt: [{ type: 'text', text: 'root prompt' }],
-      });
-      expect(mockFileHistoryService.makeSnapshot).toHaveBeenCalledTimes(1);
-
-      mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
-      mockLlmClient.tryCompressChat.mockResolvedValue({
-        originalTokenCount: 999,
-        newTokenCount: 999,
-        compressionStatus: core.CompressionStatus.NOOP,
-      });
-
-      const backgroundCallback = mockBackgroundTaskRegistry
-        .setNotificationCallback.mock.calls[0][0] as (
-        displayText: string,
-        modelText: string,
-        meta: { agentId: string; status: string; toolUseId?: string },
-      ) => void;
-      backgroundCallback('done', '<task-notification />', {
-        agentId: 'agent-1',
-        status: 'completed',
-      });
-      // The end-turn notification for the max_tokens drop is the observable
-      // proof that the turn ran through the drop path; notificationCompletion
-      // alone can be observed null before the drain even starts.
-      await vi.waitFor(() => {
-        expect(mockClient.extNotification).toHaveBeenCalledWith(
-          '_qwencode/end_turn',
-          expect.objectContaining({
-            reason: 'max_tokens',
-            source: 'background_notification',
-          }),
-        );
-      });
-      await vi.waitFor(() => {
-        expect(internals.notificationCompletion).toBeNull();
-      });
-
-      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
-      expect(mockFileHistoryService.makeSnapshot).toHaveBeenCalledTimes(1);
-      expect(mockFileHistoryService.makeSnapshot).not.toHaveBeenCalledWith(
-        expect.stringMatching(/########notification/),
-      );
-    });
-
-    it('keeps the snapshot and the preserved turn aligned when a cron turn is cancelled mid-snapshot', async () => {
-      // R8-11: Stop landing while the turn-start snapshot is in flight used
-      // to leak the snapshot — the loop-top abort check returned without
-      // pushing the user entry, so no positional turn ever owned it. The
-      // snapshot is now taken right before the send actually leaves; a
-      // cancel that lands while it is in flight takes the cancelled
-      // null-stream branch, which preserves the full message AND keeps the
-      // snapshot, so the stores stay aligned instead of diverging forever.
-      let cronCallback: ((job: { prompt: string }) => void) | undefined;
-      const scheduler = {
-        size: 1,
-        hasPendingWork: true,
-        start: vi.fn((callback: (job: { prompt: string }) => void) => {
-          cronCallback = callback;
-        }),
-        stop: vi.fn(),
-        disable: vi.fn(),
-        getExitSummary: vi.fn().mockReturnValue(undefined),
-      };
-      mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
-      mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
-      mockChat.sendMessageStream = vi
-        .fn()
-        .mockResolvedValue(createEmptyStream());
-      let releaseSnapshot: (() => void) | undefined;
-      mockFileHistoryService.makeSnapshot
-        .mockResolvedValueOnce(undefined)
-        .mockImplementationOnce(
-          () =>
-            new Promise<void>((resolve) => {
-              releaseSnapshot = resolve;
-            }),
-        );
-      const internals = session as unknown as {
-        cronCompletion: Promise<void> | null;
-      };
-
-      await session.prompt({
-        sessionId: 'test-session-id',
-        prompt: [{ type: 'text', text: 'root prompt' }],
-      });
-      expect(mockFileHistoryService.makeSnapshot).toHaveBeenCalledTimes(1);
-
-      cronCallback?.({ prompt: 'scheduled prompt' });
-      await vi.waitFor(() => {
-        expect(mockFileHistoryService.makeSnapshot).toHaveBeenCalledTimes(2);
-      });
-      await session.cancelPendingPrompt();
-      releaseSnapshot?.();
-      await vi.waitFor(() => {
-        expect(internals.cronCompletion).toBeNull();
-      });
-
-      // The cancelled send preserves the full cron message, so the snapshot
-      // taken for it keeps its owning positional turn.
-      expect(mockChat.addHistory).toHaveBeenCalledWith(
-        expect.objectContaining({
-          role: 'user',
-          parts: expect.arrayContaining([
-            expect.objectContaining({ text: 'scheduled prompt' }),
-          ]),
-        }),
-      );
-      expect(mockFileHistoryService.makeSnapshot).toHaveBeenLastCalledWith(
-        expect.stringMatching(/########cron/),
-      );
     });
 
     it('fires MessageDisplay with cumulative non-thought text and is_final on the ACP prompt path', async () => {
@@ -10950,8 +8664,6 @@ describe('Session', () => {
           config: { abortSignal: expect.any(AbortSignal) },
         },
         expect.stringMatching(/^test-session-id########notification\d+$/),
-        undefined,
-        undefined,
       );
       expect(mockChatRecordingService.recordNotification).toHaveBeenCalledWith(
         [
@@ -12512,8 +10224,6 @@ describe('Session', () => {
           config: { abortSignal: expect.any(AbortSignal) },
         },
         expect.stringMatching(/^test-session-id########notification\d+$/),
-        undefined,
-        undefined,
       );
       expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
         sessionId: 'test-session-id',
@@ -12592,9 +10302,6 @@ describe('Session', () => {
 
       expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
         '3',
-        undefined,
-        undefined,
-        'test-session-id########3',
       );
       expect(mockLlmClient.tryCompressChat).toHaveBeenCalledWith(
         'test-session-id########3',
@@ -12623,7 +10330,6 @@ describe('Session', () => {
         'internal channel instructions\n\nhello',
         undefined,
         { displayText: 'hello', hookContext: '' },
-        'test-session-id########1',
       );
       expect(
         agentTelemetry.addAgentInputMessageAttributes,
@@ -13086,16 +10792,12 @@ describe('Session', () => {
         'vision-agent\0https://vision.example.com/v1\0',
         expect.any(Object),
         expect.any(String),
-        undefined,
-        expect.objectContaining({ promptId: expect.any(String) }),
       );
       expect(mockChat.sendMessageStream).toHaveBeenNthCalledWith(
         2,
         'vision-agent\0https://vision.example.com/v1\0',
         expect.any(Object),
         expect.any(String),
-        undefined,
-        undefined,
       );
       expect(resolveForModel).toHaveBeenCalledWith(
         'vision-agent\0https://vision.example.com/v1',
@@ -13118,8 +10820,6 @@ describe('Session', () => {
         'qwen3-code-plus',
         expect.any(Object),
         expect.any(String),
-        undefined,
-        expect.objectContaining({ promptId: expect.any(String) }),
       );
       expect(mockLlmClient.tryCompressChat).toHaveBeenCalledOnce();
     });
@@ -16320,8 +14020,6 @@ describe('Session', () => {
             config: { abortSignal: expect.any(AbortSignal) },
           },
           'test-session-id########1',
-          undefined,
-          { promptId: 'test-session-id########1' },
         );
       });
 
@@ -16440,8 +14138,6 @@ describe('Session', () => {
             config: { abortSignal: expect.any(AbortSignal) },
           },
           'test-session-id########1',
-          undefined,
-          { promptId: 'test-session-id########1' },
         );
       });
 
@@ -16776,8 +14472,6 @@ describe('Session', () => {
           'vision-agent\0https://vision.example.com/v1\0',
           expect.any(Object),
           expect.any(String),
-          undefined,
-          expect.objectContaining({ promptId: expect.any(String) }),
         );
 
         // Second same-override send: compression throws, so the gate falls
@@ -16892,8 +14586,6 @@ describe('Session', () => {
           'vision-agent\0https://vision.example.com/v1\0',
           expect.any(Object),
           expect.any(String),
-          undefined,
-          expect.objectContaining({ promptId: expect.any(String) }),
         );
         expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
 
@@ -17173,12 +14865,10 @@ describe('Session', () => {
           stopReason: 'cancelled',
         });
         expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
-        expect(mockChat.addHistory).toHaveBeenCalledWith(
-          expect.objectContaining({
-            role: 'user',
-            parts: expect.any(Array),
-          }),
-        );
+        expect(mockChat.addHistory).toHaveBeenCalledWith({
+          role: 'user',
+          parts: expect.any(Array),
+        });
         expect(mockClient.sessionUpdate).not.toHaveBeenCalledWith({
           sessionId: 'test-session-id',
           update: {
@@ -17262,12 +14952,10 @@ describe('Session', () => {
         // The send never went out; the cancelled user turn was restored to
         // history and no token-limit diagnostic was emitted.
         expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
-        expect(mockChat.addHistory).toHaveBeenCalledWith(
-          expect.objectContaining({
-            role: 'user',
-            parts: expect.any(Array),
-          }),
-        );
+        expect(mockChat.addHistory).toHaveBeenCalledWith({
+          role: 'user',
+          parts: expect.any(Array),
+        });
         expect(mockClient.sessionUpdate).not.toHaveBeenCalledWith({
           sessionId: 'test-session-id',
           update: {
@@ -17321,95 +15009,6 @@ describe('Session', () => {
         });
 
         expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
-      });
-
-      it('retires the recording boundary and skips the snapshot when an interactive prompt is dropped by the session token limit', async () => {
-        // R8-13 (prompt() twin of R8-12): recordUserMessage pushes the
-        // recording boundary before the send, and the turn-start snapshot
-        // used to be captured there too. The token-limit check then drops
-        // the prompt without ever pushing a positional turn, so both
-        // artifacts leaked permanently (boundaries = turns+1, snapshots =
-        // turns+1) and the strict legacy pairing gates failed closed until
-        // /clear. The snapshot is now lazy (beforeSend runs only after the
-        // token check) and the dropped prompt's boundary is retired.
-        mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
-        mockLlmClient.tryCompressChat.mockResolvedValue({
-          originalTokenCount: 999,
-          newTokenCount: 999,
-          compressionStatus: core.CompressionStatus.NOOP,
-        });
-        mockChat.sendMessageStream = vi
-          .fn()
-          .mockResolvedValue(createEmptyStream());
-
-        const result = await session.prompt({
-          sessionId: 'test-session-id',
-          prompt: [{ type: 'text', text: 'over the limit' }],
-        });
-
-        expect(result).toEqual({ stopReason: 'max_tokens' });
-        // The boundary was recorded before the send...
-        expect(
-          mockChatRecordingService.recordUserMessage,
-        ).toHaveBeenCalledTimes(1);
-        const recordedPromptId = vi.mocked(
-          mockChatRecordingService.recordUserMessage,
-        ).mock.calls[0]![3];
-        expect(recordedPromptId).toBe('test-session-id########1');
-        // ...and retired once the drop made sure no positional turn
-        // materializes — the leak that locked the legacy rewind gates.
-        expect(
-          mockChatRecordingService.retireTurnBoundary,
-        ).toHaveBeenCalledTimes(1);
-        expect(
-          mockChatRecordingService.retireTurnBoundary,
-        ).toHaveBeenCalledWith(recordedPromptId);
-        // The lazy turn-start snapshot never runs for a prompt that never
-        // sends, and nothing reached the model.
-        expect(mockFileHistoryService.makeSnapshot).not.toHaveBeenCalled();
-        expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
-      });
-
-      it('catches up the turn-start snapshot when a send is cancelled before it leaves', async () => {
-        // R8-13 lazy-snapshot companion: a cancelled send preserves the full
-        // message, so the positional turn materializes after all — it must
-        // keep its turn-start snapshot even though the lazy capture never
-        // ran (mirrors the cron/notification catch-up, R8-12).
-        mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
-        mockLlmClient.tryCompressChat.mockImplementation(
-          async (_promptId: string, _force: boolean, signal: AbortSignal) =>
-            new Promise((_, reject) => {
-              signal.addEventListener('abort', () => {
-                const abortError = new Error('aborted');
-                abortError.name = 'AbortError';
-                reject(abortError);
-              });
-            }),
-        );
-        mockChat.sendMessageStream = vi
-          .fn()
-          .mockResolvedValue(createEmptyStream());
-
-        const promptPromise = session.prompt({
-          sessionId: 'test-session-id',
-          prompt: [{ type: 'text', text: 'hello' }],
-        });
-        await vi.waitFor(() => {
-          expect(mockLlmClient.tryCompressChat).toHaveBeenCalled();
-        });
-
-        await session.cancelPendingPrompt();
-
-        await expect(promptPromise).resolves.toEqual({
-          stopReason: 'cancelled',
-        });
-        // The message was preserved, so the turn exists and owns its
-        // snapshot; the boundary stays (no retirement on a preserved turn).
-        expect(mockChat.addHistory).toHaveBeenCalled();
-        expect(mockFileHistoryService.makeSnapshot).toHaveBeenCalledTimes(1);
-        expect(
-          mockChatRecordingService.retireTurnBoundary,
-        ).not.toHaveBeenCalled();
       });
 
       it('falls back to the previous prompt token count when compression returns zero token info', async () => {
@@ -23440,9 +21039,6 @@ describe('Session', () => {
         expect(finishedSpy).toHaveBeenCalledTimes(1);
         expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
           '/btw question',
-          undefined,
-          undefined,
-          'test-session-id########1',
         );
         expect(
           mockChatRecordingService.recordSlashCommand,
@@ -23548,119 +21144,6 @@ describe('Session', () => {
         expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalled();
       });
 
-      it('does not record a fresh boundary when a built-in /advisor prompt is retried', async () => {
-        // A failed `/advisor` throws a turn error, the bridge arms retry,
-        // and the client retries the same content. advisor pushes no
-        // history, so the retry strip is empty — the fail-closed fresh
-        // record must skip advisor-named input exactly like the normal
-        // branch, or it lands a boundary with no positional turn and no
-        // snapshot, failing every strict pairing gate for the session.
-        vi.mocked(
-          nonInteractiveCliCommands.handleSlashCommand,
-        ).mockResolvedValueOnce({
-          type: 'message',
-          messageType: 'info',
-          content: 'Review complete.',
-          resolvedCommand: {
-            name: 'advisor',
-            kind: CommandKind.BUILT_IN,
-          },
-        });
-        mockChatRecordingService.recordUserMessage.mockClear();
-
-        await session.prompt({
-          sessionId: 'test-session-id',
-          prompt: [{ type: 'text', text: '/advisor' }],
-          _meta: { 'qwen.daemon.retry': true },
-        } as PromptRequest);
-
-        expect(
-          mockChatRecordingService.recordUserMessage,
-        ).not.toHaveBeenCalled();
-        expect(mockFileHistoryService.makeSnapshot).not.toHaveBeenCalled();
-      });
-
-      it('keeps the shadowing advisor command record when its prompt is retried', async () => {
-        // The retry fresh-record branch skips advisor-named input, so the
-        // deferred post-resolution block is the shadow's only record site
-        // on the retry path too — exactly one record, not zero and not a
-        // duplicate.
-        vi.mocked(
-          nonInteractiveCliCommands.handleSlashCommand,
-        ).mockResolvedValueOnce({
-          type: 'submit_prompt',
-          content: [{ text: 'Shadowed advisor prompt' }],
-          resolvedCommand: {
-            name: 'advisor',
-            kind: CommandKind.FILE,
-          },
-        });
-        mockChatRecordingService.recordUserMessage.mockClear();
-
-        await session.prompt({
-          sessionId: 'test-session-id',
-          prompt: [{ type: 'text', text: '/advisor check my work' }],
-          _meta: { 'qwen.daemon.retry': true },
-        } as PromptRequest);
-
-        expect(
-          mockChatRecordingService.recordUserMessage,
-        ).toHaveBeenCalledTimes(1);
-        expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
-          '/advisor check my work',
-          undefined,
-          undefined,
-          'test-session-id########1',
-        );
-      });
-
-      it('does not double-record the shadowing advisor command when its retry adopts the stripped identity', async () => {
-        // Attempt 1 recorded in the deferred block, then pushed its user
-        // content and failed. The retry strips the marked orphan and adopts
-        // its identity: the resend re-pushes under attempt-1's record,
-        // which attempt-1 already recorded — the deferred block must not
-        // land a second boundary for the same positional turn (one turn
-        // owning two boundaries fails every strict pairing gate in legacy
-        // sessions).
-        const orphan: Content = {
-          role: 'user',
-          parts: [{ text: '/advisor check my work' }],
-        };
-        core.markApiHistoryPrompt(orphan, 'original-prompt');
-        mockChat.stripOrphanedUserEntriesFromHistory = vi
-          .fn()
-          .mockReturnValue([orphan]);
-        vi.mocked(
-          nonInteractiveCliCommands.handleSlashCommand,
-        ).mockResolvedValueOnce({
-          type: 'submit_prompt',
-          content: [{ text: 'Shadowed advisor prompt' }],
-          resolvedCommand: {
-            name: 'advisor',
-            kind: CommandKind.FILE,
-          },
-        });
-        mockChatRecordingService.recordUserMessage.mockClear();
-
-        await session.prompt({
-          sessionId: 'test-session-id',
-          prompt: [{ type: 'text', text: '/advisor check my work' }],
-          _meta: { 'qwen.daemon.retry': true },
-        } as PromptRequest);
-
-        expect(
-          mockChatRecordingService.recordUserMessage,
-        ).not.toHaveBeenCalled();
-        // The resend still carries the adopted identity.
-        expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
-          'qwen3-code-plus',
-          expect.any(Object),
-          'test-session-id########1',
-          undefined,
-          { promptId: 'original-prompt' },
-        );
-      });
-
       it('preserves an expanded slash prompt cancelled before model send', async () => {
         const finishedSpy = vi
           .spyOn(core, 'logConversationFinishedEvent')
@@ -23682,12 +21165,10 @@ describe('Session', () => {
           }),
         ).resolves.toEqual({ stopReason: 'cancelled' });
 
-        expect(mockChat.addHistory).toHaveBeenCalledWith(
-          expect.objectContaining({
-            role: 'user',
-            parts: [{ text: 'Expanded prompt' }],
-          }),
-        );
+        expect(mockChat.addHistory).toHaveBeenCalledWith({
+          role: 'user',
+          parts: [{ text: 'Expanded prompt' }],
+        });
         expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
         expect(finishedSpy).toHaveBeenCalledTimes(1);
       });
@@ -24609,7 +22090,6 @@ describe('Session', () => {
           }),
           expect.any(String),
           permit,
-          undefined,
         );
         expect(mockGoalRuntime.markTurnDelivered).toHaveBeenCalledWith(
           'goal-runtime:turn-1',
@@ -24623,53 +22103,6 @@ describe('Session', () => {
         expect(
           mockChatRecordingService.recordBranchCheckpointTransaction,
         ).not.toHaveBeenCalled();
-      });
-
-      it('snapshots file state for goal-runtime turns to keep legacy rewind aligned', async () => {
-        // A goal-runtime turn still counts as a positional user turn
-        // (#isUserTextContent passes its plain text) and is unmarked, so
-        // the legacy rewind path zips snapshot indexes against positional
-        // turn indexes. Skipping its snapshot would desync every slot
-        // after the first goal turn.
-        const permit: core.GoalTurnPermit = {
-          goalId: 'goal-1',
-          revision: 1,
-          turnId: 'turn-snapshot',
-        };
-        mockGoalRuntime.getSnapshot.mockReturnValue({
-          v: 2,
-          activity: 'running',
-          goal: {
-            goalId: 'goal-1',
-            revision: 1,
-            objective: 'check weather',
-            status: 'active',
-            evidenceCursor: { recordId: 'cursor-1' },
-            turnCount: 0,
-            activeTimeMs: 0,
-            createdAt: 1234,
-            updatedAt: 1234,
-          },
-        });
-        mockGoalRuntime.permitForTurn.mockImplementation((turnKey: string) =>
-          turnKey === 'goal-runtime:turn-snapshot' ? permit : undefined,
-        );
-        mockChat.sendMessageStream = vi
-          .fn()
-          .mockResolvedValue(createEmptyStream());
-
-        await boundGoalHost!.startGoalTurn({
-          permit,
-          continuationContext: 'check weather',
-        });
-
-        await vi.waitFor(() => {
-          expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit);
-        });
-        expect(mockFileHistoryService.makeSnapshot).toHaveBeenCalledTimes(1);
-        expect(mockFileHistoryService.makeSnapshot).toHaveBeenCalledWith(
-          expect.any(String),
-        );
       });
 
       it('notifies the bridge that the Goal turn ended', async () => {
@@ -25329,7 +22762,6 @@ describe('Session', () => {
           expect.any(Object),
           expect.any(String),
           permit,
-          undefined,
         );
       });
 
@@ -25445,13 +22877,10 @@ describe('Session', () => {
           expect.any(Object),
           expect.any(String),
           permit,
-          expect.objectContaining({ promptId: expect.any(String) }),
         );
         expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
           'hello',
           permit,
-          undefined,
-          'test-session-id########1',
         );
         expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit);
       });
@@ -25559,7 +22988,6 @@ describe('Session', () => {
           expect.any(Object),
           expect.any(String),
           userPermit,
-          expect.objectContaining({ promptId: expect.any(String) }),
         );
         expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(
           automaticPermit,
@@ -25811,7 +23239,6 @@ describe('Session', () => {
           expect.any(Object),
           expect.any(String),
           userPermit,
-          expect.objectContaining({ promptId: expect.any(String) }),
         );
         expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(userPermit);
       });
@@ -40974,9 +38401,6 @@ describe('Session', () => {
         { role: 'model', parts: [{ text: 'working' }] },
       ];
       vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
-      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
-        undefined,
-      ]);
       session.rewindToTurn(0);
 
       mockBackgroundTaskRegistry.getAll.mockReturnValue([

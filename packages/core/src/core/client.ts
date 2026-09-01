@@ -138,7 +138,6 @@ import {
 import type { DeferredToolSummary } from '../tools/tool-registry.js';
 import {
   buildApiHistoryFromConversation,
-  getApiHistoryPromptId,
   replayUiTelemetryFromConversation,
 } from '../services/sessionService.js';
 import { reportError } from '../utils/errorReporting.js';
@@ -1499,7 +1498,7 @@ export class LlmClient {
       return;
     }
 
-    const currentHistory = this.getChat().getHistoryShallow();
+    const currentHistory = this.getChat().getHistory();
     const startupLength = getStartupContextLength(currentHistory);
     if (startupLength === 0) {
       return;
@@ -1540,7 +1539,7 @@ export class LlmClient {
       return;
     }
 
-    const currentHistory = this.getChat().getHistoryShallow();
+    const currentHistory = this.getChat().getHistory();
     if (getStartupContextLength(currentHistory) !== 0) {
       return;
     }
@@ -2865,7 +2864,6 @@ export class LlmClient {
       return takePendingGoalEvents();
     };
     let strippedRetryEntries: Content[] = [];
-    let retryPromptIdentity: string | undefined;
     const currentPushCount = () =>
       this.getChat().getUserContentPushCount?.() ?? 0;
 
@@ -2963,17 +2961,6 @@ export class LlmClient {
 
     if (messageType === SendMessageType.Retry) {
       strippedRetryEntries = this.stripOrphanedUserEntriesFromHistory() ?? [];
-      const strippedPromptIdentities = strippedRetryEntries
-        .map(getApiHistoryPromptId)
-        .filter((identity): identity is string => identity !== undefined);
-      // Fail closed unless EXACTLY ONE entry was stripped and it is marked:
-      // a mixed strip ([marked, unmarked]) must not donate the marked
-      // identity to different resent content.
-      retryPromptIdentity =
-        strippedRetryEntries.length === 1 &&
-        strippedPromptIdentities.length === 1
-          ? strippedPromptIdentities[0]
-          : undefined;
       // The matching dangling-`functionCall` repair runs inside
       // `chat.sendMessageStream` AFTER the user content is pushed, so any
       // tool_result the user is supplying (Retry of a ToolResult
@@ -3344,21 +3331,12 @@ export class LlmClient {
             );
         } else {
           const recorder = this.config.getChatRecordingService();
-          if (userPromptRecordPayload) {
-            recorder?.recordUserMessage(
-              request,
-              goalPermit,
-              userPromptRecordPayload,
-              prompt_id,
-            );
-          } else {
-            recorder?.recordUserMessage(
-              request,
-              goalPermit,
-              undefined,
-              prompt_id,
-            );
-          }
+          recorder?.recordUserMessage(
+            request,
+            goalPermit,
+            userPromptRecordPayload,
+            prompt_id,
+          );
         }
       }
 
@@ -3603,11 +3581,7 @@ export class LlmClient {
         this.getChat(),
         prompt_id,
         goalPermit,
-        messageType === SendMessageType.UserQuery
-          ? prompt_id
-          : messageType === SendMessageType.Retry
-            ? retryPromptIdentity
-            : undefined,
+        messageType === SendMessageType.UserQuery ? prompt_id : undefined,
       );
 
       // Assemble the outgoing request. IDE context is merged into the

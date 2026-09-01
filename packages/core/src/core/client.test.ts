@@ -109,7 +109,6 @@ import {
   clearCacheSafeParams,
   getCacheSafeParams,
 } from '../agents/forkedAgent.js';
-import { markApiHistoryPrompt } from '../services/session-api-history.js';
 
 // Mock fs module to prevent actual file system operations during tests
 const mockFileSystem = new Map<string, string>();
@@ -140,7 +139,6 @@ vi.mock('node:fs', () => {
 
 // --- Mocks ---
 const mockTurnRunFn = vi.fn();
-const mockTurnConstructorFn = vi.fn();
 
 vi.mock('./turn', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./turn.js')>();
@@ -150,8 +148,8 @@ vi.mock('./turn', async (importOriginal) => {
     // The run method is a property that holds our mock function
     run = mockTurnRunFn;
 
-    constructor(...args: unknown[]) {
-      mockTurnConstructorFn(...args);
+    constructor() {
+      // The constructor can be empty or do some mock setup
     }
   }
   // Export the mock class as 'Turn'
@@ -1844,7 +1842,6 @@ describe('Gemini Client (client.ts)', () => {
       ];
       const mockChat: Partial<LlmChat> = {
         getHistory: vi.fn().mockReturnValue(currentHistory),
-        getHistoryShallow: vi.fn().mockReturnValue(currentHistory),
         setHistory: vi.fn(),
       };
       client['chat'] = mockChat as LlmChat;
@@ -1883,7 +1880,6 @@ describe('Gemini Client (client.ts)', () => {
       };
       const mockChat: Partial<LlmChat> = {
         getHistory: vi.fn().mockReturnValue(currentHistory),
-        getHistoryShallow: vi.fn().mockReturnValue(currentHistory),
         setHistory: vi.fn(),
       };
       client['chat'] = mockChat as LlmChat;
@@ -5177,7 +5173,6 @@ describe('Gemini Client (client.ts)', () => {
       client['chat'] = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue(compactedHistory),
-        getHistoryShallow: vi.fn().mockReturnValue(compactedHistory),
         setHistory,
       } as unknown as LlmChat;
 
@@ -10880,20 +10875,13 @@ Other open files:
     });
 
     describe('retry sendMessageType', () => {
-      it('reuses the stripped prompt identity without replacing the retry interaction id', async () => {
-        const orphanedPrompt: Content = {
-          role: 'user',
-          parts: [{ text: 'second message' }],
-        };
-        markApiHistoryPrompt(orphanedPrompt, 'original-prompt');
+      it('should call stripOrphanedUserEntriesFromHistory before executing', async () => {
         const mockChat: Partial<LlmChat> = {
           addHistory: vi.fn(),
           getHistory: vi.fn().mockReturnValue([]),
           getHistoryLength: vi.fn().mockReturnValueOnce(3).mockReturnValue(2),
           setHistory: vi.fn(),
-          stripOrphanedUserEntriesFromHistory: vi
-            .fn()
-            .mockReturnValue([orphanedPrompt]),
+          stripOrphanedUserEntriesFromHistory: vi.fn(),
           repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
         };
         client['chat'] = mockChat as LlmChat;
@@ -10918,54 +10906,6 @@ Other open files:
         expect(
           mockChat.stripOrphanedUserEntriesFromHistory,
         ).toHaveBeenCalledOnce();
-        expect(mockTurnConstructorFn).toHaveBeenLastCalledWith(
-          mockChat,
-          'prompt-retry',
-          undefined,
-          'original-prompt',
-        );
-      });
-
-      it.each<[string, string[]]>([
-        ['duplicate', ['original-prompt', 'original-prompt']],
-        ['ambiguous', ['first-prompt', 'second-prompt']],
-      ])('fails closed for %s stripped prompt identities', async (_, ids) => {
-        const strippedEntries = ids.map((id) => {
-          const entry: Content = {
-            role: 'user',
-            parts: [{ text: 'retry me' }],
-          };
-          markApiHistoryPrompt(entry, id);
-          return entry;
-        });
-        const mockChat: Partial<LlmChat> = {
-          addHistory: vi.fn(),
-          getHistory: vi.fn().mockReturnValue([]),
-          getHistoryLength: vi.fn().mockReturnValue(0),
-          setHistory: vi.fn(),
-          stripOrphanedUserEntriesFromHistory: vi
-            .fn()
-            .mockReturnValue(strippedEntries),
-          repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
-        };
-        client['chat'] = mockChat as LlmChat;
-        mockTurnRunFn.mockReturnValue((async function* () {})());
-
-        await fromAsync(
-          client.sendMessageStream(
-            [{ text: 'retry me' }],
-            new AbortController().signal,
-            'retry-interaction-prompt',
-            { type: SendMessageType.Retry },
-          ),
-        );
-
-        expect(mockTurnConstructorFn).toHaveBeenLastCalledWith(
-          mockChat,
-          'retry-interaction-prompt',
-          undefined,
-          undefined,
-        );
       });
 
       it('restores stripped retry entries when only a concurrent send pushes', async () => {

@@ -10,7 +10,6 @@ import {
   CompressionStatus,
   findApiHistoryPromptIndex,
   getApiHistoryPromptId,
-  getApiHistoryPromptIndexes,
   getStartupContextLength,
   isClearedMediaPlaceholder,
   isSystemReminderContent,
@@ -157,67 +156,19 @@ export function computeApiTruncationIndex(
   if (compressionIndex !== -1 && targetIndex <= compressionIndex) return -1;
 
   const target = uiHistory[targetIndex]!;
-  // The identity scan must skip the startup/compressed prefix exactly like
-  // the ACP twin (#getRewindTurnProjection in
-  // acp-integration/session/Session.ts starts its identity-less check at
-  // this same offset): the summarizing-compression summary entry is
-  // counted by isUserTextContent yet never carries an identity (freshly
-  // synthesized; the compression promptIds are all null), so scanning the
-  // ENTIRE apiHistory would make historyFullyIdentified permanently false
-  // in every compressed session and the fail-closed arm below would never
-  // fire there — an absorbed-turn rewind would fall through to the
-  // positional walk and truncate at a shape-based guess (R13-15).
-  const startIndex = getStartupContextLength(apiHistory, {
-    includeCompressed: true,
-  });
   if (isRealUserTurn(target) && target.promptId) {
     const identifiedIndex = findApiHistoryPromptIndex(
       apiHistory,
       target.promptId,
     );
-    if (identifiedIndex !== -1) {
-      return identifiedIndex;
-    }
-    // Duplicate prompt identities are ambiguous and fail closed — the same
-    // contract as both twins (the ACP session's #getRewindTurnProjection
-    // yields no projection and selectForkHistory returns []).
-    // getApiHistoryPromptIndexes signals a duplicate with `undefined`;
-    // coercing it to [] would demote to the positional walk and truncate at
-    // a shape-based guess — the exact regression class this mapping exists
-    // to eliminate (e.g. a resumed session whose JSONL carries two user
-    // records with the same promptId).
-    const apiPromptIndexes = getApiHistoryPromptIndexes(apiHistory);
-    if (apiPromptIndexes === undefined) {
-      return -1;
-    }
-    // Fail closed only when EVERY user prompt the positional walk counts
-    // carries a stable identity. /restore installs a checkpoint
-    // round-tripped through JSON.stringify, which drops the symbol-keyed
-    // identity from clientHistory while the persisted UI items keep their
-    // string promptId; the next prompt then marks only the NEW entry. For a
-    // restored target the marker is lost in the round-trip, but the target
-    // textually exists in API history, so while any identity-less user
-    // prompt remains the positional fallback below is still sound and must
-    // run instead of aborting the rewind with -1. Mirrors the
-    // partial-coverage rule of the ACP session twin
-    // (#getRewindTurnProjection in acp-integration/session/Session.ts);
-    // the TUI twin's isUserTextContent already excludes placeholder-only
-    // and reminder entries from the count, so no extra exception is needed
-    // here.
-    const historyFullyIdentified =
-      apiPromptIndexes.length > 0 &&
-      apiHistory.every(
-        (content, index) =>
-          index < startIndex ||
-          !isUserTextContent(content) ||
-          !!getApiHistoryPromptId(content),
-      );
-    if (historyFullyIdentified) {
-      return -1;
-    }
+    if (identifiedIndex !== -1) return identifiedIndex;
+
+    // A fully serialized history has no Symbol metadata and uses the legacy
+    // positional fallback. Mixed identified history must not guess.
+    if (apiHistory.some(getApiHistoryPromptId)) return -1;
   }
 
-  // Legacy sessions have no promptId and still need the positional fallback.
+  // Count how many UI user turns exist before the target
   let uiUserTurnCount = 0;
   for (
     let i = compressionIndex === -1 ? 0 : compressionIndex + 1;
@@ -229,6 +180,11 @@ export function computeApiTruncationIndex(
       uiUserTurnCount++;
     }
   }
+
+  // Determine the starting index in the API history (skip startup context)
+  const startIndex = getStartupContextLength(apiHistory, {
+    includeCompressed: true,
+  });
 
   if (uiUserTurnCount === 0) {
     // Marker-less auto-compaction (entrance 3): the API history carries a

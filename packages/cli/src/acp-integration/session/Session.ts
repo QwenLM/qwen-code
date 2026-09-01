@@ -51,13 +51,11 @@ import type {
   CronRunSessionOutcome,
   InvocationContextV1,
   ChatRecordingService,
-  ChatRecordingRewindCheckpoint,
   TurnResultRecordPayload,
   WorkflowApproval,
   WorkflowSnapshot,
   WorkflowTask,
   BranchPoint,
-  FileHistorySnapshot,
 } from '@qwen-code/qwen-code-core';
 import {
   AuthType,
@@ -113,9 +111,6 @@ import {
   getPlanModeSystemReminder,
   getArenaSystemReminder,
   getStartupContextLength,
-  getApiHistoryPromptId,
-  getApiHistoryPromptIndexes,
-  markApiHistoryPrompt,
   isSystemReminderContent,
   buildSessionRecoveryPlanFromApiHistory,
   TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
@@ -1146,42 +1141,6 @@ function extractTurnPromptText(content: ContentBlock[]): string {
   return hasImage ? '[image]' : '';
 }
 
-function textlessPromptMatchesHistoryEntry(
-  prompt: ContentBlock[],
-  entry: Content,
-): boolean {
-  if (prompt.some((block) => block.type === 'text' && block.text.trim())) {
-    return false;
-  }
-  const parts = entry.parts ?? [];
-  return (
-    prompt.length > 0 &&
-    prompt.every((block) => {
-      switch (block.type) {
-        case 'image':
-        case 'audio':
-          return parts.some(
-            (part) =>
-              part.inlineData?.mimeType === block.mimeType &&
-              part.inlineData.data === block.data,
-          );
-        case 'resource_link':
-          return parts.some(
-            (part) =>
-              part.fileData?.fileUri === block.uri.replace(/^file:\/\//, '') ||
-              part.text === `@${block.uri}`,
-          );
-        case 'resource':
-          return parts.some((part) => part.text?.includes(block.resource.uri));
-        case 'text':
-          return block.text.trim().length === 0;
-        default:
-          return false;
-      }
-    })
-  );
-}
-
 interface InFlightTurnRecording {
   promptId: string;
   originatorClientId?: string;
@@ -1784,40 +1743,6 @@ export interface AvailableCommandsSnapshot {
   }>;
 }
 
-interface RewindableSnapshotTarget {
-  promptId: string;
-  turnIndex: number;
-}
-
-interface SessionRewindResult {
-  targetTurnIndex: number;
-  apiTruncateIndex: number;
-  promptId?: string;
-}
-
-interface RewindTurnCoordinates {
-  promptId?: string;
-  /**
-   * Positional index into the visible rewindable turns, in BOTH projection
-   * modes. Numeric rewind requests address this space; it is also the
-   * advertised `turnIndex`. Never the recording ordinal.
-   */
-  turnIndex: number;
-  apiTruncateIndex: number;
-  /**
-   * Ordinal into the recording's turnParentUuids boundary list. Internal
-   * rewindRecording key only — never advertised, never matched against a
-   * client-supplied numeric index (the two spaces diverge after any
-   * compression, which never prunes boundaries).
-   */
-  recordingTurnIndex?: number;
-}
-
-interface RewindTurnProjection {
-  mode: 'identified' | 'legacy';
-  turns: RewindTurnCoordinates[];
-}
-
 const STANDALONE_SLASH_COMMAND_POLICY: NonInteractiveSlashCommandPolicy =
   Object.freeze({
     allowSessionReset: false,
@@ -2000,21 +1925,6 @@ export class Session implements SessionContext {
    */
   private followupAbort: AbortController | null = null;
   private turn: number = 0;
-  private rewindCheckpoint:
-    | {
-        promptIds: Array<string | null>;
-        /**
-         * User-turn identities the rewind LEFT BEHIND (the truncated
-         * prefix's user turns). Staleness fingerprint: the checkpoint's
-         * snapshot/recording rollback is only sound while the live history
-         * still matches it; any turn that lands afterwards appends user
-         * turns the checkpoint does not know about (see restoreHistory).
-         */
-        postRewindTurnPromptIds: Array<string | null>;
-        recording?: ChatRecordingRewindCheckpoint;
-        snapshots: FileHistorySnapshot[];
-      }
-    | undefined;
   private refreshContextFilesOnWrite = false;
   private activeTodoWorkChainPromptId: string | undefined;
   private readonly createdAt: number = Date.now();
@@ -2356,13 +2266,6 @@ export class Session implements SessionContext {
     this.lastGoalSnapshot = undefined;
     this.lastGoalPublicationKey = undefined;
     this.suppressedRecoveredGoalId = undefined;
-    // /clear swaps in a fresh ChatRecordingService/FileHistoryService via
-    // startNewSession. The checkpoint captured the OLD services' state; a
-    // later restoreSessionHistory carrying the pair the client still holds
-    // passes the positional promptIds guard and would apply session-1's
-    // rollback to session-2's recorder — resurrecting the cleared
-    // conversation and re-rooting the new transcript into the old one.
-    this.rewindCheckpoint = undefined;
     this.#bindGoalRuntime();
   }
 
@@ -4311,7 +4214,10 @@ export class Session implements SessionContext {
   rewindToTurn(
     targetTurnIndex: number,
     opts?: { rewindFiles?: boolean },
-  ): SessionRewindResult {
+  ): {
+    targetTurnIndex: number;
+    apiTruncateIndex: number;
+  } {
     if (!Number.isInteger(targetTurnIndex) || targetTurnIndex < 0) {
       throw RequestError.invalidParams(
         undefined,
@@ -4319,266 +4225,28 @@ export class Session implements SessionContext {
       );
     }
 
-    this.#assertCanRewind();
-    const apiHistory = this.captureHistorySnapshot();
-    const projection = this.#getRewindTurnProjection(apiHistory);
-    // Numeric indexes are POSITIONAL in both modes: clients address the
-    // visible turn list (the same space getRewindableSnapshotTargets
-    // advertises). Matching the recording ordinal instead would diverge
-    // from the client's space after any compression — boundaries are never
-    // pruned, so the visible turn p would resolve to a different turn (or
-    // fail) whenever earlier turns were compressed away. recordingTurnIndex
-    // stays the internal rewindRecording key.
-    const target = projection?.turns.find(
-      (turn) => turn.turnIndex === targetTurnIndex,
-    );
-    if (!target) {
-      throw RequestError.invalidParams(
-        undefined,
-        'Cannot rewind to the requested turn. It may have been compressed or does not exist.',
-      );
-    }
-
-    return this.#rewindToCoordinates(
-      target,
-      projection!.mode,
-      apiHistory,
-      opts,
-      projection!.mode === 'legacy' ? projection!.turns.length : undefined,
-    );
-  }
-
-  rewindToPrompt(
-    promptId: string,
-    opts?: { rewindFiles?: boolean },
-  ): SessionRewindResult {
-    if (!promptId) {
-      throw RequestError.invalidParams(
-        undefined,
-        'promptId must be a non-empty string',
-      );
-    }
-
-    this.#assertCanRewind();
-    const apiHistory = this.captureHistorySnapshot();
-    const projection = this.#getRewindTurnProjection(apiHistory);
-    let target = projection?.turns.find((turn) => turn.promptId === promptId);
-    if (projection?.mode === 'legacy') {
-      const snapshots = this.config.getFileHistoryService().getSnapshots();
-      // A snapshot's array index is a positional turn index only while the
-      // two stores are exactly aligned. A deficit (a resumed legacy prefix
-      // has no snapshots) mispairs every slot past the prefix; a surplus
-      // (chat compression removes turns but never prunes file-history
-      // snapshots) mispairs every slot by the compressed count — fail closed
-      // in both directions instead of rewinding to the wrong turn's boundary.
-      if (snapshots.length === projection.turns.length) {
-        const snapshotIndexes = this.#getSnapshotIndexesByPromptId(snapshots);
-        const targetTurnIndex = snapshotIndexes?.get(promptId);
-        target =
-          targetTurnIndex === undefined
-            ? undefined
-            : projection.turns[targetTurnIndex];
-        if (target?.promptId && target.promptId !== promptId) {
-          target = undefined;
-        }
-      }
-    }
-    if (!target) {
-      throw RequestError.invalidParams(
-        undefined,
-        'Cannot rewind to the requested prompt. Its stable identity is missing or ambiguous.',
-      );
-    }
-
-    return this.#rewindToCoordinates(
-      { ...target, promptId },
-      projection!.mode,
-      apiHistory,
-      opts,
-      projection!.mode === 'legacy' ? projection!.turns.length : undefined,
-    );
-  }
-
-  #assertCanRewind(): void {
     if (this.closing || this.#hasActiveTurn()) {
       throw RequestError.invalidParams(
         undefined,
         'Cannot rewind while a prompt is running',
       );
     }
-  }
-
-  #rewindToCoordinates(
-    target: RewindTurnCoordinates,
-    mode: RewindTurnProjection['mode'],
-    apiHistory: Content[],
-    opts?: { rewindFiles?: boolean },
-    legacyTurnCount?: number,
-  ): SessionRewindResult {
-    if (target.recordingTurnIndex === undefined) {
-      throw RequestError.invalidParams(
-        undefined,
-        'Cannot rewind to the requested prompt. Its recording identity is missing or ambiguous.',
-      );
-    }
-    const recording = this.config.getChatRecordingService();
-    // Legacy mode derives recordingTurnIndex positionally, and the two
-    // spaces stay pairable ONLY while their counts are exactly equal. Any
-    // divergence shifts every boundary lookup and makes rewindRecording
-    // re-root the transcript chain to a wrong parent, orphaning records on
-    // the dead branch (the rewound turn then resurrects on resume while the
-    // RPC reports success):
-    // - DEFICIT: cron/loop ticks, background notifications and
-    //   goal-runtime turns count positionally but record with subtypes that
-    //   push no turnParentUuids boundary, so an interleaved automatic turn
-    //   leaves fewer boundaries than positional turns.
-    // - SURPLUS: locally-handled slash commands (/help) and hook-blocked
-    //   prompts push a boundary via recordUserMessage before their early
-    //   returns but create no positional turn, leaving more boundaries than
-    //   turns.
-    // Neither direction is recoverable from the API history alone, so fail
-    // closed on ANY count mismatch instead of rewinding to a mispaired
-    // boundary. A zero-length boundary list with positional turns present
-    // is a mismatch too: every turn is an automatic subtype (cron/loop,
-    // notification, goal-runtime) that counts positionally but pushes no
-    // boundary, and rewindRecording would re-root the transcript chain at
-    // a null parent — the rewind reports success while the next resume
-    // loses the surviving turns. Only a missing recording (disabled —
-    // nothing to pair against or re-root) proceeds with zero boundaries.
-    const recordingBoundaryCount = recording
-      ? recording.getRewindableTurnPromptIds().length
-      : 0;
-    if (
-      mode === 'legacy' &&
-      legacyTurnCount !== undefined &&
-      legacyTurnCount > 0 &&
-      recording !== undefined &&
-      recordingBoundaryCount !== legacyTurnCount
-    ) {
-      throw RequestError.invalidParams(
-        undefined,
-        'Cannot rewind to the requested turn. Its recording boundary pairing is missing or ambiguous.',
-      );
-    }
-    const fileHistoryService = this.config.getFileHistoryService();
-    const snapshots = fileHistoryService.getSnapshots();
-    // Legacy mode pairs snapshot indexes with positional turn indexes; the
-    // pairing is only sound while the two stores are exactly aligned. A
-    // deficit means a resumed legacy prefix left turns without snapshots; a
-    // surplus means chat compression removed turns without pruning the
-    // snapshots (nothing in the compression path touches the file history).
-    // Either direction mispairs the positional zip — fail closed below.
-    const legacySnapshotsAligned =
-      mode === 'legacy' &&
-      legacyTurnCount !== undefined &&
-      snapshots.length === legacyTurnCount;
-    const effectivePromptId =
-      target.promptId ??
-      (legacySnapshotsAligned
-        ? snapshots[target.turnIndex]?.promptId
-        : undefined);
-    const rewindFiles = opts?.rewindFiles !== false;
-    // A misaligned legacy zip cannot rewind on EITHER surface. With files,
-    // the conversation would truncate while workspace files silently stay
-    // behind — or roll back to a wrong turn's boundary — and the result
-    // would still report success. Conversation-only is not a safe fallback:
-    // truncating the conversation while the snapshot store keeps every
-    // (shifted) snapshot launders the deficit into a count-equal, mispaired
-    // zip that the later gates bless — the next file rewind then restores a
-    // wrong turn's file state with success:true. rewindToPrompt refuses the
-    // identical state; fail closed here too. File history being disabled
-    // means there is nothing to pair against, so those rewinds keep working.
-    if (
-      mode === 'legacy' &&
-      fileHistoryService.isEnabled() &&
-      !legacySnapshotsAligned
-    ) {
-      throw RequestError.invalidParams(
-        undefined,
-        'Cannot rewind to the requested turn. Its legacy file snapshot pairing is missing or ambiguous.',
-      );
-    }
-    let survivingSnapshots:
-      | ReturnType<typeof fileHistoryService.getSnapshots>
-      | undefined;
-    if (rewindFiles) {
-      if (fileHistoryService.isEnabled()) {
-        let targetSnapshotIndex: number | undefined;
-        if (mode === 'identified') {
-          const snapshotIndexes = this.#getSnapshotIndexesByPromptId(snapshots);
-          if (!snapshotIndexes) {
-            throw RequestError.invalidParams(
-              undefined,
-              'Cannot rewind to the requested prompt. Its file snapshot identity is ambiguous.',
-            );
-          }
-          targetSnapshotIndex = effectivePromptId
-            ? snapshotIndexes.get(effectivePromptId)
-            : undefined;
-          // A file rewind whose target owns no snapshot cannot proceed:
-          // the conversation would truncate while the snapshot store stays
-          // untouched, and the agent's FileHistoryService.rewind then
-          // throws 'The selected snapshot was not found' — leaving the
-          // session half-rewound (conversation back, files forward) behind
-          // success:true. The legacy arm fail-closes the identical shape
-          // above, and getRewindableSnapshotTargets already filters such
-          // targets out of what is advertised. Conversation-only rewinds
-          // (rewindFiles:false) never enter this branch.
-          if (targetSnapshotIndex === undefined) {
-            throw RequestError.invalidParams(
-              undefined,
-              'Cannot rewind to the requested turn. Its file snapshot is missing.',
-            );
-          }
-        } else if (
-          legacySnapshotsAligned &&
-          target.turnIndex < snapshots.length
-        ) {
-          targetSnapshotIndex = target.turnIndex;
-        }
-        if (targetSnapshotIndex !== undefined) {
-          survivingSnapshots = snapshots.slice(0, targetSnapshotIndex + 1);
-        }
-      } else {
-        survivingSnapshots = [];
-      }
-    } else if (
-      mode === 'legacy' &&
-      fileHistoryService.isEnabled() &&
-      legacySnapshotsAligned
-    ) {
-      // Conversation-only rewind (the Web Shell RewindDialog's only rewind
-      // action) truncates the conversation while files stay forward — but
-      // the snapshot store must truncate WITH the conversation: the
-      // surviving conversation keeps target.turnIndex turns, so leaving the
-      // boundary and every later snapshot in place permanently installs
-      // the exact surplus the alignment gate above treats as unrecoverable
-      // (every later file rewind fails closed and no targets are advertised
-      // until /clear or an undo). Cutting to the surviving prefix keeps
-      // snapshot-i <-> turn-i pairing sound; file contents are not rolled
-      // back. Only sound when the stores are exactly aligned today — a
-      // pre-existing misalignment is left for the gate to refuse, not
-      // reinterpreted here.
-      survivingSnapshots = snapshots.slice(0, target.turnIndex);
-    }
-
-    this.rewindCheckpoint = {
-      promptIds: this.captureHistoryPromptIds(apiHistory),
-      // The truncated prefix is what the rewind leaves behind; capture its
-      // user-turn identities as the staleness fingerprint restoreHistory
-      // checks before applying the store rollback. stripThoughtsFromHistory
-      // (below) can drop thought-only MODEL entries but never user entries,
-      // so the user-turn list is stable across it.
-      postRewindTurnPromptIds: apiHistory
-        .slice(0, target.apiTruncateIndex)
-        .filter((content) => this.#isUserTextContent(content))
-        .map((content) => getApiHistoryPromptId(content) ?? null),
-      ...(recording ? { recording: recording.captureRewindCheckpoint() } : {}),
-      snapshots: [...snapshots],
-    };
 
     const chat = this.config.getLlmClient()!.getChat();
-    chat.truncateHistory(target.apiTruncateIndex);
+    const apiHistory = chat.getHistoryShallow();
+    const apiTruncateIndex = this.#computeApiTruncationIndexForUserTurn(
+      apiHistory,
+      targetTurnIndex,
+    );
+
+    if (apiTruncateIndex < 0) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Cannot rewind to the requested turn. It may have been compressed or does not exist.',
+      );
+    }
+
+    chat.truncateHistory(apiTruncateIndex);
     chat.stripThoughtsFromHistory();
     this.activeTodoPlanRevision = undefined;
     const preserveQueuedPromptPriority = this.todoStopGuardQueuedPromptPriority;
@@ -4588,271 +4256,53 @@ export class Session implements SessionContext {
       !preserveQueuedPromptPriority;
     this.todoStopGuard.blockUntilOrdinaryPromptStarts();
 
+    const rewindFiles = opts?.rewindFiles !== false;
+    const fileHistoryService = this.config.getFileHistoryService();
+    const survivingSnapshots = rewindFiles
+      ? fileHistoryService.getSnapshots().slice(0, targetTurnIndex + 1)
+      : undefined;
+
     if (survivingSnapshots) {
-      // File rewinds keep the target's boundary snapshot in the live
-      // store: the file rewind that runs after this method
-      // (FileHistoryService.rewind via the agent / TUI restore paths) must
-      // still find it to apply it, and the agent drops it once the files
-      // sit AT it. Conversation-only legacy rewinds settle the store
-      // directly at the truncated prefix (boundary already excluded).
       fileHistoryService.restoreFromSnapshots(survivingSnapshots);
     }
 
-    recording?.rewindRecording(
-      target.recordingTurnIndex,
-      {
-        truncatedCount: Math.max(
-          0,
-          apiHistory.length - target.apiTruncateIndex,
-        ),
-      },
-      // Re-record the surviving snapshots so a resume rebuilding the store
-      // from this batch sees the same shape the live store settles into.
-      // File rewinds keep the target's boundary snapshot live until the
-      // agent drops it, so the batch excludes it — the conversation keeps
-      // one fewer turn than the surviving prefix holds. Conversation-only
-      // legacy rewinds already settle at the boundary-less prefix, so
-      // their batch is the prefix itself.
-      rewindFiles ? survivingSnapshots?.slice(0, -1) : survivingSnapshots,
-    );
+    this.config
+      .getChatRecordingService()
+      ?.rewindRecording(
+        targetTurnIndex,
+        { truncatedCount: Math.max(0, apiHistory.length - apiTruncateIndex) },
+        survivingSnapshots,
+      );
 
     if (shouldDrainAutomaticQueues) {
       void this.#drainCronQueue();
       void this.#drainNotificationQueue();
     }
 
-    return {
-      targetTurnIndex: target.turnIndex,
-      apiTruncateIndex: target.apiTruncateIndex,
-      ...(effectivePromptId ? { promptId: effectivePromptId } : {}),
-    };
-  }
-
-  #getRewindTurnProjection(
-    apiHistory: Content[],
-  ): RewindTurnProjection | undefined {
-    const apiPromptIndexes = getApiHistoryPromptIndexes(apiHistory);
-    if (apiPromptIndexes === undefined) return undefined;
-    const recordingPromptIds = this.config
-      .getChatRecordingService()
-      ?.getRewindableTurnPromptIds();
-    const startIndex = getStartupContextLength(apiHistory, {
-      includeCompressed: true,
-    });
-    const positionalTurns = (): RewindTurnCoordinates[] => {
-      const turns: RewindTurnCoordinates[] = [];
-      for (let index = startIndex; index < apiHistory.length; index++) {
-        if (!this.#isUserTextContent(apiHistory[index]!)) continue;
-        turns.push({
-          turnIndex: turns.length,
-          apiTruncateIndex: index,
-          recordingTurnIndex: turns.length,
-        });
-      }
-      return turns;
-    };
-    if (apiPromptIndexes.length === 0) {
-      if (recordingPromptIds?.some(Boolean)) {
-        return { mode: 'identified', turns: [] };
-      }
-      return { mode: 'legacy', turns: positionalTurns() };
-    }
-    // Partial identity coverage: a session resumed from before stable
-    // identities existed gains one marked entry as soon as a new prompt
-    // lands, and entering identified mode then would silently drop every
-    // older (unmarked) turn from the rewind target space. While any
-    // identity-less user turn exists, keep the positional enumeration —
-    // the same fallback the TUI twin computeApiTruncationIndex retains.
-    // No placeholder exception: microcompaction rebuilds entries as
-    // { ...content, parts: newParts } and PRESERVES the identity mark, so
-    // a structural media-clear replacement inside an identified session is
-    // MARKED and already skipped by the promptId check above. An UNMARKED
-    // placeholder-only entry can only be a media-only LEGACY turn whose
-    // media was cleared — #isUserTextContent counts it (its file-history
-    // snapshot exists; see that twin's documented rule), so skipping it
-    // here would silently drop a live, snapshot-backed turn from the
-    // target space. Force the positional fallback like any other unmarked
-    // turn (mirrors the fork twin selectForkHistory, which dropped the
-    // same exception for the same reason).
-    for (let index = startIndex; index < apiHistory.length; index++) {
-      const content = apiHistory[index]!;
-      if (!this.#isUserTextContent(content)) continue;
-      if (getApiHistoryPromptId(content)) continue;
-      return { mode: 'legacy', turns: positionalTurns() };
-    }
-
-    const apiTurns = apiPromptIndexes.map((apiTruncateIndex) => ({
-      promptId: getApiHistoryPromptId(apiHistory[apiTruncateIndex]!),
-      apiTruncateIndex,
-    }));
-    if (apiTurns.some((turn) => !turn.promptId)) return undefined;
-
-    let recordingIndexes: Map<string, number> | undefined;
-    if (recordingPromptIds !== undefined) {
-      recordingIndexes = new Map<string, number>();
-      for (let index = 0; index < recordingPromptIds.length; index++) {
-        const promptId = recordingPromptIds[index];
-        if (!promptId) continue;
-        if (recordingIndexes.has(promptId)) return undefined;
-        recordingIndexes.set(promptId, index);
-      }
-    }
-
-    const coordinates: RewindTurnCoordinates[] = [];
-    for (let turnIndex = 0; turnIndex < apiTurns.length; turnIndex++) {
-      const apiTurn = apiTurns[turnIndex]!;
-      const promptId = apiTurn.promptId!;
-      const recordingTurnIndex = recordingIndexes
-        ? recordingIndexes.get(promptId)
-        : turnIndex;
-      coordinates.push({
-        promptId,
-        // turnIndex stays POSITIONAL (matches the legacy projection and the
-        // client's numeric index space). The recording ordinal — which
-        // diverges from the positional space once compression removes turns
-        // without pruning boundaries — rides along only as the internal
-        // rewindRecording key.
-        turnIndex,
-        apiTruncateIndex: apiTurn.apiTruncateIndex,
-        ...(recordingTurnIndex !== undefined ? { recordingTurnIndex } : {}),
-      });
-    }
-    return { mode: 'identified', turns: coordinates };
-  }
-
-  #getSnapshotIndexesByPromptId(
-    snapshots: readonly FileHistorySnapshot[],
-  ): Map<string, number> | undefined {
-    const indexes = new Map<string, number>();
-    for (let index = 0; index < snapshots.length; index++) {
-      const promptId = snapshots[index]!.promptId;
-      if (!promptId || indexes.has(promptId)) return undefined;
-      indexes.set(promptId, index);
-    }
-    return indexes;
-  }
-
-  /**
-   * Snapshot file state at turn start (mirrors the makeSnapshot block in
-   * GeminiClient.sendMessageStream). Every entry #isUserTextContent counts
-   * as a positional user turn must own a snapshot: the legacy rewind path
-   * zips snapshot indexes against positional turn indexes, so a turn that
-   * skips its snapshot desyncs every slot after it (file restore lands on
-   * the wrong snapshot or is silently skipped). Ordinary prompts, goal
-   * turns, cron/loop turns, and background-notification turns all call this
-   * at turn start — the automatic ones bypass prompt(), so they must not
-   * bypass the snapshot. Resubmissions keep updating the original turn's
-   * latest snapshot.
-   */
-  async #snapshotTurnStart(promptId: string): Promise<void> {
-    try {
-      const fileHistoryService = this.config.getFileHistoryService();
-      await fileHistoryService.makeSnapshot(promptId);
-      try {
-        const latestSnapshot = fileHistoryService.getSnapshots().at(-1);
-        if (latestSnapshot) {
-          this.config
-            .getChatRecordingService()
-            ?.recordFileHistorySnapshot(latestSnapshot);
-        }
-      } catch (e) {
-        debugLogger.error(`FileHistory: recordSnapshot failed: ${e}`);
-      }
-    } catch (e) {
-      debugLogger.error(`FileHistory: makeSnapshot failed: ${e}`);
-    }
-  }
-
-  /**
-   * Retire the recording artifacts a prompt left behind when its send was
-   * dropped before any positional turn materialized (the session-token-limit
-   * stop, R8-13). recordUserMessage pushes a recording boundary before the
-   * send; if the send is then dropped without pushing the user content, that
-   * boundary (and any turn-start snapshot) outlives the turn it belongs to.
-   * The strict legacy pairing gates compare counts, so one stray boundary or
-   * snapshot permanently fails them closed until /clear. Pop the boundary via
-   * the recording service and drop the snapshot if it belongs to this prompt.
-   */
-  #retireDroppedTurnArtifacts(promptId: string): void {
-    try {
-      this.config.getChatRecordingService()?.retireTurnBoundary(promptId);
-      const fileHistoryService = this.config.getFileHistoryService();
-      if (!fileHistoryService.isEnabled()) return;
-      const snapshots = fileHistoryService.getSnapshots();
-      const last = snapshots.at(-1);
-      if (last && last.promptId === promptId) {
-        fileHistoryService.restoreFromSnapshots(snapshots.slice(0, -1));
-      }
-    } catch (e) {
-      debugLogger.error(`FileHistory: retireDroppedTurnArtifacts failed: ${e}`);
-    }
+    return { targetTurnIndex, apiTruncateIndex };
   }
 
   captureHistorySnapshot(): Content[] {
     return this.config.getLlmClient()!.getChat().getHistoryShallow();
   }
 
-  captureHistoryPromptIds(history: readonly Content[]): Array<string | null> {
-    return history.map((content) => getApiHistoryPromptId(content) ?? null);
-  }
-
-  getRewindableSnapshotTargets(): RewindableSnapshotTarget[] {
-    const projection = this.#getRewindTurnProjection(
-      this.captureHistorySnapshot(),
-    );
-    if (!projection || projection.turns.length === 0) return [];
-    const snapshots = this.config.getFileHistoryService().getSnapshots();
-    const snapshotIndexes = this.#getSnapshotIndexesByPromptId(snapshots);
-    if (!snapshotIndexes) return [];
-    if (projection.mode === 'legacy') {
-      // Same positional zip as the rewind path: unsound once the stores are
-      // not exactly aligned — a resumed legacy prefix leaves turns without
-      // snapshots (deficit) and chat compression removes turns without
-      // pruning snapshots (surplus) — advertise nothing rather than
-      // mispaired slots.
-      if (snapshots.length !== projection.turns.length) return [];
-      // Mirror of #rewindToCoordinates' strict gate: ANY divergence between
-      // the positional turn count and the recording's boundary count
-      // (automatic turns push no boundary; locally-handled slash commands
-      // and hook-blocked prompts push one without a positional turn)
-      // shifts every boundary lookup, so the rewind refuses every target —
-      // advertise nothing rather than mispaired slots. Zero boundaries
-      // with turns present (an all-automatic session) diverges too; only
-      // a missing recording (disabled) is exempt.
-      const recording = this.config.getChatRecordingService();
-      const recordingBoundaryCount =
-        recording?.getRewindableTurnPromptIds().length ?? 0;
-      if (
-        recording !== undefined &&
-        recordingBoundaryCount !== projection.turns.length
-      ) {
-        return [];
-      }
-      return snapshots
-        .slice(0, projection.turns.length)
-        .map((snapshot, turnIndex) => ({
-          promptId: snapshot.promptId,
-          turnIndex,
-        }));
-    }
-    return projection.turns.flatMap(
-      ({ promptId, turnIndex, recordingTurnIndex }) =>
-        promptId &&
-        recordingTurnIndex !== undefined &&
-        snapshotIndexes.has(promptId)
-          ? [{ promptId, turnIndex }]
-          : [],
-    );
-  }
-
   getRewindableUserTurnCount(): number {
-    return (
-      this.#getRewindTurnProjection(this.captureHistorySnapshot())?.turns
-        .length ?? 0
-    );
+    const apiHistory = this.captureHistorySnapshot();
+    const startIndex = getStartupContextLength(apiHistory, {
+      includeCompressed: true,
+    });
+    let count = 0;
+
+    for (let i = startIndex; i < apiHistory.length; i++) {
+      if (this.#isUserTextContent(apiHistory[i]!)) {
+        count += 1;
+      }
+    }
+
+    return count;
   }
 
-  restoreHistory(history: Content[], promptIds?: Array<string | null>): void {
+  restoreHistory(history: Content[]): void {
     if (this.closing || this.#hasActiveTurn()) {
       throw RequestError.invalidParams(
         undefined,
@@ -4860,109 +4310,37 @@ export class Session implements SessionContext {
       );
     }
 
-    if (promptIds !== undefined && promptIds.length !== history.length) {
-      throw RequestError.invalidParams(
-        undefined,
-        'promptIds must have the same length as history',
-      );
-    }
-    const seen = new Set<string>();
-    const restoredHistory = structuredClone(history);
-    const restoredPromptIds = promptIds ?? history.map(() => null);
-    for (let index = 0; index < restoredPromptIds.length; index++) {
-      const promptId = restoredPromptIds[index];
-      if (promptId === null) continue;
-      if (!promptId || seen.has(promptId)) {
-        throw RequestError.invalidParams(
-          undefined,
-          'promptIds must contain unique non-empty strings or null',
-        );
-      }
-      seen.add(promptId);
-      markApiHistoryPrompt(restoredHistory[index]!, promptId);
-    }
-
-    const checkpoint = this.rewindCheckpoint;
-    // Identified restores are the undo half of a rewind: they are only
-    // admissible while the daemon still holds the rollback context the
-    // rewind captured. The checkpoint is in-memory and consumed by the
-    // first successful restore below (and dropped by /clear and by process
-    // restarts), so an identified restore arriving without one is a stale
-    // or foreign pair. Both staleness guards that follow are gated on the
-    // checkpoint, so without this gate the client's blob would apply
-    // wholesale over a session that moved on — resurrecting cleared or
-    // rewound-away turns while transcript, snapshots and files keep their
-    // state. Fail closed; the promptIds-less cold-restore/fork arm below
-    // stays open.
-    if (promptIds !== undefined && !checkpoint) {
-      throw RequestError.invalidParams(
-        undefined,
-        'Cannot restore identified history without a live rewind checkpoint',
-      );
-    }
-    if (checkpoint) {
-      // Staleness fingerprint: the pair the client still holds matches the
-      // checkpoint's pre-rewind capture even after the session advances, so
-      // the pair check alone cannot detect an undo that arrives after a
-      // later turn landed. The checkpoint's snapshot/recording rollback is
-      // only sound while the live history still sits AT the post-rewind
-      // state; once any turn (ordinary, retry, continuation, or automatic)
-      // appends user turns, applying the rollback would truncate the
-      // conversation, snapshot store and recording across the intervening
-      // turn while workspace files keep its edits — silent
-      // conversation/files divergence with success:true. Fail closed
-      // instead. The guard covers the no-promptIds arm too: the checkpoint
-      // rollback runs there as well.
-      const liveTurnPromptIds = this.captureHistorySnapshot()
-        .filter((content) => this.#isUserTextContent(content))
-        .map((content) => getApiHistoryPromptId(content) ?? null);
-      if (
-        liveTurnPromptIds.length !==
-          checkpoint.postRewindTurnPromptIds.length ||
-        liveTurnPromptIds.some(
-          (promptId, index) =>
-            promptId !== checkpoint.postRewindTurnPromptIds[index],
-        )
-      ) {
-        throw RequestError.invalidParams(
-          undefined,
-          'Cannot restore history from a stale rewind checkpoint; the session advanced past the rewind.',
-        );
-      }
-    }
-    if (
-      checkpoint &&
-      promptIds !== undefined &&
-      (promptIds.length !== checkpoint.promptIds.length ||
-        promptIds.some(
-          (promptId, index) => promptId !== checkpoint.promptIds[index],
-        ))
-    ) {
-      throw RequestError.invalidParams(
-        undefined,
-        'promptIds do not match the latest rewind checkpoint',
-      );
-    }
-
-    this.config.getLlmClient()!.getChat().setHistory(restoredHistory);
-    const recording = this.config.getChatRecordingService();
-    if (checkpoint) {
-      this.config
-        .getFileHistoryService()
-        .restoreFromSnapshots(checkpoint.snapshots);
-      if (checkpoint.recording) {
-        recording?.restoreRewindCheckpoint(
-          checkpoint.recording,
-          checkpoint.snapshots,
-          promptIds === undefined,
-        );
-      }
-      this.rewindCheckpoint = undefined;
-    } else if (promptIds === undefined) {
-      recording?.useLegacyTurnPromptIds();
-    }
+    this.config.getLlmClient()!.getChat().setHistory(structuredClone(history));
     this.activeTodoPlanRevision = undefined;
     this.#clearTodoStopGuardTrustAndDrainAutomaticQueues();
+  }
+
+  #computeApiTruncationIndexForUserTurn(
+    apiHistory: Content[],
+    targetTurnIndex: number,
+  ): number {
+    const startIndex = getStartupContextLength(apiHistory, {
+      includeCompressed: true,
+    });
+
+    if (targetTurnIndex === 0) {
+      return startIndex;
+    }
+
+    let realUserPromptCount = 0;
+    for (let i = startIndex; i < apiHistory.length; i++) {
+      if (!this.#isUserTextContent(apiHistory[i]!)) {
+        continue;
+      }
+
+      if (realUserPromptCount === targetTurnIndex) {
+        return i;
+      }
+
+      realUserPromptCount += 1;
+    }
+
+    return -1;
   }
 
   #isUserTextContent(content: Content): boolean {
@@ -4997,18 +4375,7 @@ export class Session implements SessionContext {
     // a TUI user turn. Here the placeholders MUST stay counted: ACP rewind
     // maps against per-prompt file-history snapshots, which ARE created for
     // media-only prompts. Do not mirror that exclusion into this twin.
-    // Unclear media parts count for the same reason: a media-only prompt
-    // pushes a recording boundary (recordUserMessage) and a turn-start
-    // snapshot (#snapshotTurnStart) exactly like a text prompt, so leaving
-    // it out of the positional enumeration strands a permanent +1 surplus
-    // that fails every later legacy rewind closed until /clear and hides
-    // the turn from the staleness fingerprint below.
-    return content.parts.some(
-      (part) =>
-        ('text' in part && !!part.text) ||
-        'inlineData' in part ||
-        'fileData' in part,
-    );
+    return content.parts.some((part) => 'text' in part && part.text);
   }
 
   async cancelPendingPrompt(): Promise<void> {
@@ -5877,21 +5244,7 @@ export class Session implements SessionContext {
             // throws before re-pushing it, the orphan would be permanently lost
             // — so hold it (and a push-count snapshot) to restore on that path.
             let strippedOrphanEntries: Content[] | null = null;
-            let resubmittedPromptIdentity: string | undefined;
             let orphanPushCountSnapshot = 0;
-            // The chat instance the pair was captured on (R13-19): a
-            // locally-handled /clear inside the pre-send region swaps in a
-            // fresh LlmChat, and the finally restore below must not
-            // re-inject the orphan into the cleared session. Set at every
-            // site that sets orphanPushCountSnapshot.
-            let orphanSourceChat: LlmChat | undefined;
-            // The send-time capture for the push-count restore gate (R10-7):
-            // compression during the resend can swap in a fresh chat whose
-            // counter starts at 0, so the gate must compare the SAME
-            // instance that actually sends — captured in `beforeSend` below,
-            // after compression. Undefined until the first send reaches it.
-            let orphanSendChat: LlmChat | undefined;
-            let orphanSendPushCountBeforeSend = 0;
             if (goalTurn?.origin === 'runtime') {
               this.config.getChatRecordingService()?.recordGoalRuntimeMessage(
                 modelPromptBlocks
@@ -5927,22 +5280,8 @@ export class Session implements SessionContext {
                 strippedOrphanEntries =
                   this.#getCurrentChat().stripOrphanedUserEntriesFromHistory() ??
                   null;
-                const promptIdentities =
-                  strippedOrphanEntries
-                    ?.map(getApiHistoryPromptId)
-                    .filter((value): value is string => value !== undefined) ??
-                  [];
-                // Fail closed unless EXACTLY ONE entry was stripped and it
-                // is marked (see the retry guard below for the mixed-strip
-                // identity-theft scenario).
-                resubmittedPromptIdentity =
-                  strippedOrphanEntries?.length === 1 &&
-                  promptIdentities.length === 1
-                    ? promptIdentities[0]
-                    : undefined;
-                orphanSourceChat = this.#getCurrentChat();
                 orphanPushCountSnapshot =
-                  orphanSourceChat.getUserContentPushCount?.() ?? 0;
+                  this.#getCurrentChat().getUserContentPushCount?.() ?? 0;
                 continuationParts = recoveryPlan.continuation.parts;
               } else {
                 continuationParts = recoveryPlan.continuation.parts;
@@ -5956,145 +5295,7 @@ export class Session implements SessionContext {
               // The orphaned content is already persisted; recording a new user
               // message would duplicate the turn in the transcript.
             } else if (isRetry) {
-              const strippedRetryEntries =
-                this.#getCurrentChat().stripOrphanedUserEntriesFromHistory() ??
-                [];
-              const promptIdentities = strippedRetryEntries
-                .map(getApiHistoryPromptId)
-                .filter((value): value is string => value !== undefined);
-              // Fail closed unless EXACTLY ONE entry was stripped and it is
-              // marked: a mixed strip ([marked, unmarked]) must not donate
-              // the marked identity to different resent content.
-              resubmittedPromptIdentity =
-                strippedRetryEntries.length === 1 &&
-                promptIdentities.length === 1
-                  ? promptIdentities[0]
-                  : undefined;
-              if (resubmittedPromptIdentity !== undefined) {
-                // The resend re-pushes the prompt under the adopted identity
-                // below; if it throws before the push (hard-rescue
-                // compaction stop, UserPromptSubmit Stop, a compression
-                // abort rethrow, resolve failures), the stripped orphan
-                // would be permanently lost while its record stays in the
-                // transcript — the same window the continuation branch
-                // above guards. Hand it to the shared pair so the
-                // push-count-gated catch restore covers retries exactly like
-                // continuations (on success the resend advances the push
-                // counter past the snapshot, so no double-restore).
-                strippedOrphanEntries = strippedRetryEntries;
-                orphanSourceChat = this.#getCurrentChat();
-                orphanPushCountSnapshot =
-                  orphanSourceChat.getUserContentPushCount?.() ?? 0;
-              } else if (strippedRetryEntries.length > 0) {
-                // No adoptable identity (orphan-less strips are handled by
-                // the fresh record below): the resend re-pushes ONLY the
-                // retried prompt, and nothing re-pushes these stripped
-                // entries on the send-success, null-stream, pre-send-cancel,
-                // or locally-handled-slash return paths — the
-                // push-count-gated catch covers throws alone. Re-add them
-                // now (strip returns them in original order) so their
-                // transcript records and turn-start snapshots keep matching
-                // live positional turns; the resend appends after them
-                // below. The continuation twin re-pushes its stripped
-                // content too (merged into the resent parts), so this keeps
-                // retries divergence-free on every exit path.
-                //
-                // One exception (R10-6): when the LAST stripped orphan IS
-                // the retried prompt's own failed first attempt (same
-                // text), re-adding it would put the prompt in history
-                // twice back-to-back once the resend pushes its copy. Drop
-                // that entry from the re-add; if it is marked, adopt its
-                // identity exactly like the single-orphan branch so the
-                // resend reuses it (and its record) instead of landing a
-                // fresh turn. The content match is what keeps the adoption
-                // safe here — the mixed-strip gate above only refuses to
-                // donate a marked identity to DIFFERENT resent content.
-                const retriedPromptText = promptText.trim();
-                const lastStrippedEntry =
-                  strippedRetryEntries[strippedRetryEntries.length - 1]!;
-                const lastStrippedIsRetriedPrompt =
-                  (retriedPromptText.length > 0 &&
-                    (lastStrippedEntry.parts ?? []).some(
-                      (part) =>
-                        typeof part.text === 'string' &&
-                        part.text.trim() === retriedPromptText,
-                    )) ||
-                  textlessPromptMatchesHistoryEntry(
-                    modelPromptBlocks,
-                    lastStrippedEntry,
-                  );
-                if (lastStrippedIsRetriedPrompt) {
-                  for (const entry of strippedRetryEntries.slice(0, -1)) {
-                    this.#getCurrentChat().addHistory(entry);
-                  }
-                  const lastStrippedIdentity =
-                    getApiHistoryPromptId(lastStrippedEntry);
-                  if (lastStrippedIdentity !== undefined) {
-                    resubmittedPromptIdentity = lastStrippedIdentity;
-                  }
-                  // R13-6: hold the matched orphan for the push-count-gated
-                  // restore even when it is UNMARKED (no identity to adopt):
-                  // it was dropped from the re-add above because the resend
-                  // re-pushes its content, but any pre-push exit (hook
-                  // block, locally-handled slash, resolve throw) would
-                  // otherwise lose it permanently while its record stays.
-                  // On success the resend advances the push counter past
-                  // the snapshot, so the gate prevents a double-restore.
-                  strippedOrphanEntries = [lastStrippedEntry];
-                  orphanSourceChat = this.#getCurrentChat();
-                  orphanPushCountSnapshot =
-                    orphanSourceChat.getUserContentPushCount?.() ?? 0;
-                } else {
-                  for (const entry of strippedRetryEntries) {
-                    this.#getCurrentChat().addHistory(entry);
-                  }
-                }
-              }
-              if (
-                resubmittedPromptIdentity === undefined &&
-                // Mirror the normal branch: only `/advisor` defers its
-                // record to after command resolution (a shadowing custom
-                // command keeps its record there). A failed `/advisor`
-                // throws a turn error and retries with an empty strip —
-                // recording here would land a boundary for a turn that
-                // never positionally exists (advisor pushes no history).
-                (!isSlashInput || slashCommandName !== 'advisor')
-              ) {
-                // No adoptable identity (orphan-less or multi-orphan strip):
-                // the resend cannot reuse the original attempt's record.
-                // Record it as a fresh turn so it commits to API history
-                // marked (below) and stays in the rewind projection.
-                const attachmentReferences = readDaemonAttachmentReferences(
-                  promptMetadata?.[DAEMON_ATTACHMENT_REFERENCES_META_KEY],
-                );
-                const recorder = this.config.getChatRecordingService();
-                if (promptDisplayText !== undefined || attachmentReferences) {
-                  recorder?.recordUserMessage(
-                    promptText,
-                    goalTurn?.permit,
-                    {
-                      displayText: promptDisplayText ?? promptText,
-                      hookContext: '',
-                      ...(attachmentReferences ? { attachmentReferences } : {}),
-                    },
-                    promptId,
-                  );
-                } else if (goalTurn) {
-                  recorder?.recordUserMessage(
-                    promptText,
-                    goalTurn.permit,
-                    undefined,
-                    promptId,
-                  );
-                } else {
-                  recorder?.recordUserMessage(
-                    promptText,
-                    undefined,
-                    undefined,
-                    promptId,
-                  );
-                }
-              }
+              this.#getCurrentChat().stripOrphanedUserEntriesFromHistory();
             } else if (!isSlashInput || slashCommandName !== 'advisor') {
               // record user message for session management. Only `/advisor`
               // defers its record to after command resolution below — a
@@ -6107,30 +5308,15 @@ export class Session implements SessionContext {
               );
               const recorder = this.config.getChatRecordingService();
               if (promptDisplayText !== undefined || attachmentReferences) {
-                recorder?.recordUserMessage(
-                  promptText,
-                  goalTurn?.permit,
-                  {
-                    displayText: promptDisplayText ?? promptText,
-                    hookContext: '',
-                    ...(attachmentReferences ? { attachmentReferences } : {}),
-                  },
-                  promptId,
-                );
+                recorder?.recordUserMessage(promptText, goalTurn?.permit, {
+                  displayText: promptDisplayText ?? promptText,
+                  hookContext: '',
+                  ...(attachmentReferences ? { attachmentReferences } : {}),
+                });
               } else if (goalTurn) {
-                recorder?.recordUserMessage(
-                  promptText,
-                  goalTurn.permit,
-                  undefined,
-                  promptId,
-                );
+                recorder?.recordUserMessage(promptText, goalTurn.permit);
               } else {
-                recorder?.recordUserMessage(
-                  promptText,
-                  undefined,
-                  undefined,
-                  promptId,
-                );
+                recorder?.recordUserMessage(promptText);
               }
             }
 
@@ -6156,297 +5342,227 @@ export class Session implements SessionContext {
               return true;
             };
 
-            // Declared outside the pre-send orphan-restore wrapper below:
-            // the Stop-hook handling after the send loop reads them too.
+            if (isRestoreAskUserQuestion) {
+              parts = [];
+            } else if (isContinue) {
+              // Non-null here: the `none` case returned early above, and both
+              // interruption branches assign a concrete part list.
+              parts = continuationParts!;
+            } else if (isSlashInput) {
+              // Handle slash command in ACP mode using capability-based filtering
+              const slashCommandResult = await handleSlashCommand(
+                inputText,
+                pendingSend,
+                this.config,
+                this.settings,
+                {
+                  // `/clear` swaps in a new Goal runtime under this
+                  // long-lived Session; without this the goal-state
+                  // subscription stays on the disposed instance.
+                  startNewSession: () => this.rebindGoalRuntimeForNewSession(),
+                },
+                this.slashCommandPolicy,
+              );
+
+              if (
+                slashCommandName === 'advisor' &&
+                pendingSend.signal.aborted &&
+                slashCommandResult.type === 'message'
+              ) {
+                this.todoStopGuard.suspend();
+                logConversationFinishedEvent(
+                  this.config,
+                  new ConversationFinishedEvent(
+                    this.config.getApprovalMode(),
+                    0,
+                  ),
+                );
+                return { stopReason: 'cancelled' };
+              }
+
+              // Classify by the RESOLVED command, not the raw token: a
+              // custom command named `advisor` shadows the built-in and
+              // must keep its transcript records (R18-6). Only `/advisor`
+              // defers its user-message record to here — every other slash
+              // command was already recorded above, before its action ran.
+              const resolvedCommandInfo = slashCommandResult.resolvedCommand;
+              const shouldRecordSlashCommand = !(
+                resolvedCommandInfo?.kind === CommandKind.BUILT_IN &&
+                resolvedCommandInfo.name === 'advisor'
+              );
+              if (
+                slashCommandName === 'advisor' &&
+                shouldRecordSlashCommand &&
+                goalTurn?.origin !== 'runtime' &&
+                !isRetry
+              ) {
+                const recorder = this.config.getChatRecordingService();
+                if (promptDisplayText !== undefined) {
+                  recorder?.recordUserMessage(promptText, goalTurn?.permit, {
+                    displayText: promptDisplayText,
+                    hookContext: '',
+                  });
+                } else if (goalTurn) {
+                  recorder?.recordUserMessage(promptText, goalTurn.permit);
+                } else {
+                  recorder?.recordUserMessage(promptText);
+                }
+              }
+
+              try {
+                parts = await this.#processSlashCommandResult(
+                  slashCommandResult,
+                  modelPromptBlocks,
+                  pendingSend.signal,
+                  onFullTurnModel,
+                  shouldRecordSlashCommand,
+                );
+              } catch (error) {
+                logConversationFinishedEvent(
+                  this.config,
+                  new ConversationFinishedEvent(
+                    this.config.getApprovalMode(),
+                    0,
+                  ),
+                );
+                throw error;
+              }
+
+              // If parts is null, the command was fully handled (e.g., /summary completed)
+              // Return early without sending to the model
+              if (parts === null) {
+                logConversationFinishedEvent(
+                  this.config,
+                  new ConversationFinishedEvent(
+                    this.config.getApprovalMode(),
+                    0,
+                  ),
+                );
+                return { stopReason: 'end_turn' };
+              }
+            } else {
+              // Normal processing for non-slash commands. promptLast keeps the
+              // user's instruction the final, prominent part when referenced
+              // file/editor content is appended (issue: ACP + local qwen).
+              parts = await this.#resolvePrompt(
+                modelPromptBlocks,
+                pendingSend.signal,
+                { promptLast: true, onFullTurnModel },
+              );
+            }
+
+            // Fire UserPromptSubmit hook through MessageBus (aligned with core path in client.ts)
             const hooksEnabled = !this.config.getDisableAllHooks?.();
             const messageBus = this.config.getMessageBus?.();
-
-            // R10-8: a retry/continuation strip above removed the user's
-            // entry from history, and the ONLY restore sites are the
-            // push-count-gated catch INSIDE the send loop below (throws)
-            // and the null-stream preserve (graceful returns). Several
-            // pre-send exits sit between the strip and that try — a
-            // UserPromptSubmit block or throw, #resolvePrompt throwing, a
-            // locally-handled slash return, an advisor cancel — and each
-            // would leak the stripped orphan permanently (its transcript
-            // record stays while the live entry is gone). Wrap the whole
-            // pre-send region so any such exit restores the orphan before
-            // leaving; `reachedSendLoop` distinguishes the normal
-            // fall-through into the send loop, where the catch/preserve
-            // sites take over.
+            // A runtime continuation is machine-generated, not a user
+            // submission — the same reason `isContinue` is exempt. Firing
+            // the hook on one is also unrecoverable: a block returns before
+            // `modelStarted`, so `#settleGoalTurn` takes the `releaseTurn`
+            // branch, which re-queues the identical continuation. Nothing in
+            // that cycle can change the goal state, so it spins — no model
+            // call, one persisted transcript record per lap — until someone
+            // pauses or clears the goal.
+            const isRuntimeContinuation = goalTurn?.origin === 'runtime';
             const isFreshUserTurn =
               !isRetry &&
               !isContinue &&
               !isRestoreAskUserQuestion &&
-              goalTurn?.origin !== 'runtime';
-            let reachedSendLoop = false;
-            try {
-              if (isRestoreAskUserQuestion) {
-                parts = [];
-              } else if (isContinue) {
-                // Non-null here: the `none` case returned early above, and both
-                // interruption branches assign a concrete part list.
-                parts = continuationParts!;
-              } else if (isSlashInput) {
-                // Handle slash command in ACP mode using capability-based filtering
-                const slashCommandResult = await handleSlashCommand(
-                  inputText,
-                  pendingSend,
-                  this.config,
-                  this.settings,
-                  {
-                    // `/clear` swaps in a new Goal runtime under this
-                    // long-lived Session; without this the goal-state
-                    // subscription stays on the disposed instance.
-                    startNewSession: () =>
-                      this.rebindGoalRuntimeForNewSession(),
+              !isRuntimeContinuation;
+            if (
+              !isContinue &&
+              !isRestoreAskUserQuestion &&
+              !isRuntimeContinuation &&
+              hooksEnabled &&
+              messageBus &&
+              this.config.hasHooksForEvent?.('UserPromptSubmit')
+            ) {
+              const response = await messageBus.request<
+                HookExecutionRequest,
+                HookExecutionResponse
+              >(
+                {
+                  type: MessageBusType.HOOK_EXECUTION_REQUEST,
+                  eventName: 'UserPromptSubmit',
+                  input: {
+                    prompt: promptText,
                   },
-                  this.slashCommandPolicy,
-                );
-
-                if (
-                  slashCommandName === 'advisor' &&
-                  pendingSend.signal.aborted &&
-                  slashCommandResult.type === 'message'
-                ) {
-                  this.todoStopGuard.suspend();
-                  logConversationFinishedEvent(
-                    this.config,
-                    new ConversationFinishedEvent(
-                      this.config.getApprovalMode(),
-                      0,
-                    ),
-                  );
-                  return { stopReason: 'cancelled' };
-                }
-
-                // Classify by the RESOLVED command, not the raw token: a
-                // custom command named `advisor` shadows the built-in and
-                // must keep its transcript records (R18-6). Only `/advisor`
-                // defers its user-message record to here — every other slash
-                // command was already recorded above, before its action ran.
-                // Retries included: the retry fresh-record branch skips
-                // advisor-named input, so this is the shadow's only record
-                // site when the strip yielded no adoptable identity. A retry
-                // that ADOPTED an identity re-pushes under the original
-                // attempt's record, and that attempt already recorded here
-                // (its push landed after this site) — recording again would
-                // land a second boundary for one positional turn.
-                const resolvedCommandInfo = slashCommandResult.resolvedCommand;
-                const shouldRecordSlashCommand = !(
-                  resolvedCommandInfo?.kind === CommandKind.BUILT_IN &&
-                  resolvedCommandInfo.name === 'advisor'
-                );
-                if (
-                  slashCommandName === 'advisor' &&
-                  shouldRecordSlashCommand &&
-                  goalTurn?.origin !== 'runtime' &&
-                  !(isRetry && resubmittedPromptIdentity !== undefined)
-                ) {
-                  const recorder = this.config.getChatRecordingService();
-                  if (promptDisplayText !== undefined) {
-                    recorder?.recordUserMessage(
-                      promptText,
-                      goalTurn?.permit,
-                      {
-                        displayText: promptDisplayText,
-                        hookContext: '',
-                      },
-                      promptId,
-                    );
-                  } else if (goalTurn) {
-                    recorder?.recordUserMessage(
-                      promptText,
-                      goalTurn.permit,
-                      undefined,
-                      promptId,
-                    );
-                  } else {
-                    recorder?.recordUserMessage(
-                      promptText,
-                      undefined,
-                      undefined,
-                      promptId,
-                    );
-                  }
-                }
-
-                try {
-                  parts = await this.#processSlashCommandResult(
-                    slashCommandResult,
-                    modelPromptBlocks,
-                    pendingSend.signal,
-                    onFullTurnModel,
-                    shouldRecordSlashCommand,
-                  );
-                } catch (error) {
-                  logConversationFinishedEvent(
-                    this.config,
-                    new ConversationFinishedEvent(
-                      this.config.getApprovalMode(),
-                      0,
-                    ),
-                  );
-                  throw error;
-                }
-
-                // If parts is null, the command was fully handled (e.g., /summary completed)
-                // Return early without sending to the model
-                if (parts === null) {
-                  logConversationFinishedEvent(
-                    this.config,
-                    new ConversationFinishedEvent(
-                      this.config.getApprovalMode(),
-                      0,
-                    ),
-                  );
-                  return { stopReason: 'end_turn' };
-                }
-              } else {
-                // Normal processing for non-slash commands. promptLast keeps the
-                // user's instruction the final, prominent part when referenced
-                // file/editor content is appended (issue: ACP + local qwen).
-                parts = await this.#resolvePrompt(
-                  modelPromptBlocks,
-                  pendingSend.signal,
-                  { promptLast: true, onFullTurnModel },
-                );
-              }
-
-              // Fire UserPromptSubmit hook through MessageBus (aligned with core path in client.ts)
-              // A runtime continuation is machine-generated, not a user
-              // submission — the same reason `isContinue` is exempt. Firing
-              // the hook on one is also unrecoverable: a block returns before
-              // `modelStarted`, so `#settleGoalTurn` takes the `releaseTurn`
-              // branch, which re-queues the identical continuation. Nothing in
-              // that cycle can change the goal state, so it spins — no model
-              // call, one persisted transcript record per lap — until someone
-              // pauses or clears the goal.
-              const isRuntimeContinuation = goalTurn?.origin === 'runtime';
-              if (
-                !isContinue &&
-                !isRestoreAskUserQuestion &&
-                !isRuntimeContinuation &&
-                hooksEnabled &&
-                messageBus &&
-                this.config.hasHooksForEvent?.('UserPromptSubmit')
-              ) {
-                const response = await messageBus.request<
-                  HookExecutionRequest,
-                  HookExecutionResponse
-                >(
-                  {
-                    type: MessageBusType.HOOK_EXECUTION_REQUEST,
-                    eventName: 'UserPromptSubmit',
-                    input: {
-                      prompt: promptText,
-                    },
-                    signal: pendingSend.signal,
-                  },
-                  MessageBusType.HOOK_EXECUTION_RESPONSE,
-                );
-                const hookOutput = response.output
-                  ? createHookOutput('UserPromptSubmit', response.output)
-                  : undefined;
-
-                if (
-                  hookOutput?.isBlockingDecision() ||
-                  hookOutput?.shouldStopExecution()
-                ) {
-                  // Hook blocked the prompt - send notification to UI and return
-                  const blockReason =
-                    hookOutput?.getEffectiveReason() || 'No reason provided';
-                  await this.messageEmitter.emitAgentMessage(
-                    `✗ **UserPromptSubmit blocked**: ${blockReason}`,
-                  );
-                  return { stopReason: 'end_turn' };
-                }
-
-                // Add additional context from hooks to the request, wrapped in
-                // the reserved tag so it stays distinguishable from
-                // user-authored text (same shape as the interactive path).
-                const additionalContext = hookOutput?.getAdditionalContext();
-                if (additionalContext) {
-                  parts = [
-                    ...parts,
-                    { text: wrapUserPromptSubmitContext(additionalContext) },
-                  ];
-                }
-              }
-
-              if (isFreshUserTurn) {
-                managedMemoryRecallStarted = true;
-                this.config
-                  .getLlmClient()
-                  .beginManagedAutoMemoryRecall(promptText, pendingSend.signal);
-              }
-
-              if (!continuesCurrentWorkChain && !this.todoStopGuard.enabled) {
-                this.#resetTodoStopGuardBackgroundLineage();
-              }
-              this.config.startActiveTodoWorkChain(
-                promptId,
-                continuesCurrentWorkChain
-                  ? this.activeTodoWorkChainPromptId
-                  : undefined,
+                  signal: pendingSend.signal,
+                },
+                MessageBusType.HOOK_EXECUTION_RESPONSE,
               );
-              this.activeTodoWorkChainPromptId = promptId;
-              reachedSendLoop = true;
-            } finally {
-              if (!reachedSendLoop && strippedOrphanEntries) {
-                // Nothing between the strip and here pushes user content
-                // (pushes happen only inside the send loop), so the gate
-                // always passes on these exits — it is kept verbatim with
-                // the catch's for symmetry and defense.
-                const restoreChat = this.#getCurrentChat();
-                // R13-19: a locally-handled /clear inside this wrapped
-                // region swaps in a fresh LlmChat (clearCommand →
-                // resetChat → startChat). Restoring into the replacement
-                // would re-inject the orphan into the cleared session —
-                // the model would see stale content after 'Context cleared'
-                // and the new session's rewind gates would face a marked
-                // turn with no recording pairing. Skip the restore when the
-                // instance was swapped; the orphan's record stays in the
-                // OLD session's recording, where it belongs. (The R10-7
-                // catch mirror solves the same hazard for the send-loop
-                // path with the orphanSendChat capture.)
-                if (
-                  restoreChat === orphanSourceChat &&
-                  (restoreChat.getUserContentPushCount?.() ?? 0) <=
-                    orphanPushCountSnapshot
-                ) {
-                  for (const entry of strippedOrphanEntries) {
-                    restoreChat.addHistory(entry);
-                  }
-                  strippedOrphanEntries = null;
-                }
+              const hookOutput = response.output
+                ? createHookOutput('UserPromptSubmit', response.output)
+                : undefined;
+
+              if (
+                hookOutput?.isBlockingDecision() ||
+                hookOutput?.shouldStopExecution()
+              ) {
+                // Hook blocked the prompt - send notification to UI and return
+                const blockReason =
+                  hookOutput?.getEffectiveReason() || 'No reason provided';
+                await this.messageEmitter.emitAgentMessage(
+                  `✗ **UserPromptSubmit blocked**: ${blockReason}`,
+                );
+                return { stopReason: 'end_turn' };
+              }
+
+              // Add additional context from hooks to the request, wrapped in
+              // the reserved tag so it stays distinguishable from
+              // user-authored text (same shape as the interactive path).
+              const additionalContext = hookOutput?.getAdditionalContext();
+              if (additionalContext) {
+                parts = [
+                  ...parts,
+                  { text: wrapUserPromptSubmitContext(additionalContext) },
+                ];
               }
             }
 
-            // Snapshot file state for this turn. Placed after slash-command
-            // and hook early-returns so locally handled commands don't create
-            // phantom snapshots that desync the snapshot index. Goal-runtime
-            // turns keep their snapshot too — every positional turn must own
-            // one (#snapshotTurnStart documents the invariant). Restore
-            // continuations record no user message; rewindToTurn() indexes
-            // snapshots by user-turn position, so skip them.
-            //
-            // R8-13: the capture is LAZY — taken inside beforeSend of the
-            // first send that actually leaves, mirroring the cron/loop and
-            // background-notification paths (R8-12). A prompt dropped by the
-            // session-token-limit check never pushes a positional turn, so an
-            // eager turn-start snapshot would stay a permanent phantom
-            // (snapshots = turns + 1) that fails the strict legacy pairing
-            // gates closed until /clear. #sendMessageStreamWithAutoCompression
-            // runs beforeSend only after its abort and token-limit checks, and
-            // no file mutations happen between turn start and the first send
-            // (only history compression), so the capture contents are
-            // identical to an eager one. A send cancelled AFTER the capture
-            // still preserves its message, so the null-stream branch below
-            // catches the snapshot up for the preserved turn.
-            const turnStartSnapshotEligible =
-              !isContinue && !isRetry && !isRestoreAskUserQuestion;
-            let promptTurnSnapshotTaken = false;
+            if (isFreshUserTurn) {
+              managedMemoryRecallStarted = true;
+              this.config
+                .getLlmClient()
+                .beginManagedAutoMemoryRecall(promptText, pendingSend.signal);
+            }
+
+            if (!continuesCurrentWorkChain && !this.todoStopGuard.enabled) {
+              this.#resetTodoStopGuardBackgroundLineage();
+            }
+            this.config.startActiveTodoWorkChain(
+              promptId,
+              continuesCurrentWorkChain
+                ? this.activeTodoWorkChainPromptId
+                : undefined,
+            );
+            this.activeTodoWorkChainPromptId = promptId;
+
+            // Snapshot file state before this turn (mirrors the makeSnapshot
+            // block in LlmClient.sendMessageStream). Placed after
+            // slash-command and hook early-returns so locally handled commands
+            // don't create phantom snapshots that desync the snapshot index.
+            // Restore continuations record no user message; rewindToTurn()
+            // indexes snapshots by user-turn position, so skip them.
+            if (!isRestoreAskUserQuestion) {
+              try {
+                const fileHistoryService = this.config.getFileHistoryService();
+                await fileHistoryService.makeSnapshot(promptId);
+                try {
+                  const latestSnapshot = fileHistoryService
+                    .getSnapshots()
+                    .at(-1);
+                  if (latestSnapshot) {
+                    this.config
+                      .getChatRecordingService()
+                      ?.recordFileHistorySnapshot(latestSnapshot);
+                  }
+                } catch (e) {
+                  debugLogger.error(`FileHistory: recordSnapshot failed: ${e}`);
+                }
+              } catch (e) {
+                debugLogger.error(`FileHistory: makeSnapshot failed: ${e}`);
+              }
+            }
 
             // Prepend session-level system reminders (plan mode / subagent /
             // arena) so the model sees them, matching the behaviour of
@@ -6535,19 +5651,6 @@ export class Session implements SessionContext {
             }
 
             let nextMessage: Content | null = { role: 'user', parts };
-            if (goalTurn?.origin !== 'runtime') {
-              markApiHistoryPrompt(
-                nextMessage,
-                isContinue
-                  ? resubmittedPromptIdentity
-                  : isRetry
-                    ? // A retry with no adoptable stripped identity was
-                      // recorded fresh above — mark it with the new promptId
-                      // so it stays in the identified rewind projection.
-                      (resubmittedPromptIdentity ?? promptId)
-                    : promptId,
-              );
-            }
             let turnCount = 0;
             let restorePostAnswerNoticesAttached = false;
             const toolLoopState = createDaemonToolLoopState(
@@ -6738,83 +5841,17 @@ export class Session implements SessionContext {
                       promptId,
                       nextMessage?.parts ?? [],
                       pendingSend.signal,
-                      {
-                        modelOverride: fullTurnModelOverride,
-                        promptIdentity:
-                          turnCount === 1
-                            ? getApiHistoryPromptId(nextMessage)
-                            : undefined,
-                        // R10-7: capture the ACTUAL send chat and its push
-                        // count after compression (this callback runs after
-                        // tryCompressChat, right before the provider send),
-                        // so the orphan restore gate below compares counters
-                        // on the SAME instance that pushes. Mirrors the
-                        // guard-preservation capture (`providerSendChat`).
-                        beforeSend: async () => {
-                          if (turnCount === 1) {
-                            orphanSendChat = this.#getCurrentChat();
-                            orphanSendPushCountBeforeSend =
-                              orphanSendChat.getUserContentPushCount?.() ?? 0;
-                          }
-                          // R8-13: the lazy turn-start snapshot (see the
-                          // declaration above) — runs only once the send is
-                          // past the abort and session-token-limit checks, so
-                          // a dropped prompt never creates a phantom snapshot.
-                          if (
-                            turnStartSnapshotEligible &&
-                            !promptTurnSnapshotTaken
-                          ) {
-                            promptTurnSnapshotTaken = true;
-                            await this.#snapshotTurnStart(promptId);
-                          }
-                          return {
-                            kind: 'send',
-                            message: nextMessage?.parts ?? [],
-                          };
-                        },
-                      },
+                      { modelOverride: fullTurnModelOverride },
                     );
                   if (!sendResult.responseStream) {
                     this.todoStopGuard.suspend();
                     // Preserve the full message (not just functionResponse
-                    // parts) for a continuation or retry: its content was
-                    // stripped from history before the send, so dropping it
-                    // here on a non-cancelled failure would lose the turn
-                    // the user never got an answer to. The push-count-gated
-                    // catch below never runs on this RETURN path, so this is
-                    // the only restore site for a graceful null stream
-                    // (e.g. the session-token-limit stop).
+                    // parts) for a continuation: its content was stripped from
+                    // history before the send, so dropping it here on a
+                    // non-cancelled failure would lose the orphaned turn the
+                    // user never got an answer to.
                     const preserveFullMessage =
-                      isContinue ||
-                      isRetry ||
-                      sendResult.stopReason === 'cancelled';
-                    if (!preserveFullMessage && turnCount === 1) {
-                      // R8-13: a non-cancelled drop of the FIRST send (the
-                      // session-token-limit stop) discards the message, so no
-                      // positional turn materializes — but recordUserMessage
-                      // already pushed a recording boundary before the send.
-                      // Retire it (and any turn-start snapshot) so the
-                      // boundary/snapshot space stays aligned with the
-                      // positional turns; a leaked boundary permanently fails
-                      // the strict legacy pairing gates closed until /clear.
-                      // Mirrors the lazy-snapshot guard the cron/notification
-                      // paths use for the same drop shape (R8-12). Gated on
-                      // turnCount === 1: a drop on a later tool-loop lap
-                      // arrives after the first send pushed the user content,
-                      // so the turn DOES exist there and its boundary must
-                      // stay.
-                      this.#retireDroppedTurnArtifacts(promptId);
-                    } else if (
-                      sendResult.stopReason === 'cancelled' &&
-                      turnStartSnapshotEligible &&
-                      !promptTurnSnapshotTaken
-                    ) {
-                      // A cancelled send preserves the message, so the turn
-                      // materializes after all — catch up the lazy turn-start
-                      // snapshot it needs (mirrors the cron path).
-                      promptTurnSnapshotTaken = true;
-                      await this.#snapshotTurnStart(promptId);
-                    }
+                      isContinue || sendResult.stopReason === 'cancelled';
                     this.#preserveUnsentMessageHistory(
                       nextMessage,
                       preserveFullMessage,
@@ -6941,23 +5978,11 @@ export class Session implements SessionContext {
                   // the core Retry restore in client.ts — so we only restore
                   // when the content never landed (a later tool-loop send
                   // throwing leaves the counter advanced → no double-restore).
-                  //
-                  // R10-7: the counters must come from the SAME chat
-                  // instance. When compression swapped the chat during the
-                  // resend, `this.#getCurrentChat()` is the fresh instance
-                  // (counter reset to 0) while `orphanPushCountSnapshot`
-                  // was captured on the pre-compression one — comparing
-                  // across instances double-restores the orphan on top of a
-                  // landed resend. Prefer the send-time capture; fall back
-                  // to the strip-time pair only when the send was never
-                  // reached (the throw left the current chat unchanged or
-                  // replaced it before any push, so restoring is correct).
-                  const orphanRestoreGatePassed = orphanSendChat
-                    ? (orphanSendChat.getUserContentPushCount?.() ?? 0) <=
-                      orphanSendPushCountBeforeSend
-                    : (this.#getCurrentChat().getUserContentPushCount?.() ??
-                        0) <= orphanPushCountSnapshot;
-                  if (strippedOrphanEntries && orphanRestoreGatePassed) {
+                  if (
+                    strippedOrphanEntries &&
+                    (this.#getCurrentChat().getUserContentPushCount?.() ?? 0) <=
+                      orphanPushCountSnapshot
+                  ) {
                     for (const entry of strippedOrphanEntries) {
                       this.#getCurrentChat().addHistory(entry);
                     }
@@ -8460,7 +7485,6 @@ export class Session implements SessionContext {
       beforeSend?: (
         context: BeforeModelSendContext,
       ) => Promise<BeforeModelSendDecision>;
-      promptIdentity?: string;
     } = {},
   ): Promise<AutoCompressionSendResult> {
     const llmClient = this.config.getLlmClient()!;
@@ -8497,14 +7521,6 @@ export class Session implements SessionContext {
           compressed.compressionStatus,
         );
         if (compressed.compressionStatus === CompressionStatus.COMPRESSED) {
-          // R13-18: compression replaces the WHOLE live history, and the
-          // undo staleness fingerprint is add-only — it cannot detect the
-          // removal. In an all-unmarked (legacy-projection) session the
-          // user-text count lands back at the checkpoint's with every
-          // per-index comparison null===null, so a replayed undo pair would
-          // apply the pre-rewind rollback across whatever landed after the
-          // rewind. Drop the checkpoint so the undo fails closed instead.
-          this.rewindCheckpoint = undefined;
           // Context was just compacted; a loop.md tick must re-deliver the full
           // task block (a short reminder refers back to a message that is no
           // longer in context).
@@ -8642,24 +7658,9 @@ export class Session implements SessionContext {
       },
     };
     const goalPermit = goalTurnContext.getStore();
-    const sendOptions = options.promptIdentity
-      ? { promptId: options.promptIdentity }
-      : undefined;
     const responseStream = goalPermit
-      ? await chat.sendMessageStream(
-          model,
-          request,
-          promptId,
-          goalPermit,
-          sendOptions,
-        )
-      : await chat.sendMessageStream(
-          model,
-          request,
-          promptId,
-          undefined,
-          sendOptions,
-        );
+      ? await chat.sendMessageStream(model, request, promptId, goalPermit)
+      : await chat.sendMessageStream(model, request, promptId);
     return { responseStream, requestRouteKey };
   }
 
@@ -9856,22 +8857,6 @@ export class Session implements SessionContext {
                   { text: modelText },
                 ],
               };
-              // A cron/loop turn bypasses prompt() but still counts as a
-              // positional user turn (#isUserTextContent passes its text),
-              // so it must own a turn-start snapshot like an ordinary prompt
-              // — skipping it desyncs the legacy snapshot↔turn zip from this
-              // turn onward. Taken lazily right before the first send that
-              // actually leaves — #sendMessageStreamWithAutoCompression runs
-              // beforeSend only after its abort and session-token-limit
-              // checks — so a turn that never sends (cancelled during
-              // startup, or dropped by the token limit) creates no phantom
-              // snapshot that no positional turn ever owns; a send that is
-              // cancelled AFTER the snapshot still preserves its message via
-              // the null-stream branch, so the snapshot keeps its owning
-              // turn. No file mutations happen between turn start and the
-              // first send (only history compression), so the snapshot
-              // contents are identical to a pre-loop capture.
-              let cronTurnSnapshotTaken = false;
               const toolLoopState = createDaemonToolLoopState('off');
 
               while (nextMessage !== null) {
@@ -9893,33 +8878,9 @@ export class Session implements SessionContext {
                     promptId,
                     nextMessage.parts ?? [],
                     ac.signal,
-                    {
-                      beforeSend: async () => {
-                        if (!cronTurnSnapshotTaken) {
-                          cronTurnSnapshotTaken = true;
-                          await this.#snapshotTurnStart(promptId);
-                        }
-                        return {
-                          kind: 'send',
-                          message: nextMessage?.parts ?? [],
-                        };
-                      },
-                    },
                   );
                 if (!sendResult.responseStream) {
                   this.todoStopGuard.suspend();
-                  // A cancelled send preserves the full message in history,
-                  // so the positional turn materializes after all — give it
-                  // the snapshot the lazy turn-start capture skipped. A
-                  // non-cancelled drop preserves no text-only message, so no
-                  // turn materializes and no snapshot may be created either.
-                  if (
-                    sendResult.stopReason === 'cancelled' &&
-                    !cronTurnSnapshotTaken
-                  ) {
-                    cronTurnSnapshotTaken = true;
-                    await this.#snapshotTurnStart(promptId);
-                  }
                   this.#preserveUnsentMessageHistory(
                     nextMessage,
                     sendResult.stopReason === 'cancelled',
@@ -10631,15 +9592,6 @@ export class Session implements SessionContext {
               ...notificationParts,
             ],
           };
-          // A background-notification turn bypasses prompt() but still
-          // counts as a positional user turn (#isUserTextContent passes its
-          // text), so it must own a turn-start snapshot like an ordinary
-          // prompt — skipping it desyncs the legacy snapshot↔turn zip from
-          // this turn onward. Taken lazily right before the first send that
-          // actually leaves (see the cron/loop path for the full rationale):
-          // a turn cancelled during startup or dropped by the session-token
-          // limit never sends and must not leave a phantom snapshot behind.
-          let notificationTurnSnapshotTaken = false;
           const toolLoopState = createDaemonToolLoopState('off');
 
           while (nextMessage !== null) {
@@ -10662,33 +9614,9 @@ export class Session implements SessionContext {
               promptId,
               nextMessage.parts ?? [],
               ac.signal,
-              {
-                beforeSend: async () => {
-                  if (!notificationTurnSnapshotTaken) {
-                    notificationTurnSnapshotTaken = true;
-                    await this.#snapshotTurnStart(promptId);
-                  }
-                  return {
-                    kind: 'send',
-                    message: nextMessage?.parts ?? [],
-                  };
-                },
-              },
             );
             if (!sendResult.responseStream) {
               this.todoStopGuard.suspend();
-              // A cancelled send preserves the full message in history, so
-              // the positional turn materializes after all — give it the
-              // snapshot the lazy turn-start capture skipped. A non-cancelled
-              // drop preserves no text-only message, so no turn materializes
-              // and no snapshot may be created either (see the cron path).
-              if (
-                sendResult.stopReason === 'cancelled' &&
-                !notificationTurnSnapshotTaken
-              ) {
-                notificationTurnSnapshotTaken = true;
-                await this.#snapshotTurnStart(promptId);
-              }
               this.#preserveUnsentMessageHistory(
                 nextMessage,
                 sendResult.stopReason === 'cancelled',
