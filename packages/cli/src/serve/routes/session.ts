@@ -106,6 +106,7 @@ import {
   listLiveWorkspaceSessionsForResponse,
   listWorkspaceSessionsForResponse,
   parseSessionPageSizeQuery,
+  searchWorkspaceSessionsForResponse,
 } from '../server/session-list.js';
 import {
   archiveDaemonSessions,
@@ -6743,6 +6744,137 @@ export function registerSessionRoutes(
   app.get(
     '/workspaces/:workspace/sessions',
     listWorkspaceSessionsHandler('workspace'),
+  );
+
+  const SESSION_SEARCH_QUERY_MAX_LENGTH = 200;
+  const SESSION_SEARCH_MAX_RESULTS_LIMIT = 50;
+
+  // Content search over persisted session transcripts. Workspace-scoped like
+  // the sessions list route above: resolved-runtime only, read-only
+  // secondaries search their persisted store, never falls back to primary.
+  const searchWorkspaceSessionsHandler =
+    (paramName: 'id' | 'workspace'): RequestHandler =>
+    async (req, res) => {
+      const route =
+        paramName === 'workspace'
+          ? 'GET /workspaces/:workspace/sessions/search'
+          : 'GET /workspace/:id/sessions/search';
+      const liveRuntime = await resolveLiveCatalogRuntime(req, res, paramName);
+      if (liveRuntime === null) return;
+      const runtime =
+        liveRuntime ??
+        resolveRuntimeForCatalogRoute(req, res, paramName, route);
+      if (runtime === null) return;
+      const key = runtime.workspaceCwd;
+      try {
+        const rawQuery = req.query['q'];
+        // Cap the trimmed query, consistent with the emptiness check and
+        // the matcher — whitespace padding the scan would discard must not
+        // count against the limit.
+        const trimmedQuery =
+          typeof rawQuery === 'string' ? rawQuery.trim() : '';
+        if (
+          trimmedQuery.length === 0 ||
+          trimmedQuery.length > SESSION_SEARCH_QUERY_MAX_LENGTH
+        ) {
+          res.status(400).json({
+            error: `\`q\` must be a non-empty string of at most ${SESSION_SEARCH_QUERY_MAX_LENGTH} characters`,
+            code: 'invalid_search_query',
+          });
+          return;
+        }
+        let maxResults: number | undefined;
+        const rawMaxResults = req.query['maxResults'];
+        if (rawMaxResults !== undefined) {
+          const parsed =
+            typeof rawMaxResults === 'string' && /^\d+$/.test(rawMaxResults)
+              ? Number.parseInt(rawMaxResults, 10)
+              : Number.NaN;
+          if (
+            !Number.isSafeInteger(parsed) ||
+            parsed < 1 ||
+            parsed > SESSION_SEARCH_MAX_RESULTS_LIMIT
+          ) {
+            res.status(400).json({
+              error: `\`maxResults\` must be an integer between 1 and ${SESSION_SEARCH_MAX_RESULTS_LIMIT}`,
+              code: 'invalid_search_max_results',
+            });
+            return;
+          }
+          maxResults = parsed;
+        }
+        const controller = new AbortController();
+        const onRequestAborted = () => {
+          controller.abort(new DOMException('Request aborted', 'AbortError'));
+        };
+        const onResponseClosed = () => {
+          if (!res.writableEnded) {
+            controller.abort(new DOMException('Response closed', 'AbortError'));
+          }
+        };
+        req.once('aborted', onRequestAborted);
+        res.once('close', onResponseClosed);
+        if (req.aborted || res.destroyed) onRequestAborted();
+        try {
+          const search = () =>
+            runWorkspaceInspectionWithLogPolicy(runtime, () =>
+              searchWorkspaceSessionsForResponse(
+                key,
+                trimmedQuery,
+                { ...(maxResults !== undefined ? { maxResults } : {}) },
+                {
+                  runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+                  signal: controller.signal,
+                },
+              ),
+            );
+          const result =
+            liveRuntime && deps.conversationRuntimeActivity
+              ? await deps.conversationRuntimeActivity.run(search)
+              : await search();
+          controller.signal.throwIfAborted();
+          if (res.destroyed) return;
+          res.status(200).json({ results: result.results });
+        } catch (err) {
+          if (controller.signal.aborted || res.destroyed) {
+            return;
+          }
+          throw err;
+        } finally {
+          req.off('aborted', onRequestAborted);
+          res.off('close', onResponseClosed);
+        }
+      } catch (err) {
+        if (
+          err &&
+          typeof err === 'object' &&
+          (err as { code?: unknown }).code === 'daemon_draining'
+        ) {
+          res.status(503).json({
+            error: 'The daemon is draining and no longer accepts work.',
+            code: 'daemon_draining',
+          });
+          return;
+        }
+        writeStderrLine(
+          `qwen serve: failed to search sessions for workspace ${safeLogValue(
+            key,
+          )}: ${safeLogValue(err instanceof Error ? err.message : String(err))}`,
+        );
+        res.status(500).json({
+          error: 'Failed to search sessions',
+          code: 'session_search_failed',
+        });
+      }
+    };
+
+  app.get(
+    '/workspace/:id/sessions/search',
+    searchWorkspaceSessionsHandler('id'),
+  );
+  app.get(
+    '/workspaces/:workspace/sessions/search',
+    searchWorkspaceSessionsHandler('workspace'),
   );
 
   // Last catalog version successfully exposed per bridge by the live-state

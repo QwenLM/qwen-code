@@ -32,6 +32,7 @@ import {
   PromptDeadlineExceededError,
   resolvePromptDeadlineMs,
 } from './server.js';
+import { withSessionWorkflowWriteLock } from './routes/workspace-settings.js';
 import {
   invalidateWorkspaceSessionListCache,
   listLiveWorkspaceSessionsForResponse,
@@ -71,6 +72,10 @@ import {
   type ServeProtocolVersion,
 } from './capabilities.js';
 import { isNativeDirectoryPickerAvailable } from './native-directory-picker.js';
+import {
+  isLocalPathOpenAvailable,
+  isLocalTerminalAvailable,
+} from './local-path-open.js';
 import type {
   CancelNotification,
   PromptRequest,
@@ -103,7 +108,10 @@ import {
 } from '@qwen-code/qwen-code-core';
 import * as qwenCore from '@qwen-code/qwen-code-core';
 import type { DaemonStatusProvider } from '@qwen-code/acp-bridge';
-import { BridgeTimeoutError } from '@qwen-code/acp-bridge/status';
+import {
+  BridgeTimeoutError,
+  SERVE_CONTROL_EXT_METHODS,
+} from '@qwen-code/acp-bridge/status';
 import {
   CancelSentinelCollisionError,
   InvalidClientIdError,
@@ -799,6 +807,8 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_runtime_removal',
   'native_directory_picker',
   'workspace_runtime',
+  'workspace_local_open',
+  'workspace_local_terminal',
   'workspace_qualified_rest_core',
   'workspace_qualified_voice',
   'workspace_qualified_memory',
@@ -3363,6 +3373,34 @@ describe('createServeApp', () => {
           );
           continue;
         }
+        if (feature === 'workspace_local_open') {
+          expect(predicate({ localPathOpenAvailable: true })).toBe(true);
+          expect(predicate({ localPathOpenAvailable: false })).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              localPathOpenAvailable: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
+        if (feature === 'workspace_local_terminal') {
+          expect(predicate({ localTerminalOpenAvailable: true })).toBe(true);
+          expect(predicate({ localTerminalOpenAvailable: false })).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              localTerminalOpenAvailable: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
         if (feature === 'workspace_trust_hot_reload') {
           expect(predicate({ workspaceTrustHotReloadAvailable: true })).toBe(
             true,
@@ -4390,6 +4428,8 @@ describe('createServeApp', () => {
             // Mirror the server.ts probe so the expectation matches on both
             // GUI and headless hosts.
             nativeDirectoryPickerAvailable: isNativeDirectoryPickerAvailable(),
+            localPathOpenAvailable: isLocalPathOpenAvailable(),
+            localTerminalOpenAvailable: isLocalTerminalAvailable(),
           }),
         );
         expect(res.body.modelServices).toEqual([]);
@@ -4425,6 +4465,46 @@ describe('createServeApp', () => {
         .get('/capabilities')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(disabled.body.features).not.toContain('native_directory_picker');
+    });
+
+    it('forwards the local path open probe result to capabilities', async () => {
+      const enabled = await request(
+        createServeApp(baseOpts, undefined, {
+          localPathOpenAvailable: true,
+        }),
+      )
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(enabled.body.features).toContain('workspace_local_open');
+
+      const disabled = await request(
+        createServeApp(baseOpts, undefined, {
+          localPathOpenAvailable: false,
+        }),
+      )
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(disabled.body.features).not.toContain('workspace_local_open');
+    });
+
+    it('forwards the local terminal open probe result to capabilities', async () => {
+      const enabled = await request(
+        createServeApp(baseOpts, undefined, {
+          localTerminalOpenAvailable: true,
+        }),
+      )
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(enabled.body.features).toContain('workspace_local_terminal');
+
+      const disabled = await request(
+        createServeApp(baseOpts, undefined, {
+          localTerminalOpenAvailable: false,
+        }),
+      )
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(disabled.body.features).not.toContain('workspace_local_terminal');
     });
 
     it('omits artifact persistence when the durable sink is unavailable', async () => {
@@ -4492,6 +4572,86 @@ describe('createServeApp', () => {
       expect(after.status).toBe(200);
       expect(after.body.features).toContain('multi_workspace_sessions');
       expect(after.body.workspaces).toHaveLength(2);
+    });
+
+    it('fans a user-scope Session Workflow write out to sibling workspace bridges (R6-4)', async () => {
+      // A user-scope write persists to the global user file and flips the
+      // gate for every workspace, but each runtime owns its own bridge. The
+      // legacy route's push must reach the sibling runtimes too, not just
+      // the primary.
+      const primaryInvoke = vi.fn().mockResolvedValue(undefined);
+      const secondaryInvoke = vi.fn().mockResolvedValue(undefined);
+      const primaryBridge = {
+        ...fakeBridge(),
+        invokeWorkspaceCommand: primaryInvoke,
+        publishWorkspaceEvent: vi.fn(),
+      } as unknown as AcpSessionBridge;
+      const secondaryBridge = {
+        invokeWorkspaceCommand: secondaryInvoke,
+      } as unknown as AcpSessionBridge;
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'primary-id',
+          workspaceCwd: WS_BOUND,
+          primary: true,
+          bridge: primaryBridge,
+        }),
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'secondary-id',
+          workspaceCwd: '/workspace/secondary',
+          primary: false,
+          bridge: secondaryBridge,
+        }),
+      ]);
+      const app = createServeApp({ ...baseOpts, token: 'secret' }, undefined, {
+        bridge: primaryBridge,
+        workspaceRegistry: registry,
+        persistSetting: vi.fn(async () => undefined),
+      });
+
+      let releaseSiblingWrite!: () => void;
+      let siblingWriteStarted!: () => void;
+      const siblingWriteReady = new Promise<void>((resolve) => {
+        siblingWriteStarted = resolve;
+      });
+      const siblingWriteBlocked = new Promise<void>((resolve) => {
+        releaseSiblingWrite = resolve;
+      });
+      const heldSiblingWrite = withSessionWorkflowWriteLock(
+        '/workspace/secondary',
+        async () => {
+          siblingWriteStarted();
+          await siblingWriteBlocked;
+        },
+      );
+      await siblingWriteReady;
+
+      const response = request(app)
+        .post('/workspace/settings')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .send({
+          scope: 'user',
+          key: 'experimental.sessionWorkflow',
+          value: true,
+        })
+        .then((res) => res);
+
+      await vi.waitFor(() => expect(primaryInvoke).toHaveBeenCalled());
+      expect(secondaryInvoke).not.toHaveBeenCalled();
+      releaseSiblingWrite();
+      const res = await response;
+      await heldSiblingWrite;
+
+      expect(res.status).toBe(200);
+      expect(primaryInvoke).toHaveBeenCalledWith(
+        SERVE_CONTROL_EXT_METHODS.workspaceSessionWorkflow,
+        { enabled: expect.any(Boolean) },
+      );
+      expect(secondaryInvoke).toHaveBeenCalledWith(
+        SERVE_CONTROL_EXT_METHODS.workspaceSessionWorkflow,
+        { enabled: expect.any(Boolean) },
+      );
     });
 
     it('classifies the daemon-owned Live runtime without exposing provenance', async () => {
