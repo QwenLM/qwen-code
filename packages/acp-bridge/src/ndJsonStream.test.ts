@@ -526,6 +526,54 @@ describe('ndJsonStream', () => {
     await stream.readable.cancel();
   });
 
+  it('warns once per saturation episode, not once per saturating frame', async () => {
+    let inputController!: ReadableStreamDefaultController<Uint8Array>;
+    const input = new ReadableStream<Uint8Array>({
+      start(controller) {
+        inputController = controller;
+      },
+    });
+    const frames = [
+      message('first', { text: 'x'.repeat(120) }),
+      message('second', { text: 'y'.repeat(120) }),
+      message('third', { text: 'z'.repeat(120) }),
+    ];
+    const onQueueSaturated = vi.fn();
+    const onTransportError = vi.fn();
+    const stream = ndJsonStream(
+      new WritableStream<Uint8Array>(),
+      input,
+      { onQueueSaturated, onTransportError },
+      limits({
+        maxFrameBytes: 1024,
+        maxQueuedMessages: 3,
+        maxQueuedBytes: 220,
+        queueSaturationGraceMs: 5_000,
+      }),
+    );
+    inputController.enqueue(
+      encoder.encode(
+        frames.map((frame) => `${JSON.stringify(frame)}\n`).join(''),
+      ),
+    );
+
+    // Frame one fits; frames two and three each saturate before the queue
+    // fully drains, but only the first saturation of the episode warns.
+    await vi.waitFor(() => expect(onQueueSaturated).toHaveBeenCalledOnce());
+    const reader = stream.readable.getReader();
+    for (const frame of frames) {
+      await expect(reader.read()).resolves.toMatchObject({
+        value: frame,
+        done: false,
+      });
+    }
+    inputController.close();
+    await expect(reader.read()).resolves.toMatchObject({ done: true });
+    expect(onQueueSaturated).toHaveBeenCalledOnce();
+    expect(onTransportError).not.toHaveBeenCalled();
+    reader.releaseLock();
+  });
+
   it('cancel while backpressured wakes the pump without a transport error', async () => {
     let inputController!: ReadableStreamDefaultController<Uint8Array>;
     const input = new ReadableStream<Uint8Array>({

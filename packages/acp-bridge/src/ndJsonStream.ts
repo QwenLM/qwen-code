@@ -5,6 +5,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { performance } from 'node:perf_hooks';
 import { inspect } from 'node:util';
 import type { AnyMessage, Stream } from '@agentclientprotocol/sdk';
 
@@ -29,8 +30,10 @@ export interface NdJsonStreamHooks {
   onTransportError?: (error: unknown) => void;
   /**
    * Fired once per saturation episode, before the bounded backpressure wait
-   * starts. Warns that the decoded queue is full BEFORE the fail-closed
-   * guard can fire (issue #10162).
+   * starts. An episode ends when the queue fully drains, so a chronically
+   * borderline consumer produces one warning per episode, not one per frame.
+   * Warns that the decoded queue is full BEFORE the fail-closed guard can
+   * fire (issue #10162).
    */
   onQueueSaturated?: (info: NdJsonQueueSaturationInfo) => void;
 }
@@ -246,6 +249,9 @@ function createBoundedReadable(
   let nextQueueCharge = minimumQueueCharge;
   let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   let canceled = false;
+  // Dedup state for onQueueSaturated: one warning per uninterrupted
+  // saturation episode, reset once the queue fully drains.
+  const saturationEpisode = { warned: false };
   // Single waiter: only the pump loop ever waits for queue space.
   let wakeQueueWaiter: (() => void) | undefined;
   const waitForQueueSpace = (timeoutMs: number): Promise<void> =>
@@ -277,6 +283,7 @@ function createBoundedReadable(
           minimumQueueCharge,
           graceMs,
           waitForQueueSpace,
+          saturationEpisode,
           (charge) => {
             nextQueueCharge = charge;
           },
@@ -316,6 +323,7 @@ async function pumpBoundedInput(
   minimumQueueCharge: number,
   queueSaturationGraceMs: number,
   waitForQueueSpace: (timeoutMs: number) => Promise<void>,
+  saturationEpisode: SaturationEpisodeState,
   setNextQueueCharge: (charge: number) => void,
   isCanceled: () => boolean,
 ): Promise<void> {
@@ -345,6 +353,7 @@ async function pumpBoundedInput(
         minimumQueueCharge,
         queueSaturationGraceMs,
         waitForQueueSpace,
+        saturationEpisode,
         setNextQueueCharge,
         isCanceled,
       );
@@ -403,6 +412,7 @@ async function readBoundedChunk(
   minimumQueueCharge: number,
   queueSaturationGraceMs: number,
   waitForQueueSpace: (timeoutMs: number) => Promise<void>,
+  saturationEpisode: SaturationEpisodeState,
   setNextQueueCharge: (charge: number) => void,
   isCanceled: () => boolean,
 ): Promise<void> {
@@ -425,6 +435,7 @@ async function readBoundedChunk(
       queueCharge,
       queueSaturationGraceMs,
       waitForQueueSpace,
+      saturationEpisode,
       hooks,
       isCanceled,
     });
@@ -445,12 +456,17 @@ async function readBoundedChunk(
   if (start < chunk.length) pending.append(chunk.subarray(start));
 }
 
+interface SaturationEpisodeState {
+  warned: boolean;
+}
+
 interface DecodedQueueSpaceOptions {
   controller: ReadableStreamDefaultController<AnyMessage>;
   limits: NdJsonStreamLimits;
   queueCharge: number;
   queueSaturationGraceMs: number;
   waitForQueueSpace: (timeoutMs: number) => Promise<void>;
+  saturationEpisode: SaturationEpisodeState;
   hooks: NdJsonStreamHooks | undefined;
   isCanceled: () => boolean;
 }
@@ -468,6 +484,7 @@ async function waitForDecodedQueueSpace({
   queueCharge,
   queueSaturationGraceMs,
   waitForQueueSpace,
+  saturationEpisode,
   hooks,
   isCanceled,
 }: DecodedQueueSpaceOptions): Promise<void> {
@@ -479,6 +496,11 @@ async function waitForDecodedQueueSpace({
       queueCharge,
       0,
     );
+  }
+  // The queue fully drained: the previous saturation episode is over and a
+  // new one may warn again.
+  if (availableBytes === limits.maxQueuedBytes) {
+    saturationEpisode.warned = false;
   }
   if (queueCharge <= availableBytes) return;
   // A frame that would not fit even in a fully drained queue can never be
@@ -492,18 +514,22 @@ async function waitForDecodedQueueSpace({
     );
   }
 
-  callHook(hooks?.onQueueSaturated, {
-    requiredBytes: queueCharge,
-    availableBytes: Math.max(0, availableBytes),
-    maxQueuedMessages: limits.maxQueuedMessages,
-    maxQueuedBytes: limits.maxQueuedBytes,
-    graceMs: queueSaturationGraceMs,
-  });
+  if (!saturationEpisode.warned) {
+    saturationEpisode.warned = true;
+    callHook(hooks?.onQueueSaturated, {
+      requiredBytes: queueCharge,
+      availableBytes: Math.max(0, availableBytes),
+      maxQueuedMessages: limits.maxQueuedMessages,
+      maxQueuedBytes: limits.maxQueuedBytes,
+      graceMs: queueSaturationGraceMs,
+    });
+  }
 
-  const deadline = Date.now() + queueSaturationGraceMs;
+  // Monotonic: wall-clock steps must not extend or shorten the grace window.
+  const deadline = performance.now() + queueSaturationGraceMs;
   while (queueCharge > availableBytes) {
     if (isCanceled()) return;
-    const remainingMs = deadline - Date.now();
+    const remainingMs = deadline - performance.now();
     if (remainingMs <= 0) {
       throw new NdJsonQueueLimitError(
         limits.maxQueuedMessages,
