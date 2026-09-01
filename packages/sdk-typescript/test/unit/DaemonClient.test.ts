@@ -337,6 +337,63 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('searchWorkspaceSessions', () => {
+    it('GETs the sessions search route with q and optional maxResults', async () => {
+      const body = {
+        results: [
+          {
+            session: { sessionId: 'abc', workspaceCwd: '/work/a' },
+            snippet: '...qdrant pipeline...',
+          },
+        ],
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, body));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      const res = await client.searchWorkspaceSessions('/work/a', 'qdrant', {
+        maxResults: 10,
+      });
+
+      expect(res).toEqual(body);
+      expect(calls[0]?.url).toBe(
+        `http://daemon/workspace/${encodeURIComponent('/work/a')}/sessions/search?q=qdrant&maxResults=10`,
+      );
+      expect(calls[0]?.method).toBe('GET');
+    });
+
+    it('omits maxResults when not provided and forwards the abort signal', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { results: [] }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const controller = new AbortController();
+
+      await client.searchWorkspaceSessions('/work/a', 'qdrant', {
+        signal: controller.signal,
+      });
+
+      expect(calls[0]?.url).toBe(
+        `http://daemon/workspace/${encodeURIComponent('/work/a')}/sessions/search?q=qdrant`,
+      );
+      // The client composes the caller signal with its timeout signal.
+      const seen = calls[0]?.signal;
+      expect(seen).toBeInstanceOf(AbortSignal);
+      expect(seen?.aborted).toBe(false);
+      controller.abort();
+      expect(seen?.aborted).toBe(true);
+    });
+
+    it('throws DaemonHttpError on non-2xx (e.g. older daemon 404)', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(404, { error: 'Not found' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.searchWorkspaceSessions('/work/a', 'qdrant'),
+      ).rejects.toBeInstanceOf(DaemonHttpError);
+    });
+  });
+
   describe('capabilities', () => {
     it('GETs /capabilities and returns the v1 envelope', async () => {
       const envelope = {
@@ -1543,6 +1600,76 @@ describe('DaemonClient', () => {
         ['POST', `${base}/git/commit?cwd=${enc}`],
         ['POST', `${base}/github/prs/create?cwd=${enc}`],
       ]);
+    });
+
+    it('lets workspaceGitPull outsize the client default fetch timeout', async () => {
+      let resolveResponse: ((value: Response) => void) | undefined;
+      const slowFetch = vi.fn(
+        (_input: RequestInfo | URL, init?: { signal?: AbortSignal | null }) =>
+          new Promise<Response>((resolve, reject) => {
+            resolveResponse = resolve;
+            init?.signal?.addEventListener('abort', () => {
+              reject(
+                init.signal!.reason ??
+                  new DOMException('aborted', 'AbortError'),
+              );
+            });
+          }),
+      );
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch: slowFetch as unknown as typeof globalThis.fetch,
+        fetchTimeoutMs: 1,
+      });
+
+      // The stash/force flows chain several git commands server-side; the
+      // per-call timeout must override the 1ms client budget and the option
+      // must stay out of the JSON body sent to the route.
+      const inflight = client.workspaceGitPull({ stash: true }, 1_000);
+      setTimeout(() => {
+        resolveResponse?.(jsonResponse(200, { success: true, output: '' }));
+      }, 5);
+
+      await expect(inflight).resolves.toEqual({ success: true, output: '' });
+      const call = slowFetch.mock.calls[0]!;
+      expect(JSON.parse(String((call[1] as RequestInit).body))).toEqual({
+        stash: true,
+      });
+    });
+
+    it('forwards the per-call pull timeout on the workspace-qualified route', async () => {
+      let resolveResponse: ((value: Response) => void) | undefined;
+      const slowFetch = vi.fn(
+        (_input: RequestInfo | URL, init?: { signal?: AbortSignal | null }) =>
+          new Promise<Response>((resolve, reject) => {
+            resolveResponse = resolve;
+            init?.signal?.addEventListener('abort', () => {
+              reject(
+                init.signal!.reason ??
+                  new DOMException('aborted', 'AbortError'),
+              );
+            });
+          }),
+      );
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch: slowFetch as unknown as typeof globalThis.fetch,
+        fetchTimeoutMs: 1,
+      });
+      const cwd = '/work/secondary/packages/app';
+
+      const inflight = client
+        .workspaceByCwd('/work/secondary')
+        .workspaceGitPull({ force: true }, cwd, 1_000);
+      setTimeout(() => {
+        resolveResponse?.(jsonResponse(200, { success: true, output: '' }));
+      }, 5);
+
+      await expect(inflight).resolves.toEqual({ success: true, output: '' });
+      const call = slowFetch.mock.calls[0]!;
+      expect(String(call[0])).toBe(
+        `http://daemon/workspaces/%2Fwork%2Fsecondary/git/pull?cwd=${encodeURIComponent(cwd)}`,
+      );
     });
 
     it('lets ACP preheat wait longer than the client default timeout', async () => {
@@ -5030,6 +5157,31 @@ describe('DaemonClient', () => {
         status,
         body,
         message: `POST /session/:id/model: ${expected}`,
+      });
+    });
+  });
+
+  describe('setSessionConfigOption', () => {
+    it('POSTs a strict reasoning selection with optional persistence', async () => {
+      const response = { configOptions: [], persisted: true };
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, response),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.setSessionConfigOption('s-1', 'reasoning_effort', 'none', {
+          clientId: 'client-1',
+          persist: true,
+        }),
+      ).resolves.toEqual(response);
+
+      expect(calls[0]?.url).toBe('http://daemon/session/s-1/config-option');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        configId: 'reasoning_effort',
+        value: 'none',
+        persist: true,
       });
     });
   });

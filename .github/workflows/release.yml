@@ -51,6 +51,7 @@ jobs:
     permissions:
       contents: 'read'
     outputs:
+      release_sha: '${{ steps.source.outputs.release_sha }}'
       release_tag: '${{ steps.version.outputs.RELEASE_TAG }}'
       release_version: '${{ steps.version.outputs.RELEASE_VERSION }}'
       npm_tag: '${{ steps.version.outputs.NPM_TAG }}'
@@ -73,7 +74,7 @@ jobs:
           # wipe — rather than keeping and scrubbing .git like serve-ab.yml —
           # is deliberate: these checkouts run with CI_BOT_PAT and the npm
           # OIDC id-token, so no pre-existing repo state may survive into
-          # them; the accepted cost is re-fetching full history each run.
+          # them; the accepted cost is fetching a fresh ref each run.
           #
           # Guards ported from serve-ab.yml's wipe (#9220, #9265): under a
           # mangled env even `/home` or an empty string reached the rm. A
@@ -248,6 +249,10 @@ jobs:
           fi
           echo "is_dry_run=${is_dry_run}" >> "${GITHUB_OUTPUT}"
 
+      - name: 'Resolve release commit'
+        id: 'source'
+        run: 'echo "release_sha=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"'
+
       - name: 'Set up Node.js (hosted)'
         if: "${{ runner.environment != 'self-hosted' }}"
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
@@ -312,16 +317,16 @@ jobs:
           echo "NPM_TAG=$(echo "$VERSION_JSON" | jq -r .npmTag)" >> "$GITHUB_OUTPUT"
           echo "PREVIOUS_RELEASE_TAG=$(echo "$VERSION_JSON" | jq -r .previousReleaseTag)" >> "$GITHUB_OUTPUT"
 
-  quality:
-    name: 'Quality Checks'
+  quality_static:
+    name: 'Quality Checks (Static)'
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
-    timeout-minutes: 120
+    timeout-minutes: 30
     needs: 'prepare'
     if: |-
       ${{ github.event.inputs.force_skip_tests != 'true' }}
     permissions:
       contents: 'read'
-    env:
+    env: &release_test_env
       OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
       OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
       OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
@@ -331,13 +336,15 @@ jobs:
       # containerized job. Restore the reusable workspace before checkout.
       - *restore_release_workspace
 
-      - name: 'Checkout'
+      - &checkout_release_validation
+        name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
-          ref: '${{ github.event.inputs.ref || github.sha }}'
-          fetch-depth: 0
+          ref: '${{ needs.prepare.outputs.release_sha }}'
+          fetch-depth: 1
 
-      - name: 'Set up Node.js (hosted)'
+      - &setup_release_node_hosted
+        name: 'Set up Node.js (hosted)'
         if: "${{ runner.environment != 'self-hosted' }}"
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
@@ -349,11 +356,13 @@ jobs:
       # Avoid setup-node downloads on ECS, where nodejs.org may be
       # unreachable through the egress proxy; reuse the machine's Node
       # instead.
-      - name: 'Use pre-installed Node.js (self-hosted)'
+      - &setup_release_node_self_hosted
+        name: 'Use pre-installed Node.js (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
         uses: './.github/actions/self-hosted-node'
 
-      - name: 'Install Dependencies'
+      - &install_release_dependencies
+        name: 'Install Dependencies'
         env:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
         run: |-
@@ -372,6 +381,28 @@ jobs:
         run: |-
           npm run lint:ci
 
+  quality_build:
+    name: 'Quality Checks (Build)'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    timeout-minutes: 45
+    needs: 'prepare'
+    if: |-
+      ${{ github.event.inputs.force_skip_tests != 'true' }}
+    permissions:
+      contents: 'read'
+    env: *release_test_env
+
+    steps:
+      - *restore_release_workspace
+      - *checkout_release_validation
+      - *setup_release_node_hosted
+      - *setup_release_node_self_hosted
+      - *install_release_dependencies
+
+      # This step also materializes the repo-root `dist` that Pack Build
+      # Outputs packs below: check:serve-fast-path-bundle runs the esbuild
+      # bundle (outdir dist). Keep it ahead of the pack step, or Pack would
+      # fail closed on a missing dist instead of shipping the bundle.
       - name: 'Check Serve Fast Path Bundle'
         run: |-
           npm run check:serve-fast-path-bundle
@@ -380,13 +411,170 @@ jobs:
         run: |-
           npm run build
 
+      - name: 'Pack Build Outputs'
+        run: |-
+          build_paths=('dist' 'packages/web-templates/src/generated')
+          while IFS= read -r -d '' path; do
+            build_paths+=("${path}")
+          done < <(find packages integrations -type d -name node_modules -prune -o -type d -name dist -prune -print0)
+          printf '%s\n' "${build_paths[@]}"
+          # Fail closed on a silent under-pack: if find contributes nothing
+          # beyond the two hardcoded paths (a dropped `-o` turns the two
+          # -prune clauses into one conjunction that matches nothing), tar
+          # would still succeed and the missing outputs would surface as
+          # dist errors in downstream consumers instead of here.
+          [[ ${#build_paths[@]} -gt 2 ]] || {
+            echo "::error::Pack Build Outputs found no build outputs beyond the hardcoded paths."
+            exit 1
+          }
+          tar -czf "${RUNNER_TEMP}/release-build.tgz" "${build_paths[@]}"
+
+      - name: 'Upload Build Outputs'
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'release-quality-build'
+          path: '${{ runner.temp }}/release-build.tgz'
+          retention-days: 3
+          if-no-files-found: 'error'
+          overwrite: true
+
+  quality_typecheck:
+    name: 'Quality Checks (Typecheck)'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    timeout-minutes: 30
+    needs:
+      - 'prepare'
+      - 'quality_build'
+    if: |-
+      ${{ github.event.inputs.force_skip_tests != 'true' }}
+    permissions:
+      contents: 'read'
+    env: *release_test_env
+
+    steps:
+      - *restore_release_workspace
+      - *checkout_release_validation
+      - *setup_release_node_hosted
+      - *setup_release_node_self_hosted
+      - *install_release_dependencies
+
+      - &download_release_build
+        name: 'Download Build Outputs'
+        uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
+        with:
+          name: 'release-quality-build'
+          path: '${{ runner.temp }}/release-quality-build'
+
+      - &unpack_release_build
+        name: 'Unpack Build Outputs'
+        run: 'tar -xzf "${RUNNER_TEMP}/release-quality-build/release-build.tgz"'
+
       - name: 'Typecheck Project'
         run: |-
           npm run typecheck
 
+  workspace_tests:
+    name: 'Workspace Tests (${{ matrix.shard }}/3)'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    timeout-minutes: 45
+    needs:
+      - 'prepare'
+      - 'quality_build'
+    if: |-
+      ${{ github.event.inputs.force_skip_tests != 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    permissions:
+      contents: 'read'
+    env: *release_test_env
+
+    steps:
+      - *restore_release_workspace
+      - *checkout_release_validation
+      - *setup_release_node_hosted
+      - *setup_release_node_self_hosted
+      - *install_release_dependencies
+      - *download_release_build
+      - *unpack_release_build
+
       - name: 'Run Workspace Tests'
+        env:
+          # Match the tunable per-process bound used by the main CI gate.
+          VITEST_MAX_THREADS: "${{ startsWith(runner.name, 'ecs-qwen-') && (vars.QWEN_CI_VITEST_MAX_WORKERS || '4') || '' }}"
+          VITEST_MIN_THREADS: "${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"
+          VITEST_MAX_FORKS: "${{ startsWith(runner.name, 'ecs-qwen-') && (vars.QWEN_CI_VITEST_MAX_WORKERS || '4') || '' }}"
+          VITEST_MIN_FORKS: "${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"
+        run: 'npm run test:release:workspaces -- --shard=${{ matrix.shard }}/3 --passWithNoTests'
+
+  quality_scripts:
+    name: 'Quality Checks (Scripts)'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    timeout-minutes: 30
+    needs:
+      - 'prepare'
+      - 'quality_build'
+    if: |-
+      ${{ github.event.inputs.force_skip_tests != 'true' }}
+    permissions:
+      contents: 'read'
+    env: *release_test_env
+
+    steps:
+      - *restore_release_workspace
+      - *checkout_release_validation
+      - *setup_release_node_hosted
+      - *setup_release_node_self_hosted
+      - *install_release_dependencies
+      - *download_release_build
+      - *unpack_release_build
+
+      - name: 'Run Script Tests'
+        run: 'npm run test:scripts'
+
+  quality:
+    name: 'Quality Checks'
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    needs:
+      - 'prepare'
+      - 'quality_static'
+      - 'quality_build'
+      - 'quality_typecheck'
+      - 'workspace_tests'
+      - 'quality_scripts'
+    # !cancelled() rather than always(): a cancelled run must leave this
+    # aggregate skipped, not turn component 'cancelled' results into a
+    # quality 'failure' that opens notify_failure's "Release Failed" issue
+    # for a run the operator stopped on purpose. Failed components still
+    # run this job and fail it closed. The prepare gate keeps fail-closed
+    # aggregation for real runs while skipping it when prepare never ran
+    # (forks): without it, !cancelled() would aggregate five skipped lanes
+    # into a quality 'failure' and open notify_failure on a fork dispatch.
+    if: |-
+      ${{ !cancelled() && needs.prepare.result == 'success' && github.event.inputs.force_skip_tests != 'true' }}
+    permissions: {}
+    steps:
+      - name: 'Verify quality results'
+        env:
+          STATIC_RESULT: '${{ needs.quality_static.result }}'
+          BUILD_RESULT: '${{ needs.quality_build.result }}'
+          TYPECHECK_RESULT: '${{ needs.quality_typecheck.result }}'
+          WORKSPACE_TEST_RESULT: '${{ needs.workspace_tests.result }}'
+          SCRIPT_TEST_RESULT: '${{ needs.quality_scripts.result }}'
         run: |-
-          npm run test:release
+          for result in \
+            "${STATIC_RESULT}" \
+            "${BUILD_RESULT}" \
+            "${TYPECHECK_RESULT}" \
+            "${WORKSPACE_TEST_RESULT}" \
+            "${SCRIPT_TEST_RESULT}"; do
+            if [[ "${result}" != 'success' ]]; then
+              echo "::error::A release quality check did not succeed."
+              exit 1
+            fi
+          done
 
   integration_none:
     name: 'Integration Tests (No Sandbox)'
@@ -397,48 +585,14 @@ jobs:
       ${{ github.event.inputs.force_skip_tests != 'true' }}
     permissions:
       contents: 'read'
-    env:
-      OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
-      OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
-      OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
+    env: *release_test_env
 
     steps:
-      # Shared ECS runners can retain root-owned files from an earlier
-      # containerized job. Restore the reusable workspace before checkout.
       - *restore_release_workspace
-
-      - name: 'Checkout'
-        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
-        with:
-          ref: '${{ github.event.inputs.ref || github.sha }}'
-          fetch-depth: 0
-
-      - name: 'Set up Node.js (hosted)'
-        if: "${{ runner.environment != 'self-hosted' }}"
-        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
-        with:
-          node-version-file: '.nvmrc'
-          cache: 'npm'
-          package-manager-cache: false
-          cache-dependency-path: 'package-lock.json'
-
-      # Avoid setup-node downloads on ECS, where nodejs.org may be
-      # unreachable through the egress proxy; reuse the machine's Node
-      # instead.
-      - name: 'Use pre-installed Node.js (self-hosted)'
-        if: "${{ runner.environment == 'self-hosted' }}"
-        uses: './.github/actions/self-hosted-node'
-
-      - name: 'Install Dependencies'
-        env:
-          NPM_CONFIG_PREFER_OFFLINE: 'true'
-        run: |-
-          npm ci --ignore-scripts --no-audit --progress=false
-          # Replay the root postinstall (patch-package) and commit-info
-          # generation; dependency and workspace lifecycle scripts remain
-          # disabled.
-          npm run postinstall
-          npm run generate
+      - *checkout_release_validation
+      - *setup_release_node_hosted
+      - *setup_release_node_self_hosted
+      - *install_release_dependencies
 
       - name: 'Build Bundle'
         run: |-
@@ -466,10 +620,7 @@ jobs:
       ${{ github.event.inputs.force_skip_tests != 'true' }}
     permissions:
       contents: 'read'
-    env:
-      OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
-      OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
-      OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
+    env: *release_test_env
 
     steps:
       # Shared ECS runners can retain root-owned files from an earlier
@@ -484,38 +635,10 @@ jobs:
             exit 1
           fi
 
-      - name: 'Checkout'
-        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
-        with:
-          ref: '${{ github.event.inputs.ref || github.sha }}'
-          fetch-depth: 0
-
-      - name: 'Set up Node.js (hosted)'
-        if: "${{ runner.environment != 'self-hosted' }}"
-        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
-        with:
-          node-version-file: '.nvmrc'
-          cache: 'npm'
-          package-manager-cache: false
-          cache-dependency-path: 'package-lock.json'
-
-      # Avoid setup-node downloads on ECS, where nodejs.org may be
-      # unreachable through the egress proxy; reuse the machine's Node
-      # instead.
-      - name: 'Use pre-installed Node.js (self-hosted)'
-        if: "${{ runner.environment == 'self-hosted' }}"
-        uses: './.github/actions/self-hosted-node'
-
-      - name: 'Install Dependencies'
-        env:
-          NPM_CONFIG_PREFER_OFFLINE: 'true'
-        run: |-
-          npm ci --ignore-scripts --no-audit --progress=false
-          # Replay the root postinstall (patch-package) and commit-info
-          # generation; dependency and workspace lifecycle scripts remain
-          # disabled.
-          npm run postinstall
-          npm run generate
+      - *checkout_release_validation
+      - *setup_release_node_hosted
+      - *setup_release_node_self_hosted
+      - *install_release_dependencies
 
       - name: 'Build Bundle'
         run: |-
@@ -657,7 +780,7 @@ jobs:
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           token: '${{ secrets.CI_BOT_PAT }}'
-          ref: '${{ github.event.inputs.ref || github.sha }}'
+          ref: '${{ needs.prepare.outputs.release_sha }}'
           fetch-depth: 0
           persist-credentials: false
 
