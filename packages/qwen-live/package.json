@@ -38,12 +38,11 @@
     "watch": "tsc --watch"
   },
   "dependencies": {
+    "@agentclientprotocol/sdk": "^0.14.1",
     "@qwen-code/sdk": "file:../sdk-typescript",
     "ansi-regex": "^6.2.2",
     "proper-lockfile": "^4.1.2",
-    "ws": "^8.18.0",
-    "@agentclientprotocol/sdk": "^0.14.1",
-    "zod": "^3.25.0"
+    "ws": "^8.18.0"
   },
   "devDependencies": {
     "@types/node": "^22.13.10",
