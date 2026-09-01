@@ -16,7 +16,8 @@ import type {
 } from './agent-events.js';
 import { ContextState } from './agent-headless.js';
 import type { AgentInteractiveConfig } from './agent-types.js';
-import { AgentStatus } from './agent-types.js';
+import { AgentStatus, AgentTerminateMode } from './agent-types.js';
+import { LoopType } from '../../telemetry/types.js';
 import {
   getCurrentAgentDepth,
   getCurrentAgentId,
@@ -33,7 +34,12 @@ function createMockCore(
   overrides: {
     chatValue?: unknown;
     nullChat?: boolean;
-    loopResult?: { text: string; terminateMode: null; turnsUsed: number };
+    loopResult?: {
+      text: string;
+      terminateMode: AgentTerminateMode | null;
+      turnsUsed: number;
+      loopType?: LoopType;
+    };
   } = {},
 ) {
   const emitter = new AgentEventEmitter();
@@ -320,6 +326,45 @@ describe('AgentInteractive', () => {
     });
 
     expect(core.runReasoningLoop).toHaveBeenCalledOnce();
+
+    await agent.shutdown();
+  });
+
+  it('surfaces the exact loop detector in the interactive stop message (issue #9450)', async () => {
+    // A loop stop must name its detector (issue #9450 requirement #7): the
+    // visible info message and lastRoundError both carry the LoopType, so a
+    // future regression collapsing stops back into the generic label fails
+    // here instead of shipping unattributable stops.
+    const { core } = createMockCore({
+      loopResult: {
+        text: '',
+        terminateMode: AgentTerminateMode.LOOP_DETECTED,
+        turnsUsed: 3,
+        loopType: LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS,
+      },
+    });
+    const agent = new AgentInteractive(
+      createConfig({ initialTask: 'go' }),
+      core,
+    );
+
+    await agent.start(context);
+    // A loop-detected round settles the agent as failed (the round error
+    // path); the stop message must already have been pushed by then.
+    await vi.waitFor(() => {
+      expect(['idle', 'failed']).toContain(agent.getStatus());
+    });
+    await vi.waitFor(() => {
+      expect(agent.getMessages().some((m) => m.role === 'info')).toBe(true);
+    });
+
+    const stopMessages = agent
+      .getMessages()
+      .filter((m) => m.role === 'info')
+      .map((m) => String(m.content));
+    expect(stopMessages).toContain(
+      'Agent stopped: duplicate tool-call loop detected (consecutive_identical_tool_calls).',
+    );
 
     await agent.shutdown();
   });
