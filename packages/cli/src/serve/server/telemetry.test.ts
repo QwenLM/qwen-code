@@ -426,6 +426,12 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
     ).toEqual({ route: 'GET /workspaces/:workspace/sessions/live-state' });
   });
 
+  it('maps the sessionless language route', () => {
+    expect(resolveDaemonTelemetryRoute(mockReq('POST', '/language'))).toEqual({
+      route: 'POST /language',
+    });
+  });
+
   it('attributes workspace transcript reads to the target workspace and session', () => {
     const mw = daemonTelemetryMiddleware(() => '/workspace/secondary');
     const res = mockRes(200);
