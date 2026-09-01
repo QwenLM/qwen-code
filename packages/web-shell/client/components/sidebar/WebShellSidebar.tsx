@@ -96,7 +96,12 @@ import {
 } from './workspaceOverviewModel';
 import { writeClipboardText } from '../../utils/clipboard';
 import { isLocalDaemon } from '../../config/daemon';
-import { sessionMatchesGitQuery } from './sessionSearch';
+import {
+  mergeSessionContentHits,
+  sessionMatchesGitQuery,
+  sessionMatchesSource as matchesSessionSource,
+} from './sessionSearch';
+import { useSessionContentSearch } from './useSessionContentSearch';
 import { SessionPrBadge } from '../SessionPrBadge';
 import {
   hasWorkspaceExpansionPreference,
@@ -157,17 +162,6 @@ const DEFAULT_CUSTOM_GROUP_COLOR: DaemonSessionGroupHexColor = '#416ef5';
 const SCHEDULED_TASK_RUN_SOURCE_ID_PREFIX = 'scheduled_task_run:';
 
 type SidebarSessionSource = 'default' | 'channel';
-
-function matchesSessionSource(
-  session: DaemonSessionSummary,
-  source: SidebarSessionSource | undefined,
-): boolean {
-  if (source === 'channel') return session.sourceType === 'channel';
-  if (source === 'default') {
-    return session.sourceType === undefined || session.sourceType === 'default';
-  }
-  return true;
-}
 
 function isScheduledTaskSession(session: DaemonSessionSummary): boolean {
   return (
@@ -1358,6 +1352,24 @@ export function WebShellSidebar({
     };
   }, []);
   const [searchQuery, setSearchQuery] = useState('');
+  // Order-insensitive membership key: poll-driven catalog updates change
+  // it only when the session-id set actually changes, so externally
+  // deleted/archived sessions invalidate content-search hits the same way
+  // local-handler token bumps do (without re-firing on every poll tick).
+  const sessionMembershipKey = useMemo(
+    () =>
+      sessions
+        .map((session) => session.sessionId)
+        .sort()
+        .join('|'),
+    [sessions],
+  );
+  const contentSearchHits = useSessionContentSearch(
+    workspace.client,
+    primaryWorkspaceCwd,
+    searchQuery,
+    `${workspaceSessionsReloadToken}:${sessionMembershipKey}`,
+  );
   const [isResizing, setIsResizing] = useState(false);
   const [completedUnreadIds, setCompletedUnreadIds] = useState<Set<string>>(
     () => new Set(),
@@ -1793,6 +1805,15 @@ export function WebShellSidebar({
     secondaryPinnedSessions,
     sessions,
   ]);
+  // Identities the Pinned section renders. Pinned rows have exactly one
+  // owner: content-search exemptions keep a pinned ghost in the list only
+  // when the Pinned section does NOT carry it — otherwise the session
+  // renders twice (or, for rename, nowhere that hosts the form).
+  const pinnedSectionIdentities = useMemo(
+    () =>
+      new Set(pinnedSessions.map((session) => getIdentityForSession(session))),
+    [getIdentityForSession, pinnedSessions],
+  );
   const isCurrentSession = useCallback(
     (session: DaemonSessionSummary) =>
       currentSessionIdentity === getIdentityForSession(session),
@@ -3766,22 +3787,67 @@ export function WebShellSidebar({
       .filter((session) =>
         matchesSessionSource(session, selectedSessionSource),
       );
-    return query
-      ? sourceScopedSessions.filter((session) => {
-          const label = getSessionLabel(session).toLowerCase();
-          return (
-            label.includes(query) ||
-            session.sessionId.toLowerCase().includes(query) ||
-            sessionMatchesGitQuery(session, query)
-          );
-        })
-      : sourceScopedSessions;
-  }, [applyOptimisticPin, searchQuery, selectedSessionSource, sessions]);
+    if (!query) return sourceScopedSessions;
+    const localMatches = sourceScopedSessions.filter((session) => {
+      const label = getSessionLabel(session).toLowerCase();
+      return (
+        label.includes(query) ||
+        session.sessionId.toLowerCase().includes(query) ||
+        sessionMatchesGitQuery(session, query)
+      );
+    });
+    // Merge daemon transcript-content hits into the local fast-path
+    // matches (shared with WorkspaceSection's copy — see sessionSearch).
+    return mergeSessionContentHits(
+      sourceScopedSessions,
+      localMatches,
+      contentSearchHits,
+      selectedSessionSource,
+      applyOptimisticPin,
+    );
+  }, [
+    applyOptimisticPin,
+    contentSearchHits,
+    searchQuery,
+    selectedSessionSource,
+    sessions,
+  ]);
+  // Content-search hits the loaded catalog doesn't carry ("ghosts"). A
+  // pinned ghost must still render somewhere while its hit is active:
+  // the filters below drop pinned rows because loaded pinned sessions
+  // render in the Pinned section — but when the Pinned section DOES
+  // carry the session (pinned page settled, or an optimistic pin), the
+  // ghost must not be retained too: pinned rows have exactly one owner.
+  const searchGhostIds = useMemo(() => {
+    const catalogIds = new Set(sessions.map((session) => session.sessionId));
+    const ghosts = new Set<string>();
+    for (const hit of contentSearchHits.values()) {
+      if (catalogIds.has(hit.session.sessionId)) continue;
+      if (pinnedSectionIdentities.has(getIdentityForSession(hit.session))) {
+        continue;
+      }
+      ghosts.add(hit.session.sessionId);
+    }
+    return ghosts;
+  }, [
+    contentSearchHits,
+    getIdentityForSession,
+    pinnedSectionIdentities,
+    sessions,
+  ]);
+  const isPinnedSectionMember = useCallback(
+    (session: DaemonSessionSummary) =>
+      pinnedSectionIdentities.has(getIdentityForSession(session)),
+    [getIdentityForSession, pinnedSectionIdentities],
+  );
   const filteredSessions = useMemo(() => {
     const unpinnedSessions =
       selectedSessionSource === 'channel'
         ? searchedSessions
-        : searchedSessions.filter((session) => !session.isPinned);
+        : searchedSessions.filter(
+            (session) =>
+              !session.isPinned || searchGhostIds.has(session.sessionId),
+          );
     const nextSessions = unpinnedSessions.slice();
     if (organizationEnabled) {
       return nextSessions;
@@ -3797,7 +3863,12 @@ export function WebShellSidebar({
         (createdTimeById.get(b.sessionId) ?? 0) -
         (createdTimeById.get(a.sessionId) ?? 0),
     );
-  }, [organizationEnabled, searchedSessions, selectedSessionSource]);
+  }, [
+    organizationEnabled,
+    searchGhostIds,
+    searchedSessions,
+    selectedSessionSource,
+  ]);
 
   const channelCatalogLoaded = channelCatalogData !== undefined;
   const channelSessionSections = useMemo(
@@ -3861,8 +3932,16 @@ export function WebShellSidebar({
       // On sources with a Pinned section, a pinned session without a
       // (renderable) group stays Pinned-section-only; it never spills into
       // Ungrouped. The channel source has no Pinned section, so its pinned
-      // rows keep the normal Ungrouped bucket.
-      if (session.isPinned && selectedSessionSource !== 'channel') continue;
+      // rows keep the normal Ungrouped bucket. Pinned content-search ghosts
+      // are exempt: the Pinned section never sees them, so dropping them
+      // here would render the matching session nowhere.
+      if (
+        session.isPinned &&
+        selectedSessionSource !== 'channel' &&
+        !searchGhostIds.has(session.sessionId)
+      ) {
+        continue;
+      }
       recentSessions.push(session);
     }
     const sections: SessionSection[] = [];
@@ -3907,6 +3986,7 @@ export function WebShellSidebar({
   }, [
     groups,
     organizationEnabled,
+    searchGhostIds,
     searchedSessions,
     searchQuery,
     selectedSessionSource,
@@ -4100,9 +4180,16 @@ export function WebShellSidebar({
       options: {
         isArchived?: boolean;
         renameFormDisabled?: boolean;
+        searchSnippet?: string | undefined;
       } = {},
     ) => {
-      const { isArchived = false, renameFormDisabled = false } = options;
+      const {
+        isArchived = false,
+        renameFormDisabled = false,
+        searchSnippet = searchQuery.trim()
+          ? contentSearchHits.get(session.sessionId)?.snippet
+          : undefined,
+      } = options;
       const sessionIdentity = getIdentityForSession(session);
       const label = getSessionLabel(session);
       const stamp = session.updatedAt || session.createdAt;
@@ -4422,6 +4509,11 @@ export function WebShellSidebar({
             <>
               <span className={styles.sessionText} data-web-shell-session-title>
                 <span className={styles.sessionTextInner}>{label}</span>
+                {searchSnippet && (
+                  <span className={styles.sessionSearchSnippet}>
+                    {searchSnippet}
+                  </span>
+                )}
               </span>
               {prBadge}
               <div
@@ -4667,6 +4759,7 @@ export function WebShellSidebar({
       canMutateSessionArchive,
       cancelRename,
       completedUnreadIds,
+      contentSearchHits,
       editingName,
       editingSessionIdentity,
       exportingSessionIds,
@@ -4687,6 +4780,7 @@ export function WebShellSidebar({
       isCurrentSession,
       openGroupMenuFromAnchor,
       saveRename,
+      searchQuery,
       sessionActionItems,
       inlineActionItems,
       startRename,
@@ -4804,7 +4898,18 @@ export function WebShellSidebar({
               // Pinned members also render in the Pinned section; while that
               // section is expanded its row hosts the rename form, so this
               // duplicate row must not mount a second autofocused input.
-              renameFormDisabled: Boolean(session.isPinned) && pinnedExpanded,
+              // Gate on the Pinned section actually carrying the row —
+              // content-search ghosts never appear there, so without the
+              // membership check no row would host the form at all and
+              // rename would be silently inoperable for them.
+              renameFormDisabled:
+                Boolean(session.isPinned) &&
+                pinnedExpanded &&
+                pinnedSessions.some(
+                  (candidate) =>
+                    getIdentityForSession(candidate) ===
+                    getIdentityForSession(session),
+                ),
             }),
           )}
         </SessionGroupSection>
@@ -4817,12 +4922,14 @@ export function WebShellSidebar({
     editingSessionIdentity,
     error,
     filteredSessions,
+    getIdentityForSession,
     groupBusy,
     handleDeleteGroup,
     handleRenameGroup,
     loading,
     organizationEnabled,
     pinnedExpanded,
+    pinnedSessions,
     reload,
     renderSessionRow,
     searchQuery,
@@ -5571,13 +5678,17 @@ export function WebShellSidebar({
                   excludePinned={selectedSessionSource !== 'channel'}
                   mapSession={applyOptimisticPin}
                   limitSessions={editingSessionIdentity === null}
+                  isPinnedSectionMember={isPinnedSectionMember}
                   autoExpandKey={
                     autoExpandWorkspace?.id === ws.id
                       ? autoExpandWorkspace.key
                       : undefined
                   }
-                  renderSession={(session) =>
-                    renderSessionRow({ ...session, workspaceCwd: ws.cwd })
+                  renderSession={(session, options) =>
+                    renderSessionRow(
+                      { ...session, workspaceCwd: ws.cwd },
+                      options,
+                    )
                   }
                   showSessionDetails={sessionActionItems.has('details')}
                 />
@@ -5716,6 +5827,7 @@ export function WebShellSidebar({
                             excludePinned={selectedSessionSource !== 'channel'}
                             mapSession={applyOptimisticPin}
                             limitSessions={editingSessionIdentity === null}
+                            isPinnedSectionMember={isPinnedSectionMember}
                             onOpenGitDiff={onOpenGitDiff}
                             onOpenCommit={onOpenCommit}
                             searchQuery={searchQuery}
@@ -5737,13 +5849,14 @@ export function WebShellSidebar({
                                 : undefined
                             }
                             renderSessions={!ws.primary}
-                            renderSession={(session) =>
+                            renderSession={(session, renderOptions) =>
                               renderSessionRow(
                                 {
                                   ...session,
                                   workspaceCwd: ws.cwd,
                                 },
                                 {
+                                  ...renderOptions,
                                   // Pinned members also render in the
                                   // sidebar-level Pinned section; while that
                                   // section is expanded its row hosts the

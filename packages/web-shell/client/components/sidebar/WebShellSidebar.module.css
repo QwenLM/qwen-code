@@ -967,6 +967,16 @@
   min-width: max-content;
 }
 
+.sessionSearchSnippet {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  line-height: 16px;
+  color: color-mix(in srgb, currentColor 55%, transparent);
+}
+
 .sessionRow:hover .sessionTextInner {
   animation: sessionTitleScroll var(--session-title-scroll-duration, 0s) 1s
     linear forwards;

@@ -6,6 +6,7 @@ import type { ReactNode } from 'react';
 import type {
   DaemonClient,
   DaemonSessionGroupCatalog,
+  DaemonSessionSearchResult,
   DaemonSessionSummary,
   DaemonWorkspaceCapability,
   DaemonWorkspaceGitStatus,
@@ -147,6 +148,10 @@ function renderSection(
     excludePinned: boolean;
     searchQuery: string;
     gitBranchWanted: boolean;
+    renderSession: (
+      session: DaemonSessionSummary,
+      options?: { searchSnippet?: string | undefined },
+    ) => ReactNode;
     onOpenPathLocally: (cwd: string) => Promise<void>;
     onOpenTerminalLocally: (cwd: string) => Promise<void>;
   }> = {},
@@ -175,9 +180,12 @@ function renderSection(
           sourceType={overrides.sourceType}
           channelGroupingEnabled={overrides.channelGroupingEnabled}
           ungroupedLabel="Ungrouped"
-          renderSession={(session: DaemonSessionSummary): ReactNode => (
-            <div key={session.sessionId}>{session.displayName}</div>
-          )}
+          renderSession={
+            overrides.renderSession ??
+            ((session: DaemonSessionSummary): ReactNode => (
+              <div key={session.sessionId}>{session.displayName}</div>
+            ))
+          }
           onOpenGitDiff={overrides.onOpenGitDiff}
           overviewEnabled={overrides.overviewEnabled}
           renderHeader={overrides.renderHeader}
@@ -1788,6 +1796,258 @@ describe('WorkspaceSection pinned group members (issue #10391)', () => {
     expect(ungrouped?.textContent).toContain('\u00b7 1');
     expect(ungrouped?.textContent).toContain('Plain session');
     expect(ungrouped?.textContent ?? '').not.toContain('Pinned free');
+  });
+});
+
+describe('WorkspaceSection content search', () => {
+  function makeSearchClient(input: {
+    sessions: Array<Partial<DaemonSessionSummary>>;
+    searchResults: DaemonSessionSearchResult;
+  }): DaemonClient & {
+    searchWorkspaceSessions: ReturnType<typeof vi.fn>;
+  } {
+    const searchWorkspaceSessions = vi
+      .fn()
+      .mockResolvedValue(input.searchResults);
+    const client = {
+      searchWorkspaceSessions,
+      workspaceByCwd: vi.fn(() => ({
+        workspaceGit,
+        listWorkspaceSessionsPage: vi
+          .fn()
+          .mockResolvedValue({ sessions: input.sessions }),
+        listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+      })),
+    };
+    return client as unknown as DaemonClient & {
+      searchWorkspaceSessions: ReturnType<typeof vi.fn>;
+    };
+  }
+
+  // The content search debounces 300ms before hitting the daemon.
+  async function advanceSearchDebounce(): Promise<void> {
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 350));
+    });
+  }
+
+  const renderRow = (
+    session: DaemonSessionSummary,
+    options?: { searchSnippet?: string | undefined },
+  ): ReactNode => (
+    <div key={session.sessionId}>
+      {session.displayName}
+      {options?.searchSnippet ? `|${options.searchSnippet}` : ''}
+    </div>
+  );
+
+  it('merges content hits not in the loaded catalog and forwards the snippet', async () => {
+    const client = makeSearchClient({
+      sessions: [{ sessionId: 'loaded', displayName: 'Loaded session' }],
+      searchResults: {
+        results: [
+          {
+            session: {
+              sessionId: 'ghost-hit',
+              workspaceCwd: '/tmp/project',
+              displayName: 'Ghost hit',
+            },
+            snippet: 'qdrant excerpt',
+          },
+        ],
+      },
+    });
+    renderSection({
+      client,
+      expanded: true,
+      searchQuery: 'qdrant',
+      renderSession: renderRow,
+    });
+    await flush();
+    await advanceSearchDebounce();
+    await flush();
+
+    expect(client.searchWorkspaceSessions).toHaveBeenCalledWith(
+      '/tmp/project',
+      'qdrant',
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    // The content hit renders with its snippet even though the loaded
+    // catalog page doesn't carry the session; the non-matching loaded
+    // session is filtered out.
+    expect(container.textContent).toContain('Ghost hit');
+    expect(container.textContent).toContain('qdrant excerpt');
+    expect(container.textContent ?? '').not.toContain('Loaded session');
+  });
+
+  it('keeps the catalog entry for a content hit already listed locally', async () => {
+    const client = makeSearchClient({
+      sessions: [{ sessionId: 'loaded-hit', displayName: 'Loaded hit' }],
+      searchResults: {
+        results: [
+          {
+            session: {
+              sessionId: 'loaded-hit',
+              workspaceCwd: '/tmp/project',
+              displayName: 'Stale search name',
+            },
+            snippet: 'qdrant excerpt',
+          },
+        ],
+      },
+    });
+    renderSection({
+      client,
+      expanded: true,
+      searchQuery: 'qdrant',
+      renderSession: renderRow,
+    });
+    await flush();
+    await advanceSearchDebounce();
+    await flush();
+
+    expect(container.textContent).toContain('Loaded hit');
+    expect(container.textContent).toContain('qdrant excerpt');
+    expect(container.textContent ?? '').not.toContain('Stale search name');
+  });
+
+  it('renders a pinned ghost hit instead of dropping it with excludePinned', async () => {
+    const client = makeSearchClient({
+      sessions: [],
+      searchResults: {
+        results: [
+          {
+            session: {
+              sessionId: 'pinned-ghost',
+              workspaceCwd: '/tmp/project',
+              displayName: 'Pinned ghost',
+              isPinned: true,
+            },
+            snippet: 'qdrant excerpt',
+          },
+        ],
+      },
+    });
+    renderSection({
+      client,
+      expanded: true,
+      searchQuery: 'qdrant',
+      excludePinned: true,
+      renderSession: renderRow,
+    });
+    await flush();
+    await advanceSearchDebounce();
+    await flush();
+
+    // The pinned page never carries this ghost, so excluding it like a
+    // loaded pinned row would render the matching session nowhere (R2-2).
+    expect(container.textContent).toContain('Pinned ghost');
+    expect(container.textContent).toContain('qdrant excerpt');
+  });
+
+  it('drops a hit row after its session is deleted while the query stays active', async () => {
+    const listPage = vi.fn().mockResolvedValue({ sessions: [] });
+    const search = vi.fn().mockResolvedValue({
+      results: [
+        {
+          session: {
+            sessionId: 'ghost',
+            workspaceCwd: '/tmp/project',
+            displayName: 'Ghost hit',
+          },
+          snippet: 'qdrant excerpt',
+        },
+      ],
+    });
+    const client = {
+      searchWorkspaceSessions: search,
+      workspaceByCwd: vi.fn(() => ({
+        workspaceGit,
+        listWorkspaceSessionsPage: listPage,
+        listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+      })),
+    } as unknown as DaemonClient;
+    renderSection({
+      client,
+      expanded: true,
+      searchQuery: 'qdrant',
+      renderSession: renderRow,
+      reloadToken: 0,
+    });
+    await flush();
+    await advanceSearchDebounce();
+    await flush();
+    expect(container.textContent).toContain('Ghost hit');
+
+    // The session is deleted: catalog and transcript are gone and the
+    // reload token bumps — the settled hit must not resurrect it.
+    search.mockResolvedValue({ results: [] });
+    renderSection({
+      client,
+      expanded: true,
+      searchQuery: 'qdrant',
+      renderSession: renderRow,
+      reloadToken: 1,
+    });
+    await advanceSearchDebounce();
+    await flush();
+
+    expect(container.textContent ?? '').not.toContain('Ghost hit');
+  });
+
+  it('drops a hit row when a poll-observed catalog change removes the session', async () => {
+    vi.useFakeTimers();
+    const tick = async (ms: number) => {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(ms);
+      });
+    };
+    const listPage = vi.fn().mockResolvedValue({
+      sessions: [{ sessionId: 's1', displayName: 'Loaded hit' }],
+    });
+    const search = vi.fn().mockResolvedValue({
+      results: [
+        {
+          session: {
+            sessionId: 's1',
+            workspaceCwd: '/tmp/project',
+            displayName: 'Loaded hit',
+          },
+          snippet: 'qdrant excerpt',
+        },
+      ],
+    });
+    const client = {
+      searchWorkspaceSessions: search,
+      workspaceByCwd: vi.fn(() => ({
+        workspaceGit,
+        listWorkspaceSessionsPage: listPage,
+        listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+      })),
+    } as unknown as DaemonClient;
+
+    renderSection({
+      client,
+      expanded: true,
+      searchQuery: 'qdrant',
+      renderSession: renderRow,
+    });
+    await tick(1); // catalog fetch settles
+    await tick(350); // content-search debounce fires
+    await tick(1); // search response settles
+    expect(container.textContent).toContain('Loaded hit');
+    expect(container.textContent).toContain('qdrant excerpt');
+
+    // Another client deletes the session: the next 10s poll drops it from
+    // the catalog — no handler token bump, only the membership change.
+    listPage.mockResolvedValue({ sessions: [] });
+    search.mockResolvedValue({ results: [] });
+    await tick(10_000); // catalog poll
+    await tick(350); // content-search refetch debounce
+    await tick(1);
+
+    expect(search).toHaveBeenCalledTimes(2);
+    expect(container.textContent ?? '').not.toContain('Loaded hit');
   });
 });
 
