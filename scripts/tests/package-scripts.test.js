@@ -75,6 +75,9 @@ describe('package scripts', () => {
       "'integrations/external-context-mem0/qwen-extension.json'",
     );
     expect(versionScript).toContain('mem0Manifest.version = newVersion');
+    expect(versionScript).toContain(
+      'writeJson(mem0ManifestPath, mem0Manifest);',
+    );
   });
 
   it('keeps the serve fast-path bundle check outside unit test scripts', () => {
