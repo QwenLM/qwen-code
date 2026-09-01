@@ -219,6 +219,6 @@ The multi-line layout above is what the agent sees in a 1:1 chat. In a group the
 
 This means DingTalk didn't include a reply endpoint in the message callback. This can happen if the bot's permissions are misconfigured. Check the bot's settings in the Developer Portal.
 
-### "Sorry, something went wrong processing your message"
+### "Unable to process this message"
 
-This usually means the agent encountered an error. Check the terminal output for details.
+The reply identifies the failure category and suggests a next step. If the problem continues, give the bot administrator the reference shown in the reply; the same reference appears beside the detailed error in the channel process log.

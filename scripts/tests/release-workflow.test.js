@@ -38,8 +38,12 @@ const cuaReleaseWorkflow = readFileSync(
 const nodeReplPackage = JSON.parse(
   readFileSync('packages/node-repl/package.json', 'utf8'),
 );
+const rootPackageLock = JSON.parse(readFileSync('package-lock.json', 'utf8'));
 const cuaSdkPackage = JSON.parse(
   readFileSync('packages/cua-driver/typescript/package.json', 'utf8'),
+);
+const cuaSdkPackageLock = JSON.parse(
+  readFileSync('packages/cua-driver/typescript/package-lock.json', 'utf8'),
 );
 const cuaInstallScript = readFileSync(
   'packages/cua-driver/scripts/install.sh',
@@ -73,13 +77,18 @@ const liveHostOssWorkflow = readFileSync(
 describe('CUA release workflow', () => {
   it('keeps the Node REPL package independently versioned', () => {
     expect(nodeReplPackage.name).toBe('@qwen-code/node-repl-mcp');
-    expect(nodeReplPackage.version).toBe('0.1.1');
+    expect(nodeReplPackage.version).toBe('0.1.2');
     expect(cuaReleaseWorkflow).toContain(
       "node_repl_version: '${{ steps.release.outputs.node_repl_version }}'",
     );
     expect(cuaReleaseWorkflow).not.toContain(
       'NODE_REPL_VERSION does not match release version',
     );
+    expect(rootPackageLock.packages['packages/node-repl'].version).toBe(
+      nodeReplPackage.version,
+    );
+    expect(cuaSdkPackageLock.version).toBe(cuaSdkPackage.version);
+    expect(cuaSdkPackageLock.packages[''].version).toBe(cuaSdkPackage.version);
   });
 
   it('dry-runs and clean-installs the packed Node REPL MCP server', () => {
@@ -106,6 +115,19 @@ describe('CUA release workflow', () => {
     );
     expect(cuaReleaseWorkflow).toContain(
       'INSTALL_ENTRYPOINT_RS_VERSION=$(sed -nE',
+    );
+  });
+
+  it('ships the Windows UIAccess worker for target-machine signing', () => {
+    expect(cuaReleaseWorkflow).toMatch(
+      /Build \(release\)[\s\S]*?Remove-Item[^\n]*cua-driver-uia\.exe[^\n]*\n[^\n]*cargo build[\s\S]*?Verify unsigned UIAccess worker/,
+    );
+    expect(cuaReleaseWorkflow).toMatch(
+      /Build \(release\)[\s\S]*?Verify unsigned UIAccess worker[\s\S]*?Get-AuthenticodeSignature[\s\S]*?NotSigned[\s\S]*?qwen-cua-driver-uia\.exe[\s\S]*?release artifact contract/,
+    );
+    expect(cuaReleaseWorkflow).not.toMatch(/WINDOWS_CERTIFICATE|WIN_CSC_LINK/);
+    expect(cuaReleaseWorkflow).toContain(
+      '- **Windows**: unsigned UIAccess worker + native SDK payload',
     );
   });
 
@@ -881,6 +903,33 @@ describe('release workflow', () => {
     );
   });
 
+  it('coordinates Docker image use with other shared-pool workflows', () => {
+    const steps = releaseYaml.jobs.integration_docker.steps;
+    const setupStep = steps.find((step) => step.name === 'Set up Docker');
+    const testStep = steps.find(
+      (step) => step.name === 'Run Docker Integration Tests',
+    );
+
+    expect(setupStep.if).toBe("${{ runner.environment != 'self-hosted' }}");
+    expect(testStep.run).toContain(
+      'docker-sandbox-build-release-${sandbox_revision}.lock',
+    );
+    expect(testStep.run).toContain('flock --wait 1800 8');
+    expect(testStep.run).toContain(
+      'exec 9>"${HOME}/.cache/qwen-code-ci/docker-sandbox-daemon.lock"',
+    );
+    expect(testStep.run).toContain('-release-${sandbox_revision}');
+    expect(testStep.run).toContain('--no-prune -i "$sandbox_image"');
+    expect(testStep.run).toContain(
+      'export QWEN_SANDBOX_IMAGE="$sandbox_image_id"',
+    );
+    expect(testStep.run).toContain('flock --shared --wait 1800 9');
+    expect(testStep.run).toContain('flock --shared 9');
+    expect(testStep.run).toContain('until flock --nonblock 9');
+    expect(testStep.run).toContain('integration-tests cli');
+    expect(testStep.run).toContain('integration-tests interactive');
+  });
+
   it('digest-pins every sandbox base image', () => {
     // integration_docker builds on the shared pool, whose docker daemon
     // store persists across jobs: a co-resident job can retag a mutable
@@ -1204,13 +1253,16 @@ describe('release lane runner routing', () => {
   });
 
   it('passes the runner environment to integration test configuration', () => {
-    for (const name of ['integration_none', 'integration_docker']) {
+    for (const [name, expectedSteps] of [
+      ['integration_none', 2],
+      ['integration_docker', 1],
+    ]) {
       const job = releaseYaml.jobs[name];
       expect(job.env.RUNNER_ENVIRONMENT, name).toBeUndefined();
       const testSteps = job.steps.filter((step) =>
         /(?:vitest|test:integration)/.test(String(step.run ?? '')),
       );
-      expect(testSteps, name).toHaveLength(2);
+      expect(testSteps, name).toHaveLength(expectedSteps);
       for (const step of testSteps) {
         expect(step.env.RUNNER_ENVIRONMENT, `${name}: ${step.name}`).toBe(
           '${{ runner.environment }}',
