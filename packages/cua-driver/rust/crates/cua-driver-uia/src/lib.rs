@@ -5,6 +5,11 @@
 //! this library lets CI execute the security checks without weakening the
 //! production manifest.
 
+pub fn pipe_path(authorized_parent_pid: u32, local: bool) -> String {
+    let channel = if local { "-local" } else { "" };
+    format!(r"\\.\pipe\qwen-cua-driver{channel}-uia-{authorized_parent_pid}")
+}
+
 #[cfg(target_os = "windows")]
 pub fn authorized_parent_pid_from<I>(args: I) -> anyhow::Result<u32>
 where
@@ -39,40 +44,56 @@ pub fn client_identity_is_authorized(
     client_identity == Some((authorized_parent_pid, owner_sid))
 }
 
-#[cfg(all(test, target_os = "windows"))]
-mod authorization_tests {
+#[cfg(test)]
+mod tests {
     use super::*;
 
     #[test]
-    fn launch_requires_explicit_parent_pid() {
-        assert!(authorized_parent_pid_from(Vec::<String>::new()).is_err());
-        assert!(
-            authorized_parent_pid_from(vec!["--authorized-parent-pid".into(), "0".into()]).is_err()
-        );
+    fn pipe_is_isolated_by_exact_parent_and_channel() {
+        assert_eq!(pipe_path(4242, false), r"\\.\pipe\qwen-cua-driver-uia-4242");
+        assert_eq!(pipe_path(4243, false), r"\\.\pipe\qwen-cua-driver-uia-4243");
         assert_eq!(
-            authorized_parent_pid_from(vec!["--authorized-parent-pid".into(), "4242".into()])
-                .unwrap(),
-            4242
+            pipe_path(4242, true),
+            r"\\.\pipe\qwen-cua-driver-local-uia-4242"
         );
     }
 
-    #[test]
-    fn client_must_match_both_exact_parent_and_owner_sid() {
-        assert!(client_identity_is_authorized(
-            Some((4242, "S-1-5-21-123")),
-            4242,
-            "S-1-5-21-123"
-        ));
-        assert!(!client_identity_is_authorized(
-            Some((4243, "S-1-5-21-123")),
-            4242,
-            "S-1-5-21-123"
-        ));
-        assert!(!client_identity_is_authorized(
-            Some((4242, "S-1-5-21-999")),
-            4242,
-            "S-1-5-21-123"
-        ));
-        assert!(!client_identity_is_authorized(None, 4242, "S-1-5-21-123"));
+    #[cfg(target_os = "windows")]
+    mod authorization {
+        use super::*;
+
+        #[test]
+        fn launch_requires_explicit_parent_pid() {
+            assert!(authorized_parent_pid_from(Vec::<String>::new()).is_err());
+            assert!(
+                authorized_parent_pid_from(vec!["--authorized-parent-pid".into(), "0".into()])
+                    .is_err()
+            );
+            assert_eq!(
+                authorized_parent_pid_from(vec!["--authorized-parent-pid".into(), "4242".into()])
+                    .unwrap(),
+                4242
+            );
+        }
+
+        #[test]
+        fn client_must_match_both_exact_parent_and_owner_sid() {
+            assert!(client_identity_is_authorized(
+                Some((4242, "S-1-5-21-123")),
+                4242,
+                "S-1-5-21-123"
+            ));
+            assert!(!client_identity_is_authorized(
+                Some((4243, "S-1-5-21-123")),
+                4242,
+                "S-1-5-21-123"
+            ));
+            assert!(!client_identity_is_authorized(
+                Some((4242, "S-1-5-21-999")),
+                4242,
+                "S-1-5-21-123"
+            ));
+            assert!(!client_identity_is_authorized(None, 4242, "S-1-5-21-123"));
+        }
     }
 }
