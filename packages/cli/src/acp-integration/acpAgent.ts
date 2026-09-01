@@ -246,6 +246,7 @@ import {
   buildDisabledSkillNamesProvider,
   buildEnabledSkillNamesProvider,
   loadCliConfig,
+  parseApprovalModeValue,
   SessionIdConflictError,
 } from '../config/config.js';
 import { resolveSkillSettings } from '../config/skill-settings.js';
@@ -1831,6 +1832,46 @@ function readCoreSettingValues(
     }
   }
   return values;
+}
+
+/**
+ * Folds a raw `tools.approvalMode` settings value into the mode
+ * unrestricted live sessions must converge on. Parseable values are
+ * normalized exactly the way boot accepts them (parseApprovalModeValue
+ * trims, lowercases, and maps the legacy `auto_edit`/`autoedit` aliases), so
+ * reload convergence agrees with the settings file for every boot-accepted
+ * spelling. A MISSING or falsy key folds to AUTO — the same default
+ * loadCliConfig derives in either case — so a key deletion reaches live
+ * sessions on reload instead of pinning a stale privileged mode until daemon
+ * restart.
+ * A PRESENT but unparseable value returns undefined: boot rejects that file
+ * outright (loadCliConfig has no catch around parseApprovalModeValue), so
+ * folding it to AUTO would silently escalate the approval gate for every
+ * live session; the reload loop keeps sessions on their current modes until
+ * the file is corrected. Restricted (safe/bare) sessions ignore the file at
+ * boot entirely; the reload loop converges them on DEFAULT separately.
+ */
+function foldReloadApprovalMode(raw: unknown): ApprovalMode | undefined {
+  if (!raw) {
+    return ApprovalMode.AUTO;
+  }
+  if (typeof raw === 'string') {
+    try {
+      return parseApprovalModeValue(raw);
+    } catch {
+      // Present but unparseable: boot would reject the file (see above).
+    }
+  }
+  return undefined;
+}
+
+/**
+ * True when a session's config derives from a restricted mode: safe/bare
+ * sessions ignore `tools.approvalMode` at boot (loadCliConfig pins them to
+ * DEFAULT), so reload must never converge them on a file-derived mode.
+ */
+function isRestrictedApprovalModeConfig(config: Config): boolean {
+  return config.isSafeMode?.() === true || config.getBareMode?.() === true;
 }
 
 export function normalizeCoreSettingValue(
@@ -3447,6 +3488,29 @@ class QwenAgent implements Agent {
   >();
   private readonly pendingConfigCleanup = new Map<string, Set<Config>>();
   private readonly initializingConfigs = new Set<Config>();
+  private sessionWorkflowEnabledOverride: boolean | undefined;
+  /**
+   * The last file-derived approval mode each live session actually
+   * converged on, seeded with the session's boot-derived mode at
+   * publication. `workspaceReload` compares the reloaded disk value against
+   * this — not against each session's live mode — because approval mode has
+   * runtime-only writers (`ExitPlanModeTool` approved plan exits, ACP
+   * `session/set_mode`, the `sessionApprovalMode` ext) that never persist,
+   * so a live session legitimately diverges from the file mid-workflow and
+   * an unchanged file must not clobber those transitions. The record lives
+   * on the daemon so it survives a `this.settings` cache swap, and per
+   * session because one daemon-wide baseline cannot represent a partially
+   * applied convergence: while a session skipped mid-flip still waits for
+   * its value, the file can round-trip back to the old baseline and strand
+   * the already-flipped sessions on the intermediate mode. An entry advances
+   * only when that session successfully converges, so skipped sessions and
+   * failed applies retry on the next reload, and an unparseable file value
+   * (undefined fold) is never recorded.
+   */
+  private readonly sessionApprovalModeConverged = new Map<
+    string,
+    ApprovalMode
+  >();
   private managedShuttingDown = false;
   private clientCapabilities: ClientCapabilities | undefined;
   /** Set once the daemon negotiates active-work reporting; one per channel. */
@@ -4078,6 +4142,7 @@ class QwenAgent implements Agent {
       cleanupErrors.push(error);
     }
     this.sessions.delete(sessionId);
+    this.sessionApprovalModeConverged.delete(sessionId);
     // R7-10: the registry outlives the session map entry while its runs
     // settle. Keep it reachable so the liveness gate still sees them.
     // Retention is bookkeeping, not cleanup: a Config that cannot answer
@@ -10634,8 +10699,36 @@ class QwenAgent implements Agent {
             session.clearActiveTodoPlanRevision();
           }
           session.clearTodoStopGuardTrust();
+        } else if (previous === 'plan') {
+          session.clearActiveTodoPlanRevision();
         }
         return { previous, current };
+      }
+      case SERVE_CONTROL_EXT_METHODS.workspaceSessionWorkflow: {
+        const enabled = params['enabled'];
+        if (typeof enabled !== 'boolean') {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing Session Workflow setting',
+          );
+        }
+        // Same-value guard: the settings POST routes push the post-write
+        // *effective* value, and a system-scope settings file can shadow a
+        // workspace write, so the effective value can equal the override
+        // already pinned here. Re-applying would clear every live session's
+        // active plan revision even though the gate never changed (the
+        // workspaceReload twin above guards its no-op case the same way).
+        // This only covers the already-pinned case: on the first write the
+        // override is still `undefined`, so the per-session no-op decision
+        // inside applySessionWorkflowOverrideToLiveSessions catches a first
+        // write whose pushed value matches what live sessions already derive
+        // from settings.
+        if (this.sessionWorkflowEnabledOverride === enabled) {
+          return { enabled, sessionsUpdated: 0 };
+        }
+        const sessionsUpdated =
+          this.applySessionWorkflowOverrideToLiveSessions(enabled);
+        return { enabled, sessionsUpdated };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionLanguage: {
         const sessionId = params['sessionId'];
@@ -12682,6 +12775,47 @@ class QwenAgent implements Agent {
           this.modelProviderReloadRevision += 1;
         }
 
+        // A settings-file edit to the Session Workflow gate must reach live
+        // sessions too. The UI ext method pins every Session's provider to the
+        // daemon-held override, so without re-deriving it here a disk change
+        // (hand edit, dotfile sync) would stay masked until daemon restart.
+        const readSessionWorkflow = (merged: Record<string, unknown>) =>
+          (merged as { experimental?: { sessionWorkflow?: unknown } })
+            .experimental?.sessionWorkflow === true;
+        const reloadedSessionWorkflow = readSessionWorkflow(newMerged);
+        // Apply the reloaded gate to live sessions unconditionally. A
+        // merged↔merged diff against `oldMerged` is unreliable here:
+        // `this.settings` is a replaceable "latest loaded" cache that many
+        // handlers swap for a fresh loadSettings instance, and after such a
+        // swap the diff compares two fresh views of the same disk state and
+        // misses a flip the live sessions (which still hold their own,
+        // now-stale LoadedSettings) never saw. The helper makes the no-op
+        // decision per live session — comparing the reloaded disk value
+        // against each session's effective gate — so calling it on every
+        // reload is idempotent, re-pins only the sessions that actually
+        // change, and keeps the daemon-held override equal to the disk
+        // truth (which also covers a disk state that contradicts a
+        // UI-pinned override).
+        this.applySessionWorkflowOverrideToLiveSessions(
+          reloadedSessionWorkflow,
+        );
+
+        // Fold a missing key to the fresh-session default (AUTO for
+        // unrestricted sessions; restricted sessions converge on DEFAULT per
+        // session below) so a key deletion reaches live sessions too. A
+        // present-but-invalid value folds to undefined instead: boot rejects
+        // that file, so reload must not converge live sessions on it either
+        // (folding it to AUTO would silently escalate the approval gate),
+        // and the undefined is never recorded as converged.
+        const reloadedApprovalMode = foldReloadApprovalMode(
+          newMerged.tools?.approvalMode,
+        );
+        if (reloadedApprovalMode === undefined) {
+          debugLogger.warn(
+            'reload: tools.approvalMode holds a value boot would reject; live sessions keep their current modes until the file is corrected',
+          );
+        }
+
         const sessions = [...this.sessions.entries()];
         const refreshed: string[] = [];
         const skipped: string[] = [];
@@ -12751,48 +12885,74 @@ class QwenAgent implements Agent {
                 newMerged.tools?.disabled,
               );
               config.setDisabledTools(new Set(disabled));
+            }
 
-              // `/capabilities` reads `tools.workflowsEnabled` live from
-              // the reloaded settings; a session alive before the reload
-              // was constructed with the old value and would keep
-              // answering canUseWorkflowControls with it, so the
-              // advertisement and the controls it gates would diverge.
-              // The merged view is already workspace-stripped, so a repo
-              // cannot self-grant here any more than at construction.
-              const workflowsWereEnabled = config.isWorkflowsEnabled();
-              config.setWorkflowsEnabled(
-                newMerged.tools?.workflowsEnabled === true,
-              );
-              if (config.isWorkflowsEnabled() !== workflowsWereEnabled) {
-                // The `workflows` slash command comes and goes with the
-                // flag; a client holding the old list would keep offering
-                // (or hiding) it.
-                try {
-                  await session.sendAvailableCommandsUpdate();
-                } catch (err) {
-                  debugLogger.warn(
-                    `reload: sendAvailableCommandsUpdate failed for session ${id}: ${err}`,
-                  );
-                }
+            // `/capabilities` reads `tools.workflowsEnabled` live from
+            // the reloaded settings; a session alive before the reload
+            // was constructed with the old value and would keep
+            // answering canUseWorkflowControls with it, so the
+            // advertisement and the controls it gates would diverge.
+            // The merged view is already workspace-stripped, so a repo
+            // cannot self-grant here any more than at construction.
+            const workflowsWereEnabled = config.isWorkflowsEnabled();
+            config.setWorkflowsEnabled(
+              newMerged.tools?.workflowsEnabled === true,
+            );
+            if (config.isWorkflowsEnabled() !== workflowsWereEnabled) {
+              // The `workflows` slash command comes and goes with the
+              // flag; a client holding the old list would keep offering
+              // (or hiding) it.
+              try {
+                await session.sendAvailableCommandsUpdate();
+              } catch (err) {
+                debugLogger.warn(
+                  `reload: sendAvailableCommandsUpdate failed for session ${id}: ${err}`,
+                );
               }
+            }
 
-              const newMode = newMerged.tools?.approvalMode;
-              if (
-                newMode &&
-                APPROVAL_MODES.includes(newMode as ApprovalMode) &&
-                newMode !== config.getApprovalMode()
-              ) {
+            // Apply the reloaded approval mode only when it differs from
+            // what this session last converged on (see the record's
+            // derivation above); the `!== previousMode` guard keeps the
+            // apply idempotent for sessions already at the disk value while
+            // the record still advances, so a later round-trip of the file
+            // re-converges exactly the sessions that moved. An undefined
+            // fold (present-but-invalid file value) is neither applied nor
+            // recorded, so no session converges on a value boot would
+            // reject. Restricted sessions ignore the file at boot
+            // (loadCliConfig pins them to DEFAULT), so reload must converge
+            // them on DEFAULT too — pushing the file value (or the AUTO fold
+            // of a missing key) into a safe-mode session would silently
+            // strip its approval restriction.
+            const reloadedSessionMode = isRestrictedApprovalModeConfig(config)
+              ? ApprovalMode.DEFAULT
+              : reloadedApprovalMode;
+            const previousMode = config.getApprovalMode();
+            const convergedMode = this.sessionApprovalModeConverged.get(id);
+            if (
+              reloadedSessionMode !== undefined &&
+              reloadedSessionMode !== convergedMode
+            ) {
+              if (reloadedSessionMode !== previousMode) {
                 try {
-                  config.setApprovalMode(newMode as ApprovalMode);
-                  if (newMode === 'plan') {
+                  config.setApprovalMode(reloadedSessionMode);
+                  if (reloadedSessionMode === 'plan') {
                     session.clearActiveTodoPlanRevision();
                     session.clearTodoStopGuardTrust();
+                  } else if (previousMode === 'plan') {
+                    session.clearActiveTodoPlanRevision();
                   }
+                  this.sessionApprovalModeConverged.set(
+                    id,
+                    reloadedSessionMode,
+                  );
                 } catch (err) {
                   debugLogger.warn(
                     `reload: setApprovalMode failed for session ${id}: ${err}`,
                   );
                 }
+              } else {
+                this.sessionApprovalModeConverged.set(id, reloadedSessionMode);
               }
             }
 
@@ -13462,6 +13622,38 @@ class QwenAgent implements Agent {
     }
   }
 
+  /**
+   * Pins the workflow gate of every live Session whose effective gate
+   * actually changes to `enabled`, dropping the bound plan revision on those
+   * sessions, then records `enabled` as the daemon-held override. The no-op
+   * decision is per-session because neither caller's own state can answer it:
+   * on a first UI write the override is still `undefined` although sessions
+   * already derive the pushed value from settings (a shadowed workspace
+   * write), and a reload diff can fire against a stale settings view that the
+   * UI write path never updated. Each session's live value is read BEFORE the
+   * field reassignment below so a pinned provider cannot report the new value
+   * as its "before" state. The provider reads the field rather than capturing
+   * a value so a later re-derivation (a settings-file reload) reaches
+   * sessions that were pinned earlier. Returns the number of sessions whose
+   * gate changed.
+   */
+  private applySessionWorkflowOverrideToLiveSessions(enabled: boolean): number {
+    let sessionsUpdated = 0;
+    for (const session of this.sessions.values()) {
+      const config = session.getConfig();
+      if (config.isSessionWorkflowEnabled?.() === enabled) {
+        continue;
+      }
+      config.setSessionWorkflowEnabledProvider?.(
+        () => this.sessionWorkflowEnabledOverride === true,
+      );
+      session.clearActiveTodoPlanRevision();
+      sessionsUpdated++;
+    }
+    this.sessionWorkflowEnabledOverride = enabled;
+    return sessionsUpdated;
+  }
+
   private setupFileSystem(config: Config): void {
     if (!this.clientCapabilities?.fs) return;
 
@@ -13747,7 +13939,27 @@ class QwenAgent implements Agent {
       if (options.deferWorkspaceActivation !== true) {
         config.hydrateSessionRestoreFileHistory?.();
       }
+      // Pin the workflow gate synchronously adjacent to publication. A write
+      // that lands while `registerCreateSubSessionTool` is suspended finds
+      // the session in neither the construction-time view nor the ext
+      // handler's live-session loop (it is not in `this.sessions` yet), so
+      // the recorded override must be applied here; from `sessions.set`
+      // onward concurrent writes reach the session through that loop. No
+      // await sits between the pin and the publication, so no write can land
+      // in between.
+      if (this.sessionWorkflowEnabledOverride !== undefined) {
+        config.setSessionWorkflowEnabledProvider?.(
+          () => this.sessionWorkflowEnabledOverride === true,
+        );
+      }
       this.sessions.set(sessionId, session);
+      // The session boots converged on the mode its settings derived; later
+      // reloads track convergence from here. Restricted sessions derive
+      // DEFAULT, mirroring the fold the reload loop applies to them.
+      this.sessionApprovalModeConverged.set(
+        sessionId,
+        config.getApprovalMode(),
+      );
       published = true;
       // The Session set itself is part of the snapshot: publish so the daemon
       // learns about this Session from a report rather than inferring it.
@@ -13932,7 +14144,10 @@ class QwenAgent implements Agent {
       return [modeConfigOption, modelConfigOption];
     }
 
-    const generation = config.getContentGeneratorConfig();
+    const generation = config.getContentGeneratorConfig?.();
+    if (!generation) {
+      return [modeConfigOption, modelConfigOption];
+    }
     const modelReasoning = this.getModelReasoningConfiguration(
       config,
       currentModelId,

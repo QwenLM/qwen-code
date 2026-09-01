@@ -66,6 +66,25 @@ describe('createAndAttachSessionForPrompt', () => {
     expect(actions.setModel).toHaveBeenCalledWith('qwen3');
   });
 
+  it('creates standalone sessions without workspace-only fields', async () => {
+    const actions = createActions();
+
+    await prepareSession({
+      sessionActions: actions,
+      modeId: 'yolo',
+      workspaceCwd: '/must-not-leak',
+      sessionContext: { kind: 'standalone' },
+      worktree: { slug: 'must-not-leak' },
+      branch: { name: 'must-not-leak' },
+      sessionSourceType: 'must-not-leak',
+    });
+
+    expect(actions.createSession).toHaveBeenCalledWith({
+      sessionContext: { kind: 'standalone' },
+      approvalMode: 'yolo',
+    });
+  });
+
   it('applies an explicit reasoning effort after the model and before resolving', async () => {
     const order: string[] = [];
     const actions = createActions({

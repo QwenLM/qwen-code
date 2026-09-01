@@ -2733,6 +2733,90 @@ describe('createDaemonSessionActions', () => {
     );
   });
 
+  it('publishes standalone working-directory admission failures', async () => {
+    const session = createMockSession('standalone-a');
+    session.submitPrompt.mockRejectedValueOnce(
+      new DaemonHttpError(
+        409,
+        { code: 'working_directory_missing' },
+        'working directory missing',
+      ),
+    );
+    const { actions, getConnection } = createActionsHarness({
+      session,
+      connection: {
+        status: 'connected',
+        sessionId: 'standalone-a',
+        sessionContext: { kind: 'standalone' },
+        standaloneSession: { workingDirectory: { state: 'ready' } },
+      },
+    });
+
+    await expect(actions.sendPrompt('look')).rejects.toThrow(
+      'working directory missing',
+    );
+
+    expect(getConnection().standaloneSession).toEqual({
+      workingDirectory: { state: 'ready' },
+      errorCode: 'working_directory_missing',
+    });
+  });
+
+  it('publishes standalone working-directory shell failures', async () => {
+    const session = createMockSession('standalone-shell');
+    session.shellCommand.mockRejectedValueOnce(
+      new DaemonHttpError(
+        409,
+        { code: 'working_directory_compromised' },
+        'working directory compromised',
+      ),
+    );
+    const { actions, getConnection } = createActionsHarness({
+      session,
+      connection: {
+        status: 'connected',
+        sessionId: 'standalone-shell',
+        sessionContext: { kind: 'standalone' },
+        standaloneSession: { workingDirectory: { state: 'ready' } },
+      },
+    });
+
+    await expect(actions.sendShellCommand('pwd')).rejects.toThrow(
+      'working directory compromised',
+    );
+
+    expect(getConnection().standaloneSession).toEqual({
+      workingDirectory: { state: 'ready' },
+      errorCode: 'working_directory_compromised',
+    });
+  });
+
+  it('does not publish workspace prompt admission failures as standalone state', async () => {
+    const session = createMockSession('workspace-a');
+    session.submitPrompt.mockRejectedValueOnce(
+      new DaemonHttpError(
+        409,
+        { code: 'working_directory_compromised' },
+        'working directory compromised',
+      ),
+    );
+    const { actions, getConnection } = createActionsHarness({
+      session,
+      connection: {
+        status: 'connected',
+        sessionId: 'workspace-a',
+        workspaceCwd: '/workspace',
+        sessionContext: { kind: 'workspace', cwd: '/workspace' },
+      },
+    });
+
+    await expect(actions.submitPrompt('look')).rejects.toThrow(
+      'working directory compromised',
+    );
+
+    expect(getConnection().standaloneSession).toBeUndefined();
+  });
+
   it('keeps uploaded attachments when prompt admission is uncertain', async () => {
     const session = createMockSession('session-a');
     session.submitPrompt.mockRejectedValueOnce(new TypeError('fetch failed'));
@@ -3731,6 +3815,7 @@ function createMockSession(
     })),
     removeAttachment: vi.fn(async () => true),
     removePendingPrompt: vi.fn(async () => ({ removed: true })),
+    shellCommand: vi.fn(async () => ({ promptId: 'shell-prompt-1' })),
     submitPrompt: vi.fn(async () => ({ promptId: 'prompt-1' })),
     supportedCommands: vi.fn(async () => supportedCommandsStatus(sessionId)),
     stats: vi.fn(),
