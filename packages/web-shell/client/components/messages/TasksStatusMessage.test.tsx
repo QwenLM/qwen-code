@@ -415,6 +415,27 @@ describe('TasksStatusMessage workflow details', () => {
     expect(container.textContent).toContain('run-b');
     expect(container.textContent).not.toContain('run-a');
     expect(onTasksChange).not.toHaveBeenCalled();
+
+    // Dropping the stale response is only half of it. The polling effect
+    // deliberately keeps sessionId out of its deps and re-reads the ref per
+    // tick, so a refactor that "fixes" staleness by tearing the interval
+    // down on a session switch — without re-arming it — leaves the mounted
+    // panel never refreshing again: running workflows render as running
+    // forever and onTasksChange never fires for the new session.
+    getWorkflowTasksMock.mockResolvedValue({
+      v: 1,
+      sessionId: 'session-b',
+      now: 13_000,
+      tasks: [sessionBTask],
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(3_000);
+    });
+
+    expect(getWorkflowTasksMock).toHaveBeenCalledTimes(2);
+    expect(onTasksChange).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: 'session-b' }),
+    );
   });
 
   it('cancels the row the user focused, not the one selection started on', async () => {
@@ -500,6 +521,20 @@ describe('TasksStatusMessage workflow details', () => {
     await act(async () => pause!.click());
 
     expect(controlWorkflowTaskMock).toHaveBeenCalledWith('workflow-1', 'pause');
+    // A second action must still be accepted. `busy` is released only by
+    // the session-guarded finally; stuck true, every handler returns early
+    // on `if (busy) return` and every control renders disabled until
+    // remount — and no other test touches that, so the regression ships
+    // green. Asserted through a different control because Pause itself is
+    // status-disabled once the run reports 'pausing'.
+    cancelTaskMock.mockResolvedValue({ cancelled: true });
+    const stop = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent === 'Stop');
+    expect(stop).toBeDefined();
+    expect(stop!.disabled).toBe(false);
+    await act(async () => stop!.click());
+    expect(cancelTaskMock).toHaveBeenCalledWith('workflow-1', 'workflow');
 
     controlWorkflowTaskMock.mockResolvedValue({
       changed: true,
@@ -587,6 +622,79 @@ describe('TasksStatusMessage workflow details', () => {
     expect(container.textContent).not.toContain('run-a');
     expect(getTasksMock).not.toHaveBeenCalled();
     expect(getWorkflowTasksMock).not.toHaveBeenCalled();
+
+    // The stale action's finally skips releasing `busy` (its session guard
+    // no longer matches), so the [snapshot.sessionId] reset effect is the
+    // only thing that frees the new session's panel. Without it every
+    // control here renders disabled and every handler no-ops until unmount.
+    const rowB = Array.from(
+      container.querySelectorAll<HTMLElement>('[role="button"]'),
+    ).find((candidate) => candidate.textContent?.includes('run-b'));
+    expect(rowB).toBeDefined();
+    act(() => rowB!.click());
+    const pauseB = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent === 'Pause');
+    expect(pauseB).toBeDefined();
+    expect(pauseB!.disabled).toBe(false);
+
+    controlWorkflowTaskMock.mockResolvedValue({
+      changed: true,
+      status: 'pausing',
+    });
+    getWorkflowTasksMock.mockResolvedValue({
+      v: 1,
+      sessionId: 'session-b',
+      now: 12_000,
+      tasks: [sessionBTask],
+    });
+    await act(async () => pauseB!.click());
+
+    expect(controlWorkflowTaskMock).toHaveBeenLastCalledWith(
+      'workflow-b',
+      'pause',
+    );
+  });
+
+  it('refuses a retry the daemon says is no longer valid', async () => {
+    // The daemon answers { changed: false } when the transition is no
+    // longer valid — e.g. Retry clicked while a concurrent 3s poll is
+    // finalizing the run. No `changed: false` occurs anywhere else in the
+    // suite, so dropping the guard would fire onWorkflowRunStarted for a
+    // run that never started (App bumps its refresh trigger on it) and the
+    // user would never see why the click did nothing.
+    const onWorkflowRunStarted = vi.fn();
+    const failed = workflowTask({
+      status: 'failed',
+      error: 'Architecture review failed',
+      dispatches: [
+        {
+          ...workflowTask().dispatches[0]!,
+          status: 'failed',
+          error: 'Architecture review failed',
+        },
+      ],
+    });
+    controlWorkflowTaskMock.mockResolvedValue({ changed: false });
+    const container = renderPanel([failed], { onWorkflowRunStarted });
+    const row = Array.from(container.querySelectorAll('span')).find((node) =>
+      node.textContent?.includes('review-and-fix'),
+    )?.parentElement;
+
+    act(() => row?.click());
+    const retry = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent === 'Retry failed path');
+    expect(retry).toBeDefined();
+
+    await act(async () => retry!.click());
+
+    expect(controlWorkflowTaskMock).toHaveBeenCalledWith('workflow-1', 'retry');
+    expect(onWorkflowRunStarted).not.toHaveBeenCalled();
+    expect(getWorkflowTasksMock).not.toHaveBeenCalled();
+    expect(container.textContent).toContain(
+      'Workflow state changed before the action',
+    );
   });
 
   it('retries a failed workflow path and refreshes the graph', async () => {
@@ -761,6 +869,44 @@ describe('TasksStatusMessage workflow details', () => {
 
     expect(container.textContent).not.toContain('Run history (1)');
     expect(container.textContent).not.toContain('Delete saved run');
+  });
+
+  it('refuses a history delete the daemon says is no longer valid', async () => {
+    // The sibling !result.changed branch. Without the guard the panel would
+    // reload and clear the row as if the delete had happened, and the user
+    // would never learn the saved run was already gone.
+    const historical = workflowTask({
+      id: 'wf-abcd',
+      isHistorical: true,
+      status: 'failed',
+      startTime: 500,
+      endTime: 1_000,
+      runtimeMs: 500,
+    });
+    controlWorkflowTaskMock.mockResolvedValue({ changed: false });
+    const container = renderPanel([historical]);
+    const row = Array.from(container.querySelectorAll('span')).find((node) =>
+      node.textContent?.includes('review-and-fix'),
+    )?.parentElement;
+    act(() => row?.click());
+
+    const remove = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Delete saved run',
+    );
+    act(() => remove?.click());
+    const confirm = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Confirm delete',
+    );
+    await act(async () => confirm?.click());
+
+    expect(controlWorkflowTaskMock).toHaveBeenCalledWith(
+      'wf-abcd',
+      'delete-history',
+    );
+    expect(getWorkflowTasksMock).not.toHaveBeenCalled();
+    expect(container.textContent).toContain(
+      'The saved run is no longer available',
+    );
   });
 
   it('deletes a restored run after confirmation and refreshes the task list', async () => {
