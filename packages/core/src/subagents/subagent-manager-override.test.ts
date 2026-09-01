@@ -238,4 +238,84 @@ describe('SubagentManager.buildSubagentContextOverride bound-tool isolation', ()
       expect(child.getMcpServers()).toEqual(parent.getMcpServers());
     });
   });
+
+  describe('Session Workflow revision write-through', () => {
+    const approvedRevision = {
+      planId: 'plan-approved',
+      sourceCallId: 'call-approved',
+      todoIds: ['a', 'b', 'c'],
+    };
+
+    async function createWorkflowParent(): Promise<Config> {
+      const parent = new Config({
+        ...baseParams,
+        sessionWorkflowEnabled: true,
+      });
+      const parentRegistry = await parent.createToolRegistry(undefined, {
+        skipDiscovery: true,
+      });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (parent as any).toolRegistry = parentRegistry;
+      parent.setSessionWorkflowPlanRevision(approvedRevision);
+      expect(parent.isSessionWorkflowTodoContextActive()).toBe(true);
+      return parent;
+    }
+
+    it('routes revision mutations from a subagent context wrapper to the base Config', async () => {
+      const parent = await createWorkflowParent();
+      const manager = new SubagentManager(parent);
+      const child = await callBuildOverride(manager, parent);
+
+      // A divergent todo_write inside the subagent holds the wrapper as
+      // this.config and clears the approved revision. The prototype
+      // implementation assigns this.sessionWorkflowPlanRevision, which
+      // without a shim lands as an own property on the wrapper and never
+      // reaches the session-global base Config.
+      child.clearSessionWorkflowPlanRevision();
+      expect(parent.getSessionWorkflowPlanRevision()).toBeUndefined();
+      expect(parent.isSessionWorkflowTodoContextActive()).toBe(false);
+
+      // And a bind through the wrapper lands on the base too.
+      child.setSessionWorkflowPlanRevision({
+        planId: 'plan-child',
+        sourceCallId: 'call-child',
+        todoIds: ['d'],
+      });
+      expect(parent.getSessionWorkflowPlanRevision()?.planId).toBe(
+        'plan-child',
+      );
+    });
+
+    it('writes through the full chained override stack (approval override + background wrapper)', async () => {
+      // Real-world launch stack: agent.ts wraps the parent in
+      // createApprovalModeOverride, the background path wraps that in
+      // Object.create(agentConfig), and createAgentHeadless wraps again via
+      // buildSubagentContextOverride. Every layer must forward revision
+      // mutations down to the base Config.
+      const parent = await createWorkflowParent();
+      const { config: upstreamWrapper } = await createApprovalModeOverride(
+        parent,
+        ApprovalMode.AUTO_EDIT,
+      );
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const bgWrapper = Object.create(upstreamWrapper) as any;
+      bgWrapper.getShouldAvoidPermissionPrompts = () => true;
+
+      const manager = new SubagentManager(parent);
+      const child = await callBuildOverride(manager, bgWrapper as Config);
+
+      child.clearSessionWorkflowPlanRevision();
+      expect(parent.getSessionWorkflowPlanRevision()).toBeUndefined();
+      expect(parent.isSessionWorkflowTodoContextActive()).toBe(false);
+
+      child.setSessionWorkflowPlanRevision({
+        planId: 'plan-chained',
+        sourceCallId: 'call-chained',
+        todoIds: ['x', 'y'],
+      });
+      expect(parent.getSessionWorkflowPlanRevision()?.planId).toBe(
+        'plan-chained',
+      );
+    });
+  });
 });
