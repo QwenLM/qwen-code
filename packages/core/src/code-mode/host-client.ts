@@ -16,13 +16,14 @@ import type {
   ToolCallRuntimeContext,
 } from './tool-call-runtime.js';
 import {
-  CODE_MODE_MAX_FRAME_BYTES,
+  CODE_MODE_MAX_CONTROL_FRAME_BYTES,
   CODE_MODE_MAX_OUTPUT_CHARS,
   CODE_MODE_MAX_SOURCE_CHARS,
   CODE_MODE_TIMEOUT_MS,
   encodeFrame,
   FrameDecoder,
   type CompleteMessage,
+  type CodeModeContentItem,
   type HostMessage,
   type ParentMessage,
 } from './protocol.js';
@@ -32,7 +33,7 @@ const CODE_MODE_HOST_STARTUP_GRACE_MS = 5000;
 export interface CodeModeExecutionResult {
   output: string;
   value?: unknown;
-  content?: Array<{ type: 'image' | 'audio'; value: unknown }>;
+  content?: CodeModeContentItem[];
 }
 
 function hostCommand(): { command: string; args: string[] } {
@@ -87,7 +88,7 @@ function boundedToolResult(result: CodeModeToolResult): CodeModeToolResult {
   try {
     if (
       Buffer.byteLength(JSON.stringify(bounded)) <=
-      CODE_MODE_MAX_FRAME_BYTES / 2
+      CODE_MODE_MAX_CONTROL_FRAME_BYTES / 2
     ) {
       return bounded;
     }

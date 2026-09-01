@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { executeCodeMode } from '../code-mode/host-client.js';
 import { getToolCallRuntime } from '../code-mode/tool-call-runtime.js';
@@ -47,16 +48,26 @@ class ExecInvocation extends BaseToolInvocation<ExecParams, ToolResult> {
       runtime,
       signal,
     );
+    const llmContent: Part[] = [];
+    if (result.output) llmContent.push({ text: result.output });
+    for (const item of result.content ?? []) {
+      llmContent.push({
+        inlineData: {
+          mimeType: item.mimeType,
+          data: item.data,
+        },
+      });
+    }
     const sections: string[] = [];
     if (result.output) sections.push(result.output);
     if (result.value !== undefined) {
-      sections.push(`Return value: ${JSON.stringify(result.value)}`);
-    }
-    if (result.content) {
-      sections.push(`Media output: ${JSON.stringify(result.content)}`);
+      const value = `Return value: ${JSON.stringify(result.value)}`;
+      sections.push(value);
+      llmContent.push({ text: value });
     }
     const output = sections.join('\n') || 'JavaScript completed successfully.';
-    return { llmContent: output, returnDisplay: output };
+    if (llmContent.length === 0) llmContent.push({ text: output });
+    return { llmContent, returnDisplay: output };
   }
 }
 

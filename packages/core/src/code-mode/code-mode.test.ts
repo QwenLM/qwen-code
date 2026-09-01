@@ -17,6 +17,12 @@ import {
   type CodeModeBindingPlan,
 } from '../tools/code-mode.js';
 import { executeCodeMode } from './host-client.js';
+import {
+  CODE_MODE_MAX_CONTROL_FRAME_BYTES,
+  encodeFrame,
+  FrameDecoder,
+  type HostMessage,
+} from './protocol.js';
 import type { ToolCallRuntimeContext } from './tool-call-runtime.js';
 
 function plan(...jsNames: string[]): CodeModeBindingPlan {
@@ -160,6 +166,29 @@ describe('CodeModeOnly exposure', () => {
     expect(buildExecDescription(first)).toContain(
       'tools.a_tool(args: Record<string, unknown>)',
     );
+    expect(buildExecDescription(first)).toContain('base64 data URL');
+  });
+});
+
+describe('code mode protocol', () => {
+  it('allows large completion media without widening control messages', () => {
+    const data = 'A'.repeat(CODE_MODE_MAX_CONTROL_FRAME_BYTES);
+    const complete: HostMessage = {
+      type: 'complete',
+      output: '',
+      content: [{ type: 'image', mimeType: 'image/png', data }],
+    };
+
+    const frame = encodeFrame(complete);
+    expect(new FrameDecoder<HostMessage>().push(frame)).toEqual([complete]);
+    expect(() =>
+      encodeFrame({
+        type: 'tool_call',
+        id: 'large-control',
+        name: 'probe',
+        args: { data },
+      }),
+    ).toThrow('frame exceeds the size limit');
   });
 });
 
@@ -336,12 +365,11 @@ describe('isolated code mode host', () => {
     expect(result.output).toBe('abc');
   });
 
-  it('bounds return values, media, and nested tool content', async () => {
+  it('bounds return values and nested tool content', async () => {
     const result = await executeCodeMode(
       `const nested = await tools.large({});
       text(typeof nested.content);
       try { await tools.fail({}); } catch (error) { text(error.message.length); }
-      image('m'.repeat(1000));
       return 'v'.repeat(1000);`,
       plan('large', 'fail'),
       runtime(async (name) => {
@@ -361,7 +389,45 @@ describe('isolated code mode host', () => {
     expect(result.output).toBe('undefined\n100000');
     expect(result.value).toMatch(/^\[Code mode value truncated\]/);
     expect((result.value as string).length).toBeLessThanOrEqual(100);
-    expect(result.content?.[0]?.value).toBe('[Code ');
+  });
+
+  it('preserves media independently of the text output budget', async () => {
+    const data = 'QUJD'.repeat(2_000);
+    const result = await executeCodeMode(
+      `text('before');
+      image('data:image/png;base64,${data}');
+      text('after');`,
+      plan(),
+      runtime(async () => {
+        throw new Error('unused');
+      }),
+      new AbortController().signal,
+      { maxOutputChars: 100 },
+    );
+
+    expect(result.output).toBe('before\nafter');
+    expect(result.content).toEqual([
+      { type: 'image', mimeType: 'image/png', data },
+    ]);
+  });
+
+  it('rejects image output that is not a base64 data URL', async () => {
+    for (const value of [
+      'https://example.com/image.png',
+      'data:audio/wav;base64,QUJD',
+      'data:image/png;base64,==',
+    ]) {
+      await expect(
+        executeCodeMode(
+          `image(${JSON.stringify(value)})`,
+          plan(),
+          runtime(async () => {
+            throw new Error('unused');
+          }),
+          new AbortController().signal,
+        ),
+      ).rejects.toThrow('base64 data URL');
+    }
   });
 
   it('enforces the memory limit and rejects unavailable or recursive tools', async () => {

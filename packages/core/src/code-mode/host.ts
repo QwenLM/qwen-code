@@ -12,11 +12,14 @@ import {
   type QuickJSHandle,
 } from 'quickjs-emscripten-core';
 import {
+  CODE_MODE_MAX_MEDIA_BYTES,
+  CODE_MODE_MAX_MEDIA_ITEMS,
   CODE_MODE_MAX_OUTPUT_CHARS,
   CODE_MODE_MAX_SOURCE_CHARS,
   CODE_MODE_TIMEOUT_MS,
   encodeFrame,
   FrameDecoder,
+  type CodeModeContentItem,
   type ExecuteMessage,
   type HostMessage,
   type ParentMessage,
@@ -94,6 +97,40 @@ function boundedValue(value: unknown, maxChars: number): unknown {
   return (prefix + serialized).slice(0, maxChars);
 }
 
+function normalizeMedia(
+  kind: 'image' | 'audio',
+  value: unknown,
+): { type: 'image' | 'audio'; mimeType: string; data: string; bytes: number } {
+  if (typeof value !== 'string') {
+    throw new Error(`${kind}() expects a base64 data URL.`);
+  }
+  const match =
+    /^data:([a-z0-9][a-z0-9.+-]*\/[a-z0-9][a-z0-9.+-]*);base64,([A-Za-z0-9+/]+={0,2})$/i.exec(
+      value,
+    );
+  const mimeType = match?.[1]?.toLowerCase();
+  const data = match?.[2];
+  const hasPadding = data?.endsWith('=') ?? false;
+  if (
+    !mimeType ||
+    !data ||
+    !mimeType.startsWith(`${kind}/`) ||
+    data.length % 4 === 1 ||
+    (hasPadding && data.length % 4 !== 0)
+  ) {
+    throw new Error(
+      `${kind}() expects a base64 data URL with a ${kind} MIME type.`,
+    );
+  }
+  const padding = data.endsWith('==') ? 2 : data.endsWith('=') ? 1 : 0;
+  return {
+    type: kind,
+    mimeType,
+    data,
+    bytes: Math.floor((data.length * 3) / 4) - padding,
+  };
+}
+
 async function execute(message: ExecuteMessage): Promise<void> {
   if (message.source.length > CODE_MODE_MAX_SOURCE_CHARS) {
     throw new Error('JavaScript source exceeds the size limit.');
@@ -117,7 +154,9 @@ async function execute(message: ExecuteMessage): Promise<void> {
   const vm = runtime.newContext();
   const pending = new Map<string, QuickJSDeferredPromise>();
   let output = '';
-  const content: Array<{ type: 'image' | 'audio'; value: unknown }> = [];
+  const content: CodeModeContentItem[] = [];
+  let mediaBytes = 0;
+  let mediaItems = 0;
   const toolNames = message.tools.map((tool) => tool.jsName);
   let nextId = 0;
 
@@ -221,15 +260,21 @@ async function execute(message: ExecuteMessage): Promise<void> {
 
     for (const kind of ['image', 'audio'] as const) {
       const appendMedia = vm.newFunction(`__append_${kind}`, (valueHandle) => {
-        if (content.length < 16) {
-          content.push({
-            type: kind,
-            value: boundedValue(
-              vm.dump(valueHandle),
-              Math.max(1, Math.floor(maxOutputChars / 16)),
-            ),
-          });
+        if (mediaItems >= CODE_MODE_MAX_MEDIA_ITEMS) {
+          throw new Error(
+            `Code mode supports at most ${CODE_MODE_MAX_MEDIA_ITEMS} media outputs.`,
+          );
         }
+        const media = normalizeMedia(kind, vm.dump(valueHandle));
+        if (mediaBytes + media.bytes > CODE_MODE_MAX_MEDIA_BYTES) {
+          throw new Error(
+            `Code mode media output exceeds the ${CODE_MODE_MAX_MEDIA_BYTES / (1024 * 1024)}MB limit.`,
+          );
+        }
+        mediaBytes += media.bytes;
+        mediaItems++;
+        const { bytes: _bytes, ...item } = media;
+        content.push(item);
       });
       vm.setProp(vm.global, `__append_${kind}`, appendMedia);
       appendMedia.dispose();

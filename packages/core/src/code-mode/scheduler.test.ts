@@ -20,7 +20,59 @@ import { ToolRegistry } from '../tools/tool-registry.js';
 import { MessageBusType } from '../confirmation-bus/types.js';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
 
+const TINY_PNG_BASE64 =
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==';
+
 describe('CodeModeOnly scheduler dispatch', () => {
+  it('returns image() output to the model as inline media', async () => {
+    const config = makeFakeConfig({
+      codeModeOnly: true,
+      approvalMode: ApprovalMode.DEFAULT,
+      targetDir: '/tmp',
+      cwd: '/tmp',
+    });
+    const registry = new ToolRegistry(config);
+    vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+    registry.registerTool(new ExecTool(config));
+    const completed = vi.fn();
+    const scheduler = new CoreToolScheduler({
+      config,
+      onAllToolCallsComplete: async (calls) => completed(calls),
+      onToolCallsUpdate: vi.fn(),
+      getPreferredEditor: () => undefined,
+      onEditorClose: vi.fn(),
+    });
+
+    await scheduler.schedule(
+      {
+        callId: 'exec-image',
+        name: 'exec',
+        args: {
+          source: `text('caption'); image('data:image/png;base64,${TINY_PNG_BASE64}');`,
+        },
+        isClientInitiated: false,
+        prompt_id: 'prompt-image',
+      },
+      new AbortController().signal,
+    );
+
+    expect(completed).toHaveBeenCalledOnce();
+    const completedCall = completed.mock.calls[0]?.[0][0];
+    const functionResponse =
+      completedCall.response.responseParts[0].functionResponse;
+    expect(functionResponse?.response?.['output']).toBe('caption');
+    expect(functionResponse?.parts).toEqual([
+      {
+        inlineData: {
+          mimeType: 'image/png',
+          data: TINY_PNG_BASE64,
+        },
+      },
+    ]);
+    expect(completedCall.response.resultDisplay).toBe('caption');
+    expect(JSON.stringify(functionResponse)).not.toContain('Media output:');
+  }, 10_000);
+
   it('awaits a nested tool without self-queue deadlock and reports the real name', async () => {
     const config = makeFakeConfig({
       codeModeOnly: true,

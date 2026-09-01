@@ -6,10 +6,19 @@
 
 import type { CodeModeToolResult } from './tool-call-runtime.js';
 
-export const CODE_MODE_MAX_FRAME_BYTES = 1_048_576;
+export const CODE_MODE_MAX_CONTROL_FRAME_BYTES = 1_048_576;
+export const CODE_MODE_MAX_FRAME_BYTES = 16 * 1024 * 1024;
+export const CODE_MODE_MAX_MEDIA_BYTES = 10 * 1024 * 1024;
+export const CODE_MODE_MAX_MEDIA_ITEMS = 16;
 export const CODE_MODE_MAX_SOURCE_CHARS = 131_072;
 export const CODE_MODE_MAX_OUTPUT_CHARS = 100_000;
 export const CODE_MODE_TIMEOUT_MS = 30_000;
+
+export interface CodeModeContentItem {
+  type: 'image' | 'audio';
+  mimeType: string;
+  data: string;
+}
 
 export interface ExecuteMessage {
   type: 'execute';
@@ -45,7 +54,7 @@ export interface CompleteMessage {
   type: 'complete';
   output: string;
   value?: unknown;
-  content?: Array<{ type: 'image' | 'audio'; value: unknown }>;
+  content?: CodeModeContentItem[];
 }
 
 export interface ErrorMessage {
@@ -55,9 +64,15 @@ export interface ErrorMessage {
 
 export type HostMessage = ToolCallMessage | CompleteMessage | ErrorMessage;
 
+function maxFrameBytes(message: ParentMessage | HostMessage): number {
+  return message.type === 'complete'
+    ? CODE_MODE_MAX_FRAME_BYTES
+    : CODE_MODE_MAX_CONTROL_FRAME_BYTES;
+}
+
 export function encodeFrame(message: ParentMessage | HostMessage): Buffer {
   const body = Buffer.from(JSON.stringify(message));
-  if (body.byteLength > CODE_MODE_MAX_FRAME_BYTES) {
+  if (body.byteLength > maxFrameBytes(message)) {
     throw new Error('Code mode protocol frame exceeds the size limit.');
   }
   const frame = Buffer.allocUnsafe(body.byteLength + 4);
@@ -80,7 +95,11 @@ export class FrameDecoder<T> {
       if (this.buffer.byteLength < length + 4) break;
       const body = this.buffer.subarray(4, length + 4);
       this.buffer = this.buffer.subarray(length + 4);
-      messages.push(JSON.parse(body.toString('utf8')) as T);
+      const message = JSON.parse(body.toString('utf8')) as T;
+      if (length > maxFrameBytes(message as ParentMessage | HostMessage)) {
+        throw new Error('Code mode protocol frame exceeds the size limit.');
+      }
+      messages.push(message);
     }
     return messages;
   }

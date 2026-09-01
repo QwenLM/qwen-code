@@ -9,10 +9,7 @@ import type { AnyDeclarativeTool } from './tools.js';
 import { ToolNames } from './tool-names.js';
 
 export type ToolExposure =
-  | 'exec'
-  | 'direct-only'
-  | 'code-mode-callable'
-  | 'hidden';
+  'exec' | 'direct-only' | 'code-mode-callable' | 'hidden';
 
 export const ToolMode = {
   Direct: 'direct',
@@ -234,7 +231,8 @@ Use async/await and call registered tools through tools.<name>(args). Calls use 
 Available globals:
 - tools: the code-mode-callable tool functions declared below.
 - ALL_TOOLS: frozen metadata for every function in tools.
-- text(value), image(value), audio(value): append bounded output.
+- text(value): append bounded text output.
+- image(dataUrl), audio(dataUrl): append a base64 data URL as multimodal output.
 - exit(): finish immediately.
 
 There is no Node.js, process, require, filesystem, network, import, console, timer, WebAssembly, Atomics, or persistent state. Static and dynamic imports are unsupported. Every exec call gets a new runtime.
