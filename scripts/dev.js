@@ -136,6 +136,8 @@ const tsxCmd = hasLocalTsxCli
     : tsxBinName;
 const tsxArgs = [
   ...(hasLocalTsxCli ? [localTsxCli] : []),
+  '--tsconfig',
+  join(cliPackageDir, 'tsconfig.json'),
   cliEntry,
   ...process.argv.slice(2),
 ];
