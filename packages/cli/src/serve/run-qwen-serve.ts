@@ -2364,6 +2364,14 @@ function currentServeFeaturesForRunQwenServe(
     workspaceRuntimeAvailable,
     localPathOpenAvailable,
     localTerminalOpenAvailable,
+    // The production wiring below always registers these, so the bootstrap
+    // envelope must not under-report them either — the runtime envelope
+    // serves all five once the app is up.
+    dynamicWorkspaceRegistrationAvailable: true,
+    scratchWorkspaceRegistrationAvailable: true,
+    standaloneSessionsAvailable: true,
+    workspaceTrustHotReloadAvailable: true,
+    acpHttpEnabled: resolveAcpHttpEnabled(env as NodeJS.ProcessEnv),
     clientMcpOverWsEnabled: opts.clientMcpOverWs === true,
     cdpTunnelOverWsEnabled: opts.cdpTunnelOverWs === true,
     browserAutomationMcpAvailable: isBrowserAutomationMcpAvailable(opts, env),

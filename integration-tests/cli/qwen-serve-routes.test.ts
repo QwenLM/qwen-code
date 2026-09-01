@@ -387,6 +387,7 @@ describe('qwen serve — capabilities envelope', () => {
       'session_metadata',
       'session_organization',
       'session_export',
+      'standalone_sessions_v1',
       'session_transcript',
       'session_transcript_pagination',
       'mcp_guardrails',
@@ -408,6 +409,7 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_permissions',
       'workspace_voice',
       'workspace_trust',
+      'workspace_trust_hot_reload',
       'workspace_init',
       'workspace_github_setup',
       'workspace_github_prs',
@@ -433,8 +435,10 @@ describe('qwen serve — capabilities envelope', () => {
       'channel_control',
       'channel_management',
       'workspace_channel_observed_contacts',
+      'dynamic_workspace_registration',
       'persistent_workspace_registration',
       'workspace_display_name',
+      'scratch_workspace_registration',
       'workspace_runtime_removal',
       ...(nativeDirectoryPickerAtBoot ? ['native_directory_picker'] : []),
       'workspace_runtime',
@@ -451,6 +455,7 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_session_live_state',
       'workspace_session_metadata',
       'voice_transcribe',
+      'web_terminal',
     ]);
   });
 });
