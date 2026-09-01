@@ -573,16 +573,21 @@ jobs:
 
       # A cancelled verify can leave either the active project state or its
       # protected recovery backup unreadable to the runner user. Remove only
-      # those two known names before checkout reuses the workspace.
+      # these three known names before checkout reuses the workspace.
       # `.qwen.root-orig` is emitted by recovery tooling OUTSIDE this repo —
       # nothing here produces it (git grep matches only these sweep copies
       # and their pins in scripts/tests/review-worktree-cleanup-workflow.
       # test.js). It is the backup name a cancelled verify's recovery leaves
       # after renaming an unreadable, root-owned `.qwen` aside (observed on
       # the shared pool; first recorded around review run 33146730771). If
-      # that producer's naming changes or a third residue name appears,
+      # that producer's naming changes or another residue name appears,
       # update the for-loop list in every sweep copy or the checkout
       # poisoning this sweep exists for silently recurs.
+      # `trusted-ci-classifier` is the third residue name: ci.yml's
+      # classify_pr checks the trusted base out to that path on this same
+      # shared pool, and this job inherits its leftover. actions/checkout
+      # reuses a leftover copy whose origin URL matches and runs git
+      # (hooks included) inside it, so it is swept rather than warmed.
       - name: 'Clean stale .qwen before checkout'
         run: |-
           set -uo pipefail
