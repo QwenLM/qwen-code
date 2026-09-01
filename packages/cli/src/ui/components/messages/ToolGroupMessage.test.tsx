@@ -25,7 +25,11 @@ import type { LoadedSettings } from '../../../config/settings.js';
 // consumes a compact-mode context.
 
 // Mock child components to isolate ToolGroupMessage behavior
-vi.mock('./ToolMessage.js', () => ({
+// Spread the real module so non-component exports (TOOL_ARGS_INLINE_MAX_LINES,
+// which ToolGroupMessage reserves height with) keep their real values — a
+// hand-written literal here would let the two drift apart silently.
+vi.mock('./ToolMessage.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./ToolMessage.js')>()),
   ToolMessage: vi.fn(
     ({
       callId,

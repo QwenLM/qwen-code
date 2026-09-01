@@ -2057,23 +2057,27 @@ describe('ToolMessage inline tool-call arguments (ui.showToolCallArgs)', () => {
       expect(formatInlineToolArgs({ a: 1 }, '{"a":2}', false)).toBe('{"a":1}');
     });
 
-    it('caps long args at exactly 1000 chars and reports the hidden count', () => {
-      // Pinned against the JSON.stringify oracle with the cap as a literal:
-      // docs/users/configuration/settings.md promises "capped at 1000
-      // characters inline", so a drifting cap or a corrupted `+N chars`
-      // counter must turn this red rather than ship green.
+    it('caps the whole row at exactly 1000 columns when no width is known', () => {
+      // Pinned as literals: docs/users/configuration/settings.md promises "at
+      // most 1000 characters", and the marker is reserved INSIDE that budget
+      // (978 + 22 = 1000) so the `+N chars` tail is not what spills onto the
+      // row after the last one we are allowed to draw. A drifting cap or a
+      // corrupted `+N chars` counter must turn this red rather than ship green.
       const args = { content: 'x'.repeat(5000) };
       const json = JSON.stringify(args);
-      expect(formatInlineToolArgs(args, 'file.txt', false)).toBe(
-        `${json.slice(0, 1000)}… +${json.length - 1000} chars (${toggleKeyHint})`,
-      );
+      expect(json).toHaveLength(5014);
+
+      const out = formatInlineToolArgs(args, 'file.txt', false);
+
+      expect(out).toBe(`${json.slice(0, 978)}… +4036 chars (${toggleKeyHint})`);
+      expect(out).toHaveLength(1000);
     });
 
     it('never cuts a surrogate pair in half at the cap boundary', () => {
-      // 993 x's put the 1000th UTF-16 code unit inside the emoji's surrogate
-      // pair, which a raw slice would leave as a lone high surrogate — drawn
-      // as a replacement glyph in the terminal.
-      const args = { a: 'x'.repeat(993) + '\u{1F600}' };
+      // 973 x's put the emoji astride the head budget: it is the code point the
+      // cut lands on, which a code-unit slice would leave as a lone high
+      // surrogate — drawn as a replacement glyph in the terminal.
+      const args = { a: 'x'.repeat(973) + '\u{1F600}' };
       const json = JSON.stringify(args);
       const out = formatInlineToolArgs(args, 'summary', false);
 
@@ -2081,16 +2085,62 @@ describe('ToolMessage inline tool-call arguments (ui.showToolCallArgs)', () => {
       // No unpaired surrogate anywhere in the rendered row.
       expect(out).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
       expect(out).not.toMatch(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/);
-      // The dropped orphan is accounted for in the hidden count.
-      const head = json.slice(0, 999);
-      expect(out).toBe(
-        `${head}… +${json.length - head.length} chars (${toggleKeyHint})`,
+      // The emoji plus the closing `"}` — three code points, not the four
+      // UTF-16 code units they occupy.
+      expect(out).toBe(`${json.slice(0, 979)}… +3 chars (${toggleKeyHint})`);
+    });
+
+    it('counts hidden astral characters as code points, not code units', () => {
+      // The row advertises what Ctrl+O will reveal, and Ctrl+O reveals
+      // characters. A code-unit count double-reports every emoji, so a payload
+      // of them would promise twice the content that actually exists — the
+      // same `toCodePoints` accounting the rest of this file uses.
+      const args = { a: 'x'.repeat(2000) + '\u{1F600}'.repeat(100) };
+      const out = formatInlineToolArgs(args, 'summary', false);
+      const hidden = Number(/\+(\d+) chars/.exec(out ?? '')?.[1]);
+
+      // 2000 x's + 100 emoji + the 8 structural chars of {"a":"…"} = 2108 code
+      // points; 978 of them are shown.
+      expect(hidden).toBe(2108 - 978);
+    });
+
+    it('bounds the row to two wrapped rows when the row width is known', () => {
+      // The height budget in ToolGroupMessage counts a result-less tool as one
+      // line and never sees this row, so a character-only cap let one pending
+      // batch draw past the terminal height (#5798). At width 40 the row may
+      // occupy 80 columns, not 1000.
+      const args = { content: 'x'.repeat(5000) };
+      const out = formatInlineToolArgs(args, 'file.txt', false, 40);
+
+      expect(out).toBeDefined();
+      expect(out?.length).toBeLessThanOrEqual(80);
+      expect(out).toContain(`chars (${toggleKeyHint})`);
+      // Tighter of the two bounds wins: a very wide row still stops at 1000.
+      expect(formatInlineToolArgs(args, 'file.txt', false, 4000)).toHaveLength(
+        1000,
       );
     });
 
-    it('lifts the cap in full-detail mode', () => {
+    it('measures the row in columns, so full-width args wrap at half the count', () => {
+      // Columns, not code points, are what decide where ink wraps: a CJK
+      // argument fills the row in half the characters.
+      const args = { a: '固'.repeat(500) };
+      const out = formatInlineToolArgs(args, 'summary', false, 40);
+      const head = out?.slice(0, out.indexOf('…')) ?? '';
+      const cjkCount = (head.match(/固/g) ?? []).length;
+
+      // 80 columns total, ~21 reserved for the marker: ~59 columns of head,
+      // which is ~29 double-width characters, not ~59.
+      expect(cjkCount).toBeGreaterThan(20);
+      expect(cjkCount).toBeLessThan(35);
+    });
+
+    it('lifts both caps in full-detail mode', () => {
       const args = { content: 'x'.repeat(5000) };
       expect(formatInlineToolArgs(args, 'file.txt', true)).toBe(
+        JSON.stringify(args),
+      );
+      expect(formatInlineToolArgs(args, 'file.txt', true, 40)).toBe(
         JSON.stringify(args),
       );
     });

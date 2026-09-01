@@ -9,7 +9,7 @@ import { Box, Text } from 'ink';
 import { useMemo, useRef } from 'react';
 import type { IndividualToolCallDisplay } from '../../types.js';
 import { ToolCallStatus } from '../../types.js';
-import { ToolMessage } from './ToolMessage.js';
+import { TOOL_ARGS_INLINE_MAX_LINES, ToolMessage } from './ToolMessage.js';
 import { ToolConfirmationMessage } from './ToolConfirmationMessage.js';
 import {
   CompactToolGroupDisplay,
@@ -227,11 +227,16 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   );
 
   // `ui.showToolCallArgs` may only tear down the compact partition when this
-  // group can actually pay for it with an args row. Daemon-built groups never
-  // carry args across the boundary (see `daemon-tui-adapter.ts`), so gating on
-  // the raw setting alone would expand every `Read 3 files` fold on an attached
-  // session and render zero args — a noisier transcript that reads as "these
-  // tools were called with no arguments".
+  // group can actually pay for it with an args row — otherwise a `Read 3 files`
+  // fold expands into three rows carrying nothing, a noisier transcript that
+  // reads as "these tools were called with no arguments".
+  //
+  // The live path is where that bites: a batch invoked with `{}`. Daemon-built
+  // groups carry no args across the boundary either (see
+  // `daemon-tui-adapter.ts`), but they never reach this fold anyway —
+  // `isCollapsibleTool` keys on display names ('ReadFile') while the adapter
+  // fills `name` from the ACP kind ('read_file'), so an attached session is
+  // already one row per call, with or without this setting.
   const hasRenderableToolCallArgs = useMemo(
     () =>
       showToolCallArgs &&
@@ -470,8 +475,23 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
     contentWidth,
   );
   const memoryBadgeHeight = hasMemoryBadge ? 1 : 0;
+  // `ui.showToolCallArgs` draws an args row under each tool header. That row is
+  // bounded to `TOOL_ARGS_INLINE_MAX_LINES` wrapped rows (ToolMessage.tsx), but
+  // it renders outside `availableTerminalHeightPerToolMessage` (which only
+  // reaches the result renderers) and outside `countOneLineToolCalls` (which
+  // still counts a result-less tool as one line). Reserve it here, the way
+  // `collapsibleSummaryHeight` is reserved, so the per-tool result budget below
+  // does not hand out height the args rows have already spent.
+  const inlineArgsHeight = showToolCallArgs
+    ? nonCollapsibleTools.filter(
+        (t) => t.args != null && Object.keys(t.args).length > 0,
+      ).length * TOOL_ARGS_INLINE_MAX_LINES
+    : 0;
   const staticHeight =
-    /* marginBottom */ 1 + collapsibleSummaryHeight + memoryBadgeHeight;
+    /* marginBottom */ 1 +
+    collapsibleSummaryHeight +
+    memoryBadgeHeight +
+    inlineArgsHeight;
   // ToolConfirmationMessage still has its own padding={1}, so it needs
   // the -2 reservation. ToolMessage no longer pads itself (paddingX was
   // removed in the icon-alignment PR), so it gets the full contentWidth.
