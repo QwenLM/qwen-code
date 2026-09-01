@@ -111,6 +111,7 @@ type TestableAcpBridge = AcpBridge & {
     newSession?: ReturnType<typeof vi.fn>;
     loadSession?: ReturnType<typeof vi.fn>;
     unstable_resumeSession?: ReturnType<typeof vi.fn>;
+    setSessionMode?: ReturnType<typeof vi.fn>;
     prompt?: ReturnType<typeof vi.fn>;
   };
   knownSessionIds: Set<string>;
@@ -420,21 +421,80 @@ describe('AcpBridge', () => {
     expect(extMethod).toHaveBeenCalledOnce();
   });
 
+  it('applies approval mode when creating a session', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    const newSession = vi.fn().mockResolvedValue({ sessionId: 's-1' });
+    const setSessionMode = vi.fn().mockResolvedValue({});
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = {
+      extMethod: vi.fn(),
+      newSession,
+      setSessionMode,
+    } as TestableAcpBridge['connection'];
+
+    await expect(
+      bridge.newSession('/tmp', { approvalMode: 'yolo' }),
+    ).resolves.toBe('s-1');
+
+    expect(setSessionMode).toHaveBeenCalledWith({
+      sessionId: 's-1',
+      modeId: 'yolo',
+    });
+    expect(newSession.mock.invocationCallOrder[0]).toBeLessThan(
+      setSessionMode.mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it('closes a new session when applying its approval mode fails', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    const modeError = new Error('mode rejected');
+    const extMethod = vi.fn().mockRejectedValue(new Error('close failed'));
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = {
+      extMethod,
+      newSession: vi.fn().mockResolvedValue({ sessionId: 's-1' }),
+      setSessionMode: vi.fn().mockRejectedValue(modeError),
+    } as TestableAcpBridge['connection'];
+
+    await expect(
+      bridge.newSession('/tmp', { approvalMode: 'yolo' }),
+    ).rejects.toBe(modeError);
+
+    expect(extMethod).toHaveBeenCalledWith('qwen/control/session/close', {
+      sessionId: 's-1',
+    });
+    expect(bridge.knownSessionIds.size).toBe(0);
+    expect(bridge.sessionBindingTokens.size).toBe(0);
+  });
+
   it('restores channel sessions through resume without replaying history', async () => {
     const bridge = new AcpBridge({
       cliEntryPath: '/tmp/qwen',
       cwd: '/tmp',
     }) as unknown as TestableAcpBridge;
     const resumeSession = vi.fn().mockResolvedValue({});
+    const setSessionMode = vi.fn().mockResolvedValue({});
     bridge.child = { killed: false, exitCode: null };
     bridge.connection = {
       extMethod: vi.fn(),
       unstable_resumeSession: resumeSession,
+      setSessionMode,
     } as TestableAcpBridge['connection'];
     const bindingToken = {};
 
     await expect(
-      bridge.loadSession('restored-session', '/tmp', undefined, bindingToken),
+      bridge.loadSession(
+        'restored-session',
+        '/tmp',
+        { approvalMode: 'yolo' },
+        bindingToken,
+      ),
     ).resolves.toBe('restored-session');
 
     expect(resumeSession).toHaveBeenCalledWith({
@@ -442,10 +502,61 @@ describe('AcpBridge', () => {
       cwd: '/tmp',
       mcpServers: [],
     });
+    expect(setSessionMode).toHaveBeenCalledWith({
+      sessionId: 'restored-session',
+      modeId: 'yolo',
+    });
     expect(bridge.knownSessionIds.has('restored-session')).toBe(true);
     expect(bridge.sessionBindingTokens.get('restored-session')).toBe(
       bindingToken,
     );
+  });
+
+  it('closes a restored session when applying its approval mode fails', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    const modeError = new Error('mode rejected');
+    const extMethod = vi.fn().mockResolvedValue({});
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = {
+      extMethod,
+      unstable_resumeSession: vi.fn().mockResolvedValue({}),
+      setSessionMode: vi.fn().mockRejectedValue(modeError),
+    } as TestableAcpBridge['connection'];
+
+    await expect(
+      bridge.loadSession('restored-session', '/tmp', {
+        approvalMode: 'yolo',
+      }),
+    ).rejects.toBe(modeError);
+
+    expect(extMethod).toHaveBeenCalledWith('qwen/control/session/close', {
+      sessionId: 'restored-session',
+    });
+    expect(bridge.knownSessionIds.size).toBe(0);
+    expect(bridge.sessionBindingTokens.size).toBe(0);
+  });
+
+  it('inherits the agent approval mode when no channel override is set', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    const setSessionMode = vi.fn().mockResolvedValue({});
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = {
+      extMethod: vi.fn(),
+      newSession: vi.fn().mockResolvedValue({ sessionId: 'new-session' }),
+      unstable_resumeSession: vi.fn().mockResolvedValue({}),
+      setSessionMode,
+    } as TestableAcpBridge['connection'];
+
+    await bridge.newSession('/tmp');
+    await bridge.loadSession('restored-session', '/tmp');
+
+    expect(setSessionMode).not.toHaveBeenCalled();
   });
 
   it('returns only the final turn text after tool calls', async () => {
