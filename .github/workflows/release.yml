@@ -538,6 +538,7 @@ jobs:
     runs-on: 'ubuntu-latest'
     timeout-minutes: 5
     needs:
+      - 'prepare'
       - 'quality_static'
       - 'quality_build'
       - 'quality_typecheck'
@@ -547,9 +548,12 @@ jobs:
     # aggregate skipped, not turn component 'cancelled' results into a
     # quality 'failure' that opens notify_failure's "Release Failed" issue
     # for a run the operator stopped on purpose. Failed components still
-    # run this job and fail it closed.
+    # run this job and fail it closed. The prepare gate keeps fail-closed
+    # aggregation for real runs while skipping it when prepare never ran
+    # (forks): without it, !cancelled() would aggregate five skipped lanes
+    # into a quality 'failure' and open notify_failure on a fork dispatch.
     if: |-
-      ${{ !cancelled() && github.event.inputs.force_skip_tests != 'true' }}
+      ${{ !cancelled() && needs.prepare.result == 'success' && github.event.inputs.force_skip_tests != 'true' }}
     permissions: {}
     steps:
       - name: 'Verify quality results'

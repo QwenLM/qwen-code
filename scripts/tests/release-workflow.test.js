@@ -586,6 +586,7 @@ describe('release workflow', () => {
   it('keeps publishing behind one fail-closed quality aggregate', () => {
     const quality = releaseYaml.jobs.quality;
     expect(quality.needs).toEqual([
+      'prepare',
       'quality_static',
       'quality_build',
       'quality_typecheck',
@@ -595,9 +596,12 @@ describe('release workflow', () => {
     // !cancelled(), not always(): a cancelled run leaves the aggregate
     // skipped, so notify_failure's needs.quality.result == 'failure' gate
     // stays closed for runs an operator stopped on purpose. Failed
-    // components still run the aggregate and fail it.
+    // components still run the aggregate and fail it. The prepare gate
+    // skips the aggregate when prepare never ran (forks): otherwise
+    // !cancelled() overrides the needs gate and turns five skipped lanes
+    // into a quality failure that opens notify_failure on a fork dispatch.
     expect(quality.if).toBe(
-      "${{ !cancelled() && github.event.inputs.force_skip_tests != 'true' }}",
+      "${{ !cancelled() && needs.prepare.result == 'success' && github.event.inputs.force_skip_tests != 'true' }}",
     );
     expect(quality.steps[0].run).toContain(
       'if [[ "${result}" != \'success\' ]]',
