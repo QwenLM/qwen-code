@@ -1018,6 +1018,10 @@ jobs:
           EVENT_NAME: '${{ github.event_name }}'
           EVENT_HEAD_SHA: '${{ github.event.pull_request.head.sha }}'
           MAX_TIMEOUT_MINUTES_VAR: '${{ vars.QWEN_REVIEW_MAX_TIMEOUT_MINUTES }}'
+          # Install and build the review worktree BEFORE any agent starts,
+          # through Agent 7's own build-test (issue #10108). Opt-in here only;
+          # rationale, budget and fail-open contract: cli lib/prebuild.ts.
+          QWEN_REVIEW_PREBUILD: '1'
         run: |-
           set -euo pipefail
           fail() {
@@ -1404,6 +1408,72 @@ jobs:
           fi
 
           QWEN_TIMEOUT="$EFFECTIVE_TIMEOUT_MINUTES"
+
+          # Reconcile the prebuild with the attempt budget now that the
+          # latter is final (size-aware default, docs/micro halving all
+          # applied above). The prebuild's budget is fixed (PREBUILD_BUDGET_S
+          # in lib/prebuild.ts), but an explicit --timeout=N can set the
+          # attempt as low as 6 minutes, and worst case the prebuild
+          # consumes its whole budget — the hang it exists to bound. An
+          # attempt that cannot carry the budget plus the deadline reserve
+          # below plus PREBUILD_ATTEMPT_MARGIN_S for the fetch prefix and
+          # the review itself degrades to the pre-prebuild flow instead of
+          # dying in it: GNU timeout would kill the agent mid-`npm ci`,
+          # OUTCOME='timeout' never retries, and no review would ever
+          # happen. The reserve arithmetic mirrors run_review_once below,
+          # minus its 4800 cap, which only ADDS headroom — so this gate is
+          # conservative, never lax. scripts/tests/
+          # qwen-pr-review-workflow.test.js pins both literals against the
+          # constants in lib/prebuild.ts.
+          if [ "${QWEN_REVIEW_PREBUILD:-}" = '1' ]; then
+            attempt_s=$(( EFFECTIVE_TIMEOUT_MINUTES * 60 ))
+            reserve_s=$(( attempt_s / 3 ))
+            if [ "$reserve_s" -lt 600 ]; then reserve_s=600; fi
+            if [ $(( attempt_s - reserve_s )) -lt $(( 1800 + 1800 )) ]; then
+              echo "Attempt budget ${EFFECTIVE_TIMEOUT_MINUTES}m cannot carry the prebuild budget plus the review; continuing without the prebuild."
+              unset QWEN_REVIEW_PREBUILD
+            fi
+          fi
+
+          # The prebuild (QWEN_REVIEW_PREBUILD above) runs install and build
+          # INSIDE fetch-pr, which the skill executes through the agent's
+          # shell tool: 120s built-in foreground default, 600s per-call
+          # ceiling — neither carries the prebuild's budget (measured cost
+          # ~4-5 minutes), so without a cover the tool kills fetch-pr
+          # mid-`npm ci` and the review stops over a partial tree. Weld the
+          # cover where the opt-in is welded: raise the session default in
+          # this per-run agent home's settings (shell-tool precedence:
+          # per-call timeout, then tools.shell.defaultTimeoutMs, then the
+          # built-in). The value is (PREBUILD_BUDGET_S +
+          # PREBUILD_COVER_HEADROOM_S) x 1000 — strictly above the budget,
+          # because the cover clock starts at the fetch-pr spawn while the
+          # budget clock starts only inside runBuildTest: the fetch prefix
+          # in between (refs, metadata, base fetch, diff capture, plan
+          # write) is strictly > 0, so a cover exactly AT the budget
+          # expires first in the very hang case it exists for, killing
+          # fetch-pr before it can record the outcome. Deliberately above
+          # the setting's interactive 600000 ceiling — the startup loader
+          # does not range-check, the runtime gate accepts it, and the
+          # per-call ceiling cannot hold the budget it exists to escape —
+          # and below the attempt's GNU timeout: budgets floor at 90
+          # minutes, and the budget gate above refuses the opt-in under
+          # anything that cannot carry it. The prebuild's own budget bounds
+          # a hang from inside and lands strictly before this cover fires.
+          # SESSION-WIDE TRADE-OFF (accepted): the value loads once at
+          # session start and cannot be unwelded after the prebuild, so
+          # EVERY foreground shell call in this session now hangs up to the
+          # cover instead of the 120s built-in — bounded by the GNU timeout
+          # below, the same bound the pre-prebuild flow always had; and an
+          # explicit per-call timeout outranks this default, so a call
+          # passing one shortens its own cover.
+          # scripts/tests/qwen-pr-review-workflow.test.js pins this value
+          # against PREBUILD_BUDGET_S and PREBUILD_COVER_HEADROOM_S in
+          # lib/prebuild.ts.
+          if [ "${QWEN_REVIEW_PREBUILD:-}" = '1' ]; then
+            mkdir -p "$QWEN_HOME"
+            printf '%s\n' '{"tools":{"shell":{"defaultTimeoutMs":2400000}}}' \
+              > "$QWEN_HOME/settings.json"
+          fi
 
           # One attempt of the qwen review. Sets OUTCOME (success | retryable |
           # quota | timeout | fatal), plus REASON/KIND for the failure paths.
