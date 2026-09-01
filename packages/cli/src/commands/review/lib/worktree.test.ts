@@ -1999,6 +1999,76 @@ describe('localFilterCommands', () => {
     expect(screen.keys).toEqual(['filter.evil.smudge']);
   });
 
+  it('matches a filter key whose subsection carries an invalid UTF-8 byte', () => {
+    // `--get-regexp` is POSIX matching and locale-sensitive: under a UTF-8
+    // locale a key holding an invalid byte never matches, so git exits 1 and
+    // that reads as the ordinary "no key matched". The checkout resolves
+    // filter keys by exact name, which no locale affects — so the screen would
+    // certify clean over a filter the checkout runs.
+    appendFileSync(
+      join(dir, '.git', 'config'),
+      Buffer.concat([
+        Buffer.from('[filter "'),
+        Buffer.from([0xff]),
+        Buffer.from('"]\n\tsmudge = cat\n'),
+      ]),
+    );
+
+    const screen = localFilterCommands(dir);
+
+    expect(screen.total).toBe(1);
+    expect(screen.keys[0]).toMatch(/^filter\..*\.smudge$/);
+  });
+
+  // Linux only: macOS and Windows reject a filename carrying an invalid UTF-8
+  // byte outright (EILSEQ on mkdir), so the fixture cannot be built there.
+  it.skipIf(process.platform !== 'linux')(
+    'refuses a repository whose path carries an invalid UTF-8 byte',
+    () => {
+      // `encoding: 'utf8'` transcodes the byte to U+FFFD, so every candidate
+      // built from the answer names a file that does not exist and the admin
+      // readdir hits ENOENT — the branch treated as ordinary. Unmeasured is
+      // not clean; the residue walker fails the same shape closed.
+      const base = mkdtempSync(join(tmpdir(), 'qwen-badbyte-'));
+      try {
+        const holder = Buffer.concat([
+          Buffer.from(join(base, 'n')),
+          Buffer.from([0xff]),
+          Buffer.from('d'),
+        ]);
+        mkdirSync(holder);
+        const asPath = holder.toString('binary');
+        initRepo(asPath);
+        execFileSync('git', ['config', 'filter.evil.smudge', 'cat'], {
+          cwd: asPath,
+        });
+
+        const screen = localFilterCommands(asPath);
+
+        expect(screen.stopped).toBe('unreadable');
+      } finally {
+        rmSync(base, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('refuses rather than hanging when an include names a FIFO', () => {
+    // git follows includes at startup, so the very first `rev-parse` blocks on
+    // a FIFO nobody writes to — and `spawnSync` blocks the event loop, so no
+    // JS timer can interrupt it. The bound has to be on the spawn, and a
+    // killed discovery must not read as "not a usable repository".
+    const fifo = join(dir, '.git', 'evil.fifo');
+    execFileSync('mkfifo', [fifo]);
+    appendFileSync(
+      join(dir, '.git', 'config'),
+      `[include]\n\tpath = ${fifo}\n`,
+    );
+
+    const screen = localFilterCommands(dir);
+
+    expect(screen.stopped).toBe('unreadable');
+  }, 60_000);
+
   it('caps the reported keys and keeps the pre-cap total', () => {
     // The keys come from an attacker-writable file that cleanup never wipes;
     // an unbounded list is its own denial-of-service in the refusal message.
