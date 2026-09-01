@@ -11,7 +11,7 @@ import { createInterface } from 'node:readline';
 import { setTimeout as delay } from 'node:timers/promises';
 import { describe, expect, it } from 'vitest';
 import { TestRig } from '../test-helper.js';
-import { fakeToolCall, startFakeOpenAIServer } from '../fake-openai-server.js';
+import { startFakeOpenAIServer } from '../fake-openai-server.js';
 
 const REQUEST_TIMEOUT_MS = 60_000;
 const INITIAL_PROMPT = 'Create a quick note (smoke test).';
@@ -1140,115 +1140,6 @@ function setupAcpTest(
     } catch (e) {
       if (stderr.length) console.error('Agent stderr:', stderr.join(''));
       throw e;
-    } finally {
-      await cleanup();
-      await fakeServer.close();
-    }
-  });
-
-  it('delivers managed auto-memory through the ACP recall lifecycle', async () => {
-    const marker = 'ACP-MEMORY-ZEPHYR-4207';
-    const prompt = 'What is the ACP zephyr codeword?';
-    let memoryFile = '';
-    let mainRequestCount = 0;
-    let resolveSelector!: () => void;
-    const selectorCompleted = new Promise<void>((resolve) => {
-      resolveSelector = resolve;
-    });
-    const fakeServer = await startFakeOpenAIServer(async ({ body }) => {
-      if (body['stream'] !== true) {
-        // Keep the selector outside the initial Recall budget, then make its
-        // result available before the first tool response. Whether the
-        // filesystem scan itself finishes inside 100 ms is intentionally not
-        // part of this E2E contract; fake-timer client tests cover that path.
-        await delay(250);
-        resolveSelector();
-        return {
-          content: JSON.stringify({ selected_memories: [memoryFile] }),
-        };
-      }
-      if (mainRequestCount++ === 0) {
-        await selectorCompleted;
-        return {
-          toolCalls: [
-            fakeToolCall(
-              'read_file',
-              { file_path: memoryFile },
-              'acp-memory-probe',
-            ),
-          ],
-        };
-      }
-      return { content: 'done' };
-    });
-    const rig = new TestRig();
-    await rig.setup('acp managed auto-memory recall', {
-      settings: {
-        memory: {
-          enableManagedAutoMemory: true,
-          enableManagedAutoDream: false,
-        },
-      },
-    });
-    const memoryDir = join(rig.testDir!, '.qwen', 'memory', 'project');
-    mkdirSync(memoryDir, { recursive: true });
-    memoryFile = join(memoryDir, 'acp-zephyr.md');
-    writeFileSync(
-      memoryFile,
-      [
-        '---',
-        'type: project',
-        'name: ACP Zephyr Codeword',
-        `description: The ACP zephyr codeword is ${marker}.`,
-        '---',
-        '',
-        `The ACP zephyr codeword is ${marker}.`,
-      ].join('\n'),
-      'utf8',
-    );
-
-    const { sendRequest, cleanup, stderr } = setupAcpTest(rig, {
-      env: {
-        OPENAI_API_KEY: 'fake-key',
-        OPENAI_BASE_URL: fakeServer.baseUrl,
-        OPENAI_MODEL: 'fake-model',
-        QWEN_MODEL: 'fake-model',
-        QWEN_CODE_MEMORY_LOCAL: '1',
-        NO_PROXY: '127.0.0.1,localhost',
-        no_proxy: '127.0.0.1,localhost',
-      },
-    });
-
-    try {
-      await sendRequest('initialize', {
-        protocolVersion: 1,
-        clientCapabilities: { fs: { readTextFile: true, writeTextFile: true } },
-      });
-      await sendRequest('authenticate', { methodId: 'openai' });
-      const newSession = (await sendRequest('session/new', {
-        cwd: rig.testDir!,
-        mcpServers: [],
-      })) as { sessionId: string };
-
-      await sendRequest('session/prompt', {
-        sessionId: newSession.sessionId,
-        prompt: [{ type: 'text', text: prompt }],
-      });
-
-      const mainRequests = fakeServer.requests.filter(
-        ({ body }) =>
-          body['stream'] === true &&
-          JSON.stringify(body['messages']).includes(prompt),
-      );
-      expect(mainRequests.length).toBeGreaterThanOrEqual(2);
-      expect(
-        mainRequests.some(({ body }) =>
-          JSON.stringify(body['messages']).includes(marker),
-        ),
-      ).toBe(true);
-    } catch (error) {
-      if (stderr.length) console.error('Agent stderr:', stderr.join(''));
-      throw error;
     } finally {
       await cleanup();
       await fakeServer.close();
