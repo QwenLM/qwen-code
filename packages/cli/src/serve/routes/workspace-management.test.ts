@@ -3201,9 +3201,14 @@ describe('POST /workspace-directory-picker', () => {
     });
     const req = request(app).post('/workspace-directory-picker').send({});
     req.end(() => {});
-    await new Promise((r) => setTimeout(r, 30));
+    // Shared-runner scheduling can delay the handler beyond any fixed sleep;
+    // wait for the picker to actually take the signal before hanging up.
+    await vi.waitFor(() => {
+      expect(observed).toBeDefined();
+    });
     req.abort();
-    await new Promise((r) => setTimeout(r, 60));
-    expect(observed?.aborted).toBe(true);
+    await vi.waitFor(() => {
+      expect(observed?.aborted).toBe(true);
+    });
   });
 });
