@@ -475,19 +475,22 @@
 }
 
 .workspaceHeaderActions {
+  position: absolute;
+  top: 50%;
+  right: 6px;
   display: flex;
-  flex: 0 0 auto;
   align-items: center;
-  gap: 2px;
-  margin-left: auto;
-  margin-right: 8px;
+  gap: 1px;
+  border-radius: 6px;
+  background: var(--sidebar-accent);
+  transform: translateY(-50%);
 }
 
 .workspaceHeaderAction {
   appearance: none;
-  width: 24px;
-  height: 24px;
-  flex: 0 0 24px;
+  width: 22px;
+  height: 22px;
+  flex: 0 0 22px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -547,7 +550,7 @@
   flex: 0 0 auto;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 2px;
   overflow: visible;
 }
 
@@ -676,12 +679,12 @@
 .showAllSessions {
   align-self: flex-start;
   margin-left: 26px;
-  padding: 2px 0;
+  padding: 1px 0;
   border: 0;
   background: transparent;
   color: var(--muted-foreground);
-  font-size: 14px;
-  line-height: 22px;
+  font-size: 12px;
+  line-height: 18px;
   cursor: pointer;
 }
 
@@ -703,7 +706,7 @@
   gap: 2px;
   padding: 2px 0 2px 26px;
   border-radius: 8px;
-  color: color-mix(in srgb, var(--sidebar-foreground) 68%, transparent);
+  color: color-mix(in srgb, var(--sidebar-foreground) 78%, transparent);
   cursor: pointer;
 }
 
@@ -726,6 +729,19 @@
 .currentSession {
   background: var(--sidebar-accent);
   color: var(--sidebar-accent-foreground);
+}
+
+/* Active-row marker on the left edge, mirroring editor list conventions. */
+.currentSession::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 3px;
+  width: 2px;
+  height: 14px;
+  border-radius: 1px;
+  background: var(--primary);
+  transform: translateY(-50%);
 }
 
 .busySession {
@@ -776,6 +792,56 @@
 
 .sessionDetailsRow {
   color: var(--popover-foreground);
+}
+
+.sessionDetailsRowValue {
+  margin-left: auto;
+  padding-left: 16px;
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+}
+
+.sessionDetailsRowIssue,
+.sessionDetailsRowIssue .sessionDetailsRowValue {
+  color: var(--warning-color, #d29922);
+}
+
+/* Session counts inside the workspace details popover — the same dot-count
+   language the folder header used before the counts moved here. */
+.sessionDetailsSessionCounts {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  padding-left: 16px;
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+}
+
+.sessionDetailsSessionCount {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.sessionDetailsSessionCount::before {
+  content: '';
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.sessionDetailsSessionCountRunning {
+  color: var(--success-color, #3fb950);
+}
+
+.sessionDetailsSessionCountAttention {
+  color: var(--warning-color, #d29922);
+}
+
+.sessionDetailsSessionCountTotal::before {
+  display: none;
 }
 
 .sessionDetailsRow svg {
@@ -855,6 +921,25 @@
   font-size: 12px;
 }
 
+/* Path row in the workspace details popover: the path truncates, the
+   local-open action buttons pin to the row's right edge. */
+.sessionDetailsPath {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sessionDetailsRowActions {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+  padding-left: 8px;
+}
+
 .sessionText {
   position: relative;
   min-width: 0;
@@ -862,8 +947,8 @@
   margin-right: 4px;
   overflow: hidden;
   color: currentColor;
-  font-size: 14px;
-  line-height: 22px;
+  font-size: 13px;
+  line-height: 20px;
 }
 
 /* The fade hints at a clipped tail; only overflowing titles clip, and the
@@ -931,6 +1016,12 @@
   width: 5px;
   height: 5px;
   box-shadow: 0 0 0 1.5px var(--sidebar-background);
+}
+
+/* A running turn gets the same pulsing dot in green, so busy sessions are
+   scannable without waiting for the right-edge spinner. */
+.sessionStatusDotRunning {
+  color: var(--success-color, #3fb950);
 }
 
 .sessionSourceIcon {
