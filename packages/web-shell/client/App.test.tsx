@@ -907,6 +907,9 @@ vi.mock('./components/ChatEditor', async () => {
 vi.mock('./components/MessageList', async () => {
   const React = await import('react');
   const { useInteractionBlocker } = await import('./interactionBlockContext');
+  const actual = await vi.importActual<
+    typeof import('./components/MessageList')
+  >('./components/MessageList');
   function InteractionBlockerProbe() {
     const registerInteractionBlocker = useInteractionBlocker();
     const releaseRef = React.useRef<(() => void) | null>(null);
@@ -928,20 +931,7 @@ vi.mock('./components/MessageList', async () => {
     );
   }
   return {
-    getLastTurnStartMessageId: (
-      messages: Array<{ id?: string; role?: string }>,
-    ) => {
-      for (let index = messages.length - 1; index >= 0; index -= 1) {
-        const message = messages[index];
-        if (
-          message?.id &&
-          (message.role === 'user' || message.role === 'user_shell')
-        ) {
-          return message.id;
-        }
-      }
-      return null;
-    },
+    ...actual,
     MessageList: React.forwardRef(function MessageList(
       props: {
         messages?: Array<{
@@ -22033,6 +22023,90 @@ describe('App session callbacks', () => {
       reason: 'restore',
       sessionId: 'session-1',
       artifacts: [],
+    });
+  });
+
+  it('contains callback failures and continues reporting later ready events', async () => {
+    mockConnection.capabilities = {
+      ...mockConnection.capabilities,
+      features: ['session_artifacts'],
+    };
+    mockSessionActions.loadArtifacts.mockResolvedValue({ artifacts: [] });
+    const callbackError = new Error('host callback failed');
+    const onSessionArtifactsReady = vi.fn().mockImplementationOnce(() => {
+      throw callbackError;
+    });
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { container, rerender } = renderApp({ onSessionArtifactsReady });
+    await flush();
+    await flush();
+
+    expect(onSessionArtifactsReady).toHaveBeenCalledOnce();
+    expect(errorSpy).toHaveBeenCalledWith(
+      '[web-shell] onSessionArtifactsReady callback failed',
+      callbackError,
+    );
+    expect(container.querySelector('[data-web-shell-root]')).not.toBeNull();
+
+    testState.messages = [
+      { id: 'user-turn-after-error', role: 'user', content: 'continue' },
+    ] as Message[];
+    testState.promptStatus = 'streaming';
+    rerender();
+    testState.promptStatus = 'idle';
+    rerender();
+    await flush();
+    await flush();
+
+    expect(onSessionArtifactsReady).toHaveBeenCalledTimes(2);
+    expect(onSessionArtifactsReady.mock.calls[1]?.[0]).toMatchObject({
+      reason: 'turn_complete',
+      sessionId: 'session-1',
+      turnId: 'user-turn-after-error',
+    });
+  });
+
+  it('does not replay ready events consumed while no callback is registered', async () => {
+    mockConnection.capabilities = {
+      ...mockConnection.capabilities,
+      features: ['session_artifacts'],
+    };
+    mockSessionActions.loadArtifacts.mockResolvedValue({ artifacts: [] });
+    const { rerender } = renderApp();
+    await flush();
+    await flush();
+
+    testState.messages = [
+      { id: 'unobserved-turn', role: 'user', content: 'unobserved' },
+    ] as Message[];
+    testState.promptStatus = 'streaming';
+    rerender();
+    testState.promptStatus = 'idle';
+    rerender();
+    await flush();
+    await flush();
+
+    const onSessionArtifactsReady = vi.fn();
+    rerender({ onSessionArtifactsReady });
+    await flush();
+    expect(onSessionArtifactsReady).not.toHaveBeenCalled();
+
+    testState.messages = [
+      ...testState.messages,
+      { id: 'observed-turn', role: 'user', content: 'observed' },
+    ] as Message[];
+    testState.promptStatus = 'streaming';
+    rerender({ onSessionArtifactsReady });
+    testState.promptStatus = 'idle';
+    rerender({ onSessionArtifactsReady });
+    await flush();
+    await flush();
+
+    expect(onSessionArtifactsReady).toHaveBeenCalledOnce();
+    expect(onSessionArtifactsReady.mock.calls[0]?.[0]).toMatchObject({
+      reason: 'turn_complete',
+      sessionId: 'session-1',
+      turnId: 'observed-turn',
     });
   });
 

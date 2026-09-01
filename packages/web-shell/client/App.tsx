@@ -3389,23 +3389,31 @@ export function App({
       artifactsReady.artifacts,
       connection.workspaceCwd || '',
     );
-    if (artifactsReady.reason === 'turn_complete') {
-      onSessionArtifactsReady({
-        reason: artifactsReady.reason,
-        sessionId,
-        turnId: artifactsReady.turnId,
-        artifacts: artifactsReady.artifacts,
-        artifactsByTurn: readyArtifactsByTurn,
-      });
-    } else {
-      onSessionArtifactsReady({
-        reason: artifactsReady.reason,
-        sessionId,
-        artifacts: artifactsReady.artifacts,
-        artifactsByTurn: readyArtifactsByTurn,
-      });
+    try {
+      if (artifactsReady.reason === 'turn_complete') {
+        onSessionArtifactsReady({
+          reason: artifactsReady.reason,
+          sessionId,
+          turnId: artifactsReady.turnId,
+          artifacts: artifactsReady.artifacts,
+          artifactsByTurn: readyArtifactsByTurn,
+        });
+      } else {
+        onSessionArtifactsReady({
+          reason: artifactsReady.reason,
+          sessionId,
+          artifacts: artifactsReady.artifacts,
+          artifactsByTurn: readyArtifactsByTurn,
+        });
+      }
+    } catch (error) {
+      console.error(
+        '[web-shell] onSessionArtifactsReady callback failed',
+        error,
+      );
+    } finally {
+      consumeArtifactsReady(artifactsReady.sequence);
     }
-    consumeArtifactsReady(artifactsReady.sequence);
   }, [
     artifactsReady,
     connection.catchingUp,

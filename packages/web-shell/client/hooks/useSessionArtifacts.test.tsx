@@ -11,7 +11,9 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import {
+  useSessionArtifacts,
   useSessionArtifactsWithReadiness,
+  type SessionArtifactsState,
   type SessionArtifactsReadinessState,
 } from './useSessionArtifacts';
 
@@ -54,6 +56,7 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;
 let latestState: SessionArtifactsReadinessState | undefined;
+let latestLegacyState: SessionArtifactsState | undefined;
 
 function deferred<T>(): Deferred<T> {
   let resolve: ((value: T) => void) | undefined;
@@ -92,6 +95,11 @@ function TestHost() {
   return null;
 }
 
+function LegacyTestHost() {
+  latestLegacyState = useSessionArtifacts();
+  return null;
+}
+
 async function renderHookHost() {
   container = document.createElement('div');
   document.body.appendChild(container);
@@ -107,6 +115,21 @@ async function rerenderHookHost() {
   });
 }
 
+async function renderLegacyHookHost() {
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+  await act(async () => {
+    root?.render(React.createElement(LegacyTestHost));
+  });
+}
+
+async function rerenderLegacyHookHost() {
+  await act(async () => {
+    root?.render(React.createElement(LegacyTestHost));
+  });
+}
+
 async function consumeReady() {
   const ready = latestState?.ready;
   if (!ready) return;
@@ -117,6 +140,7 @@ async function consumeReady() {
 
 beforeEach(() => {
   latestState = undefined;
+  latestLegacyState = undefined;
   sdkMock.connection = {
     status: 'connected',
     sessionId: 'session-a',
@@ -147,6 +171,33 @@ afterEach(async () => {
 });
 
 describe('useSessionArtifacts', () => {
+  it('keeps legacy refresh triggers without exposing readiness events', async () => {
+    sdkMock.actions.loadArtifacts.mockResolvedValue({ artifacts: [] });
+
+    await renderLegacyHookHost();
+    await vi.waitFor(() => {
+      expect(sdkMock.actions.loadArtifacts).toHaveBeenCalledTimes(1);
+    });
+    expect(latestLegacyState).not.toHaveProperty('ready');
+
+    sdkMock.promptStatus = 'waiting';
+    await rerenderLegacyHookHost();
+    expect(sdkMock.actions.loadArtifacts).toHaveBeenCalledTimes(1);
+
+    sdkMock.promptStatus = 'idle';
+    await rerenderLegacyHookHost();
+    await vi.waitFor(() => {
+      expect(sdkMock.actions.loadArtifacts).toHaveBeenCalledTimes(2);
+    });
+
+    sdkMock.artifactsVersion = 1;
+    await rerenderLegacyHookHost();
+    await vi.waitFor(() => {
+      expect(sdkMock.actions.loadArtifacts).toHaveBeenCalledTimes(3);
+    });
+    expect(latestLegacyState).not.toHaveProperty('ready');
+  });
+
   it('does not load or report ready state when artifacts are unsupported', async () => {
     sdkMock.connection = {
       status: 'connected',
