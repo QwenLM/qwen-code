@@ -781,6 +781,7 @@ export type {
   PromptTextContent,
   SetModelResult,
   DaemonSessionConfigOptionResult,
+  ReasoningSelection,
   SetSessionLanguageResult,
   SetUserLanguageResult,
   KnownDaemonSessionArtifactChangeAction,

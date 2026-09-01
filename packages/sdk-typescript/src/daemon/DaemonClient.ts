@@ -37,6 +37,7 @@ import type {
   DaemonSessionContextStatus,
   DaemonSessionContextUsageStatus,
   DaemonSessionConfigOptionResult,
+  ReasoningSelection,
   BranchSessionRequest,
   DaemonBranchSessionRequest,
   DaemonBranchSessionResult,
@@ -5076,13 +5077,27 @@ export class DaemonClient {
   async setSessionConfigOption(
     sessionId: string,
     configId: 'reasoning_effort',
-    value: string,
-    clientId?: string,
+    value: ReasoningSelection,
+    clientOrOptions?: string | { clientId?: string; persist?: boolean },
   ): Promise<DaemonSessionConfigOptionResult> {
+    const options =
+      typeof clientOrOptions === 'string'
+        ? { clientId: clientOrOptions }
+        : clientOrOptions;
     return await this.jsonRequest<DaemonSessionConfigOptionResult>(
       `/session/${urlEncode(sessionId)}/config-option`,
       'POST /session/:id/config-option',
-      { method: 'POST', body: { configId, value }, clientId },
+      {
+        method: 'POST',
+        body: {
+          configId,
+          value,
+          ...(options?.persist !== undefined
+            ? { persist: options.persist }
+            : {}),
+        },
+        clientId: options?.clientId,
+      },
     );
   }
 
