@@ -566,6 +566,7 @@ export function WorkspaceSection({
     sessionsEnabled ? client : undefined,
     workspace.cwd,
     searchQuery,
+    reloadToken,
   );
   const searchedSessions = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();

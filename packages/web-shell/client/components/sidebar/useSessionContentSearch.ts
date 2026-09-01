@@ -32,6 +32,7 @@ export function useSessionContentSearch(
   client: DaemonClient | undefined,
   workspaceCwd: string | undefined,
   query: string,
+  reloadToken = 0,
 ): ReadonlyMap<string, SessionContentSearchHit> {
   // Normalize at render scope: the effect depends on this value, so
   // whitespace-only edits neither blank hits nor re-fetch. The cap drops a
@@ -46,18 +47,23 @@ export function useSessionContentSearch(
     client: DaemonClient | undefined;
     workspaceCwd: string | undefined;
     trimmed: string;
+    reloadToken: number;
     hits: ReadonlyMap<string, SessionContentSearchHit>;
-  }>({ client, workspaceCwd, trimmed, hits: EMPTY_HITS });
+  }>({ client, workspaceCwd, trimmed, reloadToken, hits: EMPTY_HITS });
 
   // Reset during render, not in the passive effect (which runs after
   // paint): the first committed render after a query/workspace/client
   // change must not pair the new key with the previous key's settled hits.
+  // The reload token invalidates settled hits on catalog mutations too —
+  // otherwise a session deleted or archived while a query is active keeps
+  // rendering as a ghost row until the query is edited.
   if (
     state.client !== client ||
     state.workspaceCwd !== workspaceCwd ||
-    state.trimmed !== trimmed
+    state.trimmed !== trimmed ||
+    state.reloadToken !== reloadToken
   ) {
-    setState({ client, workspaceCwd, trimmed, hits: EMPTY_HITS });
+    setState({ client, workspaceCwd, trimmed, reloadToken, hits: EMPTY_HITS });
   }
 
   useEffect(() => {
@@ -81,6 +87,7 @@ export function useSessionContentSearch(
             client,
             workspaceCwd,
             trimmed,
+            reloadToken,
             hits: new Map(
               result.results.map((match) => [match.session.sessionId, match]),
             ),
@@ -88,18 +95,25 @@ export function useSessionContentSearch(
         })
         .catch(() => {
           if (controller.signal.aborted) return;
-          setState({ client, workspaceCwd, trimmed, hits: EMPTY_HITS });
+          setState({
+            client,
+            workspaceCwd,
+            trimmed,
+            reloadToken,
+            hits: EMPTY_HITS,
+          });
         });
     }, DEBOUNCE_MS);
     return () => {
       clearTimeout(timer);
       controller.abort();
     };
-  }, [client, workspaceCwd, trimmed]);
+  }, [client, workspaceCwd, trimmed, reloadToken]);
 
   return state.client === client &&
     state.workspaceCwd === workspaceCwd &&
-    state.trimmed === trimmed
+    state.trimmed === trimmed &&
+    state.reloadToken === reloadToken
     ? state.hits
     : EMPTY_HITS;
 }

@@ -1340,6 +1340,7 @@ export function WebShellSidebar({
     workspace.client,
     primaryWorkspaceCwd,
     searchQuery,
+    workspaceSessionsReloadToken,
   );
   const [isResizing, setIsResizing] = useState(false);
   const [completedUnreadIds, setCompletedUnreadIds] = useState<Set<string>>(

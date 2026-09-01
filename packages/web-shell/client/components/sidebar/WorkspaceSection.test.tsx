@@ -1883,6 +1883,56 @@ describe('WorkspaceSection content search', () => {
     expect(container.textContent).toContain('Pinned ghost');
     expect(container.textContent).toContain('qdrant excerpt');
   });
+
+  it('drops a hit row after its session is deleted while the query stays active', async () => {
+    const listPage = vi.fn().mockResolvedValue({ sessions: [] });
+    const search = vi.fn().mockResolvedValue({
+      results: [
+        {
+          session: {
+            sessionId: 'ghost',
+            workspaceCwd: '/tmp/project',
+            displayName: 'Ghost hit',
+          },
+          snippet: 'qdrant excerpt',
+        },
+      ],
+    });
+    const client = {
+      searchWorkspaceSessions: search,
+      workspaceByCwd: vi.fn(() => ({
+        workspaceGit,
+        listWorkspaceSessionsPage: listPage,
+        listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+      })),
+    } as unknown as DaemonClient;
+    renderSection({
+      client,
+      expanded: true,
+      searchQuery: 'qdrant',
+      renderSession: renderRow,
+      reloadToken: 0,
+    });
+    await flush();
+    await advanceSearchDebounce();
+    await flush();
+    expect(container.textContent).toContain('Ghost hit');
+
+    // The session is deleted: catalog and transcript are gone and the
+    // reload token bumps — the settled hit must not resurrect it.
+    search.mockResolvedValue({ results: [] });
+    renderSection({
+      client,
+      expanded: true,
+      searchQuery: 'qdrant',
+      renderSession: renderRow,
+      reloadToken: 1,
+    });
+    await advanceSearchDebounce();
+    await flush();
+
+    expect(container.textContent ?? '').not.toContain('Ghost hit');
+  });
 });
 
 describe('WorkspaceSection overview plumbing', () => {

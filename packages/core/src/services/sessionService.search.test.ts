@@ -307,6 +307,23 @@ describe('SessionService.searchSessionContent', () => {
     );
   });
 
+  it('matches Greek text ending in sigma for every sigma query form', async () => {
+    // Whole-string lowercasing maps word-final Σ to ς while a per-code-point
+    // fold yields σ — without unification, Greek text ending in sigma never
+    // matches, not even a byte-identical query.
+    writeSession(SESSION_A, [userText(SESSION_A, 'a1', 'ΟΔΥΣΣΕΥΣ')]);
+
+    await expect(
+      service.searchSessionContent('οδυσσευς'),
+    ).resolves.toHaveLength(1);
+    await expect(
+      service.searchSessionContent('ΟΔΥΣΣΕΥΣ'),
+    ).resolves.toHaveLength(1);
+    await expect(
+      service.searchSessionContent('οδυσσευσ'),
+    ).resolves.toHaveLength(1);
+  });
+
   it('never splits a surrogate pair at a snippet boundary', async () => {
     writeSession(SESSION_A, [
       userText(SESSION_A, 'a1', `${'🚀'.repeat(25)} needle`),

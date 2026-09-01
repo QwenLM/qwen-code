@@ -30,19 +30,25 @@ const searchWorkspaceSessions =
   vi.fn<(typeof DaemonClient.prototype)['searchWorkspaceSessions']>();
 const client = { searchWorkspaceSessions } as unknown as DaemonClient;
 
-function TestHost({ query }: { query: string }) {
-  captured = useSessionContentSearch(client, '/work/a', query);
+function TestHost({
+  query,
+  reloadToken = 0,
+}: {
+  query: string;
+  reloadToken?: number;
+}) {
+  captured = useSessionContentSearch(client, '/work/a', query, reloadToken);
   return null;
 }
 
-async function renderHost(query: string) {
+async function renderHost(query: string, reloadToken = 0) {
   if (!container) {
     container = document.createElement('div');
     document.body.appendChild(container);
     root = createRoot(container);
   }
   await act(async () => {
-    root?.render(React.createElement(TestHost, { query }));
+    root?.render(React.createElement(TestHost, { query, reloadToken }));
   });
   if (!captured) throw new Error('hook did not render');
   return captured;
@@ -347,5 +353,29 @@ describe('useSessionContentSearch', () => {
 
     const cleared = await renderHost('');
     expect(cleared.size).toBe(0);
+  });
+
+  it('invalidates settled hits when the reload token bumps', async () => {
+    searchWorkspaceSessions.mockResolvedValue({
+      results: [
+        {
+          session: { sessionId: 's1', workspaceCwd: '/work/a' },
+          snippet: 'hit',
+        },
+      ],
+    });
+    await renderHost('qdrant', 0);
+    await advanceDebounce();
+    expect(captured?.size).toBe(1);
+
+    // A catalog mutation (delete/archive) bumps the token: hits blank
+    // immediately and the refetch observes the session is gone.
+    searchWorkspaceSessions.mockResolvedValue({ results: [] });
+    const bumped = await renderHost('qdrant', 1);
+    expect(bumped.size).toBe(0);
+    await advanceDebounce();
+
+    expect(searchWorkspaceSessions).toHaveBeenCalledTimes(2);
+    expect(captured?.size).toBe(0);
   });
 });

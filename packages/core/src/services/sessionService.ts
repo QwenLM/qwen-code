@@ -427,6 +427,17 @@ const HAS_LONE_SURROGATE =
   /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 
 /**
+ * Unicode case folding maps Σ/σ/ς to σ, but only whole-string lowercasing
+ * applies the context-sensitive word-final Σ → ς mapping — a per-code-point
+ * fold produces σ instead, so the two forms disagree on Greek text ending
+ * in sigma. Unify ς → σ on both sides before matching; it is
+ * length-preserving, so the UTF-16 index mapping below stays valid.
+ */
+function normalizeSigma(text: string): string {
+  return text.replace(/ς/g, 'σ');
+}
+
+/**
  * Case-insensitive indexOf returning the match position in the ORIGINAL
  * string's UTF-16 index space. Lowercasing can change string length (e.g.
  * U+0130 folds to two code units), so an index found in the lowercased
@@ -439,7 +450,7 @@ const HAS_LONE_SURROGATE =
 function indexOfCaseInsensitive(text: string, lowerQuery: string): number {
   if (
     !HAS_LONE_SURROGATE.test(lowerQuery) &&
-    !text.toLowerCase().includes(lowerQuery)
+    !normalizeSigma(text.toLowerCase()).includes(lowerQuery)
   ) {
     return -1;
   }
@@ -447,7 +458,7 @@ function indexOfCaseInsensitive(text: string, lowerQuery: string): number {
   const indexMap: number[] = [];
   for (let i = 0; i < text.length; ) {
     const char = String.fromCodePoint(text.codePointAt(i)!);
-    const foldedChar = char.toLowerCase();
+    const foldedChar = normalizeSigma(char.toLowerCase());
     folded += foldedChar;
     for (let j = 0; j < foldedChar.length; j++) indexMap.push(i);
     i += char.length;
@@ -2232,8 +2243,11 @@ export class SessionService {
     const { maxFiles = 200, maxResults = 20, signal } = options;
     // Normalize whitespace the same way snippets collapse it, so matching
     // and excerpting see the same text (`a  b` matches "a b" and the query
-    // `a  b` matches both).
-    const lowerQuery = query.trim().replace(/\s+/g, ' ').toLowerCase();
+    // `a  b` matches both). normalizeSigma keeps the query's fold aligned
+    // with the per-code-point text fold (Greek final sigma).
+    const lowerQuery = normalizeSigma(
+      query.trim().replace(/\s+/g, ' ').toLowerCase(),
+    );
     if (!lowerQuery) return [];
     signal?.throwIfAborted();
 
