@@ -512,13 +512,88 @@ describe('ndJsonStream', () => {
       ),
     );
     expect(onQueueSaturated).toHaveBeenCalledOnce();
-    expect(onQueueSaturated).toHaveBeenCalledWith(
-      expect.objectContaining({
+    const firstFrameBytes =
+      encoder.encode(JSON.stringify(first)).byteLength + 1;
+    const secondFrameBytes =
+      encoder.encode(JSON.stringify(second)).byteLength + 1;
+    expect(onQueueSaturated).toHaveBeenCalledWith({
+      requiredBytes: secondFrameBytes,
+      availableBytes: 220 - firstFrameBytes,
+      maxQueuedMessages: 2,
+      maxQueuedBytes: 220,
+      graceMs: 25,
+    });
+    await stream.readable.cancel();
+  });
+
+  it('cancel while backpressured wakes the pump without a transport error', async () => {
+    let inputController!: ReadableStreamDefaultController<Uint8Array>;
+    const input = new ReadableStream<Uint8Array>({
+      start(controller) {
+        inputController = controller;
+      },
+    });
+    const first = message('first', { text: 'x'.repeat(120) });
+    const second = message('second', { text: 'y'.repeat(120) });
+    const onQueueSaturated = vi.fn();
+    const onTransportError = vi.fn();
+    const stream = ndJsonStream(
+      new WritableStream<Uint8Array>(),
+      input,
+      { onQueueSaturated, onTransportError },
+      limits({
+        maxFrameBytes: 1024,
+        maxQueuedMessages: 2,
         maxQueuedBytes: 220,
-        graceMs: 25,
+        queueSaturationGraceMs: 200,
       }),
     );
+    inputController.enqueue(
+      encoder.encode(`${JSON.stringify(first)}\n${JSON.stringify(second)}\n`),
+    );
+    await vi.waitFor(() => expect(onQueueSaturated).toHaveBeenCalledOnce());
+
     await stream.readable.cancel();
+    // Outlast the grace window: a pump that missed the cancel wake would expire
+    // the wait and fail closed on the cancelled stream.
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    expect(onTransportError).not.toHaveBeenCalled();
+  });
+
+  it('fails immediately for a frame that can never fit, without the saturation warning', async () => {
+    const big = message('big', { text: 'x'.repeat(300) });
+    const onQueueSaturated = vi.fn();
+    const onTransportError = vi.fn();
+    const stream = ndJsonStream(
+      new WritableStream<Uint8Array>(),
+      byteStream([encoder.encode(`${JSON.stringify(big)}\n`)]),
+      { onQueueSaturated, onTransportError },
+      limits({
+        maxFrameBytes: 1024,
+        maxQueuedMessages: 2,
+        maxQueuedBytes: 220,
+        queueSaturationGraceMs: 5_000,
+      }),
+    );
+
+    await vi.waitFor(() =>
+      expect(onTransportError).toHaveBeenCalledWith(
+        expect.any(NdJsonQueueLimitError),
+      ),
+    );
+    expect(onQueueSaturated).not.toHaveBeenCalled();
+    await stream.readable.cancel();
+  });
+
+  it('rejects a non-positive queueSaturationGraceMs', () => {
+    expect(() =>
+      ndJsonStream(
+        new WritableStream<Uint8Array>(),
+        byteStream([]),
+        undefined,
+        limits({ queueSaturationGraceMs: 0 }),
+      ),
+    ).toThrow(RangeError);
   });
 
   it('bounds requests retained by the ACP SDK while responses are blocked', async () => {
