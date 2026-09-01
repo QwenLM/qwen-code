@@ -70,6 +70,10 @@
           "description": "The preferred editor to open files in.",
           "type": "string"
         },
+        "outputStyle": {
+          "description": "Name of the output style that shapes how responses are written, for example \"Concise\" or \"Explanatory\". Leave unset for the default style.",
+          "type": "string"
+        },
         "vimMode": {
           "description": "Enable Vim keybindings",
           "type": "boolean",
