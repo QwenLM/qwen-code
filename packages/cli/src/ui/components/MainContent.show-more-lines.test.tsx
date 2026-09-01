@@ -22,35 +22,34 @@ import {
 import { ToolCallStatus, StreamingState } from '../types.js';
 import type { HistoryItem } from '../types.js';
 import type { Config } from '@qwen-code/qwen-code-core';
-import { renderWithProviders } from '../../test-utils/render.js';
-import { SettingsContext } from '../contexts/SettingsContext.js';
-import { ConfigContext } from '../contexts/ConfigContext.js';
-import { ShellFocusContext } from '../contexts/ShellFocusContext.js';
-import { KeypressProvider } from '../contexts/KeypressContext.js';
-import { LoadedSettings } from '../../config/settings.js';
+import {
+  renderWithProviders,
+  withProviders,
+  type RenderWithProvidersOptions,
+} from '../../test-utils/render.js';
+import { LoadedSettings, type Settings } from '../../config/settings.js';
 
-const emptySettings = new LoadedSettings(
-  { path: '', settings: {}, originalSettings: {} },
-  { path: '', settings: {}, originalSettings: {} },
-  { path: '', settings: {}, originalSettings: {} },
-  { path: '', settings: {}, originalSettings: {} },
-  true,
-  new Set(),
-);
+// Settings with a ui.shellOutputMaxLines override for budget-vs-cap tests.
+const settingsWithShellCap = (shellOutputMaxLines: number) =>
+  new LoadedSettings(
+    { path: '', settings: {}, originalSettings: {} },
+    { path: '', settings: {}, originalSettings: {} },
+    {
+      path: '',
+      // InferSettings narrows shellOutputMaxLines to its literal default;
+      // the schema accepts any number at runtime.
+      settings: { ui: { shellOutputMaxLines } } as Settings,
+      originalSettings: { ui: { shellOutputMaxLines } } as Settings,
+    },
+    { path: '', settings: {}, originalSettings: {} },
+    true,
+    new Set(),
+  );
 
-// The same provider stack renderWithProviders wraps around the tree —
-// rerender must keep the identical root structure to reconcile in place.
-const fullTree = (uiState: UIState) => (
-  <SettingsContext.Provider value={emptySettings}>
-    <ConfigContext.Provider value={mockConfig}>
-      <ShellFocusContext.Provider value={true}>
-        <KeypressProvider kittyProtocolEnabled={true}>
-          {appTree(uiState)}
-        </KeypressProvider>
-      </ShellFocusContext.Provider>
-    </ConfigContext.Provider>
-  </SettingsContext.Provider>
-);
+// Rebuilds the exact root structure renderWithProviders mounted (shared
+// withProviders wrapper, no hand copy), so rerender() reconciles in place.
+const wrappedTree = (uiState: UIState, options?: RenderWithProvidersOptions) =>
+  withProviders(appTree(uiState), { config: mockConfig, ...options });
 
 // Input/measurement plumbing irrelevant to the overflow decision path.
 vi.mock('../hooks/useMouseEvents.js', () => ({
@@ -274,10 +273,20 @@ const appTree = (uiState: UIState) => (
   </AppContext.Provider>
 );
 
-const renderMainContent = (uiState: UIState) =>
-  renderWithProviders(appTree(uiState), { config: mockConfig });
+const renderMainContent = (
+  uiState: UIState,
+  options?: RenderWithProvidersOptions,
+) => renderWithProviders(appTree(uiState), { config: mockConfig, ...options });
 
-const toolCall = (name: string, output: string) => ({
+// Live shell output always arrives renderOutputAsMarkdown:false
+// (ShellTool's isOutputMarkdown=false); resumed sessions omit the flag and
+// hit ToolMessage's default true. Model both shapes explicitly instead of
+// silently rendering every fixture with the resumed-session default.
+const toolCall = (
+  name: string,
+  output: string,
+  renderOutputAsMarkdown?: boolean,
+) => ({
   callId: 'call-1',
   name,
   displayName: name.toLowerCase(),
@@ -285,14 +294,19 @@ const toolCall = (name: string, output: string) => ({
   resultDisplay: output,
   status: ToolCallStatus.Success,
   confirmationDetails: undefined,
+  ...(renderOutputAsMarkdown === undefined ? {} : { renderOutputAsMarkdown }),
 });
 
-const turnWithToolOutput = (toolName: string, output: string) => [
+const turnWithToolOutput = (
+  toolName: string,
+  output: string,
+  renderOutputAsMarkdown?: boolean,
+) => [
   { id: 1, type: 'user', text: 'run' } as HistoryItem,
   {
     id: 2,
     type: 'tool_group',
-    tools: [toolCall(toolName, output)],
+    tools: [toolCall(toolName, output, renderOutputAsMarkdown)],
   } as unknown as HistoryItem,
   { id: 3, type: 'gemini', text: 'Done.' } as HistoryItem,
 ];
@@ -305,13 +319,16 @@ const WAIT_FOR_OPTIONS = { timeout: 2000, interval: 10 };
 
 describe('ctrl+s hint honesty for capped shell output (#10640)', () => {
   it('does not show the hint when the only hidden lines come from the ui.shellOutputMaxLines cap', async () => {
-    // 10-line shell result; the default cap (5) hides the first lines and
-    // ctrl+s cannot lift that cap — the hint must not advertise them.
+    // 10-line shell result in the live shape (renderOutputAsMarkdown:false);
+    // the default cap (5) hides the first lines and ctrl+s cannot lift that
+    // cap — the hint must not advertise them.
     const output = Array.from({ length: 10 }, (_, i) => `line ${i + 1}`).join(
       '\n',
     );
     const { lastFrame } = renderMainContent(
-      createUIState({ history: turnWithToolOutput('Shell', output) }),
+      createUIState({
+        history: turnWithToolOutput('Shell', output, false),
+      }),
     );
     await vi.waitFor(() => {
       const current = lastFrame() ?? '';
@@ -379,7 +396,7 @@ describe('ctrl+s hint honesty for capped shell output (#10640)', () => {
 
     // ctrl+s: constrainHeight off -> static items get no height budget.
     rerender(
-      fullTree(
+      wrappedTree(
         createUIState({
           history,
           staticAreaMaxItemHeight: 30,
@@ -401,5 +418,76 @@ describe('ctrl+s hint honesty for capped shell output (#10640)', () => {
     expect(frame).toContain('row 1');
     expect(frame).not.toContain('hidden ...');
     expect(frame).not.toContain(HINT);
+  });
+
+  it('keeps resumed-session shell output capped when ctrl+s lifts the height budget', async () => {
+    // Resumed sessions rebuild tool displays without renderOutputAsMarkdown
+    // (ToolMessage default true). Pressing ctrl+s then drops the height
+    // budget (constrainHeight=false), but the ui.shellOutputMaxLines cap must
+    // still bind — the output must not escape through the markdown branch,
+    // which MaxSizedBox does not contain (#10640).
+    const output = Array.from({ length: 10 }, (_, i) => `line ${i + 1}`).join(
+      '\n',
+    );
+    // renderOutputAsMarkdown omitted on purpose: the resumed-session shape.
+    const { lastFrame } = renderMainContent(
+      createUIState({
+        history: turnWithToolOutput('Shell', output),
+        constrainHeight: false,
+      }),
+    );
+    await vi.waitFor(() => {
+      const current = lastFrame() ?? '';
+      expect(current).toContain('... first 5 lines hidden ...');
+      expect(current).toContain('line 10');
+    }, WAIT_FOR_OPTIONS);
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('... first 5 lines hidden ...');
+    expect(frame).not.toContain('line 1\n');
+    expect(frame).not.toContain(HINT);
+  });
+
+  it('keeps the hint when the height budget binds tighter than the shell cap', async () => {
+    // ui.shellOutputMaxLines=50 with a small per-item height budget: the
+    // hidden lines come from the budget, which ctrl+s CAN lift — the hint
+    // must stay until the budget is lifted, and the expanded output stops at
+    // the (larger) shell cap rather than ignoring it.
+    const output = Array.from({ length: 20 }, (_, i) => `row ${i + 1}`).join(
+      '\n',
+    );
+    const history = turnWithToolOutput('Shell', output, false);
+    const options = { settings: settingsWithShellCap(50) };
+    const { lastFrame, rerender } = renderMainContent(
+      createUIState({ history, staticAreaMaxItemHeight: 12 }),
+      options,
+    );
+    await vi.waitFor(() => {
+      expect(lastFrame()).toContain('hidden ...');
+    }, WAIT_FOR_OPTIONS);
+    await vi.waitFor(() => {
+      expect(lastFrame()).toContain(HINT);
+    }, WAIT_FOR_OPTIONS);
+
+    // ctrl+s lifts the budget; the output expands and the hint disappears
+    // once the overflow unregisters.
+    rerender(
+      wrappedTree(
+        createUIState({
+          history,
+          staticAreaMaxItemHeight: 12,
+          constrainHeight: false,
+        }),
+        options,
+      ),
+    );
+    await vi.waitFor(() => {
+      expect(lastFrame()).toContain('row 1');
+    }, WAIT_FOR_OPTIONS);
+    await vi.waitFor(() => {
+      expect(lastFrame() ?? '').not.toContain(HINT);
+    }, WAIT_FOR_OPTIONS);
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('row 20');
+    expect(frame).not.toContain('hidden ...');
   });
 });
