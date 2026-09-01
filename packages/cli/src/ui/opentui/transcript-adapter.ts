@@ -56,12 +56,17 @@ export function transcribeSession(
   const events: OpenTuiStreamEvent[] = [];
   const prompts: string[] = [];
   let toolSeq = 0;
+  const pendingIdlessIds: string[] = [];
   for (const line of jsonl.split('\n')) {
     const t = line.trim();
     if (!t) continue;
     let o: SessionLine & {
       subtype?: string;
-      systemPayload?: { phase?: string; rawCommand?: string };
+      systemPayload?: {
+        phase?: string;
+        rawCommand?: string;
+        hiddenInvocation?: boolean;
+      };
       toolCallResult?: {
         callId?: string;
         status?: string;
@@ -79,7 +84,7 @@ export function transcribeSession(
       const text = parts
         .filter((p) => p.text && !p.thought)
         .map((p) => p.text as string)
-        .join('');
+        .join('\n');
       if (text) {
         events.push({ type: 'user', text });
         prompts.push(text);
@@ -87,7 +92,12 @@ export function transcribeSession(
       continue;
     }
     if (o.type === 'system') {
-      if (o.subtype === 'slash_command' && o.systemPayload?.rawCommand) {
+      if (
+        o.subtype === 'slash_command' &&
+        o.systemPayload?.phase === 'invocation' &&
+        o.systemPayload?.rawCommand &&
+        !o.systemPayload?.hiddenInvocation
+      ) {
         const cmd = o.systemPayload.rawCommand;
         events.push({ type: 'user', text: cmd });
         prompts.push(cmd);
@@ -96,7 +106,7 @@ export function transcribeSession(
     }
     if (o.type === 'tool_result') {
       const r = o.toolCallResult ?? {};
-      const id = r.callId ?? `tool-${++toolSeq}`;
+      const id = r.callId ?? pendingIdlessIds.shift() ?? `tool-${++toolSeq}`;
       if (r.resultDisplay) {
         // FileDiff results ride as structured payloads (colored diff lines in
         // the tool card); everything else flattens to display text. Bare
@@ -112,32 +122,37 @@ export function transcribeSession(
           });
         }
       }
-      const ok = (r.status ?? 'success') !== 'error';
+      const status = r.status ?? 'success';
+      const ok = status !== 'error' && status !== 'cancelled';
       events.push({
         type: 'tool-end',
         id,
         success: ok,
-        summary: ok ? 'ok' : 'error',
+        summary: ok ? 'ok' : status === 'cancelled' ? 'cancelled' : 'error',
       });
       continue;
     }
     if (o.type === 'assistant') {
-      let sawThought = false;
-      let closed = false;
+      let thinkingOpen = false;
       for (const p of parts) {
         if (p.thought && p.text) {
           events.push({ type: 'thinking', delta: p.text });
-          sawThought = true;
+          thinkingOpen = true;
         } else {
-          if (sawThought && !closed) {
+          if (thinkingOpen) {
             events.push({ type: 'thinking-end' });
-            closed = true;
+            thinkingOpen = false;
           }
           if (p.functionCall) {
             const name = p.functionCall.name ?? 'tool';
+            let id = p.functionCall.id;
+            if (!id) {
+              id = `tool-${++toolSeq}`;
+              pendingIdlessIds.push(id);
+            }
             events.push({
               type: 'tool-start',
-              id: p.functionCall.id ?? `tool-${++toolSeq}`,
+              id,
               tool: name,
               title: opts.toolTitle?.(name) ?? name,
             });
@@ -146,7 +161,7 @@ export function transcribeSession(
           }
         }
       }
-      if (sawThought && !closed) events.push({ type: 'thinking-end' });
+      if (thinkingOpen) events.push({ type: 'thinking-end' });
     }
   }
   events.push({ type: 'done' });

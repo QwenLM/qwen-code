@@ -14,6 +14,7 @@
  */
 
 import { C } from './theme.js';
+import { escapeAnsiCtrlCodes } from '../utils/textUtils.js';
 
 /** One rendered diff line = a row of colored spans, so a dim line-number
  * gutter can sit next to normally colored content. */
@@ -49,14 +50,14 @@ function parseDiffLines(diffContent: string): ParsedDiffLine[] {
       result.push({
         type: 'add',
         newLine: currentNewLine,
-        content: line.substring(1),
+        content: escapeAnsiCtrlCodes(line.substring(1)),
       });
     } else if (line.startsWith('-')) {
       currentOldLine++;
       result.push({
         type: 'del',
         oldLine: currentOldLine,
-        content: line.substring(1),
+        content: escapeAnsiCtrlCodes(line.substring(1)),
       });
     } else if (line.startsWith(' ')) {
       currentOldLine++;
@@ -65,7 +66,7 @@ function parseDiffLines(diffContent: string): ParsedDiffLine[] {
         type: 'context',
         oldLine: currentOldLine,
         newLine: currentNewLine,
-        content: line.substring(1),
+        content: escapeAnsiCtrlCodes(line.substring(1)),
       });
     } else if (line.startsWith('\\')) {
       result.push({ type: 'other', content: line });

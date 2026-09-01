@@ -60,6 +60,16 @@ export function compactionText(props: CompactionViewProps): string {
       return t(
         'Could not compress chat history due to a token counting error.',
       );
+    case CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY:
+      return t(
+        'Could not compress chat history because the compression summary was empty.',
+      );
+    case CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED:
+      return t(
+        'Could not compress chat history because the compression summary was truncated.',
+      );
+    case CompressionStatus.COMPRESSION_FAILED_API_ERROR:
+      return t('Could not compress chat history due to an API error.');
     case CompressionStatus.NOOP:
       return 'Nothing to compress.';
     default:

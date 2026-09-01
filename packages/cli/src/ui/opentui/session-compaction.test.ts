@@ -97,14 +97,42 @@ describe('session-compaction texts (CompressionMessage parity)', () => {
     ).toBe('Nothing to compress.');
   });
 
-  it('returns an empty text for unhandled statuses and null', () => {
+  it('reports the empty summary failure', () => {
     expect(
       compactionText(
         props({
           compressionStatus: CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY,
         }),
       ),
-    ).toBe('');
+    ).toBe(
+      'Could not compress chat history because the compression summary was empty.',
+    );
+  });
+
+  it('reports the truncated output failure', () => {
+    expect(
+      compactionText(
+        props({
+          compressionStatus:
+            CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED,
+        }),
+      ),
+    ).toBe(
+      'Could not compress chat history because the compression summary was truncated.',
+    );
+  });
+
+  it('reports the API error failure', () => {
+    expect(
+      compactionText(
+        props({
+          compressionStatus: CompressionStatus.COMPRESSION_FAILED_API_ERROR,
+        }),
+      ),
+    ).toBe('Could not compress chat history due to an API error.');
+  });
+
+  it('returns an empty text for null', () => {
     expect(compactionText(props({ compressionStatus: null }))).toBe('');
   });
 });

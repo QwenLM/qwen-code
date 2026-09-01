@@ -270,7 +270,12 @@ export async function* livePromptEvents(
             modelOverride: options.modelOverride,
           }
         : undefined
-      : { type: SendMessageType.ToolResult };
+      : {
+          type: SendMessageType.ToolResult,
+          ...(options?.modelOverride
+            ? { modelOverride: options.modelOverride }
+            : {}),
+        };
     first = false;
     const pending: Array<{ callId: string; name: string; args?: unknown }> = [];
     const stream = client.sendMessageStream(
@@ -450,7 +455,12 @@ export async function* livePromptEvents(
         type: 'tool-end',
         id: call.request.callId,
         success: !failed,
-        summary: failed ? 'error' : 'ok',
+        summary:
+          call.status === 'cancelled'
+            ? 'cancelled'
+            : call.status === 'error'
+              ? 'error'
+              : 'ok',
       };
       if (resp?.responseParts) responseParts.push(...resp.responseParts);
     }

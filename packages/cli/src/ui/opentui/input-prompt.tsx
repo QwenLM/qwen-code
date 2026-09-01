@@ -126,7 +126,7 @@ function buildCompletionContext(
       loadHistory: () => {},
       refreshStatic: () => {},
       toggleVimEnabled: async () => false,
-      setMemoryFileCount: () => {},
+      setGeminiMdFileCount: () => {},
       reloadCommands: () => {},
       setSessionName: () => {},
       extensionsUpdateState: new Map(),
@@ -749,7 +749,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     }
     if (
       key.name === 'backspace' &&
-      (key.ctrl || key.super) &&
+      (key.ctrl || key.super || key.meta || key.option) &&
       key.eventType !== 'release'
     ) {
       // DELETE_WORD_BACKWARD parity (keyBindings.ts: ctrl/command+backspace;
