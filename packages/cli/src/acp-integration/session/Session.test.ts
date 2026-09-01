@@ -986,6 +986,9 @@ describe('Session', () => {
       setCurrentSessionScheduledTaskCreator: vi.fn(),
       getCurrentSessionScheduledTaskCreator: vi.fn(),
       getExtensions: vi.fn().mockReturnValue([]),
+      // Threaded into resolveDeferredToolCall so the ACP bridge applies the
+      // same depth-gated AgentTool re-admission as the terminal scheduler.
+      getMaxSubagentDepth: vi.fn().mockReturnValue(5),
     } as unknown as Config;
 
     mockClient = {
