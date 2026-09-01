@@ -1208,6 +1208,7 @@ function compactTaskExecutionOutput(
     'terminateReason',
     'tokenCount',
     'executionSummary',
+    'skills',
   ]) {
     if (rawOutput[key] !== undefined) compact[key] = rawOutput[key];
   }
