@@ -315,3 +315,40 @@ it('backs off polling after repeated failures following a running result', async
   await act(async () => vi.advanceTimersByTimeAsync(30_000));
   expect(workspaceClient.resolveSubagentSession).toHaveBeenCalledTimes(7);
 });
+
+it('resets the retry budget after a running poll recovers', async () => {
+  vi.useFakeTimers();
+  const running = { sessionId: 'subagent-session', status: 'running' as const };
+  workspaceClient.resolveSubagentSession
+    .mockResolvedValueOnce(running)
+    .mockRejectedValueOnce(new Error('outage 1'))
+    .mockRejectedValueOnce(new Error('outage 2'))
+    .mockRejectedValueOnce(new Error('outage 3'))
+    .mockRejectedValueOnce(new Error('outage 4'))
+    .mockResolvedValueOnce(running)
+    .mockRejectedValue(new Error('new outage'));
+  container = document.createElement('div');
+  root = createRoot(container);
+
+  await act(async () => {
+    root!.render(
+      <I18nProvider language="en">
+        <SubagentDetail
+          sessionId="parent-session"
+          rootToolCallId="agent-1"
+          initialRootTool={
+            (messages[0] as Extract<Message, { role: 'tool_group' }>).tools[0]
+          }
+        />
+      </I18nProvider>,
+    );
+    await Promise.resolve();
+  });
+
+  await act(async () => vi.advanceTimersByTimeAsync(12_000));
+  expect(workspaceClient.resolveSubagentSession).toHaveBeenCalledTimes(5);
+  await act(async () => vi.advanceTimersByTimeAsync(30_000));
+  expect(workspaceClient.resolveSubagentSession).toHaveBeenCalledTimes(6);
+  await act(async () => vi.advanceTimersByTimeAsync(6_000));
+  expect(workspaceClient.resolveSubagentSession).toHaveBeenCalledTimes(8);
+});

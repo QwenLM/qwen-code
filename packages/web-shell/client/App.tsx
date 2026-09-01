@@ -468,6 +468,7 @@ interface ArtifactPanelSessionState {
   selectedReviewPath: string | null;
   extraArtifacts: DaemonSessionArtifact[];
   width: number;
+  pendingRestore?: boolean;
 }
 interface PaneArtifactSnapshot {
   artifacts: readonly DaemonSessionArtifact[];
@@ -4152,12 +4153,14 @@ export function App({
     new Map<string, DaemonSessionAttachmentReference[]>(),
   );
   const sessionAttachmentsSkeletonLoading =
-    sessionAttachmentsLoading ||
-    Boolean(
-      environmentPanelOpen &&
-        logicalSessionKey &&
-        !sessionAttachmentsBySessionRef.current.has(logicalSessionKey),
-    );
+    environmentPanelReachable &&
+    environmentPanelItems.includes('attachments') &&
+    (sessionAttachmentsLoading ||
+      Boolean(
+        environmentPanelOpen &&
+          logicalSessionKey &&
+          !sessionAttachmentsBySessionRef.current.has(logicalSessionKey),
+      ));
   const lastAttachmentsFetchRef = useRef({
     sessionKey: '',
     fetchedAt: 0,
@@ -4302,17 +4305,36 @@ export function App({
   const artifactPanelRestoredSessionKeyRef = useRef<string | undefined>(
     undefined,
   );
+  const artifactPanelDeferredPersistedTabsRef = useRef(
+    new Map<string, PersistedArtifactPanelTab[]>(),
+  );
   useLayoutEffect(() => {
     if (
       !logicalSessionKey ||
       artifactPanelRestoredSessionKeyRef.current !== logicalSessionKey
     )
       return;
+    const previousPersistedState =
+      artifactPanelPersistedStatesRef.current[logicalSessionKey];
     delete artifactPanelPersistedStatesRef.current[logicalSessionKey];
+    const serializedTabs = serializeArtifactPanelTabs(artifactPanelTabs);
+    const serializedTabIds = new Set(serializedTabs.map((tab) => tab.id));
+    const deferredTabs =
+      artifactPanelDeferredPersistedTabsRef.current.get(logicalSessionKey) ??
+      [];
     artifactPanelPersistedStatesRef.current[logicalSessionKey] = {
       open: artifactPanelOpen,
-      activeTabId: activeArtifactPanelTabId,
-      tabs: serializeArtifactPanelTabs(artifactPanelTabs),
+      activeTabId:
+        activeArtifactPanelTabId ??
+        (deferredTabs.some(
+          (tab) => tab.id === previousPersistedState?.activeTabId,
+        )
+          ? (previousPersistedState?.activeTabId ?? null)
+          : null),
+      tabs: [
+        ...deferredTabs.filter((tab) => !serializedTabIds.has(tab.id)),
+        ...serializedTabs,
+      ],
     };
     writeStoredArtifactPanelStates(
       RIGHT_PANEL_STATE_STORAGE_KEY,
@@ -5415,15 +5437,17 @@ export function App({
     if (
       previousSessionId &&
       previousSessionId !== nextSessionId &&
-      artifactPanelRestoredSessionKeyRef.current === previousSessionId
+      (artifactPanelRestoredSessionKeyRef.current === previousSessionId ||
+        (artifactPanelSessionStateRef.current?.tabs.length ?? 0) > 0)
     ) {
       const currentState = artifactPanelSessionStateRef.current;
       if (currentState) {
         artifactPanelStateBySessionRef.current.delete(previousSessionId);
-        artifactPanelStateBySessionRef.current.set(
-          previousSessionId,
-          currentState,
-        );
+        artifactPanelStateBySessionRef.current.set(previousSessionId, {
+          ...currentState,
+          pendingRestore:
+            artifactPanelRestoredSessionKeyRef.current !== previousSessionId,
+        });
         if (
           artifactPanelStateBySessionRef.current.size >
           MAX_ARTIFACT_PANEL_SESSION_STATES
@@ -5452,9 +5476,19 @@ export function App({
       setActiveArtifactPanelTabId(null);
       return;
     }
+    const newlyAvailableDeferredTab = (
+      artifactPanelDeferredPersistedTabsRef.current.get(nextSessionId) ?? []
+    ).some(
+      (tab) =>
+        (tab.kind === 'terminal' && webTerminalAvailable) ||
+        (tab.kind === 'workflow' &&
+          tab.sessionId === connection.sessionId &&
+          sessionAgentTraceSupported),
+    );
     if (
       artifactPanelRestoredSessionKeyRef.current === nextSessionId &&
-      !connection.loadingTranscript
+      !connection.loadingTranscript &&
+      !newlyAvailableDeferredTab
     ) {
       return;
     }
@@ -5509,13 +5543,16 @@ export function App({
 
     const savedState =
       artifactPanelStateBySessionRef.current.get(nextSessionId);
-    const savedDrafts =
+    const savedRuntimeTabs =
       savedState?.tabs.filter(
-        (tab) => tab.kind === 'side_task' && !tab.sessionId,
+        (tab) =>
+          savedState.pendingRestore ||
+          (tab.kind === 'side_task' && !tab.sessionId),
       ) ?? [];
     const persisted =
       artifactPanelPersistedStatesRef.current[nextSessionId] ?? undefined;
-    if (!persisted && savedDrafts.length === 0) {
+    if (!persisted && savedRuntimeTabs.length === 0) {
+      artifactPanelDeferredPersistedTabsRef.current.delete(nextSessionId);
       artifactPanelRestoredSessionKeyRef.current = nextSessionId;
       setArtifactPanelRestoring(false);
       if (previousSessionId !== nextSessionId) {
@@ -5529,6 +5566,22 @@ export function App({
         setArtifactPanelFullscreen(false);
       }
       return;
+    }
+    const deferredPersistedTabs = (persisted?.tabs ?? []).filter(
+      (tab) =>
+        (tab.kind === 'terminal' && !webTerminalAvailable) ||
+        (tab.kind === 'workflow' &&
+          tab.sessionId === connection.sessionId &&
+          !sessionAgentTraceSupported),
+    );
+    if (deferredPersistedTabs.length > 0) {
+      setBoundedMapEntry(
+        artifactPanelDeferredPersistedTabsRef.current,
+        nextSessionId,
+        deferredPersistedTabs,
+      );
+    } else {
+      artifactPanelDeferredPersistedTabsRef.current.delete(nextSessionId);
     }
     const restoredOpen = savedState?.open ?? persisted?.open ?? false;
     setArtifactPanelRestoring(restoredOpen);
@@ -5719,7 +5772,11 @@ export function App({
           ),
         )
       ).filter((tab): tab is ArtifactPanelTab => tab !== undefined);
-      restoredTabs.push(...savedDrafts);
+      const savedRuntimeTabIds = new Set(savedRuntimeTabs.map((tab) => tab.id));
+      const mergedRestoredTabs = [
+        ...restoredTabs.filter((tab) => !savedRuntimeTabIds.has(tab.id)),
+        ...savedRuntimeTabs,
+      ];
       if (cancelled) return;
       artifactPanelRestoredSessionKeyRef.current = nextSessionId;
       setArtifactPanelRestoring(false);
@@ -5730,7 +5787,7 @@ export function App({
         tabsOpenedDuringRestore.map((tab) => tab.id),
       );
       const mergedTabs = [
-        ...restoredTabs.filter((tab) => !newlyOpenedIds.has(tab.id)),
+        ...mergedRestoredTabs.filter((tab) => !newlyOpenedIds.has(tab.id)),
         ...tabsOpenedDuringRestore,
       ];
       const activeTabId = mergedTabs.some(
@@ -6112,16 +6169,17 @@ export function App({
       observer.disconnect();
     };
   }, [artifactPanelOpen, artifactPanelFullscreen]);
-  const closeArtifactPanelTabs = useCallback((tabIds: ReadonlySet<string>) => {
-    if (tabIds.size === 0) return;
-    for (const tab of artifactPanelTabsRef.current) {
-      if (tabIds.has(tab.id) && tab.kind === 'terminal') {
-        releaseWebTerminal(tab.id);
-      }
-    }
-    setArtifactPanelTabs((tabs) => {
+  const closeArtifactPanelTabs = useCallback(
+    (tabIds: ReadonlySet<string>) => {
+      if (tabIds.size === 0) return;
+      const tabs = artifactPanelTabsRef.current;
       const nextTabs = tabs.filter((tab) => !tabIds.has(tab.id));
-      if (nextTabs.length === tabs.length) return tabs;
+      if (nextTabs.length === tabs.length) return;
+      for (const tab of tabs) {
+        if (tabIds.has(tab.id) && tab.kind === 'terminal') {
+          releaseWebTerminal(tab.id);
+        }
+      }
       if (nextTabs.length === 0) {
         setArtifactPanelOpen(false);
         setArtifactPanelFullscreen(false);
@@ -6131,7 +6189,8 @@ export function App({
         setSelectedReviewPath(null);
         setArtifactPanelExtraArtifacts([]);
         setPaneArtifactSnapshots(new Map());
-        return nextTabs;
+        setArtifactPanelTabs(nextTabs);
+        return;
       }
       if (
         activeArtifactPanelTabIdRef.current &&
@@ -6141,15 +6200,23 @@ export function App({
         const nextActive =
           nextTabs[Math.min(closedIndex, nextTabs.length - 1)] ?? nextTabs[0];
         setActiveArtifactPanelTabId(nextActive.id);
-        if (nextActive.kind === 'terminal' && !nextActive.initialized) {
-          return nextTabs.map((tab) =>
-            tab.id === nextActive.id ? { ...tab, initialized: true } : tab,
-          );
-        }
+        setArtifactPanelTabs(
+          nextActive.kind === 'terminal' && !nextActive.initialized
+            ? nextTabs.map((tab) =>
+                tab.id === nextActive.id ? { ...tab, initialized: true } : tab,
+              )
+            : nextTabs,
+        );
+        void hydrateRestoredAttachmentTab(nextActive);
+        void hydratePendingArtifactPanelTab(
+          nextActive.kind === 'pending' ? nextActive : undefined,
+        );
+        return;
       }
-      return nextTabs;
-    });
-  }, []);
+      setArtifactPanelTabs(nextTabs);
+    },
+    [hydratePendingArtifactPanelTab, hydrateRestoredAttachmentTab],
+  );
   const closeArtifactPanelTab = useCallback(
     (tabId: string) => closeArtifactPanelTabs(new Set([tabId])),
     [closeArtifactPanelTabs],

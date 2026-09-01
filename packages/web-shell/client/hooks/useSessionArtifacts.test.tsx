@@ -217,6 +217,22 @@ describe('useSessionArtifacts', () => {
       reloaded.resolve({ artifacts: [] });
       await reloaded.promise;
     });
+
+    const retainedRefresh = deferred<{ artifacts: DaemonSessionArtifact[] }>();
+    sdkMock.actions.loadArtifacts.mockReturnValueOnce(retainedRefresh.promise);
+    sdkMock.connection = {
+      status: 'connected',
+      sessionId: 'session-20',
+      capabilities: { features: ['session_artifacts'] },
+    };
+    sdkMock.ownerVersion += 1;
+    await rerenderHookHost();
+
+    expect(latestState?.loading).toBe(false);
+    await act(async () => {
+      retainedRefresh.resolve({ artifacts: [] });
+      await retainedRefresh.promise;
+    });
   });
 
   it('keeps current artifacts visible while refreshing the same session', async () => {

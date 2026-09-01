@@ -26320,6 +26320,7 @@ describe('createServeApp', () => {
       sessionId: string,
       state: 'active' | 'archived' = 'active',
       workspaceCwd = wsDir,
+      text = 'hello transcript',
     ): Promise<void> {
       const chatsDir = path.join(
         new Storage(workspaceCwd).getProjectDir(),
@@ -26335,7 +26336,7 @@ describe('createServeApp', () => {
           sessionId,
           timestamp: '2026-05-28T12:00:00.000Z',
           type: 'user',
-          message: { role: 'user', parts: [{ text: 'hello transcript' }] },
+          message: { role: 'user', parts: [{ text }] },
           cwd: workspaceCwd,
           version: '1.0.0',
         }) + '\n',
@@ -26410,6 +26411,8 @@ describe('createServeApp', () => {
           pendingInteractionCount: 0,
           hasTurnError: false,
         }),
+        flushSessionTranscriptImpl: () =>
+          writeTranscriptSession(sid, 'active', wsDir, 'flushed transcript'),
       });
       const registry = createWorkspaceRegistry([
         makeWorkspaceRuntimeForTest({
@@ -26433,6 +26436,7 @@ describe('createServeApp', () => {
 
       expect(res.status).toBe(200);
       expect(bridge.flushSessionTranscriptCalls).toEqual([sid]);
+      expect(JSON.stringify(res.body)).toContain('flushed transcript');
     });
 
     it('reads and exports the active copy of an exact persisted conflict', async () => {

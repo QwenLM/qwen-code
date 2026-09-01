@@ -3674,6 +3674,38 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('flushes transcripts through the backward page barrier', async () => {
+    const handle = makeChannel({
+      extMethodImpl: (method, params) => {
+        if (method === SERVE_STATUS_EXT_METHODS.sessionTranscript) {
+          return {
+            v: 1,
+            sessionId: params['sessionId'],
+            events: [],
+            hasMore: false,
+          };
+        }
+        throw new Error(`unexpected extMethod ${method}`);
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+
+    await bridge.flushSessionTranscript?.('session-1');
+
+    expect(handle.agent.extMethodCalls).toEqual([
+      {
+        method: SERVE_STATUS_EXT_METHODS.sessionTranscript,
+        params: {
+          cwd: WS_A,
+          sessionId: 'session-1',
+          direction: 'backward',
+          limit: 1,
+        },
+      },
+    ]);
+    await bridge.shutdown();
+  });
+
   it('times out transcript page status requests', async () => {
     vi.useFakeTimers();
     try {

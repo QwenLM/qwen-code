@@ -2273,6 +2273,19 @@ describe('task activity key', () => {
     expect(testState.latestBackgroundTasksRefreshTrigger).toBe(1);
   });
 
+  it('does not show an attachment skeleton when the environment panel is unreachable', async () => {
+    const { container } = renderApp({ header: { items: [] } });
+    await flush();
+
+    testState.prompt = '/tasks';
+    await clickSubmit(container);
+    await flush();
+
+    expect(
+      container.querySelector('[data-testid="environment-file-list-skeleton"]'),
+    ).toBeNull();
+  });
+
   it('lists current-session attachments in the environment panel', async () => {
     mockConnection.capabilities.features = ['session_attachment_list'];
     mockSessionActions.listAttachments.mockResolvedValue([
@@ -2369,7 +2382,8 @@ describe('task activity key', () => {
     const imageRow = Array.from(container.querySelectorAll('button')).find(
       (button) => button.textContent?.includes('photo.png'),
     );
-    act(() => imageRow?.click());
+    expect(imageRow).toBeDefined();
+    act(() => imageRow!.click());
 
     mockConnection.sessionId = 'session-2';
     testState.ownerVersion += 1;
@@ -3034,7 +3048,7 @@ describe('task activity key', () => {
     ).toBe('true');
   });
 
-  it('does not restore a terminal tab without the capability', async () => {
+  it('defers terminal and Workflow tabs until their capabilities are available', async () => {
     window.localStorage.setItem(
       'qwen-code-web-shell-right-panel-state',
       JSON.stringify({
@@ -3048,13 +3062,19 @@ describe('task activity key', () => {
               title: 'Terminal',
               workspaceCwd: '/tmp/project',
             },
+            {
+              id: 'workflow:session-1',
+              kind: 'workflow',
+              title: 'Workflow',
+              sessionId: 'session-1',
+            },
           ],
         },
       }),
     );
 
-    const { container } = renderApp({
-      rightPanel: { items: ['terminal'] },
+    const { container, rerender } = renderApp({
+      rightPanel: { items: ['terminal', 'workflow'] },
     });
     await flush();
     await flush();
@@ -3062,6 +3082,39 @@ describe('task activity key', () => {
     expect(
       container.querySelector('[data-testid="terminal-panel"]'),
     ).toBeNull();
+    expect(container.querySelector('button[title="Workflow"]')).toBeNull();
+    const persistedState = JSON.parse(
+      window.localStorage.getItem('qwen-code-web-shell-right-panel-state') ??
+        '{}',
+    )['/tmp/project\0session-1'];
+    expect(persistedState?.activeTabId).toBe('terminal:stored');
+    expect(persistedState?.tabs).toEqual([
+      {
+        id: 'terminal:stored',
+        kind: 'terminal',
+        title: 'Terminal',
+        workspaceCwd: '/tmp/project',
+      },
+      {
+        id: 'workflow:session-1',
+        kind: 'workflow',
+        title: 'Workflow',
+        sessionId: 'session-1',
+      },
+    ]);
+
+    mockConnection.capabilities.features = [
+      'web_terminal',
+      'session_agent_trace',
+    ];
+    rerender({ rightPanel: { items: ['terminal', 'workflow'] } });
+    await flush();
+    await flush();
+
+    expect(
+      container.querySelector('[data-terminal-id="terminal:stored"]'),
+    ).not.toBeNull();
+    expect(container.querySelector('button[title="Workflow"]')).not.toBeNull();
   });
 
   it('continues cross-session transcript restoration past 20 pages', async () => {
@@ -3812,6 +3865,17 @@ describe('task activity key', () => {
     expect(mockSessionActions.readAttachment).not.toHaveBeenCalledWith(
       'third.png',
     );
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Close second.png"]',
+        )
+        ?.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(mockSessionActions.readAttachment).toHaveBeenCalledWith('third.png');
   });
 
   it('re-fetches only the active tab after switching back to a session', async () => {
@@ -4168,6 +4232,56 @@ describe('task activity key', () => {
         .querySelector('button[title="new.txt"]')
         ?.getAttribute('aria-selected'),
     ).toBe('true');
+  });
+
+  it('keeps a tab opened during restore after switching sessions', async () => {
+    const tasks =
+      deferred<Awaited<ReturnType<typeof mockSessionActions.getTasks>>>();
+    mockSessionActions.getTasks.mockReturnValue(tasks.promise);
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/tmp/project\0session-1': {
+          open: true,
+          activeTabId: 'monitor:monitor-1',
+          tabs: [
+            {
+              id: 'monitor:monitor-1',
+              kind: 'monitor',
+              title: 'watch server log',
+              taskId: 'monitor-1',
+            },
+          ],
+        },
+      }),
+    );
+
+    const { container, rerender } = renderApp();
+    await flush();
+    act(() => {
+      testState.latestMessageListProps?.onAttachmentPreview?.({
+        name: 'new.txt',
+        text: 'opened during restore',
+      });
+    });
+
+    mockConnection.sessionId = 'session-2';
+    rerender();
+    await flush();
+    mockConnection.sessionId = 'session-1';
+    rerender();
+    await flush();
+
+    tasks.resolve({
+      v: 1,
+      sessionId: 'session-1',
+      now: 6_000,
+      tasks: [],
+    });
+    await act(async () => tasks.promise);
+    await flush();
+
+    expect(container.querySelector('button[title="new.txt"]')).not.toBeNull();
   });
 
   it('shows an error when a restored attachment cannot be read', async () => {
