@@ -49,6 +49,7 @@ import {
   getStopHookContinuationReason,
   GOAL_HOOK_ID_OUTPUT_KEY,
 } from '../goals/goalHook.js';
+import { applyPendingGoalProposal } from '../goals/goal-tools.js';
 import { formatStopHookBlockingCapWarning } from '../hooks/stopHookCap.js';
 import { buildContextUsage } from '../hooks/context-usage.js';
 import { DEFAULT_TOKEN_LIMIT, tokenLimit } from './tokenLimits.js';
@@ -128,6 +129,7 @@ import {
   buildChangedAgentsReminder,
   buildChangedMcpToolsReminder,
   buildChangedSkillsReminder,
+  buildMcpServerInstructionsReminderFromEntries,
   getDirectoryContextString,
   getInitialChatHistory,
   getStartupContextLength,
@@ -209,6 +211,8 @@ export interface SendMessageOptions {
   type: SendMessageType;
   /** User-submitted text captured before prompt expansion. */
   submittedPrompt?: string;
+  /** A UserQuery running beside an active turn, without replacing its state. */
+  isConcurrentSideQuery?: boolean;
   /** Returns user input waiting to steer the active turn at a model boundary. */
   getSteerInput?: (signal: AbortSignal) => Promise<SteerInput | undefined>;
   /** Steer lease already appended to this request, settled after history push. */
@@ -431,6 +435,8 @@ export class LlmClient {
   private announcedMcpToolNames = new Set<string>();
   private pendingAddedMcpTools = new Map<string, DeferredToolSummary>();
   private pendingRemovedMcpToolNames = new Set<string>();
+  private announcedMcpServerInstructions = new Map<string, string>();
+  private pendingMcpServerInstructions = new Map<string, string>();
   private warnedAboutUnreachableEagerTools = false;
   // Dedup state for the per-turn skill/command "now available" delta reminders
   // (drainSkillAndCommandReminders). Keys are "skill:<name>" / "cmd:<name>". The
@@ -838,6 +844,58 @@ export class LlmClient {
     return chat.getHistoryLength?.() ?? chat.getHistory().length;
   }
 
+  /**
+   * Applies a `propose_goal` approval at the true end of the turn that made it.
+   *
+   * Only when the model has stopped calling tools, and only in the turn
+   * that parked it (matched by prompt id): a proposal made mid-turn stays
+   * parked through the tool-result continuations, because creating the Goal
+   * earlier would leave those continuations without a permit. Tail
+   * continuations keep the proposal parked until their final boundary. An
+   * aborted turn drops the approval instead of starting a loop the user just
+   * cancelled; an abort during dispatch pauses the new Goal.
+   */
+  private async settlePendingGoalProposal(
+    turnEnded: boolean,
+    signal: AbortSignal,
+    loadGoalRuntime: (required: boolean) => Promise<GoalRuntime | undefined>,
+    turnKey: string,
+  ): Promise<void> {
+    const take = this.config.takePendingGoalProposal;
+    if (typeof take !== 'function') return;
+    if (!turnEnded && !signal.aborted) return;
+    const proposal = take.call(this.config, turnKey);
+    if (!proposal) return;
+    if (signal.aborted) return;
+    const runtime = await loadGoalRuntime(false);
+    if (!runtime) {
+      debugLogger.debug(
+        'Dropping an approved Goal proposal: the Goal runtime is unavailable',
+      );
+      return;
+    }
+    if (signal.aborted) return;
+    const result = await applyPendingGoalProposal(runtime, proposal);
+    if (signal.aborted && result.applied) {
+      try {
+        await runtime.dispatch({
+          action: 'pause',
+          expectedGoalId: result.goal.goalId,
+          expectedRevision: result.goal.revision,
+        });
+      } catch (error) {
+        debugLogger.warn(
+          'Failed to pause a Goal applied during cancellation',
+          error,
+        );
+      }
+      return;
+    }
+    if (!result.applied) {
+      debugLogger.debug(`Dropping an approved Goal proposal: ${result.reason}`);
+    }
+  }
+
   private getLastModelMessageText(): string | undefined {
     const chat = this.getChat();
     if (chat.getLastModelMessageText) {
@@ -1055,6 +1113,9 @@ export class LlmClient {
     const tools: Tool[] = [{ functionDeclarations: toolDeclarations }];
     this.getChat().setTools(tools);
     this.queueAddedMcpToolsReminder(deferredTools ?? []);
+    this.queueMcpServerInstructionsReminder(
+      toolRegistry.getMcpServerInstructions(),
+    );
     recordStartupEvent('gemini_tools_updated', {
       toolCount: toolDeclarations.length,
       deferredCount: deferredTools?.length ?? 0,
@@ -1753,6 +1814,52 @@ export class LlmClient {
     this.pendingRemovedMcpToolNames.clear();
   }
 
+  private rememberAnnouncedMcpServerInstructions(
+    instructions: ReadonlyMap<string, string>,
+  ): void {
+    this.announcedMcpServerInstructions = new Map(instructions);
+    this.pendingMcpServerInstructions.clear();
+  }
+
+  private queueMcpServerInstructionsReminder(
+    instructions: ReadonlyMap<string, string>,
+  ): void {
+    this.pendingMcpServerInstructions.clear();
+    for (const serverName of this.announcedMcpServerInstructions.keys()) {
+      if (!instructions.has(serverName)) {
+        this.announcedMcpServerInstructions.delete(serverName);
+      }
+    }
+    for (const [serverName, text] of instructions) {
+      if (
+        text.trim().length > 0 &&
+        this.announcedMcpServerInstructions.get(serverName) !== text
+      ) {
+        this.pendingMcpServerInstructions.set(serverName, text);
+      }
+    }
+  }
+
+  private drainPendingMcpServerInstructionsReminder(): void {
+    if (this.pendingMcpServerInstructions.size === 0) {
+      return;
+    }
+    const reminder = buildMcpServerInstructionsReminderFromEntries(
+      this.pendingMcpServerInstructions,
+    );
+    if (!reminder) {
+      return;
+    }
+    this.getChat().addHistory({
+      role: 'user',
+      parts: [{ text: reminder }],
+    });
+    for (const [serverName, text] of this.pendingMcpServerInstructions) {
+      this.announcedMcpServerInstructions.set(serverName, text);
+    }
+    this.pendingMcpServerInstructions.clear();
+  }
+
   private queueAddedMcpToolsReminder(
     deferredTools: readonly DeferredToolSummary[],
   ): void {
@@ -2112,6 +2219,9 @@ export class LlmClient {
       const deferredTools = profiler.timeSync('deferred_reminder_setup', () => {
         const resolved = this.resolveDeferredToolsForReminder(deferredSummary);
         this.rememberAnnouncedDeferredTools(resolved);
+        this.rememberAnnouncedMcpServerInstructions(
+          toolRegistry.getMcpServerInstructions(),
+        );
         return resolved;
       });
       deferredReminderCount = deferredTools?.length ?? 0;
@@ -2966,6 +3076,17 @@ export class LlmClient {
       strippedRetryEntries = [];
     };
 
+    if (
+      (messageType === SendMessageType.UserQuery &&
+        !options?.isConcurrentSideQuery) ||
+      messageType === SendMessageType.Retry
+    ) {
+      // A propose_goal approval is applied when its own turn ends. One still
+      // parked when a new user/retry chain starts belongs to a turn that ended
+      // without settling, so clear it before the replacement chain can exit.
+      this.config.takePendingGoalProposal?.();
+    }
+
     if (messageType === SendMessageType.Retry) {
       strippedRetryEntries = this.stripOrphanedUserEntriesFromHistory() ?? [];
       // The matching dangling-`functionCall` repair runs inside
@@ -3084,6 +3205,19 @@ export class LlmClient {
           } else {
             endCurrentInteraction('cancelled');
           }
+          await this.settlePendingGoalProposal(
+            true,
+            signal,
+            async (required) => {
+              const runtime = await loadGoalRuntime(required);
+              if (runtime) bindGoalStateEvents(runtime);
+              return runtime;
+            },
+            prompt_id,
+          );
+          for (const goalEvent of takePendingGoalEvents()) {
+            yield goalEvent;
+          }
           yield {
             type: LlmEventType.UserPromptSubmitBlocked,
             value: {
@@ -3127,6 +3261,7 @@ export class LlmClient {
         signal.aborted ? undefined : userPromptSubmitFailureMessage,
         signal.aborted ? undefined : getErrorType(error),
       );
+      this.config.takePendingGoalProposal?.(prompt_id);
       for (const goalEvent of await finalizeInterruptedGoalTurn()) {
         yield goalEvent;
       }
@@ -3205,6 +3340,7 @@ export class LlmClient {
         signal.aborted ? undefined : 'Goal turn admission failed',
         signal.aborted ? undefined : getErrorType(error),
       );
+      this.config.takePendingGoalProposal?.(prompt_id);
       for (const goalEvent of await finalizeInterruptedGoalTurn()) {
         yield goalEvent;
       }
@@ -3570,6 +3706,14 @@ export class LlmClient {
         (messageType === SendMessageType.UserQuery ||
           messageType === SendMessageType.Cron)
       ) {
+        try {
+          this.drainPendingMcpServerInstructionsReminder();
+        } catch (error) {
+          debugLogger.warn(
+            'drainPendingMcpServerInstructionsReminder failed',
+            error,
+          );
+        }
         try {
           this.drainPendingAddedMcpToolsReminder();
         } catch (error) {
@@ -4337,6 +4481,15 @@ export class LlmClient {
               value: warning,
             };
             debugLogger.warn(warning);
+            await this.settlePendingGoalProposal(
+              true,
+              signal,
+              loadGoalRuntime,
+              prompt_id,
+            );
+            for (const goalEvent of takePendingGoalEvents()) {
+              yield goalEvent;
+            }
             endCurrentInteraction('ok');
             return turn;
           }
@@ -4408,6 +4561,15 @@ export class LlmClient {
               ? response.nonGoalBlockingStopReason || 'No reason provided'
               : continueReason;
           if (!continuationReasonAfterSteer && !pendingSteer) {
+            await this.settlePendingGoalProposal(
+              true,
+              signal,
+              loadGoalRuntime,
+              prompt_id,
+            );
+            for (const goalEvent of takePendingGoalEvents()) {
+              yield goalEvent;
+            }
             endCurrentInteraction('ok');
             normalCompletion = true;
             return turn;
@@ -4455,6 +4617,15 @@ export class LlmClient {
           hasToolCalls = hookTurn.pendingToolCalls.length > 0;
           if (!hasToolCalls) {
             endCurrentInteraction(signal.aborted ? 'cancelled' : 'ok');
+          }
+          await this.settlePendingGoalProposal(
+            !hasToolCalls,
+            signal,
+            loadGoalRuntime,
+            prompt_id,
+          );
+          for (const goalEvent of takePendingGoalEvents()) {
+            yield goalEvent;
           }
           // Preserve the pending prefetch: the inner Hook turn we just
           // yielded may have produced tool calls, and the caller's next
@@ -4527,6 +4698,15 @@ export class LlmClient {
           if (arenaAgentClient) {
             await arenaAgentClient.reportCompleted();
           }
+          await this.settlePendingGoalProposal(
+            true,
+            signal,
+            loadGoalRuntime,
+            prompt_id,
+          );
+          for (const goalEvent of takePendingGoalEvents()) {
+            yield goalEvent;
+          }
           endCurrentInteraction('ok');
           return turn;
         }
@@ -4575,6 +4755,15 @@ export class LlmClient {
           if (!hasToolCalls) {
             endCurrentInteraction(signal.aborted ? 'cancelled' : 'ok');
           }
+          await this.settlePendingGoalProposal(
+            !hasToolCalls,
+            signal,
+            loadGoalRuntime,
+            prompt_id,
+          );
+          for (const goalEvent of takePendingGoalEvents()) {
+            yield goalEvent;
+          }
           // Preserve the pending prefetch: same reasoning as the
           // `return hookTurn` site above — the recursive Hook turn may
           // have produced tool calls whose ToolResult turn still needs
@@ -4609,6 +4798,12 @@ export class LlmClient {
       if (!hasToolCalls) {
         this.finishManagedAutoMemoryRecall();
       }
+      await this.settlePendingGoalProposal(
+        turn.pendingToolCalls.length === 0,
+        signal,
+        loadGoalRuntime,
+        prompt_id,
+      );
       for (const goalEvent of takePendingGoalEvents()) {
         yield goalEvent;
       }
@@ -4668,6 +4863,7 @@ export class LlmClient {
       // `return turn`. Catches uncaught exceptions and guards against
       // future early-return sites that forget to call cancel.
       if (!normalCompletion) {
+        this.config.takePendingGoalProposal?.(prompt_id);
         this.cancelPendingMemoryPrefetch(
           signal?.aborted ? 'abort' : 'no_safe_delivery_point',
         );

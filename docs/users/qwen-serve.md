@@ -711,6 +711,21 @@ Scope and limits:
 - Binary uploads (`POST /file/upload`) always create at `0600` regardless of this setting.
 - The daemon reads the variable at workspace-filesystem construction; restart the daemon after changing it.
 
+### Session attachment storage
+
+Session attachments (files and images uploaded by Web Shell through `POST /session/:id/attachments`) are stored by default under the workspace's runtime temp dir: `<runtimeBaseDir>/tmp/<projectHash>/attachments`, keyed per session as `session-<sessionId>`. Operators who want attachments to persist outside the runtime temp dir (e.g. on a dedicated volume) can override the root:
+
+| Env var                               | Values | Default | What it does                                                                                                                                                                                                |
+| ------------------------------------- | ------ | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `QWEN_SERVE_SESSION_ATTACHMENTS_ROOT` | path   | unset   | Stores session attachments under this directory instead of the default runtime temp dir. Accepts an absolute path, a path relative to the daemon's cwd, or `~` / `~/…` expanded against the home directory. |
+
+Scope and limits:
+
+- **One-way migration.** When the env is set, new attachments are written only under the configured root. Reads and removes that miss the configured root fall back to the default runtime temp dir, so attachments uploaded **before** the switch remain readable, and removable while the default fallback dir stays writable — a remove whose legacy copy cannot be unlinked (e.g. a read-only fallback volume) surfaces the error rather than reporting success. The reverse direction — removing the env after attachments were written to the configured root — makes those attachments unreachable; keep the variable stable for a given workspace.
+- **Per-session layout.** Files live under `<root>/<projectHash>/attachments/session-<sessionId>/` in both locations, where `<projectHash>` is the same workspace hash used by the default runtime temp dir; the fallback lookup uses the same session layout in the default dir. Two workspaces pointing at the same configured root stay isolated from each other.
+- **Delete cleanup.** When a session is deleted, its attachment directory is removed from both the configured root and the default fallback dir. Archiving a session keeps its attachments so they survive unarchive.
+- The daemon reads the variable at startup; restart the daemon after changing it. The directory must be writable by the daemon process.
+
 ## Multi-session & multi-workspace deployment
 
 Pass `--workspace` more than once to register several non-overlapping workspaces in one `qwen serve` process. The first path is primary. Each registered workspace owns an isolated runtime boundary, while the daemon-wide listener, authentication policy, and total-session limit are shared. Production attempts to preheat the primary ACP child for compatibility and retries on first use after failure; trusted secondaries start their own child on demand, and untrusted secondaries do not start ACP. Requests may select a registered workspace by canonical `cwd`; requests that omit `cwd` use the primary workspace. Use one daemon per user or security principal; workspace trust is an execution gate, not an ACL.
