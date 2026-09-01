@@ -12620,6 +12620,8 @@ class QwenAgent implements Agent {
                   `reload: refreshAuth failed for session ${id}: ${err}`,
                 );
               }
+            } else if (changed.has('model')) {
+              session.reloadReasoningSelection();
             }
 
             if (changed.has('tools')) {

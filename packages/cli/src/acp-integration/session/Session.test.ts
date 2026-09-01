@@ -6432,6 +6432,20 @@ describe('Session', () => {
       },
     );
 
+    it('falls back to a compatible persisted tier after dropping a session-only tier', async () => {
+      const state = installReasoningPreference('low');
+      session.setSessionReasoningSelection('max');
+
+      await session.setModel({
+        sessionId: 'test-session-id',
+        modelId: `qwen3.8-max(${AuthType.USE_OPENAI})`,
+      });
+
+      expect(state.live.reasoning).toEqual({ effort: 'low' });
+      expect(state.rebuildable.reasoning).toEqual({ effort: 'low' });
+      expect(state.user.settings.model.reasoningEffort).toBe('low');
+    });
+
     it.each([
       ['low', { effort: 'low' }, true],
       ['none', false, true],

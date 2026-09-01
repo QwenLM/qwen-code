@@ -8627,12 +8627,16 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       mcpServers: {},
       model: { name: 'qwen3.8-max', reasoningEffort: 'none' },
     });
+    let reasoningEffort: 'none' | 'low' = 'none';
     settings.reloadScopeFromDisk = vi.fn(() => {
-      settings.merged.model = { name: 'qwen3.7-plus', reasoningEffort: 'none' };
+      settings.merged.model = { name: 'qwen3.7-plus', reasoningEffort };
       return true;
     });
-    cfg.getModel = vi.fn().mockReturnValue('qwen3.8-max');
-    const switchModel = vi.fn().mockResolvedValue(undefined);
+    let model = 'qwen3.8-max';
+    cfg.getModel = vi.fn(() => model);
+    const switchModel = vi.fn(async (_authType: string, modelId: string) => {
+      model = modelId;
+    });
     Object.assign(cfg, { switchModel });
     vi.mocked(loadSettings).mockReturnValue(settings);
     const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
@@ -8650,6 +8654,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       expect(
         lastSessionMock!.reloadReasoningSelection.mock.invocationCallOrder[0],
       ).toBeGreaterThan(switchModel.mock.invocationCallOrder[0]);
+
+      reasoningEffort = 'low';
+      await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+      expect(switchModel).toHaveBeenCalledOnce();
+      expect(lastSessionMock!.reloadReasoningSelection).toHaveBeenCalledTimes(
+        2,
+      );
     } finally {
       mockConnectionState.resolve();
       await agentPromise;
