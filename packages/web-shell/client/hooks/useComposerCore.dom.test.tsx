@@ -247,6 +247,27 @@ describe('useComposerCore tooltip portal', () => {
 });
 
 describe('useComposerCore history and drafts', () => {
+  it('places the caret after a draft restored on initial mount', async () => {
+    localStorage.setItem(
+      getSessionDraftKey('restored-session'),
+      'restored draft',
+    );
+
+    const mounted = await mount({
+      sessionId: 'restored-session',
+      atWorkspaceCwd: '/workspace/shared',
+    });
+
+    const view = latest!.viewRef.current!;
+    expect(view.state.doc.toString()).toBe('restored draft');
+    expect(view.state.selection.main.head).toBe(view.state.doc.length);
+    expect(document.activeElement).toBe(view.contentDOM);
+
+    act(() => view.dispatch({ selection: { anchor: 3 } }));
+    mounted.rerender();
+    expect(view.state.selection.main.head).toBe(3);
+  });
+
   it('does not serialize the whole document again for a slash menu refresh', async () => {
     await mount();
     const doc = latest!.viewRef.current!.state.doc;

@@ -6,7 +6,7 @@ import {
   useMemo,
   type ReactNode,
 } from 'react';
-import type { ACPToolCall } from '../../../adapters/types';
+import type { ACPToolCall, PermissionRequest } from '../../../adapters/types';
 import { useWebShellCustomization } from '../../../customization';
 import { useI18n } from '../../../i18n';
 // Circular import with ToolGroup (agents render tool rows; agent tool
@@ -34,6 +34,7 @@ import styles from './SubAgentPanel.module.css';
 
 interface SubAgentPanelProps {
   tool: ACPToolCall;
+  approval?: PermissionRequest | null;
   defaultExpanded?: boolean;
   hideHeader?: boolean;
   inline?: boolean;
@@ -98,14 +99,19 @@ function SubToolTime({
   );
 }
 
-const SubToolLine = memo(function SubToolLine({ tool }: { tool: ACPToolCall }) {
-  // Same row as the main transcript: one-line summary, expandable to
-  // the full output / diff / file content where the tool has any.
+const SubToolLine = memo(function SubToolLine({
+  tool,
+  approval,
+}: {
+  tool: ACPToolCall;
+  approval?: PermissionRequest | null;
+}) {
+  // Same expandable row as the main transcript.
   const body =
     tool.subTools || tool.subContent ? (
-      <SubAgentPanel tool={tool} />
+      <SubAgentPanel tool={tool} approval={approval} />
     ) : (
-      <ToolLine tool={tool} forceExpandable hideCollapsedOutput />
+      <ToolLine tool={tool} approval={approval} hideCollapsedOutput />
     );
   return <SubToolTime timestamp={tool.startTime}>{body}</SubToolTime>;
 });
@@ -258,6 +264,7 @@ function SubAgentTools({
 
 export function SubAgentPanel({
   tool,
+  approval,
   defaultExpanded,
   hideHeader,
   inline,
@@ -354,7 +361,7 @@ export function SubAgentPanel({
                   className={styles.step}
                   data-status={sub.status}
                 >
-                  <SubToolLine tool={sub} />
+                  <SubToolLine tool={sub} approval={approval} />
                 </div>
               ))}
             </SubAgentTools>

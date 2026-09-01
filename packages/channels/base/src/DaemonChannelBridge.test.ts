@@ -263,8 +263,311 @@ describe('DaemonChannelBridge', () => {
     });
 
     await bridge.discardSession('session-1');
-    expect(host.unregister).toHaveBeenCalledWith('session-1');
+    await waitFor(() =>
+      expect(host.unregister).toHaveBeenCalledWith('session-1'),
+    );
     expect(handlers.has('session-1')).toBe(false);
+    bridge.stop();
+  });
+
+  it.each(['new', 'load'] as const)(
+    'does not attach loop tools to an opted-out %s session',
+    async (operation) => {
+      const events = new EventQueue();
+      const session = createFakeSession(events);
+      const host: DaemonChannelLoopMcpHost = {
+        register: vi.fn().mockResolvedValue(undefined),
+        unregister: vi.fn().mockResolvedValue(undefined),
+      };
+      const bridge = new DaemonChannelBridge({
+        cwd: '/repo',
+        sessionFactory: vi.fn().mockResolvedValue(session),
+        channelLoopMcpHost: host,
+      });
+      bridge.registerChannelLoopToolHandler({
+        create: vi.fn(async () => ({ text: 'created' })),
+        list: vi.fn(async () => ({ text: 'listed' })),
+        cancel: vi.fn(async () => ({ text: 'cancelled' })),
+      });
+
+      await bridge.start();
+      if (operation === 'new') {
+        await bridge.newSession('/repo', { enableChannelLoops: false });
+      } else {
+        await bridge.loadSession('session-1', '/repo', {
+          enableChannelLoops: false,
+        });
+      }
+
+      expect(host.register).not.toHaveBeenCalled();
+      events.close();
+      bridge.stop();
+    },
+  );
+
+  it.each(['new', 'load'] as const)(
+    'keeps an opted-out %s session excluded when the loop handler registers later',
+    async (operation) => {
+      const events = new EventQueue();
+      const session = createFakeSession(events);
+      const host: DaemonChannelLoopMcpHost = {
+        register: vi.fn().mockResolvedValue(undefined),
+        unregister: vi.fn().mockResolvedValue(undefined),
+      };
+      const bridge = new DaemonChannelBridge({
+        cwd: '/repo',
+        sessionFactory: vi.fn().mockResolvedValue(session),
+        channelLoopMcpHost: host,
+      });
+
+      await bridge.start();
+      if (operation === 'new') {
+        await bridge.newSession('/repo', { enableChannelLoops: false });
+      } else {
+        await bridge.loadSession('session-1', '/repo', {
+          enableChannelLoops: false,
+        });
+      }
+      bridge.registerChannelLoopToolHandler({
+        create: vi.fn(async () => ({ text: 'created' })),
+        list: vi.fn(async () => ({ text: 'listed' })),
+        cancel: vi.fn(async () => ({ text: 'cancelled' })),
+      });
+      await Promise.resolve();
+
+      expect(host.register).not.toHaveBeenCalled();
+      events.close();
+      bridge.stop();
+    },
+  );
+
+  it('revokes loop tools when an enabled session is replaced by an opted-out binding', async () => {
+    const firstEvents = new EventQueue();
+    const secondEvents = new EventQueue();
+    const firstSession = createFakeSession(firstEvents);
+    const secondSession = createFakeSession(secondEvents);
+    let registeredHandler!:
+      | ((
+          message: Record<string, unknown>,
+        ) => Promise<Record<string, unknown> | undefined>)
+      | undefined;
+    const host: DaemonChannelLoopMcpHost = {
+      register: vi.fn(async (_sessionId, handler) => {
+        registeredHandler = handler;
+      }),
+      unregister: vi.fn().mockResolvedValue(undefined),
+    };
+    const create = vi.fn(async () => ({ text: 'created' }));
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi
+        .fn()
+        .mockResolvedValueOnce(firstSession)
+        .mockResolvedValueOnce(secondSession),
+      channelLoopMcpHost: host,
+    });
+    bridge.registerChannelLoopToolHandler({
+      create,
+      list: vi.fn(async () => ({ text: 'listed' })),
+      cancel: vi.fn(async () => ({ text: 'cancelled' })),
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+    const staleHandler = registeredHandler!;
+    await bridge.loadSession('session-1', '/repo', {
+      enableChannelLoops: false,
+    });
+
+    await waitFor(() =>
+      expect(host.unregister).toHaveBeenCalledWith('session-1'),
+    );
+    await expect(
+      staleHandler({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: {
+          name: 'channel_loop_create',
+          arguments: { cron: '*/5 * * * *', prompt: 'check status' },
+        },
+      }),
+    ).resolves.toMatchObject({ id: 1, error: expect.any(Object) });
+    expect(create).not.toHaveBeenCalled();
+    secondEvents.close();
+    bridge.stop();
+  });
+
+  it('fails loop tools closed when an in-flight registration is replaced by an opted-out binding', async () => {
+    const firstEvents = new EventQueue();
+    const secondEvents = new EventQueue();
+    const firstSession = createFakeSession(firstEvents);
+    const secondSession = createFakeSession(secondEvents);
+    let finishRegistration!: () => void;
+    const registration = new Promise<void>((resolve) => {
+      finishRegistration = resolve;
+    });
+    let registeredHandler!:
+      | ((
+          message: Record<string, unknown>,
+        ) => Promise<Record<string, unknown> | undefined>)
+      | undefined;
+    const host: DaemonChannelLoopMcpHost = {
+      register: vi.fn((_sessionId, handler) => {
+        registeredHandler = handler;
+        return registration;
+      }),
+      unregister: vi.fn().mockResolvedValue(undefined),
+    };
+    const create = vi.fn(async () => ({ text: 'created' }));
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi
+        .fn()
+        .mockResolvedValueOnce(firstSession)
+        .mockResolvedValueOnce(secondSession),
+      channelLoopMcpHost: host,
+    });
+    bridge.registerChannelLoopToolHandler({
+      create,
+      list: vi.fn(async () => ({ text: 'listed' })),
+      cancel: vi.fn(async () => ({ text: 'cancelled' })),
+    });
+
+    await bridge.start();
+    const enabled = bridge.newSession('/repo');
+    await waitFor(() => expect(host.register).toHaveBeenCalledTimes(1));
+    await bridge.loadSession('session-1', '/repo', {
+      enableChannelLoops: false,
+    });
+    await expect(
+      registeredHandler!({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: {
+          name: 'channel_loop_create',
+          arguments: { cron: '*/5 * * * *', prompt: 'check status' },
+        },
+      }),
+    ).resolves.toMatchObject({ id: 1, error: expect.any(Object) });
+    expect(create).not.toHaveBeenCalled();
+
+    finishRegistration();
+    await enabled;
+    await waitFor(() =>
+      expect(host.unregister).toHaveBeenCalledWith('session-1'),
+    );
+    secondEvents.close();
+    bridge.stop();
+  });
+
+  it('re-registers loop tools after a pending opt-out unregister is superseded', async () => {
+    const firstEvents = new EventQueue();
+    const secondEvents = new EventQueue();
+    const thirdEvents = new EventQueue();
+    const firstSession = createFakeSession(firstEvents);
+    const secondSession = createFakeSession(secondEvents);
+    const thirdSession = createFakeSession(thirdEvents);
+    let finishUnregister!: () => void;
+    const unregister = new Promise<void>((resolve) => {
+      finishUnregister = resolve;
+    });
+    let registeredHandler:
+      | ((
+          message: Record<string, unknown>,
+        ) => Promise<Record<string, unknown> | undefined>)
+      | undefined;
+    const host: DaemonChannelLoopMcpHost = {
+      register: vi.fn(async (_sessionId, handler) => {
+        registeredHandler = handler;
+      }),
+      unregister: vi.fn(() => unregister),
+    };
+    const create = vi.fn(async () => ({ text: 'created' }));
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi
+        .fn()
+        .mockResolvedValueOnce(firstSession)
+        .mockResolvedValueOnce(secondSession)
+        .mockResolvedValueOnce(thirdSession),
+      channelLoopMcpHost: host,
+    });
+    bridge.registerChannelLoopToolHandler({
+      create,
+      list: vi.fn(async () => ({ text: 'listed' })),
+      cancel: vi.fn(async () => ({ text: 'cancelled' })),
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+    await bridge.loadSession('session-1', '/repo', {
+      enableChannelLoops: false,
+    });
+    await waitFor(() => expect(host.unregister).toHaveBeenCalledTimes(1));
+
+    const enabled = bridge.loadSession('session-1', '/repo');
+    expect(host.register).toHaveBeenCalledTimes(1);
+    finishUnregister();
+    await enabled;
+
+    expect(host.register).toHaveBeenCalledTimes(2);
+    await expect(
+      registeredHandler!({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: {
+          name: 'channel_loop_create',
+          arguments: { cron: '*/5 * * * *', prompt: 'check status' },
+        },
+      }),
+    ).resolves.toMatchObject({
+      id: 1,
+      result: { content: [{ type: 'text', text: 'created' }] },
+    });
+    expect(create).toHaveBeenCalledTimes(1);
+    thirdEvents.close();
+    bridge.stop();
+  });
+
+  it('keeps failed loop unregistration eligible for retry', async () => {
+    const firstEvents = new EventQueue();
+    const secondEvents = new EventQueue();
+    const firstSession = createFakeSession(firstEvents);
+    const secondSession = createFakeSession(secondEvents);
+    const host: DaemonChannelLoopMcpHost = {
+      register: vi.fn().mockResolvedValue(undefined),
+      unregister: vi
+        .fn()
+        .mockRejectedValueOnce(new Error('host busy'))
+        .mockResolvedValue(undefined),
+    };
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi
+        .fn()
+        .mockResolvedValueOnce(firstSession)
+        .mockResolvedValueOnce(secondSession),
+      channelLoopMcpHost: host,
+    });
+    bridge.registerChannelLoopToolHandler({
+      create: vi.fn(async () => ({ text: 'created' })),
+      list: vi.fn(async () => ({ text: 'listed' })),
+      cancel: vi.fn(async () => ({ text: 'cancelled' })),
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+    await bridge.loadSession('session-1', '/repo', {
+      enableChannelLoops: false,
+    });
+    await waitFor(() => expect(host.unregister).toHaveBeenCalledTimes(1));
+
+    await bridge.discardSession('session-1');
+    await waitFor(() => expect(host.unregister).toHaveBeenCalledTimes(2));
+    secondEvents.close();
     bridge.stop();
   });
 
@@ -359,7 +662,7 @@ describe('DaemonChannelBridge', () => {
     bridge.stop();
   });
 
-  it('forwards sourceId to the session factory only for new sessions', async () => {
+  it('forwards source IDs to the session factory for new and loaded sessions', async () => {
     const events = new EventQueue();
     const session = createFakeSession(events);
     const factory = vi.fn().mockResolvedValue(session);
@@ -369,22 +672,25 @@ describe('DaemonChannelBridge', () => {
     });
 
     await bridge.start();
-    await bridge.newSession('/repo', { sourceId: 'feishu-main' });
-    await bridge.loadSession('session-1', '/repo', { sourceId: 'feishu-main' });
+    await bridge.newSession('/repo', {
+      sourceId: 'feishu-main',
+    });
+    await bridge.loadSession('session-1', '/repo', {
+      sourceId: 'feishu-main',
+    });
 
-    // New session: sourceId is forwarded to the factory (creation attribution);
     expect(factory).toHaveBeenNthCalledWith(1, {
       workspaceCwd: '/repo',
       modelServiceId: undefined,
       sessionScope: 'thread',
       sourceId: 'feishu-main',
     });
-    // Load: never forwarded even when provided — loads never re-stamp creation source.
     expect(factory).toHaveBeenNthCalledWith(2, {
       workspaceCwd: '/repo',
       modelServiceId: undefined,
       sessionId: 'session-1',
       sessionScope: 'thread',
+      sourceId: 'feishu-main',
     });
 
     events.close();

@@ -65,7 +65,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { ToolNames, canonicalToolName } from '../tools/tool-names.js';
 import { resolveToolName } from '../permissions/rule-parser.js';
 import { PLAN_EXIT_APPROVED_LLM_CONTENT_PREFIXES } from '../tools/exitPlanMode.js';
-import { approvedPlanRedactionText } from './geminiChat.js';
+import { approvedPlanRedactionText } from './llm-chat.js';
 import * as fsSync from 'node:fs';
 import {
   collectAvailableSkillEntries,
@@ -205,6 +205,7 @@ import {
 } from '../utils/invocation-context.js';
 import { evaluateToolInvocationGuard } from './tool-invocation-guard.js';
 import { goalTurnContext } from '../goals/goal-turn-context.js';
+import { goalToolResultProvenance } from '../goals/goal-tool-result-provenance.js';
 
 const debugLogger = createDebugLogger('TOOL_SCHEDULER');
 
@@ -2477,42 +2478,18 @@ export class CoreToolScheduler {
               // The legacy `coreTools` allowlist (`--core-tools` / settings
               // `tools.core`) keeps its hard-disable semantic: an unlisted
               // core tool is never registered (#9827). Attribute the miss
-              // to the real knob — since #10075 an uncovered
-              // `permissions.allow` tool is deferred (still registered),
-              // never rejected here, so a rejection without a deny rule
-              // points at the coreTools list. The optional call keeps
-              // scoped PermissionManager shims (installed via `as unknown
-              // as PermissionManager`, e.g. memory-scoped-agent-config.ts)
-              // from throwing until they grow the delegation.
+              // to the real knob — neither `permissions.allow` (pure
+              // auto-approval since #10075) nor `tools.eager` (which only
+              // defers) can reject a call here, so a rejection without a
+              // deny rule points at the coreTools list. The optional call
+              // keeps scoped PermissionManager shims (installed via `as
+              // unknown as PermissionManager`, e.g.
+              // memory-scoped-agent-config.ts) from throwing until they
+              // grow the delegation.
               typeof pm.isToolDisabledByCoreToolsAllowList === 'function' &&
               pm.isToolDisabledByCoreToolsAllowList(canonicalName)
             ) {
               permissionErrorMessage = `"${reqInfo.name}" is not listed in the active core tools allowlist (--core-tools or settings tools.core), so the tool is not available. Add it to the core tools list to re-enable it.`;
-            } else if (
-              pm.isPermissionsAllowListActive() &&
-              // Only attribute the miss to `permissions.allow` when the tool
-              // is genuinely uncovered. While the allowlist is active a
-              // COVERED tool can still be rejected by a different gate —
-              // e.g. the legacy `coreTools` (`--core-tools` / `tools.core`)
-              // allowlist — and there the "add a permissions.allow rule"
-              // advice is factually wrong and a no-op (#9827). The optional
-              // call keeps scoped PermissionManager shims (installed via
-              // `as unknown as PermissionManager`, e.g.
-              // memory-scoped-agent-config.ts) from throwing until they grow
-              // the delegation; when coverage is unknown the fallback stays
-              // on the pre-#9827 message rather than risk the wrong
-              // attribution (#9827). Since #10075 uncovered tools are
-              // deferred rather than rejected, so this branch only fires
-              // for scoped-shim rejections under an active allowlist.
-              (typeof pm.isCoveredByAllowOrAskRule === 'function'
-                ? !pm.isCoveredByAllowOrAskRule(canonicalName)
-                : false)
-            ) {
-              // The tool was rejected while the `permissions.allow` registry
-              // allowlist is active and no deny rule matched. Point at the
-              // real config knob instead of a denial that never happened
-              // (nothing was ever asked or declined on this path).
-              permissionErrorMessage = `"${reqInfo.name}" is not covered by any permissions.allow rule in the active registry allowlist, so the tool is not available. Add a rule covering it to settings permissions.allow (or permissions.ask) and restart to re-enable it.`;
             } else {
               permissionErrorMessage = `Qwen Code requires permission to use "${reqInfo.name}", but that permission was declined.`;
             }
@@ -3030,7 +3007,7 @@ export class CoreToolScheduler {
             // fast-path AUTO call.
             const messages =
               this.config
-                .getGeminiClient?.()
+                .getLlmClient?.()
                 ?.getHistoryTail(MAX_TRANSCRIPT_MESSAGES, false) ?? [];
             const decision = await runInRequestGoalContext(reqInfo, () =>
               evaluateAutoMode({
@@ -4133,6 +4110,17 @@ export class CoreToolScheduler {
     );
     if (!still) return;
 
+    // Guard: a PreToolUse-'ask' bounce re-enters awaiting_approval, so the
+    // guard above alone would let this stale round-1 resolution answer the
+    // BOUNCED confirmation. The accept path would flow resolution.content
+    // through _applyInlineModify (bounced edit details are type 'edit', and
+    // that path does not check hideModify) and execute IDE-panel content
+    // the hook never reviewed on the hook-skipping re-execution; the
+    // reject path would cancel a prompt the user never answered. Only the
+    // bounce's own confirmation may resolve a bounced call — the round-1
+    // diff is closed by resolveDiffFromCli regardless.
+    if (this.bouncedAwaitingApproval.has(callId)) return;
+
     if (resolution.status === 'accepted') {
       // When content is unchanged, skip the inline modify path so that
       // the original tool params (e.g. partial old_string for edit tool)
@@ -4420,39 +4408,74 @@ export class CoreToolScheduler {
   /**
    * Bounce a tool from the EXECUTION phase back to awaiting_approval so the
    * user can confirm a PreToolUse 'ask' decision in the TUI. Reuses the
-   * standard confirmation machinery: a synthetic 'info' confirmation whose
-   * onConfirm routes through handleConfirmationResponse (ProceedOnce →
-   * re-execute, Cancel → cancelled). `hideAlwaysAllow` is set because the
-   * hook re-evaluates on every call, so an "always allow" rule is
-   * meaningless. The callId is added to `bouncedAwaitingApproval` BEFORE
-   * the status change so executeSingleToolCall's finally keeps the tool
-   * span open across the bounce and the re-execution skips the hook +
-   * prelude (see `_executeToolCallBody`).
+   * standard confirmation machinery, including the existing diff view for
+   * edit tools. `hideAlwaysAllow` is set because the hook re-evaluates on
+   * every call, so an "always allow" rule is meaningless. The callId is
+   * added to `bouncedAwaitingApproval` BEFORE the status change so
+   * executeSingleToolCall's finally keeps the tool span open across the
+   * bounce and the re-execution skips the hook + prelude (see
+   * `_executeToolCallBody`).
    */
-  private bounceToAwaitingApprovalForAsk(
+  private async bounceToAwaitingApprovalForAsk(
     scheduledCall: ScheduledToolCall,
     reason: string | undefined,
     toolSpan: Span,
     signal: AbortSignal,
-  ): void {
+  ): Promise<void> {
     const { callId, name: toolName } = scheduledCall.request;
     const canonicalName = canonicalToolName(toolName);
+    const hookReason =
+      reason ||
+      `A PreToolUse hook requested confirmation before running ${toolName}.`;
+
+    let confirmationDetails: ToolCallConfirmationDetails | undefined;
+    if (scheduledCall.tool.kind === Kind.Edit) {
+      try {
+        const editDetails =
+          await scheduledCall.invocation.getConfirmationDetails(signal);
+        if (editDetails.type === 'edit') {
+          confirmationDetails = {
+            ...editDetails,
+            hideAlwaysAllow: true,
+            hideModify: true,
+            warnings: [hookReason, ...(editDetails.warnings ?? [])],
+            onConfirm: (outcome, payload) =>
+              this.handleConfirmationResponse(
+                callId,
+                editDetails.onConfirm,
+                outcome,
+                signal,
+                // Forward the host's denial reason (the stream-json
+                // permissionController sends { cancelMessage } on deny) but
+                // keep the modify channel closed: hideModify is set above,
+                // so a payload's newContent must not rewrite the
+                // hook-reviewed content on a bounce.
+                payload?.cancelMessage
+                  ? { cancelMessage: payload.cancelMessage }
+                  : undefined,
+              ),
+          };
+        }
+      } catch (error) {
+        debugLogger.warn(
+          `Failed to prepare edit confirmation for ${toolName}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+
+    if (this.cancelPreExecutionIfAborted(callId, signal, toolSpan)) return;
 
     this.bouncedAwaitingApproval.add(callId);
 
-    const confirmationDetails: ToolCallConfirmationDetails = {
+    confirmationDetails ??= {
       type: 'info',
       title: `Hook requested confirmation to run ${toolName}`,
-      prompt:
-        reason ||
-        `A PreToolUse hook requested confirmation before running ${toolName}.`,
+      prompt: hookReason,
       renderPromptAsPlainText: true,
       hideAlwaysAllow: true,
       onConfirm: (outcome, payload) =>
         this.handleConfirmationResponse(
           callId,
-          // No real tool onConfirm — for this synthetic prompt all of the
-          // approve/deny handling lives in handleConfirmationResponse.
           async () => {},
           outcome,
           signal,
@@ -4639,7 +4662,7 @@ export class CoreToolScheduler {
           // Preserve the tool_use_id so the post-approval re-execution
           // reuses it (see the toolUseId comment above).
           this.bouncedToolUseId.set(callId, toolUseId);
-          this.bounceToAwaitingApprovalForAsk(
+          await this.bounceToAwaitingApprovalForAsk(
             scheduledCall,
             preHookResult.blockReason,
             span,
@@ -5555,7 +5578,7 @@ export class CoreToolScheduler {
             // throws here and skips the redaction entirely.
             const savedPlan = fsSync.readFileSync(planPath, 'utf-8');
             const redacted = this.config
-              .getGeminiClient?.()
+              .getLlmClient?.()
               ?.getChat()
               .redactApprovedPlanFromHistory(
                 callId,
@@ -6284,28 +6307,14 @@ export class CoreToolScheduler {
         error: call.response.error,
         errorType: call.response.errorType,
       };
-      const goalContext = call.request.goalContext;
-      if (!goalContext) {
-        this.chatRecordingService.recordToolResult(
-          call.response.responseParts,
-          result,
-        );
-      } else if (
-        call.request.name === ToolNames.GET_GOAL ||
-        call.request.name === ToolNames.UPDATE_GOAL
-      ) {
-        this.chatRecordingService.recordToolResult(
-          call.response.responseParts,
-          result,
-          { goalContext: { ...goalContext }, provenance: 'goal_runtime' },
-        );
-      } else {
-        this.chatRecordingService.recordToolResult(
-          call.response.responseParts,
-          result,
-          { goalContext: { ...goalContext } },
-        );
-      }
+      const goalProvenance = goalToolResultProvenance(call.request);
+      this.chatRecordingService.recordToolResult(
+        call.response.responseParts,
+        result,
+        // Passed only inside a Goal turn, so recording outside one keeps its
+        // two-argument shape.
+        ...(goalProvenance ? ([goalProvenance] as const) : ([] as const)),
+      );
     }
   }
 
@@ -6402,7 +6411,7 @@ export class CoreToolScheduler {
           const fallback = shouldFallback(denialState);
           const messages =
             this.config
-              .getGeminiClient?.()
+              .getLlmClient?.()
               ?.getHistoryTail(MAX_TRANSCRIPT_MESSAGES, false) ?? [];
           const decision = await runInRequestGoalContext(
             pendingTool.request,

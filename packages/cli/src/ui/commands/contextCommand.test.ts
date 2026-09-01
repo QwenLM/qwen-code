@@ -62,6 +62,9 @@ function makeMockConfig(contextWindowSize = 32_000): Config {
       listSkills: vi.fn().mockResolvedValue([]),
     }),
     getDisabledSkillNames: vi.fn().mockReturnValue(new Set()),
+    isSkillEnabled(this: Config, skill: { name: string }) {
+      return !this.getDisabledSkillNames().has(skill.name.toLowerCase());
+    },
     getChatCompression: vi.fn().mockReturnValue(undefined),
     getAutoCompactThreshold: vi.fn(),
     getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
@@ -97,6 +100,9 @@ describe('collectContextData (contextCommand)', () => {
         listSkills: vi.fn().mockResolvedValue([]),
       }),
       getDisabledSkillNames: vi.fn().mockReturnValue(new Set()),
+      isSkillEnabled(this: Config, skill: { name: string }) {
+        return !this.getDisabledSkillNames().has(skill.name.toLowerCase());
+      },
       getChatCompression: vi.fn().mockReturnValue(undefined),
       getAutoCompactThreshold: vi.fn(),
       getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
@@ -128,7 +134,7 @@ describe('collectContextData (contextCommand)', () => {
     const isLastPromptTokenCountEstimated = vi.fn().mockReturnValue(false);
     const config = {
       ...makeMockConfig(200_000),
-      getGeminiClient: vi.fn().mockReturnValue({
+      getLlmClient: vi.fn().mockReturnValue({
         isInitialized: vi.fn().mockReturnValue(true),
         getChat: vi.fn().mockReturnValue({
           getLastPromptTokenCount,
@@ -148,7 +154,7 @@ describe('collectContextData (contextCommand)', () => {
   it('reports a nonzero compression-derived count as estimated', async () => {
     const config = {
       ...makeMockConfig(200_000),
-      getGeminiClient: vi.fn().mockReturnValue({
+      getLlmClient: vi.fn().mockReturnValue({
         isInitialized: vi.fn().mockReturnValue(true),
         getChat: vi.fn().mockReturnValue({
           getLastPromptTokenCount: vi.fn().mockReturnValue(50_000),
@@ -173,7 +179,7 @@ describe('collectContextData (contextCommand)', () => {
     mockGetLastPromptTokenCount.mockReturnValue(60_000);
     const config = {
       ...makeMockConfig(200_000),
-      getGeminiClient: vi.fn().mockReturnValue({
+      getLlmClient: vi.fn().mockReturnValue({
         isInitialized: vi.fn().mockReturnValue(false),
         getChat: vi.fn(() => {
           throw new Error('Chat not initialized');

@@ -21,7 +21,12 @@ import type {
 import { loadAccount, DEFAULT_BASE_URL } from './accounts.js';
 import { startPollLoop, getContextToken } from './monitor.js';
 import type { CdnRef, FileCdnRef } from './monitor.js';
-import { sendText, sendImage, detectImageMime } from './send.js';
+import {
+  sendText,
+  sendImage,
+  detectImageMime,
+  markdownToPlainText,
+} from './send.js';
 import { downloadAndDecrypt } from './media.js';
 import { getConfig, sendTyping, WeixinApiError } from './api.js';
 import { TypingStatus } from './types.js';
@@ -184,56 +189,73 @@ export class WeixinChannel extends ChannelBase {
     image?: CdnRef,
     file?: FileCdnRef,
   ): Promise<void> {
-    // Download image from CDN
-    if (image) {
-      try {
-        const imageData = await downloadAndDecrypt(
-          image.encryptQueryParam,
-          image.aesKey,
-        );
-        envelope.imageBase64 = imageData.toString('base64');
-        envelope.imageMimeType = detectImageMime(imageData);
-      } catch (err) {
-        process.stderr.write(
-          `[Weixin:${this.name}] Failed to download image: ${err instanceof Error ? err.message : err}\n`,
-        );
+    await this.prepareThenHandleInbound(envelope, async () => {
+      // Download image from CDN
+      if (image) {
+        try {
+          const imageData = await downloadAndDecrypt(
+            image.encryptQueryParam,
+            image.aesKey,
+          );
+          envelope.imageBase64 = imageData.toString('base64');
+          envelope.imageMimeType = detectImageMime(imageData);
+        } catch (err) {
+          process.stderr.write(
+            `[Weixin:${this.name}] Failed to download image: ${err instanceof Error ? err.message : err}\n`,
+          );
+        }
       }
-    }
 
-    // Download file from CDN, save to temp dir
-    if (file) {
-      try {
-        const fileData = await downloadAndDecrypt(
-          file.encryptQueryParam,
-          file.aesKey,
-        );
-        const dir = join(tmpdir(), 'channel-files', randomUUID());
-        mkdirSync(dir, { recursive: true });
-        const filePath = join(
-          dir,
-          basename(file.fileName) || `file_${Date.now()}`,
-        );
-        writeFileSync(filePath, fileData);
-        envelope.attachments = [
-          {
-            type: 'file',
-            filePath,
-            mimeType: 'application/octet-stream',
-            fileName: file.fileName,
-          },
-        ];
-      } catch (err) {
-        process.stderr.write(
-          `[Weixin:${this.name}] Failed to download file: ${err instanceof Error ? err.message : err}\n`,
-        );
-        envelope.text = `(User sent a file "${file.fileName}" but download failed)`;
+      // Download file from CDN, save to temp dir
+      if (file) {
+        try {
+          const fileData = await downloadAndDecrypt(
+            file.encryptQueryParam,
+            file.aesKey,
+          );
+          const dir = join(tmpdir(), 'channel-files', randomUUID());
+          mkdirSync(dir, { recursive: true });
+          const filePath = join(
+            dir,
+            basename(file.fileName) || `file_${Date.now()}`,
+          );
+          writeFileSync(filePath, fileData);
+          envelope.attachments = [
+            {
+              type: 'file',
+              filePath,
+              mimeType: 'application/octet-stream',
+              fileName: file.fileName,
+            },
+          ];
+        } catch (err) {
+          process.stderr.write(
+            `[Weixin:${this.name}] Failed to download file: ${err instanceof Error ? err.message : err}\n`,
+          );
+          envelope.text = `(User sent a file "${file.fileName}" but download failed)`;
+        }
       }
-    }
-
-    await super.handleInbound(envelope);
+    });
   }
 
   async sendMessage(chatId: string, text: string): Promise<void> {
+    await this.sendProjectedMessage(chatId, text);
+  }
+
+  protected override async sendThreadMessage(
+    chatId: string,
+    _threadId: string | undefined,
+    text: string,
+    sourceLabel?: string,
+  ): Promise<void> {
+    await this.sendProjectedMessage(chatId, text, sourceLabel);
+  }
+
+  private async sendProjectedMessage(
+    chatId: string,
+    text: string,
+    sourceLabel?: string,
+  ): Promise<void> {
     const contextToken = getContextToken(chatId) || '';
 
     // Parse [IMAGE: /path/to/file.png] markers from text.
@@ -263,11 +285,18 @@ export class WeixinChannel extends ChannelBase {
     // Clean up double blank lines left by removed markers
     cleanedText = cleanedText.replace(/\n{3,}/g, '\n\n').trim();
 
+    const plainText = cleanedText ? markdownToPlainText(cleanedText) : '';
+    const visibleText = plainText
+      ? this.formatAttributedText(plainText, sourceLabel)
+      : parsedImages.length > 0
+        ? sourceLabel
+        : undefined;
+
     // Send text first if non-empty
-    if (cleanedText) {
+    if (visibleText) {
       await sendText({
         to: chatId,
-        text: cleanedText,
+        text: visibleText,
         baseUrl: this.baseUrl,
         token: this.token,
         contextToken,
@@ -300,7 +329,10 @@ export class WeixinChannel extends ChannelBase {
           try {
             await sendText({
               to: chatId,
-              text: '图片发送失败，请稍后重试',
+              text: this.formatAttributedText(
+                '图片发送失败，请稍后重试',
+                sourceLabel,
+              ),
               baseUrl: this.baseUrl,
               token: this.token,
               contextToken,

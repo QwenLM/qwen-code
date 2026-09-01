@@ -30,6 +30,7 @@ import {
   writeWorktreeSession,
   readWorktreeSession,
   readSessionPrs,
+  toSessionPrInfo,
   upsertSessionPr,
   SESSION_PR_URL_MAX_LENGTH,
   type ApprovalMode,
@@ -44,6 +45,7 @@ import {
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   type BridgeBranchedSession,
 } from '@qwen-code/acp-bridge/bridgeTypes';
+import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import { parseSessionSource } from '@qwen-code/acp-bridge';
 import {
   isReservedLiveSessionSource,
@@ -163,6 +165,11 @@ import {
   sendUntrustedWorkspaceResponse,
   sendWorkspaceRuntimeUnavailable,
 } from '../workspace-route-runtime.js';
+import {
+  redactWorkflowsFromAvailableCommandsEvent,
+  redactWorkflowsFromReplayArrays,
+  redactWorkflowsFromSupportedCommands,
+} from '../workflow-session-gate.js';
 import type {
   WorkspaceEntry,
   WorkspaceRegistry,
@@ -191,6 +198,26 @@ import {
 // `..`, `.lock` suffixes, etc.). Compared case-insensitively because ref
 // storage is case-folding on macOS/Windows.
 const GIT_RESERVED_BRANCH = 'HEAD';
+
+function redactSdkSurfaceEvent<T extends { type: string; data: unknown }>(
+  event: T,
+  workspaceTrusted: boolean,
+): T {
+  const shaped = omitSkillDetailsForSdkSurface(event);
+  return workspaceTrusted
+    ? shaped
+    : redactWorkflowsFromAvailableCommandsEvent(shaped);
+}
+
+function redactSdkSurfaceReplay<
+  T extends {
+    compactedReplay?: BridgeEvent[];
+    liveJournal?: BridgeEvent[];
+  },
+>(session: T, workspaceTrusted: boolean): T {
+  const shaped = omitSkillDetailsFromReplayArrays(session);
+  return workspaceTrusted ? shaped : redactWorkflowsFromReplayArrays(shaped);
+}
 
 // Byte-length caps for branch names. git creates loose refs as files under
 // `.git/refs/heads/`, so each `/`-separated component is bounded by the
@@ -593,6 +620,42 @@ function parseOptionalApprovalMode(
     return null;
   }
   return rawApprovalMode as ApprovalMode;
+}
+
+function parseRequestedSessionSource(
+  body: Record<string, unknown>,
+  res: Response,
+): { sourceType?: string; sourceId?: string } | null {
+  if (
+    isReservedStandaloneSessionSource({
+      sourceType:
+        typeof body['sourceType'] === 'string' ? body['sourceType'] : undefined,
+    })
+  ) {
+    res.status(400).json({
+      error:
+        'The requested session source is reserved for daemon-owned standalone sessions.',
+      code: 'reserved_session_source',
+    });
+    return null;
+  }
+  const source = parseSessionSource(body['sourceType'], body['sourceId']);
+  if ('error' in source) {
+    res.status(400).json({
+      error: source.error,
+      code: 'invalid_session_source',
+    });
+    return null;
+  }
+  if (isReservedLiveSessionSource(source)) {
+    res.status(400).json({
+      error:
+        'The requested session source is reserved for daemon-owned Live Voice sessions.',
+      code: 'reserved_session_source',
+    });
+    return null;
+  }
+  return source;
 }
 
 export function registerSessionRoutes(
@@ -2355,12 +2418,16 @@ export function registerSessionRoutes(
   const parseSessionPrBody = (
     req: Request,
     res: Response,
-  ): { number: number; url: string } | null | undefined => {
+  ):
+    | { number: number; url: string; state?: 'open' | 'merged' | 'closed' }
+    | null
+    | undefined => {
     const raw: unknown = safeBody(req)['pr'];
     if (raw === undefined) return undefined;
     const candidate = raw as Record<string, unknown> | null;
     const number = candidate?.['number'];
     const url = candidate?.['url'];
+    const state = candidate?.['state'];
     if (
       candidate === null ||
       typeof candidate !== 'object' ||
@@ -2372,16 +2439,20 @@ export function registerSessionRoutes(
       !/^https?:\/\//i.test(url) ||
       // The url lands in the bridge's stderr audit line — control
       // characters would let a caller forge log lines.
-      hasControlCharacter(url)
+      hasControlCharacter(url) ||
+      (state !== undefined &&
+        state !== 'open' &&
+        state !== 'merged' &&
+        state !== 'closed')
     ) {
       res.status(400).json({
-        error: `\`pr\` must be an object with a positive integer \`number\` and an http(s) \`url\` of at most ${SESSION_PR_URL_MAX_LENGTH} characters, without control characters`,
+        error: `\`pr\` must be an object with a positive integer \`number\` and an http(s) \`url\` of at most ${SESSION_PR_URL_MAX_LENGTH} characters, without control characters, and an optional \`state\` of \`open\`, \`merged\`, or \`closed\``,
         code: 'invalid_metadata',
         field: 'pr',
       });
       return null;
     }
-    return { number, url };
+    return { number, url, ...(state ? { state } : {}) };
   };
 
   const serializeSessionErrors = (
@@ -2661,37 +2732,8 @@ export function registerSessionRoutes(
     }
     const approvalMode = parseOptionalApprovalMode(body, res);
     if (approvalMode === null) return;
-    if (
-      isReservedStandaloneSessionSource({
-        sourceType:
-          typeof body['sourceType'] === 'string'
-            ? body['sourceType']
-            : undefined,
-      })
-    ) {
-      res.status(400).json({
-        error:
-          'The requested session source is reserved for daemon-owned standalone sessions.',
-        code: 'reserved_session_source',
-      });
-      return;
-    }
-    const source = parseSessionSource(body['sourceType'], body['sourceId']);
-    if ('error' in source) {
-      res.status(400).json({
-        error: source.error,
-        code: 'invalid_session_source',
-      });
-      return;
-    }
-    if (isReservedLiveSessionSource(source)) {
-      res.status(400).json({
-        error:
-          'The requested session source is reserved for daemon-owned Live Voice sessions.',
-        code: 'reserved_session_source',
-      });
-      return;
-    }
+    const source = parseRequestedSessionSource(body, res);
+    if (source === null) return;
     const clientId = parseClientIdHeader(req, res);
     if (clientId === null) return;
 
@@ -3336,7 +3378,15 @@ export function registerSessionRoutes(
           daemonLog,
         );
       }
-      sendBridgeError(res, err, { route: 'POST /session' });
+      // Only the plain creation path can promise that the initialize
+      // handshake preceded every durable mutation: `branch`/`worktree`
+      // bodies mutate git BEFORE spawn, and their rollback above is
+      // best-effort (a failed checkout rollback leaves the workspace on
+      // the new branch while the error response goes out).
+      sendBridgeError(res, err, {
+        route: 'POST /session',
+        ...(branchMeta || worktreeMeta ? {} : { initPrecedesMutations: true }),
+      });
     } finally {
       sessionIdReservation?.release();
     }
@@ -3389,7 +3439,9 @@ export function registerSessionRoutes(
           }
           // Same replay-array shape as the load response; redact skill
           // bodies for the browser surface (#9234).
-          res.status(200).json(omitSkillDetailsFromReplayArrays(session));
+          res
+            .status(200)
+            .json(redactSdkSurfaceReplay(session, runtime.trusted));
         } catch (err) {
           sendBridgeError(res, err, { route, sessionId });
         }
@@ -3423,6 +3475,8 @@ export function registerSessionRoutes(
       if (historyPageSize === null) return;
       const liveReplayMode = parseLiveReplayMode(body ?? {}, res);
       if (liveReplayMode === null) return;
+      const restoreSource = parseRequestedSessionSource(body, res);
+      if (restoreSource === null) return;
       const clientId = parseClientIdHeader(req, res);
       if (clientId === null) return;
       if (
@@ -3505,7 +3559,9 @@ export function registerSessionRoutes(
               }
               return;
             }
-            res.status(200).json(omitSkillDetailsFromReplayArrays(session));
+            res
+              .status(200)
+              .json(redactSdkSurfaceReplay(session, runtime.trusted));
             return;
           }
         } catch (error) {
@@ -3602,6 +3658,15 @@ export function registerSessionRoutes(
               isReservedStandaloneSessionSource(metadata)
                 ? metadataWithoutSource
                 : metadata;
+            const hasPersistedSource =
+              'sourceType' in restoreMetadata &&
+              restoreMetadata.sourceType !== undefined;
+            const restoreRequestMetadata = {
+              ...restoreMetadata,
+              ...(hasPersistedSource || isInternalWorkspaceRuntime(runtime)
+                ? {}
+                : restoreSource),
+            };
             assertRuntimeGenerationOpen?.();
             if (isInternalWorkspaceRuntime(runtime)) {
               sessionIdReservation = requestedSessionIdAdmission.reserveRestore(
@@ -3639,14 +3704,14 @@ export function registerSessionRoutes(
                     ...(liveReplayMode !== undefined ? { liveReplayMode } : {}),
                     ...(clientId !== undefined ? { clientId } : {}),
                     ...(approvalMode !== undefined ? { approvalMode } : {}),
-                    ...restoreMetadata,
+                    ...restoreRequestMetadata,
                   })
                 : await runtime.bridge.resumeSession({
                     sessionId,
                     workspaceCwd,
                     ...(clientId !== undefined ? { clientId } : {}),
                     ...(approvalMode !== undefined ? { approvalMode } : {}),
-                    ...restoreMetadata,
+                    ...restoreRequestMetadata,
                   });
             // Every path that can register a Live entry relocates it before a
             // prompt can start. Re-queuing cd for an active entry would block
@@ -3886,7 +3951,7 @@ export function registerSessionRoutes(
         }
         // The load response embeds the replay snapshot inline; redact the
         // skill bodies there just like the SSE egress does (#9234).
-        res.status(200).json(omitSkillDetailsFromReplayArrays(session));
+        res.status(200).json(redactSdkSurfaceReplay(session, runtime.trusted));
       } catch (err) {
         if (err instanceof RequestedSessionIdAdmissionError) {
           sendRequestedSessionIdAdmissionError(res, err, route);
@@ -4085,7 +4150,10 @@ export function registerSessionRoutes(
         res
           .status(201)
           .json(
-            omitSkillDetailsFromReplayArrays(result as BridgeBranchedSession),
+            redactSdkSurfaceReplay(
+              result as BridgeBranchedSession,
+              runtime.trusted,
+            ),
           );
       },
       { rejectStandalone: true },
@@ -4155,7 +4223,7 @@ export function registerSessionRoutes(
           }
           return;
         }
-        res.status(201).json(omitSkillDetailsFromReplayArrays(result));
+        res.status(201).json(redactSdkSurfaceReplay(result, runtime.trusted));
       },
       { rejectStandalone: true },
     ),
@@ -4308,6 +4376,7 @@ export function registerSessionRoutes(
       return;
     }
 
+    let workspaceTrusted = false;
     try {
       const result = await archiveCoordinator.runSharedMany(
         [sessionId],
@@ -4319,6 +4388,7 @@ export function registerSessionRoutes(
             cursor !== undefined,
           );
           if (!runtime) return undefined;
+          workspaceTrusted = runtime.trusted;
           captureRuntimeGenerationAssertion(runtime)?.();
           return runtime.bridge.getSessionTranscriptPage({
             sessionId,
@@ -4334,7 +4404,9 @@ export function registerSessionRoutes(
         .set('Cache-Control', 'no-store')
         .json({
           ...result,
-          events: (result.events ?? []).map(omitSkillDetailsForSdkSurface),
+          events: (result.events ?? []).map((event) =>
+            redactSdkSurfaceEvent(event, workspaceTrusted),
+          ),
         });
     } catch (err) {
       sendBridgeError(res, err, {
@@ -4463,11 +4535,14 @@ export function registerSessionRoutes(
               v: 1 as const,
               sessionId,
               events: replay.updates.map((update) =>
-                omitSkillDetailsForSdkSurface({
-                  v: 1 as const,
-                  type: 'session_update' as const,
-                  data: update,
-                }),
+                redactSdkSurfaceEvent(
+                  {
+                    v: 1 as const,
+                    type: 'session_update' as const,
+                    data: update,
+                  },
+                  runtime.trusted,
+                ),
               ),
               ...(replay.nextCursor && !cursorTooLarge
                 ? { nextCursor: replay.nextCursor }
@@ -4612,10 +4687,14 @@ export function registerSessionRoutes(
     withOwnerReadSession(
       'GET /session/:id/supported-commands',
       async (_req, res, sessionId, runtime) => {
+        const status =
+          await runtime.bridge.getSessionSupportedCommandsStatus(sessionId);
         res
           .status(200)
           .json(
-            await runtime.bridge.getSessionSupportedCommandsStatus(sessionId),
+            runtime.trusted
+              ? status
+              : redactWorkflowsFromSupportedCommands(status),
           );
       },
     ),
@@ -4625,10 +4704,16 @@ export function registerSessionRoutes(
     '/session/:id/tasks',
     withOwnerReadSession(
       'GET /session/:id/tasks',
-      async (_req, res, sessionId, runtime) => {
-        res
-          .status(200)
-          .json(await runtime.bridge.getSessionTasksStatus(sessionId));
+      async (req, res, sessionId, runtime) => {
+        res.status(200).json(
+          await runtime.bridge.getSessionTasksStatus(sessionId, {
+            // Same fail-closed shape as the workflow control surfaces:
+            // opting in here leaks strictly more than the redacted
+            // supported-commands surface on an untrusted workspace.
+            includeWorkflows:
+              runtime.trusted && req.query['includeWorkflows'] === 'true',
+          }),
+        );
       },
     ),
   );
@@ -4781,16 +4866,80 @@ export function registerSessionRoutes(
         }
         const body = safeBody(req);
         const kind = body['kind'];
-        if (kind !== 'agent' && kind !== 'shell' && kind !== 'monitor') {
-          res
-            .status(400)
-            .json({ error: '`kind` must be "agent", "shell", or "monitor"' });
+        if (
+          kind !== 'agent' &&
+          kind !== 'shell' &&
+          kind !== 'monitor' &&
+          kind !== 'workflow'
+        ) {
+          res.status(400).json({
+            error: '`kind` must be "agent", "shell", "monitor", or "workflow"',
+          });
           return;
         }
+        if (kind === 'workflow' && !runtime.trusted) {
+          res.status(200).json({ cancelled: false, reason: 'disabled' });
+          return;
+        }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
         res
           .status(200)
           .json(
-            await runtime.bridge.cancelSessionTask(sessionId, taskId, kind),
+            await runtime.bridge.cancelSessionTask(
+              sessionId,
+              taskId,
+              kind,
+              clientId !== undefined ? { clientId } : undefined,
+            ),
+          );
+      },
+    ),
+  );
+
+  app.post(
+    '/session/:id/tasks/:taskId/workflow-action',
+    mutate({ strict: true }),
+    withOwnerMutableSession(
+      'POST /session/:id/tasks/:taskId/workflow-action',
+      async (req, res, sessionId, runtime) => {
+        const taskId = req.params['taskId'];
+        if (!taskId) {
+          res.status(400).json({
+            error: '`taskId` route parameter is required',
+          });
+          return;
+        }
+        const action = safeBody(req)['action'];
+        if (
+          action !== 'pause' &&
+          action !== 'resume' &&
+          action !== 'retry' &&
+          action !== 'rerun' &&
+          action !== 'delete-history' &&
+          action !== 'run-saved'
+        ) {
+          res.status(400).json({
+            error:
+              '`action` must be "pause", "resume", "retry", "rerun", "delete-history", or "run-saved"',
+          });
+          return;
+        }
+        if (!runtime.trusted) {
+          res.status(200).json({ changed: false });
+          return;
+        }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        res
+          .status(200)
+          .json(
+            await runtime.bridge.controlSessionWorkflowTask(
+              sessionId,
+              taskId,
+              action,
+              clientId !== undefined ? { clientId } : undefined,
+            ),
           );
       },
     ),
@@ -5780,7 +5929,7 @@ export function registerSessionRoutes(
                 service.getPrSessionPathForArchiveState(sessionId, 'active'),
                 pr,
               )
-            ).map(({ number, url }) => ({ number, url }));
+            ).map(toSessionPrInfo);
             effective = { ...effective, prs: persistedPrs };
           }
         } finally {
@@ -5892,7 +6041,11 @@ export function registerSessionRoutes(
           await runWithWorkspaceRuntimeStorage(runtime, async () => {
             let effective: {
               displayName?: string;
-              prs?: Array<{ number: number; url: string }>;
+              prs?: Array<{
+                number: number;
+                url: string;
+                state?: 'open' | 'merged' | 'closed';
+              }>;
             };
             const service = createWorkspaceRuntimeSessionService(runtime);
             try {
@@ -5939,7 +6092,7 @@ export function registerSessionRoutes(
                     ),
                     pr,
                   )
-                ).map(({ number, url }) => ({ number, url }));
+                ).map(toSessionPrInfo);
                 assertRuntimeGenerationOpen?.();
                 effective = { ...effective, prs: persistedPrs };
               }
@@ -5965,10 +6118,7 @@ export function registerSessionRoutes(
                   pr,
                 );
                 assertRuntimeGenerationOpen?.();
-                effective.prs = persisted.map(({ number, url }) => ({
-                  number,
-                  url,
-                }));
+                effective.prs = persisted.map(toSessionPrInfo);
               }
               if (displayName !== undefined) {
                 const renamed = await service.renameSession(
@@ -6513,12 +6663,14 @@ export function registerSessionRoutes(
                     },
                   ),
                 )
-              : Promise.resolve(
-                  listLiveWorkspaceSessionsForResponse(
-                    runtime.bridge,
-                    key,
-                    options,
-                  ),
+              : listLiveWorkspaceSessionsForResponse(
+                  runtime.bridge,
+                  key,
+                  options,
+                  {
+                    runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+                    signal: controller.signal,
+                  },
                 );
           const result =
             liveRuntime && deps.conversationRuntimeActivity

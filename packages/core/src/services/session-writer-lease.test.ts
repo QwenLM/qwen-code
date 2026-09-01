@@ -11,6 +11,7 @@ import {
   constants as fsConstants,
   mkdirSync,
   readFileSync,
+  renameSync,
   statSync,
   unlinkSync,
   utimesSync,
@@ -54,7 +55,16 @@ const lstatFault = vi.hoisted(() => ({
   calls: 0,
 }));
 
+const directorySyncFault = vi.hoisted(() => ({
+  path: undefined as string | undefined,
+  remainingFailures: 0,
+}));
+
 const zeroInodeFault = vi.hoisted(() => ({
+  underRoot: undefined as string | undefined,
+}));
+
+const pathZeroInodeFault = vi.hoisted(() => ({
   underRoot: undefined as string | undefined,
 }));
 
@@ -103,11 +113,85 @@ const readFileFault = vi.hoisted(() => ({
   afterRead: undefined as (() => Promise<void> | void) | undefined,
 }));
 
+const descriptorReadHook = vi.hoisted(() => ({
+  afterRead: undefined as (() => void) | undefined,
+}));
+
+const lockIdentityPrecisionFault = vi.hoisted(() => ({
+  path: undefined as string | undefined,
+  replaced: false,
+}));
+
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  const readFileSyncWithHook = ((...args: unknown[]) => {
+    const result = (actual.readFileSync as (...readArgs: unknown[]) => unknown)(
+      ...args,
+    );
+    if (typeof args[0] === 'number') {
+      const afterRead = descriptorReadHook.afterRead;
+      descriptorReadHook.afterRead = undefined;
+      afterRead?.();
+    }
+    return result;
+  }) as typeof actual.readFileSync;
+  const applyLockIdentityFault = (
+    result: unknown,
+    bigint: boolean,
+    replaced: boolean,
+  ): unknown => {
+    if (typeof result !== 'object' || result === null) return result;
+    const base = 9_007_199_254_740_992n;
+    Object.defineProperty(result, 'dev', {
+      value: bigint ? 1n : 1,
+    });
+    Object.defineProperty(result, 'ino', {
+      value: bigint
+        ? base + (replaced ? 1n : 0n)
+        : Number(base + (replaced ? 1n : 0n)),
+    });
+    return result;
+  };
+  const fstatSyncWithHook = ((...args: unknown[]) => {
+    const result = (actual.fstatSync as (...callArgs: unknown[]) => unknown)(
+      ...args,
+    );
+    if (lockIdentityPrecisionFault.path === undefined) return result;
+    const bigint =
+      typeof args[1] === 'object' &&
+      args[1] !== null &&
+      (args[1] as { bigint?: boolean }).bigint === true;
+    return applyLockIdentityFault(result, bigint, false);
+  }) as typeof actual.fstatSync;
+  const lstatSyncWithHook = ((...args: unknown[]) => {
+    const result = (actual.lstatSync as (...callArgs: unknown[]) => unknown)(
+      ...args,
+    );
+    if (args[0] !== lockIdentityPrecisionFault.path) return result;
+    const bigint =
+      typeof args[1] === 'object' &&
+      args[1] !== null &&
+      (args[1] as { bigint?: boolean }).bigint === true;
+    return applyLockIdentityFault(
+      result,
+      bigint,
+      lockIdentityPrecisionFault.replaced,
+    );
+  }) as typeof actual.lstatSync;
+  return {
+    ...actual,
+    fstatSync: fstatSyncWithHook,
+    lstatSync: lstatSyncWithHook,
+    readFileSync: readFileSyncWithHook,
+  };
+});
+
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
   return {
     ...actual,
-    lstat: async (filePath: Parameters<typeof actual.lstat>[0]) => {
+    lstat: async (...args: unknown[]) => {
+      const filePath = args[0] as Parameters<typeof actual.lstat>[0];
       if (filePath === lstatFault.path) {
         lstatFault.calls++;
         if (lstatFault.remainingFailures > 0) {
@@ -117,7 +201,25 @@ vi.mock('node:fs/promises', async (importOriginal) => {
           });
         }
       }
-      return actual.lstat(filePath);
+      const result = await (
+        actual.lstat as (...callArgs: unknown[]) => Promise<unknown>
+      )(...args);
+      if (filePath !== lockIdentityPrecisionFault.path) return result;
+      const bigint =
+        typeof args[1] === 'object' &&
+        args[1] !== null &&
+        (args[1] as { bigint?: boolean }).bigint === true;
+      if (typeof result !== 'object' || result === null) return result;
+      const base = 9_007_199_254_740_992n;
+      Object.defineProperty(result, 'dev', {
+        value: bigint ? 1n : 1,
+      });
+      Object.defineProperty(result, 'ino', {
+        value: bigint
+          ? base + (lockIdentityPrecisionFault.replaced ? 1n : 0n)
+          : Number(base + (lockIdentityPrecisionFault.replaced ? 1n : 0n)),
+      });
+      return result;
     },
     stat: async (
       filePath: Parameters<typeof actual.stat>[0],
@@ -127,9 +229,11 @@ vi.mock('node:fs/promises', async (importOriginal) => {
         actual.stat as (...args: unknown[]) => ReturnType<typeof actual.stat>
       )(filePath, ...rest);
       if (
-        zeroInodeFault.underRoot !== undefined &&
         typeof filePath === 'string' &&
-        filePath.startsWith(zeroInodeFault.underRoot)
+        ((zeroInodeFault.underRoot !== undefined &&
+          filePath.startsWith(zeroInodeFault.underRoot)) ||
+          (pathZeroInodeFault.underRoot !== undefined &&
+            filePath.startsWith(pathZeroInodeFault.underRoot)))
       ) {
         Object.defineProperty(result, 'ino', { value: 0 });
       }
@@ -138,6 +242,31 @@ vi.mock('node:fs/promises', async (importOriginal) => {
     open: async (filePath: PathLike, flags: string | number, mode?: Mode) => {
       await fsOpenTestHook.beforeOpen?.(filePath, flags);
       const handle = await actual.open(filePath, flags, mode);
+      if (
+        zeroInodeFault.underRoot !== undefined &&
+        typeof filePath === 'string' &&
+        filePath.startsWith(zeroInodeFault.underRoot)
+      ) {
+        const handleStat = handle.stat.bind(handle);
+        handle.stat = (async (...args) => {
+          const result = await handleStat(...args);
+          Object.defineProperty(result, 'ino', { value: 0 });
+          return result;
+        }) as typeof handle.stat;
+      }
+      const sync = handle.sync.bind(handle);
+      handle.sync = async () => {
+        if (
+          filePath === directorySyncFault.path &&
+          directorySyncFault.remainingFailures > 0
+        ) {
+          directorySyncFault.remainingFailures--;
+          throw Object.assign(new Error('directory sync failure'), {
+            code: 'EIO',
+          });
+        }
+        await sync();
+      };
       const writeFile = handle.writeFile.bind(handle);
       handle.writeFile = async (data, options) => {
         if (
@@ -397,7 +526,10 @@ afterEach(async () => {
   lstatFault.path = undefined;
   lstatFault.remainingFailures = 0;
   lstatFault.calls = 0;
+  directorySyncFault.path = undefined;
+  directorySyncFault.remainingFailures = 0;
   zeroInodeFault.underRoot = undefined;
+  pathZeroInodeFault.underRoot = undefined;
   fsOpenTestHook.beforeOpen = undefined;
   transitionFault.renameFrom = undefined;
   transitionFault.renameTo = undefined;
@@ -420,6 +552,9 @@ afterEach(async () => {
   readFileFault.triggerCall = 0;
   readFileFault.calls = 0;
   readFileFault.afterRead = undefined;
+  descriptorReadHook.afterRead = undefined;
+  lockIdentityPrecisionFault.path = undefined;
+  lockIdentityPrecisionFault.replaced = false;
   setDebugLogSession(null);
   resetDebugLoggingState();
   Storage.setRuntimeBaseDir(null);
@@ -501,7 +636,7 @@ describe('SessionWriterLease', () => {
     );
 
     await config.initialize({
-      skipGeminiInitialization: true,
+      skipLlmInitialization: true,
       skipHooks: true,
       skipMcpDiscovery: true,
       skipSkillManager: true,
@@ -561,7 +696,7 @@ describe('SessionWriterLease', () => {
       );
     const initialize = (config: Config) =>
       config.initialize({
-        skipGeminiInitialization: true,
+        skipLlmInitialization: true,
         skipHooks: true,
         skipMcpDiscovery: true,
         skipSkillManager: true,
@@ -678,7 +813,7 @@ describe('SessionWriterLease', () => {
     );
 
     await config.initialize({
-      skipGeminiInitialization: true,
+      skipLlmInitialization: true,
       skipHooks: true,
       skipMcpDiscovery: true,
       skipSkillManager: true,
@@ -930,6 +1065,7 @@ describe('SessionWriterLease', () => {
     const lease = await SessionWriterLease.acquire(fixture.options);
 
     await fs.appendFile(fixture.transcriptPath, '{"external":true}\n');
+    expect(() => lease.assertCleanupOwned()).not.toThrow();
     await expect(lease.assertOwnedAndUnchanged()).rejects.toBeInstanceOf(
       SessionTranscriptChangedError,
     );
@@ -940,6 +1076,7 @@ describe('SessionWriterLease', () => {
     );
     await fs.unlink(lockPath);
     await fs.writeFile(lockPath, '{"replacement":true}');
+    expect(() => lease.assertCleanupOwned()).toThrow(SessionWriterLostError);
     await expect(lease.assertOwnedAndUnchanged()).rejects.toBeInstanceOf(
       SessionWriterLostError,
     );
@@ -950,6 +1087,136 @@ describe('SessionWriterLease', () => {
       '{"replacement":true}',
     );
   });
+
+  it.runIf(process.platform !== 'win32')(
+    'rejects a byte-identical atomic replacement during cleanup',
+    async () => {
+      const fixture = await createFixture();
+      const lease = await SessionWriterLease.acquire(fixture.options);
+      const lockPath = getSessionWriterLockPath(
+        fixture.runtimeBaseDir,
+        fixture.options.sessionId,
+      );
+      const replacementPath = `${lockPath}.replacement`;
+      const lockRecord = await fs.readFile(lockPath, 'utf8');
+      await fs.writeFile(replacementPath, lockRecord);
+      await fs.rename(replacementPath, lockPath);
+
+      expect(() => lease.assertCleanupOwned()).toThrow(SessionWriterLostError);
+      await expect(lease.release()).rejects.toBeInstanceOf(
+        SessionWriterLostError,
+      );
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'rejects a byte-identical replacement during an asynchronous ownership read',
+    async () => {
+      const fixture = await createFixture();
+      const lease = await SessionWriterLease.acquire(fixture.options);
+      const lockPath = getSessionWriterLockPath(
+        fixture.runtimeBaseDir,
+        fixture.options.sessionId,
+      );
+      const replacementPath = `${lockPath}.replacement`;
+      await fs.writeFile(replacementPath, await fs.readFile(lockPath, 'utf8'));
+      readFileFault.path = lockPath;
+      readFileFault.triggerCall = 1;
+      readFileFault.afterRead = () => fs.rename(replacementPath, lockPath);
+
+      await expect(lease.assertOwnedAndUnchanged()).rejects.toBeInstanceOf(
+        SessionWriterLostError,
+      );
+      await expect(lease.release()).rejects.toBeInstanceOf(
+        SessionWriterLostError,
+      );
+    },
+  );
+
+  it('compares lock identities without losing large inode precision', async () => {
+    const fixture = await createFixture();
+    const lockPath = getSessionWriterLockPath(
+      fixture.runtimeBaseDir,
+      fixture.options.sessionId,
+    );
+    lockIdentityPrecisionFault.path = lockPath;
+    const lease = await SessionWriterLease.acquire(fixture.options);
+    lockIdentityPrecisionFault.replaced = true;
+
+    expect(() => lease.assertCleanupOwned()).toThrow(SessionWriterLostError);
+    await expect(lease.release()).rejects.toBeInstanceOf(
+      SessionWriterLostError,
+    );
+  });
+
+  it.runIf(process.platform !== 'win32')(
+    'rejects a lock replaced while cleanup ownership is being verified',
+    async () => {
+      const fixture = await createFixture();
+      const lease = await SessionWriterLease.acquire(fixture.options);
+      const lockPath = getSessionWriterLockPath(
+        fixture.runtimeBaseDir,
+        fixture.options.sessionId,
+      );
+      const replacementPath = `${lockPath}.replacement`;
+      writeFileSync(replacementPath, readFileSync(lockPath));
+      descriptorReadHook.afterRead = () => {
+        renameSync(replacementPath, lockPath);
+      };
+
+      expect(() => lease.assertCleanupOwned()).toThrow(SessionWriterLostError);
+      await expect(lease.release()).rejects.toBeInstanceOf(
+        SessionWriterLostError,
+      );
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'rejects a byte-identical atomic replacement during acquisition',
+    async () => {
+      const fixture = await createFixture();
+      const lockPath = getSessionWriterLockPath(
+        fixture.runtimeBaseDir,
+        fixture.options.sessionId,
+      );
+      const replacementPath = `${lockPath}.replacement`;
+
+      await expect(
+        SessionWriterLease.acquire({
+          ...fixture.options,
+          onOwnershipAcquired: () => {
+            writeFileSync(replacementPath, readFileSync(lockPath));
+            renameSync(replacementPath, lockPath);
+          },
+        }),
+      ).rejects.toBeInstanceOf(SessionWriterUnavailableError);
+      await fs.unlink(lockPath);
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'rejects a symlinked cleanup lock',
+    async () => {
+      const fixture = await createFixture();
+      const lease = await SessionWriterLease.acquire(fixture.options);
+      const lockPath = getSessionWriterLockPath(
+        fixture.runtimeBaseDir,
+        fixture.options.sessionId,
+      );
+      const targetPath = `${lockPath}.replacement`;
+      const lockRecord = await fs.readFile(lockPath, 'utf8');
+      await fs.writeFile(targetPath, lockRecord);
+      await fs.unlink(lockPath);
+      await fs.symlink(targetPath, lockPath);
+
+      expect(() => lease.assertCleanupOwned()).toThrow(SessionWriterLostError);
+      await expect(lease.release()).rejects.toBeInstanceOf(
+        SessionWriterLostError,
+      );
+      await fs.unlink(lockPath);
+      await fs.unlink(targetPath);
+    },
+  );
 
   it.runIf(process.platform !== 'win32')(
     'classifies an unreadable owned lock as unavailable',
@@ -1427,6 +1694,7 @@ describe('SessionWriterLease', () => {
     await fs.mkdir(path.dirname(fixture.transcriptPath), { recursive: true });
     const seed = '{"seed":true}\n';
     await fs.writeFile(fixture.transcriptPath, seed);
+    zeroInodeFault.underRoot = fixture.runtimeBaseDir;
     const originalStat = nativeFileHandleStat;
     const stat = vi
       .spyOn(fileHandlePrototype, 'stat')
@@ -2164,6 +2432,30 @@ describe('SessionWriterLease', () => {
     },
   );
 
+  it('retries release when a completed lease still exactly owns the primary lock', async () => {
+    const fixture = await createFixture();
+    const lease = await SessionWriterLease.acquire(fixture.options);
+    const lockPath = getSessionWriterLockPath(
+      fixture.runtimeBaseDir,
+      fixture.options.sessionId,
+    );
+    const retiredPath = `${lockPath}.released.${encodeURIComponent(lease.ownerId)}`;
+    await fs.mkdir(retiredPath);
+
+    await expect(lease.release()).rejects.toBeInstanceOf(
+      SessionWriterUnavailableError,
+    );
+    expect(lease.isReleased).toBe(false);
+    await expect(fs.readFile(lockPath, 'utf8')).resolves.toContain(
+      fixture.options.sessionId,
+    );
+
+    await fs.rmdir(retiredPath);
+    await expect(lease.release()).resolves.toBeUndefined();
+    expect(lease.isReleased).toBe(true);
+    await expect(fs.lstat(lockPath)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
   it('retries a transient ownership precheck failure before release', async () => {
     const fixture = await createFixture();
     const lease = await SessionWriterLease.acquire(fixture.options);
@@ -2175,9 +2467,151 @@ describe('SessionWriterLease', () => {
     lstatFault.remainingFailures = 1;
 
     await expect(lease.release()).resolves.toBeUndefined();
-    expect(lstatFault.calls).toBe(2);
+    expect(lstatFault.calls).toBe(3);
     expect(lease.isReleased).toBe(true);
     lstatFault.path = undefined;
+    await expect(fs.lstat(lockPath)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('retries release after ownership checks are temporarily unavailable', async () => {
+    const fixture = await createFixture();
+    const lease = await SessionWriterLease.acquire(fixture.options);
+    const lockPath = getSessionWriterLockPath(
+      fixture.runtimeBaseDir,
+      fixture.options.sessionId,
+    );
+    lstatFault.path = lockPath;
+    lstatFault.remainingFailures = 4;
+
+    await expect(lease.release()).rejects.toBeInstanceOf(
+      SessionWriterUnavailableError,
+    );
+    await expect(lease.release()).resolves.toBeUndefined();
+
+    expect(lease.isReleased).toBe(true);
+    expect(lstatFault.calls).toBeGreaterThanOrEqual(5);
+    await expect(fs.lstat(lockPath)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('retries release durability after the primary lock is removed', async () => {
+    const fixture = await createFixture();
+    const lease = await SessionWriterLease.acquire(fixture.options);
+    const lockPath = getSessionWriterLockPath(
+      fixture.runtimeBaseDir,
+      fixture.options.sessionId,
+    );
+    directorySyncFault.path = path.dirname(lockPath);
+    directorySyncFault.remainingFailures = 1;
+
+    await expect(lease.release()).rejects.toBeInstanceOf(
+      SessionWriterUnavailableError,
+    );
+    expect(lease.isReleased).toBe(true);
+    expect(lease.isReleaseDurabilityPending).toBe(true);
+    await expect(fs.lstat(lockPath)).rejects.toMatchObject({ code: 'ENOENT' });
+
+    await expect(lease.release()).resolves.toBeUndefined();
+    expect(lease.isReleased).toBe(true);
+    expect(lease.isReleaseDurabilityPending).toBe(false);
+  });
+
+  it('reconciles a release rename error after the rename took effect', async () => {
+    const fixture = await createFixture();
+    const lease = await SessionWriterLease.acquire(fixture.options);
+    const lockPath = getSessionWriterLockPath(
+      fixture.runtimeBaseDir,
+      fixture.options.sessionId,
+    );
+    transitionFault.renameFrom = lockPath;
+    transitionFault.renameTo = `${lockPath}.released.${encodeURIComponent(lease.ownerId)}`;
+    transitionFault.afterRename = () => {
+      throw Object.assign(new Error('rename result unavailable'), {
+        code: 'EIO',
+      });
+    };
+
+    await expect(lease.release()).resolves.toBeUndefined();
+
+    expect(lease.isReleased).toBe(true);
+    await expect(fs.lstat(lockPath)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('does not confirm release through a replacement lock directory', async () => {
+    const fixture = await createFixture();
+    const lease = await SessionWriterLease.acquire(fixture.options);
+    const lockPath = getSessionWriterLockPath(
+      fixture.runtimeBaseDir,
+      fixture.options.sessionId,
+    );
+    const lockDirectory = path.dirname(lockPath);
+    const originalDirectory = `${lockDirectory}.original`;
+    const retiredPath = `${lockPath}.released.${encodeURIComponent(lease.ownerId)}`;
+    transitionFault.renameFrom = lockPath;
+    transitionFault.renameTo = retiredPath;
+    transitionFault.afterRename = async () => {
+      await fs.rename(lockDirectory, originalDirectory);
+      await fs.mkdir(lockDirectory);
+    };
+
+    try {
+      await expect(lease.release()).rejects.toBeInstanceOf(
+        SessionWriterUnavailableError,
+      );
+
+      expect(lease.isReleased).toBe(true);
+      expect(lease.isReleaseDurabilityPending).toBe(true);
+      await expect(
+        fs.stat(path.join(originalDirectory, path.basename(retiredPath))),
+      ).resolves.toBeDefined();
+      await expect(fs.lstat(lockPath)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+    } finally {
+      await fs.rmdir(lockDirectory);
+      await fs.rename(originalDirectory, lockDirectory);
+      await lease.release();
+      await fs.unlink(retiredPath).catch(() => undefined);
+    }
+  });
+
+  it('rejects release when lock directory inode verifiability changes', async () => {
+    const fixture = await createFixture();
+    const lease = await SessionWriterLease.acquire(fixture.options);
+    const lockPath = getSessionWriterLockPath(
+      fixture.runtimeBaseDir,
+      fixture.options.sessionId,
+    );
+    pathZeroInodeFault.underRoot = path.dirname(lockPath);
+
+    await expect(lease.release()).rejects.toBeInstanceOf(
+      SessionWriterUnavailableError,
+    );
+    await expect(fs.stat(lockPath)).resolves.toBeDefined();
+
+    pathZeroInodeFault.underRoot = undefined;
+    await expect(lease.release()).resolves.toBeUndefined();
+  });
+
+  it('retries release durability before discarding a failed acquisition', async () => {
+    const fixture = await createFixture();
+    const lockPath = getSessionWriterLockPath(
+      fixture.runtimeBaseDir,
+      fixture.options.sessionId,
+    );
+    const activationFailure = new Error('activation failed');
+    directorySyncFault.path = path.dirname(lockPath);
+    directorySyncFault.remainingFailures = 1;
+
+    await expect(
+      SessionWriterLease.acquire({
+        ...fixture.options,
+        onOwnershipAcquired: () => {
+          throw activationFailure;
+        },
+      }),
+    ).rejects.toBe(activationFailure);
+
+    expect(directorySyncFault.remainingFailures).toBe(0);
     await expect(fs.lstat(lockPath)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 

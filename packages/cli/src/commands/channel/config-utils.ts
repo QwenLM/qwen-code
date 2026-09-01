@@ -4,7 +4,10 @@ import type {
   ChannelWebhookSourceConfig,
   ChannelWebhookTargetConfig,
 } from '@qwen-code/channel-base';
-import { APPROVAL_MODES } from '@qwen-code/qwen-code-core';
+import {
+  APPROVAL_MODES,
+  isInternalSecretEnvVar,
+} from '@qwen-code/qwen-code-core';
 import { resolveChannelCwd } from './channel-cwd.js';
 import { getPlugin, supportedTypes } from './channel-registry.js';
 
@@ -15,6 +18,21 @@ export { findCliEntryPath } from './cli-entry-path.js';
 
 type WebhookEnvironment = Readonly<Record<string, string | undefined>>;
 
+/**
+ * Channel config is loaded from merged settings, which a trusted repository
+ * contributes to, and the resolved values are sent as credentials to
+ * repo-configured endpoints — so Qwen-internal secrets are never resolved
+ * here. Throwing matches this module's contract for every other unusable
+ * reference (unset, empty), instead of silently yielding a literal.
+ */
+function assertNotInternalSecret(envName: string, reference: string): void {
+  if (isInternalSecretEnvVar(envName)) {
+    throw new Error(
+      `Environment variable ${envName} is a Qwen-internal secret and is never resolved into channel configuration (referenced as ${reference})`,
+    );
+  }
+}
+
 export function resolveEnvVars(
   value: string,
   env: WebhookEnvironment = process.env,
@@ -24,6 +42,7 @@ export function resolveEnvVars(
   }
   if (value.startsWith('$')) {
     const envName = value.substring(1);
+    assertNotInternalSecret(envName, value);
     const envValue = env[envName];
     if (envValue === undefined) {
       throw new Error(
@@ -66,11 +85,49 @@ function resolveOptionalStringField(
 type EnvResolution = boolean | 'available';
 const KNOWN_CREDENTIAL_FIELDS = new Set(['token', 'clientId', 'clientSecret']);
 
+interface MultiSessionCompatibilityConfig {
+  multiSession?: boolean;
+  sessionScope: ChannelConfig['sessionScope'];
+  groupHistoryLimit?: unknown;
+  groups?: Record<string, unknown>;
+  webhooks?: unknown;
+}
+
+export function multiSessionCompatibilityError(
+  name: string,
+  config: MultiSessionCompatibilityConfig,
+): string | undefined {
+  if (!config.multiSession) return undefined;
+  if (config.sessionScope !== 'user') {
+    return `Channel "${name}" requires sessionScope "user" when multiSession is enabled.`;
+  }
+  if (
+    typeof config.groupHistoryLimit === 'number' &&
+    config.groupHistoryLimit !== 0
+  ) {
+    return `Channel "${name}" cannot use groupHistoryLimit when multiSession is enabled.`;
+  }
+  for (const [groupId, group] of Object.entries(config.groups ?? {})) {
+    const groupHistoryLimit =
+      group !== null && typeof group === 'object' && !Array.isArray(group)
+        ? (group as Record<string, unknown>)['groupHistoryLimit']
+        : undefined;
+    if (typeof groupHistoryLimit === 'number' && groupHistoryLimit !== 0) {
+      return `Channel "${name}" group "${groupId}" cannot use groupHistoryLimit when multiSession is enabled.`;
+    }
+  }
+  if (config.webhooks !== undefined && config.webhooks !== null) {
+    return `Channel "${name}" cannot use webhooks when multiSession is enabled.`;
+  }
+  return undefined;
+}
+
 function resolveConfigEnvVar(value: string, mode: EnvResolution): string {
   if (mode === false) return value;
   if (value.startsWith('$$')) return value.substring(1);
   if (mode === 'available' && value.startsWith('$')) {
     const envName = value.substring(1);
+    assertNotInternalSecret(envName, value);
     const envValue = process.env[envName];
     if (envValue === undefined) {
       throw new Error(
@@ -285,6 +342,7 @@ function resolveWebhookSecretEnv(
       `Channel "${channelName}" field "${path}.secretEnv" must be an environment variable name or $-prefixed reference.`,
     );
   }
+  assertNotInternalSecret(envName, `${path}.secretEnv`);
   const envValue = env[envName];
   if (envValue === undefined) {
     throw new Error(
@@ -450,6 +508,22 @@ export async function parseChannelConfig(
     (rawConfig['sessionScope'] as ChannelConfig['sessionScope']) ||
     plugin.defaultSessionScope ||
     'user';
+  const multiSession = optionalBooleanField(
+    name,
+    'multiSession',
+    rawConfig['multiSession'],
+  );
+  const groups = (rawConfig['groups'] as ChannelConfig['groups']) || {};
+  const webhooks = parseWebhookConfig(name, rawConfig);
+
+  const multiSessionError = multiSessionCompatibilityError(name, {
+    multiSession,
+    sessionScope: configuredSessionScope,
+    groupHistoryLimit: rawConfig['groupHistoryLimit'],
+    groups,
+    webhooks,
+  });
+  if (multiSessionError) throw new Error(multiSessionError);
 
   return {
     ...resolvedRawConfig,
@@ -462,6 +536,7 @@ export async function parseChannelConfig(
       'allowlist',
     allowedUsers: (rawConfig['allowedUsers'] as string[]) || [],
     sessionScope: configuredSessionScope,
+    multiSession,
     cwd: resolveChannelCwd(rawConfig['cwd'] as string | undefined, defaultCwd),
     approvalMode: parseApprovalModeConfig(name, rawConfig),
     instructions: rawConfig['instructions'] as string | undefined,
@@ -475,7 +550,7 @@ export async function parseChannelConfig(
     groupPolicy:
       (rawConfig['groupPolicy'] as ChannelConfig['groupPolicy']) || 'disabled',
     dmPolicy: (rawConfig['dmPolicy'] as ChannelConfig['dmPolicy']) || 'open',
-    groups: (rawConfig['groups'] as ChannelConfig['groups']) || {},
-    webhooks: parseWebhookConfig(name, rawConfig),
+    groups,
+    webhooks,
   };
 }

@@ -42,8 +42,27 @@ describe('package scripts', () => {
         "  '@qwen-code/sdk',\n" +
         "  '@qwen-code/mobile-mcp',\n" +
         "  '@qwen-code/node-repl-mcp',\n" +
+        "  '@qwen-code/qwen-live',\n" +
         '];',
     );
+  });
+
+  it('builds the standalone qwen-live daemon in the root build order', () => {
+    const buildScript = readFileSync(
+      path.join(root, 'scripts/build.js'),
+      'utf8',
+    );
+
+    // The qwen-live e2e harness spawns packages/qwen-live/dist/index.js and
+    // the workspace unit tests run from src, so this pin is what catches the
+    // root build silently dropping the package.
+    const startIndex = buildScript.indexOf('const buildOrder = [');
+    expect(startIndex).toBeGreaterThan(-1);
+    const buildOrder = buildScript.slice(
+      startIndex,
+      buildScript.indexOf('];', startIndex),
+    );
+    expect(buildOrder).toContain("'packages/qwen-live',");
   });
 
   it('keeps the serve fast-path bundle check outside unit test scripts', () => {
@@ -90,7 +109,7 @@ describe('package scripts', () => {
     expect(packageJson.scripts['test:release']).toBe(
       [
         'cross-env NODE_OPTIONS="--max-old-space-size=3072"',
-        'npm run test:ci --workspaces --if-present --parallel -- --coverage.enabled=false',
+        'npm run test:ci --workspaces --if-present -- --coverage.enabled=false',
         '&& npm run test:scripts',
       ].join(' '),
     );
@@ -413,6 +432,16 @@ describe('package scripts', () => {
     );
     expect(workspaceTestStep).toContain('npm run test:release');
     expect(workspaceTestStep).not.toContain('npm run test:ci');
+    for (const name of ['VITEST_MAX_THREADS', 'VITEST_MAX_FORKS']) {
+      expect(workspaceTestStep).toContain(
+        `${name}: "\${{ startsWith(runner.name, 'ecs-qwen-') && (vars.QWEN_CI_VITEST_MAX_WORKERS || '4') || '' }}"`,
+      );
+    }
+    for (const name of ['VITEST_MIN_THREADS', 'VITEST_MIN_FORKS']) {
+      expect(workspaceTestStep).toContain(
+        `${name}: "\${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"`,
+      );
+    }
   });
 
   it('skips release install-time prepare and builds before publish bundling', () => {

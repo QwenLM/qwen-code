@@ -221,7 +221,7 @@ describe('InputPrompt', () => {
     mockedUseUIState.mockReturnValue({
       isFeedbackDialogOpen: false,
       messageQueue: [],
-      pendingGeminiHistoryItems: [],
+      pendingLlmHistoryItems: [],
     } as unknown as ReturnType<typeof useUIState>);
     mockedUseUIActions.mockReturnValue({
       handleRetryLastPrompt: vi.fn(),
@@ -327,6 +327,7 @@ describe('InputPrompt', () => {
       handleAutocomplete: vi.fn(),
       activeCategory: 'all' as const,
       availableCategories: ['all'] as Array<'all'>,
+      selectCategory: vi.fn(),
       switchCategory: vi.fn(),
     };
     mockedUseCommandCompletion.mockReturnValue(mockCommandCompletion);
@@ -640,7 +641,7 @@ describe('InputPrompt', () => {
     mockedUseUIState.mockReturnValue({
       isFeedbackDialogOpen: true,
       messageQueue: [],
-      pendingGeminiHistoryItems: [],
+      pendingLlmHistoryItems: [],
     } as unknown as ReturnType<typeof useUIState>);
 
     const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
@@ -667,7 +668,7 @@ describe('InputPrompt', () => {
       mockedUseUIState.mockReturnValue({
         isFeedbackDialogOpen: false,
         messageQueue: [],
-        pendingGeminiHistoryItems: [],
+        pendingLlmHistoryItems: [],
         historyManager: { addItem },
       } as unknown as ReturnType<typeof useUIState>);
       vi.mocked(createVoiceRecorder).mockReturnValue({
@@ -1756,7 +1757,7 @@ describe('InputPrompt', () => {
       mockedUseUIState.mockReturnValue({
         isFeedbackDialogOpen: false,
         messageQueue: [],
-        pendingGeminiHistoryItems: [],
+        pendingLlmHistoryItems: [],
         historyManager: { addItem },
       } as unknown as ReturnType<typeof useUIState>);
       vi.mocked(clipboardUtils.clipboardHasImage).mockImplementation(
@@ -5485,7 +5486,7 @@ describe('InputPrompt', () => {
       mockedUseUIState.mockReturnValue({
         isFeedbackDialogOpen: false,
         messageQueue: [],
-        pendingGeminiHistoryItems: [
+        pendingLlmHistoryItems: [
           {
             type: 'tool_group',
             tools: [
@@ -5988,7 +5989,7 @@ describe('InputPrompt', () => {
       mockedUseUIState.mockReturnValue({
         isFeedbackDialogOpen: false,
         messageQueue: ['queued message'],
-        pendingGeminiHistoryItems: [],
+        pendingLlmHistoryItems: [],
         streamingState: StreamingState.Responding,
       } as unknown as ReturnType<typeof useUIState>);
       const mockPopAllQueued = vi.fn(() => null);
@@ -6019,7 +6020,7 @@ describe('InputPrompt', () => {
       mockedUseUIState.mockReturnValue({
         isFeedbackDialogOpen: false,
         messageQueue: [],
-        pendingGeminiHistoryItems: [],
+        pendingLlmHistoryItems: [],
         streamingState: StreamingState.Responding,
       } as unknown as ReturnType<typeof useUIState>);
 
@@ -6046,7 +6047,7 @@ describe('InputPrompt', () => {
       mockedUseUIState.mockReturnValue({
         isFeedbackDialogOpen: false,
         messageQueue: [],
-        pendingGeminiHistoryItems: [],
+        pendingLlmHistoryItems: [],
         streamingState: StreamingState.Responding,
       } as unknown as ReturnType<typeof useUIState>);
       const mockPopAllQueued = vi.fn(() => null);
@@ -6081,7 +6082,7 @@ describe('InputPrompt', () => {
       mockedUseUIState.mockReturnValue({
         isFeedbackDialogOpen: false,
         messageQueue: ['queued follow-up'],
-        pendingGeminiHistoryItems: [],
+        pendingLlmHistoryItems: [],
         streamingState: StreamingState.Responding,
       } as unknown as ReturnType<typeof useUIState>);
       const mockPopAllQueued = vi.fn(() => null);
@@ -6115,7 +6116,7 @@ describe('InputPrompt', () => {
       mockedUseUIState.mockReturnValue({
         isFeedbackDialogOpen: false,
         messageQueue: [],
-        pendingGeminiHistoryItems: [],
+        pendingLlmHistoryItems: [],
         streamingState: StreamingState.Responding,
       } as unknown as ReturnType<typeof useUIState>);
       props.buffer.setText('draft to clear');

@@ -182,7 +182,7 @@ describe('BackgroundAgentResumeService', () => {
       getSessionId: () => 'session-1',
       getProjectRoot: () => tempDir,
       getCliVersion: () => 'test-version',
-      getGeminiClient: () =>
+      getLlmClient: () =>
         options.currentForkRuntime
           ? {
               getChat: () => ({
@@ -201,6 +201,7 @@ describe('BackgroundAgentResumeService', () => {
           : undefined,
       getSkillManager: () => options.skillManager,
       getDisabledSkillNames: () => new Set<string>(),
+      isSkillEnabled: () => true,
       getModelInvocableCommandsProvider: () => undefined,
       getSkipStartupContext: () => true,
       getTranscriptPath: () => path.join(tempDir, 'session.jsonl'),

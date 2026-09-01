@@ -4,8 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { randomUUID } from 'node:crypto';
-import { promises as fs, statSync } from 'node:fs';
+import { constants as fsConstants, promises as fs, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import type { ContentBlock } from '@agentclientprotocol/sdk';
@@ -20,6 +19,116 @@ const SUPPORTED_IMAGE_MIME_TYPES = new Set([
   'image/png',
   'image/webp',
 ]);
+
+interface DurableAttachmentDirectory {
+  path: string;
+  handle: Awaited<ReturnType<typeof fs.open>>;
+  dev: number;
+  ino: number;
+  inodeVerifiable: boolean;
+}
+
+function hasVerifiableInode(ino: number): boolean {
+  return Number.isSafeInteger(ino) && ino > 0;
+}
+
+async function openDurableAttachmentDirectory(
+  directory: string,
+  openedHandle?: Awaited<ReturnType<typeof fs.open>>,
+): Promise<DurableAttachmentDirectory> {
+  const handle =
+    openedHandle ??
+    (await fs.open(
+      directory,
+      fsConstants.O_RDONLY |
+        (process.platform === 'win32' ? 0 : (fsConstants.O_NOFOLLOW ?? 0)),
+    ));
+  try {
+    const opened = await handle.stat();
+    const current = await fs.stat(directory);
+    const openedInodeVerifiable = hasVerifiableInode(opened.ino);
+    const currentInodeVerifiable = hasVerifiableInode(current.ino);
+    if (
+      !opened.isDirectory() ||
+      !current.isDirectory() ||
+      opened.dev !== current.dev ||
+      openedInodeVerifiable !== currentInodeVerifiable ||
+      (openedInodeVerifiable && opened.ino !== current.ino)
+    ) {
+      throw new Error('Session attachment parent directory changed.');
+    }
+    return {
+      path: directory,
+      handle,
+      dev: opened.dev,
+      ino: opened.ino,
+      inodeVerifiable: openedInodeVerifiable,
+    };
+  } catch (error) {
+    await handle.close().catch(() => undefined);
+    throw error;
+  }
+}
+
+async function openDurableAttachmentDirectoryIfPresent(
+  directory: string,
+): Promise<DurableAttachmentDirectory | undefined> {
+  let handle: Awaited<ReturnType<typeof fs.open>>;
+  try {
+    handle = await fs.open(
+      directory,
+      fsConstants.O_RDONLY |
+        (process.platform === 'win32' ? 0 : (fsConstants.O_NOFOLLOW ?? 0)),
+    );
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw error;
+  }
+  return openDurableAttachmentDirectory(directory, handle);
+}
+
+async function syncDurableAttachmentDirectory(
+  expected: DurableAttachmentDirectory,
+): Promise<void> {
+  const opened = await expected.handle.stat();
+  const openedInodeVerifiable = hasVerifiableInode(opened.ino);
+  const current = await fs.stat(expected.path);
+  const currentInodeVerifiable = hasVerifiableInode(current.ino);
+  if (
+    !opened.isDirectory() ||
+    !current.isDirectory() ||
+    opened.dev !== expected.dev ||
+    openedInodeVerifiable !== expected.inodeVerifiable ||
+    (expected.inodeVerifiable && opened.ino !== expected.ino) ||
+    current.dev !== expected.dev ||
+    currentInodeVerifiable !== expected.inodeVerifiable ||
+    (expected.inodeVerifiable && current.ino !== expected.ino)
+  ) {
+    throw new Error('Session attachment parent directory changed.');
+  }
+  try {
+    await expected.handle.sync();
+  } catch (error) {
+    if (
+      process.platform !== 'win32' ||
+      !['EACCES', 'EINVAL', 'EPERM'].includes(
+        (error as NodeJS.ErrnoException).code ?? '',
+      )
+    ) {
+      throw error;
+    }
+  }
+  const after = await fs.stat(expected.path);
+  const afterInodeVerifiable = hasVerifiableInode(after.ino);
+  if (
+    !after.isDirectory() ||
+    after.dev !== expected.dev ||
+    afterInodeVerifiable !== expected.inodeVerifiable ||
+    (expected.inodeVerifiable && after.ino !== expected.ino)
+  ) {
+    throw new Error('Session attachment parent directory changed.');
+  }
+}
 
 // Text the degrade paths substitute for an attachment the model will not receive. The
 // SDK's DaemonSessionClient.hydrateBlock and the web shell's degradation
@@ -168,6 +277,29 @@ function isTextAttachment(data: Buffer, mimeType: string): boolean {
   return Buffer.from(data.toString('utf8'), 'utf8').equals(data);
 }
 
+function statSize(filePath: string): number | undefined {
+  try {
+    return statSync(filePath).size;
+  } catch {
+    // Any stat failure means "not verifiably present" — reference validation
+    // must degrade to session_attachment_gone rather than abort the prompt.
+    return undefined;
+  }
+}
+
+// Strict occupancy probe for upload dedup: unlike `statSize`, a non-ENOENT
+// failure (EACCES/EIO) surfaces so a temporarily-unreadable fallback root is
+// not mistaken for a free name (which would let a new upload shadow an
+// existing attachment).
+function statSizeStrict(filePath: string): number | undefined {
+  try {
+    return statSync(filePath).size;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw error;
+  }
+}
+
 // Append the unavailable marker to the last text block (or as a new text
 // block) so a partially degraded prompt keeps its surviving blocks instead of
 // collapsing into one wholesale placeholder.
@@ -197,9 +329,11 @@ export function withAttachmentDegradationMarker<
 export class SessionAttachmentStore {
   private directoryPromise?: Promise<string>;
   private readonly persistentDirectory?: string;
+  private readonly persistentFallbackDirectory?: string;
   private activeDirectory?: string;
   private pendingItems = 0;
   private readonly pendingNames = new Map<string, number>();
+  private readonly removingNames = new Set<string>();
   private readonly pendingDrainWaiters: Array<() => void> = [];
   private readonly copyDrainWaiters: Array<() => void> = [];
   private copying = false;
@@ -209,12 +343,19 @@ export class SessionAttachmentStore {
   constructor(
     private readonly directoryRoot?: string,
     sessionId?: string,
+    fallbackDirectoryRoot?: string,
   ) {
     if (!directoryRoot || !sessionId) return;
     this.persistentDirectory = path.join(
       directoryRoot,
       `session-${encodeURIComponent(sessionId)}`,
     );
+    if (fallbackDirectoryRoot) {
+      this.persistentFallbackDirectory = path.join(
+        fallbackDirectoryRoot,
+        `session-${encodeURIComponent(sessionId)}`,
+      );
+    }
   }
 
   async putAttachment(
@@ -260,6 +401,22 @@ export class SessionAttachmentStore {
         const candidateName = deduplicatedName(safeName, suffix);
         if (safeAttachmentName(candidateName) !== candidateName) {
           throw new TypeError('Session attachment name is invalid');
+        }
+        if (this.removingNames.has(candidateName)) {
+          suffix += 1;
+          continue;
+        }
+        // A legacy fallback copy owns this name; a new upload must not shadow
+        // it (reads resolve the primary first, so reusing the ID would make an
+        // old reference surface the new bytes). Treat it as occupied.
+        if (
+          this.persistentFallbackDirectory &&
+          statSizeStrict(
+            path.join(this.persistentFallbackDirectory, candidateName),
+          ) !== undefined
+        ) {
+          suffix += 1;
+          continue;
         }
         if (pendingName !== candidateName) {
           if (pendingName) this.releasePendingName(pendingName);
@@ -432,16 +589,31 @@ export class SessionAttachmentStore {
   ): Promise<{ data: Buffer; mimeType: string } | undefined> {
     const name = safeAttachmentName(attachmentId);
     if (!name || name !== attachmentId) return undefined;
-    const filePath = path.join(await this.directory(), name);
+    let primary: { data: Buffer; mimeType: string } | undefined;
+    try {
+      primary = await this.tryRead(await this.peekDirectory(), name);
+    } catch (error) {
+      if (!this.persistentFallbackDirectory) throw error;
+      // A degraded primary root must not hide healthy fallback bytes: any
+      // primary lookup failure degrades to the fallback read.
+      primary = undefined;
+    }
+    if (primary) return primary;
+    return await this.tryRead(this.persistentFallbackDirectory, name);
+  }
+
+  private async tryRead(
+    directory: string | undefined,
+    name: string,
+  ): Promise<{ data: Buffer; mimeType: string } | undefined> {
+    if (!directory) return undefined;
     try {
       return {
-        data: await fs.readFile(filePath),
+        data: await fs.readFile(path.join(directory, name)),
         mimeType: mimeTypeForName(name),
       };
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-        return undefined;
-      }
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
       throw error;
     }
   }
@@ -472,45 +644,64 @@ export class SessionAttachmentStore {
         );
       }
       if (this.closed) throw new Error('Session attachment store is closed');
-      const sourceDirectory =
-        source.persistentDirectory ?? source.activeDirectory;
-      if (!sourceDirectory) return;
-      let entries;
-      try {
-        entries = await fs.readdir(sourceDirectory, { withFileTypes: true });
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
-        throw error;
-      }
+      const sourceDirectories = [
+        source.persistentDirectory ?? source.activeDirectory,
+        source.persistentFallbackDirectory,
+      ].filter((directory): directory is string => Boolean(directory));
+      if (sourceDirectories.length === 0) return;
       const targetDirectory = await this.directory();
-      await Promise.all(
-        entries
-          .filter(
-            (entry) => entry.isFile() && !source.pendingNames.has(entry.name),
-          )
-          .map(async (entry) => {
-            const sourcePath = path.join(sourceDirectory, entry.name);
-            try {
-              await fs.copyFile(
-                sourcePath,
-                path.join(targetDirectory, entry.name),
-              );
-            } catch (error) {
-              if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-                try {
-                  await fs.stat(sourcePath);
-                } catch (sourceError) {
-                  if (
-                    (sourceError as NodeJS.ErrnoException).code === 'ENOENT'
-                  ) {
-                    return;
+      // Primary first so a name held by both roots resolves to the primary;
+      // fallback entries copied later with the same name are skipped.
+      const copiedNames = new Set<string>();
+      let sourceDirectoryRead = false;
+      let sourceDirectoryError: unknown;
+      for (const sourceDirectory of sourceDirectories) {
+        let entries;
+        try {
+          entries = await fs.readdir(sourceDirectory, { withFileTypes: true });
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+          sourceDirectoryError ??= error;
+          continue;
+        }
+        sourceDirectoryRead = true;
+        await Promise.all(
+          entries
+            .filter(
+              (entry) =>
+                entry.isFile() &&
+                !source.pendingNames.has(entry.name) &&
+                !source.removingNames.has(entry.name) &&
+                !copiedNames.has(entry.name),
+            )
+            .map(async (entry) => {
+              const sourcePath = path.join(sourceDirectory, entry.name);
+              try {
+                await fs.copyFile(
+                  sourcePath,
+                  path.join(targetDirectory, entry.name),
+                );
+                copiedNames.add(entry.name);
+              } catch (error) {
+                if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+                  try {
+                    await fs.stat(sourcePath);
+                  } catch (sourceError) {
+                    if (
+                      (sourceError as NodeJS.ErrnoException).code === 'ENOENT'
+                    ) {
+                      return;
+                    }
                   }
                 }
+                throw error;
               }
-              throw error;
-            }
-          }),
-      );
+            }),
+        );
+      }
+      if (!sourceDirectoryRead && sourceDirectoryError !== undefined) {
+        throw sourceDirectoryError;
+      }
     } finally {
       source.copying = false;
       this.copying = false;
@@ -525,19 +716,60 @@ export class SessionAttachmentStore {
       !name ||
       name !== attachmentId ||
       this.copying ||
-      this.pendingNames.has(name)
+      this.pendingNames.has(name) ||
+      this.removingNames.has(name)
     ) {
       return false;
     }
-    const directory = await this.directory();
-    const filePath = path.join(directory, name);
+    this.removingNames.add(name);
     try {
-      await fs.unlink(filePath);
+      const primaryDirectory = await this.peekDirectory();
+      // Probe both roots before mutating either so an unreadable root cannot
+      // turn one remove request into a partial deletion.
+      const [fallbackExists, primaryExists] = await Promise.all([
+        this.hasAttachment(this.persistentFallbackDirectory, name),
+        this.hasAttachment(primaryDirectory, name),
+      ]);
+      // Unlink the fallback first: if a legacy copy fails to unlink (e.g. the
+      // old default dir sits on a read-only volume), the authoritative primary
+      // copy is still intact and remove() can fail cleanly without leaving a
+      // deleted attachment readable through the fallback.
+      const fallbackHit =
+        fallbackExists &&
+        (await this.tryUnlink(this.persistentFallbackDirectory, name)) === true;
+      const primaryHit =
+        primaryExists &&
+        (await this.tryUnlink(primaryDirectory, name)) === true;
+      return primaryHit || fallbackHit;
+    } finally {
+      this.removingNames.delete(name);
+    }
+  }
+
+  private async hasAttachment(
+    directory: string | undefined,
+    name: string,
+  ): Promise<boolean> {
+    if (!directory) return false;
+    try {
+      await fs.stat(path.join(directory, name));
       return true;
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-        return false;
-      }
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+      throw error;
+    }
+  }
+
+  private async tryUnlink(
+    directory: string | undefined,
+    name: string,
+  ): Promise<boolean | undefined> {
+    if (!directory) return undefined;
+    try {
+      await fs.unlink(path.join(directory, name));
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
       throw error;
     }
   }
@@ -567,22 +799,95 @@ export class SessionAttachmentStore {
       this.pendingNames.clear();
       this.resolvePendingDrainWaiters();
     }
+    // Fallback removal is best-effort here (unlike remove()): the caller
+    // removes the persisted session row first (deleteDaemonSessions), so a
+    // legacy-volume fault must not skip the configured root's cleanup — a
+    // retry would throw SessionNotFoundError and orphan the configured
+    // bytes for good. A fallback failure still rejects after the primary
+    // is removed.
+    let fallbackError: unknown;
+    if (this.persistentFallbackDirectory) {
+      try {
+        await this.removeDirectoryDurably(
+          this.persistentFallbackDirectory,
+          options.assertCanCommit,
+        );
+      } catch (error) {
+        fallbackError = error;
+      }
+    }
     const directory =
       this.persistentDirectory ??
       (await this.directoryPromise?.catch(() => undefined));
     if (directory) {
-      options.assertCanCommit?.();
-      const tombstone = path.join(
-        path.dirname(directory),
-        `.${path.basename(directory)}.deleting-${randomUUID()}`,
-      );
+      await this.removeDirectoryDurably(directory, options.assertCanCommit);
+    }
+    if (fallbackError !== undefined) throw fallbackError;
+  }
+
+  /**
+   * Delete `directory` through a fixed-name tombstone while holding an open
+   * handle to its parent, re-checking the parent's identity and syncing it
+   * after each mutation. The FIXED tombstone name lets a deletion interrupted
+   * between the rename and the removal resume on the next call instead of
+   * leaking the tombstone, and a successor directory recreated at the
+   * original path after the rename is never swept up by the removal.
+   */
+  private async removeDirectoryDurably(
+    directory: string,
+    assertCanCommit?: () => void,
+  ): Promise<void> {
+    assertCanCommit?.();
+    const parent = await openDurableAttachmentDirectoryIfPresent(
+      path.dirname(directory),
+    );
+    if (!parent) return;
+    const tombstone = path.join(
+      path.dirname(directory),
+      `.${path.basename(directory)}.deleting`,
+    );
+    try {
+      assertCanCommit?.();
+      let tombstoneExists = false;
+      try {
+        const stats = await fs.lstat(tombstone);
+        if (!stats.isDirectory() || stats.isSymbolicLink()) {
+          throw new Error('Session attachment tombstone is not a directory.');
+        }
+        tombstoneExists = true;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
+      if (tombstoneExists) {
+        assertCanCommit?.();
+        await fs.rm(tombstone, { recursive: true, force: true });
+        await syncDurableAttachmentDirectory(parent);
+        return;
+      }
+      assertCanCommit?.();
       try {
         await fs.rename(directory, tombstone);
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
-        throw error;
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        try {
+          const stats = await fs.lstat(tombstone);
+          if (!stats.isDirectory() || stats.isSymbolicLink()) {
+            throw new Error('Session attachment tombstone is not a directory.');
+          }
+          assertCanCommit?.();
+          await fs.rm(tombstone, { recursive: true, force: true });
+        } catch (tombstoneError) {
+          if ((tombstoneError as NodeJS.ErrnoException).code !== 'ENOENT') {
+            throw tombstoneError;
+          }
+        }
+        await syncDurableAttachmentDirectory(parent);
+        return;
       }
       await fs.rm(tombstone, { recursive: true, force: true });
+      await syncDurableAttachmentDirectory(parent);
+    } finally {
+      await parent.handle.close().catch(() => undefined);
     }
   }
 
@@ -592,10 +897,9 @@ export class SessionAttachmentStore {
     let size: number | undefined;
     const directory = this.persistentDirectory ?? this.activeDirectory;
     if (name && name === id && directory) {
-      try {
-        size = statSync(path.join(directory, name)).size;
-      } catch {
-        size = undefined;
+      size = statSize(path.join(directory, name));
+      if (size === undefined && this.persistentFallbackDirectory) {
+        size = statSize(path.join(this.persistentFallbackDirectory, name));
       }
     }
     const storedMimeType = name ? mimeTypeForName(name) : undefined;
@@ -669,6 +973,14 @@ export class SessionAttachmentStore {
       data: attachment.data.toString('base64'),
       mimeType: attachment.mimeType,
     } as ContentBlock;
+  }
+
+  // The storage directory without forcing creation: reads and removes must
+  // degrade to the fallback when the configured root is unavailable, not
+  // fail on a forced mkdir of a degraded volume.
+  private async peekDirectory(): Promise<string | undefined> {
+    const established = await this.directoryPromise?.catch(() => undefined);
+    return established ?? this.persistentDirectory;
   }
 
   private async directory(): Promise<string> {

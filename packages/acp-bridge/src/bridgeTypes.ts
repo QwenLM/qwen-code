@@ -46,6 +46,7 @@ import type {
   ServeSessionLspStatus,
   ServeSessionSupportedCommandsStatus,
   ServeSessionTasksStatus,
+  ServeSessionWorkflowTaskStatus,
   ServeWorkspaceExtensionsStatus,
   ServeWorkspaceHooksStatus,
   ServeWorkspaceMcpToolsStatus,
@@ -267,6 +268,10 @@ export const LOAD_REPLAY_MAX_BYTES = 32 * 1024 * 1024;
 export const LOAD_REPLAY_MAX_UPDATES = 10_000;
 
 export const REQUESTED_SESSION_ID_META_KEY = 'qwen-code/sessionId';
+export const SESSION_INITIALIZATION_DEADLINE_META_KEY =
+  'qwen.daemon.sessionInitializationDeadlineMs';
+export const SESSION_INITIALIZATION_TIMEOUT_ERROR_KIND =
+  'session_initialization_timeout';
 
 export const CHANNEL_STARTUP_PROFILE_META_KEY =
   'qwen.daemon.channelStartupProfile';
@@ -312,11 +317,15 @@ export const ACTIVE_WORK_MAX_SESSION_HOLDS = 1024;
 export const WORKTREE_MCP_DEFER_META_KEY = 'qwen.session.deferMcpDiscovery';
 
 /**
- * Work categories a child reports holds for. Monitors, workflows, and cron
- * remain outside `activeWork`'s declared scope. The category travels on every
+ * Work categories a child reports holds for. Monitors and cron remain outside
+ * `activeWork`'s declared scope. The category travels on every
  * hold so peers can negotiate coverage explicitly when the scope widens.
  */
-export type ActiveWorkHoldCategory = 'agent' | 'notification' | 'shell';
+export type ActiveWorkHoldCategory =
+  | 'agent'
+  | 'notification'
+  | 'shell'
+  | 'workflow';
 
 /** Categories understood by active-work v1 before category negotiation was
  * added to the daemon's initialize request. */
@@ -327,6 +336,7 @@ export const ACTIVE_WORK_HOLD_CATEGORIES: readonly ActiveWorkHoldCategory[] = [
   'agent',
   'notification',
   'shell',
+  'workflow',
 ];
 
 export interface ActiveWorkHeartbeatCapabilityV1 {
@@ -596,6 +606,7 @@ export interface ChangeSessionCwdResult {
 }
 
 export type BridgeWorkspaceMemoryRememberContextMode = 'workspace' | 'clean';
+export type BridgeWorkspaceMemoryRememberTargetScope = 'project' | 'user';
 export type BridgeAutoMemoryTopic =
   | 'user'
   | 'feedback'
@@ -605,6 +616,7 @@ export type BridgeAutoMemoryTopic =
 export interface BridgeWorkspaceMemoryRememberRequest {
   content: string;
   contextMode: BridgeWorkspaceMemoryRememberContextMode;
+  scope?: BridgeWorkspaceMemoryRememberTargetScope;
 }
 
 export interface BridgeWorkspaceMemoryRememberResult {
@@ -615,6 +627,7 @@ export interface BridgeWorkspaceMemoryRememberResult {
 
 export interface BridgeWorkspaceMemoryForgetRequest {
   query: string;
+  scope?: BridgeWorkspaceMemoryRememberTargetScope;
 }
 
 export interface BridgeWorkspaceMemoryForgetMatch {
@@ -678,6 +691,13 @@ export interface BridgePendingUserQuestionInteraction {
   title?: string;
   questions: BridgePendingUserQuestion[];
   options: BridgePendingInteractionOption[];
+}
+
+export interface BridgeWorkspaceRuntimeLifecycleSnapshot {
+  state: 'cold' | 'starting' | 'active' | 'idle' | 'stopping';
+  runtimeLive: boolean;
+  runtimeEpoch: number;
+  activeWork: boolean;
 }
 
 export type BridgePendingInteraction =
@@ -768,11 +788,22 @@ export interface BridgeSessionGoal {
 export interface SessionPrInfo {
   number: number;
   url: string;
+  /** Snapshot of the PR's state at last bind/refresh; optional. */
+  state?: 'open' | 'merged' | 'closed';
+  /** Issues the PR closes, snapshotted by the daemon refresh; optional. */
+  issues?: SessionPrIssueInfo[];
+}
+
+export interface SessionPrIssueInfo {
+  number: number;
+  url: string;
+  state?: 'open' | 'completed' | 'not_planned';
 }
 
 export interface SessionMetadataUpdate {
   displayName?: string;
-  pr?: SessionPrInfo;
+  /** Issues are daemon-derived, never client-bound — the input omits them. */
+  pr?: Omit<SessionPrInfo, 'issues'>;
   /** Full binding list after the update (return value only; ignored on input). */
   prs?: SessionPrInfo[];
 }
@@ -1157,6 +1188,7 @@ export interface BridgeDaemonStatusLimits {
   } | null;
   channelIdleTimeoutMs: number;
   sessionIdleTimeoutMs: number;
+  sessionPromptSettledCloseGraceMs: number;
 }
 
 export interface BridgeDaemonSessionDiagnostic {
@@ -1565,6 +1597,17 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   seedSessionPrs?(sessionId: string, prs: SessionPrInfo[]): void;
 
   /**
+   * Replace the in-memory PR binding list of a live session with the
+   * persisted sidecar contents after a rewrite that can evict bindings
+   * (the backfill cap trim). Unlike {@link seedSessionPrs}, overwrites an
+   * entry that already holds bindings, so the summary merge cannot
+   * resurrect evicted numbers from a stale entry. No-op when the entry is
+   * unknown (session not live). Callers own sidecar I/O; the bridge stays
+   * storage-agnostic. Optional so lightweight fakes may omit it.
+   */
+  setSessionPrs?(sessionId: string, prs: SessionPrInfo[]): void;
+
+  /**
    * List the structured artifacts registered for a live session. Throws
    * `SessionNotFoundError` when the id is unknown.
    */
@@ -1764,7 +1807,10 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   ): Promise<ServeSessionSupportedCommandsStatus>;
 
   /** Read the live background task snapshot for a live session. */
-  getSessionTasksStatus(sessionId: string): Promise<ServeSessionTasksStatus>;
+  getSessionTasksStatus(
+    sessionId: string,
+    opts?: { includeWorkflows?: boolean },
+  ): Promise<ServeSessionTasksStatus>;
 
   /** Read sanitized LSP server status for a live session. */
   getSessionLspStatus(sessionId: string): Promise<ServeSessionLspStatus>;
@@ -1782,8 +1828,27 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   cancelSessionTask(
     sessionId: string,
     taskId: string,
-    taskKind: 'agent' | 'shell' | 'monitor',
+    taskKind: 'agent' | 'shell' | 'monitor' | 'workflow',
+    context?: BridgeClientRequestContext,
   ): Promise<{ cancelled: boolean }>;
+
+  /** Control a run, delete history, or start a saved workflow definition. */
+  controlSessionWorkflowTask(
+    sessionId: string,
+    taskId: string,
+    action:
+      | 'pause'
+      | 'resume'
+      | 'retry'
+      | 'rerun'
+      | 'delete-history'
+      | 'run-saved',
+    context?: BridgeClientRequestContext,
+  ): Promise<{
+    changed: boolean;
+    status?: ServeSessionWorkflowTaskStatus['status'];
+    taskId?: string;
+  }>;
 
   /** Clear an active goal in a live session without cancelling the running prompt. */
   clearSessionGoal(
@@ -1853,6 +1918,7 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
    */
   refreshExtensionsForAllSessions(
     data?: Omit<BridgeExtensionsChangedData, 'refreshed' | 'failed'>,
+    options?: { skillsOnly?: boolean },
   ): Promise<{
     refreshed: number;
     failed: number;
@@ -1891,6 +1957,29 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     language: string;
     outputLanguage: string | null;
     refreshed: boolean;
+  }>;
+
+  /**
+   * Sessionless user-level language sync (daemon `POST /language`). The
+   * daemon process has already persisted the user-scope settings and the
+   * global output-language file; the runtime only switches its own process
+   * UI language, reloads user-scope settings from disk, and — when
+   * `syncOutputLanguage` is true — refreshes every local session's system
+   * prompt. Project-bound output-language files are intentionally left
+   * alone: a session with its own registered path keeps its override.
+   *
+   * Runs on whatever ACP channel is already live; throws
+   * `SessionNotFoundError` when no channel is up, which callers must treat
+   * as "runtime skipped" (nothing to refresh — the next channel spawn
+   * reads the persisted files).
+   */
+  setUserLanguage(params: {
+    language: string;
+    syncOutputLanguage: boolean;
+  }): Promise<{
+    language: string;
+    sessions: number;
+    failed: number;
   }>;
 
   /** Apply Codex's realtime-active world-state transition to one session. */
@@ -2213,6 +2302,13 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
    */
   isChannelLive(): boolean;
 
+  /**
+   * Atomic physical lifecycle snapshot. Optional only for compatibility with
+   * older injected/embedded Bridge implementations; hosts must not advertise
+   * workspace runtime control when it is absent.
+   */
+  getWorkspaceRuntimeLifecycleSnapshot?(): BridgeWorkspaceRuntimeLifecycleSnapshot;
+
   /** Number of sessions with an active prompt. */
   readonly activePromptCount: number;
 
@@ -2329,7 +2425,7 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
    * cold-start latency. Fire-and-forget; failures are logged and the
    * first session falls back to lazy spawn.
    */
-  preheat(): Promise<void>;
+  preheat(options?: { keepAliveMs?: number }): Promise<void>;
 }
 
 export interface BridgeShutdownOptions {
