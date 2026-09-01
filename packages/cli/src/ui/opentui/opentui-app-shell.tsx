@@ -90,6 +90,13 @@ export interface OpenTuiAppProps {
   onQuit?: (messages: readonly HistoryItem[]) => void;
   /** Replays a transcript batch (session switch / resume). */
   onTranscriptReset?: (events: OpenTuiStreamEvent[]) => void;
+  /**
+   * Re-keys UI-side session state (chat id + stats) after core rotates the
+   * session. `/resume` and `/branch` treat this call as their commit point, so
+   * the shell reports a notice when no owner is wired rather than leaving the
+   * new transcript keyed to the old session.
+   */
+  onStartNewSession?: (sessionId: string) => void;
   /** Vim-mode toggle owner (VimModeProvider in the entry layer). */
   onToggleVim?: () => Promise<boolean>;
   /**
@@ -113,6 +120,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     onSubmitPrompt,
     onQuit,
     onTranscriptReset,
+    onStartNewSession,
     onToggleVim,
     updateNotice,
   } = props;
@@ -157,7 +165,10 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
         onChange: () => {},
         toggleVimEnabled: () => onToggleVim?.() ?? Promise.resolve(false),
         reloadCommands: () => reloadRef.current?.() ?? undefined,
-        startNewSession: () => {},
+        startNewSession: (sessionId: string) => {
+          if (onStartNewSession) onStartNewSession(sessionId);
+          else notify('Session state was not re-keyed for the new session.');
+        },
         getSessionStats,
       }),
     [
@@ -166,6 +177,8 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
       logger,
       transcript,
       confirmations,
+      onStartNewSession,
+      notify,
       onToggleVim,
       getSessionStats,
     ],

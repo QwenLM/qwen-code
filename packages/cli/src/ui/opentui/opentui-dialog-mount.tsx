@@ -45,6 +45,7 @@ import {
   applyMcpServerAction,
   applyModelSelection,
   addPermissionRule,
+  addWorkspaceDirectory,
   buildExtensionRows,
   buildMcpServers,
   buildModelEntries,
@@ -54,6 +55,7 @@ import {
   enrichMcpOAuthState,
   getMcpServerResources,
   getMcpServerTools,
+  removeWorkspaceDirectory,
   applyExtensionFavorite,
   applyExtensionScopeChange,
   applyExtensionToggle,
@@ -305,7 +307,8 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
               onClose();
               return;
             }
-            props.onSelectSetting?.(name, scope);
+            if (props.onSelectSetting) props.onSelectSetting(name, scope);
+            else notify(`'${name}' opens a dialog this shell does not mount.`);
             onClose();
           }}
         />
@@ -367,8 +370,14 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
             deletePermissionRule(config, settings, raw, type);
             reloadPermissions();
           }}
-          onAddDirectory={() => {}}
-          onRemoveDirectory={() => {}}
+          onAddDirectory={(dir) => {
+            addWorkspaceDirectory(config, settings, dir);
+            reloadPermissions();
+          }}
+          onRemoveDirectory={(dir) => {
+            removeWorkspaceDirectory(config, settings, dir);
+            reloadPermissions();
+          }}
           onExit={onClose}
         />
       );
@@ -488,6 +497,8 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
           mode={request.mode}
           onClose={onClose}
           notify={notify}
+          // Composer control is an entry-layer seam: the dialog offers
+          // "edit as input" only when this is supplied.
           onFillInput={props.fillInput}
         />
       );

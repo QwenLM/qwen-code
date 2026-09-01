@@ -21,6 +21,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, render, screen } from '@testing-library/react';
 import { OpenTuiDialogMount } from './opentui-dialog-mount.js';
+import {
+  addWorkspaceDirectory,
+  removeWorkspaceDirectory,
+} from './dialog-data.js';
 import type { OpenTuiDialogRequest } from './commands-registry.js';
 import type { OpenTuiAppHost } from './opentui-host.js';
 import type { Config } from '@qwen-code/qwen-code-core';
@@ -29,7 +33,16 @@ import type { LoadedSettings } from '../../config/settings.js';
 const mocks = vi.hoisted(() => {
   const state = {
     keyboardHandlers: [] as Array<(key: unknown) => void>,
+    dialogProps: {} as Record<string, Record<string, unknown>>,
   };
+  // Renders the dialog-name marker but keeps the props the mount passed, so
+  // wiring (callbacks, data builders) stays observable from these tests.
+  function stub(name: string) {
+    return (props: Record<string, unknown>) => {
+      state.dialogProps[name] = props;
+      return name;
+    };
+  }
   async function buildJsxRuntime() {
     const React = await import('react');
     const jsx = (
@@ -54,7 +67,7 @@ const mocks = vi.hoisted(() => {
     };
     return { jsx, jsxs: jsx, jsxDEV: jsx, Fragment: React.Fragment };
   }
-  return { state, buildJsxRuntime };
+  return { state, buildJsxRuntime, stub };
 });
 
 vi.mock('@opentui/react', () => ({
@@ -96,6 +109,8 @@ vi.mock('./dialog-data.js', () => ({
   }),
   addPermissionRule: vi.fn(),
   deletePermissionRule: vi.fn(),
+  addWorkspaceDirectory: vi.fn(),
+  removeWorkspaceDirectory: vi.fn(),
   buildMcpServers: () => [],
   enrichMcpOAuthState: async () => [],
   applyMcpServerAction: async () => ({ message: null, changed: false }),
@@ -115,49 +130,63 @@ vi.mock('./dialog-data.js', () => ({
 }));
 
 vi.mock('./help-overlay.js', () => ({ HelpOverlay: () => 'help' }));
-vi.mock('./dialogs-theme.js', () => ({ OpenTuiThemeDialog: () => 'theme' }));
+vi.mock('./dialogs-theme.js', () => ({
+  OpenTuiThemeDialog: mocks.stub('theme'),
+}));
 vi.mock('./dialogs-settings.js', () => ({
-  OpenTuiSettingsDialog: () => 'settings',
+  OpenTuiSettingsDialog: mocks.stub('settings'),
 }));
-vi.mock('./dialogs-model.js', () => ({ OpenTuiModelDialog: () => 'model' }));
+vi.mock('./dialogs-model.js', () => ({
+  OpenTuiModelDialog: mocks.stub('model'),
+}));
 vi.mock('./dialogs-extensions.js', () => ({
-  OpenTuiExtensionsDialog: () => 'extensions_manage',
+  OpenTuiExtensionsDialog: mocks.stub('extensions_manage'),
 }));
-vi.mock('./dialogs-mcp.js', () => ({ OpenTuiMcpDialog: () => 'mcp' }));
+vi.mock('./dialogs-mcp.js', () => ({ OpenTuiMcpDialog: mocks.stub('mcp') }));
 vi.mock('./dialogs-permissions.js', () => ({
-  OpenTuiPermissionsDialog: () => 'permissions',
+  OpenTuiPermissionsDialog: mocks.stub('permissions'),
 }));
-vi.mock('./dialogs-auth.js', () => ({ OpenTuiAuthDialog: () => 'auth' }));
-vi.mock('./dialogs-arena.js', () => ({ OpenTuiArenaDialog: () => 'arena' }));
+vi.mock('./dialogs-auth.js', () => ({
+  OpenTuiAuthDialog: mocks.stub('auth'),
+}));
+vi.mock('./dialogs-arena.js', () => ({
+  OpenTuiArenaDialog: mocks.stub('arena'),
+}));
 vi.mock('./dialogs-memory-status.js', () => ({
-  OpenTuiMemoryDialog: () => 'memory',
-  OpenTuiStatusLineDialog: () => 'statusline',
+  OpenTuiMemoryDialog: mocks.stub('memory'),
+  OpenTuiStatusLineDialog: mocks.stub('statusline'),
 }));
 vi.mock('./dialogs-modes.js', () => ({
-  OpenTuiApprovalModeDialog: () => 'approval-mode',
-  OpenTuiEffortDialog: () => 'effort',
+  OpenTuiApprovalModeDialog: mocks.stub('approval-mode'),
+  OpenTuiEffortDialog: mocks.stub('effort'),
 }));
 vi.mock('./dialogs-stats-skills.js', () => ({
-  OpenTuiStatsDialog: () => 'stats',
-  OpenTuiSkillsDialog: () => 'skills_manage',
+  OpenTuiStatsDialog: mocks.stub('stats'),
+  OpenTuiSkillsDialog: mocks.stub('skills_manage'),
 }));
 vi.mock('./dialogs-misc.js', () => ({
-  OpenTuiDeleteDialog: () => 'delete',
-  OpenTuiDiffDialog: () => 'diff',
-  OpenTuiEditorDialog: () => 'editor',
-  OpenTuiHooksDialog: () => 'hooks',
-  OpenTuiResumeDialog: () => 'resume',
-  OpenTuiRewindDialog: () => 'rewind',
-  OpenTuiSubagentCreateDialog: () => 'subagent_create',
-  OpenTuiSubagentListDialog: () => 'subagent_list',
-  OpenTuiTrustDialog: () => 'trust',
+  OpenTuiDeleteDialog: mocks.stub('delete'),
+  OpenTuiDiffDialog: mocks.stub('diff'),
+  OpenTuiEditorDialog: mocks.stub('editor'),
+  OpenTuiHooksDialog: mocks.stub('hooks'),
+  OpenTuiResumeDialog: mocks.stub('resume'),
+  OpenTuiRewindDialog: mocks.stub('rewind'),
+  OpenTuiSubagentCreateDialog: mocks.stub('subagent_create'),
+  OpenTuiSubagentListDialog: mocks.stub('subagent_list'),
+  OpenTuiTrustDialog: mocks.stub('trust'),
 }));
 
 const CONFIG = {} as unknown as Config;
 const SETTINGS = { merged: {} } as unknown as LoadedSettings;
 const HOST = { handleResume: async () => {} } as unknown as OpenTuiAppHost;
 
-function mount(request: OpenTuiDialogRequest) {
+function mount(
+  request: OpenTuiDialogRequest,
+  overrides: {
+    notify?: (text: string) => void;
+    onClose?: () => void;
+  } = {},
+) {
   return render(
     <OpenTuiDialogMount
       request={request}
@@ -165,10 +194,17 @@ function mount(request: OpenTuiDialogRequest) {
       config={CONFIG}
       settings={SETTINGS}
       commands={[]}
-      onClose={() => {}}
-      notify={() => {}}
+      onClose={overrides.onClose ?? (() => {})}
+      notify={overrides.notify ?? (() => {})}
     />,
   );
+}
+
+// A callback the mount handed to a stubbed dialog.
+function dialogProp(dialog: string, key: string): (...args: unknown[]) => void {
+  const value = mocks.state.dialogProps[dialog]?.[key];
+  expect(value, `${dialog} received no '${key}' prop`).toBeInstanceOf(Function);
+  return value as (...args: unknown[]) => void;
 }
 
 // Every OpenTuiDialogRequest kind the mount must route, with the exact object a
@@ -203,6 +239,8 @@ const REQUESTS: Array<[string, OpenTuiDialogRequest]> = [
 describe('OpenTuiDialogMount routing', () => {
   beforeEach(() => {
     mocks.state.keyboardHandlers.length = 0;
+    mocks.state.dialogProps = {};
+    vi.clearAllMocks();
   });
 
   it('routes every dialog request to its own component', () => {
@@ -212,6 +250,33 @@ describe('OpenTuiDialogMount routing', () => {
       expect(screen.getByText(expected)).toBeTruthy();
       unmount();
     }
+  });
+
+  it('persists working-directory changes made in the permissions dialog', () => {
+    mount({ dialog: 'permissions' });
+    // The dialog clears its input and returns to the list right after these
+    // run, so an unwired callback would look like a completed change.
+    dialogProp('permissions', 'onAddDirectory')('/abs/extra');
+    expect(addWorkspaceDirectory).toHaveBeenCalledWith(
+      CONFIG,
+      SETTINGS,
+      '/abs/extra',
+    );
+    dialogProp('permissions', 'onRemoveDirectory')('/abs/extra');
+    expect(removeWorkspaceDirectory).toHaveBeenCalledWith(
+      CONFIG,
+      SETTINGS,
+      '/abs/extra',
+    );
+  });
+
+  it('reports a settings row whose sub-dialog the shell does not mount', () => {
+    const notices: string[] = [];
+    mount({ dialog: 'settings' }, { notify: (text) => notices.push(text) });
+    dialogProp('settings', 'onSelect')('ui.theme', undefined);
+    expect(notices).toEqual([
+      "'ui.theme' opens a dialog this shell does not mount.",
+    ]);
   });
 
   it('drives help tab cycling and scrolling through its own keyboard handler', () => {

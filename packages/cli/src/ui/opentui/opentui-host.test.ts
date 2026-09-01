@@ -222,7 +222,7 @@ describe('OpenTuiAppHost — forwarded shell actions', () => {
     expect(h.presentAction).toHaveBeenCalledWith(prompt);
   });
 
-  it('extension updates mutate through the reducer and store the confirm req', () => {
+  it('extension updates mutate through the reducer', () => {
     const h = makeHost();
     const action = { foo: 'bar' } as unknown as ExtensionUpdateAction;
     h.host.dispatchExtensionStateUpdate(action);
@@ -230,12 +230,29 @@ describe('OpenTuiAppHost — forwarded shell actions', () => {
       h.host.extensionsUpdateState,
       action,
     );
-    const request = {
-      prompt: 'confirm',
-      onConfirm: () => {},
-    } as unknown as ConfirmationRequest;
+  });
+
+  it('extension consent settles through the confirmation bridge', async () => {
+    const h = makeHost();
+    const confirmed: boolean[] = [];
+    const request: ConfirmationRequest = {
+      prompt: 'install this extension?',
+      onConfirm: (value) => confirmed.push(value),
+    };
     h.host.addConfirmUpdateExtensionRequest(request);
-    expect(h.host.confirmUpdateExtensionRequest).toBe(request);
+    await vi.waitFor(() => expect(confirmed).toEqual([true]));
+    expect(h.presentAction).toHaveBeenCalledWith('install this extension?');
+  });
+
+  it('a rejected consent bridge still settles as a denial', async () => {
+    const h = makeHost();
+    h.presentAction.mockRejectedValueOnce(new Error('renderer blew up'));
+    const confirmed: boolean[] = [];
+    h.host.addConfirmUpdateExtensionRequest({
+      prompt: 'install this extension?',
+      onConfirm: (value) => confirmed.push(value),
+    } as ConfirmationRequest);
+    await vi.waitFor(() => expect(confirmed).toEqual([false]));
   });
 });
 
@@ -258,6 +275,29 @@ describe('OpenTuiAppHost — transcript and session switch delegation', () => {
     expect(handleResumeSession).toHaveBeenCalledWith(h.host, 'sess-9');
     await h.host.handleBranch('my-branch');
     expect(handleBranchSession).toHaveBeenCalledWith(h.host, 'my-branch');
+  });
+});
+
+describe('OpenTuiAppHost — caller steps cannot break the session swap', () => {
+  it('isolates a throwing subscriber and a throwing onChange', () => {
+    const h = makeHost();
+    h.onChange.mockImplementation(() => {
+      throw new Error('entry onChange blew up');
+    });
+    const unsubscribe = h.host.subscribe(() => {
+      throw new Error('subscriber blew up');
+    });
+    expect(() => h.host.setIsProcessing(true)).not.toThrow();
+    expect(h.host.getVersion()).toBeGreaterThan(0);
+    unsubscribe();
+  });
+
+  it('isolates a throwing transcript controller', () => {
+    const h = makeHost();
+    h.transcriptReset.mockImplementation(() => {
+      throw new Error('controller blew up');
+    });
+    expect(() => h.host.resetTranscript([])).not.toThrow();
   });
 });
 

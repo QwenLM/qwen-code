@@ -25,7 +25,11 @@
  */
 
 import type { ReactNode } from 'react';
-import type { Config, Logger } from '@qwen-code/qwen-code-core';
+import {
+  createDebugLogger,
+  type Config,
+  type Logger,
+} from '@qwen-code/qwen-code-core';
 import {
   type ConfirmationRequest,
   type HistoryItem,
@@ -53,6 +57,8 @@ import {
   type SessionSwitchHost,
 } from './session-switch.js';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
+
+const debugLogger = createDebugLogger('OPEN_TUI_HOST');
 
 /** Live-transcript seam the shell owns (folds events into streaming rows). */
 export interface OpenTuiTranscriptController {
@@ -126,9 +132,6 @@ export class OpenTuiAppHost implements OpenTuiCommandHost, SessionSwitchHost {
   readonly sessionShellAllowlist = new Set<string>();
   readonly extensionsUpdateState = new Map<string, ExtensionUpdateStatus>();
 
-  /** Set by `addConfirmUpdateExtensionRequest`; the shell renders + clears it. */
-  confirmUpdateExtensionRequest: ConfirmationRequest | null = null;
-
   private version = 0;
   private readonly listeners = new Set<() => void>();
 
@@ -156,8 +159,23 @@ export class OpenTuiAppHost implements OpenTuiCommandHost, SessionSwitchHost {
 
   private notify(): void {
     this.version++;
-    for (const listener of this.listeners) listener();
-    this.deps.onChange();
+    for (const listener of this.listeners) this.runIsolated(listener);
+    this.runIsolated(() => this.deps.onChange());
+  }
+
+  /**
+   * `/resume` and `/branch` run the UI display steps after re-keying core, and
+   * set their commit flag only once the last step returns. So one throw from a
+   * caller-owned callback leaves the swap uncommitted: core rolls back to the
+   * old session, and `/branch` deletes the fork it just created. Isolate the
+   * steps so a broken subscriber cannot undo a session the user is already on.
+   */
+  private runIsolated(step: () => void): void {
+    try {
+      step();
+    } catch (error) {
+      debugLogger.error('UI step failed', error);
+    }
   }
 
   // --- history (faithful `useHistory` parity) -----------------------------
@@ -305,9 +323,18 @@ export class OpenTuiAppHost implements OpenTuiCommandHost, SessionSwitchHost {
     this.notify();
   }
 
+  /**
+   * Extension consent has no renderer in this batch, so it goes through the
+   * same bridge the shell auto-denies. The caller awaits `onConfirm` and
+   * nothing else, so a request left pending here would wedge the slash
+   * gateway for the rest of the session — hence a rejected bridge settles as
+   * a denial too.
+   */
   addConfirmUpdateExtensionRequest(value: ConfirmationRequest): void {
-    this.confirmUpdateExtensionRequest = value;
-    this.notify();
+    void this.deps.confirmations
+      .presentAction(value.prompt)
+      .catch(() => false)
+      .then((confirmed) => value.onConfirm(confirmed));
   }
 
   // --- idle / processing --------------------------------------------------
@@ -343,7 +370,7 @@ export class OpenTuiAppHost implements OpenTuiCommandHost, SessionSwitchHost {
   // --- session switch (implements SessionSwitchHost for session-switch.ts) -
 
   resetTranscript(events: OpenTuiStreamEvent[]): void {
-    this.transcript.reset(events);
+    this.runIsolated(() => this.transcript.reset(events));
   }
 
   handleResume(sessionId: string): Promise<void> {

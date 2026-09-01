@@ -18,12 +18,14 @@
  *  - composer input flows through the gateway and the outcome is applied:
  *    `open_dialog` swaps the composer for the dialog mount, `submit_prompt`
  *    reaches the live-turn seam, `quit` reaches the entry, a non-slash input
- *    (dispatcher returns false) is sent as a prompt, and image paths fold into
- *    the prompt content;
+ *    (dispatcher returns false) is sent as a prompt, with pasted image paths
+ *    forwarded as a structured argument rather than folded into the text;
  *  - a failed dispatcher initialization rejects later submissions with the
  *    recorded reason instead of misrouting to the model;
  *  - the confirmation bridge auto-denies (Cancel / false) so a command can never
  *    hang waiting for a renderer this shell does not own;
+ *  - the session re-key reaches the entry seam, or reports that no owner is
+ *    wired to re-key the UI-side session state;
  *  - user history rows drive the composer's history, and an error thrown in the
  *    subtree is caught by the boundary.
  */
@@ -317,6 +319,34 @@ describe('OpenTuiApp shell wiring', () => {
     });
     const userMessages = mocks.state.inputProps?.['userMessages'] as string[];
     expect(userMessages).toContain('earlier question');
+  });
+
+  it('routes the session re-key to the entry seam', async () => {
+    const onStartNewSession = vi.fn();
+    renderApp({ onStartNewSession });
+    await settle();
+    const host = mocks.state.host as {
+      startNewSession: (id: string) => void;
+    };
+    await act(async () => {
+      host.startNewSession('sess-2');
+    });
+    expect(onStartNewSession).toHaveBeenCalledWith('sess-2');
+    expect(screen.queryByText(/not re-keyed/)).toBeNull();
+  });
+
+  it('reports when no owner is wired to re-key the session state', async () => {
+    renderApp();
+    await settle();
+    const host = mocks.state.host as {
+      startNewSession: (id: string) => void;
+    };
+    await act(async () => {
+      host.startNewSession('sess-2');
+    });
+    expect(
+      screen.getByText('Session state was not re-keyed for the new session.'),
+    ).toBeTruthy();
   });
 
   it('auto-denies the confirmation bridge so no command can hang', async () => {
