@@ -6855,7 +6855,8 @@ export function App({
     modelDialogMode !== null ||
     showApprovalModeDialog ||
     tasksDialogMessage !== null ||
-    mcpDialogMessage !== null ||
+    // mcpDialogMessage survives closing the Plugins panel; MCP surfaces are
+    // already blocked by activePanel below, so including it would lock chat.
     showMemoryDialog ||
     showAuthDialog ||
     showAddWorkspaceDialog ||
