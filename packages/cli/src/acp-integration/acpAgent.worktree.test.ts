@@ -282,6 +282,7 @@ vi.mock('../config/settings-cache.js', async () => {
   const settings = await import('../config/settings.js');
   return {
     loadSettingsCached: (cwd: string) => settings.loadSettings(cwd),
+    loadSettingsCachedForSession: (cwd: string) => settings.loadSettings(cwd),
   };
 });
 vi.mock('../config/config.js', () => ({

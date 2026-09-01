@@ -557,7 +557,9 @@ describe('Session', () => {
     getTool: ReturnType<typeof vi.fn>;
     ensureTool: ReturnType<typeof vi.fn>;
     registerTool: ReturnType<typeof vi.fn>;
+    registerSessionTool: ReturnType<typeof vi.fn>;
     registerPermissionDeferredFactory: ReturnType<typeof vi.fn>;
+    registerSessionPermissionDeferredFactory: ReturnType<typeof vi.fn>;
     revealDeferredTool: ReturnType<typeof vi.fn>;
     pinDeferredToolReveal: ReturnType<typeof vi.fn>;
     warmAll: ReturnType<typeof vi.fn>;
@@ -874,7 +876,9 @@ describe('Session', () => {
       getTool: vi.fn(),
       ensureTool: vi.fn().mockResolvedValue(true),
       registerTool: vi.fn(),
+      registerSessionTool: vi.fn(),
       registerPermissionDeferredFactory: vi.fn(),
+      registerSessionPermissionDeferredFactory: vi.fn(),
       revealDeferredTool: vi.fn(),
       pinDeferredToolReveal: vi.fn(),
       warmAll: vi.fn().mockResolvedValue(undefined),
@@ -882,6 +886,13 @@ describe('Session', () => {
         names.map((name) => ({ name })),
       ),
     };
+    mockToolRegistry.registerSessionTool = vi.fn((tool) =>
+      mockToolRegistry.registerTool(tool),
+    );
+    mockToolRegistry.registerSessionPermissionDeferredFactory = vi.fn(
+      (name, factory) =>
+        mockToolRegistry.registerPermissionDeferredFactory(name, factory),
+    );
     const fileService = {
       shouldGitIgnoreFile: vi.fn().mockReturnValue(false),
       shouldIgnoreFile: vi.fn().mockReturnValue(false),
@@ -915,6 +926,7 @@ describe('Session', () => {
       assertCanStartTurn: vi.fn().mockResolvedValue(undefined),
       getWorkingDir: vi.fn().mockReturnValue(process.cwd()),
       getProjectRoot: vi.fn().mockReturnValue('/repo'),
+      getContextFileNames: vi.fn().mockReturnValue(['QWEN.md', 'AGENTS.md']),
       // Folder trust gates the project `.qwen/loop.md`; default trusted (the
       // production default). Untrusted-folder tests override to false.
       isTrustedFolder: vi.fn().mockReturnValue(true),
@@ -2227,6 +2239,11 @@ describe('Session', () => {
       await session.enableLiveScreenContext();
       const screenTool = registered.get(CAPTURE_SCREEN_CONTEXT_TOOL_NAME);
       expect(screenTool?.name).toBe('capture_screen_context');
+      // Session-owned, not merely registered: a plain `registerTool` here
+      // would let the next `/cd` dispose the live channel tool.
+      expect(mockToolRegistry.registerSessionTool).toHaveBeenCalledWith(
+        expect.objectContaining({ name: CAPTURE_SCREEN_CONTEXT_TOOL_NAME }),
+      );
       const invocation = screenTool?.build({});
       expect(invocation).toBeDefined();
       await expect(invocation?.getDefaultPermission()).resolves.toBe('allow');
@@ -9657,9 +9674,28 @@ describe('Session', () => {
 
       await registerCreateSubSessionTool(mockConfig);
 
-      expect(mockToolRegistry.registerTool).toHaveBeenCalledWith(
+      // Session-OWNED registration: `/cd` rebuilds the project-scoped tool
+      // set and must keep this one, so the plain `registerTool` path
+      // (which the mock delegates to) is not enough of a witness.
+      expect(mockToolRegistry.registerSessionTool).toHaveBeenCalledWith(
         expect.objectContaining({ name: 'create_sub_session' }),
       );
+    });
+
+    it('registers a deferred create_sub_session factory as session-owned', async () => {
+      mockConfig.getPermissionManager = vi.fn().mockReturnValue({
+        getToolRegistrationStatus: vi.fn().mockResolvedValue('deferred'),
+      });
+      mockConfig.getSubSessionSpawner = vi
+        .fn()
+        .mockReturnValue(async () => ({ sessionId: 'sub-1' }));
+
+      await registerCreateSubSessionTool(mockConfig);
+
+      expect(
+        mockToolRegistry.registerSessionPermissionDeferredFactory,
+      ).toHaveBeenCalledWith('create_sub_session', expect.any(Function));
+      expect(mockToolRegistry.registerSessionTool).not.toHaveBeenCalled();
     });
 
     it('reveals the deferred tool and refreshes the declarations after registering', async () => {

@@ -7,7 +7,9 @@
 import {
   APPROVAL_MODE_INFO,
   APPROVAL_MODES,
+  AGENT_CONTEXT_FILENAME,
   AuthType,
+  DEFAULT_CONTEXT_FILENAME,
   hasVertexProjectConfigured,
   BTW_MAX_INPUT_LENGTH,
   buildBtwCacheSafeParams,
@@ -201,17 +203,21 @@ import {
 import { observeAcpToolResultWire } from '../nonInteractive/tool-result-boundary-diagnostics.js';
 import { Readable, Writable } from 'node:stream';
 import { normalizeDisabledToolList } from '../config/normalizeDisabledTools.js';
-import type { Stats } from 'node:fs';
+import { realpathSync, type Stats } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { LoadedSettings } from '../config/settings.js';
+import { formatCronRelocationNotice } from '../config/cron-relocation-notice.js';
 import {
   loadSettings,
   reloadEnvironment,
   SettingScope,
 } from '../config/settings.js';
-import { loadSettingsCached } from '../config/settings-cache.js';
+import {
+  loadSettingsCached,
+  loadSettingsCachedForSession,
+} from '../config/settings-cache.js';
 import {
   normalizeSessionIdForLookup,
   parseCallerSuppliedSessionId,
@@ -2338,8 +2344,9 @@ function readScopeSettings(
 async function resolvePreferredMemoryFile(
   dir: string,
   fallbackFilename: string,
+  contextFileNames: readonly string[],
 ): Promise<string> {
-  for (const filename of getAllMemoryFilenames()) {
+  for (const filename of contextFileNames) {
     const filePath = path.join(dir, filename);
     try {
       await fs.access(filePath);
@@ -2355,15 +2362,25 @@ async function resolvePreferredMemoryFile(
 async function resolveQwenMemoryPaths(params: {
   cwd: string;
   projectRoot: string;
+  /**
+   * The session's context-file names. `/cd` makes these session-scoped
+   * and never updates the process-global list, so a host asking for the
+   * memory paths after a move must be answered from the session, or it
+   * is handed `QWEN.md` for a project whose file is `CONTEXT.md`.
+   */
+  contextFileNames?: readonly string[];
 }): Promise<QwenMemoryPaths> {
-  const fallbackFilename = getAllMemoryFilenames()[0] ?? 'QWEN.md';
+  const contextFileNames = params.contextFileNames ?? getAllMemoryFilenames();
+  const fallbackFilename = contextFileNames[0] ?? 'QWEN.md';
   const userMemoryFile = await resolvePreferredMemoryFile(
     Storage.getGlobalQwenDir(),
     fallbackFilename,
+    contextFileNames,
   );
   const projectMemoryFile = await resolvePreferredMemoryFile(
     params.cwd,
     fallbackFilename,
+    contextFileNames,
   );
   const autoMemoryDir = getAutoMemoryRoot(params.projectRoot);
 
@@ -3440,6 +3457,7 @@ class QwenAgent implements Agent {
   >();
   private readonly pendingConfigCleanup = new Map<string, Set<Config>>();
   private readonly initializingConfigs = new Set<Config>();
+  private pendingSessionConfigCreations = 0;
   private managedShuttingDown = false;
   private clientCapabilities: ClientCapabilities | undefined;
   /** Set once the daemon negotiates active-work reporting; one per channel. */
@@ -4877,7 +4895,7 @@ class QwenAgent implements Agent {
           // persists model changes through this instance, so a mix-up writes to
           // another workspace's settings.json.
           const settings = profiler.timeSync('settings_load', () =>
-            loadSettingsCached(cwd),
+            loadSettingsCachedForSession(cwd),
           );
           this.settings = settings;
           const deferMcpDiscovery = shouldDeferMcpDiscovery(params);
@@ -5123,7 +5141,7 @@ class QwenAgent implements Agent {
       // Load per-request settings only after reserving a non-live id. The check
       // must resolve `advanced.runtimeOutputDir` from this request's cwd.
       const settings = profiler.timeSync('settings_load', () =>
-        loadSettingsCached(params.cwd),
+        loadSettingsCachedForSession(params.cwd),
       );
       const persistedSessionId = await profiler.time('existence_check', () =>
         this.runWithPinnedRuntimeBaseDir(settings, params.cwd, async () => {
@@ -5511,7 +5529,7 @@ class QwenAgent implements Agent {
     try {
       // Same per-request settings discipline as `loadSession`.
       const settings = profiler.timeSync('settings_load', () =>
-        loadSettingsCached(params.cwd),
+        loadSettingsCachedForSession(params.cwd),
       );
       const persistedSessionId = await profiler.time('existence_check', () =>
         this.runWithPinnedRuntimeBaseDir(settings, params.cwd, async () => {
@@ -8347,7 +8365,11 @@ class QwenAgent implements Agent {
             ? params['projectRoot']
             : cwd;
         return {
-          paths: await resolveQwenMemoryPaths({ cwd, projectRoot }),
+          paths: await resolveQwenMemoryPaths({
+            cwd,
+            projectRoot,
+            contextFileNames: this.contextFileNamesForCwd(cwd),
+          }),
         };
       }
       case SERVE_STATUS_EXT_METHODS.workspaceMcp:
@@ -10413,7 +10435,11 @@ class QwenAgent implements Agent {
           const relocation = await config.relocateWorkingDirectory(
             canonicalPath,
             canonicalPath,
-            { skipProcessChdir: true, skipArtifactMigration: true },
+            {
+              skipProcessChdir: true,
+              skipArtifactMigration: true,
+              trustedFolder: true,
+            },
           );
           if (conversationDirectoryExpectation !== undefined) {
             await assertManagedConversationDirectoryIdentity(
@@ -10445,6 +10471,32 @@ class QwenAgent implements Agent {
               }`,
             );
           }
+          for (const error of relocation.projectRuntimeRefreshErrors ?? []) {
+            warnings.push(
+              `Project runtime refresh failed: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
+          }
+          if (relocation.cronExitSummary) {
+            warnings.push(
+              formatCronRelocationNotice(relocation.cronExitSummary),
+            );
+          }
+
+          try {
+            await session.refreshSkillsFromSettings({
+              reloadSettings: false,
+              notifyConfigChanged: false,
+            });
+          } catch (error) {
+            warnings.push(
+              `Available commands refresh failed: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
+          }
+          session.startCronScheduler();
 
           try {
             await config
@@ -12970,6 +13022,7 @@ class QwenAgent implements Agent {
       sessionId ?? (sessionIdGenerated ? randomUUID() : undefined);
     const debugSessionId =
       effectiveSessionId ?? inheritedSessionId ?? 'transcript-replay';
+    this.pendingSessionConfigCreations++;
     try {
       this.assertManagedSessionAdmission();
       return await sessionIdContext.run(debugSessionId, () =>
@@ -13008,6 +13061,8 @@ class QwenAgent implements Agent {
       throw sessionId && restoreOptions
         ? mapSessionRestoreRequestError(error, sessionId)
         : error;
+    } finally {
+      this.pendingSessionConfigCreations--;
     }
   }
 
@@ -13142,29 +13197,30 @@ class QwenAgent implements Agent {
       // not process.exit(1) the shared ACP child and every session on its
       // channel. newSessionConfig maps the throw to a RequestError.
       true,
-      this.managedToolInvocationGuard || restoreOptions || provisionalWorkspace
-        ? {
-            ...(provisionalWorkspace
-              ? { provisionalWorkspace: true as const }
-              : {}),
-            ...(this.managedToolInvocationGuard
-              ? { toolInvocationGuard: this.managedToolInvocationGuard }
-              : {}),
-            ...(restoreOptions && sessionId
-              ? {
-                  sessionRestore: {
-                    projectionSource: (restoreSessionId) =>
-                      new SessionService(cwd, {
-                        runtimeBaseDir: Storage.getRuntimeBaseDir(),
-                      }).readRestoreProjection(
-                        restoreSessionId,
-                        restoreOptions,
-                      ),
-                  },
-                }
-              : {}),
-          }
-        : undefined,
+      {
+        // This child can accept another session at any time, and spawned
+        // tools inherit one process-wide environment.
+        ownsProcessEnvironment: () => false,
+        ...(provisionalWorkspace
+          ? { provisionalWorkspace: true as const }
+          : {}),
+        ...(this.managedToolInvocationGuard
+          ? { toolInvocationGuard: this.managedToolInvocationGuard }
+          : {}),
+        ...(sessionSource?.sourceType === 'channel'
+          ? { projectRuntimeCronEnabled: false }
+          : {}),
+        ...(restoreOptions && sessionId
+          ? {
+              sessionRestore: {
+                projectionSource: (restoreSessionId) =>
+                  new SessionService(cwd, {
+                    runtimeBaseDir: Storage.getRuntimeBaseDir(),
+                  }).readRestoreProjection(restoreSessionId, restoreOptions),
+              },
+            }
+          : {}),
+      },
       settings,
       buildEnabledSkillNamesProvider(settings),
     );
@@ -13347,6 +13403,36 @@ class QwenAgent implements Agent {
       },
     );
     config.setFileSystemService(acpFileSystemService);
+  }
+
+  /**
+   * Context-file names for a host request about `cwd`. Prefer the live session
+   * or bootstrap config that owns the directory. An unrelated directory uses
+   * the immutable defaults because the process-global list may reflect a
+   * different session.
+   */
+  private contextFileNamesForCwd(cwd: string): readonly string[] {
+    // The stored directory is normalized (`path.resolve` at construction,
+    // realpath on `/cd`); the host-supplied param is not, so a trailing
+    // slash or `..` spelling must not fall through to the global list.
+    const canonicalize = (value: string): string => {
+      try {
+        return realpathSync(value);
+      } catch {
+        return path.resolve(value);
+      }
+    };
+    const requested = canonicalize(cwd);
+    for (const session of this.sessions.values()) {
+      const config = session.getConfig();
+      if (canonicalize(config.getWorkingDir()) === requested) {
+        return config.getContextFileNames();
+      }
+    }
+    if (canonicalize(this.config.getWorkingDir()) === requested) {
+      return this.config.getContextFileNames();
+    }
+    return [DEFAULT_CONTEXT_FILENAME, AGENT_CONTEXT_FILENAME];
   }
 
   /**

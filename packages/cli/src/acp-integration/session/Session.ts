@@ -1710,14 +1710,14 @@ export async function registerCreateSubSessionTool(
   }
   const toolRegistry = config.getToolRegistry();
   if (registrationStatus === 'deferred') {
-    toolRegistry.registerPermissionDeferredFactory(
+    toolRegistry.registerSessionPermissionDeferredFactory(
       ToolNames.CREATE_SUB_SESSION,
       async () => new CreateSubSessionTool(config),
     );
     await config.getLlmClient().setTools();
     return;
   }
-  toolRegistry.registerTool(new CreateSubSessionTool(config));
+  toolRegistry.registerSessionTool(new CreateSubSessionTool(config));
   // The registration lands after `config.initialize()` → `startChat()` already
   // snapshotted the chat's tool declarations, and the tool is deferred — so it
   // stays filtered out of the declarations until revealed. Reveal it and
@@ -3289,7 +3289,7 @@ export class Session implements SessionContext {
           screenshotPath,
         };
       });
-      registry.registerTool(tool);
+      registry.registerSessionTool(tool);
       if (registry.getTool(CAPTURE_SCREEN_CONTEXT_TOOL_NAME) !== tool) {
         throw new Error(
           'capture_screen_context is required for Live Voice but is disabled.',
@@ -3313,7 +3313,7 @@ export class Session implements SessionContext {
           );
         }
       }
-      for (const tool of tools) registry.registerTool(tool);
+      for (const tool of tools) registry.registerSessionTool(tool);
       for (const tool of tools) {
         if (registry.getTool(tool.name) !== tool) {
           throw new Error(
@@ -3340,7 +3340,7 @@ export class Session implements SessionContext {
           message,
         });
       });
-      registry.registerTool(tool);
+      registry.registerSessionTool(tool);
       if (registry.getTool(SPEAK_TO_USER_TOOL_NAME) !== tool) {
         throw new Error(
           'speak_to_user is required for Live Voice but is disabled.',
@@ -10693,6 +10693,7 @@ export class Session implements SessionContext {
       const matchedContextFileWrite = didWriteProjectContextFile(
         memoryWriteCandidates,
         this.config.getProjectRoot(),
+        this.config.getContextFileNames(),
       );
       debugLogger.debug(
         `ACP session ${this.sessionId} checked marked context-file memory tool batch; matched=${matchedContextFileWrite}`,
@@ -11582,7 +11583,11 @@ export class Session implements SessionContext {
           // prompt right after an allow-rule call just worked.
           const forceAutoReviewForAllow =
             approvalMode === ApprovalMode.AUTO &&
-            (shouldForceAutoModeReviewForAllow(pmCtx, this.config.getCwd()) ||
+            (shouldForceAutoModeReviewForAllow(
+              pmCtx,
+              this.config.getCwd(),
+              this.config.getContextFileNames(),
+            ) ||
               shouldClassifyAllShellForAutoMode(policyToolName, this.config));
           const confirmationPermission = getEffectivePermissionForConfirmation(
             finalPermission,

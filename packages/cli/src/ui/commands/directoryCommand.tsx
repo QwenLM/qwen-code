@@ -256,6 +256,10 @@ export const directoryCommand: SlashCommand = {
                   context.services.settings.merged.context?.importFormat ||
                     'tree',
                   config.getContextRuleExcludes(),
+                  // Session-scoped after `/cd`; the process-global default
+                  // would load the wrong file set and overwrite the
+                  // correctly relocated memory.
+                  { contextFileNames: config.getContextFileNames() },
                 );
                 config.setUserMemory(memoryContent);
                 config.setMemoryFileCount(fileCount);

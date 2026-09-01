@@ -5115,6 +5115,7 @@ export const useLlmStream = (
         const matchedContextFileWrite = didWriteProjectContextFile(
           memoryWriteCandidates,
           config.getProjectRoot(),
+          config.getContextFileNames(),
         );
         debugLogger.debug(
           `Checked marked context-file memory tool batch; matched=${matchedContextFileWrite}`,
@@ -5987,10 +5988,16 @@ export const useLlmStream = (
   // effect doesn't list sessionId as a dep. Keeping it out of the deps is
   // deliberate: /clear swaps the sessionId mid-session, and a re-run would
   // fire the cleanup below — printing a false "loops cancelled" notice and
-  // tearing down a scheduler that immediately restarts. The effect should
-  // run once on mount and clean up only on real unmount.
+  // tearing down a scheduler that immediately restarts. The effect DOES
+  // list `cronWorkingDir`: a `/cd` must stop the previous project's
+  // scheduler and start the target's. On that re-run the cleanup's exit
+  // summary is null because `relocateWorkingDirectory` already destroyed
+  // the old scheduler before committing the new working directory, so no
+  // false notice is printed.
   const cronSessionIdRef = useRef(sessionStates.sessionId);
   cronSessionIdRef.current = sessionStates.sessionId;
+  const cronWorkingDir =
+    config.getWorkingDir?.() ?? config.getTargetDir?.() ?? '';
 
   // Start the cron scheduler once config is initialized, stop on unmount.
   // Cron fires enqueue onto the shared notification queue.
@@ -6078,7 +6085,12 @@ export const useLlmStream = (
         process.stderr.write(summary + '\n');
       }
     };
-  }, [config, getAutonomousLoopTickResolver, isConfigInitialized]);
+  }, [
+    config,
+    cronWorkingDir,
+    getAutonomousLoopTickResolver,
+    isConfigInitialized,
+  ]);
 
   // Register background agent notification callback onto the shared queue.
   useEffect(() => {

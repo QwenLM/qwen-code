@@ -44,7 +44,6 @@ import {
   describeDeliveryStatus,
   describeHoldCause,
   getErrorMessage,
-  getAllMemoryFilenames,
   ShellExecutionService,
   Storage,
   createInstructionsLoadedCallback,
@@ -2212,6 +2211,9 @@ export const AppContainer = (props: AppContainerProps) => {
           onInstructionsLoaded: createInstructionsLoadedCallback(() =>
             config.getHookSystem(),
           ),
+          // Session-scoped after `/cd`: the process-global names would
+          // reload the wrong file set and overwrite the relocated memory.
+          contextFileNames: config.getContextFileNames(),
         },
       );
 
@@ -3375,14 +3377,11 @@ export const AppContainer = (props: AppContainerProps) => {
   });
 
   // Context file names computation
-  const contextFileNames = useMemo(() => {
-    const fromSettings = settings.merged.context?.fileName;
-    return fromSettings
-      ? Array.isArray(fromSettings)
-        ? fromSettings
-        : [fromSettings]
-      : getAllMemoryFilenames();
-  }, [settings.merged.context?.fileName]);
+  const contextFileNamesKey = config.getContextFileNames().join('\0');
+  const contextFileNames = useMemo(
+    () => contextFileNamesKey.split('\0'),
+    [contextFileNamesKey],
+  );
   // Initial prompt handling
   const initialPrompt = useMemo(() => config.getQuestion(), [config]);
   const initialPromptSubmitted = useRef(false);

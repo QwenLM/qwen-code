@@ -263,6 +263,7 @@ describe('directoryCommand', () => {
       mockConfig.getContextRuleExcludes = vi.fn().mockReturnValue([]);
       mockConfig.setContextFilePaths = vi.fn();
       mockConfig.setConditionalRulesRegistry = vi.fn();
+      mockConfig.getContextFileNames = vi.fn().mockReturnValue(['CONTEXT.md']);
       mockContext.ui.setMemoryFileCount = vi.fn();
 
       if (!addCommand?.action) throw new Error('No action');
@@ -271,8 +272,10 @@ describe('directoryCommand', () => {
         path.normalize('/home/user/new-project'),
       );
 
-      // Pin the CWD anchor (getWorkingDir, not process.cwd) and the new
-      // directory so an anchor regression can't slip through green.
+      // Pin the CWD anchor (getWorkingDir, not process.cwd), the new
+      // directory, and the session-scoped context-file names: after a
+      // `/cd` the process-global names would load the wrong file set and
+      // `setUserMemory` would overwrite the relocated memory with it.
       expect(loadServerHierarchicalMemory).toHaveBeenCalledWith(
         '/test/dir',
         expect.arrayContaining([path.normalize('/home/user/new-project')]),
@@ -281,6 +284,7 @@ describe('directoryCommand', () => {
         true,
         'tree',
         expect.anything(),
+        expect.objectContaining({ contextFileNames: ['CONTEXT.md'] }),
       );
       expect(mockConfig.setUserMemory).toHaveBeenCalledWith('reloaded memory');
       expect(mockConfig.setContextFilePaths).toHaveBeenCalledWith([

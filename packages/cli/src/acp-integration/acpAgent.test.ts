@@ -602,6 +602,8 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   ),
   clearCachedCredentialFile: vi.fn(),
   getAllMemoryFilenames: vi.fn(() => ['QWEN.md', 'AGENTS.md']),
+  DEFAULT_CONTEXT_FILENAME: 'QWEN.md',
+  AGENT_CONTEXT_FILENAME: 'AGENTS.md',
   getAutoMemoryRoot: vi.fn(
     (projectRoot: string) => `${projectRoot}/.qwen/memory`,
   ),
@@ -874,6 +876,7 @@ vi.mock('../config/settings-cache.js', async () => {
   const settings = await import('../config/settings.js');
   return {
     loadSettingsCached: (cwd: string) => settings.loadSettings(cwd),
+    loadSettingsCachedForSession: (cwd: string) => settings.loadSettings(cwd),
   };
 });
 vi.mock('../config/loadedSettingsAdapter.js', () => ({
@@ -2109,6 +2112,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         installPendingManagedConversationBinding: ReturnType<typeof vi.fn>;
         commitManagedConversationBinding: ReturnType<typeof vi.fn>;
         releaseManagedConversationBinding: ReturnType<typeof vi.fn>;
+        startCronScheduler: ReturnType<typeof vi.fn>;
         appendLiveConversationTranscript: ReturnType<typeof vi.fn>;
         collectActiveWorkHolds: ReturnType<typeof vi.fn>;
         hasStandaloneRelocationBlockers: ReturnType<typeof vi.fn>;
@@ -2179,6 +2183,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       reloadModelProvidersConfig: vi.fn(),
       refreshAuth: vi.fn().mockResolvedValue(undefined),
       getWorkspaceContext: vi.fn().mockReturnValue({}),
+      getWorkingDir: vi.fn().mockReturnValue('/tmp'),
+      getContextFileNames: vi.fn().mockReturnValue(['QWEN.md', 'AGENTS.md']),
       getDebugMode: vi.fn().mockReturnValue(false),
       getToolRegistry: vi.fn().mockReturnValue(undefined),
     } as unknown as Config;
@@ -3585,7 +3591,12 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await vi.waitFor(() =>
       expect(vi.mocked(loadCliConfig)).toHaveBeenCalledTimes(1),
     );
+    const sessionAHostPolicy = vi.mocked(loadCliConfig).mock.calls[0]?.[9];
+    expect(sessionAHostPolicy?.ownsProcessEnvironment?.()).toBe(false);
     await agent.newSession({ cwd: '/workspace-b', mcpServers: [] });
+    const sessionBHostPolicy = vi.mocked(loadCliConfig).mock.calls[1]?.[9];
+    expect(sessionAHostPolicy?.ownsProcessEnvironment?.()).toBe(false);
+    expect(sessionBHostPolicy?.ownsProcessEnvironment?.()).toBe(false);
     releaseSessionA();
     await sessionAPromise;
 
@@ -4556,6 +4567,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           getCreatedAt: vi.fn().mockReturnValue(1_700_000_000_000),
           getTurnCount: vi.fn().mockReturnValue(3),
           prompt: vi.fn().mockResolvedValue({ stopReason: 'end_turn' }),
+          refreshSkillsFromSettings: vi.fn().mockResolvedValue(undefined),
         };
         lastSessionMock = sessionMock;
         return sessionMock as unknown as InstanceType<typeof Session>;
@@ -5498,6 +5510,19 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       expect(
         lastSessionMock?.hardSuspendTodoStopGuard.mock.invocationCallOrder[0],
       ).toBeLessThan(relocateWorkingDirectory.mock.invocationCallOrder[0]!);
+      expect(lastSessionMock?.startCronScheduler).toHaveBeenCalledTimes(2);
+      // The daemon owns the settings watcher for non-managed sessions, so
+      // this is the only push of `available_commands_update` after a move.
+      expect(
+        (
+          lastSessionMock as unknown as {
+            refreshSkillsFromSettings: ReturnType<typeof vi.fn>;
+          }
+        ).refreshSkillsFromSettings,
+      ).toHaveBeenCalledWith({
+        reloadSettings: false,
+        notifyConfigChanged: false,
+      });
     } finally {
       await fs.rm(targetDir, { recursive: true, force: true });
     }
@@ -5781,7 +5806,11 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         expect(innerConfig.relocateWorkingDirectory).toHaveBeenCalledWith(
           expectation.child.canonicalPath,
           expectation.child.canonicalPath,
-          { skipProcessChdir: true, skipArtifactMigration: true },
+          {
+            skipProcessChdir: true,
+            skipArtifactMigration: true,
+            trustedFolder: true,
+          },
         );
         expect(
           lastSessionMock?.installPendingManagedConversationBinding,
@@ -11700,6 +11729,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       expect.objectContaining({
         toolInvocationGuard: expect.any(Function),
       }),
+      expect.anything(),
       expect.any(Function),
     );
 
@@ -14136,6 +14166,78 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         userMemoryFile: path.join('/tmp/qwen-global-test', 'QWEN.md'),
         projectMemoryFile: path.join('/tmp/qwen-memory-cwd-test', 'QWEN.md'),
         autoMemoryDir: '/tmp/qwen-memory-root-test/.qwen/memory',
+      },
+    });
+    // A live session that `/cd`-ed into a project with its own
+    // `context.fileName` answers for that directory — even when the host
+    // spells the cwd with a trailing slash — instead of the global name.
+    (agent as unknown as { sessions: Map<string, unknown> }).sessions.set(
+      'scoped-session',
+      {
+        getConfig: () => ({
+          getWorkingDir: () => '/tmp/qwen-memory-scoped-test',
+          getContextFileNames: () => ['CONTEXT.md'],
+        }),
+      },
+    );
+    await expect(
+      agent.extMethod('qwen/settings/getMemoryPaths', {
+        cwd: '/tmp/qwen-memory-scoped-test/',
+        projectRoot: '/tmp/qwen-memory-scoped-test',
+      }),
+    ).resolves.toEqual({
+      paths: {
+        userMemoryFile: path.join('/tmp/qwen-global-test', 'CONTEXT.md'),
+        projectMemoryFile: path.join(
+          '/tmp/qwen-memory-scoped-test',
+          'CONTEXT.md',
+        ),
+        autoMemoryDir: '/tmp/qwen-memory-scoped-test/.qwen/memory',
+      },
+    });
+    const realDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-memory-real-'),
+    );
+    const linkedDir = `${realDir}-link`;
+    await fs.symlink(realDir, linkedDir, 'dir');
+    try {
+      (agent as unknown as { sessions: Map<string, unknown> }).sessions.set(
+        'scoped-session',
+        {
+          getConfig: () => ({
+            getWorkingDir: () => realDir,
+            getContextFileNames: () => ['CONTEXT.md'],
+          }),
+        },
+      );
+      await expect(
+        agent.extMethod('qwen/settings/getMemoryPaths', {
+          cwd: linkedDir,
+          projectRoot: linkedDir,
+        }),
+      ).resolves.toMatchObject({
+        paths: {
+          projectMemoryFile: path.join(linkedDir, 'CONTEXT.md'),
+        },
+      });
+    } finally {
+      await fs.unlink(linkedDir);
+      await fs.rm(realDir, { recursive: true, force: true });
+    }
+    (agent as unknown as { sessions: Map<string, unknown> }).sessions.delete(
+      'scoped-session',
+    );
+    await expect(
+      agent.extMethod('qwen/settings/getMemoryPaths', {
+        cwd: '/tmp/qwen-memory-unowned-test',
+        projectRoot: '/tmp/qwen-memory-unowned-test',
+      }),
+    ).resolves.toMatchObject({
+      paths: {
+        projectMemoryFile: path.join(
+          '/tmp/qwen-memory-unowned-test',
+          'QWEN.md',
+        ),
       },
     });
     await expect(
@@ -22048,8 +22150,10 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       }
 
       const sessionSettings = vi.mocked(loadCliConfig).mock.calls[0]?.[0];
+      const hostPolicy = vi.mocked(loadCliConfig).mock.calls[0]?.[9];
       expect(sessionSettings?.experimental?.cron).toBe(false);
       expect(requestSettings.merged.experimental?.cron).toBe(true);
+      expect(hostPolicy?.projectRuntimeCronEnabled).toBe(false);
 
       mockConnectionState.resolve();
       await agentPromise;

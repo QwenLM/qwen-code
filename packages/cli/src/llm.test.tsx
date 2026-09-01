@@ -856,8 +856,9 @@ describe('llm.tsx main function', () => {
       undefined,
       // settingsWatcher: not started in bare mode
       undefined,
+      false,
       undefined,
-      undefined,
+      expect.objectContaining({ merged: {} }),
       expect.any(Function),
     );
   });

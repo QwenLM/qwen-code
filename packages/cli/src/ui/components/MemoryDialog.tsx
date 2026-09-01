@@ -11,7 +11,6 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import {
-  getAllMemoryFilenames,
   Storage,
   getAutoMemoryRoot,
   getAutoMemoryProjectStateDir,
@@ -46,8 +45,9 @@ interface DialogItem {
 async function resolvePreferredMemoryFile(
   dir: string,
   fallbackFilename: string,
+  contextFileNames: readonly string[],
 ): Promise<string> {
-  for (const filename of getAllMemoryFilenames()) {
+  for (const filename of contextFileNames) {
     const filePath = path.join(dir, filename);
     try {
       await fs.access(filePath);
@@ -148,18 +148,11 @@ export function MemoryDialog({ onClose }: MemoryDialogProps) {
 
   const globalMemoryPath = useMemo(
     () =>
-      path.join(
-        Storage.getGlobalQwenDir(),
-        getAllMemoryFilenames()[0] ?? 'QWEN.md',
-      ),
-    [],
+      path.join(Storage.getGlobalQwenDir(), config.getPrimaryContextFileName()),
+    [config],
   );
   const projectMemoryPath = useMemo(
-    () =>
-      path.join(
-        config.getWorkingDir(),
-        getAllMemoryFilenames()[0] ?? 'QWEN.md',
-      ),
+    () => path.join(config.getWorkingDir(), config.getPrimaryContextFileName()),
     [config],
   );
   const managedMemoryPath = useMemo(
@@ -273,12 +266,14 @@ export function MemoryDialog({ onClose }: MemoryDialogProps) {
         case 'project':
           return resolvePreferredMemoryFile(
             config.getWorkingDir(),
-            getAllMemoryFilenames()[0] ?? 'QWEN.md',
+            config.getPrimaryContextFileName(),
+            config.getContextFileNames(),
           );
         case 'global':
           return resolvePreferredMemoryFile(
             Storage.getGlobalQwenDir(),
-            getAllMemoryFilenames()[0] ?? 'QWEN.md',
+            config.getPrimaryContextFileName(),
+            config.getContextFileNames(),
           );
         default: {
           const _exhaustive: never = item.value;
