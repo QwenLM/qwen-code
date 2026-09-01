@@ -40,6 +40,11 @@ import {
   Storage,
   type ChatRecord,
 } from '@qwen-code/qwen-code-core';
+import { isNativeDirectoryPickerAvailable } from '../../packages/cli/src/serve/native-directory-picker.js';
+import {
+  isLocalPathOpenAvailable,
+  isLocalTerminalAvailable,
+} from '../../packages/cli/src/serve/local-path-open.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // Match the rest of the integration suite: prefer the bundled CLI
@@ -60,6 +65,16 @@ let homeDir = '';
 let port = 0;
 let base = '';
 let client: DaemonClient;
+// The daemon evaluates isNativeDirectoryPickerAvailable() in its own process
+// at boot. Probe once at spawn time (same host, same uid, same relevant env)
+// so the expectation matches the daemon's boot-time view; re-probing at
+// assertion time minutes later diverged when the host's GUI session state
+// drifted mid-run (red macOS E2E runs after #9406, tracked in #10453).
+let nativeDirectoryPickerAtBoot = false;
+// Same boot-time probe pinning as above, for the workspace_local_open tag.
+let localPathOpenAtBoot = false;
+// Same boot-time probe pinning as above, for the workspace_local_terminal tag.
+let localTerminalOpenAtBoot = false;
 
 function writePersistedTranscript(
   sessionId: string,
@@ -111,6 +126,9 @@ function chatRecord(
 
 beforeAll(async () => {
   homeDir = mkdtempSync(path.join(tmpdir(), 'qwen-serve-routes-home-'));
+  nativeDirectoryPickerAtBoot = isNativeDirectoryPickerAvailable();
+  localPathOpenAtBoot = isLocalPathOpenAvailable();
+  localTerminalOpenAtBoot = isLocalTerminalAvailable();
   daemon = spawn(
     process.execPath,
     [
@@ -293,6 +311,10 @@ describe('qwen serve — capabilities envelope', () => {
     // `require_auth`, `allow_origin`, `cdp_tunnel_over_ws`,
     // `prompt_absolute_deadline`, `writer_idle_timeout`,
     // `workspace_voice_transcription`, `rate_limit`, `channel_reload`.
+    // `native_directory_picker` is host-conditional (the daemon host's GUI
+    // environment, not a spawn flag) and is spliced at its registry
+    // position below, using the boot-time probe captured when the daemon
+    // was spawned rather than a fresh probe at assertion time.
     // Pool tags (`mcp_workspace_pool`, `mcp_pool_restart`) ARE present
     // because the workspace MCP pool is on by default, as are
     // `workspace_settings`, `workspace_permissions`, `workspace_voice`,
@@ -342,7 +364,10 @@ describe('qwen serve — capabilities envelope', () => {
       'auth_provider_install',
       'workspace_memory',
       'workspace_memory_remember',
+      'workspace_memory_remember_project_scope',
+      'workspace_memory_remember_user_scope',
       'workspace_memory_forget',
+      'workspace_memory_forget_scope',
       'workspace_memory_dream',
       'workspace_agents',
       'workspace_agent_generate',
@@ -362,6 +387,7 @@ describe('qwen serve — capabilities envelope', () => {
       'session_metadata',
       'session_organization',
       'session_export',
+      'standalone_sessions_v1',
       'session_transcript',
       'session_transcript_pagination',
       'mcp_guardrails',
@@ -383,6 +409,7 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_permissions',
       'workspace_voice',
       'workspace_trust',
+      'workspace_trust_hot_reload',
       'workspace_init',
       'workspace_github_setup',
       'workspace_github_prs',
@@ -397,6 +424,7 @@ describe('qwen serve — capabilities envelope', () => {
       'permission_mediation',
       'non_blocking_prompt',
       'session_language',
+      'user_language_sync',
       'session_rewind',
       'workspace_hooks',
       'session_hooks',
@@ -407,11 +435,18 @@ describe('qwen serve — capabilities envelope', () => {
       'channel_control',
       'channel_management',
       'workspace_channel_observed_contacts',
+      'dynamic_workspace_registration',
       'persistent_workspace_registration',
       'workspace_display_name',
+      'scratch_workspace_registration',
       'workspace_runtime_removal',
+      ...(nativeDirectoryPickerAtBoot ? ['native_directory_picker'] : []),
+      'workspace_runtime',
+      ...(localPathOpenAtBoot ? ['workspace_local_open'] : []),
+      ...(localTerminalOpenAtBoot ? ['workspace_local_terminal'] : []),
       'workspace_qualified_rest_core',
       'extension_management_v2',
+      'extension_state',
       'extension_git_credentials',
       'extension_local_path_install',
       'workspace_persisted_transcript',
@@ -420,6 +455,7 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_session_live_state',
       'workspace_session_metadata',
       'voice_transcribe',
+      'web_terminal',
     ]);
   });
 });

@@ -485,6 +485,7 @@ describe('daemon UI normalizer and transcript reducer', () => {
             },
           ],
           _meta: {
+            qwenSessionWorkflow: true,
             qwenTodoPlan: { id: 'plan-1' },
             qwenTranscript: { planToolCallId: 'call-1' },
             stats: {
@@ -512,6 +513,7 @@ describe('daemon UI normalizer and transcript reducer', () => {
           },
         ],
         plan: { id: 'plan-1', sourceCallId: 'call-1' },
+        sessionWorkflow: true,
         stats: {
           promptTokens: 100,
           cachedTokens: 10,
@@ -8668,6 +8670,41 @@ describe('parallel subAgent text interleaving fix', () => {
       inputTokens: 4500,
       outputTokens: 1000,
       totalTokens: 5500,
+    });
+  });
+
+  it('retains executionMode in compacted task_execution output', () => {
+    let state = createDaemonTranscriptState({
+      now: 1,
+      retainSubagentBlocks: false,
+    });
+
+    state = reduceDaemonTranscriptEvents(state, [
+      {
+        type: 'tool.update',
+        toolCallId: 'agent-task-mode',
+        toolName: 'agent',
+        status: 'running',
+        rawOutput: {
+          type: 'task_execution',
+          status: 'running',
+          executionMode: 'background',
+          subagentName: 'probe',
+        },
+      },
+    ] as DaemonUiEvent[]);
+
+    // Web Shell classification treats executionMode as authoritative from
+    // the first running update; summary-mode compaction must not drop it.
+    expect(state.blocks[0]).toMatchObject({
+      kind: 'tool',
+      toolCallId: 'agent-task-mode',
+      rawOutput: {
+        type: 'task_execution',
+        status: 'running',
+        executionMode: 'background',
+        subagentName: 'probe',
+      },
     });
   });
 

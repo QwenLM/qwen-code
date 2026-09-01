@@ -144,6 +144,9 @@ jobs:
           GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
           PR_NUMBER: '${{ github.event.issue.number || github.event.pull_request.number }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+          # Empty for a pull_request_review trigger: review bodies have no
+          # reactions endpoint, so only the two comment shapes get the 👀.
+          COMMENT_ID: '${{ github.event.comment.id }}'
         run: |-
           set -euo pipefail
           PR_STATE="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json state --jq '.state')"
@@ -151,32 +154,55 @@ jobs:
             echo "PR #${PR_NUMBER} is ${PR_STATE}; skipping acknowledgement." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
+          # The 👀 on the command itself is the one signal GitHub renders in
+          # place, next to what the requester typed. Best effort: a failed
+          # reaction must not cost the ack comment below.
+          case "$GITHUB_EVENT_NAME" in
+            issue_comment)
+              REACTION_PATH="repos/${GITHUB_REPOSITORY}/issues/comments/${COMMENT_ID}/reactions" ;;
+            pull_request_review_comment)
+              REACTION_PATH="repos/${GITHUB_REPOSITORY}/pulls/comments/${COMMENT_ID}/reactions" ;;
+            *)
+              REACTION_PATH="" ;;
+          esac
+          if [ -n "$REACTION_PATH" ] && [ -n "$COMMENT_ID" ]; then
+            gh api --method POST "$REACTION_PATH" -f content=eyes > /dev/null \
+              || echo "Could not react to comment ${COMMENT_ID}." >> "$GITHUB_STEP_SUMMARY"
+          fi
           # Blank line after the marker, or none of the prose below renders. A
           # line opening with `<!--` starts an HTML block that runs to the line
           # containing the closing delimiter, and the REST of that line stays
           # inside it — so gluing the text on shipped it as raw source with a
           # dead link. Verified against GitHub's own renderer.
-          ACK_BODY="$(printf '<!-- qwen-review-ack -->\n\n_Qwen Code review request accepted. Review is queued in [workflow run](%s)._' "$RUN_URL")"
-          EXISTING_ACK_ID="$(
-            # -F would otherwise make gh api default to POST.
-            gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
-              --method GET \
-              --paginate \
-              -F per_page=100 \
-              | jq -sr '[.[][] | select(.body | contains("<!-- qwen-review-ack -->")) | select(.user.login == "github-actions[bot]")] | last | .id // empty'
-          )" || EXISTING_ACK_ID=""
-          if [ -n "$EXISTING_ACK_ID" ]; then
-            gh api \
-              --method PATCH \
-              "repos/${GITHUB_REPOSITORY}/issues/comments/${EXISTING_ACK_ID}" \
-              -f body="$ACK_BODY" > /dev/null
-            echo "Queued acknowledgement updated on PR #${PR_NUMBER}." >> "$GITHUB_STEP_SUMMARY"
-          else
-            gh pr comment "$PR_NUMBER" \
-              --repo "$GITHUB_REPOSITORY" \
-              --body "$ACK_BODY"
-            echo "Queued acknowledgement posted on PR #${PR_NUMBER}." >> "$GITHUB_STEP_SUMMARY"
-          fi
+          #
+          # A command-triggered run executes against the base branch, so its
+          # `review-pr` check attaches to main's commit and never shows under
+          # this PR's checks — the link here is the only way to watch it.
+          ACK_BODY="$(printf '<!-- qwen-review-ack -->\n\n_Qwen Code review request accepted. Review is running in [workflow run](%s). A command-triggered review is not listed under the checks of this PR; the result is posted here as a review when it finishes._' "$RUN_URL")"
+          # One ack per PR, and it must sit right under the command that asked
+          # for it. Editing the previous ack in place kept the count at one but
+          # left the notice wherever the FIRST request landed — on a 15-comment
+          # thread that was comment #2, above the previous day's triage, and
+          # the requester reading from the bottom concluded nothing had
+          # started. Delete-then-post keeps the count and moves the notice to
+          # the bottom. Nothing keys on the comment id: every consumer
+          # (qwen-autofix's bot-comment filters, the review's bypass audit)
+          # matches the marker.
+          # -F would otherwise make gh api default to POST.
+          gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+            --method GET \
+            --paginate \
+            -F per_page=100 \
+            | jq -r '.[] | select(.body | contains("<!-- qwen-review-ack -->")) | select(.user.login == "github-actions[bot]") | .id' \
+            | while read -r STALE_ACK_ID; do
+                [ -n "$STALE_ACK_ID" ] || continue
+                gh api --method DELETE "repos/${GITHUB_REPOSITORY}/issues/comments/${STALE_ACK_ID}" \
+                  || echo "Could not delete stale acknowledgement ${STALE_ACK_ID}." >> "$GITHUB_STEP_SUMMARY"
+              done
+          gh pr comment "$PR_NUMBER" \
+            --repo "$GITHUB_REPOSITORY" \
+            --body "$ACK_BODY"
+          echo "Queued acknowledgement posted on PR #${PR_NUMBER}." >> "$GITHUB_STEP_SUMMARY"
 
   review-config:
     # Bot-requested review_requested only: a CODEOWNERS-covered PR open
@@ -338,18 +364,33 @@ jobs:
             exit 0
           fi
           # Fail closed: any API error or non-write permission denies the run.
+          # But ask more than once before a transient GitHub error becomes the
+          # denial: a 503 ("No server is currently available") here has
+          # silently dropped real /resolve requests — the commenter had write,
+          # no job started, and nothing on the PR said why.
           api_error_file="$(mktemp)"
-          if ! permission="$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${principal}/permission" --jq '.permission' 2>"$api_error_file")"; then
+          permission=''
+          attempt=0
+          while :; do
+            attempt=$((attempt + 1))
+            if permission="$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${principal}/permission" --jq '.permission' 2>"$api_error_file")"; then
+              break
+            fi
             api_error="$(cat "$api_error_file")"
-            rm -f "$api_error_file"
             api_error="${api_error:-unknown error}"
             api_error="${api_error//$'\r'/ }"
             api_error="${api_error//$'\n'/ }"
+            if [ "$attempt" -lt 3 ] && grep -qiE 'HTTP 5[0-9][0-9]|No server is currently available|connection reset|timed out|unexpected EOF' "$api_error_file"; then
+              echo "Permission API call for ${principal} failed transiently (attempt ${attempt} of 3): ${api_error}; retrying."
+              sleep $((attempt * 5))
+              continue
+            fi
+            rm -f "$api_error_file"
             echo "::error::Permission API call failed for ${principal}: ${api_error}"
             echo "Failed to check permission for ${principal} (API error: ${api_error}); denying." >> "$GITHUB_STEP_SUMMARY"
             echo "should_review=false" >> "$GITHUB_OUTPUT"
             exit 0
-          fi
+          done
           rm -f "$api_error_file"
           case "$permission" in
             admin|maintain|write)
@@ -413,7 +454,7 @@ jobs:
     # (default: 360); must stay above QWEN_REVIEW_MAX_TIMEOUT_MINUTES so
     # retry plus posting never hit the cap.
     timeout-minutes: '${{ fromJSON(vars.QWEN_REVIEW_JOB_TIMEOUT_MINUTES) }}'
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-agent"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     permissions:
       contents: 'read'
       pull-requests: 'write'
@@ -529,6 +570,53 @@ jobs:
               done || true
           "${GIT_SAFE[@]}" worktree prune -v || true
           echo "stale agent state cleaned"
+
+      # A cancelled verify can leave either the active project state or its
+      # protected recovery backup unreadable to the runner user. Remove only
+      # those two known names before checkout reuses the workspace.
+      # `.qwen.root-orig` is emitted by recovery tooling OUTSIDE this repo —
+      # nothing here produces it (git grep matches only these sweep copies
+      # and their pins in scripts/tests/review-worktree-cleanup-workflow.
+      # test.js). It is the backup name a cancelled verify's recovery leaves
+      # after renaming an unreadable, root-owned `.qwen` aside (observed on
+      # the shared pool; first recorded around review run 33146730771). If
+      # that producer's naming changes or a third residue name appears,
+      # update the for-loop list in every sweep copy or the checkout
+      # poisoning this sweep exists for silently recurs.
+      - name: 'Clean stale .qwen before checkout'
+        run: |-
+          set -uo pipefail
+          for stale_qwen in "$GITHUB_WORKSPACE/.qwen" "$GITHUB_WORKSPACE/.qwen.root-orig"; do
+            if [ ! -e "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
+              continue
+            fi
+            if [ -d "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
+              chmod -R u+w "$stale_qwen" 2>/dev/null || true
+            fi
+            # If a foreign-owned directory cannot move to a different parent,
+            # quarantine the runner-owned workspace and recreate the checkout
+            # root. Warm contents are lost only on this unrecoverable path.
+            rm -rf -- "$stale_qwen" 2>/dev/null ||
+              sudo -n rm -rf -- "$stale_qwen" 2>/dev/null ||
+              {
+                quarantine="$(dirname -- "$GITHUB_WORKSPACE")/_qwen-quarantine"
+                mkdir -p "$quarantine" 2>/dev/null || true
+                stale_name="$(basename -- "$stale_qwen")"
+                if mv -- "$stale_qwen" "$quarantine/${stale_name#\.}-$(date -u +%Y%m%dT%H%M%SZ)-$$" 2>/dev/null; then
+                  echo "::warning::could not delete leaked $stale_name; moved it to $quarantine so this checkout can proceed — that directory needs manual cleanup"
+                else
+                  workspace_quarantine="$quarantine/workspace-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+                  if mv -- "$GITHUB_WORKSPACE" "$workspace_quarantine" 2>/dev/null &&
+                     mkdir -p "$GITHUB_WORKSPACE" 2>/dev/null &&
+                     cd "$GITHUB_WORKSPACE"; then
+                    echo "::warning::could not delete leaked $stale_name; moved the whole workspace to $workspace_quarantine so this checkout can proceed — that directory needs manual cleanup"
+                    break
+                  else
+                    echo "::warning::leaked $stale_name survived every recovery; runner needs manual cleanup"
+                  fi
+                fi
+              }
+          done
 
       # SECURITY: checkout trusted base code; /review fetches PR diff context.
       # Self-heals on the reused self-hosted pool in two observed shapes: a
@@ -898,17 +986,12 @@ jobs:
           QWEN_CODE_API_TIMEOUT_MS: '600000'
           QWEN_STREAM_IDLE_TIMEOUT_MS: '600000'
           QWEN_STREAM_MAX_LIFETIME_MS: '1800000'
-          # Evidence-image destination for `qwen review publish-assets` —
-          # OPT-IN by design: the command refuses to push images anywhere the
-          # user did not designate, so with the repository variable unset the
-          # review simply keeps its evidence as prose and local paths. Set the
-          # variable (e.g. to this repository) to let reviews embed capture
-          # PNGs; images land on commit-pinned pr-assets/<pr>-review branches,
-          # pushed with the same CI_BOT_PAT this step already uses for gh.
-          # Retention: the visuals cleanup workflow deletes those branches
-          # only when the variable points at THIS repository — a fork or
-          # scratch destination manages its own retention.
-          QWEN_REVIEW_ASSETS_REPO: '${{ vars.QWEN_REVIEW_ASSETS_REPO }}'
+          # Evidence-image destination for `qwen review publish-assets`.
+          # It must be a dedicated external host repository: project-local
+          # image branches are fetched by ordinary clones and permanently
+          # inflate this repository. Unset or self-targeting configurations
+          # deliberately degrade to prose and local artifact paths.
+          QWEN_REVIEW_ASSETS_REPO: "${{ vars.QWEN_REVIEW_ASSETS_REPO != github.repository && vars.QWEN_REVIEW_ASSETS_REPO || '' }}"
           # Per-run agent home so this review's session/memory cannot leak into
           # the next on the reused self-hosted workspace (reset in "Clean stale
           # agent state"). Must match the QWEN_HOME computed there.
@@ -923,6 +1006,10 @@ jobs:
           EVENT_NAME: '${{ github.event_name }}'
           EVENT_HEAD_SHA: '${{ github.event.pull_request.head.sha }}'
           MAX_TIMEOUT_MINUTES_VAR: '${{ vars.QWEN_REVIEW_MAX_TIMEOUT_MINUTES }}'
+          # Install and build the review worktree BEFORE any agent starts,
+          # through Agent 7's own build-test (issue #10108). Opt-in here only;
+          # rationale, budget and fail-open contract: cli lib/prebuild.ts.
+          QWEN_REVIEW_PREBUILD: '1'
         run: |-
           set -euo pipefail
           fail() {
@@ -939,6 +1026,22 @@ jobs:
           }
 
           REPO="${GITHUB_REPOSITORY}"
+
+          # Normalize the assets-repo designation before the CLI reads it.
+          # The env-level guard compares the RAW variable, so whitespace
+          # variants (" QwenLM/qwen-code ") and case variants slip past it;
+          # trim both ends and re-check self-targeting case-insensitively
+          # (repository names are case-insensitive). A padded or case-shifted
+          # self-reference must degrade to prose exactly like an unset one.
+          QWEN_REVIEW_ASSETS_REPO="${QWEN_REVIEW_ASSETS_REPO#"${QWEN_REVIEW_ASSETS_REPO%%[![:space:]]*}"}"
+          QWEN_REVIEW_ASSETS_REPO="${QWEN_REVIEW_ASSETS_REPO%"${QWEN_REVIEW_ASSETS_REPO##*[![:space:]]}"}"
+          if [ -n "${QWEN_REVIEW_ASSETS_REPO}" ] &&
+             [ "$(printf '%s' "${QWEN_REVIEW_ASSETS_REPO}" | tr '[:upper:]' '[:lower:]')" = \
+               "$(printf '%s' "${REPO}" | tr '[:upper:]' '[:lower:]')" ]; then
+            QWEN_REVIEW_ASSETS_REPO=''
+          fi
+          export QWEN_REVIEW_ASSETS_REPO
+
           REVIEW_URL="${GITHUB_SERVER_URL}/${REPO}/pull/${PR_NUMBER}"
           LOG_PATH="${RUNNER_TEMP:-/tmp}/qwen-review-pr-${PR_NUMBER}.jsonl"
           # Set by configure_qwen_network once the wrapper dir exists.
@@ -1294,6 +1397,72 @@ jobs:
 
           QWEN_TIMEOUT="$EFFECTIVE_TIMEOUT_MINUTES"
 
+          # Reconcile the prebuild with the attempt budget now that the
+          # latter is final (size-aware default, docs/micro halving all
+          # applied above). The prebuild's budget is fixed (PREBUILD_BUDGET_S
+          # in lib/prebuild.ts), but an explicit --timeout=N can set the
+          # attempt as low as 6 minutes, and worst case the prebuild
+          # consumes its whole budget — the hang it exists to bound. An
+          # attempt that cannot carry the budget plus the deadline reserve
+          # below plus PREBUILD_ATTEMPT_MARGIN_S for the fetch prefix and
+          # the review itself degrades to the pre-prebuild flow instead of
+          # dying in it: GNU timeout would kill the agent mid-`npm ci`,
+          # OUTCOME='timeout' never retries, and no review would ever
+          # happen. The reserve arithmetic mirrors run_review_once below,
+          # minus its 4800 cap, which only ADDS headroom — so this gate is
+          # conservative, never lax. scripts/tests/
+          # qwen-pr-review-workflow.test.js pins both literals against the
+          # constants in lib/prebuild.ts.
+          if [ "${QWEN_REVIEW_PREBUILD:-}" = '1' ]; then
+            attempt_s=$(( EFFECTIVE_TIMEOUT_MINUTES * 60 ))
+            reserve_s=$(( attempt_s / 3 ))
+            if [ "$reserve_s" -lt 600 ]; then reserve_s=600; fi
+            if [ $(( attempt_s - reserve_s )) -lt $(( 1800 + 1800 )) ]; then
+              echo "Attempt budget ${EFFECTIVE_TIMEOUT_MINUTES}m cannot carry the prebuild budget plus the review; continuing without the prebuild."
+              unset QWEN_REVIEW_PREBUILD
+            fi
+          fi
+
+          # The prebuild (QWEN_REVIEW_PREBUILD above) runs install and build
+          # INSIDE fetch-pr, which the skill executes through the agent's
+          # shell tool: 120s built-in foreground default, 600s per-call
+          # ceiling — neither carries the prebuild's budget (measured cost
+          # ~4-5 minutes), so without a cover the tool kills fetch-pr
+          # mid-`npm ci` and the review stops over a partial tree. Weld the
+          # cover where the opt-in is welded: raise the session default in
+          # this per-run agent home's settings (shell-tool precedence:
+          # per-call timeout, then tools.shell.defaultTimeoutMs, then the
+          # built-in). The value is (PREBUILD_BUDGET_S +
+          # PREBUILD_COVER_HEADROOM_S) x 1000 — strictly above the budget,
+          # because the cover clock starts at the fetch-pr spawn while the
+          # budget clock starts only inside runBuildTest: the fetch prefix
+          # in between (refs, metadata, base fetch, diff capture, plan
+          # write) is strictly > 0, so a cover exactly AT the budget
+          # expires first in the very hang case it exists for, killing
+          # fetch-pr before it can record the outcome. Deliberately above
+          # the setting's interactive 600000 ceiling — the startup loader
+          # does not range-check, the runtime gate accepts it, and the
+          # per-call ceiling cannot hold the budget it exists to escape —
+          # and below the attempt's GNU timeout: budgets floor at 90
+          # minutes, and the budget gate above refuses the opt-in under
+          # anything that cannot carry it. The prebuild's own budget bounds
+          # a hang from inside and lands strictly before this cover fires.
+          # SESSION-WIDE TRADE-OFF (accepted): the value loads once at
+          # session start and cannot be unwelded after the prebuild, so
+          # EVERY foreground shell call in this session now hangs up to the
+          # cover instead of the 120s built-in — bounded by the GNU timeout
+          # below, the same bound the pre-prebuild flow always had; and an
+          # explicit per-call timeout outranks this default, so a call
+          # passing one shortens its own cover.
+          # scripts/tests/qwen-pr-review-workflow.test.js pins this value
+          # against PREBUILD_BUDGET_S and PREBUILD_COVER_HEADROOM_S in
+          # lib/prebuild.ts.
+          if [ "${QWEN_REVIEW_PREBUILD:-}" = '1' ]; then
+            mkdir -p "$QWEN_HOME"
+            printf '%s\n' '{"tools":{"shell":{"defaultTimeoutMs":2400000}}}' \
+              > "$QWEN_HOME/settings.json"
+          fi
+
           # One attempt of the qwen review. Sets OUTCOME (success | retryable |
           # quota | timeout | fatal), plus REASON/KIND for the failure paths.
           # A transient abort (dropped connection, a non-quota API/rate-limit
@@ -1363,13 +1532,20 @@ jobs:
             # The agent runs no-sandbox with the full job environment, and
             # the runner applies whatever it appends to $GITHUB_PATH /
             # $GITHUB_ENV to every LATER step (prepending the path file,
-            # shell lookup included). Point both at invocation-scoped decoys
-            # so appends die with PROXY_BIN no matter how the step exits —
-            # SIGKILL, set -e abort, chmod 444 on the real files, or an
-            # EXIT-trap bypass all become irrelevant because the real
-            # command files are never in the agent's environment.
+            # shell lookup included). Point all four runner command files at
+            # invocation-scoped decoys so appends die with PROXY_BIN no matter
+            # how the step exits — SIGKILL, set -e abort, chmod 444 on the
+            # real files, or an EXIT-trap bypass all become irrelevant because
+            # the real command files are never in the agent's environment, and
+            # a decoyed $GITHUB_STEP_SUMMARY cannot plant attacker text into
+            # the run page. The prefix only reaches the qwen invocation, so
+            # the step's own later writes still hit the real files. This
+            # shield is copied inline in 'Resolve conflicts': keep the decoy
+            # set aligned, edit both copies together.
             GITHUB_PATH="$PROXY_BIN/decoy.github-path" \
             GITHUB_ENV="$PROXY_BIN/decoy.github-env" \
+            GITHUB_OUTPUT="$PROXY_BIN/decoy.github-output" \
+            GITHUB_STEP_SUMMARY="$PROXY_BIN/decoy.github-step-summary" \
             timeout --kill-after=10s "${attempt_timeout}s" qwen \
               --auth-type openai \
               --approval-mode yolo \
@@ -2358,16 +2534,20 @@ jobs:
     # `true`. The variable is daemon state, and autofix's preflight is what
     # checks it up front, failing the job in seconds instead of at agent
     # startup. Anything moving a sandboxed job onto the pool should copy that
-    # preflight — see #9556.
+    # preflight — see #9556. (Moot for now: the agent step below runs with
+    # tools.sandbox false, for the reasons recorded on its settings block.)
     runs-on: 'ubuntu-latest'
     timeout-minutes: 120
     # Shared with qwen-autofix.yml's review-address job — see the rationale
     # there. GitHub concurrency groups are repository-scoped, so the identical
-    # prefix is what serialises the two workflows against each other; both
-    # merge the base branch and push to this PR's head, and racing them costs a
-    # whole agent run on the loser (observed on #7355). The prefix must stay
-    # byte-identical in both files; a test pins that, because renaming one side
-    # alone re-opens the race with nothing failing.
+    # prefix is what serialises the two workflows against each other; both run
+    # an expensive conflict-resolution agent against this PR's head, and
+    # racing them costs a whole agent run on the loser (observed on #7355).
+    # The prefix must stay byte-identical in both files; a test pins that,
+    # because renaming one side alone re-opens the race with nothing failing.
+    # Only the AGENT phase lives here; the credentialed push runs in
+    # publish-resolution under a per-run group (see the note there), so a
+    # completed resolution waiting to publish can never be replaced.
     concurrency:
       group: 'qwen-pr-head-write-${{ github.event.issue.number || github.event.inputs.pr_number }}'
       cancel-in-progress: false
@@ -2377,6 +2557,18 @@ jobs:
     # conflict-resolution path can reach a writable ambient token.
     permissions:
       contents: 'read'
+    # Consumed by publish-resolution. All of these are written before the
+    # agent step runs (or by the runner about it), never by the agent.
+    outputs:
+      decision: '${{ steps.prepare.outputs.decision }}'
+      pr_number: '${{ steps.resolve.outputs.pr_number }}'
+      agent_outcome: '${{ steps.resolve_conflicts.outcome }}'
+      agent_run_attempt: '${{ steps.resolve.outputs.run_attempt }}'
+      head_ref: '${{ steps.prepare.outputs.head_ref }}'
+      head_sha: '${{ steps.prepare.outputs.head_sha }}'
+      head_repo: '${{ steps.prepare.outputs.head_repo }}'
+      head_fetch_ref: '${{ steps.prepare.outputs.head_fetch_ref }}'
+      base_ref: '${{ steps.prepare.outputs.base_ref }}'
     env:
       REPO: '${{ github.repository }}'
       WORKDIR: '/tmp/qwen-resolve'
@@ -2423,6 +2615,10 @@ jobs:
             pr_number="$ISSUE_NUMBER"
           fi
           echo "pr_number=${pr_number}" >> "$GITHUB_OUTPUT"
+          # The attempt that runs the agent — publish-resolution downloads
+          # the run artifact by THIS number, not its own github.run_attempt
+          # (a partial "Re-run failed jobs" re-runs only the publish job).
+          echo "run_attempt=${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
 
       - name: 'Checkout base branch'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
@@ -2482,11 +2678,11 @@ jobs:
           pr_json="${WORKDIR}/pr.json"
           gh pr view "$PR_NUMBER" \
             --repo "$REPO" \
-            --json state,isDraft,headRefName,headRefOid,headRepository,headRepositoryOwner,baseRefName,url,title \
+            --json state,headRefName,headRefOid,headRepository,headRepositoryOwner,maintainerCanModify,baseRefName,url,title \
             > "$pr_json"
 
           state="$(jq -r '.state' "$pr_json")"
-          is_draft="$(jq -r '.isDraft' "$pr_json")"
+          maintainer_can_modify="$(jq -r '.maintainerCanModify' "$pr_json")"
           head_ref="$(jq -r '.headRefName' "$pr_json")"
           head_sha="$(jq -r '.headRefOid' "$pr_json")"
           head_repo_owner="$(jq -r '.headRepositoryOwner.login // ""' "$pr_json")"
@@ -2508,13 +2704,24 @@ jobs:
           if [ "$state" != "OPEN" ]; then
             finish_without_agent skip "PR #${PR_NUMBER} is ${state}."
           fi
-          if [ "$is_draft" = "true" ]; then
-            finish_without_agent skip "PR #${PR_NUMBER} is draft."
-          fi
+          # Drafts are not refused. /resolve is an explicit request by someone
+          # with write permission, and a draft with conflicts is exactly where
+          # resolving them is cheapest; the old gate only turned such requests
+          # into a skip comment (182 of them). The automatic review lane keeps
+          # its own draft gate — this is about the command only.
+          #
           # A deleted head repository makes headRepository null, so head_repo would
           # be "/" or "owner/" and the push URL malformed. Bail before the fetch.
           if [ -z "$head_repo_owner" ] || [ -z "$head_repo_name" ]; then
             finish_without_agent unsupported "PR #${PR_NUMBER}'s head repository was deleted; cannot push a resolution back."
+          fi
+          # A fork PR is pushable only through "Allow edits by maintainers".
+          # When it is off, the agent run is wasted: the resolution is produced
+          # and then rejected at the push (10 runs so far). Say so up front.
+          # (GitHub also refuses maintainer edits on organization-owned forks
+          # even when the box is ticked; that case still surfaces at the push.)
+          if [ "$head_repo" != "$REPO" ] && [ "$maintainer_can_modify" != "true" ]; then
+            finish_without_agent unsupported "PR #${PR_NUMBER} comes from the fork \`${head_repo}\` with **Allow edits by maintainers** off, so a resolution could not be pushed back to it. Enable that option on the PR and re-run /resolve, or merge \`${base_ref}\` into \`${head_ref}\` locally."
           fi
 
           # Fetch the PR head through refs/pull/N/head — the base repo mirrors it
@@ -2564,27 +2771,77 @@ jobs:
           write_output decision run
           decision_written=1
 
+      - name: 'Install Qwen CLI'
+        if: "steps.prepare.outputs.decision == 'run'"
+        env:
+          # Pinned, not `latest`. The CLI is installed from npm at run time,
+          # so `latest` makes every /resolve depend on the release pipeline
+          # of the moment: on 2026-08-15 the dist-tag moved to 0.21.12
+          # before the tarball was resolvable and 14 runs in a row died on
+          # `npm error notarget`. 0.21.10 is the last version with a
+          # measured record on this job (16 of 19 requests pushed on
+          # 2026-08-12). Bump it on purpose, after a dry-run /resolve on the
+          # new version.
+          QWEN_CLI_VERSION: '0.21.10'
+        run: |-
+          set -euo pipefail
+          npm install -g --registry=https://registry.npmjs.org "@qwen-code/qwen-code@${QWEN_CLI_VERSION}"
+          qwen --version
+
+      # The agent is invoked directly rather than through qwen-code-action so
+      # that its process environment can be controlled: the action runs the
+      # CLI with the runner's real $GITHUB_ENV / $GITHUB_PATH, and anything
+      # appended there is applied to every later step of this job. See the
+      # decoy note in the run block.
       - name: 'Resolve conflicts'
         if: "steps.prepare.outputs.decision == 'run'"
         id: 'resolve_conflicts'
-        uses: 'QwenLM/qwen-code-action@05f81718976f3b7da657422e6e8e4d372b8621d7'
+        # A pushed resolution takes 6 minutes at the median, 41 at p95 and 70
+        # at p99 (294 runs, request to result comment); only two ever took
+        # longer than 75. The 120-minute job timeout has therefore never ended
+        # a healthy run, only hung ones — and a hang billed the full 120
+        # minutes 40 times in 2026-08. 75 keeps the p99 tail and cuts that
+        # bill by a third. Keep AGENT_TIMEOUT_MINUTES on 'Report result' in
+        # step with this value; a test pins the pair.
+        timeout-minutes: 75
         env:
-          PR_NUMBER: '${{ steps.resolve.outputs.pr_number }}'
-          BASE_REF: '${{ steps.prepare.outputs.base_ref }}'
-          HEAD_REF: '${{ steps.prepare.outputs.head_ref }}'
-        with:
           OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
-          # The input name is `settings` — this action version has no
-          # `settings_json` input, and an unknown input is silently dropped.
-          # That is exactly what happened to this block: every /resolve run so
-          # far ignored it, and the agent ran without the turn cap, toolset
-          # allowlist, or the sandbox the runs-on comment above assumes.
-          # tools.core specifiers (e.g. `run_shell_command(git add)`) are advisory:
-          # the permission manager keys on the tool name and drops the parenthesised
-          # command. Real containment = sandbox + write authorization + no agent token.
-          settings: |-
+          # Written to a per-run QWEN_HOME by the run block below. Until
+          # #9252 this block was passed to the action under the wrong input
+          # name and silently dropped, so every /resolve ran without the turn
+          # cap or toolset allowlist; it now takes effect on every run.
+          # tools.core specifiers (e.g. `run_shell_command(git add)`) are
+          # advisory: the permission manager keys on the tool name and drops
+          # the parenthesised command, so the agent has arbitrary shell in
+          # this checkout. Containment therefore lives OUTSIDE the agent, and
+          # structurally: no token in this job after the agent starts — the
+          # push and the result comment run in `publish-resolution`, on a
+          # runner that never executed the agent, from a fresh checkout whose
+          # refs come from GitHub and whose only agent-supplied input is a
+          # verified git bundle. Whatever the agent leaves behind here — a
+          # config scope, a hook, a moved ref, a PATH shim, an append to the
+          # real $GITHUB_ENV, a detached process reading /proc — dies with
+          # this runner. (An in-job denylist was tried first and could not be
+          # closed: each entrance named produced the next one; see the review
+          # threads on #10428.) The remaining in-job measures — decoyed
+          # command files and the parsing-off window below — only keep the
+          # agent's OWN job's later steps (packaging, upload) honest.
+          #
+          # tools.sandbox is deliberately false. The day #9252 made this block
+          # take effect, `sandbox: true` took effect with it, and /resolve went
+          # from 84% pushed (273 agent runs, 2026-06-25..08-14) to 0 of 81
+          # (2026-08-15..08-27). Inside the container the agent either died at
+          # startup — the versioned `ghcr.io/qwenlm/qwen-code:<cli>` image lags
+          # the npm release (#9898: `manifest unknown` on 0.21.13, 0.22.0 and
+          # 0.22.1; 24 runs) — or produced no output at all until the job
+          # timeout (40 runs; `git status` afterwards showed the merge had not
+          # even started). No sandboxed /resolve run has ever pushed a
+          # resolution; every pushed one ran without the container. Turning the
+          # sandbox back on needs the same evidence the other way: a dry-run
+          # whose logs show the agent finishing inside it.
+          QWEN_SETTINGS: |-
             {
               "model": {
                 "maxSessionTurns": 400
@@ -2608,10 +2865,10 @@ jobs:
                   "run_shell_command(mkdir)",
                   "run_shell_command(pwd)"
                 ],
-                "sandbox": true
+                "sandbox": false
               }
             }
-          prompt: |-
+          PROMPT: |-
             ## Role
 
             You are resolving merge conflicts for PR #${{ steps.resolve.outputs.pr_number }} in this repository. The pull request branch is already checked out. You only need git to resolve the text conflicts; dependencies are not installed. Read ${{ env.WORKDIR }}/context.md first.
@@ -2640,10 +2897,225 @@ jobs:
               End with the project's collapsed Chinese translation: `<details>` / `<summary>中文说明</summary>` / the translated body / `</details>`.
             - If there is no longer a conflict, do not commit. Write `${{ env.WORKDIR }}/no-action.md` explaining what changed.
             - If you cannot confidently resolve the conflict, do not commit. Write `${{ env.WORKDIR }}/failure.md` with the blocker and what you learned.
+        run: |-
+          set -euo pipefail
+          # Per-run agent home: the settings above and nothing inherited from
+          # the runner user's ~/.qwen.
+          QWEN_HOME="${RUNNER_TEMP:?}/qwen-resolve-home"
+          rm -rf "$QWEN_HOME"
+          mkdir -p "$QWEN_HOME"
+          printf '%s\n' "$QWEN_SETTINGS" > "$QWEN_HOME/settings.json"
+          export QWEN_HOME
+          # A fork PR can commit its own .qwen/settings.json (the workspace
+          # layer), which the CLI merges ABOVE the user layer written above —
+          # an attacker-authored tools.sandbox or maxSessionTurns would
+          # outrank these settings. Remove the file; it is git-ignored here,
+          # so it can only arrive via a forced add on a fork branch. Do not
+          # rm -rf .qwen/: commands/, skills/ and agents/ under it can be
+          # legitimate tracked content.
+          rm -f .qwen/settings.json
+          MODEL_ARGS=()
+          if [ -n "${OPENAI_MODEL:-}" ]; then
+            MODEL_ARGS=(--model "$OPENAI_MODEL")
+          fi
+          # The agent runs no-sandbox with arbitrary shell and, on a fork PR,
+          # reads attacker-authored files. The runner applies whatever a step
+          # appends to $GITHUB_PATH / $GITHUB_ENV to every LATER step — the
+          # credentialed push included — so every runner command file is
+          # pointed at an invocation-scoped decoy that dies with this step.
+          # This shield is copied inline in 'Run review' (run_review_once):
+          # keep the decoy set aligned, edit both copies together. Command
+          # parsing is switched off around the agent for the same reason: a
+          # `::set-output`-style line in its output must stay text. The token
+          # is random per attempt so no agent output can guess it and resume
+          # parsing early. Nothing credentialed follows in this job; the
+          # publish job starts from a clean runner (see the settings block).
+          decoy_dir="$(mktemp -d "${RUNNER_TEMP}/qwen-resolve-decoy.XXXXXX")"
+          stop_token="qwen-resolve-stop-$(date +%s%N)-${RANDOM}${RANDOM}"
+          echo "::stop-commands::${stop_token}"
+          set +e
+          # GNU timeout (mirroring 'Run review') so a hung agent ends inside
+          # THIS shell: the runner-side timeout-minutes kills the whole
+          # process tree before the resume below and the command-file
+          # truncation can run. 4440s sits just under the 75-minute step
+          # timeout, which stays the outer backstop.
+          GITHUB_PATH="$decoy_dir/github-path" \
+          GITHUB_ENV="$decoy_dir/github-env" \
+          GITHUB_OUTPUT="$decoy_dir/github-output" \
+          GITHUB_STEP_SUMMARY="$decoy_dir/github-step-summary" \
+          timeout --kill-after=10s 4440s qwen \
+            --auth-type openai \
+            --approval-mode yolo \
+            "${MODEL_ARGS[@]}" \
+            --prompt "$PROMPT" \
+            --output-format stream-json \
+            > "${WORKDIR}/agent.stream-json.log" 2> "${WORKDIR}/agent.stderr.log"
+          status=$?
+          # The decoys only mask THIS invocation's environment: the real
+          # runner command files stay discoverable by the agent (this step's
+          # parent-shell /proc/<pid>/environ is same-uid readable,
+          # $RUNNER_TEMP is enumerable), and anything planted there applies to
+          # every later step — shell lookup included. This step writes nothing
+          # to them and downstream reads only runner-tracked values, so
+          # truncate all four on every exit path before the step ends.
+          : > "${GITHUB_ENV:?}" || true
+          : > "${GITHUB_PATH:?}" || true
+          : > "${GITHUB_OUTPUT:?}" || true
+          : > "${GITHUB_STEP_SUMMARY:?}" || true
+          # Diagnostics stay inside the parsing-off window: agent output is
+          # untrusted text. The full logs travel with the run artifact.
+          echo "qwen exited with ${status}; last stderr lines:"
+          tail -n 40 "${WORKDIR}/agent.stderr.log" || true
+          printf '\n::%s::\n' "$stop_token"
+          set -e
+          rm -rf "$decoy_dir"
+          exit "$status"
+
+      # The agent job ends here. Everything the publish job needs travels
+      # through the run artifact: the resolution as a git bundle (objects and
+      # one named ref — no config, no hooks, no other refs) plus the agent's
+      # report files. The publish job fetches the base and head refs from
+      # GitHub itself and verifies the bundle against them before anything
+      # else happens, so this runner's state stays in this job.
+      - name: 'Package resolution'
+        if: "${{ always() && steps.prepare.outputs.decision == 'run' }}"
+        env:
+          HEAD_SHA: '${{ steps.prepare.outputs.head_sha }}'
+          PR_NUMBER: '${{ steps.resolve.outputs.pr_number }}'
+        run: |-
+          set -uo pipefail
+          if [ ! -d .git ]; then
+            echo "no .git directory after the agent step; nothing to package"
+            exit 0
+          fi
+          resolved="$(git rev-parse --verify HEAD 2>/dev/null || true)"
+          if [ -z "$resolved" ] || [ "$resolved" = "$HEAD_SHA" ]; then
+            echo "branch unchanged (${resolved:-unreadable}); no bundle to package"
+            exit 0
+          fi
+          git update-ref "refs/heads/qwen-resolve/pr-${PR_NUMBER}" "$resolved"
+          if git bundle create "${WORKDIR}/resolution.bundle" "${HEAD_SHA}..refs/heads/qwen-resolve/pr-${PR_NUMBER}"; then
+            printf '%s\n' "$resolved" > "${WORKDIR}/resolution.sha"
+            echo "packaged ${resolved} (on ${HEAD_SHA}) as resolution.bundle"
+          else
+            echo "::warning::could not package the resolution bundle; the publish job will report the run as failed."
+          fi
+
+      - name: 'Show run artifacts'
+        if: "${{ always() && steps.prepare.outputs.decision == 'run' }}"
+        env:
+          BASE_REF: '${{ steps.prepare.outputs.base_ref }}'
+        run: |-
+          # Diagnostics only, in the agent's own runner. Nothing printed or
+          # written here is trusted downstream: the publish job recomputes the
+          # diff and every verdict from the bundle and GitHub's refs, so a
+          # planted diff driver or config can only mislead this log.
+          git status --short || true
+          git diff "origin/${BASE_REF}...HEAD" > "${WORKDIR}/pr.diff" || true
+          for file in context.md address-summary.md no-action.md failure.md pr.diff; do
+            if [ -f "${WORKDIR}/${file}" ]; then
+              echo "=============== ${file} ==============="
+              cat "${WORKDIR}/${file}"
+              echo
+            fi
+          done
+
+      - name: 'Upload run artifacts'
+        if: "${{ always() && steps.prepare.outputs.decision == 'run' }}"
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          # The name carries run_attempt: a re-run keeps the run_id, and the
+          # publish job downloads by this exact name — without the suffix the
+          # re-run 409s on attempt 1's artifact and republishes the stale one.
+          name: 'qwen-resolve-pr-${{ steps.resolve.outputs.pr_number }}-attempt-${{ github.run_attempt }}'
+          path: '${{ env.WORKDIR }}/'
+          if-no-files-found: 'ignore'
+
+      - name: 'Report skipped request'
+        # always(): the prepare step's EXIT trap writes decision=failed when it
+        # crashes, but a bare if implicitly requires success() — so without
+        # always() this step is skipped on the very crash it must report.
+        if: "${{ always() && (steps.prepare.outputs.decision == 'skip' || steps.prepare.outputs.decision == 'unsupported' || steps.prepare.outputs.decision == 'failed') }}"
+        env:
+          GH_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
+          PR_NUMBER: '${{ steps.resolve.outputs.pr_number }}'
+          SKIP_REASON: '${{ steps.prepare.outputs.skip_reason }}'
+        run: |-
+          set -euo pipefail
+          {
+            echo "<!-- qwen-resolve-result -->"
+            echo "Qwen Code did not run conflict resolution for this request."
+            echo
+            echo "${SKIP_REASON}"
+          } > "${WORKDIR}/report.md"
+          # Best-effort, matching 'Report result': a transient API error here must
+          # not abort the step under set -e and swallow the only failure signal.
+          gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file "${WORKDIR}/report.md" ||
+            echo "::warning::Resolve was skipped, but posting the skip-reason comment failed."
+
+
+  # Publishes what the agent job produced — verification, push and the result
+  # comment — on a runner that never executed the agent. It starts from a
+  # fresh checkout, fetches the base and head refs from GitHub itself, and
+  # takes from the agent job only the run artifact (a git bundle and the
+  # report files), each verified or sanitised before use. The push token lives
+  # only in this job.
+  publish-resolution:
+    needs: ['resolve-pr']
+    if: "${{ always() && needs.resolve-pr.outputs.decision == 'run' }}"
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 20
+    # A PER-RUN group, deliberately NOT the shared qwen-pr-head-write-<pr> one.
+    # This job is only reached after resolve-pr finished and uploaded a
+    # completed resolution; between that and this job starting it sits pending.
+    # GitHub keeps only one pending job per group and replaces it when another
+    # same-group job is queued (cancel-in-progress:false protects only a
+    # RUNNING job), so sharing the head-write group would let a second
+    # /resolve, a later publisher, or an autofix writer silently cancel this
+    # pending publisher — dropping a resolution that already succeeded, before
+    # it is ever pushed or reported. A per-run group has one member for life,
+    # so this job can never be replaced. Competing publishers stay safe not
+    # through the group but through the push itself: it is force-with-lease
+    # pinned to the head the agent resolved from, so of two concurrent pushes
+    # exactly one wins and the other reports "moved" cleanly (never a clobber,
+    # never a silent drop). The expensive, wasteful-to-race work — the agent —
+    # is what stays in the shared head-write group, on resolve-pr.
+    concurrency:
+      group: 'qwen-pr-publish-${{ github.run_id }}'
+      cancel-in-progress: false
+    permissions:
+      contents: 'read'
+    env:
+      REPO: '${{ github.repository }}'
+      WORKDIR: '/tmp/qwen-resolve'
+      DRY_RUN: '${{ github.event.inputs.dry_run || false }}'
+      PR_NUMBER: '${{ needs.resolve-pr.outputs.pr_number }}'
+    steps:
+      - name: 'Checkout base branch'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          ref: '${{ github.event.repository.default_branch }}'
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: 'Download run artifacts'
+        # A cancelled or crashed agent job may have uploaded nothing; the
+        # import in 'Resolution check' reports that as an infrastructure
+        # failure instead of letting this step end the job without a comment.
+        # The name ends in the attempt that RAN THE AGENT, not this job's own
+        # github.run_attempt: a partial "Re-run failed jobs" re-runs only the
+        # publish job, and only the agent's attempt uploaded an artifact —
+        # downloading by this attempt's name would miss it and wedge the
+        # re-run on a contradictory failure comment.
+        continue-on-error: true
+        uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
+        with:
+          name: 'qwen-resolve-pr-${{ needs.resolve-pr.outputs.pr_number }}-attempt-${{ needs.resolve-pr.outputs.agent_run_attempt }}'
+          path: '/tmp/qwen-resolve'
 
       - name: 'Resolution check'
         id: 'verify'
-        if: "${{ always() && steps.prepare.outputs.decision == 'run' }}"
+        if: '${{ always() }}'
         # Refs are passed as env vars and only referenced as "$BASE_REF" /
         # "$HEAD_FETCH_REF" inside the script. They must never be inlined as
         # ${{ ... }}: branch names legally contain `$(...)`/backticks, so textual
@@ -2651,21 +3123,82 @@ jobs:
         env:
           # No PR code runs in this step — it only runs git checks — but the empty
           # value keeps a writable GITHUB_TOKEN out of the workspace as defense in
-          # depth, mirroring the no-token contract of the agent step above.
+          # depth, mirroring the no-token contract of the agent step.
           GITHUB_TOKEN: ''
-          BASE_REF: '${{ steps.prepare.outputs.base_ref }}'
-          HEAD_FETCH_REF: '${{ steps.prepare.outputs.head_fetch_ref }}'
-          RESOLVE_OUTCOME: '${{ steps.resolve_conflicts.outcome }}'
+          BASE_REF: '${{ needs.resolve-pr.outputs.base_ref }}'
+          HEAD_FETCH_REF: '${{ needs.resolve-pr.outputs.head_fetch_ref }}'
+          HEAD_SHA: '${{ needs.resolve-pr.outputs.head_sha }}'
+          RESOLVE_OUTCOME: '${{ needs.resolve-pr.outputs.agent_outcome }}'
         run: |-
           set -euo pipefail
+
+          # This checkout never ran the agent: the refs it checks against come
+          # from GitHub, and the resolution arrives only as a bundle (below).
+          git fetch origin "+refs/pull/${PR_NUMBER}/head:${HEAD_FETCH_REF}" "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+          # Every check compares against the head the agent resolved FROM —
+          # recorded by the agent job before its agent ran — not against the
+          # PR's current head. A head that moved meanwhile is the push's
+          # business (the lease declines and the moved-head comment follows),
+          # not a scope-guard failure that would blame the contributor's new
+          # commits on the agent. If the PR head no longer points at it, the
+          # commit is fetched by SHA.
+          if ! git cat-file -e "${HEAD_SHA}^{commit}" 2>/dev/null; then
+            git fetch origin "$HEAD_SHA" || true
+          fi
+          if ! git cat-file -e "${HEAD_SHA}^{commit}" 2>/dev/null; then
+            echo "The PR head the agent resolved from (${HEAD_SHA}) is no longer reachable on GitHub; refusing."
+            echo "outcome=failed" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          git update-ref "$HEAD_FETCH_REF" "$HEAD_SHA"
 
           # The agent step runs under always(); if it failed at the infrastructure
           # level (API timeout, model quota, action crash) the branch is unmodified
           # and the merge-tree check below would misreport "still has conflicts".
           # Surface the real cause instead.
           if [ "$RESOLVE_OUTCOME" != "success" ]; then
-            echo "The conflict-resolution agent step did not succeed (outcome=${RESOLVE_OUTCOME}): API/quota/infrastructure error or cancellation. Check its logs."
+            echo "The conflict-resolution agent step did not succeed (outcome=${RESOLVE_OUTCOME}): CLI install, model endpoint or infrastructure error, its step timeout, or cancellation. Check its logs."
             echo "outcome=failed" >> "$GITHUB_OUTPUT"
+            # Distinguish "never reached a verdict" from "reached a wrong one":
+            # 'Report result' words the comment differently and does not invite
+            # a re-run, because a re-run repeats an infrastructure failure.
+            echo "failure_kind=infra" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          # Import the resolution. The artifact is attacker-influenced (the
+          # agent wrote it), so it is admitted as objects only: `git bundle
+          # verify` proves the bundle's prerequisites exist in THIS repository
+          # (the head fetched from GitHub above), and the imported commit must
+          # descend from the head the agent resolved from. No bundle means the
+          # agent changed nothing — a no-op or a written-up failure — and the
+          # checks below run against the unchanged head.
+          bundle="${WORKDIR}/resolution.bundle"
+          resolution_ref="refs/heads/qwen-resolve/pr-${PR_NUMBER}"
+          if [ -s "$bundle" ]; then
+            if ! git bundle verify "$bundle" > /dev/null; then
+              echo "The resolution bundle from the agent job does not verify against the PR head; refusing."
+              echo "outcome=failed" >> "$GITHUB_OUTPUT"
+              exit 1
+            fi
+            git fetch "$bundle" "+${resolution_ref}:${resolution_ref}"
+            git checkout -q -B "qwen-resolve/pr-${PR_NUMBER}" "$resolution_ref"
+            if ! git merge-base --is-ancestor "$HEAD_SHA" HEAD; then
+              echo "The resolution does not descend from the PR head the agent resolved from (${HEAD_SHA}); refusing."
+              echo "outcome=failed" >> "$GITHUB_OUTPUT"
+              exit 1
+            fi
+          elif [ -d "$WORKDIR" ]; then
+            git checkout -q -B "qwen-resolve/pr-${PR_NUMBER}" "$HEAD_FETCH_REF"
+          else
+            # Only reachable with RESOLVE_OUTCOME=success — any other outcome
+            # exits in the never-ran block above. The agent finished, but its
+            # artifact is gone (the upload step failed or it expired), so the
+            # result cannot be verified or published; classify the LOST
+            # ARTIFACT, never the agent run, and word the comment accordingly.
+            echo "The agent step succeeded, but its run artifact is missing (the upload failed or the artifact expired); nothing to verify."
+            echo "outcome=failed" >> "$GITHUB_OUTPUT"
+            echo "failure_kind=artifact_missing" >> "$GITHUB_OUTPUT"
             exit 1
           fi
 
@@ -2729,13 +3262,14 @@ jobs:
           # itself changed (conflict resolutions live in those same files).
           # Anything edited outside that set is out of scope — a prompt-injection
           # symptom — so fail closed and list the offending files. Granularity is
-          # deliberately file-level, not per-hunk: real containment is sandbox +
-          # write authorization + no agent token; this is one defense-in-depth layer.
+          # deliberately file-level, not per-hunk: real containment is write
+          # authorization + no agent token + an ephemeral runner; this is one
+          # defense-in-depth layer.
           merge_base="$(git merge-base "origin/${BASE_REF}" "$HEAD_FETCH_REF")"
           # -z/sort -zu mirrors the conflict-marker check above so unusual
-          # filenames in the diff are handled consistently. ponytail: tr back to
+          # filenames in the diff are handled consistently, then tr back to
           # newlines because bash vars can't hold NUL — a filename containing a
-          # literal newline still splits, but that's covered by the sandbox +
+          # literal newline still splits, but that's covered by the
           # write-authorization + no-token containment this guard backstops.
           base_changed="$(git diff --name-only -z "${merge_base}" "origin/${BASE_REF}" | sort -zu | tr '\0' '\n')"
           agent_changed="$(git diff --name-only -z "$HEAD_FETCH_REF" HEAD | sort -zu | tr '\0' '\n')"
@@ -2753,65 +3287,36 @@ jobs:
           # in scope, and committed, the resolution is publishable.
           echo "outcome=fixed" >> "$GITHUB_OUTPUT"
 
-      - name: 'Show run artifacts'
-        if: "${{ always() && steps.prepare.outputs.decision == 'run' }}"
-        env:
-          BASE_REF: '${{ steps.prepare.outputs.base_ref }}'
-        run: |-
-          git status --short || true
-          git diff "origin/${BASE_REF}...HEAD" > "${WORKDIR}/pr.diff" || true
-          for file in context.md address-summary.md no-action.md failure.md pr.diff; do
-            if [ -f "${WORKDIR}/${file}" ]; then
-              echo "=============== ${file} ==============="
-              cat "${WORKDIR}/${file}"
-              echo
-            fi
-          done
-
-      - name: 'Upload run artifacts'
-        if: "${{ always() && steps.prepare.outputs.decision == 'run' }}"
-        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
-        with:
-          name: 'qwen-resolve-pr-${{ steps.resolve.outputs.pr_number }}'
-          path: '${{ env.WORKDIR }}/'
-          if-no-files-found: 'ignore'
-
-      - name: 'Report skipped request'
-        # always(): the prepare step's EXIT trap writes decision=failed when it
-        # crashes, but a bare if implicitly requires success() — so without
-        # always() this step is skipped on the very crash it must report.
-        if: "${{ always() && (steps.prepare.outputs.decision == 'skip' || steps.prepare.outputs.decision == 'unsupported' || steps.prepare.outputs.decision == 'failed') }}"
-        env:
-          GH_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
-          PR_NUMBER: '${{ steps.resolve.outputs.pr_number }}'
-          SKIP_REASON: '${{ steps.prepare.outputs.skip_reason }}'
-        run: |-
-          set -euo pipefail
-          {
-            echo "<!-- qwen-resolve-result -->"
-            echo "Qwen Code did not run conflict resolution for this request."
-            echo
-            echo "${SKIP_REASON}"
-          } > "${WORKDIR}/report.md"
-          # Best-effort, matching 'Report result': a transient API error here must
-          # not abort the step under set -e and swallow the only failure signal.
-          gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file "${WORKDIR}/report.md" ||
-            echo "::warning::Resolve was skipped, but posting the skip-reason comment failed."
-
       - name: 'Report result'
-        if: "${{ always() && steps.prepare.outputs.decision == 'run' }}"
+        if: '${{ always() }}'
         env:
           GH_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
           PUSH_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
-          PR_NUMBER: '${{ steps.resolve.outputs.pr_number }}'
-          HEAD_REF: '${{ steps.prepare.outputs.head_ref }}'
-          HEAD_SHA: '${{ steps.prepare.outputs.head_sha }}'
-          HEAD_REPO: '${{ steps.prepare.outputs.head_repo }}'
+          HEAD_REF: '${{ needs.resolve-pr.outputs.head_ref }}'
+          HEAD_SHA: '${{ needs.resolve-pr.outputs.head_sha }}'
+          HEAD_REPO: '${{ needs.resolve-pr.outputs.head_repo }}'
+          # The replay merges the base branch again; without this the step's
+          # `set -u` aborts on the first ${BASE_REF} — a test pins env coverage.
+          BASE_REF: '${{ needs.resolve-pr.outputs.base_ref }}'
+          # Test hook for the replay's fetch URL; empty in production, where
+          # the replay fetches https://github.com/<repo>.git.
+          RESOLVE_ORIGIN_URL: ''
           OUTCOME: '${{ steps.verify.outputs.outcome }}'
+          FAILURE_KIND: '${{ steps.verify.outputs.failure_kind }}'
+          RESOLVE_OUTCOME: '${{ needs.resolve-pr.outputs.agent_outcome }}'
+          # The attempt that ran the agent; the artifact name cited below
+          # carries it (this job's own github.run_attempt is one ahead on a
+          # partial "Re-run failed jobs").
+          AGENT_RUN_ATTEMPT: '${{ needs.resolve-pr.outputs.agent_run_attempt }}'
+          # Mirrors timeout-minutes on 'Resolve conflicts'; a test pins the pair.
+          AGENT_TIMEOUT_MINUTES: '75'
           DRY_RUN: '${{ env.DRY_RUN }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
         run: |-
           set -euo pipefail
+          export GIT_TERMINAL_PROMPT=0
+          mkdir -p "${WORKDIR}"
+
           push_failed=false
 
           # Budget for one agent-written section of the comment. The old 2000
@@ -2843,58 +3348,189 @@ jobs:
           }
 
           push_fail_reason=''
+          replayed_on=''
+          push_log="${WORKDIR}/push.log"
+
+          # Push the resolved branch back to the PR head. For a fork PR the head
+          # lives in the contributor's repository (HEAD_REPO), reachable only via
+          # "Allow edits by maintainers"; for an in-repo PR HEAD_REPO == REPO, so
+          # the same push works. The token is passed inline so it never lands in
+          # .git/config (origin keeps its credential-free URL). git redacts the
+          # token from its own output; push.log is only grepped to classify the
+          # failure and is never echoed into the PR comment.
+          # SECURITY: the push token carries the `workflow` scope, so a conflict
+          # the agent resolves inside a .github/workflows/** file is pushed to the
+          # (possibly fork) head branch and then runs in that repo's Actions. This
+          # is bounded by the no-token agent, the scope guard (only base-changed
+          # files), and write+ maintainer authorization, and it lands in the
+          # contributor's own CI context — not this repo's. The push runs on a
+          # runner the agent never touched (this job), from a checkout whose
+          # refs came from GitHub and whose only agent-supplied input is the
+          # verified bundle, so nothing the agent could plant reaches it.
+          push_resolution() {
+            git push --no-verify \
+              --force-with-lease="refs/heads/${HEAD_REF}:${HEAD_SHA}" \
+              "https://x-access-token:${PUSH_TOKEN}@github.com/${HEAD_REPO}.git" \
+              "HEAD:refs/heads/${HEAD_REF}" 2> "$push_log"
+          }
+
+          # Classify in priority order:
+          # 1. workflow_scope — resolving merges the base branch in, which
+          #    carries its .github/workflows/** changes; GitHub rejects any PAT
+          #    without the `workflow` scope from updating workflow files. Anchor
+          #    on GitHub's server phrase "refusing to allow ... workflow" — NOT a
+          #    loose `workflow.*scope`, which the attacker-controlled branch name
+          #    in git's `! [remote rejected] HEAD -> <branch>` echo could trip
+          #    (e.g. a branch named `fix-workflow-scope`), producing a comment
+          #    that tells maintainers to grant the bot the workflow scope.
+          # 2. moved — the head branch advanced, so force-with-lease declined.
+          #    Tested BEFORE permission: git echoes the destination ref into
+          #    the same log (`HEAD -> <branch> (stale info)`), so a branch
+          #    named e.g. fix/permission-prompt or fix-403-error would match a
+          #    permission substring and the replay would never run. A genuine
+          #    permission denial never carries a lease-decline phrase. The
+          #    same echo cuts the other way: `force-with-lease` and
+          #    `non-fast-forward` are legal branch-name substrings, so match
+          #    git's parenthesised reason — `(stale info)`, `(fetch first)`,
+          #    `(non-fast-forward)` — not the bare words, and anchor it to
+          #    end-of-line: git prints the reason last on the rejection line,
+          #    so a branch merely containing `(non-fast-forward)` still ends
+          #    with the real reason and does not match.
+          # 3. permission — 403, or a 404 "not found" (GitHub hides repos a token
+          #    can't see) which is an access problem in practice.
+          classify_push_failure() {
+            if grep -qiE 'refusing to allow.*workflow' "$push_log"; then
+              push_fail_reason='workflow_scope'
+            elif grep -qiE '\((stale info|fetch first|non-fast-forward)\)$' "$push_log"; then
+              push_fail_reason='moved'
+            elif grep -qiE '403|permission|not authorized|forbidden|protected branch|cannot be updated|not found|does not exist' "$push_log"; then
+              push_fail_reason='permission'
+            else
+              push_fail_reason='other'
+            fi
+          }
+
+          # The head moved while the agent worked. That lost 17 of the 294
+          # resolutions ever produced — the largest single loss after the agent
+          # itself — and nearly all such pushes are unrelated to the conflict
+          # (a CI fix, a review nit). So: fetch the new head, redo the merge on
+          # top of it, and wherever it still conflicts take the agent's version
+          # of that file IF the new head has not touched the file since the SHA
+          # the agent resolved from. Any other conflict gives up and reports
+          # "moved" exactly as before, with the original resolution attached.
+          # The replayed tree is then held to the same structural checks
+          # 'Resolution check' applied to the first merge — no markers, merges
+          # cleanly, only base-changed files — before it is pushed with a lease
+          # on the NEW head. The agent is never re-run.
+          replay_give_up() {
+            echo "Replay gave up: $1"
+            git merge --abort > /dev/null 2>&1 || true
+            git checkout -q -f "qwen-resolve/pr-${PR_NUMBER}" > /dev/null 2>&1 || true
+          }
+          replay_on_moved_head() {
+            local resolved_commit new_ref new_sha file
+            local markers merge_base base_changed replay_changed out_of_scope
+            # The replay commits (`git commit -C` below reuses the agent's
+            # author and message; the committer comes from the environment).
+            # The publish job's fresh checkout carries no committer identity —
+            # supply it here, never from config.
+            export GIT_COMMITTER_NAME='qwen-code-dev-bot'
+            export GIT_COMMITTER_EMAIL='qwen-code-dev-bot@users.noreply.github.com'
+            # Conflicted filenames are literal paths, not glob patterns: a file
+            # named `spec[1].md` would otherwise widen the per-file diff,
+            # checkout, and rm pathspecs to its sibling `spec1.md`.
+            export GIT_LITERAL_PATHSPECS=1
+            resolved_commit="$(git rev-parse HEAD)"
+            new_ref="refs/remotes/origin/qwen-resolve/pr-${PR_NUMBER}/moved"
+            # Fetch by URL, not by remote name: the replay must not depend on
+            # the checkout's remote configuration, and RESOLVE_ORIGIN_URL
+            # exists so the fixture test can point this at a local bare
+            # repository.
+            git fetch "${RESOLVE_ORIGIN_URL:-https://github.com/${REPO}.git}" "+refs/pull/${PR_NUMBER}/head:${new_ref}" || { replay_give_up "could not fetch the new head."; return 1; }
+            new_sha="$(git rev-parse "$new_ref")"
+            if [ "$new_sha" = "$HEAD_SHA" ]; then
+              replay_give_up "the PR head is still ${HEAD_SHA}; the push was declined for another reason."
+              return 1
+            fi
+            git checkout -q -B "qwen-resolve/pr-${PR_NUMBER}-replay" "$new_ref" || { replay_give_up "could not check out ${new_sha}."; return 1; }
+            if ! git merge --no-commit --no-ff "origin/${BASE_REF}" > /dev/null 2>&1; then
+              while IFS= read -r -d '' file; do
+                if git diff --quiet "$HEAD_SHA" "$new_sha" -- "$file"; then
+                  # A deletion IS the agent's version of the file: checkout
+                  # fails on a path absent from the resolved commit.
+                  if git cat-file -e "${resolved_commit}:${file}" 2>/dev/null; then
+                    git checkout "$resolved_commit" -- "$file" || { replay_give_up "could not take the agent's version of ${file}."; return 1; }
+                  else
+                    git rm -q -- "$file" || { replay_give_up "could not take the agent's deletion of ${file}."; return 1; }
+                  fi
+                else
+                  replay_give_up "${file} still conflicts and the new head changed it since ${HEAD_SHA}."
+                  return 1
+                fi
+              done < <(git diff --name-only --diff-filter=U -z)
+            fi
+            if git ls-files -u | grep -q .; then
+              replay_give_up "unresolved paths remain."
+              return 1
+            fi
+            if git diff --cached --quiet; then
+              replay_give_up "merging ${BASE_REF} into ${new_sha} changes nothing."
+              return 1
+            fi
+            git commit -q -C "$resolved_commit" || { replay_give_up "could not commit the replay."; return 1; }
+            markers="$(git diff --name-only -z --diff-filter=ACMRT "$new_sha" HEAD |
+              xargs -0 -r grep -InE -e '^(<<<<<<<|>>>>>>>) ' -- || true)"
+            if [ -n "$markers" ]; then
+              replay_give_up "conflict markers after replay."
+              return 1
+            fi
+            if ! git merge-tree --write-tree "origin/${BASE_REF}" HEAD > /dev/null 2>&1; then
+              replay_give_up "the replay still conflicts with ${BASE_REF}."
+              return 1
+            fi
+            merge_base="$(git merge-base "origin/${BASE_REF}" "$new_sha")"
+            base_changed="$(git diff --name-only -z "${merge_base}" "origin/${BASE_REF}" | sort -zu | tr '\0' '\n')"
+            replay_changed="$(git diff --name-only -z "$new_sha" HEAD | sort -zu | tr '\0' '\n')"
+            out_of_scope="$(comm -23 <(printf '%s\n' "$replay_changed") <(printf '%s\n' "$base_changed"))"
+            if [ -n "$out_of_scope" ]; then
+              replay_give_up "files outside the base-changed set: $(printf '%s ' $out_of_scope)"
+              return 1
+            fi
+            replayed_on="$new_sha"
+            HEAD_SHA="$new_sha"
+            echo "Head moved to ${new_sha} while resolving; replayed the resolution on top of it."
+            return 0
+          }
+
           if [ "$OUTCOME" = "fixed" ] && [ "$DRY_RUN" != "true" ]; then
             if [ -z "${PUSH_TOKEN}" ]; then
               echo "::error::CI_DEV_BOT_PAT is required to push conflict fixes."
               exit 1
             fi
-            # Push the resolved branch back to the PR head. For a fork PR the head
-            # lives in the contributor's repository (HEAD_REPO), reachable only via
-            # "Allow edits by maintainers"; for an in-repo PR HEAD_REPO == REPO, so
-            # the same push works. The token is passed inline so it never lands in
-            # .git/config (origin keeps its credential-free URL). git redacts the
-            # token from its own output; push.log is only grepped to classify the
-            # failure and is never echoed into the PR comment.
-            # SECURITY: the push token carries the `workflow` scope, so a conflict
-            # the agent resolves inside a .github/workflows/** file is pushed to the
-            # (possibly fork) head branch and then runs in that repo's Actions. This
-            # is bounded by the no-token sandboxed agent, the scope guard (only
-            # base-changed files), and write+ maintainer authorization, and it lands
-            # in the contributor's own CI context — not this repo's.
-            push_log="${WORKDIR}/push.log"
-            if git push \
-              --force-with-lease="refs/heads/${HEAD_REF}:${HEAD_SHA}" \
-              "https://x-access-token:${PUSH_TOKEN}@github.com/${HEAD_REPO}.git" \
-              "HEAD:refs/heads/${HEAD_REF}" 2> "$push_log"; then
+            if push_resolution; then
               :
             else
-              push_failed=true
-              # Classify in priority order:
-              # 1. workflow_scope — resolving merges the base branch in, which
-              #    carries its .github/workflows/** changes; GitHub rejects any PAT
-              #    without the `workflow` scope from updating workflow files. Anchor
-              #    on GitHub's server phrase "refusing to allow ... workflow" — NOT a
-              #    loose `workflow.*scope`, which the attacker-controlled branch name
-              #    in git's `! [remote rejected] HEAD -> <branch>` echo could trip
-              #    (e.g. a branch named `fix-workflow-scope`), producing a comment
-              #    that tells maintainers to grant the bot the workflow scope.
-              # 2. permission — 403, or a 404 "not found" (GitHub hides repos a token
-              #    can't see) which is an access problem in practice.
-              # 3. moved — the head branch advanced, so force-with-lease declined.
-              if grep -qiE 'refusing to allow.*workflow' "$push_log"; then
-                push_fail_reason='workflow_scope'
-              elif grep -qiE '403|permission|not authorized|forbidden|protected branch|cannot be updated|not found|does not exist' "$push_log"; then
-                push_fail_reason='permission'
-              elif grep -qiE 'stale info|force-with-lease|non-fast-forward|fetch first' "$push_log"; then
-                push_fail_reason='moved'
+              classify_push_failure
+              if [ "$push_fail_reason" = "moved" ] && replay_on_moved_head && push_resolution; then
+                # The run artifact uploaded earlier describes the ORIGINAL
+                # resolution; what was just pushed is its replay onto the new
+                # head. Record the pushed tree so the upload step after this
+                # one preserves it beside the original (the replay-success
+                # comment points at it).
+                mkdir -p "${WORKDIR}/pushed"
+                git rev-parse HEAD > "${WORKDIR}/pushed/pushed.sha" || true
+                git diff "origin/${BASE_REF}...HEAD" > "${WORKDIR}/pushed/pushed.diff" || true
               else
-                push_fail_reason='other'
+                push_failed=true
+                # A replay that reached its own push leaves that push's log
+                # behind; classify whatever is there now.
+                classify_push_failure
+                echo "::error::Push to ${HEAD_REPO} failed (reason=${push_fail_reason})."
+                # Echo the git error for diagnosis with the token scrubbed. git already
+                # redacts the URL password to ***; this is belt-and-suspenders.
+                echo '--- git push stderr (token redacted) ---'
+                sed -E 's#x-access-token:[^@]*@#x-access-token:***@#g' "$push_log" || true
               fi
-              echo "::error::Push to ${HEAD_REPO} failed (reason=${push_fail_reason})."
-              # Echo the git error for diagnosis with the token scrubbed. git already
-              # redacts the URL password to ***; this is belt-and-suspenders.
-              echo '--- git push stderr (token redacted) ---'
-              sed -E 's#x-access-token:[^@]*@#x-access-token:***@#g' "$push_log" || true
             fi
           fi
 
@@ -2905,20 +3541,22 @@ jobs:
                 if [ "$push_failed" = "true" ]; then
                   case "$push_fail_reason" in
                     workflow_scope)
-                      echo "Qwen Code resolved the merge conflicts, but could not push to \`${HEAD_REPO}\`: resolving merges the base branch in, which includes its \`.github/workflows/**\` changes, and GitHub blocks a token without the **\`workflow\`** scope from updating workflow files. A maintainer needs to grant that scope to the push bot (classic PAT: check \`workflow\`; fine-grained PAT: Workflows → Read and write), then re-run /resolve. The resolved diff is attached as the \`qwen-resolve-pr-${PR_NUMBER}\` artifact on the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})."
+                      echo "Qwen Code resolved the merge conflicts, but could not push to \`${HEAD_REPO}\`: resolving merges the base branch in, which includes its \`.github/workflows/**\` changes, and GitHub blocks a token without the **\`workflow\`** scope from updating workflow files. A maintainer needs to grant that scope to the push bot (classic PAT: check \`workflow\`; fine-grained PAT: Workflows → Read and write), then re-run /resolve. The resolved diff is attached as the \`qwen-resolve-pr-${PR_NUMBER}-attempt-${AGENT_RUN_ATTEMPT}\` artifact on the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})."
                       ;;
                     permission)
-                      echo "Qwen Code resolved the merge conflicts, but could not push to \`${HEAD_REPO}\`. For a fork PR this needs **Allow edits by maintainers** enabled, and GitHub blocks maintainer edits on forks owned by an organization. The resolved diff is attached as the \`qwen-resolve-pr-${PR_NUMBER}\` artifact on the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})."
+                      echo "Qwen Code resolved the merge conflicts, but could not push to \`${HEAD_REPO}\`. For a fork PR this needs **Allow edits by maintainers** enabled, and GitHub blocks maintainer edits on forks owned by an organization. The resolved diff is attached as the \`qwen-resolve-pr-${PR_NUMBER}-attempt-${AGENT_RUN_ATTEMPT}\` artifact on the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})."
                       ;;
                     moved)
-                      echo "Qwen Code resolved the merge conflicts, but the head branch changed while resolving, so the update was not pushed. Re-run /resolve. The resolved diff is attached as the \`qwen-resolve-pr-${PR_NUMBER}\` artifact on the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})."
+                      echo "Qwen Code resolved the merge conflicts, but the head branch changed while resolving, so the update was not pushed. Re-run /resolve. The resolved diff is attached as the \`qwen-resolve-pr-${PR_NUMBER}-attempt-${AGENT_RUN_ATTEMPT}\` artifact on the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})."
                       ;;
                     *)
-                      echo "Qwen Code resolved the merge conflicts, but pushing to \`${HEAD_REPO}\` failed. The resolved diff is attached as the \`qwen-resolve-pr-${PR_NUMBER}\` artifact on the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})."
+                      echo "Qwen Code resolved the merge conflicts, but pushing to \`${HEAD_REPO}\` failed. The resolved diff is attached as the \`qwen-resolve-pr-${PR_NUMBER}-attempt-${AGENT_RUN_ATTEMPT}\` artifact on the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})."
                       ;;
                   esac
                 elif [ "$DRY_RUN" = "true" ]; then
                   echo "Qwen Code resolved the merge conflicts in dry-run mode. No branch update was pushed."
+                elif [ -n "$replayed_on" ]; then
+                  echo "Qwen Code resolved the merge conflicts and pushed the branch update. The head branch moved to \`${replayed_on}\` while the conflicts were being resolved; the resolution was replayed on top of it and re-checked before the push — where a file still conflicted and the new commits had not touched it, the replay took the agent's version. The pushed branch is that replay: its diff against \`${BASE_REF}\` is attached as the \`qwen-resolve-pr-${PR_NUMBER}-pushed\` artifact on the [workflow run](${RUN_URL}); the \`qwen-resolve-pr-${PR_NUMBER}-attempt-${AGENT_RUN_ATTEMPT}\` artifact describes the original resolution it was replayed from."
                 else
                   echo "Qwen Code resolved the merge conflicts and pushed the branch update."
                 fi
@@ -2931,16 +3569,32 @@ jobs:
                 append_safe_file "${WORKDIR}/no-action.md"
                 ;;
               *)
-                echo "Qwen Code attempted to resolve merge conflicts but the run did not complete successfully."
-                echo
-                for file in failure.md address-summary.md no-action.md; do
-                  if [ -s "${WORKDIR}/${file}" ]; then
-                    echo "### ${file}"
-                    append_safe_file "${WORKDIR}/${file}"
-                    echo
-                  fi
-                done
-                echo "Check the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for full logs."
+                if [ "$FAILURE_KIND" = "artifact_missing" ]; then
+                  # The agent SUCCEEDED: the infra wording below would blame
+                  # a run that did not fail, and a partial re-run cannot
+                  # bring the artifact back. Say the agent finished, and
+                  # point at the one recovery that re-produces the artifact.
+                  echo "Qwen Code's conflict-resolution agent finished successfully, but its run artifact never reached the publish job — the upload failed or the artifact expired — so the result could not be verified or published. This is not a verdict on the conflict. Use **Re-run all jobs** on the [workflow run](${RUN_URL}) to run the agent again and publish a fresh result; re-running only the failed jobs cannot recover the missing artifact."
+                elif [ "$FAILURE_KIND" = "infra" ]; then
+                  # The agent never reached a verdict: outcome=failure (CLI
+                  # install, model endpoint, crash) or outcome=cancelled (its
+                  # step timeout). Say which, and do not invite a re-run: the
+                  # generic text below reads as "the model gave up", and 13
+                  # days of re-runs against one broken install (#9898) is what
+                  # this branch exists to stop.
+                  echo "Qwen Code could not run conflict resolution on this PR: the agent step ended with \`outcome=${RESOLVE_OUTCOME}\` before producing a result — a CLI install, model endpoint or infrastructure failure, or the step's ${AGENT_TIMEOUT_MINUTES}-minute timeout. This is not a verdict on the conflict. Requesting /resolve again will fail the same way until the cause shown in the [workflow run](${RUN_URL}) is fixed."
+                else
+                  echo "Qwen Code attempted to resolve merge conflicts but the run did not complete successfully."
+                  echo
+                  for file in failure.md address-summary.md no-action.md; do
+                    if [ -s "${WORKDIR}/${file}" ]; then
+                      echo "### ${file}"
+                      append_safe_file "${WORKDIR}/${file}"
+                      echo
+                    fi
+                  done
+                  echo "Check the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for full logs."
+                fi
                 ;;
             esac
           } > "${WORKDIR}/report.md"
@@ -2956,3 +3610,15 @@ jobs:
           if [ "$OUTCOME" != "fixed" ] && [ "$OUTCOME" != "noop" ]; then
             exit 1
           fi
+
+      # Only populated when a moved head was replayed: the tree that was
+      # actually pushed, beside the attempt-suffixed run artifact that holds
+      # the original resolution. always() so it still runs when 'Report
+      # result' exits 1; the job-level gate already carries the decision check.
+      - name: 'Upload pushed tree'
+        if: '${{ always() }}'
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'qwen-resolve-pr-${{ needs.resolve-pr.outputs.pr_number }}-pushed'
+          path: '${{ env.WORKDIR }}/pushed/'
+          if-no-files-found: 'ignore'

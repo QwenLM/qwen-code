@@ -511,7 +511,7 @@ done
 #
 # Version is resolved in priority order:
 #   1. CUA_DRIVER_RS_VERSION env var (explicit pin)
-#   2. CUA_DRIVER_RS_BAKED_VERSION below (updated after release publication)
+#   2. CUA_DRIVER_RS_BAKED_VERSION below (validated before release publication)
 #   3. GitHub Releases API (fallback for dev / un-baked checkouts;
 #      unauthenticated = 60 req/hr per IP)
 #
@@ -522,8 +522,8 @@ done
 # checkouts) or when the baked version turns out to have no downloadable
 # asset — see the recovery at the download step below.
 #
-# ~~~ BAKED_VERSION: auto-updated after release publication — do not edit ~~~
-CUA_DRIVER_RS_BAKED_VERSION="0.20.0"
+# ~~~ BAKED_VERSION: must match the release version in this change ~~~
+CUA_DRIVER_RS_BAKED_VERSION="0.20.3"
 # ~~~ END_BAKED_VERSION ~~~
 
 # Run API requests with an optional token. Keep the header construction here

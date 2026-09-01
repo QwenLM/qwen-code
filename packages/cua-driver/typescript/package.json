@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/cua-sdk",
-  "version": "0.20.1",
+  "version": "0.20.3",
   "description": "Typed CUA Driver SDK and Computer Use API for Node.js",
   "type": "module",
   "license": "MIT",
@@ -41,6 +41,7 @@
     "computer-use/index.js",
     "computer-use/index.d.ts",
     "computer-use/README.md",
+    "computer-use/SKILL.md",
     "scripts/install-native.mjs",
     "LICENSE.md",
     "NOTICE.md",
@@ -55,9 +56,10 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "postinstall": "node scripts/install-native.mjs",
-    "prepack": "npm run build",
+    "prepack": "npm run build && node scripts/stage-computer-use-skill.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && node --test test/*.test.mjs computer-use/test/computer-use.test.mjs",
+    "typecheck:computer-use": "tsc -p computer-use/test/tsconfig.json",
+    "test": "npm run build && npm run typecheck:computer-use && node --test test/*.test.mjs computer-use/test/computer-use.test.mjs",
     "test:e2e": "node --test computer-use/test/daemon-integration.test.mjs",
     "generate:uniffi": "node ../scripts/generate-uniffi-bindings.mjs",
     "generate:uniffi:check": "node ../scripts/generate-uniffi-bindings.mjs --check",

@@ -800,6 +800,27 @@ describe('ModelRegistry', () => {
       expect(registry.getModel(AuthType.USE_OPENAI, 'gpt-3.5')).toBeDefined();
     });
 
+    it('keeps the previous registry when a replacement model is invalid', () => {
+      const registry = new ModelRegistry(
+        { idealab: [{ id: 'old-model' }] } as ModelProvidersConfig,
+        { idealab: 'openai' },
+      );
+
+      expect(() =>
+        registry.reloadModels(
+          {
+            idealab: [{ id: 'new-model' }, { id: '' }],
+          } as ModelProvidersConfig,
+          { idealab: 'gemini' },
+        ),
+      ).toThrow('missing required field: id');
+
+      expect(registry.getModel(AuthType.USE_OPENAI, 'old-model')).toBeDefined();
+      expect(
+        registry.getModel(AuthType.USE_GEMINI, 'new-model'),
+      ).toBeUndefined();
+    });
+
     it('should correctly reload same-id different-baseUrl models', () => {
       const registry = new ModelRegistry({
         openai: [
@@ -857,6 +878,26 @@ describe('ModelRegistry', () => {
       expect(registry.getModelsForAuthType(AuthType.QWEN_OAUTH).length).toBe(
         QWEN_OAUTH_MODELS.length,
       );
+    });
+
+    it('exposes the applied providers config so hot-reload can diff against registry state', () => {
+      const boot: ModelProvidersConfig = {
+        openai: [{ id: 'gpt-4', name: 'GPT-4' }],
+      };
+      const registry = new ModelRegistry(boot);
+      expect(registry.getModelProvidersConfig()).toBe(boot);
+
+      const next: ModelProvidersConfig = {
+        openai: [{ id: 'gpt-5', name: 'GPT-5' }],
+      };
+      registry.reloadModels(next);
+      // The copy in reloadModels is load-bearing: without it the hot-reload
+      // gate in registerModelProvidersHotReload would diff against a stale
+      // value and rebuild the registry on every settings event.
+      expect(registry.getModelProvidersConfig()).toBe(next);
+
+      registry.reloadModels(undefined);
+      expect(registry.getModelProvidersConfig()).toBeUndefined();
     });
 
     it('should handle reload replacing same-id entries when baseUrls change', () => {
