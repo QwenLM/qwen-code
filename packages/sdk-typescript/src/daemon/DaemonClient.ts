@@ -1378,14 +1378,22 @@ export class DaemonClient {
     );
   }
 
-  async workspaceGitPull(opts?: {
-    rebase?: boolean;
-    fetchOnly?: boolean;
-  }): Promise<DaemonGitPullResult> {
+  async workspaceGitPull(
+    opts?: {
+      rebase?: boolean;
+      fetchOnly?: boolean;
+      stash?: boolean;
+      force?: boolean;
+    },
+    // The stash/force flows chain several git commands server-side, each
+    // with its own budget, so callers can outsize the client's default
+    // fetch timeout instead of aborting mid-flow while the daemon runs on.
+    timeoutMs?: number,
+  ): Promise<DaemonGitPullResult> {
     return await this.jsonRequest<DaemonGitPullResult>(
       '/workspace/git/pull',
       'POST /workspace/git/pull',
-      { method: 'POST', body: opts ?? {}, mode: 'rest' },
+      { method: 'POST', body: opts ?? {}, mode: 'rest', timeoutMs },
     );
   }
 
@@ -6330,8 +6338,14 @@ export class WorkspaceDaemonClient {
     opts?: {
       rebase?: boolean;
       fetchOnly?: boolean;
+      stash?: boolean;
+      force?: boolean;
     },
     cwd?: string,
+    // The stash/force flows chain several git commands server-side, each
+    // with its own budget, so callers can outsize the client's default
+    // fetch timeout instead of aborting mid-flow while the daemon runs on.
+    timeoutMs?: number,
   ): Promise<DaemonGitPullResult> {
     const suffix =
       cwd != null ? `/git/pull?cwd=${urlEncode(cwd)}` : '/git/pull';
@@ -6339,7 +6353,7 @@ export class WorkspaceDaemonClient {
       this.workspaceSelector,
       suffix,
       'POST /workspaces/:workspace/git/pull',
-      { method: 'POST', body: opts ?? {}, mode: 'rest' },
+      { method: 'POST', body: opts ?? {}, mode: 'rest', timeoutMs },
     );
   }
 
