@@ -1325,6 +1325,46 @@ describe('DaemonClient', () => {
       ]);
     });
 
+    it('asks the daemon host to open the workspace locally', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          kind: 'workspace-local-open',
+          opened: true,
+          target: 'folder',
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.workspaceByCwd('/work/secondary').openLocally(),
+      ).resolves.toBeUndefined();
+
+      expect(calls.map((call) => [call.method, call.url])).toEqual([
+        ['POST', 'http://daemon/workspaces/%2Fwork%2Fsecondary/open'],
+      ]);
+      expect(calls.map((call) => call.body)).toEqual(['{}']);
+    });
+
+    it('asks the daemon host to open a terminal in the workspace', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          kind: 'workspace-local-open',
+          opened: true,
+          target: 'terminal',
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.workspaceByCwd('/work/secondary').openTerminalLocally(),
+      ).resolves.toBeUndefined();
+
+      expect(calls.map((call) => [call.method, call.url])).toEqual([
+        ['POST', 'http://daemon/workspaces/%2Fwork%2Fsecondary/open'],
+      ]);
+      expect(calls.map((call) => call.body)).toEqual(['{"target":"terminal"}']);
+    });
+
     it('reads primary and workspace-qualified Git status over REST', async () => {
       const primary = {
         v: 1 as const,

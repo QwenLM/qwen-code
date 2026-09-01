@@ -383,6 +383,18 @@ export const SERVE_CAPABILITY_REGISTRY = {
   native_directory_picker: { since: 'v1' },
   // Workspace-owned runtime lifecycle status and explicit on-demand startup.
   workspace_runtime: { since: 'v1' },
+  // The daemon host can open a workspace directory in the host's OS file
+  // manager (Finder via `open` on macOS, Explorer via `explorer.exe` on
+  // Windows, xdg-open on a Linux host with a display). Headless hosts omit
+  // the tag so clients hide the Open-locally affordance instead of
+  // surfacing a guaranteed launch failure.
+  workspace_local_open: { since: 'v1' },
+  // The daemon host can open a terminal window in a workspace directory
+  // (`open -a Terminal` on macOS, wt.exe/cmd.exe on Windows, a common
+  // terminal emulator on a Linux host with a display). Headless hosts omit
+  // the tag so clients hide the Open-in-terminal affordance instead of
+  // surfacing a guaranteed launch failure.
+  workspace_local_terminal: { since: 'v1' },
   // Workspace-qualified core REST routes under `/workspaces/:workspace/...`.
   // Covers core file read/write/upload, status/permissions/trust/lifecycle/MCP/tool,
   // memory, workspace agent CRUD, and persisted session organization surfaces.
@@ -531,6 +543,8 @@ export interface AdvertiseFeatureToggles {
   workspaceRuntimeRemovalAvailable?: boolean;
   nativeDirectoryPickerAvailable?: boolean;
   workspaceRuntimeAvailable?: boolean;
+  localPathOpenAvailable?: boolean;
+  localTerminalOpenAvailable?: boolean;
   /**
    * Whether the HTTP ACP surface is enabled (default on; opts out via
    * QWEN_SERVE_ACP_HTTP=0). Workspace-qualified ACP is only advertised when on.
@@ -677,6 +691,14 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   [
     'workspace_runtime',
     (toggles) => toggles.workspaceRuntimeAvailable === true,
+  ],
+  [
+    'workspace_local_open',
+    (toggles) => toggles.localPathOpenAvailable === true,
+  ],
+  [
+    'workspace_local_terminal',
+    (toggles) => toggles.localTerminalOpenAvailable === true,
   ],
   [
     'workspace_qualified_acp',
