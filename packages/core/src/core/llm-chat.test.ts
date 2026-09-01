@@ -15058,6 +15058,44 @@ describe('LlmChat', async () => {
       expect(recordedText(recordAssistantTurn)).toBe('done');
     });
 
+    it('keeps the transport prefix when a STOP continuation is abandoned', async () => {
+      const recordAssistantTurn = vi.fn();
+      const recordingChat = chatWithRecorder(recordAssistantTurn);
+      const response = (async function* () {
+        yield makeChunk([{ text: '42.' }], 'STOP');
+        await new Promise<void>(() => undefined);
+      })();
+      const internalChat = recordingChat as unknown as {
+        processStreamResponse(
+          model: string,
+          stream: AsyncGenerator<GenerateContentResponse>,
+          routeKey: string,
+          goalContext?: unknown,
+          transportContinuationPrefix?: string,
+          recordDeferral?: 'on-max-tokens' | 'always',
+        ): AsyncGenerator<GenerateContentResponse>;
+      };
+      const iterator = internalChat.processStreamResponse(
+        'test-model',
+        response,
+        'test-route',
+        undefined,
+        'The answer is ',
+        'on-max-tokens',
+      );
+
+      const first = await iterator.next();
+      expect(first.done).toBe(false);
+      expect(first.value?.candidates?.[0]?.finishReason).toBe(
+        FinishReason.STOP,
+      );
+
+      await iterator.return?.(undefined);
+      expect(recordingChat.getLastModelMessageText()).toBe('The answer is 42.');
+      expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+      expect(recordedText(recordAssistantTurn)).toBe('The answer is 42.');
+    });
+
     it('does not commit an empty STOP when returned before provider EOF', async () => {
       const recordAssistantTurn = vi.fn();
       const recordingChat = chatWithRecorder(recordAssistantTurn);
@@ -19103,6 +19141,79 @@ describe('LlmChat', async () => {
           : undefined,
       ).toBe(FinishReason.STOP);
       expect(display).toBe('Hello');
+      expect(recordingChat.getHistory()[1]?.parts).toEqual([{ text: 'Hello' }]);
+      expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+      expect(recordedText(recordAssistantTurn)).toBe('Hello');
+      await iterator.return?.(undefined);
+    });
+
+    it('reconciles a mutation before buffered recovery completion is delivered', async () => {
+      const recordAssistantTurn = vi.fn();
+      const recordingChat = chatWithRecorder(recordAssistantTurn);
+      const streams = [
+        makeStream([makeChunk([{ text: 'Hello' }], 'MAX_TOKENS')]),
+        (async function* () {
+          try {
+            yield makeChunk([{ text: ' world' }]);
+            yield makeChunk([], 'STOP');
+          } finally {
+            recordingChat.addHistory({
+              role: 'user',
+              parts: [{ text: 'interloper' }],
+            });
+          }
+        })(),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await recordingChat.sendMessageStream(
+        'gemini-3-pro',
+        { message: 'essay' },
+        'recovery-completion-mutation-abort',
+      );
+      const iterator = stream[Symbol.asyncIterator]();
+      for (;;) {
+        const result = await iterator.next();
+        expect(result.done).toBe(false);
+        if (
+          result.value?.type === StreamEventType.RETRY &&
+          result.value.isContinuation
+        ) {
+          break;
+        }
+      }
+
+      const continuation = await iterator.next();
+      expect(
+        continuation.value?.type === StreamEventType.CHUNK
+          ? continuation.value.value.candidates?.[0]?.content?.parts?.[0]?.text
+          : undefined,
+      ).toBe(' world');
+      const retry = await iterator.next();
+      expect(retry.value?.type).toBe(StreamEventType.RETRY);
+      expect(
+        retry.value?.type === StreamEventType.RETRY
+          ? retry.value.isContinuation
+          : undefined,
+      ).not.toBe(true);
+      const redisplay = await iterator.next();
+      expect(
+        redisplay.value?.type === StreamEventType.CHUNK
+          ? redisplay.value.value.candidates?.[0]?.content?.parts
+              ?.map((part: Part) => part.text ?? '')
+              .join('')
+          : undefined,
+      ).toBe('Hello');
+      const terminal = await iterator.next();
+
+      expect(
+        terminal.value?.type === StreamEventType.CHUNK
+          ? terminal.value.value.candidates?.[0]?.finishReason
+          : undefined,
+      ).toBe(FinishReason.STOP);
       expect(recordingChat.getHistory()[1]?.parts).toEqual([{ text: 'Hello' }]);
       expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
       expect(recordedText(recordAssistantTurn)).toBe('Hello');

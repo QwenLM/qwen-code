@@ -1156,6 +1156,22 @@ function mergeDeliveredPrefix(
   );
 }
 
+function foldTransportContinuationPrefix(
+  parts: Part[],
+  transportContinuationPrefix: string,
+): void {
+  const textIndex = parts.findIndex(isPlainTextPart);
+  if (textIndex < 0) {
+    parts.unshift({ text: transportContinuationPrefix });
+    return;
+  }
+  const remainderPart = parts[textIndex] as Part & { text: string };
+  parts[textIndex] = {
+    ...remainderPart,
+    text: mergeDeliveredPrefix(transportContinuationPrefix, remainderPart.text),
+  };
+}
+
 function isPlainTextPart(part: Part | undefined): part is Part & {
   text: string;
 } {
@@ -4607,7 +4623,15 @@ export class LlmChat {
                 );
               }
               for (const chunk of bufferedContinuationChunks) {
+                if (attemptState.isCurrent && !attemptState.isCurrent()) {
+                  for (const event of mutationAbortEvents()) yield event;
+                  return;
+                }
                 yield { type: StreamEventType.CHUNK, value: chunk };
+              }
+              if (attemptState.isCurrent && !attemptState.isCurrent()) {
+                for (const event of mutationAbortEvents()) yield event;
+                return;
               }
               for (const chunk of terminalChunks ?? []) {
                 yield { type: StreamEventType.CHUNK, value: chunk };
@@ -6975,6 +6999,12 @@ export class LlmChat {
         this.historyMutationVersion === streamHistoryMutationVersion
       ) {
         const normalized = normalizeStreamedModelParts(allModelParts);
+        if (streamError === null && transportContinuationPrefix) {
+          foldTransportContinuationPrefix(
+            normalized.consolidatedHistoryParts,
+            transportContinuationPrefix,
+          );
+        }
         const abandonedParts = [
           ...normalized.thoughtContentParts,
           ...normalized.consolidatedHistoryParts,
@@ -7297,24 +7327,10 @@ export class LlmChat {
     // attempt that did not survive, and a fresh-restart retry discards it via
     // `resetTransportContinuation`.
     if (streamError === null && transportContinuationPrefix) {
-      const textIndex = consolidatedHistoryParts.findIndex(isPlainTextPart);
-      if (textIndex < 0) {
-        // Continuation returned no text of its own (e.g. only a functionCall).
-        // `thoughtContentParts` are prepended separately at the push below, so
-        // index 0 here is already "after any leading thought part".
-        consolidatedHistoryParts.unshift({ text: transportContinuationPrefix });
-      } else {
-        const remainderPart = consolidatedHistoryParts[textIndex] as Part & {
-          text: string;
-        };
-        consolidatedHistoryParts[textIndex] = {
-          ...remainderPart,
-          text: mergeDeliveredPrefix(
-            transportContinuationPrefix,
-            remainderPart.text,
-          ),
-        };
-      }
+      foldTransportContinuationPrefix(
+        consolidatedHistoryParts,
+        transportContinuationPrefix,
+      );
       contentText = consolidatedHistoryParts
         .filter((part) => part.text)
         .map((part) => part.text)
