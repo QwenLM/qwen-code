@@ -4663,7 +4663,21 @@ describe('SessionService', () => {
 
       const history = buildApiHistoryFromConversation(conversation);
 
-      expect(history).toEqual([identifiedUser.message, assistantA1.message]);
+      expect(
+        history.map((content) => ({
+          role: content.role,
+          parts: content.parts,
+        })),
+      ).toEqual([
+        {
+          role: identifiedUser.message!.role,
+          parts: identifiedUser.message!.parts,
+        },
+        {
+          role: assistantA1.message!.role,
+          parts: assistantA1.message!.parts,
+        },
+      ]);
       expect(getApiHistoryPromptId(history[0]!)).toBe('prompt-1');
       expect(JSON.stringify(history[0])).not.toContain('prompt-1');
     });

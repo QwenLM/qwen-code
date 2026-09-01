@@ -15,6 +15,7 @@ import type {
 } from '@google/genai';
 import { createUserContent } from './genai-compat.js';
 import process from 'node:process';
+import { isDeepStrictEqual } from 'node:util';
 
 // Config
 import type { Config } from '../config/config.js';
@@ -142,6 +143,7 @@ import {
 import type { DeferredToolSummary } from '../tools/tool-registry.js';
 import {
   buildApiHistoryFromConversation,
+  getApiHistoryPromptId,
   replayUiTelemetryFromConversation,
 } from '../services/sessionService.js';
 import { reportError } from '../utils/errorReporting.js';
@@ -2926,6 +2928,7 @@ export class LlmClient {
       return takePendingGoalEvents();
     };
     let strippedRetryEntries: Content[] = [];
+    let retryPromptIdentity: string | undefined;
     const currentPushCount = () =>
       this.getChat().getUserContentPushCount?.() ?? 0;
 
@@ -3023,6 +3026,26 @@ export class LlmClient {
 
     if (messageType === SendMessageType.Retry) {
       strippedRetryEntries = this.stripOrphanedUserEntriesFromHistory() ?? [];
+      const strippedEntry =
+        strippedRetryEntries.length === 1 ? strippedRetryEntries[0] : undefined;
+      const strippedIdentity = strippedEntry
+        ? getApiHistoryPromptId(strippedEntry)
+        : undefined;
+      const retryParts = createUserContent(request).parts ?? [];
+      const comparableParts = (strippedEntry?.parts ?? [])
+        .slice(-retryParts.length)
+        .map((part, index) => {
+          const retryText = retryParts[index]?.text;
+          return retryText && part.text?.endsWith(retryText)
+            ? { ...part, text: retryText }
+            : part;
+        });
+      const contentMatches =
+        retryParts.length > 0 && isDeepStrictEqual(comparableParts, retryParts);
+      retryPromptIdentity =
+        strippedEntry && strippedIdentity === prompt_id && contentMatches
+          ? strippedIdentity
+          : undefined;
       // The matching dangling-`functionCall` repair runs inside
       // `chat.sendMessageStream` AFTER the user content is pushed, so any
       // tool_result the user is supplying (Retry of a ToolResult
@@ -3651,7 +3674,9 @@ export class LlmClient {
         this.getChat(),
         prompt_id,
         goalPermit,
-        messageType === SendMessageType.UserQuery ? prompt_id : undefined,
+        messageType === SendMessageType.UserQuery
+          ? prompt_id
+          : retryPromptIdentity,
       );
 
       // Assemble the outgoing request. IDE context is merged into the
