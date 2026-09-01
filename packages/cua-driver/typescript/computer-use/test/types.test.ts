@@ -9,7 +9,7 @@ export async function exerciseComputerUseTypes(
   computer: ComputerUse,
   signal: AbortSignal,
 ): Promise<ActAndVerifyResult> {
-  await computer.listApps({ signal, callTimeoutMs: 100 });
+  await computer.listApps({ signal });
   const result = await computer.actAndVerify({
     action: () =>
       computer.click({
@@ -25,7 +25,7 @@ export async function exerciseComputerUseTypes(
         pid: 42,
         windowId: 7,
         expect: [{ element: { token: "rv1:l_a:1", selected: true } }],
-        callTimeoutMs: 100,
+        signal,
       }),
   });
   const verification: ComputerUseVerificationResult = result.verification;
