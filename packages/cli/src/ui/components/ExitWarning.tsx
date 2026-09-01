@@ -5,25 +5,27 @@
  */
 
 import type React from 'react';
-import { Box, Text } from 'ink';
+import { Text } from 'ink';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { theme } from '../semantic-colors.js';
 
 export const ExitWarning: React.FC = () => {
   const uiState = useUIState();
-  return (
-    <>
-      {uiState.dialogsVisible && uiState.ctrlCPressedOnce && (
-        <Box marginTop={1}>
-          <Text color={theme.status.warning}>Press Ctrl+C again to exit.</Text>
-        </Box>
-      )}
-
-      {uiState.dialogsVisible && uiState.ctrlDPressedOnce && (
-        <Box marginTop={1}>
-          <Text color={theme.status.warning}>Press Ctrl+D again to exit.</Text>
-        </Box>
-      )}
-    </>
-  );
+  if (!uiState.dialogsVisible) {
+    return null;
+  }
+  // No marginTop: a spacer row on top of a near-full dialog overflows the
+  // terminal, Ink full-clears at stdout.rows, and the startup banner scrolls
+  // off. Keep this to a single replacement row (matches Footer).
+  if (uiState.ctrlCPressedOnce) {
+    return (
+      <Text color={theme.status.warning}>Press Ctrl+C again to exit.</Text>
+    );
+  }
+  if (uiState.ctrlDPressedOnce) {
+    return (
+      <Text color={theme.status.warning}>Press Ctrl+D again to exit.</Text>
+    );
+  }
+  return null;
 };
