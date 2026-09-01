@@ -272,6 +272,7 @@ import {
   TasksStatusMessage,
   type SerializedTasksMessage,
 } from './components/messages/TasksStatusMessage';
+import { SessionWorkflowCockpit } from './components/workflow/SessionWorkflowCockpit';
 import { serializeContextUsageMessage } from './components/messages/ContextUsageMessage';
 import {
   serializeStatsMessage,
@@ -312,10 +313,12 @@ import {
   computeTodoTimeline,
   getAgentToolsForPlan,
   getFloatingTodos,
+  getSessionWorkflowTodos,
   getActiveTodosForPlanRevision,
   isExitPlanApprovalRequest,
   todoDetailSignature,
   todoTimelineSignature,
+  type FloatingTodosState,
   type TodoDetail,
   type TodoSnapshotDiff,
 } from './utils/todos';
@@ -1357,6 +1360,12 @@ const NON_WORKSPACE_BLOCKED_COMMANDS = new Set([
 ]);
 
 const EMPTY_BOTTOM_STATUS_ITEMS: readonly WebShellBottomStatusItem[] = [];
+const EMPTY_SESSION_WORKFLOW_TODOS: FloatingTodosState = {
+  todos: [],
+  planId: null,
+  allCompleted: false,
+  sourceMessageId: null,
+};
 const EMPTY_ADDITIONAL_SLASH_COMMANDS: readonly CommandInfo[] = [];
 const DEFAULT_CHAT_MAX_WIDTH = 1000;
 const DEFAULT_CHAT_HEADER_ITEMS: readonly WebShellChatHeaderItem[] = [
@@ -1384,6 +1393,7 @@ function imageTabId(src: string): string {
 }
 
 type ChatWidthMode = `${typeof DEFAULT_CHAT_MAX_WIDTH}` | 'wide';
+type MainView = 'chat' | 'cockpit' | 'scheduledTasks' | 'goals' | 'split';
 
 const CHAT_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-chat-width';
 const CHAT_SHELL_HORIZONTAL_PADDING = 40;
@@ -1536,6 +1546,23 @@ function getInitialLanguage(): WebShellLanguage {
   return normalizeLanguage(
     params.get('language') ?? params.get('lang') ?? navigator.language,
   );
+}
+
+function cockpitViewRequested(): boolean {
+  return (
+    typeof window !== 'undefined' &&
+    new URLSearchParams(window.location.search).get('view') === 'cockpit'
+  );
+}
+
+function updateCockpitLocation(open: boolean, replace = false): void {
+  const url = new URL(window.location.href);
+  if (open) {
+    url.searchParams.set('view', 'cockpit');
+  } else {
+    url.searchParams.delete('view');
+  }
+  window.history[replace ? 'replaceState' : 'pushState'](null, '', url);
 }
 
 function formatError(error: unknown, fallback: string): string {
@@ -1909,6 +1936,7 @@ export function getEnvironmentAgentTasks(
           liveTask
             ? {
                 ...liveTask,
+                toolUseId: tool.callId,
                 label,
                 description: taskDescription || liveTask.description,
                 ...(subagentType ? { subagentType } : {}),
@@ -3345,6 +3373,15 @@ export function App({
   }, [logicalSessionKey]);
   const artifactPanelOpenRef = useRef(artifactPanelOpen);
   artifactPanelOpenRef.current = artifactPanelOpen;
+  const artifactPanelTriggerRef = useRef<HTMLElement | null>(null);
+  const rememberArtifactPanelTrigger = useCallback(() => {
+    if (
+      !artifactPanelOpenRef.current &&
+      document.activeElement instanceof HTMLElement
+    ) {
+      artifactPanelTriggerRef.current = document.activeElement;
+    }
+  }, []);
   const [activeArtifactPanelTabId, setActiveArtifactPanelTabId] = useState<
     string | null
   >(null);
@@ -3790,6 +3827,7 @@ export function App({
   const openArtifactPanel = useCallback(
     (artifactId: string, previewContent?: string) => {
       if (!artifactId) return;
+      rememberArtifactPanelTrigger();
       const artifact = artifactPanelArtifacts.find(
         (item) => item.id === artifactId,
       );
@@ -3824,6 +3862,7 @@ export function App({
       artifactWorkspaceTarget?.workspaceId,
       connection.workspaceCwd,
       getDefaultReviewPanelWidth,
+      rememberArtifactPanelTrigger,
     ],
   );
   const openReviewPanel = useCallback(
@@ -4147,6 +4186,7 @@ export function App({
       if (!artifactPanelOpenRef.current) {
         setWaitForSubagentPanelAnimation(true);
       }
+      rememberArtifactPanelTrigger();
       const rawOutput =
         tool.rawOutput && typeof tool.rawOutput === 'object'
           ? (tool.rawOutput as Record<string, unknown>)
@@ -4178,7 +4218,7 @@ export function App({
       );
       setArtifactPanelOpen(true);
     },
-    [getDefaultReviewPanelWidth, t],
+    [getDefaultReviewPanelWidth, rememberArtifactPanelTrigger, t],
   );
   const openSubagentPanel = useCallback(
     (tool: ACPToolCall) => {
@@ -4683,31 +4723,6 @@ export function App({
       ),
     [terminalBackgroundShellTaskIdsKey],
   );
-  const environmentAgentTasks = useMemo(
-    () => getEnvironmentAgentTasks(messages, sessionTasks),
-    [messages, sessionTasks],
-  );
-  const lastReportedAgentTasksRef = useRef<string | undefined>(undefined);
-  useEffect(() => {
-    if (!onAgentTasksChange) {
-      lastReportedAgentTasksRef.current = undefined;
-      return;
-    }
-    const snapshot = JSON.stringify(
-      environmentAgentTasks.map(
-        ({
-          runtimeMs: _runtimeMs,
-          stats: _stats,
-          recentActivities: _recentActivities,
-          prompt: _prompt,
-          ...stable
-        }) => stable,
-      ),
-    );
-    if (snapshot === lastReportedAgentTasksRef.current) return;
-    lastReportedAgentTasksRef.current = snapshot;
-    onAgentTasksChange(environmentAgentTasks);
-  }, [environmentAgentTasks, onAgentTasksChange]);
   const backgroundTasks = useMemo(
     () => sessionTasks.filter((task) => task.kind !== 'agent'),
     [sessionTasks],
@@ -5477,12 +5492,30 @@ export function App({
   // (not a modal overlay), mirroring the reference design; creating or opening
   // a chat returns to 'chat'. (Daemon Status is no longer a boolean dialog — it
   // is one of the activePanel values below.)
-  const [mainView, setMainView] = useState<
-    'chat' | 'scheduledTasks' | 'goals' | 'split'
-  >('chat');
+  const [mainView, setMainView] = useState<MainView>('chat');
   const mainViewRef = useRef(mainView);
+  const showChat = useCallback(() => {
+    if (cockpitViewRequested()) updateCockpitLocation(false);
+    setMainView('chat');
+  }, []);
   const useFloatingArtifactPanel =
     !canDockArtifactPanel || mainView === 'split';
+  // The floating drawer mounts already-open. Only a genuine closed->open may
+  // move focus into it: the docked->floating hand-over of an open panel
+  // (viewport resize, split view) mounts the drawer mid-session, where
+  // autofocus would yank focus from whatever the user is typing. The ref
+  // tracks the panel's open state at the last render where the drawer was
+  // NOT mounted and stays frozen while it is, so re-renders never flip the
+  // prop under the drawer's mount-time autofocus wiring.
+  const floatingArtifactPanelVisible =
+    artifactPanelOpen && useFloatingArtifactPanel;
+  const artifactPanelOpenBeforeDrawerMountRef = useRef(artifactPanelOpen);
+  if (!floatingArtifactPanelVisible) {
+    artifactPanelOpenBeforeDrawerMountRef.current = artifactPanelOpen;
+  }
+  const floatingArtifactDrawerAutoFocus =
+    floatingArtifactPanelVisible &&
+    !artifactPanelOpenBeforeDrawerMountRef.current;
   const deferSubagentMount =
     waitForSubagentPanelAnimation &&
     artifactPanelOpen &&
@@ -5777,6 +5810,7 @@ export function App({
     if (
       mainView === 'scheduledTasks' ||
       mainView === 'goals' ||
+      mainView === 'cockpit' ||
       mainView === 'split'
     ) {
       setMainView('chat');
@@ -5812,10 +5846,10 @@ export function App({
         | 'channels',
     ) => {
       splitClassificationGenerationRef.current += 1;
-      setMainView('chat');
+      showChat();
       setActivePanel(panel);
     },
-    [],
+    [showChat],
   );
   const loadMcpManagerMessage = useCallback(async () => {
     const status = await workspaceActions.loadMcpStatus();
@@ -5831,21 +5865,28 @@ export function App({
   const openScheduledTasks = useCallback(() => {
     splitClassificationGenerationRef.current += 1;
     setActivePanel(null);
+    // Route through showChat so leaving the cockpit strips its ?view=cockpit
+    // deep link — the URL-sync removal branch only fires when the feature is
+    // disabled, and a stale deep link would reopen the cockpit on reload or
+    // Forward navigation instead of the view actually on screen.
+    showChat();
     setMainView('scheduledTasks');
-  }, []);
+  }, [showChat]);
   const openGoals = useCallback(() => {
     splitClassificationGenerationRef.current += 1;
     setActivePanel(null);
+    // See openScheduledTasks: leaving the cockpit must strip its deep link.
+    showChat();
     setMainView('goals');
-  }, []);
+  }, [showChat]);
   const openSessionDrawer = useCallback(() => {
     if (!sidebarOptions.enabled) return;
     splitClassificationGenerationRef.current += 1;
     setActivePanel(null);
-    setMainView('chat');
+    showChat();
     setForceMobileDrawer(true);
     setMobileDrawerOpen(true);
-  }, [sidebarOptions.enabled]);
+  }, [showChat, sidebarOptions.enabled]);
   const sanitizeSplitSessionIds = useCallback(
     async (sessionIds: readonly string[]): Promise<string[]> => {
       const requested = Array.from(new Set(sessionIds.filter(Boolean))).slice(
@@ -5868,6 +5909,8 @@ export function App({
     (sessionIds?: readonly string[]) => {
       if (!workspaceContextActive) return;
       setActivePanel(null);
+      // See openScheduledTasks: leaving the cockpit must strip its deep link.
+      showChat();
       const requested = Array.from(
         new Set((sessionIds ?? []).filter(Boolean)),
       ).slice(0, MAX_SPLIT_PANES);
@@ -5907,6 +5950,7 @@ export function App({
       connection.sessionId,
       connection.workspaceCwd,
       sanitizeSplitSessionIds,
+      showChat,
       workspaceContextActive,
     ],
   );
@@ -5946,6 +5990,9 @@ export function App({
       : [];
     const generation = splitClassificationGenerationRef.current + 1;
     splitClassificationGenerationRef.current = generation;
+    if (requested.length > 0 && cockpitViewRequested()) {
+      updateCockpitLocation(false, true);
+    }
     if (requested.length === 0) {
       setSplitSessionIds([]);
       setMainView((previous) => (previous === 'split' ? 'chat' : previous));
@@ -6228,12 +6275,15 @@ export function App({
     // need a pending-approval signal plumbed up through SplitView. Escape or
     // the toolbar exits fullscreen and reveals them.
     if (artifactPanelFullscreen) setArtifactPanelFullscreen(false);
-    // The Scheduled Tasks and Goals pages are full-pane overlays
+    // Workflow, Scheduled Tasks, and Goals are full-pane overlays
     // (position:absolute) that cover the chat footer too, so dismiss them for
     // the same reason. The split view is deliberately NOT dismissed: each pane
     // owns and renders its own session's approval, so an approval on the (outer)
     // main session must not yank the user out of the panes they are working in.
-    if (mainView === 'scheduledTasks' || mainView === 'goals') {
+    if (cockpitViewRequested()) updateCockpitLocation(false, true);
+    if (mainView === 'cockpit') {
+      setMainView('chat');
+    } else if (mainView === 'scheduledTasks' || mainView === 'goals') {
       setMainView('chat');
     }
   }, [
@@ -6360,13 +6410,6 @@ export function App({
   const escapeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [tasksDialogMessage, setTasksDialogMessage] =
     useState<SerializedTasksMessage | null>(null);
-  const planAgentTools = useMemo(
-    () =>
-      tasksDialogMessage
-        ? getAgentToolsForPlan(messages, floatingTodosState)
-        : [],
-    [floatingTodosState, messages, tasksDialogMessage],
-  );
   const handleOpenMonitorDetails = useCallback(
     (task: DaemonSessionMonitorTaskStatus) => {
       setTasksDialogMessage(null);
@@ -8056,10 +8099,122 @@ export function App({
       (setting) => setting.key === 'experimental.liveVoice.enabled',
     ),
   );
+  // Do not expose workflow surfaces until settings have loaded successfully.
+  // The resource keeps stale data when a reload fails, so the error check is
+  // required to fail closed in that case too. `loading` is deliberately NOT
+  // part of the gate: a background revalidation (any client of this workspace
+  // saving any setting bumps settingsVersion) sets loading:true while keeping
+  // the last-known-good data, and gating on it would evict the user from an
+  // established Workflow view and delete its deep link. The initial load still
+  // fails closed via `status === undefined`.
   const sessionWorkflowEnabled =
+    !workspaceSettingsState.error &&
+    workspaceSettingsState.status !== undefined &&
     workspaceSettings.find(
       (setting) => setting.key === 'experimental.sessionWorkflow',
     )?.values.effective === true;
+  const sessionWorkflowSettingsResolved =
+    workspaceSettingsState.status !== undefined ||
+    workspaceSettingsState.error !== undefined;
+  const sessionWorkflowTodosState = useMemo(
+    () =>
+      sessionWorkflowEnabled
+        ? getSessionWorkflowTodos(messages)
+        : EMPTY_SESSION_WORKFLOW_TODOS,
+    [messages, sessionWorkflowEnabled],
+  );
+  const sessionWorkflowTodos = useStableArray(
+    sessionWorkflowTodosState.todos,
+    (todo) =>
+      JSON.stringify([
+        todo.id,
+        todo.status,
+        todo.content,
+        todo.blockedBy ?? [],
+      ]),
+  );
+  const floatingTodosUseSessionWorkflow =
+    sessionWorkflowEnabled &&
+    floatingTodosState.sourceMessageId !== null &&
+    floatingTodosState.sourceMessageId ===
+      sessionWorkflowTodosState.sourceMessageId;
+  const [selectedWorkflowTodoId, setSelectedWorkflowTodoId] = useState<
+    string | undefined
+  >();
+  useEffect(() => {
+    setSelectedWorkflowTodoId(undefined);
+  }, [logicalSessionKey]);
+  useEffect(() => {
+    if (
+      approvalOverlayActive ||
+      sessionWorkflowEnabled ||
+      !sessionWorkflowSettingsResolved ||
+      !artifactPanelTabs.some((tab) => tab.kind === 'workflow')
+    ) {
+      return;
+    }
+    closeArtifactPanelTab('workflow');
+  }, [
+    artifactPanelTabs,
+    approvalOverlayActive,
+    closeArtifactPanelTab,
+    sessionWorkflowEnabled,
+    sessionWorkflowSettingsResolved,
+  ]);
+  const environmentAgentTasks = useMemo(
+    () => getEnvironmentAgentTasks(messages, sessionTasks),
+    [messages, sessionTasks],
+  );
+  const lastReportedAgentTasksRef = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (!onAgentTasksChange) {
+      lastReportedAgentTasksRef.current = undefined;
+      return;
+    }
+    const snapshot = JSON.stringify(
+      environmentAgentTasks.map(
+        ({
+          runtimeMs: _runtimeMs,
+          stats: _stats,
+          recentActivities: _recentActivities,
+          prompt: _prompt,
+          ...stable
+        }) => stable,
+      ),
+    );
+    if (snapshot === lastReportedAgentTasksRef.current) return;
+    lastReportedAgentTasksRef.current = snapshot;
+    onAgentTasksChange(environmentAgentTasks);
+  }, [environmentAgentTasks, onAgentTasksChange]);
+  const planAgentTools = useMemo(() => {
+    if (
+      !sessionWorkflowEnabled ||
+      (mainView !== 'cockpit' &&
+        !artifactPanelTabs.some((tab) => tab.kind === 'workflow'))
+    ) {
+      return [];
+    }
+    return getAgentToolsForPlan(messages, sessionWorkflowTodosState);
+  }, [
+    artifactPanelTabs,
+    mainView,
+    messages,
+    sessionWorkflowEnabled,
+    sessionWorkflowTodosState,
+  ]);
+  // The tasks dialog renders the floating (latest) plan, so its agent tools
+  // anchor to floatingTodosState. That anchoring must stay out of
+  // planAgentTools: the cockpit and workflow inspector stay mounted behind
+  // the dialog and would lose (or re-anchor) the session-workflow plan's
+  // linked tools whenever the dialog opens after a user message emptied the
+  // floating plan.
+  const tasksDialogAgentTools = useMemo(
+    () =>
+      tasksDialogMessage
+        ? getAgentToolsForPlan(messages, floatingTodosState)
+        : [],
+    [floatingTodosState, messages, tasksDialogMessage],
+  );
   const reloadTargetedWorkspaceSettings = useCallback(async () => {
     const status = await reloadWorkspaceSettings();
     if (mainVoiceTarget?.route === 'workspace-qualified') {
@@ -9346,7 +9501,7 @@ export function App({
         splitFoldedByShrinkRef.current = false;
         closePanel();
       }
-      if (!opts?.keepView) setMainView('chat');
+      if (!opts?.keepView) showChat();
       let focusRequest: number | undefined;
       try {
         autoRecapVersionRef.current += 1;
@@ -9390,6 +9545,7 @@ export function App({
       scheduleComposerFocus,
       setPendingSessionContext,
       sessionActions,
+      showChat,
       t,
       workspaceCapabilitiesReady,
       workspace.client,
@@ -10149,7 +10305,7 @@ export function App({
       splitClassificationGenerationRef.current += 1;
       // Explicit navigation cancels any pending shrink-fold split restore.
       splitFoldedByShrinkRef.current = false;
-      setMainView('chat');
+      showChat();
       const currentContext =
         pendingSessionContextRef.current ??
         connectionRef.current.sessionContext;
@@ -10163,7 +10319,7 @@ export function App({
         },
       );
     },
-    [loadSidebarSession, reportError],
+    [loadSidebarSession, reportError, showChat],
   );
 
   // Listen for `qwen:open-session` events dispatched by the markdown renderer
@@ -10338,7 +10494,7 @@ export function App({
   }, [clearPendingBoundRun, enqueueManualRun]);
   const runTaskManually = useCallback(
     (prompt: string, sessionId: string | null): Promise<void> => {
-      setMainView('chat');
+      showChat();
       if (!sessionId) {
         // Unbound: runs in the current session — resolves at admission.
         return enqueueManualRun(prompt);
@@ -10379,6 +10535,7 @@ export function App({
       enqueueManualRun,
       loadSidebarSession,
       clearPendingBoundRun,
+      showChat,
       sessionOwnerGuard,
       tryFireBoundRun,
     ],
@@ -10413,6 +10570,154 @@ export function App({
     sessionActions,
     sessionOwnerGuard,
   ]);
+  const openCockpit = useCallback((): boolean => {
+    if (!sessionWorkflowEnabled || approvalOverlayActive) return false;
+    if (!requireActiveSessionForLocalCommand()) return false;
+    if (!cockpitViewRequested()) updateCockpitLocation(true);
+    setActivePanel(null);
+    setTasksDialogMessage(null);
+    setMainView('cockpit');
+    return true;
+  }, [
+    approvalOverlayActive,
+    requireActiveSessionForLocalCommand,
+    sessionWorkflowEnabled,
+  ]);
+  const openWorkflowInspector = useCallback(() => {
+    if (!sessionWorkflowEnabled || approvalOverlayActive) return;
+    if (!requireActiveSessionForLocalCommand()) return;
+    rememberArtifactPanelTrigger();
+    const tab: ArtifactPanelTab = {
+      id: 'workflow',
+      kind: 'workflow',
+      title: t('workflow.title'),
+    };
+    setArtifactPanelTabs((tabs) =>
+      tabs.some((item) => item.id === tab.id) ? tabs : [...tabs, tab],
+    );
+    setActiveArtifactPanelTabId(tab.id);
+    setArtifactPanelWidth((width) =>
+      artifactPanelOpenRef.current
+        ? width
+        : Math.min(440, getDefaultReviewPanelWidth()),
+    );
+    setArtifactPanelOpen(true);
+  }, [
+    approvalOverlayActive,
+    getDefaultReviewPanelWidth,
+    rememberArtifactPanelTrigger,
+    requireActiveSessionForLocalCommand,
+    sessionWorkflowEnabled,
+    t,
+  ]);
+  const keepWorkflowDrawerClosedForCanvasRef = useRef(false);
+  const workflowCanvasEntryHandledRef = useRef(false);
+  const expandWorkflowGraph = useCallback(() => {
+    // Only close the floating inspector drawer when the cockpit actually
+    // opened: openCockpit() silently aborts on the approval-overlay and
+    // active-session guards, and closing the drawer anyway would drop the
+    // interactive workflow surface without delivering the expand action.
+    if (!openCockpit()) return;
+    if (artifactPanelFullscreen) setArtifactPanelFullscreen(false);
+    if (useFloatingArtifactPanel) {
+      keepWorkflowDrawerClosedForCanvasRef.current = true;
+      setArtifactPanelOpen(false);
+    }
+  }, [artifactPanelFullscreen, openCockpit, useFloatingArtifactPanel]);
+  useEffect(() => {
+    if (mainView !== 'cockpit') {
+      keepWorkflowDrawerClosedForCanvasRef.current = false;
+      workflowCanvasEntryHandledRef.current = false;
+      return;
+    }
+    if (workflowCanvasEntryHandledRef.current) return;
+    workflowCanvasEntryHandledRef.current = true;
+    if (
+      keepWorkflowDrawerClosedForCanvasRef.current ||
+      artifactPanelTabs.some((tab) => tab.kind === 'workflow')
+    ) {
+      return;
+    }
+    openWorkflowInspector();
+  }, [artifactPanelTabs, mainView, openWorkflowInspector]);
+  const focusComposerAfterCockpitCloseRef = useRef(false);
+  const closeCockpit = useCallback(() => {
+    focusComposerAfterCockpitCloseRef.current = true;
+    showChat();
+  }, [showChat]);
+  useEffect(() => {
+    if (mainView !== 'chat' || !focusComposerAfterCockpitCloseRef.current) {
+      return;
+    }
+    focusComposerAfterCockpitCloseRef.current = false;
+    if (!activePanel && !approvalOverlayActive) editorRef.current?.focus();
+  }, [activePanel, approvalOverlayActive, mainView]);
+  useEffect(() => {
+    if (!sessionWorkflowEnabled) {
+      if (mainView !== 'cockpit') return;
+      if (cockpitViewRequested()) {
+        if (sessionWorkflowSettingsResolved) {
+          updateCockpitLocation(false, true);
+        }
+      }
+      focusComposerAfterCockpitCloseRef.current = true;
+      setMainView('chat');
+      return;
+    }
+    if (
+      mainView === 'chat' &&
+      cockpitViewRequested() &&
+      !approvalOverlayActive
+    ) {
+      setMainView('cockpit');
+    }
+  }, [
+    approvalOverlayActive,
+    mainView,
+    sessionWorkflowEnabled,
+    sessionWorkflowSettingsResolved,
+  ]);
+  useEffect(() => {
+    const handlePopState = () => {
+      if (cockpitViewRequested()) {
+        if (sessionWorkflowEnabled && !approvalOverlayActive) {
+          setMainView('cockpit');
+        } else {
+          setMainView('chat');
+          if (approvalOverlayActive || sessionWorkflowSettingsResolved) {
+            updateCockpitLocation(false, true);
+          }
+        }
+      } else if (mainViewRef.current === 'cockpit') {
+        if (!approvalOverlayActive) {
+          focusComposerAfterCockpitCloseRef.current = true;
+        }
+        setMainView('chat');
+      }
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, [
+    approvalOverlayActive,
+    sessionWorkflowEnabled,
+    sessionWorkflowSettingsResolved,
+  ]);
+  useEffect(() => {
+    if (
+      mainView === 'cockpit' &&
+      sessionWorkflowEnabled &&
+      !cockpitViewRequested()
+    ) {
+      updateCockpitLocation(true, true);
+    } else if (
+      mainView !== 'cockpit' &&
+      cockpitViewRequested() &&
+      !sessionWorkflowEnabled &&
+      sessionWorkflowSettingsResolved
+    ) {
+      updateCockpitLocation(false, true);
+    }
+  }, [mainView, sessionWorkflowEnabled, sessionWorkflowSettingsResolved]);
   const openEnvironmentTasksPanel = useCallback(() => {
     if (!requireActiveSessionForLocalCommand()) return;
     setEnvironmentPanelOpen(true);
@@ -11976,11 +12281,20 @@ export function App({
   const handleConfirm = useCallback(
     (id: string, selectedOption: string, answers?: Record<string, string>) => {
       const owner = sessionOwnerGuard.capture();
-      sessionActions
+      // Return the submission promise (and rethrow a rejection) so the
+      // ToolApproval re-arm contract engages: its confirm() resets the
+      // double-submit guard only when the returned promise rejects.
+      // Swallowing the rejection here would leave submittedRef latched on a
+      // transient daemon/WS failure, blocking every retry for this request.
+      // Same shape as ChatPane.handleConfirm.
+      return sessionActions
         .submitPermission(id, selectedOption, answers)
+        .then(() => undefined)
         .catch((error: unknown) => {
-          if (!owner.isCurrent()) return;
-          reportError(error, 'Failed to submit permission choice');
+          if (owner.isCurrent()) {
+            reportError(error, 'Failed to submit permission choice');
+          }
+          throw error;
         });
     },
     [sessionActions, reportError, sessionOwnerGuard],
@@ -13284,6 +13598,20 @@ export function App({
     onNestedArtifactsChange: handlePaneArtifactsChange,
     onError: reportError,
     sessionWorkflowEnabled,
+    workflow: sessionWorkflowEnabled
+      ? {
+          todos: sessionWorkflowTodos,
+          tools: planAgentTools,
+          tasks: environmentAgentTasks,
+          artifacts,
+          selectedTodoId: selectedWorkflowTodoId,
+          onSelectedTodoIdChange: setSelectedWorkflowTodoId,
+          onExpandGraph: expandWorkflowGraph,
+          onOpenSubagent: openSubagentPanel,
+          onOpenArtifact: openArtifactPanel,
+          canvasMode: mainView === 'cockpit',
+        }
+      : undefined,
     onImageIngestionNotice: pushToast,
     deferSubagentMount,
     onClose: closeArtifactPanel,
@@ -13406,7 +13734,7 @@ export function App({
                   ? t('planExecution.dialogTitle')
                   : t('tasks.title')
               }
-              size="lg"
+              size="auto"
               onClose={() => setTasksDialogMessage(null)}
             >
               <TasksStatusMessage
@@ -13415,7 +13743,9 @@ export function App({
                 manageActiveEvent={false}
                 onClose={() => setTasksDialogMessage(null)}
                 planTodos={sessionWorkflowEnabled ? floatingTodos : []}
-                agentTools={sessionWorkflowEnabled ? planAgentTools : []}
+                agentTools={
+                  sessionWorkflowEnabled ? tasksDialogAgentTools : []
+                }
                 onOpenSubagent={(tool) => {
                   setTasksDialogMessage(null);
                   openSubagentPanel(tool);
@@ -13725,7 +14055,7 @@ export function App({
                     standaloneSessionsSupported && !lockedWorkspaceCwd
                   }
                   onLoadSession={(sessionId, workspaceCwd) => {
-                    setMainView('chat');
+                    showChat();
                     return loadSidebarSession(sessionId, workspaceCwd);
                   }}
                   onLoadStandaloneSession={(sessionId) => {
@@ -13742,8 +14072,8 @@ export function App({
                   projectFeaturesEnabled={workspaceContextActive}
                   onSelectCurrentSession={() => {
                     closeMobileDrawer();
-                    setMainView('chat');
                     splitFoldedByShrinkRef.current = false;
+                    showChat();
                     closePanel();
                   }}
                   onSessionRenameConfirmed={reconcileCatalogRename}
@@ -13855,7 +14185,7 @@ export function App({
               {chatHeaderEnabled &&
                 !isChatEmptyState &&
                 !activePanel &&
-                mainView === 'chat' && (
+                (mainView === 'chat' || mainView === 'cockpit') && (
                 <div className={styles.chatHeaderRow}>
                   {sidebarOptions.enabled &&
                     sidebarOptions.showCompactToggle && (
@@ -13884,7 +14214,7 @@ export function App({
                         </svg>
                       </button>
                     )}
-                  {renderChatHeader ? (
+                  {renderChatHeader && mainView === 'chat' ? (
                     <div className={styles.customChatHeader}>
                       {renderChatHeader({
                         sessionId: connection.sessionId,
@@ -13920,10 +14250,14 @@ export function App({
                           : null
                       }
                       environmentOpen={environmentPanelVisible}
-                      environmentAvailable={environmentHeaderItemVisible}
+                      environmentAvailable={
+                        mainView === 'chat' && environmentHeaderItemVisible
+                      }
                       rightPanelOpen={artifactPanelOpen}
                       rightPanelAvailable={
-                        rightPanelHeaderItemVisible && !artifactPanelOpen
+                        mainView === 'chat' &&
+                        rightPanelHeaderItemVisible &&
+                        !artifactPanelOpen
                       }
                       onToggleEnvironment={() =>
                         handleEnvironmentPanelOpenChange(
@@ -13949,6 +14283,20 @@ export function App({
                       }
                     />
                   )}
+                  {sessionWorkflowEnabled &&
+                    (sessionWorkflowTodos.length > 0 ||
+                      mainView === 'cockpit') && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="mr-3"
+                        data-testid="open-workflow"
+                        disabled={approvalOverlayActive}
+                        onClick={openWorkflowInspector}
+                      >
+                        {t('workflow.title')}
+                      </Button>
+                    )}
                 </div>
               )}
               <div
@@ -14305,7 +14653,7 @@ export function App({
                     <button
                       type="button"
                       className={styles.fullPageBack}
-                      onClick={() => setMainView('chat')}
+                      onClick={showChat}
                       aria-label={t('common.back')}
                       title={t('common.back')}
                     >
@@ -14384,7 +14732,7 @@ export function App({
                       onOpenSession={(sessionId) => {
                         // The task's bound session IS its run history — switch
                         // to the chat view and load that session's transcript.
-                        setMainView('chat');
+                        showChat();
                         loadSidebarSession(sessionId).catch(
                           (error: unknown) => {
                             reportError(error, 'Failed to open session');
@@ -14402,7 +14750,7 @@ export function App({
                     <button
                       type="button"
                       className={styles.fullPageBack}
-                      onClick={() => setMainView('chat')}
+                      onClick={showChat}
                       aria-label={t('common.back')}
                       title={t('common.back')}
                     >
@@ -14493,11 +14841,11 @@ export function App({
                         }
                         if (!owner.isCurrent()) return false;
                         strandedGoalSessionRef.current = undefined;
-                        setMainView('chat');
+                        showChat();
                       }}
                       onOpenSession={(sessionId) => {
                         // The goal's session transcript IS its history.
-                        setMainView('chat');
+                        showChat();
                         loadSidebarSession(sessionId).catch(
                           (error: unknown) => {
                             reportError(error, 'Failed to open session');
@@ -14507,6 +14855,27 @@ export function App({
                       onError={reportError}
                     />
                   </div>
+                </div>
+              )}
+              {workspaceContextActive && mainView === 'cockpit' && (
+                <div className={styles.fullPage} data-testid="cockpit-page">
+                  <SessionWorkflowCockpit
+                    sessionId={connection.sessionId ?? ''}
+                    connected={connected}
+                    todos={sessionWorkflowTodos}
+                    tools={planAgentTools}
+                    tasks={environmentAgentTasks}
+                    selectedTodoId={selectedWorkflowTodoId}
+                    onSelectedTodoIdChange={setSelectedWorkflowTodoId}
+                    onBackToChat={closeCockpit}
+                    onOpenSubagent={openSubagentPanel}
+                    {...(sessionDisplayName
+                      ? { sessionName: sessionDisplayName }
+                      : {})}
+                    {...(connection.workspaceCwd
+                      ? { workspaceCwd: connection.workspaceCwd }
+                      : {})}
+                  />
                 </div>
               )}
               {workspaceContextActive && mainView === 'split' && (
@@ -14522,7 +14891,7 @@ export function App({
                       data-testid="split-approval-notice"
                     >
                       <span>{t('splitView.outerApprovalPending')}</span>
-                      <button type="button" onClick={() => setMainView('chat')}>
+                      <button type="button" onClick={showChat}>
                         {t('splitView.goToApproval')}
                       </button>
                     </div>
@@ -14867,15 +15236,17 @@ export function App({
                             todos={showFloatingTodos ? floatingTodos : []}
                             statusItems={floatingBottomStatusItems}
                             onOpen={
-                              sessionWorkflowEnabled && showFloatingTodos
-                                ? openTasksPanel
+                              showFloatingTodos
+                                ? floatingTodosUseSessionWorkflow
+                                  ? openWorkflowInspector
+                                  : openTasksPanel
                                 : undefined
                             }
                           />
                         </div>
                       )}
                       {/* Only render the outer session's approval on the chat
-                          view. Under a full-page view (split / scheduled tasks)
+                          view. Under a full-page view (Workflow / split / scheduled tasks)
                           it would sit hidden and unreachable. Each split pane
                           surfaces its own approval. `keyboardActive` tells the
                           overlay to grab focus only when it's the topmost one. */}
@@ -15521,6 +15892,7 @@ export function App({
             {artifactPanelOpen && useFloatingArtifactPanel && (
               <Drawer
                 open
+                autoFocus={floatingArtifactDrawerAutoFocus}
                 direction="right"
                 shouldScaleBackground={false}
                 onOpenChange={(open) => {
@@ -15536,8 +15908,16 @@ export function App({
                   className={
                     artifactPanelFullscreen
                       ? 'data-[vaul-drawer-direction=right]:w-full data-[vaul-drawer-direction=right]:sm:max-w-none data-[vaul-drawer-direction=right]:rounded-none data-[vaul-drawer-direction=right]:border-0 data-[vaul-drawer-direction=right]:pt-[env(safe-area-inset-top)] data-[vaul-drawer-direction=right]:pr-[env(safe-area-inset-right)] data-[vaul-drawer-direction=right]:pb-[env(safe-area-inset-bottom)] data-[vaul-drawer-direction=right]:pl-[env(safe-area-inset-left)]'
-                      : 'data-[vaul-drawer-direction=right]:w-[min(520px,calc(100vw-16px))] data-[vaul-drawer-direction=right]:sm:max-w-[520px]'
+                      : 'shadow-2xl data-[vaul-drawer-direction=right]:w-[min(520px,calc(100vw-16px))] data-[vaul-drawer-direction=right]:sm:max-w-[520px]'
                   }
+                  overlayProps={{ className: 'bg-black/35 backdrop-blur-[1px]' }}
+                  onCloseAutoFocus={(event) => {
+                    const trigger = artifactPanelTriggerRef.current;
+                    artifactPanelTriggerRef.current = null;
+                    if (!trigger?.isConnected) return;
+                    event.preventDefault();
+                    trigger.focus();
+                  }}
                   onEscapeKeyDown={(event) => {
                     if (isWebTerminalTarget(event)) {
                       event.preventDefault();

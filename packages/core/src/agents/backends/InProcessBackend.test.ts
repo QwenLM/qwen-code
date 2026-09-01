@@ -1184,3 +1184,96 @@ describe('InProcessBackend', () => {
     });
   });
 });
+
+describe('InProcessBackend Session Workflow revision write-through', () => {
+  // Teammates and arena agents run on InProcessBackend.createPerAgentConfig,
+  // a third Config-wrapper family besides createApprovalModeOverride and
+  // buildSubagentContextOverride. Its rebuilt tool registry binds
+  // TodoWriteTool to `this.config = wrapper`, so a divergent todo_write
+  // clears the session-global approved revision through the wrapper — the
+  // clear must land on the root Config, not as an own property on the
+  // wrapper (the base would keep rejecting Agent launches against a plan
+  // that no longer exists).
+  const approvedRevision = {
+    planId: 'plan-approved',
+    sourceCallId: 'call-approved',
+    todoIds: ['a', 'b'],
+  };
+
+  const workflowBaseParams = {
+    cwd: '/tmp',
+    targetDir: '/tmp',
+    debugMode: false,
+    model: 'test-model',
+    usageStatisticsEnabled: false,
+    bareMode: true,
+  };
+
+  async function spawnWithWorkflowBase(
+    approvalMode?: ApprovalMode,
+  ): Promise<{ base: Config; agentContext: Config }> {
+    const base = new Config({
+      ...workflowBaseParams,
+      sessionWorkflowEnabled: true,
+    });
+    const registry = await base.createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (base as any).toolRegistry = registry;
+    base.setSessionWorkflowPlanRevision(approvedRevision);
+    expect(base.isSessionWorkflowTodoContextActive()).toBe(true);
+
+    const localBackend = new InProcessBackend(base);
+    await localBackend.init();
+    const spawnConfig = createSpawnConfig('agent-1');
+    spawnConfig.inProcess!.initialTask = undefined;
+    if (approvalMode !== undefined) {
+      spawnConfig.inProcess!.approvalMode = approvalMode;
+    }
+    await localBackend.spawnAgent(spawnConfig);
+
+    const MockAgentCore = AgentCore as unknown as ReturnType<typeof vi.fn>;
+    const { runtimeContext } = destructureAgentCoreCall(
+      MockAgentCore.mock.calls.at(-1)!,
+    );
+    return { base, agentContext: runtimeContext as unknown as Config };
+  }
+
+  it('routes revision mutations from the plain per-agent wrapper to the base Config', async () => {
+    const { base, agentContext } = await spawnWithWorkflowBase();
+    // Reads keep walking the prototype to the session-global value.
+    expect(agentContext.getSessionWorkflowPlanRevision()?.planId).toBe(
+      'plan-approved',
+    );
+
+    // A divergent todo_write inside the teammate clears through its wrapper.
+    agentContext.clearSessionWorkflowPlanRevision();
+    expect(base.getSessionWorkflowPlanRevision()).toBeUndefined();
+    expect(base.isSessionWorkflowTodoContextActive()).toBe(false);
+
+    // And a bind through the wrapper lands on the base too.
+    agentContext.setSessionWorkflowPlanRevision({
+      planId: 'plan-teammate',
+      sourceCallId: 'call-teammate',
+      todoIds: ['c'],
+    });
+    expect(base.getSessionWorkflowPlanRevision()?.planId).toBe('plan-teammate');
+  });
+
+  it('routes revision mutations through the per-agent approval-mode wrapper too', async () => {
+    const { base, agentContext } = await spawnWithWorkflowBase(
+      ApprovalMode.PLAN,
+    );
+
+    agentContext.clearSessionWorkflowPlanRevision();
+    expect(base.getSessionWorkflowPlanRevision()).toBeUndefined();
+
+    agentContext.setSessionWorkflowPlanRevision({
+      planId: 'plan-arena',
+      sourceCallId: 'call-arena',
+      todoIds: ['d'],
+    });
+    expect(base.getSessionWorkflowPlanRevision()?.planId).toBe('plan-arena');
+  });
+});
