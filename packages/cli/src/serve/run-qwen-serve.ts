@@ -4792,14 +4792,6 @@ async function runQwenServeImpl(
       runtimeBootSettings,
       runtimeEnvSnapshot.effectiveEnv,
     );
-    const sessionAttachmentsRoot = (
-      workspace: string,
-      runtimeBaseDir: string,
-    ): string =>
-      path.join(
-        new core.Storage(workspace, runtimeBaseDir).getProjectTempDir(),
-        'attachments',
-      );
     const runtimeEffectiveEnv: NodeJS.ProcessEnv = {
       ...runtimeEnvSnapshot.effectiveEnv,
       QWEN_RUNTIME_DIR: primarySessionRuntimeBaseDir,
@@ -5375,6 +5367,9 @@ async function runQwenServeImpl(
         import('./create-sub-session.js'),
         import('./routes/scheduled-tasks.js'),
       ]);
+    const { sessionAttachmentsRoots } = await import(
+      './session-attachments-root.js'
+    );
     const createCurrentSessionScheduledTaskHandler =
       (
         workspaceCwd: string,
@@ -5429,13 +5424,15 @@ async function runQwenServeImpl(
         runtimeBootSettings?.merged.serve ?? {},
       ),
     });
+    const attachmentsRoots = sessionAttachmentsRoots(
+      boundWorkspace,
+      primarySessionRuntimeBaseDir,
+    );
     const bridge =
       deps.bridge ??
       runtime.createAcpSessionBridge({
-        sessionAttachmentsRoot: sessionAttachmentsRoot(
-          boundWorkspace,
-          primarySessionRuntimeBaseDir,
-        ),
+        sessionAttachmentsRoot: attachmentsRoots.root,
+        sessionAttachmentsFallbackRoot: attachmentsRoots.fallback,
         // Reverse tool channel: let `BridgeClient.extMethod` reach the WS
         // connection that hosts a named client MCP server (#5626).
         clientMcpSender: clientMcpSenderRegistry.lookup,
@@ -6000,11 +5997,13 @@ async function runQwenServeImpl(
           secondarySettings?.merged.serve ?? {},
         ),
       });
+      const secondaryAttachmentsRoots = sessionAttachmentsRoots(
+        workspaceInput.cwd,
+        secondaryEnv.sessionRuntimeBaseDir,
+      );
       const secondaryBridge = runtime.createAcpSessionBridge({
-        sessionAttachmentsRoot: sessionAttachmentsRoot(
-          workspaceInput.cwd,
-          secondaryEnv.sessionRuntimeBaseDir,
-        ),
+        sessionAttachmentsRoot: secondaryAttachmentsRoots.root,
+        sessionAttachmentsFallbackRoot: secondaryAttachmentsRoots.fallback,
         clientMcpSender: secondaryClientMcpSenderRegistry.lookup,
         onCreateSubSession: secondarySubSessionLauncher.launch,
         onCreateCurrentSessionScheduledTask:
@@ -6674,11 +6673,13 @@ async function runQwenServeImpl(
       });
       let wsBridge: ReturnType<typeof runtime.createAcpSessionBridge>;
       try {
+        const wsAttachmentsRoots = sessionAttachmentsRoots(
+          cwd,
+          wsEnv.sessionRuntimeBaseDir,
+        );
         wsBridge = runtime.createAcpSessionBridge({
-          sessionAttachmentsRoot: sessionAttachmentsRoot(
-            cwd,
-            wsEnv.sessionRuntimeBaseDir,
-          ),
+          sessionAttachmentsRoot: wsAttachmentsRoots.root,
+          sessionAttachmentsFallbackRoot: wsAttachmentsRoots.fallback,
           clientMcpSender: wsClientMcpRegistry.lookup,
           onCreateSubSession: wsSubSessionLauncher.launch,
           onCreateCurrentSessionScheduledTask:

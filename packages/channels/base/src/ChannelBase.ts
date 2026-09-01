@@ -261,7 +261,10 @@ const PERMISSION_COPY = {
     allowAlways: 'always allow',
     deny: 'Deny',
     required: 'Permission required to run a tool',
-    command: 'Command:',
+    request: 'Request:',
+    tool: 'Tool:',
+    action: 'Action:',
+    parameters: 'Parameters:',
     replyWith: 'Reply with:',
   },
   zh: {
@@ -272,7 +275,10 @@ const PERMISSION_COPY = {
     allowAlways: '始终允许',
     deny: '拒绝',
     required: '运行工具需要授权',
-    command: '操作：',
+    request: '请求：',
+    tool: '工具：',
+    action: '操作：',
+    parameters: '参数：',
     replyWith: '回复以下命令：',
   },
 } as const;
@@ -879,10 +885,7 @@ export abstract class ChannelBase {
       ...(precedingSegment
         ? { precedingSegmentId: precedingSegment.segmentId }
         : {}),
-      title: sanitizeQuotedText(
-        pending.request.toolCall.title || PERMISSION_COPY[this.locale].toolUse,
-        160,
-      ),
+      title: this.permissionTitle(pending.request.toolCall),
       decisions,
       onSettled: (listener) => {
         if (pending.settled) {
@@ -943,24 +946,15 @@ export abstract class ChannelBase {
   private permissionPresentationDecisions(
     pending: PendingPermission,
   ): ChannelPermissionRequestContext['decisions'] | undefined {
-    const allowOnceId = this.approvalOptionId(pending);
-    if (!allowOnceId) return undefined;
-    const allowOnce = pending.request.options.find(
-      (option) => option.optionId === allowOnceId,
-    );
+    const allowOnce = this.approvalOption(pending);
+    if (!allowOnce) return undefined;
+    const copy = PERMISSION_COPY[this.locale];
     const allowAlways = this.approvalAlwaysOption(pending);
-    const deny =
-      pending.request.options.find((option) => option.kind === 'reject_once') ??
-      pending.request.options.find(
-        (option) =>
-          option.optionId === 'cancel' &&
-          (option as { kind?: string }).kind === undefined,
-      );
     return [
       {
         kind: 'allow_once',
         label: sanitizeQuotedText(
-          this.permissionOptionLabel(allowOnce?.name, 'allow_once'),
+          this.permissionOptionLabel(allowOnce, copy.allowOnce),
           80,
         ),
       },
@@ -975,29 +969,11 @@ export abstract class ChannelBase {
       {
         kind: 'deny',
         label: sanitizeQuotedText(
-          this.permissionOptionLabel(deny?.name, 'deny'),
+          this.permissionOptionLabel(this.denialOption(pending), copy.deny),
           80,
         ),
       },
     ];
-  }
-
-  private permissionOptionLabel(
-    name: string | undefined,
-    kind: 'allow_once' | 'deny',
-  ): string {
-    const copy = PERMISSION_COPY[this.locale];
-    if (!name) return kind === 'allow_once' ? copy.allowOnce : copy.deny;
-    if (this.locale === 'zh') {
-      if (
-        kind === 'allow_once' &&
-        (name === 'Allow' || name === 'Allow once')
-      ) {
-        return copy.allowOnce;
-      }
-      if (kind === 'deny' && name === 'Deny') return copy.deny;
-    }
-    return name;
   }
 
   private permissionPresentationResponse(
@@ -3070,54 +3046,150 @@ export abstract class ChannelBase {
   private formatPermissionRequest(pending: PendingPermission): string {
     const { toolCall } = pending.request;
     const copy = PERMISSION_COPY[this.locale];
-    const title = sanitizeQuotedText(toolCall.title || copy.toolUse, 160);
+    const parameters = this.permissionParameterSummary(toolCall);
+    const approveLabel = this.permissionOptionLabel(
+      this.approvalOption(pending),
+      copy.allowOnce.toLocaleLowerCase(this.locale),
+    );
     const alwaysOption = this.approvalAlwaysOption(pending);
-    if (pending.taskName) {
-      const replies = [
-        `/approve ${pending.requestId}          allow once`,
-        ...(alwaysOption
-          ? [`/approve-always ${pending.requestId}   ${alwaysOption.label}`]
-          : []),
-        `/deny ${pending.requestId}             deny`,
-      ];
-      return [
-        'Permission required to run a tool',
-        `Request: ${pending.requestId}`,
-        '',
-        'Command:',
-        title,
-        '',
-        'Reply with:',
-        ...replies,
-      ].join('\n');
-    }
+    const denyLabel = this.permissionOptionLabel(
+      this.denialOption(pending),
+      'deny',
+    );
+    const requestSuffix = pending.taskName ? ` ${pending.requestId}` : '';
+    const replyPadding = pending.taskName
+      ? { approve: '          ', always: '   ', deny: '             ' }
+      : { approve: '        ', always: ' ', deny: '           ' };
     const replies = [
-      `/approve        ${copy.allowOnce.toLocaleLowerCase(this.locale)}`,
-      ...(alwaysOption ? [`/approve-always ${alwaysOption.label}`] : []),
-      `/deny           ${copy.deny.toLocaleLowerCase(this.locale)}`,
+      `/approve${requestSuffix}${replyPadding.approve}${approveLabel}`,
+      ...(alwaysOption
+        ? [
+            `/approve-always${requestSuffix}${replyPadding.always}${alwaysOption.label}`,
+          ]
+        : []),
+      `/deny${requestSuffix}${replyPadding.deny}${denyLabel}`,
     ];
-    const lines = [
+    return [
       copy.required,
+      ...(pending.taskName ? [`${copy.request} ${pending.requestId}`] : []),
       '',
-      copy.command,
-      title,
+      `${copy.tool} ${this.permissionToolName(toolCall)}`,
+      `${copy.action} ${this.permissionTitle(toolCall)}`,
+      ...(parameters ? [`${copy.parameters} ${parameters}`] : []),
       '',
       copy.replyWith,
       ...replies,
-    ];
-    return lines.join('\n');
+    ].join('\n');
   }
 
-  private approvalOptionId(pending: PendingPermission): string | undefined {
+  private permissionTitle(
+    toolCall: PermissionRequestEvent['request']['toolCall'],
+  ): string {
+    const rawTitle =
+      typeof toolCall.title === 'string' ? toolCall.title : undefined;
+    return (
+      sanitizeQuotedText(rawTitle || '', 160).trim() ||
+      PERMISSION_COPY[this.locale].toolUse
+    );
+  }
+
+  private permissionToolName(
+    toolCall: PermissionRequestEvent['request']['toolCall'],
+  ): string {
+    const rawToolCall = toolCall as unknown as Record<string, unknown>;
+    const meta = isRecord(rawToolCall['_meta'])
+      ? rawToolCall['_meta']
+      : undefined;
+    for (const candidate of [meta?.['toolName'], rawToolCall['kind']]) {
+      if (typeof candidate !== 'string') continue;
+      const name = sanitizeQuotedText(candidate, 120).trim();
+      if (name) return name;
+    }
+    return 'unknown';
+  }
+
+  private permissionParameterSummary(
+    toolCall: PermissionRequestEvent['request']['toolCall'],
+  ): string | undefined {
+    const rawToolCall = toolCall as unknown as Record<string, unknown>;
+    const rawInput = isRecord(rawToolCall['rawInput'])
+      ? rawToolCall['rawInput']
+      : undefined;
+    if (!rawInput) return undefined;
+
+    const entries = Object.entries(rawInput);
+    if (entries.length === 0) return undefined;
+    const visible = entries.slice(0, 4).map(([key, value]) => {
+      const safeKey = sanitizeQuotedText(key, 48).trim() || 'unknown';
+      if (Array.isArray(value)) {
+        return `${safeKey} (${value.length} ${value.length === 1 ? 'item' : 'items'})`;
+      }
+      if (isRecord(value)) {
+        return `${safeKey} (object)`;
+      }
+      return safeKey;
+    });
+    if (entries.length > visible.length) {
+      visible.push(`+${entries.length - visible.length} more`);
+    }
+    return visible.join(', ');
+  }
+
+  private permissionOptionLabel(
+    option: PermissionOption | undefined,
+    fallback: string,
+  ): string {
+    const rawLabel = typeof option?.name === 'string' ? option.name : '';
+    const label = sanitizeQuotedText(rawLabel, 160).trim();
+    if (!label) return fallback;
+    return this.localizedPermissionOptionLabel(option, label) ?? label;
+  }
+
+  private localizedPermissionOptionLabel(
+    option: PermissionOption | undefined,
+    label: string,
+  ): string | undefined {
+    if (this.locale !== 'zh') return undefined;
+    const copy = PERMISSION_COPY[this.locale];
+    if (option?.kind === 'allow_always') {
+      if (
+        option.optionId === 'proceed_always_project' &&
+        label.startsWith('Always Allow in project')
+      ) {
+        return copy.allowAlwaysProject;
+      }
+      if (
+        option.optionId === 'proceed_always_user' &&
+        label.startsWith('Always Allow for user')
+      ) {
+        return copy.allowAlwaysUser;
+      }
+      if (option.optionId === 'proceed_always' && label === 'Allow All Edits') {
+        return copy.allowAlways;
+      }
+      return undefined;
+    }
+    if (label === 'Allow' || label === 'Allow once') return copy.allowOnce;
+    if (label === 'Deny' || label === 'Reject') return copy.deny;
+    return undefined;
+  }
+
+  private approvalOption(
+    pending: PendingPermission,
+  ): PermissionOption | undefined {
     const options = pending.request.options;
     return (
-      options.find((option) => option.kind === 'allow_once')?.optionId ??
+      options.find((option) => option.kind === 'allow_once') ??
       options.find(
         (option) =>
           option.optionId === 'proceed_once' &&
           (option as { kind?: string }).kind === undefined,
-      )?.optionId
+      )
     );
+  }
+
+  private approvalOptionId(pending: PendingPermission): string | undefined {
+    return this.approvalOption(pending)?.optionId;
   }
 
   private approvalAlwaysOption(
@@ -3135,7 +3207,10 @@ export abstract class ChannelBase {
     }
     return {
       optionId: option.optionId,
-      label: this.approvalAlwaysLabel(option),
+      label: this.permissionOptionLabel(
+        option,
+        this.approvalAlwaysLabel(option),
+      ),
     };
   }
 
@@ -3164,7 +3239,17 @@ export abstract class ChannelBase {
       | { outcome: 'selected'; optionId: string }
       | { outcome: 'cancelled' };
   } {
-    const option =
+    const option = this.denialOption(pending);
+    if (option) {
+      return { outcome: { outcome: 'selected', optionId: option.optionId } };
+    }
+    return { outcome: { outcome: 'cancelled' } };
+  }
+
+  private denialOption(
+    pending: PendingPermission,
+  ): PermissionOption | undefined {
+    return (
       pending.request.options.find(
         (candidate) => candidate.kind === 'reject_once',
       ) ??
@@ -3172,11 +3257,8 @@ export abstract class ChannelBase {
         (candidate) =>
           candidate.optionId === 'cancel' &&
           (candidate as { kind?: string }).kind === undefined,
-      );
-    if (option) {
-      return { outcome: { outcome: 'selected', optionId: option.optionId } };
-    }
-    return { outcome: { outcome: 'cancelled' } };
+      )
+    );
   }
 
   private async handlePermissionResponseCommand(
@@ -3216,7 +3298,7 @@ export abstract class ChannelBase {
         .map((id) => {
           const pending = this.pendingPermissions.get(id);
           const title = pending
-            ? `: ${sanitizeQuotedText(pending.request.toolCall.title || 'Tool use', 160)}`
+            ? `: ${this.permissionTitle(pending.request.toolCall)}`
             : '';
           const task = pending?.taskName ? `Task ${pending.taskName} — ` : '';
           return `- ${task}${sanitizeQuotedText(id, 128)}${title}`;

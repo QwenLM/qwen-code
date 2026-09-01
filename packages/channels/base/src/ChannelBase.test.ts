@@ -1215,8 +1215,8 @@ describe('ChannelBase', () => {
           kind: 'allow_always',
           name: 'Always Allow in project',
         },
-        { optionId: 'proceed_once', kind: 'allow_once', name: 'Allow once' },
-        { optionId: 'cancel', kind: 'reject_once', name: 'Deny' },
+        { optionId: 'proceed_once', kind: 'allow_once', name: 'Allow' },
+        { optionId: 'cancel', kind: 'reject_once', name: 'Reject' },
       ],
       title = `Run ${requestId}`,
     ): void {
@@ -1229,6 +1229,7 @@ describe('ChannelBase', () => {
             kind: 'shell',
             title,
             rawInput: { command: 'echo secret-token' },
+            _meta: { toolName: 'run_shell_command' },
           },
           options,
         },
@@ -1243,7 +1244,7 @@ describe('ChannelBase', () => {
           toolCall: {
             toolCallId: `tool-${requestId}`,
             kind: 'other',
-            title: 'AskUserQuestion: Ask user 1 question',
+            title: 'Ask user 1 question',
             rawInput: {
               questions: [
                 {
@@ -1475,7 +1476,7 @@ describe('ChannelBase', () => {
           toolCall: {
             toolCallId: 'tool-question',
             kind: 'other',
-            title: 'AskUserQuestion: Ask user 2 questions',
+            title: 'Ask user 2 questions',
             rawInput: { questions: [{ question: 'stale legacy question' }] },
             _meta: {
               toolName: 'ask_user_question',
@@ -1859,12 +1860,12 @@ describe('ChannelBase', () => {
         },
         title: 'Run req-native-permission',
         decisions: [
-          { kind: 'allow_once', label: 'Allow once' },
+          { kind: 'allow_once', label: 'Allow' },
           {
             kind: 'allow_always',
-            label: 'always allow for this project',
+            label: 'Always Allow in project',
           },
-          { kind: 'deny', label: 'Deny' },
+          { kind: 'deny', label: 'Reject' },
         ],
       });
       expect(ch.sent).toEqual([]);
@@ -1928,9 +1929,9 @@ describe('ChannelBase', () => {
 
       await vi.waitFor(() => expect(ch.sent).toHaveLength(1));
       expect(ch.permissionPresentations).toHaveLength(1);
-      expect(ch.sent[0]!.text).toContain('/approve        allow once');
+      expect(ch.sent[0]!.text).toContain('/approve        Allow');
       expect(ch.sent[0]!.text).toContain('/approve-always');
-      expect(ch.sent[0]!.text).toContain('/deny           deny');
+      expect(ch.sent[0]!.text).toContain('/deny           Reject');
 
       await active.finish();
     });
@@ -1966,7 +1967,7 @@ describe('ChannelBase', () => {
       ]);
 
       await vi.waitFor(() => expect(ch.sent).toHaveLength(1));
-      expect(ch.sent[0]!.text).toContain('/approve        allow once');
+      expect(ch.sent[0]!.text).toContain('/approve        Allow once');
       expect(respondToPermissionMock()).not.toHaveBeenCalled();
 
       await active.finish();
@@ -2049,6 +2050,9 @@ describe('ChannelBase', () => {
       await vi.waitFor(() => expect(ch.sent).toHaveLength(1));
       expect(ch.userInputPresentations).toHaveLength(1);
       expect(ch.sent[0]!.text).toContain('Permission required to run a tool');
+      expect(ch.sent[0]!.text).toContain('Tool: ask_user_question');
+      expect(ch.sent[0]!.text).toContain('Action: Ask user 1 question');
+      expect(ch.sent[0]!.text).toContain('Parameters: questions (1 item)');
       expect(respondToPermissionMock()).not.toHaveBeenCalled();
 
       await active.finish();
@@ -2347,11 +2351,14 @@ describe('ChannelBase', () => {
       expect(ch.sent.at(-1)?.text).toContain(
         'Permission required to run a tool',
       );
-      expect(ch.sent.at(-1)?.text).toContain('Command:');
-      expect(ch.sent.at(-1)?.text).toContain('Run req-1');
-      expect(ch.sent.at(-1)?.text).toContain('/approve        allow once');
-      expect(ch.sent.at(-1)?.text).toContain('/approve-always always allow');
-      expect(ch.sent.at(-1)?.text).toContain('/deny           deny');
+      expect(ch.sent.at(-1)?.text).toContain('Tool: run_shell_command');
+      expect(ch.sent.at(-1)?.text).toContain('Action: Run req-1');
+      expect(ch.sent.at(-1)?.text).toContain('Parameters: command');
+      expect(ch.sent.at(-1)?.text).toContain('/approve        Allow');
+      expect(ch.sent.at(-1)?.text).toContain(
+        '/approve-always Always Allow in project',
+      );
+      expect(ch.sent.at(-1)?.text).toContain('/deny           Reject');
       expect(ch.sent.at(-1)?.text).not.toContain('Request: req-1');
       expect(ch.sent.at(-1)?.text).not.toContain('proceed_once');
       expect(ch.sent.at(-1)?.text).not.toContain('secret-token');
@@ -2362,6 +2369,88 @@ describe('ChannelBase', () => {
         outcome: { outcome: 'selected', optionId: 'proceed_once' },
       });
       expect(ch.sent.at(-1)?.text).toBe('Permission approved.');
+    });
+
+    it('uses stable fallbacks when permission labels sanitize to empty', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      (bridge as unknown as EventEmitter).emit('permissionRequest', {
+        requestId: 'req-empty-labels',
+        sessionId,
+        request: {
+          toolCall: {
+            toolCallId: 'tool-empty-labels',
+            kind: 'shell',
+            title: 42,
+            rawInput: { '\u0000\n[]': true },
+            _meta: { toolName: '\u0000\n' },
+          },
+          options: [
+            {
+              optionId: 'proceed_once',
+              kind: 'allow_once',
+              name: { trim: true },
+            },
+            {
+              optionId: 'cancel',
+              kind: 'reject_once',
+              name: '\u0000\n',
+            },
+          ],
+        },
+      });
+
+      expect(ch.sent.at(-1)?.text).toContain('Tool: shell');
+      expect(ch.sent.at(-1)?.text).toContain('Action: Tool use');
+      expect(ch.sent.at(-1)?.text).toContain('Parameters: unknown');
+      expect(ch.sent.at(-1)?.text).toContain('/approve        allow once');
+      expect(ch.sent.at(-1)?.text).toContain('/deny           deny');
+
+      emitPermission(sessionId, 'req-other');
+      await ch.handleInbound(envelope({ text: '/approve' }));
+      expect(ch.sent.at(-1)?.text).toContain('- req-empty-labels: Tool use');
+    });
+
+    it('summarizes permission parameters with shape markers and overflow', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      const emitParams = (requestId: string, rawInput: unknown): void => {
+        (bridge as unknown as EventEmitter).emit('permissionRequest', {
+          requestId,
+          sessionId,
+          request: {
+            toolCall: {
+              toolCallId: `tool-${requestId}`,
+              kind: 'shell',
+              title: `Run ${requestId}`,
+              rawInput,
+              _meta: { toolName: 'run_shell_command' },
+            },
+            options: [
+              { optionId: 'proceed_once', kind: 'allow_once', name: 'Allow' },
+              { optionId: 'cancel', kind: 'reject_once', name: 'Reject' },
+            ],
+          },
+        });
+      };
+
+      emitParams('req-params-mixed', {
+        config: { strict: true },
+        tags: ['alpha', 'beta'],
+        first: 1,
+        second: 2,
+        third: 3,
+      });
+      expect(ch.sent.at(-1)?.text).toContain(
+        'Parameters: config (object), tags (2 items), first, second, +1 more',
+      );
+
+      emitParams('req-params-short', { command: 'ls', timeout: 30 });
+      expect(ch.sent.at(-1)?.text).toContain('Parameters: command, timeout');
+      expect(ch.sent.at(-1)?.text).not.toContain('more');
+
+      emitParams('req-params-empty', {});
+      expect(ch.sent.at(-1)?.text).not.toContain('Parameters:');
     });
 
     it('cancels bridge permissions when the target no longer belongs to the channel', async () => {
@@ -2786,7 +2875,7 @@ describe('ChannelBase', () => {
       ]);
 
       expect(ch.sent.at(-1)?.text).toContain(
-        '/approve-always always allow for this project',
+        '/approve-always Always Allow in project',
       );
 
       await ch.handleInbound(envelope({ text: '/approve-always req-1' }));
@@ -2810,7 +2899,7 @@ describe('ChannelBase', () => {
       ]);
 
       expect(ch.sent.at(-1)?.text).toContain(
-        '/approve-always always allow for this user',
+        '/approve-always Always Allow for user',
       );
 
       await ch.handleInbound(envelope({ text: '/approve-always req-1' }));
@@ -2838,7 +2927,7 @@ describe('ChannelBase', () => {
       ]);
 
       expect(ch.sent.at(-1)?.text).toContain(
-        '/approve-always always allow for this user',
+        '/approve-always Always Allow for user',
       );
 
       await ch.handleInbound(envelope({ text: '/approve-always req-1' }));
@@ -3969,7 +4058,7 @@ describe('ChannelBase', () => {
           },
         });
         expect(ch.sent[0]!.text).toBe(
-          '[review] Permission required to run a tool\nRequest: req-123\n\nCommand:\nRun tests\n\nReply with:\n/approve req-123          allow once\n/approve-always req-123   always allow for this project\n/deny req-123             deny',
+          '[review] Permission required to run a tool\nRequest: req-123\n\nTool: unknown\nAction: Run tests\n\nReply with:\n/approve req-123          Allow once\n/approve-always req-123   Always\n/deny req-123             Deny',
         );
 
         ch.sent = [];
