@@ -151,6 +151,19 @@ describe('FileExclusions', () => {
   });
 
   describe('with Config', () => {
+    it('uses the current session context filenames', () => {
+      const mockConfig = {
+        getContextFileNames: vi.fn(() => ['PROJECT-B.md']),
+      } as unknown as Config;
+
+      const patterns = new FileExclusions(
+        mockConfig,
+      ).getDefaultExcludePatterns();
+
+      expect(patterns).toContain('**/PROJECT-B.md');
+      expect(patterns).not.toContain('**/QWEN.md');
+    });
+
     it('should use config custom excludes when available', () => {
       const mockConfig = {
         getCustomExcludes: vi.fn(() => ['**/config-exclude/**']),

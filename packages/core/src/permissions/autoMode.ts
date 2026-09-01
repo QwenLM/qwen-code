@@ -171,19 +171,20 @@ function trimPathSlashes(filePath: string): string {
   return filePath.slice(start, end);
 }
 
-function matchesConfiguredContextFile(normalizedPath: string): boolean {
-  return [...getAllMemoryFilenames(), LOCAL_CONTEXT_FILENAME].some(
-    (filename) => {
-      const normalizedFilename = trimPathSlashes(
-        normalizePathForAutoModePattern(filename),
-      );
-      if (!normalizedFilename) return false;
-      return (
-        normalizedPath === normalizedFilename ||
-        normalizedPath.endsWith(`/${normalizedFilename}`)
-      );
-    },
-  );
+function matchesConfiguredContextFile(
+  normalizedPath: string,
+  contextFileNames: readonly string[],
+): boolean {
+  return [...contextFileNames, LOCAL_CONTEXT_FILENAME].some((filename) => {
+    const normalizedFilename = trimPathSlashes(
+      normalizePathForAutoModePattern(filename),
+    );
+    if (!normalizedFilename) return false;
+    return (
+      normalizedPath === normalizedFilename ||
+      normalizedPath.endsWith(`/${normalizedFilename}`)
+    );
+  });
 }
 
 let qwenHomePrefixesCacheKey: string | undefined;
@@ -258,11 +259,14 @@ function getAutoModeWritePathCandidates(filePath: string): string[] {
   return [...candidates];
 }
 
-export function isAutoModeProtectedWritePath(filePath: string): boolean {
+export function isAutoModeProtectedWritePath(
+  filePath: string,
+  contextFileNames: readonly string[] = getAllMemoryFilenames(),
+): boolean {
   return getAutoModeWritePathCandidates(filePath).some((candidate) => {
     const normalized = normalizePathForAutoModePattern(candidate);
     return (
-      matchesConfiguredContextFile(normalized) ||
+      matchesConfiguredContextFile(normalized, contextFileNames) ||
       matchesQwenHomeSurface(normalized) ||
       PERSISTENCE_PATH_PATTERNS.some((pattern) => pattern.test(normalized)) ||
       SELF_MODIFICATION_PATH_PATTERNS.some((pattern) =>
@@ -292,11 +296,12 @@ export function shouldClassifyAllShellForAutoMode(
 export function shouldForceAutoModeReviewForAllow(
   ctx: PermissionCheckContext,
   cwdFallback = process.cwd(),
+  contextFileNames: readonly string[] = getAllMemoryFilenames(),
 ): boolean {
   if (
     PROTECTED_WRITE_TOOL_NAMES.has(ctx.toolName) &&
     ctx.filePath &&
-    isAutoModeProtectedWritePath(ctx.filePath)
+    isAutoModeProtectedWritePath(ctx.filePath, contextFileNames)
   ) {
     return true;
   }
@@ -311,8 +316,8 @@ export function shouldForceAutoModeReviewForAllow(
       : ctx.command;
   const cwd = ctx.cwd ?? cwdFallback;
 
-  if (hasRawProtectedRedirect(command, cwd)) return true;
-  if (hasRawProtectedWriteCommand(command, cwd)) return true;
+  if (hasRawProtectedRedirect(command, cwd, contextFileNames)) return true;
+  if (hasRawProtectedWriteCommand(command, cwd, contextFileNames)) return true;
 
   return extractShellOperationsAcrossCommand(command, cwd).some((op) => {
     if (
@@ -324,11 +329,18 @@ export function shouldForceAutoModeReviewForAllow(
     if (op.cwdUnknown && op.pathMayDependOnCwd) {
       return true;
     }
-    return Boolean(op.filePath && isAutoModeProtectedWritePath(op.filePath));
+    return Boolean(
+      op.filePath &&
+        isAutoModeProtectedWritePath(op.filePath, contextFileNames),
+    );
   });
 }
 
-function hasRawProtectedRedirect(command: string, cwd: string): boolean {
+function hasRawProtectedRedirect(
+  command: string,
+  cwd: string,
+  contextFileNames: readonly string[],
+): boolean {
   for (let i = 0; i < command.length; i++) {
     if (command[i] !== '>') continue;
     while (command[i] === '>' || command[i] === '|' || command[i] === '&') {
@@ -347,12 +359,16 @@ function hasRawProtectedRedirect(command: string, cwd: string): boolean {
     const target = stripRawRedirectTargetToken(token);
     if (!target || target.startsWith('&')) continue;
     const resolved = path.isAbsolute(target) ? target : path.join(cwd, target);
-    if (isAutoModeProtectedWritePath(resolved)) return true;
+    if (isAutoModeProtectedWritePath(resolved, contextFileNames)) return true;
   }
   return false;
 }
 
-function hasRawProtectedWriteCommand(command: string, cwd: string): boolean {
+function hasRawProtectedWriteCommand(
+  command: string,
+  cwd: string,
+  contextFileNames: readonly string[],
+): boolean {
   for (const line of command.split('\n')) {
     if (!RAW_PROTECTED_WRITE_COMMANDS.test(line)) continue;
     if (
@@ -368,7 +384,9 @@ function hasRawProtectedWriteCommand(command: string, cwd: string): boolean {
       );
       for (const candidate of rawProtectedWriteTargets(target, line)) {
         if (/\$[{(A-Za-z_]/.test(candidate)) return true;
-        if (containsProtectedPathFragment(candidate, cwd)) return true;
+        if (containsProtectedPathFragment(candidate, cwd, contextFileNames)) {
+          return true;
+        }
       }
     }
   }
@@ -413,12 +431,16 @@ function rawFlagValue(token: string, line: string): string | undefined {
   return undefined;
 }
 
-function containsProtectedPathFragment(token: string, cwd: string): boolean {
+function containsProtectedPathFragment(
+  token: string,
+  cwd: string,
+  contextFileNames: readonly string[],
+): boolean {
   for (const candidate of token.match(/[A-Za-z0-9_./~-]+/g) ?? []) {
     const resolved = path.isAbsolute(candidate)
       ? candidate
       : path.join(cwd, candidate);
-    if (isAutoModeProtectedWritePath(resolved)) return true;
+    if (isAutoModeProtectedWritePath(resolved, contextFileNames)) return true;
   }
   return false;
 }
@@ -472,7 +494,12 @@ export function passesAcceptEditsFastPath(
   // auto-approve via fast-path — the former execute code on subsequent tooling
   // operations, the latter let an agent rewrite its own permissions or
   // instructions.
-  if (isAutoModeProtectedWritePath(ctx.filePath)) {
+  if (
+    isAutoModeProtectedWritePath(
+      ctx.filePath,
+      config.getContextFileNames?.() ?? getAllMemoryFilenames(),
+    )
+  ) {
     return false;
   }
   return config.getWorkspaceContext().isPathWithinWorkspace(ctx.filePath);

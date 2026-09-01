@@ -80,7 +80,12 @@ import {
   getMCPServerStatus,
   type SendSdkMcpMessage,
 } from '../tools/mcp-client.js';
-import { setMemoryFilename } from '../utils/memory-constants.js';
+import {
+  AGENT_CONTEXT_FILENAME,
+  DEFAULT_CONTEXT_FILENAME,
+  getAllMemoryFilenames,
+  setMemoryFilename,
+} from '../utils/memory-constants.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
 import { recordStartupEvent } from '../utils/startupEventSink.js';
 import { ToolRegistry, type ToolFactory } from '../tools/tool-registry.js';
@@ -841,6 +846,103 @@ export interface AgentsCollabSettings {
   };
 }
 
+export interface ProjectRuntimeConfig {
+  trustedFolder: boolean;
+  includeDirectories: readonly string[];
+  loadMemoryFromIncludeDirectories: boolean;
+  plansDir: string;
+  plansDirectoryConfigured: boolean;
+  cronEnabled: boolean;
+  cronRecurringMaxAgeDays?: number;
+  lsToolEnabled: boolean;
+  agentTeamEnabled: boolean;
+  artifactEnabled: boolean;
+  artifactAutoOpen: boolean;
+  artifactPublisher: 'local' | 'host' | 'oss';
+  artifactHost?: ArtifactHostConfig;
+  artifactOss?: ArtifactOssConfig;
+  workflowsEnabled: boolean;
+  skipWorkflowUsageWarning: boolean;
+  useRipgrep?: boolean;
+  useBuiltinRipgrep?: boolean;
+  webSearch?: WebSearchSettings;
+  imageModel?: string;
+  allowedHttpHookUrls: string[];
+  allowPrivateNetworkHooks: boolean;
+  fileFiltering?: ConfigParameters['fileFiltering'];
+  shouldUseNodePtyShell?: boolean;
+  shellDefaultTimeoutMs?: number;
+  shellHeartbeatIntervalMs?: number;
+  truncateToolOutputThreshold?: number;
+  truncateToolOutputLines?: number;
+  toolOutputBatchBudget?: number;
+  defaultFileEncoding?: FileEncodingType;
+  bugCommand?: BugCommandSettings;
+  coreTools?: string[];
+  allowedTools?: string[];
+  excludeTools?: string[];
+  disabledSlashCommands?: string[];
+  permissions?: {
+    allow?: string[];
+    ask?: string[];
+    deny?: string[];
+    autoMode?: AutoModeSettings;
+  };
+  disabledTools?: string[];
+  visibleTools?: string[];
+  eagerTools?: string[];
+  toolSearchThreshold?: number;
+  toolDiscoveryCommand?: string;
+  toolCallCommand?: string;
+  mcpServerCommand?: string;
+  mcpToolIdleTimeoutMs?: number;
+  disabledSkillLevels?: readonly SkillLevel[];
+  customSkillDirs?: readonly string[];
+  importFormat?: 'tree' | 'flat';
+  contextFileName?: string | string[];
+  enableManagedAutoMemory?: boolean;
+  enableManagedAutoDream?: boolean;
+  enableTeamMemory?: boolean;
+  enableTeamMemorySync?: boolean;
+  enableAutoSkill?: boolean;
+  autoSkillConfirm?: boolean;
+  agents?: AgentsCollabSettings;
+  worktree?: WorktreeSettings;
+  onPersistPermissionRule?: ConfigParameters['onPersistPermissionRule'];
+  disableAllHooks?: boolean;
+  stopHookBlockingCap?: number;
+  userHooks?: Record<string, unknown>;
+  projectHooks?: Record<string, unknown>;
+  mcpServers?: Record<string, MCPServerConfig>;
+  allowedMcpServers?: string[];
+  excludedMcpServers?: string[];
+  pendingMcpServers?: string[];
+}
+
+export interface PreparedProjectRuntime {
+  config: ProjectRuntimeConfig;
+  /**
+   * Non-blocking conditions the host decided at prepare time (for example,
+   * declining to rewrite a process-wide resource because the process hosts
+   * other sessions). Surfaced to the caller as
+   * `projectRuntimeRefreshErrors` once the switch has committed.
+   */
+  warnings?: readonly string[];
+  commit(): Promise<void>;
+  rollback(): Promise<void>;
+  complete(): Promise<void>;
+}
+
+export interface ProjectRuntimeReloader {
+  prepare(
+    targetDir: string,
+    trustedFolder: boolean | undefined,
+    approvalMode: ApprovalMode,
+    /** The directory being left; a rollback restores its environment. */
+    previousDir: string,
+  ): Promise<PreparedProjectRuntime>;
+}
+
 export interface ConfigParameters {
   sessionId?: string;
   sessionData?: ResumedSessionData;
@@ -876,8 +978,7 @@ export interface ConfigParameters {
   /**
    * Live-read provider for the set of skill names that should be hidden
    * from `<available_skills>` and the `/<skill-name>` slash-command
-   * surface. Unlike `disabledSlashCommands` (which is a frozen snapshot),
-   * this is a function so the CLI layer can close over `LoadedSettings`
+   * surface. This is a function so the CLI layer can close over `LoadedSettings`
    * and have post-`setValue` toggles take effect without restart.
    *
    * Must be attached at construction time — `Config.initialize()` calls
@@ -1333,6 +1434,7 @@ export interface ConfigParameters {
   ) => Promise<void>;
   /** Lifecycle handle for an external settings file watcher. Stopped during shutdown. */
   settingsWatcher?: { stopWatching(): void };
+  projectRuntimeReloader?: ProjectRuntimeReloader;
 }
 
 export type TerminalImageRenderSupport =
@@ -1663,6 +1765,21 @@ function resolveCronRecurringMaxAgeDays(setting: number | undefined): number {
     return DEFAULT_RECURRING_MAX_AGE_DAYS;
   }
   return normalizeRecurringMaxAge(raw, DEFAULT_RECURRING_MAX_AGE_DAYS);
+}
+
+function resolveContextFileNames(
+  value: string | string[] | undefined,
+): readonly string[] {
+  // Settings JSON is not schema-validated on load, and a `/cd` target's
+  // `context.fileName` reaches here verbatim — a non-string entry must not
+  // throw out of the middle of a half-committed relocation.
+  const names = (Array.isArray(value) ? value : value ? [value] : [])
+    .filter((name): name is string => typeof name === 'string')
+    .map((name) => name.trim())
+    .filter(Boolean);
+  return names.length > 0
+    ? Object.freeze(names)
+    : Object.freeze([DEFAULT_CONTEXT_FILENAME, AGENT_CONTEXT_FILENAME]);
 }
 
 /** Request from the `create_sub_session` tool to spawn a fresh top-level
@@ -2140,10 +2257,10 @@ export class Config {
   private readonly appendSystemPrompt: string | undefined;
   private liveAppendSystemPrompt: string | undefined;
   private outputStyle: OutputStyleDefinition | undefined;
-  private readonly coreTools: string[] | undefined;
-  private readonly allowedTools: string[] | undefined;
-  private readonly excludeTools: string[] | undefined;
-  private readonly disabledSlashCommands: readonly string[];
+  private coreTools: string[] | undefined;
+  private allowedTools: string[] | undefined;
+  private excludeTools: string[] | undefined;
+  private disabledSlashCommands: readonly string[];
   private readonly disabledSkillNamesProvider:
     | (() => ReadonlySet<string>)
     | null;
@@ -2153,8 +2270,8 @@ export class Config {
   private readonly terminalImageRenderSupportProvider:
     | (() => Promise<TerminalImageRenderSupport>)
     | null;
-  private readonly disabledSkillLevels: ReadonlySet<SkillLevel>;
-  private readonly customSkillDirs: readonly string[];
+  private disabledSkillLevels: ReadonlySet<SkillLevel>;
+  private customSkillDirs: readonly string[];
   //   `disabledTools` is set at construction
   // time but can be re-synced by the daemon mutation surface
   // (`setWorkspaceToolEnabled` propagates through ACP) so a subsequent
@@ -2164,16 +2281,16 @@ export class Config {
   // captured reference (e.g. by ToolRegistry mid-iteration) remains
   // self-consistent.
   private disabledTools: ReadonlySet<string>;
-  private readonly visibleTools: ReadonlySet<string>;
-  private readonly eagerTools: readonly string[] | undefined;
-  private readonly toolSearchThreshold: number;
-  private readonly permissionsAllow: string[];
-  private readonly permissionsAsk: string[];
-  private readonly permissionsDeny: string[];
-  private readonly permissionsAutoMode: AutoModeSettings;
-  private readonly toolDiscoveryCommand: string | undefined;
-  private readonly toolCallCommand: string | undefined;
-  private readonly mcpServerCommand: string | undefined;
+  private visibleTools: ReadonlySet<string>;
+  private eagerTools: readonly string[] | undefined;
+  private toolSearchThreshold: number;
+  private permissionsAllow: string[];
+  private permissionsAsk: string[];
+  private permissionsDeny: string[];
+  private permissionsAutoMode: AutoModeSettings;
+  private toolDiscoveryCommand: string | undefined;
+  private toolCallCommand: string | undefined;
+  private mcpServerCommand: string | undefined;
   private mcpServers: Record<string, MCPServerConfig> | undefined;
   /**
    * Names of MCP servers that were present in the effective server map but
@@ -2196,7 +2313,7 @@ export class Config {
   private readonly cliAllowedMcpServerNames?: string[];
   private excludedMcpServers?: string[];
   private pendingMcpServers?: string[];
-  private readonly mcpToolIdleTimeoutMs: number;
+  private mcpToolIdleTimeoutMs: number;
   /**
    * Guards against concurrent MCP reconcile passes (hot-reload watcher vs.
    * `/reload`). `SettingsWatcher` serializes its own listeners, but `/reload`
@@ -2234,6 +2351,7 @@ export class Config {
   private autoMemoryPrompt = '';
   private sdkMode: boolean;
   private memoryFileCount: number;
+  private contextFileNames: readonly string[];
   private loadedContextFilePaths: string[] = [];
   private conditionalRulesRegistry: ConditionalRulesRegistry | undefined;
   private readonly contextRuleExcludes: string[];
@@ -2262,7 +2380,7 @@ export class Config {
   private llmClient!: LlmClient;
   private baseLlmClient!: BaseLlmClient;
   private cronScheduler: CronScheduler | null = null;
-  private readonly fileFiltering: {
+  private fileFiltering: {
     respectGitIgnore: boolean;
     respectQwenIgnore: boolean;
     customIgnoreFiles: string[];
@@ -2299,8 +2417,9 @@ export class Config {
   private fileHistoryService: FileHistoryService | undefined;
   private readonly proxy: string | undefined;
   private cwd: string;
-  private readonly explicitIncludeDirectories: string[];
-  private readonly bugCommand: BugCommandSettings | undefined;
+  private explicitIncludeDirectories: string[];
+  private managedWorkspaceDirectories: Set<string>;
+  private bugCommand: BugCommandSettings | undefined;
   private outputLanguageFilePath?: string;
   private readonly noBrowser: boolean;
   private readonly folderTrustFeature: boolean;
@@ -2330,30 +2449,31 @@ export class Config {
    */
   private preserveRestorableAskUserQuestion = false;
   private readonly sessionWriterLeaseEnabled: boolean = false;
-  private readonly cronEnabled: boolean = true;
-  /** Recurring cron max age in days, resolved once at construction
-   * (the setting declares `requiresRestart`); `Infinity` = no expiry. */
-  private readonly cronRecurringMaxAgeDays: number;
-  private readonly lsToolEnabled: boolean = false;
-  private readonly agentTeamEnabled: boolean = false;
-  private readonly artifactEnabled: boolean = true;
-  private readonly artifactAutoOpen: boolean = true;
-  private readonly artifactPublisher: 'local' | 'host' | 'oss' = 'local';
-  private readonly artifactHost?: ArtifactHostConfig;
-  private readonly artifactOss?: ArtifactOssConfig;
+  private cronEnabled: boolean = true;
+  /** Recurring cron max age in days; `Infinity` = no expiry. Resolved at
+   * construction and re-resolved per project by `applyProjectRuntimeConfig`
+   * on `/cd` (the scheduler is destroyed and restarted for the target). */
+  private cronRecurringMaxAgeDays: number;
+  private lsToolEnabled: boolean = false;
+  private agentTeamEnabled: boolean = false;
+  private artifactEnabled: boolean = true;
+  private artifactAutoOpen: boolean = true;
+  private artifactPublisher: 'local' | 'host' | 'oss' = 'local';
+  private artifactHost?: ArtifactHostConfig;
+  private artifactOss?: ArtifactOssConfig;
   private workflowsEnabled = false;
-  private readonly skipWorkflowUsageWarning: boolean = false;
+  private skipWorkflowUsageWarning: boolean = false;
   private readonly emitToolUseSummaries: boolean = true;
   private readonly chatRecordingEnabled: boolean;
-  private readonly loadMemoryFromIncludeDirectories: boolean = false;
-  private readonly importFormat: 'tree' | 'flat';
+  private loadMemoryFromIncludeDirectories: boolean = false;
+  private importFormat: 'tree' | 'flat';
   private readonly chatCompression: ChatCompressionSettings | undefined;
   private readonly autoCompactThreshold: number | undefined;
   private readonly interactive: boolean;
-  private readonly trustedFolder: boolean | undefined;
-  private readonly useRipgrep: boolean;
-  private readonly useBuiltinRipgrep: boolean;
-  private readonly shouldUseNodePtyShell: boolean;
+  private trustedFolder: boolean | undefined;
+  private useRipgrep: boolean;
+  private useBuiltinRipgrep: boolean;
+  private shouldUseNodePtyShell: boolean;
   private readonly preventSystemSleep: boolean;
   private readonly skipNextSpeakerCheck: boolean;
   private shellExecutionConfig: ShellExecutionConfig;
@@ -2367,8 +2487,8 @@ export class Config {
     (manager: TeamManager | null) => void
   >();
   private teamContext: TeamContext | null = null;
-  private readonly agentsSettings: AgentsCollabSettings;
-  private readonly worktreeSettings: WorktreeSettings;
+  private agentsSettings: AgentsCollabSettings;
+  private worktreeSettings: WorktreeSettings;
   private readonly skipLoopDetection: boolean;
   private readonly maxToolCallsPerTurn: number;
   private readonly maxToolCallsPerTurnExplicit: boolean;
@@ -2376,9 +2496,9 @@ export class Config {
   private readonly bareMode: boolean;
   private readonly safeMode: boolean;
   private readonly warnings: string[];
-  private readonly allowedHttpHookUrls: string[];
-  private readonly allowPrivateNetworkHooks: boolean;
-  private readonly onPersistPermissionRuleCallback?: (
+  private allowedHttpHookUrls: string[];
+  private allowPrivateNetworkHooks: boolean;
+  private onPersistPermissionRuleCallback?: (
     scope: 'project' | 'user',
     ruleType: 'allow' | 'ask' | 'deny',
     rule: string,
@@ -2395,50 +2515,50 @@ export class Config {
   private runtimeStatusWrite: Promise<void> = Promise.resolve();
   private sessionRegistryWrite: Promise<void> = Promise.resolve();
   private readonly fileExclusions: FileExclusions;
-  private readonly truncateToolOutputThreshold: number;
-  private readonly truncateToolOutputThresholdExplicit: boolean;
-  private readonly truncateToolOutputLines: number;
-  private readonly toolOutputBatchBudget: number;
-  private readonly shellDefaultTimeoutMs: number | undefined;
-  private readonly shellHeartbeatIntervalMs: number | undefined;
+  private truncateToolOutputThreshold: number;
+  private truncateToolOutputThresholdExplicit: boolean;
+  private truncateToolOutputLines: number;
+  private toolOutputBatchBudget: number;
+  private shellDefaultTimeoutMs: number | undefined;
+  private shellHeartbeatIntervalMs: number | undefined;
   private readonly eventEmitter?: EventEmitter;
   private readonly channel: string | undefined;
   private readonly jsonFd: number | undefined;
   private readonly jsonFile: string | undefined;
   private readonly jsonSchema: Record<string, unknown> | undefined;
   private readonly inputFile: string | undefined;
-  private readonly plansDir: string;
-  private readonly plansDirectoryConfigured: boolean;
-  private readonly defaultFileEncoding: FileEncodingType | undefined;
-  private readonly enableManagedAutoMemory: boolean;
-  private readonly enableManagedAutoDream: boolean;
-  private readonly enableTeamMemory: boolean;
-  private readonly enableTeamMemorySync: boolean;
+  private plansDir: string;
+  private plansDirectoryConfigured: boolean;
+  private defaultFileEncoding: FileEncodingType | undefined;
+  private enableManagedAutoMemory: boolean;
+  private enableManagedAutoDream: boolean;
+  private enableTeamMemory: boolean;
+  private enableTeamMemorySync: boolean;
   // Latch (keyed by projectRoot) so the "team memory enabled but not shareable"
   // warning is emitted at most once per repo, even though refreshHierarchicalMemory
   // may re-run. Keyed rather than a single boolean so entering a new repo (/cd)
   // re-checks shareability instead of reusing the first repo's result.
   private readonly teamMemoryShareabilityChecked = new Set<string>();
   private enableAutoSkill: boolean;
-  private readonly autoSkillConfirm: boolean;
+  private autoSkillConfirm: boolean;
   private readonly memoryAgentTimeoutMinutes: number | undefined;
   private readonly memoryAgentMaxTurns: number | undefined;
   private fastModel?: string;
-  private readonly webSearchSettings?: WebSearchSettings;
+  private webSearchSettings?: WebSearchSettings;
   private webSearchNoticeEmitted = false;
   private visionModel?: string;
   private compactionModel?: string;
   private imageModel?: string;
   private readonly visionBridgeTimeoutMs: number | undefined;
   private readonly modelFallbacks: string[];
-  private readonly disableAllHooks: boolean;
-  private readonly stopHookBlockingCap: number;
+  private disableAllHooks: boolean;
+  private stopHookBlockingCap: number;
   /** User-level hooks (always loaded regardless of trust) */
-  private readonly userHooks?: Record<string, unknown>;
+  private userHooks?: Record<string, unknown>;
   /** Project-level hooks (only loaded in trusted folders) */
-  private readonly projectHooks?: Record<string, unknown>;
+  private projectHooks?: Record<string, unknown>;
   /** @deprecated Legacy merged hooks field - use userHooks/projectHooks instead */
-  private readonly hooks?: Record<string, unknown>;
+  private hooks?: Record<string, unknown>;
   private hookSystem?: HookSystem;
   private messageBus?: MessageBus;
   private readonly memoryManager: MemoryManager;
@@ -2448,6 +2568,7 @@ export class Config {
   // other instance updates it. Per-session publishing is not gated on it.
   private readonly ownsModelEnvSlot: boolean = false;
   private readonly settingsWatcher?: { stopWatching(): void };
+  private readonly projectRuntimeReloader?: ProjectRuntimeReloader;
 
   constructor(params: ConfigParameters) {
     this.sessionRuntimeBaseDir = Storage.getRuntimeBaseDir();
@@ -2485,6 +2606,9 @@ export class Config {
       this.targetDir,
       this.explicitIncludeDirectories,
     );
+    this.managedWorkspaceDirectories = new Set(
+      this.workspaceContext.getDirectories(),
+    );
     this.debugMode = params.debugMode;
     this.inputFormat = params.inputFormat ?? InputFormat.TEXT;
     const normalizedOutputFormat = normalizeConfigOutputFormat(
@@ -2517,14 +2641,7 @@ export class Config {
     // An explicitly empty array is preserved as an ACTIVE-but-empty
     // allowlist (defer everything); only `undefined` means "no
     // restriction". `tools.core` differs: its empty list is treated as unset.
-    this.eagerTools =
-      params.eagerTools === undefined
-        ? undefined
-        : Object.freeze(
-            params.eagerTools.filter(
-              (name): name is string => typeof name === 'string',
-            ),
-          );
+    this.eagerTools = Config.normalizeEagerTools(params.eagerTools);
     this.toolSearchThreshold =
       params.toolSearchThreshold ?? DEFAULT_TOOL_SEARCH_THRESHOLD;
     this.permissionsAllow = params.permissions?.allow || [];
@@ -2794,6 +2911,9 @@ export class Config {
     if (params.contextFileName) {
       setMemoryFilename(params.contextFileName);
     }
+    this.contextFileNames = resolveContextFileNames(
+      params.contextFileName ?? getAllMemoryFilenames(),
+    );
 
     // Create ModelsConfig for centralized model management
     // Prefer params.authType over generationConfig.authType because:
@@ -2954,6 +3074,7 @@ export class Config {
     // Legacy: fall back to merged hooks if new fields are not provided
     this.hooks = params.hooks;
     this.settingsWatcher = params.settingsWatcher;
+    this.projectRuntimeReloader = params.projectRuntimeReloader;
     this.memoryManager = new MemoryManager();
   }
 
@@ -3908,6 +4029,7 @@ export class Config {
       this.contextRuleExcludes,
       {
         explicitOnly: this.getBareMode(),
+        contextFileNames: this.contextFileNames,
         loadReason,
         onInstructionsLoaded: createInstructionsLoadedCallback(
           () => this.hookSystem,
@@ -5583,6 +5705,136 @@ export class Config {
     return this.targetDir;
   }
 
+  private applyProjectRuntimeConfig(runtime: ProjectRuntimeConfig): void {
+    this.trustedFolder = runtime.trustedFolder;
+    this.explicitIncludeDirectories = [...runtime.includeDirectories];
+    this.loadMemoryFromIncludeDirectories =
+      runtime.loadMemoryFromIncludeDirectories;
+    this.plansDir = runtime.plansDir;
+    this.plansDirectoryConfigured = runtime.plansDirectoryConfigured;
+    this.cronEnabled = runtime.cronEnabled;
+    this.cronRecurringMaxAgeDays = resolveCronRecurringMaxAgeDays(
+      runtime.cronRecurringMaxAgeDays,
+    );
+    this.lsToolEnabled = runtime.lsToolEnabled;
+    this.agentTeamEnabled = runtime.agentTeamEnabled;
+    this.artifactEnabled = runtime.artifactEnabled;
+    this.artifactAutoOpen = runtime.artifactAutoOpen;
+    this.artifactPublisher = runtime.artifactPublisher;
+    this.artifactHost = runtime.artifactHost;
+    this.artifactOss = runtime.artifactOss;
+    this.workflowsEnabled = runtime.workflowsEnabled;
+    this.skipWorkflowUsageWarning = runtime.skipWorkflowUsageWarning;
+    this.useRipgrep = runtime.useRipgrep ?? true;
+    this.useBuiltinRipgrep = runtime.useBuiltinRipgrep ?? true;
+    this.webSearchSettings = runtime.webSearch;
+    this.webSearchNoticeEmitted = false;
+    this.imageModel = runtime.imageModel || undefined;
+    this.allowedHttpHookUrls = Array.isArray(runtime.allowedHttpHookUrls)
+      ? [...runtime.allowedHttpHookUrls]
+      : [];
+    this.allowPrivateNetworkHooks = runtime.allowPrivateNetworkHooks;
+    this.hookSystem?.updateHttpSecurity(
+      this.getAllowedHttpHookUrls(),
+      this.getAllowPrivateNetworkHooks(),
+    );
+    this.fileFiltering = {
+      respectGitIgnore: runtime.fileFiltering?.respectGitIgnore ?? true,
+      respectQwenIgnore: runtime.fileFiltering?.respectQwenIgnore ?? true,
+      customIgnoreFiles: runtime.fileFiltering?.customIgnoreFiles ?? [
+        ...DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES,
+      ],
+      enableRecursiveFileSearch:
+        runtime.fileFiltering?.enableRecursiveFileSearch ?? true,
+      enableFuzzySearch: runtime.fileFiltering?.enableFuzzySearch ?? true,
+    };
+    this.shouldUseNodePtyShell =
+      runtime.shouldUseNodePtyShell ?? shouldDefaultToNodePty();
+    this.shellDefaultTimeoutMs =
+      runtime.shellDefaultTimeoutMs !== undefined &&
+      Number.isInteger(runtime.shellDefaultTimeoutMs) &&
+      runtime.shellDefaultTimeoutMs >= 0 &&
+      runtime.shellDefaultTimeoutMs <= 2_147_483_647
+        ? runtime.shellDefaultTimeoutMs
+        : undefined;
+    this.shellHeartbeatIntervalMs =
+      runtime.shellHeartbeatIntervalMs !== undefined &&
+      Number.isInteger(runtime.shellHeartbeatIntervalMs) &&
+      runtime.shellHeartbeatIntervalMs >= 0 &&
+      runtime.shellHeartbeatIntervalMs <= 2_147_483_647
+        ? runtime.shellHeartbeatIntervalMs
+        : undefined;
+    this.truncateToolOutputThreshold =
+      runtime.truncateToolOutputThreshold ??
+      DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD;
+    this.truncateToolOutputThresholdExplicit =
+      runtime.truncateToolOutputThreshold != null;
+    this.truncateToolOutputLines =
+      runtime.truncateToolOutputLines ?? DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES;
+    this.toolOutputBatchBudget =
+      runtime.toolOutputBatchBudget ?? DEFAULT_TOOL_OUTPUT_BATCH_BUDGET;
+    this.defaultFileEncoding = runtime.defaultFileEncoding;
+    this.bugCommand = runtime.bugCommand;
+    this.coreTools = runtime.coreTools;
+    this.allowedTools = runtime.allowedTools;
+    this.excludeTools = runtime.excludeTools;
+    this.disabledSlashCommands = Object.freeze([
+      ...(runtime.disabledSlashCommands ?? []),
+    ]);
+    this.permissionsAllow = runtime.permissions?.allow ?? [];
+    this.permissionsAsk = runtime.permissions?.ask ?? [];
+    this.permissionsDeny = runtime.permissions?.deny ?? [];
+    this.permissionsAutoMode = runtime.permissions?.autoMode ?? {};
+    this.disabledTools = new Set(runtime.disabledTools ?? []);
+    this.visibleTools = new Set(runtime.visibleTools ?? []);
+    this.eagerTools = Config.normalizeEagerTools(runtime.eagerTools);
+    this.toolSearchThreshold =
+      runtime.toolSearchThreshold ?? DEFAULT_TOOL_SEARCH_THRESHOLD;
+    this.toolDiscoveryCommand = runtime.toolDiscoveryCommand;
+    this.toolCallCommand = runtime.toolCallCommand;
+    this.mcpServerCommand = runtime.mcpServerCommand;
+    const envMcpToolIdleTimeout = Number(
+      process.env['QWEN_CODE_MCP_TOOL_IDLE_TIMEOUT_MS'],
+    );
+    this.mcpToolIdleTimeoutMs =
+      runtime.mcpToolIdleTimeoutMs ??
+      (Number.isFinite(envMcpToolIdleTimeout) && envMcpToolIdleTimeout >= 0
+        ? envMcpToolIdleTimeout
+        : 300000);
+    this.disabledSkillLevels = new Set(runtime.disabledSkillLevels ?? []);
+    this.customSkillDirs = Object.freeze([...(runtime.customSkillDirs ?? [])]);
+    this.importFormat = runtime.importFormat ?? 'tree';
+    this.contextFileNames = resolveContextFileNames(runtime.contextFileName);
+    this.enableManagedAutoMemory = runtime.enableManagedAutoMemory ?? true;
+    this.enableManagedAutoDream = runtime.enableManagedAutoDream ?? true;
+    this.enableTeamMemory = runtime.enableTeamMemory ?? false;
+    this.enableTeamMemorySync = runtime.enableTeamMemorySync ?? false;
+    this.enableAutoSkill = runtime.enableAutoSkill ?? false;
+    this.autoSkillConfirm = runtime.autoSkillConfirm ?? true;
+    this.agentsSettings = runtime.agents ?? {};
+    this.backgroundTaskRegistry.setConcurrencyLimits({
+      maxConcurrentBackgroundAgents: this.agentsSettings.maxParallelAgents,
+      maxConcurrentBackgroundAgentsByModel:
+        this.agentsSettings.maxParallelAgentsByModel,
+    });
+    this.worktreeSettings = runtime.worktree ?? {};
+    this.onPersistPermissionRuleCallback = runtime.onPersistPermissionRule;
+    this.disableAllHooks = runtime.disableAllHooks ?? false;
+    this.stopHookBlockingCap = resolveStopHookBlockingCap(
+      runtime.stopHookBlockingCap,
+    );
+    this.userHooks = runtime.userHooks;
+    this.projectHooks = runtime.projectHooks;
+    // The legacy merged `hooks` field is only the getters' fallback when
+    // the split fields are unset. A hook-less target project sets both to
+    // undefined, and leaving the startup value here would revive the
+    // previous project's hooks — under the User source, past the trust gate.
+    this.hooks = undefined;
+    this.setAllowedMcpServers(runtime.allowedMcpServers);
+    this.setExcludedMcpServers(runtime.excludedMcpServers ?? []);
+    this.setPendingMcpServers(runtime.pendingMcpServers);
+  }
+
   private getCurrentSessionArtifactMoves(
     oldStorage: Storage,
     newStorage: Storage,
@@ -5696,10 +5948,22 @@ export class Config {
   async relocateWorkingDirectory(
     newDir: string,
     expectedCanonicalDir?: string,
-    opts?: { skipProcessChdir?: boolean; skipArtifactMigration?: boolean },
+    opts?: {
+      skipProcessChdir?: boolean;
+      skipArtifactMigration?: boolean;
+      trustedFolder?: boolean;
+    },
   ): Promise<{
     memoryRefreshError?: unknown;
     mcpRefreshError?: unknown;
+    projectRuntimeRefreshErrors?: unknown[];
+    /**
+     * Session-only cron jobs and loop wakeups the swap cancelled, in the
+     * scheduler's exit-summary wording. The old scheduler is destroyed
+     * before the UI's effect cleanup can read it, so this is the only
+     * place the cancellation can still be reported.
+     */
+    cronExitSummary?: string;
   }> {
     if (isDerivedConfig(this)) {
       throw new Error('Derived Configs cannot relocate working directories');
@@ -5718,57 +5982,187 @@ export class Config {
     if (!fs.statSync(targetPath).isDirectory()) {
       throw new Error(`Path is not a directory: ${targetPath}`);
     }
+    const preparedProjectRuntime = await this.projectRuntimeReloader?.prepare(
+      expected,
+      opts?.trustedFolder,
+      this.getApprovalMode(),
+      oldDir,
+    );
     const workspaceDirectories = WorkspaceContext.resolveRootDirectories(
       expected,
-      this.explicitIncludeDirectories,
+      preparedProjectRuntime?.config.includeDirectories ??
+        this.explicitIncludeDirectories,
     );
+    if (preparedProjectRuntime) {
+      try {
+        await preparedProjectRuntime.commit();
+      } catch (error) {
+        await preparedProjectRuntime.rollback();
+        throw error;
+      }
+    }
 
     if (!opts?.skipProcessChdir) {
-      process.chdir(targetPath);
-      const actualCwd = fs.realpathSync(process.cwd());
-      if (actualCwd !== expected) {
-        process.chdir(oldDir);
-        throw new Error(
-          `Changed directory to ${actualCwd}, expected ${expected}.`,
-        );
+      try {
+        process.chdir(targetPath);
+        const actualCwd = fs.realpathSync(process.cwd());
+        if (actualCwd !== expected) {
+          throw new Error(
+            `Changed directory to ${actualCwd}, expected ${expected}.`,
+          );
+        }
+      } catch (error) {
+        try {
+          process.chdir(oldDir);
+        } catch (rollbackError) {
+          this.debugLogger.warn(
+            'Failed to roll back working directory after relocation failed',
+            rollbackError,
+          );
+        }
+        await preparedProjectRuntime?.rollback();
+        throw error;
       }
     } else {
       // ACP path: validate realpath matches expected without calling
       // process.chdir — guards against TOCTOU swaps between the trust
       // check and the config state update.
-      const actualCanonical = fs.realpathSync(targetPath);
-      if (actualCanonical !== expected) {
-        throw new Error(
-          `Realpath mismatch: resolved ${actualCanonical}, expected ${expected}.`,
-        );
+      try {
+        const actualCanonical = fs.realpathSync(targetPath);
+        if (actualCanonical !== expected) {
+          throw new Error(
+            `Realpath mismatch: resolved ${actualCanonical}, expected ${expected}.`,
+          );
+        }
+      } catch (error) {
+        await preparedProjectRuntime?.rollback();
+        throw error;
       }
     }
 
     const oldStorage = this.storage;
     if (!opts?.skipArtifactMigration) {
       const newStorage = new Storage(expected, this.sessionRuntimeBaseDir);
-      await this.prepareSessionArtifactMigration(
-        oldStorage,
-        newStorage,
-        oldDir,
-        opts,
-      );
+      try {
+        await this.prepareSessionArtifactMigration(
+          oldStorage,
+          newStorage,
+          oldDir,
+          opts,
+        );
+      } catch (error) {
+        await preparedProjectRuntime?.rollback();
+        throw error;
+      }
       this.storage = newStorage;
       this.chatRecordingService?.resetStoragePaths();
     }
 
+    const projectRuntimeRefreshErrors: unknown[] = [];
+    for (const warning of preparedProjectRuntime?.warnings ?? []) {
+      projectRuntimeRefreshErrors.push(new Error(warning));
+    }
+    if (preparedProjectRuntime) {
+      try {
+        await this.cleanupTeamRuntime();
+      } catch (error) {
+        projectRuntimeRefreshErrors.push(error);
+        this.setTeamManager(null);
+        this.setTeamContext(null);
+      }
+      try {
+        await this.cleanupArenaRuntime();
+      } catch (error) {
+        projectRuntimeRefreshErrors.push(error);
+        this.setArenaManager(null);
+      }
+    }
+
     this.backgroundTaskRegistry.disposeResidentAgents();
+    const cronExitSummary = this.cronScheduler?.getExitSummary() ?? undefined;
+    this.cronScheduler?.destroy();
+    this.cronScheduler = null;
     this.targetDir = expected;
     this.cwd = expected;
     resetPreloadedContentGenerator(this.contentGenerator);
     await this.refreshCurrentRuntimeStatus(expected);
-    this.workspaceContext.applyRootDirectories(workspaceDirectories);
+    // Directories the user added at runtime (`/directory add`) are not the
+    // previous project's to replace. They must also not be absorbed into
+    // the managed set just because the next project happens to list them:
+    // that would let a later `/cd` — to a project that does not — drop them.
+    const runtimeAddedDirectories = new Set(
+      [...this.workspaceContext.getDirectories()].filter(
+        (directory) => !this.managedWorkspaceDirectories.has(directory),
+      ),
+    );
+    this.workspaceContext.applyRootDirectories(
+      workspaceDirectories,
+      this.managedWorkspaceDirectories,
+    );
+    this.managedWorkspaceDirectories = new Set(
+      [...workspaceDirectories.directories].filter(
+        (directory) => !runtimeAddedDirectories.has(directory),
+      ),
+    );
     this.fileDiscoveryService = null;
     this.sessionService = undefined;
     this.fileHistoryService = undefined;
     this.getFileReadCache().clear();
 
+    if (preparedProjectRuntime) {
+      try {
+        this.applyProjectRuntimeConfig(preparedProjectRuntime.config);
+      } catch (error) {
+        // A bad field must not strand the move: the settings swap and
+        // chdir are already committed, and `complete()` below is what
+        // resumes the settings watcher.
+        projectRuntimeRefreshErrors.push(error);
+      }
+
+      try {
+        this.permissionManager?.reloadForProjectChange();
+        const nextCoreTools = await this.createToolRegistry(undefined, {
+          skipDiscovery: true,
+        });
+        await this.toolRegistry.replaceCoreToolsFrom(nextCoreTools);
+        await this.toolRegistry.rediscoverCommandTools();
+      } catch (error) {
+        projectRuntimeRefreshErrors.push(error);
+        try {
+          await this.toolRegistry.clearProjectRuntimeTools();
+        } catch (cleanupError) {
+          projectRuntimeRefreshErrors.push(cleanupError);
+        }
+      }
+
+      try {
+        await this.hookSystem?.reload({ failClosed: true });
+      } catch (error) {
+        projectRuntimeRefreshErrors.push(error);
+      }
+      try {
+        await this.skillManager?.refreshForProjectChange();
+      } catch (error) {
+        projectRuntimeRefreshErrors.push(error);
+      }
+      try {
+        await this.subagentManager.refreshForProjectChange();
+      } catch (error) {
+        projectRuntimeRefreshErrors.push(error);
+      }
+    }
+
     let memoryRefreshError: unknown;
+    if (preparedProjectRuntime) {
+      this.setUserMemory('');
+      this.autoMemoryPrompt = '';
+      this.setGeminiMdFileCount(0);
+      this.setContextFilePaths([]);
+      this.conditionalRulesRegistry = new ConditionalRulesRegistry(
+        [],
+        expected,
+      );
+    }
     try {
       await this.refreshHierarchicalMemory();
     } catch (error) {
@@ -5778,14 +6172,52 @@ export class Config {
     let mcpRefreshError: unknown;
     try {
       await this.waitForMcpReady();
-      await this.refreshMcpServers();
+      if (preparedProjectRuntime) {
+        await this.reinitializeMcpServers(
+          preparedProjectRuntime.config.mcpServers,
+        );
+      } else {
+        await this.refreshMcpServers();
+      }
     } catch (error) {
       mcpRefreshError = error;
+    }
+
+    if (preparedProjectRuntime) {
+      try {
+        await this.llmClient?.refreshSystemInstruction();
+      } catch (error) {
+        projectRuntimeRefreshErrors.push(error);
+      }
+      try {
+        await this.llmClient?.setTools();
+      } catch (error) {
+        projectRuntimeRefreshErrors.push(error);
+      }
+      try {
+        // Every other fire site checks the kill switch; this one runs
+        // right after `disableAllHooks` may have flipped to the target
+        // project's value, so it must too.
+        if (!this.getDisableAllHooks()) {
+          await this.hookSystem?.fireCwdChangedEvent(oldDir, expected);
+        }
+      } catch (error) {
+        projectRuntimeRefreshErrors.push(error);
+      }
+      try {
+        await preparedProjectRuntime.complete();
+      } catch (error) {
+        projectRuntimeRefreshErrors.push(error);
+      }
     }
 
     return {
       ...(memoryRefreshError !== undefined && { memoryRefreshError }),
       ...(mcpRefreshError !== undefined && { mcpRefreshError }),
+      ...(projectRuntimeRefreshErrors.length > 0 && {
+        projectRuntimeRefreshErrors,
+      }),
+      ...(cronExitSummary !== undefined && { cronExitSummary }),
     };
   }
 
@@ -6077,6 +6509,24 @@ export class Config {
   }
 
   /**
+   * Normalizes a `tools.eager` list for storage. An explicitly empty array is
+   * preserved as an ACTIVE-but-empty allowlist (defer everything); only
+   * `undefined` means "no restriction". `tools.core` differs: its empty list
+   * is treated as unset. Shared by the constructor and
+   * {@link applyProjectRuntimeConfig} so a `/cd` applies exactly the startup
+   * semantics.
+   */
+  private static normalizeEagerTools(
+    eagerTools: string[] | undefined,
+  ): readonly string[] | undefined {
+    return eagerTools === undefined
+      ? undefined
+      : Object.freeze(
+          eagerTools.filter((name): name is string => typeof name === 'string'),
+        );
+  }
+
+  /**
    * Returns the `settings.tools.eager` allowlist: eager-by-default tool names
    * whose schemas remain eligible for the initial model request.
    *
@@ -6124,8 +6574,7 @@ export class Config {
 
   /**
    * Returns the live set of skill names that are currently disabled.
-   * Unlike `getDisabledSlashCommands()` (frozen snapshot), this delegates
-   * to the provider supplied at construction so the CLI's `LoadedSettings`
+   * This delegates to the provider supplied at construction so the CLI's `LoadedSettings`
    * mutations are visible without restarting the process.
    *
    * Names are lower-cased. Empty set when no provider was supplied.
@@ -6842,6 +7291,14 @@ export class Config {
   /** @deprecated Use `setMemoryFileCount`; retained until a future major release. */
   setGeminiMdFileCount(count: number): void {
     this.setMemoryFileCount(count);
+  }
+
+  getContextFileNames(): readonly string[] {
+    return this.contextFileNames;
+  }
+
+  getPrimaryContextFileName(): string {
+    return this.contextFileNames[0] ?? DEFAULT_CONTEXT_FILENAME;
   }
 
   /** Display paths of the currently loaded context (memory) files. */

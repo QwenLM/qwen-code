@@ -28,6 +28,7 @@ import type { Settings } from './settings.js';
 import * as ServerConfig from '@qwen-code/qwen-code-core';
 import { isWorkspaceTrusted } from './trustedFolders.js';
 import { resetMcpApprovalsForTesting } from './mcpApprovals.js';
+import { resolvePath } from '../utils/resolvePath.js';
 
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
@@ -5447,13 +5448,38 @@ describe('loadCliConfig skills.directories', () => {
           42 as unknown as string,
           null as unknown as string,
           '/abs/skills',
+          'relative-skills',
         ],
       },
     };
 
     const config = await loadCliConfig(settings, argv);
 
-    expect(config.getCustomSkillDirs()).toEqual(['~/my-skills', '/abs/skills']);
+    // Home spellings are expanded here (not deferred to the skill manager),
+    // so `~` and `%userprofile%` both survive; a relative entry is nailed
+    // under the project.
+    expect(config.getCustomSkillDirs()).toEqual([
+      resolvePath('~/my-skills'),
+      '/abs/skills',
+      path.resolve(process.cwd(), 'relative-skills'),
+    ]);
+    expect(path.isAbsolute(config.getCustomSkillDirs()[0])).toBe(true);
+  });
+
+  it('should expand %userprofile% skill directories against the home directory', async () => {
+    const argv = await parseArguments();
+    const settings: Settings = {
+      skills: { directories: ['%userprofile%/my-skills'] },
+    };
+
+    const config = await loadCliConfig(settings, argv);
+
+    const [dir] = config.getCustomSkillDirs();
+    expect(dir).toBe(resolvePath('%userprofile%/my-skills'));
+    expect(dir.endsWith(path.join('my-skills'))).toBe(true);
+    // The prefix must not be treated as a relative path under the project.
+    expect(dir.startsWith(process.cwd())).toBe(false);
+    expect(dir).not.toContain('%userprofile%');
   });
 
   it('should return empty array when skills.directories is not set', async () => {

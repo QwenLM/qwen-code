@@ -581,6 +581,7 @@ export async function main() {
         undefined,
         undefined,
         undefined,
+        undefined,
         buildEnabledSkillNamesProvider(settings),
       );
 
@@ -880,8 +881,9 @@ export async function main() {
       buildDisabledSkillNamesProvider(settings),
       undefined,
       settingsWatcher,
+      false,
       undefined,
-      undefined,
+      settings,
       buildEnabledSkillNamesProvider(settings),
     );
     markAcpStartup('configConstructionEnd');

@@ -5,10 +5,12 @@
  */
 
 import {
+  AGENT_CONTEXT_FILENAME,
   ApprovalMode,
   APPROVAL_MODES,
   type AuthType,
   Config,
+  DEFAULT_CONTEXT_FILENAME,
   DEFAULT_QWEN_EMBEDDING_MODEL,
   FileDiscoveryService,
   getAllMemoryFilenames,
@@ -40,6 +42,8 @@ import {
   parseBooleanEnvFlag,
   SchemaValidator,
   type ConfigParameters,
+  type PreparedProjectRuntime,
+  type ProjectRuntimeReloader,
   type MCPServerConfig,
   type SkillLevel,
   type WebSearchSettings,
@@ -51,7 +55,12 @@ import { hooksCommand } from '../commands/hooks.js';
 import { resolveAcpChannelFallback } from './acp-channel-fallback.js';
 import { normalizeDisabledToolList } from './normalizeDisabledTools.js';
 import type { LoadedSettings, Settings } from './settings.js';
-import { loadSettings, SettingScope } from './settings.js';
+import {
+  createMinimalSettings,
+  loadSettings,
+  SettingScope,
+} from './settings.js';
+import { reloadEnvironment } from './environment.js';
 import {
   resolveCliGenerationConfig,
   getAuthTypeFromEnv,
@@ -76,7 +85,7 @@ import {
 } from './top-level-options.js';
 import { getCliVersion } from '../utils/version.js';
 import { loadSandboxConfig } from './sandboxConfig.js';
-import { appEvents } from '../utils/events.js';
+import { AppEvent, appEvents } from '../utils/events.js';
 import { mcpCommand } from '../commands/mcp.js';
 import { channelCommand } from '../commands/channel.js';
 import { authCommand } from '../commands/auth.js';
@@ -100,6 +109,7 @@ import {
 } from '../utils/runBudget.js';
 import { detectSystemLanguage } from '../i18n/index.js';
 import { resolveSkillSettings } from './skill-settings.js';
+import { recomputeMcpGating } from './hot-reload.js';
 
 const debugLogger = createDebugLogger('CONFIG');
 
@@ -1012,23 +1022,24 @@ function resolveModelFallbacks(
  */
 function resolveWebSearchSettings(
   settings: Settings,
+  env: Readonly<NodeJS.ProcessEnv> = process.env,
 ): WebSearchSettings | undefined {
   const webSearch = settings.tools?.webSearch;
   // A set-but-empty env var is "unset", not an override: dotenv templates and
   // CI wrappers export empty values, which must not clobber a valid
   // settings.json config (same rule as WEB_SEARCH_BASE_URL below).
-  const envEnabled = process.env['ENABLE_WEB_SEARCH']?.trim() || undefined;
+  const envEnabled = env['ENABLE_WEB_SEARCH']?.trim() || undefined;
   const enabled =
     envEnabled !== undefined ? isTruthy(envEnabled) : webSearch?.enabled;
-  const model = process.env['WEB_SEARCH_MODEL']?.trim() || webSearch?.model;
-  const envExtractor = process.env['WEB_SEARCH_EXTRACTOR']?.trim() || undefined;
+  const model = env['WEB_SEARCH_MODEL']?.trim() || webSearch?.model;
+  const envExtractor = env['WEB_SEARCH_EXTRACTOR']?.trim() || undefined;
   const webExtractor =
     envExtractor !== undefined
       ? isTruthy(envExtractor)
       : webSearch?.webExtractor;
-  const baseUrl = process.env['WEB_SEARCH_BASE_URL']?.trim() || undefined;
+  const baseUrl = env['WEB_SEARCH_BASE_URL']?.trim() || undefined;
   const apiKeyEnv = baseUrl
-    ? process.env['WEB_SEARCH_API_KEY']?.trim()
+    ? env['WEB_SEARCH_API_KEY']?.trim()
       ? 'WEB_SEARCH_API_KEY'
       : 'DASHSCOPE_API_KEY'
     : undefined;
@@ -1254,6 +1265,621 @@ export function buildDisabledSkillNamesProvider(
   return () => resolveSkillSettings(loadedSettings).disabledNames;
 }
 
+function resolveDisabledSlashCommands(
+  settings: Settings,
+  argv: CliArgs,
+  bareMode: boolean,
+  safeMode: boolean,
+  /**
+   * The environment the `QWEN_DISABLED_SLASH_COMMANDS` denylist is read
+   * from. Startup reads `process.env` after `loadEnvironment` ran; the `/cd`
+   * reloader passes the TARGET project's environment view instead, since
+   * `prepare()` runs before (and, in a shared process, instead of) any
+   * `process.env` rewrite.
+   */
+  env: Readonly<NodeJS.ProcessEnv> = process.env,
+): string[] {
+  const disabled: string[] = [];
+  const seen = new Set<string>();
+  const add = (value: string | undefined) => {
+    if (!value) return;
+    const trimmed = value.trim();
+    if (!trimmed) return;
+    const key = trimmed.toLowerCase();
+    if (!seen.has(key)) {
+      seen.add(key);
+      disabled.push(trimmed);
+    }
+  };
+  if (!bareMode && !safeMode) {
+    for (const name of settings.slashCommands?.disabled ?? []) add(name);
+  }
+  for (const name of argv.disabledSlashCommands ?? []) add(name);
+  for (const name of (env['QWEN_DISABLED_SLASH_COMMANDS'] ?? '').split(',')) {
+    add(name);
+  }
+  return disabled;
+}
+
+/**
+ * The runtime-facing projection of `settings.agents`, shared by startup and
+ * the `/cd` reloader so the two cannot drift. Every schema-declared key the
+ * runtime reads through `Config.getAgentsSettings()` is carried, including
+ * the arena limits. Dropped in both places: `crossSessionMessaging` /
+ * `crossSessionInbound` (read from `settings.merged` elsewhere) and `team`
+ * / `swarm`, which the schema declares as opaque reserved objects with no
+ * keys — `team.maxTeammates` needs a schema entry before it can be carried.
+ */
+function projectAgentsSettings(
+  agents: Settings['agents'],
+): ConfigParameters['agents'] {
+  if (!agents) return undefined;
+  return {
+    builtin: agents.builtin
+      ? {
+          exploreModel: agents.builtin.exploreModel,
+        }
+      : undefined,
+    modelGrades: agents.modelGrades,
+    allowedGrades: agents.allowedGrades,
+    maxParallelAgents: agents.maxParallelAgents,
+    maxParallelAgentsByModel: agents.maxParallelAgentsByModel,
+    displayMode: agents.displayMode,
+    arena: agents.arena
+      ? {
+          worktreeBaseDir: agents.arena.worktreeBaseDir,
+          preserveArtifacts: agents.arena.preserveArtifacts ?? false,
+          maxRoundsPerAgent: agents.arena.maxRoundsPerAgent,
+          timeoutSeconds: agents.arena.timeoutSeconds,
+        }
+      : undefined,
+  };
+}
+
+/**
+ * Resolves a settings-sourced directory against a project root. Expand
+ * first, then resolve: `resolvePath` handles every home spelling (`~`,
+ * `%userprofile%`), and an expanded path is absolute, so it is left alone
+ * rather than nailed under the project. Hand-enumerating `~` prefixes here
+ * silently broke `%userprofile%` skill directories.
+ */
+function resolveProjectPath(value: string, baseDir: string): string {
+  const expanded = resolvePath(value);
+  return path.isAbsolute(expanded)
+    ? path.normalize(expanded)
+    : path.resolve(baseDir, expanded);
+}
+
+/**
+ * Builds the "Always allow" persistence callback for a working directory.
+ *
+ * Every write is a read-modify-write against a FRESH disk load of that
+ * directory's settings — never the session's in-memory `LoadedSettings`:
+ *
+ * - bare mode assembles the session against `createMinimalSettings()`,
+ *   whose scope paths are all `''`; persisting through it wrote a stray
+ *   `.tmp` into the cwd and threw on the rename;
+ * - `--safe-mode` loads with `skipWorkspaceSettings`, so the in-memory
+ *   workspace scope is EMPTY while the file on disk is not — a
+ *   read-modify-write against memory wiped the project's existing rules;
+ * - a sibling session in the same project may have persisted a rule
+ *   since the last settings-watcher refresh; reading memory replayed the
+ *   stale list and deleted its rule.
+ *
+ * `skipLoadEnvironment` keeps the load free of side effects: a persist must
+ * never re-apply `.env` files to `process.env` (bare mode never loads env).
+ */
+function createPermissionRulePersistenceCallback(
+  cwd: string,
+): NonNullable<ConfigParameters['onPersistPermissionRule']> {
+  return async (scope, ruleType, rule) => {
+    const currentSettings = loadSettings(cwd, {
+      consumeCorruptionEnvVars: false,
+      skipLoadEnvironment: true,
+    });
+    const settingScope =
+      scope === 'project' ? SettingScope.Workspace : SettingScope.User;
+    const key = `permissions.${ruleType}`;
+    const currentRules: string[] =
+      currentSettings.forScope(settingScope).settings.permissions?.[ruleType] ??
+      [];
+    if (!currentRules.includes(rule)) {
+      currentSettings.setValue(settingScope, key, [...currentRules, rule]);
+    }
+  };
+}
+
+/**
+ * Resolves the `tools.eager` allowlist from a settings snapshot. Shared by
+ * startup and the `/cd` project-runtime reloader so both apply the same
+ * bare/safe-mode gating, normalization, and dropped-entry warning.
+ */
+function resolveEagerTools(
+  settings: Settings,
+  bareMode: boolean,
+  safeMode: boolean,
+): string[] | undefined {
+  // `tools.eager` restricts which schemas ride in the initial model request
+  // (#9827). Unlisted tools stay registered and reachable via tool_search —
+  // it is a schema-size knob, not an availability knob (#10075).
+  //
+  // An explicitly empty array must survive as an empty array, not collapse
+  // into "unset": `[]` is an active allowlist naming nothing (defer
+  // everything). `tools.core` differs: its empty list is treated as unset.
+  // `normalizeDisabledToolList` maps undefined to `[]`,
+  // so the Array.isArray guard has to come first — without it, absent and
+  // explicitly-empty would reach core as the same value, which is exactly
+  // the SDK divergence #10138 reports for coreTools.
+  const eagerTools =
+    bareMode || safeMode || !Array.isArray(settings.tools?.eager)
+      ? undefined
+      : normalizeDisabledToolList(settings.tools.eager);
+  if (eagerTools !== undefined) {
+    // `normalizeDisabledToolList` strips empty/whitespace-only and
+    // non-string entries before `PermissionManager.initialize()` ever sees
+    // the list, so the dropped-entries warning there can never fire for
+    // that class on the real CLI path — and a degenerate list like
+    // `tools.eager: [""]` would collapse to the active defer-everything
+    // allowlist `[]` in silence. Warn here so the collapse always leaves a
+    // signal (#10075).
+    const droppedEagerEntries = (settings.tools?.eager ?? []).filter(
+      (entry) => typeof entry !== 'string' || entry.trim() === '',
+    );
+    if (droppedEagerEntries.length > 0) {
+      // eslint-disable-next-line no-console -- operator-facing breadcrumb; the debug log file is off in default runs, where this reshaping would otherwise be invisible
+      console.warn(
+        `tools.eager: ignoring ${droppedEagerEntries.length} unusable entr${
+          droppedEagerEntries.length === 1 ? 'y' : 'ies'
+        } (${droppedEagerEntries
+          .map((entry) => JSON.stringify(entry))
+          .join(', ')}). ` +
+          `The allowlist stays active with ${eagerTools.length} entr${
+            eagerTools.length === 1 ? 'y' : 'ies'
+          }, so every other non-exempt tool is deferred to tool_search.`,
+      );
+    }
+  }
+  return eagerTools;
+}
+
+/**
+ * Embedding-host policy for the `/cd` project-runtime reloader. Runtime-only:
+ * never sourced from argv, settings, or the environment.
+ */
+export interface ProjectRuntimeHostPolicy {
+  /** Host-managed session whose startup cwd is only a placeholder. */
+  provisionalWorkspace?: true;
+  /** Session policy that remains authoritative across project changes. */
+  cronEnabled?: boolean;
+  /**
+   * Whether this session may rewrite the process-wide environment
+   * (`process.env`) to the target project's `.env` / `settings.env`.
+   * Spawned MCP servers and shell tools inherit `process.env`, so a process
+   * hosting OTHER live sessions must answer `false`: a per-session `/cd`
+   * would otherwise hand a sibling session's subprocesses this project's
+   * secrets while deleting its own. Defaults to `true` (single-session
+   * process). The target's environment still shapes the session's own
+   * configuration (for example `QWEN_DISABLED_SLASH_COMMANDS`).
+   */
+  ownsProcessEnvironment?: () => boolean;
+}
+
+export function createProjectRuntimeReloader(
+  loadedSettings: LoadedSettings,
+  settingsWatcher:
+    | {
+        pauseWorkspaceWatching?: () => Promise<() => void>;
+      }
+    | undefined,
+  argv: CliArgs,
+  topTierMcpServers: Record<string, MCPServerConfig> | undefined,
+  bareMode: boolean,
+  safeMode: boolean,
+  cliIncludeDirectories: readonly string[],
+  /**
+   * Startup's model-derived half of the tool-search decision. The model is
+   * session-stable, so it is captured once rather than re-resolved per `/cd`.
+   */
+  modelDisablesToolSearch: boolean,
+  hostPolicy?: ProjectRuntimeHostPolicy,
+): ProjectRuntimeReloader {
+  const resolutionEnvironment = loadedSettings.environment;
+  const syncMemoryFilenames = (settings: Settings): void => {
+    setServerMemoryFilename(
+      settings.context?.fileName ?? [
+        DEFAULT_CONTEXT_FILENAME,
+        AGENT_CONTEXT_FILENAME,
+      ],
+    );
+  };
+  return {
+    async prepare(targetDir, trustedFolder, approvalMode, previousDir) {
+      // Mirror startup: a bare session is assembled against
+      // `createMinimalSettings()` and never sees the user's real settings.
+      // Loading them here would let `/cd` bring ambient command-execution
+      // hooks (bugCommand, artifact upload) into a bare session — and swap
+      // in real file paths for later settings writes.
+      const nextSettings = bareMode
+        ? createMinimalSettings()
+        : loadSettings(targetDir, {
+            consumeCorruptionEnvVars: false,
+            environment: resolutionEnvironment,
+            readOnly: true,
+            skipLoadEnvironment: true,
+            skipWorkspaceSettings: safeMode,
+            workspaceTrusted: trustedFolder,
+          });
+      const effectiveTrust =
+        trustedFolder ??
+        (bareMode
+          ? (isWorkspaceTrusted(nextSettings.merged)?.isTrusted ?? true)
+          : nextSettings.isTrusted);
+      // Never rewrite `process.env` from a bare session (bare startup never
+      // loads env) or from a process that hosts other live sessions.
+      const reloadProcessEnvironment =
+        !bareMode && (hostPolicy?.ownsProcessEnvironment?.() ?? true);
+      // Shared processes keep their existing environment. An owning process
+      // refreshes the environment-backed fields after commit rewrites it.
+      const targetEnvironment: Readonly<NodeJS.ProcessEnv> = process.env;
+      const warnings: string[] = [];
+      if (!bareMode && !reloadProcessEnvironment) {
+        warnings.push(
+          'Process environment left unchanged: this process may host other ' +
+            "sessions, so the target project's .env and settings.env were " +
+            'not applied to spawned tools and MCP servers.',
+        );
+      }
+      const assembled =
+        bareMode || safeMode
+          ? { ...topTierMcpServers }
+          : assembleMcpServers(
+              nextSettings.merged.mcpServers,
+              targetDir,
+              topTierMcpServers,
+            );
+      const gating =
+        bareMode || safeMode || argv.allowedMcpServerNames !== undefined
+          ? {
+              allowed: argv.allowedMcpServerNames?.filter(Boolean),
+              excluded: undefined,
+              pending:
+                bareMode || safeMode || approvalMode === ApprovalMode.YOLO
+                  ? undefined
+                  : getPendingGatedMcpServers(assembled, targetDir),
+            }
+          : recomputeMcpGating(
+              nextSettings,
+              assembled,
+              targetDir,
+              argv.allowedMcpServerNames,
+              approvalMode === ApprovalMode.YOLO,
+            );
+      const runtimeSettings = nextSettings.merged;
+      const includeDirectories = hostPolicy?.provisionalWorkspace
+        ? []
+        : [
+            ...(bareMode || safeMode
+              ? []
+              : (runtimeSettings.context?.includeDirectories ?? []).map(
+                  (directory) => resolveProjectPath(directory, targetDir),
+                )),
+            ...cliIncludeDirectories,
+          ];
+      const plansDirectory = runtimeSettings.plansDirectory;
+      const coreTools =
+        bareMode || safeMode
+          ? undefined
+          : argv.coreTools || runtimeSettings.tools?.core || undefined;
+      const permissionsAllow =
+        bareMode || safeMode
+          ? []
+          : [
+              ...(runtimeSettings.permissions?.allow ?? []),
+              ...(runtimeSettings.tools?.allowed ?? []),
+            ];
+      for (const rule of argv.allowedTools ?? []) {
+        if (rule && !permissionsAllow.includes(rule)) {
+          permissionsAllow.push(rule);
+        }
+      }
+      const permissionsDeny =
+        bareMode || safeMode
+          ? []
+          : [
+              ...(runtimeSettings.permissions?.deny ?? []),
+              ...(runtimeSettings.tools?.exclude ?? []),
+            ];
+      for (const rule of argv.excludeTools ?? []) {
+        if (rule && !permissionsDeny.includes(rule)) {
+          permissionsDeny.push(rule);
+        }
+      }
+      // Same rule as startup (`shouldDisableToolSearch` in `loadCliConfig`):
+      // these lists were readonly before `/cd` existed, so the startup
+      // injection used to survive for the whole session.
+      const toolSearchExplicitlyEnabled =
+        runtimeSettings.tools?.toolSearch?.enabled;
+      if (
+        (toolSearchExplicitlyEnabled === false ||
+          (toolSearchExplicitlyEnabled === undefined &&
+            modelDisablesToolSearch)) &&
+        !permissionsDeny.includes('tool_search')
+      ) {
+        permissionsDeny.push('tool_search');
+      }
+
+      let previousSettings: LoadedSettings | undefined;
+      let resumeWatching: (() => void) | undefined;
+      let committed = false;
+      let environmentReloaded = false;
+
+      const preparedRuntime: PreparedProjectRuntime = {
+        warnings,
+        config: {
+          trustedFolder: effectiveTrust,
+          includeDirectories,
+          loadMemoryFromIncludeDirectories: hostPolicy?.provisionalWorkspace
+            ? false
+            : bareMode || safeMode
+              ? includeDirectories.length > 0
+              : (runtimeSettings.context?.loadFromIncludeDirectories ?? false),
+          plansDir: Storage.getPlansDir(targetDir, plansDirectory),
+          plansDirectoryConfigured: Boolean(plansDirectory?.trim()),
+          cronEnabled:
+            hostPolicy?.cronEnabled ??
+            runtimeSettings.experimental?.cron ??
+            true,
+          cronRecurringMaxAgeDays:
+            runtimeSettings.experimental?.cronRecurringMaxAgeDays,
+          lsToolEnabled: runtimeSettings.tools?.listDirectory?.enabled === true,
+          agentTeamEnabled: runtimeSettings.experimental?.agentTeam ?? false,
+          artifactEnabled: runtimeSettings.experimental?.artifact ?? true,
+          artifactAutoOpen: runtimeSettings.artifact?.autoOpen ?? true,
+          artifactPublisher: runtimeSettings.artifact?.publisher ?? 'local',
+          artifactHost: runtimeSettings.artifact?.host
+            ? {
+                uploadCommand:
+                  runtimeSettings.artifact.host.uploadCommand ?? '',
+                urlTemplate: runtimeSettings.artifact.host.urlTemplate ?? '',
+                keyPrefix: runtimeSettings.artifact.host.keyPrefix,
+              }
+            : undefined,
+          artifactOss: runtimeSettings.artifact?.oss
+            ? {
+                bucket: runtimeSettings.artifact.oss.bucket ?? '',
+                endpoint: runtimeSettings.artifact.oss.endpoint ?? '',
+                keyPrefix: runtimeSettings.artifact.oss.keyPrefix,
+                acl: runtimeSettings.artifact.oss.acl,
+                publicBaseUrl: runtimeSettings.artifact.oss.publicBaseUrl,
+              }
+            : undefined,
+          workflowsEnabled: runtimeSettings.tools?.workflowsEnabled ?? false,
+          skipWorkflowUsageWarning:
+            runtimeSettings.model?.skipWorkflowUsageWarning ?? false,
+          useRipgrep: runtimeSettings.tools?.useRipgrep,
+          useBuiltinRipgrep: runtimeSettings.tools?.useBuiltinRipgrep,
+          webSearch:
+            bareMode || safeMode
+              ? undefined
+              : resolveWebSearchSettings(runtimeSettings, targetEnvironment),
+          imageModel: runtimeSettings.imageModel || undefined,
+          allowedHttpHookUrls:
+            bareMode || safeMode
+              ? []
+              : (runtimeSettings.security?.allowedHttpHookUrls ?? []),
+          allowPrivateNetworkHooks:
+            bareMode || safeMode
+              ? false
+              : (runtimeSettings.security?.allowPrivateNetworkHooks ?? false),
+          fileFiltering: runtimeSettings.context?.fileFiltering,
+          shouldUseNodePtyShell:
+            runtimeSettings.tools?.shell?.enableInteractiveShell,
+          shellDefaultTimeoutMs: runtimeSettings.tools?.shell?.defaultTimeoutMs,
+          shellHeartbeatIntervalMs:
+            runtimeSettings.tools?.shell?.heartbeatIntervalMs,
+          truncateToolOutputThreshold:
+            runtimeSettings.tools?.truncateToolOutputThreshold,
+          truncateToolOutputLines:
+            runtimeSettings.tools?.truncateToolOutputLines,
+          toolOutputBatchBudget: runtimeSettings.tools?.toolOutputBatchBudget,
+          defaultFileEncoding: runtimeSettings.general?.defaultFileEncoding,
+          bugCommand: runtimeSettings.advanced?.bugCommand,
+          coreTools,
+          allowedTools:
+            bareMode || safeMode
+              ? argv.allowedTools || undefined
+              : argv.allowedTools ||
+                runtimeSettings.tools?.allowed ||
+                undefined,
+          excludeTools:
+            permissionsDeny.length > 0 ? permissionsDeny : undefined,
+          disabledSlashCommands: resolveDisabledSlashCommands(
+            runtimeSettings,
+            argv,
+            bareMode,
+            safeMode,
+            targetEnvironment,
+          ),
+          permissions: {
+            allow: permissionsAllow.length > 0 ? permissionsAllow : undefined,
+            ask:
+              bareMode || safeMode
+                ? undefined
+                : runtimeSettings.permissions?.ask,
+            deny: permissionsDeny.length > 0 ? permissionsDeny : undefined,
+            autoMode:
+              bareMode || safeMode
+                ? undefined
+                : runtimeSettings.permissions?.autoMode,
+          },
+          disabledTools:
+            bareMode || safeMode
+              ? undefined
+              : normalizeDisabledToolList(runtimeSettings.tools?.disabled),
+          visibleTools:
+            bareMode || safeMode
+              ? undefined
+              : normalizeDisabledToolList(runtimeSettings.tools?.visible),
+          eagerTools: resolveEagerTools(runtimeSettings, bareMode, safeMode),
+          toolSearchThreshold:
+            bareMode || safeMode
+              ? 0
+              : runtimeSettings.tools?.toolSearch?.threshold,
+          toolDiscoveryCommand:
+            bareMode || safeMode
+              ? undefined
+              : runtimeSettings.tools?.discoveryCommand,
+          toolCallCommand:
+            bareMode || safeMode
+              ? undefined
+              : runtimeSettings.tools?.callCommand,
+          mcpServerCommand:
+            bareMode || safeMode
+              ? undefined
+              : runtimeSettings.mcp?.serverCommand,
+          mcpToolIdleTimeoutMs: runtimeSettings.mcp?.toolIdleTimeoutMs,
+          disabledSkillLevels:
+            bareMode ||
+            safeMode ||
+            !Array.isArray(nextSettings.merged.skills?.disabledLevels)
+              ? undefined
+              : nextSettings.merged.skills.disabledLevels.filter(isSkillLevel),
+          customSkillDirs:
+            bareMode || safeMode
+              ? undefined
+              : (Array.isArray(nextSettings.merged.skills?.directories)
+                  ? nextSettings.merged.skills.directories
+                  : []
+                )
+                  .filter(
+                    (directory): directory is string =>
+                      typeof directory === 'string' &&
+                      directory.trim().length > 0,
+                  )
+                  .map((directory) =>
+                    resolveProjectPath(directory.trim(), targetDir),
+                  ),
+          importFormat: runtimeSettings.context?.importFormat ?? 'tree',
+          contextFileName:
+            bareMode || safeMode
+              ? undefined
+              : runtimeSettings.context?.fileName,
+          enableManagedAutoMemory:
+            bareMode || safeMode
+              ? false
+              : (runtimeSettings.memory?.enableManagedAutoMemory ?? true),
+          enableManagedAutoDream:
+            bareMode || safeMode
+              ? false
+              : (runtimeSettings.memory?.enableManagedAutoDream ?? true),
+          enableTeamMemory:
+            bareMode || safeMode
+              ? false
+              : (runtimeSettings.memory?.enableTeamMemory ?? false),
+          enableTeamMemorySync:
+            bareMode || safeMode
+              ? false
+              : (runtimeSettings.memory?.enableTeamMemorySync ?? false),
+          enableAutoSkill:
+            bareMode || safeMode
+              ? false
+              : (runtimeSettings.memory?.enableAutoSkill ?? false),
+          autoSkillConfirm:
+            bareMode || safeMode
+              ? false
+              : (runtimeSettings.memory?.autoSkillConfirm ?? true),
+          agents: bareMode
+            ? undefined
+            : projectAgentsSettings(nextSettings.merged.agents),
+          worktree:
+            bareMode || !runtimeSettings.worktree
+              ? undefined
+              : {
+                  symlinkDirectories:
+                    runtimeSettings.worktree.symlinkDirectories,
+                },
+          onPersistPermissionRule:
+            createPermissionRulePersistenceCallback(targetDir),
+          disableAllHooks:
+            bareMode || safeMode
+              ? true
+              : (nextSettings.merged.disableAllHooks ?? false),
+          stopHookBlockingCap:
+            bareMode || safeMode
+              ? undefined
+              : nextSettings.merged.stopHookBlockingCap,
+          userHooks:
+            bareMode || safeMode ? undefined : nextSettings.getUserHooks(),
+          projectHooks:
+            bareMode || safeMode ? undefined : nextSettings.getProjectHooks(),
+          mcpServers: assembled,
+          allowedMcpServers: gating.allowed,
+          excludedMcpServers: gating.excluded,
+          pendingMcpServers: gating.pending,
+        },
+        async commit() {
+          if (committed) return;
+          resumeWatching = await settingsWatcher?.pauseWorkspaceWatching?.();
+          try {
+            nextSettings.persistInMemoryMigrations();
+            previousSettings = loadedSettings.replaceWith(nextSettings);
+            syncMemoryFilenames(nextSettings.merged);
+            committed = true;
+          } catch (error) {
+            resumeWatching?.();
+            resumeWatching = undefined;
+            throw error;
+          }
+          // The target's `.env` files and `settings.env` must reach
+          // `process.env` too — the assembled MCP servers inherit it at spawn
+          // and expand their commands against it. Same step serve's
+          // `workspaceReload` performs. Skipped for bare sessions and for
+          // processes hosting other sessions (see `reloadProcessEnvironment`).
+          if (reloadProcessEnvironment) {
+            reloadEnvironment(nextSettings.merged, targetDir, effectiveTrust);
+            environmentReloaded = true;
+            preparedRuntime.config.webSearch = safeMode
+              ? undefined
+              : resolveWebSearchSettings(runtimeSettings, process.env);
+            preparedRuntime.config.disabledSlashCommands =
+              resolveDisabledSlashCommands(
+                runtimeSettings,
+                argv,
+                bareMode,
+                safeMode,
+                process.env,
+              );
+          }
+        },
+        async rollback() {
+          if (!committed || !previousSettings) return;
+          loadedSettings.replaceWith(previousSettings);
+          syncMemoryFilenames(previousSettings.merged);
+          committed = false;
+          if (environmentReloaded) {
+            reloadEnvironment(
+              previousSettings.merged,
+              previousDir,
+              previousSettings.isTrusted,
+            );
+            environmentReloaded = false;
+          }
+          resumeWatching?.();
+          resumeWatching = undefined;
+          appEvents.emit(AppEvent.McpPendingApprovalChanged);
+        },
+        async complete() {
+          if (!committed) return;
+          resumeWatching?.();
+          resumeWatching = undefined;
+          appEvents.emit(AppEvent.McpPendingApprovalChanged);
+        },
+      };
+      return preparedRuntime;
+    },
+  };
+}
+
 export function buildEnabledSkillNamesProvider(
   loadedSettings: LoadedSettings,
 ): () => ReadonlySet<string> {
@@ -1319,7 +1945,10 @@ export async function loadCliConfig(
    * stopped during shutdown — only `stopWatching()` is exposed here to keep
    * core decoupled from the CLI-owned `SettingsWatcher` implementation.
    */
-  settingsWatcher?: { stopWatching(): void },
+  settingsWatcher?: {
+    stopWatching(): void;
+    pauseWorkspaceWatching?: () => Promise<() => void>;
+  },
   /**
    * When true, a duplicate caller-supplied session id throws
    * `SessionIdConflictError` instead of calling `process.exit(1)`. Embedded
@@ -1336,12 +1965,17 @@ export async function loadCliConfig(
     toolInvocationGuard?: ToolInvocationGuard;
     /** Host-managed session whose exact private cwd is bound after bootstrap. */
     provisionalWorkspace?: true;
+    /** Session policy that remains authoritative across project changes. */
+    projectRuntimeCronEnabled?: boolean;
+    /** See {@link ProjectRuntimeHostPolicy.ownsProcessEnvironment}. */
+    ownsProcessEnvironment?: () => boolean;
     sessionRestore?: {
       projectionSource: (
         sessionId: string,
       ) => Promise<SessionRestoreProjection | undefined>;
     };
   },
+  loadedSettings?: LoadedSettings,
   enabledSkillNamesProvider?: () => ReadonlySet<string>,
 ): Promise<Config> {
   const provisionalWorkspace = hostPolicy?.provisionalWorkspace === true;
@@ -1432,11 +2066,19 @@ export async function loadCliConfig(
         settings.context?.fileFiltering?.customIgnoreFiles,
       );
 
+  const cliIncludeDirectories = (argv.includeDirectories ?? []).map(
+    (directory) => resolveProjectPath(directory, cwd),
+  );
   const includeDirectories = provisionalWorkspace
     ? []
-    : (bareMode || safeMode ? [] : (settings.context?.includeDirectories ?? []))
-        .map(resolvePath)
-        .concat((argv.includeDirectories || []).map(resolvePath));
+    : [
+        ...(bareMode || safeMode
+          ? []
+          : (settings.context?.includeDirectories ?? []).map((directory) =>
+              resolveProjectPath(directory, cwd),
+            )),
+        ...cliIncludeDirectories,
+      ];
 
   // LSP configuration: enabled only via --experimental-lsp flag
   const lspEnabled =
@@ -1582,28 +2224,12 @@ export async function loadCliConfig(
   // Merge the slash-command denylist from settings + CLI flag + env var.
   // Settings merge (UNION across scopes) is already handled upstream; we
   // only de-duplicate while preserving case for diagnostic purposes.
-  const disabledSlashCommands: string[] = [];
-  const seenDisabled = new Set<string>();
-  const addDisabled = (value: string | undefined) => {
-    if (!value) return;
-    const trimmed = value.trim();
-    if (!trimmed) return;
-    const key = trimmed.toLowerCase();
-    if (!seenDisabled.has(key)) {
-      seenDisabled.add(key);
-      disabledSlashCommands.push(trimmed);
-    }
-  };
-  if (!bareMode && !safeMode) {
-    for (const name of settings.slashCommands?.disabled ?? [])
-      addDisabled(name);
-  }
-  for (const name of argv.disabledSlashCommands ?? []) addDisabled(name);
-  for (const name of (process.env['QWEN_DISABLED_SLASH_COMMANDS'] ?? '').split(
-    ',',
-  )) {
-    addDisabled(name);
-  }
+  const disabledSlashCommands = resolveDisabledSlashCommands(
+    settings,
+    argv,
+    bareMode,
+    safeMode,
+  );
 
   // Resolve the per-workspace tool denylist. De-duplicate while preserving
   // original casing; shared helper since the MCP restart refresh path
@@ -1616,46 +2242,7 @@ export async function loadCliConfig(
     bareMode || safeMode
       ? []
       : normalizeDisabledToolList(settings.tools?.visible);
-  // `tools.eager` restricts which schemas ride in the initial model request
-  // (#9827). Unlisted tools stay registered and reachable via tool_search —
-  // it is a schema-size knob, not an availability knob (#10075).
-  //
-  // An explicitly empty array must survive as an empty array, not collapse
-  // into "unset": `[]` is an active allowlist naming nothing (defer
-  // everything). `tools.core` differs: its empty list is treated as unset.
-  // `normalizeDisabledToolList` maps undefined to `[]`,
-  // so the Array.isArray guard has to come first — without it, absent and
-  // explicitly-empty would reach core as the same value, which is exactly
-  // the SDK divergence #10138 reports for coreTools.
-  const eagerTools =
-    bareMode || safeMode || !Array.isArray(settings.tools?.eager)
-      ? undefined
-      : normalizeDisabledToolList(settings.tools.eager);
-  if (eagerTools !== undefined) {
-    // `normalizeDisabledToolList` strips empty/whitespace-only and
-    // non-string entries before `PermissionManager.initialize()` ever sees
-    // the list, so the dropped-entries warning there can never fire for
-    // that class on the real CLI path — and a degenerate list like
-    // `tools.eager: [""]` would collapse to the active defer-everything
-    // allowlist `[]` in silence. Warn here so the collapse always leaves a
-    // signal (#10075).
-    const droppedEagerEntries = (settings.tools?.eager ?? []).filter(
-      (entry) => typeof entry !== 'string' || entry.trim() === '',
-    );
-    if (droppedEagerEntries.length > 0) {
-      // eslint-disable-next-line no-console -- operator-facing breadcrumb; the debug log file is off in default runs, where this reshaping would otherwise be invisible
-      console.warn(
-        `tools.eager: ignoring ${droppedEagerEntries.length} unusable entr${
-          droppedEagerEntries.length === 1 ? 'y' : 'ies'
-        } (${droppedEagerEntries
-          .map((entry) => JSON.stringify(entry))
-          .join(', ')}). ` +
-          `The allowlist stays active with ${eagerTools.length} entr${
-            eagerTools.length === 1 ? 'y' : 'ies'
-          }, so every other non-exempt tool is deferred to tool_search.`,
-      );
-    }
-  }
+  const eagerTools = resolveEagerTools(settings, bareMode, safeMode);
 
   // Helper: check if a tool is explicitly covered by an allow rule OR by the
   // coreTools whitelist. Uses alias matching for coreTools (via isToolEnabled)
@@ -1782,11 +2369,11 @@ export async function loadCliConfig(
   // Note: no `^` anchor — model names may include a provider prefix
   // (e.g. "openrouter/deepseek/deepseek-v4-flash").
   const toolSearchExplicitlyEnabled = settings.tools?.toolSearch?.enabled;
+  const modelDisablesToolSearch =
+    resolvedModel !== undefined && /deepseek-(v3|v4|chat)/i.test(resolvedModel);
   const shouldDisableToolSearch =
     toolSearchExplicitlyEnabled === false ||
-    (toolSearchExplicitlyEnabled === undefined &&
-      resolvedModel !== undefined &&
-      /deepseek-(v3|v4|chat)/i.test(resolvedModel));
+    (toolSearchExplicitlyEnabled === undefined && modelDisablesToolSearch);
   if (shouldDisableToolSearch) {
     if (!mergedDeny.includes('tool_search')) {
       mergedDeny.push('tool_search');
@@ -1965,6 +2552,27 @@ export async function loadCliConfig(
     bareMode || safeMode || approvalMode === ApprovalMode.YOLO
       ? undefined
       : getPendingGatedMcpServers(mcpServers, cwd);
+  const projectRuntimeReloader = loadedSettings
+    ? createProjectRuntimeReloader(
+        loadedSettings,
+        settingsWatcher,
+        argv,
+        topTierMcpServers,
+        bareMode,
+        safeMode,
+        cliIncludeDirectories,
+        modelDisablesToolSearch,
+        hostPolicy
+          ? {
+              ...(provisionalWorkspace
+                ? { provisionalWorkspace: true as const }
+                : {}),
+              cronEnabled: hostPolicy.projectRuntimeCronEnabled,
+              ownsProcessEnvironment: hostPolicy.ownsProcessEnvironment,
+            }
+          : undefined,
+      )
+    : undefined;
 
   const configParams: ConfigParameters = {
     sessionId,
@@ -2024,7 +2632,7 @@ export async function loadCliConfig(
             .filter(
               (d): d is string => typeof d === 'string' && d.trim().length > 0,
             )
-            .map((d) => d.trim()),
+            .map((d) => resolveProjectPath(d.trim(), cwd)),
     disabledTools: disabledTools.length > 0 ? disabledTools : undefined,
     visibleTools: visibleTools.length > 0 ? visibleTools : undefined,
     eagerTools,
@@ -2040,19 +2648,7 @@ export async function loadCliConfig(
     },
     toolInvocationGuard: hostPolicy?.toolInvocationGuard,
     // Permission rule persistence callback (writes to settings files).
-    onPersistPermissionRule: async (scope, ruleType, rule) => {
-      const currentSettings = loadSettings(cwd);
-      const settingScope =
-        scope === 'project' ? SettingScope.Workspace : SettingScope.User;
-      const key = `permissions.${ruleType}`;
-      const currentRules: string[] =
-        currentSettings.forScope(settingScope).settings.permissions?.[
-          ruleType
-        ] ?? [];
-      if (!currentRules.includes(rule)) {
-        currentSettings.setValue(settingScope, key, [...currentRules, rule]);
-      }
-    },
+    onPersistPermissionRule: createPermissionRulePersistenceCallback(cwd),
     toolDiscoveryCommand:
       bareMode || safeMode ? undefined : settings.tools?.discoveryCommand,
     toolCallCommand:
@@ -2266,33 +2862,14 @@ export async function loadCliConfig(
     lsp: {
       enabled: lspEnabled,
     },
-    agents: settings.agents
-      ? {
-          builtin: settings.agents.builtin
-            ? {
-                exploreModel: settings.agents.builtin.exploreModel,
-              }
-            : undefined,
-          modelGrades: settings.agents.modelGrades,
-          allowedGrades: settings.agents.allowedGrades,
-          maxParallelAgents: settings.agents.maxParallelAgents,
-          maxParallelAgentsByModel: settings.agents.maxParallelAgentsByModel,
-          displayMode: settings.agents.displayMode,
-          arena: settings.agents.arena
-            ? {
-                worktreeBaseDir: settings.agents.arena.worktreeBaseDir,
-                preserveArtifacts:
-                  settings.agents.arena.preserveArtifacts ?? false,
-              }
-            : undefined,
-        }
-      : undefined,
+    agents: projectAgentsSettings(settings.agents),
     worktree: settings.worktree
       ? {
           symlinkDirectories: settings.worktree.symlinkDirectories,
         }
       : undefined,
     settingsWatcher,
+    projectRuntimeReloader,
   };
 
   const config = new Config(configParams);

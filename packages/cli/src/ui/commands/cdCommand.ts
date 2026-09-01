@@ -15,6 +15,7 @@ import {
   TrustLevel,
 } from '../../config/trustedFolders.js';
 import { t } from '../../i18n/index.js';
+import { formatCronRelocationNotice } from '../../config/cron-relocation-notice.js';
 
 const MAX_PENDING_TRUST_CONFIRMATIONS = 50;
 const pendingTrustedPathConfirmations = new Map<string, string>();
@@ -166,10 +167,13 @@ export const cdCommand: SlashCommand = {
 
     const warnings: string[] = [];
     try {
-      const relocation = await config.relocateWorkingDirectory(
-        realTargetPath,
-        realTargetPath,
-      );
+      const relocation = trustedTargetPath
+        ? await config.relocateWorkingDirectory(
+            realTargetPath,
+            realTargetPath,
+            { trustedFolder: true },
+          )
+        : await config.relocateWorkingDirectory(realTargetPath, realTargetPath);
       if (relocation.memoryRefreshError) {
         warnings.push(
           `Memory refresh failed: ${
@@ -187,6 +191,16 @@ export const cdCommand: SlashCommand = {
               : String(relocation.mcpRefreshError)
           }`,
         );
+      }
+      for (const error of relocation.projectRuntimeRefreshErrors ?? []) {
+        warnings.push(
+          `Project runtime refresh failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+      if (relocation.cronExitSummary) {
+        warnings.push(formatCronRelocationNotice(relocation.cronExitSummary));
       }
     } catch (error) {
       return {

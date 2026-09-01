@@ -8,7 +8,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
 import { mkdir, mkdtemp, open, rm, stat, writeFile } from 'node:fs/promises';
 import type { Stats } from 'node:fs';
-import type { ConfigParameters, SandboxConfig } from './config.js';
+import type {
+  ConfigParameters,
+  ProjectRuntimeConfig,
+  SandboxConfig,
+} from './config.js';
 import {
   Config,
   ApprovalMode,
@@ -172,6 +176,15 @@ vi.mock('../tools/tool-registry', () => {
   ToolRegistryMock.prototype.ensureTool = vi.fn();
   ToolRegistryMock.prototype.warmAll = vi.fn();
   ToolRegistryMock.prototype.discoverAllTools = vi.fn();
+  ToolRegistryMock.prototype.replaceCoreToolsFrom = vi
+    .fn()
+    .mockResolvedValue(undefined);
+  ToolRegistryMock.prototype.clearProjectRuntimeTools = vi
+    .fn()
+    .mockResolvedValue(undefined);
+  ToolRegistryMock.prototype.rediscoverCommandTools = vi
+    .fn()
+    .mockResolvedValue(undefined);
   ToolRegistryMock.prototype.getAllTools = vi.fn(() => []); // Mock methods if needed
   ToolRegistryMock.prototype.getAllToolNames = vi.fn(() => []);
   ToolRegistryMock.prototype.getTool = vi.fn();
@@ -246,6 +259,11 @@ vi.mock('../memory/team-memory-git-status.js', () => ({
 vi.mock('../hooks/index.js', () => {
   const HookSystemMock = vi.fn();
   HookSystemMock.prototype.initialize = vi.fn().mockResolvedValue(undefined);
+  HookSystemMock.prototype.reload = vi.fn().mockResolvedValue(undefined);
+  HookSystemMock.prototype.updateHttpSecurity = vi.fn();
+  HookSystemMock.prototype.fireCwdChangedEvent = vi
+    .fn()
+    .mockResolvedValue(undefined);
   HookSystemMock.prototype.hasHooksForEvent = vi.fn().mockReturnValue(false);
   HookSystemMock.prototype.getAllHooks = vi.fn().mockReturnValue([]);
   return {
@@ -318,6 +336,7 @@ vi.mock('../utils/memory-constants.js', () => ({
   getCurrentMemoryFilename: vi.fn(() => 'QWEN.md'), // Mock the original filename
   getAllMemoryFilenames: vi.fn(() => ['QWEN.md', 'AGENTS.md']),
   DEFAULT_CONTEXT_FILENAME: 'QWEN.md',
+  AGENT_CONTEXT_FILENAME: 'AGENTS.md',
 }));
 vi.mock('../tools/memory-config', () => ({
   setMemoryFilename: vi.fn(),
@@ -335,6 +354,7 @@ vi.mock('../core/client.js', () => ({
     initialize: vi.fn().mockResolvedValue(undefined),
     isInitialized: vi.fn().mockReturnValue(true),
     setTools: vi.fn(),
+    refreshSystemInstruction: vi.fn().mockResolvedValue(undefined),
   })),
 }));
 
@@ -371,6 +391,9 @@ vi.mock('../skills/skill-manager.js', () => {
   SkillManagerMock.prototype.refreshCache = vi
     .fn()
     .mockResolvedValue(undefined);
+  SkillManagerMock.prototype.refreshForProjectChange = vi
+    .fn()
+    .mockResolvedValue(undefined);
   SkillManagerMock.prototype.stopWatching = vi.fn();
   SkillManagerMock.prototype.listSkills = vi.fn().mockResolvedValue([]);
   SkillManagerMock.prototype.addChangeListener = vi.fn();
@@ -395,6 +418,12 @@ vi.mock('../subagents/subagent-manager.js', () => {
     .fn()
     .mockReturnValue(() => {});
   SubagentManagerMock.prototype.listSubagents = vi.fn().mockResolvedValue([]);
+  SubagentManagerMock.prototype.refreshCache = vi
+    .fn()
+    .mockResolvedValue(undefined);
+  SubagentManagerMock.prototype.refreshForProjectChange = vi
+    .fn()
+    .mockResolvedValue(undefined);
   return { SubagentManager: SubagentManagerMock };
 });
 
@@ -7404,6 +7433,356 @@ describe('Server Config (config.ts)', () => {
     cwdSpy.mockRestore();
   });
 
+  it('relocateWorkingDirectory should apply the prepared project runtime', async () => {
+    const commit = vi.fn().mockResolvedValue(undefined);
+    const rollback = vi.fn().mockResolvedValue(undefined);
+    const complete = vi.fn().mockResolvedValue(undefined);
+    const prepare = vi.fn().mockResolvedValue({
+      config: {
+        trustedFolder: true,
+        includeDirectories: ['/path/to/project-b-include'],
+        loadMemoryFromIncludeDirectories: true,
+        plansDir: '/path/to/other/project-plans',
+        plansDirectoryConfigured: true,
+        cronEnabled: false,
+        cronRecurringMaxAgeDays: 3,
+        lsToolEnabled: true,
+        agentTeamEnabled: true,
+        artifactEnabled: false,
+        artifactAutoOpen: false,
+        artifactPublisher: 'host',
+        artifactHost: {
+          uploadCommand: 'publish-artifact',
+          urlTemplate: 'https://example.test/{key}',
+        },
+        workflowsEnabled: true,
+        skipWorkflowUsageWarning: true,
+        useRipgrep: false,
+        useBuiltinRipgrep: false,
+        webSearch: { enabled: false, model: 'search-model' },
+        imageModel: 'target-image-model',
+        allowedHttpHookUrls: ['https://hooks.example.test/*'],
+        allowPrivateNetworkHooks: true,
+        fileFiltering: {
+          respectGitIgnore: false,
+          respectQwenIgnore: false,
+          customIgnoreFiles: ['.project-b-ignore'],
+          enableRecursiveFileSearch: false,
+          enableFuzzySearch: false,
+        },
+        shouldUseNodePtyShell: false,
+        shellDefaultTimeoutMs: 1234,
+        shellHeartbeatIntervalMs: 4321,
+        truncateToolOutputThreshold: 9000,
+        truncateToolOutputLines: 90,
+        toolOutputBatchBudget: 12000,
+        defaultFileEncoding: 'utf-8-bom',
+        bugCommand: { urlTemplate: 'https://bugs.example.test/{title}' },
+        coreTools: ['read_file'],
+        allowedTools: ['read_file'],
+        excludeTools: ['sdk-exclude'],
+        disabledSlashCommands: ['auth'],
+        permissions: {
+          allow: ['target-permission-allow'],
+          ask: ['target-permission-ask'],
+          deny: ['target-permission-deny'],
+        },
+        eagerTools: ['read_file'],
+        toolSearchThreshold: 17,
+        mcpServerCommand: 'target-mcp-command',
+        mcpToolIdleTimeoutMs: 4567,
+        disabledSkillLevels: ['user'],
+        customSkillDirs: ['/target-skills'],
+        importFormat: 'flat',
+        contextFileName: ['PROJECT-B.md'],
+        enableManagedAutoMemory: false,
+        enableManagedAutoDream: false,
+        enableTeamMemory: true,
+        enableTeamMemorySync: true,
+        enableAutoSkill: true,
+        autoSkillConfirm: false,
+        agents: { allowedGrades: ['fast'] },
+        disableAllHooks: true,
+        projectHooks: {},
+        mcpServers: {},
+      },
+      commit,
+      rollback,
+      complete,
+    });
+    const config = new Config({
+      ...baseParams,
+      includeDirectories: ['/path/to/project-a-include'],
+      projectRuntimeReloader: { prepare },
+    });
+    const cleanupTeam = vi.fn().mockResolvedValue(undefined);
+    const cleanupArena = vi.fn().mockResolvedValue(undefined);
+    config.setTeamManager({ cleanup: cleanupTeam } as never);
+    config.setArenaManager({ cleanup: cleanupArena } as never);
+    await config.initialize({ skipGeminiInitialization: true });
+    await config.waitForMcpReady();
+    const permissionReload = vi.spyOn(
+      config.getPermissionManager()!,
+      'reloadForProjectChange',
+    );
+    const skillRefresh = vi.spyOn(
+      config.getSkillManager()!,
+      'refreshForProjectChange',
+    );
+    const subagentRefresh = vi.spyOn(
+      config.getSubagentManager(),
+      'refreshForProjectChange',
+    );
+    config
+      .getWorkspaceContext()
+      .addDirectory('/path/to/runtime-added-directory');
+    const previousCronScheduler = config.getCronScheduler();
+    const destroyCronScheduler = vi.spyOn(previousCronScheduler, 'destroy');
+    const oldDir = path.resolve('/path/to/project-a');
+    const newDir = path.resolve('/path/to/other');
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {});
+    // The directory being left is read BEFORE the chdir; a rollback restores
+    // its environment, so passing the target here would be a real defect.
+    const cwdSpy = vi
+      .spyOn(process, 'cwd')
+      .mockReturnValueOnce(oldDir)
+      .mockReturnValue(newDir);
+
+    const result = await config.relocateWorkingDirectory(newDir, newDir, {
+      trustedFolder: true,
+    });
+
+    expect(result).toEqual({});
+    expect(prepare).toHaveBeenCalledWith(
+      newDir,
+      true,
+      ApprovalMode.AUTO,
+      oldDir,
+    );
+    expect(config.shouldLoadMemoryFromIncludeDirectories()).toBe(true);
+    expect(commit).toHaveBeenCalledOnce();
+    expect(rollback).not.toHaveBeenCalled();
+    expect(complete).toHaveBeenCalledOnce();
+    expect(cleanupTeam).toHaveBeenCalledOnce();
+    expect(cleanupArena).toHaveBeenCalledOnce();
+    expect(config.getTeamManager()).toBeNull();
+    expect(config.getArenaManager()).toBeNull();
+    expect(config.getCoreTools()).toEqual(['read_file']);
+    expect(config.getPermissionsAllow()).toEqual([
+      'target-permission-allow',
+      'read_file',
+    ]);
+    expect(config.getPermissionsAsk()).toEqual(['target-permission-ask']);
+    expect(config.getEagerTools()).toEqual(['read_file']);
+    expect(config.getDisabledSlashCommands()).toEqual(['auth']);
+    expect(config.getToolSearchThreshold()).toBe(17);
+    expect(config.getMcpServerCommand()).toBe('target-mcp-command');
+    expect(config.getMcpToolIdleTimeoutMs()).toBe(4567);
+    expect(config.getPermissionsDeny()).toEqual([
+      'target-permission-deny',
+      'sdk-exclude',
+    ]);
+    expect(config.getDisabledSkillLevels()).toEqual(new Set(['user']));
+    expect(config.getCustomSkillDirs()).toEqual(['/target-skills']);
+    expect(config.getImportFormat()).toBe('flat');
+    expect(config.getContextFileNames()).toEqual(['PROJECT-B.md']);
+    expect(mockSetMemoryFilename).not.toHaveBeenCalled();
+    expect(config.getManagedAutoMemoryEnabled()).toBe(false);
+    expect(config.getManagedAutoDreamEnabled()).toBe(false);
+    expect(config.getTeamMemoryEnabled()).toBe(true);
+    expect(config.getTeamMemorySyncEnabled()).toBe(true);
+    expect(config.getAutoSkillEnabled()).toBe(true);
+    expect(config.getAutoSkillConfirmEnabled()).toBe(false);
+    expect(config.getAgentsSettings().allowedGrades).toEqual(['fast']);
+    expect(config.getDisableAllHooks()).toBe(true);
+    expect(config.getPlansDir()).toBe('/path/to/other/project-plans');
+    expect(config.isCronEnabled()).toBe(false);
+    expect(config.getCronRecurringMaxAgeDays()).toBe(3);
+    expect(config.isLsToolEnabled()).toBe(true);
+    expect(config.isAgentTeamEnabled()).toBe(true);
+    expect(config.isRecordArtifactEnabled()).toBe(false);
+    expect(config.shouldAutoOpenArtifact()).toBe(false);
+    expect(config.getArtifactPublisherKind()).toBe('host');
+    expect(config.getArtifactHostConfig()).toEqual({
+      uploadCommand: 'publish-artifact',
+      urlTemplate: 'https://example.test/{key}',
+    });
+    expect(config.isWorkflowsEnabled()).toBe(true);
+    expect(config.getSkipWorkflowUsageWarning()).toBe(true);
+    expect(config.getUseRipgrep()).toBe(false);
+    expect(config.getUseBuiltinRipgrep()).toBe(false);
+    expect(config.getWebSearchSettings()).toEqual({
+      enabled: false,
+      model: 'search-model',
+    });
+    expect(config.getAllowedHttpHookUrls()).toEqual([
+      'https://hooks.example.test/*',
+    ]);
+    expect(config.getAllowPrivateNetworkHooks()).toBe(true);
+    expect(config.getFileFilteringOptions()).toEqual({
+      respectGitIgnore: false,
+      respectQwenIgnore: false,
+      customIgnoreFiles: ['.project-b-ignore'],
+    });
+    expect(config.getEnableRecursiveFileSearch()).toBe(false);
+    expect(config.getFileFilteringEnableFuzzySearch()).toBe(false);
+    expect(config.getShouldUseNodePtyShell()).toBe(false);
+    expect(config.getShellDefaultTimeoutMs()).toBe(1234);
+    expect(config.getShellHeartbeatIntervalMs()).toBe(4321);
+    expect(config.getTruncateToolOutputThreshold()).toBe(9000);
+    expect(config.isTruncateToolOutputThresholdExplicit()).toBe(true);
+    expect(config.getTruncateToolOutputLines()).toBe(90);
+    expect(config.getToolOutputBatchBudget()).toBe(12000);
+    expect(config.getDefaultFileEncoding()).toBe('utf-8-bom');
+    expect(config.getBugCommand()).toEqual({
+      urlTemplate: 'https://bugs.example.test/{title}',
+    });
+    expect(HookSystem.prototype.updateHttpSecurity).toHaveBeenCalledWith(
+      ['https://hooks.example.test/*'],
+      true,
+    );
+    const resolveImageGenerationModel = vi
+      .spyOn(config, 'resolveImageGenerationModel')
+      .mockReturnValue(undefined);
+    expect(config.getImageGenerationConfig()).toBeUndefined();
+    expect(resolveImageGenerationModel).toHaveBeenCalledWith(
+      'target-image-model',
+    );
+    expect(config.getWorkspaceContext().getDirectories()).toEqual([
+      newDir,
+      '/path/to/project-b-include',
+      '/path/to/runtime-added-directory',
+    ]);
+    expect(destroyCronScheduler).toHaveBeenCalledOnce();
+    expect(config.getCronScheduler()).not.toBe(previousCronScheduler);
+    expect(ToolRegistry.prototype.replaceCoreToolsFrom).toHaveBeenCalledOnce();
+    expect(
+      ToolRegistry.prototype.rediscoverCommandTools,
+    ).toHaveBeenCalledOnce();
+    expect(permissionReload).toHaveBeenCalledOnce();
+    expect(skillRefresh).toHaveBeenCalledOnce();
+    expect(subagentRefresh).toHaveBeenCalledOnce();
+
+    chdirSpy.mockRestore();
+    cwdSpy.mockRestore();
+  });
+
+  it('relocateWorkingDirectory should reject target settings before moving', async () => {
+    const configError = new Error('invalid target settings');
+    const prepare = vi.fn().mockRejectedValue(configError);
+    const config = new Config({
+      ...baseParams,
+      projectRuntimeReloader: { prepare },
+    });
+    config.setApprovalMode(ApprovalMode.YOLO);
+    const newDir = path.resolve('/path/to/other');
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {});
+
+    await expect(config.relocateWorkingDirectory(newDir)).rejects.toThrow(
+      configError,
+    );
+
+    expect(chdirSpy).not.toHaveBeenCalled();
+    expect(prepare).toHaveBeenCalledWith(
+      newDir,
+      undefined,
+      ApprovalMode.YOLO,
+      expect.any(String),
+    );
+    expect(config.getTargetDir()).toBe(baseParams.targetDir);
+    chdirSpy.mockRestore();
+  });
+
+  it('relocateWorkingDirectory should apply the target runtime trust decision', async () => {
+    // The constructor default is trusted; deleting the re-application
+    // keeps a session trusted in a workspace the runtime declared untrusted.
+    const prepare = vi.fn().mockResolvedValue({
+      config: preparedRuntime({ trustedFolder: false }),
+      commit: vi.fn().mockResolvedValue(undefined),
+      rollback: vi.fn(),
+      complete: vi.fn().mockResolvedValue(undefined),
+    });
+    const config = new Config({
+      ...baseParams,
+      projectRuntimeReloader: { prepare },
+    });
+    await config.initialize({ skipGeminiInitialization: true });
+    expect(config.isTrustedFolder()).toBe(true);
+    const newDir = path.resolve('/path/to/other');
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {});
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
+
+    await config.relocateWorkingDirectory(newDir, newDir, {
+      trustedFolder: false,
+    });
+
+    expect(config.isTrustedFolder()).toBe(false);
+    chdirSpy.mockRestore();
+    cwdSpy.mockRestore();
+  });
+
+  it('relocateWorkingDirectory should surface prepare-time warnings as refresh errors', async () => {
+    // A host that declines to rewrite a process-wide resource (for example
+    // the environment, in a process hosting sibling sessions) reports it
+    // at prepare time; the switch still commits and the caller sees why.
+    const commit = vi.fn().mockResolvedValue(undefined);
+    const prepare = vi.fn().mockResolvedValue({
+      config: preparedRuntime(),
+      warnings: ['Process environment left unchanged'],
+      commit,
+      rollback: vi.fn(),
+      complete: vi.fn().mockResolvedValue(undefined),
+    });
+    const config = new Config({
+      ...baseParams,
+      projectRuntimeReloader: { prepare },
+    });
+    await config.initialize({ skipGeminiInitialization: true });
+    const newDir = path.resolve('/path/to/other');
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {});
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
+
+    const result = await config.relocateWorkingDirectory(newDir, newDir, {
+      trustedFolder: true,
+    });
+
+    expect(result.projectRuntimeRefreshErrors?.[0]).toBeInstanceOf(Error);
+    expect(result.projectRuntimeRefreshErrors).toHaveLength(1);
+    expect((result.projectRuntimeRefreshErrors?.[0] as Error).message).toBe(
+      'Process environment left unchanged',
+    );
+    expect(config.getTargetDir()).toBe(newDir);
+    expect(commit).toHaveBeenCalledOnce();
+    chdirSpy.mockRestore();
+    cwdSpy.mockRestore();
+  });
+
+  it('relocateWorkingDirectory should roll back prepared settings when commit fails', async () => {
+    const commitError = new Error('commit failed');
+    const rollback = vi.fn().mockResolvedValue(undefined);
+    const prepare = vi.fn().mockResolvedValue({
+      config: {} as ProjectRuntimeConfig,
+      commit: vi.fn().mockRejectedValue(commitError),
+      rollback,
+      complete: vi.fn(),
+    });
+    const config = new Config({
+      ...baseParams,
+      projectRuntimeReloader: { prepare },
+    });
+    const newDir = path.resolve('/path/to/other');
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {});
+
+    await expect(config.relocateWorkingDirectory(newDir)).rejects.toThrow(
+      commitError,
+    );
+
+    expect(rollback).toHaveBeenCalledOnce();
+    expect(chdirSpy).not.toHaveBeenCalled();
+    expect(config.getTargetDir()).toBe(baseParams.targetDir);
+    chdirSpy.mockRestore();
+  });
+
   it('relocateWorkingDirectory should preserve leased storage for an ACP cwd change', async () => {
     const config = new Config(baseParams);
     const generator = {} as ContentGenerator;
@@ -8037,8 +8416,364 @@ describe('Server Config (config.ts)', () => {
     cwdSpy.mockRestore();
   });
 
+  // The smallest prepared runtime `applyProjectRuntimeConfig` accepts; the
+  // relocation tests below override the one or two fields they are about.
+  const preparedRuntime = (
+    overrides: Record<string, unknown> = {},
+  ): Record<string, unknown> => ({
+    trustedFolder: true,
+    includeDirectories: [],
+    loadMemoryFromIncludeDirectories: false,
+    plansDir: '/path/to/other/plans',
+    plansDirectoryConfigured: false,
+    cronEnabled: true,
+    lsToolEnabled: false,
+    agentTeamEnabled: false,
+    artifactEnabled: true,
+    artifactAutoOpen: true,
+    artifactPublisher: 'local',
+    workflowsEnabled: false,
+    skipWorkflowUsageWarning: false,
+    allowedHttpHookUrls: [],
+    allowPrivateNetworkHooks: false,
+    mcpServers: {},
+    ...overrides,
+  });
+
+  const relocateWithRuntime = async (
+    config: Config,
+    newDir: string,
+    extra: { trustedFolder?: boolean } = { trustedFolder: true },
+  ) => {
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {});
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
+    try {
+      return await config.relocateWorkingDirectory(newDir, newDir, extra);
+    } finally {
+      chdirSpy.mockRestore();
+      cwdSpy.mockRestore();
+    }
+  };
+
+  it('relocateWorkingDirectory drops non-string context file names instead of throwing mid-move', async () => {
+    // Settings JSON is not validated on load, so a target project's
+    // `context.fileName: ["PROJECT-B.md", 42]` reaches the apply verbatim.
+    // Throwing there stranded a half-committed relocation (settings
+    // swapped, chdir done, watcher paused, tools not refreshed).
+    const prepare = vi.fn().mockResolvedValue({
+      config: preparedRuntime({ contextFileName: ['PROJECT-B.md', 42] }),
+      commit: vi.fn().mockResolvedValue(undefined),
+      rollback: vi.fn().mockResolvedValue(undefined),
+      complete: vi.fn().mockResolvedValue(undefined),
+    });
+    const config = new Config({
+      ...baseParams,
+      projectRuntimeReloader: { prepare },
+    });
+    await config.initialize({ skipGeminiInitialization: true });
+    await config.waitForMcpReady();
+
+    const result = await relocateWithRuntime(
+      config,
+      path.resolve('/path/to/other'),
+    );
+
+    expect(result).toEqual({});
+    expect(config.getContextFileNames()).toEqual(['PROJECT-B.md']);
+  });
+
+  it('relocateWorkingDirectory continues applying runtime settings after a malformed hook URL list', async () => {
+    const prepare = vi.fn().mockResolvedValue({
+      config: preparedRuntime({
+        allowedHttpHookUrls: 42,
+        permissions: { deny: ['target-project-deny'] },
+        contextFileName: 'PROJECT-B.md',
+      }),
+      commit: vi.fn().mockResolvedValue(undefined),
+      rollback: vi.fn().mockResolvedValue(undefined),
+      complete: vi.fn().mockResolvedValue(undefined),
+    });
+    const config = new Config({
+      ...baseParams,
+      permissions: { deny: ['source-project-deny'] },
+      contextFileName: 'PROJECT-A.md',
+      projectRuntimeReloader: { prepare },
+    });
+    await config.initialize({ skipGeminiInitialization: true });
+    await config.waitForMcpReady();
+
+    const result = await relocateWithRuntime(
+      config,
+      path.resolve('/path/to/other'),
+    );
+
+    expect(result).toEqual({});
+    expect(config.getAllowedHttpHookUrls()).toEqual([]);
+    expect(config.getPermissionsDeny()).toEqual(['target-project-deny']);
+    expect(config.getContextFileNames()).toEqual(['PROJECT-B.md']);
+  });
+
+  it('relocateWorkingDirectory updates agent, worktree, and persistence runtime state', async () => {
+    const initialPersistence = vi.fn();
+    const targetPersistence = vi.fn();
+    const prepare = vi.fn().mockResolvedValue({
+      config: preparedRuntime({
+        agents: {
+          maxParallelAgents: 3,
+          maxParallelAgentsByModel: { 'weak-model': 1 },
+        },
+        worktree: { symlinkDirectories: ['target-node_modules'] },
+        onPersistPermissionRule: targetPersistence,
+      }),
+      commit: vi.fn().mockResolvedValue(undefined),
+      rollback: vi.fn().mockResolvedValue(undefined),
+      complete: vi.fn().mockResolvedValue(undefined),
+    });
+    const config = new Config({
+      ...baseParams,
+      agents: { maxParallelAgents: 1 },
+      worktree: { symlinkDirectories: ['old-node_modules'] },
+      onPersistPermissionRule: initialPersistence,
+      projectRuntimeReloader: { prepare },
+    });
+    await config.initialize({ skipGeminiInitialization: true });
+    await config.waitForMcpReady();
+
+    await relocateWithRuntime(config, path.resolve('/path/to/other'));
+
+    expect(config.getAgentsSettings().maxParallelAgents).toBe(3);
+    expect(
+      config.getBackgroundTaskRegistry().getMaxConcurrentBackgroundAgents(),
+    ).toBe(3);
+    config.getBackgroundTaskRegistry().register({
+      agentId: 'weak-agent',
+      description: 'weak agent',
+      model: 'weak-model',
+      isBackgrounded: true,
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      outputFile: '/tmp/weak-agent.jsonl',
+    });
+    expect(
+      config.getBackgroundTaskRegistry().canStartBackgroundAgent('weak-model'),
+    ).toBe(false);
+    expect(config.getWorktreeSymlinkDirectories()).toEqual([
+      'target-node_modules',
+    ]);
+    expect(config.getOnPersistPermissionRule()).toBe(targetPersistence);
+  });
+
+  it('relocateWorkingDirectory falls back to the default context file names when the target sets none', async () => {
+    const prepare = vi.fn().mockResolvedValue({
+      config: preparedRuntime(),
+      commit: vi.fn().mockResolvedValue(undefined),
+      rollback: vi.fn().mockResolvedValue(undefined),
+      complete: vi.fn().mockResolvedValue(undefined),
+    });
+    const config = new Config({
+      ...baseParams,
+      contextFileName: 'PROJECT-A.md',
+      projectRuntimeReloader: { prepare },
+    });
+    await config.initialize({ skipGeminiInitialization: true });
+    await config.waitForMcpReady();
+    expect(config.getContextFileNames()).toEqual(['PROJECT-A.md']);
+
+    await relocateWithRuntime(config, path.resolve('/path/to/other'));
+
+    expect(config.getContextFileNames()).toEqual(['QWEN.md', 'AGENTS.md']);
+  });
+
+  it('relocateWorkingDirectory does not revive the previous project hooks through the legacy hooks field', async () => {
+    // `getUserHooks()`/`getProjectHooks()` fall back to the legacy merged
+    // `hooks` field, which was only ever set at construction. A hook-less
+    // target leaves both split fields undefined — and the fallback then
+    // re-registered project A's command hooks in project B, under the
+    // User source that bypasses the workspace trust gate.
+    const legacyHooks = {
+      PreToolUse: [{ matcher: 'run_shell_command', hooks: [] }],
+    };
+    const prepare = vi.fn().mockResolvedValue({
+      config: preparedRuntime({
+        userHooks: undefined,
+        projectHooks: undefined,
+      }),
+      commit: vi.fn().mockResolvedValue(undefined),
+      rollback: vi.fn().mockResolvedValue(undefined),
+      complete: vi.fn().mockResolvedValue(undefined),
+    });
+    const config = new Config({
+      ...baseParams,
+      hooks: legacyHooks,
+      projectRuntimeReloader: { prepare },
+    });
+    await config.initialize({ skipGeminiInitialization: true });
+    await config.waitForMcpReady();
+    expect(config.getUserHooks()).toEqual(legacyHooks);
+    expect(config.getProjectHooks()).toEqual(legacyHooks);
+
+    await relocateWithRuntime(config, path.resolve('/path/to/other'));
+
+    expect(config.getUserHooks()).toBeUndefined();
+    expect(config.getProjectHooks()).toBeUndefined();
+  });
+
+  it('relocateWorkingDirectory honours the hooks kill switch for the CwdChanged event', async () => {
+    // Every other fire site checks `getDisableAllHooks()`; this one runs
+    // right after the flag may have flipped to the target's value.
+    const fireCwdChangedEvent = vi.mocked(
+      HookSystem.prototype.fireCwdChangedEvent,
+    );
+    const relocate = async (disableAllHooks: boolean) => {
+      fireCwdChangedEvent.mockClear();
+      const prepare = vi.fn().mockResolvedValue({
+        config: preparedRuntime({ disableAllHooks }),
+        commit: vi.fn().mockResolvedValue(undefined),
+        rollback: vi.fn().mockResolvedValue(undefined),
+        complete: vi.fn().mockResolvedValue(undefined),
+      });
+      const config = new Config({
+        ...baseParams,
+        projectRuntimeReloader: { prepare },
+      });
+      await config.initialize({ skipGeminiInitialization: true });
+      await config.waitForMcpReady();
+      expect(config.getHookSystem()).toBeDefined();
+      await relocateWithRuntime(config, path.resolve('/path/to/other'));
+      expect(config.getDisableAllHooks()).toBe(disableAllHooks);
+    };
+
+    await relocate(false);
+    expect(fireCwdChangedEvent).toHaveBeenCalledOnce();
+
+    await relocate(true);
+    expect(fireCwdChangedEvent).not.toHaveBeenCalled();
+  });
+
+  it('relocateWorkingDirectory keeps a runtime-added directory across a project that also lists it', async () => {
+    // `/directory add D` in project 1; project 2 lists D in its own
+    // `context.includeDirectories`; project 3 does not. D is the user's,
+    // not project 2's, so the third hop must not drop it.
+    const runtimeDir = path.resolve('/shared/runtime-added');
+    const makePrepared = (includeDirectories: string[]) => ({
+      config: preparedRuntime({ includeDirectories }),
+      commit: vi.fn().mockResolvedValue(undefined),
+      rollback: vi.fn().mockResolvedValue(undefined),
+      complete: vi.fn().mockResolvedValue(undefined),
+    });
+    const prepare = vi
+      .fn()
+      .mockResolvedValueOnce(makePrepared([runtimeDir]))
+      .mockResolvedValueOnce(makePrepared([]));
+    const config = new Config({
+      ...baseParams,
+      projectRuntimeReloader: { prepare },
+    });
+    await config.initialize({ skipGeminiInitialization: true });
+    await config.waitForMcpReady();
+    config.getWorkspaceContext().addDirectory(runtimeDir);
+
+    await relocateWithRuntime(config, path.resolve('/path/to/project2'));
+    expect(config.getWorkspaceContext().getDirectories()).toContain(runtimeDir);
+
+    await relocateWithRuntime(config, path.resolve('/path/to/project3'));
+    expect(config.getWorkspaceContext().getDirectories()).toContain(runtimeDir);
+  });
+
+  it('relocateWorkingDirectory reports the session-only cron work the swap cancelled', async () => {
+    // The old scheduler is destroyed before the UI effect cleanup can read
+    // its exit summary, so the relocation result is the only carrier.
+    const prepare = vi.fn().mockResolvedValue({
+      config: preparedRuntime(),
+      commit: vi.fn().mockResolvedValue(undefined),
+      rollback: vi.fn().mockResolvedValue(undefined),
+      complete: vi.fn().mockResolvedValue(undefined),
+    });
+    const config = new Config({
+      ...baseParams,
+      projectRuntimeReloader: { prepare },
+    });
+    await config.initialize({ skipGeminiInitialization: true });
+    await config.waitForMcpReady();
+    const scheduler = config.getCronScheduler();
+    scheduler.create('* * * * *', 'loop', true);
+    const summary = scheduler.getExitSummary();
+    expect(summary).not.toBeNull();
+    const stderrWrite = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    vi.spyOn(
+      config as unknown as {
+        refreshCurrentRuntimeStatus: (workDir: string) => Promise<void>;
+      },
+      'refreshCurrentRuntimeStatus',
+    ).mockImplementation(async () => {
+      const cleanupSummary = scheduler.getExitSummary();
+      if (cleanupSummary) process.stderr.write(`${cleanupSummary}\n`);
+    });
+
+    const result = await relocateWithRuntime(
+      config,
+      path.resolve('/path/to/other'),
+    );
+
+    expect(result.cronExitSummary).toBe(summary);
+    expect(stderrWrite).not.toHaveBeenCalled();
+  });
+
+  it('relocateWorkingDirectory rolls back the prepared runtime when the ACP realpath check fails', async () => {
+    // `commit()` has already swapped the target project's settings by the
+    // time the TOCTOU check runs; without the rollback the session would
+    // stay in the old directory under the new project's rules.
+    const commit = vi.fn().mockResolvedValue(undefined);
+    const rollback = vi.fn().mockResolvedValue(undefined);
+    const complete = vi.fn().mockResolvedValue(undefined);
+    const prepare = vi.fn().mockResolvedValue({
+      config: preparedRuntime(),
+      commit,
+      rollback,
+      complete,
+    });
+    const config = new Config({
+      ...baseParams,
+      projectRuntimeReloader: { prepare },
+    });
+    await config.initialize({ skipGeminiInitialization: true });
+    await config.waitForMcpReady();
+    const newDir = path.resolve('/path/to/other');
+    vi.mocked(fs.realpathSync).mockImplementation((pathToResolve) =>
+      pathToResolve.toString() === newDir
+        ? path.resolve('/path/to/swapped')
+        : pathToResolve.toString(),
+    );
+
+    await expect(
+      config.relocateWorkingDirectory(newDir, newDir, {
+        skipProcessChdir: true,
+        skipArtifactMigration: true,
+      }),
+    ).rejects.toThrow(/Realpath mismatch/);
+
+    expect(commit).toHaveBeenCalledOnce();
+    expect(rollback).toHaveBeenCalledOnce();
+    expect(complete).not.toHaveBeenCalled();
+  });
+
   it('relocateWorkingDirectory should reject and roll back when session artifact migration fails', async () => {
-    const config = new Config({ ...baseParams, chatRecording: true });
+    const commit = vi.fn().mockResolvedValue(undefined);
+    const rollback = vi.fn().mockResolvedValue(undefined);
+    const complete = vi.fn().mockResolvedValue(undefined);
+    const config = new Config({
+      ...baseParams,
+      chatRecording: true,
+      projectRuntimeReloader: {
+        prepare: vi.fn().mockResolvedValue({
+          config: preparedRuntime(),
+          commit,
+          rollback,
+          complete,
+        }),
+      },
+    });
     const disposeResidentAgents = vi.spyOn(
       config.getBackgroundTaskRegistry(),
       'disposeResidentAgents',
@@ -8082,6 +8817,11 @@ describe('Server Config (config.ts)', () => {
     await expect(config.relocateWorkingDirectory(newDir)).rejects.toThrow(
       moveError,
     );
+    // The settings swap was committed before the move failed; it must be
+    // undone, and the watcher-resuming `complete()` never reached.
+    expect(commit).toHaveBeenCalledOnce();
+    expect(rollback).toHaveBeenCalledOnce();
+    expect(complete).not.toHaveBeenCalled();
 
     expect(fs.renameSync).toHaveBeenCalledWith(
       oldTranscriptPath,
@@ -8154,7 +8894,18 @@ describe('Server Config (config.ts)', () => {
   });
 
   it('relocateWorkingDirectory should reject and roll back when the final cwd differs from the expected path', async () => {
-    const config = new Config(baseParams);
+    const rollback = vi.fn().mockResolvedValue(undefined);
+    const config = new Config({
+      ...baseParams,
+      projectRuntimeReloader: {
+        prepare: vi.fn().mockResolvedValue({
+          config: {} as ProjectRuntimeConfig,
+          commit: vi.fn().mockResolvedValue(undefined),
+          rollback,
+          complete: vi.fn(),
+        }),
+      },
+    });
     const oldDir = config.getTargetDir();
     const newDir = path.resolve('/path/to/other');
     const expectedDir = path.resolve('/path/to/confirmed');
@@ -8174,6 +8925,7 @@ describe('Server Config (config.ts)', () => {
 
     expect(chdirSpy).toHaveBeenCalledWith(newDir);
     expect(chdirSpy).toHaveBeenCalledWith(oldDir);
+    expect(rollback).toHaveBeenCalledOnce();
     expect(config.getTargetDir()).toBe(oldDir);
     expect(config.storage.getProjectRoot()).toBe(oldDir);
 

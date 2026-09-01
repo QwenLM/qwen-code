@@ -3829,6 +3829,7 @@ class QwenAgent implements Agent {
           undefined,
           undefined,
           undefined,
+          undefined,
           buildEnabledSkillNamesProvider(settings),
         ),
       );
@@ -13164,6 +13165,7 @@ class QwenAgent implements Agent {
               : {}),
           }
         : undefined,
+      settings,
       buildEnabledSkillNamesProvider(settings),
     );
     if (sessionSource) {

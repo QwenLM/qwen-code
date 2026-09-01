@@ -160,7 +160,9 @@ export class FileExclusions {
 
     // Add dynamic patterns (like context filenames)
     if (includeDynamicPatterns) {
-      for (const filename of getAllMemoryFilenames()) {
+      const contextFileNames =
+        this.config?.getContextFileNames?.() ?? getAllMemoryFilenames();
+      for (const filename of contextFileNames) {
         patterns.push(`**/${filename}`);
       }
     }
