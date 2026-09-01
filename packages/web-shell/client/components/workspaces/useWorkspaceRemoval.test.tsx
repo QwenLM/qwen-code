@@ -191,9 +191,14 @@ describe('useWorkspaceRemoval', () => {
     await act(async () => {
       await latest!.confirm();
     });
-    // The forced retry never reached the daemon.
+    // The forced retry never reached the daemon...
     expect(removeWorkspace).toHaveBeenCalledTimes(1);
     expect(options.onRemoved).not.toHaveBeenCalled();
+    // ...and the busy report survives the refusal: force derives from it,
+    // so clearing it would silently downgrade the next click to a
+    // non-forced attempt and restart the consent flow.
+    expect(latest?.activity).toEqual(activity);
+    expect(latest?.candidate).toEqual(workspace);
   });
 
   it('reports other errors through onError and keeps the dialog open', async () => {
