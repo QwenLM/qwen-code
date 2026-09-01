@@ -83,6 +83,15 @@ function makeBridge(): AcpSessionBridge {
       v: 1,
       resources: [],
     })),
+    getWorkspaceRuntimeLifecycleSnapshot: vi.fn(() => ({
+      state: 'idle',
+      runtimeLive: true,
+      runtimeEpoch: 1,
+      activeWork: false,
+    })),
+    preheat: vi.fn(async () => {}),
+    initializeWorkspaceMcp: vi.fn(async () => ({ accepted: true })),
+    reloadWorkspaceMcp: vi.fn(async () => ({ accepted: true })),
     getDaemonStatusSnapshot: vi.fn(() => ({
       limits: {
         maxSessions: 20,
@@ -184,6 +193,10 @@ function makeWorkspaceService(label: string): DaemonWorkspaceService {
     getWorkspaceMcpStatus: vi.fn(async (ctx) => ({
       v: 1,
       workspaceCwd: ctx.workspaceCwd,
+      initialized: true,
+      runtimeEpoch: 1,
+      source: 'live' as const,
+      discoveryState: 'completed' as const,
       servers: [{ name: label }],
     })),
     getWorkspaceSkillsStatus: vi.fn(async (ctx) => ({
@@ -215,6 +228,7 @@ function makeWorkspaceService(label: string): DaemonWorkspaceService {
 }
 
 async function makeHarness(opts?: {
+  primaryTrusted?: boolean;
   secondaryTrusted?: boolean;
   secondaryDirName?: string;
   token?: string;
@@ -235,7 +249,7 @@ async function makeHarness(opts?: {
 
   const primaryFsFactoryBase = createWorkspaceFileSystemFactory({
     boundWorkspaces: [primaryCwd],
-    trusted: true,
+    trusted: opts?.primaryTrusted ?? true,
     emit: () => {},
   });
   // A Proxy (not a spread) so prototype methods like resolve/stat are
@@ -285,7 +299,7 @@ async function makeHarness(opts?: {
     workspaceCwd: primaryCwd,
     sessionRuntimeBaseDir: path.join(primaryCwd, '.runtime'),
     primary: true,
-    trusted: true,
+    trusted: opts?.primaryTrusted ?? true,
     env: { mode: 'parent-process', overlayKeys: [] },
     bridge: makeBridge(),
     workspaceService: primaryWorkspaceService,
@@ -566,6 +580,7 @@ describe('workspace-qualified core REST', () => {
 
       for (const route of [
         'mcp',
+        'runtime/mcp',
         'skills',
         'providers',
         'env',
@@ -628,6 +643,16 @@ describe('workspace-qualified core REST', () => {
         .set('Host', host());
       expect(mcpResources.status).toBe(200);
       expect(mcpResources.body).toEqual({ v: 1, resources: [] });
+
+      const runtimeMcp = await request(h.app)
+        .get(`/workspaces/${encodeURIComponent(h.secondaryId)}/runtime/mcp`)
+        .set('Host', host());
+      expect(runtimeMcp.status).toBe(200);
+      expect(runtimeMcp.body).toMatchObject({
+        workspaceCwd: h.secondaryCwd,
+        runtimeEpoch: 1,
+        source: 'live',
+      });
     } finally {
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }
@@ -1080,6 +1105,19 @@ describe('workspace-qualified core REST', () => {
         restarted: true,
       });
 
+      const runtimeRestart = await request(h.app)
+        .post(
+          `/workspaces/${encodeURIComponent(h.secondaryId)}/runtime/mcp/docs/restart`,
+        )
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({});
+      expect(runtimeRestart.status).toBe(200);
+      expect(runtimeRestart.body).toMatchObject({
+        serverName: 'docs',
+        restarted: true,
+      });
+
       const enable = await request(h.app)
         .post(
           `/workspaces/${encodeURIComponent(h.secondaryId)}/mcp/docs/enable`,
@@ -1133,6 +1171,163 @@ describe('workspace-qualified core REST', () => {
       expect(res.body.code).toBe('untrusted_workspace');
     } finally {
       await fsp.rm(untrusted.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('persists workspace MCP configuration through the selected workspace route', async () => {
+    const h = await makeHarness({ token: 'secret' });
+    vi.mocked(h.secondaryBridge.publishWorkspaceEvent).mockImplementationOnce(
+      () => {
+        throw new Error('subscriber unavailable');
+      },
+    );
+    try {
+      const response = await request(h.app)
+        .put(
+          `/workspaces/${encodeURIComponent(h.secondaryId)}/config/mcp/servers/docs`,
+        )
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({
+          scope: 'workspace',
+          config: { command: 'node', args: ['server.js'] },
+        });
+
+      expect(response.status).toBe(200);
+      expect(response.body).toMatchObject({
+        name: 'docs',
+        scope: 'workspace',
+        activation: 'reconciling',
+      });
+      expect(h.persistSetting).toHaveBeenCalledWith(
+        h.secondaryCwd,
+        expect.any(String),
+        'mcpServers',
+        { docs: { command: 'node', args: ['server.js'] } },
+        expect.any(Function),
+      );
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('does not publish unchanged workspace MCP exclusions', async () => {
+    const h = await makeHarness({ token: 'secret' });
+    try {
+      const response = await request(h.app)
+        .post(
+          `/workspaces/${encodeURIComponent(h.secondaryId)}/config/mcp/docs/enable`,
+        )
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ scope: 'workspace' });
+
+      expect(response.status).toBe(200);
+      expect(response.body).toMatchObject({ changed: false });
+      expect(h.secondaryBridge.publishWorkspaceEvent).not.toHaveBeenCalled();
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects enabling an MCP server blocked by a wildcard exclusion', async () => {
+    const h = await makeHarness({ token: 'secret' });
+    try {
+      await fsp.mkdir(path.join(h.secondaryCwd, '.qwen'), { recursive: true });
+      await fsp.writeFile(
+        path.join(h.secondaryCwd, '.qwen', 'settings.json'),
+        JSON.stringify({ mcp: { excluded: ['docs*'] } }),
+      );
+
+      const response = await request(h.app)
+        .post(
+          `/workspaces/${encodeURIComponent(h.secondaryId)}/config/mcp/docs/enable`,
+        )
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ scope: 'workspace' });
+
+      expect(response.status).toBe(409);
+      expect(response.body).toMatchObject({
+        code: 'mcp_excluded_by_pattern',
+        patterns: ['docs*'],
+      });
+      expect(h.persistSetting).not.toHaveBeenCalled();
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('reconciles user MCP configuration across managed workspaces', async () => {
+    const h = await makeHarness({ token: 'secret' });
+    try {
+      const response = await request(h.app)
+        .put('/workspace/config/mcp/servers/global-docs')
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ scope: 'user', config: { command: 'node' } });
+
+      expect(response.status).toBe(200);
+      expect(response.body.activation).toBe('reconciling');
+      expect(h.primaryBridge.publishWorkspaceEvent).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'settings_changed' }),
+      );
+      expect(h.secondaryBridge.publishWorkspaceEvent).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'settings_changed' }),
+      );
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('persists user MCP configuration without a live trusted primary runtime', async () => {
+    const h = await makeHarness({ primaryTrusted: false, token: 'secret' });
+    h.workspaceRegistry.beginReplacement(
+      h.workspaceRegistry.primaryEntry,
+      'policy-2',
+    );
+    try {
+      const response = await request(h.app)
+        .put('/workspace/config/mcp/servers/global-docs')
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ scope: 'user', config: { command: 'node' } });
+
+      expect(h.persistSetting).toHaveBeenCalledWith(
+        h.primaryCwd,
+        expect.any(String),
+        'mcpServers',
+        expect.objectContaining({
+          'global-docs': expect.objectContaining({ command: 'node' }),
+        }),
+        undefined,
+      );
+      expect(response.status).toBe(200);
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('reads untrusted workspace MCP configuration but rejects its mutation', async () => {
+    const h = await makeHarness({ secondaryTrusted: false, token: 'secret' });
+    try {
+      const path = `/workspaces/${encodeURIComponent(h.secondaryId)}/config/mcp/servers`;
+      const read = await request(h.app)
+        .get(path)
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host());
+      expect(read.status).toBe(200);
+      expect(read.body).toMatchObject({ v: 1 });
+
+      const mutation = await request(h.app)
+        .put(`${path}/docs`)
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ scope: 'workspace', config: { command: 'node' } });
+      expect(mutation.status).toBe(403);
+      expect(mutation.body.code).toBe('untrusted_workspace');
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
     }
   });
 

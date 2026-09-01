@@ -4170,6 +4170,32 @@ describe('runQwenServe telemetry validation', () => {
     expect(primaryEpochSource).toBeDefined();
     expect(secondaryEpochSource).toBeDefined();
     expect(primaryEpochSource).not.toBe(secondaryEpochSource);
+    const primaryMcpAuthenticationAdmission = createBridge.mock.calls.find(
+      ([options]) => options.boundWorkspace === canonicalizeWorkspace(primary),
+    )?.[0].acquireMcpAuthentication;
+    const secondaryMcpAuthenticationAdmission = createBridge.mock.calls.find(
+      ([options]) =>
+        options.boundWorkspace === canonicalizeWorkspace(secondary),
+    )?.[0].acquireMcpAuthentication;
+    expect(primaryMcpAuthenticationAdmission).toBeDefined();
+    expect(secondaryMcpAuthenticationAdmission).toBe(
+      primaryMcpAuthenticationAdmission,
+    );
+    const releaseAuthentication = primaryMcpAuthenticationAdmission!(
+      primary,
+      'aone',
+    );
+    expect(releaseAuthentication).toBeTypeOf('function');
+    expect(secondaryMcpAuthenticationAdmission!(secondary, 'yuque')).toBe(
+      undefined,
+    );
+    releaseAuthentication!();
+    const releaseSecondaryAuthentication = secondaryMcpAuthenticationAdmission!(
+      secondary,
+      'yuque',
+    );
+    expect(releaseSecondaryAuthentication).toBeTypeOf('function');
+    releaseSecondaryAuthentication!();
     for (const [options] of createBridge.mock.calls) {
       expect(options).toMatchObject({
         delegateReadTextFileToClient: false,

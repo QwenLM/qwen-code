@@ -280,6 +280,8 @@ import {
   registerWorkspaceMcpControlRoutes,
   registerWorkspaceQualifiedMcpControlRoutes,
 } from './routes/workspace-mcp-control.js';
+import { registerWorkspaceMcpConfigRoutes } from './routes/workspace-mcp-config.js';
+import { registerWorkspaceRuntimeMcpRoutes } from './routes/workspace-runtime-mcp.js';
 import { registerWorkspaceChannelControlRoutes } from './routes/workspace-channel-control.js';
 import { registerWorkspaceChannelManagementRoutes } from './routes/workspace-channel-management.js';
 import { registerWorkspaceChannelObservedContactRoutes } from './routes/workspace-channel-observed-contacts.js';
@@ -2642,6 +2644,17 @@ export function createServeApp(
           ...workspaceRegistry.list().map((runtime) => runtime.bridge),
         ]),
     });
+    registerWorkspaceMcpConfigRoutes(app, {
+      workspaceRegistry,
+      mutate,
+      safeBody,
+      persistSetting: async (...args) => {
+        await persistSetting(...args);
+      },
+      sendBridgeError,
+      invalidateServeFeaturesCache,
+      broadcastSettingsChanged,
+    });
   }
   registerWorkspacePermissionsRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
@@ -2795,6 +2808,12 @@ export function createServeApp(
       parseAndValidateWorkspaceClientId(req, res, primaryBridge),
   });
   registerWorkspaceQualifiedMcpControlRoutes(app, {
+    workspaceRegistry,
+    mutate,
+    safeBody,
+    sendBridgeError,
+  });
+  registerWorkspaceRuntimeMcpRoutes(app, {
     workspaceRegistry,
     mutate,
     safeBody,

@@ -37,10 +37,15 @@ const { mockRunExitCleanup } = vi.hoisted(() => ({
 const { mockStartNonInteractiveOpenAILogHousekeeping } = vi.hoisted(() => ({
   mockStartNonInteractiveOpenAILogHousekeeping: vi.fn(),
 }));
-const { mockMcpPoolDrainAll } = vi.hoisted(() => ({
+const { mockMcpPoolDrainAll, mockMcpPoolGetSnapshot } = vi.hoisted(() => ({
   mockMcpPoolDrainAll: vi
     .fn()
     .mockResolvedValue({ drained: 0, forced: 0, errors: [] }),
+  mockMcpPoolGetSnapshot: vi.fn().mockReturnValue({
+    total: 0,
+    subprocessCount: 0,
+    byName: {},
+  }),
 }));
 vi.mock('../utils/cleanup.js', () => ({
   runExitCleanup: mockRunExitCleanup,
@@ -639,11 +644,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   })),
   McpTransportPool: vi.fn().mockImplementation(() => ({
     drainAll: mockMcpPoolDrainAll,
-    getSnapshot: vi.fn().mockReturnValue({
-      total: 0,
-      subprocessCount: 0,
-      byName: {},
-    }),
+    getSnapshot: mockMcpPoolGetSnapshot,
     releaseSession: vi.fn(),
     restartByName: vi.fn().mockResolvedValue([]),
     getBudget: vi.fn().mockReturnValue(undefined),
@@ -2142,6 +2143,11 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     mockMcpPoolDrainAll
       .mockReset()
       .mockResolvedValue({ drained: 0, forced: 0, errors: [] });
+    mockMcpPoolGetSnapshot.mockReset().mockReturnValue({
+      total: 0,
+      subprocessCount: 0,
+      byName: {},
+    });
     mockExtensionManagerState.extensions = [];
     mockExtensionManagerState.refreshCache.mockResolvedValue(undefined);
     mockRunManagedAutoMemoryDream.mockReset();
@@ -5312,6 +5318,67 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     expect(workspaceDiscover).toHaveBeenCalledWith('aone');
     expect(sessionDiscover).toHaveBeenCalledWith('aone');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('uses the pool status for the top-level MCP server status', async () => {
+    const manager = {
+      getDiscoveryState: vi.fn().mockReturnValue(MCPDiscoveryState.COMPLETED),
+      getMcpClientAccounting: vi.fn().mockReturnValue({
+        total: 0,
+        reservedSlots: [],
+        refusedServerNames: [],
+      }),
+      getMcpClientBudget: vi.fn().mockReturnValue(undefined),
+      getMcpBudgetMode: vi.fn().mockReturnValue('off'),
+      getServerStatus: vi.fn().mockReturnValue(MCPServerStatus.DISCONNECTED),
+    };
+    mockConfig = {
+      ...mockConfig,
+      getMcpServers: vi
+        .fn()
+        .mockReturnValue({ code: { httpUrl: 'https://example.com/mcp' } }),
+      getWorkingDir: vi.fn().mockReturnValue('/tmp'),
+      getTargetDir: vi.fn().mockReturnValue('/tmp'),
+      isMcpServerDisabled: vi.fn().mockReturnValue(false),
+      getToolRegistry: vi.fn().mockReturnValue({
+        getMcpClientManager: vi.fn().mockReturnValue(manager),
+      }),
+    } as unknown as Config;
+    mockMcpPoolGetSnapshot.mockReturnValue({
+      total: 1,
+      subprocessCount: 0,
+      byName: {
+        code: {
+          entryCount: 1,
+          entrySummary: [
+            {
+              entryIndex: 0,
+              refs: 1,
+              status: MCPServerStatus.CONNECTED,
+            },
+          ],
+        },
+      },
+    });
+    const { agent, agentPromise } = await bootAcpAgent();
+
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.workspaceMcp, {}),
+    ).resolves.toMatchObject({
+      servers: [
+        expect.objectContaining({
+          name: 'code',
+          status: 'ok',
+          mcpStatus: 'connected',
+          entrySummary: [
+            expect.objectContaining({ entryIndex: 0, status: 'connected' }),
+          ],
+        }),
+      ],
+    });
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -24262,6 +24329,7 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
     };
     const runtimeServer = { command: 'runtime-server' };
     const forceDiscover = vi.fn().mockResolvedValue(undefined);
+    const setTools = vi.fn().mockResolvedValue(undefined);
     let finishDiscovery!: () => void;
     const discoveryPending = new Promise<void>((resolve) => {
       finishDiscovery = resolve;
@@ -24314,6 +24382,10 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
       .mockReturnValue({ runtime: runtimeServer });
     mockConfig.getWorkingDir = vi.fn().mockReturnValue('/tmp');
     mockConfig.isMcpServerDisabled = vi.fn().mockReturnValue(false);
+    mockConfig.getLlmClient = vi.fn().mockReturnValue({
+      isInitialized: vi.fn().mockReturnValue(true),
+      setTools,
+    });
     mockConfig.getToolRegistry = vi.fn().mockReturnValue({
       discoverToolsForServer: forceDiscover,
       getMcpClientManager: vi.fn().mockReturnValue({
@@ -24387,6 +24459,7 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
         discovery: discoveryServer,
       }),
     );
+    expect(setTools).toHaveBeenCalledOnce();
     expect(mockConfig.setExcludedMcpServers).toHaveBeenCalledWith(['disabled']);
     expect(mockConfig.setAllowedMcpServers).toHaveBeenCalledWith([
       'persisted',

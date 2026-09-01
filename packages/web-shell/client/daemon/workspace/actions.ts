@@ -290,90 +290,101 @@ export function createDaemonWorkspaceActions({
       },
     },
 
-    async loadMcpStatus() {
-      const client = requireClient(getClient, 'Load MCP status failed');
+    async ensureRuntime() {
+      const workspace = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Initialize workspace runtime failed',
+      );
       return withActionTimeout(
-        client.workspaceMcp(),
+        workspace.ensureRuntime(),
+        'Initialize workspace runtime timed out',
+        62_000,
+      );
+    },
+
+    async loadMcpConfig() {
+      const workspace = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Load MCP configuration failed',
+      );
+      return withActionTimeout(
+        workspace.mcpConfig(),
+        'Load MCP configuration timed out',
+      );
+    },
+
+    async loadMcpStatus() {
+      const workspace = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Load MCP status failed',
+      );
+      return withActionTimeout(
+        workspace.runtimeMcp(),
         'Load MCP status timed out',
       );
     },
 
     async initializeMcp() {
-      const client = requireClient(getClient, 'Initialize MCP failed');
+      const workspace = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Initialize MCP failed',
+      );
       return withActionTimeout(
-        client.initializeWorkspaceMcp(),
+        workspace.ensureRuntime().then(() => ({ accepted: true })),
         'Initialize MCP timed out',
+        62_000,
       );
     },
 
     async reloadMcp() {
-      const client = requireClient(getClient, 'Reload MCP failed');
+      const workspace = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Reload MCP failed',
+      );
       return withActionTimeout(
-        client.reloadWorkspaceMcp(),
+        workspace.reloadRuntimeMcp(),
         'Reload MCP timed out',
+        5 * 60_000,
       );
     },
 
     async loadMcpTools(serverName) {
-      const client = requireClient(getClient, 'Load MCP tools failed');
-      try {
-        return await withActionTimeout(
-          client.workspaceMcpTools(serverName),
-          'Load MCP tools timed out',
-        );
-      } catch {
-        return {
-          v: 1 as const,
-          workspaceCwd: '',
-          serverName,
-          initialized: false,
-          acpChannelLive: false,
-          tools: [],
-          errors: [
-            {
-              kind: 'mcp_tools' as const,
-              status: 'error' as const,
-              error: 'The connected daemon does not expose MCP tool details.',
-            },
-          ],
-        };
-      }
+      const workspace = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Load MCP tools failed',
+      );
+      return withActionTimeout(
+        workspace.runtimeMcpTools(serverName),
+        'Load MCP tools timed out',
+      );
     },
 
     async loadMcpResources(serverName) {
-      const client = requireClient(getClient, 'Load MCP resources failed');
-      try {
-        return await withActionTimeout(
-          client.workspaceMcpResources(serverName),
-          'Load MCP resources timed out',
-        );
-      } catch {
-        // Older daemons lack the resources route. Degrade gracefully so a
-        // mixed-version client still renders the rest of the /mcp dialog —
-        // mirrors the loadMcpTools fallback.
-        return {
-          v: 1 as const,
-          workspaceCwd: '',
-          serverName,
-          initialized: false,
-          acpChannelLive: false,
-          resources: [],
-          errors: [
-            {
-              kind: 'mcp_resources' as const,
-              status: 'error' as const,
-              error:
-                'The connected daemon does not expose MCP resource details.',
-            },
-          ],
-        };
-      }
+      const workspace = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Load MCP resources failed',
+      );
+      return withActionTimeout(
+        workspace.runtimeMcpResources(serverName),
+        'Load MCP resources timed out',
+      );
     },
 
     async restartMcpServer(serverName) {
-      const client = requireClient(getClient, 'Restart MCP server failed');
+      const workspace = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Restart MCP server failed',
+      );
       return withActionTimeout(
-        client.restartMcpServer(serverName),
+        workspace.restartRuntimeMcpServer(serverName),
         'Restart MCP server timed out',
         5 * 60_000,
       );
@@ -381,9 +392,41 @@ export function createDaemonWorkspaceActions({
 
     async manageMcpServer(serverName, action) {
       const client = requireClient(getClient, 'Manage MCP server failed');
+      const workspace = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Manage MCP server failed',
+      );
       const timeoutMs = action === 'authenticate' ? 10 * 60_000 : 5 * 60_000;
+      if (action === 'enable' || action === 'disable') {
+        const config =
+          action === 'disable' ? await workspace.mcpConfig() : undefined;
+        const scopes =
+          action === 'enable'
+            ? (['user', 'workspace'] as const)
+            : [
+                serverName in config!.user && !(serverName in config!.workspace)
+                  ? ('user' as const)
+                  : ('workspace' as const),
+              ];
+        let changed: boolean | undefined;
+        for (const scope of scopes) {
+          const result = await (scope === 'workspace'
+            ? workspace.setMcpServerEnabled(serverName, action === 'enable')
+            : client.setUserMcpServerEnabled(serverName, action === 'enable'));
+          if (result.changed !== undefined) {
+            changed = (changed ?? false) || result.changed;
+          }
+        }
+        return {
+          serverName,
+          action,
+          ok: true,
+          ...(changed === undefined ? {} : { changed }),
+        };
+      }
       return withActionTimeout(
-        client.manageMcpServer(serverName, action),
+        workspace.manageRuntimeMcpServer(serverName, action),
         'Manage MCP server timed out',
         timeoutMs,
       );
@@ -405,6 +448,42 @@ export function createDaemonWorkspaceActions({
         'Remove MCP server timed out',
         5 * 60_000,
       );
+    },
+
+    async setMcpServer(name, scope, config) {
+      const client = requireClient(getClient, 'Save MCP server failed');
+      const workspace = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Save MCP server failed',
+      );
+      return scope === 'user'
+        ? client.setUserMcpServer(name, config)
+        : workspace.setMcpServer(name, config);
+    },
+
+    async removeMcpServer(name, scope) {
+      const client = requireClient(getClient, 'Remove MCP server failed');
+      const workspace = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Remove MCP server failed',
+      );
+      return scope === 'user'
+        ? client.removeUserMcpServer(name)
+        : workspace.removeMcpServer(name);
+    },
+
+    async setMcpServerEnabled(name, scope, enabled) {
+      const client = requireClient(getClient, 'Update MCP server failed');
+      const workspace = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Update MCP server failed',
+      );
+      return scope === 'user'
+        ? client.setUserMcpServerEnabled(name, enabled)
+        : workspace.setMcpServerEnabled(name, enabled);
     },
 
     async loadDaemonStatus(detail) {

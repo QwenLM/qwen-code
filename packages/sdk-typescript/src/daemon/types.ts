@@ -1832,6 +1832,8 @@ export interface DaemonWorkspaceMcpStatus {
   v: 1;
   workspaceCwd: string;
   initialized: boolean;
+  runtimeEpoch?: number;
+  source?: 'live' | 'cache';
   discoveryState?: DaemonMcpDiscoveryState;
   servers: DaemonWorkspaceMcpServerStatus[];
   errors?: DaemonStatusCell[];
@@ -1849,9 +1851,33 @@ export interface DaemonWorkspaceMcpStatus {
   budgets?: DaemonMcpBudgetStatusCell[];
 }
 
+export type DaemonMcpConfigScope = 'user' | 'workspace';
+
+export interface DaemonWorkspaceMcpConfigStatus {
+  v: 1;
+  effective: Record<string, unknown>;
+  user: Record<string, unknown>;
+  workspace: Record<string, unknown>;
+}
+
+export interface DaemonMcpConfigMutationResult {
+  name?: string;
+  serverName?: string;
+  scope?: DaemonMcpConfigScope;
+  config?: unknown;
+  action?: 'enable' | 'disable';
+  ok?: true;
+  changed?: boolean;
+  activation: 'applied' | 'deferred' | 'reconciling';
+}
+
 /** Response of `POST /workspace/mcp/initialize`. */
 export interface DaemonWorkspaceMcpInitializeResult {
   /** True only when this request started a new background discovery task. */
+  accepted: boolean;
+}
+
+export interface DaemonWorkspaceMcpReloadResult {
   accepted: boolean;
 }
 
@@ -1875,6 +1901,7 @@ export interface DaemonWorkspaceMcpToolsStatus {
   workspaceCwd: string;
   serverName: string;
   initialized: boolean;
+  runtimeEpoch?: number;
   acpChannelLive: boolean;
   tools: DaemonWorkspaceMcpToolStatus[];
   errors?: DaemonStatusCell[];
@@ -1903,6 +1930,7 @@ export interface DaemonWorkspaceMcpResourcesStatus {
   workspaceCwd: string;
   serverName: string;
   initialized: boolean;
+  runtimeEpoch?: number;
   acpChannelLive: boolean;
   resources: DaemonWorkspaceMcpResourceStatus[];
   errors?: DaemonStatusCell[];
@@ -1954,6 +1982,14 @@ export interface DaemonWorkspaceRuntimeStatus {
   state: 'cold' | 'starting' | 'active' | 'idle' | 'stopping';
   runtimeLive: boolean;
   runtimeEpoch: number;
+  capabilities?: {
+    mcp?: {
+      state: 'not_started' | 'starting' | 'ready' | 'stale' | 'error';
+      revision: number;
+      runtimeEpoch?: number;
+      error?: { code: string; message: string };
+    };
+  };
 }
 
 export interface DaemonWorkspaceProviderCurrent {
