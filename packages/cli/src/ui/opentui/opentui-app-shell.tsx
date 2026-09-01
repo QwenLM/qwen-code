@@ -76,8 +76,16 @@ export interface OpenTuiAppProps {
   // --- seams owned by the renderer / entry layer ---------------------------
   /** Renders the transcript + status line (needs the real OpenTUI renderer). */
   renderMain?: () => ReactNode;
-  /** Runs a model turn for a plain prompt or a `submit_prompt` outcome. */
-  onSubmitPrompt?: (content: PartListUnion) => void;
+  /**
+   * Runs a model turn for a plain prompt or a `submit_prompt` outcome. A
+   * composer prompt passes its pasted image paths as a second, structured
+   * argument: turning them into image parts (ink: attachments) belongs to the
+   * entry layer, so the shell must not flatten them into the prompt text.
+   */
+  onSubmitPrompt?: (
+    content: PartListUnion,
+    imagePaths?: readonly string[],
+  ) => void;
   /** Reaches the entry after `/quit`; receives the closing history rows. */
   onQuit?: (messages: readonly HistoryItem[]) => void;
   /** Replays a transcript batch (session switch / resume). */
@@ -117,23 +125,16 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
 
   const notify = useCallback((text: string) => setNoticeText(text), []);
 
-  // The confirmation seam resolves against a single pending slot; without a
-  // renderer the shell must not hang a command, so it auto-denies.
-  const confirmationRef = useRef<{
-    resolve: (r: ShellConfirmationResolution) => void;
-  } | null>(null);
+  // Neither confirmation renderer exists in this batch, so the bridge denies
+  // every request outright: a pending promise here would hang the dispatcher's
+  // `run()` (and the gateway's busy flag) for the rest of the session.
   const confirmations = useMemo(
     () => ({
-      presentShell(commandsToConfirm: readonly string[]) {
-        return new Promise<ShellConfirmationResolution>((resolve) => {
-          confirmationRef.current = { resolve };
-          if (commandsToConfirm.length === 0) {
-            confirmationRef.current = null;
-            resolve({ outcome: ToolConfirmationOutcome.Cancel });
-          }
-        });
-      },
-      presentAction: () => new Promise<boolean>((resolve) => resolve(false)),
+      presentShell: () =>
+        Promise.resolve<ShellConfirmationResolution>({
+          outcome: ToolConfirmationOutcome.Cancel,
+        }),
+      presentAction: () => Promise.resolve(false),
     }),
     [],
   );
@@ -245,16 +246,13 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   const onSubmit = useCallback(
     async (text: string, imagePaths?: string[]) => {
       setNoticeText(null);
-      const content: PartListUnion = imagePaths?.length
-        ? [{ text }, ...imagePaths.map((path) => ({ text: `[image] ${path}` }))]
-        : text;
       const settlement = await gateway.dispatch(text);
       if (settlement.kind === 'rejected') {
         notify(settlement.reason);
         return;
       }
       if (settlement.outcome === false) {
-        if (onSubmitPrompt) onSubmitPrompt(content);
+        if (onSubmitPrompt) onSubmitPrompt(text, imagePaths);
         else notify('The live prompt turn is not wired in this shell.');
         return;
       }

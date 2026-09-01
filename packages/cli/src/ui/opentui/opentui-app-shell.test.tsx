@@ -261,20 +261,24 @@ describe('OpenTuiApp shell wiring', () => {
     mocks.state.handleResult = false;
 
     await submit('summarize the diff');
-    expect(onSubmitPrompt).toHaveBeenCalledWith('summarize the diff');
+    expect(onSubmitPrompt).toHaveBeenCalledWith(
+      'summarize the diff',
+      undefined,
+    );
   });
 
-  it('folds image paths into the submitted prompt content', async () => {
+  it('passes pasted image paths through structured, not folded into the text', async () => {
     const onSubmitPrompt = vi.fn();
     renderApp({ onSubmitPrompt });
     await settle();
     mocks.state.handleResult = false;
 
     await submit('what is in these', ['a.png', 'b.png']);
-    expect(onSubmitPrompt).toHaveBeenCalledWith([
-      { text: 'what is in these' },
-      { text: '[image] a.png' },
-      { text: '[image] b.png' },
+    // The shell has no business choosing an image encoding: the entry layer
+    // builds the real parts (ink: attachments), so the paths stay separate.
+    expect(onSubmitPrompt).toHaveBeenCalledWith('what is in these', [
+      'a.png',
+      'b.png',
     ]);
   });
 
@@ -324,9 +328,14 @@ describe('OpenTuiApp shell wiring', () => {
       ) => Promise<{ outcome: ToolConfirmationOutcome }>;
       presentActionConfirmation: (prompt: unknown) => Promise<boolean>;
     };
+    // The dispatcher awaits this with the real, non-empty allowlist; a list
+    // left pending would park `run()` and the gateway busy flag forever.
     await expect(host.presentShellConfirmation([])).resolves.toEqual({
       outcome: ToolConfirmationOutcome.Cancel,
     });
+    await expect(
+      host.presentShellConfirmation(['rm -rf build', 'npm publish']),
+    ).resolves.toEqual({ outcome: ToolConfirmationOutcome.Cancel });
     await expect(host.presentActionConfirmation('delete?')).resolves.toBe(
       false,
     );
