@@ -22,6 +22,7 @@ import type {
   WorkspaceRuntime,
 } from '../workspace-registry.js';
 import { getWorkspaceRuntimeCoordinatorIfSupported } from '../workspace-runtime-coordinator.js';
+import { WorkspaceSkillNotFoundError } from '../workspace-service/types.js';
 import {
   MAX_WORKSPACE_SKILL_NAME_LENGTH,
   WorkspaceSkillManagementError,
@@ -269,6 +270,10 @@ function parseDeleteScope(req: Request, res: Response) {
 }
 
 function sendSkillManagementError(res: Response, error: unknown): boolean {
+  if (error instanceof WorkspaceSkillNotFoundError) {
+    res.status(404).json({ error: error.message, code: 'skill_not_found' });
+    return true;
+  }
   if (!(error instanceof WorkspaceSkillManagementError)) return false;
   res.status(error.statusCode).json({
     error: error.message,
@@ -555,6 +560,18 @@ export function registerWorkspaceQualifiedSkillsRoutes(
     | 'invalidateSkillsConfigStatus'
   > & { workspaceRegistry: WorkspaceRegistry },
 ): void {
+  const invalidateConfigStatus = (
+    runtime: WorkspaceRuntime,
+    scope: WorkspaceSkillScope = 'workspace',
+  ) => {
+    if (scope === 'workspace') {
+      deps.invalidateSkillsConfigStatus(runtime.workspaceCwd);
+      return;
+    }
+    for (const entry of deps.workspaceRegistry.listAllEntries()) {
+      deps.invalidateSkillsConfigStatus(entry.workspaceCwd);
+    }
+  };
   app.get('/workspaces/:workspace/config/skills', async (req, res) => {
     const entry = resolveWorkspaceEntryFromParam(
       deps.workspaceRegistry,
@@ -751,6 +768,7 @@ export function registerWorkspaceQualifiedSkillsRoutes(
           createBuildWorkspaceCtx(runtime.workspaceCwd)(installRoute, clientId),
           input,
         );
+        invalidateConfigStatus(runtime, input.scope);
         res.status(200).json(result);
       } catch (err) {
         if (!sendSkillManagementError(res, err))
@@ -791,6 +809,7 @@ export function registerWorkspaceQualifiedSkillsRoutes(
           skillName,
           scope,
         );
+        invalidateConfigStatus(runtime, scope);
         res.status(200).json(result);
       } catch (err) {
         if (!sendSkillManagementError(res, err))
@@ -822,6 +841,7 @@ export function registerWorkspaceQualifiedSkillsRoutes(
           input.skillNames,
           input.enabled,
         );
+        invalidateConfigStatus(runtime);
         res.status(200).json(result);
       } catch (err) {
         deps.sendBridgeError(res, err, { route: batchRoute });
@@ -852,6 +872,7 @@ export function registerWorkspaceQualifiedSkillsRoutes(
           input.skillName,
           input.enabled,
         );
+        invalidateConfigStatus(runtime);
         res.status(200).json(result);
       } catch (err) {
         deps.sendBridgeError(res, err, { route });

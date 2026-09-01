@@ -72,6 +72,7 @@ export interface WorkspaceManagementRouteDeps {
   workspaceRegistrationStore?: WorkspaceRegistrationStore;
   getAcpHandle?: () => AcpHttpHandle | undefined;
   runtimeRemoval?: WorkspaceRuntimeRemovalController;
+  onWorkspaceRemoved?: (workspaceCwd: string) => void;
   pickWorkspaceDirectory?: (
     signal?: AbortSignal,
   ) => Promise<string | undefined>;
@@ -407,6 +408,7 @@ export function registerWorkspaceManagementRoutes(
         }
         try {
           workspaceRegistry.completeDrain(runtime);
+          deps.onWorkspaceRemoved?.(runtime.workspaceCwd);
         } catch (error) {
           failures.push(error);
         }
@@ -1561,6 +1563,7 @@ export function registerWorkspaceManagementRoutes(
         }
         try {
           workspaceRegistry.completeDrain(runtime);
+          deps.onWorkspaceRemoved?.(runtime.workspaceCwd);
         } catch (err) {
           logCleanupFailure(
             `qwen serve: failed to complete workspace registry drain: ${

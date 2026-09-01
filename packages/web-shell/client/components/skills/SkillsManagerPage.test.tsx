@@ -237,6 +237,30 @@ describe('SkillsManagerPage', () => {
     );
   });
 
+  it('keeps the client id for an explicitly selected active workspace', async () => {
+    skillsState.current.skills = [
+      {
+        kind: 'skill',
+        status: 'disabled',
+        name: 'review',
+        description: 'Review code',
+        level: 'user',
+        modelInvocable: true,
+        disabledReason: 'default',
+      },
+    ];
+
+    await renderPage('/workspace/demo');
+    await openDisabledSkill('review');
+    await enableSelectedSkill();
+
+    expect(skillsState.current.setEnabled).toHaveBeenCalledWith(
+      'review',
+      true,
+      { clientId: 'client-1' },
+    );
+  });
+
   it('shows the authoritative enabled state after a normal toggle', async () => {
     const disabledSkill: DaemonWorkspaceSkillStatus = {
       kind: 'skill',

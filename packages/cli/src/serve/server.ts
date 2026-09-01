@@ -2592,6 +2592,7 @@ export function createServeApp(
     workspaceRegistrationStore: deps.workspaceRegistrationStore,
     getAcpHandle: () => acpHandleRef.current,
     runtimeRemoval: deps.workspaceRuntimeRemoval,
+    onWorkspaceRemoved: invalidateSkillsConfigStatus,
     ...(deps.liveConversationWorkspace
       ? { reservedWorkspaceRoots: [deps.liveConversationWorkspace.rootPath] }
       : {}),
@@ -2934,10 +2935,20 @@ export function createServeApp(
       installWorkspaceSkill(
         workspaceCwd,
         request,
-        daemonEnvAtBoot['GH_TOKEN'] ?? daemonEnvAtBoot['GITHUB_TOKEN'],
+        primaryEffectiveEnv?.['GH_TOKEN'] ??
+          primaryEffectiveEnv?.['GITHUB_TOKEN'] ??
+          daemonEnvAtBoot['GH_TOKEN'] ??
+          daemonEnvAtBoot['GITHUB_TOKEN'],
+        capturePrimaryGenerationAssertion(),
       ),
     deleteSkillConfig: (workspaceCwd, scope, skillName, installedPath) =>
-      deleteWorkspaceSkill(workspaceCwd, scope, skillName, installedPath),
+      deleteWorkspaceSkill(
+        workspaceCwd,
+        scope,
+        skillName,
+        installedPath,
+        capturePrimaryGenerationAssertion(),
+      ),
     parseAndValidateClientId: (req, res) =>
       parseAndValidateWorkspaceClientId(req, res, primaryBridge),
   });

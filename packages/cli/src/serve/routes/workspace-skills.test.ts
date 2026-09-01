@@ -11,9 +11,10 @@ import {
   type WorkspaceRuntime,
 } from '../workspace-registry.js';
 import { WorkspaceSkillManagementError } from '../workspace-skill-management.js';
-import type {
-  WorkspaceSkillBatchToggleResult,
-  WorkspaceSkillToggleResult,
+import {
+  WorkspaceSkillNotFoundError,
+  type WorkspaceSkillBatchToggleResult,
+  type WorkspaceSkillToggleResult,
 } from '../workspace-service/types.js';
 import {
   registerWorkspaceQualifiedSkillsRoutes,
@@ -251,6 +252,44 @@ describe('workspace Skill management routes', () => {
     );
   });
 
+  it('handles unique and ambiguous case-insensitive config deletes', async () => {
+    const harness = createHarness();
+    const configured = harness.configStatus.skills.find(
+      (skill) => skill.level === 'user',
+    )!;
+    harness.configStatus.skills = [
+      {
+        ...configured,
+        name: 'Configured',
+        installedPath: '/global/skills/Configured/SKILL.md',
+      },
+    ];
+
+    const unique = await request(harness.app).delete(
+      '/workspace/config/skills/configured?scope=global',
+    );
+    expect(unique.status).toBe(200);
+    expect(harness.deleteWorkspaceSkill).toHaveBeenCalledWith(
+      '/workspace',
+      'global',
+      'Configured',
+      '/global/skills/Configured/SKILL.md',
+    );
+
+    harness.deleteWorkspaceSkill.mockClear();
+    harness.configStatus.skills.push({
+      ...configured,
+      name: 'CONFIGURED',
+      installedPath: '/global/skills/CONFIGURED/SKILL.md',
+    });
+    const ambiguous = await request(harness.app).delete(
+      '/workspace/config/skills/configured?scope=global',
+    );
+    expect(ambiguous.status).toBe(409);
+    expect(ambiguous.body.code).toBe('skill_not_managed');
+    expect(harness.deleteWorkspaceSkill).not.toHaveBeenCalled();
+  });
+
   it('reads qualified config for untrusted and transitioning workspaces', async () => {
     const untrusted = createHarness(false);
     const first = await request(untrusted.app).get(
@@ -336,6 +375,20 @@ describe('workspace Skill management routes', () => {
     expect(response.status).toBe(501);
     expect(response.body.code).toBe('workspace_runtime_not_supported');
     expect(harness.installWorkspaceSkill).not.toHaveBeenCalled();
+  });
+
+  it('returns 404 when a qualified config Skill is not found', async () => {
+    const harness = createHarness();
+    harness.deleteWorkspaceSkill.mockRejectedValueOnce(
+      new WorkspaceSkillNotFoundError('missing'),
+    );
+
+    const response = await request(harness.app).delete(
+      '/workspaces/workspace-1/config/skills/missing?scope=workspace',
+    );
+
+    expect(response.status).toBe(404);
+    expect(response.body.code).toBe('skill_not_found');
   });
 
   it('rejects wrong scopes and untrusted qualified config writes', async () => {
@@ -430,6 +483,35 @@ describe('workspace Skill management routes', () => {
     );
   });
 
+  it('invalidates config status after qualified legacy mutations', async () => {
+    const harness = createHarness();
+
+    const responses = await Promise.all([
+      request(harness.app)
+        .post('/workspaces/workspace-1/skills/install')
+        .send({
+          name: 'demo-skill',
+          scope: 'workspace',
+          source: { type: 'folder', path: '/tmp/demo-skill' },
+        }),
+      request(harness.app).delete(
+        '/workspaces/workspace-1/skills/demo-skill?scope=workspace',
+      ),
+      request(harness.app)
+        .post('/workspaces/workspace-1/skills/enable')
+        .send({ skillNames: ['demo-skill'], enabled: false }),
+      request(harness.app)
+        .post('/workspaces/workspace-1/skills/demo-skill/enable')
+        .send({ enabled: false }),
+    ]);
+
+    expect(responses.map(({ status }) => status)).toEqual([200, 200, 200, 200]);
+    expect(harness.invalidateSkillsConfigStatus).toHaveBeenCalledTimes(4);
+    expect(harness.invalidateSkillsConfigStatus).toHaveBeenCalledWith(
+      '/workspace',
+    );
+  });
+
   it('forwards delete scope and rejects invalid scopes', async () => {
     const harness = createHarness();
 
@@ -448,6 +530,9 @@ describe('workspace Skill management routes', () => {
     );
     expect(invalid.status).toBe(400);
     expect(invalid.body.code).toBe('invalid_skill_scope');
+    expect(harness.invalidateSkillsConfigStatus).toHaveBeenCalledWith(
+      '/workspace',
+    );
   });
 
   it('returns structured management errors', async () => {
@@ -554,6 +639,22 @@ describe('workspace Skill management routes', () => {
       }),
       ['Review', 'missing', 'locked'],
       false,
+    );
+    expect(harness.invalidateSkillsConfigStatus).toHaveBeenCalledWith(
+      '/workspace',
+    );
+  });
+
+  it('invalidates config status after a singular Skill toggle', async () => {
+    const harness = createHarness();
+
+    const response = await request(harness.app)
+      .post('/workspace/skills/demo-skill/enable')
+      .send({ enabled: false });
+
+    expect(response.status).toBe(200);
+    expect(harness.invalidateSkillsConfigStatus).toHaveBeenCalledWith(
+      '/workspace',
     );
   });
 

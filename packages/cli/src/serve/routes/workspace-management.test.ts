@@ -428,9 +428,11 @@ describe('owned Conversations runtime quarantine', () => {
     });
     const registry = createMockRegistry([runtime]);
     const runtimeRemoval = createRemovalController();
+    const onWorkspaceRemoved = vi.fn();
     const { handle } = createApp({
       workspaceRegistry: registry,
       runtimeRemoval,
+      onWorkspaceRemoved,
     });
 
     await expect(
@@ -446,6 +448,7 @@ describe('owned Conversations runtime quarantine', () => {
     );
     expect(runtimeRemoval.completeDrain).toHaveBeenCalledWith(runtime);
     expect(registry.completeDrain).toHaveBeenCalledWith(runtime);
+    expect(onWorkspaceRemoved).toHaveBeenCalledWith(runtime.workspaceCwd);
     expect(runtimeRemoval.cancelDrain).not.toHaveBeenCalled();
     expect(registry.cancelDrain).not.toHaveBeenCalled();
     expect(
