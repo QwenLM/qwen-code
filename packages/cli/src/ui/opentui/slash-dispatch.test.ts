@@ -298,27 +298,23 @@ describe('executeSlashCommand ink-processor guards (R1-96/100/101/102)', () => {
   });
 
   it('an AbortError from a pre-aborted signal is handled, not a failure (R3-1)', async () => {
-    // ESC before dispatch reaches the race: the signal is already aborted,
-    // addEventListener never fires, and the action's I/O rejects with
-    // AbortError into the catch — the user's own cancellation must not be
-    // recorded as a command failure or shown as an error message.
+    // ESC before dispatch reaches the race: the signal is already aborted
+    // and addEventListener never fires, so the action must be skipped
+    // entirely — a cancelled submission must not run its side effects nor
+    // surface its (possibly abort-shaped) error as a command failure.
     const controller = new AbortController();
     controller.abort();
-    const commands = [
-      stub({
-        name: 'doctor',
-        action: (ctx) => {
-          void ctx.abortSignal;
-          return Promise.reject(new Error('This operation was aborted'));
-        },
-      }),
-    ];
+    const action = vi.fn(() =>
+      Promise.reject(new Error('This operation was aborted')),
+    );
+    const commands = [stub({ name: 'doctor', action })];
     const effect = await executeSlashCommand(
       '/doctor',
       commands,
       makeEnv({ abortSignal: controller.signal }),
     );
     expect(effect).toEqual({ kind: 'handled' });
+    expect(action).not.toHaveBeenCalled();
   });
 
   it('defers stacked skill invocations instead of leaking the second skill', async () => {
