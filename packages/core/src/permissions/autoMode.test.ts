@@ -31,6 +31,16 @@ import type { Config } from '../config/config.js';
 import type { PermissionCheckContext } from './types.js';
 import { setMemoryFilename } from '../utils/memory-constants.js';
 
+//Mock classifier to ensure in workspace protected writes still reach it
+vi.mock('./classifier.js', () => ({
+  classifyAction: vi.fn(async () => ({
+    shouldBlock: false,
+    reason: 'ok',
+    stage: 'fast',
+    durationMs: 1,
+  })),
+}));
+
 // ─── SAFE_TOOL_ALLOWLIST contents (frozen) ───────────────────────────────
 
 describe('SAFE_TOOL_ALLOWLIST', () => {
@@ -1139,6 +1149,67 @@ describe('evaluateAutoMode — fast-path gating', () => {
       skipClassifierReason: 'total_denial',
     });
     expect(decision).toEqual({ via: 'fallback', reason: 'total_denial' });
+  });
+
+  // ─── New tests for external write fallback ───
+  it('routes external EDIT to manual fallback before classifier', async () => {
+    const decision = await evaluateAutoMode({
+      ctx: {
+        toolName: ToolNames.EDIT,
+        filePath: '/Users/test/other-project/x.ts',
+      },
+      pmForcedAsk: false,
+      toolParams: {},
+      messages: [],
+      config: baseConfig,
+      signal: new AbortController().signal,
+    });
+    expect(decision).toEqual({ via: 'fallback', reason: 'external_write' });
+  });
+
+  it('routes external WRITE_FILE to manual fallback before classifier', async () => {
+    const decision = await evaluateAutoMode({
+      ctx: {
+        toolName: ToolNames.WRITE_FILE,
+        filePath: '/etc/hosts',
+      },
+      pmForcedAsk: false,
+      toolParams: {},
+      messages: [],
+      config: baseConfig,
+      signal: new AbortController().signal,
+    });
+    expect(decision).toEqual({ via: 'fallback', reason: 'external_write' });
+  });
+
+  it('routes external NOTEBOOK_EDIT to manual fallback before classifier', async () => {
+    const decision = await evaluateAutoMode({
+      ctx: {
+        toolName: ToolNames.NOTEBOOK_EDIT,
+        filePath: '/users/test/other-project/nb.ipynb',
+      },
+      pmForcedAsk: false,
+      toolParams: {},
+      messages: [],
+      config: baseConfig,
+      signal: new AbortController().signal,
+    });
+    expect(decision).toEqual({ via: 'fallback', reason: 'external_write' });
+  });
+
+  it('routes in-workspace protected writes to classifier', async () => {
+    const decision = await evaluateAutoMode({
+      ctx: {
+        toolName: ToolNames.EDIT,
+        filePath: `${cwd}/.qwen/settings.json`,
+      },
+      pmForcedAsk: false,
+      toolParams: {},
+      messages: [],
+      config: baseConfig,
+      signal: new AbortController().signal,
+    });
+    expect(decision.via).toBe('classifier');
   });
 });
 

@@ -42,8 +42,27 @@ describe('package scripts', () => {
         "  '@qwen-code/sdk',\n" +
         "  '@qwen-code/mobile-mcp',\n" +
         "  '@qwen-code/node-repl-mcp',\n" +
+        "  '@qwen-code/qwen-live',\n" +
         '];',
     );
+  });
+
+  it('builds the standalone qwen-live daemon in the root build order', () => {
+    const buildScript = readFileSync(
+      path.join(root, 'scripts/build.js'),
+      'utf8',
+    );
+
+    // The qwen-live e2e harness spawns packages/qwen-live/dist/index.js and
+    // the workspace unit tests run from src, so this pin is what catches the
+    // root build silently dropping the package.
+    const startIndex = buildScript.indexOf('const buildOrder = [');
+    expect(startIndex).toBeGreaterThan(-1);
+    const buildOrder = buildScript.slice(
+      startIndex,
+      buildScript.indexOf('];', startIndex),
+    );
+    expect(buildOrder).toContain("'packages/qwen-live',");
   });
 
   it('keeps the serve fast-path bundle check outside unit test scripts', () => {
@@ -88,10 +107,12 @@ describe('package scripts', () => {
     const packageJson = readPackageJson();
 
     expect(packageJson.scripts['test:release']).toBe(
+      'npm run test:release:workspaces && npm run test:scripts',
+    );
+    expect(packageJson.scripts['test:release:workspaces']).toBe(
       [
         'cross-env NODE_OPTIONS="--max-old-space-size=3072"',
         'npm run test:ci --workspaces --if-present -- --coverage.enabled=false',
-        '&& npm run test:scripts',
       ].join(' '),
     );
 
@@ -395,24 +416,35 @@ describe('package scripts', () => {
 
   it('wires release quality checks to fast explicit validation steps', () => {
     const workflow = readWorkflow('.github/workflows/release.yml');
-    const qualityJob = getWorkflowJob(workflow, 'quality');
-    const buildStep = getWorkflowStep(qualityJob, 'Build Project');
+    const buildJob = getWorkflowJob(workflow, 'quality_build');
+    const workspaceTestJob = getWorkflowJob(workflow, 'workspace_tests');
+    const buildStep = getWorkflowStep(buildJob, 'Build Project');
     const serveFastPathStep = getWorkflowStep(
-      qualityJob,
+      buildJob,
       'Check Serve Fast Path Bundle',
     );
     const workspaceTestStep = getWorkflowStep(
-      qualityJob,
+      workspaceTestJob,
       'Run Workspace Tests',
     );
 
-    expect(qualityJob).toContain("name: 'Check Serve Fast Path Bundle'");
-    expect(qualityJob).toContain('npm run check:serve-fast-path-bundle');
-    expect(qualityJob.indexOf(serveFastPathStep)).toBeLessThan(
-      qualityJob.indexOf(buildStep),
+    expect(buildJob).toContain("name: 'Check Serve Fast Path Bundle'");
+    expect(buildJob).toContain('npm run check:serve-fast-path-bundle');
+    expect(buildJob.indexOf(serveFastPathStep)).toBeLessThan(
+      buildJob.indexOf(buildStep),
     );
-    expect(workspaceTestStep).toContain('npm run test:release');
+    expect(workspaceTestStep).toContain('npm run test:release:workspaces');
     expect(workspaceTestStep).not.toContain('npm run test:ci');
+    for (const name of ['VITEST_MAX_THREADS', 'VITEST_MAX_FORKS']) {
+      expect(workspaceTestStep).toContain(
+        `${name}: "\${{ startsWith(runner.name, 'ecs-qwen-') && (vars.QWEN_CI_VITEST_MAX_WORKERS || '4') || '' }}"`,
+      );
+    }
+    for (const name of ['VITEST_MIN_THREADS', 'VITEST_MIN_FORKS']) {
+      expect(workspaceTestStep).toContain(
+        `${name}: "\${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"`,
+      );
+    }
   });
 
   it('skips release install-time prepare and builds before publish bundling', () => {
@@ -422,10 +454,12 @@ describe('package scripts', () => {
     );
     const installSteps =
       workflow.match(
-        / {6}- name: 'Install Dependencies'[\s\S]*?(?=\n {6}- name: '|\n {4}[A-Za-z0-9_-]+:|$)/g,
+        / {6}- (?:&[^\n]+\n {8})?name: 'Install Dependencies'[\s\S]*?(?=\n {6}- (?:&[^\n]+\n {8})?name: '|\n {4}[A-Za-z0-9_-]+:|$)/g,
       ) || [];
 
-    expect(installSteps.length).toBe(5);
+    // The validation jobs reuse the anchored install step; only the anchor
+    // definition plus prepare and publish appear as full textual copies.
+    expect(installSteps.length).toBe(3);
     for (const installStep of installSteps) {
       expect(installStep).toContain(
         'npm ci --ignore-scripts --no-audit --progress=false',

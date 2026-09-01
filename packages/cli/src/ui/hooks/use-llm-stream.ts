@@ -3914,6 +3914,9 @@ export const useLlmStream = (
             todoWorkChainId: metadata?.todoWorkChainId,
             modelOverride: modelOverrideRef.current,
             steerInput: metadata?.steerInput,
+            ...(allowConcurrentBtwDuringResponse
+              ? { isConcurrentSideQuery: true }
+              : {}),
             ...(submittedPrompt !== undefined ? { submittedPrompt } : {}),
             ...(!allowConcurrentBtwDuringResponse &&
             !isDetachedToolContinuation &&

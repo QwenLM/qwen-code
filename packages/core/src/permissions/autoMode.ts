@@ -477,8 +477,8 @@ function stripRawRedirectTargetToken(token: string): string {
  *
  * Symlinks ARE resolved via `WorkspaceContext.isPathWithinWorkspace`, which
  * internally calls `fs.realpathSync`. A symlink whose target is outside the
- * workspace correctly fails this check and falls through to the classifier
- * — fail-safe by implementation.
+ * workspace correctly fails this check and falls through to the L5.2.6
+ * external_write manual fallback — fail-safe by implementation.
  *
  * Caller should only consult this when L4 evaluation returned `'default'`.
  */
@@ -547,6 +547,7 @@ export type FallbackToAskReason =
   | 'plan_mode_floor'
   | 'org_ask_ceiling'
   | 'classifier_unavailable'
+  | 'external_write'
   | DenialFallbackReason;
 
 /** Outcome of {@link applyAutoModeDecision}. */
@@ -604,6 +605,14 @@ export function applyAutoModeDecision(
       config.setAutoModeDenialState(recordAllow(denialState));
       return { kind: 'approved' };
     case 'fallback':
+      if (decision.reason === 'external_write') {
+        return {
+          kind: 'fallback',
+          reason: 'external_write',
+          message:
+            'Writes outside the workspace require manual approval in AUTO mode.',
+        };
+      }
       return { kind: 'fallback', reason: decision.reason };
     default: {
       const _exhaustive: never = decision;
@@ -755,6 +764,19 @@ export async function evaluateAutoMode(
   // User `ask` rules require manual confirmation.
   if (input.pmForcedAsk) {
     return { via: 'fallback', reason: 'ask_rule' };
+  }
+
+  // L5.2.6: External writes must never be auto-approved by the classifier.
+  // If a write tool targets a path outside the workspace, force a fallback to
+  // manual approval (ask) instead of risking an LLM classifier auto-approval.
+  if (
+    PROTECTED_WRITE_TOOL_NAMES.has(input.ctx.toolName) &&
+    input.ctx.filePath &&
+    !input.config
+      .getWorkspaceContext()
+      .isPathWithinWorkspace(input.ctx.filePath)
+  ) {
+    return { via: 'fallback', reason: 'external_write' };
   }
 
   // Caller (scheduler) has detected an armed fallback state; surface that

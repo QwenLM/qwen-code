@@ -9,10 +9,9 @@ name: 'CD: Qwen CUA Driver'
 #                   (APPLE_NOTARY_API_KEY_P8_BASE64 / _KEY_ID / _ISSUER_ID)
 #     The Developer ID Application identity is auto-discovered from the
 #     imported cert (no DEVELOPER_NAME secret needed).
-# The Windows UIAccess worker is Authenticode-signed. Release builds require
-# the repository Windows signing certificate; dry runs use an ephemeral test
-# certificate so packaging and installation verification exercise the same
-# signed-worker contract without producing a releasable artifact.
+# Windows archives carry the unsigned UIAccess worker. Deployments that need
+# UIAccess must sign and trust that worker on the target machine before placing
+# it under the secure Program Files path required by Windows.
 #
 # Artifact convention used by the @qwen-code/cua-sdk native installer:
 #   macOS  : cua-driver-rs-<v>-darwin-{arm64,x86_64,universal}.tar.gz
@@ -277,7 +276,7 @@ jobs:
           path: 'packages/cua-driver/rust/release/cua-driver-rs-*-linux-${{ matrix.arch }}*.tar.gz'
           if-no-files-found: 'error'
 
-  # ── Windows (x86_64 + arm64) — SIGNED UIAccess worker ────────────────────
+  # ── Windows (x86_64 + arm64) — unsigned UIAccess worker ────────────────────
   build-windows:
     name: 'windows-${{ matrix.arch }}'
     needs: ['validate-version']
@@ -325,7 +324,12 @@ jobs:
             cua-driver-windows-${{ matrix.arch }}-
       - name: 'Build (release)'
         working-directory: 'packages/cua-driver/rust'
-        run: 'cargo build -p cua-driver -p cursor-theme-cli -p cua-driver-uia -p cua-driver-sdk --release --locked --target ${{ matrix.target }}'
+        shell: 'pwsh'
+        run: |
+          # A cached target may contain a worker mutated by an earlier signing
+          # job. Remove the final PE so Cargo always relinks an unsigned worker.
+          Remove-Item "target/${{ matrix.target }}/release/cua-driver-uia.exe" -Force -ErrorAction SilentlyContinue
+          cargo build -p cua-driver -p cursor-theme-cli -p cua-driver-uia -p cua-driver-sdk --release --locked --target ${{ matrix.target }}
       - name: 'Build Electron-compatible Node runtime'
         working-directory: 'packages/cua-driver'
         shell: 'bash'
@@ -334,64 +338,16 @@ jobs:
           node scripts/build-node-runtime.mjs \
             --target "${{ matrix.target }}" \
             --output "rust/target/${{ matrix.target }}/release/cua_driver_node_runtime.node"
-      - name: 'Sign UIAccess worker'
+      - name: 'Verify unsigned UIAccess worker'
         shell: 'pwsh'
-        env:
-          WINDOWS_CERTIFICATE: '${{ secrets.WINDOWS_CERTIFICATE }}'
-          WINDOWS_CERTIFICATE_PASSWORD: '${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}'
-          LEGACY_WIN_CSC_LINK: '${{ secrets.WIN_CSC_LINK }}'
-          LEGACY_WIN_CSC_KEY_PASSWORD: '${{ secrets.WIN_CSC_KEY_PASSWORD }}'
         run: |
           $worker = "packages/cua-driver/rust/target/${{ matrix.target }}/release/cua-driver-uia.exe"
-          $primaryIncomplete = ([bool]$env:WINDOWS_CERTIFICATE) -ne ([bool]$env:WINDOWS_CERTIFICATE_PASSWORD)
-          $legacyIncomplete = ([bool]$env:LEGACY_WIN_CSC_LINK) -ne ([bool]$env:LEGACY_WIN_CSC_KEY_PASSWORD)
-          if ($primaryIncomplete -or $legacyIncomplete) {
-            throw 'Incomplete Windows signing configuration.'
+          if (-not (Test-Path -LiteralPath $worker -PathType Leaf)) {
+            throw 'Windows build did not produce cua-driver-uia.exe'
           }
-
-          $certificate = $null
-          if ($env:WINDOWS_CERTIFICATE -and $env:WINDOWS_CERTIFICATE_PASSWORD) {
-            $pfx = $env:WINDOWS_CERTIFICATE
-            $pfxPassword = $env:WINDOWS_CERTIFICATE_PASSWORD
-          } elseif ($env:LEGACY_WIN_CSC_LINK -and $env:LEGACY_WIN_CSC_KEY_PASSWORD) {
-            $pfx = $env:LEGACY_WIN_CSC_LINK
-            $pfxPassword = $env:LEGACY_WIN_CSC_KEY_PASSWORD
-          } elseif ('${{ inputs.dry_run }}' -eq 'true') {
-            $certificate = New-SelfSignedCertificate -Type CodeSigningCert -Subject 'CN=Qwen CUA Driver CI Test' -CertStoreLocation Cert:\CurrentUser\My
-            $cer = Join-Path $env:RUNNER_TEMP 'qwen-cua-driver-ci-test.cer'
-            Export-Certificate -Cert $certificate -FilePath $cer | Out-Null
-            Import-Certificate -FilePath $cer -CertStoreLocation Cert:\CurrentUser\Root | Out-Null
-            Import-Certificate -FilePath $cer -CertStoreLocation Cert:\CurrentUser\TrustedPublisher | Out-Null
-          } else {
-            throw 'A Windows signing certificate is required for a CUA release.'
-          }
-
-          if (-not $certificate) {
-            $path = Join-Path $env:RUNNER_TEMP 'qwen-cua-driver.pfx'
-            [IO.File]::WriteAllBytes($path, [Convert]::FromBase64String($pfx))
-            $password = ConvertTo-SecureString $pfxPassword -AsPlainText -Force
-            $imported = @(Import-PfxCertificate -FilePath $path -CertStoreLocation Cert:\CurrentUser\My -Password $password)
-            $certificate = $imported |
-              Where-Object {
-                $_.HasPrivateKey -and
-                $_.EnhancedKeyUsageList.ObjectId.Value -contains '1.3.6.1.5.5.7.3.3'
-              } |
-              Select-Object -First 1
-            if (-not $certificate) {
-              throw 'The Windows PFX does not contain a code-signing certificate with a private key.'
-            }
-          }
-
-          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Filter signtool.exe -Recurse |
-            Where-Object { $_.FullName -match '\\x64\\signtool\.exe$' } |
-            Sort-Object FullName -Descending |
-            Select-Object -First 1
-          if (-not $signtool) { throw 'signtool.exe was not found' }
-          & $signtool.FullName sign /sha1 $certificate.Thumbprint /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $worker
-          if ($LASTEXITCODE -ne 0) { throw "signtool failed with exit code $LASTEXITCODE" }
           $signature = Get-AuthenticodeSignature -LiteralPath $worker
-          if ($signature.Status -ne 'Valid') {
-            throw "UIAccess worker signature status is $($signature.Status)"
+          if ($signature.Status -ne 'NotSigned') {
+            throw "Release worker must be unsigned for target-machine signing; status is $($signature.Status)"
           }
       - name: 'Package'
         working-directory: 'packages/cua-driver/rust'
@@ -876,8 +832,9 @@ jobs:
 
             - **macOS**: codesigned + notarized universal binary + `QwenCuaDriver.app`
             - **Linux**: unsigned (x86_64 + arm64, glibc 2.31 floor)
-            - **Windows**: signed UIAccess worker + native SDK payload
-              (x86_64 + arm64)
+            - **Windows**: unsigned UIAccess worker + native SDK payload
+              (x86_64 + arm64); deployments must sign and trust the worker
+              on the target machine before UIAccess activation
             - **Node.js**: the same workflow publishes `@qwen-code/cua-sdk`
               after a clean install against these release assets and publishes
               the independently versioned `@qwen-code/node-repl-mcp` package
