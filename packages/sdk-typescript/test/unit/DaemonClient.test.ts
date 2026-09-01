@@ -5104,6 +5104,31 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('setSessionConfigOption', () => {
+    it('POSTs a strict reasoning selection with optional persistence', async () => {
+      const response = { configOptions: [], persisted: true };
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, response),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.setSessionConfigOption('s-1', 'reasoning_effort', 'none', {
+          clientId: 'client-1',
+          persist: true,
+        }),
+      ).resolves.toEqual(response);
+
+      expect(calls[0]?.url).toBe('http://daemon/session/s-1/config-option');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        configId: 'reasoning_effort',
+        value: 'none',
+        persist: true,
+      });
+    });
+  });
+
   describe('setSessionApprovalMode (#4175 Wave 4 PR 17)', () => {
     it('POSTs the mode and returns the typed result', async () => {
       const { fetch, calls } = recordingFetch(() =>
