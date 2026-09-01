@@ -83,8 +83,9 @@ export interface SmartResizeOptions {
  * caller applies the result with sharp/ffmpeg.
  *
  * Mirrors the plugin's `smart_resize`: upscale first when below
- * minPixels, downscale when above maxPixels, then round both dimensions
- * to the grid (never below one cell).
+ * minPixels, downscale when above maxPixels, then snap both dimensions
+ * to the grid (never below one cell). If grid rounding crosses maxPixels,
+ * shrink one cell at a time while preserving the closest aspect ratio.
  */
 export function smartResize(
   width: number,
@@ -113,6 +114,24 @@ export function smartResize(
   }
   w = Math.max(factor, Math.round(w / factor) * factor);
   h = Math.max(factor, Math.round(h / factor) * factor);
+  const aspectRatio = width / height;
+  while (w * h > maxPixels && (w > factor || h > factor)) {
+    if (w === factor) {
+      h -= factor;
+      continue;
+    }
+    if (h === factor) {
+      w -= factor;
+      continue;
+    }
+    const widthError = Math.abs((w - factor) / h / aspectRatio - 1);
+    const heightError = Math.abs(w / (h - factor) / aspectRatio - 1);
+    if (widthError <= heightError) {
+      w -= factor;
+    } else {
+      h -= factor;
+    }
+  }
   return { width: w, height: h };
 }
 
