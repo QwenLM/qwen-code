@@ -1375,14 +1375,23 @@ export function convertOpenAIChunkToLlm(
 
     // Handle text content
     if (typeof choice.delta?.content === 'string') {
-      const normalizedContent = normalizeStreamingTextDelta(
-        choice.delta.content,
-        (requestContext.textDeltaState ??= {
-          emittedText: '',
-          emittedLength: 0,
-          cumulativeMode: false,
-        }),
-      );
+      const rawContent = choice.delta.content;
+      const replayedTaggedThinkingSnapshot =
+        requestContext.responseParsingOptions
+          ?.taggedThinkingTagsAfterReasoning === true &&
+        requestContext.taggedThinkingParser !== undefined &&
+        requestContext.textDeltaState?.emittedText === rawContent &&
+        THINKING_TAG_PATTERN.test(rawContent);
+      const normalizedContent = replayedTaggedThinkingSnapshot
+        ? ''
+        : normalizeStreamingTextDelta(
+            rawContent,
+            (requestContext.textDeltaState ??= {
+              emittedText: '',
+              emittedLength: 0,
+              cumulativeMode: false,
+            }),
+          );
       const taggedThinkingCandidate =
         (requestContext.pendingThinkingTagCandidate?.text ?? '') +
         normalizedContent;
