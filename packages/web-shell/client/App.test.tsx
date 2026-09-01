@@ -18974,6 +18974,7 @@ describe('App session callbacks', () => {
     });
 
     expect(mockMcp.manageServer).toHaveBeenCalledWith('filesystem', 'enable');
+    expect(mockMcp.ensureRuntime).toHaveBeenCalledOnce();
     expect(mockMcp.runtimeStatus).toHaveBeenCalledOnce();
     expect(mockMcp.reload).not.toHaveBeenCalled();
 

@@ -8,7 +8,7 @@ import type { Application, Request, RequestHandler, Response } from 'express';
 import type { SendBridgeError } from '../server/error-response.js';
 import {
   createBuildWorkspaceCtx,
-  validateMcpRuntimeServerName,
+  MAX_SERVER_NAME_LENGTH,
 } from '../server/request-helpers.js';
 import {
   requireTrustedWorkspaceRuntime,
@@ -29,6 +29,26 @@ interface WorkspaceRuntimeMcpRoutesDeps {
 }
 
 type ResolveRuntime = (req: Request, res: Response) => WorkspaceRuntime | null;
+
+function validateRuntimeServerName(
+  name: unknown,
+  res: Response,
+): name is string {
+  if (
+    typeof name === 'string' &&
+    name.length > 0 &&
+    name.length <= MAX_SERVER_NAME_LENGTH
+  )
+    return true;
+  res.status(400).json({
+    error:
+      typeof name === 'string' && name.length > 0
+        ? `Server name exceeds ${MAX_SERVER_NAME_LENGTH}-character limit`
+        : 'Server name is required and must be a non-empty string',
+    code: 'invalid_server_name',
+  });
+  return false;
+}
 
 function parseReloadOptions(body: Record<string, unknown>, res: Response) {
   const forceReconnectAll = body['forceReconnectAll'];
@@ -115,7 +135,7 @@ function registerFor(
     const runtime = resolveRuntime(req, res);
     if (!runtime) return;
     const serverName = req.params['server'];
-    if (!validateMcpRuntimeServerName(serverName, res)) return;
+    if (!validateRuntimeServerName(serverName, res)) return;
     const route = `GET ${base}/runtime/mcp/:server/tools`;
     try {
       res
@@ -130,7 +150,7 @@ function registerFor(
     const runtime = resolveRuntime(req, res);
     if (!runtime) return;
     const serverName = req.params['server'];
-    if (!validateMcpRuntimeServerName(serverName, res)) return;
+    if (!validateRuntimeServerName(serverName, res)) return;
     const route = `GET ${base}/runtime/mcp/:server/resources`;
     try {
       res
@@ -156,6 +176,7 @@ function registerFor(
         ).runMcpRuntimeMutation(() =>
           runtime.bridge.reloadWorkspaceMcp(options),
         );
+        runtime.generationGuard?.assertOpen();
         res.status(200).json(result);
       } catch (error) {
         deps.sendBridgeError(res, error, { route });
@@ -170,7 +191,7 @@ function registerFor(
       const runtime = resolveRuntime(req, res);
       if (!runtime) return;
       const serverName = req.params['server'];
-      if (!validateMcpRuntimeServerName(serverName, res)) return;
+      if (!validateRuntimeServerName(serverName, res)) return;
       const entryIndex = parseEntryIndex(req, res);
       if (entryIndex === null) return;
       const route = `POST ${base}/runtime/mcp/:server/restart`;
@@ -184,6 +205,7 @@ function registerFor(
             entryIndex === undefined ? undefined : { entryIndex },
           ),
         );
+        runtime.generationGuard?.assertOpen();
         res.status(200).json(result);
       } catch (error) {
         deps.sendBridgeError(res, error, { route });
@@ -199,7 +221,7 @@ function registerFor(
         const runtime = resolveRuntime(req, res);
         if (!runtime) return;
         const serverName = req.params['server'];
-        if (!validateMcpRuntimeServerName(serverName, res)) return;
+        if (!validateRuntimeServerName(serverName, res)) return;
         const route = `POST ${base}/runtime/mcp/:server/${action}`;
         try {
           const result = await getWorkspaceRuntimeCoordinator(
@@ -207,6 +229,7 @@ function registerFor(
           ).runMcpRuntimeMutation(() =>
             runtime.bridge.manageMcpServer(serverName, action, undefined),
           );
+          runtime.generationGuard?.assertOpen();
           res.status(200).json(result);
         } catch (error) {
           deps.sendBridgeError(res, error, { route });

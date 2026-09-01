@@ -430,6 +430,7 @@ export function McpStatusMessage({
   const reloadSelectedServer = useCallback(async () => {
     let nextStatus: DaemonWorkspaceMcpStatus | undefined;
     let runtimeEpoch: number | undefined;
+    await mcp.ensureRuntime();
     for (let attempt = 0; attempt < 81; attempt += 1) {
       const runtimeStatus = await mcp.runtimeStatus();
       const capability = runtimeStatus.capabilities?.mcp;

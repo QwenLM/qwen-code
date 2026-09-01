@@ -405,7 +405,8 @@ export function createDaemonWorkspaceActions({
           action === 'enable'
             ? (['user', 'workspace'] as const)
             : [
-                serverName in config!.user && !(serverName in config!.workspace)
+                Object.hasOwn(config!.user, serverName) &&
+                !Object.hasOwn(config!.workspace, serverName)
                   ? ('user' as const)
                   : ('workspace' as const),
               ];

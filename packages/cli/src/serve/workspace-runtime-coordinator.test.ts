@@ -221,6 +221,34 @@ describe('WorkspaceRuntimeCoordinator', () => {
     expect(harness.reloadWorkspaceMcp).toHaveBeenCalledOnce();
   });
 
+  it('keeps a queued config reload when a runtime mutation bumps the revision', async () => {
+    const harness = makeRuntime();
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+    await coordinator.ensure();
+    let releaseMutation!: () => void;
+    const mutationGate = new Promise<void>((resolve) => {
+      releaseMutation = resolve;
+    });
+    const firstMutation = coordinator.runMcpRuntimeMutation(async () => {
+      await mutationGate;
+      return { accepted: true };
+    });
+    await vi.waitFor(() => expect(coordinator.hasActiveWork()).toBe(true));
+
+    coordinator.reconcileMcpConfiguration();
+    const secondMutation = coordinator.runMcpRuntimeMutation(async () => ({
+      accepted: true,
+    }));
+    releaseMutation();
+
+    await Promise.all([firstMutation, secondMutation]);
+    expect(harness.reloadWorkspaceMcp).toHaveBeenCalledOnce();
+    expect(coordinator.status().capabilities?.mcp).toMatchObject({
+      state: 'ready',
+      revision: 3,
+    });
+  });
+
   it('records a background MCP reconciliation failure', async () => {
     const harness = makeRuntime();
     const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
@@ -390,6 +418,65 @@ describe('WorkspaceRuntimeCoordinator', () => {
         revision: 1,
       });
     });
+  });
+
+  it('replays MCP reconciliation interrupted while draining', async () => {
+    const harness = makeRuntime();
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+    await coordinator.ensure();
+    harness.getWorkspaceMcpStatus.mockResolvedValueOnce({
+      v: 1,
+      workspaceCwd: '/workspace',
+      initialized: true,
+      runtimeEpoch: 1,
+      source: 'live',
+      discoveryState: 'in_progress',
+      servers: [],
+    });
+
+    coordinator.reconcileMcpConfiguration();
+    await vi.waitFor(() => {
+      expect(harness.getWorkspaceMcpStatus).toHaveBeenCalledTimes(2);
+    });
+    coordinator.beginDrain();
+    await vi.waitFor(() => {
+      expect(coordinator.status().capabilities?.mcp?.state).toBe('stale');
+    });
+    coordinator.cancelDrain();
+
+    await vi.waitFor(() => {
+      expect(harness.reloadWorkspaceMcp).toHaveBeenCalledTimes(2);
+      expect(coordinator.status().capabilities?.mcp?.state).toBe('ready');
+    });
+  });
+
+  it('handles a queued MCP preparation rejection after ensure returns', async () => {
+    const harness = makeRuntime();
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+    await coordinator.ensure();
+    let releaseMutation!: () => void;
+    const mutationGate = new Promise<void>((resolve) => {
+      releaseMutation = resolve;
+    });
+    const mutation = coordinator.runMcpRuntimeMutation(async () => {
+      await mutationGate;
+      return { accepted: true };
+    });
+    await vi.waitFor(() => expect(coordinator.hasActiveWork()).toBe(true));
+
+    await coordinator.ensure(0);
+    const unhandled: unknown[] = [];
+    const onUnhandled = (error: unknown) => unhandled.push(error);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      coordinator.beginDrain();
+      releaseMutation();
+      await mutation;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
   });
 
   it('renews the warm window on every ensure call', async () => {

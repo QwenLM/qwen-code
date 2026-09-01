@@ -70,6 +70,8 @@ export class WorkspaceRuntimeCoordinator {
 
   private mcpRevision = 0;
 
+  private mcpConfigRevision = 0;
+
   private mcpStatus: ServeWorkspaceRuntimeCapabilityStatus = {
     state: 'not_started',
     revision: 0,
@@ -156,7 +158,11 @@ export class WorkspaceRuntimeCoordinator {
         new Error('ACP preheat completed without a live runtime'),
       );
     }
+    const revision = this.mcpRevision;
     const preparation = this.prepareMcp();
+    void preparation.catch((error: unknown) => {
+      this.recordMcpError(revision, status.runtimeEpoch, error);
+    });
     const remainingMs = deadline - Date.now();
     if (remainingMs > 0) {
       try {
@@ -180,6 +186,7 @@ export class WorkspaceRuntimeCoordinator {
 
   reconcileMcpConfiguration(): 'deferred' | 'reconciling' {
     this.mcpRevision += 1;
+    this.mcpConfigRevision += 1;
     return this.scheduleMcpReconciliation();
   }
 
@@ -203,8 +210,9 @@ export class WorkspaceRuntimeCoordinator {
       runtimeEpoch: snapshot.runtimeEpoch,
     };
     const revision = this.mcpRevision;
+    const configRevision = this.mcpConfigRevision;
     void this.queueMcpWork(async () => {
-      if (revision !== this.mcpRevision) return;
+      if (configRevision !== this.mcpConfigRevision) return;
       await this.bridge.reloadWorkspaceMcp();
       await this.prepareMcpRevision(revision);
     }).catch((error: unknown) => {
@@ -318,6 +326,14 @@ export class WorkspaceRuntimeCoordinator {
           !current.runtimeLive ||
           current.runtimeEpoch !== epoch
         ) {
+          if (
+            this.draining &&
+            !this.disposed &&
+            current.runtimeLive &&
+            current.runtimeEpoch === epoch
+          ) {
+            this.mcpReconcileDeferred = true;
+          }
           this.mcpStatus = { state: 'stale', revision, runtimeEpoch: epoch };
           return;
         }
