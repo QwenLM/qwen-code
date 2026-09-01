@@ -967,6 +967,11 @@ export interface WebShellApi {
   createNewSession: () => Promise<boolean>;
   /** Open the right panel with a new side-task draft. */
   createSideTask: () => boolean;
+  /** Resolve the visible approval, optionally binding it to an exact request. */
+  respondToPendingPermission?: {
+    (decision: 'allow' | 'reject'): Promise<boolean>;
+    (requestId: string, decision: 'allow' | 'reject'): Promise<boolean>;
+  };
 }
 
 export type WebShellComposerPlaceholderState = ComposerPlaceholderState;
@@ -1047,6 +1052,8 @@ export interface WebShellProps {
   onFileReviewOpen?: (
     request: Extract<TurnOutputOpenRequest, { kind: 'review' }>,
   ) => void;
+  /** Open a workspace file in the embedding host instead of WebShell preview. */
+  onWorkspaceFileOpen?: (path: string) => void;
   /** Open a completed Insight report in a host-native surface. */
   onInsightReportOpen?: (path: string) => void;
   /**
@@ -1195,6 +1202,8 @@ export interface WebShellProps {
   bottomStatusItems?: readonly WebShellBottomStatusItem[];
   /** Collapse thinking blocks to 5 lines with a click-to-expand toggle. */
   compactThinking?: boolean;
+  /** Let the host own pending Edit diff previews instead of the inline tool row. */
+  hostOwnsEditDiffPreview?: boolean;
   /** Auto-collapse completed turns to just the prompt and final answer, with a per-turn toggle. Defaults to true. */
   collapseCompletedTurns?: boolean;
   /** Markdown table rendering mode. Defaults to basic. */
@@ -2102,6 +2111,7 @@ export function App({
   renderPaneHeaderActions,
   onRightPanelOpen,
   onFileReviewOpen,
+  onWorkspaceFileOpen,
   onInsightReportOpen,
   messageTurnOutputs,
   shellRef,
@@ -2118,6 +2128,7 @@ export function App({
   composerToolbarAdditionalActions,
   composerPlaceholders,
   compactThinking = false,
+  hostOwnsEditDiffPreview = false,
   collapseCompletedTurns = true,
   markdownTableMode = 'basic',
   virtualScrollThreshold,
@@ -2379,6 +2390,10 @@ export function App({
       fileUploadEnabled,
       fileUploadDirectory,
     ],
+  );
+  const mainChatCustomization = useMemo(
+    () => ({ ...customization, hostOwnsEditDiffPreview }),
+    [customization, hostOwnsEditDiffPreview],
   );
   const CustomFooter = renderFooter;
   const CustomComposerHeader = renderComposerHeader;
@@ -3774,6 +3789,15 @@ export function App({
       workspaceCwd = connection.workspaceCwd,
       sourceSessionId = connection.sessionId,
     ) => {
+      if (
+        onWorkspaceFileOpen &&
+        file.workspacePath &&
+        file.text === undefined &&
+        file.data === undefined
+      ) {
+        onWorkspaceFileOpen(file.workspacePath);
+        return;
+      }
       const open = (resolvedFile: AttachmentPreviewRequest) => {
         const workspacePath = resolvedFile.workspacePath ?? resolvedFile.name;
         const workspaceId = resolveArtifactWorkspaceOwner(
@@ -3864,6 +3888,7 @@ export function App({
       connection.workspaceCwd,
       connection.sessionId,
       getDefaultReviewPanelWidth,
+      onWorkspaceFileOpen,
       pushToast,
       sessionActions,
       sessionOwnerGuard,
@@ -6883,7 +6908,8 @@ export function App({
     modelDialogMode !== null ||
     showApprovalModeDialog ||
     tasksDialogMessage !== null ||
-    mcpDialogMessage !== null ||
+    // mcpDialogMessage survives closing the Plugins panel; MCP surfaces are
+    // already blocked by activePanel below, so including it would lock chat.
     showMemoryDialog ||
     showAuthDialog ||
     showAddWorkspaceDialog ||
@@ -9285,6 +9311,56 @@ export function App({
     editorRef.current?.focus();
   }, [dismissNewSessionSuggestion, newSessionSuggestion]);
 
+  const respondToPendingPermission = useCallback(
+    async (
+      requestIdOrDecision: string,
+      exactDecision?: 'allow' | 'reject',
+    ): Promise<boolean> => {
+      const request = pendingApprovalRef.current;
+      const decision = exactDecision ?? requestIdOrDecision;
+      if (
+        !request ||
+        isAskUserPermission(request) ||
+        (decision !== 'allow' && decision !== 'reject')
+      ) {
+        return false;
+      }
+      const requestId = exactDecision ? requestIdOrDecision : undefined;
+      if (
+        requestId !== undefined &&
+        (!requestId ||
+          request.id !== requestId ||
+          !hostOwnsEditDiffPreview ||
+          request.hasDiffPreview !== true)
+      ) {
+        return false;
+      }
+      const preferredKind = decision === 'allow' ? 'allow_once' : 'reject_once';
+      const fallbackKind =
+        decision === 'allow' ? 'allow_always' : 'reject_always';
+      const option = requestId
+        ? request.options.find((candidate) => candidate.kind === preferredKind)
+        : (request.options.find(
+            (candidate) => candidate.kind === preferredKind,
+          ) ??
+          request.options.find(
+            (candidate) => candidate.kind === fallbackKind,
+          ) ??
+          request.options.find((candidate) => {
+            const id = candidate.id.toLowerCase();
+            return decision === 'allow'
+              ? id.includes('allow') || id.includes('proceed')
+              : id.includes('reject') || id.includes('cancel');
+          }));
+      if (!option) {
+        return false;
+      }
+      await sessionActions.submitPermission(request.id, option.id);
+      return true;
+    },
+    [hostOwnsEditDiffPreview, sessionActions],
+  );
+
   const shellApi = useMemo<WebShellApi>(
     () => ({
       openSplitView: () => {
@@ -9298,6 +9374,7 @@ export function App({
       openSessionDrawer,
       createNewSession: () => createNewSession(),
       createSideTask,
+      respondToPendingPermission,
     }),
     [
       closeMobileDrawer,
@@ -9306,6 +9383,7 @@ export function App({
       openPanel,
       openSessionDrawer,
       requestOpenSplitView,
+      respondToPendingPermission,
     ],
   );
   useEffect(() => {
@@ -13867,7 +13945,7 @@ export function App({
                       : styles.chatSubtree
                   }
                 >
-                  <WebShellCustomizationProvider value={customization}>
+                  <WebShellCustomizationProvider value={mainChatCustomization}>
                       <TodoContextsProvider
                         timeline={todoTimeline}
                         details={todoDetails}

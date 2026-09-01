@@ -5348,6 +5348,12 @@ function makePendingPermissionBlock(
     toolName?: string;
     kind?: string;
     todoPlan?: { planId: string; sourceCallId: string };
+    options?: Array<{
+      optionId: string;
+      label: string;
+      raw: Record<string, unknown>;
+    }>;
+    content?: unknown[];
   } = {},
 ): unknown {
   const toolName = overrides.toolName ?? 'run_shell_command';
@@ -5365,11 +5371,12 @@ function makePendingPermissionBlock(
         toolName,
         ...(overrides.todoPlan ? { qwenTodoApproval: overrides.todoPlan } : {}),
       },
+      ...(overrides.content ? { content: overrides.content } : {}),
       ...(isAskUser
         ? { input: { questions: [{ question: 'Pick one', options: [] }] } }
         : {}),
     },
-    options: [
+    options: overrides.options ?? [
       { optionId: 'proceed_once', label: 'Allow', raw: {} },
       { optionId: 'cancel', label: 'Reject', raw: {} },
     ],
@@ -5379,8 +5386,12 @@ function makePendingPermissionBlock(
 beforeEach(() => {
   // Split persistence uses sessionStorage; clear it so one test's split doesn't
   // auto-restore into the next test's App mount.
-  sessionStorage.clear();
-  localStorage.removeItem('qwen-code-web-shell-chat-width');
+  try {
+    sessionStorage.clear();
+    window.localStorage?.removeItem('qwen-code-web-shell-chat-width');
+  } catch {
+    // Web storage may be unavailable under storage-disabled jsdom contexts.
+  }
   mockReleaseWebTerminal.mockReset();
   Object.defineProperty(document, 'hidden', {
     configurable: true,
@@ -19237,6 +19248,61 @@ describe('App session callbacks', () => {
     ).toBe('true');
   });
 
+  it('restores composer interaction after closing Plugins on the MCP tab', async () => {
+    mockWorkspaceActions.loadMcpStatus.mockResolvedValue({
+      initialized: true,
+      discoveryState: 'completed',
+      servers: [],
+    });
+    const { container } = renderApp();
+    await flush();
+    expect(testState.latestChatEditorProps?.dialogOpen).toBe(false);
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-plugins"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+    const panel = container.querySelector('[data-testid="inline-panel"]');
+    const tabs =
+      panel?.querySelectorAll<HTMLButtonElement>('button[role="tab"]');
+    expect(Array.from(tabs ?? []).map((tab) => tab.textContent)).toEqual([
+      'Extensions',
+      'MCP',
+      'Skills',
+      'Agents',
+    ]);
+    const mcpTab = Array.from(tabs ?? []).find(
+      (tab) => tab.textContent === 'MCP',
+    );
+    await act(async () => {
+      mcpTab?.focus();
+      mcpTab?.click();
+      await Promise.resolve();
+    });
+    await flush();
+    expect(mockWorkspaceActions.loadMcpStatus).toHaveBeenCalled();
+    expect(testState.latestChatEditorProps?.dialogOpen).toBe(true);
+
+    const mcpPanel = container.querySelector('[data-testid="inline-panel"]');
+    await act(async () => {
+      mcpPanel?.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          bubbles: true,
+          cancelable: true,
+          key: 'Escape',
+        }),
+      );
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
+    expect(testState.latestChatEditorProps?.dialogOpen).toBe(false);
+  });
+
   it('opens Channel management from the sidebar', async () => {
     const { container } = renderApp();
     await flush();
@@ -20459,6 +20525,75 @@ describe('App session callbacks', () => {
     expect(
       container.querySelector('[data-testid="split-initial"]')?.textContent,
     ).toBe('session-1');
+  });
+
+  it('submits allow_once for a native structured edit approval accept', async () => {
+    let shellApi: WebShellApi | null = null;
+    const { rerender } = renderApp({
+      hostOwnsEditDiffPreview: true,
+      shellRef: (api) => {
+        shellApi = api;
+      },
+    });
+    await flush();
+
+    // Edit approval options arrive in the wire order built by
+    // toPermissionOptions: allow_always first. The allow_once preference in
+    // respondToPendingPermission is the only thing keeping a single native
+    // Accept from submitting "Allow All Edits".
+    await act(async () => {
+      testState.blocks = [
+        makePendingPermissionBlock({
+          toolName: 'run_shell_command',
+          kind: 'execute',
+          content: [
+            {
+              type: 'diff',
+              path: 'file.ts',
+              oldText: 'before',
+              newText: 'after',
+            },
+          ],
+          options: [
+            {
+              optionId: 'proceed_always',
+              label: 'Allow All Edits',
+              raw: { kind: 'allow_always' },
+            },
+            {
+              optionId: 'proceed_once',
+              label: 'Allow',
+              raw: { kind: 'allow_once' },
+            },
+            {
+              optionId: 'cancel',
+              label: 'Reject',
+              raw: { kind: 'reject_once' },
+            },
+          ],
+        }),
+      ];
+      rerender();
+      await Promise.resolve();
+    });
+    await flush();
+    expect(
+      document.querySelector('[data-testid="approval-overlay"]'),
+    ).not.toBeNull();
+
+    let resolved: boolean | undefined;
+    await act(async () => {
+      resolved = await shellApi?.respondToPendingPermission('req-1', 'allow');
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(resolved).toBe(true);
+    expect(mockSessionActions.submitPermission).toHaveBeenCalledTimes(1);
+    expect(mockSessionActions.submitPermission).toHaveBeenCalledWith(
+      'req-1',
+      'proceed_once',
+    );
   });
 
   it('requests controlled split ids from the external shell ref', async () => {
