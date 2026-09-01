@@ -3470,8 +3470,9 @@ function composeReviewBody(
   bodyCriticals.push(...ownAfterGateDedup);
   const modelBodyCriticals = [...bodyCriticals]; // input's, captured before the gate
   // Disclosed-but-non-capping notes from the gate (a deferred checker). Rendered
-  // in the body on every verdict, but never fed into the cap.
-  const gateDisclosed: string[] = [];
+  // in the body on every verdict, but never fed into the cap. Bilingual pairs —
+  // see `scriptLintGate` for why this channel can afford a real translation.
+  const gateDisclosed: Array<{ en: string; zh: string }> = [];
   // Test Plan rulings. Disclosed on every verdict and counted toward nothing —
   // see `testPlanGate` for why this one neither blocks nor caps.
   const testPlanNotes: string[] = [];
@@ -4878,12 +4879,17 @@ function composeReviewBody(
     });
   }
   for (const d of explainedCaller) {
-    // Caller prose, untranslatable by construction — quoted as-is in both,
-    // its comment grammar inert.
+    // Caller prose, untranslatable by construction — quoted as-is in both
+    // halves, its comment grammar inert. The Chinese label SAYS so: without
+    // the parenthetical, the 中文说明 block presented an all-English sentence
+    // as its translation (#10567's posted body), and the reader is left
+    // wondering whether the translation machinery broke. The payload keeps
+    // its own English full stop — closing an English sentence with "。" is
+    // the other half of that mismatch.
     const disclosed = stripCommentGrammar(d);
     notReviewedParts.push({
       en: `Not reviewed: ${disclosed}.`,
-      zh: `未审查：${disclosed}。`,
+      zh: `未审查（原文为英文）：${disclosed}.`,
     });
   }
   // Budget-gap disclosures, one BOUNDED sentence for all of them. Four
@@ -5180,8 +5186,8 @@ function composeReviewBody(
     ? [
         {
           trim: 2,
-          en: `Not linted (tool limitation, not a blocker): ${gateDisclosed.join('; ')}.`,
-          zh: `未检查（工具限制，非阻断）：${gateDisclosed.join('; ')}。`,
+          en: `Not linted (tool limitation, not a blocker): ${gateDisclosed.map((g) => g.en).join('; ')}.`,
+          zh: `未检查（工具限制，非阻断）：${gateDisclosed.map((g) => g.zh).join('；')}。`,
         },
       ]
     : [];
@@ -6232,14 +6238,17 @@ function structurallyValidReport(report: unknown): boolean {
 export function scriptLintGate(planPath: string): {
   criticals: string[];
   unreviewed: string[];
-  disclosed: string[];
+  disclosed: Array<{ en: string; zh: string }>;
 } {
   const criticals: string[] = [];
   const unreviewed: string[] = [];
   // Disclosed-but-NOT-capping: a `deferred` checker (actionlint) is a known tool
   // limitation, not a finding and not an unrun-checker gap — the reader is told a
   // workflow's embedded shell was not linted, but the verdict is not capped on it.
-  const disclosed: string[] = [];
+  // Bilingual, unlike the capping lists: these strings are machine-built from the
+  // report (no model prose), so the body's Chinese half can carry a real
+  // translation instead of the English line verbatim.
+  const disclosed: Array<{ en: string; zh: string }> = [];
   let plan: {
     prNumber?: unknown;
     files?: unknown;
@@ -6354,10 +6363,19 @@ export function scriptLintGate(planPath: string): {
   // A deferred checker (actionlint) is disclosed but does not cap — the reader is
   // told the workflow's embedded shell was not linted, without making every
   // workflow PR un-Approvable on a checker we deliberately decline to run.
+  // No "the executable-script lint —" prefix here: the body's own wrapper opens
+  // with "Not linted:", and naming the lint after that header rendered as
+  // "Not linted: the executable-script lint" — a sentence about not running a
+  // lint on a lint (#10567's posted body). The path and reason carry the facts.
   for (const d of report.deferred ?? []) {
-    disclosed.push(
-      `the executable-script lint — ${mdField(d.path)}: ${stripCommentGrammar(d.reason ?? `${d.tool} deferred`)}`,
-    );
+    const reason = stripCommentGrammar(d.reason ?? `${d.tool} deferred`);
+    disclosed.push({
+      en: `${mdField(d.path)} — ${reason}`,
+      // An older CLI's report has no `reasonZh`; English both halves beats a
+      // half-empty sentence. Its comment grammar goes inert like the reason's —
+      // the report is agent-rewritable prose either way.
+      zh: `${mdField(d.path)}——${d.reasonZh ? stripCommentGrammar(d.reasonZh) : reason}`,
+    });
   }
   return { criticals, unreviewed, disclosed };
 }
