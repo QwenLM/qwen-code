@@ -8,6 +8,29 @@ export const QUESTION_CARD_TEMPLATE_ID =
 const DINGTALK_API = 'https://api.dingtalk.com';
 const CARD_FETCH_TIMEOUT_MS = 10_000;
 
+function isRetryableStatus(status: number): boolean {
+  return (
+    status === 408 ||
+    status === 425 ||
+    status === 429 ||
+    (status >= 500 && status <= 599)
+  );
+}
+
+export class DingtalkCardRequestError extends Error {
+  constructor(
+    message: string,
+    readonly retryable: boolean,
+  ) {
+    super(message);
+    this.name = 'DingtalkCardRequestError';
+  }
+}
+
+export function isRetryableDingtalkCardError(error: unknown): boolean {
+  return !(error instanceof DingtalkCardRequestError) || error.retryable;
+}
+
 type CardParamMap = Record<string, unknown>;
 
 export interface CreateCardInput {
@@ -33,6 +56,7 @@ export interface UpdateCardInput {
 export interface DingtalkInteractiveCardClientOptions {
   robotCode: string;
   getAccessToken(): Promise<string>;
+  invalidateAccessToken(token: string): void;
   fetch?: typeof fetch;
 }
 
@@ -102,12 +126,13 @@ export class DingtalkInteractiveCardClient {
           (entry as { success?: unknown }).success === false,
       ) as { errorMsg?: unknown } | undefined;
       if (failure) {
-        throw new Error(
+        throw new DingtalkCardRequestError(
           `${input.templateId}: ${
             typeof failure.errorMsg === 'string' && failure.errorMsg.trim()
               ? failure.errorMsg.trim()
               : 'DingTalk card delivery failed'
           }`,
+          false,
         );
       }
     }
@@ -141,22 +166,30 @@ export class DingtalkInteractiveCardClient {
     body: unknown,
     templateId?: string,
   ): Promise<unknown> {
-    const token = await this.options.getAccessToken();
-    const response = await this.fetch(`${DINGTALK_API}${path}`, {
-      method,
-      headers: {
-        'Content-Type': 'application/json',
-        'x-acs-dingtalk-access-token': token,
-      },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(CARD_FETCH_TIMEOUT_MS),
-    });
-    if (!response.ok) {
-      const detail = (await response.text().catch(() => '')).slice(0, 300);
-      throw new Error(
-        `DingTalk Card OpenAPI ${method} ${path} failed${templateId ? ` for ${templateId}` : ''}: HTTP ${response.status}${detail ? ` ${detail}` : ''}`,
-      );
+    for (let attempt = 0; ; attempt++) {
+      const token = await this.options.getAccessToken();
+      const response = await this.fetch(`${DINGTALK_API}${path}`, {
+        method,
+        headers: {
+          'Content-Type': 'application/json',
+          'x-acs-dingtalk-access-token': token,
+        },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(CARD_FETCH_TIMEOUT_MS),
+      });
+      if (response.status === 401 && attempt === 0) {
+        this.options.invalidateAccessToken(token);
+        await response.body?.cancel();
+        continue;
+      }
+      if (!response.ok) {
+        const detail = (await response.text().catch(() => '')).slice(0, 300);
+        throw new DingtalkCardRequestError(
+          `DingTalk Card OpenAPI ${method} ${path} failed${templateId ? ` for ${templateId}` : ''}: HTTP ${response.status}${detail ? ` ${detail}` : ''}`,
+          isRetryableStatus(response.status),
+        );
+      }
+      return response.json().catch(() => undefined);
     }
-    return response.json().catch(() => undefined);
   }
 }
