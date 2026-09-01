@@ -7365,14 +7365,37 @@ describe('stage 1-pre duplicate gate', () => {
     // unless the closer's repository is selected and matched. The capture
     // is pinned too — every stage-local variable is bound in a snippet.
     expect(section).toContain('repository { nameWithOwner }');
-    expect(section).toContain('read -r MERGED_PR MERGED_FLAG MERGED_REPO');
+    expect(section).toContain(
+      'read -r MERGED_PR MERGED_FLAG MERGED_BASE MERGED_REPO',
+    );
     // The jq output interpolation wires the selection set to the binding:
     // reverted to the pre-PR two-field form, MERGED_REPO stays empty for
     // every closer, the gate rejects them all, and the duplicate gate is
     // dead while every other pin stays green.
-    expect(section).toContain('\\(.merged) \\(.repository.nameWithOwner)');
+    expect(section).toContain(
+      '\\(.merged) \\(.baseRefName) \\(.repository.nameWithOwner)',
+    );
     expect(section).toContain('[ "$MERGED_REPO" = "$REPO" ]');
     expect(section).toContain('never resolved to a colliding number');
+  });
+
+  it('accepts only closers that landed on the default branch', () => {
+    // A backport merged into a release/* branch closes the issue but its
+    // patch never lands on the default branch; judged against it, the gate
+    // would close as duplicate a default-branch PR whose fix the default
+    // branch still lacks. Every stage of the guard is pinned — selection
+    // set, jq interpolation, binding, condition, prose — and each pin is
+    // unique to this clause: removing the condition (or any wiring piece)
+    // must turn its pin red while every other pin stays green.
+    expect(section).toContain('baseRefName');
+    expect(section).toContain('\\(.baseRefName)');
+    expect(section).toContain(
+      'read -r MERGED_PR MERGED_FLAG MERGED_BASE MERGED_REPO',
+    );
+    expect(section).toContain('[ "$MERGED_BASE" = "$DEFAULT_BRANCH" ]');
+    expect(section).toContain(
+      'without its patch ever landing on the default branch',
+    );
   });
 
   it('compares against every resolved closer in one fixed order', () => {

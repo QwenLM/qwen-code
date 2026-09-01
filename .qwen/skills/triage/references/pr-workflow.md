@@ -248,6 +248,7 @@ gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body-file /tmp/stag
                     number
                     state
                     merged
+                    baseRefName
                     repository { nameWithOwner }
                   }
                   ... on Commit { oid }
@@ -260,9 +261,9 @@ gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body-file /tmp/stag
     }' -f owner="${REPO%%/*}" -f name="${REPO##*/}" -F n="$N" \
     --jq '.data.repository.issue.timelineItems.nodes // [] | last | .closer
       | select(. != null and .number != null)
-      | "\(.number) \(.merged) \(.repository.nameWithOwner)"')
-  read -r MERGED_PR MERGED_FLAG MERGED_REPO <<< "$CLOSER"
-  if [ "$MERGED_FLAG" = "true" ] && [ "$MERGED_REPO" = "$REPO" ]; then
+      | "\(.number) \(.merged) \(.baseRefName) \(.repository.nameWithOwner)"')
+  read -r MERGED_PR MERGED_FLAG MERGED_BASE MERGED_REPO <<< "$CLOSER"
+  if [ "$MERGED_FLAG" = "true" ] && [ "$MERGED_BASE" = "$DEFAULT_BRANCH" ] && [ "$MERGED_REPO" = "$REPO" ]; then
     # One closer can close several linked issues — keep only its first
     # entry: a duplicate iteration re-fetches, and its `>` truncates the
     # already-fetched patch before gh retries
@@ -283,14 +284,20 @@ gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body-file /tmp/stag
   query fails or emits
   nothing (the number is a PR, not an issue; the issue does not exist;
   the latest close was manual), treat that issue's closer as unresolved.
-  The closer must also be a merged PR of `$REPO` itself (`MERGED_FLAG`
-  true and `MERGED_REPO` equal to `$REPO`): a closing keyword can close
-  an issue from a merged PR in a DIFFERENT repository, and PR numbers
-  restart at 1 in every repository, so a foreign closer's number
-  collides within `$REPO` — `gh pr diff` would fetch this repo's
-  unrelated same-number PR. The gate can only fetch and judge `$REPO`'s
-  patches: a foreign-repo closer cannot be verified and is treated as
-  unresolved — never resolved to a colliding number. `$MERGED_PRS`
+  The closer must also be a merged PR of `$REPO` itself that landed on
+  the default branch (`MERGED_FLAG` true, `MERGED_BASE` equal to
+  `$DEFAULT_BRANCH`, and `MERGED_REPO` equal to `$REPO`): a closing
+  keyword can close an issue from a merged PR in a DIFFERENT repository,
+  and PR numbers restart at 1 in every repository, so a foreign closer's
+  number collides within `$REPO` — `gh pr diff` would fetch this repo's
+  unrelated same-number PR. A closer merged into a non-default branch (a
+  `release/*` backport) cannot be judged either — it closed the issue
+  without its patch ever landing on the default branch, so judging a
+  default-branch PR against it would close as duplicate a fix the default
+  branch still lacks. The gate can only fetch and judge `$REPO`'s patches:
+  a foreign-repo or non-default-branch closer cannot be verified and is
+  treated as unresolved — never resolved to a colliding number.
+  `$MERGED_PRS`
   lists the resolved closers in the deterministic `$ISSUES` order, each
   closer number once even when one closer closed several linked issues.
 
