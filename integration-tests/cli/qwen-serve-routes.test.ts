@@ -348,6 +348,7 @@ describe('qwen serve — capabilities envelope', () => {
       'permission_vote',
       'workspace_mcp',
       'workspace_skills',
+      'workspace_skills_config_runtime',
       'workspace_providers',
       'workspace_acp_preheat',
       'workspace_acp_status',
