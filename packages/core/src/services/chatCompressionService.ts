@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Content, GenerateContentConfig } from '@google/genai';
+import type { Content, GenerateContentConfig, Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
 import type { GenerateTextResult } from '../core/baseLlmClient.js';
@@ -28,6 +28,7 @@ import { isAbortError } from '../utils/errors.js';
 import { isManagedMemoryPath } from '../memory/paths.js';
 import {
   estimateContentChars,
+  getFunctionResponseParts,
   resolveCompactionTuning,
   resolveSlimmingConfig,
   slimCompactionInput,
@@ -143,7 +144,7 @@ export const HARD_BUFFER = 3_000;
  */
 export const MAX_CONSECUTIVE_FAILURES = 3;
 
-function estimateNonAsciiUtf8Adjustment(text: string): number {
+function measureNonAsciiUtf8Expansion(text: string): number {
   let utf8Bytes = 0;
   let utf16CodeUnits = 0;
   for (const character of text) {
@@ -152,7 +153,40 @@ function estimateNonAsciiUtf8Adjustment(text: string): number {
     utf16CodeUnits += character.length;
     utf8Bytes += codePoint <= 0x7ff ? 2 : codePoint <= 0xffff ? 3 : 4;
   }
-  return Math.ceil(utf8Bytes - utf16CodeUnits / CHARS_PER_TOKEN);
+  return utf8Bytes - utf16CodeUnits;
+}
+
+function estimateNonAsciiUtf8Adjustment(text: string): number {
+  return Math.ceil(measureNonAsciiUtf8Expansion(text) / 2);
+}
+
+function measurePartUtf8Expansion(part: Part): number {
+  if (part.inlineData || part.fileData) {
+    return 0;
+  }
+  if (typeof part.text === 'string') {
+    return (
+      measureNonAsciiUtf8Expansion(part.text) +
+      (typeof part.thoughtSignature === 'string'
+        ? measureNonAsciiUtf8Expansion(part.thoughtSignature)
+        : 0)
+    );
+  }
+  if (part.functionResponse) {
+    const output = part.functionResponse.response?.['output'];
+    const error = part.functionResponse.response?.['error'];
+    let expansion =
+      typeof output === 'string'
+        ? measureNonAsciiUtf8Expansion(output)
+        : typeof error === 'string'
+          ? measureNonAsciiUtf8Expansion(error)
+          : 0;
+    for (const nestedPart of getFunctionResponseParts(part) ?? []) {
+      expansion += measurePartUtf8Expansion(nestedPart);
+    }
+    return expansion;
+  }
+  return measureNonAsciiUtf8Expansion(JSON.stringify(part ?? {}));
 }
 
 function estimateUtf8AdjustedTextTokens(text: string): number {
@@ -167,9 +201,13 @@ function estimateUtf8AdjustedContentTokens(
   imageTokenEstimate: number,
 ): number {
   const genericEstimate = estimateContentTokens(contents, imageTokenEstimate);
-  return (
-    genericEstimate + estimateNonAsciiUtf8Adjustment(JSON.stringify(contents))
-  );
+  let utf8Expansion = 0;
+  for (const content of contents) {
+    for (const part of content.parts ?? []) {
+      utf8Expansion += measurePartUtf8Expansion(part);
+    }
+  }
+  return genericEstimate + Math.ceil(utf8Expansion / 2);
 }
 
 function estimateSummaryOutputTokens(
@@ -295,6 +333,8 @@ export interface CompressOptions {
    * the service does not read or write any global telemetry.
    */
   originalTokenCount: number;
+  /** Whether originalTokenCount contains locally estimated components. */
+  originalTokenCountIsEstimated?: boolean;
   /**
    * Hook trigger to report for this compression. `force=true` bypasses the
    * threshold gate but does not always mean the user manually requested
@@ -1366,6 +1406,7 @@ export class ChatCompressionService {
     let extraHistory: Content[] = [];
     let canCalculateNewTokenCount = false;
     let usedEstimatedVisibleDelta = false;
+    let restorationChars = 0;
 
     if (!isSummaryEmpty) {
       // Manual /compress has no pending functionResponse, so a trailing
@@ -1501,7 +1542,7 @@ export class ChatCompressionService {
         // compressionOutputTokenCount. Estimate their cost locally so the
         // inflation guard below fires when attachments dominate the
         // post-compact size.
-        const restorationChars = extraHistory
+        restorationChars = extraHistory
           .slice(2) // skip [summary, model ack]
           .reduce(
             (acc, c) =>
@@ -1549,6 +1590,10 @@ export class ChatCompressionService {
       }
     }
 
+    const newTokenCountIsEstimated =
+      usedEstimatedVisibleDelta ||
+      Boolean(opts.originalTokenCountIsEstimated) ||
+      restorationChars > 0;
     logCompressionResult(newTokenCount);
 
     if (isSummaryEmpty) {
@@ -1578,7 +1623,7 @@ export class ChatCompressionService {
         info: {
           originalTokenCount,
           newTokenCount,
-          ...(usedEstimatedVisibleDelta && {
+          ...(newTokenCountIsEstimated && {
             newTokenCountIsEstimated: true,
           }),
           compressionStatus:
@@ -1613,7 +1658,7 @@ export class ChatCompressionService {
         info: {
           originalTokenCount,
           newTokenCount,
-          newTokenCountIsEstimated: usedEstimatedVisibleDelta,
+          newTokenCountIsEstimated,
           compressionStatus: CompressionStatus.COMPRESSED,
           triggerReason,
           ...(compactionWarning && { warning: compactionWarning }),
