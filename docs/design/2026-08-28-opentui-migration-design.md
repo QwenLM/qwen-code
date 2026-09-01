@@ -174,6 +174,15 @@ holds, the dispatcher falls back to ink silently. npm remains the primary
 install path, so plain-Node loadability is a Phase 3 gate (below), not an
 assumption.
 
+Measured status of that assumption: `@opentui/core` 0.5.8 — the version
+pinned in `packages/cli` — selects its FFI backend with `require('node:ffi')`,
+and that specifier does not resolve on Node 24 (`ERR_UNKNOWN_BUILTIN_MODULE`;
+reported on 24.18.1 during the dialogs-and-commands review and reproduced
+locally on 24.15). The native renderer therefore initialises under **Bun
+only**, today. Two consequences: the silent ink fallback above is
+load-bearing rather than defensive, and the activation batch is runnable
+end-to-end only under Bun until the Node leg is proven.
+
 ### Composition-root contracts
 
 Settled while reviewing #10696. They are what keeps a deliberately thin root
@@ -218,7 +227,9 @@ safe to run before its owners exist, and the activation batch inherits them:
      came from — Windows PowerShell, web-based terminals, tmux < 3.5 — not
      only the ones already tested (Warp/Tabby/macOS);
    - the renderer demonstrated loadable under plain Node (`node:ffi`): boot
-     plus smoke, not assumed. Bun-only is not acceptable as the default;
+     plus smoke, not assumed. Bun-only is not acceptable as the default — and
+     Bun-only is where 0.5.8 stands today (measured status above), so this
+     gate is open, not merely unproven;
    - explicit drop / replace / defer-with-tracking-issue decisions for the
      degraded modes: legacy scrollback mode, iTerm2 inline images,
      screen-reader support.
@@ -227,12 +238,15 @@ safe to run before its owners exist, and the activation batch inherits them:
 
 ## Verification strategy
 
-- **The PTY harness is the shared acceptance instrument.** Both renderers
-  are exercised through the same terminal-level harness; flicker metrics
-  (erase counts, full-screen clears, frame patterns) are the objective
-  measure. An ink baseline on current main is recorded so every later phase
-  is measured against numbers, not anecdote (#10005 tracks the metrics
-  library, runner scenarios, and fixtures).
+- **The PTY harness is the intended shared acceptance instrument — and does
+  not exist yet.** The plan is for both renderers to be exercised through the
+  same terminal-level harness, with flicker metrics (erase counts,
+  full-screen clears, frame patterns) as the objective measure and an ink
+  baseline on current main so every later phase is measured against numbers,
+  not anecdote. That is #10005, still open: no metrics library, runner, or
+  recorded baseline is in the tree, `scripts/` carries only the
+  dependency-direction gate, and no test drives ink's test renderer. Until it
+  lands, flicker claims rest on the one-off PTY measurements cited above.
 - **Per-batch acceptance criteria** (each landing PR): build and typecheck
   clean across workspaces; ESLint + Prettier clean; the full `packages/cli`
   vitest suite green; the default (ink) path byte-for-byte unchanged — the
@@ -243,6 +257,38 @@ safe to run before its owners exist, and the activation batch inherits them:
 - **1:1 parity audits** — screen-by-screen comparison against ink, plus a
   reverse audit pass, with surviving differences landing as tracked gaps
   (G-series) rather than silent drift.
+
+### What the reviews kept finding
+
+Recurring across the five landed batches, and the activation batch will draw
+on the same classes:
+
+- **An assertion outrunning the code.** A PR body, docblock, or test header
+  claiming a mechanism that was not there — the `QWEN_TUI_RENDERER` opt-in, a
+  "separate PTY gate" that no workflow or test implements, an image-path
+  encoding no reader exists for. Grep the claim before writing it, again
+  after every fix commit.
+- **Tests that cannot fail.** In the dialogs-and-commands batch, tested logic
+  killed 15/15 injected mutants while five untested modules survived 5/5 with
+  the whole 927-test suite green, and one _tested_ dialog hook still carried
+  a re-sync assertion that no change could turn red. Name-only dialog stubs
+  did the same job in the composition-root batch, hiding three dead-end
+  callbacks. A stub that records nothing asserts nothing.
+- **Silent success at a seam.** Empty arrows, optional chains, and
+  written-but-never-read slots, in both renderer and error paths. This is what
+  the contracts section exists to forbid.
+- **Untrusted text reaching the terminal.** Diff bodies, MCP output, and
+  projections skipping the sanitiser — filed repeatedly in the foundation and
+  live-session batches. The specific paths named there escape today, so read
+  this as a class to re-check on every new projection, not an open hole.
+- **Parity copies with no drift guard.** The same rule living twice, byte
+  identical today, nothing asserting it stays that way — the migration's own
+  failure mode, raised in the dialogs-and-commands review. It needs an
+  assertion, not a comment.
+- **Deferrals with no address.** Items acknowledged in a review thread as
+  "valid, deferred" were never registered as an issue or a ledger row, so no
+  later batch owns them. The migration's U-xx numbering covers #10696
+  onward; the earlier test-hardening and dead-code deferrals still do not.
 
 ## Accepted trade-offs (documented, unchanged)
 
