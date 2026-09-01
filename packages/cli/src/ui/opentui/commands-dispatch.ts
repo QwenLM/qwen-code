@@ -392,7 +392,10 @@ export class OpenTuiSlashDispatcher {
    */
   cancel(): void {
     this.host.cancelBtw();
-    if (!this.activeAbortController) {
+    if (
+      !this.activeAbortController ||
+      this.activeAbortController.signal.aborted
+    ) {
       return;
     }
     this.activeAbortController.abort();
@@ -981,6 +984,7 @@ export class OpenTuiSlashDispatcher {
         });
         logSlashCommand(this.services.config, event);
       }
+      this.activeAbortController = null;
       this.host.setIsProcessing(false);
     }
   }
