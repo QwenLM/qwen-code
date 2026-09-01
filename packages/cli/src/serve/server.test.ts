@@ -664,6 +664,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_display_name',
   'workspace_qualified_rest_core',
   'extension_management_v2',
+  'extension_state',
   'extension_git_credentials',
   'extension_local_path_install',
   'workspace_persisted_transcript',
@@ -733,6 +734,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_display_name' &&
       f !== 'workspace_qualified_rest_core' &&
       f !== 'extension_management_v2' &&
+      f !== 'extension_state' &&
       f !== 'extension_git_credentials' &&
       f !== 'extension_local_path_install' &&
       f !== 'workspace_persisted_transcript' &&
@@ -768,6 +770,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'writer_idle_timeout',
   'non_blocking_prompt',
   'session_language',
+  'user_language_sync',
   'session_rewind',
   'workspace_hooks',
   'session_hooks',
@@ -789,10 +792,12 @@ const EXPECTED_REGISTERED_FEATURES = [
   'scratch_workspace_registration',
   'workspace_runtime_removal',
   'native_directory_picker',
+  'workspace_runtime',
   'workspace_qualified_rest_core',
   'workspace_qualified_voice',
   'workspace_qualified_memory',
   'extension_management_v2',
+  'extension_state',
   'extension_git_credentials',
   'extension_local_path_install',
   'workspace_persisted_transcript',
@@ -3008,7 +3013,11 @@ describe('createServeApp', () => {
           );
           continue;
         }
-        if (feature === 'workspace_settings' || feature === 'workspace_voice') {
+        if (
+          feature === 'workspace_settings' ||
+          feature === 'workspace_voice' ||
+          feature === 'user_language_sync'
+        ) {
           expect(predicate({ persistSettingAvailable: true })).toBe(true);
           expect(predicate({ persistSettingAvailable: false })).toBe(false);
           expect(predicate({})).toBe(false);
@@ -3324,6 +3333,20 @@ describe('createServeApp', () => {
           expect(
             getAdvertisedServeFeatures(undefined, {
               nativeDirectoryPickerAvailable: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
+        if (feature === 'workspace_runtime') {
+          expect(predicate({ workspaceRuntimeAvailable: true })).toBe(true);
+          expect(predicate({ workspaceRuntimeAvailable: false })).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              workspaceRuntimeAvailable: true,
             }),
           ).toContain(feature);
           expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
@@ -4353,6 +4376,7 @@ describe('createServeApp', () => {
             sessionArtifactsPersistenceAvailable: true,
             sessionGenerationAvailable: true,
             workspaceGenerationAvailable: true,
+            workspaceRuntimeAvailable: true,
             acpHttpEnabled: true,
             // Mirror the server.ts probe so the expectation matches on both
             // GUI and headless hosts.
@@ -5353,6 +5377,53 @@ describe('createServeApp', () => {
         resetHomeEnvBootstrapForTesting();
         await fsp.rm(tempHome, { recursive: true, force: true });
       }
+    });
+
+    it('mounts primary workspace runtime status and ensure routes', async () => {
+      let snapshot = {
+        state: 'cold' as const,
+        runtimeLive: false,
+        runtimeEpoch: 0,
+        activeWork: false,
+      };
+      const bridge = Object.assign(fakeBridge(), {
+        getWorkspaceRuntimeLifecycleSnapshot: () => snapshot,
+        preheat: vi.fn(async () => {
+          snapshot = {
+            state: 'idle' as const,
+            runtimeLive: true,
+            runtimeEpoch: 1,
+            activeWork: false,
+          };
+        }),
+      });
+      const workspaceRegistry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'primary-id',
+          workspaceCwd: WS_BOUND,
+          primary: true,
+          bridge,
+        }),
+      ]);
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, workspaceRegistry },
+      );
+
+      const before = await request(app)
+        .get('/workspace/runtime/status')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(before.status).toBe(200);
+      expect(before.body).toMatchObject({ state: 'cold', runtimeEpoch: 0 });
+
+      const ensured = await request(app)
+        .post('/workspace/runtime/ensure')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({});
+      expect(ensured.status).toBe(200);
+      expect(ensured.body).toMatchObject({ state: 'idle', runtimeEpoch: 1 });
+      expect(bridge.preheat).toHaveBeenCalledWith({ keepAliveMs: 600_000 });
     });
 
     it('rejects workspace ACP preheat timeouts above the route cap', async () => {
@@ -22207,6 +22278,69 @@ describe('createServeApp', () => {
         .send({ language: 'zh' });
       expect(res.status).toBe(500);
       expect(res.body).toMatchObject({ error: expect.any(String) });
+    });
+  });
+
+  describe('POST /language', () => {
+    it('accepts a client id known only to a secondary runtime', async () => {
+      const primaryBridge = Object.assign(fakeBridge(), {
+        setUserLanguage: vi.fn().mockResolvedValue({
+          language: 'zh',
+          sessions: 0,
+          failed: 0,
+        }),
+      });
+      const secondaryBridge = Object.assign(
+        fakeBridge({ knownClientIds: ['secondary-client'] }),
+        {
+          setUserLanguage: vi.fn().mockResolvedValue({
+            language: 'zh',
+            sessions: 0,
+            failed: 0,
+          }),
+        },
+      );
+      const workspaceRegistry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'primary-id',
+          workspaceCwd: WS_BOUND,
+          primary: true,
+          bridge: primaryBridge,
+        }),
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'secondary-id',
+          workspaceCwd: '/workspace/secondary',
+          primary: false,
+          bridge: secondaryBridge,
+        }),
+      ]);
+      const app = createServeApp(baseOpts, undefined, {
+        bridge: primaryBridge,
+        workspaceRegistry,
+        persistSetting: vi.fn().mockResolvedValue(undefined),
+      });
+
+      const res = await request(app)
+        .post('/language')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('X-Qwen-Client-Id', 'secondary-client')
+        .send({ language: 'zh' });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({ language: 'zh' });
+    });
+
+    it('is not registered when settings persistence is unavailable', async () => {
+      const app = createServeApp(baseOpts, undefined, {
+        bridge: fakeBridge(),
+      });
+
+      const res = await request(app)
+        .post('/language')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ language: 'zh' });
+
+      expect(res.status).toBe(404);
     });
   });
 
