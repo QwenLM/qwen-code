@@ -16,6 +16,8 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { PROJECT_ENV_HARDCODED_EXCLUSIONS } from '../../../config/shared-env-keys.js';
+import { getSettingsSchema } from '../../../config/settingsSchema.js';
 import type { BuildTestReport, CommandResult } from '../build-test.js';
 import {
   PREBUILD_BUDGET_S,
@@ -52,6 +54,21 @@ describe('prebuildRequested', () => {
     ]) {
       expect(prebuildRequested({ [PREBUILD_ENV]: value }, never)).toBe(false);
     }
+  });
+
+  it('is excluded from project .env files at load time', () => {
+    // The registry the read-time check consults is per-process: a child
+    // inheriting a file-sourced value sees an empty registry (R12-1). The
+    // closure is the loader's hardcoded project-env exclusion — pinned with
+    // both real symbols so neither side can drift; the loader-behavior arm
+    // lives in config/environment.test.ts.
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(PREBUILD_ENV);
+  });
+
+  it('accepts a process-sourced value under the production default binding', () => {
+    // No injected predicate: the default isFileSourcedEnvKey binding runs,
+    // and a key the loader never registered is a real process variable.
+    expect(prebuildRequested({ [PREBUILD_ENV]: '1' })).toBe(true);
   });
 
   it('ignores a value sourced from a .env file', () => {
@@ -316,6 +333,38 @@ describe('prebuildCovered', () => {
   it('is not covered by a session default below the cover', () => {
     weld(PREBUILD_COVER_MS - 1);
     expect(prebuildCovered()).toBe(false);
+  });
+
+  it('treats the disabled-timer sentinel as cover', () => {
+    // 0 at the settings level disables the shell timeout entirely
+    // (shell.ts's precedence comment): a call with no deadline at all
+    // carries any budget, so the gate must not refuse the one
+    // configuration that can never kill the prebuild.
+    weld(0);
+    expect(prebuildCovered()).toBe(true);
+  });
+
+  it('needs — and the loader grants — a value above the schema ceiling', () => {
+    // The welded cover exceeds settingsSchema's interactive maximum for
+    // tools.shell.defaultTimeoutMs on purpose; the startup loader applies
+    // it unchecked and the runtime gate accepts it. Pinned against the
+    // real schema and through the real loader, so a future range-check in
+    // either cannot silently turn every CI cover into "not covered" (R2-6).
+    const schema = getSettingsSchema() as unknown as {
+      tools?: {
+        properties?: {
+          shell?: {
+            properties?: { defaultTimeoutMs?: { maximum?: number } };
+          };
+        };
+      };
+    };
+    const max =
+      schema.tools?.properties?.shell?.properties?.defaultTimeoutMs?.maximum;
+    expect(typeof max).toBe('number');
+    expect(PREBUILD_COVER_MS).toBeGreaterThan(max as number);
+    weld(PREBUILD_COVER_MS);
+    expect(prebuildCovered()).toBe(true);
   });
 
   it('falls back to the built-in for values the runtime gate rejects', () => {

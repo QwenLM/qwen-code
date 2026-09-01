@@ -161,10 +161,16 @@ export interface WorktreeDependencies {
 /**
  * Whether this run asked for the prebuild.
  *
- * Only a real process variable counts: the environment loader applies the
- * reviewed checkout's `.qwen/.env`, and a switch a repository can flip about
- * its own review belongs to the operator. Injected so a test can pin the
- * file-sourced refusal without a `.env` on disk deciding the outcome.
+ * Only a real process variable counts — a switch a repository can flip
+ * about its own review belongs to the operator — and the property holds in
+ * two tiers. The closing tier is the loader's: `QWEN_REVIEW_PREBUILD` sits
+ * in `PROJECT_ENV_HARDCODED_EXCLUSIONS`, so a project `.env` (the reviewed
+ * checkout's `.qwen/.env` included) never writes the key into the
+ * environment at all — necessary, because the registry consulted below is
+ * per-process, and a CHILD process inherits a value with no provenance
+ * attached. The check here stays as defence in depth for values this
+ * process's own loader sourced from a user-scope file. Injected so a test
+ * can pin the refusal without a `.env` on disk deciding the outcome.
  */
 export function prebuildRequested(
   env: NodeJS.ProcessEnv = process.env,
@@ -212,7 +218,9 @@ export function prebuildCovered(): boolean {
     Number.isInteger(raw) &&
     raw >= 0 &&
     raw <= 2_147_483_647 &&
-    raw >= PREBUILD_COVER_MS;
+    // 0 is the settings-level disable-the-timer sentinel (shell.ts): a
+    // call with no deadline at all carries any budget.
+    (raw === 0 || raw >= PREBUILD_COVER_MS);
   return covers(opOnly) && covers(full);
 }
 

@@ -425,11 +425,30 @@ vi.mock('./lib/prebuild.js', async (importOriginal) => {
   };
 });
 
+// Hermetic against the ambient opt-in this same PR welds into CI's review
+// sessions: post-merge every review-session shell inherits
+// QWEN_REVIEW_PREBUILD=1, and every suite in this FILE that drives the
+// handler passes the REAL env gate (the prebuild module mock keeps
+// prebuildRequested real) before dereferencing the bare prebuildWorktree
+// stub — so the scrub must cover the whole file, not one describe (R5-1).
+// The prebuild describe re-sets the variable for the tests that are about
+// it: its describe-level beforeEach runs after this file-level one.
+const ambientPrebuild = process.env['QWEN_REVIEW_PREBUILD'];
+beforeEach(() => {
+  delete process.env['QWEN_REVIEW_PREBUILD'];
+});
+afterAll(() => {
+  if (ambientPrebuild === undefined) {
+    delete process.env['QWEN_REVIEW_PREBUILD'];
+  } else {
+    process.env['QWEN_REVIEW_PREBUILD'] = ambientPrebuild;
+  }
+});
+
 describe('fetch-pr report assembly', () => {
   const savedEnv: {
     sessionId?: string;
     promptId?: string;
-    prebuild?: string;
   } = {};
 
   beforeEach(() => {
@@ -487,15 +506,6 @@ describe('fetch-pr report assembly', () => {
     savedEnv.promptId = process.env['QWEN_CODE_PROMPT_ID'];
     process.env['QWEN_CODE_SESSION_ID'] = 'session-self';
     process.env['QWEN_CODE_PROMPT_ID'] = 'prompt-now';
-    // Hermetic against the ambient opt-in this same PR welds into CI:
-    // with QWEN_REVIEW_PREBUILD inherited from the environment, every
-    // full-path test passes the REAL env gate (kept real by the mock
-    // above) and dereferences the bare prebuildWorktree stub's undefined
-    // result — and post-merge every review-session shell inherits the
-    // variable. Sanitize at the env level; the prebuild describe below
-    // re-sets it for the tests that are about it.
-    savedEnv.prebuild = process.env['QWEN_REVIEW_PREBUILD'];
-    delete process.env['QWEN_REVIEW_PREBUILD'];
   });
 
   afterEach(() => {
@@ -508,11 +518,6 @@ describe('fetch-pr report assembly', () => {
       delete process.env['QWEN_CODE_PROMPT_ID'];
     } else {
       process.env['QWEN_CODE_PROMPT_ID'] = savedEnv.promptId;
-    }
-    if (savedEnv.prebuild === undefined) {
-      delete process.env['QWEN_REVIEW_PREBUILD'];
-    } else {
-      process.env['QWEN_REVIEW_PREBUILD'] = savedEnv.prebuild;
     }
   });
 
