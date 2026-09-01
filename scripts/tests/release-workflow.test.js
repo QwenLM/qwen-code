@@ -118,15 +118,16 @@ describe('CUA release workflow', () => {
     );
   });
 
-  it('requires the signed Windows UIAccess worker in release artifacts', () => {
+  it('ships the Windows UIAccess worker for target-machine signing', () => {
     expect(cuaReleaseWorkflow).toMatch(
-      /Build \(release\)[\s\S]*?Sign UIAccess worker[\s\S]*?Get-AuthenticodeSignature[\s\S]*?qwen-cua-driver-uia\.exe[\s\S]*?release artifact contract/,
+      /Build \(release\)[\s\S]*?Remove-Item[^\n]*cua-driver-uia\.exe[^\n]*\n[^\n]*cargo build[\s\S]*?Verify unsigned UIAccess worker/,
     );
-    expect(cuaReleaseWorkflow).toContain(
-      'A Windows signing certificate is required for a CUA release.',
+    expect(cuaReleaseWorkflow).toMatch(
+      /Build \(release\)[\s\S]*?Verify unsigned UIAccess worker[\s\S]*?Get-AuthenticodeSignature[\s\S]*?NotSigned[\s\S]*?qwen-cua-driver-uia\.exe[\s\S]*?release artifact contract/,
     );
+    expect(cuaReleaseWorkflow).not.toMatch(/WINDOWS_CERTIFICATE|WIN_CSC_LINK/);
     expect(cuaReleaseWorkflow).toContain(
-      '- **Windows**: signed UIAccess worker + native SDK payload',
+      '- **Windows**: unsigned UIAccess worker + native SDK payload',
     );
   });
 

@@ -20,8 +20,9 @@
                EnableSecureUIAPaths=0 set by an admin
 
           Development builds use a separately named local worker. Release
-          builds are signed by Qwen's Windows release certificate and install
-          the worker under \Program Files\Qwen\CuaDriver\<version>\.
+          archives carry an unsigned worker; deployments must sign and trust it
+          on the target machine before installing it under
+          \Program Files\Qwen\CuaDriver\<version>\.
         -->
         <requestedExecutionLevel level="asInvoker" uiAccess="true"/>
       </requestedPrivileges>
