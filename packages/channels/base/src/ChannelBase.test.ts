@@ -339,11 +339,7 @@ class UnsafeProcessChannel extends TestChannel {
   }
 }
 
-type TestChannelAgentBridge = ChannelAgentBridge & {
-  btw?: ReturnType<typeof vi.fn>;
-};
-
-function createBridge(): TestChannelAgentBridge {
+function createBridge(): ChannelAgentBridge {
   const emitter = new EventEmitter();
   let sessionCounter = 0;
   let channelLoopToolHandler: ChannelLoopToolHandler | undefined;
@@ -369,7 +365,7 @@ function createBridge(): TestChannelAgentBridge {
     }),
     getChannelLoopToolHandler: () => channelLoopToolHandler,
   });
-  return bridge as unknown as TestChannelAgentBridge;
+  return bridge as unknown as ChannelAgentBridge;
 }
 
 function defaultConfig(overrides: Partial<ChannelConfig> = {}): ChannelConfig {
@@ -464,7 +460,7 @@ function createChannelMemory(entries: ChannelMemoryEntry[] = []) {
 }
 
 describe('ChannelBase', () => {
-  let bridge: TestChannelAgentBridge;
+  let bridge: ChannelAgentBridge;
 
   beforeEach(() => {
     bridge = createBridge();
@@ -5010,6 +5006,10 @@ describe('ChannelBase', () => {
       expect(ch.sent[0]!.text).toContain('/help');
       expect(ch.sent[0]!.text).toContain('/clear');
       expect(ch.sent[0]!.text).toContain('/approve-always [request-id]');
+      expect(ch.sent[0]!.text).toContain(
+        '/btw <question> — Ask a side question without interrupting the current task',
+      );
+      expect(ch.sent[0]!.text).not.toContain('\n/btw\n');
       expect(ch.sent[0]!.text).not.toContain('/cancel');
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
@@ -16161,6 +16161,7 @@ describe('ChannelBase', () => {
     });
 
     it('fails closed when the active bridge lacks BTW support', async () => {
+      const btw = bridge.btw as ReturnType<typeof vi.fn>;
       delete bridge.btw;
       const ch = createChannel();
 
@@ -16169,6 +16170,8 @@ describe('ChannelBase', () => {
       expect(ch.sent.at(-1)?.text).toBe(
         '/btw is not supported by the current agent connection.',
       );
+      expect(bridge.newSession).not.toHaveBeenCalled();
+      expect(btw).not.toHaveBeenCalled();
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
@@ -16181,10 +16184,19 @@ describe('ChannelBase', () => {
       await ch.handleInbound(
         envelope({ senderId: 'intruder', text: '/btw question' }),
       );
-
-      expect(ch.sent.at(-1)?.text).toBe(
-        'Only authorized members can use /btw in this shared session.',
+      await ch.handleInbound(envelope({ senderId: 'intruder', text: '/btw' }));
+      await ch.handleInbound(
+        envelope({
+          senderId: 'intruder',
+          text: `/btw ${'x'.repeat(4097)}`,
+        }),
       );
+
+      expect(ch.sent.map(({ text }) => text)).toEqual([
+        'Only authorized members can use /btw in this shared session.',
+        'Only authorized members can use /btw in this shared session.',
+        'Only authorized members can use /btw in this shared session.',
+      ]);
       expect(bridge.newSession).not.toHaveBeenCalled();
       expect(bridge.btw).not.toHaveBeenCalled();
     });
@@ -16400,6 +16412,78 @@ describe('ChannelBase', () => {
       } finally {
         rmSync(stateDir, { recursive: true, force: true });
       }
+    });
+
+    it('delivers the answer to the asker chat when the session spans chats', async () => {
+      const ch = createChannel({ sessionScope: 'single' });
+
+      await ch.handleInbound(
+        envelope({ senderId: 'alice', chatId: 'chat-a', text: 'main task' }),
+      );
+      ch.sent = [];
+
+      await ch.handleInbound(
+        envelope({
+          senderId: 'bob',
+          chatId: 'chat-b',
+          text: '/btw question',
+        }),
+      );
+      await vi.waitFor(() => expect(ch.sent).toHaveLength(2));
+
+      expect(ch.sent[0]?.text).toMatch(/^BTW #[a-f0-9]{8} received\./u);
+      expect(ch.sent[1]?.text).toMatch(/^BTW #[a-f0-9]{8}\n\nside answer$/u);
+      expect(ch.sent.map(({ chatId }) => chatId)).toEqual(['chat-b', 'chat-b']);
+      expect(ch.sent.some(({ chatId }) => chatId === 'chat-a')).toBe(false);
+    });
+
+    it('still delivers the answer when a group message promotes the session target mid-flight', async () => {
+      let resolveBtw!: (result: {
+        sessionId: string;
+        answer: string | null;
+      }) => void;
+      (bridge.btw as ReturnType<typeof vi.fn>).mockReturnValue(
+        new Promise((resolve) => {
+          resolveBtw = resolve;
+        }),
+      );
+      const ch = createChannel({ groupPolicy: 'open' });
+
+      await ch.handleInbound(envelope({ text: '/btw question' }));
+      await vi.waitFor(() => expect(bridge.btw).toHaveBeenCalledOnce());
+      await ch.handleInbound(
+        envelope({
+          isGroup: true,
+          isMentioned: true,
+          text: 'unrelated group chatter',
+        }),
+      );
+
+      resolveBtw({ sessionId: 's-1', answer: 'side answer' });
+
+      await vi.waitFor(() =>
+        expect(ch.sent.some(({ text }) => text.includes('side answer'))).toBe(
+          true,
+        ),
+      );
+    });
+
+    it('rejects a response that belongs to a different session', async () => {
+      (bridge.btw as ReturnType<typeof vi.fn>).mockResolvedValue({
+        sessionId: 's-other',
+        answer: 'foreign answer',
+      });
+      const ch = createChannel();
+
+      await ch.handleInbound(envelope({ text: '/btw question' }));
+      await vi.waitFor(() => expect(ch.sent).toHaveLength(2));
+
+      expect(ch.sent[1]?.text).toMatch(
+        /^BTW #[a-f0-9]{8} failed\. Please try again\.$/u,
+      );
+      expect(ch.sent.some(({ text }) => text.includes('foreign answer'))).toBe(
+        false,
+      );
     });
   });
 

@@ -334,19 +334,13 @@ type ActivePrompt = {
    */
   clearEvicted?: boolean;
 };
-interface ChannelBtwProvider {
-  btw?(
-    sessionId: string,
-    question: string,
-    signal?: AbortSignal,
-  ): Promise<{ sessionId: string; answer: string | null }>;
-}
-
 type ActiveBtw = {
   id: string;
-  bridge: ChannelAgentBridge & ChannelBtwProvider;
+  bridge: ChannelAgentBridge;
   controller: AbortController;
   target: SessionTarget;
+  chatId: string;
+  threadId?: string;
   sourceLabel?: string;
   taskName?: string;
 };
@@ -615,16 +609,6 @@ export abstract class ChannelBase {
     question: string,
     sourceLabel?: string,
   ): Promise<void> {
-    const bridge: ChannelAgentBridge & ChannelBtwProvider = this.bridge;
-    if (!bridge.btw) {
-      await this.sendThreadMessage(
-        envelope.chatId,
-        envelope.threadId,
-        '/btw is not supported by the current agent connection.',
-        sourceLabel,
-      );
-      return;
-    }
     const target = this.router.getTarget(sessionId);
     if (!target || target.channelName !== this.name) {
       await this.sendThreadMessage(
@@ -649,9 +633,11 @@ export abstract class ChannelBase {
     const reference = this.namedSessions?.presentation(sessionId);
     const request: ActiveBtw = {
       id: randomUUID().slice(0, 8),
-      bridge,
+      bridge: this.bridge,
       controller: new AbortController(),
       target: { ...target },
+      chatId: envelope.chatId,
+      ...(envelope.threadId ? { threadId: envelope.threadId } : {}),
       ...(sourceLabel ? { sourceLabel } : {}),
       ...(reference?.status === 'open' ? { taskName: reference.taskName } : {}),
     };
@@ -708,8 +694,8 @@ export abstract class ChannelBase {
       }
       if (!this.isBtwCurrent(sessionId, request)) return;
       await this.sendThreadMessage(
-        request.target.chatId,
-        request.target.threadId,
+        request.chatId,
+        request.threadId,
         message,
         request.sourceLabel,
       );
@@ -730,9 +716,15 @@ export abstract class ChannelBase {
       return false;
     }
     const currentTarget = this.router.getTarget(sessionId);
+    // Compare owner + thread only: SessionRouter.promoteTargetToGroup flips
+    // the live target's isGroup whenever any group envelope resolves the same
+    // routing key, which changes neither the conversation nor the delivery
+    // destination, so it must not void an acknowledged answer. The named-task
+    // branch below keeps the stricter sameSessionTarget comparison.
     if (
       !currentTarget ||
-      !this.sameSessionTarget(request.target, currentTarget)
+      !this.sameTaskOwner(request.target, currentTarget) ||
+      request.target.threadId !== currentTarget.threadId
     ) {
       return false;
     }
@@ -3920,6 +3912,7 @@ export abstract class ChannelBase {
         '/approve [request-id] — Approve a pending permission request',
         '/approve-always [request-id] — Always approve a pending permission request',
         '/deny [request-id] — Deny a pending permission request',
+        '/btw <question> — Ask a side question without interrupting the current task',
         ...(this.namedSessions
           ? [
               '/sessions [all] — List your named tasks',
@@ -3937,6 +3930,7 @@ export abstract class ChannelBase {
         'approve',
         'approve-always',
         'deny',
+        'btw',
         'remember-channel',
         'channel-memory',
         'forget-channel',
@@ -6112,6 +6106,14 @@ export abstract class ChannelBase {
       }
       // Unrecognized commands fall through to the agent
       if (parsed.command === 'btw') {
+        if (!this.isAuthorizedForSharedSession(envelope)) {
+          await this.sendThreadMessage(
+            envelope.chatId,
+            envelope.threadId,
+            'Only authorized members can use /btw in this shared session.',
+          );
+          return;
+        }
         btwQuestion = parsed.args.trim();
         if (!btwQuestion) {
           await this.sendThreadMessage(
@@ -6137,11 +6139,13 @@ export abstract class ChannelBase {
           );
           return;
         }
-        if (!this.isAuthorizedForSharedSession(envelope)) {
+        // Refuse before session resolution so an unsupported /btw never
+        // creates or persists a session — same invariant as the ! gate below.
+        if (!this.bridge.btw) {
           await this.sendThreadMessage(
             envelope.chatId,
             envelope.threadId,
-            'Only authorized members can use /btw in this shared session.',
+            '/btw is not supported by the current agent connection.',
           );
           return;
         }
