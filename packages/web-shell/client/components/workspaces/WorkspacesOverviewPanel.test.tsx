@@ -317,7 +317,7 @@ describe('WorkspacesOverviewPanel', () => {
     expect(newTask?.disabled).toBe(true);
   });
 
-  it('starts a new task in the row workspace (primary maps to undefined)', async () => {
+  it('starts a new task in the row workspace', async () => {
     const onNewSession = vi.fn().mockResolvedValue(true);
     await render({ onNewSession });
     const clickNewTask = async (row: HTMLTableRowElement) => {
@@ -329,7 +329,7 @@ describe('WorkspacesOverviewPanel', () => {
       });
     };
     await clickNewTask(rowByLabel('/w'));
-    expect(onNewSession).toHaveBeenCalledWith(undefined);
+    expect(onNewSession).toHaveBeenCalledWith('/w');
     await clickNewTask(rowByLabel('API'));
     expect(onNewSession).toHaveBeenCalledWith('/other');
   });

@@ -36,6 +36,7 @@ import type {
   DaemonSessionContextStatus,
   DaemonSessionContextUsageStatus,
   DaemonSessionConfigOptionResult,
+  ReasoningSelection,
   DaemonSessionLspStatus,
   DaemonSessionRecapResult,
   DaemonSessionSummary,
@@ -779,14 +780,13 @@ export class DaemonSessionClient {
 
   setConfigOption(
     configId: 'reasoning_effort',
-    value: string,
+    value: ReasoningSelection,
+    opts?: { persist?: boolean },
   ): Promise<DaemonSessionConfigOptionResult> {
-    return this.client.setSessionConfigOption(
-      this.sessionId,
-      configId,
-      value,
-      this.clientId,
-    );
+    return this.client.setSessionConfigOption(this.sessionId, configId, value, {
+      clientId: this.clientId,
+      persist: opts?.persist,
+    });
   }
 
   getRewindSnapshots(): Promise<{

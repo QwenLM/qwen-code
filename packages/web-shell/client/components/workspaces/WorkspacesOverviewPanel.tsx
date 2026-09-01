@@ -266,8 +266,8 @@ function LastActivityCell({
 
 export interface WorkspacesOverviewPanelProps {
   onClose: () => void;
-  /** Starts a new draft in the workspace (undefined targets the primary). */
-  onNewSession: (workspaceCwd?: string) => Promise<boolean> | boolean;
+  /** Starts a new draft in the row's workspace (every row names one). */
+  onNewSession: (workspaceCwd: string) => Promise<boolean> | boolean;
   /** Opens the existing Add-workspace dialog; hidden when not registered. */
   onAddWorkspace?: () => void;
   onError?: (error: unknown, message: string) => void;
@@ -337,7 +337,7 @@ export function WorkspacesOverviewPanel({
       setCreatingCwd(ws.cwd);
       void (async () => {
         try {
-          await onNewSession(ws.primary ? undefined : ws.cwd);
+          await onNewSession(ws.cwd);
         } finally {
           setCreatingCwd(null);
         }
