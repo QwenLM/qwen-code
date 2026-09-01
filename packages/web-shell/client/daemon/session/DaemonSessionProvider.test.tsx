@@ -1828,6 +1828,7 @@ describe('DaemonSessionProvider', () => {
       enabled: true,
       effort: 'xhigh',
       efforts: ['low', 'medium', 'xhigh'],
+      defaultEffort: 'xhigh',
     });
 
     const providerActions = requireActions(actions);
@@ -1852,6 +1853,7 @@ describe('DaemonSessionProvider', () => {
       enabled: true,
       effort: 'medium',
       efforts: ['low', 'medium', 'xhigh'],
+      defaultEffort: 'xhigh',
     });
   });
 
@@ -1959,6 +1961,7 @@ describe('DaemonSessionProvider', () => {
       enabled: true,
       effort: 'xhigh',
       efforts: ['low', 'medium', 'xhigh'],
+      defaultEffort: 'xhigh',
     });
   });
 
@@ -11506,6 +11509,7 @@ describe('DaemonSessionProvider', () => {
       enabled: true,
       effort: 'xhigh',
       efforts: ['low', 'medium', 'xhigh'],
+      defaultEffort: 'xhigh',
     });
   });
 
@@ -12919,6 +12923,7 @@ describe('DaemonSessionProvider', () => {
       enabled: true,
       effort: 'xhigh',
       efforts: ['low', 'medium', 'xhigh'],
+      defaultEffort: 'xhigh',
     });
     await act(async () => {
       await expect(providerActions.cancel()).rejects.toThrow(
@@ -12968,6 +12973,7 @@ describe('DaemonSessionProvider', () => {
       enabled: true,
       effort: 'xhigh',
       efforts: ['low', 'medium', 'xhigh'],
+      defaultEffort: 'xhigh',
     });
   });
 
@@ -16161,6 +16167,7 @@ describe('DaemonSessionProvider', () => {
       enabled: true,
       effort: 'xhigh',
       efforts: ['low', 'medium', 'xhigh'],
+      defaultEffort: 'xhigh',
     });
   });
 
