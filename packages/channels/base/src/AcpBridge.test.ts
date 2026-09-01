@@ -400,6 +400,28 @@ describe('AcpBridge', () => {
     );
   });
 
+  it('accepts null BTW answers and rejects invalid answer types', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    const extMethod = vi
+      .fn()
+      .mockResolvedValueOnce({ sessionId: 's-1', answer: null })
+      .mockResolvedValueOnce({ sessionId: 's-1', answer: 42 });
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = { extMethod };
+    bridge.knownSessionIds.add('s-1');
+
+    await expect(bridge.btw('s-1', 'question')).resolves.toEqual({
+      sessionId: 's-1',
+      answer: null,
+    });
+    await expect(bridge.btw('s-1', 'question')).rejects.toThrow(
+      'Invalid BTW response',
+    );
+  });
+
   it('stops waiting for an ACP BTW response when aborted', async () => {
     const bridge = new AcpBridge({
       cliEntryPath: '/tmp/qwen',
