@@ -3377,7 +3377,15 @@ export function registerSessionRoutes(
           daemonLog,
         );
       }
-      sendBridgeError(res, err, { route: 'POST /session' });
+      // Only the plain creation path can promise that the initialize
+      // handshake preceded every durable mutation: `branch`/`worktree`
+      // bodies mutate git BEFORE spawn, and their rollback above is
+      // best-effort (a failed checkout rollback leaves the workspace on
+      // the new branch while the error response goes out).
+      sendBridgeError(res, err, {
+        route: 'POST /session',
+        ...(branchMeta || worktreeMeta ? {} : { initPrecedesMutations: true }),
+      });
     } finally {
       sessionIdReservation?.release();
     }
