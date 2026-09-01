@@ -25,6 +25,7 @@ import {
   IdeClient,
   ToolConfirmationOutcome,
   buildHumanReadableRuleLabel,
+  isEditorAvailable,
 } from '@qwen-code/qwen-code-core';
 import type { RadioSelectItem } from '../shared/RadioButtonSelect.js';
 import { RadioButtonSelect } from '../shared/RadioButtonSelect.js';
@@ -259,7 +260,7 @@ export const ToolConfirmationMessage: React.FC<
     if (
       !confirmationDetails.hideModify &&
       (!config.getIdeMode() || !isDiffingEnabled) &&
-      preferredEditor
+      isEditorAvailable(preferredEditor)
     ) {
       options.push({
         label: t('Modify with external editor'),
