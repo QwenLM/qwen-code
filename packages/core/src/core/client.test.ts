@@ -95,6 +95,7 @@ import {
   buildChangedAgentsReminder,
   buildChangedMcpToolsReminder,
   buildChangedSkillsReminder,
+  buildMcpServerInstructionsReminderFromEntries,
   getInitialChatHistory,
 } from './environmentContext.js';
 import { collectAvailableSkillEntries } from '../tools/skill-utils.js';
@@ -1241,6 +1242,7 @@ describe('Gemini Client (client.ts)', () => {
         mockConfig.getToolRegistry,
       )() as unknown as {
         getDeferredToolSummary: ReturnType<typeof vi.fn>;
+        getMcpServerInstructions: ReturnType<typeof vi.fn>;
         getTool: ReturnType<typeof vi.fn>;
       };
       toolRegistry.getDeferredToolSummary.mockReturnValue([
@@ -2110,6 +2112,7 @@ describe('Gemini Client (client.ts)', () => {
       return vi.mocked(mockConfig.getToolRegistry)() as unknown as {
         getFunctionDeclarations: ReturnType<typeof vi.fn>;
         getDeferredToolSummary: ReturnType<typeof vi.fn>;
+        getMcpServerInstructions: ReturnType<typeof vi.fn>;
         getTool: ReturnType<typeof vi.fn>;
         isDeferredToolRevealed: ReturnType<typeof vi.fn>;
         isPermissionDeferred: ReturnType<typeof vi.fn>;
@@ -2345,6 +2348,55 @@ describe('Gemini Client (client.ts)', () => {
           },
         ],
       });
+    });
+
+    it('delivers late MCP server instructions once on the next user turn', async () => {
+      const reg = getRegistryMock();
+      reg.getMcpServerInstructions.mockReturnValue(
+        new Map([['node_repl', 'Keep one persistent kernel.']]),
+      );
+      vi.spyOn(client.getChat(), 'setTools').mockImplementation(() => {});
+      const addHistorySpy = vi.spyOn(client.getChat(), 'addHistory');
+
+      await client.setTools();
+      expect(addHistorySpy).not.toHaveBeenCalled();
+
+      await runTurn();
+      expect(addHistorySpy).toHaveBeenCalledWith({
+        role: 'user',
+        parts: [
+          {
+            text: buildMcpServerInstructionsReminderFromEntries(
+              new Map([['node_repl', 'Keep one persistent kernel.']]),
+            ),
+          },
+        ],
+      });
+
+      addHistorySpy.mockClear();
+      await client.setTools();
+      await runTurn();
+      expect(addHistorySpy).not.toHaveBeenCalled();
+
+      reg.getMcpServerInstructions.mockReturnValue(
+        new Map([['node_repl', 'Transient replacement.']]),
+      );
+      await client.setTools();
+      reg.getMcpServerInstructions.mockReturnValue(
+        new Map([['node_repl', 'Keep one persistent kernel.']]),
+      );
+      await client.setTools();
+      await runTurn();
+      expect(addHistorySpy).not.toHaveBeenCalled();
+
+      reg.getMcpServerInstructions.mockReturnValue(new Map());
+      await client.setTools();
+      reg.getMcpServerInstructions.mockReturnValue(
+        new Map([['node_repl', 'Keep one persistent kernel.']]),
+      );
+      await client.setTools();
+      await runTurn();
+      expect(addHistorySpy).toHaveBeenCalledTimes(1);
     });
 
     it('does not announce MCP removal before an added tool was drained', async () => {

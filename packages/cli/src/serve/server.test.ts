@@ -89,6 +89,8 @@ import {
   Storage,
   TrustGateError,
   readSessionPrs,
+  updateSessionPrStates,
+  writeSessionPrs,
   upsertSessionPr,
   type Extension,
   type ExtensionInstallMetadata,
@@ -16706,6 +16708,18 @@ describe('createServeApp', () => {
         url: 'https://github.com/o/r/pull/9517',
         state: 'merged',
       });
+      // The issue snapshot is likewise sweep-written and sidecar-only.
+      const issues = [
+        {
+          number: 7,
+          url: 'https://github.com/o/r/issues/7',
+          state: 'completed' as const,
+        },
+      ];
+      await updateSessionPrStates(
+        sidecarPath,
+        new Map([[9517, { url: 'https://github.com/o/r/pull/9517', issues }]]),
+      );
       // The TTL cache would otherwise keep serving a scan taken before this
       // test's sidecar write.
       invalidateWorkspaceSessionListCache({
@@ -16740,6 +16754,190 @@ describe('createServeApp', () => {
           number: 9517,
           url: 'https://github.com/o/r/pull/9517',
           state: 'merged',
+          issues,
+        },
+      ]);
+    });
+
+    it('does not attach the sidecar snapshot to a live re-bind of another repository', async () => {
+      // Both bind paths mutate the live entry before the sidecar write, so a
+      // list built in that window still reads the previous binding's
+      // sidecar; matched by number alone, repo-a's issues would ride onto
+      // repo-b's same-numbered PR.
+      const id = '550e8400-e29b-41d4-a716-44665544a006';
+      await writeStoredSession({
+        sessionId: id,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:00:00.000Z',
+        prompt: 'stored prompt',
+        mtime: new Date('2026-05-17T12:00:05.000Z'),
+      });
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(id, 'active');
+      await fsp.rm(sidecarPath, { force: true });
+      await upsertSessionPr(sidecarPath, {
+        number: 42,
+        url: 'https://github.com/repo-a/o/pull/42',
+        state: 'merged',
+      });
+      await updateSessionPrStates(
+        sidecarPath,
+        new Map([
+          [
+            42,
+            {
+              url: 'https://github.com/repo-a/o/pull/42',
+              issues: [
+                { number: 7, url: 'https://github.com/repo-a/o/issues/7' },
+              ],
+            },
+          ],
+        ]),
+      );
+      invalidateWorkspaceSessionListCache({
+        runtimeBaseDir: new Storage(WS_BOUND).getRuntimeBaseDir(),
+        workspaceCwd: WS_BOUND,
+        archiveStates: ['active'],
+      });
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: id,
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+            prs: [{ number: 42, url: 'https://github.com/repo-b/o/pull/42' }],
+          },
+        ],
+      });
+
+      const result = await listWorkspaceSessionsForResponse(bridge, WS_BOUND);
+
+      const merged = result.sessions.find((s) => s.sessionId === id);
+      expect(merged?.prs).toEqual([
+        { number: 42, url: 'https://github.com/repo-b/o/pull/42' },
+      ]);
+    });
+
+    it('inherits the sidecar snapshot across a canonical-equal url spelling', async () => {
+      // The live entry may spell the same PR with a query or trailing
+      // slash; the gate compares canonical urls, not bytes.
+      const id = '550e8400-e29b-41d4-a716-44665544a008';
+      await writeStoredSession({
+        sessionId: id,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:00:00.000Z',
+        prompt: 'stored prompt',
+        mtime: new Date('2026-05-17T12:00:05.000Z'),
+      });
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(id, 'active');
+      const issues = [{ number: 7, url: 'https://github.com/o/r/issues/7' }];
+      await writeSessionPrs(sidecarPath, [
+        {
+          number: 9517,
+          url: 'https://github.com/o/r/pull/9517',
+          createdAt: '2026-05-17T12:00:01.000Z',
+          state: 'merged',
+          issues,
+        },
+      ]);
+      invalidateWorkspaceSessionListCache({
+        runtimeBaseDir: new Storage(WS_BOUND).getRuntimeBaseDir(),
+        workspaceCwd: WS_BOUND,
+        archiveStates: ['active'],
+      });
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: id,
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+            prs: [
+              {
+                number: 9517,
+                url: 'https://github.com/o/r/pull/9517?v=2',
+                state: 'open' as const,
+              },
+            ],
+          },
+        ],
+      });
+
+      const result = await listWorkspaceSessionsForResponse(bridge, WS_BOUND);
+
+      const merged = result.sessions.find((s) => s.sessionId === id);
+      expect(merged?.prs).toEqual([
+        {
+          number: 9517,
+          url: 'https://github.com/o/r/pull/9517?v=2',
+          state: 'merged',
+          issues,
+        },
+      ]);
+    });
+
+    it('attaches the snapshot of the url-matched entry, not a same-numbered duplicate', async () => {
+      // A hand-edited sidecar can hold two entries with one number (the
+      // reader validates shape, not uniqueness); the live binding must find
+      // its own entry by url, not whichever one comes last.
+      const id = '550e8400-e29b-41d4-a716-44665544a007';
+      await writeStoredSession({
+        sessionId: id,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:00:00.000Z',
+        prompt: 'stored prompt',
+        mtime: new Date('2026-05-17T12:00:05.000Z'),
+      });
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(id, 'active');
+      const issues = [
+        { number: 7, url: 'https://github.com/repo-a/o/issues/7' },
+      ];
+      await writeSessionPrs(sidecarPath, [
+        {
+          number: 42,
+          url: 'https://github.com/repo-a/o/pull/42',
+          createdAt: '2026-05-17T12:00:01.000Z',
+          state: 'merged',
+          issues,
+        },
+        {
+          number: 42,
+          url: 'https://github.com/repo-b/o/pull/42',
+          createdAt: '2026-05-17T12:00:02.000Z',
+        },
+      ]);
+      invalidateWorkspaceSessionListCache({
+        runtimeBaseDir: new Storage(WS_BOUND).getRuntimeBaseDir(),
+        workspaceCwd: WS_BOUND,
+        archiveStates: ['active'],
+      });
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: id,
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+            prs: [{ number: 42, url: 'https://github.com/repo-a/o/pull/42' }],
+          },
+        ],
+      });
+
+      const result = await listWorkspaceSessionsForResponse(bridge, WS_BOUND);
+
+      const merged = result.sessions.find((s) => s.sessionId === id);
+      expect(merged?.prs).toEqual([
+        {
+          number: 42,
+          url: 'https://github.com/repo-a/o/pull/42',
+          state: 'merged',
+          issues,
         },
       ]);
     });
@@ -21112,7 +21310,10 @@ describe('createServeApp', () => {
         },
       ];
       const bridge = fakeBridge({
-        setConfigOptionImpl: async () => ({ configOptions }),
+        setConfigOptionImpl: async () => ({
+          configOptions,
+          _meta: { 'qwenCode/reasoningSelectionPersisted': true },
+        }),
       });
       const app = createServeApp(baseOpts, undefined, { bridge });
 
@@ -21123,10 +21324,59 @@ describe('createServeApp', () => {
           sessionId: 'spoofed-B',
           configId: 'reasoning_effort',
           value: 'medium',
+          persist: true,
         });
 
       expect(res.status).toBe(200);
-      expect(res.body).toEqual({ configOptions });
+      expect(res.body).toEqual({ configOptions, persisted: true });
+      expect(bridge.setConfigOptionCalls).toEqual([
+        {
+          sessionId: 'session-A',
+          req: {
+            sessionId: 'session-A',
+            configId: 'reasoning_effort',
+            value: 'medium',
+            _meta: { 'qwenCode/persistReasoningSelection': true },
+          },
+        },
+      ]);
+    });
+
+    it('rejects a non-boolean persist option', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+
+      const res = await request(app)
+        .post('/session/session-A/config-option')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          configId: 'reasoning_effort',
+          value: 'medium',
+          persist: 'yes',
+        });
+
+      expect(res.status).toBe(400);
+      expect(bridge.setConfigOptionCalls).toHaveLength(0);
+    });
+
+    it('does not trust persistence metadata when persist is omitted', async () => {
+      const configOptions = [{ id: 'reasoning_effort' }];
+      const bridge = fakeBridge({
+        setConfigOptionImpl: async () => ({ configOptions }),
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+
+      const res = await request(app)
+        .post('/session/session-A/config-option')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          configId: 'reasoning_effort',
+          value: 'medium',
+          _meta: { 'qwenCode/persistReasoningSelection': true },
+        });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ configOptions, persisted: false });
       expect(bridge.setConfigOptionCalls).toEqual([
         {
           sessionId: 'session-A',

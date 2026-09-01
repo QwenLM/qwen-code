@@ -26,6 +26,7 @@ import {
   DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
   DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
   OutputFormat,
+  REASONING_EFFORT_TIERS,
   SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
 } from '@qwen-code/qwen-code-core';
 import type { CustomTheme } from '../ui/themes/theme.js';
@@ -432,6 +433,19 @@ const SETTINGS_SCHEMA = {
         default: undefined as string | undefined,
         description: 'The preferred editor to open files in.',
         showInDialog: true,
+      },
+      outputStyle: {
+        type: 'string',
+        label: 'Output Style',
+        category: 'General',
+        // Read once in `loadCliConfig` and frozen into `Config`; nothing
+        // applies a mid-session change, so the restart hint is the honest
+        // answer. Same as `general.outputLanguage`.
+        requiresRestart: true,
+        default: undefined as string | undefined,
+        description:
+          'Name of the output style that shapes how responses are written, for example "Concise" or "Explanatory". Leave unset for the default style.',
+        showInDialog: false,
       },
       vimMode: {
         type: 'boolean',
@@ -1574,6 +1588,11 @@ const SETTINGS_SCHEMA = {
           { value: 'xhigh', label: 'Extra High' },
           { value: 'max', label: 'Max' },
         ],
+        // WebShell persists none; the TUI keeps its existing tier-only control.
+        jsonSchemaOverride: {
+          type: 'string',
+          enum: ['none', ...REASONING_EFFORT_TIERS],
+        },
       },
       maxSessionTurns: {
         type: 'integer',
@@ -3167,7 +3186,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: [] as string[],
         description:
-          'Whitelist of URL patterns for HTTP hooks. Supports * wildcard. If empty, all URLs are allowed (subject to SSRF protection).',
+          'Whitelist of URL patterns for HTTP hooks. Supports * wildcard. If empty, all URLs are allowed (subject to SSRF protection). A value in Workspace settings is honored only when no User, System, or SystemDefaults scope sets one, so a cloned repository can narrow but never replace your whitelist.',
         showInDialog: false,
         items: {
           type: 'string',
@@ -3266,6 +3285,31 @@ const SETTINGS_SCHEMA = {
     },
   },
 
+  goals: {
+    type: 'object',
+    label: 'Goals',
+    category: 'Advanced',
+    requiresRestart: true,
+    default: {},
+    description: 'Settings for session Goals (/goal).',
+    showInDialog: false,
+    properties: {
+      modelProposed: {
+        type: 'enum',
+        label: 'Model-Proposed Goals',
+        category: 'Advanced',
+        requiresRestart: true,
+        default: 'alwaysAsk',
+        description:
+          'Controls the propose_goal tool, which lets the model propose a session Goal for you to approve. "alwaysAsk" (default) shows every proposal in an approval dialog and nothing is set until you accept it; "disabled" removes the tool. A typed /goal is unaffected. Consent-affecting, so this setting is only honored from User, System, or SystemDefaults scope; workspace values are ignored.',
+        showInDialog: true,
+        options: [
+          { value: 'alwaysAsk', label: 'Always ask' },
+          { value: 'disabled', label: 'Disabled' },
+        ],
+      },
+    },
+  },
   agents: {
     type: 'object',
     label: 'Agents',
@@ -4075,9 +4119,13 @@ type InferSettings<T extends SettingsSchema> = {
   -readonly [K in keyof T]?: T[K] extends { properties: SettingsSchema }
     ? InferSettings<T[K]['properties']>
     : T[K]['type'] extends 'enum'
-      ? T[K]['options'] extends readonly SettingEnumOption[]
-        ? T[K]['options'][number]['value']
-        : T[K]['default']
+      ? T[K] extends {
+          jsonSchemaOverride: { enum: ReadonlyArray<string | number> };
+        }
+        ? T[K]['jsonSchemaOverride']['enum'][number]
+        : T[K]['options'] extends readonly SettingEnumOption[]
+          ? T[K]['options'][number]['value']
+          : T[K]['default']
       : T[K]['default'] extends boolean
         ? boolean
         : T[K]['default'];
