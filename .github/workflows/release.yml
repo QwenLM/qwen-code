@@ -839,7 +839,7 @@ jobs:
           RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
           CI_BOT_PAT: '${{ secrets.CI_BOT_PAT }}'
         run: |-
-          git add package.json package-lock.json packages/*/package.json packages/channels/*/package.json integrations/*/package.json
+          git add package.json package-lock.json packages/*/package.json packages/channels/*/package.json integrations/*/package.json integrations/*/qwen-extension.json
           if git diff --staged --quiet; then
             echo "No version changes to commit"
           else
@@ -941,6 +941,28 @@ jobs:
           RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
           QWEN_STANDALONE_REQUIRE_AUDIO_CAPTURE_PREBUILD: "${{ github.repository == 'QwenLM/qwen-code' && '1' || '' }}"
         run: 'npm run package:standalone:release -- --version "${RELEASE_VERSION}" --out-dir dist/standalone'
+
+      # npm trusted publishing can only be configured after a package exists.
+      # Keep this disabled until the one-time bootstrap publish and trusted
+      # publisher setup are complete.
+      - name: 'Publish @qwen-code/external-context-mem0'
+        if: |-
+          ${{ github.repository == 'QwenLM/qwen-code' && vars.NPM_EXTERNAL_CONTEXT_MEM0_TRUSTED_PUBLISHING_ENABLED == 'true' }}
+        working-directory: 'integrations/external-context-mem0'
+        run: |-
+          PACKAGE_NAME="$(node -p "require('./package.json').name")"
+          PUBLISH_ARGS=(--access public "--tag=${NPM_TAG}")
+          if [[ "${IS_DRY_RUN}" == "true" ]]; then
+            PUBLISH_ARGS+=(--dry-run)
+          elif npm view "${PACKAGE_NAME}@${RELEASE_VERSION}" version >/dev/null 2>&1; then
+            echo "::notice::${PACKAGE_NAME}@${RELEASE_VERSION} already published; skipping"
+            exit 0
+          fi
+          npm publish --provenance "${PUBLISH_ARGS[@]}"
+        env:
+          RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
+          NPM_TAG: '${{ needs.prepare.outputs.npm_tag }}'
+          IS_DRY_RUN: '${{ needs.prepare.outputs.is_dry_run }}'
 
       - name: 'Publish @qwen-code/audio-capture'
         if: |-
