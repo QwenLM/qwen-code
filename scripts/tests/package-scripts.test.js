@@ -413,6 +413,16 @@ describe('package scripts', () => {
     );
     expect(workspaceTestStep).toContain('npm run test:release');
     expect(workspaceTestStep).not.toContain('npm run test:ci');
+    for (const [name, limit] of [
+      ['VITEST_MAX_THREADS', '4'],
+      ['VITEST_MIN_THREADS', '1'],
+      ['VITEST_MAX_FORKS', '4'],
+      ['VITEST_MIN_FORKS', '1'],
+    ]) {
+      expect(workspaceTestStep).toContain(
+        `${name}: "\${{ startsWith(runner.name, 'ecs-qwen-') && '${limit}' || '' }}"`,
+      );
+    }
   });
 
   it('skips release install-time prepare and builds before publish bundling', () => {

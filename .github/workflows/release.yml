@@ -385,6 +385,13 @@ jobs:
           npm run typecheck
 
       - name: 'Run Workspace Tests'
+        env:
+          # Keep release validation within one runner's share of the same
+          # 128-core, 32-registration ECS host used by the main CI gate.
+          VITEST_MAX_THREADS: "${{ startsWith(runner.name, 'ecs-qwen-') && '4' || '' }}"
+          VITEST_MIN_THREADS: "${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"
+          VITEST_MAX_FORKS: "${{ startsWith(runner.name, 'ecs-qwen-') && '4' || '' }}"
+          VITEST_MIN_FORKS: "${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"
         run: |-
           npm run test:release
 
