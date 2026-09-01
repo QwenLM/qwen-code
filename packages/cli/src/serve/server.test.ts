@@ -72,6 +72,10 @@ import {
   type ServeProtocolVersion,
 } from './capabilities.js';
 import { isNativeDirectoryPickerAvailable } from './native-directory-picker.js';
+import {
+  isLocalPathOpenAvailable,
+  isLocalTerminalAvailable,
+} from './local-path-open.js';
 import type {
   CancelNotification,
   PromptRequest,
@@ -804,6 +808,8 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_runtime_removal',
   'native_directory_picker',
   'workspace_runtime',
+  'workspace_local_open',
+  'workspace_local_terminal',
   'workspace_qualified_rest_core',
   'workspace_qualified_voice',
   'workspace_qualified_memory',
@@ -3368,6 +3374,34 @@ describe('createServeApp', () => {
           );
           continue;
         }
+        if (feature === 'workspace_local_open') {
+          expect(predicate({ localPathOpenAvailable: true })).toBe(true);
+          expect(predicate({ localPathOpenAvailable: false })).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              localPathOpenAvailable: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
+        if (feature === 'workspace_local_terminal') {
+          expect(predicate({ localTerminalOpenAvailable: true })).toBe(true);
+          expect(predicate({ localTerminalOpenAvailable: false })).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              localTerminalOpenAvailable: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
         if (feature === 'workspace_trust_hot_reload') {
           expect(predicate({ workspaceTrustHotReloadAvailable: true })).toBe(
             true,
@@ -4395,6 +4429,8 @@ describe('createServeApp', () => {
             // Mirror the server.ts probe so the expectation matches on both
             // GUI and headless hosts.
             nativeDirectoryPickerAvailable: isNativeDirectoryPickerAvailable(),
+            localPathOpenAvailable: isLocalPathOpenAvailable(),
+            localTerminalOpenAvailable: isLocalTerminalAvailable(),
           }),
         );
         expect(res.body.modelServices).toEqual([]);
@@ -4430,6 +4466,46 @@ describe('createServeApp', () => {
         .get('/capabilities')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(disabled.body.features).not.toContain('native_directory_picker');
+    });
+
+    it('forwards the local path open probe result to capabilities', async () => {
+      const enabled = await request(
+        createServeApp(baseOpts, undefined, {
+          localPathOpenAvailable: true,
+        }),
+      )
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(enabled.body.features).toContain('workspace_local_open');
+
+      const disabled = await request(
+        createServeApp(baseOpts, undefined, {
+          localPathOpenAvailable: false,
+        }),
+      )
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(disabled.body.features).not.toContain('workspace_local_open');
+    });
+
+    it('forwards the local terminal open probe result to capabilities', async () => {
+      const enabled = await request(
+        createServeApp(baseOpts, undefined, {
+          localTerminalOpenAvailable: true,
+        }),
+      )
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(enabled.body.features).toContain('workspace_local_terminal');
+
+      const disabled = await request(
+        createServeApp(baseOpts, undefined, {
+          localTerminalOpenAvailable: false,
+        }),
+      )
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(disabled.body.features).not.toContain('workspace_local_terminal');
     });
 
     it('omits artifact persistence when the durable sink is unavailable', async () => {
