@@ -129,9 +129,7 @@ const EMPTY_FLOATING_TODOS: FloatingTodosState = {
   sourceMessageId: null,
 };
 
-export function getFloatingTodos(
-  messages: readonly Message[],
-): FloatingTodosState {
+function getLatestTodos(messages: readonly Message[]): FloatingTodosState {
   let todos: TodoItem[] = [];
   let planId: string | null = null;
   let sourceMessageId: string | null = null;
@@ -166,6 +164,34 @@ export function getFloatingTodos(
   const allCompleted = !hasActiveTodos(todos);
   if (userMessageAfter) return EMPTY_FLOATING_TODOS;
   return { todos, planId, allCompleted, sourceMessageId };
+}
+
+export function getFloatingTodos(
+  messages: readonly Message[],
+): FloatingTodosState {
+  return getLatestTodos(messages);
+}
+
+export function getSessionWorkflowTodos(
+  messages: readonly Message[],
+): FloatingTodosState {
+  let state = EMPTY_FLOATING_TODOS;
+  for (const message of messages) {
+    if (message.role !== 'tool_group') continue;
+    for (const tool of message.tools) {
+      const rawOutput = getRecord(tool.rawOutput);
+      if (rawOutput?.['sessionWorkflow'] !== true) continue;
+      const todos = extractTodosFromToolCall(tool);
+      if (!todos) continue;
+      state = {
+        todos,
+        planId: getTodoPlanId(tool),
+        allCompleted: !hasActiveTodos(todos),
+        sourceMessageId: message.id,
+      };
+    }
+  }
+  return state;
 }
 
 export function getActiveTodosForPlanRevision(

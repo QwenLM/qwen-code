@@ -1196,6 +1196,7 @@ function normalizePlanUpdate(
   const todoPlan =
     meta && isRecord(meta['qwenTodoPlan']) ? meta['qwenTodoPlan'] : undefined;
   const planId = getString(todoPlan, 'id');
+  const sessionWorkflow = meta?.['qwenSessionWorkflow'] === true;
   return {
     ...base,
     type: 'tool.update',
@@ -1214,6 +1215,7 @@ function normalizePlanUpdate(
       entries,
       ...(stats ? { stats } : {}),
       ...(planId ? { plan: { id: planId, sourceCallId: planCallId } } : {}),
+      ...(sessionWorkflow ? { sessionWorkflow: true } : {}),
     },
   };
 }

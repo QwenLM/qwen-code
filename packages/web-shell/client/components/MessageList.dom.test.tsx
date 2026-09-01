@@ -1401,6 +1401,15 @@ describe('MessageList — turn collapse (DOM)', () => {
       hasOlderHistory: true,
       onLoadOlderHistory,
     });
+    const waitForLoadCount = async (count: number) => {
+      for (
+        let frame = 0;
+        frame < 32 && onLoadOlderHistory.mock.calls.length < count;
+        frame += 1
+      ) {
+        await nextFrame();
+      }
+    };
     const list = c.querySelector(
       '[data-web-shell-message-list]',
     ) as HTMLElement;
@@ -1433,6 +1442,7 @@ describe('MessageList — turn collapse (DOM)', () => {
         list.dispatchEvent(new Event('scroll'));
         await Promise.resolve();
       });
+      await waitForLoadCount(2);
       expect(onLoadOlderHistory).toHaveBeenCalledTimes(2);
 
       // The user collapses the turn before the page commits.
@@ -1454,6 +1464,7 @@ describe('MessageList — turn collapse (DOM)', () => {
         list.dispatchEvent(new Event('scroll'));
         await Promise.resolve();
       });
+      await waitForLoadCount(3);
       expect(onLoadOlderHistory).toHaveBeenCalledTimes(3);
 
       // The superseded load's snapshot must not wedge later detection: page 3
@@ -1477,6 +1488,7 @@ describe('MessageList — turn collapse (DOM)', () => {
         list.dispatchEvent(new Event('scroll'));
         await Promise.resolve();
       });
+      await waitForLoadCount(4);
       expect(onLoadOlderHistory).toHaveBeenCalledTimes(4);
       rerenderMessages(
         c,

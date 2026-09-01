@@ -547,6 +547,7 @@ describe('daemon UI normalizer and transcript reducer', () => {
             },
           ],
           _meta: {
+            qwenSessionWorkflow: true,
             qwenTodoPlan: { id: 'plan-1' },
             qwenTranscript: { planToolCallId: 'call-1' },
             stats: {
@@ -574,6 +575,7 @@ describe('daemon UI normalizer and transcript reducer', () => {
           },
         ],
         plan: { id: 'plan-1', sourceCallId: 'call-1' },
+        sessionWorkflow: true,
         stats: {
           promptTokens: 100,
           cachedTokens: 10,
