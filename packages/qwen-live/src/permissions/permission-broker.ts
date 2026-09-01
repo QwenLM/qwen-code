@@ -59,15 +59,21 @@ interface StandingRule {
 
 /**
  * Standing-rule key: tool name plus the WHOLE normalized detail (trimmed,
- * whitespace-collapsed, lowercased). A voice "always allow" is a trust
- * grant; it must cover only repeats of the exact command the user heard
- * and approved — `git push origin main` never silently covers
- * `git push --force origin main`.
+ * whitespace-collapsed — but case-preserved: `/a` and `/A` are different
+ * directories on Linux, and commands routinely contain colons, so the
+ * split is on the FIRST colon only and the entire remainder is the
+ * detail). A voice "always allow" is a trust grant; it must cover only
+ * repeats of the exact command the user heard and approved —
+ * `git push origin main` never silently covers
+ * `git push --force origin main`, and `git commit -m "fix: bug"` never
+ * covers `git commit -m "fix: something else entirely"`.
  */
 function titleKeyOf(title: string): string {
-  const [head = '', detail = ''] = title.split(':', 2);
+  const separator = title.indexOf(':');
+  const head = separator === -1 ? title : title.slice(0, separator);
+  const detail = separator === -1 ? '' : title.slice(separator + 1);
   const normalized = detail.trim().split(/\s+/).join(' ');
-  return `${head.trim().toLowerCase()}:${normalized.toLowerCase()}`;
+  return `${head.trim()}:${normalized}`;
 }
 
 export class PermissionBroker {
@@ -148,6 +154,18 @@ export class PermissionBroker {
     if (!pending) return 'not_found';
     if (decision === 'allow_always') {
       this.remember(pending);
+    }
+    if (decision === 'deny') {
+      // An explicit refusal must outrank any standing rule that matched
+      // this same request (the silent auto-answer failed and fell back to
+      // asking): without revocation the invisible rule silently overrides
+      // the user's spoken "no" on the next identical request. Broker-local
+      // per the design note — the protocol vote has no revocation concept.
+      const key = titleKeyOf(pending.title);
+      this.rules = this.rules.filter(
+        (rule) =>
+          rule.sessionHandle !== pending.sessionHandle || rule.titleKey !== key,
+      );
     }
     return await this.deliver(
       pending,

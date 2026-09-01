@@ -224,7 +224,11 @@ export class LiveDaemon {
       route === 'GET /live/setup'
         ? await this.installer.refresh()
         : route === 'POST /live/setup/install'
-          ? await this.installer.ensureInstalled()
+          ? // force=true is the recovery path: a corrupted-but-present
+            // installation (bad Info.plist, revoked notarization) would
+            // otherwise permanently fail inspection while the status still
+            // says retryable. Force re-downloads and re-verifies.
+            await this.installer.ensureInstalled(true)
           : await this.installer.launch();
     res.statusCode = 200;
     res.setHeader('content-type', 'application/json');

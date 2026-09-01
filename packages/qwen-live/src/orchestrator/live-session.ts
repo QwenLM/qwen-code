@@ -350,8 +350,11 @@ export class LiveSession {
     }
     if (!context.realtime) return true; // still connecting
     try {
-      context.realtime.pushAudio(call.pcm16);
-      return true;
+      // Propagate the provider's backpressure signal: a false return
+      // means the socket buffer is over its cap and frames are being
+      // dropped — the port source fails the call rather than letting VAD
+      // and transcription run on a gappy utterance.
+      return context.realtime.pushAudio(call.pcm16);
     } catch {
       return false;
     }
@@ -468,6 +471,17 @@ export class LiveSession {
           );
         }
       },
+      onAudioDropped: () => {
+        // The provider is dropping mic frames (socket buffer over its
+        // cap): speech would run on a gappy utterance with no error
+        // surfaced — fail the call instead, mirroring the port source.
+        if (this.active !== context) return;
+        this.log.write('error', {
+          source: 'realtime',
+          message: 'audio frames were dropped: provider socket backpressured',
+        });
+        this.host.failCall(context.epoch, 'audio frames were dropped');
+      },
       onError: (error: { message: string; fatal: boolean; code?: string }) => {
         if (!current()) return;
         this.log.write('error', {
@@ -579,6 +593,17 @@ export class LiveSession {
         status: 'ok',
         sessions: sessions.map((summary) => {
           const handle = this.handles.session(summary.handle);
+          // Reconcile stale non-terminal jobs: a turn_complete emitted
+          // while no pump was subscribed (pumps are per-call and aborted
+          // at call end) would otherwise keep session_list reporting a
+          // running active_job forever. Gated on the backend's own idle
+          // report so a genuinely busy session is never touched.
+          if (
+            summary.state !== 'busy' &&
+            !this.adaptor.isBusy(summary.handle)
+          ) {
+            this.handles.reconcileIdleSession(handle);
+          }
           const activeJob = this.handles.activeJobForSession(handle);
           return {
             handle,
@@ -665,6 +690,9 @@ export class LiveSession {
           status: 'error',
           note: 'unknown session; call session_list first.',
         };
+      }
+      if (!this.adaptor.isBusy(backend)) {
+        this.handles.reconcileIdleSession(sessionHandle);
       }
       const activeJob = job ?? this.handles.activeJobForSession(sessionHandle);
       return {
@@ -1019,8 +1047,18 @@ export class LiveSession {
         }
         return;
       }
-      case 'session_closed':
+      case 'session_closed': {
+        // A closed session must not keep resolving every session-less
+        // handoff to a dead target for the rest of the call (WebShell
+        // deletion, daemon restart, idle reaper): stop resolving its
+        // handle entirely and clear the default so
+        // resolveHandoffTarget's createSession fall-through rebuilds.
+        this.handles.closeSession(sessionHandle);
+        if (context.defaultSessionHandle === sessionHandle) {
+          context.defaultSessionHandle = undefined;
+        }
         return;
+      }
       default:
         return;
     }

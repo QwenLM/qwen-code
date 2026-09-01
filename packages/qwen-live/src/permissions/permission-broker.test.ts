@@ -312,4 +312,67 @@ describe('PermissionBroker', () => {
     );
     expect(failure?.payload).toMatchObject({ auto: true, decision: 'allow' });
   });
+
+  it('keeps the whole command after colons in the standing-rule key', async () => {
+    // `git commit -m "fix: bug"` — the command itself contains a colon;
+    // the key must not truncate at it (or a different -m message with the
+    // same prefix would silently match).
+    const { broker } = createBroker();
+    await request(broker, {
+      requestId: 'r1',
+      title: 'Shell: git commit -m "fix: bug"',
+    });
+    await broker.respond('req_1', 'allow_always');
+
+    const different = await request(broker, {
+      requestId: 'r2',
+      title: 'Shell: git commit -m "fix: something else entirely"',
+    });
+    expect(different.autoAnswered).toBe(false);
+
+    const identical = await request(broker, {
+      requestId: 'r3',
+      title: 'Shell: git commit -m "fix: bug"',
+    });
+    expect(identical.autoAnswered).toBe(true);
+  });
+
+  it('does not case-fold the standing-rule key — /a and /A are different paths', async () => {
+    const { broker } = createBroker();
+    await request(broker, { requestId: 'r1', title: 'Bash: rm -rf /a' });
+    await broker.respond('req_1', 'allow_always');
+
+    const different = await request(broker, {
+      requestId: 'r2',
+      title: 'Bash: rm -rf /A',
+    });
+    expect(different.autoAnswered).toBe(false);
+  });
+
+  it('an explicit deny revokes the standing rule that matched the request', async () => {
+    const { broker, adaptor } = createBroker();
+    await request(broker, { requestId: 'r1', title: 'Bash: rm -rf /a' });
+    await broker.respond('req_1', 'allow_always');
+
+    // The silent auto-answer fails and falls back to a spoken ask…
+    adaptor.respondPermission.mockImplementation(async () => {
+      throw new Error('daemon unreachable');
+    });
+    const fallback = await request(broker, {
+      requestId: 'r2',
+      title: 'Bash: rm -rf /a',
+    });
+    expect(fallback.autoAnswered).toBe(false);
+
+    // …and the user says deny. The rule must not survive the refusal.
+    adaptor.respondPermission.mockImplementation(
+      async () => 'delivered' as const,
+    );
+    await broker.respond('req_2', 'deny');
+    const again = await request(broker, {
+      requestId: 'r3',
+      title: 'Bash: rm -rf /a',
+    });
+    expect(again.autoAnswered).toBe(false);
+  });
 });

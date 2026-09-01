@@ -261,6 +261,7 @@ afterAll(async () => {
 interface Rig {
   session: LiveSession;
   adaptor: FakeAdaptor;
+  logWrites: ReturnType<typeof vi.fn>;
   host: ReturnType<typeof createFakeHost>;
   realtime: FakeRealtime;
   config: QwenRealtimeConfig;
@@ -276,6 +277,7 @@ async function startSession(adaptorArg?: FakeAdaptor): Promise<Rig> {
     screenshotPath: pngPath,
   });
   const realtime = createFakeRealtime();
+  const logWrites = vi.fn();
   let config: QwenRealtimeConfig | undefined;
   let callbacks: QwenRealtimeCallbacks = {};
   const openRealtime: typeof openQwenRealtimeSession = (cfg, cbs = {}) => {
@@ -291,12 +293,20 @@ async function startSession(adaptorArg?: FakeAdaptor): Promise<Rig> {
       model: 'qwen-omni-turbo-realtime',
       voice: 'Cherry',
     },
-    log: { write: vi.fn(), close: async () => {} } as unknown as SessionLog,
+    log: { write: logWrites, close: async () => {} } as unknown as SessionLog,
     openRealtime,
   });
   await session.start({ epoch: 1, callId: 'call-1', mode: 'new' });
   if (!config) throw new Error('openRealtime was not called');
-  return { session, adaptor, host, realtime, config, callbacks };
+  return {
+    session,
+    adaptor,
+    host,
+    realtime,
+    config,
+    callbacks,
+    logWrites,
+  };
 }
 
 let callSeq = 0;
@@ -886,5 +896,57 @@ describe('LiveSession', () => {
 
     callbacks.onResponseDone?.({ callEpoch: 1, responseId: 'resp_1' });
     await stopPending;
+  });
+
+  it('rebuilds the default session after it closes mid-call', async () => {
+    const { adaptor, callbacks, realtime, logWrites } = await startSession();
+
+    // First handoff creates and uses the default session…
+    callTool(callbacks, 'handoff', { task: 'first task' });
+    await awaitReceipts(realtime, 1);
+    const firstCreateCalls = adaptor.createSession.mock.calls.length;
+
+    // …then that session closes (WebShell deletion / daemon restart).
+    // The pump consumes the event asynchronously; wait until the closure
+    // has been observed before handing off again.
+    adaptor.queue('s1').push({ type: 'session_closed' });
+    adaptor.queue('s1').end();
+    await vi.waitFor(() => {
+      expect(logWrites).toHaveBeenCalledWith(
+        'backend.event',
+        expect.objectContaining({ type: 'session_closed' }),
+      );
+    });
+
+    // A session-less handoff must NOT re-target the dead session.
+    callTool(callbacks, 'handoff', { task: 'second task' });
+    await awaitReceipts(realtime, 2);
+    expect(adaptor.createSession.mock.calls.length).toBeGreaterThan(
+      firstCreateCalls,
+    );
+    const targets = adaptor.prompt.mock.calls.map(
+      (call) => (call[0] as { id: string }).id,
+    );
+    expect(new Set(targets).size).toBe(targets.length);
+  });
+
+  it('reconciles stale running jobs when the backend reports idle', async () => {
+    const { adaptor, callbacks, realtime } = await startSession();
+
+    callTool(callbacks, 'handoff', { task: 'a task' });
+    await awaitReceipts(realtime, 1);
+    // The turn_complete is emitted while no one consumes it (pump aborted
+    // between calls); mark the adaptor idle and list sessions.
+    adaptor.busy = false;
+    adaptor.summaries = [
+      { handle: { id: 's1', adaptor: 'fake' }, state: 'idle' },
+    ];
+    callTool(callbacks, 'session_list', {});
+    await awaitReceipts(realtime, 2);
+    const list = receipts(realtime)[1];
+    // The stale running job must not survive the idle reconciliation.
+    expect(list?.['sessions']).toEqual([
+      { handle: 'session_1', state: 'idle' },
+    ]);
   });
 });

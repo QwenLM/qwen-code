@@ -1149,4 +1149,53 @@ describe('QwenCodeAdaptor prompt image blocks', () => {
     });
     expect(body.prompt[1]).toBe(reference);
   });
+
+  it('attributes a resolution to the daemon stamp, not our own in-flight vote', async () => {
+    // R1-2 regression pin: we record the vote BEFORE the HTTP round-trip
+    // (the SSE resolution can beat the response). When another client
+    // resolves the request during that window, the frame carries THEIR
+    // originatorClientId — byUs must be false even though ownVotes still
+    // holds the requestId.
+    const client = makeClient();
+    const adaptor = makeAdaptor(client);
+    await adaptor.createSession();
+    vi.mocked(client.subscribeEvents).mockReturnValueOnce(
+      envelopeStream([permissionRequestEnvelope('req-1')]),
+    );
+    await collect(adaptor, handleFor());
+
+    // Park the vote mid-round-trip, then let the pump deliver the
+    // resolution stamped with the OTHER client's id.
+    let releaseVote: (() => void) | undefined;
+    vi.mocked(client.respondToSessionPermission).mockImplementation(
+      () =>
+        new Promise<boolean>((resolve) => {
+          releaseVote = () => resolve(true);
+        }),
+    );
+    const vote = adaptor.respondPermission(handleFor(), 'req-1', 'allow');
+    await vi.waitFor(() => {
+      expect(client.respondToSessionPermission).toHaveBeenCalled();
+    });
+
+    // Feed the resolution through a second stream subscription.
+    vi.mocked(client.subscribeEvents).mockReturnValueOnce(
+      envelopeStream([
+        envelope(
+          'permission_resolved',
+          { requestId: 'req-1' },
+          { originatorClientId: 'webshell-42' },
+        ),
+      ]),
+    );
+    const resolved = await collect(adaptor, handleFor());
+    releaseVote?.();
+    await vote;
+
+    expect(
+      resolved.some(
+        (event) => event.type === 'permission_resolved' && event.byUs,
+      ),
+    ).toBe(false);
+  });
 });

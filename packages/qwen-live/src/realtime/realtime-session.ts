@@ -514,7 +514,6 @@ export function openQwenRealtimeSession(
     const responseInputItemIds = new Map<string, string>();
     const consumedInputItemIds = new Set<string>();
     const transcriptEntries: RealtimeTranscriptEntry[] = [];
-    let lastHandoffEntryCount = 0;
     const pendingDirectTranscriptEntries: RealtimeTranscriptEntry[] = [];
     const collectedDirectResponseIds = new Set<string>();
     const collectedDirectInputItemIds = new Set<string>();
@@ -853,10 +852,9 @@ export function openQwenRealtimeSession(
       transcriptEntries.push(entry);
       // Long stretches without a capturing handoff must not grow the
       // retained transcript without bound: evict the oldest entries past a
-      // fixed cap, keeping the handoff cursor aligned with the survivors.
+      // fixed cap.
       while (transcriptEntries.length > MAX_RETAINED_TRANSCRIPT_ENTRIES) {
         transcriptEntries.shift();
-        if (lastHandoffEntryCount > 0) lastHandoffEntryCount -= 1;
       }
     };
 
@@ -963,15 +961,12 @@ export function openQwenRealtimeSession(
 
     const takeHandoffTranscriptTail =
       (): readonly RealtimeTranscriptEntry[] => {
-        const tail = transcriptEntries
-          .slice(lastHandoffEntryCount)
-          .map((entry) => ({ ...entry }));
+        const tail = transcriptEntries.map((entry) => ({ ...entry }));
         // Everything up to here has now been handed off and is never read
         // again; drop the consumed entries (instead of only advancing a
         // cursor) so retention and the dedup scan in takeHandoffTranscript
         // stay bounded by one capture window, not the whole call history.
         transcriptEntries.length = 0;
-        lastHandoffEntryCount = 0;
         return tail;
       };
 

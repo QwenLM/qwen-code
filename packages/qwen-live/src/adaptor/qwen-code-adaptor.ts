@@ -229,15 +229,41 @@ function pickLeastEscalating(
   return best;
 }
 
+/**
+ * Compose the human-readable permission title. Control sequences are
+ * stripped (the title flows verbatim into the spoken ask and keys the
+ * broker's standing rule — raw ESC/OSC bytes must not reach speech or
+ * anchor a trust grant), but NOT truncated to the first line: the
+ * standing-rule key must span the whole command.
+ */
 function describeToolCall(toolCall: unknown): string {
   if (!isRecord(toolCall)) return 'a tool call';
   const name = typeof toolCall['name'] === 'string' ? toolCall['name'] : '';
   const command =
     typeof toolCall['command'] === 'string' ? toolCall['command'] : '';
   const title = typeof toolCall['title'] === 'string' ? toolCall['title'] : '';
-  const detail = command || title;
+  const detail = stripControlSequences(command || title);
   if (name && detail) return `${name}: ${detail}`;
   return name || detail || 'a tool call';
+}
+
+/**
+ * Remove terminal control sequences without the first-line cut that
+ * sanitizeTitleLine applies — the permission key needs the whole command.
+ * Mirrors the same sequence families (OSC, CSI, SS2/SS3/DCS, C0/DEL/C1).
+ */
+function stripControlSequences(text: string): string {
+  return (
+    text
+      // eslint-disable-next-line no-control-regex
+      .replace(/\x1b\][\s\S]*?(?:\x07|\x1b\\)/g, '')
+      // eslint-disable-next-line no-control-regex
+      .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
+      // eslint-disable-next-line no-control-regex
+      .replace(/\x1b[NOP]/g, '')
+      // eslint-disable-next-line no-control-regex
+      .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/g, ' ')
+  );
 }
 
 /**
@@ -512,8 +538,15 @@ export class QwenCodeAdaptor implements BackendAdaptor {
     }
     const promptId = accepted['promptId'];
     const jobRef = typeof promptId === 'string' ? promptId : undefined;
+    // Only advance activeJobRef when this prompt actually starts the
+    // session's turn: a busy-session fallback (image steer, over-long text
+    // 400) queues behind the running turn, and overwriting the ref here
+    // would make a later accepted steer report the QUEUED prompt's id as
+    // the running turn's jobRef. pending_prompt_started establishes it
+    // when the queued prompt eventually runs.
+    const wasBusy = state.busy;
     state.busy = true;
-    if (jobRef !== undefined) state.activeJobRef = jobRef;
+    if (!wasBusy && jobRef !== undefined) state.activeJobRef = jobRef;
     return {
       status: opts?.steer ? 'queued' : 'accepted',
       ...(jobRef !== undefined ? { jobRef } : {}),
@@ -772,17 +805,22 @@ export class QwenCodeAdaptor implements BackendAdaptor {
         const requestId = data['requestId'];
         if (typeof requestId !== 'string') return [];
         state.permissionOptions.delete(requestId);
-        // Own-vote record first: adopted sessions have no issued clientId,
-        // and the daemon stamps no originator on anonymous votes.
+        // The daemon's originator stamp is authoritative when present:
+        // another client (WebShell) can resolve the request while our own
+        // vote is still mid-round-trip, and the short-circuit below would
+        // otherwise attribute THEIR resolution to us (skipping the spoken
+        // ask retraction). ownVotes only covers anonymous resolutions —
+        // adopted sessions carry no issued clientId to compare against.
         const votedByUs = state.ownVotes.delete(requestId);
         return [
           {
             type: 'permission_resolved',
             requestId,
             byUs:
-              votedByUs ||
-              (state.clientId !== undefined &&
-                envelope.originatorClientId === state.clientId),
+              envelope.originatorClientId !== undefined
+                ? state.clientId !== undefined &&
+                  envelope.originatorClientId === state.clientId
+                : votedByUs,
           },
         ];
       }

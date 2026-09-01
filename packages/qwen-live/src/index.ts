@@ -10,7 +10,8 @@
  * SIGINT/SIGTERM.
  */
 
-import { realpathSync } from 'node:fs';
+import { realpathSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { loadConfig } from './config.js';
 import { LiveDaemon } from './daemon.js';
@@ -89,8 +90,19 @@ async function main(): Promise<void> {
 let invokedDirectly = false;
 if (process.argv[1] !== undefined) {
   try {
-    invokedDirectly =
-      import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href;
+    const entry = realpathSync(process.argv[1]);
+    // Direct file invocation…
+    invokedDirectly = import.meta.url === pathToFileURL(entry).href;
+    // …or directory-form invocation (`node packages/qwen-live`): Node
+    // resolves the directory against package.json main; compare against
+    // the built entry the bin ships so main() still runs.
+    if (
+      !invokedDirectly &&
+      statSync(entry, { throwIfNoEntry: false })?.isDirectory()
+    ) {
+      invokedDirectly =
+        import.meta.url === pathToFileURL(join(entry, 'dist', 'index.js')).href;
+    }
   } catch {
     invokedDirectly = import.meta.url === pathToFileURL(process.argv[1]).href;
   }

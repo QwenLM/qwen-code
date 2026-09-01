@@ -36,6 +36,8 @@ const MAX_ASSETS = 32;
 export class HandleRegistry {
   private readonly sessions = new Map<string, BackendHandle>();
   private readonly sessionsByBackendId = new Map<string, string>();
+  /** Sessions whose backend reported closure — handles no longer resolve. */
+  private readonly closedSessions = new Set<string>();
   private readonly jobs = new Map<string, JobRecord>();
   private readonly jobsByRef = new Map<string, string>();
   private readonly assets = new Map<string, AssetRecord>();
@@ -55,7 +57,14 @@ export class HandleRegistry {
   }
 
   resolveSession(handle: string): BackendHandle | undefined {
-    return this.sessions.get(handle.trim());
+    const key = handle.trim();
+    if (this.closedSessions.has(key)) return undefined;
+    return this.sessions.get(key);
+  }
+
+  /** Mark a session closed: its handle stops resolving from now on. */
+  closeSession(handle: string): void {
+    this.closedSessions.add(handle.trim());
   }
 
   /**
@@ -98,6 +107,23 @@ export class HandleRegistry {
   jobByRef(jobRef: string): JobRecord | undefined {
     const handle = this.jobsByRef.get(jobRef);
     return handle ? this.jobs.get(handle) : undefined;
+  }
+
+  /**
+   * Reconcile a session's non-terminal jobs against reality: the backend
+   * reports idle, so any 'accepted'/'running' record left over from a
+   * missed terminal event (emitted while no pump was subscribed — pumps
+   * are per-call and aborted at call end) transitions to 'done'. Gated on
+   * the caller's isBusy check so a genuinely busy backend is never
+   * touched.
+   */
+  reconcileIdleSession(sessionHandle: string): void {
+    for (const job of this.jobs.values()) {
+      if (job.sessionHandle !== sessionHandle) continue;
+      if (job.state === 'done' || job.state === 'failed') continue;
+      if (job.state === 'cancelled') continue;
+      job.state = 'done';
+    }
   }
 
   /** The most recent non-terminal job for a session, if any. */
