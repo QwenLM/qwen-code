@@ -1414,7 +1414,22 @@ const PROTOCOL_TAG_PREFIXES = [
   '<summary',
   '</summary',
 ] as const;
-const LEAKED_TOOL_CALL_TAGS = /[}\]]\s*<\/parameter>\s*<\/function>/iy;
+const LEAKED_TOOL_CALL_TAGS =
+  /(?:[}\]]\s*)?<\/parameter>\s*<\/(?:function|invoke)>/iy;
+const TOOL_CALL_OPEN_TAG = /<(?:function|invoke)\b/i;
+
+function hasUnclosedToolCallOpenTagBefore(
+  text: string,
+  index: number,
+): boolean {
+  const prefix = text.slice(0, index);
+  const lowerPrefix = prefix.toLowerCase();
+  const lastClose = Math.max(
+    lowerPrefix.lastIndexOf('</function>'),
+    lowerPrefix.lastIndexOf('</invoke>'),
+  );
+  return TOOL_CALL_OPEN_TAG.test(prefix.slice(lastClose + 1));
+}
 
 function hasLeakedToolCallTags(text: string): boolean {
   let inString = false;
@@ -1427,9 +1442,14 @@ function hasLeakedToolCallTags(text: string): boolean {
       else if (char === '"') inString = false;
     } else if (char === '"') {
       inString = true;
-    } else if (char === '}' || char === ']') {
+    } else if (char === '<' || char === '}' || char === ']') {
       LEAKED_TOOL_CALL_TAGS.lastIndex = i;
-      if (LEAKED_TOOL_CALL_TAGS.test(text)) return true;
+      if (
+        LEAKED_TOOL_CALL_TAGS.test(text) &&
+        !hasUnclosedToolCallOpenTagBefore(text, i)
+      ) {
+        return true;
+      }
     }
   }
   return false;
@@ -5622,9 +5642,12 @@ export class LlmChat {
       }
     }
 
-    if (streamError === null && protocolTagDetector.leaked && !hasToolCall) {
+    const hasProtocolTagLeak =
+      protocolTagDetector.leaked ||
+      (contentText ? hasLeakedToolCallTags(contentText) : false);
+    if (streamError === null && hasProtocolTagLeak && !hasToolCall) {
       throw new InvalidStreamError(
-        'Model response started with leaked protocol tags.',
+        'Model response contained leaked protocol tags.',
         'PROTOCOL_TAG_LEAK',
       );
     }

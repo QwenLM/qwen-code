@@ -13118,6 +13118,54 @@ describe('LlmChat', async () => {
     expect(chat.getLastModelMessageText()).toBe(response);
   });
 
+  it('retries orphaned XML tool-call closing tags before persistence', async () => {
+    vi.useFakeTimers();
+    try {
+      const recordAssistantTurn = vi.fn();
+      const chatWithRecording = chatWithRecorder(recordAssistantTurn);
+      vi.mocked(mockContentGenerator.generateContentStream)
+        .mockResolvedValueOnce(
+          streamResponse(
+            stopResponse([{ text: 'Done.\n</parameter>\n</invoke>\n' }]),
+          ),
+        )
+        .mockResolvedValueOnce(
+          streamResponse(stopResponse([{ text: 'Successful final response' }])),
+        );
+
+      const stream = await chatWithRecording.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'prompt-id-orphaned-xml-close-tags',
+      );
+      const events: StreamEvent[] = [];
+      const iterator = stream[Symbol.asyncIterator]();
+      for (;;) {
+        const next = iterator.next();
+        await vi.advanceTimersByTimeAsync(5_000);
+        const result = await next;
+        if (result.done) break;
+        events.push(result.value);
+      }
+
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        2,
+      );
+      expect(events.some((event) => event.type === StreamEventType.RETRY)).toBe(
+        true,
+      );
+      expect(chatWithRecording.getLastModelMessageText()).toBe(
+        'Successful final response',
+      );
+      expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+      expect(recordAssistantTurn.mock.calls[0]?.[0].message).toEqual([
+        { text: 'Successful final response' },
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('retries leaked JSON before a structured tool call', async () => {
     vi.useFakeTimers();
     try {
