@@ -399,6 +399,10 @@ jobs:
       - *setup_release_node_self_hosted
       - *install_release_dependencies
 
+      # This step also materializes the repo-root `dist` that Pack Build
+      # Outputs packs below: check:serve-fast-path-bundle runs the esbuild
+      # bundle (outdir dist). Keep it ahead of the pack step, or Pack would
+      # fail closed on a missing dist instead of shipping the bundle.
       - name: 'Check Serve Fast Path Bundle'
         run: |-
           npm run check:serve-fast-path-bundle
@@ -430,7 +434,7 @@ jobs:
         with:
           name: 'release-quality-build'
           path: '${{ runner.temp }}/release-build.tgz'
-          retention-days: 1
+          retention-days: 3
           if-no-files-found: 'error'
           overwrite: true
 

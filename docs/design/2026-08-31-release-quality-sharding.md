@@ -24,7 +24,7 @@ The preparation job resolves the selected ref to one immutable commit SHA. Every
 
 The matrix does not fail fast, so all shards report their result. The aggregate quality job runs after success, failure, or cancellation and fails unless every component succeeded. When `force_skip_tests` is enabled, all quality components and the aggregate are skipped, preserving the existing publish override.
 
-Build artifacts are scoped to one workflow run and retained for one day. Uploads explicitly replace an earlier artifact with the same name so “Re-run all jobs” remains recoverable. They contain only generated repository outputs and carry no credentials.
+Build artifacts are scoped to one workflow run and retained for three days. The window covers “Re-run failed jobs” more than a day later, where the succeeded producer is not re-run and its consumers must still download the original artifact. Uploads explicitly replace an earlier artifact with the same name so “Re-run all jobs” remains recoverable too. They contain only generated repository outputs and carry no credentials.
 
 ## Expected impact
 

@@ -418,6 +418,55 @@ describe('release workflow', () => {
     expect(upload.with.overwrite).toBe(true);
   });
 
+  it('keeps the build artifact alive long enough for re-run failed jobs', () => {
+    const upload = releaseYaml.jobs.quality_build.steps.find((step) =>
+      String(step.uses ?? '').includes('actions/upload-artifact'),
+    );
+    // "Re-run failed jobs" more than a day later does not re-run the
+    // succeeded producer; with retention-days: 1 its artifact is already
+    // expired and every consumer fails the download. Three days keeps the
+    // re-run path recoverable without paying for long-term storage.
+    expect(upload.with['retention-days']).toBe(3);
+  });
+
+  it('downloads and unpacks the build artifact in every consumer job', () => {
+    // The build-once contract has one producer and three consumers; the
+    // upload pin alone leaves a consumer free to drop the download/unpack
+    // and silently test a checkout without build outputs.
+    for (const id of [
+      'quality_typecheck',
+      'workspace_tests',
+      'quality_scripts',
+    ]) {
+      const steps = releaseYaml.jobs[id].steps;
+      // The download only waits for the upload when the needs edge
+      // exists; without it the consumer races the producer.
+      expect([].concat(releaseYaml.jobs[id].needs ?? []), id).toContain(
+        'quality_build',
+      );
+      const downloadIndex = steps.findIndex((step) =>
+        String(step.uses ?? '').includes('actions/download-artifact'),
+      );
+      expect(
+        downloadIndex,
+        `${id} lost the build download step`,
+      ).toBeGreaterThanOrEqual(0);
+      expect(steps[downloadIndex].with.name, id).toBe('release-quality-build');
+      expect(steps[downloadIndex].with.path, id).toBe(
+        '${{ runner.temp }}/release-quality-build',
+      );
+      const unpackIndex = steps.findIndex(
+        (step) => step.name === 'Unpack Build Outputs',
+      );
+      // Unpack must stay after download: reversed, tar would read a path
+      // that does not exist yet.
+      expect(unpackIndex, id).toBeGreaterThan(downloadIndex);
+      expect(steps[unpackIndex].run, id).toBe(
+        'tar -xzf "${RUNNER_TEMP}/release-quality-build/release-build.tgz"',
+      );
+    }
+  });
+
   it('shares generated web templates with build consumers', () => {
     const pack = releaseYaml.jobs.quality_build.steps.find(
       (step) => step.name === 'Pack Build Outputs',
@@ -433,6 +482,28 @@ describe('release workflow', () => {
     // paths while the symptom lands in downstream consumers.
     expect(pack.run).toContain('printf');
     expect(pack.run).toContain('${#build_paths[@]} -gt 2');
+  });
+
+  it('keeps the dist producer ahead of the pack step', () => {
+    // Pack hardcodes the repo-root `dist`, which only exists as a side
+    // effect of check:serve-fast-path-bundle (the check runs the esbuild
+    // bundle with outdir dist; scripts/build.js never writes it). The
+    // dependency must stay documented and ordered: moving the check after
+    // Pack, or dropping it, leaves tar without the bundle outputs.
+    const names = releaseYaml.jobs.quality_build.steps.map((step) => step.name);
+    const producer = names.indexOf('Check Serve Fast Path Bundle');
+    const pack = names.indexOf('Pack Build Outputs');
+    expect(producer).toBeGreaterThanOrEqual(0);
+    expect(pack).toBeGreaterThan(producer);
+    expect(workflow).toContain(
+      '# This step also materializes the repo-root `dist` that Pack Build',
+    );
+    const packStep = releaseYaml.jobs.quality_build.steps.find(
+      (step) => step.name === 'Pack Build Outputs',
+    );
+    expect(packStep.run).toContain(
+      "build_paths=('dist' 'packages/web-templates/src/generated')",
+    );
   });
 
   it('fans workspace tests into three complete Vitest shards', () => {
