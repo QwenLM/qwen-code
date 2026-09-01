@@ -11,7 +11,12 @@ import {
   writeSync,
 } from 'node:fs';
 import * as path from 'node:path';
-import { Storage } from '@qwen-code/qwen-code-core';
+import {
+  isSameProcess,
+  readProcStartToken,
+  Storage,
+} from '@qwen-code/qwen-code-core';
+import { withChannelPidfileLock } from './pidfile-lock.js';
 
 export interface ServiceInfoWorker {
   workspaceId?: string;
@@ -23,6 +28,8 @@ export interface ServiceInfoWorker {
 export interface ServiceInfo {
   owner: 'channel' | 'serve';
   pid: number;
+  /** Start-time token guarding against PID reuse; absent in legacy files. */
+  procStart?: string | null;
   startedAt: string;
   channels: string[];
   servePid?: number;
@@ -62,6 +69,13 @@ function parseServiceInfo(value: unknown): ServiceInfo | null {
   }
   if (info.servePid !== undefined && !isValidPid(info.servePid)) return null;
   if (info.workerPid !== undefined && !isValidPid(info.workerPid)) return null;
+  if (
+    info.procStart !== undefined &&
+    info.procStart !== null &&
+    typeof info.procStart !== 'string'
+  ) {
+    return null;
+  }
 
   const workers = parseServiceInfoWorkers(info.workers);
   if (workers === null) return null;
@@ -69,6 +83,7 @@ function parseServiceInfo(value: unknown): ServiceInfo | null {
   return {
     owner,
     pid: info.pid,
+    ...(info.procStart !== undefined ? { procStart: info.procStart } : {}),
     startedAt: info.startedAt,
     channels: info.channels,
     ...(info.servePid !== undefined ? { servePid: info.servePid } : {}),
@@ -138,6 +153,15 @@ function unlinkPidFile(filePath: string): boolean {
   }
 }
 
+/**
+ * Serialize all pidfile readers and writers. `proper-lockfile` uses an atomic
+ * lock directory and recovers abandoned locks after their heartbeat is stale.
+ */
+function withPidFileLock<T>(operation: (filePath: string) => T): T {
+  const filePath = pidFilePath();
+  return withChannelPidfileLock(filePath, () => operation(filePath));
+}
+
 /** Check if a process is alive. */
 function isProcessAlive(pid: number): boolean {
   if (!isValidPid(pid)) {
@@ -158,32 +182,33 @@ function isProcessAlive(pid: number): boolean {
  * Automatically cleans up stale PID files.
  */
 export function readServiceInfo(): ServiceInfo | null {
-  const filePath = pidFilePath();
-  if (!existsSync(filePath)) return null;
+  return withPidFileLock((filePath) => {
+    if (!existsSync(filePath)) return null;
 
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(readFileSync(filePath, 'utf-8'));
-  } catch {
-    // Corrupt file — clean up
-    unlinkPidFile(filePath);
-    return null;
-  }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(readFileSync(filePath, 'utf-8'));
+    } catch {
+      // Corrupt file — clean up while holding the shared pidfile lock.
+      unlinkPidFile(filePath);
+      return null;
+    }
 
-  const info = parseServiceInfo(parsed);
-  if (!info) {
-    // Invalid file — clean up before treating it as a running service.
-    unlinkPidFile(filePath);
-    return null;
-  }
+    const info = parseServiceInfo(parsed);
+    if (!info) {
+      // Invalid file — clean up before treating it as a running service.
+      unlinkPidFile(filePath);
+      return null;
+    }
 
-  if (!isProcessAlive(info.pid)) {
-    // Stale PID — process is dead, clean up
-    unlinkPidFile(filePath);
-    return null;
-  }
+    if (!isSameProcess(info.pid, info.procStart)) {
+      // Stale PID or recycled PID — clean up without signalling its new owner.
+      unlinkPidFile(filePath);
+      return null;
+    }
 
-  return info;
+    return info;
+  });
 }
 
 function writeInfo(info: ServiceInfo, flag: 'w' | 'wx' = 'w'): void {
@@ -210,11 +235,12 @@ export function writeServiceInfo(channels: string[]): void {
   const info: ServiceInfo = {
     owner: 'channel',
     pid: process.pid,
+    procStart: readProcStartToken(process.pid),
     startedAt: new Date().toISOString(),
     channels,
   };
 
-  writeInfo(info, 'wx');
+  withPidFileLock(() => writeInfo(info, 'wx'));
 }
 
 export function writeServeServiceInfo({
@@ -228,9 +254,13 @@ export function writeServeServiceInfo({
   workerPid?: number;
   workers?: ServiceInfoWorker[];
 }): void {
-  const buildInfo = (startedAt: string): ServiceInfo => ({
+  const buildInfo = (
+    startedAt: string,
+    procStart: string | null,
+  ): ServiceInfo => ({
     owner: 'serve',
     pid: servePid,
+    procStart,
     startedAt,
     channels,
     servePid,
@@ -238,42 +268,49 @@ export function writeServeServiceInfo({
     ...(workers !== undefined ? { workers } : {}),
   });
 
-  const filePath = pidFilePath();
-  let fd: number;
-  try {
-    fd = openSync(filePath, constants.O_RDWR | constants.O_NOFOLLOW);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-      writeInfo(buildInfo(new Date().toISOString()), 'wx');
-      return;
-    }
-    throw err;
-  }
-
-  try {
-    let existing: ServiceInfo | null = null;
+  withPidFileLock((filePath) => {
+    let fd: number;
     try {
-      existing = parseServiceInfo(JSON.parse(readFileSync(fd, 'utf-8')));
-    } catch {
-      // Treat corrupt data as owned by another process. This updater must only
-      // replace the serve reservation it created earlier in startup.
+      fd = openSync(filePath, constants.O_RDWR | constants.O_NOFOLLOW);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        writeInfo(
+          buildInfo(new Date().toISOString(), readProcStartToken(servePid)),
+          'wx',
+        );
+        return;
+      }
+      throw err;
     }
-    if (
-      !existing ||
-      existing.owner !== 'serve' ||
-      existing.pid !== servePid ||
-      existing.servePid !== servePid
-    ) {
-      throw fileExistsError(
-        'Channel service pidfile is owned by another process.',
+
+    try {
+      let existing: ServiceInfo | null = null;
+      try {
+        existing = parseServiceInfo(JSON.parse(readFileSync(fd, 'utf-8')));
+      } catch {
+        // Treat corrupt data as owned by another process. This updater must only
+        // replace the serve reservation it created earlier in startup.
+      }
+      if (
+        !existing ||
+        existing.owner !== 'serve' ||
+        existing.pid !== servePid ||
+        existing.servePid !== servePid
+      ) {
+        throw fileExistsError(
+          'Channel service pidfile is owned by another process.',
+        );
+      }
+      const info = buildInfo(
+        existing.startedAt,
+        existing.procStart ?? readProcStartToken(servePid),
       );
+      ftruncateSync(fd, 0);
+      writeSync(fd, JSON.stringify(info, null, 2), 0, 'utf-8');
+    } finally {
+      closeSync(fd);
     }
-    const info = buildInfo(existing.startedAt);
-    ftruncateSync(fd, 0);
-    writeSync(fd, JSON.stringify(info, null, 2), 0, 'utf-8');
-  } finally {
-    closeSync(fd);
-  }
+  });
 }
 
 export function reserveServeServiceInfo({
@@ -286,46 +323,66 @@ export function reserveServeServiceInfo({
   const info: ServiceInfo = {
     owner: 'serve',
     pid: servePid,
+    procStart: readProcStartToken(servePid),
     startedAt: new Date().toISOString(),
     channels,
     servePid,
   };
 
-  writeInfo(info, 'wx');
+  withPidFileLock(() => writeInfo(info, 'wx'));
 }
 
 /** Delete the PID file. */
-export function removeServiceInfo(): void {
-  const filePath = pidFilePath();
-  if (existsSync(filePath)) {
-    unlinkPidFile(filePath);
-  }
+export function removeServiceInfo(expected?: ServiceInfo): void {
+  withPidFileLock((filePath) => {
+    if (!expected) {
+      if (existsSync(filePath)) unlinkPidFile(filePath);
+      return;
+    }
+
+    try {
+      const current = parseServiceInfo(
+        JSON.parse(readFileSync(filePath, 'utf-8')),
+      );
+      if (
+        current?.owner === expected.owner &&
+        current.pid === expected.pid &&
+        current.procStart === expected.procStart &&
+        current.startedAt === expected.startedAt
+      ) {
+        unlinkPidFile(filePath);
+      }
+    } catch {
+      // The original service already removed its pidfile.
+    }
+  });
 }
 
 export function removeServeServiceInfo(
   servePid: number = process.pid,
 ): boolean {
-  const filePath = pidFilePath();
-  if (!existsSync(filePath)) return false;
+  return withPidFileLock((filePath) => {
+    if (!existsSync(filePath)) return false;
 
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(readFileSync(filePath, 'utf-8'));
-  } catch {
-    return false;
-  }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(readFileSync(filePath, 'utf-8'));
+    } catch {
+      return false;
+    }
 
-  const info = parseServiceInfo(parsed);
-  if (
-    !info ||
-    info.owner !== 'serve' ||
-    info.servePid !== servePid ||
-    info.pid !== servePid
-  ) {
-    return false;
-  }
+    const info = parseServiceInfo(parsed);
+    if (
+      !info ||
+      info.owner !== 'serve' ||
+      info.servePid !== servePid ||
+      info.pid !== servePid
+    ) {
+      return false;
+    }
 
-  return unlinkPidFile(filePath);
+    return unlinkPidFile(filePath);
+  });
 }
 
 /**
@@ -335,10 +392,13 @@ export function removeServeServiceInfo(
 export function signalService(
   pid: number,
   signal: NodeJS.Signals = 'SIGTERM',
+  procStart?: string | null,
 ): boolean {
   if (!isValidPid(pid)) {
     return false;
   }
+
+  if (procStart != null && !isSameProcess(pid, procStart)) return false;
 
   try {
     process.kill(pid, signal);
@@ -356,11 +416,14 @@ export async function waitForExit(
   pid: number,
   timeoutMs: number = 5000,
   pollMs: number = 200,
+  procStart?: string | null,
 ): Promise<boolean> {
+  const isOriginalProcessAlive = () =>
+    procStart == null ? isProcessAlive(pid) : isSameProcess(pid, procStart);
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
-    if (!isProcessAlive(pid)) return true;
+    if (!isOriginalProcessAlive()) return true;
     await new Promise((r) => setTimeout(r, pollMs));
   }
-  return !isProcessAlive(pid);
+  return !isOriginalProcessAlive();
 }

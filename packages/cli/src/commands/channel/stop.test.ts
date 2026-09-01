@@ -42,6 +42,33 @@ afterEach(() => {
 });
 
 describe('stopCommand', () => {
+  it('threads the recorded process token through signal and wait operations', async () => {
+    mockReadServiceInfo.mockReturnValue({
+      owner: 'channel',
+      pid: 1234,
+      procStart: 'boot-id:recorded-start',
+      startedAt: '2026-01-01T00:00:00.000Z',
+      channels: ['telegram'],
+    });
+    mockSignalService.mockReturnValue(true);
+    mockWaitForExit.mockResolvedValue(true);
+    vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+
+    await invokeStop();
+
+    expect(mockSignalService).toHaveBeenCalledWith(
+      1234,
+      'SIGTERM',
+      'boot-id:recorded-start',
+    );
+    expect(mockWaitForExit).toHaveBeenCalledWith(
+      1234,
+      5000,
+      200,
+      'boot-id:recorded-start',
+    );
+  });
+
   it('does not signal serve-owned channel workers', async () => {
     mockReadServiceInfo.mockReturnValue({
       owner: 'serve',

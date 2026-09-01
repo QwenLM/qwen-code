@@ -17,6 +17,14 @@ const fsFds = vi.hoisted(() => {
 });
 const mockGlobalQwenDir = vi.hoisted(() => '/tmp/qwen-pidfile-test/.qwen');
 const fsControls = vi.hoisted(() => ({ failUnlink: false }));
+const pidfileLock = vi.hoisted(() => ({
+  acquire: vi.fn(),
+  release: vi.fn(),
+  failures: 0,
+}));
+const processIdentity = vi.hoisted(() => ({
+  currentToken: 'boot-id:current-start',
+}));
 
 vi.mock('node:fs', () => {
   const mock = {
@@ -88,9 +96,35 @@ vi.mock('node:fs', () => {
   return { ...mock, default: mock };
 });
 
+vi.mock('proper-lockfile', () => ({
+  default: {
+    lockSync: (...args: unknown[]) => {
+      pidfileLock.acquire(...args);
+      if (pidfileLock.failures > 0) {
+        pidfileLock.failures -= 1;
+        const error = new Error(
+          'Lock file is already being held',
+        ) as NodeJS.ErrnoException;
+        error.code = 'ELOCKED';
+        throw error;
+      }
+      return pidfileLock.release;
+    },
+  },
+}));
+
 vi.mock('@qwen-code/qwen-code-core', () => ({
   Storage: {
     getGlobalQwenDir: () => mockGlobalQwenDir,
+  },
+  readProcStartToken: () => processIdentity.currentToken,
+  isSameProcess: (pid: number, procStart: string | null | undefined) => {
+    try {
+      process.kill(pid, 0);
+    } catch {
+      return false;
+    }
+    return procStart == null || procStart === processIdentity.currentToken;
   },
 }));
 
@@ -119,6 +153,10 @@ beforeEach(() => {
   for (const k of Object.keys(fsFds.flags)) delete fsFds.flags[Number(k)];
   fsFds.openedFlags.length = 0;
   fsControls.failUnlink = false;
+  pidfileLock.acquire.mockClear();
+  pidfileLock.release.mockClear();
+  pidfileLock.failures = 0;
+  processIdentity.currentToken = 'boot-id:current-start';
 });
 
 afterEach(() => {
@@ -140,6 +178,68 @@ describe('writeServiceInfo + readServiceInfo', () => {
     expect(info!.owner).toBe('channel');
     expect(info!.channels).toEqual(['telegram', 'dingtalk']);
     expect(info!.startedAt).toBeTruthy();
+    expect(JSON.parse(fsStore[getPidFilePath()]!)).toMatchObject({
+      procStart: 'boot-id:current-start',
+    });
+  });
+
+  it('cleans up a pidfile when the live PID belongs to a different process incarnation', () => {
+    const filePath = getPidFilePath();
+    fsStore[filePath] = JSON.stringify({
+      pid: 1234,
+      procStart: 'boot-id:old-start',
+      startedAt: '2026-08-26T08:35:25.541Z',
+      channels: ['dingtalk'],
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    process.kill = vi.fn(() => true) as any;
+
+    expect(readServiceInfo()).toBeNull();
+    expect(filePath in fsStore).toBe(false);
+  });
+
+  it('serializes stale cleanup through the shared pidfile lock', () => {
+    const filePath = getPidFilePath();
+    fsStore[filePath] = JSON.stringify({
+      pid: 1234,
+      procStart: 'boot-id:old-start',
+      startedAt: '2026-08-26T08:35:25.541Z',
+      channels: ['dingtalk'],
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    process.kill = vi.fn(() => true) as any;
+
+    expect(readServiceInfo()).toBeNull();
+    expect(pidfileLock.acquire).toHaveBeenCalledWith(
+      filePath,
+      expect.objectContaining({ realpath: false }),
+    );
+    expect(pidfileLock.release).toHaveBeenCalledOnce();
+  });
+
+  it('retries brief synchronous pidfile lock contention', () => {
+    pidfileLock.failures = 2;
+
+    expect(readServiceInfo()).toBeNull();
+    expect(pidfileLock.acquire).toHaveBeenCalledTimes(3);
+    expect(pidfileLock.release).toHaveBeenCalledOnce();
+  });
+
+  it('keeps legacy live pidfiles that do not carry a process-start token', () => {
+    const filePath = getPidFilePath();
+    fsStore[filePath] = JSON.stringify({
+      pid: 1234,
+      startedAt: '2026-08-26T08:35:25.541Z',
+      channels: ['dingtalk'],
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    process.kill = vi.fn(() => true) as any;
+
+    expect(readServiceInfo()).toMatchObject({
+      pid: 1234,
+      channels: ['dingtalk'],
+    });
+    expect(filePath in fsStore).toBe(true);
   });
 
   it('treats legacy pidfiles without owner as standalone channel services', () => {
@@ -178,6 +278,9 @@ describe('writeServiceInfo + readServiceInfo', () => {
       servePid: 4321,
       workerPid: 8765,
       channels: ['telegram', 'feishu'],
+    });
+    expect(JSON.parse(fsStore[getPidFilePath()]!)).toMatchObject({
+      procStart: 'boot-id:current-start',
     });
   });
 
@@ -229,6 +332,9 @@ describe('writeServiceInfo + readServiceInfo', () => {
       workerPid: 8765,
       channels: ['telegram'],
     });
+    expect(JSON.parse(fsStore[getPidFilePath()]!)).toMatchObject({
+      procStart: 'boot-id:current-start',
+    });
     expect(fsFds.openedFlags).toContain(2 | 0x20000);
   });
 
@@ -276,6 +382,9 @@ describe('writeServiceInfo + readServiceInfo', () => {
       owner: 'channel',
       pid: process.pid,
       channels: ['telegram'],
+    });
+    expect(JSON.parse(fsStore[getPidFilePath()]!)).toMatchObject({
+      procStart: 'boot-id:current-start',
     });
   });
 
@@ -559,6 +668,16 @@ describe('signalService', () => {
     expect(signalService(0)).toBe(false);
     expect(process.kill).not.toHaveBeenCalled();
   });
+
+  it('does not signal a recycled PID when the process token changed', () => {
+    processIdentity.currentToken = 'boot-id:new-start';
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    process.kill = vi.fn(() => true) as any;
+
+    expect(signalService(1234, 'SIGKILL', 'boot-id:old-start')).toBe(false);
+    expect(process.kill).toHaveBeenCalledTimes(1);
+    expect(process.kill).toHaveBeenCalledWith(1234, 0);
+  });
 });
 
 describe('waitForExit', () => {
@@ -606,5 +725,17 @@ describe('waitForExit', () => {
 
     const result = await waitForExit(1234, 150, 50);
     expect(result).toBe(false);
+  });
+
+  it('treats a recycled PID as the original process having exited', async () => {
+    processIdentity.currentToken = 'boot-id:new-start';
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    process.kill = vi.fn(() => true) as any;
+
+    const result = await waitForExit(1234, 1000, 50, 'boot-id:old-start');
+
+    expect(result).toBe(true);
+    expect(process.kill).toHaveBeenCalledTimes(1);
+    expect(process.kill).toHaveBeenCalledWith(1234, 0);
   });
 });

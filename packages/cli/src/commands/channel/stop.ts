@@ -84,27 +84,27 @@ export const stopCommand: CommandModule<unknown, StopArgs> = {
 
     writeStdoutLine(`Stopping channel service (PID ${info.pid})...`);
 
-    if (!signalService(info.pid, 'SIGTERM')) {
+    if (!signalService(info.pid, 'SIGTERM', info.procStart)) {
       writeStderrLine(
         'Failed to send signal — process may have already exited.',
       );
-      removeServiceInfo();
+      removeServiceInfo(info);
       process.exit(0);
     }
 
-    const exited = await waitForExit(info.pid, 5000);
+    const exited = await waitForExit(info.pid, 5000, 200, info.procStart);
 
     if (exited) {
       // Clean up in case the process didn't delete its own PID file
-      removeServiceInfo();
+      removeServiceInfo(info);
       writeStdoutLine('Service stopped.');
     } else {
       writeStderrLine(
         'Service did not exit within 5 seconds. Sending SIGKILL...',
       );
-      signalService(info.pid, 'SIGKILL');
-      await waitForExit(info.pid, 2000);
-      removeServiceInfo();
+      signalService(info.pid, 'SIGKILL', info.procStart);
+      await waitForExit(info.pid, 2000, 200, info.procStart);
+      removeServiceInfo(info);
       writeStdoutLine('Service killed.');
     }
 
