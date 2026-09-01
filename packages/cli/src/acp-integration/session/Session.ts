@@ -17,6 +17,7 @@ import type {
 } from '@google/genai';
 import type {
   Config,
+  ContentGeneratorConfig,
   LlmChat,
   ToolCallConfirmationDetails,
   ToolConfirmationPayload,
@@ -53,6 +54,8 @@ import type {
   ChatRecordingService,
   TurnResultRecordPayload,
   WorkflowApproval,
+  WorkflowSnapshot,
+  WorkflowTask,
   BranchPoint,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -108,6 +111,9 @@ import {
   MessageDisplayDispatcher,
   getPlanModeSystemReminder,
   getArenaSystemReminder,
+  getOutputStyleTurnReminder,
+  resolveMainSessionOutputStyle,
+  wrapSystemReminder,
   getStartupContextLength,
   isSystemReminderContent,
   buildSessionRecoveryPlanFromApiHistory,
@@ -202,6 +208,13 @@ import {
   toolResultPartDiagnosticValues,
   getInvocationContext,
   runWithInvocationContext,
+  getWorkflowTaskMutationKey,
+  isTerminalWorkflowStatus,
+  tryWithWorkflowTaskMutation,
+  MAX_RETAINED_SNAPSHOTS,
+  toSnapshot,
+  deleteWorkflowSnapshot,
+  listWorkflowSnapshots,
   truncateNotificationLabel,
   buildBackgroundEntryLabel,
   collectSessionTurnState,
@@ -314,8 +327,24 @@ import {
   resolveAcpModelOption,
 } from '../../utils/acpModelUtils.js';
 import { classifyApiError } from '../../utils/classify-api-error.js';
-import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
+import {
+  getPersistScopeForModelSelection,
+  getWritableScopes,
+} from '../../config/modelProvidersScope.js';
+import {
+  deleteNestedPropertySafe,
+  settingExistsInScope,
+} from '../../config/settingsUtils.js';
 import { recordDaemonSessionModel } from '../session-model-persistence.js';
+import {
+  applyReasoningSelection,
+  clearReasoningRequestOverrides,
+  getModelConfiguration,
+  isReasoningSelectionSupported,
+  parseReasoningSelection,
+  REASONING_EFFORT_DEFAULT,
+  type ReasoningSelection,
+} from '../model-configuration.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   buildExtensionMentionContext,
@@ -528,6 +557,7 @@ type TodoStopGuardBackgroundBaseline = {
   agents: Set<string>;
   shells: Set<string>;
   monitors: Set<string>;
+  workflows: Set<WorkflowTask>;
   wakeups: Set<string>;
 };
 
@@ -1389,7 +1419,7 @@ export interface BackgroundNotificationQueueItem {
   modelText: string;
   taskId: string;
   status: string;
-  kind: 'agent' | 'monitor' | 'shell';
+  kind: 'agent' | 'monitor' | 'shell' | 'workflow';
   toolUseId?: string;
   todoWorkChainId?: string;
   /** Structured fields for i18n rendering on the frontend. */
@@ -1773,12 +1803,10 @@ export async function buildAvailableCommandsSnapshot(
     settings,
     executionPolicy,
   );
-  const disabledSkillNames = config.getDisabledSkillNames();
   const inactiveSkillRefs = inactiveExtensionSkillRefs(config);
 
   const visibleSlashCommands = slashCommands.filter((cmd) => {
     if (cmd.kind !== CommandKind.SKILL || !cmd.skillDetail) return true;
-    const skillName = cmd.skillDetail.name.toLowerCase();
     const isInactiveExtensionCommand =
       cmd.skillDetail.level === 'extension' &&
       isInactiveExtensionSkill(
@@ -1793,7 +1821,9 @@ export async function buildAvailableCommandsSnapshot(
         },
         inactiveSkillRefs,
       );
-    return !disabledSkillNames.has(skillName) && !isInactiveExtensionCommand;
+    return (
+      config.isSkillEnabled(cmd.skillDetail) && !isInactiveExtensionCommand
+    );
   });
 
   const availableCommands: AvailableCommand[] = visibleSlashCommands.map(
@@ -1837,7 +1867,7 @@ export async function buildAvailableCommandsSnapshot(
     if (skillManager) {
       const skills = (await skillManager.listSkills()).filter(
         (skill) =>
-          !disabledSkillNames.has(skill.name.toLowerCase()) &&
+          config.isSkillEnabled(skill) &&
           !isInactiveExtensionSkill(skill, inactiveSkillRefs),
       );
       availableSkills = skills.map((skill) => skill.name);
@@ -1981,13 +2011,14 @@ export class Session implements SessionContext {
   private notificationAbortController: AbortController | null = null;
   private notificationCompletion: Promise<void> | null = null;
   private currentAgentNotificationTaskId: string | null = null;
+  private currentWorkflowNotificationTaskId: string | null = null;
   private currentShellNotificationActive = false;
   private readonly persistedBackgroundNotificationTaskIds = new Set<string>();
   private readonly backgroundNotificationAcceptances = new Map<
     string,
     Promise<boolean>
   >();
-  private readonly activeAgentNotificationAcceptances = new Set<string>();
+  private readonly activeNotificationAcceptances = new Set<string>();
 
   private readonly goalQueue: AcpGoalTurn[] = [];
   private goalProcessing = false;
@@ -2015,12 +2046,44 @@ export class Session implements SessionContext {
   /** The exact status-change callback this Session installed, so dispose can
    *  retract its own and nobody else's. */
   #statusChangeCallback: (() => void) | undefined;
+  #workflowStatusChangeCallback: ((entry?: WorkflowTask) => void) | undefined;
+  private workflowHistory: WorkflowSnapshot[];
+  /**
+   * R7-5: runIds whose snapshot write this session has observed. Latches
+   * `#rememberWorkflowHistory` off so a post-persistence status emission
+   * cannot resurrect a sibling-deleted run. See that method.
+   */
+  private readonly persistedWorkflowRunIds = new Set<string>();
+  /**
+   * R7-4: every runId the last `refreshWorkflowHistory` merged, BEFORE the
+   * MAX_RETAINED_SNAPSHOTS cap. `workflowHistory` is the display window;
+   * this is what deletion tests membership against.
+   */
+  private mergedWorkflowRunIds = new Set<string>();
+  private readonly unpersistedWorkflowHistory = new Map<
+    string,
+    WorkflowSnapshot
+  >();
+  /**
+   * Deletion order, so a refresh can tell which runs were deleted AFTER
+   * its disk read began. `refreshWorkflowHistory` reads the directory
+   * and then merges without holding a claim, while deletion holds one —
+   * a delete that lands between the read and the merge would otherwise
+   * be overwritten by the stale listing and the run would reappear
+   * until the next refresh. Keyed by runId so a later re-run of the same
+   * id (a retry reuses it) is not suppressed: its sequence predates that
+   * refresh's mark.
+   */
+  private workflowDeletionSeq = 0;
+  private readonly workflowDeletionSeqByRunId = new Map<string, number>();
   #shellStatusChangeCallback: (() => void) | undefined;
   private readonly workflowApprovalAbortController = new AbortController();
   private activeTodoPlanRevision?: {
     planId: string;
     sourceCallId: string;
   };
+  private activeTodoPlanStructure?: string;
+  private todoPlanRevisionGeneration = 0;
 
   // Modular components
   private readonly historyReplayer: HistoryReplayer;
@@ -2072,6 +2135,7 @@ export class Session implements SessionContext {
 
   // Implement SessionContext interface
   readonly sessionId: string;
+  private sessionReasoningSelection?: ReasoningSelection;
 
   constructor(
     id: string,
@@ -2087,8 +2151,19 @@ export class Session implements SessionContext {
      * a full snapshot; the Session itself keeps no reporting state.
      */
     private readonly onActiveWorkChanged?: () => void,
+    workflowHistory: readonly WorkflowSnapshot[] = [],
+    /**
+     * Reports whether another session in this process owns a live or
+     * still-settling registry entry for the run. Every session here shares
+     * one on-disk workflow store but keeps a private registry, so history
+     * deletion must consult all of them, not just this session's.
+     */
+    private readonly isWorkflowRunLiveInSiblingSession: (
+      runId: string,
+    ) => boolean = () => false,
   ) {
     this.sessionId = id;
+    this.workflowHistory = [...workflowHistory];
     this.requiresManagedConversationBinding =
       isReservedStandaloneSessionSourceType(
         this.config.getSessionSourceType?.(),
@@ -2104,6 +2179,20 @@ export class Session implements SessionContext {
       this.settings.merged.experimental?.todoStopGuard === true &&
       !this.config.getBareMode() &&
       !this.config.isSafeMode();
+    // Capture the settings-derived gate value ONCE instead of tracking the
+    // live settings view: this session's LoadedSettings is reloaded from
+    // disk behind the session's back (e.g. `reloadSkillSettings` during a
+    // workspaceSkillsRefresh), and such a reload must not silently flip the
+    // Session Workflow gate with no change event and no plan-revision
+    // cleanup. Gate changes flow only through the daemon's explicit writers
+    // (the workspaceSessionWorkflow UI write and the workspaceReload
+    // re-derivation, both via applySessionWorkflowOverrideToLiveSessions),
+    // which re-pin the provider and run the per-session side effects.
+    const sessionWorkflowEnabledFromSettings =
+      this.settings.merged.experimental?.sessionWorkflow === true;
+    this.config.setSessionWorkflowEnabledProvider?.(
+      () => sessionWorkflowEnabledFromSettings,
+    );
     this.todoStopGuard = new DaemonTodoStopGuard(todoStopGuardEnabled);
     const configuredGuardMode =
       process.env[ENV_ACP_REPEATED_TOOL_FAILURE_GUARD];
@@ -2823,7 +2912,10 @@ export class Session implements SessionContext {
   }
 
   clearActiveTodoPlanRevision(): void {
+    this.todoPlanRevisionGeneration++;
     this.activeTodoPlanRevision = undefined;
+    this.activeTodoPlanStructure = undefined;
+    this.config.clearSessionWorkflowPlanRevision?.();
   }
 
   hardSuspendTodoStopGuard(): void {
@@ -2942,6 +3034,7 @@ export class Session implements SessionContext {
     const agents = this.config.getBackgroundTaskRegistry?.()?.getAll?.() ?? [];
     const shells = this.config.getBackgroundShellRegistry?.()?.getAll?.() ?? [];
     const monitors = this.config.getMonitorRegistry?.()?.getAll?.() ?? [];
+    const workflows = this.config.getWorkflowRunRegistry?.()?.list?.() ?? [];
     const wakeups = this.config.isCronEnabled?.()
       ? (this.config.getCronScheduler?.()?.list?.() ?? []).filter(
           (job) => job.cronExpr === '@wakeup',
@@ -2967,6 +3060,7 @@ export class Session implements SessionContext {
           .filter((item) => item.kind === 'monitor')
           .map((item) => item.taskId),
       ]),
+      workflows: new Set(workflows),
       wakeups: new Set([
         ...wakeups.map((job) => job.id),
         ...this.cronQueue.flatMap((item) =>
@@ -3064,6 +3158,17 @@ export class Session implements SessionContext {
             task.id,
             task.ownerAgentId,
           ) && task.status === 'running',
+      )
+    ) {
+      return true;
+    }
+
+    const workflows = this.config.getWorkflowRunRegistry?.()?.list?.() ?? [];
+    if (
+      workflows.some(
+        (task) =>
+          !baseline.workflows.has(task) &&
+          !isTerminalWorkflowStatus(task.status),
       )
     ) {
       return true;
@@ -3384,6 +3489,177 @@ export class Session implements SessionContext {
     return this.config;
   }
 
+  getWorkflowHistory(): readonly WorkflowSnapshot[] {
+    return this.workflowHistory;
+  }
+
+  async refreshWorkflowHistory(): Promise<readonly WorkflowSnapshot[]> {
+    const deletionMark = this.workflowDeletionSeq;
+    const persisted = await listWorkflowSnapshots(this.config);
+    const byRunId = new Map(
+      persisted.map((snapshot) => [snapshot.runId, snapshot]),
+    );
+    for (const [runId, seq] of this.workflowDeletionSeqByRunId) {
+      if (seq > deletionMark) byRunId.delete(runId);
+    }
+    for (const [runId, snapshot] of this.unpersistedWorkflowHistory) {
+      const stored = byRunId.get(runId);
+      if (stored === undefined) {
+        // Never persisted (write pending or failed): keep the cached
+        // projection visible. Once persistence is observed the entry is
+        // retired via the snapshot-persisted callback, so absence here
+        // afterwards means the run was deleted and must stay gone.
+        byRunId.set(runId, snapshot);
+      } else {
+        // A persisted copy is the newer authoritative projection: the
+        // runId settled (possibly re-run in another session), so a stale
+        // cache must not shadow it.
+        this.unpersistedWorkflowHistory.delete(runId);
+      }
+    }
+    // R7-4: the returned/stored history is the capped display window, but
+    // deletion must reason about the whole merged set — keep it before the
+    // slice rather than making callers re-derive it.
+    this.mergedWorkflowRunIds = new Set(byRunId.keys());
+    this.workflowHistory = [...byRunId.values()]
+      .sort((a, b) => b.startTime - a.startTime)
+      .slice(0, MAX_RETAINED_SNAPSHOTS);
+    this.#pruneUnpersistedWorkflowHistory();
+    return this.workflowHistory;
+  }
+
+  async deleteWorkflowHistory(runId: string): Promise<boolean> {
+    const attempt = await tryWithWorkflowTaskMutation(
+      getWorkflowTaskMutationKey(this.config, runId),
+      () => this.#deleteWorkflowHistoryClaimed(runId),
+    );
+    return attempt.acquired ? attempt.value : false;
+  }
+
+  async #deleteWorkflowHistoryClaimed(runId: string): Promise<boolean> {
+    const registry = this.config.getWorkflowRunRegistry();
+    const isDeletable = (): boolean => {
+      if (this.isWorkflowRunLiveInSiblingSession(runId)) return false;
+      if (registry.isStarting?.(runId)) return false;
+      const current = registry.get(runId);
+      return !current || isTerminalWorkflowStatus(current.status);
+    };
+    if (!isDeletable()) return false;
+    const handle = registry.getHandle(runId);
+    if (handle) {
+      await handle.completion;
+      if (!isDeletable()) return false;
+    }
+    await this.refreshWorkflowHistory();
+    if (!isDeletable()) return false;
+    // R7-4: membership must be tested against everything the client can
+    // SEE, not against the capped window. `buildSessionTasksStatus`
+    // serializes every registry entry unconditionally, while
+    // `refreshWorkflowHistory` truncates to MAX_RETAINED_SNAPSHOTS by
+    // startTime — so a long run that settles after ~30 newer ones started
+    // stays listed via the registry but falls out of the window, and the
+    // capped check answered `{changed: false}` forever. It was terminal,
+    // handle-free and live in no sibling: nothing but the window kept it
+    // undeletable. `deleteWorkflowSnapshot` already tolerates an absent
+    // target, so widening the gate cannot delete something that is not
+    // there.
+    if (
+      !this.mergedWorkflowRunIds.has(runId) &&
+      registry.get(runId) === undefined &&
+      !this.unpersistedWorkflowHistory.has(runId)
+    ) {
+      return false;
+    }
+    // Retire the registry entry before touching the store. `removeTerminal`
+    // refuses a live or handle-held entry — the registry's own last word
+    // on whether the run is still active here — so `false` for an entry
+    // that exists means the run re-registered and must not be reported
+    // deleted; a persisted-only run has no entry to retire.
+    if (registry.get(runId) !== undefined && !registry.removeTerminal(runId)) {
+      return false;
+    }
+    if (!(await deleteWorkflowSnapshot(this.config, runId))) return false;
+    this.workflowDeletionSeqByRunId.set(runId, ++this.workflowDeletionSeq);
+    this.unpersistedWorkflowHistory.delete(runId);
+    this.mergedWorkflowRunIds.delete(runId);
+    this.persistedWorkflowRunIds.delete(runId);
+    this.workflowHistory = this.workflowHistory.filter(
+      (item) => item.runId !== runId,
+    );
+    this.#activeWorkChanged();
+    return true;
+  }
+
+  /**
+   * A sibling session deleted `runId` from the shared store. The
+   * deletion-sequence marker is per-Session — it records deletions THIS
+   * session issued — while the store and the delete entrance are
+   * process-wide, so without this a refresh of ours that began reading
+   * the directory before the sibling's delete landed would merge the
+   * stale listing and republish the run the sibling's client was just
+   * told was gone. Called under the sibling's task-mutation claim,
+   * symmetric to the registry `removeTerminal` sweep.
+   *
+   * The R7-5 persisted latch is deliberately kept: a late terminal
+   * emission for the deleted run must still not re-insert it.
+   */
+  noteExternalWorkflowDeletion(runId: string): void {
+    this.workflowDeletionSeqByRunId.set(runId, ++this.workflowDeletionSeq);
+    this.unpersistedWorkflowHistory.delete(runId);
+    this.mergedWorkflowRunIds.delete(runId);
+    const retained = this.workflowHistory.filter(
+      (item) => item.runId !== runId,
+    );
+    if (retained.length === this.workflowHistory.length) return;
+    this.workflowHistory = retained;
+    this.#activeWorkChanged();
+  }
+
+  #rememberWorkflowHistory(entry: WorkflowTask): void {
+    if (!isTerminalWorkflowStatus(entry.status)) {
+      // Back in an active state means this runId was registered afresh
+      // (a retry/resume reuses it), so its next settlement must be
+      // remembered again — release the R7-5 latch here rather than
+      // wiring a second registry callback for it.
+      this.persistedWorkflowRunIds.delete(entry.runId);
+      return;
+    }
+    // R7-5: retirement is a latch, not a one-shot. The registry's
+    // dispatch-drain callbacks (onAgentCompleted / onBudgetUpdated /
+    // onDispatchSettled) emit status changes on TERMINAL entries with no
+    // status gate, and in-flight dispatches keep draining across the
+    // snapshot write — so a terminal emission routinely lands AFTER
+    // `notifySnapshotPersisted` retired the cache entry. Without this
+    // guard each late emission re-inserted the run as "never persisted",
+    // and a sibling session's deletion was then undone by the next
+    // refresh: absent on disk but present in the stale cache reads as a
+    // pending write, so the deleted run was republished and stayed for
+    // the life of the session. Released at the top of this method when
+    // the runId comes back non-terminal (a retry/resume re-registers it)
+    // so a genuine re-run of the same runId is remembered again.
+    if (this.persistedWorkflowRunIds.has(entry.runId)) return;
+    const snapshot = toSnapshot(entry);
+    this.unpersistedWorkflowHistory.set(snapshot.runId, snapshot);
+    this.workflowHistory = [
+      snapshot,
+      ...this.workflowHistory.filter((item) => item.runId !== entry.runId),
+    ]
+      .sort((a, b) => b.startTime - a.startTime)
+      .slice(0, MAX_RETAINED_SNAPSHOTS);
+    this.#pruneUnpersistedWorkflowHistory();
+  }
+
+  #pruneUnpersistedWorkflowHistory(): void {
+    const retainedRunIds = new Set(
+      this.workflowHistory.map((item) => item.runId),
+    );
+    for (const runId of this.unpersistedWorkflowHistory.keys()) {
+      if (!retainedRunIds.has(runId)) {
+        this.unpersistedWorkflowHistory.delete(runId);
+      }
+    }
+  }
+
   reloadModelProvidersFromDisk(): void {
     if (
       !this.settings.reloadScopesFromDiskAtomically([
@@ -3640,13 +3916,18 @@ export class Session implements SessionContext {
     }
     const notificationIds = new Set<string>();
     for (const item of this.notificationQueue) {
-      if (item.kind === 'agent') notificationIds.add(item.taskId);
+      if (item.kind === 'agent' || item.kind === 'workflow') {
+        notificationIds.add(item.taskId);
+      }
     }
-    for (const taskId of this.activeAgentNotificationAcceptances) {
+    for (const taskId of this.activeNotificationAcceptances) {
       notificationIds.add(taskId);
     }
     if (this.currentAgentNotificationTaskId !== null) {
       notificationIds.add(this.currentAgentNotificationTaskId);
+    }
+    if (this.currentWorkflowNotificationTaskId !== null) {
+      notificationIds.add(this.currentWorkflowNotificationTaskId);
     }
     for (const taskId of notificationIds) {
       holds.push({ category: 'notification', id: taskId });
@@ -3657,6 +3938,26 @@ export class Session implements SessionContext {
       this.currentShellNotificationActive;
     if (shellActive) {
       holds.push({ category: 'shell', id: 'background-shells' });
+    }
+    const workflowRegistry = this.config.getWorkflowRunRegistry();
+    // A reserved-but-unregistered run (script loading, journal replay)
+    // has no `list()` entry yet, but the registry's hasRunningEntries()
+    // and the delete/cancel liveness gates already count it as live. A
+    // daemon-initiated conditional close that read no hold here would
+    // dispose the session and abort the start under the client that just
+    // asked for it. The hold releases itself: registration takes over
+    // with the entry's running hold, and a failed or cancelled start
+    // drops the reservation via `releaseStart`.
+    for (const runId of workflowRegistry.listStartingRunIds?.() ?? []) {
+      holds.push({ category: 'workflow', id: runId });
+    }
+    for (const task of workflowRegistry.list()) {
+      // Mirror the registry's hasRunningEntries(): a paused run executes
+      // nothing and no backstop would ever release the hold, so it must
+      // not pin the session the way executing work does.
+      if (task.status === 'running' || task.status === 'pausing') {
+        holds.push({ category: 'workflow', id: task.runId });
+      }
     }
     return holds;
   }
@@ -3800,6 +4101,7 @@ export class Session implements SessionContext {
   dispose(): void {
     this.disposed = true;
     this.closing = true;
+    this.clearActiveTodoPlanRevision();
     this.pendingPrompt?.abort(SESSION_DISPOSE_ABORT_REASON);
     this.pendingPrompt = null;
     this.resolveCloseGate?.();
@@ -3850,6 +4152,24 @@ export class Session implements SessionContext {
     if (this.#shellStatusChangeCallback) {
       shellRegistry.clearStatusChangeCallback(this.#shellStatusChangeCallback);
       this.#shellStatusChangeCallback = undefined;
+    }
+    // R7-10: mirror the agent registry's treatment above. Without this a
+    // workflow outlives its session's removal — close/kill/shutdown use
+    // force semantics and a background run owns a detached controller —
+    // and an orphan that nothing can see keeps writing its snapshot,
+    // recreating history a sibling session just deleted. Abort BEFORE the
+    // callbacks are cleared so the cancellation still reaches this
+    // session's own bookkeeping.
+    this.config.getWorkflowRunRegistry().abortAll();
+    this.config.getWorkflowRunRegistry().setCompletionCallback(undefined);
+    this.config
+      .getWorkflowRunRegistry()
+      .setSnapshotPersistedCallback(undefined);
+    if (this.#workflowStatusChangeCallback) {
+      this.config
+        .getWorkflowRunRegistry()
+        .clearStatusChangeCallback(this.#workflowStatusChangeCallback);
+      this.#workflowStatusChangeCallback = undefined;
     }
     this.config.getChatRecordingService()?.setTitleRecordedCallback(undefined);
     this.unsubscribeChatRecordingFailure?.();
@@ -3928,7 +4248,7 @@ export class Session implements SessionContext {
       // belong to finished cycles; only live updates may bind the next
       // exit_plan_mode approval, so a replayed session starts text-only —
       // even when the replay fails part-way.
-      this.activeTodoPlanRevision = undefined;
+      this.clearActiveTodoPlanRevision();
     }
   }
 
@@ -3969,7 +4289,7 @@ export class Session implements SessionContext {
 
     chat.truncateHistory(apiTruncateIndex);
     chat.stripThoughtsFromHistory();
-    this.activeTodoPlanRevision = undefined;
+    this.clearActiveTodoPlanRevision();
     const preserveQueuedPromptPriority = this.todoStopGuardQueuedPromptPriority;
     const shouldDrainAutomaticQueues =
       (this.todoStopGuard.blocksUnrelatedAutomaticTurns ||
@@ -4032,7 +4352,7 @@ export class Session implements SessionContext {
     }
 
     this.config.getLlmClient()!.getChat().setHistory(structuredClone(history));
-    this.activeTodoPlanRevision = undefined;
+    this.clearActiveTodoPlanRevision();
     this.#clearTodoStopGuardTrustAndDrainAutomaticQueues();
   }
 
@@ -7013,22 +7333,76 @@ export class Session implements SessionContext {
       sessionId: this.sessionId,
       update: projectedUpdate,
     };
+    const canUpdateTodoPlanRevision =
+      update.sessionUpdate === 'plan' &&
+      this.config.getApprovalMode() === ApprovalMode.PLAN;
+    const todoPlanRevision = canUpdateTodoPlanRevision
+      ? this.#readTodoPlanRevision(update)
+      : undefined;
+    const preservesPendingRevision =
+      todoPlanRevision !== undefined &&
+      todoPlanRevision.structure === this.activeTodoPlanStructure;
+    const previousActiveTodoPlanRevision = this.activeTodoPlanRevision;
+    const previousActiveTodoPlanStructure = this.activeTodoPlanStructure;
+    const previousWorkflowRevision =
+      this.config.getSessionWorkflowPlanRevision?.();
 
-    if (update.sessionUpdate === 'plan') {
-      // Clear before delivery: a plan update the client never receives
-      // must not stay bound to the next exit_plan_mode approval. The
-      // capture below re-stamps only after delivery succeeds.
-      this.activeTodoPlanRevision = undefined;
+    if (canUpdateTodoPlanRevision && !preservesPendingRevision) {
+      // Clear during delivery so a replacement cannot be approved before the
+      // client sees it. Success captures the new revision below; failure
+      // restores the previous one while the session remains in PLAN mode.
+      this.clearActiveTodoPlanRevision();
     }
-    await this.client.sessionUpdate(params);
-    if (update.sessionUpdate === 'plan') {
-      this.#captureTodoPlanRevision(update);
+    try {
+      await this.client.sessionUpdate(params);
+    } catch (error) {
+      if (
+        canUpdateTodoPlanRevision &&
+        !preservesPendingRevision &&
+        this.config.getApprovalMode() === ApprovalMode.PLAN
+      ) {
+        this.activeTodoPlanRevision = previousActiveTodoPlanRevision;
+        this.activeTodoPlanStructure = previousActiveTodoPlanStructure;
+        this.config.setSessionWorkflowPlanRevision?.(previousWorkflowRevision);
+      }
+      throw error;
+    }
+    if (
+      canUpdateTodoPlanRevision &&
+      this.config.getApprovalMode() === ApprovalMode.PLAN &&
+      todoPlanRevision?.allPending
+    ) {
+      if (
+        this.activeTodoPlanRevision?.planId !== todoPlanRevision.planId ||
+        this.activeTodoPlanRevision?.sourceCallId !==
+          todoPlanRevision.sourceCallId
+      ) {
+        this.todoPlanRevisionGeneration++;
+      }
+      this.activeTodoPlanRevision = {
+        planId: todoPlanRevision.planId,
+        sourceCallId: todoPlanRevision.sourceCallId,
+      };
+      this.activeTodoPlanStructure = todoPlanRevision.structure;
+      this.config.setSessionWorkflowPlanRevision?.({
+        planId: todoPlanRevision.planId,
+        sourceCallId: todoPlanRevision.sourceCallId,
+        todoIds: todoPlanRevision.todoIds,
+      });
     }
   }
 
-  #captureTodoPlanRevision(
+  #readTodoPlanRevision(
     update: Extract<SessionUpdate, { sessionUpdate: 'plan' }>,
-  ): void {
+  ):
+    | {
+        planId: string;
+        sourceCallId: string;
+        todoIds: string[];
+        structure: string;
+        allPending: boolean;
+      }
+    | undefined {
     const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
     const plan = isRecord(meta?.['qwenTodoPlan'])
       ? meta['qwenTodoPlan']
@@ -7038,12 +7412,58 @@ export class Session implements SessionContext {
       : undefined;
     const planId = plan?.['id'];
     const sourceCallId = transcript?.['planToolCallId'];
-    this.activeTodoPlanRevision =
+    const workflowPlan = meta?.['qwenSessionWorkflow'] === true;
+    const hasValidIdentity =
       typeof planId === 'string' &&
+      planId.trim() !== '' &&
       typeof sourceCallId === 'string' &&
-      update.entries.length > 0
-        ? { planId, sourceCallId }
+      sourceCallId.trim() !== '' &&
+      update.entries.length > 0;
+    const workflowEnabled = this.config.isSessionWorkflowEnabled?.() === true;
+    if (!workflowEnabled || !workflowPlan || !hasValidIdentity)
+      return undefined;
+
+    const todos = update.entries.flatMap((entry) => {
+      const entryRecord = entry as unknown as Record<string, unknown>;
+      const entryMeta = isRecord(entryRecord['_meta'])
+        ? entryRecord['_meta']
         : undefined;
+      const todo = isRecord(entryMeta?.['qwenTodo'])
+        ? entryMeta['qwenTodo']
+        : undefined;
+      const todoId = todo?.['id'];
+      const blockedBy = todo?.['blockedBy'];
+      if (
+        typeof todoId !== 'string' ||
+        todoId.trim() === '' ||
+        (blockedBy !== undefined &&
+          (!Array.isArray(blockedBy) ||
+            !blockedBy.every((dependency) => typeof dependency === 'string')))
+      ) {
+        return [];
+      }
+      return [
+        {
+          id: todoId,
+          content: entry.content,
+          priority: entry.priority,
+          blockedBy: blockedBy ?? [],
+        },
+      ];
+    });
+    const todoIds = todos.map((todo) => todo.id);
+    if (
+      todos.length !== update.entries.length ||
+      new Set(todoIds).size !== todoIds.length
+    )
+      return undefined;
+    return {
+      planId,
+      sourceCallId,
+      todoIds,
+      structure: JSON.stringify([planId, todos]),
+      allPending: update.entries.every((entry) => entry.status === 'pending'),
+    };
   }
 
   #scheduleChannelDelivery(params: Record<string, unknown>): void {
@@ -8955,6 +9375,36 @@ export class Session implements SessionContext {
       });
     });
 
+    const workflowRegistry = this.config.getWorkflowRunRegistry();
+    this.#workflowStatusChangeCallback = (entry) => {
+      this.#activeWorkChanged();
+      if (entry) this.#rememberWorkflowHistory(entry);
+    };
+    workflowRegistry.setStatusChangeCallback(
+      this.#workflowStatusChangeCallback,
+    );
+    workflowRegistry.setSnapshotPersistedCallback((runId) => {
+      // The run is safely on disk now; drop the unpersisted copy so a
+      // deletion by another session cannot resurrect it on refresh. The
+      // latch makes that retirement stick against the late terminal
+      // emissions draining dispatches still produce (R7-5).
+      this.persistedWorkflowRunIds.add(runId);
+      this.unpersistedWorkflowHistory.delete(runId);
+    });
+    workflowRegistry.setCompletionCallback((displayText, modelText, meta) => {
+      const entry = workflowRegistry.get(meta.runId);
+      this.#enqueueBackgroundNotification({
+        displayText,
+        modelText,
+        taskId: meta.runId,
+        status: meta.status,
+        kind: 'workflow',
+        continuesTodoStopGuardWorkChain:
+          !entry || !this.todoStopGuardBackgroundBaseline.workflows.has(entry),
+        todoWorkChainId: meta.todoWorkChainId,
+      });
+    });
+
     // Session title recorded (auto-generated after a turn, or an in-process
     // /rename) → notify attached clients. A title update is NOT an ACP
     // `SessionUpdate` variant (the external @agentclientprotocol/sdk union
@@ -9042,8 +9492,8 @@ export class Session implements SessionContext {
 
     const acceptance = this.#persistDaemonBackgroundNotification(item);
     this.backgroundNotificationAcceptances.set(item.taskId, acceptance);
-    if (item.kind === 'agent') {
-      this.activeAgentNotificationAcceptances.add(item.taskId);
+    if (item.kind === 'agent' || item.kind === 'workflow') {
+      this.activeNotificationAcceptances.add(item.taskId);
       this.#activeWorkChanged();
     }
     try {
@@ -9053,8 +9503,8 @@ export class Session implements SessionContext {
         this.backgroundNotificationAcceptances.get(item.taskId) === acceptance
       ) {
         this.backgroundNotificationAcceptances.delete(item.taskId);
-        if (item.kind === 'agent') {
-          this.activeAgentNotificationAcceptances.delete(item.taskId);
+        if (item.kind === 'agent' || item.kind === 'workflow') {
+          this.activeNotificationAcceptances.delete(item.taskId);
           this.#activeWorkChanged();
         }
       }
@@ -9178,6 +9628,8 @@ export class Session implements SessionContext {
         if (!item) break;
         this.currentAgentNotificationTaskId =
           item.kind === 'agent' ? item.taskId : null;
+        this.currentWorkflowNotificationTaskId =
+          item.kind === 'workflow' ? item.taskId : null;
         this.currentShellNotificationActive = item.kind === 'shell';
         this.#activeWorkChanged();
         try {
@@ -9196,6 +9648,7 @@ export class Session implements SessionContext {
           );
         } finally {
           this.currentAgentNotificationTaskId = null;
+          this.currentWorkflowNotificationTaskId = null;
           this.currentShellNotificationActive = false;
           this.#activeWorkChanged();
         }
@@ -9752,12 +10205,21 @@ export class Session implements SessionContext {
     }
     const previousApprovalMode = this.config.getApprovalMode();
     this.config.setApprovalMode(approvalMode);
+    // Only plan-involving transitions touch the revision: entering PLAN starts
+    // a fresh approval cycle and leaving PLAN abandons the draft, but an
+    // approved workflow plan keeps executing in a non-plan mode — switching
+    // between non-plan modes (default → auto-edit/yolo) must not disarm it
+    // mid-execution. Matches the sibling sessionApprovalMode ext route and the
+    // workspaceReload handler; the exit_plan_mode approval path deliberately
+    // retains the revision.
+    if (
+      previousApprovalMode !== approvalMode &&
+      (previousApprovalMode === ApprovalMode.PLAN ||
+        approvalMode === ApprovalMode.PLAN)
+    ) {
+      this.clearActiveTodoPlanRevision();
+    }
     if (approvalMode === ApprovalMode.PLAN) {
-      if (previousApprovalMode !== ApprovalMode.PLAN) {
-        // A redundant plan re-select keeps the revision captured by the
-        // live cycle; only a fresh entry starts a new approval cycle.
-        this.activeTodoPlanRevision = undefined;
-      }
       this.clearTodoStopGuardTrust();
     }
 
@@ -9837,6 +10299,12 @@ export class Session implements SessionContext {
     const isRuntime =
       resolvedRoute?.isRuntime ??
       rawModelId.startsWith(RUNTIME_SNAPSHOT_PREFIX);
+    const persistDefault =
+      !this.requiresManagedConversationBinding &&
+      (options.persistDefault ?? true);
+    this.reconcileReasoningSelection(effectiveModelId, {
+      persist: persistDefault,
+    });
     void recordDaemonSessionModel(this.config, {
       modelId: isRuntime
         ? (resolvedRoute?.modelId ?? parsed.modelId)
@@ -9880,9 +10348,6 @@ export class Session implements SessionContext {
         debugLogger.debug('model-update extNotification failed', error);
       });
 
-    const persistDefault =
-      !this.requiresManagedConversationBinding &&
-      (options.persistDefault ?? true);
     if (persistDefault) {
       const persistScope = getPersistScopeForModelSelection(this.settings);
       this.settings.setValue(
@@ -9917,6 +10382,175 @@ export class Session implements SessionContext {
         },
       },
     };
+  }
+
+  getDefaultReasoningConfig(): ContentGeneratorConfig['reasoning'] {
+    // Runtime snapshots already include the persisted selection, not its defaults.
+    const authType = this.config.getAuthType?.();
+    const model =
+      authType && !this.config.getActiveRuntimeModelSnapshot?.()
+        ? this.config.getResolvedModelConfig?.(
+            authType,
+            this.config.getModel(),
+            this.config.getCurrentModelRegistryBaseUrl?.() ?? undefined,
+          )
+        : undefined;
+    if (model) return model.generationConfig.reasoning;
+    return (
+      this.settings.merged.model?.generationConfig as
+        | Partial<ContentGeneratorConfig>
+        | undefined
+    )?.reasoning;
+  }
+
+  reloadReasoningSelection(): void {
+    this.settings.reloadScopeFromDisk(SettingScope.User);
+    this.settings.reloadScopeFromDisk(SettingScope.Workspace);
+    this.reconcileReasoningSelection(this.config.getModel(), {
+      persist: !this.requiresManagedConversationBinding,
+    });
+  }
+
+  setSessionReasoningSelection(
+    selection: ReasoningSelection | undefined,
+  ): void {
+    this.sessionReasoningSelection = selection;
+  }
+
+  getSessionReasoningSelection(): ReasoningSelection | undefined {
+    return this.sessionReasoningSelection;
+  }
+
+  persistReasoningSelection(selection: ReasoningSelection): void {
+    if (this.requiresManagedConversationBinding) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Reasoning selection cannot be persisted for this session',
+      );
+    }
+
+    const key = 'model.reasoningEffort';
+    const persistScope = getPersistScopeForModelSelection(this.settings);
+    const clears = getWritableScopes(this.settings)
+      .filter(
+        (scope) =>
+          (selection === REASONING_EFFORT_DEFAULT || scope !== persistScope) &&
+          settingExistsInScope(key, this.settings.forScope(scope).settings),
+      )
+      .map((scope) => ({ scope, value: undefined }));
+    const writes =
+      selection === REASONING_EFFORT_DEFAULT
+        ? clears
+        : [{ scope: persistScope, value: selection }, ...clears];
+    const committed: Array<{ scope: SettingScope; value: unknown }> = [];
+    // setValues does not roll back scopes it already wrote.
+    for (const write of writes) {
+      const previous = this.settings.forScope(write.scope).settings.model
+        ?.reasoningEffort;
+      try {
+        this.writeReasoningSelection(write.scope, write.value);
+      } catch (error) {
+        this.settings.reloadScopeFromDisk(write.scope);
+        for (const previousWrite of committed.reverse()) {
+          try {
+            this.writeReasoningSelection(
+              previousWrite.scope,
+              previousWrite.value,
+            );
+          } catch (rollbackError) {
+            this.settings.reloadScopeFromDisk(previousWrite.scope);
+            debugLogger.warn(
+              `Failed to roll back reasoning preference: ${
+                rollbackError instanceof Error
+                  ? rollbackError.message
+                  : String(rollbackError)
+              }`,
+            );
+          }
+        }
+        throw error;
+      }
+      committed.push({ scope: write.scope, value: previous });
+    }
+  }
+
+  private reconcileReasoningSelection(
+    modelId: string,
+    options: { persist: boolean },
+  ): void {
+    const rawSelection = this.settings.merged.model?.reasoningEffort;
+    let hasSessionSelection = this.sessionReasoningSelection !== undefined;
+    if (!hasSessionSelection && rawSelection === undefined) return;
+
+    let selection = hasSessionSelection
+      ? this.sessionReasoningSelection
+      : parseReasoningSelection(rawSelection);
+    const generation = this.config.getContentGeneratorConfig?.();
+    const thinkingMandatory = generation?.thinkingMandatory === true;
+    let supported =
+      selection !== undefined &&
+      selection !== REASONING_EFFORT_DEFAULT &&
+      isReasoningSelectionSupported(modelId, selection, thinkingMandatory);
+
+    const appliesSessionDefault =
+      hasSessionSelection && selection === REASONING_EFFORT_DEFAULT;
+    if (hasSessionSelection && !supported && !appliesSessionDefault) {
+      this.sessionReasoningSelection = undefined;
+      hasSessionSelection = false;
+      selection = parseReasoningSelection(rawSelection);
+      supported =
+        selection !== undefined &&
+        selection !== REASONING_EFFORT_DEFAULT &&
+        isReasoningSelectionSupported(modelId, selection, thinkingMandatory);
+    }
+    if (
+      !hasSessionSelection &&
+      rawSelection !== undefined &&
+      !supported &&
+      options.persist
+    ) {
+      try {
+        this.persistReasoningSelection(REASONING_EFFORT_DEFAULT);
+      } catch (error) {
+        debugLogger.warn(
+          `Failed to clear incompatible reasoning preference: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    }
+    const modelReasoning = getModelConfiguration(modelId)?.reasoning;
+    if (
+      supported &&
+      generation &&
+      modelReasoning &&
+      !modelReasoning.toggleOnly
+    ) {
+      clearReasoningRequestOverrides(generation);
+    }
+    const effectiveSelection =
+      (supported || appliesSessionDefault) && selection !== undefined
+        ? selection
+        : REASONING_EFFORT_DEFAULT;
+    applyReasoningSelection(
+      this.config,
+      effectiveSelection,
+      this.getDefaultReasoningConfig(),
+    );
+  }
+
+  private writeReasoningSelection(scope: SettingScope, value: unknown): void {
+    const key = 'model.reasoningEffort';
+    this.settings.setValue(scope, key, value, undefined, {
+      throwOnWriteFailure: true,
+    });
+    if (value !== undefined) return;
+    const file = this.settings.forScope(scope);
+    for (const settings of [file.settings, file.originalSettings]) {
+      if (settings)
+        deleteNestedPropertySafe(settings as Record<string, unknown>, key);
+    }
+    this.settings.recomputeMerged();
   }
 
   /**
@@ -10670,6 +11304,18 @@ export class Session implements SessionContext {
       }
     }
 
+    // The output-style reminder, exactly as `LlmClient.sendMessageStream`
+    // sends it: the ACP prompt carries the style section, so it needs the
+    // same per-turn nudge or the style fades over a long session.
+    if (this.config.getOutputStyle?.()) {
+      const outputStyle = resolveMainSessionOutputStyle(this.config);
+      if (outputStyle) {
+        reminders.push({
+          text: wrapSystemReminder(getOutputStyleTurnReminder(outputStyle)),
+        });
+      }
+    }
+
     return reminders;
   }
 
@@ -10729,6 +11375,10 @@ export class Session implements SessionContext {
     let nestedPermissionCancelled = false;
     let agentToolAbortController: AbortController | undefined;
     let removeAgentToolAbortPropagation: (() => void) | undefined;
+    let todoPlanApprovalGeneration: number | undefined;
+    let todoPlanApprovalRevision:
+      | { planId: string; sourceCallId: string }
+      | undefined;
     let subAgentCleanupFunctions: Array<() => void> = [];
 
     const cleanupAgentToolResources = () => {
@@ -11360,8 +12010,16 @@ export class Session implements SessionContext {
                 // Drop through to the manual-approval flow below.
                 wasAutoModeManualFallback =
                   isDenialFallbackReason(outcome.reason) ||
-                  outcome.reason === 'classifier_unavailable';
-                autoModeFallbackMessage = outcome.message;
+                  outcome.reason === 'classifier_unavailable' ||
+                  outcome.reason === 'external_write';
+
+                if (
+                  outcome.reason === 'classifier_unavailable' ||
+                  outcome.reason === 'external_write'
+                ) {
+                  autoModeFallbackMessage = outcome.message;
+                }
+
                 if (wasAutoModeManualFallback) {
                   debugLogger.warn(
                     `Auto mode fallback to manual approval (${outcome.reason}): ` +
@@ -11378,6 +12036,46 @@ export class Session implements SessionContext {
 
           let didRequestPermission = false;
           let confirmationDetails: ToolCallConfirmationDetails | undefined;
+          const cancelStaleTodoPlanApproval = async () => {
+            const configRevision =
+              this.config.getSessionWorkflowPlanRevision?.();
+            if (
+              todoPlanApprovalGeneration === undefined ||
+              !todoPlanApprovalRevision ||
+              (todoPlanApprovalGeneration === this.todoPlanRevisionGeneration &&
+                this.activeTodoPlanRevision?.planId ===
+                  todoPlanApprovalRevision.planId &&
+                this.activeTodoPlanRevision?.sourceCallId ===
+                  todoPlanApprovalRevision.sourceCallId &&
+                configRevision?.planId === todoPlanApprovalRevision.planId &&
+                configRevision?.sourceCallId ===
+                  todoPlanApprovalRevision.sourceCallId)
+            ) {
+              return undefined;
+            }
+            try {
+              await confirmationDetails?.onConfirm(
+                ToolConfirmationOutcome.Cancel,
+              );
+            } catch (error) {
+              debugLogger.warn(
+                `Failed to cancel stale plan approval: ${this.#formatError(error)}`,
+              );
+            }
+            onStopAfterPermissionCancel?.();
+            return earlyErrorResponse(
+              new Error(
+                'Plan approval is stale because its Session Workflow revision changed. No action was taken.',
+              ),
+              toolName,
+              {
+                status: 'cancelled',
+                errorType: undefined,
+                executionStatus: 'not_started',
+                stopAfterPermissionCancel: true,
+              },
+            );
+          };
           const recordAutoModeFallbackResolution = (
             outcome: ToolConfirmationOutcome,
           ) => {
@@ -11684,6 +12382,22 @@ export class Session implements SessionContext {
               const offeredPermissionOptions = permissionOptions.map(
                 (option) => ({ ...option }),
               );
+              const workflowPlanRevision = isExitPlanModeTool
+                ? this.config.getSessionWorkflowPlanRevision?.()
+                : undefined;
+              const qwenTodoApproval =
+                isExitPlanModeTool &&
+                this.activeTodoPlanRevision &&
+                workflowPlanRevision?.planId ===
+                  this.activeTodoPlanRevision.planId &&
+                workflowPlanRevision.sourceCallId ===
+                  this.activeTodoPlanRevision.sourceCallId
+                  ? this.activeTodoPlanRevision
+                  : undefined;
+              if (qwenTodoApproval) {
+                todoPlanApprovalGeneration = this.todoPlanRevisionGeneration;
+                todoPlanApprovalRevision = qwenTodoApproval;
+              }
               const params: RequestPermissionRequest = {
                 sessionId: this.sessionId,
                 options: permissionOptions,
@@ -11702,11 +12416,7 @@ export class Session implements SessionContext {
                   _meta: {
                     toolName,
                     ...interactionMetaFields(confirmationDetails),
-                    ...(isExitPlanModeTool && this.activeTodoPlanRevision
-                      ? {
-                          qwenTodoApproval: this.activeTodoPlanRevision,
-                        }
-                      : {}),
+                    ...(qwenTodoApproval ? { qwenTodoApproval } : {}),
                   },
                 },
               };
@@ -11748,6 +12458,9 @@ export class Session implements SessionContext {
                 if (permissionRequestCancellation) {
                   return permissionRequestCancellation;
                 }
+                const staleTodoPlanApproval =
+                  await cancelStaleTodoPlanApproval();
+                if (staleTodoPlanApproval) return staleTodoPlanApproval;
                 outcome = resolvePermissionOutcome(
                   output,
                   offeredPermissionOptions,
@@ -12077,6 +12790,8 @@ export class Session implements SessionContext {
           if (executionBoundaryCancellation) {
             return executionBoundaryCancellation;
           }
+          const staleTodoPlanApproval = await cancelStaleTodoPlanApproval();
+          if (staleTodoPlanApproval) return staleTodoPlanApproval;
 
           const continuedAgentId =
             toolName === ToolNames.SEND_MESSAGE &&
@@ -12314,7 +13029,7 @@ export class Session implements SessionContext {
           ) {
             await this.sendCurrentModeUpdateNotification();
             if (this.config.getApprovalMode() === ApprovalMode.PLAN) {
-              this.activeTodoPlanRevision = undefined;
+              this.clearActiveTodoPlanRevision();
               this.#clearTodoStopGuardTrustAndDrainAutomaticQueues();
             }
           }

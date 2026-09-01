@@ -19,6 +19,8 @@ export default defineConfig({
     outputFile: {
       junit: '../junit.xml',
     },
+    // RPC-timeout exemption; see scripts/tests/unit-vitest-configs.test.ts.
+    dangerouslyIgnoreUnhandledErrors: process.platform !== 'linux',
     coverage: {
       provider: 'v8',
       reportsDirectory: '../coverage',

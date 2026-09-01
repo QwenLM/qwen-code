@@ -30,8 +30,10 @@ import type {
   DaemonSession,
   DaemonSessionSummary,
   DaemonSessionSupportedCommandsStatus,
-  DaemonSessionTaskStatus,
+  DaemonSessionTaskWithWorkflowStatus,
   DaemonSessionTasksStatus,
+  DaemonSessionWorkflowTaskStatus,
+  DaemonSessionWorkflowTasksStatus,
   DaemonSessionStatsStatus,
   DaemonSessionArtifactsEnvelope,
   DaemonSkillToggleMutation,
@@ -49,6 +51,7 @@ import type {
   PermissionResponse,
   PromptContentBlock,
   PromptResult,
+  ReasoningSelection,
   SessionMetadataResult,
   SetModelResult,
 } from '@qwen-code/sdk/daemon';
@@ -135,8 +138,10 @@ export interface DaemonConnectionState {
 
 export interface DaemonReasoningControls {
   enabled: boolean;
-  effort: string;
-  efforts: string[];
+  effort: ReasoningSelection;
+  efforts: Array<Exclude<ReasoningSelection, 'none' | 'default'>>;
+  /** The model default when the daemon advertises one. */
+  defaultEffort?: Exclude<ReasoningSelection, 'none' | 'default'>;
   /** Defaults to true. False means effort is mutable but thinking is required. */
   canDisable?: boolean;
 }
@@ -250,6 +255,8 @@ export type DaemonNoticeOperation =
   | 'read_attachment'
   | 'remove_attachment'
   | 'cancel_task'
+  | 'control_workflow'
+  | 'run_saved_workflow'
   | 'load_goal'
   | 'control_goal'
   | 'clear_goal'
@@ -410,7 +417,10 @@ export interface DaemonSessionActions {
   ): Promise<SubmitPromptResult>;
   cancel(): Promise<void>;
   setModel(modelId: string): Promise<SetModelResult>;
-  setReasoningEffort(value: string): Promise<void>;
+  setReasoningEffort(
+    value: ReasoningSelection,
+    opts?: { persist?: boolean },
+  ): Promise<void>;
   setApprovalMode(
     mode: DaemonApprovalMode,
     opts?: { persist?: boolean },
@@ -549,10 +559,26 @@ export interface DaemonSessionActions {
   ): Promise<DaemonRemovePendingPromptResult>;
   sendShellCommand(command: string): Promise<DaemonShellCommandResult>;
   getTasks(opts?: GetTasksActionOptions): Promise<DaemonSessionTasksStatus>;
+  getWorkflowTasks(
+    opts?: GetTasksActionOptions,
+  ): Promise<DaemonSessionWorkflowTasksStatus>;
   cancelTask(
     taskId: string,
-    kind: DaemonSessionTaskStatus['kind'],
+    kind: DaemonSessionTaskWithWorkflowStatus['kind'],
   ): Promise<{ cancelled: boolean }>;
+  controlWorkflowTask(
+    taskId: string,
+    action: 'pause' | 'resume' | 'retry' | 'rerun' | 'delete-history',
+  ): Promise<{
+    changed: boolean;
+    status?: DaemonSessionWorkflowTaskStatus['status'];
+    taskId?: string;
+  }>;
+  runSavedWorkflow(name: string): Promise<{
+    started: boolean;
+    status?: DaemonSessionWorkflowTaskStatus['status'];
+    taskId?: string;
+  }>;
   getGoal(): Promise<GoalStateResponse>;
   controlGoal(request: GoalControlRequest): Promise<GoalStateResponse>;
   /**

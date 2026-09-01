@@ -39,6 +39,7 @@ import { scrubAndReportInheritedLoaderEnv } from './config/shared-env-keys.js';
 import { QWEN_CODE_SERVE_ENV } from './config/acp-channel-fallback.js';
 import {
   buildDisabledSkillNamesProvider,
+  buildEnabledSkillNamesProvider,
   loadCliConfig,
   parseArguments,
 } from './config/config.js';
@@ -52,7 +53,10 @@ import {
   preResolveHomeEnvOverrides,
 } from './config/settings.js';
 import { SettingsWatcher } from './config/settingsWatcher.js';
-import { registerMcpHotReload } from './config/hot-reload.js';
+import {
+  registerMcpHotReload,
+  registerModelProvidersHotReload,
+} from './config/hot-reload.js';
 import { LspConfigWatcher } from './config/lsp-config-watcher.js';
 import { ExtensionFileWatcher } from './config/extension-file-watcher.js';
 import { ExtensionRefreshState } from './config/extension-refresh-state.js';
@@ -576,6 +580,11 @@ export async function main() {
           projectHooks: settings.getProjectHooks(),
         },
         buildDisabledSkillNamesProvider(settings),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        buildEnabledSkillNamesProvider(settings),
       );
 
       if (!settings.merged.security?.auth?.useExternal) {
@@ -874,6 +883,9 @@ export async function main() {
       buildDisabledSkillNamesProvider(settings),
       undefined,
       settingsWatcher,
+      undefined,
+      undefined,
+      buildEnabledSkillNamesProvider(settings),
     );
     markAcpStartup('configConstructionEnd');
     profileCheckpoint('after_load_cli_config');
@@ -899,6 +911,16 @@ export async function main() {
         config.getTopTierMcpServers(),
       );
       registerCleanup(disposeMcpHotReload);
+
+      // Same plumbing for modelProviders edits (#10568): reload the model
+      // registry in place so `/model` picks up new providers without a
+      // session restart.
+      const disposeModelProvidersHotReload = registerModelProvidersHotReload(
+        settingsWatcher,
+        settings,
+        config,
+      );
+      registerCleanup(disposeModelProvidersHotReload);
     }
 
     registerLspHotReload(config, registerCleanup);

@@ -546,6 +546,13 @@ function projectSubagentToolUpdate(
   const status = boundedString(rawOutput?.['status'], 80);
   const executionMode = rawOutput?.['executionMode'];
   const terminateReason = boundedString(rawOutput?.['terminateReason'], 240);
+  const skills = Array.isArray(rawOutput?.['skills'])
+    ? rawOutput['skills']
+        .slice(0, 32)
+        .flatMap((skill) =>
+          boundedString(skill, 120) ? [boundedString(skill, 120)!] : [],
+        )
+    : [];
   const projectedInput = rawInput
     ? {
         ...(subagentType ? { subagent_type: subagentType } : {}),
@@ -573,6 +580,7 @@ function projectSubagentToolUpdate(
         ...(typeof rawOutput['tokenCount'] === 'number'
           ? { tokenCount: rawOutput['tokenCount'] }
           : {}),
+        ...(skills.length > 0 ? { skills } : {}),
         ...(executionSummary
           ? {
               executionSummary: {
@@ -2712,10 +2720,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               currentMode: currentMode ?? current.currentMode,
               reasoning:
                 configSnapshotCurrent && context !== undefined
-                  ? mapSessionContextReasoning(
-                      context,
-                      current.reasoning?.effort,
-                    )
+                  ? mapSessionContextReasoning(context)
                   : current.reasoning,
               displayName:
                 getSessionDisplayName(activeSession.state) ??
@@ -2724,7 +2729,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 ? (sessionContextWindow ?? current.contextWindow)
                 : current.contextWindow,
               providers: activeWorkspaceScoped
-                ? (providers ?? current.providers)
+                ? configSnapshotCurrent
+                  ? (providers ?? current.providers)
+                  : current.providers
                 : undefined,
               supportedCommands: supportedCommands ?? current.supportedCommands,
               context: configSnapshotCurrent
