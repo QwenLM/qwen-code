@@ -235,6 +235,7 @@ function mockConfig(options: {
     getWorkflowRunRegistry: () => ({
       hasRunningEntries: () => false,
       list: () => [],
+      listStartingRunIds: () => [],
     }),
   };
 }
