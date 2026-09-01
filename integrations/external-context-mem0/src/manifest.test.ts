@@ -6,7 +6,6 @@
 
 import { readFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
-import { builtInPresets } from './presets.js';
 
 describe('Mem0 Extension package', () => {
   it('is self-contained and exposes only context_search', async () => {
@@ -31,8 +30,15 @@ describe('Mem0 Extension package', () => {
     expect(packageJson.dependencies).toBeUndefined();
   });
 
-  it('ships no live provider preset in PR1', () => {
-    expect([...builtInPresets]).toEqual([]);
+  it('ships only the runtime, schemas, manifest, and documentation', async () => {
+    const packageJson = await readJson('../package.json');
+
+    expect(packageJson.files).toEqual([
+      'dist/main.js',
+      'schemas',
+      'qwen-extension.json',
+      'README.md',
+    ]);
   });
 });
 

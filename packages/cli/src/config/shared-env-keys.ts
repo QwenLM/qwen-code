@@ -195,6 +195,14 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // (documented as a per-daemon opt-in), so only the daemon's launch
   // environment or a home `.env` may set it.
   'QWEN_SERVE_NEW_FILE_MODE',
+  // QWEN_SERVE_SESSION_ATTACHMENTS_ROOT decides where the daemon stores
+  // every workspace's session attachments. A project `.env` redirecting it
+  // would capture uploads for ALL workspaces the daemon serves — and reads
+  // consult the configured root first, so attacker-modified bytes would be
+  // served back — with no recovery after unsetting the variable. The
+  // location is an operator decision (documented as a per-daemon opt-in), so
+  // only the daemon's launch environment or a home `.env` may set it.
+  'QWEN_SERVE_SESSION_ATTACHMENTS_ROOT',
   // DEV gates the daemon's inherited-loader-env scrub (run-qwen-serve.ts);
   // only the dev harness (scripts/dev.js) stamps it into the launch env. A
   // project file setting it would silently keep loader vars in the base env

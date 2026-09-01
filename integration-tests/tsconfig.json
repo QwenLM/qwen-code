@@ -45,6 +45,9 @@
       "@qwen-code/qwen-code-core/transcriptRecords": [
         "../packages/core/src/utils/transcript-records.ts"
       ],
+      "@qwen-code/qwen-code-core/noFollowOpen": [
+        "../packages/core/src/utils/no-follow-open.ts"
+      ],
       "@qwen-code/qwen-code-core/goalWire": [
         "../packages/core/src/goals/goal-wire.ts"
       ],
@@ -124,10 +127,10 @@
       "@qwen-code/acp-bridge/workspacePaths": [
         "../packages/acp-bridge/src/workspacePaths.ts"
       ],
-      // qwen-serve-webui-live-journal-recovery.test.ts imports this subpath;
-      // without an entry it resolves through the exports map to dist.
-      "@qwen-code/webui/daemon-react-sdk": [
-        "../packages/webui/src/daemon-react-sdk.ts"
+      // qwen-serve-webui-live-journal-recovery.test.ts imports Web Shell's
+      // daemon bindings; map to source so typecheck does not depend on dist.
+      "@qwen-code/web-shell/daemon-react-sdk": [
+        "../packages/web-shell/client/daemon-react-sdk.ts"
       ],
       // channel-plugin.test.ts and the plugin-example sources it imports
       // both import `@qwen-code/channel-base`. Map it to source so the

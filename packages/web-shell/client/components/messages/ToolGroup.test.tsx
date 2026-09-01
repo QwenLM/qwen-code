@@ -2233,3 +2233,55 @@ describe('tool output logic', () => {
     );
   });
 });
+
+describe('pending edit approval rows', () => {
+  it('locks the row while an approval is pending, even for mixed-case tool names', () => {
+    // Daemon adapters pass tool names through unnormalized; the pending-edit
+    // treatment must not silently stop applying when the wire value carries
+    // case variations (every sibling is*ToolName helper lowercases
+    // internally).
+    const tool = makeTool({
+      toolName: 'WriteFile',
+      status: 'in_progress',
+      args: { file_path: 'package.json' },
+    });
+    const container = renderToolLine(
+      tool,
+      {
+        approval: {
+          id: 'perm-edit',
+          toolCallId: tool.callId,
+          toolName: 'WriteFile',
+          hasDiffPreview: true,
+          content: [],
+          options: [],
+        },
+      },
+      { hostOwnsEditDiffPreview: true },
+    );
+
+    // The native diff editor owns the approval interaction: no auto-expand
+    // and no expand affordance while the approval is outstanding.
+    expect(container.querySelector('[class*="lineExpandable"]')).toBeNull();
+  });
+
+  it('keeps pending edit rows expandable when the host does not own the diff', () => {
+    const tool = makeTool({
+      toolName: 'WriteFile',
+      status: 'in_progress',
+      args: { file_path: 'package.json' },
+    });
+    const container = renderToolLine(tool, {
+      approval: {
+        id: 'perm-edit',
+        toolCallId: tool.callId,
+        toolName: 'WriteFile',
+        hasDiffPreview: true,
+        content: [],
+        options: [],
+      },
+    });
+
+    expect(container.querySelector('[class*="lineExpandable"]')).not.toBeNull();
+  });
+});

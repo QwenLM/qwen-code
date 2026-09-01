@@ -180,6 +180,7 @@ import {
   type GoalTurnHost,
 } from '../goals/goal-runtime.js';
 import type { GoalRecoveryRecord } from '../goals/goal-persistence.js';
+import { GOAL_DEFAULT_TOKEN_BUDGET } from '../goals/goal-protocol.js';
 import { createGoalCheckpointVerifier } from '../goals/goal-checkpoint-verifier.js';
 import { createGoalVerifier } from '../goals/goal-verifier.js';
 import type { ToolInvocationGuard } from '../core/tool-invocation-guard.js';
@@ -474,6 +475,16 @@ export interface AutoModeSettings {
    * auto-approved. Default false.
    */
   classifyAllShell?: boolean;
+  /** AUTO classifier controls for third-party MCP tools. */
+  mcp?: {
+    /**
+     * Forward MCP tool arguments (bounded and truncated) to the AUTO
+     * classifier so it can judge what the agent is about to send to the
+     * server. Default true. When false the classifier sees only the tool
+     * name, which usually results in a conservative block.
+     */
+    forwardArguments?: boolean;
+  };
 }
 
 export interface AccessibilitySettings {
@@ -884,6 +895,7 @@ export interface ConfigParameters {
    * Names returned must be lower-cased; consumers compare case-insensitively.
    */
   disabledSkillNamesProvider?: () => ReadonlySet<string>;
+  enabledSkillNamesProvider?: () => ReadonlySet<string>;
   terminalImageRenderSupportProvider?: () => Promise<TerminalImageRenderSupport>;
   /**
    * Skill discovery levels that should not be loaded. Sourced from
@@ -1009,6 +1021,14 @@ export interface ConfigParameters {
   model?: string;
   outputLanguageFilePath?: string;
   maxSessionTurns?: number;
+  /**
+   * Autonomous spend window armed on each new Goal, in `tokensUsed` tokens
+   * (`totalTokenCount` summed per Goal-turn model call). `0` runs Goals with
+   * no budget, and `-1` is accepted as an alias for `0`, matching the sibling
+   * settings where `-1` means unlimited; absent or invalid falls back to
+   * `GOAL_DEFAULT_TOKEN_BUDGET`. See `normalizeGoalTokenBudget`.
+   */
+  goalTokenBudget?: number;
   /**
    * Maximum number of nested sub-agent levels (1-based). `1` reproduces the
    * pre-nesting behavior — level-1 sub-agents exist but cannot themselves
@@ -1431,6 +1451,49 @@ export function validateMaxSessionTurns(value: number | undefined): number {
   return resolved;
 }
 
+/**
+ * Resolves the operator's Goal token budget setting to the grant the Goal
+ * runtime arms on each new Goal.
+ *
+ * A positive integer is the grant. `0` opts out -- the runtime treats a
+ * non-finite grant as "arm nothing", and a Goal with no `tokenBudget` field
+ * runs unbounded, so the opt-out never has to persist `Infinity`. `-1` is an
+ * alias for `0`, matching the sibling budget settings where `-1` means
+ * unlimited. Anything else (absent, other negative, fractional, NaN,
+ * non-number) is the default; the caller decides whether that deserves a
+ * warning via `isValidGoalTokenBudget`.
+ */
+export function normalizeGoalTokenBudget(value: unknown): number {
+  if (value === 0 || value === -1) return Number.POSITIVE_INFINITY;
+  return isValidGoalTokenBudget(value) ? value : GOAL_DEFAULT_TOKEN_BUDGET;
+}
+
+/**
+ * Largest accepted `model.goalTokenBudget`: 10x the built-in default.
+ *
+ * The bound is a typo guard, not a policy on long runs. The population for
+ * this setting is exactly "people typing zeros into a safety bound", and a
+ * silent extra zero disarms the runaway-spend guard the setting exists for;
+ * an operator who genuinely wants more autonomy than 300M tokens per window
+ * has the explicit opt-out (`0`/`-1`) instead. Values above the cap fall
+ * back to the default and land in the debug log like every other invalid
+ * value.
+ */
+export const GOAL_TOKEN_BUDGET_CAP = 10 * GOAL_DEFAULT_TOKEN_BUDGET;
+
+/**
+ * True for the values `normalizeGoalTokenBudget` honours (`-1` as the
+ * opt-out alias for `0`, positives up to `GOAL_TOKEN_BUDGET_CAP`); false for
+ * the values that fall back to the default.
+ */
+export function isValidGoalTokenBudget(value: unknown): value is number {
+  return (
+    typeof value === 'number' &&
+    Number.isInteger(value) &&
+    (value === -1 || (value >= 0 && value <= GOAL_TOKEN_BUDGET_CAP))
+  );
+}
+
 function validateMaxToolCallsPerTurn(value: number | undefined): number {
   const resolved = value ?? DEFAULT_MAX_TOOL_CALLS_PER_TURN;
   if (!Number.isInteger(resolved)) {
@@ -1482,6 +1545,8 @@ function readMemoryPressureRatioEnv(envName: string, fallback: number): number {
  * Options for Config.initialize()
  */
 export interface ConfigInitializeOptions {
+  /** Cancels request-scoped initialization without becoming a session signal. */
+  signal?: AbortSignal;
   /**
    * Callback for sending MCP messages to SDK servers via control plane.
    * Required for SDK MCP server support in SDK mode.
@@ -2093,6 +2158,9 @@ export class Config {
   private readonly disabledSkillNamesProvider:
     | (() => ReadonlySet<string>)
     | null;
+  private readonly enabledSkillNamesProvider:
+    | (() => ReadonlySet<string>)
+    | null;
   private readonly terminalImageRenderSupportProvider:
     | (() => Promise<TerminalImageRenderSupport>)
     | null;
@@ -2251,6 +2319,7 @@ export class Config {
   private ideMode: boolean;
 
   private readonly maxSessionTurns: number;
+  private readonly goalTokenBudgetGrant: number;
   private readonly maxSubagentDepth: number;
   private readonly maxWallTimeSeconds: number;
   private readonly maxToolCalls: number;
@@ -2446,6 +2515,7 @@ export class Config {
       ...(params.disabledSlashCommands ?? []),
     ]);
     this.disabledSkillNamesProvider = params.disabledSkillNamesProvider ?? null;
+    this.enabledSkillNamesProvider = params.enabledSkillNamesProvider ?? null;
     this.terminalImageRenderSupportProvider =
       params.terminalImageRenderSupportProvider ?? null;
     this.disabledSkillLevels = new Set(params.disabledSkillLevels ?? []);
@@ -2553,6 +2623,17 @@ export class Config {
     this.fileDiscoveryService = params.fileDiscoveryService ?? null;
     this.bugCommand = params.bugCommand;
     this.maxSessionTurns = validateMaxSessionTurns(params.maxSessionTurns);
+    this.goalTokenBudgetGrant = normalizeGoalTokenBudget(
+      params.goalTokenBudget,
+    );
+    if (
+      params.goalTokenBudget !== undefined &&
+      !isValidGoalTokenBudget(params.goalTokenBudget)
+    ) {
+      this.debugLogger.warn(
+        `Ignoring invalid goalTokenBudget ${String(params.goalTokenBudget)}: expected a non-negative integer or -1 (no budget); using the default of ${GOAL_DEFAULT_TOKEN_BUDGET}.`,
+      );
+    }
     this.maxSubagentDepth = normalizeMaxSubagentDepth(params.maxSubagentDepth);
     this.maxWallTimeSeconds = params.maxWallTimeSeconds ?? -1;
     this.maxToolCalls = params.maxToolCalls ?? -1;
@@ -2903,6 +2984,7 @@ export class Config {
     if (this.shutdownRequested) {
       throw Error('Config is shutting down');
     }
+    options?.signal?.throwIfAborted();
     this.initialized = true;
     const initialization = this.initializeOnce(options);
     this.initializationPromise = initialization;
@@ -2955,6 +3037,7 @@ export class Config {
           this.sessionWriterActivationPromise = undefined;
         }
       }
+      options?.signal?.throwIfAborted();
       registerSessionProjectDir(this.sessionId, this.storage.getProjectDir());
       this.sessionProjectDirRegistered = true;
       await this.initializeInternal(options);
@@ -2967,6 +3050,16 @@ export class Config {
       try {
         await this.closeSessionWriter();
       } catch (closeError) {
+        if (
+          options?.signal?.aborted &&
+          containsErrorByIdentity(error, options.signal.reason)
+        ) {
+          this.debugLogger.warn(
+            'Chat recording close failed after initialization was aborted:',
+            closeError,
+          );
+          options.signal.throwIfAborted();
+        }
         if (containsErrorByIdentity(error, closeError)) {
           throw error;
         }
@@ -2986,6 +3079,7 @@ export class Config {
   ): Promise<void> {
     this.debugLogger.info('Config initialization started');
     await this.proxyDispatcherReady;
+    options?.signal?.throwIfAborted();
     if (options?.skipFileCheckpointing === true) {
       this.fileCheckpointingEnabled = false;
       this.fileHistoryService = undefined;
@@ -3014,6 +3108,7 @@ export class Config {
       });
     }
     recordStartupEvent('config_initialize_extensions_initial_end');
+    options?.signal?.throwIfAborted();
     this.debugLogger.debug('Extension manager initialized');
 
     // Bare mode and read-only replay helpers skip all hook loading and execution.
@@ -3270,6 +3365,7 @@ export class Config {
       this.debugLogger.debug('Hook system disabled, skipping initialization');
     }
     recordStartupEvent('config_initialize_hooks_end');
+    options?.signal?.throwIfAborted();
 
     this.subagentManager = new SubagentManager(this);
     recordStartupEvent('config_initialize_skills_start');
@@ -3306,6 +3402,7 @@ export class Config {
       this.debugLogger.debug('Skill manager skipped');
     }
     recordStartupEvent('config_initialize_skills_end');
+    options?.signal?.throwIfAborted();
 
     this.memoryPressureConfig = loadMemoryPressureConfig();
     this.memoryPressureMonitor = new MemoryPressureMonitor(
@@ -3327,13 +3424,15 @@ export class Config {
       await this.extensionManager.refreshCache();
     }
     recordStartupEvent('config_initialize_extensions_final_end');
+    options?.signal?.throwIfAborted();
 
     if (!this.provisionalWorkspace) {
       recordStartupEvent('config_initialize_hierarchical_memory_start');
-      await this.refreshHierarchicalMemory('session_start');
+      await this.refreshHierarchicalMemory('session_start', options?.signal);
       recordStartupEvent('config_initialize_hierarchical_memory_end');
       this.debugLogger.debug('Hierarchical memory loaded');
     }
+    options?.signal?.throwIfAborted();
 
     // Progressive MCP availability: skip MCP discovery in the synchronous
     // tool-registry construction path and kick it off in the background
@@ -3360,6 +3459,7 @@ export class Config {
       options?.sendSdkMcpMessage,
       skipInlineMcpDiscovery ? { skipDiscovery: true } : undefined,
     );
+    options?.signal?.throwIfAborted();
     recordStartupEvent('config_initialize_tool_registry_end');
     recordStartupEvent('tool_registry_created', {
       toolCount: this.toolRegistry.getAllToolNames().length,
@@ -3373,7 +3473,7 @@ export class Config {
       !(options?.skipLlmInitialization ?? options?.skipGeminiInitialization) &&
       !this.provisionalWorkspace
     ) {
-      await this.llmClient.initialize();
+      await this.llmClient.initialize(undefined, options?.signal);
       this.debugLogger.info('LLM client initialized');
     } else {
       this.debugLogger.info('LLM client initialization skipped');
@@ -3392,6 +3492,7 @@ export class Config {
       await this.toolRegistry.warmAll({
         strict: options?.lenientToolWarmup !== true,
       });
+      options?.signal?.throwIfAborted();
       recordStartupEvent('config_initialize_tool_warmup_end');
     }
 
@@ -3429,6 +3530,7 @@ export class Config {
     }
 
     if (!this.provisionalWorkspace) {
+      options?.signal?.throwIfAborted();
       logStartSession(this, new StartSessionEvent(this));
     }
     this.debugLogger.info('Config initialization completed');
@@ -3789,6 +3891,7 @@ export class Config {
 
   async refreshHierarchicalMemory(
     loadReason: Exclude<InstructionLoadReason, 'include'> = 'refresh',
+    signal?: AbortSignal,
   ): Promise<void> {
     // Safe mode: skip all context file loading (QWEN.md, AGENTS.md, rules)
     if (this.isSafeMode()) {
@@ -3821,6 +3924,7 @@ export class Config {
         loadReason,
         onInstructionsLoaded: createInstructionsLoadedCallback(
           () => this.hookSystem,
+          signal,
         ),
       },
     );
@@ -5460,6 +5564,15 @@ export class Config {
     return this.maxSessionTurns;
   }
 
+  /**
+   * The autonomous spend window armed on each new Goal, as the runtime's
+   * `tokenBudgetGrant`: a positive integer, or `Infinity` when the operator
+   * set `goalTokenBudget` to `0` or `-1` (Goals then run unbounded).
+   */
+  getGoalTokenBudgetGrant(): number {
+    return this.goalTokenBudgetGrant;
+  }
+
   getMaxSubagentDepth(): number {
     return this.maxSubagentDepth;
   }
@@ -6052,6 +6165,35 @@ export class Config {
    */
   getDisabledSkillNames(): ReadonlySet<string> {
     return this.disabledSkillNamesProvider?.() ?? EMPTY_DISABLED_SKILL_NAMES;
+  }
+
+  isSkillEnabled(skill: {
+    name: string;
+    level?: string;
+    filePath?: string;
+    extensionName?: string;
+  }): boolean {
+    const name = skill.name.trim().toLowerCase();
+    const extension =
+      skill.level === 'extension'
+        ? this.getExtensions().find(
+            (candidate) =>
+              candidate.name === skill.extensionName &&
+              candidate.skills?.some(
+                (owned) =>
+                  owned.name.trim().toLowerCase() === name &&
+                  owned.filePath === skill.filePath,
+              ),
+          )
+        : undefined;
+    if (skill.level === 'extension' && !extension?.isActive) return false;
+    if (this.getDisabledSkillNames().has(name)) return false;
+    if (!extension || this.enabledSkillNamesProvider?.().has(name)) return true;
+    const state = this.extensionManager.getExtensionSkillState(
+      extension.id,
+      skill.name,
+    );
+    return state.workspaceEnabled ?? state.defaultEnabled;
   }
 
   /**
@@ -8464,6 +8606,7 @@ export class Config {
       tokenLedger: recorder,
       verifier: createGoalVerifier(this),
       checkpointVerifier: createGoalCheckpointVerifier(this),
+      tokenBudgetGrant: this.goalTokenBudgetGrant,
     });
     this.goalRuntime = runtime;
     if (this.goalTurnHost) {
