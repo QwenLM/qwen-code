@@ -671,6 +671,7 @@ vi.mock('./hooks/useBackgroundTasks', () => ({
   useBackgroundTasks: (
     _sessionId: string | undefined,
     _taskActivityKey: string,
+    _taskActivityActive: boolean,
     _connected: boolean,
     refreshTrigger = 0,
   ) => {
