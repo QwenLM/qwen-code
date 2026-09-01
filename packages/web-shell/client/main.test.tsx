@@ -80,6 +80,9 @@ describe('StandaloneApp', () => {
     expect(testState.props?.webShellProps.environmentPanel?.items).toContain(
       'artifacts',
     );
+    expect(testState.props?.webShellProps.environmentPanel?.items).toContain(
+      'attachments',
+    );
   });
 
   it('round-trips standalone context without a workspace selector', () => {

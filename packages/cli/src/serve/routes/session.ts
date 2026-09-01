@@ -4544,6 +4544,13 @@ export function registerSessionRoutes(
               }
             };
             const activePromptBeforeRead = hasActivePrompt();
+            if (direction === 'backward') {
+              try {
+                await runtime.bridge.flushSessionTranscript?.(sessionId);
+              } catch (error) {
+                if (!(error instanceof SessionNotFoundError)) throw error;
+              }
+            }
             let page;
             try {
               page = await reader.readPage(sessionId, {

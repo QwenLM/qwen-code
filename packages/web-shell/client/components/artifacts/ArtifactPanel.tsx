@@ -19,7 +19,6 @@ import {
   Code2Icon,
   EyeIcon,
   GaugeIcon,
-  GitBranchIcon,
   ImageIcon,
   Maximize2Icon,
   MessageCirclePlusIcon,
@@ -134,11 +133,6 @@ export type ImageTabSource = {
 };
 
 export type ArtifactPanelTab =
-  | {
-      id: string;
-      kind: 'workflow';
-      title: string;
-    }
   | {
       id: string;
       kind: 'review';
@@ -279,7 +273,7 @@ export type ArtifactPanelTab =
       id: string;
       kind: 'workflow';
       title: string;
-      sessionId: string;
+      sessionId?: string;
     };
 
 type WorkspaceScopedArtifactPanelTab = Extract<
@@ -545,7 +539,7 @@ export function ArtifactPanel({
                     {getArtifactPanelTabKind(tab) === 'review' ? (
                       <TabReviewIcon />
                     ) : tab.kind === 'workflow' ? (
-                      <GitBranchIcon
+                      <NetworkIcon
                         className={styles.tabIconSvg}
                         strokeWidth={1.6}
                       />
@@ -586,11 +580,6 @@ export function ArtifactPanel({
                       />
                     ) : tab.kind === 'token_usage' ? (
                       <GaugeIcon
-                        className={styles.tabIconSvg}
-                        strokeWidth={1.6}
-                      />
-                    ) : tab.kind === 'workflow' ? (
-                      <NetworkIcon
                         className={styles.tabIconSvg}
                         strokeWidth={1.6}
                       />
@@ -923,7 +912,14 @@ export function ArtifactPanel({
             {activeTab.loadError ?? t('common.loading')}
           </div>
         ) : activeTab.kind === 'workflow' ? (
-          workflow ? (
+          activeTab.sessionId ? (
+            <AgentWorkflow
+              tasks={agentTasks}
+              loading={agentTraceLoading}
+              error={agentTraceError}
+              onOpenAgent={onOpenWorkflowAgent}
+            />
+          ) : workflow ? (
             <SessionWorkflowInspector {...workflow} />
           ) : (
             <div className={styles.empty}>{t('workflow.empty.title')}</div>
@@ -1077,13 +1073,6 @@ export function ArtifactPanel({
             key={activeTab.id}
             sessionActions={activeTab.sessionActions}
             sessionId={activeTab.sessionId}
-          />
-        ) : activeTab.kind === 'workflow' ? (
-          <AgentWorkflow
-            tasks={agentTasks}
-            loading={agentTraceLoading}
-            error={agentTraceError}
-            onOpenAgent={onOpenWorkflowAgent}
           />
         ) : (
           <ScheduledTaskDetail

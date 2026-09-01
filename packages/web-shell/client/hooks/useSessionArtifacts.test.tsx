@@ -417,8 +417,8 @@ describe('useSessionArtifacts', () => {
 
   it('keeps the empty artifacts reference stable while a load has not established an owner', async () => {
     // A session whose artifact load fails (e.g. a subagent session without an
-    // artifacts endpoint) never sets `loadedOwnerRef`, so the hook must hand
-    // back one stable empty array. A fresh literal per render changes
+    // artifacts endpoint) caches one empty array, so the hook must hand back
+    // that stable reference. A fresh literal per render changes
     // `artifacts` identity on every render, which re-runs consumer effects
     // that depend on it and cascades into an infinite update loop.
     const load = deferred<{ artifacts: DaemonSessionArtifact[] }>();

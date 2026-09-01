@@ -1792,7 +1792,6 @@ function parsePersistedArtifactPanelTab(
         closeWithPane: tab['closeWithPane'],
       } as PersistedArtifactPanelTab;
     case 'workflow':
-      if (typeof tab['sessionId'] !== 'string') return;
       return {
         ...common,
         kind: 'workflow',
@@ -2676,14 +2675,16 @@ function findToolCall(
 }
 
 function transcriptEventsToMessages(events: readonly DaemonEvent[]): Message[] {
-  let state = createDaemonTranscriptState({
+  const state = createDaemonTranscriptState({
     maxBlocks: Math.max(2_000, events.length),
     maxRetainedBytes: Number.POSITIVE_INFINITY,
   });
-  for (const event of events) {
-    state = reduceDaemonTranscriptEvents(state, normalizeDaemonEvent(event));
-  }
-  return transcriptBlocksToDaemonMessages(state.blocks);
+  return transcriptBlocksToDaemonMessages(
+    reduceDaemonTranscriptEvents(
+      state,
+      events.flatMap((event) => normalizeDaemonEvent(event)),
+    ).blocks,
+  );
 }
 
 function mapToWebShellTaskInfo(
@@ -4091,9 +4092,6 @@ export function App({
       ? (environmentPanelOpenBySessionRef.current[logicalSessionKey] ?? false)
       : false,
   );
-  const environmentPanelRestoreRef = useRef<
-    { sessionKey: string; open: boolean } | undefined
-  >(undefined);
   const environmentArtifactsOpenRef = useRef({
     sessionKey: logicalSessionKey,
     open: environmentPanelOpen,
@@ -4105,27 +4103,20 @@ export function App({
       environmentPanelReachable && logicalSessionKey
         ? (environmentPanelOpenBySessionRef.current[logicalSessionKey] ?? false)
         : false;
-    environmentPanelRestoreRef.current = logicalSessionKey
-      ? { sessionKey: logicalSessionKey, open }
-      : undefined;
     setEnvironmentPanelOpen(open);
   }, [environmentPanelReachable, logicalSessionKey]);
-  useEffect(() => {
-    if (!logicalSessionKey) return;
-    const restore = environmentPanelRestoreRef.current;
-    if (restore?.sessionKey === logicalSessionKey) {
-      if (environmentPanelOpen !== restore.open) return;
-      environmentPanelRestoreRef.current = undefined;
-      return;
-    }
-    delete environmentPanelOpenBySessionRef.current[logicalSessionKey];
-    environmentPanelOpenBySessionRef.current[logicalSessionKey] =
-      environmentPanelOpen;
-    writeStoredBooleanMap(
-      ENVIRONMENT_PANEL_OPEN_STORAGE_KEY,
-      environmentPanelOpenBySessionRef.current,
-    );
-  }, [environmentPanelOpen, logicalSessionKey]);
+  const persistEnvironmentPanelOpen = useCallback(
+    (open: boolean) => {
+      if (!logicalSessionKey) return;
+      delete environmentPanelOpenBySessionRef.current[logicalSessionKey];
+      environmentPanelOpenBySessionRef.current[logicalSessionKey] = open;
+      writeStoredBooleanMap(
+        ENVIRONMENT_PANEL_OPEN_STORAGE_KEY,
+        environmentPanelOpenBySessionRef.current,
+      );
+    },
+    [logicalSessionKey],
+  );
   useEffect(() => {
     const previous = environmentArtifactsOpenRef.current;
     environmentArtifactsOpenRef.current = {
@@ -4192,6 +4183,9 @@ export function App({
       !connection.sessionId ||
       !logicalSessionKey
     ) {
+      if (logicalSessionKey) {
+        attachmentRetryCountRef.current.delete(logicalSessionKey);
+      }
       setSessionAttachmentsLoading(false);
       return;
     }
@@ -5417,7 +5411,11 @@ export function App({
   useLayoutEffect(() => {
     const previousSessionId = artifactPanelSessionIdRef.current;
     const nextSessionId = logicalSessionKey;
-    if (previousSessionId && previousSessionId !== nextSessionId) {
+    if (
+      previousSessionId &&
+      previousSessionId !== nextSessionId &&
+      artifactPanelRestoredSessionKeyRef.current === previousSessionId
+    ) {
       const currentState = artifactPanelSessionStateRef.current;
       if (currentState) {
         artifactPanelStateBySessionRef.current.delete(previousSessionId);
@@ -5710,8 +5708,9 @@ export function App({
                   };
                 }
                 case 'workflow':
-                  return tab.sessionId === connection.sessionId &&
-                    sessionAgentTraceSupported
+                  return !tab.sessionId ||
+                    (tab.sessionId === connection.sessionId &&
+                      sessionAgentTraceSupported)
                     ? tab
                     : undefined;
               }
@@ -6141,6 +6140,11 @@ export function App({
         const nextActive =
           nextTabs[Math.min(closedIndex, nextTabs.length - 1)] ?? nextTabs[0];
         setActiveArtifactPanelTabId(nextActive.id);
+        if (nextActive.kind === 'terminal' && !nextActive.initialized) {
+          return nextTabs.map((tab) =>
+            tab.id === nextActive.id ? { ...tab, initialized: true } : tab,
+          );
+        }
       }
       return nextTabs;
     });
@@ -10054,31 +10058,6 @@ export function App({
     sessionWorkflowEnabled,
     sessionWorkflowSettingsResolved,
   ]);
-  const environmentAgentTasks = useMemo(
-    () => getEnvironmentAgentTasks(messages, sessionTasks),
-    [messages, sessionTasks],
-  );
-  const lastReportedAgentTasksRef = useRef<string | undefined>(undefined);
-  useEffect(() => {
-    if (!onAgentTasksChange) {
-      lastReportedAgentTasksRef.current = undefined;
-      return;
-    }
-    const snapshot = JSON.stringify(
-      environmentAgentTasks.map(
-        ({
-          runtimeMs: _runtimeMs,
-          stats: _stats,
-          recentActivities: _recentActivities,
-          prompt: _prompt,
-          ...stable
-        }) => stable,
-      ),
-    );
-    if (snapshot === lastReportedAgentTasksRef.current) return;
-    lastReportedAgentTasksRef.current = snapshot;
-    onAgentTasksChange(environmentAgentTasks);
-  }, [environmentAgentTasks, onAgentTasksChange]);
   const planAgentTools = useMemo(() => {
     if (
       !sessionWorkflowEnabled ||
@@ -12614,8 +12593,9 @@ export function App({
   const openEnvironmentTasksPanel = useCallback(() => {
     if (!requireActiveSessionForLocalCommand()) return;
     setEnvironmentPanelOpen(true);
+    persistEnvironmentPanelOpen(true);
     setBackgroundTasksRefreshTrigger((value) => value + 1);
-  }, [requireActiveSessionForLocalCommand]);
+  }, [persistEnvironmentPanelOpen, requireActiveSessionForLocalCommand]);
   const openEnvironmentTask = useCallback(
     (task: DaemonSessionTaskStatus) => {
       if (task.kind === 'monitor' || task.kind === 'shell') {
@@ -15235,19 +15215,24 @@ export function App({
     !isChatEmptyState &&
     !activePanel &&
     mainView === 'chat';
-  const handleEnvironmentPanelOpenChange = useCallback((open: boolean) => {
-    if (!open) {
-      preserveEnvironmentPanelOnArtifactOpenRef.current = false;
-      setEnvironmentPanelOpen(false);
-      return;
-    }
-    setEnvironmentPanelOpen(true);
-    setBackgroundTasksRefreshTrigger((value) => value + 1);
-  }, []);
+  const handleEnvironmentPanelOpenChange = useCallback(
+    (open: boolean) => {
+      persistEnvironmentPanelOpen(open);
+      if (!open) {
+        preserveEnvironmentPanelOnArtifactOpenRef.current = false;
+        setEnvironmentPanelOpen(false);
+        return;
+      }
+      setEnvironmentPanelOpen(true);
+      setBackgroundTasksRefreshTrigger((value) => value + 1);
+    },
+    [persistEnvironmentPanelOpen],
+  );
   const dismissEnvironmentPanel = useCallback(() => {
     preserveEnvironmentPanelOnArtifactOpenRef.current = false;
+    persistEnvironmentPanelOpen(false);
     setEnvironmentPanelOpen(false);
-  }, []);
+  }, [persistEnvironmentPanelOpen]);
   const handleRightPanelOpenChange = useCallback(
     (open: boolean) => {
       if (open) {

@@ -1536,6 +1536,32 @@ describe('SessionAttachmentStore', () => {
       await fs.writeFile(path.join(directory, name), data);
     }
 
+    it('lists primary and fallback attachments with primary precedence', async () => {
+      const { main, fallback } = await createRoots();
+      const store = new SessionAttachmentStore(main, sessionId, fallback);
+      try {
+        await writeIn(main, 'current.txt', 'current');
+        await writeIn(main, 'shared.txt', 'primary');
+        await writeIn(fallback, 'legacy.txt', 'legacy');
+        await writeIn(fallback, 'shared.txt', 'fallback copy');
+
+        const listed = await store.list();
+
+        expect(listed.map((item) => item.attachmentId).sort()).toEqual([
+          'current.txt',
+          'legacy.txt',
+          'shared.txt',
+        ]);
+        expect(
+          listed.find((item) => item.attachmentId === 'shared.txt')?.size,
+        ).toBe(Buffer.byteLength('primary'));
+      } finally {
+        await store.close();
+        await fs.rm(main, { recursive: true, force: true });
+        await fs.rm(fallback, { recursive: true, force: true });
+      }
+    });
+
     it('reads from the fallback root when the primary misses', async () => {
       const { main, fallback } = await createRoots();
       const store = new SessionAttachmentStore(main, sessionId, fallback);
@@ -2186,6 +2212,7 @@ describe('SessionAttachmentStore', () => {
       try {
         const removing = source.remove('notes.txt');
         await unlinkPaused;
+        await expect(source.list()).resolves.toEqual([]);
         await target.copyFrom(source);
         resumeUnlink();
 

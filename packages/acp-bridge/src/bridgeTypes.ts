@@ -1835,6 +1835,9 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     req: BridgeSessionTranscriptPageRequest,
   ): Promise<BridgeSessionTranscriptPage>;
 
+  /** Flush pending transcript writes for a live session. */
+  flushSessionTranscript?(sessionId: string): Promise<void>;
+
   /** Cancel a background task in a live session. */
   cancelSessionTask(
     sessionId: string,

@@ -11933,6 +11933,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       return requestSessionTranscriptPage(req);
     },
 
+    async flushSessionTranscript(sessionId) {
+      // The child flushes before every backward page; a one-record page is the
+      // existing read-only barrier without adding another ACP extension.
+      await requestSessionTranscriptPage({
+        sessionId,
+        direction: 'backward',
+        limit: 1,
+      });
+    },
+
     async cancelSessionTask(sessionId, taskId, taskKind, context) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);

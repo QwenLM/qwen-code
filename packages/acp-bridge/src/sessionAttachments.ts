@@ -623,39 +623,55 @@ export class SessionAttachmentStore {
       reference: SessionAttachmentReference;
       mtimeMs: number;
     }> = [];
-    const directory = this.persistentDirectory ?? this.activeDirectory;
-    if (!directory) return [];
-    let entries;
-    try {
-      entries = await fs.readdir(directory, { withFileTypes: true });
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
-      throw error;
-    }
-    for (const entry of entries) {
-      if (!entry.isFile() || this.pendingNames.has(entry.name)) continue;
-      const name = safeAttachmentName(entry.name);
-      if (!name || name !== entry.name) continue;
-      let size: number;
-      let mtimeMs: number;
+    const directories = [
+      this.persistentDirectory ?? this.activeDirectory,
+      this.persistentFallbackDirectory,
+    ].filter((directory): directory is string => Boolean(directory));
+    const foundNames = new Set<string>();
+    let directoryRead = false;
+    let directoryError: unknown;
+    for (const directory of directories) {
+      let entries;
       try {
-        const stat = await fs.stat(path.join(directory, entry.name));
-        size = stat.size;
-        mtimeMs = stat.mtimeMs;
-      } catch {
-        // A file that vanished between readdir and stat is not an attachment.
+        entries = await fs.readdir(directory, { withFileTypes: true });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          directoryError ??= error;
+        }
         continue;
       }
-      const mimeType = mimeTypeForName(entry.name);
-      found.push({
-        reference: {
-          type: isSupportedImageMimeType(mimeType) ? 'image' : 'resource',
-          attachmentId: entry.name,
-          mimeType,
-          size,
-        },
-        mtimeMs,
-      });
+      directoryRead = true;
+      for (const entry of entries) {
+        if (
+          !entry.isFile() ||
+          this.pendingNames.has(entry.name) ||
+          this.removingNames.has(entry.name) ||
+          foundNames.has(entry.name)
+        ) {
+          continue;
+        }
+        const name = safeAttachmentName(entry.name);
+        if (!name || name !== entry.name) continue;
+        try {
+          const stat = await fs.stat(path.join(directory, entry.name));
+          const mimeType = mimeTypeForName(entry.name);
+          found.push({
+            reference: {
+              type: isSupportedImageMimeType(mimeType) ? 'image' : 'resource',
+              attachmentId: entry.name,
+              mimeType,
+              size: stat.size,
+            },
+            mtimeMs: stat.mtimeMs,
+          });
+          foundNames.add(entry.name);
+        } catch {
+          // A file that vanished between readdir and stat is not an attachment.
+        }
+      }
+    }
+    if (!directoryRead && directoryError !== undefined) {
+      throw directoryError;
     }
     // Files are written once (flag 'wx'), so mtime is the upload time; stable
     // order for the attachments panel is upload order, name as tiebreaker.

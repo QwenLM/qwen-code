@@ -2740,6 +2740,39 @@ describe('task activity key', () => {
     ).not.toBeNull();
   });
 
+  it('keeps the environment preference when layout temporarily hides it', async () => {
+    const { container } = renderApp();
+    await flush();
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle environment information"]',
+        )
+        ?.click();
+      testState.latestChatEditorProps?.onChatWidthModeChange?.('wide');
+    });
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+    });
+
+    expect(
+      container.querySelector(
+        '[data-testid="environment-panel"]:not([hidden])',
+      ),
+    ).toBeNull();
+    expect(
+      JSON.parse(
+        window.localStorage.getItem(
+          'qwen-code-web-shell-environment-panel-open',
+        ) ?? '{}',
+      )['/tmp/project\0session-1'],
+    ).toBe(true);
+  });
+
   it('retains at most twenty environment panel session states', async () => {
     window.localStorage.setItem(
       'qwen-code-web-shell-environment-panel-open',
@@ -2968,6 +3001,18 @@ describe('task activity key', () => {
         workspaceCwd: '/tmp/project',
       },
     ]);
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Close Terminal"]')
+        ?.click();
+    });
+    expect(mockReleaseWebTerminal).toHaveBeenCalledWith('terminal:stored');
+    expect(
+      container
+        .querySelector('[data-terminal-id="terminal:inactive"]')
+        ?.getAttribute('data-enabled'),
+    ).toBe('true');
   });
 
   it('does not restore a terminal tab without the capability', async () => {
@@ -3814,6 +3859,53 @@ describe('task activity key', () => {
     expect(mockSessionActions.readAttachment).not.toHaveBeenCalledWith(
       'second.png',
     );
+  });
+
+  it('does not replace a saved panel with transient session-switch state', async () => {
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/tmp/project\0session-2': {
+          open: true,
+          activeTabId: 'terminal:saved',
+          tabs: [
+            {
+              id: 'terminal:saved',
+              kind: 'terminal',
+              title: 'Saved terminal',
+              workspaceCwd: '/tmp/project',
+            },
+          ],
+        },
+      }),
+    );
+    mockConnection.capabilities.features = ['web_terminal'];
+    const { container, rerender } = renderApp({
+      rightPanel: { items: ['terminal'] },
+    });
+    await flush();
+
+    mockConnection.loadingTranscript = true;
+    mockConnection.sessionId = 'session-2';
+    rerender();
+    await flush();
+    mockConnection.sessionId = 'session-1';
+    rerender();
+    await flush();
+    mockConnection.sessionId = 'session-2';
+    rerender();
+    mockConnection.loadingTranscript = false;
+    rerender();
+    await flush();
+
+    expect(
+      container.querySelector('button[title="Saved terminal"]'),
+    ).not.toBeNull();
+    expect(
+      container
+        .querySelector('[data-terminal-id="terminal:saved"]')
+        ?.getAttribute('data-enabled'),
+    ).toBe('true');
   });
 
   it('restores cross-session task tabs lazily', async () => {
@@ -7582,7 +7674,6 @@ beforeEach(() => {
   mockConnection.error = undefined;
   mockConnection.errorStatus = undefined;
   mockConnection.missingSession = false;
-  mockConnection.sessionContext = undefined;
   mockConnection.commands = [];
   mockConnection.skills = [];
   mockConnection.loadingTranscript = false;
@@ -12736,6 +12827,7 @@ describe('App session callbacks', () => {
         startTime: 1,
         runtimeMs: 10,
         isBackgrounded: true,
+        toolUseId: 'fork-tool-1',
       },
     ];
     const { container } = renderApp();
@@ -12785,7 +12877,7 @@ describe('App session callbacks', () => {
     });
     expect(
       mockWorkspace.client.resolveSubagentSession,
-    ).toHaveBeenCalledExactlyOnceWith('session-1', 'fork-agent-1');
+    ).toHaveBeenCalledExactlyOnceWith('session-1', 'fork-tool-1');
   });
 
   it('loads an out-of-band fork after the floating drawer opens with reduced motion', async () => {
