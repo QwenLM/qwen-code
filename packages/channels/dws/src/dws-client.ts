@@ -786,10 +786,13 @@ export class DwsClient implements DwsClientLike {
             return;
           }
         };
-        void result.admitted.then(
-          () => result.completed.catch(reportError),
-          () => undefined,
+        const admissionSucceeded = result.admitted.then(
+          () => true,
+          () => false,
         );
+        void result.completed.catch(async (error: unknown) => {
+          if (await admissionSucceeded) reportError(error);
+        });
         return result.admitted;
       },
       onError,

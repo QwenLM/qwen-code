@@ -554,6 +554,60 @@ describe('DwsClient', () => {
     );
   });
 
+  it('observes completion failure while direct admission is pending', async () => {
+    let onLine!: (line: string) => void | Promise<void>;
+    const eventStarter = vi.fn<DwsEventProcessStarter>(
+      async (_executable, _args, lineHandler) => {
+        onLine = lineHandler;
+        return subscription();
+      },
+    );
+    const client = new DwsClient(
+      { executable: '/opt/dws' },
+      vi.fn(),
+      eventStarter,
+    );
+    let releaseAdmission!: () => void;
+    const admitted = new Promise<void>((resolve) => {
+      releaseAdmission = resolve;
+    });
+    let rejectCompletion!: (error: Error) => void;
+    const completed = new Promise<void>((_resolve, reject) => {
+      rejectCompletion = reject;
+    });
+    const onError = vi.fn();
+
+    await client.subscribeToIm(
+      { kind: 'direct' },
+      vi.fn((): DwsImDispatch => ({ admitted, completed })),
+      onError,
+    );
+    const reading = Promise.resolve(
+      onLine(
+        json({
+          type: 'user_im_message_receive_o2o_all',
+          event_id: 'event-1',
+          message_id: 'message-1',
+          conversation_id: 'conversation-a',
+          content: 'request',
+          sender_open_dingtalk_id: 'user-a',
+          sender: 'User A',
+        }),
+      ),
+    );
+    rejectCompletion(new Error('turn failed'));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(onError).not.toHaveBeenCalled();
+
+    releaseAdmission();
+    await reading;
+    await vi.waitFor(() =>
+      expect(onError).toHaveBeenCalledWith(
+        expect.objectContaining({ message: 'turn failed' }),
+      ),
+    );
+  });
+
   it('subscribes to all ordinary group messages without a group filter', async () => {
     const eventStarter = vi.fn<DwsEventProcessStarter>(async () =>
       subscription(),

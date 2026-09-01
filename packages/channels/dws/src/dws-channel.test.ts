@@ -240,8 +240,10 @@ class FakeDwsClient implements DwsClientLike {
     const stream = this.streams[sourceIndex];
     if (!stream) throw new Error(`Missing fake stream ${sourceIndex}.`);
     const result = stream.onMessage(event);
-    if (result && 'completed' in result) await result.completed;
-    else await result;
+    if (result && 'completed' in result) {
+      await result.admitted;
+      await result.completed;
+    } else await result;
   }
 }
 
@@ -249,6 +251,7 @@ class TestableDwsChannel extends DwsChannel {
   inbound: Envelope[] = [];
   inboundError?: Error;
   inboundHandler?: (envelope: Envelope) => Promise<void>;
+  nextCursorSaveError?: Error;
   responseMessageId?: string;
   responseSenderId?: string;
   responseThreadId?: string;
@@ -257,6 +260,15 @@ class TestableDwsChannel extends DwsChannel {
 
   protected override get todoPollInterval(): number {
     return 0;
+  }
+
+  protected override saveCursor(): void {
+    if (this.nextCursorSaveError) {
+      const error = this.nextCursorSaveError;
+      this.nextCursorSaveError = undefined;
+      throw error;
+    }
+    super.saveCursor();
   }
 
   inboundAttempts = 0;
@@ -348,9 +360,14 @@ class TestableDwsChannel extends DwsChannel {
 
   releasePendingMessage(conversationId: string, messageId: string): void {
     const removePendingMessage = (
-      this as unknown as { removePendingMessage(key: string): void }
+      this as unknown as { removePendingMessage(key: string): boolean }
     ).removePendingMessage.bind(this);
     removePendingMessage(`${conversationId}\0${messageId}`);
+    this.saveCursor();
+  }
+
+  markPendingMessageProcessed(conversationId: string, messageId: string): void {
+    this.cursor.processedMessages.push(`${conversationId}\0${messageId}`);
     this.saveCursor();
   }
 
@@ -397,6 +414,14 @@ class PolicyDwsChannel extends DwsChannel {
 
   pendingDocumentNotifications(): unknown[] {
     return this.cursor.pendingDocumentNotifications ?? [];
+  }
+
+  queuedDirectMessageCount(): number {
+    return (
+      this as unknown as {
+        queuedDirectMessages: Map<string, Promise<void>>;
+      }
+    ).queuedDirectMessages.size;
   }
 
   documentSetSize(): number {
@@ -1476,6 +1501,38 @@ describe('DwsChannel', () => {
     expect(channel.pendingMessageIds()).toHaveLength(4_999);
   });
 
+  it('does not acknowledge admission when cursor persistence fails', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    const event = message(
+      'user_im_message_receive_o2o_all',
+      'retry-after-save-failure',
+      'request',
+    );
+    channel.nextCursorSaveError = new Error('disk unavailable');
+
+    await expect(client.emit(1, event)).rejects.toThrow('disk unavailable');
+    expect(channel.pendingMessageIds()).toEqual([]);
+    expect(channel.inbound).toEqual([]);
+
+    await client.emit(1, event);
+    expect(channel.inbound.map(({ messageId }) => messageId)).toEqual([
+      'retry-after-save-failure',
+    ]);
+  });
+
+  it('cleans up a persisted message that is already processed', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    channel.seedPendingMessages(1);
+    channel.markPendingMessageProcessed('conversation-capacity', 'parked-0');
+
+    await channel.poll();
+
+    expect(channel.pendingMessageIds()).toEqual([]);
+    expect(channel.inbound).toEqual([]);
+  });
+
   it('turns a document mention notification into a document task and replies to its comment', async () => {
     const client = new FakeDwsClient();
     const channel = await readyChannel(client);
@@ -2022,6 +2079,55 @@ describe('DwsChannel', () => {
     await vi.waitFor(() => expect(channel.inbound).toHaveLength(2));
   });
 
+  it('does not let a document notification block another history conversation', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    let releaseDocument!: () => void;
+    const documentBlocked = new Promise<void>((resolve) => {
+      releaseDocument = resolve;
+    });
+    let releaseOrdinary!: () => void;
+    const ordinaryBlocked = new Promise<void>((resolve) => {
+      releaseOrdinary = resolve;
+    });
+    const started: string[] = [];
+    channel.inboundHandler = async (envelope) => {
+      started.push(envelope.messageId);
+      if (envelope.messageId === 'history-document') await documentBlocked;
+      if (envelope.messageId === 'history-ordinary') await ordinaryBlocked;
+      channel.inbound.push(envelope);
+    };
+    const eventTime = Date.now();
+    client.directMessages = [
+      message(
+        'user_im_message_receive_o2o_all',
+        'history-document',
+        documentMentionCard('doc-history-blocked', 'comment-history-blocked'),
+        { conversationId: 'conversation-document', eventTime },
+      ),
+      message(
+        'user_im_message_receive_o2o_all',
+        'history-ordinary',
+        'second request',
+        { conversationId: 'conversation-ordinary', eventTime },
+      ),
+    ];
+
+    await channel.poll();
+
+    await vi.waitFor(() =>
+      expect(started).toEqual(['history-document', 'history-ordinary']),
+    );
+    expect(channel.pendingMessageIds()).toEqual([
+      'history-document',
+      'history-ordinary',
+    ]);
+    releaseDocument();
+    releaseOrdinary();
+    await vi.waitFor(() => expect(channel.inbound).toHaveLength(2));
+    expect(channel.pendingMessageIds()).toEqual([]);
+  });
+
   // R1-7: every history window re-opens at `watermark - 5s`, so every
   // live-dispatched direct message is re-fetched by a later poll. The
   // processed-key guard is the only thing standing between that refetch and
@@ -2043,10 +2149,11 @@ describe('DwsChannel', () => {
   });
 
   // R2-1: the history loop dispatches every DM-history message, and
-  // `handleImMessage`'s self-message check is the only filter keeping the
-  // bot's own replies — now ordinary sent messages that reappear in every
-  // overlap window — out of the agent. If that check were ever conditioned
-  // on `!fromHistory`, every poll would re-dispatch them as fresh turns.
+  // The self-message check in `admitReceivedDirectMessage` is the only filter
+  // keeping the bot's own replies — now ordinary sent messages that reappear
+  // in every overlap window — out of the agent. If that check were ever
+  // conditioned on `!fromHistory`, every poll would re-dispatch them as fresh
+  // turns.
   it('does not dispatch self-sent messages recovered from direct-message history', async () => {
     const client = new FakeDwsClient();
     const channel = await readyChannel(client);
@@ -2064,9 +2171,9 @@ describe('DwsChannel', () => {
   });
 
   // R1-1 (fix-induced): without the loop-level processed-key skip, every
-  // re-fetched self-message re-enters `handleImMessage`, whose self branch
-  // persists the whole cursor before the processed-key early return — one
-  // blocking mkdir/write/rename per own reply per poll on top of the
+  // re-fetched self-message re-enters `admitReceivedDirectMessage`, whose self
+  // branch persists the whole cursor before the processed-key early return —
+  // one blocking mkdir/write/rename per own reply per poll on top of the
   // end-of-poll persist.
   it('saves the cursor once per poll for own replies re-fetched in the overlap window', async () => {
     const client = new FakeDwsClient();
@@ -2130,12 +2237,10 @@ describe('DwsChannel', () => {
     }
   });
 
-  // R2-2 discriminator: a document notification whose turn fails is NOT
-  // parked, so the mid-window catch must rethrow it — the pinned watermark
-  // is its only retry path. Swallowing it would advance the watermark, the
-  // notification would fall out of the overlap window, and its remaining
-  // budget would never run.
-  it('keeps spending the retry budget of an unparked document notification', async () => {
+  // R2-2 discriminator: a failed document notification is durably admitted
+  // before its turn starts. The detached turn must leave that pending entry
+  // available for later polls until the shared retry budget is exhausted.
+  it('keeps spending the retry budget of a parked document notification', async () => {
     vi.useFakeTimers();
     try {
       const client = new FakeDwsClient();
@@ -3001,10 +3106,12 @@ describe('DwsChannel', () => {
 
     await channel.poll();
 
-    expect(channel.pendingDocumentNotifications()).toEqual([
-      expect.objectContaining({ senderId: 'open-alice' }),
-      expect.objectContaining({ senderId: 'open-bob' }),
-    ]);
+    await vi.waitFor(() =>
+      expect(channel.pendingDocumentNotifications()).toEqual([
+        expect.objectContaining({ senderId: 'open-alice' }),
+        expect.objectContaining({ senderId: 'open-bob' }),
+      ]),
+    );
     const bobPairingText = client.sendImMessage.mock.calls.find(
       ([target]) =>
         target.kind === 'direct' && target.openDingTalkId === 'open-bob',
@@ -3017,8 +3124,10 @@ describe('DwsChannel', () => {
     await channel.poll();
     await channel.poll();
 
-    expect(bridge.prompt).toHaveBeenCalledOnce();
-    expect(channel.pendingDocumentNotifications()).toEqual([]);
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+    await vi.waitFor(() =>
+      expect(channel.pendingDocumentNotifications()).toEqual([]),
+    );
   });
 
   it('drops profile-scoped document work and IM targets on profile switch', async () => {
@@ -4730,8 +4839,8 @@ describe('DwsChannel', () => {
     releasePairing();
     await Promise.all([denied, catchUpPoll]);
 
-    expect(bridge.prompt).not.toHaveBeenCalled();
-    expect(channel.pendingDocumentNotifications()).toContainEqual(
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+    expect(channel.pendingDocumentNotifications()).not.toContainEqual(
       expect.objectContaining({ messageId: 'allowed-catch-up' }),
     );
     expect(channel.notificationWatermark()).toBeGreaterThan(
@@ -5038,7 +5147,7 @@ describe('DwsChannel', () => {
 
   // R3-1: history dispatch skips messages that are ALREADY parked, but a
   // direct message whose live turn is still in flight passes the skip and
-  // blocks in `handleImMessage`'s in-flight wait. When the live turn then
+  // blocks in `dispatchImMessage`'s in-flight wait. When the live turn then
   // fails it parks the message and spends attempt 1 — parked ≠ processed, so
   // the waiting history dispatch must not start a second turn in the same
   // poll and spend attempt 2.
@@ -5262,6 +5371,12 @@ describe('DwsChannel', () => {
 
     for (let round = 0; round < 6; round += 1) {
       await channel.poll();
+      await vi.waitFor(() =>
+        expect(bridge.prompt).toHaveBeenCalledTimes(Math.min(round + 1, 5)),
+      );
+      await vi.waitFor(() =>
+        expect(channel.queuedDirectMessageCount()).toBe(0),
+      );
     }
 
     expect(bridge.prompt).toHaveBeenCalledTimes(5);
@@ -5282,8 +5397,10 @@ describe('DwsChannel', () => {
 
     await channel.poll();
 
-    expect(bridge.prompt).toHaveBeenCalledTimes(6);
-    expect(channel.pendingDocumentNotifications()).toEqual([]);
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(6));
+    await vi.waitFor(() =>
+      expect(channel.pendingDocumentNotifications()).toEqual([]),
+    );
   });
 
   // R4-1: `pollTodos` remembers a fingerprint only on success, so a todo whose
