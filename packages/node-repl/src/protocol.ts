@@ -33,6 +33,7 @@ export interface InitMessage {
 export interface ExecMessage {
   type: 'exec';
   execId: string;
+  timeoutMs: number;
   source: string;
   previousBindings: NodeReplBindingDescriptor[];
   bindingExports: Array<{
@@ -41,6 +42,11 @@ export interface ExecMessage {
     exportName: string;
   }>;
   snapshotExportName: string;
+}
+
+export interface CancelMessage {
+  type: 'cancel';
+  execId: string;
 }
 
 export interface AddModuleRootMessage {
@@ -56,6 +62,7 @@ export interface ShutdownMessage {
 export type HostToKernelMessage =
   | InitMessage
   | ExecMessage
+  | CancelMessage
   | AddModuleRootMessage
   | ShutdownMessage;
 
@@ -83,7 +90,7 @@ export interface ImageMessage {
 export interface ExecResultMessage {
   type: 'execResult';
   execId: string;
-  status: 'ok' | 'error';
+  status: 'ok' | 'error' | 'cancelled' | 'timeout';
   bindingNames: string[];
   rawTextTruncated?: boolean;
   imagesDropped?: number;

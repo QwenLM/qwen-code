@@ -37,6 +37,7 @@ export { buildSkillLlmContent } from './skill-utils.js';
 import {
   buildSkillLlmContent,
   applySkillAllowedTools,
+  canApplySkillSideEffects,
   collectAvailableSkillEntries,
   clearCollectedSkillEntriesCache,
 } from './skill-utils.js';
@@ -473,6 +474,75 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
     return 'ask';
   }
 
+  /**
+   * Apply the skill's side effects — `allowedTools` session allow rules and
+   * frontmatter hooks — when the folder-trust gate allows it. Idempotent:
+   * both underlying registrations dedup already-applied entries.
+   *
+   * The gate has two sides. This is the way in; a project skill's grants
+   * are additionally marked trust-gated, and both the permission manager
+   * and the hook event handler re-read `isTrustedFolder()` at decision
+   * time, so a trust revoked mid-session (an IDE trust notification flips it
+   * live) suspends the already-applied hooks and allow rules without a
+   * restart, and a trust granted again restores them.
+   */
+  private applySideEffects(skill: SkillConfig): void {
+    if (!canApplySkillSideEffects(skill, this.config)) {
+      debugLogger.warn(
+        `Skill "${this.params.skill}" is a project skill in an untrusted folder; ignoring its allowedTools and hooks.`,
+      );
+      return;
+    }
+    // Auto-approve the skill's declared allowedTools for the rest of the session.
+    applySkillAllowedTools(
+      this.config.getPermissionManager(),
+      skill.allowedTools,
+      { trustGated: skill.level === 'project' },
+    );
+    this.registerHooks(skill);
+  }
+
+  private registerHooks(skill: SkillConfig): void {
+    debugLogger.debug('Skill hooks check:', {
+      hasHooks: !!skill.hooks,
+      hooksKeys: skill.hooks ? Object.keys(skill.hooks) : [],
+      skillName: skill.name,
+    });
+    if (!skill.hooks) {
+      // Re-run on every invocation (the gate is re-evaluated each time), so
+      // a hookless skill would otherwise WARN on every use of it.
+      debugLogger.debug(
+        `Skill "${this.params.skill}" has no hooks to register`,
+      );
+      return;
+    }
+    const hookSystem = this.config.getHookSystem();
+    const sessionId = this.config.getSessionId();
+    debugLogger.debug('Hook system and session:', {
+      hasHookSystem: !!hookSystem,
+      sessionId,
+    });
+    if (!hookSystem || !sessionId) {
+      return;
+    }
+    const sessionHooksManager = hookSystem.getSessionHooksManager();
+    const hookCount = registerSkillHooks(sessionHooksManager, sessionId, skill);
+    if (hookCount > 0) {
+      debugLogger.info(
+        `Registered ${hookCount} hooks from skill "${this.params.skill}"`,
+      );
+    } else {
+      // Zero is the expected outcome of every re-invocation: the hooks are
+      // already registered and `registerSkillHooks` dedups them (it logs
+      // each skip at debug level). Not a warning — a steady-state WARN
+      // claiming "no hooks registered" over hooks that are firing sends
+      // whoever reads the log after a phantom failure.
+      debugLogger.debug(
+        `No new hooks registered from skill "${this.params.skill}" (already registered or none registrable)`,
+      );
+    }
+  }
+
   private async recordAutoSkillUsageBestEffort(
     skill: SkillConfig,
   ): Promise<void> {
@@ -694,6 +764,12 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
       // onSkillLoaded, which adds the name to the loaded set.
       if (this.isSkillLoaded(this.params.skill)) {
         this.onSkillLoaded(this.params.skill);
+        // Re-evaluated on every invocation, not just the first load: folder
+        // trust can be granted mid-session (IDE trust notifications flip it
+        // live), and a project skill first invoked while untrusted must not
+        // stay side-effect-less for the rest of the session. Both grants
+        // dedup, so re-applying is idempotent.
+        this.applySideEffects(skill);
         void this.recordAutoSkillUsageBestEffort(skill);
         const msg = `Skill "${this.params.skill}" is already loaded in context.`;
         return {
@@ -705,48 +781,7 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
       const baseDir = path.dirname(skill.filePath);
       const llmContent = buildSkillLlmContent(baseDir, skill.body);
       this.onSkillLoaded(this.params.skill, llmContent);
-
-      // Auto-approve the skill's declared allowedTools for the rest of the session.
-      applySkillAllowedTools(
-        this.config.getPermissionManager(),
-        skill.allowedTools,
-      );
-
-      // Register skill hooks if present
-      debugLogger.debug('Skill hooks check:', {
-        hasHooks: !!skill.hooks,
-        hooksKeys: skill.hooks ? Object.keys(skill.hooks) : [],
-        skillName: skill.name,
-      });
-      if (skill.hooks) {
-        const hookSystem = this.config.getHookSystem();
-        const sessionId = this.config.getSessionId();
-        debugLogger.debug('Hook system and session:', {
-          hasHookSystem: !!hookSystem,
-          sessionId,
-        });
-        if (hookSystem && sessionId) {
-          const sessionHooksManager = hookSystem.getSessionHooksManager();
-          const hookCount = registerSkillHooks(
-            sessionHooksManager,
-            sessionId,
-            skill,
-          );
-          if (hookCount > 0) {
-            debugLogger.info(
-              `Registered ${hookCount} hooks from skill "${this.params.skill}"`,
-            );
-          } else {
-            debugLogger.warn(
-              `No hooks registered from skill "${this.params.skill}"`,
-            );
-          }
-        }
-      } else {
-        debugLogger.warn(
-          `Skill "${this.params.skill}" has no hooks to register`,
-        );
-      }
+      this.applySideEffects(skill);
 
       void this.recordAutoSkillUsageBestEffort(skill);
       recordSkillInvocation(this.config, {

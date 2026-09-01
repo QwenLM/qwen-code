@@ -43,6 +43,7 @@ import {
   TURN_RESULT_TEXT_MAX_CHARS,
   TrustGateError,
   canonicalSessionPrUrl,
+  toSessionPrInfo,
   normalizeTurnResultError,
   normalizeSnapshotPayload,
   ShellExecutionService,
@@ -6812,6 +6813,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       attachments: new SessionAttachmentStore(
         opts.sessionAttachmentsRoot,
         sessionId,
+        opts.sessionAttachmentsFallbackRoot,
       ),
       recordingDegraded: false,
       closing: false,
@@ -10814,6 +10816,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             const branchAttachments = new SessionAttachmentStore(
               opts.sessionAttachmentsRoot,
               result.newSessionId,
+              opts.sessionAttachmentsFallbackRoot,
             );
             try {
               await branchAttachments.copyFrom(entry.attachments);
@@ -11416,6 +11419,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                       known?.state) as SessionPrInfo['state'],
                   }
                 : {}),
+              // The issue snapshot is daemon-derived, never client-bound.
+              ...(known?.issues ? { issues: known.issues } : {}),
             },
           ].slice(-SESSION_PR_LIST_LIMIT);
           markSessionCatalogChanged();
@@ -11456,25 +11461,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     seedSessionPrs(sessionId, prs) {
       const entry = byId.get(sessionId);
       if (!entry || (entry.prs && entry.prs.length > 0)) return;
-      entry.prs = prs
-        .map(({ number, url, state }) => ({
-          number,
-          url,
-          ...(state ? { state } : {}),
-        }))
-        .slice(-SESSION_PR_LIST_LIMIT);
+      entry.prs = prs.map(toSessionPrInfo).slice(-SESSION_PR_LIST_LIMIT);
     },
 
     setSessionPrs(sessionId, prs) {
       const entry = byId.get(sessionId);
       if (!entry) return;
-      entry.prs = prs
-        .map(({ number, url, state }) => ({
-          number,
-          url,
-          ...(state ? { state } : {}),
-        }))
-        .slice(-SESSION_PR_LIST_LIMIT);
+      entry.prs = prs.map(toSessionPrInfo).slice(-SESSION_PR_LIST_LIMIT);
     },
 
     async getSessionArtifacts(sessionId, context) {
@@ -12754,7 +12747,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     async deleteSessionAttachments(sessionId, options) {
       const store =
         byId.get(sessionId)?.attachments ??
-        new SessionAttachmentStore(opts.sessionAttachmentsRoot, sessionId);
+        new SessionAttachmentStore(
+          opts.sessionAttachmentsRoot,
+          sessionId,
+          opts.sessionAttachmentsFallbackRoot,
+        );
       await store.delete(options);
     },
 

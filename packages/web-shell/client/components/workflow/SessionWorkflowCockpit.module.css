@@ -1,0 +1,224 @@
+.cockpit,
+.emptyCockpit {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  color: var(--foreground);
+  background: var(--background);
+}
+
+.cockpit {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* No descendant button reset here: preflight.css already normalizes every
+   button at zero specificity, and a blanket button reset at this selector's
+   specificity (0,1,1) would silently outrank the single-class styles it
+   envelops — this file's .backButton and PlanExecutionView's nested rows
+   declare their own complete typography. The focus ring is scoped to the
+   cockpit's own buttons so it can't stack over PlanExecutionView's
+   deliberate node focus styles. */
+.backButton:focus-visible,
+.emptyCockpit button:focus-visible {
+  outline: 2px solid var(--agent-blue-500);
+  outline-offset: 2px;
+}
+
+.header {
+  display: flex;
+  flex: none;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 20px 24px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.identity {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: 14px;
+}
+
+.identity > div {
+  min-width: 0;
+}
+
+.identity span {
+  color: var(--agent-blue-500);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+/* preflight.css resets headings to `font: inherit`, so size and weight both
+   have to be restated or the session title renders at body text. The row's
+   `min-width: 0` already caps the width; a fixed max-width only stranded space
+   on wide viewports. */
+.identity h1 {
+  margin: 4px 0 3px;
+  overflow: hidden;
+  font-size: clamp(20px, 2.2vw, 28px);
+  font-weight: 600;
+  letter-spacing: -0.03em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.identity small {
+  color: var(--muted-foreground);
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+}
+
+.backButton {
+  display: flex;
+  height: 36px;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--background);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.backButton:hover {
+  background: var(--accent);
+}
+
+.backButton svg {
+  width: 14px;
+  height: 14px;
+}
+
+.headerStatus {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+}
+
+.headerStatus > span {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 9px;
+  border-radius: var(--radius-md);
+  color: var(--muted-foreground);
+  background: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.headerStatus > span[data-status='running'] {
+  color: var(--status-running-fg);
+  background: var(--status-running-bg);
+}
+
+.headerStatus > span[data-status='attention'] {
+  color: var(--status-attention-fg);
+  background: var(--status-attention-bg);
+}
+
+.headerStatus > span[data-status='completed'] {
+  color: var(--status-done-fg);
+  background: var(--status-done-bg);
+}
+
+.connectionDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--status-attention-fg);
+}
+
+[data-connected='true'] > .connectionDot {
+  background: var(--status-done-fg);
+}
+
+.canvas {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  padding: 18px 24px 24px;
+}
+
+.canvas > section {
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+.emptyCockpit {
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 10px;
+  padding: 32px;
+  text-align: center;
+}
+
+.emptyCockpit > svg {
+  width: 36px;
+  height: 36px;
+  color: var(--agent-blue-500);
+}
+
+.emptyCockpit h1,
+.emptyCockpit p {
+  margin: 0;
+}
+
+/* Without an explicit size and weight the reset leaves this at body text, so
+   the empty state opens with no title. */
+.emptyCockpit h1 {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.emptyCockpit p {
+  max-width: 520px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
+
+.emptyCockpit button {
+  height: 38px;
+  margin-top: 6px;
+  padding: 0 13px;
+  border: 0;
+  border-radius: var(--radius-md);
+  color: var(--primary-foreground);
+  background: var(--primary);
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.emptyCockpit button:hover {
+  background: color-mix(in srgb, var(--primary) 88%, var(--background));
+}
+
+@media (max-width: 900px) {
+  .header {
+    align-items: stretch;
+    flex-direction: column;
+    padding: 14px;
+  }
+
+  .headerStatus {
+    justify-content: space-between;
+  }
+
+  .canvas {
+    padding: 12px;
+  }
+}
