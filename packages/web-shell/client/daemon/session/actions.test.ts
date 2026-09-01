@@ -2317,6 +2317,132 @@ describe('createDaemonSessionActions', () => {
     });
   });
 
+  it.each(['/Compress', '/SUMMARIZE'])(
+    'keeps attachments for unresolved wrong-case command %s',
+    async (text) => {
+      const session = createMockSession('session-a');
+      const { actions } = createActionsHarness({
+        session,
+        connection: {
+          status: 'connected',
+          workspaceCwd: '/workspace',
+          commands: [commandInfo('compress', 'builtin-command', ['summarize'])],
+          capabilities: {
+            v: 1,
+            mode: 'http-bridge',
+            features: ['session_attachments'],
+            modelServices: [],
+          },
+        },
+      });
+
+      await actions.submitPrompt(text, {
+        images: [{ data: 'AQID', mimeType: 'image/png' }],
+      });
+
+      expect(session.uploadAttachment).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('prefers a primary command name over another command alias', async () => {
+    const session = createMockSession('session-a');
+    const { actions } = createActionsHarness({
+      session,
+      connection: {
+        status: 'connected',
+        workspaceCwd: '/workspace',
+        commands: [
+          commandInfo('compress', 'builtin-command', ['summarize']),
+          commandInfo('summarize', 'skill-dir-command'),
+        ],
+        capabilities: {
+          v: 1,
+          mode: 'http-bridge',
+          features: ['session_attachments'],
+          modelServices: [],
+        },
+      },
+    });
+
+    await actions.submitPrompt('/summarize', {
+      images: [{ data: 'AQID', mimeType: 'image/png' }],
+    });
+
+    expect(session.uploadAttachment).toHaveBeenCalledOnce();
+  });
+
+  it('recognizes built-in commands with whitespace after the slash', async () => {
+    const session = createMockSession('session-a');
+    const { actions } = createActionsHarness({
+      session,
+      connection: {
+        status: 'connected',
+        workspaceCwd: '/workspace',
+        commands: [commandInfo('compress', 'builtin-command')],
+        capabilities: {
+          v: 1,
+          mode: 'http-bridge',
+          features: ['session_attachments'],
+          modelServices: [],
+        },
+      },
+    });
+
+    await actions.submitPrompt('/ compress', {
+      images: [{ data: 'AQID', mimeType: 'image/png' }],
+    });
+
+    expect(session.uploadAttachment).not.toHaveBeenCalled();
+  });
+
+  it('does not upload an unknown slash command before command metadata loads', async () => {
+    const session = createMockSession('session-a');
+    const { actions } = createActionsHarness({
+      session,
+      connection: {
+        status: 'connected',
+        workspaceCwd: '/workspace',
+        commands: [commandInfo('price-sheet', 'skill-dir-command')],
+        capabilities: {
+          v: 1,
+          mode: 'http-bridge',
+          features: ['session_attachments'],
+          modelServices: [],
+        },
+      },
+    });
+
+    await actions.submitPrompt('/remember this API shape', {
+      images: [{ data: 'AQID', mimeType: 'image/png' }],
+    });
+
+    expect(session.uploadAttachment).not.toHaveBeenCalled();
+  });
+
+  it('uploads attachments for unknown commands after metadata loads', async () => {
+    const session = createMockSession('session-a');
+    const { actions } = createActionsHarness({
+      session,
+      connection: {
+        status: 'connected',
+        workspaceCwd: '/workspace',
+        commands: [commandInfo('compress', 'builtin-command')],
+        capabilities: {
+          v: 1,
+          mode: 'http-bridge',
+          features: ['session_attachments'],
+          modelServices: [],
+        },
+      },
+    });
+
+    await actions.submitPrompt('/unlisted update', {
+      images: [{ data: 'AQID', mimeType: 'image/png' }],
+    });
+
+    expect(session.uploadAttachment).toHaveBeenCalledOnce();
+  });
+
   it('uploads attachments used by skill slash commands', async () => {
     const session = createMockSession('session-a');
     const { actions, store } = createActionsHarness({
@@ -2362,6 +2488,58 @@ describe('createDaemonSessionActions', () => {
       [],
     );
   });
+
+  it.each([
+    ['skill-dir-command', true],
+    ['builtin-command', false],
+  ] as const)(
+    'classifies %s command attachments on the sendPrompt path',
+    async (source, shouldUpload) => {
+      const session = createMockSession('session-a');
+      const { actions } = createActionsHarness({
+        session,
+        connection: {
+          status: 'connected',
+          workspaceCwd: '/workspace',
+          commands: [commandInfo('price-sheet', source)],
+          capabilities: {
+            v: 1,
+            mode: 'http-bridge',
+            features: ['session_attachments'],
+            modelServices: [],
+          },
+        },
+      });
+
+      const prompt = actions.sendPrompt('/price-sheet update', {
+        images: [{ data: 'AQID', mimeType: 'image/png' }],
+      });
+      await vi.waitFor(() => expect(session.submitPrompt).toHaveBeenCalled());
+
+      expect(session.uploadAttachment).toHaveBeenCalledTimes(
+        shouldUpload ? 1 : 0,
+      );
+      expect(session.submitPrompt).toHaveBeenCalledWith(
+        {
+          prompt: shouldUpload
+            ? [
+                { type: 'text', text: '/price-sheet update' },
+                {
+                  type: 'image',
+                  attachmentId: 'image.png',
+                  mimeType: 'image/png',
+                  size: 3,
+                },
+              ]
+            : [{ type: 'text', text: '/price-sheet update' }],
+        },
+        expect.any(AbortSignal),
+      );
+
+      await actions.cancel();
+      await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
+    },
+  );
 
   it('uploads text attachments and submits attachment references', async () => {
     const session = createMockSession('session-a');

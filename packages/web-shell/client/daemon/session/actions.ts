@@ -416,14 +416,20 @@ export function createDaemonSessionActions({
   }
 
   function discardsSlashCommandAttachments(text: string): boolean {
-    const name = /^\/([^\s]+)/.exec(text.trimStart())?.[1]?.toLowerCase();
+    const trimmed = text.trim();
+    if (!trimmed.startsWith('/')) return false;
+    const name = trimmed.slice(1).trim().split(/\s+/, 1)[0];
     if (!name) return false;
-    const command = getConnection().commands?.find(
-      (candidate) =>
-        candidate.name.toLowerCase() === name ||
-        candidate.altNames?.some((alias) => alias.toLowerCase() === name),
+    const connection = getConnection();
+    const command =
+      connection.commands?.find((candidate) => candidate.name === name) ??
+      connection.commands?.find((candidate) =>
+        candidate.altNames?.includes(name),
+      );
+    if (command) return command.source === 'builtin-command';
+    return !connection.commands?.some(
+      (candidate) => candidate.source === 'builtin-command',
     );
-    return command?.source === 'builtin-command';
   }
 
   async function promptContentWithUploadedAttachments(
