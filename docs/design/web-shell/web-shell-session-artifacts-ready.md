@@ -15,6 +15,10 @@ the initial artifact load and transcript restoration settle. A `turn_complete`
 snapshot is delivered after the completed turn's final artifact refresh and
 includes the captured user turn ID.
 
+A session created by its first prompt does not emit `restore`; its first
+lifecycle snapshot is the first turn's `turn_complete`. This avoids exposing an
+empty mid-turn snapshot as restored state.
+
 Failed artifact loads do not emit a ready snapshot. Session ownership and
 request guards prevent stale asynchronous loads from a previous session from
 being delivered to the active host.

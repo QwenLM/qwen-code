@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   useActions,
   useConnection,
@@ -8,7 +8,7 @@ import {
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import {
-  useSessionArtifactsReadiness,
+  useSessionArtifactsReadyQueue,
   type SessionArtifactsLoadResult,
   type SessionArtifactsReadyEvent,
 } from './useSessionArtifactsReadiness';
@@ -66,6 +66,18 @@ function useSessionArtifactsInternal({
   const requestIdRef = useRef(0);
   const loadedOwnerRef = useRef<typeof owner | undefined>(undefined);
   const loadingOwnerRef = useRef<typeof owner | undefined>(undefined);
+  const previousPromptRef = useRef({ owner, sessionId, status: promptStatus });
+  const lastTurnIdRef = useRef(activeTurnId);
+  const previousArtifactsVersionRef = useRef(artifactsVersion);
+  const readinessScopeRef = useRef<
+    { enabled: boolean; owner: typeof owner; sessionId?: string } | undefined
+  >(undefined);
+  const activeTurnRef = useRef({
+    baselineTurnId: activeTurnId,
+    turnId: undefined as string | undefined,
+    turnIsShell: false,
+    sawStreaming: false,
+  });
   const load = useCallback(async () => {
     const requestId = ++requestIdRef.current;
     if (!sessionId || !isConnected || !supportsArtifacts) {
@@ -101,17 +113,177 @@ function useSessionArtifactsInternal({
       }
     }
   }, [actions, isConnected, owner, sessionId, supportsArtifacts]);
-  const readiness = useSessionArtifactsReadiness({
-    enabled: trackReadiness && supportsArtifacts,
-    owner,
-    sessionId,
+  const readinessEnabled = trackReadiness && supportsArtifacts;
+  const { ready, consumeReady, enqueue, hasPending, invalidate, reset, retry } =
+    useSessionArtifactsReadyQueue(readinessEnabled, load);
+
+  useEffect(() => {
+    const previous = readinessScopeRef.current;
+    readinessScopeRef.current = {
+      enabled: readinessEnabled,
+      owner,
+      sessionId,
+    };
+    if (!readinessEnabled) {
+      if (previous?.enabled) reset();
+      void load();
+      return;
+    }
+
+    const sameSessionOwnerReplacement =
+      previous?.enabled === true &&
+      previous.owner !== owner &&
+      sessionId !== undefined &&
+      previous.sessionId === sessionId;
+    const deferredSessionCreation =
+      previous?.enabled === true &&
+      previous.sessionId === undefined &&
+      sessionId !== undefined &&
+      deferredSessionId === sessionId;
+    const sessionChanged =
+      previous === undefined ||
+      !previous.enabled ||
+      previous.sessionId !== sessionId;
+
+    if (!sameSessionOwnerReplacement && sessionChanged) {
+      reset(
+        sessionId && !deferredSessionCreation
+          ? { reason: 'restore' }
+          : undefined,
+      );
+    }
+
+    if (hasPending()) {
+      retry(owner);
+    } else if (sameSessionOwnerReplacement || sessionChanged) {
+      void load();
+    }
+  }, [
     deferredSessionId,
-    promptStatus,
+    hasPending,
+    load,
+    owner,
+    readinessEnabled,
+    reset,
+    retry,
+    sessionId,
+  ]);
+
+  useEffect(() => {
+    const previous = previousPromptRef.current;
+    const previousTurnId = lastTurnIdRef.current;
+    previousPromptRef.current = { owner, sessionId, status: promptStatus };
+    lastTurnIdRef.current = activeTurnId;
+    let turn = activeTurnRef.current;
+    const sameSessionOwnerReplacement =
+      previous.owner !== owner &&
+      previous.sessionId !== undefined &&
+      previous.sessionId === sessionId;
+    const deferredOwnerReplacement =
+      previous.owner !== owner &&
+      previous.sessionId === undefined &&
+      sessionId !== undefined &&
+      deferredSessionId === sessionId &&
+      previous.status !== 'idle';
+    const continuousOwnerReplacement =
+      sameSessionOwnerReplacement || deferredOwnerReplacement;
+    const settled =
+      (previous.owner === owner || continuousOwnerReplacement) &&
+      previous.status !== 'idle' &&
+      promptStatus === 'idle';
+
+    if (
+      !continuousOwnerReplacement &&
+      promptStatus !== 'idle' &&
+      (previous.owner !== owner || previous.status === 'idle')
+    ) {
+      turn = {
+        baselineTurnId: previous.owner === owner ? previousTurnId : undefined,
+        turnId: undefined,
+        turnIsShell: false,
+        sawStreaming: false,
+      };
+    }
+    if (promptStatus !== 'idle') {
+      if (
+        turn.turnId === undefined &&
+        activeTurnId !== undefined &&
+        activeTurnId !== turn.baselineTurnId
+      ) {
+        turn = {
+          ...turn,
+          turnId: activeTurnId,
+          turnIsShell: activeTurnIsShell,
+        };
+      }
+      if (promptStatus === 'streaming') {
+        turn = { ...turn, sawStreaming: true };
+      }
+      activeTurnRef.current = turn;
+    }
+    if (!settled) return;
+
+    if (
+      turn.turnId === undefined &&
+      activeTurnIsShell &&
+      activeTurnId !== undefined &&
+      activeTurnId !== turn.baselineTurnId
+    ) {
+      turn = { ...turn, turnId: activeTurnId, turnIsShell: true };
+    }
+    const completedTurnId =
+      turn.sawStreaming || turn.turnIsShell
+        ? (turn.turnId ?? turn.baselineTurnId)
+        : undefined;
+    activeTurnRef.current = {
+      baselineTurnId: activeTurnId,
+      turnId: undefined,
+      turnIsShell: false,
+      sawStreaming: false,
+    };
+
+    if (!readinessEnabled) {
+      void load();
+    } else if (completedTurnId) {
+      enqueue(owner, {
+        reason: 'turn_complete',
+        turnId: completedTurnId,
+      });
+    } else if (hasPending()) {
+      invalidate(owner);
+    } else {
+      void load();
+    }
+  }, [
     activeTurnId,
     activeTurnIsShell,
-    artifactsVersion,
+    deferredSessionId,
+    enqueue,
+    hasPending,
+    invalidate,
     load,
-  });
+    owner,
+    promptStatus,
+    readinessEnabled,
+    sessionId,
+  ]);
+
+  useEffect(() => {
+    const previous = previousArtifactsVersionRef.current;
+    previousArtifactsVersionRef.current = artifactsVersion;
+    if (
+      previous === undefined ||
+      artifactsVersion === undefined ||
+      artifactsVersion === previous
+    ) {
+      return;
+    }
+    if (readinessEnabled && hasPending()) {
+      invalidate(owner);
+    } else {
+      void load();
+    }
+  }, [artifactsVersion, hasPending, invalidate, load, owner, readinessEnabled]);
   const refresh = useCallback(async () => {
     await load();
   }, [load]);
@@ -129,8 +301,8 @@ function useSessionArtifactsInternal({
   return {
     artifacts: visibleArtifacts,
     artifactById,
-    ready: readiness.ready,
-    consumeReady: readiness.consumeReady,
+    ready,
+    consumeReady,
     loading: loading && loadingOwnerRef.current === owner,
     error: null,
     refresh,
@@ -153,9 +325,10 @@ export function useSessionArtifactsWithReadiness(
   activeTurnId?: string,
   activeTurnIsShell = false,
   deferredSessionId?: string,
+  enabled = true,
 ): SessionArtifactsReadinessState {
   return useSessionArtifactsInternal({
-    trackReadiness: true,
+    trackReadiness: enabled,
     activeTurnId,
     activeTurnIsShell,
     deferredSessionId,

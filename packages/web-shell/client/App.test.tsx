@@ -5169,6 +5169,31 @@ async function flush(): Promise<void> {
   });
 }
 
+function enableSessionArtifacts(): void {
+  mockConnection.capabilities = {
+    ...mockConnection.capabilities,
+    features: ['session_artifacts'],
+  };
+}
+
+function readyArtifact(
+  id: string,
+  overrides: Partial<DaemonSessionArtifact> = {},
+): DaemonSessionArtifact {
+  return {
+    id,
+    kind: 'other',
+    storage: 'managed',
+    source: 'hook',
+    status: 'available',
+    title: id,
+    clientRetained: false,
+    createdAt: '2026-08-28T00:00:00.000Z',
+    updatedAt: '2026-08-28T00:00:00.000Z',
+    ...overrides,
+  };
+}
+
 async function clickSubmit(container: HTMLElement): Promise<void> {
   await act(async () => {
     container
@@ -21942,10 +21967,7 @@ describe('App session callbacks', () => {
   });
 
   it('reports a restored session artifact snapshot when built-in turn outputs are hidden', async () => {
-    mockConnection.capabilities = {
-      ...mockConnection.capabilities,
-      features: ['session_artifacts'],
-    };
+    enableSessionArtifacts();
     testState.messages = [
       { id: 'user-1', role: 'user', content: 'update resource' },
       {
@@ -21961,18 +21983,10 @@ describe('App session callbacks', () => {
         ],
       },
     ] as Message[];
-    const artifact = {
-      id: 'artifact-1',
-      kind: 'other',
-      storage: 'managed',
-      source: 'hook',
-      status: 'available',
+    const artifact = readyArtifact('artifact-1', {
       title: 'resource-1',
       toolCallId: 'tool-call-1',
-      clientRetained: false,
-      createdAt: '2026-08-27T00:00:00.000Z',
-      updatedAt: '2026-08-27T00:00:00.000Z',
-    } as DaemonSessionArtifact;
+    });
     mockSessionActions.loadArtifacts.mockResolvedValue({
       artifacts: [artifact],
     });
@@ -21997,10 +22011,7 @@ describe('App session callbacks', () => {
   });
 
   it('waits for transcript restoration before reporting artifacts ready', async () => {
-    mockConnection.capabilities = {
-      ...mockConnection.capabilities,
-      features: ['session_artifacts'],
-    };
+    enableSessionArtifacts();
     mockConnection.loadingTranscript = true;
     const restoreLoad = deferred<{ artifacts: DaemonSessionArtifact[] }>();
     mockSessionActions.loadArtifacts.mockReturnValueOnce(restoreLoad.promise);
@@ -22027,10 +22038,7 @@ describe('App session callbacks', () => {
   });
 
   it('contains callback failures and continues reporting later ready events', async () => {
-    mockConnection.capabilities = {
-      ...mockConnection.capabilities,
-      features: ['session_artifacts'],
-    };
+    enableSessionArtifacts();
     mockSessionActions.loadArtifacts.mockResolvedValue({ artifacts: [] });
     const callbackError = new Error('host callback failed');
     const onSessionArtifactsReady = vi.fn().mockImplementationOnce(() => {
@@ -22066,11 +22074,8 @@ describe('App session callbacks', () => {
     });
   });
 
-  it('does not replay ready events consumed while no callback is registered', async () => {
-    mockConnection.capabilities = {
-      ...mockConnection.capabilities,
-      features: ['session_artifacts'],
-    };
+  it('starts with a fresh restore without replaying turns completed before callback registration', async () => {
+    enableSessionArtifacts();
     mockSessionActions.loadArtifacts.mockResolvedValue({ artifacts: [] });
     const { rerender } = renderApp();
     await flush();
@@ -22089,7 +22094,12 @@ describe('App session callbacks', () => {
     const onSessionArtifactsReady = vi.fn();
     rerender({ onSessionArtifactsReady });
     await flush();
-    expect(onSessionArtifactsReady).not.toHaveBeenCalled();
+    await flush();
+    expect(onSessionArtifactsReady).toHaveBeenCalledOnce();
+    expect(onSessionArtifactsReady.mock.calls[0]?.[0]).toMatchObject({
+      reason: 'restore',
+      sessionId: 'session-1',
+    });
 
     testState.messages = [
       ...testState.messages,
@@ -22102,8 +22112,8 @@ describe('App session callbacks', () => {
     await flush();
     await flush();
 
-    expect(onSessionArtifactsReady).toHaveBeenCalledOnce();
-    expect(onSessionArtifactsReady.mock.calls[0]?.[0]).toMatchObject({
+    expect(onSessionArtifactsReady).toHaveBeenCalledTimes(2);
+    expect(onSessionArtifactsReady.mock.calls[1]?.[0]).toMatchObject({
       reason: 'turn_complete',
       sessionId: 'session-1',
       turnId: 'observed-turn',
@@ -22111,27 +22121,12 @@ describe('App session callbacks', () => {
   });
 
   it('reports every ready event queued while connection catch-up is active', async () => {
-    mockConnection.capabilities = {
-      ...mockConnection.capabilities,
-      features: ['session_artifacts'],
-    };
+    enableSessionArtifacts();
     mockConnection.catchingUp = true;
-    const snapshotArtifact = (id: string) =>
-      ({
-        id,
-        kind: 'other',
-        storage: 'managed',
-        source: 'hook',
-        status: 'available',
-        title: id,
-        clientRetained: false,
-        createdAt: '2026-08-28T00:00:00.000Z',
-        updatedAt: '2026-08-28T00:00:00.000Z',
-      }) as DaemonSessionArtifact;
     mockSessionActions.loadArtifacts
-      .mockResolvedValueOnce({ artifacts: [snapshotArtifact('restore')] })
-      .mockResolvedValueOnce({ artifacts: [snapshotArtifact('turn-1')] })
-      .mockResolvedValueOnce({ artifacts: [snapshotArtifact('turn-2')] });
+      .mockResolvedValueOnce({ artifacts: [readyArtifact('restore')] })
+      .mockResolvedValueOnce({ artifacts: [readyArtifact('turn-1')] })
+      .mockResolvedValueOnce({ artifacts: [readyArtifact('turn-2')] });
     const onSessionArtifactsReady = vi.fn();
     const { rerender } = renderApp({ onSessionArtifactsReady });
     await flush();
@@ -22182,10 +22177,7 @@ describe('App session callbacks', () => {
   });
 
   it('reports the user-shell turn id after a shell command settles', async () => {
-    mockConnection.capabilities = {
-      ...mockConnection.capabilities,
-      features: ['session_artifacts'],
-    };
+    enableSessionArtifacts();
     mockSessionActions.loadArtifacts.mockResolvedValue({ artifacts: [] });
     const onSessionArtifactsReady = vi.fn();
     const { rerender } = renderApp({ onSessionArtifactsReady });
@@ -22218,10 +22210,7 @@ describe('App session callbacks', () => {
   });
 
   it('reports turn artifacts only after the post-turn refresh settles', async () => {
-    mockConnection.capabilities = {
-      ...mockConnection.capabilities,
-      features: ['session_artifacts'],
-    };
+    enableSessionArtifacts();
     testState.messages = [
       { id: 'user-turn-1', role: 'user', content: 'update resource' },
       {
@@ -22237,18 +22226,10 @@ describe('App session callbacks', () => {
         ],
       },
     ] as Message[];
-    const refreshedArtifact = {
-      id: 'artifact-after-turn',
-      kind: 'other',
-      storage: 'managed',
-      source: 'hook',
-      status: 'available',
+    const refreshedArtifact = readyArtifact('artifact-after-turn', {
       title: 'updated resource',
       toolCallId: 'tool-call-turn-1',
-      clientRetained: false,
-      createdAt: '2026-08-28T00:00:00.000Z',
-      updatedAt: '2026-08-28T00:00:00.000Z',
-    } as DaemonSessionArtifact;
+    });
     const postTurnLoad = deferred<{
       artifacts: DaemonSessionArtifact[];
     }>();

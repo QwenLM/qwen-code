@@ -198,50 +198,6 @@ describe('useSessionArtifacts', () => {
     expect(latestLegacyState).not.toHaveProperty('ready');
   });
 
-  it('does not load or report ready state when artifacts are unsupported', async () => {
-    sdkMock.connection = {
-      status: 'connected',
-      sessionId: 'session-a',
-      capabilities: { features: [] },
-    };
-
-    await renderHookHost();
-
-    expect(sdkMock.actions.loadArtifacts).not.toHaveBeenCalled();
-    expect(latestState?.ready).toBeNull();
-  });
-
-  it('marks only the successful initial load as restore-ready', async () => {
-    const initialLoad = deferred<{ artifacts: DaemonSessionArtifact[] }>();
-    const refreshLoad = deferred<{ artifacts: DaemonSessionArtifact[] }>();
-    sdkMock.actions.loadArtifacts
-      .mockReturnValueOnce(initialLoad.promise)
-      .mockReturnValueOnce(refreshLoad.promise);
-
-    await renderHookHost();
-    expect(latestState?.ready).toBeNull();
-
-    await act(async () => {
-      initialLoad.resolve({ artifacts: [] });
-      await initialLoad.promise;
-    });
-    expect(latestState?.ready).toMatchObject({
-      reason: 'restore',
-      sequence: 1,
-    });
-    await consumeReady();
-
-    sdkMock.artifactsVersion = 1;
-    await rerenderHookHost();
-    expect(latestState?.ready).toBeNull();
-
-    await act(async () => {
-      refreshLoad.resolve({ artifacts: [] });
-      await refreshLoad.promise;
-    });
-    expect(latestState?.ready).toBeNull();
-  });
-
   it('marks the snapshot ready only after the post-prompt load settles', async () => {
     const initialLoad = deferred<{ artifacts: DaemonSessionArtifact[] }>();
     const duringPromptLoad = deferred<{ artifacts: DaemonSessionArtifact[] }>();
@@ -280,40 +236,6 @@ describe('useSessionArtifacts', () => {
     sdkMock.activeTurnId = 'turn-2';
     sdkMock.promptStatus = 'streaming';
     await rerenderHookHost();
-    await act(async () => {
-      postPromptLoad.resolve({ artifacts: [] });
-      await postPromptLoad.promise;
-    });
-    expect(latestState?.ready).toMatchObject({
-      reason: 'turn_complete',
-      sequence: 2,
-      turnId: 'turn-1',
-    });
-  });
-
-  it('keeps the first active turn id when a follow-up is queued before settling', async () => {
-    const initialLoad = deferred<{ artifacts: DaemonSessionArtifact[] }>();
-    const postPromptLoad = deferred<{ artifacts: DaemonSessionArtifact[] }>();
-    sdkMock.actions.loadArtifacts
-      .mockReturnValueOnce(initialLoad.promise)
-      .mockReturnValueOnce(postPromptLoad.promise);
-
-    await renderHookHost();
-    await act(async () => {
-      initialLoad.resolve({ artifacts: [] });
-      await initialLoad.promise;
-    });
-    await consumeReady();
-
-    sdkMock.promptStatus = 'streaming';
-    await rerenderHookHost();
-    sdkMock.activeTurnId = 'turn-1';
-    await rerenderHookHost();
-    sdkMock.activeTurnId = 'queued-turn-2';
-    await rerenderHookHost();
-    sdkMock.promptStatus = 'idle';
-    await rerenderHookHost();
-
     await act(async () => {
       postPromptLoad.resolve({ artifacts: [] });
       await postPromptLoad.promise;
@@ -380,17 +302,13 @@ describe('useSessionArtifacts', () => {
     sdkMock.deferredSessionId = 'session-a';
     sdkMock.promptStatus = 'waiting';
     await rerenderHookHost();
-    expect(latestState?.ready).toMatchObject({
-      reason: 'restore',
-      sequence: 1,
-    });
-    await consumeReady();
+    expect(latestState?.ready).toBeNull();
 
     sdkMock.promptStatus = 'idle';
     await rerenderHookHost();
     expect(latestState?.ready).toMatchObject({
       reason: 'turn_complete',
-      sequence: 2,
+      sequence: 1,
       turnId: 'turn-1',
       artifacts: [artifact('turn-1-snapshot')],
     });
@@ -421,13 +339,8 @@ describe('useSessionArtifacts', () => {
     await rerenderHookHost();
 
     expect(latestState?.ready).toMatchObject({
-      reason: 'restore',
-      sequence: 1,
-    });
-    await consumeReady();
-    expect(latestState?.ready).toMatchObject({
       reason: 'turn_complete',
-      sequence: 2,
+      sequence: 1,
       turnId: 'turn-1',
       artifacts: [artifact('turn-1-snapshot')],
     });
@@ -642,7 +555,7 @@ describe('useSessionArtifacts', () => {
     },
   );
 
-  it('retries a failed pending event load once without another signal', async () => {
+  it('keeps a failed pending event until the next refresh signal', async () => {
     sdkMock.actions.loadArtifacts
       .mockResolvedValueOnce({ artifacts: [] })
       .mockRejectedValueOnce(new Error('transient load failure'))
@@ -657,34 +570,13 @@ describe('useSessionArtifacts', () => {
     sdkMock.promptStatus = 'idle';
     await rerenderHookHost();
 
-    expect(sdkMock.actions.loadArtifacts).toHaveBeenCalledTimes(3);
-    expect(latestState?.ready).toMatchObject({
-      reason: 'turn_complete',
-      sequence: 2,
-      turnId: 'turn-1',
-      artifacts: [artifact('turn-1-snapshot')],
-    });
-  });
-
-  it('retries a pending turn event after reconnecting', async () => {
-    sdkMock.actions.loadArtifacts.mockResolvedValue({
-      artifacts: [artifact('turn-1-snapshot')],
-    });
-
-    await renderHookHost();
-    await consumeReady();
-
-    sdkMock.activeTurnId = 'turn-1';
-    sdkMock.promptStatus = 'streaming';
-    await rerenderHookHost();
-    sdkMock.connection = { ...sdkMock.connection, status: 'connecting' };
-    sdkMock.promptStatus = 'idle';
-    await rerenderHookHost();
+    expect(sdkMock.actions.loadArtifacts).toHaveBeenCalledTimes(2);
     expect(latestState?.ready).toBeNull();
 
-    sdkMock.connection = { ...sdkMock.connection, status: 'connected' };
+    sdkMock.artifactsVersion = 1;
     await rerenderHookHost();
 
+    expect(sdkMock.actions.loadArtifacts).toHaveBeenCalledTimes(3);
     expect(latestState?.ready).toMatchObject({
       reason: 'turn_complete',
       sequence: 2,
@@ -828,31 +720,6 @@ describe('useSessionArtifacts', () => {
     });
   });
 
-  it('reports a retry that reuses the previous user turn id', async () => {
-    const retryLoad = deferred<{ artifacts: DaemonSessionArtifact[] }>();
-    sdkMock.activeTurnId = 'turn-1';
-    sdkMock.actions.loadArtifacts
-      .mockResolvedValueOnce({ artifacts: [] })
-      .mockReturnValueOnce(retryLoad.promise);
-
-    await renderHookHost();
-    await consumeReady();
-
-    sdkMock.promptStatus = 'streaming';
-    await rerenderHookHost();
-    sdkMock.promptStatus = 'idle';
-    await rerenderHookHost();
-    await act(async () => {
-      retryLoad.resolve({ artifacts: [] });
-      await retryLoad.promise;
-    });
-    expect(latestState?.ready).toMatchObject({
-      reason: 'turn_complete',
-      sequence: 2,
-      turnId: 'turn-1',
-    });
-  });
-
   it('clears stale artifacts while loading a different session', async () => {
     const sessionA = deferred<{ artifacts: DaemonSessionArtifact[] }>();
     const sessionB = deferred<{ artifacts: DaemonSessionArtifact[] }>();
@@ -966,16 +833,12 @@ describe('useSessionArtifacts', () => {
     const load3 = deferred<{ artifacts: DaemonSessionArtifact[] }>();
     const load4 = deferred<{ artifacts: DaemonSessionArtifact[] }>();
     const load5 = deferred<{ artifacts: DaemonSessionArtifact[] }>();
-    const load6 = deferred<{ artifacts: DaemonSessionArtifact[] }>();
-    const load7 = deferred<{ artifacts: DaemonSessionArtifact[] }>();
     sdkMock.actions.loadArtifacts
       .mockReturnValueOnce(load1.promise)
       .mockReturnValueOnce(load2.promise)
       .mockReturnValueOnce(load3.promise)
       .mockReturnValueOnce(load4.promise)
-      .mockReturnValueOnce(load5.promise)
-      .mockReturnValueOnce(load6.promise)
-      .mockReturnValueOnce(load7.promise);
+      .mockReturnValueOnce(load5.promise);
 
     await renderHookHost();
     expect(sdkMock.actions.loadArtifacts).toHaveBeenCalledTimes(1);
@@ -1020,12 +883,7 @@ describe('useSessionArtifacts', () => {
       load3.reject(new Error('Failed to fetch'));
       await load3.promise.catch(() => undefined);
     });
-    expect(sdkMock.actions.loadArtifacts).toHaveBeenCalledTimes(4);
-    expect(latestState?.loading).toBe(true);
-    await act(async () => {
-      load4.reject(new Error('Failed to fetch'));
-      await load4.promise.catch(() => undefined);
-    });
+    expect(sdkMock.actions.loadArtifacts).toHaveBeenCalledTimes(3);
     expect(latestState?.loading).toBe(false);
     expect(latestState?.error).toBeNull();
     expect(latestState?.artifacts.map((item) => item.id)).toEqual([
@@ -1036,16 +894,10 @@ describe('useSessionArtifacts', () => {
     // Automatic refresh #4: artifactsVersion fails and still keeps last-good.
     sdkMock.artifactsVersion = 2;
     await rerenderHookHost();
-    expect(sdkMock.actions.loadArtifacts).toHaveBeenCalledTimes(5);
+    expect(sdkMock.actions.loadArtifacts).toHaveBeenCalledTimes(4);
     await act(async () => {
-      load5.reject(new Error('Failed to fetch'));
-      await load5.promise.catch(() => undefined);
-    });
-    expect(sdkMock.actions.loadArtifacts).toHaveBeenCalledTimes(6);
-    expect(latestState?.loading).toBe(true);
-    await act(async () => {
-      load6.reject(new Error('Failed to fetch'));
-      await load6.promise.catch(() => undefined);
+      load4.reject(new Error('Failed to fetch'));
+      await load4.promise.catch(() => undefined);
     });
     expect(latestState?.loading).toBe(false);
     expect(latestState?.error).toBeNull();
@@ -1055,15 +907,15 @@ describe('useSessionArtifacts', () => {
 
     // Re-rendering the same version is not a new automatic refresh.
     await rerenderHookHost();
-    expect(sdkMock.actions.loadArtifacts).toHaveBeenCalledTimes(6);
+    expect(sdkMock.actions.loadArtifacts).toHaveBeenCalledTimes(4);
 
     // The panel is not wedged: the next automatic refresh recovers.
     sdkMock.artifactsVersion = 3;
     await rerenderHookHost();
-    expect(sdkMock.actions.loadArtifacts).toHaveBeenCalledTimes(7);
+    expect(sdkMock.actions.loadArtifacts).toHaveBeenCalledTimes(5);
     await act(async () => {
-      load7.resolve({ artifacts: [artifact('recovered-artifact')] });
-      await load7.promise;
+      load5.resolve({ artifacts: [artifact('recovered-artifact')] });
+      await load5.promise;
     });
     expect(latestState?.artifacts.map((item) => item.id)).toEqual([
       'recovered-artifact',

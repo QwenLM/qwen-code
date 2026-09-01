@@ -3236,6 +3236,7 @@ export function App({
     activeArtifactTurnId,
     activeArtifactTurnIsShell,
     artifactDeferredSessionIdRef.current,
+    Boolean(onSessionArtifactsReady),
   );
   useEffect(() => {
     if (connection.sessionId !== undefined) {
@@ -3370,11 +3371,7 @@ export function App({
   const lastNotifiedArtifactsReadySequenceRef = useRef(0);
   useEffect(() => {
     const sessionId = connection.sessionId;
-    if (!artifactsReady) return;
-    if (!onSessionArtifactsReady) {
-      consumeArtifactsReady(artifactsReady.sequence);
-      return;
-    }
+    if (!artifactsReady || !onSessionArtifactsReady) return;
     if (
       !sessionId ||
       connection.loadingTranscript ||
@@ -3390,22 +3387,20 @@ export function App({
       connection.workspaceCwd || '',
     );
     try {
-      if (artifactsReady.reason === 'turn_complete') {
-        onSessionArtifactsReady({
-          reason: artifactsReady.reason,
-          sessionId,
-          turnId: artifactsReady.turnId,
-          artifacts: artifactsReady.artifacts,
-          artifactsByTurn: readyArtifactsByTurn,
-        });
-      } else {
-        onSessionArtifactsReady({
-          reason: artifactsReady.reason,
-          sessionId,
-          artifacts: artifactsReady.artifacts,
-          artifactsByTurn: readyArtifactsByTurn,
-        });
-      }
+      const snapshotBase = {
+        sessionId,
+        artifacts: artifactsReady.artifacts,
+        artifactsByTurn: readyArtifactsByTurn,
+      };
+      onSessionArtifactsReady(
+        artifactsReady.reason === 'turn_complete'
+          ? {
+              ...snapshotBase,
+              reason: artifactsReady.reason,
+              turnId: artifactsReady.turnId,
+            }
+          : { ...snapshotBase, reason: artifactsReady.reason },
+      );
     } catch (error) {
       console.error(
         '[web-shell] onSessionArtifactsReady callback failed',
