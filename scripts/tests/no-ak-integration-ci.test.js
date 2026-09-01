@@ -128,6 +128,28 @@ describe('no-AK integration CI wiring', () => {
     }
   });
 
+  it('uses a tunable max for every Vitest pool on ECS', () => {
+    const workflow = readFileSync(
+      path.join(ROOT, '.github/workflows/ci.yml'),
+      'utf8',
+    );
+    const testStep = getWorkflowStep(
+      getWorkflowJob(workflow, 'test'),
+      'Run tests and generate reports',
+    );
+
+    for (const name of ['VITEST_MAX_THREADS', 'VITEST_MAX_FORKS']) {
+      expect(testStep).toContain(
+        `${name}: "\${{ startsWith(runner.name, 'ecs-qwen-') && (vars.QWEN_CI_VITEST_MAX_WORKERS || '4') || '' }}"`,
+      );
+    }
+    for (const name of ['VITEST_MIN_THREADS', 'VITEST_MIN_FORKS']) {
+      expect(testStep).toContain(
+        `${name}: "\${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"`,
+      );
+    }
+  });
+
   it('defines a focused no-AK integration script', () => {
     const packageJson = JSON.parse(
       readFileSync(path.join(ROOT, 'package.json'), 'utf8'),
@@ -145,6 +167,10 @@ describe('no-AK integration CI wiring', () => {
         './fake-openai-server.test.ts',
         './test-helper.test.ts',
         './chat-transcript-contract.test.ts',
+        './qwen-live-m1-call.test.ts',
+        './qwen-live-m2-inject.test.ts',
+        './qwen-live-m2-permission.test.ts',
+        './qwen-live-m2-steering.test.ts',
         './cli/daemon-invocation-context.test.ts',
         './cli/list_directory.test.ts',
         './cli/qwen-serve-routes.test.ts',

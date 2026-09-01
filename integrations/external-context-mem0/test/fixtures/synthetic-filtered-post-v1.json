@@ -1,7 +1,7 @@
 {
   "instance": {
-    "schemaVersion": 1,
-    "preset": "synthetic-filtered-post-v1",
+    "schemaVersion": 2,
+    "dialectPath": "/administrator/synthetic-filtered-post-v1.dialect.json",
     "endpoint": {
       "origin": "https://memory.example.com",
       "basePath": "/tenant-a",

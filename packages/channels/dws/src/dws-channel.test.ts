@@ -2936,7 +2936,7 @@ describe('DwsChannel', () => {
     }
   });
 
-  it('shows a working eyes reaction on the notification while a document task runs', async () => {
+  it('shows the default start reaction on a notification while its task runs', async () => {
     const client = new FakeDwsClient();
     const { bridge } = await readyPolicyChannel(client);
     let finishPrompt!: (value: string) => void;
@@ -2961,7 +2961,7 @@ describe('DwsChannel', () => {
       expect(client.addImReaction).toHaveBeenCalledWith(
         'cid-1',
         'document-notification',
-        '暗中观察',
+        '🤔',
       );
     });
 
@@ -2972,7 +2972,7 @@ describe('DwsChannel', () => {
       expect(client.removeImReaction).toHaveBeenCalledWith(
         'cid-1',
         'document-notification',
-        '暗中观察',
+        '🤔',
       );
     });
     expect(client.replyToComment).toHaveBeenCalledWith(
@@ -2980,11 +2980,54 @@ describe('DwsChannel', () => {
       'comment-1',
       'done',
     );
+    expect(client.addImReaction).toHaveBeenCalledOnce();
   });
 
-  it('shows a working eyes reaction only while an accepted IM task is running', async () => {
+  it('shows the default start reaction only while an accepted IM task runs', async () => {
     const client = new FakeDwsClient();
     const { bridge } = await readyPolicyChannel(client);
+    let finishPrompt!: (value: string) => void;
+    const prompt = bridge.prompt as ReturnType<typeof vi.fn>;
+    prompt.mockImplementation(
+      async () =>
+        new Promise<string>((resolve) => {
+          finishPrompt = resolve;
+        }),
+    );
+
+    const delivery = client.emit(
+      1,
+      message('user_im_message_receive_o2o_all', 'message-1', 'do the task'),
+    );
+
+    await vi.waitFor(() => {
+      expect(client.addImReaction).toHaveBeenCalledWith(
+        'cid-1',
+        'message-1',
+        '🤔',
+      );
+    });
+    expect(client.removeImReaction).not.toHaveBeenCalled();
+
+    finishPrompt('done');
+    await delivery;
+
+    await vi.waitFor(() => {
+      expect(client.removeImReaction).toHaveBeenCalledWith(
+        'cid-1',
+        'message-1',
+        '🤔',
+      );
+    });
+    expect(client.addImReaction).toHaveBeenCalledOnce();
+  });
+
+  it('replaces a custom start reaction with a custom end reaction', async () => {
+    const client = new FakeDwsClient();
+    const { bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({ startReaction: '暗中观察', endReaction: '赞' }),
+    );
     let finishPrompt!: (value: string) => void;
     const prompt = bridge.prompt as ReturnType<typeof vi.fn>;
     prompt.mockImplementation(
@@ -3006,7 +3049,6 @@ describe('DwsChannel', () => {
         '暗中观察',
       );
     });
-    expect(client.removeImReaction).not.toHaveBeenCalled();
 
     finishPrompt('done');
     await delivery;
@@ -3017,12 +3059,20 @@ describe('DwsChannel', () => {
         'message-1',
         '暗中观察',
       );
+      expect(client.addImReaction).toHaveBeenLastCalledWith(
+        'cid-1',
+        'message-1',
+        '赞',
+      );
     });
   });
 
   it('removes an active working reaction when the channel disconnects', async () => {
     const client = new FakeDwsClient();
-    const { channel, bridge } = await readyPolicyChannel(client);
+    const { channel, bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({ endReaction: '赞' }),
+    );
     let finishPrompt!: (value: string) => void;
     const prompt = bridge.prompt as ReturnType<typeof vi.fn>;
     prompt.mockImplementation(
@@ -3045,16 +3095,20 @@ describe('DwsChannel', () => {
       expect(client.removeImReaction).toHaveBeenCalledWith(
         'cid-1',
         'running',
-        '暗中观察',
+        '🤔',
       );
     });
     finishPrompt('done');
     await delivery;
+    expect(client.addImReaction).toHaveBeenCalledOnce();
   });
 
   it('removes an active working reaction when the agent session dies', async () => {
     const client = new FakeDwsClient();
-    const { channel, bridge } = await readyPolicyChannel(client);
+    const { channel, bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({ endReaction: '赞' }),
+    );
     let finishPrompt!: (value: string) => void;
     const prompt = bridge.prompt as ReturnType<typeof vi.fn>;
     prompt.mockImplementation(
@@ -3077,11 +3131,12 @@ describe('DwsChannel', () => {
       expect(client.removeImReaction).toHaveBeenCalledWith(
         'cid-1',
         'running',
-        '暗中观察',
+        '🤔',
       );
     });
     finishPrompt('done');
     await delivery;
+    expect(client.addImReaction).toHaveBeenCalledOnce();
   });
 
   it('does not add a working reaction to a message rejected by pairing', async () => {
@@ -3096,10 +3151,13 @@ describe('DwsChannel', () => {
     expect(client.addImReaction).not.toHaveBeenCalled();
   });
 
-  it('keeps processing when the working reaction cannot be added', async () => {
+  it('keeps processing and adds the end reaction when the start add fails', async () => {
     const client = new FakeDwsClient();
     client.addImReaction.mockRejectedValueOnce(new Error('reaction denied'));
-    const { bridge } = await readyPolicyChannel(client);
+    const { bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({ endReaction: '赞' }),
+    );
 
     await client.emit(
       1,
@@ -3108,9 +3166,124 @@ describe('DwsChannel', () => {
 
     expect(bridge.prompt).toHaveBeenCalledOnce();
     expect(client.sendImMessage).toHaveBeenCalledOnce();
+    await vi.waitFor(() => {
+      expect(client.addImReaction).toHaveBeenLastCalledWith(
+        'cid-1',
+        'message-1',
+        '赞',
+      );
+    });
   });
 
-  it('removes a working reaction that finishes attaching after the task', async () => {
+  it('replaces the start reaction with the end reaction when a task fails', async () => {
+    const client = new FakeDwsClient();
+    const { bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({ endReaction: '赞' }),
+    );
+    const prompt = bridge.prompt as ReturnType<typeof vi.fn>;
+    prompt.mockRejectedValueOnce(new Error('agent unavailable'));
+
+    await expect(
+      client.emit(
+        1,
+        message('user_im_message_receive_o2o_all', 'failed', 'do the task'),
+      ),
+    ).rejects.toThrow('agent unavailable');
+
+    await vi.waitFor(() => {
+      expect(client.removeImReaction).toHaveBeenCalledWith(
+        'cid-1',
+        'failed',
+        '🤔',
+      );
+      expect(client.addImReaction).toHaveBeenLastCalledWith(
+        'cid-1',
+        'failed',
+        '赞',
+      );
+    });
+  });
+
+  it('replaces the start reaction with the end reaction when a task is steered', async () => {
+    const client = new FakeDwsClient();
+    const { bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({ endReaction: '赞' }),
+    );
+    let finishPrompt!: (value: string) => void;
+    const prompt = bridge.prompt as ReturnType<typeof vi.fn>;
+    prompt
+      .mockImplementationOnce(
+        async () =>
+          new Promise<string>((resolve) => {
+            finishPrompt = resolve;
+          }),
+      )
+      .mockResolvedValueOnce('replacement done');
+    const cancelSession = bridge.cancelSession as ReturnType<typeof vi.fn>;
+    cancelSession.mockImplementation(async () => finishPrompt('late'));
+
+    const task = client.emit(
+      1,
+      message('user_im_message_receive_o2o_all', 'running', 'do the task'),
+    );
+    await vi.waitFor(() => {
+      expect(client.addImReaction).toHaveBeenCalledWith(
+        'cid-1',
+        'running',
+        '🤔',
+      );
+    });
+
+    await client.emit(
+      1,
+      message(
+        'user_im_message_receive_o2o_all',
+        'replacement',
+        'replace the task',
+      ),
+    );
+    await task;
+
+    expect(cancelSession).toHaveBeenCalledWith('session-1');
+    await vi.waitFor(() => {
+      expect(client.removeImReaction).toHaveBeenCalledWith(
+        'cid-1',
+        'running',
+        '🤔',
+      );
+      expect(client.addImReaction).toHaveBeenCalledWith(
+        'cid-1',
+        'running',
+        '赞',
+      );
+    });
+  });
+
+  it('keeps the delivered response when the end reaction cannot be added', async () => {
+    const client = new FakeDwsClient();
+    client.addImReaction
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error('end reaction denied'));
+    const { bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({ endReaction: '赞' }),
+    );
+
+    await client.emit(
+      1,
+      message('user_im_message_receive_o2o_all', 'message-1', 'do the task'),
+    );
+
+    expect(bridge.prompt).toHaveBeenCalledOnce();
+    expect(client.sendImMessage).toHaveBeenCalledOnce();
+    await vi.waitFor(() => {
+      expect(client.addImReaction).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  it('removes a start reaction that finishes attaching after the task', async () => {
     const client = new FakeDwsClient();
     let finishReaction!: () => void;
     client.addImReaction.mockImplementationOnce(
@@ -3125,13 +3298,554 @@ describe('DwsChannel', () => {
       1,
       message('user_im_message_receive_o2o_all', 'message-1', 'do the task'),
     );
-    expect(client.removeImReaction).toHaveBeenCalledOnce();
+    expect(client.removeImReaction).not.toHaveBeenCalled();
 
     finishReaction();
 
     await vi.waitFor(() => {
-      expect(client.removeImReaction).toHaveBeenCalledTimes(2);
+      expect(client.removeImReaction).toHaveBeenCalledOnce();
     });
+  });
+
+  it('keeps a matching custom end reaction after an in-flight start add', async () => {
+    const client = new FakeDwsClient();
+    let finishReaction!: () => void;
+    client.addImReaction.mockImplementationOnce(
+      async () =>
+        new Promise<void>((resolve) => {
+          finishReaction = resolve;
+        }),
+    );
+    await readyPolicyChannel(
+      client,
+      makeConfig({ startReaction: '赞', endReaction: '赞' }),
+    );
+
+    await client.emit(
+      1,
+      message('user_im_message_receive_o2o_all', 'message-1', 'do the task'),
+    );
+    expect(client.removeImReaction).not.toHaveBeenCalled();
+
+    finishReaction();
+
+    await vi.waitFor(() => {
+      expect(client.removeImReaction).toHaveBeenCalledWith(
+        'cid-1',
+        'message-1',
+        '赞',
+      );
+      expect(client.addImReaction).toHaveBeenCalledTimes(2);
+      expect(client.addImReaction).toHaveBeenLastCalledWith(
+        'cid-1',
+        'message-1',
+        '赞',
+      );
+    });
+  });
+
+  it('serializes reaction transitions when the same message is retried', async () => {
+    const client = new FakeDwsClient();
+    let finishRemoval!: () => void;
+    client.removeImReaction.mockImplementationOnce(
+      async () =>
+        new Promise<void>((resolve) => {
+          finishRemoval = resolve;
+        }),
+    );
+    const { bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({ startReaction: '暗中观察', endReaction: '赞' }),
+    );
+    let finishRetry!: (value: string) => void;
+    const prompt = bridge.prompt as ReturnType<typeof vi.fn>;
+    prompt
+      .mockRejectedValueOnce(new Error('first turn failed'))
+      .mockImplementationOnce(
+        async () =>
+          new Promise<string>((resolve) => {
+            finishRetry = resolve;
+          }),
+      );
+    const inbound = message(
+      'user_im_message_receive_o2o_all',
+      'retry-message',
+      'do the task',
+    );
+
+    await expect(client.emit(1, inbound)).rejects.toThrow('first turn failed');
+    await vi.waitFor(() => {
+      expect(client.removeImReaction).toHaveBeenCalledWith(
+        'cid-1',
+        'retry-message',
+        '暗中观察',
+      );
+    });
+
+    const retry = client.emit(1, inbound);
+    await vi.waitFor(() => expect(prompt).toHaveBeenCalledTimes(2));
+    finishRemoval();
+
+    await vi.waitFor(() => {
+      expect(client.addImReaction).toHaveBeenCalledTimes(2);
+    });
+    expect(client.addImReaction).not.toHaveBeenCalledWith(
+      'cid-1',
+      'retry-message',
+      '赞',
+    );
+
+    finishRetry('done');
+    await retry;
+
+    await vi.waitFor(() => {
+      expect(client.addImReaction).toHaveBeenLastCalledWith(
+        'cid-1',
+        'retry-message',
+        '赞',
+      );
+    });
+  });
+
+  it('adds one end reaction when a retry finishes during prior removal', async () => {
+    const client = new FakeDwsClient();
+    let finishRemoval!: () => void;
+    client.removeImReaction.mockImplementationOnce(
+      async () =>
+        new Promise<void>((resolve) => {
+          finishRemoval = resolve;
+        }),
+    );
+    const { bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({ startReaction: '暗中观察', endReaction: '赞' }),
+    );
+    const prompt = bridge.prompt as ReturnType<typeof vi.fn>;
+    prompt
+      .mockRejectedValueOnce(new Error('first turn failed'))
+      .mockRejectedValueOnce(new Error('retry failed'));
+    const inbound = message(
+      'user_im_message_receive_o2o_all',
+      'retry-message',
+      'do the task',
+    );
+
+    await expect(client.emit(1, inbound)).rejects.toThrow('first turn failed');
+    await vi.waitFor(() => {
+      expect(client.removeImReaction).toHaveBeenCalledWith(
+        'cid-1',
+        'retry-message',
+        '暗中观察',
+      );
+    });
+
+    await expect(client.emit(1, inbound)).rejects.toThrow('retry failed');
+    finishRemoval();
+
+    await vi.waitFor(() => {
+      expect(client.addImReaction).toHaveBeenCalledTimes(2);
+      expect(
+        client.addImReaction.mock.calls.filter(
+          ([, , reaction]) => reaction === '赞',
+        ),
+      ).toHaveLength(1);
+    });
+  });
+
+  it('reuses an in-flight start reaction when the same message is retried', async () => {
+    const client = new FakeDwsClient();
+    let finishStartReaction!: () => void;
+    client.addImReaction.mockImplementationOnce(
+      async () =>
+        new Promise<void>((resolve) => {
+          finishStartReaction = resolve;
+        }),
+    );
+    const { bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({ startReaction: '暗中观察', endReaction: '赞' }),
+    );
+    let finishRetry!: (value: string) => void;
+    const prompt = bridge.prompt as ReturnType<typeof vi.fn>;
+    prompt
+      .mockRejectedValueOnce(new Error('first turn failed'))
+      .mockImplementationOnce(
+        async () =>
+          new Promise<string>((resolve) => {
+            finishRetry = resolve;
+          }),
+      );
+    const inbound = message(
+      'user_im_message_receive_o2o_all',
+      'retry-message',
+      'do the task',
+    );
+
+    const firstFailure = expect(client.emit(1, inbound)).rejects.toThrow(
+      'first turn failed',
+    );
+    await vi.waitFor(() => expect(client.addImReaction).toHaveBeenCalledOnce());
+    await firstFailure;
+
+    const retry = client.emit(1, inbound);
+    await vi.waitFor(() => expect(prompt).toHaveBeenCalledTimes(2));
+    finishStartReaction();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(client.addImReaction).toHaveBeenCalledOnce();
+    expect(client.removeImReaction).not.toHaveBeenCalled();
+
+    finishRetry('done');
+    await retry;
+
+    await vi.waitFor(() => {
+      expect(client.removeImReaction).toHaveBeenCalledWith(
+        'cid-1',
+        'retry-message',
+        '暗中观察',
+      );
+      expect(client.addImReaction).toHaveBeenLastCalledWith(
+        'cid-1',
+        'retry-message',
+        '赞',
+      );
+    });
+  });
+
+  it('keeps a single end reaction when the retry cannot remove the prior one', async () => {
+    const client = new FakeDwsClient();
+    client.removeImReaction.mockImplementation(
+      async (
+        _conversationId: unknown,
+        _messageId: unknown,
+        reaction: unknown,
+      ) => {
+        if (reaction === '赞') {
+          throw new Error('transient removal failure');
+        }
+      },
+    );
+    const { bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({ startReaction: '暗中观察', endReaction: '赞' }),
+    );
+    const prompt = bridge.prompt as ReturnType<typeof vi.fn>;
+    prompt
+      .mockRejectedValueOnce(new Error('first turn failed'))
+      .mockRejectedValueOnce(new Error('retry failed'));
+    const inbound = message(
+      'user_im_message_receive_o2o_all',
+      'retry-message',
+      'do the task',
+    );
+
+    await expect(client.emit(1, inbound)).rejects.toThrow('first turn failed');
+    await vi.waitFor(() => {
+      expect(client.addImReaction).toHaveBeenCalledWith(
+        'cid-1',
+        'retry-message',
+        '赞',
+      );
+    });
+
+    await expect(client.emit(1, inbound)).rejects.toThrow('retry failed');
+
+    await vi.waitFor(() => {
+      expect(client.removeImReaction).toHaveBeenCalledTimes(3);
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(client.addImReaction).toHaveBeenCalledTimes(3);
+    expect(
+      client.addImReaction.mock.calls.filter(
+        ([, , reaction]) => reaction === '赞',
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('drops the stale finish when the retry session dies during prior removal', async () => {
+    const client = new FakeDwsClient();
+    let finishRemoval!: () => void;
+    client.removeImReaction.mockImplementationOnce(
+      async () =>
+        new Promise<void>((resolve) => {
+          finishRemoval = resolve;
+        }),
+    );
+    const { channel, bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({ startReaction: '暗中观察', endReaction: '赞' }),
+    );
+    const prompt = bridge.prompt as ReturnType<typeof vi.fn>;
+    prompt
+      .mockRejectedValueOnce(new Error('first turn failed'))
+      .mockImplementationOnce(async () => new Promise<string>(() => undefined));
+    const inbound = message(
+      'user_im_message_receive_o2o_all',
+      'retry-message',
+      'do the task',
+    );
+
+    const firstFailure = expect(client.emit(1, inbound)).rejects.toThrow(
+      'first turn failed',
+    );
+    await vi.waitFor(() => expect(client.addImReaction).toHaveBeenCalledOnce());
+    await firstFailure;
+    await vi.waitFor(() =>
+      expect(client.removeImReaction).toHaveBeenCalledOnce(),
+    );
+
+    void client.emit(1, inbound).catch(() => undefined);
+    await vi.waitFor(() => expect(prompt).toHaveBeenCalledTimes(2));
+    channel.onSessionDied('session-1');
+
+    finishRemoval();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(client.addImReaction).toHaveBeenCalledOnce();
+    expect(client.addImReaction).not.toHaveBeenCalledWith(
+      'cid-1',
+      'retry-message',
+      '赞',
+    );
+  });
+
+  it('removes a stale end reaction when a failed message is retried after cleanup completes', async () => {
+    const client = new FakeDwsClient();
+    const { bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({ startReaction: '暗中观察', endReaction: '赞' }),
+    );
+    let finishRetry!: (value: string) => void;
+    const prompt = bridge.prompt as ReturnType<typeof vi.fn>;
+    prompt
+      .mockRejectedValueOnce(new Error('first turn failed'))
+      .mockImplementationOnce(
+        async () =>
+          new Promise<string>((resolve) => {
+            finishRetry = resolve;
+          }),
+      );
+    const inbound = message(
+      'user_im_message_receive_o2o_all',
+      'retry-message',
+      'do the task',
+    );
+
+    await expect(client.emit(1, inbound)).rejects.toThrow('first turn failed');
+    await vi.waitFor(() => {
+      expect(client.removeImReaction).toHaveBeenCalledWith(
+        'cid-1',
+        'retry-message',
+        '暗中观察',
+      );
+      expect(client.addImReaction).toHaveBeenLastCalledWith(
+        'cid-1',
+        'retry-message',
+        '赞',
+      );
+    });
+
+    const retry = client.emit(1, inbound);
+    await vi.waitFor(() => {
+      expect(client.removeImReaction).toHaveBeenCalledWith(
+        'cid-1',
+        'retry-message',
+        '赞',
+      );
+      expect(client.addImReaction).toHaveBeenCalledTimes(3);
+    });
+
+    finishRetry('done');
+    await retry;
+
+    await vi.waitFor(() => {
+      expect(client.addImReaction).toHaveBeenLastCalledWith(
+        'cid-1',
+        'retry-message',
+        '赞',
+      );
+      expect(
+        client.addImReaction.mock.calls.filter(
+          ([, , reaction]) => reaction === '赞',
+        ),
+      ).toHaveLength(2);
+    });
+  });
+
+  it('does not add an end reaction when the channel disconnects mid transition', async () => {
+    const client = new FakeDwsClient();
+    let finishStartAdd!: () => void;
+    client.addImReaction.mockImplementationOnce(
+      async () =>
+        new Promise<void>((resolve) => {
+          finishStartAdd = resolve;
+        }),
+    );
+    const { channel } = await readyPolicyChannel(
+      client,
+      makeConfig({ endReaction: '赞' }),
+    );
+
+    await client.emit(
+      1,
+      message('user_im_message_receive_o2o_all', 'message-1', 'do the task'),
+    );
+    await vi.waitFor(() => expect(client.addImReaction).toHaveBeenCalledOnce());
+    channel.disconnect();
+
+    finishStartAdd();
+
+    await vi.waitFor(() => {
+      expect(client.removeImReaction).toHaveBeenCalledWith(
+        'cid-1',
+        'message-1',
+        '🤔',
+      );
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(client.addImReaction).toHaveBeenCalledOnce();
+    expect(client.addImReaction).not.toHaveBeenCalledWith(
+      'cid-1',
+      'message-1',
+      '赞',
+    );
+  });
+
+  it('does not apply a stale end reaction after a disconnect and reconnect', async () => {
+    const client = new FakeDwsClient();
+    let finishStartAdd!: () => void;
+    client.addImReaction.mockImplementationOnce(
+      async () =>
+        new Promise<void>((resolve) => {
+          finishStartAdd = resolve;
+        }),
+    );
+    const { channel } = await readyPolicyChannel(
+      client,
+      makeConfig({ endReaction: '赞' }),
+    );
+
+    await client.emit(
+      1,
+      message('user_im_message_receive_o2o_all', 'message-1', 'do the task'),
+    );
+    await vi.waitFor(() => expect(client.addImReaction).toHaveBeenCalledOnce());
+    channel.disconnect();
+    await channel.connect();
+
+    finishStartAdd();
+
+    await vi.waitFor(() => {
+      expect(client.removeImReaction).toHaveBeenCalledWith(
+        'cid-1',
+        'message-1',
+        '🤔',
+      );
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(client.addImReaction).toHaveBeenCalledOnce();
+    expect(client.addImReaction).not.toHaveBeenCalledWith(
+      'cid-1',
+      'message-1',
+      '赞',
+    );
+  });
+
+  it('drops reaction operation tracking once queued transitions settle', async () => {
+    const client = new FakeDwsClient();
+    let finishRemoval!: () => void;
+    client.removeImReaction.mockImplementationOnce(
+      async () =>
+        new Promise<void>((resolve) => {
+          finishRemoval = resolve;
+        }),
+    );
+    let finishRetryStartAdd!: () => void;
+    client.addImReaction
+      .mockResolvedValueOnce(undefined)
+      .mockImplementationOnce(
+        async () =>
+          new Promise<void>((resolve) => {
+            finishRetryStartAdd = resolve;
+          }),
+      );
+    const { channel, bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({ startReaction: '暗中观察', endReaction: '赞' }),
+    );
+    const operations = channel as unknown as {
+      reactionOperations: Map<string, Promise<void>>;
+    };
+    const prompt = bridge.prompt as ReturnType<typeof vi.fn>;
+    prompt
+      .mockRejectedValueOnce(new Error('first turn failed'))
+      .mockImplementationOnce(async () => new Promise<string>(() => undefined));
+    const inbound = message(
+      'user_im_message_receive_o2o_all',
+      'retry-message',
+      'do the task',
+    );
+
+    const firstFailure = expect(client.emit(1, inbound)).rejects.toThrow(
+      'first turn failed',
+    );
+    await vi.waitFor(() => expect(client.addImReaction).toHaveBeenCalledOnce());
+    await firstFailure;
+    await vi.waitFor(() =>
+      expect(client.removeImReaction).toHaveBeenCalledOnce(),
+    );
+    expect(operations.reactionOperations.size).toBe(1);
+
+    void client.emit(1, inbound).catch(() => undefined);
+    await vi.waitFor(() => expect(prompt).toHaveBeenCalledTimes(2));
+    expect(operations.reactionOperations.size).toBe(1);
+
+    finishRemoval();
+    await vi.waitFor(() =>
+      expect(client.addImReaction).toHaveBeenCalledTimes(2),
+    );
+    expect(operations.reactionOperations.size).toBe(1);
+
+    finishRetryStartAdd();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(operations.reactionOperations.size).toBe(0);
+  });
+
+  it('refreshes and bounds remembered end reaction keys', async () => {
+    const client = new FakeDwsClient();
+    const { channel } = await readyPolicyChannel(client);
+    const state = channel as unknown as {
+      rememberEndReaction(key: string): void;
+      endReactionKeys: Set<string>;
+    };
+
+    state.rememberEndReaction('recent');
+    expect(state.endReactionKeys.has('recent')).toBe(true);
+    expect(state.endReactionKeys.size).toBe(1);
+
+    for (let index = 0; index < 999; index += 1) {
+      state.rememberEndReaction(`filler-${index}`);
+    }
+    expect(state.endReactionKeys.size).toBe(1000);
+
+    state.rememberEndReaction('recent');
+    expect(state.endReactionKeys.size).toBe(1000);
+
+    state.rememberEndReaction('latest');
+    expect(state.endReactionKeys.size).toBe(1000);
+    expect(state.endReactionKeys.has('filler-0')).toBe(false);
+    expect(state.endReactionKeys.has('filler-1')).toBe(true);
+    expect(state.endReactionKeys.has('recent')).toBe(true);
+    expect(state.endReactionKeys.has('latest')).toBe(true);
   });
 
   it('applies sender pairing to ordinary direct messages', async () => {
