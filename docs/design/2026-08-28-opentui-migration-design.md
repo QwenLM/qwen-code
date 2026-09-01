@@ -1,8 +1,9 @@
 # OpenTUI Migration — Design and Architecture
 
 Tracking: [#8662](https://github.com/QwenLM/qwen-code/issues/8662). Status
-2026-08-28: Phase 1 in progress; the infra batch has landed on main, the
-foundation-modules batch is under review.
+2026-09-01: Phase 1 in progress; five of the seven batches are on main (infra,
+foundation modules, live-session & input, dialogs & commands, backend
+composition root). Renderer activation is the next batch.
 
 ## Goal
 
@@ -122,7 +123,7 @@ The pieces, in landing order:
   nothing in ink today — it is additive, and its contract is pinned by an
   immutability test matrix (no state or item reachable from an earlier fold
   result may ever change).
-- **Foundation modules** (under review). The renderer-agnostic services the
+- **Foundation modules** (landed, #10146). The renderer-agnostic services the
   later batches build on: the theme family, accessibility (plain-text
   transcript projection + screen-reader path), clipboard (OSC 52 with
   multiplexer handling plus platform fallback), key-map, mouse hit-testing
@@ -132,19 +133,23 @@ The pieces, in landing order:
   a11y/clipboard), slash-command dispatch into the existing command
   registry, and the dialog scaffolding with the theme dialog as its first
   consumer.
-- **Live-session & input.** Live-session stream fold wiring, message
-  rendering, transcript adapter with resume/session-switch, sticky todos,
-  the composer, mouse rows/scrollbar/selection with multi-click select,
-  diff rendering, session compaction.
-- **Dialogs & commands.** The dialog family and dialog data, the
-  folder-trust gate, session rewind, the slash-command registry/dispatch
-  surface, the help overlay.
-- **Backend composition root.** The OpenTUI app shell: command bridge,
-  dialog mount, error boundary, runtime sidecar.
-- **Renderer activation.** Renderer dispatch plus the runtime gate and the
-  entry wiring into `startInteractiveUI`; small shared exports and runtime
-  fixes. **Default renderer stays ink.** OpenTUI becomes reachable only
-  through the flag.
+- **Live-session & input** (landed, #10368). Live-session stream fold
+  wiring, message rendering, transcript adapter with
+  resume/session-switch, sticky todos, the composer, mouse
+  rows/scrollbar/selection with multi-click select, diff rendering, session
+  compaction.
+- **Dialogs & commands** (landed, #10383). The dialog family and dialog
+  data, the folder-trust gate, session rewind, the slash-command
+  registry/dispatch surface, the help overlay.
+- **Backend composition root** (landed, #10696). The OpenTUI app shell:
+  command bridge, dialog mount, error boundary, runtime sidecar. It is a
+  thin assembly, not a copy of `AppContainer`: the transcript view, model
+  turn, session re-key and composer control stay explicit seams for the
+  activation batch to own.
+- **Renderer activation** (next). Renderer dispatch plus the runtime gate
+  and the entry wiring into `startInteractiveUI`; small shared exports and
+  runtime fixes. **Default renderer stays ink.** OpenTUI becomes reachable
+  only through the flag.
 - **Build & CI.** Bundle asset pipeline for the OpenTUI runtime assets, the
   CI legs (e2e, tui-parity), renderer-matrix integration tests, and the
   parity tooling (codemod, PTY harness).
@@ -216,6 +221,15 @@ so plain-Node loadability is a Phase 3 gate (below), not an assumption.
   the ink consumers.
 - ESLint rules for OpenTUI JSX — deferred from the infra batch to the
   foundation-modules batch, the first batch carrying OpenTUI JSX sources.
+- Composition-root callback identity (#8662 U-8) — the shell memoizes its
+  host and dispatcher effect on the callback props it is given, so the
+  activation batch must pass stable identities at the mount site; no mount
+  site existed to fix this in the composition-root batch.
+- Settings sub-dialog routing and composer ownership (#8662 U-9) — deferred
+  from the composition-root batch: the dialog mount has no channel to switch
+  to a sub-dialog and the composer belongs to the entry layer, so those
+  settings rows and the arena picker report an unwired seam instead of
+  acting.
 - Gate hardening noted in the infra PR's second review round: JSX implicit
   runtime imports, triple-slash/JSDoc type references, UTF-16 sources, and
   tsconfig `baseUrl` bare-specifier resolution.
@@ -227,6 +241,10 @@ so plain-Node loadability is a Phase 3 gate (below), not an assumption.
 | Batch                                               | PR                                       |
 | --------------------------------------------------- | ---------------------------------------- |
 | Infra                                               | #10134 (merged)                          |
-| Foundation modules                                  | #10146                                   |
+| Foundation modules                                  | #10146 (merged)                          |
+| Live-session & input                                | #10368 (merged)                          |
+| Dialogs & commands                                  | #10383 (merged)                          |
+| Backend composition root                            | #10696 (merged)                          |
+| Renderer activation                                 | next batch                               |
 | OpenTUI runtime npm packaging                       | #9885 (rebases after the build/CI batch) |
 | Original implementation (superseded by the batches) | #8677 (draft)                            |
