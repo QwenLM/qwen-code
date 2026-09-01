@@ -781,6 +781,96 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
     }
   });
 
+  it('drops a server row after successful deletion', async () => {
+    sdkMock.actions.getPendingPrompts.mockResolvedValue({
+      pendingPrompts: [
+        {
+          promptId: 'p-delete-success',
+          text: 'delete me',
+          state: 'queued',
+        },
+      ],
+    });
+    const removal = deferred<{ removed: boolean }>();
+    sdkMock.actions.removePendingPrompt.mockReturnValueOnce(removal.promise);
+    const harness = createHarness();
+    try {
+      await harness.render({ streamingState: 'responding' });
+      sdkMock.actions.getPendingPrompts.mockResolvedValue({
+        pendingPrompts: [],
+      });
+      const row = harness.result().queuedPrompts[0]!;
+      await act(async () => {
+        harness.result().removeQueuedPrompt(row.id);
+        await Promise.resolve();
+      });
+      expect(harness.result().queuedPrompts[0]?.isRemoving).toBe(true);
+
+      await act(async () => {
+        removal.resolve({ removed: true });
+        await Promise.resolve();
+      });
+
+      expect(harness.result().queuedPrompts).toEqual([]);
+      expect(harness.reportError).not.toHaveBeenCalled();
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('keeps a server row while deletion is in flight', async () => {
+    sdkMock.actions.getPendingPrompts.mockResolvedValue({
+      pendingPrompts: [
+        {
+          promptId: 'p-delete-race',
+          text: 'delete me',
+          state: 'queued',
+        },
+      ],
+    });
+    const removal = deferred<{ removed: boolean }>();
+    sdkMock.actions.removePendingPrompt.mockReturnValueOnce(removal.promise);
+    const harness = createHarness();
+    try {
+      await harness.render({ streamingState: 'responding' });
+      sdkMock.actions.getPendingPrompts.mockResolvedValue({
+        pendingPrompts: [],
+      });
+      const row = harness.result().queuedPrompts[0]!;
+      await act(async () => {
+        harness.result().removeQueuedPrompt(row.id);
+        await Promise.resolve();
+      });
+
+      await act(async () => {
+        sdkMock.publishPendingEvents([
+          {
+            type: 'pending_prompt_started',
+            originatorClientId: 'client-before-reload',
+            data: {
+              sessionId: 'session-a',
+              promptId: 'p-other',
+              text: 'other prompt',
+            },
+          },
+        ]);
+        await Promise.resolve();
+      });
+      expect(harness.result().queuedPrompts).toHaveLength(1);
+      expect(harness.result().queuedPrompts[0]?.isRemoving).toBe(true);
+
+      await act(async () => {
+        removal.resolve({ removed: false });
+        await Promise.resolve();
+      });
+
+      expect(harness.result().queuedPrompts).toEqual([]);
+      expect(harness.reportError).toHaveBeenCalledOnce();
+    } finally {
+      await harness.dispose();
+    }
+  });
+
   it('keeps unrelated prompts from a response that crosses a terminal event', async () => {
     const harness = createHarness();
     try {

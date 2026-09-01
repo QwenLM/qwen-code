@@ -564,7 +564,13 @@ export function useQueuedPrompts({
   const syncServerQueuedPrompts = useCallback(
     (serverQueued: DaemonPendingPromptSummary[], targetSessionId: string) => {
       const next = queuedPromptsRef.current.filter((p) => {
-        if (p.isEditing || p.isRemoving) return true;
+        if (
+          (p.isEditing || p.isRemoving) &&
+          (!p.serverPromptId ||
+            removingServerPromptIdsRef.current.has(p.serverPromptId))
+        ) {
+          return true;
+        }
         const promptId = p.serverPromptId ?? p.midTurnMessageId;
         if (promptId && settledServerPromptIdsRef.current.has(promptId)) {
           return false;
