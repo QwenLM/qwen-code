@@ -104,9 +104,16 @@ describe('DefaultOpenAICompatibleProvider', () => {
   });
 
   describe('getResponseParsingOptions', () => {
-    it('enables leak handling without treating balanced tags as protocol', () => {
-      expect(provider.getResponseParsingOptions()).toEqual({
+    it('keeps balanced tags visible for generic models', () => {
+      expect(provider.getResponseParsingOptions('gpt-4o')).toEqual({
         contentOnlyThinkingTagLeaks: true,
+      });
+    });
+
+    it('parses tagged thinking for Qwen3 models', () => {
+      expect(provider.getResponseParsingOptions('qwen3.8-max')).toEqual({
+        contentOnlyThinkingTagLeaks: true,
+        taggedThinkingTags: true,
       });
     });
   });
