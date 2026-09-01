@@ -24,6 +24,7 @@ export interface AsyncEventQueueOptions {
 
 interface Waiter<T> {
   resolve: (result: IteratorResult<T>) => void;
+  detach?: () => void;
 }
 
 export class AsyncEventQueue<T> {
@@ -32,8 +33,6 @@ export class AsyncEventQueue<T> {
   private buffered: T[] = [];
   private waiters: Array<Waiter<T>> = [];
   private ended = false;
-  /** Live iterator(s); only the latest one keeps receiving events. */
-  private active: Array<Waiter<T>> = [];
 
   constructor(options: AsyncEventQueueOptions = {}) {
     this.capacity = options.capacity ?? 500;
@@ -44,6 +43,7 @@ export class AsyncEventQueue<T> {
     if (this.ended) return;
     const waiter = this.waiters.shift();
     if (waiter) {
+      if (waiter.detach) waiter.detach();
       waiter.resolve({ value: item, done: false });
       return;
     }
@@ -57,6 +57,7 @@ export class AsyncEventQueue<T> {
     if (this.ended) return;
     this.ended = true;
     for (const waiter of this.waiters.splice(0)) {
+      if (waiter.detach) waiter.detach();
       waiter.resolve({ value: undefined as never, done: true });
     }
   }
@@ -64,10 +65,8 @@ export class AsyncEventQueue<T> {
   subscribe(options: { signal?: AbortSignal } = {}): AsyncIterable<T> {
     // A new subscription takes over: the previous iterator must end or
     // the pump's resubscribe would double-consume.
-    for (const stale of this.active.splice(0)) {
-      stale.resolve({ value: undefined as never, done: true });
-    }
     for (const stale of this.waiters.splice(0)) {
+      if (stale.detach) stale.detach();
       stale.resolve({ value: undefined as never, done: true });
     }
     const signal = options.signal;
@@ -90,20 +89,16 @@ export class AsyncEventQueue<T> {
               return { value: undefined as never, done: true };
             }
             return await new Promise<IteratorResult<T>>((resolve) => {
-              const waiter = { resolve };
+              const waiter: Waiter<T> & { detach?: () => void } = { resolve };
               queue.waiters.push(waiter);
-              queue.active.push(waiter);
-              signal?.addEventListener(
-                'abort',
-                () => {
-                  const index = queue.waiters.indexOf(waiter);
-                  if (index !== -1) queue.waiters.splice(index, 1);
-                  const activeIndex = queue.active.indexOf(waiter);
-                  if (activeIndex !== -1) queue.active.splice(activeIndex, 1);
-                  resolve({ value: undefined as never, done: true });
-                },
-                { once: true },
-              );
+              const onAbort = () => {
+                const index = queue.waiters.indexOf(waiter);
+                if (index !== -1) queue.waiters.splice(index, 1);
+                resolve({ value: undefined as never, done: true });
+              };
+              waiter.detach = () =>
+                signal?.removeEventListener('abort', onAbort);
+              signal?.addEventListener('abort', onAbort, { once: true });
             });
           },
         };

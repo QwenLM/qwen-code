@@ -56,6 +56,7 @@ import {
   MAX_SUMMARY_CHARS,
   pickLeastEscalating,
   sanitizeTitleLine,
+  stripControlSequences,
   tailSlice,
 } from './adaptor-utils.js';
 import type {
@@ -383,6 +384,13 @@ export class AcpAdaptor implements BackendAdaptor {
   }
 
   private trackSession(id: string, generation: number): AcpSessionState {
+    const existing = this.sessions.get(id);
+    // A respawned agent can reuse a sessionId from a crashed process; the
+    // stale entry's closed/dead-generation state would make the new session
+    // dead on arrival. Replace it with a fresh state.
+    if (existing && (existing.closed || existing.generation !== generation)) {
+      this.sessions.delete(id);
+    }
     let state = this.sessions.get(id);
     if (!state) {
       state = {
@@ -490,7 +498,7 @@ export class AcpAdaptor implements BackendAdaptor {
         state.queue.push({
           type: 'turn_error',
           jobRef,
-          error: `the turn ended unexpectedly (${String(stopReason)})`,
+          error: 'the turn ended unexpectedly',
         });
     }
   }
@@ -524,11 +532,26 @@ export class AcpAdaptor implements BackendAdaptor {
     throw new Error('session state not registered');
   }
 
+  private connecting?: Promise<AcpConnectionLike>;
+
   private async ensureChild(): Promise<AcpConnectionLike> {
     if (this.connection) return this.connection;
     if (this.closing) {
       throw new Error(`acp backend '${this.name}' is closed`);
     }
+    // Memoize: two concurrent callers (session_create + a handoff whose
+    // default was cleared) both pass the this.connection guard and each
+    // spawns its own child, orphaning one. Return the in-flight promise.
+    if (this.connecting) return this.connecting;
+    this.connecting = this.startChild();
+    try {
+      return await this.connecting;
+    } finally {
+      this.connecting = undefined;
+    }
+  }
+
+  private async startChild(): Promise<AcpConnectionLike> {
     this.generation += 1;
     this.drainObserved = false;
     this.imageInput = false;
@@ -541,10 +564,10 @@ export class AcpAdaptor implements BackendAdaptor {
         this.onChildExit(info.code, info.signal),
       );
     } else {
-      const { connection, child, exitPromise } = this.spawnChild(client);
-      conn = connection;
-      this.child = child;
-      exited = exitPromise;
+      const spawned = this.spawnChild(client);
+      conn = spawned.connection;
+      this.child = spawned.child;
+      exited = spawned.exitPromise;
     }
     // Race the handshake against both a timeout and child exit — a
     // crash-on-boot must fail in milliseconds, not after 10s.
@@ -557,7 +580,17 @@ export class AcpAdaptor implements BackendAdaptor {
       this.handshakeDeadline(),
     ];
     if (exited) racers.push(exited);
-    const initialized = (await Promise.race(racers)) as Record<string, unknown>;
+    let initialized: Record<string, unknown>;
+    try {
+      initialized = (await Promise.race(racers)) as Record<string, unknown>;
+    } catch (error) {
+      // A failed handshake (timeout, protocol error, child exit, or spawn
+      // error) must not leak the spawned child: kill it so it cannot
+      // later exit and tear down a healthy respawned connection (R1-5),
+      // and so orphan agent processes do not accumulate per retry (R1-47).
+      this.killChild();
+      throw error;
+    }
     const caps = isRecord(initialized['agentCapabilities'])
       ? initialized['agentCapabilities']
       : {};
@@ -580,7 +613,39 @@ export class AcpAdaptor implements BackendAdaptor {
       }
     }
     this.connection = conn;
+    // Attach the real exit handler only after the handshake succeeds, so a
+    // stale orphan child's late exit cannot tear down the healthy
+    // respawned connection (R1-5). The handshake-race exitPromise above
+    // handles pre-handshake exits.
+    if (this.child) {
+      const healthyChild = this.child;
+      healthyChild.once('exit', (code, signal) => {
+        // Only react if this child is still the active one.
+        if (this.child === healthyChild) {
+          this.onChildExit(code, signal);
+        }
+      });
+    }
     return conn;
+  }
+
+  private killChild(): void {
+    const child = this.child;
+    if (!child?.kill) return;
+    try {
+      child.kill('SIGTERM');
+      const timer = setTimeout(() => {
+        try {
+          child.kill('SIGKILL');
+        } catch {
+          /* already dead */
+        }
+      }, KILL_GRACE_MS);
+      timer.unref?.();
+    } catch {
+      /* already dead */
+    }
+    this.child = undefined;
   }
 
   private handshakeDeadline(): Promise<never> {
@@ -623,13 +688,23 @@ export class AcpAdaptor implements BackendAdaptor {
     // The exit promise feeds the handshake race: a child that dies before
     // initialize completes must fail preflight immediately.
     const exitPromise = new Promise<never>((_, reject) => {
+      // A spawn failure (ENOENT) emits 'error', never 'exit'; without
+      // this listener the process dies with an uncaught error (R1-31).
+      child.once('error', (error) => {
+        reject(
+          new Error(
+            `acp backend '${this.name}' failed to spawn: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          ),
+        );
+      });
       child.once('exit', (code, signal) => {
         reject(
           new Error(
             `acp backend '${this.name}' exited before initializing (code ${String(code)}, signal ${String(signal)})`,
           ),
         );
-        this.onChildExit(code, signal);
       });
     });
     return { connection, child, exitPromise };
@@ -714,7 +789,7 @@ export class AcpAdaptor implements BackendAdaptor {
       const content = isRecord(update['content']) ? update['content'] : {};
       const text = content['text'];
       if (typeof text === 'string') {
-        state.turnBuffer = `${state.turnBuffer}${text}`;
+        state.turnBuffer = `${state.turnBuffer}${stripControlSequences(text)}`;
         if (state.turnBuffer.length > MAX_DETAIL_CHARS) {
           state.turnBuffer = tailSlice(state.turnBuffer, MAX_DETAIL_CHARS);
         }
@@ -814,7 +889,7 @@ export class AcpAdaptor implements BackendAdaptor {
           ? this.sessions.get(sessionId)
           : undefined;
       if (state && !state.closed && typeof text === 'string') {
-        state.queue.push({ type: 'speak', text });
+        state.queue.push({ type: 'speak', text: stripControlSequences(text) });
       }
       return {};
     }

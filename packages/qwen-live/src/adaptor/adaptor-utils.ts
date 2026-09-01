@@ -53,25 +53,11 @@ export function classifyOption(
   // Fail closed: a structured kind we do not understand must not be votable
   // through a bare "allow"/"deny".
   if (wireKind !== undefined) return { kind: 'other' };
-  // Fallback for backends that omit the structured kind. Snake/kebab ids
-  // ("proceed_once") must split into words — `\b` treats an underscore as a
-  // word character and would never match inside them.
-  const haystack = `${optionId} ${name ?? ''}`
-    .toLowerCase()
-    .replace(/[_-]/g, ' ');
-  const escalation = /\balways\b/.test(haystack)
-    ? ('always' as const)
-    : /\bonce\b/.test(haystack)
-      ? ('once' as const)
-      : undefined;
-  // Word boundaries matter: a bare /no/ would match inside "notify" and
-  // misroute an allow vote to a reject option.
-  if (/\b(allow|proceed|approve|yes|accept)\b/.test(haystack)) {
-    return { kind: 'proceed', ...(escalation ? { escalation } : {}) };
-  }
-  if (/\b(deny|reject|refuse|no|cancel)\b/.test(haystack)) {
-    return { kind: 'reject', ...(escalation ? { escalation } : {}) };
-  }
+  // No structured kind at all: this is a generic/non-qwen agent (the
+  // target of this PR). Word heuristics over free-form labels can be
+  // inverted by negation ("Do not allow" → proceed), so fail closed
+  // rather than guess — the spoken ask surfaces the title for the user
+  // to decide.
   return { kind: 'other' };
 }
 
@@ -95,15 +81,41 @@ export function pickLeastEscalating(
   return best;
 }
 
+/**
+ * Compose the human-readable permission title. Control sequences are
+ * stripped (the title flows verbatim into the spoken ask and keys the
+ * broker's standing rule — raw ESC/OSC bytes must not reach speech or
+ * anchor a trust grant), but NOT truncated to the first line: the
+ * standing-rule key must span the whole command.
+ */
 export function describeToolCall(toolCall: unknown): string {
   if (!isRecord(toolCall)) return 'a tool call';
   const name = typeof toolCall['name'] === 'string' ? toolCall['name'] : '';
   const command =
     typeof toolCall['command'] === 'string' ? toolCall['command'] : '';
   const title = typeof toolCall['title'] === 'string' ? toolCall['title'] : '';
-  const detail = command || title;
+  const detail = stripControlSequences(command || title);
   if (name && detail) return `${name}: ${detail}`;
   return name || detail || 'a tool call';
+}
+
+/**
+ * Remove terminal control sequences without the first-line cut that
+ * sanitizeTitleLine applies — the permission key needs the whole command.
+ * Mirrors the same sequence families (OSC, CSI, SS2/SS3/DCS, C0/DEL/C1).
+ */
+export function stripControlSequences(text: string): string {
+  return (
+    text
+      // eslint-disable-next-line no-control-regex
+      .replace(/\x1b\][\s\S]*?(?:\x07|\x1b\\)/g, '')
+      // eslint-disable-next-line no-control-regex
+      .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
+      // eslint-disable-next-line no-control-regex
+      .replace(/\x1b[NOP]/g, '')
+      // eslint-disable-next-line no-control-regex
+      .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/g, ' ')
+  );
 }
 
 /**

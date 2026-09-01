@@ -917,7 +917,9 @@ export class LiveSession {
         };
       }
       if (pending) {
-        context.injector.retractPermission(pending.requestId);
+        context.injector.retractPermission(
+          this.scopedPermissionId(pending.backend, pending.requestId),
+        );
       }
       // The vote channel carries no free text; a user constraint ("only this
       // file") would otherwise be silently discarded — the grant would be
@@ -1216,7 +1218,9 @@ export class LiveSession {
       }
       case 'permission_resolved': {
         const pending = this.broker.onResolved(backend, event.requestId);
-        const retracted = context.injector.retractPermission(event.requestId);
+        const retracted = context.injector.retractPermission(
+          this.scopedPermissionId(backend, event.requestId),
+        );
         if (!event.byUs) {
           if (!retracted && pending) {
             context.injector.enqueue({
@@ -1264,7 +1268,7 @@ export class LiveSession {
   ): void {
     context.injector.enqueue({
       kind: 'permission',
-      requestId: pending.requestId,
+      requestId: this.scopedPermissionId(pending.backend, pending.requestId),
       context: `[PERMISSION ${pending.requestHandle}] Session ${pending.sessionHandle} wants to run: ${pending.title}. Ask the user and relay their answer with respond_permission in this response. Do not claim it was allowed until that tool returns status delivered.`,
       spoken: `The task wants to ${pending.title}. Should I allow it?`,
     });
@@ -1287,6 +1291,13 @@ export class LiveSession {
       this.enqueuePendingPermissions(context);
     }, PERMISSION_REMINDER_DELAY_MS);
     context.permissionReminderTimer.unref?.();
+  }
+
+  private scopedPermissionId(
+    backend: BackendHandle,
+    requestId: string,
+  ): string {
+    return `${backend.adaptor}:${requestId}`;
   }
 
   private spokenTaskLabel(job: JobRecord | undefined): string {

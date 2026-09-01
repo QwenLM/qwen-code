@@ -69,7 +69,14 @@ export class HandleRegistry {
 
   /** Mark a session closed: its handle stops resolving from now on. */
   closeSession(handle: string): void {
-    this.closedSessions.add(handle.trim());
+    const normalized = handle.trim();
+    this.closedSessions.add(normalized);
+    // Clear the reverse mapping so a respawned agent reusing the same
+    // backend session id gets a fresh handle, not the poisoned closed one.
+    const backend = this.sessions.get(normalized);
+    if (backend) {
+      this.sessionsByBackendId.delete(`${backend.adaptor}:${backend.id}`);
+    }
   }
 
   /**

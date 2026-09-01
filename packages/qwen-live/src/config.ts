@@ -304,6 +304,9 @@ function parseBackends(
       `${source}: mark one backend "default": true (a single entry is implicitly the default)`,
     );
   }
+  if (defaults.length === 0 && backends.length === 1) {
+    backends[0] = { ...backends[0], isDefault: true };
+  }
   return backends;
 }
 

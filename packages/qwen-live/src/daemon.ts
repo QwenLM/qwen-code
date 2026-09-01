@@ -57,6 +57,7 @@ function buildAdaptor(
       ...(backend.token ? { token: backend.token } : {}),
       ...(fields.defaultCwd ? { defaultCwd: fields.defaultCwd } : {}),
       clientId: fields.clientId,
+      name: backend.name,
     });
   }
   return new AcpAdaptor({
