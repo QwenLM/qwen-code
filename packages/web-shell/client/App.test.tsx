@@ -506,6 +506,9 @@ const {
       latestToolApprovalKeyboardActive: null as boolean | null,
       toolApprovalKeyboardActiveHistory: [] as Array<boolean | null>,
       latestToolApprovalPlanTodos: [] as Array<{ id: string }>,
+      latestToolApprovalOnConfirm: null as
+        | ((id: string, selectedOption: string) => void | Promise<void>)
+        | null,
       latestAskUserQuestionKeyboardActive: null as boolean | null,
       askUserKeyboardActiveHistory: [] as Array<boolean | null>,
       latestTodoPanelTodos: [] as Array<{
@@ -531,6 +534,11 @@ const {
         onOpenMonitor?: (task: DaemonSessionMonitorTaskStatus) => void;
       } | null,
       settings: [] as DaemonSettingDescriptor[],
+      settingsLoading: false,
+      // A background revalidation: the real resource sets loading:true while
+      // keeping the last-known-good data and status.
+      settingsReloading: false,
+      settingsError: undefined as Error | undefined,
       latestSettingsHookOptions: undefined as
         | { autoLoad?: boolean; enabled?: boolean }
         | undefined,
@@ -548,6 +556,11 @@ const {
       },
       latestSettingsState: null as {
         settings: DaemonSettingDescriptor[];
+      } | null,
+      latestSplitViewProps: null as {
+        includeOtherWorkspaces?: boolean;
+        workspaceCwd?: string;
+        sessionWorkflowEnabled?: boolean;
       } | null,
       latestSettingsInitialCategory: undefined as string | undefined,
       latestModelManagement: null as {
@@ -645,7 +658,12 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => {
         settings: testState.settings,
         setValue: settingsSetValue,
         reload: settingsReload,
-        loading: false,
+        status:
+          testState.settingsLoading || testState.settingsError
+            ? undefined
+            : { v: 1, settings: testState.settings },
+        loading: testState.settingsLoading || testState.settingsReloading,
+        error: testState.settingsError,
       };
     },
     useProviders: (options?: { autoLoad?: boolean; enabled?: boolean }) => {
@@ -1172,6 +1190,7 @@ vi.mock('./components/sidebar/WebShellSidebar', async () => {
         workspaceCwd?: string,
       ) => Promise<boolean> | boolean | void;
       onSelectWorkspace?: (workspaceCwd: string | undefined) => void;
+      onOpenWorkspacesOverview?: () => void;
       onLoadSession?: (sessionId: string) => Promise<void> | void;
       onLoadStandaloneSession?: (sessionId: string) => Promise<void> | void;
       onSelectCurrentSession?: () => void;
@@ -1244,6 +1263,15 @@ vi.mock('./components/sidebar/WebShellSidebar', async () => {
             onClick: () => void props.onNewWorktreeSession?.('/other'),
           },
           'new worktree session in other',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'open-workspaces-overview',
+            type: 'button',
+            onClick: () => props.onOpenWorkspacesOverview?.(),
+          },
+          'open workspaces overview',
         ),
         React.createElement(
           'button',
@@ -1418,6 +1446,15 @@ vi.mock('./session-catalog/session-catalog-store', async (importOriginal) => {
 vi.mock('./session-catalog/session-catalog-hooks', () => ({
   useSessionCatalogController: () => sessionCatalogController,
   useSessionHasActivePrompt: () => testState.sessionHasActivePrompt,
+  // The Workspaces overview panel's per-row session counts; inert here.
+  useSessionCatalogQuery: () => ({
+    page: undefined,
+    sessions: [],
+    truncated: false,
+    loading: false,
+    stale: false,
+    reload: vi.fn(),
+  }),
 }));
 
 vi.mock('./components/dialogs/AddWorkspaceDialog', async () => {
@@ -1545,7 +1582,14 @@ vi.doMock('./components/SplitView', async () => {
         outcome: 'completed';
         transcriptComplete: boolean;
       }) => void;
-      onPaneArtifactsChange?: (sessionId: string, artifacts: unknown[]) => void;
+      includeOtherWorkspaces?: boolean;
+      workspaceCwd?: string;
+      sessionWorkflowEnabled?: boolean;
+      onPaneArtifactsChange?: (
+        sessionId: string,
+        artifacts: unknown[],
+        workspaceActions: unknown,
+      ) => void;
       onRightPanelOpen?: (request: unknown) => void;
       onOpenMonitor?: (
         task: DaemonSessionMonitorTaskStatus,
@@ -1559,6 +1603,7 @@ vi.doMock('./components/SplitView', async () => {
       }) => unknown;
       voiceWorkspaces?: readonly unknown[];
     }) => {
+      testState.latestSplitViewProps = props;
       const artifact = {
         id: 'pane-artifact',
         kind: 'report',
@@ -1950,12 +1995,16 @@ vi.doMock('./components/messages/ToolApproval', async () => {
     ToolApproval: (props: {
       keyboardActive?: boolean;
       planTodos?: Array<{ id: string }>;
+      onConfirm?: (id: string, selectedOption: string) => void | Promise<void>;
     }) => {
       testState.latestToolApprovalKeyboardActive = props.keyboardActive ?? null;
       testState.toolApprovalKeyboardActiveHistory.push(
         props.keyboardActive ?? null,
       );
       testState.latestToolApprovalPlanTodos = props.planTodos ?? [];
+      // Captured so app-level tests can drive the overlay's confirm path and
+      // observe the promise contract the real component re-arms on.
+      testState.latestToolApprovalOnConfirm = props.onConfirm ?? null;
       return React.createElement('div', {
         'data-web-shell-permission-panel': '',
       });
@@ -3334,6 +3383,33 @@ describe('artifact panel fullscreen', () => {
     expect(testState.latestAskUserQuestionKeyboardActive).toBe(true);
   });
 
+  it('rethrows a rejected permission submission so the overlay re-arms', async () => {
+    // The main-chat approval overlay is onConfirm for every main-chat
+    // approval. ToolApproval re-arms its double-submit guard only when the
+    // promise returned by onConfirm rejects — an onConfirm that swallows the
+    // rejection (returning undefined) leaves submittedRef latched after a
+    // transient daemon/WS failure, blocking every retry for that request.
+    testState.blocks = [makePendingPermissionBlock()];
+    renderApp();
+    await flush();
+    expect(testState.latestToolApprovalOnConfirm).not.toBeNull();
+
+    const failure = new Error('daemon unavailable');
+    mockSessionActions.submitPermission.mockRejectedValueOnce(failure);
+
+    const submission = testState.latestToolApprovalOnConfirm?.(
+      'req-1',
+      'proceed_once',
+    );
+    expect(submission).toBeInstanceOf(Promise);
+    await expect(submission).rejects.toBe(failure);
+    expect(mockSessionActions.submitPermission).toHaveBeenCalledWith(
+      'req-1',
+      'proceed_once',
+      undefined,
+    );
+  });
+
   it('leaves a docked-fullscreen IME Escape to the window handler guard', async () => {
     const { container } = renderApp();
 
@@ -3566,6 +3642,114 @@ describe('artifact panel fullscreen', () => {
     expect(
       container.querySelector('[class*="artifactPanelDockNoOpenAnimation"]'),
     ).toBeNull();
+  });
+
+  it('does not steal focus when an open docked panel hands over to the floating drawer', async () => {
+    // The drawer mounts already-open; autofocus belongs to a genuine
+    // closed->open only. A docked->floating hand-over of an open panel
+    // (viewport resize here) mounts the drawer mid-session, and pulling
+    // focus into it would eat the user's keystrokes.
+    const dockQuery = '(min-width: 1001px)';
+    let dockMatches = true;
+    const dockChangeListeners = new Set<
+      (event: { matches: boolean }) => void
+    >();
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        matches:
+          query === dockQuery ? dockMatches : query.includes('min-width'),
+        media: query,
+        addEventListener: vi.fn((type: string, handler: unknown) => {
+          if (type === 'change' && query === dockQuery) {
+            dockChangeListeners.add(
+              handler as (event: { matches: boolean }) => void,
+            );
+          }
+        }),
+        removeEventListener: vi.fn((type: string, handler: unknown) => {
+          if (type === 'change' && query === dockQuery) {
+            dockChangeListeners.delete(
+              handler as (event: { matches: boolean }) => void,
+            );
+          }
+        }),
+      })),
+    });
+    const { container } = renderApp();
+    await flush();
+
+    // Open the panel while it docks.
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+    expect(
+      container.querySelector('aside[aria-label="Right panel"]'),
+    ).not.toBeNull();
+
+    // The user is on the composer's submit control when the viewport narrows.
+    const composer = container.querySelector<HTMLElement>(
+      '[data-testid="submit"]',
+    );
+    expect(composer).not.toBeNull();
+    composer!.focus();
+    expect(document.activeElement).toBe(composer);
+
+    // Narrow: the dock unmounts and the drawer takes over mid-session.
+    dockMatches = false;
+    await act(async () => {
+      dockChangeListeners.forEach((handler) => handler({ matches: false }));
+      await Promise.resolve();
+    });
+    await flush();
+    expect(container.querySelector('[class*="artifactPanelDock"]')).toBeNull();
+    expect(
+      document.querySelector(
+        '[data-web-shell-portal-root] aside[aria-label="Right panel"]',
+      ),
+    ).not.toBeNull();
+
+    // The hand-over mounts the drawer already-open; it must not autofocus.
+    expect(document.activeElement).toBe(composer);
+  });
+
+  it('moves focus into the floating drawer on a genuine open', async () => {
+    // No min-width query matches: the panel floats in a drawer instead of
+    // docking, so opening it is a genuine closed->open — the autofocus the
+    // hand-over test above keeps out must still land here.
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        matches: false,
+        media: query,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    });
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    const drawerAside = document.querySelector(
+      '[data-web-shell-portal-root] aside[aria-label="Right panel"]',
+    );
+    expect(drawerAside).not.toBeNull();
+    expect(drawerAside!.contains(document.activeElement)).toBe(true);
   });
 
   it('keeps the dock animation suppressed across a fullscreen floating interlude', async () => {
@@ -5504,6 +5688,7 @@ beforeEach(() => {
   testState.latestToolApprovalKeyboardActive = null;
   testState.toolApprovalKeyboardActiveHistory = [];
   testState.latestToolApprovalPlanTodos = [];
+  testState.latestToolApprovalOnConfirm = null;
   testState.latestAskUserQuestionKeyboardActive = null;
   testState.askUserKeyboardActiveHistory = [];
   testState.latestTodoPanelTodos = [];
@@ -5514,6 +5699,9 @@ beforeEach(() => {
   testState.backgroundTasks = [];
   testState.latestMonitorDetailsOnOpen = null;
   testState.settings = [];
+  testState.settingsLoading = false;
+  testState.settingsReloading = false;
+  testState.settingsError = undefined;
   testState.latestSettingsHookOptions = undefined;
   testState.latestProvidersHookOptions = undefined;
   testState.latestSettingsState = null;
@@ -5521,6 +5709,7 @@ beforeEach(() => {
   testState.latestModelManagement = null;
   testState.latestScheduledTasksProps = null;
   testState.latestGoalsProps = null;
+  testState.latestSplitViewProps = null;
   rawEnqueuePrompt.mockClear();
   editorClear.mockClear();
   editorCommit.mockClear();
@@ -5678,6 +5867,11 @@ afterEach(() => {
   for (const { root, container } of mounted.splice(0)) {
     act(() => root.unmount());
     container.remove();
+  }
+  const url = new URL(window.location.href);
+  if (url.searchParams.has('view')) {
+    url.searchParams.delete('view');
+    window.history.replaceState(null, '', url);
   }
   vi.useRealTimers();
   vi.restoreAllMocks();
@@ -5894,9 +6088,29 @@ describe('App plan todos', () => {
     expect(testState.latestTodoPanelTodos[1]?.blockedBy).toEqual([]);
   });
 
-  it('opens the workflow dialog with plan todos and linked agents', async () => {
+  it('keeps ordinary Todos on the task details surface', async () => {
     testState.settings = [sessionWorkflowSetting()];
     testState.messages = [
+      {
+        id: 'completed-workflow',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'workflow-todos',
+            toolName: 'todo_write',
+            status: 'completed',
+            args: {
+              todos: [
+                { id: 'old-work', content: 'Old work', status: 'completed' },
+              ],
+            },
+            rawOutput: {
+              sessionWorkflow: true,
+              plan: { id: 'old-plan' },
+            },
+          },
+        ],
+      },
       {
         id: 'plan',
         role: 'plan',
@@ -5915,7 +6129,7 @@ describe('App plan todos', () => {
         ],
       },
     ];
-    renderApp();
+    const { container } = renderApp();
     await flush();
 
     await act(async () => {
@@ -5923,12 +6137,12 @@ describe('App plan todos', () => {
       await Promise.resolve();
     });
 
+    expect(container.querySelector('[data-testid="cockpit-page"]')).toBeNull();
     expect(
-      testState.latestTasksStatusProps?.planTodos?.map((todo) => todo.id),
-    ).toEqual(['work']);
-    expect(
-      testState.latestTasksStatusProps?.agentTools?.map((tool) => tool.callId),
-    ).toEqual(['agent-call']);
+      container
+        .querySelector('[data-testid="dialog-shell"]')
+        ?.getAttribute('data-dialog-title'),
+    ).toBe('Plan & tasks');
   });
 
   it('keeps the tasks dialog plain when Session Workflow is off', async () => {
@@ -5968,24 +6182,835 @@ describe('App plan todos', () => {
     ).toBe('Background tasks');
   });
 
-  it('only binds the todo panel entry when session workflow is enabled', async () => {
+  it('routes the Todo panel entry through Workflow when enabled', async () => {
+    testState.messages = [
+      {
+        id: 'plan',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'todo-workflow',
+            toolName: 'todo_write',
+            status: 'completed',
+            args: {
+              todos: [
+                {
+                  id: 'prepare',
+                  content: 'Prepare',
+                  status: 'completed',
+                },
+                {
+                  id: 'work',
+                  content: 'Work',
+                  status: 'in_progress',
+                  blockedBy: ['prepare'],
+                },
+              ],
+            },
+            rawOutput: {
+              sessionWorkflow: true,
+              plan: { id: 'plan-1' },
+            },
+          },
+        ],
+      },
+    ];
+    const { container, rerender } = renderApp();
+    await flush();
+
+    expect(testState.latestTodoPanelOnOpen).not.toBeNull();
+
+    testState.settings = [sessionWorkflowSetting()];
+    rerender();
+    await flush();
+
+    await act(async () => {
+      testState.latestTodoPanelOnOpen?.();
+      await Promise.resolve();
+    });
+    expect(container.querySelector('[data-testid="cockpit-page"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="workflow-inspector"]'),
+    ).not.toBeNull();
+  });
+});
+
+describe('App session workflow', () => {
+  it('keeps a direct cockpit route and normal approval fail-closed when disabled', async () => {
+    testState.blocks = [makePendingPermissionBlock()];
+    window.history.replaceState(null, '', '/?view=cockpit');
+
+    const { container } = renderApp();
+    await flush();
+
+    expect(container.querySelector('[data-testid="cockpit-page"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="approval-overlay"]'),
+    ).not.toBeNull();
+    expect(new URLSearchParams(window.location.search).has('view')).toBe(false);
+
+    window.history.pushState(null, '', '/?view=cockpit');
+    act(() => window.dispatchEvent(new PopStateEvent('popstate')));
+    expect(container.querySelector('[data-testid="cockpit-page"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="approval-overlay"]'),
+    ).not.toBeNull();
+  });
+
+  it('keeps an arriving approval in Chat without a cockpit history loop', async () => {
+    testState.settings = [sessionWorkflowSetting()];
+    testState.messages = [
+      {
+        id: 'plan',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'todo-workflow',
+            toolName: 'todo_write',
+            status: 'completed',
+            args: {
+              todos: [{ id: 'work', content: 'Work', status: 'in_progress' }],
+            },
+            rawOutput: {
+              sessionWorkflow: true,
+              plan: { id: 'plan-1' },
+            },
+          },
+        ],
+      },
+    ];
+    const { container, rerender } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-workflow"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="workflow-inspector"]'),
+    ).not.toBeNull();
+    expect(new URLSearchParams(window.location.search).has('view')).toBe(false);
+
+    const replaceState = vi.spyOn(window.history, 'replaceState');
+    testState.blocks = [makePendingPermissionBlock()];
+    rerender();
+    await flush();
+
+    expect(container.querySelector('[data-testid="cockpit-page"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="workflow-inspector"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="approval-overlay"]'),
+    ).not.toBeNull();
+    expect(new URLSearchParams(window.location.search).has('view')).toBe(false);
+    expect(replaceState).not.toHaveBeenCalled();
+
+    window.history.pushState(null, '', '/?view=cockpit');
+    act(() => window.dispatchEvent(new PopStateEvent('popstate')));
+    await flush();
+    expect(container.querySelector('[data-testid="cockpit-page"]')).toBeNull();
+    expect(new URLSearchParams(window.location.search).has('view')).toBe(false);
+    expect(replaceState).toHaveBeenCalledOnce();
+
+    act(() => testState.latestTodoPanelOnOpen?.());
+    expect(container.querySelector('[data-testid="cockpit-page"]')).toBeNull();
+  });
+
+  it('leaves panel fullscreen before expanding the Workflow graph', async () => {
+    testState.settings = [sessionWorkflowSetting()];
+    testState.messages = [
+      {
+        id: 'plan',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'todo-workflow',
+            toolName: 'todo_write',
+            status: 'completed',
+            args: {
+              todos: [{ id: 'work', content: 'Work', status: 'in_progress' }],
+            },
+            rawOutput: {
+              sessionWorkflow: true,
+              plan: { id: 'plan-1' },
+            },
+          },
+        ],
+      },
+    ];
+    const { container } = renderApp();
+    await flush();
+
+    act(() => testState.latestTodoPanelOnOpen?.());
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Fullscreen"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(
+      document.querySelector('[class*="artifactPanelFullscreen"]'),
+    ).not.toBeNull();
+
+    act(() => {
+      Array.from(document.querySelectorAll('button'))
+        .find((button) =>
+          button.textContent?.includes('Expand dependency graph'),
+        )
+        ?.click();
+    });
+
+    expect(
+      container.querySelector('[data-testid="cockpit-page"]'),
+    ).not.toBeNull();
+    expect(
+      document.querySelector('[class*="artifactPanelFullscreen"]'),
+    ).toBeNull();
+  });
+
+  it('keeps a Chat return path when the host hides the Chat header', async () => {
+    testState.settings = [sessionWorkflowSetting()];
+    testState.messages = [
+      {
+        id: 'plan',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'todo-workflow',
+            toolName: 'todo_write',
+            status: 'completed',
+            args: {
+              todos: [{ id: 'work', content: 'Work', status: 'in_progress' }],
+            },
+            rawOutput: {
+              sessionWorkflow: true,
+              plan: { id: 'plan-1' },
+            },
+          },
+        ],
+      },
+    ];
+    const { container } = renderApp({ header: { items: [] } });
+    await flush();
+    editorFocus.mockClear();
+
+    act(() => testState.latestTodoPanelOnOpen?.());
+    expect(
+      container.querySelector('[data-testid="workflow-inspector"]'),
+    ).not.toBeNull();
+    act(() => {
+      Array.from(container.querySelectorAll('button'))
+        .find((button) =>
+          button.textContent?.includes('Expand dependency graph'),
+        )
+        ?.click();
+    });
+    expect(
+      container.querySelector('[data-testid="cockpit-page"]'),
+    ).not.toBeNull();
+    const backToChat = container.querySelector<HTMLButtonElement>(
+      '[data-testid="workflow-back-to-chat"]',
+    );
+    expect(document.activeElement).toBe(backToChat);
+
+    act(() => {
+      backToChat?.click();
+    });
+    await flush();
+    expect(container.querySelector('[data-testid="cockpit-page"]')).toBeNull();
+    expect(new URLSearchParams(window.location.search).has('view')).toBe(false);
+    expect(editorFocus).toHaveBeenCalled();
+  });
+
+  it('does not enter cockpit while settings are loading or after an error', async () => {
+    testState.settingsLoading = true;
+    window.history.replaceState(null, '', '/?view=cockpit');
+
+    const { container, rerender } = renderApp();
+    await flush();
+    expect(container.querySelector('[data-testid="cockpit-page"]')).toBeNull();
+
+    testState.settingsLoading = false;
+    testState.settingsError = new Error('settings unavailable');
+    rerender();
+    await flush();
+
+    expect(container.querySelector('[data-testid="cockpit-page"]')).toBeNull();
+    expect(new URLSearchParams(window.location.search).has('view')).toBe(false);
+  });
+
+  it('keeps an established cockpit through a background settings revalidation', async () => {
+    testState.settings = [sessionWorkflowSetting()];
+    window.history.replaceState(null, '', '/?view=cockpit');
+
+    const { container, rerender } = renderApp();
+    await flush();
+    expect(
+      container.querySelector('[data-testid="cockpit-page"]'),
+    ).not.toBeNull();
+
+    // Any client of this workspace saving any setting bumps settingsVersion,
+    // which reloads the resource: loading flips true while the last-known-good
+    // status is retained. That must not evict the view or drop the deep link.
+    testState.settingsReloading = true;
+    rerender();
+    await flush();
+
+    expect(
+      container.querySelector('[data-testid="cockpit-page"]'),
+    ).not.toBeNull();
+    expect(new URLSearchParams(window.location.search).get('view')).toBe(
+      'cockpit',
+    );
+
+    testState.settingsReloading = false;
+    rerender();
+    await flush();
+
+    expect(
+      container.querySelector('[data-testid="cockpit-page"]'),
+    ).not.toBeNull();
+  });
+
+  it('evicts an established cockpit when revalidation resolves disabled', async () => {
+    testState.settings = [sessionWorkflowSetting()];
+    window.history.replaceState(null, '', '/?view=cockpit');
+
+    const { container, rerender } = renderApp();
+    await flush();
+    expect(
+      container.querySelector('[data-testid="cockpit-page"]'),
+    ).not.toBeNull();
+
+    // The retaining walk above keeps the last-known-good flag through a
+    // background reload; this is the reset walk: the reload RESOLVES with
+    // the gate disabled (file edit, dotfile sync) while the cockpit is
+    // open. The Chat/Workflow toggle hides when disabled, so nothing can
+    // lead back in — the eviction must be automatic: unmount the view,
+    // strip the deep link, and restore composer focus.
+    editorFocus.mockClear();
+    testState.settings = [];
+    rerender();
+    await flush();
+
+    expect(container.querySelector('[data-testid="cockpit-page"]')).toBeNull();
+    expect(new URLSearchParams(window.location.search).has('view')).toBe(false);
+    expect(editorFocus).toHaveBeenCalled();
+  });
+
+  it('strips the cockpit deep link when a controlled host takes over the view', async () => {
+    testState.settings = [sessionWorkflowSetting()];
+    window.history.replaceState(null, '', '/?view=cockpit');
+
+    const { container, rerender } = renderApp({
+      sidebar: false,
+      splitSessionIds: [],
+    });
+    await flush();
+    expect(
+      container.querySelector('[data-testid="cockpit-page"]'),
+    ).not.toBeNull();
+
+    // A controlled host taking over the view is a cockpit departure: the deep
+    // link must be stripped the way every interactive departure does.
+    rerender({ sidebar: false, splitSessionIds: ['s1'] });
+    await flush();
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).not.toBeNull();
+    expect(new URLSearchParams(window.location.search).has('view')).toBe(false);
+
+    // When the host clears the split the app lands on chat — and stays
+    // there, instead of the stale deep link snapping back to the Workflow view.
+    rerender({ sidebar: false, splitSessionIds: [] });
+    await flush();
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).toBeNull();
+    expect(container.querySelector('[data-testid="cockpit-page"]')).toBeNull();
+    expect(new URLSearchParams(window.location.search).has('view')).toBe(false);
+  });
+
+  it('strips a stale cockpit deep link when a controlled host takes over from chat', async () => {
+    // While settings load the gate is unresolved, so the deep link cannot
+    // enter the cockpit and the app stays on chat — the stale link survives.
+    // The takeover must strip it anyway: if the single commit that resolves
+    // the gate enabled also hands the view to the host, the later-declared
+    // reopen effect would read the stale link in that same commit and
+    // out-vote the host's split — the cockpit wins and the split never
+    // renders.
+    testState.settingsLoading = true;
+    window.history.replaceState(null, '', '/?view=cockpit');
+
+    const { container, rerender } = renderApp({
+      sidebar: false,
+      splitSessionIds: [],
+    });
+    await flush();
+    expect(container.querySelector('[data-testid="cockpit-page"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).toBeNull();
+    // Precondition: the stale link survives while the gate is unresolved.
+    expect(new URLSearchParams(window.location.search).get('view')).toBe(
+      'cockpit',
+    );
+
+    // One commit resolves the gate enabled AND hands the view to the host.
+    testState.settingsLoading = false;
+    testState.settings = [sessionWorkflowSetting()];
+    rerender({ sidebar: false, splitSessionIds: ['s1'] });
+    await flush();
+
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).not.toBeNull();
+    expect(container.querySelector('[data-testid="cockpit-page"]')).toBeNull();
+    expect(new URLSearchParams(window.location.search).has('view')).toBe(false);
+  });
+
+  it('keeps the revision-bound plan approval in Chat', async () => {
+    const approvedEntries = [
+      {
+        content: 'Prepare',
+        status: 'completed',
+        _meta: { qwenTodo: { id: 'prepare' } },
+      },
+      {
+        content: 'Ship',
+        status: 'pending',
+        _meta: { qwenTodo: { id: 'ship', blockedBy: ['prepare'] } },
+      },
+    ];
+    testState.messages = [
+      {
+        id: 'approved-plan',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'todo-approved',
+            toolName: 'todo_write',
+            status: 'completed',
+            rawOutput: {
+              sessionWorkflow: true,
+              entries: approvedEntries,
+              plan: { id: 'plan-1' },
+            },
+          },
+        ],
+      },
+      { id: 'revision', role: 'user', content: 'Revise the wording' },
+      {
+        id: 'newer-plan',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'todo-newer',
+            toolName: 'todo_write',
+            status: 'completed',
+            rawOutput: {
+              sessionWorkflow: true,
+              entries: [
+                ...approvedEntries.map((entry) => ({
+                  ...entry,
+                  status: 'completed',
+                })),
+                {
+                  content: 'Deploy',
+                  status: 'pending',
+                  _meta: { qwenTodo: { id: 'deploy' } },
+                },
+              ],
+              plan: { id: 'plan-1' },
+            },
+          },
+        ],
+      },
+    ];
+    testState.blocks = [
+      makePendingPermissionBlock({
+        toolName: 'exit_plan_mode',
+        kind: 'switch_mode',
+        todoPlan: { planId: 'plan-1', sourceCallId: 'todo-approved' },
+      }),
+    ];
+
+    const { container, rerender } = renderApp();
+    await flush();
+
+    expect(testState.latestToolApprovalPlanTodos).toEqual([]);
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    testState.settings = [sessionWorkflowSetting()];
+    rerender();
+    await flush();
+
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).not.toBeNull();
+    await act(async () => {
+      container
+        .querySelector('[data-testid="split-approval-notice"] button')
+        ?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    expect(
+      container.querySelector('[data-testid="approval-overlay"]'),
+    ).not.toBeNull();
+    expect(
+      testState.latestToolApprovalPlanTodos.map((todo) => todo.id),
+    ).toEqual(['prepare', 'ship']);
+    expect(new URLSearchParams(window.location.search).has('view')).toBe(false);
+
+    testState.blocks = [
+      makePendingPermissionBlock({
+        resolved: true,
+        toolName: 'exit_plan_mode',
+        kind: 'switch_mode',
+        todoPlan: { planId: 'plan-1', sourceCallId: 'todo-approved' },
+      }),
+    ];
+    rerender();
+    await flush();
+    expect(container.querySelector('[data-testid="cockpit-page"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="open-workflow"]'),
+    ).not.toBeNull();
+  });
+
+  it('opens the inspector first and expands into a synchronized graph', async () => {
+    testState.settings = [sessionWorkflowSetting()];
+    testState.messages = [
+      {
+        id: 'plan',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'todo-start',
+            toolName: 'todo_write',
+            status: 'completed',
+            args: {
+              todos: [
+                {
+                  id: 'prepare',
+                  content: 'Prepare',
+                  status: 'completed',
+                },
+                {
+                  id: 'work',
+                  content: 'Work',
+                  status: 'in_progress',
+                  blockedBy: ['prepare'],
+                },
+              ],
+            },
+            rawOutput: {
+              sessionWorkflow: true,
+              plan: { id: 'plan-1' },
+            },
+          },
+        ],
+      },
+      {
+        id: 'agents',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'agent-call',
+            toolName: 'Agent',
+            title: 'Worker agent',
+            status: 'in_progress',
+            args: { todo_id: 'work', description: 'Inspect repository' },
+          },
+        ],
+      },
+    ];
+    const { container } = renderApp();
+    await flush();
+
+    expect(testState.latestTodoPanelOnOpen).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="open-workflow"]'),
+    ).not.toBeNull();
+
+    await act(async () => {
+      testState.latestTodoPanelOnOpen?.();
+      await Promise.resolve();
+    });
+
+    expect(container.querySelector('[data-testid="cockpit-page"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="workflow-inspector"]')
+        ?.textContent,
+    ).toContain('Worker agent');
+    expect(container.querySelector('[data-plan-node-id="work"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="chat-context-header"]'),
+    ).not.toBeNull();
+    expect(new URLSearchParams(window.location.search).has('view')).toBe(false);
+
+    await act(async () => {
+      Array.from(container.querySelectorAll('button'))
+        .find((button) =>
+          button.textContent?.includes('Expand dependency graph'),
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="cockpit-page"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-plan-node-id="work"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="workflow-canvas-detail"]'),
+    ).not.toBeNull();
+    expect(new URLSearchParams(window.location.search).get('view')).toBe(
+      'cockpit',
+    );
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-plan-node-id="prepare"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="workflow-canvas-detail"]')
+        ?.textContent,
+    ).toContain('Prepare');
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="workflow-back-to-chat"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(new URLSearchParams(window.location.search).has('view')).toBe(false);
+    expect(container.querySelector('[data-testid="cockpit-page"]')).toBeNull();
+  });
+
+  it('keeps the floating inspector drawer when expand is gated by a pending approval', async () => {
+    // openCockpit() silently aborts while an approval overlay is active;
+    // expandWorkflowGraph must not run its drawer-closing side effect
+    // without the action, or the interactive workflow surface disappears
+    // with no cockpit to show for it.
+    const dockQuery = '(min-width: 1001px)';
+    const dockChangeListeners = new Set<
+      (event: { matches: boolean }) => void
+    >();
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        matches: query === dockQuery ? false : query.includes('min-width'),
+        media: query,
+        addEventListener: vi.fn((type: string, handler: unknown) => {
+          if (type === 'change' && query === dockQuery) {
+            dockChangeListeners.add(
+              handler as (event: { matches: boolean }) => void,
+            );
+          }
+        }),
+        removeEventListener: vi.fn((type: string, handler: unknown) => {
+          if (type === 'change' && query === dockQuery) {
+            dockChangeListeners.delete(
+              handler as (event: { matches: boolean }) => void,
+            );
+          }
+        }),
+      })),
+    });
+    testState.settings = [sessionWorkflowSetting()];
+    testState.messages = [
+      {
+        id: 'plan',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'todo-workflow',
+            toolName: 'todo_write',
+            status: 'completed',
+            args: {
+              todos: [{ id: 'work', content: 'Work', status: 'in_progress' }],
+            },
+            rawOutput: {
+              sessionWorkflow: true,
+              plan: { id: 'plan-1' },
+            },
+          },
+        ],
+      },
+    ];
+    const { container, rerender } = renderApp();
+    await flush();
+
+    // Open the inspector while the panel floats in a drawer.
+    await act(async () => {
+      testState.latestTodoPanelOnOpen?.();
+      await Promise.resolve();
+    });
+    await flush();
+    const floatingDrawer = () =>
+      document.querySelector(
+        '[data-web-shell-portal-root] aside[aria-label="Right panel"]',
+      );
+    expect(floatingDrawer()).not.toBeNull();
+    expect(
+      document.querySelector('[data-testid="workflow-inspector"]'),
+    ).not.toBeNull();
+
+    // A permission request becomes pending; the drawer stays interactive.
+    await act(async () => {
+      testState.blocks = [makePendingPermissionBlock()];
+      rerender();
+      await Promise.resolve();
+    });
+    await flush();
+    expect(
+      document.querySelector('[data-testid="approval-overlay"]'),
+    ).not.toBeNull();
+    expect(floatingDrawer()).not.toBeNull();
+
+    // The expand action is gated: the cockpit must not open, and the drawer
+    // must not close as a side effect of the aborted action.
+    await act(async () => {
+      Array.from(document.querySelectorAll('button'))
+        .find((button) =>
+          button.textContent?.includes('Expand dependency graph'),
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+    expect(container.querySelector('[data-testid="cockpit-page"]')).toBeNull();
+    expect(new URLSearchParams(window.location.search).has('view')).toBe(false);
+    expect(floatingDrawer()).not.toBeNull();
+    expect(
+      document.querySelector('[data-testid="workflow-inspector"]'),
+    ).not.toBeNull();
+  });
+
+  it('keeps the tasks dialog plain when Session Workflow is off', async () => {
     testState.messages = [
       {
         id: 'plan',
         role: 'plan',
         todos: [{ id: 'work', content: 'Work', status: 'in_progress' }],
       },
+      {
+        id: 'agents',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'agent-call',
+            toolName: 'Agent',
+            status: 'in_progress',
+            args: { todo_id: 'work' },
+          },
+        ],
+      },
     ];
-    const { rerender } = renderApp();
+    const { container } = renderApp();
     await flush();
 
-    expect(testState.latestTodoPanelOnOpen).toBeNull();
+    await act(async () => {
+      testState.latestTodoPanelOnOpen?.();
+      await Promise.resolve();
+    });
 
+    expect(testState.latestTasksStatusProps?.planTodos).toEqual([]);
+    expect(testState.latestTasksStatusProps?.agentTools).toEqual([]);
+    expect(
+      container
+        .querySelector('[data-testid="dialog-shell"]')
+        ?.getAttribute('data-dialog-title'),
+    ).toBe('Background tasks');
+  });
+
+  it('keeps workflow agent tools mounted behind the tasks dialog', async () => {
     testState.settings = [sessionWorkflowSetting()];
+    testState.messages = [
+      {
+        id: 'plan',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'todo-workflow',
+            toolName: 'todo_write',
+            status: 'completed',
+            args: {
+              todos: [{ id: 'work', content: 'Work', status: 'in_progress' }],
+            },
+            rawOutput: {
+              sessionWorkflow: true,
+              plan: { id: 'plan-1' },
+            },
+          },
+        ],
+      },
+      {
+        id: 'agents',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'agent-call',
+            toolName: 'Agent',
+            status: 'in_progress',
+            args: { todo_id: 'work', description: 'Do the work' },
+          },
+        ],
+      },
+    ];
+    const { container, rerender } = renderApp();
+    await flush();
+
+    act(() => testState.latestTodoPanelOnOpen?.());
+    await flush();
+    expect(
+      container.querySelector('[data-testid="workflow-inspector"]'),
+    ).not.toBeNull();
+    expect(container.textContent).toContain('Do the work');
+
+    // A follow-up user message empties the floating plan while the tagged
+    // session-workflow plan (and the inspector projecting it) stays.
+    testState.messages = [
+      ...testState.messages,
+      { id: 'follow-up', role: 'user', content: 'Keep going' },
+    ];
     rerender();
     await flush();
 
-    expect(testState.latestTodoPanelOnOpen).not.toBeNull();
+    await act(async () => {
+      testState.latestStatusBarOnOpenTasks?.();
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(
+      container.querySelector('[data-testid="dialog-shell"]'),
+    ).not.toBeNull();
+    // The dialog renders the floating plan, which is empty after the user
+    // message, so it shows no agent tools.
+    expect(testState.latestTasksStatusProps?.agentTools).toEqual([]);
+    // The inspector behind the dialog must stay anchored to the workflow
+    // plan and keep its linked subagent (R15-5).
+    expect(
+      container.querySelector('[data-testid="workflow-inspector"]'),
+    ).not.toBeNull();
+    expect(container.textContent).toContain('Do the work');
   });
 });
 
@@ -12074,6 +13099,55 @@ describe('App session callbacks', () => {
     expect(mockSessionActions.createSession).toHaveBeenCalledWith(
       expect.not.objectContaining({ worktree: expect.anything() }),
     );
+  });
+
+  it('opens the Workspaces overview panel from the sidebar entry', async () => {
+    mockConnection.sessionId = undefined;
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    };
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    const { container } = renderApp();
+    await flush();
+    expect(
+      container.querySelector('[data-testid="workspaces-overview-panel"]'),
+    ).toBeNull();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-workspaces-overview"]',
+        )!
+        .click();
+      await Promise.resolve();
+    });
+    await flush();
+    const panel = container.querySelector(
+      '[data-testid="workspaces-overview-panel"]',
+    );
+    expect(panel).not.toBeNull();
+    // The panel renders its own header (no generic Back button), so the
+    // focus effect must land on the panel heading.
+    expect(document.activeElement).toBe(panel!.querySelector('h1'));
+
+    // New task on a row starts a draft there and returns to the chat view.
+    const newTask = Array.from(panel!.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('New task'),
+    );
+    expect(newTask).toBeDefined();
+    await act(async () => {
+      newTask!.click();
+      await Promise.resolve();
+    });
+    await flush();
+    expect(mockSessionActions.clearSession).toHaveBeenCalled();
+    expect(
+      container.querySelector('[data-testid="workspaces-overview-panel"]'),
+    ).toBeNull();
   });
 
   it('reloads skills from the target workspace when starting a new session', async () => {
