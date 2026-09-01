@@ -99,7 +99,17 @@ export async function resolveDeferredToolCall(
   if (!registry.getTool(targetName)) {
     const lower = targetName.toLowerCase();
     const registered = registry.getAllToolNames?.() ?? [];
-    const match = registered.find((name) => name.toLowerCase() === lower);
+    // Last match wins, mirroring the discovery half's lowerIndex
+    // (tool_search builds a Map keyed by lowercase name, so the last
+    // registered case-variant overwrites earlier ones) — the two bridge
+    // halves must resolve the same tool for a case-variant request
+    // (round-7 review, R7-14).
+    let match: string | undefined;
+    for (const name of registered) {
+      if (name.toLowerCase() === lower) {
+        match = name;
+      }
+    }
     if (match !== undefined) {
       targetName = match;
     }

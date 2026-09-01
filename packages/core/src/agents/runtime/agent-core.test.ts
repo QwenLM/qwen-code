@@ -795,6 +795,78 @@ describe('AgentCore approval response deduplication', () => {
     expect(capturedPredicate?.(ToolNames.TOOL_CALL)).toBe(true);
   });
 
+  it('lets disallowedTools beat the execution allowlist for bridged targets', async () => {
+    // R7-13: the two policy lists must compose with the blocklist winning —
+    // an allowlist entry cannot re-admit a tool the agent's disallowedTools
+    // removes. Mutation check: moving the blocklist fold after the allowlist
+    // pass (or dropping it) turns this red.
+    const config = {
+      getToolRegistry: vi.fn().mockReturnValue({
+        getTool: vi.fn(),
+      }),
+      getDebugLogger: vi
+        .fn()
+        .mockReturnValue({ debug: vi.fn(), error: vi.fn() }),
+      getToolOutputBatchBudget: vi
+        .fn()
+        .mockReturnValue(Number.POSITIVE_INFINITY),
+      getToolResultBytesWritten: vi.fn().mockReturnValue(0),
+      getSessionId: vi.fn().mockReturnValue('precedence-session'),
+    } as unknown as Config;
+    const core = new AgentCore(
+      'precedence-agent',
+      config,
+      { systemPrompt: '' },
+      { model: 'test-model' },
+      { max_turns: 1 },
+      {
+        tools: ['*'],
+        executionAllowedTools: [
+          ToolNames.TOOL_CALL,
+          ToolNames.TOOL_SEARCH,
+          'mcp__slack__post_message',
+        ],
+        disallowedTools: ['mcp__slack'],
+      },
+    );
+
+    let capturedPredicate: ((name: string) => boolean) | undefined;
+    const scheduleSpy = vi
+      .spyOn(CoreToolScheduler.prototype, 'schedule')
+      .mockImplementation(async function (this: CoreToolScheduler) {
+        capturedPredicate = (
+          this as unknown as {
+            isToolExecutionAllowed?: (name: string) => boolean;
+          }
+        ).isToolExecutionAllowed;
+      });
+    const abortController = new AbortController();
+
+    const processing = core.processFunctionCalls(
+      [
+        {
+          id: 'call-precedence',
+          name: ToolNames.TOOL_CALL,
+          args: { name: 'mcp__slack__post_message', arguments: {} },
+        },
+      ],
+      abortController,
+      'prompt-precedence',
+      1,
+      [{ name: ToolNames.TOOL_CALL } as FunctionDeclaration],
+    );
+    await vi.waitFor(() => expect(scheduleSpy).toHaveBeenCalledOnce());
+    abortController.abort();
+    await processing;
+    scheduleSpy.mockRestore();
+
+    expect(capturedPredicate).toBeDefined();
+    // Allowlisted AND blocklisted → blocklist wins.
+    expect(capturedPredicate?.('mcp__slack__post_message')).toBe(false);
+    // Allowlisted and not blocklisted → allowed.
+    expect(capturedPredicate?.(ToolNames.TOOL_CALL)).toBe(true);
+  });
+
   it('retries only a transiently failed listener', async () => {
     const { core, errorSpy } = buildApprovalCore();
     const deliveryError = new Error('approval listener failed');
