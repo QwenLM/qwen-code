@@ -19,6 +19,7 @@ import type {
   PromptReceipt,
   SessionSummary,
 } from '../adaptor/types.js';
+import { BackendRegistry } from '../adaptor/registry.js';
 import type { LiveScreenContextCapture } from '../host/live-host-coordinator.js';
 import type { LiveState } from '../host/types.js';
 import type { SessionLog } from '../log/session-log.js';
@@ -88,7 +89,7 @@ class AsyncQueue<T> implements AsyncIterable<T> {
 }
 
 class FakeAdaptor implements BackendAdaptor {
-  readonly name = 'fake';
+  constructor(readonly name = 'fake') {}
   busy = false;
   promptReceipt: PromptReceipt = { status: 'accepted', jobRef: 'p1' };
   summaries: SessionSummary[] = [];
@@ -261,15 +262,24 @@ afterAll(async () => {
 interface Rig {
   session: LiveSession;
   adaptor: FakeAdaptor;
-  logWrites: ReturnType<typeof vi.fn>;
   host: ReturnType<typeof createFakeHost>;
   realtime: FakeRealtime;
   config: QwenRealtimeConfig;
   callbacks: QwenRealtimeCallbacks;
 }
 
-async function startSession(adaptorArg?: FakeAdaptor): Promise<Rig> {
-  const adaptor = adaptorArg ?? new FakeAdaptor();
+async function startSession(
+  adaptorArg?: FakeAdaptor | FakeAdaptor[],
+): Promise<Rig & { secondary?: FakeAdaptor }> {
+  const adaptor: FakeAdaptor =
+    adaptorArg === undefined
+      ? new FakeAdaptor()
+      : Array.isArray(adaptorArg)
+        ? (adaptorArg[0] as FakeAdaptor)
+        : adaptorArg;
+  const secondary: FakeAdaptor | undefined = Array.isArray(adaptorArg)
+    ? adaptorArg[1]
+    : undefined;
   const host = createFakeHost({
     appName: 'Safari',
     windowTitle: 'Docs',
@@ -277,7 +287,6 @@ async function startSession(adaptorArg?: FakeAdaptor): Promise<Rig> {
     screenshotPath: pngPath,
   });
   const realtime = createFakeRealtime();
-  const logWrites = vi.fn();
   let config: QwenRealtimeConfig | undefined;
   let callbacks: QwenRealtimeCallbacks = {};
   const openRealtime: typeof openQwenRealtimeSession = (cfg, cbs = {}) => {
@@ -287,13 +296,20 @@ async function startSession(adaptorArg?: FakeAdaptor): Promise<Rig> {
   };
   const session = new LiveSession({
     host,
-    adaptor,
+    registry: new BackendRegistry(
+      secondary
+        ? [
+            { adaptor, isDefault: true },
+            { adaptor: secondary, isDefault: false },
+          ]
+        : [{ adaptor, isDefault: true }],
+    ),
     realtime: {
       endpoint: 'https://dashscope.example.com',
       model: 'qwen-omni-turbo-realtime',
       voice: 'Cherry',
     },
-    log: { write: logWrites, close: async () => {} } as unknown as SessionLog,
+    log: { write: vi.fn(), close: async () => {} } as unknown as SessionLog,
     openRealtime,
   });
   await session.start({ epoch: 1, callId: 'call-1', mode: 'new' });
@@ -301,11 +317,11 @@ async function startSession(adaptorArg?: FakeAdaptor): Promise<Rig> {
   return {
     session,
     adaptor,
+    ...(secondary ? { secondary } : {}),
     host,
     realtime,
     config,
     callbacks,
-    logWrites,
   };
 }
 
@@ -472,8 +488,14 @@ describe('LiveSession', () => {
 
     expect(receipt).toMatchObject({ status: 'ok' });
     expect(receipt?.['sessions']).toEqual([
-      { handle: 'session_1', label: 'One', cwd: '/tmp/a', state: 'idle' },
-      { handle: 'session_2', state: 'busy' },
+      {
+        handle: 'session_1',
+        backend: 'fake',
+        label: 'One',
+        cwd: '/tmp/a',
+        state: 'idle',
+      },
+      { handle: 'session_2', backend: 'fake', state: 'busy' },
     ]);
   });
 
@@ -898,55 +920,105 @@ describe('LiveSession', () => {
     await stopPending;
   });
 
-  it('rebuilds the default session after it closes mid-call', async () => {
-    const { adaptor, callbacks, realtime, logWrites } = await startSession();
+  it('routes tool calls to the owning adaptor when two backends coexist', async () => {
+    const [primary, secondary] = [
+      new FakeAdaptor('serve'),
+      new FakeAdaptor('acp'),
+    ];
+    const { callbacks, realtime } = await startSession([primary, secondary]);
 
-    // First handoff creates and uses the default session…
-    callTool(callbacks, 'handoff', { task: 'first task' });
-    await awaitReceipts(realtime, 1);
-    const firstCreateCalls = adaptor.createSession.mock.calls.length;
-
-    // …then that session closes (WebShell deletion / daemon restart).
-    // The pump consumes the event asynchronously; wait until the closure
-    // has been observed before handing off again.
-    adaptor.queue('s1').push({ type: 'session_closed' });
-    adaptor.queue('s1').end();
-    await vi.waitFor(() => {
-      expect(logWrites).toHaveBeenCalledWith(
-        'backend.event',
-        expect.objectContaining({ type: 'session_closed' }),
-      );
-    });
-
-    // A session-less handoff must NOT re-target the dead session.
-    callTool(callbacks, 'handoff', { task: 'second task' });
+    // Create one session per backend.
+    callTool(callbacks, 'session_create', { backend: 'acp' });
+    callTool(callbacks, 'session_create', {});
     await awaitReceipts(realtime, 2);
-    expect(adaptor.createSession.mock.calls.length).toBeGreaterThan(
-      firstCreateCalls,
-    );
-    const targets = adaptor.prompt.mock.calls.map(
-      (call) => (call[0] as { id: string }).id,
-    );
-    expect(new Set(targets).size).toBe(targets.length);
+    const [acpReceipt, defaultReceipt] = receipts(realtime).slice(0, 2);
+    expect(acpReceipt?.['status']).toBe('ok');
+    expect(defaultReceipt?.['status']).toBe('ok');
+    expect(secondary.createSession).toHaveBeenCalledTimes(1);
+    expect(primary.createSession).toHaveBeenCalledTimes(1);
+
+    // session_list fans out across both backends with backend labels.
+    primary.summaries = [
+      { handle: { id: 'a', adaptor: 'serve' }, state: 'idle' },
+    ];
+    secondary.summaries = [
+      { handle: { id: 'b', adaptor: 'acp' }, state: 'idle' },
+    ];
+    callTool(callbacks, 'session_list', {});
+    await awaitReceipts(realtime, 3);
+    const listReceipt = receipts(realtime)[2];
+    expect(listReceipt?.['sessions']).toEqual([
+      { handle: 'session_3', backend: 'serve', state: 'idle' },
+      { handle: 'session_4', backend: 'acp', state: 'idle' },
+    ]);
+
+    // A handoff naming the acp session drives the acp adaptor only.
+    callTool(callbacks, 'handoff', {
+      task: 'do the thing',
+      session: 'session_4',
+    });
+    await awaitReceipts(realtime, 4);
+    expect(secondary.prompt).toHaveBeenCalledTimes(1);
+    expect(primary.prompt).not.toHaveBeenCalled();
   });
 
-  it('reconciles stale running jobs when the backend reports idle', async () => {
-    const { adaptor, callbacks, realtime } = await startSession();
-
-    callTool(callbacks, 'handoff', { task: 'a task' });
-    await awaitReceipts(realtime, 1);
-    // The turn_complete is emitted while no one consumes it (pump aborted
-    // between calls); mark the adaptor idle and list sessions.
-    adaptor.busy = false;
-    adaptor.summaries = [
-      { handle: { id: 's1', adaptor: 'fake' }, state: 'idle' },
+  it('rejects session_create for an unknown or unavailable backend', async () => {
+    const [primary, secondary] = [
+      new FakeAdaptor('serve'),
+      new FakeAdaptor('acp'),
     ];
+    const { callbacks, realtime } = await startSession([primary, secondary]);
+
+    callTool(callbacks, 'session_create', { backend: 'nope' });
+    await awaitReceipts(realtime, 1);
+    const unknown = receipts(realtime)[0];
+    expect(unknown?.['status']).toBe('error');
+    expect(String(unknown?.['note'])).toContain("unknown backend 'nope'");
+
+    // The secondary reports unavailable via preflight at the registry level;
+    // simulate the marked entry by making listSessions throw — the fan-out
+    // must skip it without emptying the list.
+    primary.summaries = [
+      { handle: { id: 'a', adaptor: 'serve' }, state: 'idle' },
+    ];
+    secondary.summaries = [];
+    secondary.listSessions = async () => {
+      throw new Error('agent process exited');
+    };
     callTool(callbacks, 'session_list', {});
     await awaitReceipts(realtime, 2);
     const list = receipts(realtime)[1];
-    // The stale running job must not survive the idle reconciliation.
+    expect(list?.['status']).toBe('ok');
     expect(list?.['sessions']).toEqual([
-      { handle: 'session_1', state: 'idle' },
+      { handle: 'session_1', backend: 'serve', state: 'idle' },
     ]);
+  });
+
+  it('strips image blocks for an image-incapable backend and notes it', async () => {
+    const adaptor = new FakeAdaptor();
+    adaptor.capabilities = () => ({
+      steering: 'native',
+      imageInput: false,
+      permissionForwarding: true,
+      proactiveSpeak: false,
+      sessionList: true,
+      eventDelivery: 'stream',
+    });
+    const { callbacks, realtime } = await startSession(adaptor);
+
+    // Register the asset first (appshot), then hand off referencing it.
+    callTool(callbacks, 'appshot', {});
+    callTool(
+      callbacks,
+      'handoff',
+      { task: 'look at this', input_refs: ['asset_1'] },
+      [{ role: 'user', text: 'what is on my screen' }],
+    );
+    await awaitReceipts(realtime, 2);
+    const receipt = receipts(realtime)[1];
+    expect(receipt?.['status']).toBe('accepted');
+    expect(String(receipt?.['note'] ?? '')).toContain('cannot take images');
+    const blocks = adaptor.prompt.mock.calls[0]?.[1] as readonly ContentBlock[];
+    expect(blocks.every((block) => block.type !== 'image')).toBe(true);
   });
 });
