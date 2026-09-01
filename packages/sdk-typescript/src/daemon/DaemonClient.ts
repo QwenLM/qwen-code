@@ -62,6 +62,8 @@ import type {
   DaemonSessionLspStatus,
   DaemonSessionListPage,
   DaemonSessionListPageOptions,
+  DaemonSessionSearchOptions,
+  DaemonSessionSearchResult,
   DaemonWorkspaceSessionInfo,
   DaemonWorkspaceSessionLiveState,
   DaemonSessionOrganizationResult,
@@ -3035,6 +3037,28 @@ export class DaemonClient {
   }
 
   /**
+   * Search user/assistant message content across a workspace's persisted
+   * sessions via `GET /workspace/:id/sessions/search`. Returns one summary +
+   * snippet per matching session, most recently modified first. Requires a
+   * daemon new enough to serve the route — older daemons answer 404.
+   */
+  async searchWorkspaceSessions(
+    workspaceCwd: string,
+    queryText: string,
+    options: DaemonSessionSearchOptions = {},
+  ): Promise<DaemonSessionSearchResult> {
+    const query = new URLSearchParams({ q: queryText });
+    if (options.maxResults !== undefined) {
+      query.set('maxResults', String(options.maxResults));
+    }
+    return await this.jsonRequest<DaemonSessionSearchResult>(
+      `/workspace/${urlEncode(workspaceCwd)}/sessions/search?${query.toString()}`,
+      'GET /workspace/sessions/search',
+      { ...(options.signal ? { signal: options.signal } : {}) },
+    );
+  }
+
+  /**
    * Read the memory-only live-state snapshot for a workspace via
    * `GET /workspaces/:workspace/sessions/live-state`: the complete set of
    * live sessions with volatile state plus the in-memory catalog version
@@ -5923,6 +5947,36 @@ export class WorkspaceDaemonClient {
       '/runtime/status',
       'GET /workspaces/:workspace/runtime/status',
       { mode: 'rest' },
+    );
+  }
+
+  /**
+   * Ask the daemon host to open this workspace's directory in the host's OS
+   * file manager (Finder/Explorer/xdg-open). Only advertised via the
+   * `workspace_local_open` capability; on a headless host the daemon answers
+   * 501 `local_path_open_unavailable`.
+   */
+  async openLocally(): Promise<void> {
+    await this.client.workspaceJsonRequest(
+      this.workspaceSelector,
+      '/open',
+      'POST /workspaces/:workspace/open',
+      { method: 'POST', body: {}, mode: 'rest' },
+    );
+  }
+
+  /**
+   * Ask the daemon host to open a terminal window in this workspace's
+   * directory (Terminal.app/wt.exe/a Linux terminal emulator). Only
+   * advertised via the `workspace_local_terminal` capability; on a headless
+   * host the daemon answers 501 `local_path_open_unavailable`.
+   */
+  async openTerminalLocally(): Promise<void> {
+    await this.client.workspaceJsonRequest(
+      this.workspaceSelector,
+      '/open',
+      'POST /workspaces/:workspace/open',
+      { method: 'POST', body: { target: 'terminal' }, mode: 'rest' },
     );
   }
 
