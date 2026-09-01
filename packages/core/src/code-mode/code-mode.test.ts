@@ -146,7 +146,15 @@ describe('CodeModeOnly exposure', () => {
         },
       }),
       new MockTool({ name: 'z_tool' }),
-      new MockTool({ name: 'a-tool', shouldDefer: true }),
+      new MockTool({
+        name: 'a-tool',
+        shouldDefer: true,
+        params: {
+          type: 'object',
+          properties: { query: { type: 'string' } },
+          required: ['query'],
+        },
+      }),
     ];
     const first = planCodeModeBindings(tools, (name) => name === 'a-tool');
     const second = planCodeModeBindings(
@@ -166,10 +174,38 @@ describe('CodeModeOnly exposure', () => {
       'tools.z_tool(args: { "count": number })',
     );
     expect(buildExecDescription(first)).toContain(
-      'tools.a_tool(args: Record<string, unknown>)',
+      'tools.a_tool(args: { "query": string })',
     );
     expect(buildExecDescription(first)).toContain('ImageContent');
     expect(buildExecDescription(first)).toContain('generatedImage');
+  });
+
+  it('expands deferred tool schemas because nothing can reveal them later', () => {
+    const deferredPlan = planCodeModeBindings(
+      [
+        new MockTool({
+          name: 'mcp__server__fetch',
+          shouldDefer: true,
+          params: {
+            type: 'object',
+            properties: {
+              url: { type: 'string' },
+              depth: { type: 'integer' },
+            },
+            required: ['url'],
+          },
+        }),
+      ],
+      () => true,
+    );
+    const description = buildExecDescription(deferredPlan);
+
+    expect(deferredPlan.bindings[0]?.deferred).toBe(true);
+    expect(description).toContain(
+      'tools.mcp__server__fetch(args: { "depth"?: number; "url": string })',
+    );
+    expect(description).not.toContain('mcp__server__fetch(args: Record');
+    expect(description).toContain('"deferred":true');
   });
 });
 

@@ -61,11 +61,13 @@ whose lifecycle cannot safely be hidden behind an interpreted program. New
 tools default to code-mode-callable; adding a direct-only or hidden tool
 requires an explicit policy edit.
 
-Deferred tools remain registered and callable from `exec`. Their full schemas
-may be omitted from the generated `exec` description, but their names and
-descriptions remain in `ALL_TOOLS`. CodeModeOnly skips deferred preload and
-ToolSearch reminders because neither mechanism is part of its model-facing
-protocol.
+Deferred tools remain registered and callable from `exec`, and keep their
+deferred registry state. The generated `exec` description nonetheless carries
+their full schemas, alongside their names and descriptions in `ALL_TOOLS`:
+CodeModeOnly hides `tool_search`, and a nested call never appears in history as
+a `functionCall`, so no later reveal can supply a schema the description
+omitted. CodeModeOnly skips deferred preload and ToolSearch reminders because
+neither mechanism is part of its model-facing protocol.
 
 ## Deterministic JavaScript interface
 

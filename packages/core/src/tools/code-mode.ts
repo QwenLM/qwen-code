@@ -205,9 +205,11 @@ function schemaToType(schema: unknown): string {
 }
 
 function describeBinding(binding: CodeModeToolBinding): string {
-  const params = binding.deferred
-    ? 'Record<string, unknown>'
-    : schemaToType(binding.parametersJsonSchema);
+  // A deferred tool keeps its registry semantics, but CodeModeOnly hides
+  // tool_search and never surfaces nested calls as history functionCalls, so
+  // nothing can reveal it later: this description is its only chance to carry
+  // a schema.
+  const params = schemaToType(binding.parametersJsonSchema);
   return `tools.${binding.jsName}(args: ${params}): Promise<CodeModeToolResult>;`;
 }
 
