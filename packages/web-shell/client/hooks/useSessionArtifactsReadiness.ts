@@ -53,6 +53,10 @@ export function useSessionArtifactsReadiness({
   loadRef.current = load;
   const pendingRef = useRef<OwnedPendingReadyEvent[]>([]);
   const drainingOwnerRef = useRef<SessionOwner | undefined>(undefined);
+  const refreshGenerationRef = useRef(0);
+  const readinessScopeRef = useRef<
+    { enabled: boolean; owner: SessionOwner; sessionId?: string } | undefined
+  >(undefined);
   const [readyQueue, setReadyQueue] = useState<SessionArtifactsReadyEvent[]>(
     [],
   );
@@ -70,6 +74,7 @@ export function useSessionArtifactsReadiness({
   const drain = useCallback(async (drainOwner: SessionOwner) => {
     if (!enabledRef.current || drainingOwnerRef.current === drainOwner) return;
     drainingOwnerRef.current = drainOwner;
+    let retriedFailedEvent: OwnedPendingReadyEvent | undefined;
     try {
       while (enabledRef.current && drainOwner.isCurrent()) {
         const event = pendingRef.current.find(
@@ -77,8 +82,12 @@ export function useSessionArtifactsReadiness({
         );
         if (!event) break;
         const attemptedLoad = loadRef.current;
+        const attemptedRefreshGeneration = refreshGenerationRef.current;
         const result = await attemptedLoad();
         if (!enabledRef.current || !drainOwner.isCurrent()) break;
+        if (attemptedRefreshGeneration !== refreshGenerationRef.current) {
+          continue;
+        }
         if (result.status !== 'success') {
           if (
             result.status === 'superseded' ||
@@ -86,8 +95,17 @@ export function useSessionArtifactsReadiness({
           ) {
             continue;
           }
+          if (
+            result.status === 'failed' &&
+            event.reason === 'turn_complete' &&
+            retriedFailedEvent !== event
+          ) {
+            retriedFailedEvent = event;
+            continue;
+          }
           break;
         }
+        retriedFailedEvent = undefined;
         const eventIndex = pendingRef.current.indexOf(event);
         if (eventIndex < 0) continue;
         pendingRef.current.splice(eventIndex, 1);
@@ -109,16 +127,40 @@ export function useSessionArtifactsReadiness({
   }, []);
 
   useEffect(() => {
-    pendingRef.current = enabled ? [{ owner, reason: 'restore' }] : [];
-    setReadyQueue([]);
-    if (enabled) void drain(owner);
-  }, [drain, enabled, owner]);
-
-  useEffect(() => {
-    if (enabled && pendingRef.current.some((event) => event.owner === owner)) {
-      void drain(owner);
+    const previous = readinessScopeRef.current;
+    readinessScopeRef.current = { enabled, owner, sessionId };
+    if (!enabled) {
+      pendingRef.current = [];
+      setReadyQueue([]);
+      return;
     }
-  }, [drain, enabled, load, owner]);
+    const sameSessionOwnerReplacement =
+      previous?.enabled === true &&
+      previous.owner !== owner &&
+      sessionId !== undefined &&
+      previous.sessionId === sessionId;
+    const resetScope =
+      previous === undefined ||
+      !previous.enabled ||
+      previous.sessionId !== sessionId ||
+      (previous.owner !== owner && !sameSessionOwnerReplacement);
+    if (resetScope) {
+      pendingRef.current = [{ owner, reason: 'restore' }];
+      setReadyQueue([]);
+    } else if (sameSessionOwnerReplacement) {
+      pendingRef.current = pendingRef.current.map((event) =>
+        event.owner === previous.owner ? { ...event, owner } : event,
+      );
+    }
+    const hasPendingEvent = pendingRef.current.some(
+      (event) => event.owner === owner,
+    );
+    if (hasPendingEvent) {
+      void drain(owner);
+    } else if (sameSessionOwnerReplacement) {
+      void load();
+    }
+  }, [drain, enabled, load, owner, sessionId]);
 
   useEffect(() => {
     if (!enabled) void load();
@@ -130,6 +172,10 @@ export function useSessionArtifactsReadiness({
     previousPromptRef.current = { owner, sessionId, status: promptStatus };
     previousTurnIdRef.current = { owner, turnId: activeTurnId };
     let turn = activeTurnRef.current;
+    const sameSessionOwnerReplacement =
+      previous.owner !== owner &&
+      previous.sessionId !== undefined &&
+      previous.sessionId === sessionId;
     const deferredOwnerReplacement =
       previous.owner !== owner &&
       previous.sessionId === undefined &&
@@ -137,8 +183,10 @@ export function useSessionArtifactsReadiness({
       deferredSessionId === sessionId &&
       previous.status !== 'idle' &&
       turn.owner === previous.owner;
+    const continuousOwnerReplacement =
+      sameSessionOwnerReplacement || deferredOwnerReplacement;
     const settled =
-      (previous.owner === owner || deferredOwnerReplacement) &&
+      (previous.owner === owner || continuousOwnerReplacement) &&
       previous.status !== 'idle' &&
       promptStatus === 'idle';
     if (!enabled) {
@@ -146,7 +194,7 @@ export function useSessionArtifactsReadiness({
       return;
     }
 
-    if (deferredOwnerReplacement) {
+    if (continuousOwnerReplacement) {
       turn = { ...turn, owner };
     } else if (
       promptStatus !== 'idle' &&
@@ -208,6 +256,7 @@ export function useSessionArtifactsReadiness({
       sawStreaming: false,
     };
     if (pendingRef.current.some((event) => event.owner === owner)) {
+      if (!completedTurnId) refreshGenerationRef.current += 1;
       void drain(owner);
     } else {
       void load();
@@ -234,6 +283,7 @@ export function useSessionArtifactsReadiness({
     ) {
       return;
     }
+    if (enabled) refreshGenerationRef.current += 1;
     if (enabled && pendingRef.current.some((event) => event.owner === owner)) {
       void drain(owner);
     } else {
