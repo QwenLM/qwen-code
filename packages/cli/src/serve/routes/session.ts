@@ -30,6 +30,7 @@ import {
   writeWorktreeSession,
   readWorktreeSession,
   readSessionPrs,
+  toSessionPrInfo,
   upsertSessionPr,
   SESSION_PR_URL_MAX_LENGTH,
   type ApprovalMode,
@@ -136,6 +137,10 @@ import {
 } from '../skill-details-redaction.js';
 import { replayTranscriptRecordPage } from '../../acp-integration/session/history-replay-page.js';
 import { GENERATION_MAX_PROMPT_BYTES } from '../../acp-integration/generation.js';
+import {
+  PERSIST_REASONING_SELECTION_META_KEY,
+  REASONING_SELECTION_PERSISTED_META_KEY,
+} from '../../acp-integration/model-configuration.js';
 import {
   formatGenerationSse,
   GENERATION_HEARTBEAT_MS,
@@ -3377,7 +3382,15 @@ export function registerSessionRoutes(
           daemonLog,
         );
       }
-      sendBridgeError(res, err, { route: 'POST /session' });
+      // Only the plain creation path can promise that the initialize
+      // handshake preceded every durable mutation: `branch`/`worktree`
+      // bodies mutate git BEFORE spawn, and their rollback above is
+      // best-effort (a failed checkout rollback leaves the workspace on
+      // the new branch while the error response goes out).
+      sendBridgeError(res, err, {
+        route: 'POST /session',
+        ...(branchMeta || worktreeMeta ? {} : { initPrecedesMutations: true }),
+      });
     } finally {
       sessionIdReservation?.release();
     }
@@ -5920,11 +5933,7 @@ export function registerSessionRoutes(
                 service.getPrSessionPathForArchiveState(sessionId, 'active'),
                 pr,
               )
-            ).map(({ number, url, state }) => ({
-              number,
-              url,
-              ...(state ? { state } : {}),
-            }));
+            ).map(toSessionPrInfo);
             effective = { ...effective, prs: persistedPrs };
           }
         } finally {
@@ -6087,11 +6096,7 @@ export function registerSessionRoutes(
                     ),
                     pr,
                   )
-                ).map(({ number, url, state }) => ({
-                  number,
-                  url,
-                  ...(state ? { state } : {}),
-                }));
+                ).map(toSessionPrInfo);
                 assertRuntimeGenerationOpen?.();
                 effective = { ...effective, prs: persistedPrs };
               }
@@ -6117,11 +6122,7 @@ export function registerSessionRoutes(
                   pr,
                 );
                 assertRuntimeGenerationOpen?.();
-                effective.prs = persisted.map(({ number, url, state }) => ({
-                  number,
-                  url,
-                  ...(state ? { state } : {}),
-                }));
+                effective.prs = persisted.map(toSessionPrInfo);
               }
               if (displayName !== undefined) {
                 const renamed = await service.renameSession(
@@ -6874,6 +6875,7 @@ export function registerSessionRoutes(
         const body = safeBody(req);
         const configId = body['configId'];
         const value = body['value'];
+        const persist = body['persist'];
         if (configId !== 'reasoning_effort') {
           res.status(400).json({
             error: '`configId` must be reasoning_effort',
@@ -6886,11 +6888,32 @@ export function registerSessionRoutes(
           });
           return;
         }
+        if (persist !== undefined && typeof persist !== 'boolean') {
+          res.status(400).json({
+            error: '`persist` must be a boolean when provided',
+          });
+          return;
+        }
         const response = await runtime.bridge.setSessionConfigOption(
           sessionId,
-          { sessionId, configId, value },
+          {
+            sessionId,
+            configId,
+            value,
+            ...(persist === true
+              ? {
+                  _meta: {
+                    [PERSIST_REASONING_SELECTION_META_KEY]: true,
+                  },
+                }
+              : {}),
+          },
         );
-        res.status(200).json(response);
+        res.status(200).json({
+          configOptions: response.configOptions,
+          persisted:
+            response._meta?.[REASONING_SELECTION_PERSISTED_META_KEY] === true,
+        });
       },
     ),
   );

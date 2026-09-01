@@ -108,6 +108,24 @@ When `--max-total-sessions` rejects a fresh session, the same response shape is 
 
 Attaches to existing sessions are NOT counted toward the cap, so an idle daemon's reconnects keep working even when at-capacity.
 
+If the ACP channel initialization budget expires before `newSession` is dispatched, `POST /session` returns `504` with `Retry-After: 5` and:
+
+```json
+{
+  "error": "AcpSessionBridge initialize timed out after 10000ms",
+  "code": "init_timeout",
+  "errorKind": "init_timeout",
+  "retryable": true,
+  "sideEffectPossible": false,
+  "phase": "channel.initialize",
+  "timeoutMs": 10000
+}
+```
+
+`timeoutMs` — and the numeric suffix of `error` — reflect the daemon's configured `--initialize-timeout-ms` budget (the values above are the default). The full safe-retry shape above is emitted only for plain session creation, where channel initialization strictly precedes every durable mutation: on that path the `sideEffectPossible: false` field is authoritative because initialization precedes the ACP `newSession` request, and a client that understands this structured contract may retry after the advertised delay without risking a duplicate Session.
+
+Requests carrying `branch` or `worktree`, and initialize timeouts surfaced by mutation-bearing routes other than plain creation (for example `POST /session/:id/branch` and `POST /session/:id/side-task`, where a committed fork can outlive the failed handshake), return the same `504` with `code: "init_timeout"`, `phase`, and `timeoutMs` — but WITHOUT `Retry-After`, `retryable`, or `sideEffectPossible`. For those the mutation outcome is unknown: branch and worktree preparation mutates git before the channel initializes, and the rollback attempted on failure is best-effort (a failed checkout rollback leaves the workspace on the new branch, and a retry may surface a branch-already-exists conflict). Clients that classify all 5xx mutation responses as ambiguous remain conservatively fail-closed, and should apply the same policy to the reduced shape. `POST /session/:id/load` and `POST /session/:id/resume` surface the same reduced `init_timeout` `504` when channel initialization times out before the restore request is dispatched (the `ensureChannel` stage); unlike the `session_restore_timeout` `504` documented in their Errors lists, this shape carries no `Retry-After`, no `retryable`, and installs no fence because the restore was never dispatched. The `newSession` dispatch timeout on `POST /session` is an exception: it returns `504` with `code: "init_timeout"`, `retryable: true`, and a budget-derived `Retry-After`, but without `phase` or `sideEffectPossible`, because the creation outcome is ambiguous. All other timeout labels keep the generic mapping.
+
 `RestoreInProgressError` — emitted by `POST /session/:id/load`, `POST /session/:id/resume`, or a caller-supplied-id `POST /session` when another registration already owns that id — returns `409` and:
 
 ```json
@@ -2222,6 +2240,7 @@ The replay-window byte caps apply after the child has reconstructed the persiste
 - `403` — `untrusted_workspace` when `cwd` targets an untrusted non-primary workspace.
 - `503` — `session_limit_exceeded` (counts against `--max-sessions`; in-flight restores are accounted for too).
 - `504` — `session_restore_timeout`; retryable, with a `Retry-After` derived from the restore budget (clamped to 5-120s) because the same session id stays fenced until late cleanup settles.
+- `504` — `init_timeout`; NOT retryable, no `Retry-After`, no `sideEffectPossible`, no fence installed. Emitted when channel initialization times out before the restore request is dispatched (the `ensureChannel` stage); the restore was never attempted, so no session id is fenced and no cleanup is pending.
 - `503` — `acp_channel_unavailable` when the workspace channel is closed to new session work. `reason` says why: `restore_cleanup_failed` when an abandoned restore could not be cleaned up conclusively; `restore_settlement_overdue` when an abandoned restore has still not settled one full restore budget after its deadline; `new_session_cleanup_failed` when a session created after the public initialization timeout could not be closed conclusively; or `new_session_settlement_overdue` when the timed-out initialization has still not settled one further initialization budget after its deadline. Existing sessions remain available. A settlement-overdue state clears after a late failure settles or a late success completes its exact-ID cleanup; inconclusive cleanup transitions to the matching cleanup-failed state, which requires the workspace channel to drain and recycle. The body carries `retryAfterSeconds` and the header a matching budget-derived `Retry-After` so clients use an operation-budget-scale backoff instead of polling at the ordinary 5-second cadence.
 - `409` — `restore_in_progress` (a `session/resume` for the same id is already in flight, or a fresh spawn supplied an id a restore owns). `Retry-After: 5` while the restore is active; a budget-derived hint once it is fenced as `awaiting_abandoned_cleanup`. Same-action races (two concurrent `session/load` for the same id) coalesce — exactly one returns `attached: false`, the rest return `attached: true` with the same `state`.
 - `409` — `session_workspace_conflict` when the same session id is already live or being restored by another workspace runtime.

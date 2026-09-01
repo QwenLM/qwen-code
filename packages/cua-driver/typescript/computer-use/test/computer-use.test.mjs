@@ -23,6 +23,7 @@ const METHOD_NAMES = [
 ];
 
 const fakeSdk = {
+  ActionEffect: { Refused: 4 },
   ClickButton: { Left: "left", Right: "right", Middle: "middle" },
   DeliveryMode: { Background: "background", Foreground: "foreground" },
   ScrollDirection: { Up: "up", Down: "down", Left: "left", Right: "right" },
@@ -184,7 +185,11 @@ test("forceFull is explicit and the wrapper never invents a base", async () => {
     },
   });
   const computer = new ComputerUse(driver, { sdk: fakeSdk });
-  const observation = await computer.observeWindow({ pid: 42, windowId: 7, forceFull: true });
+  const observation = await computer.observeWindow({
+    pid: 42,
+    windowId: 7,
+    forceFull: true,
+  });
   assert.deepEqual(driver.calls[0].input.observationRevision, {
     version: 1,
     serializerVersion: "accessibility-render-v1",
@@ -220,7 +225,9 @@ test("drivers without revision capability retain legacy full observations", asyn
 test("typed discovery methods expose apps, windows, and exact-window lookup", async () => {
   const driver = fakeDriver({
     results: {
-      listApps: toolResult({ structured: { apps: [{ pid: 42, name: "Harness" }] } }),
+      listApps: toolResult({
+        structured: { apps: [{ pid: 42, name: "Harness" }] },
+      }),
       listWindows: toolResult({
         structured: { windows: [{ pid: 42, window_id: 7, title: "Harness" }] },
       }),
@@ -336,7 +343,9 @@ test("all core actions use named typed SDK methods", async () => {
 
 test("verifyState converts public numeric options to the generated u64 ABI", async () => {
   const driver = fakeDriver({
-    results: { verifyState: toolResult({ structured: { status: "satisfied" } }) },
+    results: {
+      verifyState: toolResult({ structured: { status: "satisfied" } }),
+    },
   });
   const computer = new ComputerUse(driver, { sdk: fakeSdk });
   await computer.verifyState({
@@ -395,84 +404,169 @@ test("driver refusals retain their closed code without wrapper retry", async () 
   assert.equal(driver.calls.length, 1);
 });
 
-test("native calls receive an AbortSignal and fail before the outer REPL timeout", async () => {
+test("post-dispatch cancellation waits for the native terminal result", async () => {
+  let finishNative;
   const driver = fakeDriver({
     results: {
-      listApps: (_input, options) => {
-        if (!options?.signal) return new Promise(() => {});
-        return new Promise((_resolve, reject) => {
-          options.signal.addEventListener(
-            "abort",
-            () => reject(options.signal.reason),
-            { once: true },
-          );
-        });
-      },
+      listApps: () =>
+        new Promise((resolve) => {
+          finishNative = resolve;
+        }),
     },
   });
   const computer = new ComputerUse(driver, { sdk: fakeSdk });
-  const watchdog = new Promise((_resolve, reject) => {
-    setTimeout(() => reject(new Error("facade did not cancel the native call")), 500);
+  const controller = new AbortController();
+  let registeredTerminal;
+  Object.defineProperty(controller.signal, "waitUntil", {
+    value: (promise) => {
+      registeredTerminal = promise;
+      return promise;
+    },
   });
+  let settled = false;
+  const read = computer.listApps({ signal: controller.signal }).finally(() => {
+    settled = true;
+  });
+  await new Promise((resolve) => setImmediate(resolve));
 
-  await assert.rejects(
-    Promise.race([computer.listApps({ callTimeoutMs: 20 }), watchdog]),
-    (error) => error instanceof ComputerUseError && error.code === "call_timeout",
-  );
-  assert.equal(driver.asyncOptions[0].options.signal instanceof AbortSignal, true);
+  assert.equal(registeredTerminal instanceof Promise, true);
+  controller.abort(new Error("stop"));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(settled, false);
+  finishNative(toolResult({ structured: { apps: [{ pid: 42 }] } }));
+  assert.deepEqual(await read, [{ pid: 42 }]);
+  assert.equal(driver.asyncOptions[0].options, undefined);
 });
 
-test("observation capability discovery shares the native call deadline", async () => {
+test("capability cancellation waits for discovery then prevents observation dispatch", async () => {
   const driver = fakeDriver();
-  let listingSignal;
-  driver.listToolsJson = (options) => {
-    listingSignal = options?.signal;
-    return new Promise((_resolve, reject) => {
-      listingSignal?.addEventListener(
-        "abort",
-        () => reject(listingSignal.reason),
-        { once: true },
-      );
-    });
-  };
-  const computer = new ComputerUse(driver, { sdk: fakeSdk });
-  const watchdog = new Promise((_resolve, reject) => {
-    setTimeout(() => reject(new Error("capability discovery was not cancelled")), 500);
-  });
-
-  await assert.rejects(
-    Promise.race([
-      computer.observeWindow({ pid: 42, windowId: 7, callTimeoutMs: 20 }),
-      watchdog,
-    ]),
-    (error) => error instanceof ComputerUseError && error.code === "call_timeout",
-  );
-  assert.equal(listingSignal instanceof AbortSignal, true);
-});
-
-test("observation capability discovery respects caller cancellation", async () => {
-  const driver = fakeDriver();
-  driver.listToolsJson = (options) =>
-    new Promise((_resolve, reject) => {
-      options.signal.addEventListener(
-        "abort",
-        () => reject(options.signal.reason),
-        { once: true },
-      );
+  let finishListing;
+  driver.listToolsJson = () =>
+    new Promise((resolve) => {
+      finishListing = resolve;
     });
   const computer = new ComputerUse(driver, { sdk: fakeSdk });
   const controller = new AbortController();
-  const observation = computer.observeWindow({
-    pid: 42,
-    windowId: 7,
-    signal: controller.signal,
+  let registeredTerminal;
+  Object.defineProperty(controller.signal, "waitUntil", {
+    value: (promise) => {
+      registeredTerminal = promise;
+      return promise;
+    },
   });
+  let settled = false;
+  const observation = computer
+    .observeWindow({
+      pid: 42,
+      windowId: 7,
+      signal: controller.signal,
+    })
+    .finally(() => {
+      settled = true;
+    });
+  await new Promise((resolve) => setImmediate(resolve));
 
+  assert.equal(registeredTerminal instanceof Promise, true);
   controller.abort();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(settled, false);
+  finishListing(JSON.stringify({ tools: [] }));
   await assert.rejects(
     observation,
     (error) => error instanceof ComputerUseError && error.code === "call_cancelled",
   );
+  assert.equal(driver.calls.length, 0);
+});
+
+test("pre-dispatch cancellation performs no native action", async () => {
+  const driver = fakeDriver();
+  const computer = new ComputerUse(driver, { sdk: fakeSdk });
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(
+    computer.click({
+      pid: 42,
+      windowId: 7,
+      x: 10,
+      y: 20,
+      signal: controller.signal,
+    }),
+    (error) =>
+      error instanceof ComputerUseError &&
+      error.code === "call_cancelled" &&
+      error.details.operation.dispatched === false &&
+      error.details.operation.committed === false,
+  );
+  assert.equal(driver.calls.length, 0);
+});
+
+test("a refused native action is dispatched but never reported as committed", async () => {
+  const driver = fakeDriver({
+    results: {
+      windowClick: toolResult({
+        text: "foreground target was unavailable",
+        structured: { effect: "refused", route: "global_input" },
+        isError: true,
+        errorCode: "foreground_unavailable",
+        action: { effect: 4, route: 2 },
+      }),
+    },
+  });
+  const computer = new ComputerUse(driver, { sdk: fakeSdk });
+
+  await assert.rejects(
+    computer.click({ pid: 42, windowId: 7, x: 10, y: 20 }),
+    (error) =>
+      error instanceof ComputerUseError &&
+      error.code === "foreground_unavailable" &&
+      error.details.operation.dispatched === true &&
+      error.details.operation.committed === false,
+  );
+  assert.equal(driver.calls.length, 1);
+});
+
+test("post-dispatch cancellation returns the committed action result once", async () => {
+  let finishAction;
+  const driver = fakeDriver({
+    results: {
+      windowClick: () =>
+        new Promise((resolve) => {
+          finishAction = resolve;
+        }),
+    },
+  });
+  const computer = new ComputerUse(driver, { sdk: fakeSdk });
+  const controller = new AbortController();
+  let settled = false;
+  const action = computer
+    .click({
+      pid: 42,
+      windowId: 7,
+      x: 10,
+      y: 20,
+      signal: controller.signal,
+    })
+    .finally(() => {
+      settled = true;
+    });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  controller.abort();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(settled, false);
+  finishAction(
+    toolResult({
+      structured: { effect: "confirmed", route: "trusted_input" },
+      action: { effect: "confirmed", route: "trusted_input" },
+    }),
+  );
+  const result = await action;
+  assert.equal(result.operation.state, "completed");
+  assert.equal(result.operation.dispatched, true);
+  assert.equal(result.operation.committed, true);
+  assert.equal(result.operation.cancellationRequested, true);
+  assert.equal(driver.calls.length, 1);
+  assert.equal(driver.asyncOptions[0].options, undefined);
 });
 
 test("typed action and verification records survive the facade and fail closed", async () => {
@@ -551,8 +645,7 @@ test("typed action and verification records survive the facade and fail closed",
           expect: [{ element: { token: "rv1:l_a:1", selected: true } }],
         }),
     }),
-    (error) =>
-      error instanceof ComputerUseError && error.code === "postcondition_not_satisfied",
+    (error) => error instanceof ComputerUseError && error.code === "postcondition_not_satisfied",
   );
 });
 
@@ -585,7 +678,9 @@ test("unavailable read calls reconnect once and force the next observation full"
   };
   const replacement = fakeDriver({
     results: {
-      listApps: toolResult({ structured: { apps: [{ pid: 42, name: "Harness" }] } }),
+      listApps: toolResult({
+        structured: { apps: [{ pid: 42, name: "Harness" }] },
+      }),
       getSession: sessionOutput,
       getWindowState: toolResult({
         structured: {
@@ -608,7 +703,7 @@ test("unavailable read calls reconnect once and force the next observation full"
     sdk: fakeSdk,
     ownsSession: true,
     publicSession: "persistent-session",
-    sessionFactory: (_signal, publicSession) => {
+    sessionFactory: (publicSession) => {
       factoryCalls += 1;
       replacementPublicSession = publicSession;
       return replacement;
@@ -629,11 +724,43 @@ test("unavailable read calls reconnect once and force the next observation full"
     windowId: 7,
     baseRevisionId: "l_old:r9",
   });
-  const observeInput = replacement.calls.find(
-    (entry) => entry.method === "getWindowState",
-  ).input;
+  const observeInput = replacement.calls.find((entry) => entry.method === "getWindowState").input;
   assert.equal(observeInput.observationRevision.baseRevisionId, undefined);
   assert.equal(observeInput.observationRevision.forceFull, true);
+});
+
+test("explicit reconnect registers session creation as a cancellation barrier", async () => {
+  const previous = fakeDriver();
+  previous.close = () => {};
+  const replacement = fakeDriver();
+  let finishReplacement;
+  const computer = new ComputerUse(previous, {
+    sdk: fakeSdk,
+    ownsSession: true,
+    sessionFactory: () =>
+      new Promise((resolve) => {
+        finishReplacement = resolve;
+      }),
+  });
+  const controller = new AbortController();
+  let registeredTerminal;
+  Object.defineProperty(controller.signal, "waitUntil", {
+    value: (promise) => {
+      registeredTerminal = promise;
+      return promise;
+    },
+  });
+
+  const reconnect = computer.reconnect({ signal: controller.signal });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(registeredTerminal instanceof Promise, true);
+  controller.abort();
+  finishReplacement(replacement);
+
+  const result = await reconnect;
+  assert.equal(result.operation.committed, true);
+  assert.equal(result.operation.cancellationRequested, true);
+  assert.equal(computer.connectionGeneration, 2);
 });
 
 test("stale observations cannot clear a replacement session's full-observation guard", async () => {
@@ -741,7 +868,9 @@ test("concurrent expired reads share one replacement session", async () => {
   };
   const replacement = fakeDriver({
     results: {
-      listApps: toolResult({ structured: { apps: [{ pid: 42, name: "Harness" }] } }),
+      listApps: toolResult({
+        structured: { apps: [{ pid: 42, name: "Harness" }] },
+      }),
     },
   });
   let resolveFactory;
@@ -777,7 +906,7 @@ test("concurrent expired reads share one replacement session", async () => {
   assert.equal(computer.connectionGeneration, 2);
 });
 
-test("automatic reconnect shares the caller deadline with async teardown and binding", async () => {
+test("automatic reconnect drains async teardown and binding before redispatch", async () => {
   const expired = fakeDriver({
     results: {
       listApps: toolResult({
@@ -791,49 +920,37 @@ test("automatic reconnect shares the caller deadline with async teardown and bin
     },
   });
   let syncCloseCalls = 0;
-  let asyncCloseSignal;
+  let asyncCloseOptions;
   expired.close = () => {
     syncCloseCalls += 1;
     throw new Error("synchronous close must not run during reconnect");
   };
   expired.closeAsync = async (options) => {
-    asyncCloseSignal = options?.signal;
+    asyncCloseOptions = options;
   };
-  let factorySignal;
+  const replacement = fakeDriver({
+    results: {
+      listApps: toolResult({ structured: { apps: [{ pid: 42 }] } }),
+    },
+  });
+  let factoryCalls = 0;
   const computer = new ComputerUse(expired, {
     sdk: fakeSdk,
     ownsSession: true,
-    sessionFactory: (signal) =>
-      new Promise((_resolve, reject) => {
-        factorySignal = signal;
-        signal?.addEventListener("abort", () => reject(signal.reason), {
-          once: true,
-        });
-      }),
-  });
-  let watchdogTimer;
-  const watchdog = new Promise((_resolve, reject) => {
-    watchdogTimer = setTimeout(
-      () => reject(new Error("reconnect ignored its deadline")),
-      500,
-    );
+    sessionFactory: async () => {
+      factoryCalls += 1;
+      return replacement;
+    },
   });
 
-  try {
-    await assert.rejects(
-      Promise.race([computer.listApps({ callTimeoutMs: 20 }), watchdog]),
-      (error) =>
-        error instanceof ComputerUseError && error.code === "call_timeout",
-    );
-  } finally {
-    clearTimeout(watchdogTimer);
-  }
+  assert.deepEqual(await computer.listApps(), [{ pid: 42 }]);
   assert.equal(syncCloseCalls, 0);
-  assert.equal(asyncCloseSignal instanceof AbortSignal, true);
-  assert.equal(factorySignal instanceof AbortSignal, true);
+  assert.equal(asyncCloseOptions, undefined);
+  assert.equal(factoryCalls, 1);
+  assert.equal(replacement.calls.length, 1);
 });
 
-test("caller cancellation aborts replacement binding", async () => {
+test("caller cancellation waits for replacement binding then prevents redispatch", async () => {
   const expired = fakeDriver({
     results: {
       listApps: toolResult({
@@ -850,33 +967,33 @@ test("caller cancellation aborts replacement binding", async () => {
     throw new Error("synchronous close must not run during reconnect");
   };
   expired.closeAsync = async () => {};
-  let factorySignal;
+  const replacement = fakeDriver();
+  let finishFactory;
   const computer = new ComputerUse(expired, {
     sdk: fakeSdk,
     ownsSession: true,
-    sessionFactory: (signal) =>
-      new Promise((_resolve, reject) => {
-        factorySignal = signal;
-        signal.addEventListener("abort", () => reject(signal.reason), {
-          once: true,
-        });
+    sessionFactory: () =>
+      new Promise((resolve) => {
+        finishFactory = () => resolve(replacement);
       }),
   });
   const controller = new AbortController();
-  const read = computer.listApps({
-    signal: controller.signal,
-    callTimeoutMs: 200,
+  let settled = false;
+  const read = computer.listApps({ signal: controller.signal }).finally(() => {
+    settled = true;
   });
   await new Promise((resolve) => setImmediate(resolve));
 
   controller.abort(new Error("stop reconnect"));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(settled, false);
+  finishFactory();
   await assert.rejects(
     read,
-    (error) =>
-      error instanceof ComputerUseError && error.code === "call_cancelled",
+    (error) => error instanceof ComputerUseError && error.code === "call_cancelled",
   );
-  assert.equal(factorySignal.aborted, true);
-  assert.equal(computer.connectionGeneration, 1);
+  assert.equal(replacement.calls.length, 0);
+  assert.equal(computer.connectionGeneration, 2);
 });
 
 test("a later call retries session creation after automatic reconnect fails", async () => {
@@ -913,8 +1030,7 @@ test("a later call retries session creation after automatic reconnect fails", as
 
   await assert.rejects(
     computer.listApps(),
-    (error) =>
-      error instanceof ComputerUseError && error.code === "reconnect_failed",
+    (error) => error instanceof ComputerUseError && error.code === "reconnect_failed",
   );
   assert.deepEqual(await computer.listApps(), [{ pid: 42, name: "Harness" }]);
   assert.equal(factoryCalls, 2);
@@ -990,9 +1106,7 @@ test("an expired state-changing action is never replayed automatically", async (
   });
   await assert.rejects(
     computer.click({ pid: 42, windowId: 7, x: 1, y: 2 }),
-    (error) =>
-      error instanceof ComputerUseError &&
-      error.code === "authorization_context_expired",
+    (error) => error instanceof ComputerUseError && error.code === "authorization_context_expired",
   );
   assert.equal(factoryCalls, 0);
   assert.equal(driver.calls.length, 1);
@@ -1002,9 +1116,7 @@ test("local validation rejects ambiguous or malformed targets before dispatch", 
   const driver = fakeDriver();
   const computer = new ComputerUse(driver, { sdk: fakeSdk });
   await assert.rejects(computer.observeWindow({ pid: 0, windowId: 7 }));
-  await assert.rejects(
-    computer.click({ pid: 42, windowId: 7, elementToken: "token", x: 1, y: 2 }),
-  );
+  await assert.rejects(computer.click({ pid: 42, windowId: 7, elementToken: "token", x: 1, y: 2 }));
   await assert.rejects(computer.click({ pid: 42, x: 1, y: 2 }));
   await assert.rejects(computer.scroll({ pid: 42, windowId: 7 }));
   await assert.rejects(computer.setValue({ pid: 42, value: "x" }));
@@ -1025,12 +1137,11 @@ test("local validation rejects ambiguous or malformed targets before dispatch", 
   assert.equal(driver.calls.length, 0);
 });
 
-test("closeAsync receives a usable signal when close has no caller signal", async () => {
+test("closeAsync is awaited without a detachable cancellation signal", async () => {
   const session = fakeDriver();
   session.closeAsyncCalls = 0;
-  session.closeAsync = async function ({ signal }) {
-    assert.equal(signal instanceof AbortSignal, true);
-    assert.equal(signal.aborted, false);
+  session.closeAsync = async function (options) {
+    assert.equal(options, undefined);
     this.closeAsyncCalls += 1;
   };
   const owner = fakeDriver();

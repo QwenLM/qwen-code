@@ -1936,6 +1936,42 @@ describe('serve fast path environment bootstrap', () => {
     }
   });
 
+  // QWEN_SERVE_SESSION_ATTACHMENTS_ROOT is the daemon-wide attachment
+  // storage location: a start-dir .env fixing it redirects storage for every
+  // workspace the daemon serves, and reads resolve the configured root first
+  // — an attacker repo would capture uploads and serve back tampered bytes.
+  it('never applies QWEN_SERVE_SESSION_ATTACHMENTS_ROOT from a project .env on the fast path', () => {
+    useTempQwenHome();
+    const trackedKeys = ['QWEN_SERVE_SESSION_ATTACHMENTS_ROOT'] as const;
+    const previous: Record<string, string | undefined> = {};
+    for (const key of trackedKeys) {
+      previous[key] = process.env[key];
+      delete process.env[key];
+    }
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-attachments-root-')),
+    );
+    writeFileSync(
+      join(tempWorkspace, '.env'),
+      ['QWEN_SERVE_SESSION_ATTACHMENTS_ROOT=./exfil', ''].join('\n'),
+    );
+
+    try {
+      loadServeFastPathEnvironment({}, tempWorkspace);
+      expect(
+        process.env['QWEN_SERVE_SESSION_ATTACHMENTS_ROOT'],
+      ).toBeUndefined();
+    } finally {
+      for (const key of trackedKeys) {
+        if (previous[key] === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = previous[key];
+        }
+      }
+    }
+  });
+
   // The fast-path settings.env loop rejects hardcoded exclusions through the
   // case-folded isHardcodedProjectEnvExclusion predicate. Every other
   // settings.env fixture uses loader/allowlisted keys, so a regression to
@@ -2315,6 +2351,37 @@ describe('serve fast path environment bootstrap', () => {
     await bootstrapServeFastPathEnvironment(tempWorkspace);
 
     expect(process.env['QWEN_SERVER_TOKEN']).toBe('from-referenced-env');
+  });
+
+  it('never expands Qwen-internal secrets referenced from workspace settings.env', async () => {
+    process.env['QWEN_SERVER_TOKEN'] = 'daemon-secret';
+    delete process.env['FAST_PATH_LEAKED_COPY'];
+    useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-settings-secret-')),
+    );
+    mkdirSync(join(tempWorkspace, '.qwen'));
+    writeFileSync(
+      join(tempWorkspace, '.qwen', 'settings.json'),
+      JSON.stringify({
+        env: {
+          FAST_PATH_LEAKED_COPY: 'copy=${QWEN_SERVER_TOKEN}/$qwen_server_token',
+        },
+      }),
+    );
+    process.chdir(tempWorkspace);
+
+    try {
+      await bootstrapServeFastPathEnvironment(tempWorkspace);
+
+      // The placeholders survive verbatim, exactly like an unset variable's;
+      // the daemon bearer token is never copied under another key.
+      expect(process.env['FAST_PATH_LEAKED_COPY']).toBe(
+        'copy=${QWEN_SERVER_TOKEN}/$qwen_server_token',
+      );
+    } finally {
+      delete process.env['FAST_PATH_LEAKED_COPY'];
+    }
   });
 
   it('expands home .env fallback placeholders in workspace settings.env', async () => {

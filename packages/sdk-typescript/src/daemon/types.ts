@@ -352,6 +352,22 @@ export interface DaemonGitPushResult {
 export interface DaemonGitPullResult {
   success: boolean;
   output: string;
+  /**
+   * Present and true when the pull succeeded but restoring the
+   * auto-stashed changes failed; the stash entry is kept, and the
+   * working tree may carry conflict markers.
+   */
+  stashRestoreConflict?: boolean;
+  /**
+   * Present and true when the pull and restore succeeded but a stash
+   * entry was kept on the stack; `output` carries the notice.
+   */
+  stashKept?: boolean;
+  /**
+   * SHA of the kept auto-stash entry when `stashRestoreConflict` or
+   * `stashKept` is set.
+   */
+  stashSha?: string;
 }
 
 /** Response from `POST /workspaces/:workspace/git/commit`. */
@@ -1052,6 +1068,18 @@ export interface DaemonSessionPrInfo {
   url: string;
   /** Snapshot of the PR's state at last bind/refresh; optional. */
   state?: 'open' | 'merged' | 'closed';
+  /**
+   * Issues the PR closes (its GitHub closing references), derived by the
+   * daemon's refresh sweep; absent until the first sweep after binding.
+   */
+  issues?: DaemonSessionIssueInfo[];
+}
+
+export interface DaemonSessionIssueInfo {
+  number: number;
+  url: string;
+  /** Snapshot of the issue's state at last refresh; optional. */
+  state?: 'open' | 'completed' | 'not_planned';
 }
 
 /** Returned from `POST /session`. */
@@ -2953,8 +2981,18 @@ export interface SetModelResult {
 }
 
 /** Returned from `POST /session/:id/config-option`. */
+export type ReasoningSelection =
+  | 'none'
+  | 'default'
+  | 'low'
+  | 'medium'
+  | 'high'
+  | 'xhigh'
+  | 'max';
+
 export interface DaemonSessionConfigOptionResult {
   configOptions: unknown[];
+  persisted: boolean;
 }
 
 /** Returned from `POST /session/:id/language`. */
