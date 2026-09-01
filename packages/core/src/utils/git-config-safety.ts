@@ -18,6 +18,8 @@ interface LocalGitConfigRisk {
   signatureVerifier: boolean;
   promisorRemote: boolean;
   mergeDriver: boolean;
+  alternateRefsCommand: boolean;
+  hooksPath: boolean;
 }
 
 const debugLogger = createDebugLogger('GIT_CONFIG_SAFETY');
@@ -32,6 +34,8 @@ const NO_RISK: LocalGitConfigRisk = {
   signatureVerifier: false,
   promisorRemote: false,
   mergeDriver: false,
+  alternateRefsCommand: false,
+  hooksPath: false,
 };
 const PROBE_FAILED: LocalGitConfigRisk = {
   diffExternal: true,
@@ -43,6 +47,8 @@ const PROBE_FAILED: LocalGitConfigRisk = {
   signatureVerifier: true,
   promisorRemote: true,
   mergeDriver: true,
+  alternateRefsCommand: true,
+  hooksPath: true,
 };
 
 const DIFF_DRIVER_COMMAND_KEY_PATTERN = String.raw`^diff\..*\.command$`;
@@ -77,6 +83,8 @@ const LOCAL_GIT_CONFIG_RISK_KEY_PATTERN = [
   PROMISOR_REMOTE_KEY_PATTERN,
   PARTIAL_CLONE_FILTER_KEY_PATTERN,
   MERGE_DRIVER_KEY_PATTERN,
+  String.raw`^core\.alternaterefscommand$`,
+  String.raw`^core\.hookspath$`,
 ].join('|');
 
 const DIFF_DRIVER_COMMAND_KEY = new RegExp(
@@ -211,6 +219,8 @@ export function getLocalGitConfigRisk(cwd: string): LocalGitConfigRisk {
       SIGNATURE_PLACEHOLDER.test(value),
     );
   const partialCloneExtension = localValue('extensions.partialclone') ?? '';
+  const alternateRefsCommand = localValue('core.alternaterefscommand');
+  const hooksPath = localValue('core.hookspath');
 
   const risk: LocalGitConfigRisk = {
     diffExternal: diffExternal !== undefined && diffExternal !== '',
@@ -234,6 +244,9 @@ export function getLocalGitConfigRisk(cwd: string): LocalGitConfigRisk {
       hasLocalTrueValueMatching(PROMISOR_REMOTE_KEY) ||
       hasLocalValueMatching(PARTIAL_CLONE_FILTER_KEY),
     mergeDriver: hasLocalValueMatching(MERGE_DRIVER_KEY),
+    alternateRefsCommand:
+      alternateRefsCommand !== undefined && alternateRefsCommand !== '',
+    hooksPath: hooksPath !== undefined && hooksPath !== '',
   };
 
   const activeRisks = Object.entries(risk)
