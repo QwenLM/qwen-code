@@ -154,6 +154,11 @@ interface ImSubscriptionState {
   restartAttempts: number;
 }
 
+interface DirectConversationTail {
+  started: Promise<void>;
+  completed: Promise<void>;
+}
+
 interface ActiveReaction {
   target: { conversationId: string; messageId: string };
   sessionId: string;
@@ -521,7 +526,11 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
   private readonly notifiedSenderPairingNotifications = new Set<string>();
   private readonly processingMessages = new Map<string, Promise<void>>();
   private readonly queuedDirectMessages = new Map<string, Promise<void>>();
-  private readonly directConversationTails = new Map<string, Promise<void>>();
+  private readonly directConversationTails = new Map<
+    string,
+    DirectConversationTail
+  >();
+  private readonly directMessageStartResolvers = new Map<string, () => void>();
   private readonly pendingMessageCapacityWaiters = new Set<() => void>();
   private pollAbortController = new AbortController();
   private lifecycleGeneration = 0;
@@ -831,6 +840,8 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     }
     this.sessionReactionKeys.clear();
     this.queuedDirectMessages.clear();
+    for (const resolve of this.directMessageStartResolvers.values()) resolve();
+    this.directMessageStartResolvers.clear();
     this.directConversationTails.clear();
     for (const resolve of this.pendingMessageCapacityWaiters) resolve();
     this.pendingMessageCapacityWaiters.clear();
@@ -1662,26 +1673,35 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         }
       }
     };
-    const serializeConversation = this.config.dispatchMode === 'followup';
-    const previous = serializeConversation
-      ? this.directConversationTails.get(message.conversationId)
-      : undefined;
-    const task = previous
-      ? previous.catch(() => undefined).then(dispatch)
+    let resolveStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      resolveStarted = resolve;
+    });
+    const previous = this.directConversationTails.get(message.conversationId);
+    // Live turns only need FIFO through ChannelBase registration; replay and
+    // followup turns must wait for the prior turn to finish.
+    const predecessor =
+      reportFailure || this.config.dispatchMode === 'followup'
+        ? previous?.completed
+        : previous?.started;
+    const task = predecessor
+      ? predecessor.catch(() => undefined).then(dispatch)
       : Promise.resolve().then(dispatch);
+    const tail = { started, completed: task };
     this.queuedDirectMessages.set(key, task);
-    if (serializeConversation) {
-      this.directConversationTails.set(message.conversationId, task);
-      void task
-        .finally(() => {
-          if (
-            this.directConversationTails.get(message.conversationId) === task
-          ) {
-            this.directConversationTails.delete(message.conversationId);
-          }
-        })
-        .catch(() => undefined);
-    }
+    this.directMessageStartResolvers.set(key, resolveStarted);
+    this.directConversationTails.set(message.conversationId, tail);
+    void task
+      .finally(() => {
+        this.releaseDirectMessageStart(
+          message.conversationId,
+          message.messageId,
+        );
+        if (this.directConversationTails.get(message.conversationId) === tail) {
+          this.directConversationTails.delete(message.conversationId);
+        }
+      })
+      .catch(() => undefined);
     if (reportFailure) {
       void task.catch((error: unknown) => {
         this.logImError(
@@ -1890,18 +1910,11 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
   ): Promise<boolean> {
     const key = messageKey(message);
     if (this.hasPendingMessage(key)) return true;
-    const generation = this.lifecycleGeneration;
-    while (
-      this.connected &&
-      generation === this.lifecycleGeneration &&
-      (this.cursor.pendingMessages?.length ?? 0) >= MAX_PROCESSED_ITEMS
-    ) {
-      await new Promise<void>((resolve) => {
-        this.pendingMessageCapacityWaiters.add(resolve);
-      });
-    }
-    if (!this.connected || generation !== this.lifecycleGeneration) {
-      return false;
+    if (!this.connected) return false;
+    if ((this.cursor.pendingMessages?.length ?? 0) >= MAX_PROCESSED_ITEMS) {
+      throw new Error(
+        'DWS pending-message capacity is exhausted; retry later.',
+      );
     }
     if (this.hasPendingMessage(key)) return true;
     const pending = this.cursor.pendingMessages ?? [];
@@ -2257,6 +2270,17 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     return `${conversationId}\0${messageId}`;
   }
 
+  private releaseDirectMessageStart(
+    conversationId: string,
+    messageId: string,
+  ): void {
+    const key = `${conversationId}\0${messageId}`;
+    const resolve = this.directMessageStartResolvers.get(key);
+    if (!resolve) return;
+    this.directMessageStartResolvers.delete(key);
+    resolve();
+  }
+
   private rememberInboundReactionTarget(
     chatId: string,
     messageId: string,
@@ -2449,6 +2473,9 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
 
   protected override onTaskLifecycle(event: ChannelTaskLifecycleEvent): void {
     if (event.type === 'started') {
+      if (event.messageId) {
+        this.releaseDirectMessageStart(event.chatId, event.messageId);
+      }
       this.startReaction(event.chatId, event.messageId, event.sessionId);
       return;
     }

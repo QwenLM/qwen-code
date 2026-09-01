@@ -1522,7 +1522,7 @@ describe('DwsChannel', () => {
     expect(bridge.prompt).toHaveBeenCalledTimes(2);
   });
 
-  it('preserves followup order while the first message is classified', async () => {
+  it('preserves default steer order while the first message is classified', async () => {
     const client = new FakeDwsClient();
     let finishClassification!: (result: {
       intent: 'none';
@@ -1542,12 +1542,15 @@ describe('DwsChannel', () => {
     };
     const { bridge } = await readyPolicyChannel(
       client,
-      makeConfig({ dispatchMode: 'followup' }),
+      makeConfig(),
       'classified-order-dws',
       {
         channelMemory: makeChannelMemory(),
         memoryIntentClassifier,
       },
+    );
+    (bridge.cancelSession as ReturnType<typeof vi.fn>).mockResolvedValue(
+      undefined,
     );
 
     const firstDelivery = client.emit(
@@ -1635,25 +1638,20 @@ describe('DwsChannel', () => {
     await delivery;
   });
 
-  it('releases capacity-blocked admission when disconnected', async () => {
+  it('rejects full-capacity admission without waiting', async () => {
     const client = new FakeDwsClient();
     const channel = await readyChannel(client);
     channel.seedPendingMessages(5_000);
 
-    const delivery = client.emit(
-      1,
-      message(
-        'user_im_message_receive_o2o_all',
-        'disconnect-capacity',
-        'request',
+    await expect(
+      client.emit(
+        1,
+        message('user_im_message_receive_o2o_all', 'full-capacity', 'request'),
       ),
+    ).rejects.toThrow(
+      'DWS pending-message capacity is exhausted; retry later.',
     );
-    await vi.waitFor(() =>
-      expect(channel.pendingMessageCapacityWaiterCount()).toBe(1),
-    );
-    channel.disconnect();
 
-    await delivery;
     expect(channel.pendingMessageCapacityWaiterCount()).toBe(0);
   });
 
@@ -1726,33 +1724,29 @@ describe('DwsChannel', () => {
     }
   });
 
-  it('applies backpressure instead of evicting an admitted message', async () => {
+  it('rejects admission instead of evicting a pending message', async () => {
     const client = new FakeDwsClient();
     const channel = await readyChannel(client);
     channel.seedPendingMessages(5_000);
 
-    const delivery = client.emit(
-      1,
-      message('user_im_message_receive_o2o_all', 'new-request', 'request', {
-        conversationId: 'conversation-new',
-      }),
+    await expect(
+      client.emit(
+        1,
+        message('user_im_message_receive_o2o_all', 'new-request', 'request', {
+          conversationId: 'conversation-new',
+        }),
+      ),
+    ).rejects.toThrow(
+      'DWS pending-message capacity is exhausted; retry later.',
     );
-    await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(channel.inbound).toEqual([]);
     expect(channel.pendingMessageIds()).toHaveLength(5_000);
     expect(channel.pendingMessageIds()[0]).toBe('parked-0');
     expect(channel.pendingMessageIds()).not.toContain('new-request');
-
-    channel.releasePendingMessage('conversation-capacity', 'parked-0');
-    await delivery;
-    expect(channel.inbound.map(({ messageId }) => messageId)).toEqual([
-      'new-request',
-    ]);
-    expect(channel.pendingMessageIds()).toHaveLength(4_999);
   });
 
-  it('does not advance direct history past admission released by disconnect', async () => {
+  it('does not block or advance direct history at pending capacity', async () => {
     const client = new FakeDwsClient();
     const channel = await readyChannel(client);
     const initialWatermark = channel.notificationWatermark()!;
@@ -1779,14 +1773,10 @@ describe('DwsChannel', () => {
       .spyOn(Date, 'now')
       .mockReturnValue(initialWatermark + 10_000);
     try {
-      const poll = channel.poll();
-      await vi.waitFor(() =>
-        expect(channel.pendingMessageCapacityWaiterCount()).toBe(1),
-      );
-      channel.disconnect();
-      await poll;
+      await channel.poll();
 
       expect(channel.notificationWatermark()).toBe(initialWatermark);
+      expect(channel.pendingMessageCapacityWaiterCount()).toBe(0);
 
       release();
       await vi.waitFor(() =>
@@ -1810,6 +1800,54 @@ describe('DwsChannel', () => {
       );
     } finally {
       release();
+      now.mockRestore();
+    }
+  });
+
+  it('drains failed replay capacity until direct history can resume', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    const initialWatermark = channel.notificationWatermark()!;
+    channel.seedPendingMessages(5_000, true);
+    channel.inboundError = new Error('agent unavailable');
+    const victim = message(
+      'user_im_message_receive_o2o_all',
+      'history-capacity-victim',
+      'request',
+      {
+        conversationId: 'history-victim',
+        eventTime: initialWatermark - 1_000,
+      },
+    );
+    client.directMessages = [victim];
+    const now = vi
+      .spyOn(Date, 'now')
+      .mockReturnValue(initialWatermark + 10_000);
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      for (const expectedAttempts of [16, 32, 48, 64]) {
+        await channel.poll();
+        await vi.waitFor(() =>
+          expect(channel.inboundAttempts).toBe(expectedAttempts),
+        );
+        expect(channel.notificationWatermark()).toBe(initialWatermark);
+      }
+
+      await channel.poll();
+      await vi.waitFor(() =>
+        expect(channel.pendingMessageIds().length).toBeLessThan(5_000),
+      );
+      if (!channel.pendingMessageIds().includes('history-capacity-victim')) {
+        await channel.poll();
+      }
+      await vi.waitFor(() =>
+        expect(channel.pendingMessageIds()).toContain(
+          'history-capacity-victim',
+        ),
+      );
+      expect(channel.notificationWatermark()).toBeGreaterThan(initialWatermark);
+    } finally {
+      stderr.mockRestore();
       now.mockRestore();
     }
   });
@@ -2534,6 +2572,14 @@ describe('DwsChannel', () => {
       const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
       expect(logged).toContain('DWS message turn failed (attempt 1/5)');
       expect(logged).not.toContain('failed to poll DWS direct-message history');
+      await vi.waitFor(() => {
+        expect(
+          channel.queuedDirectMessage('cid-1\0failing-first'),
+        ).toBeUndefined();
+        expect(
+          channel.queuedDirectMessage('cid-1\0waiting-second'),
+        ).toBeUndefined();
+      });
 
       channel.inboundError = undefined;
       await channel.poll();
