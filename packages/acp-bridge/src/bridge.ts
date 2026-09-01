@@ -319,6 +319,43 @@ function safeTransportFailureCode(error: unknown): string | undefined {
     : undefined;
 }
 
+/**
+ * Bounded numeric/enum context retained for telemetry and the `channel exited`
+ * breadcrumb when a transport guard fires. Mirrors `safeTransportFailureCode`:
+ * only known, safe fields from the guard error types (`NdJsonQueueLimitError`,
+ * `NdJsonFrameTooLargeError`, `AcpInboundHandlerLimitError`) are surfaced — never
+ * the raw error message — so operators can tell WHICH budget fired and how full,
+ * instead of only seeing the opaque `transport=<code>`.
+ */
+const TRANSPORT_FAILURE_DETAIL_NUMBER_KEYS = [
+  'maxQueuedMessages',
+  'maxQueuedBytes',
+  'maxActiveHandlers',
+  'maxActiveHandlerBytes',
+  'requiredBytes',
+  'availableBytes',
+  'limitBytes',
+  'observedBytes',
+] as const;
+
+function safeTransportFailureDetail(
+  error: unknown,
+): Record<string, number | string> | undefined {
+  if (!isRecord(error)) return undefined;
+  const detail: Record<string, number | string> = {};
+  for (const key of TRANSPORT_FAILURE_DETAIL_NUMBER_KEYS) {
+    const value = error[key];
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      detail[key] = value;
+    }
+  }
+  const direction = error['direction'];
+  if (direction === 'sent' || direction === 'received') {
+    detail['direction'] = direction;
+  }
+  return Object.keys(detail).length > 0 ? detail : undefined;
+}
+
 function sessionSourceRequestMeta(
   sourceType: string | undefined,
   sourceId: string | undefined,
@@ -962,6 +999,8 @@ interface ChannelInfo {
   transportFailureInitiatedTeardown: boolean;
   /** Safe bounded code retained for telemetry; never the raw error message. */
   transportFailureCode?: string;
+  /** Safe bounded budget context for telemetry; never the raw error message. */
+  transportFailureDetail?: Record<string, number | string>;
   /**
    * Cached channel-close race for workspace-scoped status requests. Workspace
    * status can be polled frequently by dashboards, so keep one promise per
@@ -4601,6 +4640,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         }
         info.transportFailed = true;
         info.transportFailureCode = safeTransportFailureCode(error);
+        info.transportFailureDetail = safeTransportFailureDetail(error);
         info.isDying = true;
         info.channelLiveness?.stop();
         clearInFlightExtensionRefreshes(info.connection);
@@ -4707,12 +4747,28 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                     info.transportFailureCode,
                 }
               : {}),
+            ...(info.transportFailureDetail
+              ? Object.fromEntries(
+                  Object.entries(info.transportFailureDetail).map(
+                    ([key, value]) =>
+                      [
+                        `qwen-code.daemon.channel.transport_error_${key}`,
+                        value,
+                      ] as const,
+                  ),
+                )
+              : {}),
             ...(exitInfo?.signalCode
               ? { 'qwen-code.daemon.channel.signal': exitInfo.signalCode }
               : {}),
           });
+          const transportFailureDetailText = info.transportFailureDetail
+            ? ` ${Object.entries(info.transportFailureDetail)
+                .map(([key, value]) => `${key}=${value}`)
+                .join(' ')}`
+            : '';
           writeStderrLine(
-            `qwen serve: channel exited (code=${exitInfo?.exitCode ?? 'none'}, signal=${exitInfo?.signalCode ?? 'none'}, transport=${info.transportFailed ? (info.transportFailureCode ?? 'failed') : 'ok'}, ${sessions.length} session(s) torn down)`,
+            `qwen serve: channel exited (code=${exitInfo?.exitCode ?? 'none'}, signal=${exitInfo?.signalCode ?? 'none'}, transport=${info.transportFailed ? (info.transportFailureCode ?? 'failed') : 'ok'}${transportFailureDetailText}, ${sessions.length} session(s) torn down)`,
           );
         }
         for (const sid of sessions) {
