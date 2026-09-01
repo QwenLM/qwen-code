@@ -3605,6 +3605,64 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('gets turn-index pages through workspace status without creating a session', async () => {
+    const handles: ChannelHandle[] = [];
+    const bridge = makeBridge({
+      channelFactory: async () => {
+        const h = makeChannel({
+          extMethodImpl: (method, params) => {
+            if (method === SERVE_STATUS_EXT_METHODS.sessionTurnIndex) {
+              return {
+                v: 1,
+                sessionId: params['sessionId'],
+                snapshot: 'snapshot-1',
+                totalTurns: 1,
+                start: 0,
+                turns: [
+                  {
+                    ordinal: 0,
+                    turnId: 'record-1',
+                    kind: 'prompt',
+                    label: 'hello',
+                  },
+                ],
+              };
+            }
+            throw new Error(`unexpected extMethod ${method}`);
+          },
+        });
+        handles.push(h);
+        return h.channel;
+      },
+    });
+
+    const result = await bridge.getSessionTurnIndexPage({
+      sessionId: 'session-1',
+      snapshot: 'snapshot-1',
+      start: 0,
+      limit: 2,
+    });
+
+    expect(result.totalTurns).toBe(1);
+    expect(handles[0]?.agent.extMethodCalls).toEqual([
+      {
+        method: SERVE_STATUS_EXT_METHODS.sessionTurnIndex,
+        params: {
+          cwd: WS_A,
+          sessionId: 'session-1',
+          snapshot: 'snapshot-1',
+          start: 0,
+          limit: 2,
+        },
+      },
+    ]);
+    expect(handles[0]?.agent.newSessionCalls).toHaveLength(0);
+    expect(handles[0]?.agent.loadSessionCalls).toHaveLength(0);
+    expect(bridge.listWorkspaceSessions(WS_A)).toEqual([]);
+
+    await bridge.shutdown();
+  });
+
   it('times out transcript page status requests', async () => {
     vi.useFakeTimers();
     try {

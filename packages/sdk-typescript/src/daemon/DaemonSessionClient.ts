@@ -27,6 +27,8 @@ import type {
   DaemonSessionAttachmentReference,
   DaemonSessionTranscriptPage,
   DaemonSessionTranscriptPageOptions,
+  DaemonSessionTurnIndexPage,
+  DaemonSessionTurnIndexPageOptions,
   DaemonSessionGenerationEvent,
   DaemonMidTurnMessageResult,
   DaemonMidTurnMessagesResult,
@@ -938,6 +940,15 @@ export class DaemonSessionClient {
         page.events.map(async (event) => await this.hydrateEvent(event)),
       ),
     };
+  }
+
+  async getTurnIndexPage(
+    opts: DaemonSessionTurnIndexPageOptions = {},
+  ): Promise<DaemonSessionTurnIndexPage> {
+    return this.client.getSessionTurnIndexPage(this.sessionId, {
+      ...opts,
+      clientId: opts.clientId ?? this.clientId,
+    });
   }
 
   removePendingPrompt(

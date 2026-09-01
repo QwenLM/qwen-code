@@ -372,9 +372,12 @@ export {
 export * from './services/session-writer-lease.js';
 export {
   decodeSessionTranscriptCursor,
+  decodeSessionTranscriptSnapshot,
   encodeSessionTranscriptCursor,
+  encodeSessionTranscriptSnapshot,
   findBoundaryAtOrBefore,
   InvalidSessionTranscriptCursorError,
+  InvalidSessionTranscriptTurnAnchorError,
   isReplayTurnStartType,
   SESSION_TRANSCRIPT_CURSOR_VERSION,
   SESSION_TRANSCRIPT_DEFAULT_LIMIT,
@@ -382,6 +385,7 @@ export {
   SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
   SESSION_TRANSCRIPT_MAX_LIMIT,
   SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
+  SESSION_TRANSCRIPT_TURN_INDEX_VERSION,
   SessionTranscriptCursorCodec,
   SessionTranscriptReader,
   SessionTranscriptPageTooLargeError,
@@ -396,8 +400,13 @@ export type {
   SessionRestoreReplaySelection,
   SessionRuntimeResumeState,
   SessionTranscriptCursorState,
+  SessionTranscriptNavigationTurn,
+  SessionTranscriptNavigationTurnKind,
   SessionTranscriptReadPageOptions,
+  SessionTranscriptReadTurnIndexOptions,
   SessionTranscriptRecordPage,
+  SessionTranscriptSnapshotState,
+  SessionTranscriptTurnIndexPage,
 } from './services/session-transcript-reader.js';
 export * from './utils/conversation-chain.js';
 export * from './utils/transcript-records.js';

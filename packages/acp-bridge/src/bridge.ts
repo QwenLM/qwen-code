@@ -209,6 +209,8 @@ import type {
   BridgeWorkspaceMemoryRememberResult,
   BridgeSessionTranscriptPage,
   BridgeSessionTranscriptPageRequest,
+  BridgeSessionTurnIndexPage,
+  BridgeSessionTurnIndexPageRequest,
   BridgeGenerationStreamEvent,
   BridgeWorkspaceGenerationStreamEvent,
   BridgePromptContentBlock,
@@ -7297,6 +7299,32 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     }
   }
 
+  async function requestSessionTurnIndexPage(
+    req: BridgeSessionTurnIndexPageRequest,
+  ): Promise<BridgeSessionTurnIndexPage> {
+    try {
+      const response = await withEnsuredWorkspaceControl((info) =>
+        withTimeout(
+          Promise.race([
+            info.connection.extMethod(
+              SERVE_STATUS_EXT_METHODS.sessionTurnIndex,
+              { ...req, cwd: boundWorkspace },
+            ),
+            getChannelClosedReject(info),
+          ]),
+          Math.max(initTimeoutMs, SESSION_TRANSCRIPT_TIMEOUT_MS),
+          SERVE_STATUS_EXT_METHODS.sessionTurnIndex,
+        ),
+      );
+      return response as unknown as BridgeSessionTurnIndexPage;
+    } catch (err) {
+      if (isAcpSessionResourceNotFound(err, req.sessionId)) {
+        throw new SessionNotFoundError(req.sessionId);
+      }
+      throw err;
+    }
+  }
+
   async function refreshedReplayFieldsFor(
     entry: SessionEntry,
     historyPageSize: number,
@@ -11921,6 +11949,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
     async getSessionTranscriptPage(req) {
       return requestSessionTranscriptPage(req);
+    },
+
+    async getSessionTurnIndexPage(req) {
+      return requestSessionTurnIndexPage(req);
     },
 
     async cancelSessionTask(sessionId, taskId, taskKind, context) {

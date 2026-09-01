@@ -494,6 +494,44 @@ function parseTranscriptCursorQuery(
   return rawCursor;
 }
 
+function parseTranscriptSnapshotQuery(
+  rawSnapshot: unknown,
+  res: Response,
+): string | undefined | null {
+  if (rawSnapshot === undefined) return undefined;
+  if (typeof rawSnapshot !== 'string' || rawSnapshot.trim() === '') {
+    res.status(400).json({
+      error: '`snapshot` must be a non-empty string',
+      code: 'invalid_transcript_cursor',
+    });
+    return null;
+  }
+  return rawSnapshot;
+}
+
+function parseTranscriptStartQuery(
+  rawStart: unknown,
+  res: Response,
+): number | undefined | null {
+  if (rawStart === undefined) return undefined;
+  if (typeof rawStart !== 'string' || !/^\d+$/.test(rawStart)) {
+    res.status(400).json({
+      error: '`start` must be a non-negative integer',
+      code: 'invalid_transcript_cursor',
+    });
+    return null;
+  }
+  const start = Number(rawStart);
+  if (!Number.isSafeInteger(start)) {
+    res.status(400).json({
+      error: '`start` must be a non-negative safe integer',
+      code: 'invalid_transcript_cursor',
+    });
+    return null;
+  }
+  return start;
+}
+
 function parseTranscriptRecordBoundaryQuery(
   rawBoundary: unknown,
   res: Response,
@@ -511,6 +549,25 @@ function parseTranscriptRecordBoundaryQuery(
     return null;
   }
   return rawBoundary;
+}
+
+function parseTranscriptTurnAnchorQuery(
+  rawAnchor: unknown,
+  res: Response,
+): string | undefined | null {
+  if (rawAnchor === undefined) return undefined;
+  if (
+    typeof rawAnchor !== 'string' ||
+    rawAnchor.trim() === '' ||
+    rawAnchor.length > 200
+  ) {
+    res.status(400).json({
+      error: '`atRecordId` must be a non-empty record id',
+      code: 'invalid_turn_anchor',
+    });
+    return null;
+  }
+  return rawAnchor;
 }
 
 function parseHistoryPageSize(
@@ -4359,9 +4416,37 @@ export function registerSessionRoutes(
       res,
     );
     if (beforeRecordId === null) return;
-    if (cursor !== undefined && beforeRecordId !== undefined) {
+    const atRecordId = parseTranscriptTurnAnchorQuery(
+      req.query['atRecordId'],
+      res,
+    );
+    if (atRecordId === null) return;
+    const snapshot = parseTranscriptSnapshotQuery(req.query['snapshot'], res);
+    if (snapshot === null) return;
+    if (
+      (cursor !== undefined &&
+        (beforeRecordId !== undefined ||
+          atRecordId !== undefined ||
+          snapshot !== undefined)) ||
+      (atRecordId !== undefined &&
+        (beforeRecordId !== undefined || snapshot === undefined)) ||
+      (snapshot !== undefined &&
+        atRecordId === undefined &&
+        beforeRecordId === undefined)
+    ) {
       res.status(400).json({
-        error: '`cursor` and `beforeRecordId` are mutually exclusive',
+        error: 'Invalid transcript cursor and anchor combination',
+        code: 'invalid_transcript_cursor',
+      });
+      return;
+    }
+    if (
+      (cursor !== undefined && workspaceTranscriptCursorExceedsLimit(cursor)) ||
+      (snapshot !== undefined &&
+        workspaceTranscriptCursorExceedsLimit(snapshot))
+    ) {
+      res.status(400).json({
+        error: 'Transcript cursor or snapshot exceeds the maximum size',
         code: 'invalid_transcript_cursor',
       });
       return;
@@ -4376,29 +4461,40 @@ export function registerSessionRoutes(
             res,
             route,
             sessionId,
-            cursor !== undefined,
+            cursor !== undefined || snapshot !== undefined,
           );
           if (!runtime) return undefined;
           workspaceTrusted = runtime.trusted;
-          captureRuntimeGenerationAssertion(runtime)?.();
-          return runtime.bridge.getSessionTranscriptPage({
+          const assertRuntimeGenerationOpen =
+            captureRuntimeGenerationAssertion(runtime);
+          assertRuntimeGenerationOpen?.();
+          const page = await runtime.bridge.getSessionTranscriptPage({
             sessionId,
             ...(limit !== undefined ? { limit } : {}),
             ...(cursor !== undefined ? { cursor } : {}),
             ...(beforeRecordId !== undefined ? { beforeRecordId } : {}),
+            ...(atRecordId !== undefined ? { atRecordId } : {}),
+            ...(snapshot !== undefined ? { snapshot } : {}),
           });
+          assertRuntimeGenerationOpen?.();
+          return page;
         },
       );
       if (result === undefined) return;
-      res
-        .status(200)
-        .set('Cache-Control', 'no-store')
-        .json({
+      const serialized = serializeWorkspaceTranscriptResponse(
+        {
           ...result,
           events: (result.events ?? []).map((event) =>
             redactSdkSurfaceEvent(event, workspaceTrusted),
           ),
-        });
+        },
+        sessionId,
+      );
+      res
+        .status(200)
+        .set('Cache-Control', 'no-store')
+        .type('application/json')
+        .send(serialized);
     } catch (err) {
       sendBridgeError(res, err, {
         route,
@@ -4426,16 +4522,37 @@ export function registerSessionRoutes(
       res,
     );
     if (beforeRecordId === null) return;
-    if (cursor !== undefined && beforeRecordId !== undefined) {
+    const atRecordId = parseTranscriptTurnAnchorQuery(
+      req.query['atRecordId'],
+      res,
+    );
+    if (atRecordId === null) return;
+    const snapshot = parseTranscriptSnapshotQuery(req.query['snapshot'], res);
+    if (snapshot === null) return;
+    if (
+      (cursor !== undefined &&
+        (beforeRecordId !== undefined ||
+          atRecordId !== undefined ||
+          snapshot !== undefined)) ||
+      (atRecordId !== undefined &&
+        (beforeRecordId !== undefined || snapshot === undefined)) ||
+      (snapshot !== undefined &&
+        atRecordId === undefined &&
+        beforeRecordId === undefined)
+    ) {
       res.status(400).json({
-        error: '`cursor` and `beforeRecordId` are mutually exclusive',
+        error: 'Invalid transcript cursor and anchor combination',
         code: 'invalid_transcript_cursor',
       });
       return;
     }
-    if (cursor !== undefined && workspaceTranscriptCursorExceedsLimit(cursor)) {
+    if (
+      (cursor !== undefined && workspaceTranscriptCursorExceedsLimit(cursor)) ||
+      (snapshot !== undefined &&
+        workspaceTranscriptCursorExceedsLimit(snapshot))
+    ) {
       res.status(400).json({
-        error: '`cursor` exceeds the maximum size',
+        error: 'Transcript cursor or snapshot exceeds the maximum size',
         code: 'invalid_transcript_cursor',
       });
       return;
@@ -4488,13 +4605,15 @@ export function registerSessionRoutes(
                 ...(limit !== undefined ? { limit } : {}),
                 ...(cursor !== undefined ? { cursor } : {}),
                 ...(beforeRecordId !== undefined ? { beforeRecordId } : {}),
+                ...(atRecordId !== undefined ? { atRecordId } : {}),
+                ...(snapshot !== undefined ? { snapshot } : {}),
                 maxBytes: SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
               });
             } catch (error) {
               if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
                 throw error;
               }
-              if (cursor !== undefined) {
+              if (cursor !== undefined || snapshot !== undefined) {
                 throw new SessionTranscriptSnapshotUnavailableError(sessionId);
               }
               const location = await service.getSessionLocation(sessionId);
@@ -4549,7 +4668,185 @@ export function registerSessionRoutes(
                       : replay.replayError,
                   }
                 : {}),
+              ...(page.targetRecordId
+                ? { targetRecordId: page.targetRecordId }
+                : {}),
+              ...(page.hasOlder !== undefined
+                ? { hasOlder: page.hasOlder }
+                : {}),
             };
+          });
+        }),
+      );
+      if (result === undefined) return;
+      const serialized = serializeWorkspaceTranscriptResponse(
+        result,
+        sessionId,
+      );
+      res
+        .status(200)
+        .set('Cache-Control', 'no-store')
+        .type('application/json')
+        .send(serialized);
+    } catch (err) {
+      sendBridgeError(res, err, { route, sessionId });
+    }
+  });
+
+  app.get('/session/:id/turn-index', async (req, res) => {
+    const route = 'GET /session/:id/turn-index';
+    const sessionId = requireSessionId(req, res);
+    if (sessionId === null) return;
+    const limit = parseTranscriptLimitQuery(req.query['limit'], res);
+    if (limit === null) return;
+    const snapshot = parseTranscriptSnapshotQuery(req.query['snapshot'], res);
+    if (snapshot === null) return;
+    const start = parseTranscriptStartQuery(req.query['start'], res);
+    if (start === null) return;
+    if (start !== undefined && snapshot === undefined) {
+      res.status(400).json({
+        error: '`start` requires `snapshot`',
+        code: 'invalid_transcript_cursor',
+      });
+      return;
+    }
+    if (
+      snapshot !== undefined &&
+      workspaceTranscriptCursorExceedsLimit(snapshot)
+    ) {
+      res.status(400).json({
+        error: '`snapshot` exceeds the maximum size',
+        code: 'invalid_transcript_cursor',
+      });
+      return;
+    }
+
+    try {
+      const result = await archiveCoordinator.runSharedMany(
+        [sessionId],
+        async () => {
+          const runtime = await resolveTranscriptSessionRuntime(
+            res,
+            route,
+            sessionId,
+            snapshot !== undefined,
+          );
+          if (!runtime) return undefined;
+          const assertRuntimeGenerationOpen =
+            captureRuntimeGenerationAssertion(runtime);
+          assertRuntimeGenerationOpen?.();
+          const page = await runtime.bridge.getSessionTurnIndexPage({
+            sessionId,
+            ...(snapshot !== undefined ? { snapshot } : {}),
+            ...(start !== undefined ? { start } : {}),
+            ...(limit !== undefined ? { limit } : {}),
+          });
+          assertRuntimeGenerationOpen?.();
+          return page;
+        },
+      );
+      if (result === undefined) return;
+      const serialized = serializeWorkspaceTranscriptResponse(
+        result,
+        sessionId,
+      );
+      res
+        .status(200)
+        .set('Cache-Control', 'no-store')
+        .type('application/json')
+        .send(serialized);
+    } catch (err) {
+      sendBridgeError(res, err, { route, sessionId });
+    }
+  });
+
+  app.get('/workspaces/:workspace/session/:id/turn-index', async (req, res) => {
+    const route = 'GET /workspaces/:workspace/session/:id/turn-index';
+    const sessionId = requireSessionId(req, res);
+    if (sessionId === null) return;
+    const qualifiedTarget = resolveQualifiedSessionTarget(req, res, {
+      allowUntrustedSecondary: true,
+    });
+    if (!qualifiedTarget) return;
+    const preResolvedRuntime =
+      qualifiedTarget.kind === 'ordinary' ? qualifiedTarget.runtime : undefined;
+    const limit = parseTranscriptLimitQuery(req.query['limit'], res);
+    if (limit === null) return;
+    const snapshot = parseTranscriptSnapshotQuery(req.query['snapshot'], res);
+    if (snapshot === null) return;
+    const start = parseTranscriptStartQuery(req.query['start'], res);
+    if (start === null) return;
+    if (start !== undefined && snapshot === undefined) {
+      res.status(400).json({
+        error: '`start` requires `snapshot`',
+        code: 'invalid_transcript_cursor',
+      });
+      return;
+    }
+    if (
+      snapshot !== undefined &&
+      workspaceTranscriptCursorExceedsLimit(snapshot)
+    ) {
+      res.status(400).json({
+        error: '`snapshot` exceeds the maximum size',
+        code: 'invalid_transcript_cursor',
+      });
+      return;
+    }
+
+    try {
+      const result = await runWithoutDebugLogSession(() =>
+        archiveCoordinator.runSharedMany([sessionId], async () => {
+          const runtime =
+            preResolvedRuntime ??
+            (await resolveQualifiedSessionRuntime(
+              req,
+              res,
+              route,
+              [sessionId],
+              'active',
+            ));
+          if (!runtime) return undefined;
+          const assertRuntimeGenerationOpen =
+            captureRuntimeGenerationAssertion(runtime);
+          assertRuntimeGenerationOpen?.();
+          return runWithWorkspaceRuntimeStorage(runtime, async () => {
+            if (snapshot === undefined) {
+              await assertSessionLoadable(
+                runtime.workspaceCwd,
+                sessionId,
+                runtime.sessionRuntimeBaseDir,
+                { allowActiveConflict: true },
+              );
+            }
+            try {
+              const page = await new SessionTranscriptReader(
+                runtime.workspaceCwd,
+                getTranscriptCursorCodec(runtime),
+              ).readTurnIndexPage(sessionId, {
+                ...(snapshot !== undefined ? { snapshot } : {}),
+                ...(start !== undefined ? { start } : {}),
+                ...(limit !== undefined ? { limit } : {}),
+              });
+              assertRuntimeGenerationOpen?.();
+              return page;
+            } catch (error) {
+              if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+                throw error;
+              }
+              if (snapshot !== undefined) {
+                throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+              }
+              const service = createWorkspaceRuntimeSessionService(runtime);
+              const location = await service.getSessionLocation(sessionId);
+              if (location === 'archived') {
+                throw new SessionArchivedError(sessionId);
+              }
+              if (location === 'conflict') {
+                throw new SessionConflictError(sessionId);
+              }
+              throw new SessionNotFoundError(sessionId);
+            }
           });
         }),
       );

@@ -14,6 +14,7 @@ import type {
 // does not pull in the full core package barrel.
 import {
   projectUserTranscriptForDisplay,
+  stripGeneratedAttachmentTokens,
   type TranscriptProjectionDiagnostic,
   type TranscriptRecordInput,
   type TranscriptReplayGapInput,
@@ -204,31 +205,6 @@ function replaceTextPartsForDisplay(
     projected.push({ text: displayText });
   }
   return projected;
-}
-
-function stripGeneratedAttachmentTokens(
-  displayText: string,
-  payload: Record<string, unknown> | undefined,
-): string {
-  const references = payload?.['attachmentReferences'];
-  if (!Array.isArray(references)) return displayText;
-  const tokens = references.flatMap((reference) => {
-    if (
-      !isObjectRecord(reference) ||
-      reference['type'] !== 'resource' ||
-      typeof reference['attachmentId'] !== 'string'
-    ) {
-      return [];
-    }
-    return [`@attachment:///${encodeURIComponent(reference['attachmentId'])}`];
-  });
-  if (tokens.length === 0) return displayText;
-  const tokenText = tokens.join('\n');
-  if (displayText === tokenText) return '';
-  const suffix = `\n\n${tokenText}`;
-  return displayText.endsWith(suffix)
-    ? displayText.slice(0, -suffix.length)
-    : displayText;
 }
 
 export function toTranscriptEpochMs(

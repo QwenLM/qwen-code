@@ -159,6 +159,33 @@ function turnCompleteFrame(promptId: string): string {
 }
 
 describe('DaemonSessionClient', () => {
+  it('binds turn-index reads to the session and client identity', async () => {
+    const body = {
+      v: 1 as const,
+      sessionId: 's-1',
+      snapshot: 'snap-1',
+      totalTurns: 0,
+      start: 0,
+      turns: [],
+    };
+    const { fetch, calls } = recordingFetch(() => jsonResponse(200, body));
+    const session = new DaemonSessionClient({
+      client: new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+      session: {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+        clientId: 'client-1',
+      },
+    });
+
+    await expect(session.getTurnIndexPage({ limit: 10 })).resolves.toEqual(
+      body,
+    );
+    expect(calls[0]?.url).toBe('http://daemon/session/s-1/turn-index?limit=10');
+    expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+  });
+
   it('binds Goal reads and controls to the session and client identity', async () => {
     const { fetch, calls } = recordingFetch(() =>
       jsonResponse(200, { snapshot: GOAL_SNAPSHOT }),

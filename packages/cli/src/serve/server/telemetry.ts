@@ -105,6 +105,12 @@ export const legacySessionTelemetryRoutes = [
   },
   {
     method: 'GET',
+    path: '/session/:id/turn-index',
+    attribution: 'handler_resolved',
+    route: 'GET /session/:id/turn-index',
+  },
+  {
+    method: 'GET',
     path: '/session/:id/context',
     attribution: 'handler_resolved',
     route: 'GET /session/:id/context',
@@ -545,6 +551,15 @@ export function resolveDaemonTelemetryRoute(
     return {
       route: 'GET /workspaces/:workspace/session/:id/transcript',
       sessionId: decodePathSegment(workspaceTranscript[1]),
+    };
+  }
+  const workspaceTurnIndex = path.match(
+    /^\/workspaces\/[^/]+\/session\/([^/]+)\/turn-index$/,
+  );
+  if (workspaceTurnIndex?.[1] && req.method === 'GET') {
+    return {
+      route: 'GET /workspaces/:workspace/session/:id/turn-index',
+      sessionId: decodePathSegment(workspaceTurnIndex[1]),
     };
   }
   const workspaceExport = path.match(
