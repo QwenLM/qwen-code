@@ -59,7 +59,6 @@ async function loadWasmBinary(
 
   try {
     if (isBundleMode) {
-      // Bundle mode: esbuild replaces `?binary` imports with inline Uint8Array.
       const mod = await dynamicImport();
       const wasmBinary = (mod as { default?: unknown }).default;
       if (wasmBinary instanceof Uint8Array && wasmBinary.byteLength > 0) {
@@ -70,523 +69,111 @@ async function loadWasmBinary(
     // Fall through to node_modules lookup below.
   }
 
-  // Source / dev mode: read the file directly from node_modules.
   const require = createRequire(import.meta.url);
   const filePath = require.resolve(fallbackSpecifier);
   return new Uint8Array(nativeFs.readFileSync(filePath));
 }
 
-/**
- * Root commands considered read-only by default (no sub-command analysis needed
- * unless explicitly listed in COMMANDS_WITH_SUBCOMMANDS).
- */
 const READ_ONLY_ROOT_COMMANDS = new Set([
-  'awk',
-  'basename',
-  'cat',
-  'cd',
-  'column',
-  'cut',
-  'df',
-  'dirname',
-  'du',
-  'echo',
-  'find',
-  'git',
-  'grep',
-  'head',
-  'less',
-  'ls',
-  'more',
-  'printenv',
-  'printf',
-  'ps',
-  'pwd',
-  'rg',
-  'ripgrep',
-  'sed',
-  'sort',
-  'stat',
-  'tail',
-  'tree',
-  'uniq',
-  'wc',
-  'which',
-  'where',
-  'whoami',
+  'awk', 'basename', 'cat', 'cd', 'column', 'cut', 'df', 'dirname', 'du',
+  'echo', 'find', 'git', 'grep', 'head', 'less', 'ls', 'more', 'printenv',
+  'printf', 'ps', 'pwd', 'rg', 'ripgrep', 'sed', 'sort', 'stat', 'tail',
+  'tree', 'uniq', 'wc', 'which', 'where', 'whoami',
 ]);
 
 const WRITE_ROOT_COMMAND =
   /^(chgrp|chmod|chown|cp|install|ln|mkdir|mkfifo|mknod|mv|rename|rm|rmdir|shred|touch|truncate|unlink)$/;
-/** Git sub-commands considered read-only. */
 const READ_ONLY_GIT_SUBCOMMANDS = new Set([
-  'blame',
-  'branch',
-  'cat-file',
-  'diff',
-  'grep',
-  'log',
-  'ls-files',
-  'remote',
-  'rev-parse',
-  'show',
-  'status',
-  'describe',
+  'blame', 'branch', 'cat-file', 'diff', 'grep', 'log', 'ls-files', 'remote',
+  'rev-parse', 'show', 'status', 'describe',
 ]);
 const WRITE_GIT_SUBCOMMAND =
   /^(add|am|checkout|cherry-pick|clean|clone|commit|fetch|gc|init|merge|mv|pull|push|rebase|reset|restore|revert|rm|stash|switch)$/;
-/** git remote actions that mutate state. */
 const WRITE_GIT_REMOTE_ACTION =
   /^(add|remove|rm|rename|set-branches|set-head|set-url|update)$/;
 const GIT_EXTERNAL_HELPER_OPTION =
   /^--(?:ext-diff|filters|show-signature|textconv|open-files-in-pager|remerge-diff)(?:=|$)|^--diff-merges=(?:remerge|r)$/;
 const GIT_COMMIT_VALUE_OPTION =
   /^(?:-[CcFmt]|--(?:author|cleanup|date|file|fixup|message|pathspec-from-file|reedit-message|reuse-message|squash|template|trailer))$/;
-/** git branch flags that mutate state. */
 const WRITE_GIT_BRANCH_FLAG =
   /^(?:-[cCdDmMu](?:.|$)|--(?:delete|move|copy|set-upstream(?:-to)?|unset-upstream|create-reflog|edit-description)(?:=|$))/;
 const GIT_BRANCH_LIST_FLAG =
   /^(?:-[alr]|--(?:all|list|remotes|show-current|contains|no-contains|merged|no-merged|points-at))(?:=|$)/;
-
 const BLOCKED_FIND_PREFIXES = ['-fls', '-fprint', '-fprintf'];
 const FIND_VALUE_PREDICATE =
   /^-(?:[ac]?newer|newer[a-z]{2}|[acm](?:min|time)|context|fstype|gid|group|i?(?:lname|name|path|regex)|inum|links|maxdepth|mindepth|path|perm|printf|regextype|samefile|size|type|uid|used|user|wholename|xtype)$/;
-
 const UNIQ_VALUE_OPTIONS = new Set(
   '-f --skip-fields -s --skip-chars -w --check-chars'.split(' '),
 );
-/**
- * Write-redirection operators in file_redirect nodes.
- * Input-only redirections (`<`, `<<`, `<<<`) are safe.
- */
 const WRITE_REDIRECT_OPERATORS = new Set(['>', '>>', '&>', '&>>', '>|']);
 
-/**
- * Map of root command → known sub-command sets.
- * Used by `extractCommandRules()` to identify sub-commands vs arguments.
- */
 const KNOWN_SUBCOMMANDS: Record<string, Set<string>> = {
   git: new Set([
-    'add',
-    'am',
-    'archive',
-    'bisect',
-    'blame',
-    'branch',
-    'bundle',
-    'cat-file',
-    'checkout',
-    'cherry-pick',
-    'clean',
-    'clone',
-    'commit',
-    'config',
-    'describe',
-    'diff',
-    'fetch',
-    'format-patch',
-    'gc',
-    'grep',
-    'init',
-    'log',
-    'ls-files',
-    'ls-remote',
-    'merge',
-    'mv',
-    'notes',
-    'pull',
-    'push',
-    'range-diff',
-    'rebase',
-    'reflog',
-    'remote',
-    'reset',
-    'restore',
-    'revert',
-    'rev-parse',
-    'rm',
-    'shortlog',
-    'show',
-    'stash',
-    'status',
-    'submodule',
-    'switch',
-    'tag',
-    'worktree',
+    'add','am','archive','bisect','blame','branch','bundle','cat-file','checkout',
+    'cherry-pick','clean','clone','commit','config','describe','diff','fetch',
+    'format-patch','gc','grep','init','log','ls-files','ls-remote','merge','mv',
+    'notes','pull','push','range-diff','rebase','reflog','remote','reset','restore',
+    'revert','rev-parse','rm','shortlog','show','stash','status','submodule','switch',
+    'tag','worktree',
   ]),
   npm: new Set([
-    'access',
-    'adduser',
-    'audit',
-    'bugs',
-    'cache',
-    'ci',
-    'completion',
-    'config',
-    'create',
-    'dedupe',
-    'deprecate',
-    'diff',
-    'dist-tag',
-    'docs',
-    'doctor',
-    'edit',
-    'exec',
-    'explain',
-    'explore',
-    'find-dupes',
-    'fund',
-    'help',
-    'hook',
-    'init',
-    'install',
-    'install-ci-test',
-    'install-test',
-    'link',
-    'login',
-    'logout',
-    'ls',
-    'org',
-    'outdated',
-    'owner',
-    'pack',
-    'ping',
-    'pkg',
-    'prefix',
-    'profile',
-    'prune',
-    'publish',
-    'query',
-    'rebuild',
-    'repo',
-    'restart',
-    'root',
-    'run',
-    'run-script',
-    'search',
-    'set-script',
-    'shrinkwrap',
-    'star',
-    'stars',
-    'start',
-    'stop',
-    'team',
-    'test',
-    'token',
-    'uninstall',
-    'unpublish',
-    'unstar',
-    'update',
-    'version',
-    'view',
-    'whoami',
+    'access','adduser','audit','bugs','cache','ci','completion','config','create',
+    'dedupe','deprecate','diff','dist-tag','docs','doctor','edit','exec','explain',
+    'explore','find-dupes','fund','help','hook','init','install','install-ci-test',
+    'install-test','link','login','logout','ls','org','outdated','owner','pack','ping',
+    'pkg','prefix','profile','prune','publish','query','rebuild','repo','restart','root',
+    'run','run-script','search','set-script','shrinkwrap','star','stars','start','stop',
+    'team','test','token','uninstall','unpublish','unstar','update','version','view','whoami',
   ]),
   yarn: new Set([
-    'add',
-    'autoclean',
-    'bin',
-    'cache',
-    'check',
-    'config',
-    'create',
-    'generate-lock-entry',
-    'global',
-    'help',
-    'import',
-    'info',
-    'init',
-    'install',
-    'licenses',
-    'link',
-    'list',
-    'login',
-    'logout',
-    'outdated',
-    'owner',
-    'pack',
-    'policies',
-    'publish',
-    'remove',
-    'run',
-    'tag',
-    'team',
-    'test',
-    'unlink',
-    'unplug',
-    'upgrade',
-    'upgrade-interactive',
-    'version',
-    'versions',
-    'why',
-    'workspace',
-    'workspaces',
+    'add','autoclean','bin','cache','check','config','create','generate-lock-entry','global',
+    'help','import','info','init','install','licenses','link','list','login','logout',
+    'outdated','owner','pack','policies','publish','remove','run','tag','team','test',
+    'unlink','unplug','upgrade','upgrade-interactive','version','versions','why','workspace','workspaces',
   ]),
   pnpm: new Set([
-    'add',
-    'audit',
-    'create',
-    'dedupe',
-    'deploy',
-    'dlx',
-    'env',
-    'exec',
-    'fetch',
-    'import',
-    'init',
-    'install',
-    'install-test',
-    'licenses',
-    'link',
-    'list',
-    'ls',
-    'outdated',
-    'pack',
-    'patch',
-    'patch-commit',
-    'prune',
-    'publish',
-    'rebuild',
-    'remove',
-    'root',
-    'run',
-    'server',
-    'setup',
-    'store',
-    'test',
-    'uninstall',
-    'unlink',
-    'update',
-    'why',
+    'add','audit','create','dedupe','deploy','dlx','env','exec','fetch','import','init',
+    'install','install-test','licenses','link','list','ls','outdated','pack','patch',
+    'patch-commit','prune','publish','rebuild','remove','root','run','server','setup',
+    'store','test','uninstall','unlink','update','why',
   ]),
   docker: new Set([
-    'attach',
-    'build',
-    'commit',
-    'compose',
-    'container',
-    'context',
-    'cp',
-    'create',
-    'diff',
-    'events',
-    'exec',
-    'export',
-    'history',
-    'image',
-    'images',
-    'import',
-    'info',
-    'inspect',
-    'kill',
-    'load',
-    'login',
-    'logout',
-    'logs',
-    'manifest',
-    'network',
-    'node',
-    'pause',
-    'plugin',
-    'port',
-    'ps',
-    'pull',
-    'push',
-    'rename',
-    'restart',
-    'rm',
-    'rmi',
-    'run',
-    'save',
-    'search',
-    'secret',
-    'service',
-    'stack',
-    'start',
-    'stats',
-    'stop',
-    'swarm',
-    'system',
-    'tag',
-    'top',
-    'trust',
-    'unpause',
-    'update',
-    'version',
-    'volume',
-    'wait',
+    'attach','build','commit','compose','container','context','cp','create','diff','events',
+    'exec','export','history','image','images','import','info','inspect','kill','load','login',
+    'logout','logs','manifest','network','node','pause','plugin','port','ps','pull','push',
+    'rename','restart','rm','rmi','run','save','search','secret','service','stack','start',
+    'stats','stop','swarm','system','tag','top','trust','unpause','update','version','volume','wait',
   ]),
-  pip: new Set([
-    'install',
-    'download',
-    'uninstall',
-    'freeze',
-    'inspect',
-    'list',
-    'show',
-    'check',
-    'config',
-    'search',
-    'cache',
-    'index',
-    'wheel',
-    'hash',
-    'completion',
-    'debug',
-    'help',
-  ]),
-  pip3: new Set([
-    'install',
-    'download',
-    'uninstall',
-    'freeze',
-    'inspect',
-    'list',
-    'show',
-    'check',
-    'config',
-    'search',
-    'cache',
-    'index',
-    'wheel',
-    'hash',
-    'completion',
-    'debug',
-    'help',
-  ]),
+  pip: new Set(['install','download','uninstall','freeze','inspect','list','show','check','config','search','cache','index','wheel','hash','completion','debug','help']),
+  pip3: new Set(['install','download','uninstall','freeze','inspect','list','show','check','config','search','cache','index','wheel','hash','completion','debug','help']),
   cargo: new Set([
-    'add',
-    'bench',
-    'build',
-    'check',
-    'clean',
-    'clippy',
-    'doc',
-    'fetch',
-    'fix',
-    'fmt',
-    'generate-lockfile',
-    'init',
-    'install',
-    'locate-project',
-    'login',
-    'metadata',
-    'new',
-    'owner',
-    'package',
-    'pkgid',
-    'publish',
-    'read-manifest',
-    'remove',
-    'report',
-    'run',
-    'rustc',
-    'rustdoc',
-    'search',
-    'test',
-    'tree',
-    'uninstall',
-    'update',
-    'vendor',
-    'verify-project',
-    'version',
-    'yank',
+    'add','bench','build','check','clean','clippy','doc','fetch','fix','fmt','generate-lockfile',
+    'init','install','locate-project','login','metadata','new','owner','package','pkgid','publish',
+    'read-manifest','remove','report','run','rustc','rustdoc','search','test','tree','uninstall',
+    'update','vendor','verify-project','version','yank',
   ]),
   kubectl: new Set([
-    'annotate',
-    'api-resources',
-    'api-versions',
-    'apply',
-    'attach',
-    'auth',
-    'autoscale',
-    'certificate',
-    'cluster-info',
-    'completion',
-    'config',
-    'cordon',
-    'cp',
-    'create',
-    'debug',
-    'delete',
-    'describe',
-    'diff',
-    'drain',
-    'edit',
-    'events',
-    'exec',
-    'explain',
-    'expose',
-    'get',
-    'kustomize',
-    'label',
-    'logs',
-    'patch',
-    'plugin',
-    'port-forward',
-    'proxy',
-    'replace',
-    'rollout',
-    'run',
-    'scale',
-    'set',
-    'taint',
-    'top',
-    'uncordon',
-    'version',
-    'wait',
+    'annotate','api-resources','api-versions','apply','attach','auth','autoscale','certificate',
+    'cluster-info','completion','config','cordon','cp','create','debug','delete','describe','diff',
+    'drain','edit','events','exec','explain','expose','get','kustomize','label','logs','patch',
+    'plugin','port-forward','proxy','replace','rollout','run','scale','set','taint','top','uncordon','version','wait',
   ]),
-  make: new Set([]), // make targets are positional, not subcommands
+  make: new Set([]),
 };
 
-/** Docker multi-level sub-command support (e.g., `docker compose up`). */
 const DOCKER_COMPOSE_SUBCOMMANDS = new Set([
-  'build',
-  'config',
-  'cp',
-  'create',
-  'down',
-  'events',
-  'exec',
-  'images',
-  'kill',
-  'logs',
-  'ls',
-  'pause',
-  'port',
-  'ps',
-  'pull',
-  'push',
-  'restart',
-  'rm',
-  'run',
-  'start',
-  'stop',
-  'top',
-  'unpause',
-  'up',
-  'version',
-  'wait',
-  'watch',
+  'build','config','cp','create','down','events','exec','images','kill','logs','ls','pause',
+  'port','ps','pull','push','restart','rm','run','start','stop','top','unpause','up','version','wait','watch',
 ]);
-
-// ---------------------------------------------------------------------------
-// Parser Singleton
-// ---------------------------------------------------------------------------
 
 let parserInstance: Parser | null = null;
 let bashLanguage: Parser.Language | null = null;
 let parserClass: typeof Parser;
 let initPromise: Promise<void> | null = null;
-/** Set to true permanently once WASM initialisation fails. */
 let parserInitFailed = false;
 
-/**
- * Initialise the tree-sitter Parser singleton.
- * Safe to call multiple times – only the first call does real work.
- */
 export async function initParser(): Promise<void> {
   if (parserInstance) return;
-  // Once init has permanently failed, skip retrying to prevent hangs.
   if (parserInitFailed)
     throw new Error(
       'tree-sitter WASM failed to initialise; using regex-based fallback',
@@ -594,19 +181,16 @@ export async function initParser(): Promise<void> {
   if (initPromise) return initPromise;
 
   initPromise = (async () => {
-    // Dynamically import the web-tree-sitter runtime to minimize synchronous bundle size.
     const { default: ParserClass } = (await import(
       'web-tree-sitter'
     )) as unknown as { default: typeof Parser };
-
     const treeSitterWasm = await loadWasmBinary(
       () => import('web-tree-sitter/tree-sitter.wasm?binary' as string),
       'web-tree-sitter/tree-sitter.wasm',
     );
     await ParserClass.init({ wasmBinary: treeSitterWasm });
     const bashWasm = await loadWasmBinary(
-      () =>
-        import('tree-sitter-wasms/out/tree-sitter-bash.wasm?binary' as string),
+      () => import('tree-sitter-wasms/out/tree-sitter-bash.wasm?binary' as string),
       'tree-sitter-wasms/out/tree-sitter-bash.wasm',
     );
     bashLanguage = await ParserClass.Language.load(bashWasm);
@@ -617,8 +201,6 @@ export async function initParser(): Promise<void> {
     const failedParser = parserInstance;
     parserInstance = null;
     bashLanguage = null;
-    // Mark as permanently failed so callers can use the regex fallback
-    // instead of retrying (which could cause the agent to hang).
     parserInitFailed = true;
     initPromise = null;
     try {
@@ -632,10 +214,6 @@ export async function initParser(): Promise<void> {
   return initPromise;
 }
 
-/**
- * Parse a shell command string into a tree-sitter Tree.
- * Initialises the parser lazily if needed.
- */
 export async function parseShellCommand(command: string): Promise<Parser.Tree> {
   await initParser();
   const parser = parserInstance!;
@@ -664,18 +242,13 @@ export async function parseShellCommand(command: string): Promise<Parser.Tree> {
   }
 }
 
-// ---------------------------------------------------------------------------
-// AST Helpers
-// ---------------------------------------------------------------------------
-
 type SyntaxNode = Parser.SyntaxNode;
-
 const SHELL_EXPANSION_TYPES = new Set(
   'simple_expansion expansion arithmetic_expansion'.split(' '),
 );
 const CHILD_STATEMENT =
   /^(?:pipeline|list|subshell|compound_statement|negated_command)$/;
-/** Collect all descendant nodes of given types. */
+
 function collectDescendants(
   node: SyntaxNode,
   types: Set<string>,
@@ -696,35 +269,21 @@ function collectDescendants(
   return result;
 }
 
-/**
- * Extract the command_name text from a `command` node.
- * Handles leading variable_assignment(s) gracefully.
- */
 function getCommandName(commandNode: SyntaxNode): string | null {
   const nameNode = commandNode.childForFieldName('name');
   if (!nameNode) return null;
   return nameNode.text.toLowerCase();
 }
 
-/**
- * Argument node extraction using field name iteration.
- */
 function getArgumentNodes(commandNode: SyntaxNode): SyntaxNode[] {
   const args: SyntaxNode[] = [];
   for (let i = 0; i < commandNode.childCount; i++) {
     const fieldName = commandNode.fieldNameForChild(i);
-    if (fieldName === 'argument') {
-      args.push(commandNode.child(i)!);
-    }
+    if (fieldName === 'argument') args.push(commandNode.child(i)!);
   }
   return args;
 }
 
-/**
- * Strip outer quotes from a token text.
- * tree-sitter preserves quotes in argument text (e.g., `'s/foo/bar/e'`),
- * but for pattern matching we need the unquoted content.
- */
 function stripOuterQuotes(text: string): string {
   if (text.length >= 2) {
     if (
@@ -1112,7 +671,10 @@ function evaluateStatementSafety(node: SyntaxNode): ShellCommandSafety {
     );
   if (/^variable_assignments?$/.test(node.type))
     return mergeSafety(
-      node.parent?.namedChildCount === 1 ? 'read-only' : 'unknown',
+      node.parent?.namedChildCount === 1 &&
+        node.parent.type !== 'compound_statement'
+        ? 'read-only'
+        : 'unknown',
       evaluateSubstitutions(node),
     );
   if (node.type === 'function_definition') return 'unknown';
@@ -1120,12 +682,7 @@ function evaluateStatementSafety(node: SyntaxNode): ShellCommandSafety {
 }
 
 const FS_MONITOR_AND_FILTER_SAFE_SUBCOMMANDS = new Set([
-  'branch',
-  'cat-file',
-  'log',
-  'remote',
-  'rev-parse',
-  'show',
+  'branch','cat-file','log','remote','rev-parse','show',
 ]);
 
 function localGitConfigMakesCommandUnsafe(
@@ -1142,7 +699,6 @@ function localGitConfigMakesCommandUnsafe(
       continue;
     }
     if (name !== 'git') continue;
-
     const args = getArgumentNodes(command).map((node) =>
       stripOuterQuotes(node.text),
     );
@@ -1154,11 +710,13 @@ function localGitConfigMakesCommandUnsafe(
 
   if (gitReads.length === 0) return false;
   const risk = getLocalGitConfigRisk(cwd);
-
-  // Broad execution mechanisms are fail-closed. Only narrowly proven
-  // non-consumers stay auto-approved; promisor repositories get no exemption
-  // because even resolving HEAD can materialize a missing commit object.
-  if (risk.pager || risk.promisorRemote) return true;
+  if (
+    risk.pager ||
+    risk.promisorRemote ||
+    risk.alternateRefsCommand ||
+    risk.hooksPath
+  )
+    return true;
 
   return gitReads.some((subcommand) => {
     if (
@@ -1186,8 +744,6 @@ function localGitConfigMakesCommandUnsafe(
   });
 }
 
-// GIT_CONFIG_COUNT/GIT_CONFIG_KEY_* are rejected at the raw shell permission
-// boundary before wrapper stripping; this layer protects on-disk repository config.
 function fallbackGitConfigMakesCommandUnsafe(
   command: string,
   cwd: string,
@@ -1223,6 +779,7 @@ async function classifyInternal(
     tree.delete();
   }
 }
+
 export async function classifyShellCommandSafety(
   command: string,
 ): Promise<ShellCommandSafety> {
@@ -1238,19 +795,6 @@ export async function classifyShellCommandSafetyInDirectory(
   return classifyInternal(command, cwd).catch(() => 'unknown');
 }
 
-/**
- * AST-based check whether a shell command is read-only.
- *
- * Replaces the regex-based `isShellCommandReadOnly()` from shellReadOnlyChecker.ts.
- * This version uses tree-sitter-bash for accurate parsing of:
- *   - Compound commands (&&, ||, ;, |)
- *   - Redirections (>, >>)
- *   - Command substitution ($(), ``)
- *   - Sub-shells, heredocs, etc.
- *
- * @param command - The shell command string to evaluate.
- * @returns `true` if the command only performs read-only operations.
- */
 export async function isShellCommandReadOnlyAST(
   command: string,
 ): Promise<boolean> {
@@ -1269,22 +813,15 @@ async function isShellCommandReadOnlyInternal(
   cwd?: string,
 ): Promise<boolean> {
   if (typeof command !== 'string' || !command.trim()) return false;
-
-  // If the WASM parser is permanently unavailable (e.g. WASM file missing
-  // after a symlinked install), fall back to the regex-based checker so the
-  // agent remains functional instead of hanging or crashing.
   if (parserInitFailed) {
     return (
       isShellCommandReadOnly(command) &&
       !(cwd && fallbackGitConfigMakesCommandUnsafe(command, cwd))
     );
   }
-
   try {
     return (await classifyInternal(command, cwd)) === 'read-only';
   } catch {
-    // Unexpected runtime failure (e.g. WASM init error on first call) –
-    // fall back to the regex-based checker rather than propagating the error.
     return (
       isShellCommandReadOnly(command) &&
       !(cwd && fallbackGitConfigMakesCommandUnsafe(command, cwd))
@@ -1292,40 +829,19 @@ async function isShellCommandReadOnlyInternal(
   }
 }
 
-// ---------------------------------------------------------------------------
-// Public API: extractCommandRules
-// ---------------------------------------------------------------------------
-
-/**
- * Extract a simple command's root + subcommand from a `command` AST node.
- *
- * Returns a rule string following the minimum-scope principle:
- *   - root + known subcommand + `*` if there are remaining args
- *   - root + `*` if no known subcommand but has args
- *   - root only if the command has no args at all
- */
 function extractRuleFromCommand(commandNode: SyntaxNode): string | null {
   const rootName = getCommandName(commandNode);
   if (!rootName) return null;
-
   const argNodes = getArgumentNodes(commandNode);
   const argTexts = argNodes.map((n) => n.text);
-
-  // Skip leading flags to find potential subcommand
   let idx = 0;
-  while (idx < argTexts.length && argTexts[idx]!.startsWith('-')) {
-    idx++;
-  }
-
+  while (idx < argTexts.length && argTexts[idx]!.startsWith('-')) idx++;
   const knownSubs = KNOWN_SUBCOMMANDS[rootName];
   let rule = rootName;
-
   if (knownSubs && knownSubs.size > 0 && idx < argTexts.length) {
     const potentialSub = argTexts[idx]!.toLowerCase();
     if (knownSubs.has(potentialSub)) {
       rule = `${rootName} ${argTexts[idx]!}`;
-
-      // Docker multi-level: docker compose <sub>
       if (
         rootName === 'docker' &&
         potentialSub === 'compose' &&
@@ -1334,39 +850,22 @@ function extractRuleFromCommand(commandNode: SyntaxNode): string | null {
         const composeSub = argTexts[idx + 1]!.toLowerCase();
         if (DOCKER_COMPOSE_SUBCOMMANDS.has(composeSub)) {
           rule = `${rootName} compose ${argTexts[idx + 1]!}`;
-          // Remaining args after compose sub
-          if (idx + 2 < argTexts.length) {
-            rule += ' *';
-          }
+          if (idx + 2 < argTexts.length) rule += ' *';
           return rule;
         }
       }
-
-      // Remaining args after subcommand
-      if (idx + 1 < argTexts.length) {
-        rule += ' *';
-      }
+      if (idx + 1 < argTexts.length) rule += ' *';
       return rule;
     }
   }
-
-  // No known subcommand – if there are any args, append *
-  if (argTexts.length > 0) {
-    rule += ' *';
-  }
-
+  if (argTexts.length > 0) rule += ' *';
   return rule;
 }
 
-/**
- * Recursively extract rules from a statement node.
- * Handles pipeline, list, redirected_statement, etc.
- */
 function extractRulesFromStatement(node: SyntaxNode): string[] {
   switch (node.type) {
     case 'command':
       return [extractRuleFromCommand(node)].filter(Boolean) as string[];
-
     case 'pipeline':
     case 'list':
     case 'compound_statement':
@@ -1377,87 +876,34 @@ function extractRulesFromStatement(node: SyntaxNode): string[] {
       }
       return rules;
     }
-
     case 'redirected_statement': {
       const body = node.namedChildren[0];
       return body ? extractRulesFromStatement(body) : [];
     }
-
     case 'negated_command': {
       const inner = node.namedChildren[0];
       return inner ? extractRulesFromStatement(inner) : [];
     }
-
     case 'variable_assignment':
     case 'variable_assignments':
-      // Pure assignments – no rule needed
       return [];
-
     default:
-      // For complex constructs (if/while/for/case), try to extract from
-      // named children conservatively
       return [];
   }
 }
 
-/**
- * Extract minimum-scope wildcard permission rules from a shell command.
- *
- * Rules follow the minimum-scope principle:
- *   - Preserve root command + sub-command, replace arguments with `*`
- *   - Compound commands are split → separate rules for each part
- *   - No arguments → no wildcard suffix
- *
- * @param command - The full shell command string.
- * @returns Deduplicated list of permission rule strings.
- *
- * @example
- * extractCommandRules('git clone https://github.com/foo/bar.git')
- * // → ['git clone *']
- *
- * extractCommandRules('npm install express')
- * // → ['npm install *']
- *
- * extractCommandRules('npm outdated')
- * // → ['npm outdated']
- *
- * extractCommandRules('cat /etc/passwd')
- * // → ['cat *']
- *
- * extractCommandRules('git clone foo && npm install')
- * // → ['git clone *', 'npm install']
- *
- * extractCommandRules('ls -la /tmp')
- * // → ['ls *']
- *
- * extractCommandRules('docker compose up -d')
- * // → ['docker compose up *']
- */
 export async function extractCommandRules(command: string): Promise<string[]> {
   if (typeof command !== 'string' || !command.trim()) return [];
-
   const tree = await parseShellCommand(command);
   const root = tree.rootNode;
   const rules: string[] = [];
-
   for (const stmt of root.namedChildren) {
     rules.push(...extractRulesFromStatement(stmt));
   }
-
   tree.delete();
-
-  // Deduplicate while preserving order
   return [...new Set(rules)];
 }
 
-// ---------------------------------------------------------------------------
-// Reset (for testing)
-// ---------------------------------------------------------------------------
-
-/**
- * Reset the parser singleton. Only intended for testing.
- * @internal
- */
 export function _resetParser(): void {
   if (parserInstance) {
     parserInstance.delete();
@@ -1468,11 +914,6 @@ export function _resetParser(): void {
   parserInitFailed = false;
 }
 
-/**
- * Force the parser into the "init failed" state. Only intended for testing
- * fallback behaviour without actually breaking WASM loading.
- * @internal
- */
 export function _setParserFailedForTesting(): void {
   parserInitFailed = true;
   initPromise = null;
