@@ -268,6 +268,22 @@ describe('memory metadata migration', () => {
     );
   });
 
+  it('preserves the body when leniently parsed frontmatter is migrated', async () => {
+    const body = 'Real body\nwith trailing newline\n';
+    const original = `---\ntype: project\n\tcategory: memory\n---\n${body}`;
+    await write('project/legacy.md', original);
+    const [candidate] = await scanMemoryMetadataMigrationCandidates(
+      memoryRoot,
+      'project',
+    );
+
+    expect(
+      await commitMigratedMemoryMetadata(candidate!, metadata(candidate!)),
+    ).toBe('committed');
+    const updated = await fs.readFile(candidate!.filePath, 'utf-8');
+    expect(updated.slice(updated.indexOf('\n---\n') + 5)).toBe(body);
+  });
+
   it('adds frontmatter to a plain legacy file without changing its body', async () => {
     const body = 'Plain legacy body.\r\nSecond line.\r\n';
     await write('project/plain.md', body);

@@ -8,7 +8,6 @@ import { createHash } from 'node:crypto';
 import * as fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { parseDocument } from 'yaml';
 import { deriveConfig, type Config } from '../config/config.js';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { runForkedAgent } from '../agents/forkedAgent.js';
@@ -122,20 +121,9 @@ function hash(value: string): string {
   return createHash('sha256').update(value).digest('hex');
 }
 
-function isYamlObject(content: string): boolean {
-  try {
-    const document = parseDocument(content, { schema: 'core' });
-    if (document.errors.length > 0) return false;
-    const value = document.toJS() as unknown;
-    return value !== null && typeof value === 'object' && !Array.isArray(value);
-  } catch {
-    return false;
-  }
-}
-
-function splitFrontmatter(content: string): FrontmatterParts {
+function splitFrontmatter(filePath: string, content: string): FrontmatterParts {
   const match = content.match(/^---(\r?\n)([\s\S]*?)(\r?\n---)([\s\S]*)$/);
-  if (match && isYamlObject(match[2])) {
+  if (match && parseAutoMemoryTopicDocument(filePath, content)) {
     return {
       frontmatter: match[2],
       suffix: match[4],
@@ -176,7 +164,7 @@ export async function scanMemoryMetadataMigrationCandidates(
       throw error;
     }
     if (validateStructuredAutoMemoryDocument(content).valid) continue;
-    const parts = splitFrontmatter(content);
+    const parts = splitFrontmatter(filePath, content);
     candidates.push({
       scope,
       root,
@@ -273,7 +261,7 @@ function mergeMetadata(
   ) {
     return null;
   }
-  const parts = splitFrontmatter(candidate.content);
+  const parts = splitFrontmatter(candidate.filePath, candidate.content);
   const frontmatter = parts.frontmatter.trim()
     ? parseYaml(parts.frontmatter)
     : {};
