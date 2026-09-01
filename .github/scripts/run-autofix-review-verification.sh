@@ -610,10 +610,10 @@ run_check_no_ab 'settings schema is stale on the agent-committed fix' \
   bash "${RUNNER_TEMP}/check-settings-schema.sh"
 CHANGED_FILES="$(git diff --name-only "origin/main...${BRANCH}")"
 # The contracts check launches a web-shell vitest inside this same env -i
-# child, and web-shell's config sets no timeouts at all — so the drift test
-# would run at vitest's 5s default on the same saturating host. Hand the
-# shared script our clamps; the issue-fix gate calls it where RUNNER_NAME
-# is present and leaves this unset.
+# child, and web-shell's config sets no timeouts and no RUNNER_NAME branch
+# — so the drift test runs at vitest's 5s default on the same saturating
+# host. Hand the shared script our clamps; the issue-fix gate and
+# repo-hygiene's docker leg call it without them and accept that default.
 AUTOFIX_VITEST_FLAGS="${VITEST_LOAD_CLAMPS[*]}"
 export AUTOFIX_VITEST_FLAGS
 run_check_no_ab 'cross-package contract verification failed' \

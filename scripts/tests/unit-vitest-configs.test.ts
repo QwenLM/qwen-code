@@ -40,7 +40,11 @@ import scriptsTestsConfig from './vitest.config.js';
 // witness pins the flag in every guarded config so removing it from any
 // one of them fails the scripts suite on every platform.
 type ExemptionConfig = {
-  test?: { dangerouslyIgnoreUnhandledErrors?: boolean };
+  test?: {
+    dangerouslyIgnoreUnhandledErrors?: boolean;
+    pool?: 'threads' | 'forks' | 'vmThreads';
+    poolOptions?: { threads?: { maxThreads?: number } };
+  };
 };
 
 const configs: Record<string, ExemptionConfig> = {
@@ -142,5 +146,51 @@ describe('autofix gate load clamps', () => {
     // Nothing in the gate or its report path consumes coverage, and
     // collecting it was the bulk of the 60-minute overruns.
     expect(clamps['coverage.enabled']).toBe('false');
+  });
+
+  it('pins the numeric thread cap that shields vitest-1.x legs from --maxWorkers', () => {
+    // The clamps pass --maxWorkers=25% to every vitest the gate launches.
+    // vitest 1.x coerces that value with Number('25%') -> NaN, and its
+    // tinypool then builds new Array(NaN): RangeError, zero tests
+    // collected, exit 1. The pool builder reads a numeric
+    // poolOptions.threads.maxThreads before ctx.config.maxWorkers, so
+    // that cap is the shield keeping a 1.x workspace's legs alive under
+    // the clamps — pin it here so removing it fails the suite instead of
+    // crashing every gate leg for the workspace.
+    const lock = JSON.parse(
+      readFileSync(
+        fileURLToPath(new URL('../../package-lock.json', import.meta.url)),
+        'utf8',
+      ),
+    ) as { packages: Record<string, { version?: string }> };
+    const hoisted = lock.packages['node_modules/vitest']?.version ?? '';
+    // Nested lockfile copies under workspace dirs are exactly the
+    // workspaces whose pinned vitest differs from the hoisted one; if the
+    // hoisted copy itself were 1.x this filter would go blind, so pin the
+    // premise.
+    expect(Number(hoisted.split('.')[0])).toBeGreaterThanOrEqual(2);
+    const legacyWorkspaces = Object.entries(lock.packages)
+      .filter(
+        ([path, entry]) =>
+          path.endsWith('/node_modules/vitest') &&
+          (path.startsWith('packages/') || path.startsWith('integrations/')) &&
+          Number(entry.version?.split('.')[0] ?? 99) < 2,
+      )
+      .map(([path]) => path.slice(0, -'/node_modules/vitest'.length));
+    for (const workspace of legacyWorkspaces) {
+      if (!(workspace in configs)) {
+        throw new Error(
+          `${workspace} pins vitest 1.x; add its config to the registry above so the shield is pinned`,
+        );
+      }
+      const config = configs[workspace];
+      // forks reads poolOptions.forks, which these configs do not set —
+      // only the threads pool carries the shield.
+      expect(config.test?.pool ?? 'threads', workspace).toBe('threads');
+      expect(
+        typeof config.test?.poolOptions?.threads?.maxThreads,
+        workspace,
+      ).toBe('number');
+    }
   });
 });

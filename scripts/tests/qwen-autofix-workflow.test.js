@@ -8950,7 +8950,9 @@ exit 1
     // gate reverts to 15s timeouts, unbounded workers and coverage on,
     // which is the incident this script's clamps exist to prevent.
     // Pinned on reviewVerificationRunner only: the inline issue-fix gate
-    // runs where RUNNER_NAME is present and stays deliberately unclamped.
+    // keeps unclamped copies by design — RUNNER_NAME is present there, so
+    // its package legs keep the config-level clamps, and its contracts leg
+    // accepts the web-shell 5s default.
     expect(reviewVerificationRunner).toContain(
       '--changed origin/main --passWithNoTests "${VITEST_LOAD_CLAMPS[@]}"',
     );
@@ -8959,6 +8961,17 @@ exit 1
     );
     expect(reviewVerificationRunner).toContain(
       'AUTOFIX_VITEST_FLAGS="${VITEST_LOAD_CLAMPS[*]}"',
+    );
+    expect(reviewVerificationRunner).toContain('export AUTOFIX_VITEST_FLAGS');
+    // ...and above the contracts call: run_check_no_ab spawns a child bash
+    // that inherits exported variables only, so an export missing or moved
+    // below the call leaves the drift leg at vitest's 5s default.
+    expect(
+      reviewVerificationRunner.indexOf('export AUTOFIX_VITEST_FLAGS'),
+    ).toBeLessThan(
+      reviewVerificationRunner.indexOf(
+        'bash "${RUNNER_TEMP}/check-autofix-contracts.sh"',
+      ),
     );
     // The check sits BEFORE the no-commit/no-op exits: a no-op audit round
     // whose verdict is sound with nothing left to fix still needs the artifact.
@@ -11969,7 +11982,10 @@ exit 1
         join(dir, 'npm'),
         [
           '#!/usr/bin/env bash',
-          'printf \'%s\\n\' "$*" >> "${NPM_LOG}"',
+          // One bracketed line per argv word: $*-joined logging renders a
+          // joined-blob flag identically to separate words, so a [*]-for-
+          // [@] regression in the contracts script would survive it.
+          'printf \'[%s]\\n\' "$@" >> "${NPM_LOG}"',
           'if [[ "$*" == "run check-i18n" ]]; then',
           '  exit "${I18N_EXIT:-0}"',
           'fi',
@@ -11993,21 +12009,28 @@ exit 1
 
       expect(run('packages/core/src/config/config.ts\n').status).toBe(0);
       expect(readFileSync(npmLog, 'utf8').trim().split('\n')).toEqual([
-        'run check-i18n',
+        '[run]',
+        '[check-i18n]',
       ]);
 
       writeFileSync(npmLog, '');
       expect(run('packages/core/src/tools/tool-names.ts\n').status).toBe(0);
       expect(readFileSync(npmLog, 'utf8').trim().split('\n')).toEqual([
-        'run check-i18n',
-        'run test --workspace packages/web-shell -- client/components/messages/toolFormatting.drift.test.ts',
+        '[run]',
+        '[check-i18n]',
+        '[run]',
+        '[test]',
+        '[--workspace]',
+        '[packages/web-shell]',
+        '[--]',
+        '[client/components/messages/toolFormatting.drift.test.ts]',
       ]);
 
-      // The review gate runs this inside an env -i child that drops
-      // RUNNER_NAME, so the ECS clamps in the vitest configs deactivate and
-      // the drift test would fall back to vitest's 5s default on a
-      // saturating shared host. It hands its clamps down through this
-      // variable; the issue-fix gate leaves it unset (the case above).
+      // web-shell's config sets no timeouts and has no RUNNER_NAME branch,
+      // so without caller flags the drift test runs at vitest's 5s default;
+      // the review gate launches it on a saturating shared host and hands
+      // its clamps down through this variable. The issue-fix gate leaves
+      // it unset (the case above) and accepts the 5s default there.
       writeFileSync(npmLog, '');
       expect(
         run('packages/core/src/tools/tool-names.ts\n', {
@@ -12015,8 +12038,16 @@ exit 1
         }).status,
       ).toBe(0);
       expect(readFileSync(npmLog, 'utf8').trim().split('\n')).toEqual([
-        'run check-i18n',
-        'run test --workspace packages/web-shell -- --maxWorkers=25% --testTimeout=60000 client/components/messages/toolFormatting.drift.test.ts',
+        '[run]',
+        '[check-i18n]',
+        '[run]',
+        '[test]',
+        '[--workspace]',
+        '[packages/web-shell]',
+        '[--]',
+        '[--maxWorkers=25%]',
+        '[--testTimeout=60000]',
+        '[client/components/messages/toolFormatting.drift.test.ts]',
       ]);
 
       writeFileSync(npmLog, '');
@@ -12027,7 +12058,7 @@ exit 1
           I18N_EXIT: '1',
         }).status,
       ).toBe(1);
-      expect(readFileSync(npmLog, 'utf8').trim()).toBe('run check-i18n');
+      expect(readFileSync(npmLog, 'utf8').trim()).toBe('[run]\n[check-i18n]');
       expect(readFileSync(output, 'utf8')).toContain('outcome=failed');
 
       writeFileSync(npmLog, '');
