@@ -42,8 +42,27 @@ describe('package scripts', () => {
         "  '@qwen-code/sdk',\n" +
         "  '@qwen-code/mobile-mcp',\n" +
         "  '@qwen-code/node-repl-mcp',\n" +
+        "  '@qwen-code/qwen-live',\n" +
         '];',
     );
+  });
+
+  it('builds the standalone qwen-live daemon in the root build order', () => {
+    const buildScript = readFileSync(
+      path.join(root, 'scripts/build.js'),
+      'utf8',
+    );
+
+    // The qwen-live e2e harness spawns packages/qwen-live/dist/index.js and
+    // the workspace unit tests run from src, so this pin is what catches the
+    // root build silently dropping the package.
+    const startIndex = buildScript.indexOf('const buildOrder = [');
+    expect(startIndex).toBeGreaterThan(-1);
+    const buildOrder = buildScript.slice(
+      startIndex,
+      buildScript.indexOf('];', startIndex),
+    );
+    expect(buildOrder).toContain("'packages/qwen-live',");
   });
 
   it('keeps the serve fast-path bundle check outside unit test scripts', () => {
