@@ -1849,6 +1849,40 @@ describe('WorkspaceSection content search', () => {
     expect(container.textContent).toContain('qdrant excerpt');
     expect(container.textContent ?? '').not.toContain('Stale search name');
   });
+
+  it('renders a pinned ghost hit instead of dropping it with excludePinned', async () => {
+    const client = makeSearchClient({
+      sessions: [],
+      searchResults: {
+        results: [
+          {
+            session: {
+              sessionId: 'pinned-ghost',
+              workspaceCwd: '/tmp/project',
+              displayName: 'Pinned ghost',
+              isPinned: true,
+            },
+            snippet: 'qdrant excerpt',
+          },
+        ],
+      },
+    });
+    renderSection({
+      client,
+      expanded: true,
+      searchQuery: 'qdrant',
+      excludePinned: true,
+      renderSession: renderRow,
+    });
+    await flush();
+    await advanceSearchDebounce();
+    await flush();
+
+    // The pinned page never carries this ghost, so excluding it like a
+    // loaded pinned row would render the matching session nowhere (R2-2).
+    expect(container.textContent).toContain('Pinned ghost');
+    expect(container.textContent).toContain('qdrant excerpt');
+  });
 });
 
 describe('WorkspaceSection overview plumbing', () => {

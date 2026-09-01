@@ -33,24 +33,42 @@ export function useSessionContentSearch(
   workspaceCwd: string | undefined,
   query: string,
 ): ReadonlyMap<string, SessionContentSearchHit> {
-  const [hits, setHits] =
-    useState<ReadonlyMap<string, SessionContentSearchHit>>(EMPTY_HITS);
+  // Normalize at render scope: the effect depends on this value, so
+  // whitespace-only edits neither blank hits nor re-fetch. The cap drops a
+  // lead surrogate straddling the boundary instead of slicing mid-pair.
+  let trimmed = query.trim().slice(0, MAX_QUERY_LENGTH);
+  const lastUnit = trimmed.charCodeAt(trimmed.length - 1);
+  if (lastUnit >= 0xd800 && lastUnit <= 0xdbff) {
+    trimmed = trimmed.slice(0, -1);
+  }
+
+  const [state, setState] = useState<{
+    client: DaemonClient | undefined;
+    workspaceCwd: string | undefined;
+    trimmed: string;
+    hits: ReadonlyMap<string, SessionContentSearchHit>;
+  }>({ client, workspaceCwd, trimmed, hits: EMPTY_HITS });
+
+  // Reset during render, not in the passive effect (which runs after
+  // paint): the first committed render after a query/workspace/client
+  // change must not pair the new key with the previous key's settled hits.
+  if (
+    state.client !== client ||
+    state.workspaceCwd !== workspaceCwd ||
+    state.trimmed !== trimmed
+  ) {
+    setState({ client, workspaceCwd, trimmed, hits: EMPTY_HITS });
+  }
 
   useEffect(() => {
-    const trimmed = query.trim().slice(0, MAX_QUERY_LENGTH);
     if (
       !client ||
       !workspaceCwd ||
       trimmed.length < MIN_QUERY_LENGTH ||
       typeof client.searchWorkspaceSessions !== 'function'
     ) {
-      setHits(EMPTY_HITS);
       return;
     }
-    // A query change invalidates the settled hits: until the new response
-    // resolves, degrade to the local fast path rather than rendering the
-    // previous query's hits (and their stale snippets) under the new one.
-    setHits(EMPTY_HITS);
     const controller = new AbortController();
     const timer = setTimeout(() => {
       client
@@ -59,22 +77,29 @@ export function useSessionContentSearch(
         })
         .then((result) => {
           if (controller.signal.aborted) return;
-          setHits(
-            new Map(
+          setState({
+            client,
+            workspaceCwd,
+            trimmed,
+            hits: new Map(
               result.results.map((match) => [match.session.sessionId, match]),
             ),
-          );
+          });
         })
         .catch(() => {
           if (controller.signal.aborted) return;
-          setHits(EMPTY_HITS);
+          setState({ client, workspaceCwd, trimmed, hits: EMPTY_HITS });
         });
     }, DEBOUNCE_MS);
     return () => {
       clearTimeout(timer);
       controller.abort();
     };
-  }, [client, workspaceCwd, query]);
+  }, [client, workspaceCwd, trimmed]);
 
-  return hits;
+  return state.client === client &&
+    state.workspaceCwd === workspaceCwd &&
+    state.trimmed === trimmed
+    ? state.hits
+    : EMPTY_HITS;
 }

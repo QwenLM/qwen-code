@@ -3724,11 +3724,26 @@ export function WebShellSidebar({
     selectedSessionSource,
     sessions,
   ]);
+  // Content-search hits the loaded catalog doesn't carry ("ghosts"). A
+  // pinned ghost must still render somewhere while its hit is active:
+  // the filters below drop pinned rows because loaded pinned sessions
+  // render in the Pinned section — which never sees ghosts.
+  const searchGhostIds = useMemo(() => {
+    const catalogIds = new Set(sessions.map((session) => session.sessionId));
+    const ghosts = new Set<string>();
+    for (const sessionId of contentSearchHits.keys()) {
+      if (!catalogIds.has(sessionId)) ghosts.add(sessionId);
+    }
+    return ghosts;
+  }, [contentSearchHits, sessions]);
   const filteredSessions = useMemo(() => {
     const unpinnedSessions =
       selectedSessionSource === 'channel'
         ? searchedSessions
-        : searchedSessions.filter((session) => !session.isPinned);
+        : searchedSessions.filter(
+            (session) =>
+              !session.isPinned || searchGhostIds.has(session.sessionId),
+          );
     const nextSessions = unpinnedSessions.slice();
     if (organizationEnabled) {
       return nextSessions;
@@ -3744,7 +3759,12 @@ export function WebShellSidebar({
         (createdTimeById.get(b.sessionId) ?? 0) -
         (createdTimeById.get(a.sessionId) ?? 0),
     );
-  }, [organizationEnabled, searchedSessions, selectedSessionSource]);
+  }, [
+    organizationEnabled,
+    searchGhostIds,
+    searchedSessions,
+    selectedSessionSource,
+  ]);
 
   const channelCatalogLoaded = channelCatalogData !== undefined;
   const channelSessionSections = useMemo(
@@ -3808,8 +3828,16 @@ export function WebShellSidebar({
       // On sources with a Pinned section, a pinned session without a
       // (renderable) group stays Pinned-section-only; it never spills into
       // Ungrouped. The channel source has no Pinned section, so its pinned
-      // rows keep the normal Ungrouped bucket.
-      if (session.isPinned && selectedSessionSource !== 'channel') continue;
+      // rows keep the normal Ungrouped bucket. Pinned content-search ghosts
+      // are exempt: the Pinned section never sees them, so dropping them
+      // here would render the matching session nowhere.
+      if (
+        session.isPinned &&
+        selectedSessionSource !== 'channel' &&
+        !searchGhostIds.has(session.sessionId)
+      ) {
+        continue;
+      }
       recentSessions.push(session);
     }
     const sections: SessionSection[] = [];
@@ -3854,6 +3882,7 @@ export function WebShellSidebar({
   }, [
     groups,
     organizationEnabled,
+    searchGhostIds,
     searchedSessions,
     searchQuery,
     selectedSessionSource,

@@ -248,6 +248,89 @@ describe('useSessionContentSearch', () => {
     expect(captured?.size).toBe(1);
   });
 
+  it('drops a lead surrogate straddling the query cap instead of slicing mid-pair', async () => {
+    searchWorkspaceSessions.mockResolvedValue({
+      results: [
+        {
+          session: { sessionId: 's1', workspaceCwd: '/work/a' },
+          snippet: 'hit',
+        },
+      ],
+    });
+
+    await renderHost(`${'a'.repeat(199)}${'🚀'.repeat(5)}`);
+    await advanceDebounce();
+
+    // Slicing at code unit 200 would cut the first rocket's surrogate pair
+    // and send a corrupted (U+FFFD) query the daemon can't match.
+    expect(searchWorkspaceSessions).toHaveBeenCalledWith(
+      '/work/a',
+      'a'.repeat(199),
+      expect.anything(),
+    );
+    expect(captured?.size).toBe(1);
+  });
+
+  it('ignores whitespace-only edits after hits settle', async () => {
+    searchWorkspaceSessions.mockResolvedValue({
+      results: [
+        {
+          session: { sessionId: 's1', workspaceCwd: '/work/a' },
+          snippet: 'hit',
+        },
+      ],
+    });
+    await renderHost('qdrant');
+    await advanceDebounce();
+    expect(captured?.size).toBe(1);
+    expect(searchWorkspaceSessions).toHaveBeenCalledTimes(1);
+
+    // The trimmed query is unchanged: no blanking, no redundant refetch.
+    const spaced = await renderHost('qdrant ');
+    await advanceDebounce();
+    expect(spaced.size).toBe(1);
+    expect(searchWorkspaceSessions).toHaveBeenCalledTimes(1);
+  });
+
+  it('never commits a render pairing a changed query with settled hits', async () => {
+    const committed: Array<[string, number]> = [];
+    function RecordingHost({ query }: { query: string }) {
+      const hits = useSessionContentSearch(client, '/work/a', query);
+      // A layout effect observes committed renders before passive effects
+      // run — a passive-effect reset would still paint one stale frame.
+      React.useLayoutEffect(() => {
+        committed.push([query, hits.size]);
+      });
+      return null;
+    }
+    searchWorkspaceSessions.mockResolvedValue({
+      results: [
+        {
+          session: { sessionId: 's1', workspaceCwd: '/work/a' },
+          snippet: 'hit',
+        },
+      ],
+    });
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => {
+      root?.render(React.createElement(RecordingHost, { query: 'qd' }));
+    });
+    await advanceDebounce();
+    expect(committed).toContainEqual(['qd', 1]);
+
+    await act(async () => {
+      root?.render(React.createElement(RecordingHost, { query: 'qdrant' }));
+    });
+
+    expect(committed.some(([query]) => query === 'qdrant')).toBe(true);
+    for (const [query, size] of committed) {
+      if (query === 'qdrant') expect(size).toBe(0);
+    }
+  });
+
   it('clears hits when the query is cleared', async () => {
     searchWorkspaceSessions.mockResolvedValue({
       results: [

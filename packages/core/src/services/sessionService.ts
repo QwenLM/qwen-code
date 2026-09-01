@@ -423,19 +423,34 @@ export interface SessionContentSearchHit {
 /** Characters of context kept before/after the match in a search snippet. */
 const SEARCH_SNIPPET_CONTEXT = 40;
 
+const HAS_LONE_SURROGATE =
+  /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
 /**
  * Case-insensitive indexOf returning the match position in the ORIGINAL
  * string's UTF-16 index space. Lowercasing can change string length (e.g.
  * U+0130 folds to two code units), so an index found in the lowercased
- * string cannot be used to slice the original directly.
+ * string cannot be used to slice the original directly. The per-code-point
+ * fold keeps supplementary-plane case pairs (Deseret, Adlam, ...) matching.
+ * A native whole-string pre-filter keeps the common no-match path off the
+ * JS-level fold; the lone-surrogate skip is required because a per-unit /
+ * whole-string fold disagree on those inputs.
  */
 function indexOfCaseInsensitive(text: string, lowerQuery: string): number {
+  if (
+    !HAS_LONE_SURROGATE.test(lowerQuery) &&
+    !text.toLowerCase().includes(lowerQuery)
+  ) {
+    return -1;
+  }
   let folded = '';
   const indexMap: number[] = [];
-  for (let i = 0; i < text.length; i++) {
-    const foldedChar = text[i]!.toLowerCase();
+  for (let i = 0; i < text.length; ) {
+    const char = String.fromCodePoint(text.codePointAt(i)!);
+    const foldedChar = char.toLowerCase();
     folded += foldedChar;
     for (let j = 0; j < foldedChar.length; j++) indexMap.push(i);
+    i += char.length;
   }
   const index = folded.indexOf(lowerQuery);
   return index === -1 ? -1 : (indexMap[index] ?? -1);

@@ -290,6 +290,23 @@ describe('SessionService.searchSessionContent', () => {
     expect(hits[0].snippet).toContain('needle');
   });
 
+  it('matches supplementary-plane case pairs in both directions', async () => {
+    // Deseret uppercase folds to supplementary-plane lowercase code points;
+    // a per-UTF-16-unit fold would leave it unchanged and miss the match.
+    writeSession(SESSION_A, [userText(SESSION_A, 'a1', '𐐀𐐯𐑊𐐮𐐻𐐯𐐼')]);
+
+    await expect(
+      service.searchSessionContent('𐐀𐐯𐑊𐐮𐐻𐐯𐐼'.toLowerCase()),
+    ).resolves.toHaveLength(1);
+
+    writeSession(SESSION_B, [
+      userText(SESSION_B, 'b1', '𐐀𐐯𐑊𐐮𐐻𐐯𐐼'.toLowerCase()),
+    ]);
+    await expect(service.searchSessionContent('𐐀𐐯𐑊𐐮𐐻𐐯𐐼')).resolves.toHaveLength(
+      2,
+    );
+  });
+
   it('never splits a surrogate pair at a snippet boundary', async () => {
     writeSession(SESSION_A, [
       userText(SESSION_A, 'a1', `${'🚀'.repeat(25)} needle`),
@@ -300,6 +317,21 @@ describe('SessionService.searchSessionContent', () => {
     expect(hits[0].snippet).toContain('needle');
     expect(hits[0].snippet).not.toMatch(
       // Lone lead surrogate, or lone trail surrogate.
+      /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/,
+    );
+  });
+
+  it('never ends the snippet window on a lone lead surrogate', async () => {
+    // The match sits at the message start so the window end lands inside
+    // the astral run, exercising the end-side clamp.
+    writeSession(SESSION_A, [
+      userText(SESSION_A, 'a1', `needle ${'🚀'.repeat(40)}`),
+    ]);
+
+    const hits = await service.searchSessionContent('needle');
+    expect(hits).toHaveLength(1);
+    expect(hits[0].snippet).toContain('needle');
+    expect(hits[0].snippet).not.toMatch(
       /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/,
     );
   });

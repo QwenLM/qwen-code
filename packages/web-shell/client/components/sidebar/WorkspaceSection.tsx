@@ -591,15 +591,25 @@ export function WorkspaceSection({
   }, [contentSearchHits, mapSession, searchQuery, sessions, sourceType]);
   const renderSessionWithSnippet = (session: DaemonSessionSummary) =>
     renderSession(session, {
-      searchSnippet: contentSearchHits.get(session.sessionId)?.snippet,
+      // Explicit options override renderSessionRow's guarded default, so
+      // gate the lookup on an active query the same way.
+      searchSnippet: searchQuery.trim()
+        ? contentSearchHits.get(session.sessionId)?.snippet
+        : undefined,
     });
-  const visibleSessions = useMemo(
-    () =>
-      excludePinned
-        ? searchedSessions.filter((session) => !session.isPinned)
-        : searchedSessions,
-    [excludePinned, searchedSessions],
-  );
+  const visibleSessions = useMemo(() => {
+    if (!excludePinned) return searchedSessions;
+    // A pinned content-search hit the loaded catalog doesn't carry must
+    // stay visible: loaded pinned rows render via their Pinned section /
+    // group buckets, but that path never sees ghost hits (R2-2).
+    const catalogIds = new Set(sessions.map((session) => session.sessionId));
+    return searchedSessions.filter(
+      (session) =>
+        !session.isPinned ||
+        (contentSearchHits.has(session.sessionId) &&
+          !catalogIds.has(session.sessionId)),
+    );
+  }, [contentSearchHits, excludePinned, searchedSessions, sessions]);
   const directSessions =
     searchActive || showAllSessions || !limitSessions
       ? visibleSessions
