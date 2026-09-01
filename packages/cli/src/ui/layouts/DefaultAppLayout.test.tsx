@@ -208,6 +208,29 @@ describe('DefaultAppLayout', () => {
     expect(output).not.toContain('DialogManager 20');
   });
 
+  it('keeps a short dialog at its natural height', () => {
+    mockedUseAgentViewState.mockReturnValue({
+      activeView: 'main',
+      agents: new Map(),
+    });
+
+    const constrained = renderLayout({
+      ...baseUIState,
+      dialogsVisible: true,
+      terminalHeight: 24,
+    });
+    const unconstrained = renderLayout({
+      ...baseUIState,
+      dialogsVisible: true,
+      terminalHeight: 24,
+      constrainHeight: false,
+    });
+
+    expect(frameHeight(constrained.lastFrame() ?? '')).toBe(
+      frameHeight(unconstrained.lastFrame() ?? ''),
+    );
+  });
+
   it('does not cap a tall dialog when height constraints are disabled', () => {
     mockedUseAgentViewState.mockReturnValue({
       activeView: 'main',

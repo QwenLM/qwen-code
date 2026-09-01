@@ -677,6 +677,29 @@ describe('<Footer />', () => {
       expect(frame).not.toContain('? for shortcuts');
     });
 
+    it('does not change footer height when Ctrl+C exit warning overrides a two-line status line', () => {
+      useStatusLineMock.mockReturnValue({
+        lines: ['model-name (main) ctx:34%', '████░░░░ 34% context'],
+        useThemeColors: false,
+        respectUserColors: false,
+        hideContextIndicator: false,
+      });
+      const idle = renderAtLayoutWidth(120, createMockUIState());
+      const armed = renderAtLayoutWidth(
+        120,
+        createMockUIState({ ctrlCPressedOnce: true }),
+      );
+      const idleFrame = stripAnsi(idle.lastFrame());
+      const armedFrame = stripAnsi(armed.lastFrame());
+      const lineCount = (frame: string) =>
+        frame.length === 0 ? 0 : frame.split('\n').length;
+
+      expect(armedFrame).toContain('Press Ctrl+C again to exit.');
+      expect(lineCount(armedFrame)).toBe(lineCount(idleFrame));
+      idle.unmount();
+      armed.unmount();
+    });
+
     it('suppresses hint when status line is active', () => {
       useStatusLineMock.mockReturnValue({
         lines: ['status info'],

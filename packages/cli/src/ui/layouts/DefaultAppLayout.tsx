@@ -90,7 +90,9 @@ export const DefaultAppLayout: React.FC = () => {
                 marginX={2}
                 flexDirection="column"
                 width={uiState.mainAreaWidth}
-                height={dialogHeight}
+                // Max height, not fixed height: a padded full-height frame triggers
+                // Ink's full-clear repaint and wipes the startup banner.
+                maxHeight={dialogHeight}
                 overflow={uiState.constrainHeight ? 'hidden' : undefined}
               >
                 <DialogManager
