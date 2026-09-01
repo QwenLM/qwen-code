@@ -376,8 +376,8 @@ export class PeerMessaging {
     await this.gate?.shutdown();
     await this.settleUnconsumed();
     await this.inbox?.close();
-    delete process.env[MESSAGING_SOCKET_ENV];
-    delete process.env[MESSAGING_TOKEN_ENV];
+    // Same pair, same removal as the startup scrub — one writer for it.
+    clearInheritedPeerMessagingEnv();
     await this.updateSessionRegistryIpcPath(undefined);
   }
 
