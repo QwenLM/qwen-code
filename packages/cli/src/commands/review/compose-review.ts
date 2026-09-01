@@ -479,6 +479,13 @@ function openLedgerCriticalEntries(
     // Present but not an array — the baseline is unreadable, not empty.
     if (!Array.isArray(cache.findings)) return null;
     const entries: Array<{ id: string; title?: string; file?: string }> = [];
+    // A repeated id is the same unreadable-baseline refusal as any other
+    // shape violation: two rows under one id collapse the grant's
+    // set-based completeness check and the last-wins title/file maps into
+    // ONE disposition — the "shrank the open set below what the ledger
+    // really holds" shape, from the ledger side (the disposition-side
+    // duplicate was already refused).
+    const seenIds = new Set<string>();
     for (const f of cache.findings) {
       const e = f as {
         id?: unknown;
@@ -498,6 +505,8 @@ function openLedgerCriticalEntries(
       ) {
         return null;
       }
+      if (seenIds.has(e.id)) return null;
+      seenIds.add(e.id);
       if (e.severity === 'Critical' && e.status === 'open') {
         entries.push({
           id: e.id,
@@ -2103,8 +2112,17 @@ export function composeReview(
   // defines "measured". SKILL tells the round to omit the field there; this
   // refusal is the module's half, symmetric with round 1 — absence then
   // carries the streak, exactly as an unmeasured round must.
+  // A stop re-rule is the THIRD unmeasurable state: no agents ran, so
+  // nothing this round could have derived a fresh/induced split — every
+  // posted entry is a carried-id re-assertion the grant itself proves is
+  // NOT fresh, which is exactly what let a model-written census satisfy
+  // the fresh <= reported cross-check and mint the non-convergence blocker
+  // over a round that measured nothing. Refused as null so the streak
+  // CARRIES rather than resets, like the other two.
   const readCensus =
-    prevRound === 0 || input.contextUnavailable === true
+    prevRound === 0 ||
+    input.contextUnavailable === true ||
+    input.stopReRule !== undefined
       ? null
       : churnCensusOf(input.convergence);
   const churnCensus =

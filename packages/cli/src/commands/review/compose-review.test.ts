@@ -15738,6 +15738,7 @@ describe('composeReview — the decided-stop re-rule', () => {
       reason?: string;
       cacheFile?: string;
       supersededPaths?: string[];
+      prNumber?: number;
       /** `false` leaves the sidecar to the test — the fence-shape tests. */
       sidecar?: boolean;
     } = {},
@@ -15779,6 +15780,7 @@ describe('composeReview — the decided-stop re-rule', () => {
         skippedFiles: [],
         target: 'local',
         cachePath: opts.cacheFile ?? cachePath,
+        ...(opts.prNumber !== undefined ? { prNumber: opts.prNumber } : {}),
         ...(opts.supersededPaths
           ? {
               incremental: {
@@ -15953,6 +15955,66 @@ describe('composeReview — the decided-stop re-rule', () => {
     expect(() => reRule({ stopReRule: null })).toThrow(
       /must be an object carrying dispositions/,
     );
+  });
+
+  it('refuses a ledger carrying two rows under one id', () => {
+    // Two open Criticals under ONE id collapse the set-based completeness
+    // check and the last-wins title/file maps into one disposition — the
+    // real blocker leaves the verdict lineage through its filler twin. A
+    // repeated id is an unreadable baseline like any other shape drift.
+    expect(() =>
+      reRule({
+        planPath: stopPlan({
+          name: 'dup-id',
+          ledger: [
+            {
+              id: 'R2-1',
+              severity: 'Critical',
+              status: 'open',
+              title: 'real blocker citing a.ts',
+            },
+            {
+              id: 'R2-1',
+              severity: 'Critical',
+              status: 'open',
+              title: 'filler citing b.ts',
+            },
+          ],
+        }),
+        stopReRule: { dispositions: [{ id: 'R2-1', ruling: 'still-stands' }] },
+        bodyCriticals: ['R2-1: filler citing b.ts'],
+      }),
+    ).toThrow(/ledger the plan names cannot be read/);
+  });
+
+  it('refuses the model-written census on a stop re-rule — no minted blocker', () => {
+    // No agents ran, so nothing this round could have measured a
+    // fresh/induced split — yet a supplied census satisfied the
+    // fresh <= reported cross-check through the carried-id re-assertions
+    // the grant itself proves are NOT fresh, and minted the
+    // non-convergence blocker over a round that measured nothing. Refused
+    // like the round-0 and context-unavailable unmeasurable states: the
+    // streak carries.
+    writeFileSync(
+      join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
+      JSON.stringify({ v: 1, findings: [], round: 2, churnRounds: 1 }),
+    );
+    const ledger = [1, 2, 3, 4].map((i) => ({
+      id: `R1-${i}`,
+      severity: 'Critical',
+      status: 'open',
+      title: `standing blocker ${i}`,
+    }));
+    const r = reRule({
+      planPath: stopPlan({ name: 'census', ledger, prNumber: 8255 }),
+      stopReRule: {
+        dispositions: ledger.map((e) => ({ id: e.id, ruling: 'still-stands' })),
+      },
+      bodyCriticals: ledger.map((e) => `${e.id}: ${e.title}`),
+      convergence: { fresh: 4, induced: 2 },
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.body).not.toContain('is not converging');
   });
 
   it('refuses a ledger row whose status drifts from the vocabulary', () => {
