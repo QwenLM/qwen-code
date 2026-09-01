@@ -345,7 +345,11 @@ function findReplayActivePromptId(
   for (const event of events) {
     const promptId = eventPromptId(event);
     if (!promptId) continue;
-    if (event.type === 'turn_complete' || event.type === 'turn_error') {
+    if (
+      event.type === 'turn_complete' ||
+      event.type === 'turn_error' ||
+      event.type === 'prompt_cancelled'
+    ) {
       if (activePromptId === promptId) activePromptId = undefined;
       continue;
     }
@@ -2684,7 +2688,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   existingRepair?.target.signature === replayTarget.signature &&
                   existingRepair.attempted;
                 if (existingRepair && !reuseExistingRepair) {
-                  publishPendingRepairSettlement(existingRepair, false);
+                  publishPendingRepairSettlement(
+                    existingRepair,
+                    findLiveJournalRepairSuffix(
+                      replayEvents,
+                      existingRepair.target.promptId,
+                    ) !== undefined,
+                  );
                 }
                 liveJournalRepairRef.current = reuseExistingRepair
                   ? existingRepair
@@ -3209,6 +3219,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             setPromptStatus('idle');
             clearPendingTranscriptEvents();
             store.reset();
+            // The rebuilt epoch restarts event ids, so ledger entries keyed
+            // on the discarded epoch's ids would corrupt later settlements.
+            settledLiveJournalMarkerEventIdsRef.current.clear();
+            settledLiveJournalMarkerClaimKeysRef.current.clear();
+            pendingLiveJournalMarkerClaimsRef.current.clear();
+            liveJournalMarkerPromptIdsByEventIdRef.current.clear();
             activeSession.setLastEventId(0);
             reconnectSessionId = activeSession.sessionId;
             resyncRequested = true;
