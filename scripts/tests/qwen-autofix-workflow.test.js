@@ -8944,6 +8944,22 @@ exit 1
     expect(reviewVerificationRunner).toContain(
       'strip_runner_channels npm run test',
     );
+    // The load clamps must actually reach every vitest the gate launches.
+    // Dropping the expansion from any of the three legs is silent —
+    // `set -eo pipefail` without `-u` swallows an empty array — and the
+    // gate reverts to 15s timeouts, unbounded workers and coverage on,
+    // which is the incident this script's clamps exist to prevent.
+    // Pinned on reviewVerificationRunner only: the inline issue-fix gate
+    // runs where RUNNER_NAME is present and stays deliberately unclamped.
+    expect(reviewVerificationRunner).toContain(
+      '--changed origin/main --passWithNoTests "${VITEST_LOAD_CLAMPS[@]}"',
+    );
+    expect(reviewVerificationRunner).toContain(
+      'strip_runner_channels npm run test --workspace "${ws}" --if-present -- "${VITEST_LOAD_CLAMPS[@]}" "$@"',
+    );
+    expect(reviewVerificationRunner).toContain(
+      'AUTOFIX_VITEST_FLAGS="${VITEST_LOAD_CLAMPS[*]}"',
+    );
     // The check sits BEFORE the no-commit/no-op exits: a no-op audit round
     // whose verdict is sound with nothing left to fix still needs the artifact.
     const verdictGateAt = reviewVerificationRunner.indexOf(
@@ -11985,6 +12001,22 @@ exit 1
       expect(readFileSync(npmLog, 'utf8').trim().split('\n')).toEqual([
         'run check-i18n',
         'run test --workspace packages/web-shell -- client/components/messages/toolFormatting.drift.test.ts',
+      ]);
+
+      // The review gate runs this inside an env -i child that drops
+      // RUNNER_NAME, so the ECS clamps in the vitest configs deactivate and
+      // the drift test would fall back to vitest's 5s default on a
+      // saturating shared host. It hands its clamps down through this
+      // variable; the issue-fix gate leaves it unset (the case above).
+      writeFileSync(npmLog, '');
+      expect(
+        run('packages/core/src/tools/tool-names.ts\n', {
+          AUTOFIX_VITEST_FLAGS: '--maxWorkers=25% --testTimeout=60000',
+        }).status,
+      ).toBe(0);
+      expect(readFileSync(npmLog, 'utf8').trim().split('\n')).toEqual([
+        'run check-i18n',
+        'run test --workspace packages/web-shell -- --maxWorkers=25% --testTimeout=60000 client/components/messages/toolFormatting.drift.test.ts',
       ]);
 
       writeFileSync(npmLog, '');

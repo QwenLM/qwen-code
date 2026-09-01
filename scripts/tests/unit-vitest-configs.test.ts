@@ -4,7 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { describe, expect, it, vi } from 'vitest';
 
 import externalContextConfig from '../../integrations/external-context/vitest.config.js';
 import externalContextMem0Config from '../../integrations/external-context-mem0/vitest.config.js';
@@ -83,5 +85,62 @@ describe('unhandled-error exemption on the platform lanes', () => {
     expect(config.test?.dangerouslyIgnoreUnhandledErrors).toBe(
       process.platform !== 'linux',
     );
+  });
+});
+
+describe('autofix gate load clamps', () => {
+  // The gate launches vitest through an `env -i` allowlist that drops
+  // RUNNER_NAME, so these configs' ECS branches deactivate in there and the
+  // gate passes the same numbers on the command line instead — where they
+  // outrank the config. That makes the shell array the effective ceiling
+  // for every gate round, so it has to track the configs: raising an ECS
+  // ceiling here to shelter a heavier test would otherwise leave the gate
+  // enforcing the old one and rejecting a fix that is green in normal CI.
+  it('carries the same values as the ECS branch of the configs they stand in for', async () => {
+    vi.stubEnv('RUNNER_NAME', 'ecs-qwen-parity');
+    vi.resetModules();
+    // Re-imported under the stub: the configs read the env at import time,
+    // and the static imports above already resolved the non-ECS branch.
+    const [core, cli, acpBridge] = await Promise.all([
+      import('../../packages/core/vitest.config.js'),
+      import('../../packages/cli/vitest.config.js'),
+      import('../../packages/acp-bridge/vitest.config.js'),
+    ]);
+    vi.unstubAllEnvs();
+
+    const script = readFileSync(
+      fileURLToPath(
+        new URL(
+          '../../.github/scripts/run-autofix-review-verification.sh',
+          import.meta.url,
+        ),
+      ),
+      'utf8',
+    );
+    const body = script.match(/^VITEST_LOAD_CLAMPS=\(\n([\s\S]*?)\n\)$/m)?.[1];
+    expect(
+      body,
+      'VITEST_LOAD_CLAMPS not found in the gate script',
+    ).toBeTruthy();
+    const clamps = Object.fromEntries(
+      body!
+        .split('\n')
+        .map((line) => line.trim().replace(/^--/, ''))
+        .filter(Boolean)
+        .map((flag) => flag.split('=') as [string, string]),
+    );
+
+    // 60_000 / 60_000 / '25%' on the ECS branch of core and cli;
+    // acp-bridge sets the two timeouts but defines no maxWorkers.
+    for (const config of [core.default, cli.default, acpBridge.default]) {
+      expect(String(config.test?.testTimeout)).toBe(clamps['testTimeout']);
+      expect(String(config.test?.hookTimeout)).toBe(clamps['hookTimeout']);
+    }
+    for (const config of [core.default, cli.default]) {
+      expect(config.test?.maxWorkers).toBe(clamps['maxWorkers']);
+    }
+    // Nothing in the gate or its report path consumes coverage, and
+    // collecting it was the bulk of the 60-minute overruns.
+    expect(clamps['coverage.enabled']).toBe('false');
   });
 });
