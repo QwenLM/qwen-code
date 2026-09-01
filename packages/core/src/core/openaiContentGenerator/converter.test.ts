@@ -5985,7 +5985,7 @@ describe('OpenAIContentConverter', () => {
       ).toBe(false);
     });
 
-    it('isolates grammar checks for schemas that share a top-level $id', async () => {
+    it('keeps grammar constraints for schemas with a top-level $id', async () => {
       const sharedId = 'https://qwen-code.test/shared-tool-schema';
       const makeSchema = () => ({
         $id: sharedId,
@@ -6011,7 +6011,9 @@ describe('OpenAIContentConverter', () => {
           description: '',
           parameters: {
             type: 'object',
-            properties: { value: { type: 'string' } },
+            properties: {
+              value: { type: 'string', maxLength: 1999 },
+            },
           },
         },
         {
@@ -6019,7 +6021,9 @@ describe('OpenAIContentConverter', () => {
           description: '',
           parameters: {
             type: 'object',
-            properties: { value: { type: 'string' } },
+            properties: {
+              value: { type: 'string', maxLength: 1999 },
+            },
           },
         },
       ]);

@@ -371,9 +371,13 @@ export async function convertLlmToolsToOpenAI(
           }
 
           if (parameters) {
+            const sourceSchema = func.parametersJsonSchema;
             const canValidateLocally =
-              func.parametersJsonSchema !== undefined &&
-              SchemaValidator.compileStrict(func.parametersJsonSchema) === null;
+              typeof sourceSchema === 'object' &&
+              sourceSchema !== null &&
+              !Array.isArray(sourceSchema) &&
+              !('$id' in sourceSchema) &&
+              SchemaValidator.compileStrict(sourceSchema) === null;
             parameters = convertSchema(parameters, schemaCompliance);
             // #7315: gateways enforcing OpenAI's structured-output contract
             // promote every property to required when an object level has
