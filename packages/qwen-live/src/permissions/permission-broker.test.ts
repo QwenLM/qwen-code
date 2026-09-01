@@ -55,12 +55,18 @@ function createBroker(options?: { ruleTtlMs?: number }): Rig {
 
 function request(
   broker: PermissionBroker,
-  fields?: { requestId?: string; sessionHandle?: string; title?: string },
+  fields?: {
+    requestId?: string;
+    sessionHandle?: string;
+    jobRef?: string;
+    title?: string;
+  },
 ) {
   return broker.onRequest({
     requestId: fields?.requestId ?? 'r1',
     backend: BACKEND,
     sessionHandle: fields?.sessionHandle ?? 'session_1',
+    ...(fields?.jobRef !== undefined ? { jobRef: fields.jobRef } : {}),
     title: fields?.title ?? 'Bash: rm -rf /a',
     options: OPTIONS,
   });
@@ -82,6 +88,40 @@ describe('PermissionBroker', () => {
 
     expect(broker.pendingCount).toBe(2);
     expect(adaptor.respondPermission).not.toHaveBeenCalled();
+    expect(
+      broker.pendingRequests.map((pending) => pending.requestHandle),
+    ).toEqual(['req_1', 'req_2']);
+    expect(
+      broker.pendingUserRequests.map((pending) => pending.requestHandle),
+    ).toEqual(['req_1', 'req_2']);
+    expect(broker.pendingForSession('session_1')?.requestHandle).toBe('req_2');
+    expect(broker.pendingForSession('session_99')).toBeUndefined();
+  });
+
+  it('keeps a replayed backend request idempotent', async () => {
+    const { broker } = createBroker();
+    const first = await request(broker, { requestId: 'r1' });
+    const replay = await request(broker, { requestId: 'r1' });
+
+    expect(replay.pending).toBe(first.pending);
+    expect(replay.alreadyPending).toBe(true);
+    expect(first.alreadyPending).toBe(false);
+    expect(broker.pendingCount).toBe(1);
+    expect(broker.pendingRequests[0]?.requestHandle).toBe('req_1');
+  });
+
+  it('finds pending permissions only for their exact backend job', async () => {
+    const { broker } = createBroker();
+    await request(broker, { requestId: 'r1', jobRef: 'job-ref-1' });
+    await request(broker, { requestId: 'r2', jobRef: 'job-ref-2' });
+
+    expect(broker.pendingForJob(BACKEND, 'job-ref-1')?.requestHandle).toBe(
+      'req_1',
+    );
+    expect(broker.pendingForJob(BACKEND, 'job-ref-2')?.requestHandle).toBe(
+      'req_2',
+    );
+    expect(broker.pendingForJob(BACKEND, 'job-ref-3')).toBeUndefined();
   });
 
   it('delivers an allow vote and clears the pending ask', async () => {
@@ -98,6 +138,17 @@ describe('PermissionBroker', () => {
     );
     expect(broker.pendingCount).toBe(0);
     expect(broker.resolveHandle('req_1')).toBeUndefined();
+  });
+
+  it('clears pending requests when a session closes', async () => {
+    const { broker } = createBroker();
+    await request(broker, { requestId: 'r1', sessionHandle: 'session_1' });
+    await request(broker, { requestId: 'r2', sessionHandle: 'session_2' });
+
+    broker.clearSession('session_1');
+
+    expect(broker.resolveHandle('req_1')).toBeUndefined();
+    expect(broker.resolveHandle('req_2')).toBeDefined();
   });
 
   it('translates allow_always to a one-shot allow and auto-answers identical repeats', async () => {

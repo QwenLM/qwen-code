@@ -20,6 +20,7 @@ import type {
   SessionSummary,
 } from '../adaptor/types.js';
 import { BackendRegistry } from '../adaptor/registry.js';
+import { AsyncEventQueue } from '../adaptor/async-event-queue.js';
 import type { LiveScreenContextCapture } from '../host/live-host-coordinator.js';
 import type { LiveState } from '../host/types.js';
 import type { SessionLog } from '../log/session-log.js';
@@ -93,7 +94,7 @@ class FakeAdaptor implements BackendAdaptor {
   busy = false;
   promptReceipt: PromptReceipt = { status: 'accepted', jobRef: 'p1' };
   summaries: SessionSummary[] = [];
-  readonly queues = new Map<string, AsyncQueue<BackendEvent>>();
+  readonly queues = new Map<string, AsyncEventQueue<BackendEvent>>();
   private sessionSeq = 0;
 
   readonly createSession = vi.fn(
@@ -141,8 +142,13 @@ class FakeAdaptor implements BackendAdaptor {
     return this.summaries;
   }
 
-  events(handle: BackendHandle): AsyncIterable<BackendEvent> {
-    return this.queue(handle.id);
+  events(
+    handle: BackendHandle,
+    opts?: { signal?: AbortSignal },
+  ): AsyncIterable<BackendEvent> {
+    return this.queue(handle.id).subscribe({
+      ...(opts?.signal ? { signal: opts.signal } : {}),
+    });
   }
 
   isBusy(_handle: BackendHandle): boolean {
@@ -151,10 +157,10 @@ class FakeAdaptor implements BackendAdaptor {
 
   async close(): Promise<void> {}
 
-  queue(backendId: string): AsyncQueue<BackendEvent> {
+  queue(backendId: string): AsyncEventQueue<BackendEvent> {
     let queue = this.queues.get(backendId);
     if (!queue) {
-      queue = new AsyncQueue<BackendEvent>();
+      queue = new AsyncEventQueue<BackendEvent>();
       this.queues.set(backendId, queue);
     }
     return queue;
@@ -264,8 +270,10 @@ interface Rig {
   adaptor: FakeAdaptor;
   host: ReturnType<typeof createFakeHost>;
   realtime: FakeRealtime;
+  log: { write: ReturnType<typeof vi.fn>; close: () => Promise<void> };
   config: QwenRealtimeConfig;
   callbacks: QwenRealtimeCallbacks;
+  currentCallbacks: () => QwenRealtimeCallbacks;
 }
 
 async function startSession(
@@ -294,6 +302,7 @@ async function startSession(
     callbacks = cbs;
     return Promise.resolve(realtime as unknown as QwenRealtimeSession);
   };
+  const log = { write: vi.fn(), close: async () => {} };
   const session = new LiveSession({
     host,
     registry: new BackendRegistry(
@@ -309,7 +318,7 @@ async function startSession(
       model: 'qwen-omni-turbo-realtime',
       voice: 'Cherry',
     },
-    log: { write: vi.fn(), close: async () => {} } as unknown as SessionLog,
+    log: log as unknown as SessionLog,
     openRealtime,
   });
   await session.start({ epoch: 1, callId: 'call-1', mode: 'new' });
@@ -320,8 +329,10 @@ async function startSession(
     ...(secondary ? { secondary } : {}),
     host,
     realtime,
+    log,
     config,
     callbacks,
+    currentCallbacks: () => callbacks,
   };
 }
 
@@ -367,8 +378,80 @@ describe('LiveSession', () => {
     const { config, host } = await startSession();
 
     expect(config.tools).toBe(LIVE_SESSION_TOOLS);
+    expect(
+      config.tools.find((tool) => tool.function.name === 'respond_permission')
+        ?.continuesResponse,
+    ).toBe(true);
     expect(config.instructions.length).toBeGreaterThan(0);
+    expect(config.instructions).toContain('Never pronounce internal handles');
     expect(host.states).toEqual(['starting', 'listening']);
+  });
+
+  it('logs each transcript once while draining direct transcript delivery', async () => {
+    const { callbacks, log } = await startSession();
+
+    callbacks.onInputTranscriptDone?.({
+      callEpoch: 1,
+      itemId: 'input_1',
+      text: 'hello',
+    });
+    callbacks.onOutputTextDone?.({
+      callEpoch: 1,
+      responseId: 'resp_1',
+      inputItemId: 'input_1',
+      text: 'hi',
+      source: 'audio_transcript',
+    });
+    callbacks.onDirectTranscript?.({
+      callEpoch: 1,
+      responseId: 'resp_1',
+      inputItemId: 'input_1',
+      entries: [
+        { role: 'user', text: 'hello' },
+        { role: 'assistant', text: 'hi' },
+      ],
+    });
+
+    const transcripts = log.write.mock.calls.filter(
+      ([type]) => type === 'transcript.user' || type === 'transcript.assistant',
+    );
+    expect(transcripts).toEqual([
+      ['transcript.user', { text: 'hello' }],
+      ['transcript.assistant', { text: 'hi' }],
+    ]);
+  });
+
+  it('keeps partial direct output that never emitted a done callback', async () => {
+    const { callbacks, log } = await startSession();
+
+    callbacks.onInputTranscriptDone?.({
+      callEpoch: 1,
+      itemId: 'input_1',
+      text: 'hello',
+    });
+    callbacks.onOutputTextDelta?.({
+      callEpoch: 1,
+      responseId: 'resp_1',
+      text: 'partial answer',
+      source: 'audio_transcript',
+    });
+    callbacks.onDirectTranscript?.({
+      callEpoch: 1,
+      responseId: 'resp_1',
+      inputItemId: 'input_1',
+      entries: [
+        { role: 'user', text: 'hello' },
+        { role: 'assistant', text: 'partial answer' },
+      ],
+    });
+
+    const transcripts = log.write.mock.calls.filter(
+      ([type]) => type === 'transcript.user' || type === 'transcript.assistant',
+    );
+    expect(transcripts).toEqual([
+      ['transcript.user', { text: 'hello' }],
+      ['transcript.assistant', { text: 'partial answer', direct: true }],
+    ]);
   });
 
   it('handoff creates a default session and prompts with the task plus voice context', async () => {
@@ -541,7 +624,9 @@ describe('LiveSession', () => {
       /^\[COMPLETE job_1\]/,
     );
     expect(realtime.speakToUser).toHaveBeenCalledTimes(1);
-    expect(realtime.speakToUser.mock.calls[0]?.[0]).toContain('job_1');
+    expect(realtime.speakToUser.mock.calls[0]?.[0]).toBe(
+      'The task to run the tests finished. done: all tests pass',
+    );
 
     queue.push({ type: 'turn_error', jobRef: 'p1', error: 'lint exploded' });
     await vi.waitFor(() => {
@@ -550,6 +635,71 @@ describe('LiveSession', () => {
     expect(realtime.sendBackendContext.mock.calls[1]?.[0]).toMatch(
       /^\[ERROR job_1\]/,
     );
+  });
+
+  it('holds backend completion through speech stop and merges it on input commit', async () => {
+    const { adaptor, callbacks, realtime } = await startSession();
+
+    callTool(callbacks, 'handoff', { task: 'search the news' });
+    await awaitReceipts(realtime, 1);
+    callbacks.onSpeechStarted?.({ callEpoch: 1 });
+    adaptor.queue('s1').push({
+      type: 'turn_complete',
+      jobRef: 'p1',
+      summary: 'news found',
+    });
+    await delay(30);
+
+    expect(realtime.sendBackendContext).not.toHaveBeenCalled();
+    expect(realtime.speakToUser).not.toHaveBeenCalled();
+    callbacks.onSpeechStopped?.({ callEpoch: 1 });
+    await delay(30);
+    expect(realtime.sendBackendContext).not.toHaveBeenCalled();
+    expect(realtime.speakToUser).not.toHaveBeenCalled();
+
+    callbacks.onInputCommitted?.({ callEpoch: 1, itemId: 'input-weather' });
+    await vi.waitFor(() => {
+      expect(realtime.sendBackendContext).toHaveBeenCalledTimes(1);
+      expect(realtime.speakToUser).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('closes injection before an interrupted response is finalized', async () => {
+    const { adaptor, callbacks, realtime } = await startSession();
+
+    callTool(callbacks, 'handoff', { task: 'search the news' });
+    await awaitReceipts(realtime, 1);
+    callbacks.onResponseCreated?.({
+      callEpoch: 1,
+      responseId: 'response-old',
+      authority: 'direct',
+    });
+    adaptor.queue('s1').push({
+      type: 'turn_complete',
+      jobRef: 'p1',
+      summary: 'news found',
+    });
+    await delay(30);
+
+    callbacks.onSpeechStarted?.({ callEpoch: 1, itemId: 'input-weather' });
+    callbacks.onBargeIn?.({ callEpoch: 1, responseId: 'response-old' });
+    callbacks.onResponseDone?.({
+      callEpoch: 1,
+      responseId: 'response-old',
+      status: 'cancelled',
+    });
+    await delay(30);
+    expect(realtime.sendBackendContext).not.toHaveBeenCalled();
+    expect(realtime.speakToUser).not.toHaveBeenCalled();
+
+    callbacks.onInputCommitted?.({
+      callEpoch: 1,
+      itemId: 'input-weather',
+    });
+    await vi.waitFor(() => {
+      expect(realtime.sendBackendContext).toHaveBeenCalledTimes(1);
+      expect(realtime.speakToUser).toHaveBeenCalledTimes(1);
+    });
   });
 
   it('routes permission requests to the voice and relays the answer back', async () => {
@@ -573,6 +723,18 @@ describe('LiveSession', () => {
     );
     expect(realtime.speakToUser).toHaveBeenCalledTimes(1);
 
+    // A stream replay/resubscribe must not ask for the same backend request
+    // a second time.
+    adaptor.queue('s1').push({
+      type: 'permission_request',
+      jobRef: 'p1',
+      requestId: 'r1',
+      title: 'Bash: rm -rf /tmp',
+      options: PERMISSION_OPTIONS,
+    });
+    await delay(30);
+    expect(realtime.speakToUser).toHaveBeenCalledTimes(1);
+
     callTool(callbacks, 'respond_permission', {
       request_id: 'req_1',
       decision: 'allow',
@@ -585,6 +747,406 @@ describe('LiveSession', () => {
     expect(requestId).toBe('r1');
     expect(decision).toBe('allow');
     expect(respondReceipt).toEqual({ status: 'delivered' });
+  });
+
+  it('replays an unresolved permission after the user interrupts its speech', async () => {
+    const { adaptor, callbacks, realtime } = await startSession();
+
+    callTool(callbacks, 'handoff', { task: 'clean tmp' });
+    await awaitReceipts(realtime, 1);
+    adaptor.queue('s1').push({
+      type: 'permission_request',
+      jobRef: 'p1',
+      requestId: 'r1',
+      title: 'Bash: rm -rf /tmp',
+      options: PERMISSION_OPTIONS,
+    });
+    await vi.waitFor(() => {
+      expect(realtime.speakToUser).toHaveBeenCalledTimes(1);
+    });
+    realtime.sendBackendContext.mockClear();
+    realtime.speakToUser.mockClear();
+
+    callbacks.onResponseCreated?.({
+      callEpoch: 1,
+      responseId: 'permission-speech',
+      authority: 'backend_speech',
+    });
+    callbacks.onOutputAudioDelta?.({
+      callEpoch: 1,
+      responseId: 'permission-speech',
+      audio: new Uint8Array(48_000),
+    });
+    callbacks.onResponseDone?.({
+      callEpoch: 1,
+      responseId: 'permission-speech',
+    });
+    callbacks.onSpeechStarted?.({ callEpoch: 1, itemId: 'input-answer' });
+    await delay(30);
+    expect(realtime.speakToUser).not.toHaveBeenCalled();
+
+    callbacks.onInputCommitted?.({
+      callEpoch: 1,
+      itemId: 'input-answer',
+    });
+    await vi.waitFor(() => {
+      expect(realtime.speakToUser).toHaveBeenCalledTimes(1);
+    });
+    expect(realtime.sendBackendContext.mock.calls[0]?.[0]).toContain(
+      '[PERMISSION req_1]',
+    );
+  });
+
+  it('replays an active permission response after barge-in', async () => {
+    const { adaptor, callbacks, host, realtime } = await startSession();
+
+    callTool(callbacks, 'handoff', { task: 'clean tmp' });
+    await awaitReceipts(realtime, 1);
+    adaptor.queue('s1').push({
+      type: 'permission_request',
+      jobRef: 'p1',
+      requestId: 'r1',
+      title: 'Bash: rm -rf /tmp',
+      options: PERMISSION_OPTIONS,
+    });
+    await vi.waitFor(() => {
+      expect(realtime.speakToUser).toHaveBeenCalledTimes(1);
+    });
+    realtime.speakToUser.mockClear();
+    host.clearOutput.mockClear();
+
+    callbacks.onResponseCreated?.({
+      callEpoch: 1,
+      responseId: 'permission-speech',
+      authority: 'backend_speech',
+    });
+    callbacks.onSpeechStarted?.({ callEpoch: 1, itemId: 'input-answer' });
+    callbacks.onBargeIn?.({
+      callEpoch: 1,
+      responseId: 'permission-speech',
+    });
+    callbacks.onResponseDone?.({
+      callEpoch: 1,
+      responseId: 'permission-speech',
+      status: 'cancelled',
+    });
+    expect(host.clearOutput).toHaveBeenCalledTimes(1);
+    expect(realtime.speakToUser).not.toHaveBeenCalled();
+
+    callbacks.onInputCommitted?.({
+      callEpoch: 1,
+      itemId: 'input-answer',
+    });
+    await vi.waitFor(() => {
+      expect(realtime.speakToUser).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('actively reminds after a direct response leaves permission unresolved', async () => {
+    const { adaptor, callbacks, realtime } = await startSession();
+
+    callTool(callbacks, 'handoff', { task: 'clean tmp' });
+    await awaitReceipts(realtime, 1);
+    adaptor.queue('s1').push({
+      type: 'permission_request',
+      jobRef: 'p1',
+      requestId: 'r1',
+      title: 'Bash: rm -rf /tmp',
+      options: PERMISSION_OPTIONS,
+    });
+    await vi.waitFor(() => {
+      expect(realtime.speakToUser).toHaveBeenCalledTimes(1);
+    });
+    realtime.speakToUser.mockClear();
+
+    callbacks.onResponseCreated?.({
+      callEpoch: 1,
+      responseId: 'direct-without-vote',
+      authority: 'direct',
+    });
+    callbacks.onResponseDone?.({
+      callEpoch: 1,
+      responseId: 'direct-without-vote',
+      inputItemId: 'input-allow',
+    });
+
+    await vi.waitFor(
+      () => {
+        expect(realtime.speakToUser).toHaveBeenCalledTimes(1);
+      },
+      { timeout: 2_000 },
+    );
+    expect(adaptor.respondPermission).not.toHaveBeenCalled();
+  });
+
+  it('cancels a pending reminder when a delayed permission tool call arrives', async () => {
+    const { adaptor, callbacks, realtime } = await startSession();
+
+    callTool(callbacks, 'handoff', { task: 'clean tmp' });
+    await awaitReceipts(realtime, 1);
+    adaptor.queue('s1').push({
+      type: 'permission_request',
+      jobRef: 'p1',
+      requestId: 'r1',
+      title: 'Bash: rm -rf /tmp',
+      options: PERMISSION_OPTIONS,
+    });
+    await vi.waitFor(() => {
+      expect(realtime.speakToUser).toHaveBeenCalledTimes(1);
+    });
+    realtime.speakToUser.mockClear();
+
+    callbacks.onResponseCreated?.({
+      callEpoch: 1,
+      responseId: 'direct-ack',
+      authority: 'direct',
+    });
+    callbacks.onResponseDone?.({
+      callEpoch: 1,
+      responseId: 'direct-ack',
+      inputItemId: 'input-allow',
+    });
+    await delay(500);
+    callbacks.onResponseCreated?.({
+      callEpoch: 1,
+      responseId: 'direct-tool',
+      authority: 'direct',
+    });
+    // Let the reminder timer fire while the delayed tool response owns the
+    // response slot. The ask is now queued in Injector and must be retracted
+    // by the delivered vote rather than leaking after response.done.
+    await delay(600);
+    callTool(callbacks, 'respond_permission', {
+      request_id: 'req_1',
+      decision: 'allow',
+    });
+    await awaitReceipts(realtime, 2);
+    callbacks.onResponseDone?.({
+      callEpoch: 1,
+      responseId: 'direct-tool',
+      inputItemId: 'input-allow',
+    });
+    await delay(1_100);
+
+    expect(adaptor.respondPermission).toHaveBeenCalledTimes(1);
+    expect(realtime.speakToUser).not.toHaveBeenCalled();
+  });
+
+  it('does not attach an older job permission to a newer queued job', async () => {
+    const { adaptor, callbacks, realtime } = await startSession();
+
+    callTool(callbacks, 'handoff', { task: 'first task' });
+    await awaitReceipts(realtime, 1);
+    adaptor.busy = true;
+    adaptor.queue('s1').push({ type: 'turn_started', jobRef: 'p1' });
+    adaptor.queue('s1').push({
+      type: 'permission_request',
+      jobRef: 'p1',
+      requestId: 'r1',
+      title: 'Bash: first command',
+      options: PERMISSION_OPTIONS,
+    });
+    await vi.waitFor(() => {
+      expect(realtime.speakToUser).toHaveBeenCalledTimes(1);
+    });
+
+    adaptor.promptReceipt = { status: 'queued', jobRef: 'p2' };
+    callTool(callbacks, 'handoff', { task: 'second task' });
+    await awaitReceipts(realtime, 2);
+    callTool(callbacks, 'session_monitor', { job: 'job_2' });
+    callTool(callbacks, 'session_monitor', { job: 'job_1' });
+    const [, , second, first] = await awaitReceipts(realtime, 4);
+
+    expect(second).toMatchObject({
+      status: 'ok',
+      state: 'busy',
+      job: 'job_2',
+      job_state: 'accepted',
+    });
+    expect(second?.['pending_permission']).toBeUndefined();
+    expect(first).toMatchObject({
+      status: 'ok',
+      state: 'waiting_for_permission',
+      job: 'job_1',
+      job_state: 'waiting_for_permission',
+      pending_permission: { request_id: 'req_1' },
+    });
+  });
+
+  it('reports and restores a pending permission across Live calls', async () => {
+    const rig = await startSession();
+    const { adaptor, callbacks, realtime, session } = rig;
+
+    callTool(callbacks, 'handoff', { task: 'check the weather' });
+    await awaitReceipts(realtime, 1);
+    adaptor.busy = true;
+    adaptor.summaries = [
+      {
+        handle: { id: 's1', adaptor: adaptor.name },
+        label: 'Voice chat',
+        state: 'busy',
+      },
+    ];
+    adaptor.queue('s1').push({
+      type: 'permission_request',
+      jobRef: 'p1',
+      requestId: 'r1',
+      title: 'curl weather.example',
+      options: PERMISSION_OPTIONS,
+    });
+    await vi.waitFor(() => {
+      expect(realtime.speakToUser).toHaveBeenCalledTimes(1);
+    });
+
+    callTool(callbacks, 'session_monitor', { job: 'job_1' });
+    callTool(callbacks, 'session_list', {});
+    const [, monitor, list] = await awaitReceipts(realtime, 3);
+    expect(monitor).toMatchObject({
+      state: 'waiting_for_permission',
+      job_state: 'waiting_for_permission',
+      pending_permission: {
+        request_id: 'req_1',
+        title: 'curl weather.example',
+      },
+    });
+    expect(list?.['sessions']).toEqual([
+      expect.objectContaining({
+        state: 'waiting_for_permission',
+        pending_permission: expect.objectContaining({ request_id: 'req_1' }),
+      }),
+    ]);
+
+    await session.stop({ epoch: 1, callId: 'call-1' });
+    realtime.speakToUser.mockClear();
+    await session.start({ epoch: 2, callId: 'call-2', mode: 'resume' });
+    await vi.waitFor(() => {
+      expect(realtime.speakToUser).toHaveBeenCalledTimes(1);
+    });
+
+    callTool(rig.currentCallbacks(), 'respond_permission', {
+      request_id: 'req_1',
+      decision: 'allow',
+    });
+    const resumedReceipts = await awaitReceipts(realtime, 4);
+    expect(resumedReceipts[3]).toEqual({ status: 'delivered' });
+    expect(adaptor.respondPermission).toHaveBeenLastCalledWith(
+      { id: 's1', adaptor: adaptor.name },
+      'r1',
+      'allow',
+    );
+  });
+
+  it('consumes a permission request buffered between Live calls', async () => {
+    const rig = await startSession();
+    const { adaptor, callbacks, realtime, session } = rig;
+
+    callTool(callbacks, 'handoff', { task: 'check the weather' });
+    await awaitReceipts(realtime, 1);
+    await session.stop({ epoch: 1, callId: 'call-1' });
+
+    adaptor.queue('s1').push({
+      type: 'permission_request',
+      requestId: 'r-between',
+      title: 'curl weather.example',
+      options: PERMISSION_OPTIONS,
+    });
+    realtime.speakToUser.mockClear();
+    await session.start({ epoch: 2, callId: 'call-2', mode: 'resume' });
+
+    await vi.waitFor(() => {
+      expect(realtime.speakToUser).toHaveBeenCalledTimes(1);
+    });
+    callTool(rig.currentCallbacks(), 'respond_permission', {
+      request_id: 'req_1',
+      decision: 'allow',
+    });
+    const resumedReceipts = await awaitReceipts(realtime, 2);
+    expect(resumedReceipts[1]).toEqual({ status: 'delivered' });
+    expect(adaptor.respondPermission).toHaveBeenLastCalledWith(
+      { id: 's1', adaptor: adaptor.name },
+      'r-between',
+      'allow',
+    );
+  });
+
+  it('does not replay a permission resolved while Live was disconnected', async () => {
+    const rig = await startSession();
+    const { adaptor, callbacks, realtime, session } = rig;
+
+    callTool(callbacks, 'handoff', { task: 'check the weather' });
+    await awaitReceipts(realtime, 1);
+    adaptor.queue('s1').push({
+      type: 'permission_request',
+      requestId: 'r1',
+      title: 'curl weather.example',
+      options: PERMISSION_OPTIONS,
+    });
+    await vi.waitFor(() => {
+      expect(realtime.speakToUser).toHaveBeenCalledTimes(1);
+    });
+    await session.stop({ epoch: 1, callId: 'call-1' });
+
+    adaptor
+      .queue('s1')
+      .push({ type: 'permission_resolved', requestId: 'r1', byUs: false });
+    realtime.speakToUser.mockClear();
+    realtime.sendBackendContext.mockClear();
+    await session.start({ epoch: 2, callId: 'call-2', mode: 'resume' });
+    await delay(30);
+
+    expect(realtime.speakToUser).not.toHaveBeenCalled();
+    expect(realtime.sendBackendContext).toHaveBeenCalledOnce();
+    expect(realtime.sendBackendContext.mock.calls[0]?.[0]).toContain(
+      'already handled elsewhere',
+    );
+  });
+
+  it('does not speak while a standing-rule vote is still in flight on resume', async () => {
+    const rig = await startSession();
+    const { adaptor, callbacks, realtime, session } = rig;
+
+    callTool(callbacks, 'handoff', { task: 'check the weather' });
+    await awaitReceipts(realtime, 1);
+    adaptor.queue('s1').push({
+      type: 'permission_request',
+      requestId: 'r1',
+      title: 'curl weather.example',
+      options: PERMISSION_OPTIONS,
+    });
+    await vi.waitFor(() => {
+      expect(realtime.speakToUser).toHaveBeenCalledTimes(1);
+    });
+    callTool(callbacks, 'respond_permission', {
+      request_id: 'req_1',
+      decision: 'allow_always',
+    });
+    await awaitReceipts(realtime, 2);
+    await session.stop({ epoch: 1, callId: 'call-1' });
+
+    let finishAutoVote: (outcome: 'delivered') => void = () => undefined;
+    const autoVote = new Promise<'delivered'>((resolve) => {
+      finishAutoVote = resolve;
+    });
+    adaptor.respondPermission.mockImplementationOnce(async () => autoVote);
+    adaptor.queue('s1').push({
+      type: 'permission_request',
+      requestId: 'r2',
+      title: 'curl weather.example',
+      options: PERMISSION_OPTIONS,
+    });
+    realtime.speakToUser.mockClear();
+
+    await session.start({ epoch: 2, callId: 'call-2', mode: 'resume' });
+    expect(realtime.speakToUser).not.toHaveBeenCalled();
+    callTool(rig.currentCallbacks(), 'session_monitor', { job: 'job_1' });
+    const [, , monitor] = await awaitReceipts(realtime, 3);
+    expect(monitor?.['state']).not.toBe('waiting_for_permission');
+    expect(monitor?.['pending_permission']).toBeUndefined();
+
+    finishAutoVote('delivered');
+    await delay(30);
+    expect(adaptor.respondPermission).toHaveBeenCalledTimes(2);
+    expect(realtime.speakToUser).not.toHaveBeenCalled();
   });
 
   it('relays a respond_permission note to the backend session after the vote', async () => {
@@ -654,39 +1216,41 @@ describe('LiveSession', () => {
     expect(adaptor.prompt).toHaveBeenCalledTimes(1);
   });
 
-  it('retracts a queued permission ask resolved elsewhere before injection', async () => {
-    const { adaptor, callbacks, realtime } = await startSession();
+  it.each([true, false])(
+    'retracts a queued permission ask when resolved (byUs=%s)',
+    async (byUs) => {
+      const { adaptor, callbacks, realtime } = await startSession();
 
-    callTool(callbacks, 'handoff', { task: 'clean tmp' });
-    await awaitReceipts(realtime, 1);
-    const queue = adaptor.queue('s1');
+      callTool(callbacks, 'handoff', { task: 'clean tmp' });
+      await awaitReceipts(realtime, 1);
+      const queue = adaptor.queue('s1');
 
-    // Close the injection window: a realtime response is in flight.
-    callbacks.onResponseCreated?.({
-      callEpoch: 1,
-      responseId: 'resp_open',
-      authority: 'direct',
-    });
+      // Close the injection window: a realtime response is in flight.
+      callbacks.onResponseCreated?.({
+        callEpoch: 1,
+        responseId: 'resp_open',
+        authority: 'direct',
+      });
 
-    queue.push({
-      type: 'permission_request',
-      requestId: 'r2',
-      title: 'Bash: rm -rf /tmp',
-      options: PERMISSION_OPTIONS,
-    });
-    await delay(30);
-    expect(realtime.sendBackendContext).not.toHaveBeenCalled();
+      queue.push({
+        type: 'permission_request',
+        requestId: 'r2',
+        title: 'Bash: rm -rf /tmp',
+        options: PERMISSION_OPTIONS,
+      });
+      await delay(30);
+      expect(realtime.sendBackendContext).not.toHaveBeenCalled();
 
-    // Resolved from the WebShell before the voice ever asked.
-    queue.push({ type: 'permission_resolved', requestId: 'r2', byUs: false });
-    await delay(30);
+      queue.push({ type: 'permission_resolved', requestId: 'r2', byUs });
+      await delay(30);
 
-    // Reopen the window: the retracted ask must not surface.
-    callbacks.onResponseDone?.({ callEpoch: 1, responseId: 'resp_open' });
-    await delay(50);
-    expect(realtime.sendBackendContext).not.toHaveBeenCalled();
-    expect(realtime.speakToUser).not.toHaveBeenCalled();
-  });
+      // Reopen the window: the retracted ask must not surface.
+      callbacks.onResponseDone?.({ callEpoch: 1, responseId: 'resp_open' });
+      await delay(50);
+      expect(realtime.sendBackendContext).not.toHaveBeenCalled();
+      expect(realtime.speakToUser).not.toHaveBeenCalled();
+    },
+  );
 
   it('barge-in clears the host output', async () => {
     const { callbacks, host } = await startSession();
@@ -694,6 +1258,40 @@ describe('LiveSession', () => {
     callbacks.onBargeIn?.({ callEpoch: 1, responseId: 'resp_x' });
 
     expect(host.clearOutput).toHaveBeenCalledTimes(1);
+  });
+
+  it('clears estimated playback tail when speech starts after response.done', async () => {
+    const { callbacks, host } = await startSession();
+
+    callbacks.onOutputAudioDelta?.({
+      callEpoch: 1,
+      responseId: 'resp_tail',
+      audio: new Uint8Array(48_000),
+    });
+    callbacks.onResponseDone?.({ callEpoch: 1, responseId: 'resp_tail' });
+    callbacks.onSpeechStarted?.({ callEpoch: 1 });
+
+    expect(host.clearOutput).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not clear output twice for active-response barge-in', async () => {
+    const { callbacks, host, log } = await startSession();
+
+    callbacks.onResponseCreated?.({
+      callEpoch: 1,
+      responseId: 'resp_active',
+      authority: 'direct',
+    });
+    callbacks.onSpeechStarted?.({ callEpoch: 1 });
+    callbacks.onBargeIn?.({ callEpoch: 1, responseId: 'resp_active' });
+
+    expect(host.clearOutput).toHaveBeenCalledTimes(1);
+    expect(log.write).toHaveBeenCalledWith('playback.cleared', {
+      reason: 'speech_started',
+    });
+    expect(log.write).toHaveBeenCalledWith('response.cancelled', {
+      responseId: 'resp_active',
+    });
   });
 
   it('stop resolves immediately when no response is in flight', async () => {
@@ -861,7 +1459,7 @@ describe('LiveSession', () => {
       expect(realtime.speakToUser).toHaveBeenCalledTimes(1);
     });
     expect(realtime.speakToUser.mock.calls[0]?.[0]).toBe(
-      `Task job_1 finished. ${closing}`,
+      `The task to 跑测试 finished. ${closing}`,
     );
   });
 

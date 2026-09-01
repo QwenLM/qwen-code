@@ -252,6 +252,35 @@ describe('AcpAdaptor sessions and receipts', () => {
     ]);
   });
 
+  it('attributes permission requests to the active turn', async () => {
+    const connection = new FakeConnection();
+    const adaptor = makeAdaptor(connection);
+    adaptors.push(adaptor);
+    const handle = await adaptor.createSession({ cwd: '/ws' });
+    const collector = eventCollector(adaptor, handle.id);
+
+    void adaptor.prompt(handle, [{ type: 'text', text: 'do it' }]);
+    const vote = connection.client.requestPermission({
+      sessionId: handle.id,
+      toolCall: { name: 'Bash', command: 'rm -rf /tmp' },
+      options: [{ optionId: 'allow', name: 'Allow once' }],
+    } as never);
+    const events = await collector.waitFor((collected) =>
+      collected.some((event) => event.type === 'permission_request'),
+    );
+
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: 'permission_request',
+        jobRef: 'turn-1',
+        requestId: 'perm-1',
+      }),
+    );
+    await adaptor.respondPermission(handle, 'perm-1', 'allow');
+    await vote;
+    connection.settle();
+  });
+
   it('maps stopReasons to turn_error semantics', async () => {
     const connection = new FakeConnection();
     const adaptor = makeAdaptor(connection);

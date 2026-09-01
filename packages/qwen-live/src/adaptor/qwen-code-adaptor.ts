@@ -767,6 +767,7 @@ export class QwenCodeAdaptor implements BackendAdaptor {
       case 'permission_request': {
         const requestId = data['requestId'];
         if (typeof requestId !== 'string') return [];
+        const jobRef = envelope.promptId ?? state.activeJobRef;
         const rawOptions = Array.isArray(data['options'])
           ? data['options']
           : [];
@@ -793,6 +794,7 @@ export class QwenCodeAdaptor implements BackendAdaptor {
         return [
           {
             type: 'permission_request',
+            ...(jobRef !== undefined ? { jobRef } : {}),
             requestId,
             title: describeToolCall(data['toolCall']),
             options,

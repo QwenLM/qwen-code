@@ -35,7 +35,10 @@ import {
   type RealtimeTranscriptEntry,
 } from '../realtime/realtime-session.js';
 import type { SessionLog } from '../log/session-log.js';
-import { PermissionBroker } from '../permissions/permission-broker.js';
+import {
+  PermissionBroker,
+  type PendingPermission,
+} from '../permissions/permission-broker.js';
 import {
   APPSHOT_TOOL_NAME,
   HANDOFF_TOOL_NAME,
@@ -59,6 +62,7 @@ const MAX_ACCESSIBILITY_CHARS = 8_000;
 const MAX_VOICE_CONTEXT_ENTRIES = 12;
 const MAX_VOICE_CONTEXT_CHARS = 4_000;
 const MAX_SPOKEN_SUMMARY_CHARS = 200;
+const PERMISSION_REMINDER_DELAY_MS = 1_000;
 
 /**
  * The Host surface LiveSession drives. Structurally satisfied by the ported
@@ -108,12 +112,17 @@ interface CallContext {
   stopping: boolean;
   speechInProgress: boolean;
   responseInFlight: boolean;
+  /** Suppress asks until buffered backend events have drained on resume. */
+  restoringBackendEvents: boolean;
   caption: string;
+  loggedInputTranscripts: Map<string, string>;
+  loggedResponseTranscripts: Map<string, string>;
+  responseAuthorities: Map<string, string>;
+  permissionReminderTimer?: ReturnType<typeof setTimeout>;
   defaultSessionHandle?: string;
   /** Per backend-session event pump cancellation. */
   pumps: Map<string, AbortController>;
   injector: Injector;
-  broker: PermissionBroker;
   stopResolve?: (outcome: void | { error: string }) => void;
 }
 
@@ -175,6 +184,9 @@ export class LiveSession {
   private readonly openRealtime: typeof openQwenRealtimeSession;
   private readonly gracefulStopDrainMs: number;
   private readonly handles = new HandleRegistry();
+  private readonly broker: PermissionBroker;
+  /** Stream sessions explicitly observed by this Live daemon across calls. */
+  private readonly observedSessions = new Map<string, BackendHandle>();
   private active?: CallContext;
 
   constructor(private readonly options: LiveSessionOptions) {
@@ -184,6 +196,10 @@ export class LiveSession {
     this.openRealtime = options.openRealtime ?? openQwenRealtimeSession;
     this.gracefulStopDrainMs =
       options.gracefulStopDrainMs ?? DEFAULT_GRACEFUL_STOP_DRAIN_MS;
+    this.broker = new PermissionBroker({
+      adaptorFor: (backend) => this.adaptorFor(backend),
+      log: (type, payload) => this.log.write(type, payload),
+    });
   }
 
   /** The adaptor that owns a backend handle (registry routing). */
@@ -204,7 +220,11 @@ export class LiveSession {
       stopping: false,
       speechInProgress: false,
       responseInFlight: false,
+      restoringBackendEvents: true,
       caption: '',
+      loggedInputTranscripts: new Map(),
+      loggedResponseTranscripts: new Map(),
+      responseAuthorities: new Map(),
       pumps: new Map(),
       injector: new Injector({
         sink: {
@@ -218,10 +238,6 @@ export class LiveSession {
             });
           },
         },
-      }),
-      broker: new PermissionBroker({
-        adaptorFor: (backend) => this.adaptorFor(backend),
-        log: (type, payload) => this.log.write(type, payload),
       }),
     };
     this.active = context;
@@ -264,6 +280,18 @@ export class LiveSession {
       }
       context.realtime = realtime;
       this.host.setCallState(call.epoch, 'listening');
+      for (const [sessionHandle, backend] of this.observedSessions) {
+        this.ensurePump(context, sessionHandle, backend);
+      }
+      // ACP keeps backend events in a local queue while a Live call is down.
+      // Let that synchronous backlog drain before replaying unresolved asks,
+      // so a buffered resolution retracts an old request before it is spoken.
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      if (this.active !== context || context.stopping) return;
+      context.restoringBackendEvents = false;
+      for (const pending of this.broker.pendingUserRequests) {
+        this.enqueuePermission(context, pending);
+      }
     } catch (error) {
       this.log.write('error', {
         source: 'realtime',
@@ -387,13 +415,21 @@ export class LiveSession {
       onSpeechStarted: () => {
         if (!current()) return;
         context.speechInProgress = true;
-        context.injector.noteSpeechStarted();
+        const outputWasPlaying = context.injector.noteSpeechStarted();
+        if (context.responseInFlight || outputWasPlaying) {
+          this.host.clearOutput(context.epoch);
+          this.host.setCaption(context.epoch, '');
+          this.host.setStatusText(context.epoch);
+          context.injector.noteOutputCleared();
+          this.log.write('playback.cleared', {
+            reason: 'speech_started',
+          });
+        }
+        this.enqueuePendingPermissions(context);
         this.log.write('vad.speech_started', {});
       },
       onSpeechStopped: () => {
         if (!current()) return;
-        context.speechInProgress = false;
-        context.injector.noteSpeechStopped();
         this.log.write('vad.speech_stopped', {});
       },
       // The provider's input-commit ack: the utterance is out of the buffer,
@@ -403,23 +439,29 @@ export class LiveSession {
       onInputCommitted: () => {
         if (!current()) return;
         context.speechInProgress = false;
+        context.injector.noteInputCommitted();
         this.log.write('vad.speech_stopped', { phase: 'input_committed' });
       },
-      onInputTranscriptDone: (event: { text: string }) => {
+      onInputTranscriptDone: (event: { itemId?: string; text: string }) => {
         if (!current()) return;
         context.speechInProgress = false;
+        context.injector.noteInputCommitted();
         this.host.setTranscript?.(context.epoch, event.text);
         this.log.write('transcript.user', { text: event.text });
+        if (event.itemId) {
+          context.loggedInputTranscripts.set(event.itemId, event.text);
+        }
       },
       onOutputTextDelta: (event: { text: string; source: string }) => {
         if (!current()) return;
         context.caption = `${context.caption}${event.text}`;
         this.host.setCaption(context.epoch, context.caption);
       },
-      onOutputTextDone: (event: { text: string }) => {
+      onOutputTextDone: (event: { responseId: string; text: string }) => {
         if (!current()) return;
         context.caption = '';
         this.log.write('transcript.assistant', { text: event.text });
+        context.loggedResponseTranscripts.set(event.responseId, event.text);
       },
       onOutputAudioDelta: (event: { audio: Uint8Array }) => {
         if (!current()) return;
@@ -430,6 +472,7 @@ export class LiveSession {
         if (!current()) return;
         context.responseInFlight = true;
         context.injector.noteResponseCreated();
+        context.responseAuthorities.set(event.responseId, event.authority);
         // During the stop drain the call state must stay 'stopping' — a
         // 'speaking' flip here would strand the coordinator (its finish/fail
         // paths early-return unless the call is still 'stopping').
@@ -441,36 +484,69 @@ export class LiveSession {
           authority: event.authority,
         });
       },
-      onResponseDone: (event: { responseId: string }) => {
+      onResponseDone: (event: { responseId: string; inputItemId?: string }) => {
         if (!current()) return;
         context.responseInFlight = false;
         context.caption = '';
         context.injector.noteResponseDone();
+        const authority = context.responseAuthorities.get(event.responseId);
+        context.responseAuthorities.delete(event.responseId);
         if (!context.stopping) {
           this.host.setCallState(context.epoch, 'listening');
         }
         this.log.write('response.done', { responseId: event.responseId });
+        context.loggedResponseTranscripts.delete(event.responseId);
+        if (event.inputItemId) {
+          context.loggedInputTranscripts.delete(event.inputItemId);
+        }
+        if (authority === 'direct') {
+          this.schedulePermissionReminder(context);
+        }
       },
       onBargeIn: (event: { responseId: string }) => {
         if (!current()) return;
-        this.host.clearOutput(context.epoch);
-        this.host.setCaption(context.epoch, '');
-        this.host.setStatusText(context.epoch);
-        context.injector.noteOutputCleared();
-        this.log.write('playback.cleared', {
-          reason: 'barge_in',
-          responseId: event.responseId,
-        });
+        if (!context.speechInProgress) {
+          this.host.clearOutput(context.epoch);
+          this.host.setCaption(context.epoch, '');
+          this.host.setStatusText(context.epoch);
+          context.injector.noteOutputCleared();
+          this.log.write('playback.cleared', {
+            reason: 'barge_in',
+            responseId: event.responseId,
+          });
+        } else {
+          this.log.write('response.cancelled', {
+            responseId: event.responseId,
+          });
+        }
       },
       onFunctionCall: (event: RealtimeFunctionCall) => {
         if (!current()) return;
+        if (
+          event.name === RESPOND_PERMISSION_TOOL_NAME &&
+          context.permissionReminderTimer !== undefined
+        ) {
+          clearTimeout(context.permissionReminderTimer);
+          context.permissionReminderTimer = undefined;
+        }
         void this.dispatchTool(context, event);
       },
       onDirectTranscript: (event: {
+        responseId?: string;
+        inputItemId?: string;
         entries: readonly RealtimeTranscriptEntry[];
       }) => {
         if (!current()) return;
         for (const entry of event.entries) {
+          const alreadyLogged =
+            entry.role === 'user'
+              ? event.inputItemId !== undefined &&
+                context.loggedInputTranscripts.get(event.inputItemId) ===
+                  entry.text
+              : event.responseId !== undefined &&
+                context.loggedResponseTranscripts.get(event.responseId) ===
+                  entry.text;
+          if (alreadyLogged) continue;
           this.log.write(
             entry.role === 'user' ? 'transcript.user' : 'transcript.assistant',
             { text: entry.text, direct: true },
@@ -610,6 +686,7 @@ export class LiveSession {
         }
         for (const summary of summaries) {
           const handle = this.handles.session(summary.handle);
+          const pending = this.broker.pendingForSession(handle);
           // Reconcile stale non-terminal jobs: a turn_complete emitted
           // while no pump was subscribed (pumps are per-call and aborted
           // at call end) would otherwise keep session_list reporting a
@@ -627,9 +704,19 @@ export class LiveSession {
             backend: entry.adaptor.name,
             ...(summary.label ? { label: summary.label } : {}),
             ...(summary.cwd ? { cwd: summary.cwd } : {}),
-            state: entry.adaptor.isBusy(summary.handle)
-              ? 'busy'
-              : summary.state,
+            state: pending
+              ? 'waiting_for_permission'
+              : entry.adaptor.isBusy(summary.handle)
+                ? 'busy'
+                : summary.state,
+            ...(pending
+              ? {
+                  pending_permission: {
+                    request_id: pending.requestHandle,
+                    title: pending.title,
+                  },
+                }
+              : {}),
             ...(activeJob ? { active_job: activeJob.jobHandle } : {}),
           });
         }
@@ -745,14 +832,34 @@ export class LiveSession {
         this.handles.reconcileIdleSession(sessionHandle);
       }
       const activeJob = job ?? this.handles.activeJobForSession(sessionHandle);
+      const sessionPending = this.broker.pendingForSession(sessionHandle);
+      const jobPending =
+        activeJob?.jobRef !== undefined
+          ? this.broker.pendingForJob(backend, activeJob.jobRef)
+          : undefined;
+      const pending = job ? jobPending : sessionPending;
       return {
         status: 'ok',
         session: sessionHandle,
-        state: this.adaptorFor(backend).isBusy(backend) ? 'busy' : 'idle',
+        state: pending
+          ? 'waiting_for_permission'
+          : this.adaptorFor(backend).isBusy(backend)
+            ? 'busy'
+            : 'idle',
+        ...(pending
+          ? {
+              pending_permission: {
+                request_id: pending.requestHandle,
+                title: pending.title,
+              },
+            }
+          : {}),
         ...(activeJob
           ? {
               job: activeJob.jobHandle,
-              job_state: activeJob.state,
+              job_state: jobPending
+                ? 'waiting_for_permission'
+                : activeJob.state,
               task: activeJob.task.slice(0, 200),
             }
           : {}),
@@ -797,8 +904,8 @@ export class LiveSession {
       const note = typeof args['note'] === 'string' ? args['note'].trim() : '';
       // Resolve before respond(): a delivered vote clears the pending entry,
       // and the backend handle is needed to relay the user's constraint.
-      const pending = context.broker.resolveHandle(requestHandle);
-      const outcome = await context.broker.respond(
+      const pending = this.broker.resolveHandle(requestHandle);
+      const outcome = await this.broker.respond(
         requestHandle,
         decision,
         note || undefined,
@@ -808,6 +915,9 @@ export class LiveSession {
           status: 'error',
           note: `no pending request ${requestHandle}.`,
         };
+      }
+      if (pending) {
+        context.injector.retractPermission(pending.requestId);
       }
       // The vote channel carries no free text; a user constraint ("only this
       // file") would otherwise be silently discarded — the grant would be
@@ -926,6 +1036,7 @@ export class LiveSession {
       });
       return;
     }
+    this.observedSessions.set(sessionHandle, backend);
     const abort = new AbortController();
     context.pumps.set(sessionHandle, abort);
     void this.pump(context, sessionHandle, backend, abort.signal).catch(
@@ -1038,8 +1149,8 @@ export class LiveSession {
           kind: 'complete',
           context: `[COMPLETE ${label}] ${event.detail ?? event.summary}`,
           spoken: spokenSummary
-            ? `Task ${label} finished. ${spokenSummary}`
-            : `Task ${label} finished.`,
+            ? `${this.spokenTaskLabel(job)} finished. ${spokenSummary}`
+            : `${this.spokenTaskLabel(job)} finished.`,
           ...(job ? { jobHandle: job.jobHandle } : {}),
         });
         return;
@@ -1059,28 +1170,31 @@ export class LiveSession {
         context.injector.enqueue({
           kind: 'error',
           context: `[ERROR ${label}] ${event.error}`,
-          spoken: `Task ${label} hit a problem. ${firstSentence(event.error, 120)}`,
+          spoken: `${this.spokenTaskLabel(job)} hit a problem. ${firstSentence(event.error, 120)}`,
           ...(job ? { jobHandle: job.jobHandle } : {}),
         });
         return;
       }
       case 'permission_request': {
-        void context.broker
+        void this.broker
           .onRequest({
             requestId: event.requestId,
             backend,
             sessionHandle,
+            ...(event.jobRef !== undefined ? { jobRef: event.jobRef } : {}),
             title: event.title,
             options: event.options,
           })
           .then((ask) => {
-            if (ask.autoAnswered || this.active !== context) return;
-            context.injector.enqueue({
-              kind: 'permission',
-              requestId: event.requestId,
-              context: `[PERMISSION ${ask.pending.requestHandle}] Session ${sessionHandle} wants to run: ${event.title}. Ask the user and relay their answer with respond_permission.`,
-              spoken: `The task wants to ${event.title}. Should I allow it?`,
-            });
+            if (
+              ask.autoAnswered ||
+              ask.alreadyPending ||
+              context.restoringBackendEvents ||
+              this.active !== context
+            ) {
+              return;
+            }
+            this.enqueuePermission(context, ask.pending);
           })
           .catch((error: unknown) => {
             // A rejected broker chain must never become an unhandled
@@ -1101,9 +1215,9 @@ export class LiveSession {
         return;
       }
       case 'permission_resolved': {
-        const pending = context.broker.onResolved(backend, event.requestId);
+        const pending = this.broker.onResolved(backend, event.requestId);
+        const retracted = context.injector.retractPermission(event.requestId);
         if (!event.byUs) {
-          const retracted = context.injector.retractPermission(event.requestId);
           if (!retracted && pending) {
             context.injector.enqueue({
               kind: 'progress',
@@ -1120,6 +1234,8 @@ export class LiveSession {
         // handle entirely and clear the default so
         // resolveHandoffTarget's createSession fall-through rebuilds.
         this.handles.closeSession(sessionHandle);
+        this.broker.clearSession(sessionHandle);
+        this.observedSessions.delete(sessionHandle);
         if (context.defaultSessionHandle === sessionHandle) {
           context.defaultSessionHandle = undefined;
         }
@@ -1140,6 +1256,43 @@ export class LiveSession {
       if (byRef) return byRef;
     }
     return this.handles.activeJobForSession(sessionHandle);
+  }
+
+  private enqueuePermission(
+    context: CallContext,
+    pending: PendingPermission,
+  ): void {
+    context.injector.enqueue({
+      kind: 'permission',
+      requestId: pending.requestId,
+      context: `[PERMISSION ${pending.requestHandle}] Session ${pending.sessionHandle} wants to run: ${pending.title}. Ask the user and relay their answer with respond_permission in this response. Do not claim it was allowed until that tool returns status delivered.`,
+      spoken: `The task wants to ${pending.title}. Should I allow it?`,
+    });
+  }
+
+  private enqueuePendingPermissions(context: CallContext): void {
+    if (this.active !== context || context.stopping) return;
+    for (const pending of this.broker.pendingUserRequests) {
+      this.enqueuePermission(context, pending);
+    }
+  }
+
+  private schedulePermissionReminder(context: CallContext): void {
+    if (this.broker.pendingUserRequests.length === 0) return;
+    if (context.permissionReminderTimer !== undefined) {
+      clearTimeout(context.permissionReminderTimer);
+    }
+    context.permissionReminderTimer = setTimeout(() => {
+      context.permissionReminderTimer = undefined;
+      this.enqueuePendingPermissions(context);
+    }, PERMISSION_REMINDER_DELAY_MS);
+    context.permissionReminderTimer.unref?.();
+  }
+
+  private spokenTaskLabel(job: JobRecord | undefined): string {
+    if (!job) return 'A task';
+    const task = firstSentence(job.task, 80);
+    return task ? `The task to ${task}` : 'A task';
   }
 
   // -- injection sinks -------------------------------------------------------
@@ -1184,6 +1337,10 @@ export class LiveSession {
 
   private cleanupContext(context: CallContext): void {
     if (this.active === context) this.active = undefined;
+    if (context.permissionReminderTimer !== undefined) {
+      clearTimeout(context.permissionReminderTimer);
+      context.permissionReminderTimer = undefined;
+    }
     context.injector.dispose();
     for (const abort of context.pumps.values()) abort.abort();
     context.pumps.clear();

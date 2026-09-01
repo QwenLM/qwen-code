@@ -608,7 +608,12 @@ describe('QwenCodeAdaptor.events', () => {
   it('normalizes permission_request with a descriptive title and classified options', async () => {
     const client = makeClient({
       subscribeEvents: vi.fn(() =>
-        envelopeStream([permissionRequestEnvelope('req-1')]),
+        envelopeStream([
+          {
+            ...permissionRequestEnvelope('req-1'),
+            promptId: 'p1',
+          },
+        ]),
       ),
     });
     const adaptor = makeAdaptor(client);
@@ -620,6 +625,7 @@ describe('QwenCodeAdaptor.events', () => {
     expect(event.type).toBe('permission_request');
     if (event.type !== 'permission_request') return;
     expect(event.requestId).toBe('req-1');
+    expect(event.jobRef).toBe('p1');
     expect(event.title).toContain('Bash');
     expect(event.title).toContain('rm -rf /tmp');
     expect(event.options).toEqual([

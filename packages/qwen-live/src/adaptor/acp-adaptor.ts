@@ -777,6 +777,7 @@ export class AcpAdaptor implements BackendAdaptor {
     });
     state.queue.push({
       type: 'permission_request',
+      ...(state.activeJobRef ? { jobRef: state.activeJobRef } : {}),
       requestId,
       title: describeToolCall(params['toolCall']),
       options,

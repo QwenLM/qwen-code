@@ -27,6 +27,7 @@ export const RESPOND_PERMISSION_TOOL_NAME = 'respond_permission';
 
 const APPSHOT_TOOL: RealtimeToolDefinition = {
   type: 'function',
+  continuesResponse: true,
   function: {
     name: APPSHOT_TOOL_NAME,
     description:
@@ -41,6 +42,7 @@ const APPSHOT_TOOL: RealtimeToolDefinition = {
 
 const SESSION_LIST_TOOL: RealtimeToolDefinition = {
   type: 'function',
+  continuesResponse: true,
   function: {
     name: SESSION_LIST_TOOL_NAME,
     description:
@@ -54,6 +56,7 @@ const SESSION_LIST_TOOL: RealtimeToolDefinition = {
 
 const SESSION_CREATE_TOOL: RealtimeToolDefinition = {
   type: 'function',
+  continuesResponse: true,
   function: {
     name: SESSION_CREATE_TOOL_NAME,
     description:
@@ -126,11 +129,13 @@ const HANDOFF_TOOL: RealtimeToolDefinition = {
 
 const SESSION_MONITOR_TOOL: RealtimeToolDefinition = {
   type: 'function',
+  continuesResponse: true,
   function: {
     name: SESSION_MONITOR_TOOL_NAME,
     description:
       'Get a progress snapshot for a session or job (state plus recent ' +
-      'activity). Use it only when the user asks how something is going; ' +
+      'activity, including whether it is waiting for permission). Use it ' +
+      'only when the user asks how something is going; ' +
       'completed work announces itself without polling.',
     parameters: {
       type: 'object',
@@ -145,6 +150,7 @@ const SESSION_MONITOR_TOOL: RealtimeToolDefinition = {
 
 const SESSION_STOP_TOOL: RealtimeToolDefinition = {
   type: 'function',
+  continuesResponse: true,
   function: {
     name: SESSION_STOP_TOOL_NAME,
     description:
@@ -164,13 +170,15 @@ const SESSION_STOP_TOOL: RealtimeToolDefinition = {
 
 const RESPOND_PERMISSION_TOOL: RealtimeToolDefinition = {
   type: 'function',
+  continuesResponse: true,
   function: {
     name: RESPOND_PERMISSION_TOOL_NAME,
     description:
       "Relay the user's spoken answer to a pending [PERMISSION] request. " +
       '`allow_always` also lets similar requests through silently for a ' +
       'while. Only call this after the user actually answered; never decide ' +
-      'for them.',
+      'for them. Do not tell the user the vote succeeded until this tool ' +
+      'returns status `delivered`.',
     parameters: {
       type: 'object',
       properties: {

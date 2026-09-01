@@ -38,6 +38,7 @@ export interface PendingPermission {
   requestId: string;
   backend: BackendHandle;
   sessionHandle: string;
+  jobRef?: string;
   title: string;
   options: readonly PermissionOption[];
   createdAt: number;
@@ -60,6 +61,8 @@ export interface PermissionAskEvent {
   pending: PendingPermission;
   /** True when a standing rule answered it silently — nothing to speak. */
   autoAnswered: boolean;
+  /** True when the event stream replayed an ask already awaiting a vote. */
+  alreadyPending: boolean;
 }
 
 interface StandingRule {
@@ -90,6 +93,7 @@ function titleKeyOf(title: string): string {
 export class PermissionBroker {
   private readonly pending = new Map<string, PendingPermission>();
   private readonly pendingByRequestId = new Map<string, string>();
+  private readonly autoAnswering = new Set<string>();
   private rules: StandingRule[] = [];
   private seq = 0;
   private readonly now: () => number;
@@ -108,14 +112,26 @@ export class PermissionBroker {
     requestId: string;
     backend: BackendHandle;
     sessionHandle: string;
+    jobRef?: string;
     title: string;
     options: readonly PermissionOption[];
   }): Promise<PermissionAskEvent> {
+    const existingHandle = this.pendingByRequestId.get(
+      scopedRequestId(fields.backend, fields.requestId),
+    );
+    const existing = existingHandle
+      ? this.pending.get(existingHandle)
+      : undefined;
+    if (existing) {
+      return { pending: existing, autoAnswered: false, alreadyPending: true };
+    }
+
     const pending: PendingPermission = {
       requestHandle: `req_${++this.seq}`,
       requestId: fields.requestId,
       backend: fields.backend,
       sessionHandle: fields.sessionHandle,
+      ...(fields.jobRef !== undefined ? { jobRef: fields.jobRef } : {}),
       title: fields.title,
       options: fields.options,
       createdAt: this.now(),
@@ -135,9 +151,10 @@ export class PermissionBroker {
     if (this.matchesRule(pending)) {
       // A failed silent delivery must not crash the caller or swallow the
       // request: fall back to asking the user aloud.
+      this.autoAnswering.add(pending.requestHandle);
       try {
         await this.deliver(pending, 'allow', true);
-        return { pending, autoAnswered: true };
+        return { pending, autoAnswered: true, alreadyPending: false };
       } catch (error) {
         this.options.log?.('permission.decision', {
           requestHandle: pending.requestHandle,
@@ -147,10 +164,12 @@ export class PermissionBroker {
           outcome: 'delivery_failed',
           error: error instanceof Error ? error.message : String(error),
         });
-        return { pending, autoAnswered: false };
+        return { pending, autoAnswered: false, alreadyPending: false };
+      } finally {
+        this.autoAnswering.delete(pending.requestHandle);
       }
     }
-    return { pending, autoAnswered: false };
+    return { pending, autoAnswered: false, alreadyPending: false };
   }
 
   /**
@@ -209,6 +228,50 @@ export class PermissionBroker {
 
   get pendingCount(): number {
     return this.pending.size;
+  }
+
+  get pendingRequests(): readonly PendingPermission[] {
+    return [...this.pending.values()];
+  }
+
+  /** Pending requests that still need a user decision, not an in-flight rule. */
+  get pendingUserRequests(): readonly PendingPermission[] {
+    return [...this.pending.values()].filter(
+      (pending) => !this.autoAnswering.has(pending.requestHandle),
+    );
+  }
+
+  pendingForSession(sessionHandle: string): PendingPermission | undefined {
+    return [...this.pendingUserRequests]
+      .reverse()
+      .find((pending) => pending.sessionHandle === sessionHandle.trim());
+  }
+
+  pendingForJob(
+    backend: BackendHandle,
+    jobRef: string,
+  ): PendingPermission | undefined {
+    return [...this.pendingUserRequests]
+      .reverse()
+      .find(
+        (pending) =>
+          pending.backend.adaptor === backend.adaptor &&
+          pending.backend.id === backend.id &&
+          pending.jobRef === jobRef.trim(),
+      );
+  }
+
+  clearSession(sessionHandle: string): void {
+    const normalized = sessionHandle.trim();
+    for (const pending of this.pending.values()) {
+      if (pending.sessionHandle !== normalized) continue;
+      this.pending.delete(pending.requestHandle);
+      this.autoAnswering.delete(pending.requestHandle);
+      this.pendingByRequestId.delete(
+        scopedRequestId(pending.backend, pending.requestId),
+      );
+    }
+    this.rules = this.rules.filter((rule) => rule.sessionHandle !== normalized);
   }
 
   private matchesRule(pending: PendingPermission): boolean {
