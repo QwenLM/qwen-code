@@ -271,6 +271,15 @@ describe('no-AK integration CI wiring', () => {
         "TRUSTED_CI_PROFILE: '${{ needs.classify_pr.outputs.ci_profile }}'",
       );
       expect(profileStep).toContain('profile="${TRUSTED_CI_PROFILE:-full}"');
+      // The allowlist case line and the output write are load-bearing in
+      // the consumers too: dropping the echo empties
+      // steps.ci_profile.outputs.ci_profile, so every downstream profile
+      // gate mis-compares; dropping the case line lets an unexpected
+      // profile value pass through unnormalized.
+      expect(profileStep).toContain('docs_only|github_ci_only|full) ;;');
+      expect(profileStep).toContain(
+        'echo "ci_profile=${profile}" >> "${GITHUB_OUTPUT}"',
+      );
       // Degraded path (classify_pr failed or was skipped, so the output is
       // empty) must not log a byte-identical line to a legitimate `full`
       // classification: the breadcrumb is the only signal that distinguishes a
