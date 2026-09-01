@@ -37,7 +37,7 @@
 5942 qwen-autofix-fork-signal.yml
 454547 qwen-autofix.yml
 7061 qwen-ci-flaky-rerun.yml
-205562 qwen-code-pr-review.yml
+210113 qwen-code-pr-review.yml
 79041 qwen-fleet-shepherd.yml
 22680 qwen-issue-followup-bot.yml
 5760 qwen-pr-safety-precheck.yml
@@ -59,7 +59,7 @@
 10920 sync-desktop-to-oss.yml
 10018 sync-live-host-to-oss.yml
 10138 sync-release-to-oss.yml
-3303 update-ecs-runner-qwen.yml
+7187 update-ecs-runner-qwen.yml
 2307 web-shell-visuals-cleanup.yml
 20047 web-shell-visuals-publish.yml
 16384 web-shell-visuals.yml
