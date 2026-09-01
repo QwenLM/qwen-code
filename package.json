@@ -168,7 +168,7 @@
   },
   "dependencies": {
     "@testing-library/dom": "^10.4.1",
-    "ink": "^7.0.3",
+    "ink": "7.0.3",
     "simple-git": "^3.36.0"
   },
   "optionalDependencies": {
