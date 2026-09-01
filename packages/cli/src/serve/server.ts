@@ -8,6 +8,7 @@ import express from 'express';
 import type { Application } from 'express';
 import * as path from 'node:path';
 import type { DaemonStatusProvider } from '@qwen-code/acp-bridge';
+import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
 import {
   hashDaemonWorkspace,
   readCronTasks,
@@ -169,8 +170,10 @@ import {
   registerWorkspaceQualifiedPermissionsRoutes,
 } from './routes/workspace-permissions.js';
 import {
+  readEffectiveSessionWorkflow,
   registerWorkspaceQualifiedSettingsRoutes,
   registerWorkspaceSettingsRoutes,
+  withSessionWorkflowWriteLock,
 } from './routes/workspace-settings.js';
 import { registerUserLanguageRoutes } from './routes/user-language.js';
 import {
@@ -2608,6 +2611,42 @@ export function createServeApp(
       safeBody,
       persistSetting: async (...args) => {
         await persistSetting(...args);
+      },
+      updateSessionWorkflow: (enabled) =>
+        primaryBridge.invokeWorkspaceCommand(
+          SERVE_CONTROL_EXT_METHODS.workspaceSessionWorkflow,
+          { enabled },
+        ),
+      updateSiblingSessionWorkflows: async () => {
+        for (const runtime of workspaceRegistry.listAll()) {
+          if (runtime.primary) continue;
+          try {
+            // Each sibling re-derives its OWN post-write effective value: a
+            // workspace-scope file can shadow the user write differently per
+            // workspace, so the primary's value is not generally correct for
+            // them.
+            await withSessionWorkflowWriteLock(runtime.workspaceCwd, () =>
+              runtime.bridge.invokeWorkspaceCommand(
+                SERVE_CONTROL_EXT_METHODS.workspaceSessionWorkflow,
+                {
+                  enabled: readEffectiveSessionWorkflow(
+                    runtime.workspaceCwd,
+                    runtime.trusted,
+                  ),
+                },
+              ),
+            );
+          } catch (err) {
+            // A draining or dead sibling must not fail the write; its
+            // sessions converge on daemon restart (no production caller
+            // re-triggers workspaceReload on sibling runtimes).
+            writeStderrLine(
+              `qwen serve: Session Workflow push to sibling workspace ${runtime.workspaceCwd} failed: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            );
+          }
+        }
       },
       broadcastSettingsChanged,
       parseAndValidateClientId: (req, res) =>
