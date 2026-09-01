@@ -1702,9 +1702,12 @@ function makeConfig(
      * of the permission rules (#10075).
      */
     eagerTools: string[];
+    /** Live folder trust; absent reads as trusted. */
+    isTrustedFolder: () => boolean;
   }> = {},
 ): PermissionManagerConfig {
   return {
+    ...(opts.isTrustedFolder ? { isTrustedFolder: opts.isTrustedFolder } : {}),
     getPermissionsAllow: () => opts.permissionsAllow,
     getPermissionsAsk: () => opts.permissionsAsk,
     getPermissionsDeny: () => opts.permissionsDeny,
@@ -3075,6 +3078,74 @@ describe('PermissionManager', () => {
       pm.addSessionAllowRule('run_shell_command');
       pm.addSessionDenyRule('run_shell_command');
       expect(await pm.evaluate({ toolName: 'run_shell_command' })).toBe('deny');
+    });
+
+    it('a trust-gated allow rule is suspended while the folder is untrusted and restored with trust', async () => {
+      // A project skill's `allowedTools` are repository-controlled: they
+      // auto-approve only while the folder is trusted, re-read at every
+      // decision, so a revocation mid-session takes effect at the next
+      // tool call and a later grant of trust restores the rule — the
+      // second side of the gate applied on the way in.
+      let trusted = true;
+      pm = new PermissionManager(
+        makeConfig({ isTrustedFolder: () => trusted }),
+      );
+      pm.initialize();
+      const call = { toolName: 'run_shell_command', command: 'git commit' };
+      pm.addSessionAllowRule('Bash(git *)', { trustGated: true });
+      pm.addSessionAllowRule('Bash(npm *)'); // the user's own grant
+      expect(await pm.evaluate(call)).toBe('allow');
+
+      trusted = false;
+      expect(await pm.evaluate(call)).toBe('ask');
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: 'npm test',
+        }),
+      ).toBe('allow');
+      // The effective-rules listing agrees with the decision.
+      expect(pm.listRules().some((r) => r.rule.raw === 'Bash(git *)')).toBe(
+        false,
+      );
+
+      trusted = true;
+      expect(await pm.evaluate(call)).toBe('allow');
+    });
+
+    it('an ungated grant of the same raw rule outranks the repo grant — the dedup must not inherit the suspension', async () => {
+      // A project skill grants `Bash(git *)` trust-gated; a user-level
+      // skill later grants the identical raw. The dedup keeps one entry,
+      // and it must carry the WIDER grant: the user's, which no folder
+      // trust suspends. A gated re-arrival (skill reload) stays a skip.
+      let trusted = true;
+      pm = new PermissionManager(
+        makeConfig({ isTrustedFolder: () => trusted }),
+      );
+      pm.initialize();
+      const call = { toolName: 'run_shell_command', command: 'git commit' };
+      pm.addSessionAllowRule('Bash(git *)', { trustGated: true });
+      pm.addSessionAllowRule('Bash(git *)'); // the user-level skill's grant
+      trusted = false;
+      expect(await pm.evaluate(call)).toBe('allow');
+      // Re-adding the gated rule (a reload cycle) neither duplicates nor
+      // re-gates the entry the user now holds.
+      pm.addSessionAllowRule('Bash(git *)', { trustGated: true });
+      expect(await pm.evaluate(call)).toBe('allow');
+      expect(
+        (pm as unknown as { sessionRules: { allow: unknown[] } }).sessionRules
+          .allow,
+      ).toHaveLength(1);
+    });
+
+    it('a trust-gated rule stays in force when the config reports no trust probe', async () => {
+      pm.addSessionAllowRule('Bash(git *)', { trustGated: true });
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: 'git commit',
+        }),
+      ).toBe('allow');
     });
 
     it('addSessionAllowRule deduplicates identical rules', () => {
