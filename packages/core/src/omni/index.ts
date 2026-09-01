@@ -44,6 +44,7 @@ import {
   formatDisclosureText,
   formatOmissionText,
   formatResourceHandleText,
+  formatResourcePathText,
   formatTranscriptText,
 } from './disclosure.js';
 import {
@@ -1064,9 +1065,26 @@ export async function readMediaViaOmniDelivery(params: {
     // branch — even an omitted/transcript-only delivery leaves the model
     // a handle to recall or reprocess the source. Placed FIRST so the
     // disclosure keeps its D8 adjacency to the media part.
-    const handleParts = delivery.resourceId
-      ? [{ text: formatResourceHandleText(displayName, delivery.resourceId) }]
-      : [];
+    // A model-visible local source — its registry binding's fileRef is the
+    // very path the model read (non-ephemeral user input) — is referenced by
+    // that ABSOLUTE PATH rather than an opaque handle: the model already
+    // holds the path and can re-read it or point tools at it, so the handle
+    // is redundant noise. Passive recall still recovers the handle from the
+    // path (resolveByFileRef). Path-less sources (tool/URL media, whose
+    // fileRef is an internal object-store locator) keep the handle form —
+    // no usable path exists to show.
+    const handleParts: Array<{ text: string }> = (() => {
+      if (!delivery.resourceId) return [];
+      const binding = config
+        .getOmniMediaResourceRegistry?.()
+        ?.resolve(delivery.resourceId);
+      if (binding && binding.fileRef === filePath) {
+        return [{ text: formatResourcePathText(filePath) }];
+      }
+      return [
+        { text: formatResourceHandleText(displayName, delivery.resourceId) },
+      ];
+    })();
     if (delivery.omission) {
       // Explicit omission (policy design §10.2): the media is withheld and
       // the omission notice text stands in its place. Not an error — the
