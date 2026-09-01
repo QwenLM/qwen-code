@@ -81,7 +81,9 @@ function parseAsk(value: unknown): AskRecord {
     }
     assertItemId('task id', ask.aboutTask, 't');
   }
-  if (!['open', 'answered', 'declined'].includes(ask.state ?? '')) {
+  if (
+    !['open', 'answered', 'declined', 'timeout'].includes(ask.state ?? '')
+  ) {
     throw new Error('Invalid ask state.');
   }
   if (!Number.isFinite(ask.createdAt) || !Number.isFinite(ask.expiresAt)) {
@@ -111,6 +113,12 @@ function parseAsk(value: unknown): AskRecord {
   } else if (ask.state === 'answered') {
     if (!ask.answer || ask.reason !== null || ask.settledAt === null) {
       throw new Error('An answered ask requires answer and settledAt.');
+    }
+  } else if (ask.state === 'timeout') {
+    // settleAsk produces this shape in memory; a foreign runtime sharing the
+    // board may also write it. It carries no result payload.
+    if (ask.settledAt === null || ask.answer !== null || ask.reason !== null) {
+      throw new Error('A timed-out ask requires settledAt and no result.');
     }
   } else if (!ask.reason || ask.answer !== null || ask.settledAt === null) {
     throw new Error('A declined ask requires reason and settledAt.');
