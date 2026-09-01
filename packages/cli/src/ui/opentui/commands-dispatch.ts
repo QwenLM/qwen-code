@@ -759,8 +759,9 @@ export class OpenTuiSlashDispatcher {
                   ?.getGeminiClient()
                   ?.setHistory(result.clientHistory);
                 fullCommandContext.ui.clear();
+                const now = Date.now();
                 result.history.forEach((item, index) => {
-                  fullCommandContext.ui.addItem(item, index);
+                  fullCommandContext.ui.addItem(item, now + index);
                 });
                 return { kind: 'handled' };
               }

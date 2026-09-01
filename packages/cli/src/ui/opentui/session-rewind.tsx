@@ -15,7 +15,7 @@
  * the state machine are exported for unit testing.
  */
 
-import { useEffect, useReducer, useState } from 'react';
+import { useEffect, useReducer, useRef, useState } from 'react';
 import { useKeyboard, useTerminalDimensions } from '@opentui/react';
 import { C } from './theme.js';
 import { t } from '../../i18n/index.js';
@@ -114,12 +114,20 @@ export function OpentuiRewindSelector(props: OpentuiRewindSelectorProps) {
     };
   }, [state.phase, selectedTurn, fileCheckpointingEnabled, getDiffStats]);
 
+  const restoringRef = useRef(false);
   const startRestore = (turn: RewindTurn, option: RestoreOption) => {
+    if (restoringRef.current) return;
+    restoringRef.current = true;
     setIsRestoring(true);
     dispatch({ type: 'begin-restore' });
     Promise.resolve(onRewind(turn, option))
-      .catch(() => {})
-      .finally(() => setIsRestoring(false));
+      .catch(() => {
+        dispatch({ type: 'restore-error' });
+      })
+      .finally(() => {
+        restoringRef.current = false;
+        setIsRestoring(false);
+      });
   };
 
   useKeyboard((key) => {

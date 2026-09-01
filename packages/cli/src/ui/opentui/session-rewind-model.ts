@@ -172,7 +172,8 @@ export type RewindAction =
   | { type: 'option-up' }
   | { type: 'option-down'; optionCount: number }
   | { type: 'back' }
-  | { type: 'begin-restore' };
+  | { type: 'begin-restore' }
+  | { type: 'restore-error' };
 
 /** Ink starts the pick list on the most recent turn. */
 export function createRewindState(turnCount: number): RewindState {
@@ -239,6 +240,15 @@ export function rewindReducer(
     case 'begin-restore': {
       if (state.phase === 'pick' || state.phase === 'restoring') return state;
       return { ...state, phase: 'restoring' };
+    }
+    case 'restore-error': {
+      if (state.phase !== 'restoring') return state;
+      return {
+        ...state,
+        phase: 'pick',
+        selectedTurnIndex: null,
+        restoreOptionIndex: 0,
+      };
     }
     default:
       return state;
