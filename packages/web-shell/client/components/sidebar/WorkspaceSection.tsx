@@ -22,7 +22,7 @@ import { FolderClosedIcon, FolderOpenIcon } from 'lucide-react';
 import { GitBranchIndicator } from '../GitBranchIndicator';
 import { BranchPickerPopover } from '../BranchPickerPopover';
 import { useI18n } from '../../i18n';
-import { formatRelativeTime } from '../../utils/formatRelativeTime';
+import { formatDateTime } from '../../utils/formatDateTime';
 import {
   SESSION_LIST_PAGE_SIZE,
   SIDEBAR_SESSION_PREVIEW_LIMIT,
@@ -47,7 +47,7 @@ import { useSessionContentSearch } from './useSessionContentSearch';
 import { measureSessionTitleScroll } from './sessionTitleScroll';
 import { groupSessionsByChannelType } from './channelSessionGroups';
 import { useWorkspaceOverview } from './useWorkspaceOverview';
-import { WorkspaceOverview } from './WorkspaceOverview';
+import { WorkspaceDetailsTooltip } from './WorkspaceDetailsTooltip';
 import {
   DEFAULT_WORKSPACE_OVERVIEW_ITEMS,
   summarizeSessions,
@@ -84,8 +84,8 @@ function WorkspaceFolderIcon({ open }: { open: boolean }) {
   return (
     <Icon
       className={styles.folderIcon}
-      size={16}
-      strokeWidth={1.2}
+      size={14}
+      strokeWidth={1.4}
       aria-hidden="true"
     />
   );
@@ -144,15 +144,13 @@ interface WorkspaceSectionProps {
     context: WorkspaceHeaderActionsContext,
   ) => ReactNode;
   /**
-   * Show session counts in the header and, while expanded, the full path and
-   * facet chips (MCP, skills, …). Off by default so embedders that render
-   * their own header keep today's layout. Facets are fetched only while the
-   * section is expanded and the workspace is trusted.
+   * Show a details popover on hover with the full path, git branch, session
+   * counts and facet counts (MCP, skills, …). Off by default so embedders
+   * that render their own header keep today's layout. Facets are fetched
+   * only while the section is expanded and the workspace is trusted.
    */
   overviewEnabled?: boolean;
   overviewItems?: readonly WorkspaceOverviewItem[];
-  /** Narrow sidebar: chips drop their text labels. */
-  compact?: boolean;
   /**
    * A header action reads the polled git branch (the worktree entry), so the
    * poll must run even without the diff-chip handler. Off when no consumer
@@ -160,8 +158,8 @@ interface WorkspaceSectionProps {
    */
   gitBranchWanted?: boolean;
   /**
-   * Session counts for the header. The primary workspace's sessions are
-   * listed by the sidebar itself, so it passes them in; other workspaces
+   * Session counts for the hover popover. The primary workspace's sessions
+   * are listed by the sidebar itself, so it passes them in; other workspaces
    * count their own catalog page. `null` means the parent owns the counts
    * but has no page yet (a source switch in flight): show none rather than
    * the previous source's numbers.
@@ -187,6 +185,18 @@ interface WorkspaceSectionProps {
    */
   onOpenGitDiff?: (workspaceCwd: string) => void;
   onOpenCommit?: (workspaceCwd: string) => void;
+  /**
+   * Open the workspace folder in the daemon host's file manager. Wired only
+   * when the daemon advertises `workspace_local_open` and the client is on
+   * the same machine; the hover popover's path row shows the button then.
+   */
+  onOpenPathLocally?: (cwd: string) => Promise<void>;
+  /**
+   * Open a terminal at the workspace path on the daemon host. Wired only
+   * when the daemon advertises `workspace_local_terminal` and the client is
+   * on the same machine.
+   */
+  onOpenTerminalLocally?: (cwd: string) => Promise<void>;
 }
 
 export function WorkspaceSection({
@@ -217,7 +227,6 @@ export function WorkspaceSection({
   headerActions,
   overviewEnabled = false,
   overviewItems = DEFAULT_WORKSPACE_OVERVIEW_ITEMS,
-  compact = false,
   gitBranchWanted = false,
   sessionStats,
   onRenameGroup,
@@ -230,6 +239,8 @@ export function WorkspaceSection({
   isPinnedSectionMember,
   onOpenGitDiff,
   onOpenCommit,
+  onOpenPathLocally,
+  onOpenTerminalLocally,
 }: WorkspaceSectionProps) {
   const [groups, setGroups] = useState<DaemonSessionGroup[]>([]);
   const [channelCatalog, setChannelCatalog] = useState<{
@@ -502,11 +513,9 @@ export function WorkspaceSection({
     workspace.trusted,
   ]);
 
-  // The path and chips block below renders only under the default header;
-  // the header actions (the menu's live counts) are the snapshot's other
-  // consumer and can be wired under a custom header too.
-  const overviewVisible =
-    overviewEnabled && expanded && !disabled && !renderHeader;
+  // The hover details popover under the default header and the header
+  // actions (the menu's live counts) are the snapshot's consumers; a custom
+  // header without wired actions fetches nothing.
   const overviewConsumed =
     overviewEnabled &&
     expanded &&
@@ -548,8 +557,9 @@ export function WorkspaceSection({
     sessionsResult.truncated,
   ]);
   // Collapsing a row disables its catalog query, so keep the last counts the
-  // row computed: the header keeps telling how busy the workspace is without
-  // paying for a subscription it no longer lists. While the query is active
+  // row computed: the hover popover keeps telling how busy the workspace is
+  // without paying for a subscription it no longer lists. While the query is
+  // active
   // a missing page is a fetch in progress (a source switch swapped the query
   // key), and stale counts above an empty list would mislead — show none.
   // The retained value is tagged with the source it was computed for: a
@@ -698,150 +708,106 @@ export function WorkspaceSection({
     onExpandedChange?.(nextExpanded);
   };
 
+  const headerRow = (
+    <div
+      className={cx(styles.headerRow, disabled && styles.headerDisabled)}
+      onClick={(event) => {
+        if (event.target === event.currentTarget) toggleExpanded();
+      }}
+      onMouseEnter={() => setActionsVisible(true)}
+      onMouseLeave={() => setActionsVisible(false)}
+      onFocus={() => setActionsVisible(true)}
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget)) {
+          setActionsVisible(false);
+        }
+      }}
+    >
+      <button
+        className={styles.header}
+        type="button"
+        disabled={disabled}
+        aria-expanded={expanded}
+        onClick={toggleExpanded}
+      >
+        {renderHeader ? (
+          renderHeader(expanded)
+        ) : (
+          <>
+            <span
+              className={cx(styles.chevron, expanded && styles.chevronOpen)}
+            >
+              <WorkspaceFolderIcon open={expanded} />
+            </span>
+            <span className={styles.headerContent}>
+              <span className={styles.name} title={workspace.cwd}>
+                {workspaceLabel(workspace)}
+              </span>
+            </span>
+            {!workspace.trusted && (
+              <span className={styles.badge}>{untrustedLabel}</span>
+            )}
+            {readOnly && <span className={styles.badge}>{readOnlyLabel}</span>}
+          </>
+        )}
+      </button>
+      {onOpenGitDiff && workspace.trusted && gitStatus?.branch && (
+        <BranchPickerPopover
+          open={branchPickerOpen}
+          onOpenChange={setBranchPickerOpen}
+          workspaceCwd={workspace.cwd}
+          onBranchChanged={() => void loadGitStatus()}
+          status={gitStatus}
+          onStatusRefreshed={setGitStatus}
+          onOpenDiff={() => onOpenGitDiff(workspace.cwd)}
+          onOpenCommit={
+            onOpenCommit ? () => onOpenCommit(workspace.cwd) : undefined
+          }
+        >
+          <button
+            type="button"
+            className={styles.gitPill}
+            aria-label={`${t('branchPicker.label')} — ${gitStatus.branch}`}
+          >
+            <GitBranchIndicator
+              branch={gitStatus.branch}
+              status={gitStatus}
+              compact
+            />
+          </button>
+        </BranchPickerPopover>
+      )}
+      {headerActions?.(actionsVisible, {
+        overview: overview ?? retainedOverview,
+        gitBranch: gitStatus?.branch,
+      })}
+    </div>
+  );
   return (
     <div className={styles.section}>
-      <div
-        className={cx(styles.headerRow, disabled && styles.headerDisabled)}
-        onClick={(event) => {
-          if (event.target === event.currentTarget) toggleExpanded();
-        }}
-        onMouseEnter={() => setActionsVisible(true)}
-        onMouseLeave={() => setActionsVisible(false)}
-        onFocus={() => setActionsVisible(true)}
-        onBlur={(event) => {
-          if (!event.currentTarget.contains(event.relatedTarget)) {
-            setActionsVisible(false);
+      {overviewEnabled && !renderHeader && !disabled ? (
+        <WorkspaceDetailsTooltip
+          label={workspaceLabel(workspace)}
+          cwd={gitPollCwd}
+          branch={gitStatus?.branch}
+          sessions={stats}
+          overview={overview ?? retainedOverview}
+          items={overviewItems}
+          onOpenPathLocally={
+            onOpenPathLocally && gitPollCwd && workspace.trusted
+              ? () => onOpenPathLocally(workspace.cwd)
+              : undefined
           }
-        }}
-      >
-        <button
-          className={styles.header}
-          type="button"
-          disabled={disabled}
-          aria-expanded={expanded}
-          onClick={toggleExpanded}
+          onOpenTerminalLocally={
+            onOpenTerminalLocally && gitPollCwd && workspace.trusted
+              ? () => onOpenTerminalLocally(workspace.cwd)
+              : undefined
+          }
         >
-          {renderHeader ? (
-            renderHeader(expanded)
-          ) : (
-            <>
-              <span
-                className={cx(styles.chevron, expanded && styles.chevronOpen)}
-              >
-                <WorkspaceFolderIcon open={expanded} />
-              </span>
-              <span className={styles.headerContent}>
-                <span className={styles.name} title={workspace.cwd}>
-                  {workspaceLabel(workspace)}
-                </span>
-              </span>
-              {!workspace.trusted && (
-                <span className={styles.badge}>{untrustedLabel}</span>
-              )}
-              {readOnly && (
-                <span className={styles.badge}>{readOnlyLabel}</span>
-              )}
-              {stats && stats.total > 0 && (
-                <span className={styles.headerCounts}>
-                  {stats.attention > 0 && (
-                    <span
-                      className={cx(
-                        styles.headerCount,
-                        styles.headerCountAttention,
-                      )}
-                      title={t('sidebar.sessionsAttention', {
-                        count: stats.attention,
-                      })}
-                      aria-label={t('sidebar.sessionsAttention', {
-                        count: stats.attention,
-                      })}
-                    >
-                      {stats.attention}
-                    </span>
-                  )}
-                  {stats.running > 0 && (
-                    <span
-                      className={cx(
-                        styles.headerCount,
-                        styles.headerCountRunning,
-                      )}
-                      title={t('sidebar.sessionsRunning', {
-                        count: stats.running,
-                      })}
-                      aria-label={t('sidebar.sessionsRunning', {
-                        count: stats.running,
-                      })}
-                    >
-                      {stats.running}
-                    </span>
-                  )}
-                  <span
-                    className={cx(styles.headerCount, styles.headerCountTotal)}
-                    title={t('sidebar.sessionsTotal', {
-                      count: stats.total,
-                      truncated: stats.truncated ? 1 : 0,
-                    })}
-                    aria-label={t('sidebar.sessionsTotal', {
-                      count: stats.total,
-                      truncated: stats.truncated ? 1 : 0,
-                    })}
-                  >
-                    {stats.total}
-                    {stats.truncated ? '+' : ''}
-                  </span>
-                </span>
-              )}
-            </>
-          )}
-        </button>
-        {onOpenGitDiff && workspace.trusted && gitStatus?.branch && (
-          <BranchPickerPopover
-            open={branchPickerOpen}
-            onOpenChange={setBranchPickerOpen}
-            workspaceCwd={workspace.cwd}
-            onBranchChanged={() => void loadGitStatus()}
-            status={gitStatus}
-            onStatusRefreshed={setGitStatus}
-            onOpenDiff={() => onOpenGitDiff(workspace.cwd)}
-            onOpenCommit={
-              onOpenCommit ? () => onOpenCommit(workspace.cwd) : undefined
-            }
-          >
-            <button
-              type="button"
-              className={styles.gitPill}
-              aria-label={`${t('branchPicker.label')} — ${gitStatus.branch}`}
-            >
-              <GitBranchIndicator
-                branch={gitStatus.branch}
-                status={gitStatus}
-                compact
-              />
-            </button>
-          </BranchPickerPopover>
-        )}
-        {headerActions?.(actionsVisible, {
-          overview: overview ?? retainedOverview,
-          gitBranch: gitStatus?.branch,
-        })}
-      </div>
-      {overviewVisible && gitPollCwd !== undefined && (
-        <>
-          <div
-            className={cx(styles.path, compact && styles.pathCompact)}
-            title={workspace.cwd}
-            data-web-shell-workspace-path
-          >
-            {workspace.cwd}
-          </div>
-          {workspace.trusted && (
-            <WorkspaceOverview
-              overview={overview}
-              items={overviewItems}
-              compact={compact}
-            />
-          )}
-        </>
+          {headerRow}
+        </WorkspaceDetailsTooltip>
+      ) : (
+        headerRow
       )}
       {renderSessions &&
         (expanded || Boolean(searchQuery.trim())) &&
@@ -982,7 +948,7 @@ export function WorkspaceSection({
                       key={session.sessionId}
                       session={session}
                       label={label}
-                      time={stamp ? formatRelativeTime(stamp, t) : ''}
+                      time={stamp ? formatDateTime(stamp) : ''}
                       completedUnread={false}
                     >
                       {row}
