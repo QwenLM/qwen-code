@@ -1004,6 +1004,25 @@ run_check_no_ab 'lint failed on the agent-committed fix' npm run lint
 # Test changed/related files for the packages this PR touches.
 # --changed follows the import graph so transitive breakage is caught.
 # Full regression is covered by regular CI on the PR after the push.
+#
+# The gate launches through an env -i allowlist that (deliberately) drops
+# RUNNER_NAME, so the vitest configs' ECS load clamps (60s test/hook
+# timeouts, maxWorkers 25%) silently deactivate in here: tests run with
+# 15s timeouts and unbounded workers on a host shared with other autofix
+# jobs. Under pool saturation that produced both false rejections (73
+# load-induced 15s timeouts charged to a round on #10171) and gate deaths
+# past the step's 60-minute cap that discarded verified fixes (#10171
+# rounds 1/2/5-7, #10543 x5). Pass the same clamp values explicitly —
+# the verdict must not depend on env plumbing or runner naming — and turn
+# coverage off: nothing in the gate consumes it, and its collection was
+# the bulk of the overrun. Applies to every vitest invocation below (the
+# per-package --changed run and the bite check).
+VITEST_LOAD_CLAMPS=(
+  --maxWorkers=25%
+  --testTimeout=60000
+  --hookTimeout=60000
+  --coverage.enabled=false
+)
 # Map each changed file to its OWNING npm workspace via the trusted
 # staged resolver, shared with the other verify gate so both resolve
 # packages identically. It expands the on-disk root package.json
@@ -1038,7 +1057,7 @@ else
     # npm exits 1 there with "No workspaces found".) Their rejections stay
     # charged to the round, where the repair agent can act.
     run_check_no_ab "tests failed in ${p}" \
-      npm run test --workspace "${p}" --if-present -- --changed origin/main --passWithNoTests
+      npm run test --workspace "${p}" --if-present -- --changed origin/main --passWithNoTests "${VITEST_LOAD_CLAMPS[@]}"
   done
 fi
 
@@ -1086,7 +1105,7 @@ bite_runner_default() {
   # $1 = workspace dir, rest = test paths relative to the workspace.
   local ws="${1}"
   shift
-  strip_runner_channels npm run test --workspace "${ws}" --if-present -- "$@"
+  strip_runner_channels npm run test --workspace "${ws}" --if-present -- "${VITEST_LOAD_CLAMPS[@]}" "$@"
 }
 mapfile -d '' -t BITE_FILES < <(git diff --name-only -z --no-renames --diff-filter=AM "${ROUND_RANGE}" \
   -- ':(glob)**/*.test.*' ':(glob)**/*.spec.*' ':(exclude,glob)**/__snapshots__/**' \
