@@ -863,8 +863,14 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
 
   // Long tool call response in MarkdownDisplay doesn't respect availableTerminalHeight properly,
   // we're forcing it to not render as markdown when the response is too long, it will fallback
-  // to render as plain text, which is contained within the terminal using MaxSizedBox
-  if (availableHeight) {
+  // to render as plain text, which is contained within the terminal using MaxSizedBox.
+  // `isCappingShell` keeps the cap honest when ctrl+s has been pressed
+  // (#10640): constrainHeight=false drops the height budget (availableHeight
+  // above is undefined) but the ui.shellOutputMaxLines cap still binds.
+  // Resumed sessions rebuild tool displays without renderOutputAsMarkdown
+  // (default true), so without this the capped shell output would escape
+  // through the markdown branch, which MaxSizedBox does not contain.
+  if (availableHeight || isCappingShell) {
     renderOutputAsMarkdown = false;
   }
 
@@ -911,7 +917,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   // detailedDisplay is RAW tool output (file content, grep hits, directory
   // listings). Render it as plain text — Markdown formatting would turn the
   // file's own `#`/`*`/`-`/`>` characters into headings/bold/lists. The usual
-  // `if (availableHeight)` guard above doesn't catch this because fullDetail
+  // markdown-suppression guard above doesn't catch this because fullDetail
   // lifts the height cap (availableTerminalHeight is undefined in transcript).
   if (usingDetailedDisplay) {
     renderOutputAsMarkdown = false;
