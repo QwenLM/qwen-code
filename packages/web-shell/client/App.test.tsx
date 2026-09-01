@@ -22984,8 +22984,8 @@ describe('App session callbacks', () => {
     expect(document.body.textContent).toContain('Main artifact');
     expect(document.body.textContent).toContain('10 B');
 
-    // A transient disconnect empties the live artifact list; the cached
-    // open-time row keeps the tab renderable through the gap.
+    // A transient disconnect keeps the last-good live Artifact snapshot and
+    // the open-time row remains renderable through the gap.
     mockConnection.status = 'disconnected';
     await act(async () => {
       rerender();
@@ -23005,6 +23005,40 @@ describe('App session callbacks', () => {
     });
 
     expect(document.body.textContent).toContain('Main artifact');
+    mockSessionActions.loadArtifacts.mockResolvedValue({ artifacts: [] });
+  });
+
+  it('delivers the main-session Artifact snapshot to the embedding host', async () => {
+    mockConnection.capabilities = {
+      ...mockConnection.capabilities,
+      features: ['session_artifacts'],
+    };
+    const artifact = {
+      id: 'host-artifact',
+      kind: 'html',
+      storage: 'workspace',
+      source: 'tool',
+      status: 'available',
+      title: 'Host artifact',
+      workspacePath: 'host.html',
+      clientRetained: false,
+      createdAt: '2026-09-02T00:00:00.000Z',
+      updatedAt: '2026-09-02T00:00:00.000Z',
+    };
+    mockSessionActions.loadArtifacts.mockResolvedValue({
+      artifacts: [artifact],
+    });
+    const onSessionArtifactsChange = vi.fn();
+    renderApp({ onSessionArtifactsChange });
+    await flush();
+
+    expect(onSessionArtifactsChange).toHaveBeenCalledWith({
+      reason: 'restore',
+      sessionId: 'session-1',
+      sequence: 1,
+      artifacts: [artifact],
+      artifactsByTurn: new Map(),
+    });
     mockSessionActions.loadArtifacts.mockResolvedValue({ artifacts: [] });
   });
 

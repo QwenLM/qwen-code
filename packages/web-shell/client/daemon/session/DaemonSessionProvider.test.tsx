@@ -4796,73 +4796,115 @@ describe('DaemonSessionProvider', () => {
     });
   });
 
-  it('does not invalidate workspace data from standalone session events', async () => {
-    sdkMocks.capabilities.mockResolvedValue({
-      workspaceCwd: '/primary',
-      features: ['standalone_sessions_v1'],
-    });
-    sdkMocks.sessions.push(
-      createMockSession({
-        sessionId: 'standalone-signals',
-        workspaceCwd: '/private/standalone-signals',
-        session: {
-          sessionId: 'standalone-signals',
-          workspaceCwd: '/private/standalone-signals',
-          sourceType: 'standalone',
-          context: { kind: 'standalone' },
-          workingDirectory: { state: 'ready' },
-        },
-        events: async function* standaloneWorkspaceEvents() {
-          yield {
-            id: 21,
-            v: 1,
-            type: 'memory_changed',
-            data: {
-              scope: 'workspace',
-              filePath: '/private/standalone-signals/QWEN.md',
-              mode: 'append',
-              bytesWritten: 12,
-            },
-          } satisfies DaemonEvent;
-          yield {
-            id: 22,
-            v: 1,
-            type: 'settings_changed',
-            data: {
-              key: 'ui.theme',
-              scope: 'workspace',
-              value: 'Qwen Dark',
-            },
-          } satisfies DaemonEvent;
-        },
-      }),
-    );
-    let signals: DaemonWorkspaceEventSignals | undefined;
+  it.each(['standalone', 'live'] as const)(
+    'only invalidates session artifacts from %s session events',
+    async (kind) => {
+      const sessionId = `${kind}-signals`;
+      const workspaceCwd = `/private/${sessionId}`;
+      sdkMocks.capabilities.mockResolvedValue({
+        workspaceCwd: '/primary',
+        features: ['standalone_sessions_v1', 'multi_workspace_sessions'],
+        workspaces: [
+          { id: 'primary', cwd: '/primary', primary: true, trusted: true },
+          {
+            id: 'live',
+            cwd: workspaceCwd,
+            kind: 'live',
+            primary: false,
+            trusted: true,
+          },
+        ],
+      });
+      sdkMocks.sessions.push(
+        createMockSession({
+          sessionId,
+          workspaceCwd,
+          ...(kind === 'standalone'
+            ? {
+                session: {
+                  sessionId,
+                  workspaceCwd,
+                  sourceType: 'standalone',
+                  context: { kind: 'standalone' as const },
+                  workingDirectory: { state: 'ready' as const },
+                },
+              }
+            : {}),
+          events: async function* standaloneWorkspaceEvents() {
+            yield {
+              id: 21,
+              v: 1,
+              type: 'memory_changed',
+              data: {
+                scope: 'workspace',
+                filePath: `${workspaceCwd}/QWEN.md`,
+                mode: 'append',
+                bytesWritten: 12,
+              },
+            } satisfies DaemonEvent;
+            yield {
+              id: 22,
+              v: 1,
+              type: 'settings_changed',
+              data: {
+                key: 'ui.theme',
+                scope: 'workspace',
+                value: 'Qwen Dark',
+              },
+            } satisfies DaemonEvent;
+            yield {
+              id: 23,
+              v: 1,
+              type: 'artifact_changed',
+              data: {
+                sessionId,
+                change: {
+                  action: 'created',
+                  artifactId: 'artifact-1',
+                  artifact: {
+                    id: 'artifact-1',
+                    kind: 'html',
+                    storage: 'workspace',
+                    source: 'tool',
+                    status: 'available',
+                    title: 'Report',
+                    workspacePath: 'report.html',
+                    createdAt: '2026-09-02T00:00:00.000Z',
+                    updatedAt: '2026-09-02T00:00:00.000Z',
+                  },
+                },
+              },
+            } satisfies DaemonEvent;
+          },
+        }),
+      );
+      let signals: DaemonWorkspaceEventSignals | undefined;
 
-    function Harness() {
-      signals = useDaemonWorkspaceEventSignals();
-      return null;
-    }
+      function Harness() {
+        signals = useDaemonWorkspaceEventSignals();
+        return null;
+      }
 
-    await renderWithProvider(<Harness />, {
-      autoConnect: true,
-      sessionId: 'standalone-signals',
-      sessionContext: { kind: 'standalone' },
-    });
-    await act(async () => flushPromises());
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        sessionId,
+        sessionContext: { kind },
+      });
+      await act(async () => flushPromises());
 
-    expect(signals).toMatchObject({
-      memoryVersion: 0,
-      agentsVersion: 0,
-      toolsVersion: 0,
-      settingsVersion: 0,
-      skillsVersion: 0,
-      mcpVersion: 0,
-      artifactsVersion: 0,
-      initVersion: 0,
-      authVersion: 0,
-    });
-  });
+      expect(signals).toMatchObject({
+        memoryVersion: 0,
+        agentsVersion: 0,
+        toolsVersion: 0,
+        settingsVersion: 0,
+        skillsVersion: 0,
+        mcpVersion: 0,
+        artifactsVersion: 1,
+        initVersion: 0,
+        authVersion: 0,
+      });
+    },
+  );
 
   it('deduplicates skill toggle settings events from the generic settings signal', async () => {
     const mutation = {
@@ -9336,6 +9378,15 @@ describe('DaemonSessionProvider', () => {
               level: 'project',
             },
           },
+          {
+            id: 3,
+            v: 1,
+            type: 'artifact_changed',
+            data: {
+              sessionId: 'session-1',
+              change: { action: 'removed', artifactId: 'artifact-1' },
+            },
+          },
         ],
         liveJournal: [],
       },
@@ -9362,6 +9413,7 @@ describe('DaemonSessionProvider', () => {
       agentsVersion: 1,
       toolsVersion: 0,
       mcpVersion: 0,
+      artifactsVersion: 0,
       initVersion: 0,
       authVersion: 0,
     });
