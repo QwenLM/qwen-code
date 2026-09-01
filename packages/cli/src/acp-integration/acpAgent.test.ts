@@ -6635,6 +6635,65 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     }
   });
 
+  it('defers standalone reasoning options until the generation config is available', async () => {
+    const sessionId = '11111111-1111-4111-8111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    innerConfig.getSessionSourceType = vi.fn().mockReturnValue('standalone');
+    innerConfig.getModel = vi.fn().mockReturnValue('qwen3.8-max');
+    innerConfig.getContentGeneratorConfig = vi.fn().mockReturnValue(undefined);
+    const { agent, agentPromise } = await bootInitializedAcpAgent(
+      makeSessionSettings(),
+      'trusted-capability',
+    );
+
+    try {
+      const session = (await agent.newSession({
+        cwd: '/tmp',
+        mcpServers: [],
+        _meta: {
+          [SESSION_SOURCE_META_KEY]: {
+            sourceType: 'standalone',
+            [DAEMON_OWNED_STANDALONE_CREATION_KEY]: true,
+          },
+        },
+      })) as {
+        configOptions: Array<{ id: string; options: Array<{ value: string }> }>;
+      };
+
+      expect(session.configOptions.map((option) => option.id)).toEqual([
+        'mode',
+        'model',
+      ]);
+      expect(innerConfig.refreshAuth).not.toHaveBeenCalled();
+
+      innerConfig.getContentGeneratorConfig.mockReturnValue({
+        thinkingMandatory: true,
+      });
+      const context = (await agent.extMethod(
+        SERVE_STATUS_EXT_METHODS.sessionContext,
+        { sessionId },
+      )) as {
+        state: {
+          configOptions: Array<{
+            id: string;
+            options: Array<{ value: string }>;
+          }>;
+        };
+      };
+      const reasoningOption = context.state.configOptions.find(
+        (option) => option.id === 'reasoning_effort',
+      );
+
+      expect(reasoningOption).toBeDefined();
+      expect(
+        reasoningOption?.options.some((option) => option.value === 'none'),
+      ).toBe(false);
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
   it('persists trusted direct Realtime dialogue without prompting the backend', async () => {
     const sessionId = 'session-A';
     await setupSessionMocks(sessionId);
@@ -21556,6 +21615,10 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
           messages: [{ role: 'user', parts: [{ text: 'restored' }] }],
         },
       });
+      innerConfig.getModel = vi.fn().mockReturnValue('qwen3.8-max');
+      innerConfig.getContentGeneratorConfig = vi
+        .fn()
+        .mockReturnValue(undefined);
       vi.mocked(loadSettings).mockReturnValue(settings);
       const { agent, agentPromise } = await spawnAgent('expected-capability');
 
@@ -21571,12 +21634,18 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
             },
           },
         };
-        if (action === 'load') {
-          await agent.loadSession(request);
-        } else {
-          await agent.unstable_resumeSession(request);
-        }
+        const response = (
+          action === 'load'
+            ? await agent.loadSession(request)
+            : await agent.unstable_resumeSession(request)
+        ) as {
+          configOptions: Array<{ id: string }>;
+        };
 
+        expect(response.configOptions.map((option) => option.id)).toEqual([
+          'mode',
+          'model',
+        ]);
         expect(innerConfig.refreshAuth).not.toHaveBeenCalled();
         expect(innerConfig.activateProvisionalWorkspace).not.toHaveBeenCalled();
         expect(
