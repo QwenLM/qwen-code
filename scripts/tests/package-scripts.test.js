@@ -52,6 +52,12 @@ describe('package scripts', () => {
         '@qwen-code/channel-base': '0.22.4',
         fixture: 'file:../fixture',
       },
+      devDependencies: {
+        '@qwen-code/acp-bridge': 'file:../acp-bridge',
+      },
+      optionalDependencies: {
+        '@qwen-code/sdk': '0.22.4',
+      },
     };
 
     expect(pnpmHooks.readPackage(packageJson)).toEqual({
@@ -59,6 +65,12 @@ describe('package scripts', () => {
         '@qwen-code/qwen-code-core': 'workspace:*',
         '@qwen-code/channel-base': 'workspace:*',
         fixture: 'file:../fixture',
+      },
+      devDependencies: {
+        '@qwen-code/acp-bridge': 'workspace:*',
+      },
+      optionalDependencies: {
+        '@qwen-code/sdk': 'workspace:*',
       },
     });
   });
@@ -133,6 +145,48 @@ describe('package scripts', () => {
     }
   });
 
+  it.skipIf(process.platform !== 'win32')(
+    'resolves the path variable under its native Windows casing',
+    () => {
+      const binDir = mkdtempSync(path.join(tmpdir(), 'qwen-worktree-path-'));
+      const commandDir = path.join(binDir, 'runner bin');
+      const logFile = path.join(binDir, 'corepack.log');
+      mkdirSync(commandDir);
+
+      try {
+        writeFileSync(
+          path.join(commandDir, 'corepack.cmd'),
+          '@echo %QWEN_SKIP_PREPARE% %QWEN_SKIP_NOTICE_GENERATION% %*>>"%WORKTREE_SETUP_LOG%"\r\n',
+        );
+
+        // Native shells expose the path variable as `Path`; a case-sensitive
+        // `env.PATH` read on the spread object would miss it and fall back
+        // to npx.
+        const env = { ...process.env, WORKTREE_SETUP_LOG: logFile };
+        delete env.PATH;
+        delete env.Path;
+        env.Path = `${commandDir}${path.delimiter}${process.env.Path ?? process.env.PATH ?? ''}`;
+
+        const result = spawnSync(
+          process.execPath,
+          [path.join(root, 'scripts/setup-worktree.js')],
+          {
+            cwd: root,
+            encoding: 'utf8',
+            env,
+          },
+        );
+
+        expect(result.status).toBe(0);
+        expect(readFileSync(logFile, 'utf8').trim()).toBe(
+          '1 1 pnpm install --frozen-lockfile --offline',
+        );
+      } finally {
+        rmSync(binDir, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('falls back to registry access when the pnpm store is incomplete', () => {
     const binDir = mkdtempSync(path.join(tmpdir(), 'qwen-worktree-fallback-'));
     const logFile = path.join(binDir, 'npx.log');
@@ -166,7 +220,7 @@ describe('package scripts', () => {
       );
 
       expect(result.status).toBe(0);
-      expect(readFileSync(logFile, 'utf8').trim().split('\n')).toEqual([
+      expect(readFileSync(logFile, 'utf8').trim().split(/\r?\n/)).toEqual([
         '1 1 --yes pnpm@11.24.0 install --frozen-lockfile --offline',
         '1 1 --yes pnpm@11.24.0 install --frozen-lockfile --prefer-offline',
       ]);
@@ -241,6 +295,7 @@ describe('package scripts', () => {
       'macos-latest',
       'windows-latest',
     ]);
+    expect(job.strategy['fail-fast']).toBe(false);
     expect(
       job.steps.find(
         (step) => step.name === 'Install frozen pnpm worktree dependencies',
@@ -253,7 +308,23 @@ describe('package scripts', () => {
       )?.run,
     ).toBe('git diff --exit-code');
 
-    expect(job.steps.some((step) => step.run === 'npm run build')).toBe(false);
+    // The clean check only means anything after the install; pin the order.
+    const stepNames = job.steps.map((step) => step.name);
+    expect(
+      stepNames.indexOf('Install frozen pnpm worktree dependencies'),
+    ).toBeLessThan(
+      stepNames.indexOf('Ensure bootstrap keeps the worktree clean'),
+    );
+
+    // Substring check on the raw job text: an exact `step.run` match is
+    // bypassed by any other spelling of a build step (block scalar,
+    // compound command).
+    expect(
+      getWorkflowJob(
+        readWorkflow('.github/workflows/pnpm-worktree-smoke.yml'),
+        'install',
+      ),
+    ).not.toContain('npm run build');
   });
 
   it('runs the pnpm smoke workflow when a dependency input changes', () => {
