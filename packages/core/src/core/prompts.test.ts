@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   assembleSystemPrompt,
   getCoreSystemPrompt,
@@ -14,10 +14,16 @@ import {
   resolvePathFromEnv,
   getCompressionPrompt,
   resolveInteractionMode,
+  resolveMainSessionOutputStyle,
 } from './prompts.js';
+// The base-prompt builder lives with the client that calls it; these tests
+// pin it against the resolver here so the prompt and the per-turn reminder
+// cannot drift apart.
+import { getMainSessionBaseSystemPrompt } from './client.js';
 import {
   BUILT_IN_OUTPUT_STYLES,
   getBuiltInOutputStyle,
+  type OutputStyleDefinition,
 } from './output-styles.js';
 import { InputFormat } from '../output/types.js';
 import { isGitRepository } from '../utils/gitUtils.js';
@@ -786,6 +792,125 @@ describe('Core System Prompt (prompts.ts)', () => {
       // ...and the dumped identity sentence is the unstyled one.
       expect(written).toContain('specializing in software engineering tasks');
     });
+  });
+});
+
+describe('main-session style: reminder decision matches prompt section', () => {
+  const concise = getBuiltInOutputStyle('Concise')!;
+  const learning = getBuiltInOutputStyle('Learning')!;
+
+  const sessions = [
+    ['interactive', { interactive: true, acp: false }],
+    ['headless', { interactive: false, acp: false }],
+    ['acp', { interactive: false, acp: true }],
+  ] as const;
+
+  const makeConfig = (opts: {
+    customPrompt?: string;
+    style?: OutputStyleDefinition;
+    interactive: boolean;
+    acp: boolean;
+  }) => ({
+    getSystemPrompt: () => opts.customPrompt,
+    getModel: () => 'test-model',
+    getOutputStyle: () => opts.style,
+    getExperimentalZedIntegration: () => opts.acp,
+    getInputFormat: () => InputFormat.TEXT,
+    isInteractive: () => opts.interactive,
+  });
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    vi.stubEnv('QWEN_SYSTEM_MD', undefined);
+    vi.stubEnv('QWEN_SYSTEM_IDENTITY_MD', undefined);
+    vi.stubEnv('QWEN_WRITE_SYSTEM_MD', undefined);
+    vi.stubEnv('QWEN_CODE_TOOL_CALL_STYLE', undefined);
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it.each(sessions)(
+    'renders the %s interaction mode the config resolves to',
+    (session, flags) => {
+      const markers = {
+        interactive: 'an interactive CLI agent',
+        headless: 'a non-interactive CLI agent',
+        acp: 'a CLI agent operating through an ACP host',
+      } as const;
+      expect(getMainSessionBaseSystemPrompt(makeConfig(flags))).toContain(
+        markers[session],
+      );
+    },
+  );
+
+  interface Case {
+    name: string;
+    customPrompt?: string;
+    systemMd?: string;
+    style?: OutputStyleDefinition;
+    flags: { interactive: boolean; acp: boolean };
+  }
+
+  const cases: Case[] = [];
+  for (const customPrompt of [undefined, 'You are terse.']) {
+    for (const systemMd of [undefined, 'true']) {
+      for (const style of [undefined, concise, learning]) {
+        for (const [session, flags] of sessions) {
+          cases.push({
+            name:
+              `custom=${customPrompt ? 'yes' : 'no'} ` +
+              `systemMd=${systemMd ?? 'off'} ` +
+              `style=${style?.name ?? 'none'} session=${session}`,
+            customPrompt,
+            systemMd,
+            style,
+            flags,
+          });
+        }
+      }
+    }
+  }
+
+  // The per-turn gate in LlmClient is exactly
+  // resolveMainSessionOutputStyle(config), so pinning that decision against
+  // the rendered prompt means the reminder and the prompt cannot drift when
+  // a new prompt condition is added. The client-side wiring is pinned by the
+  // reminder tests in client.test.ts.
+  it.each(cases)(
+    'reminds if and only if the prompt carries the style section ($name)',
+    ({ customPrompt, systemMd, style, flags }) => {
+      vi.stubEnv('QWEN_SYSTEM_MD', systemMd);
+      if (systemMd) {
+        vi.mocked(fs.existsSync).mockReturnValue(true);
+        vi.mocked(fs.readFileSync).mockReturnValue('custom system prompt');
+      }
+
+      const config = makeConfig({ customPrompt, style, ...flags });
+      const reminded = resolveMainSessionOutputStyle(config) !== undefined;
+      const prompt = getMainSessionBaseSystemPrompt(config);
+
+      expect(reminded).toBe(prompt.includes('# Output Style:'));
+      if (customPrompt) {
+        // The override replaces the base verbatim.
+        expect(prompt).toContain(customPrompt);
+        expect(prompt).not.toContain('You are Qwen Code');
+      } else if (!systemMd) {
+        expect(prompt).toContain('You are Qwen Code');
+      }
+    },
+  );
+
+  it('forwards the config model to the base prompt', () => {
+    const config = {
+      ...makeConfig({ interactive: true, acp: false }),
+      getModel: () => 'qwen3-coder-7b',
+    };
+
+    expect(getMainSessionBaseSystemPrompt(config)).toContain(
+      '<function=run_shell_command>',
+    );
   });
 });
 

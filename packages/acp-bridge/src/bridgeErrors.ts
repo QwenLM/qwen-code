@@ -623,10 +623,12 @@ export class SessionBusyError extends Error {
 export class WorkspaceDrainingError extends Error {
   readonly code = 'workspace_draining';
   readonly workspaceCwd: string;
-  constructor(workspaceCwd: string) {
+  override readonly cause: unknown;
+  constructor(workspaceCwd: string, cause?: unknown) {
     super(`Workspace ${JSON.stringify(workspaceCwd)} is being removed`);
     this.name = 'WorkspaceDrainingError';
     this.workspaceCwd = workspaceCwd;
+    this.cause = cause;
   }
 }
 
