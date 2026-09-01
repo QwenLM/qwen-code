@@ -179,7 +179,9 @@ import {
   type GoalRuntime,
   type GoalTurnHost,
 } from '../goals/goal-runtime.js';
+import type { PendingGoalProposal } from '../goals/goal-tools.js';
 import type { GoalRecoveryRecord } from '../goals/goal-persistence.js';
+import { GOAL_DEFAULT_TOKEN_BUDGET } from '../goals/goal-protocol.js';
 import { createGoalCheckpointVerifier } from '../goals/goal-checkpoint-verifier.js';
 import { createGoalVerifier } from '../goals/goal-verifier.js';
 import type { ToolInvocationGuard } from '../core/tool-invocation-guard.js';
@@ -840,6 +842,26 @@ export interface AgentsCollabSettings {
   };
 }
 
+export interface SessionWorkflowPlanRevision {
+  planId: string;
+  sourceCallId: string;
+  todoIds: readonly string[];
+  /**
+   * Stamped when the bound plan exits PLAN mode through an approved
+   * exit_plan_mode (Config.approveSessionWorkflowPlanRevision). The
+   * approved/pending status lives on the session-global revision instead of
+   * being derived from `getApprovalMode()`: per-agent Config wrappers carry
+   * their OWN approvalMode (e.g. an `approvalMode: plan` subagent frontmatter)
+   * while the revision is session-global, so a mode-based read would
+   * misjudge an already-approved revision as a pending draft inside such a
+   * wrapper.
+   */
+  approved?: boolean;
+}
+
+/** `goals.modelProposed`: whether the model may propose a Goal for approval. */
+export type ModelProposedGoalsMode = 'alwaysAsk' | 'disabled';
+
 export interface ConfigParameters {
   sessionId?: string;
   sessionData?: ResumedSessionData;
@@ -1015,6 +1037,14 @@ export interface ConfigParameters {
   outputLanguageFilePath?: string;
   maxSessionTurns?: number;
   /**
+   * Autonomous spend window armed on each new Goal, in `tokensUsed` tokens
+   * (`totalTokenCount` summed per Goal-turn model call). `0` runs Goals with
+   * no budget, and `-1` is accepted as an alias for `0`, matching the sibling
+   * settings where `-1` means unlimited; absent or invalid falls back to
+   * `GOAL_DEFAULT_TOKEN_BUDGET`. See `normalizeGoalTokenBudget`.
+   */
+  goalTokenBudget?: number;
+  /**
    * Maximum number of nested sub-agent levels (1-based). `1` reproduces the
    * pre-nesting behavior — level-1 sub-agents exist but cannot themselves
    * spawn sub-agents. The default `5` lets a sub-agent spawn sub-agents up to
@@ -1060,6 +1090,10 @@ export interface ConfigParameters {
   lsToolEnabled?: boolean;
   agentTeamEnabled?: boolean;
   workflowsEnabled?: boolean;
+  /** Enable the opt-in ACP/Web Shell Session Workflow gate. */
+  sessionWorkflowEnabled?: boolean;
+  /** Consent gate for the propose_goal tool; see ProposeGoalTool. */
+  modelProposedGoals?: ModelProposedGoalsMode;
   artifactEnabled?: boolean;
   artifactAutoOpen?: boolean;
   artifactPublisher?: 'local' | 'host' | 'oss';
@@ -1429,6 +1463,49 @@ export function validateMaxSessionTurns(value: number | undefined): number {
     );
   }
   return resolved;
+}
+
+/**
+ * Resolves the operator's Goal token budget setting to the grant the Goal
+ * runtime arms on each new Goal.
+ *
+ * A positive integer is the grant. `0` opts out -- the runtime treats a
+ * non-finite grant as "arm nothing", and a Goal with no `tokenBudget` field
+ * runs unbounded, so the opt-out never has to persist `Infinity`. `-1` is an
+ * alias for `0`, matching the sibling budget settings where `-1` means
+ * unlimited. Anything else (absent, other negative, fractional, NaN,
+ * non-number) is the default; the caller decides whether that deserves a
+ * warning via `isValidGoalTokenBudget`.
+ */
+export function normalizeGoalTokenBudget(value: unknown): number {
+  if (value === 0 || value === -1) return Number.POSITIVE_INFINITY;
+  return isValidGoalTokenBudget(value) ? value : GOAL_DEFAULT_TOKEN_BUDGET;
+}
+
+/**
+ * Largest accepted `model.goalTokenBudget`: 10x the built-in default.
+ *
+ * The bound is a typo guard, not a policy on long runs. The population for
+ * this setting is exactly "people typing zeros into a safety bound", and a
+ * silent extra zero disarms the runaway-spend guard the setting exists for;
+ * an operator who genuinely wants more autonomy than 300M tokens per window
+ * has the explicit opt-out (`0`/`-1`) instead. Values above the cap fall
+ * back to the default and land in the debug log like every other invalid
+ * value.
+ */
+export const GOAL_TOKEN_BUDGET_CAP = 10 * GOAL_DEFAULT_TOKEN_BUDGET;
+
+/**
+ * True for the values `normalizeGoalTokenBudget` honours (`-1` as the
+ * opt-out alias for `0`, positives up to `GOAL_TOKEN_BUDGET_CAP`); false for
+ * the values that fall back to the default.
+ */
+export function isValidGoalTokenBudget(value: unknown): value is number {
+  return (
+    typeof value === 'number' &&
+    Number.isInteger(value) &&
+    (value === -1 || (value >= 0 && value <= GOAL_TOKEN_BUDGET_CAP))
+  );
 }
 
 function validateMaxToolCallsPerTurn(value: number | undefined): number {
@@ -2222,6 +2299,8 @@ export class Config {
   private chatRecordingService: ChatRecordingService | undefined = undefined;
   private goalRuntime: GoalRuntime | undefined;
   private goalRuntimeReady: Promise<GoalRuntime> | undefined;
+  /** A `propose_goal` approval waiting for its turn to end; see PendingGoalProposal. */
+  private pendingGoalProposal: PendingGoalProposal | undefined;
   /**
    * A Goal restore held back because the session writer is not accepting
    * writes yet. Settled by {@link startPendingGoalRestore} once the
@@ -2256,6 +2335,7 @@ export class Config {
   private ideMode: boolean;
 
   private readonly maxSessionTurns: number;
+  private readonly goalTokenBudgetGrant: number;
   private readonly maxSubagentDepth: number;
   private readonly maxWallTimeSeconds: number;
   private readonly maxToolCalls: number;
@@ -2289,6 +2369,10 @@ export class Config {
   private readonly artifactHost?: ArtifactHostConfig;
   private readonly artifactOss?: ArtifactOssConfig;
   private workflowsEnabled = false;
+  private readonly sessionWorkflowEnabled: boolean;
+  private sessionWorkflowEnabledProvider?: () => boolean;
+  private sessionWorkflowPlanRevision?: SessionWorkflowPlanRevision;
+  private readonly modelProposedGoals: ModelProposedGoalsMode;
   private readonly skipWorkflowUsageWarning: boolean = false;
   private readonly emitToolUseSummaries: boolean = true;
   private readonly chatRecordingEnabled: boolean;
@@ -2558,6 +2642,17 @@ export class Config {
     this.fileDiscoveryService = params.fileDiscoveryService ?? null;
     this.bugCommand = params.bugCommand;
     this.maxSessionTurns = validateMaxSessionTurns(params.maxSessionTurns);
+    this.goalTokenBudgetGrant = normalizeGoalTokenBudget(
+      params.goalTokenBudget,
+    );
+    if (
+      params.goalTokenBudget !== undefined &&
+      !isValidGoalTokenBudget(params.goalTokenBudget)
+    ) {
+      this.debugLogger.warn(
+        `Ignoring invalid goalTokenBudget ${String(params.goalTokenBudget)}: expected a non-negative integer or -1 (no budget); using the default of ${GOAL_DEFAULT_TOKEN_BUDGET}.`,
+      );
+    }
     this.maxSubagentDepth = normalizeMaxSubagentDepth(params.maxSubagentDepth);
     this.maxWallTimeSeconds = params.maxWallTimeSeconds ?? -1;
     this.maxToolCalls = params.maxToolCalls ?? -1;
@@ -2593,6 +2688,8 @@ export class Config {
     this.artifactHost = params.artifactHost;
     this.artifactOss = params.artifactOss;
     this.workflowsEnabled = params.workflowsEnabled ?? false;
+    this.sessionWorkflowEnabled = params.sessionWorkflowEnabled ?? false;
+    this.modelProposedGoals = params.modelProposedGoals ?? 'alwaysAsk';
     this.skipWorkflowUsageWarning = params.skipWorkflowUsageWarning ?? false;
     this.emitToolUseSummaries = params.emitToolUseSummaries ?? true;
     this.listExtensions = params.listExtensions ?? false;
@@ -4109,6 +4206,15 @@ export class Config {
   }
 
   /**
+   * The raw modelProviders config the model registry was last built from.
+   * Lets hot-reload listeners diff against the APPLIED registry state instead
+   * of a listener-local snapshot (which out-of-band reloads would desync).
+   */
+  getModelProvidersConfig(): ModelProvidersConfig | undefined {
+    return this.modelsConfig.getModelProvidersConfig();
+  }
+
+  /**
    * Refresh authentication and rebuild ContentGenerator.
    */
   async refreshAuth(authMethod: AuthType, isInitialAuth?: boolean) {
@@ -5465,6 +5571,15 @@ export class Config {
 
   getMaxSessionTurns(): number {
     return this.maxSessionTurns;
+  }
+
+  /**
+   * The autonomous spend window armed on each new Goal, as the runtime's
+   * `tokenBudgetGrant`: a positive integer, or `Infinity` when the operator
+   * set `goalTokenBudget` to `0` or `-1` (Goals then run unbounded).
+   */
+  getGoalTokenBudgetGrant(): number {
+    return this.goalTokenBudgetGrant;
   }
 
   getMaxSubagentDepth(): number {
@@ -6969,10 +7084,12 @@ export class Config {
       /** @deprecated Model origin no longer changes plan-exit approval. */
       enteredByModel?: boolean;
       /**
-       * Set by ExitPlanModeTool for user/leader-approved plan exits. Every
-       * other PLAN → non-PLAN transition (Shift+Tab, /approval-mode, /plan,
-       * ACP setSessionMode, confirm-and-switch) is a manual exit the model
-       * was never told about, and queues a one-shot system reminder.
+       * Set by ExitPlanModeTool for user/leader-approved plan exits. Only the
+       * root Session Config may stamp the session-global workflow revision;
+       * derived agent configs still clear their local plan-exit notice.
+       * Every other PLAN → non-PLAN transition (Shift+Tab, /approval-mode,
+       * /plan, ACP setSessionMode, confirm-and-switch) is a manual exit the
+       * model was never told about, and queues a one-shot system reminder.
        */
       fromApprovedPlanExit?: boolean;
     },
@@ -7027,6 +7144,12 @@ export class Config {
       noticeEvent.kind = options?.fromApprovedPlanExit
         ? 'clear'
         : 'manual-exit';
+      if (
+        options?.fromApprovedPlanExit &&
+        Object.getPrototypeOf(this) === Config.prototype
+      ) {
+        this.approveSessionWorkflowPlanRevision();
+      }
     }
     // Any deliberate mode change invalidates the AUTO denialTracking signal.
     if (fromMode !== mode) {
@@ -7662,6 +7785,127 @@ export class Config {
 
   setWorkflowsEnabled(enabled: boolean): void {
     this.workflowsEnabled = enabled;
+  }
+
+  /**
+   * Pure gate check — MUST stay a read. This method is reached
+   * unconditionally by every revision read path
+   * (`getSessionWorkflowPlanRevision`, `isSessionWorkflowTodoContextActive`),
+   * including through `Object.create(base)` Config wrappers. An assignment
+   * here would land as an OWN property on such a wrapper and permanently
+   * shadow the session-global base value (a gate-off read in one subagent
+   * would then hide revisions the base approves later). Invalidation
+   * belongs in the explicit writers: `setSessionWorkflowEnabledProvider`
+   * below clears on an explicit gate change, and the read paths already
+   * gate on this method, so an off gate hides the revision without
+   * destroying it.
+   */
+  isSessionWorkflowEnabled(): boolean {
+    return (
+      this.sessionWorkflowEnabledProvider?.() ?? this.sessionWorkflowEnabled
+    );
+  }
+
+  setSessionWorkflowEnabledProvider(provider?: () => boolean): void {
+    this.sessionWorkflowEnabledProvider = provider;
+    if (!this.isSessionWorkflowEnabled()) {
+      this.sessionWorkflowPlanRevision = undefined;
+    }
+  }
+
+  getSessionWorkflowPlanRevision(): SessionWorkflowPlanRevision | undefined {
+    if (!this.isSessionWorkflowEnabled()) return undefined;
+    return this.sessionWorkflowPlanRevision;
+  }
+
+  setSessionWorkflowPlanRevision(
+    revision: SessionWorkflowPlanRevision | undefined,
+  ): void {
+    if (
+      !this.isSessionWorkflowEnabled() ||
+      revision === undefined ||
+      revision.planId.trim() === '' ||
+      revision.sourceCallId.trim() === ''
+    ) {
+      this.sessionWorkflowPlanRevision = undefined;
+      return;
+    }
+
+    const todoIds = Array.from(
+      new Set(
+        revision.todoIds.filter(
+          (todoId): todoId is string =>
+            typeof todoId === 'string' && todoId.trim() !== '',
+        ),
+      ),
+    );
+    this.sessionWorkflowPlanRevision =
+      todoIds.length > 0
+        ? {
+            planId: revision.planId,
+            sourceCallId: revision.sourceCallId,
+            todoIds,
+            ...(revision.approved ? { approved: true } : {}),
+          }
+        : undefined;
+  }
+
+  clearSessionWorkflowPlanRevision(): void {
+    this.sessionWorkflowPlanRevision = undefined;
+  }
+
+  /**
+   * Stamp the bound revision as approved. Runs on the PLAN → non-PLAN
+   * transition of an approved exit_plan_mode on the root Session Config.
+   */
+  approveSessionWorkflowPlanRevision(): void {
+    const revision = this.getSessionWorkflowPlanRevision();
+    if (!revision || revision.approved) return;
+    this.setSessionWorkflowPlanRevision({ ...revision, approved: true });
+  }
+
+  isSessionWorkflowTodoContextActive(): boolean {
+    return (
+      this.isSessionWorkflowEnabled() &&
+      (this.approvalMode === ApprovalMode.PLAN ||
+        this.sessionWorkflowPlanRevision !== undefined)
+    );
+  }
+
+  /**
+   * Whether the model may propose a session Goal through `propose_goal`.
+   * Read from user/system settings only (see WORKSPACE_RESTRICTED_SETTINGS
+   * in the CLI): a workspace must not be able to switch on a tool that asks
+   * the user to start an autonomous loop.
+   */
+  getModelProposedGoals(): ModelProposedGoalsMode {
+    return this.modelProposedGoals;
+  }
+
+  hasPendingGoalProposal(): boolean {
+    return this.pendingGoalProposal !== undefined;
+  }
+
+  /** Parks a `propose_goal` approval until the proposing turn ends. */
+  setPendingGoalProposal(proposal: PendingGoalProposal): boolean {
+    if (this.pendingGoalProposal) return false;
+    this.pendingGoalProposal = proposal;
+    return true;
+  }
+
+  /** Hands the parked approval to its owning turn, or clears it explicitly. */
+  takePendingGoalProposal(
+    expectedTurnKey?: string,
+  ): PendingGoalProposal | undefined {
+    const proposal = this.pendingGoalProposal;
+    if (
+      expectedTurnKey !== undefined &&
+      proposal?.turnKey !== expectedTurnKey
+    ) {
+      return undefined;
+    }
+    this.pendingGoalProposal = undefined;
+    return proposal;
   }
 
   /**
@@ -8485,6 +8729,8 @@ export class Config {
         'Goal runtime was replaced before the session writer became available',
       ),
     );
+    // An approval belongs to the session that produced it.
+    this.pendingGoalProposal = undefined;
     if (!this.chatRecordingService) {
       this.goalRuntime = undefined;
       this.goalRuntimeReady = undefined;
@@ -8500,6 +8746,7 @@ export class Config {
       tokenLedger: recorder,
       verifier: createGoalVerifier(this),
       checkpointVerifier: createGoalCheckpointVerifier(this),
+      tokenBudgetGrant: this.goalTokenBudgetGrant,
     });
     this.goalRuntime = runtime;
     if (this.goalTurnHost) {
@@ -9151,6 +9398,18 @@ export class Config {
         const { UpdateGoalTool } = await import('../goals/goal-tools.js');
         return new UpdateGoalTool(this);
       });
+      // propose_goal only exists where its approval dialog can be shown and
+      // the user has not switched model-proposed Goals off. Headless runs
+      // keep the text hand-off (`/goal set …`) that /goal-draft prints.
+      if (
+        this.getModelProposedGoals() !== 'disabled' &&
+        resolveInteractionMode(this) === 'interactive'
+      ) {
+        await registerLazy(ToolNames.PROPOSE_GOAL, async () => {
+          const { ProposeGoalTool } = await import('../goals/goal-tools.js');
+          return new ProposeGoalTool(this);
+        });
+      }
     };
 
     if (this.getBareMode()) {
@@ -9599,4 +9858,45 @@ export class Config {
     | undefined {
     return this.currentSessionScheduledTaskCreator;
   }
+}
+
+/**
+ * Install the Session Workflow plan-revision write-through shims on a
+ * prototype-wrapper Config (`Object.create(base)`).
+ *
+ * Plan-revision state is session-global and lives on the root Config. The
+ * Config prototype methods assign `this.sessionWorkflowPlanRevision`, which
+ * on a wrapper lands as an OWN property and shadows the base value — e.g. a
+ * subagent's divergent todo_write clearing the approved revision only for
+ * itself while the parent keeps rejecting Agent launches against a plan that
+ * no longer exists. The shims forward set/clear to the wrapped Config (which
+ * may itself be a write-through wrapper — the chain bottoms out at the root
+ * Config); reads keep walking the prototype.
+ *
+ * Apply at EVERY wrapper builder — `createApprovalModeOverride` and the
+ * AgentTool isolation-worktree wrapper (tools/agent/agent.ts),
+ * `buildSubagentContextOverride` (subagents/subagent-manager.ts),
+ * `InProcessBackend.createPerAgentConfig`, and the dir-scoped dispatch
+ * wrappers + `createSchemaConfigOverride`
+ * (agents/runtime/workflow-orchestrator.ts) — otherwise the un-shimmed
+ * family silently diverges the session-global revision. A wrapper ABOVE a
+ * shimmed one needs no shim of its own: the inner shim stays reachable
+ * through the prototype chain.
+ */
+export function installSessionWorkflowRevisionWriteThrough(
+  wrapper: Config,
+  base: Config,
+): void {
+  // The shims intentionally mirror Config's TS-private field name through
+  // the prototype method signatures; keep the any-cast local.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const ov = wrapper as any;
+  ov.setSessionWorkflowPlanRevision = (
+    revision: Parameters<Config['setSessionWorkflowPlanRevision']>[0],
+  ): void => {
+    base.setSessionWorkflowPlanRevision(revision);
+  };
+  ov.clearSessionWorkflowPlanRevision = (): void => {
+    base.clearSessionWorkflowPlanRevision();
+  };
 }

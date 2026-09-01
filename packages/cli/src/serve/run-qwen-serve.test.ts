@@ -35,6 +35,7 @@ import {
 } from './run-qwen-serve.js';
 import { isBrowserAutomationMcpAvailable } from './cdp-mcp-command.js';
 import * as nativeDirectoryPicker from './native-directory-picker.js';
+import * as localPathOpen from './local-path-open.js';
 import { loadServeFastPathEnvironment } from './fast-path-settings.js';
 import { loadEnvironment } from '../config/environment.js';
 import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
@@ -118,13 +119,14 @@ const BASE_BRIDGE_SNAPSHOT: BridgeDaemonStatusSnapshot = {
   limits: {
     maxSessions: 20,
     maxPendingPromptsPerSession: 5,
-    eventRingSize: 8000,
+    eventRingSize: 8_000,
     compactedReplayMaxBytes: 4 * 1024 * 1024,
     maxJournalEvents: 10_000,
     maxJournalBytes: 8 * 1024 * 1024,
     journalGrowth: null,
     channelIdleTimeoutMs: 0,
     sessionIdleTimeoutMs: 1_800_000,
+    sessionPromptSettledCloseGraceMs: 0,
   },
   sessionCount: 0,
   pendingPermissionCount: 0,
@@ -4843,6 +4845,7 @@ describe('runQwenServe telemetry validation', () => {
         compactedReplayMaxBytes: 1024,
         channelIdleTimeoutMs: 60_000,
         sessionRestoreTimeoutMs: 90_000,
+        sessionPromptSettledCloseGraceMs: 5_000,
         serveWebShell: false,
       },
       {
@@ -4867,6 +4870,7 @@ describe('runQwenServe telemetry validation', () => {
         compactedReplayMaxBytes: 1024,
         eventRingSize: 1234,
         sessionRestoreTimeoutMs: 90_000,
+        sessionPromptSettledCloseGraceMs: 5_000,
         permissionPolicy: 'local-only',
         onChannelDelivery: expect.any(Function),
       });
@@ -4875,6 +4879,7 @@ describe('runQwenServe telemetry validation', () => {
         compactedReplayMaxBytes: 1024,
         eventRingSize: 1234,
         sessionRestoreTimeoutMs: 90_000,
+        sessionPromptSettledCloseGraceMs: 5_000,
         permissionPolicy: 'local-only',
         onChannelDelivery: expect.any(Function),
       });
@@ -6741,7 +6746,10 @@ describe('runQwenServe session reaper timeout validation', () => {
   }
 
   async function runWithReaperOption(
-    optionName: 'sessionReapIntervalMs' | 'sessionIdleTimeoutMs',
+    optionName:
+      | 'sessionReapIntervalMs'
+      | 'sessionIdleTimeoutMs'
+      | 'sessionPromptSettledCloseGraceMs',
     value: number,
   ) {
     tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-rt-')));
@@ -6776,6 +6784,10 @@ describe('runQwenServe session reaper timeout validation', () => {
     ['sessionIdleTimeoutMs', 1.5],
     ['sessionIdleTimeoutMs', Number.NaN],
     ['sessionIdleTimeoutMs', Number.POSITIVE_INFINITY],
+    ['sessionPromptSettledCloseGraceMs', -1],
+    ['sessionPromptSettledCloseGraceMs', 1.5],
+    ['sessionPromptSettledCloseGraceMs', Number.NaN],
+    ['sessionPromptSettledCloseGraceMs', Number.POSITIVE_INFINITY],
   ] as const)('rejects invalid %s=%s', async (optionName, value) => {
     await expect(runWithReaperOption(optionName, value)).rejects.toThrow(
       optionName,
@@ -6785,6 +6797,7 @@ describe('runQwenServe session reaper timeout validation', () => {
   it.each([
     ['sessionReapIntervalMs', 0],
     ['sessionIdleTimeoutMs', 0],
+    ['sessionPromptSettledCloseGraceMs', 0],
   ] as const)(
     'keeps %s=0 as the disabled sentinel',
     async (optionName, value) => {
@@ -11021,7 +11034,7 @@ describe('runQwenServe runtime startup failures', () => {
           maxSessions: 1,
           maxPendingPromptsPerSession: 5,
           listenerMaxConnections: 256,
-          eventRingSize: 8000,
+          eventRingSize: 8_000,
           compactedReplayMaxBytes: 4 * 1024 * 1024,
           maxJournalEvents: 10_000,
           maxJournalBytes: 8 * 1024 * 1024,
@@ -11029,6 +11042,7 @@ describe('runQwenServe runtime startup failures', () => {
           writerIdleTimeoutMs: null,
           channelIdleTimeoutMs: 0,
           sessionIdleTimeoutMs: 1_800_000,
+          sessionPromptSettledCloseGraceMs: 0,
           acpConnectionCap: null,
           memory: expect.objectContaining({ enforced: false }),
         },
@@ -11211,6 +11225,114 @@ describe('runQwenServe runtime startup failures', () => {
           );
           expect(status.capabilities.features).not.toContain(
             'native_directory_picker',
+          );
+        }
+        // Probed once while the bootstrap app was built, not per request.
+        expect(probe.mock.calls.length).toBe(probeCallsAfterBoot);
+      } finally {
+        await handle.close();
+      }
+    },
+  );
+
+  it.each([true, false])(
+    'mirrors the local path open probe on the bootstrap envelopes (available: %s)',
+    async (available) => {
+      tmpDir = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qws-bootstrap-open-')),
+      );
+      // Keep the runtime from mounting so the bootstrap `/capabilities` and
+      // `/daemon/status` envelopes stay the ones being served.
+      vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(() => {
+        throw new Error('runtime boom');
+      });
+      const probe = vi
+        .spyOn(localPathOpen, 'isLocalPathOpenAvailable')
+        .mockReturnValue(available);
+      const handle = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          maxSessions: 1,
+          serveWebShell: false,
+        },
+        { resolveOnListen: true },
+      );
+      try {
+        await expect(handle.runtimeReady).rejects.toThrow('runtime boom');
+        const probeCallsAfterBoot = probe.mock.calls.length;
+        const capabilities = (await (
+          await fetch(`${handle.url}/capabilities`)
+        ).json()) as { features: string[] };
+        const status = (await (
+          await fetch(`${handle.url}/daemon/status`)
+        ).json()) as { capabilities: { features: string[] } };
+        if (available) {
+          expect(capabilities.features).toContain('workspace_local_open');
+          expect(status.capabilities.features).toContain(
+            'workspace_local_open',
+          );
+        } else {
+          expect(capabilities.features).not.toContain('workspace_local_open');
+          expect(status.capabilities.features).not.toContain(
+            'workspace_local_open',
+          );
+        }
+        // Probed once while the bootstrap app was built, not per request.
+        expect(probe.mock.calls.length).toBe(probeCallsAfterBoot);
+      } finally {
+        await handle.close();
+      }
+    },
+  );
+
+  it.each([true, false])(
+    'mirrors the local terminal open probe on the bootstrap envelopes (available: %s)',
+    async (available) => {
+      tmpDir = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qws-bootstrap-terminal-')),
+      );
+      // Keep the runtime from mounting so the bootstrap `/capabilities` and
+      // `/daemon/status` envelopes stay the ones being served.
+      vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(() => {
+        throw new Error('runtime boom');
+      });
+      const probe = vi
+        .spyOn(localPathOpen, 'isLocalTerminalAvailable')
+        .mockReturnValue(available);
+      const handle = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          maxSessions: 1,
+          serveWebShell: false,
+        },
+        { resolveOnListen: true },
+      );
+      try {
+        await expect(handle.runtimeReady).rejects.toThrow('runtime boom');
+        const probeCallsAfterBoot = probe.mock.calls.length;
+        const capabilities = (await (
+          await fetch(`${handle.url}/capabilities`)
+        ).json()) as { features: string[] };
+        const status = (await (
+          await fetch(`${handle.url}/daemon/status`)
+        ).json()) as { capabilities: { features: string[] } };
+        if (available) {
+          expect(capabilities.features).toContain('workspace_local_terminal');
+          expect(status.capabilities.features).toContain(
+            'workspace_local_terminal',
+          );
+        } else {
+          expect(capabilities.features).not.toContain(
+            'workspace_local_terminal',
+          );
+          expect(status.capabilities.features).not.toContain(
+            'workspace_local_terminal',
           );
         }
         // Probed once while the bootstrap app was built, not per request.
