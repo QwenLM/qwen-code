@@ -26,6 +26,17 @@
   gap: 8px;
 }
 
+/*
+ * The two run panes are force-mounted so their pollers keep the badge
+ * counts and the saved cards' recent-runs list live while the user browses
+ * the Saved tab. Radix's forceMount does NOT hide inactive content — it
+ * only keeps it mounted — so the hiding is ours to do. Mounted and hidden
+ * is exactly what is wanted here: effects keep running, nothing renders.
+ */
+.content[data-state='inactive'] {
+  display: none;
+}
+
 .content {
   padding-top: 10px;
 }

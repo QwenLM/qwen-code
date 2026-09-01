@@ -90,10 +90,14 @@ export function WorkflowRunsPage({
     );
     setLoading(true);
     try {
-      const [nextSnapshot] = await Promise.all([
-        actions.getWorkflowTasks(),
-        actions.refreshCommands(),
-      ]);
+      // Only the task fetch gates the page. A supported-commands refresh
+      // is auxiliary — in the same Promise.all its rejection discarded an
+      // already-fetched snapshot and hid all three tabs behind the load
+      // banner, and a persistently failing refresh made the page unusable
+      // while task status worked fine. The user still hears about it:
+      // refreshCommands dispatches its own notice before throwing.
+      void actions.refreshCommands().catch(() => {});
+      const nextSnapshot = await actions.getWorkflowTasks();
       if (
         reloadGenerationRef.current !== generation ||
         activeSessionIdRef.current !== sessionId ||
@@ -132,6 +136,10 @@ export function WorkflowRunsPage({
     setSelectedWorkflow(null);
     setDetailState(null);
     setShowSource(false);
+    // Session A's failure banner must not render over session B: reload
+    // clears this only on success, so without the reset a hanging load on
+    // B leaves A's 'failed' banner up for a session that never failed.
+    setLoadError(false);
   }, [connection.sessionId]);
 
   const counts = useMemo(() => {
@@ -432,7 +440,13 @@ export function WorkflowRunsPage({
                   </div>
                 )}
               </TabsContent>
-              <TabsContent value="active" className={styles.content}>
+              {/* forceMount: the snapshot's only live update path is the
+                  poller inside these panes, and Radix unmounts an inactive
+                  pane — so on the default 'saved' tab the Active/History
+                  badges and the saved cards' recent-runs list froze at
+                  whatever the last reload saw. Radix keeps forced content
+                  hidden while inactive, so only the poller stays alive. */}
+              <TabsContent forceMount value="active" className={styles.content}>
                 <TasksStatusMessage
                   message={{ snapshot }}
                   embedded
@@ -445,7 +459,11 @@ export function WorkflowRunsPage({
                   onWorkflowRunStarted={handleWorkflowRunStarted}
                 />
               </TabsContent>
-              <TabsContent value="history" className={styles.content}>
+              <TabsContent
+                forceMount
+                value="history"
+                className={styles.content}
+              >
                 <TasksStatusMessage
                   message={{ snapshot }}
                   embedded

@@ -209,6 +209,56 @@ describe('WorkflowRunsPage', () => {
     ).not.toBeNull();
   });
 
+  it('loads the page when only the auxiliary commands refresh fails', async () => {
+    // refreshCommands is not load-bearing: coupling it into the same
+    // Promise.all as the task fetch discarded an already-fetched snapshot
+    // and hid all three tabs behind the failure banner, so a persistently
+    // failing refresh made the page unusable while task status worked. It
+    // reports itself through its own notice before throwing.
+    getTasksMock.mockResolvedValue({
+      v: 1,
+      sessionId: 'session-1',
+      now: 10_000,
+      tasks: [workflowTask('workflow-live', 'live-review')],
+    });
+    refreshCommandsMock.mockRejectedValue(new Error('boom'));
+    runSavedWorkflowMock.mockResolvedValue({ started: true });
+
+    const container = await mountPage();
+
+    expect(container.textContent).not.toContain('Failed to load workflow runs');
+    expect(container.textContent).toContain('Running1');
+    expect(getTasksMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("drops the previous session's load failure when the session changes", async () => {
+    // reload clears loadError only on success, so without a reset the old
+    // session's banner renders over the new one — indefinitely if the new
+    // session's load hangs.
+    getTasksMock.mockRejectedValueOnce(new Error('boom'));
+    refreshCommandsMock.mockResolvedValue(undefined);
+    const container = await mountPage();
+    expect(container.textContent).toContain('Failed to load workflow runs');
+
+    // Session B's load never settles.
+    getTasksMock.mockReturnValue(new Promise(() => {}));
+    connectionMock.sessionId = 'session-2';
+    connectionMock.supportedCommands.sessionId = 'session-2';
+    const root = mounted.at(-1)!.root;
+    await act(async () => {
+      root.render(
+        <I18nProvider language="en">
+          <WorkflowRunsPage
+            onCreateViaChat={createViaChatMock}
+            onWorkflowRunStarted={workflowRunStartedMock}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    expect(container.textContent).not.toContain('Failed to load workflow runs');
+  });
+
   it('separates active runs from saved and terminal history', async () => {
     const container = await renderPage({
       v: 1,
@@ -225,17 +275,33 @@ describe('WorkflowRunsPage', () => {
       ],
     });
 
+    // The two run panes are forceMount'd so their pollers keep the badge
+    // counts live while the user browses the Saved tab — Radix keeps the
+    // inactive one in the DOM but hidden, so separation is asserted on the
+    // visible pane, not on the whole container.
+    // data-state is Radix's own signal and is independent of HOW the pane
+    // is hidden (the forced ones are hidden by this page's CSS, which jsdom
+    // does not apply).
+    const visibleText = () =>
+      Array.from(
+        container.querySelectorAll<HTMLElement>(
+          '[data-slot="tabs-content"][data-state="active"]',
+        ),
+      )
+        .map((pane) => pane.textContent ?? '')
+        .join('');
+
     await selectTab(container, 'Running');
 
-    expect(container.textContent).toContain('live-review');
-    expect(container.textContent).not.toContain('saved-review');
-    expect(container.textContent).not.toContain('ordinary-agent');
+    expect(visibleText()).toContain('live-review');
+    expect(visibleText()).not.toContain('saved-review');
+    expect(visibleText()).not.toContain('ordinary-agent');
 
     await selectTab(container, 'History');
 
-    expect(container.textContent).toContain('saved-review');
-    expect(container.textContent).not.toContain('live-review');
-    expect(container.textContent).not.toContain('ordinary-agent');
+    expect(visibleText()).toContain('saved-review');
+    expect(visibleText()).not.toContain('live-review');
+    expect(visibleText()).not.toContain('ordinary-agent');
   });
 
   it('lists reusable project and user workflows and starts a new run', async () => {
