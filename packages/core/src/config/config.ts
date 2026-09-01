@@ -4183,6 +4183,15 @@ export class Config {
   }
 
   /**
+   * The raw modelProviders config the model registry was last built from.
+   * Lets hot-reload listeners diff against the APPLIED registry state instead
+   * of a listener-local snapshot (which out-of-band reloads would desync).
+   */
+  getModelProvidersConfig(): ModelProvidersConfig | undefined {
+    return this.modelsConfig.getModelProvidersConfig();
+  }
+
+  /**
    * Refresh authentication and rebuild ContentGenerator.
    */
   async refreshAuth(authMethod: AuthType, isInitialAuth?: boolean) {
