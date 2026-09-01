@@ -11,6 +11,14 @@ import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 import { runWithTeammateIdentity } from '../agents/team/identity.js';
 import { getPlanModeSystemReminder } from '../core/prompts.js';
 
+vi.mock('../core/prompts.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../core/prompts.js')>();
+  return {
+    ...actual,
+    getPlanModeSystemReminder: vi.fn(actual.getPlanModeSystemReminder),
+  };
+});
+
 describe('EnterPlanModeTool', () => {
   let tool: EnterPlanModeTool;
   let mockConfig: Config;
@@ -18,6 +26,7 @@ describe('EnterPlanModeTool', () => {
   let savedPrePlanMode: ApprovalMode | undefined;
 
   beforeEach(() => {
+    vi.mocked(getPlanModeSystemReminder).mockClear();
     approvalMode = ApprovalMode.DEFAULT;
     savedPrePlanMode = undefined;
     mockConfig = {
@@ -107,6 +116,7 @@ describe('EnterPlanModeTool', () => {
       );
       expect(approvalMode).toBe(ApprovalMode.PLAN);
       expect(savedPrePlanMode).toBe(ApprovalMode.DEFAULT);
+      expect(getPlanModeSystemReminder).toHaveBeenCalledWith(false, mockConfig);
       expect(result.llmContent).toBe(getPlanModeSystemReminder(false));
     });
 

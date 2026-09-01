@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { beforeEach, describe, it, expect, vi } from 'vitest';
 import { ToolNames } from '../tools/tool-names.js';
 import {
   BuiltinAgentRegistry,
@@ -18,6 +18,10 @@ vi.mock('../utils/bash-search-tools.js', () => ({
 }));
 
 describe('BuiltinAgentRegistry', () => {
+  beforeEach(() => {
+    mockIsBashSearchAvailable.mockReturnValue(false);
+  });
+
   describe('getBuiltinAgents', () => {
     it('should return array of builtin agents with correct properties', () => {
       const agents = BuiltinAgentRegistry.getBuiltinAgents();
@@ -84,16 +88,14 @@ describe('BuiltinAgentRegistry', () => {
       expect(exploreAgent?.tools).toContain(ToolNames.GLOB);
     });
 
-    it('uses Shell search when Bash search is available', async () => {
-      mockIsBashSearchAvailable.mockReturnValue(true);
-      vi.resetModules();
-      const { BuiltinAgentRegistry: BashBuiltinAgentRegistry } = await import(
-        './builtin-agents.js'
+    it('rebuilds agents when Bash search availability changes', () => {
+      expect(BuiltinAgentRegistry.getBuiltinAgent('Explore')?.tools).toContain(
+        ToolNames.GREP,
       );
 
-      const exploreAgent = BashBuiltinAgentRegistry.getBuiltinAgent('Explore');
-      const reviewAgent =
-        BashBuiltinAgentRegistry.getBuiltinAgent('review-agent');
+      mockIsBashSearchAvailable.mockReturnValue(true);
+      const exploreAgent = BuiltinAgentRegistry.getBuiltinAgent('Explore');
+      const reviewAgent = BuiltinAgentRegistry.getBuiltinAgent('review-agent');
 
       expect(exploreAgent?.tools).toContain(ToolNames.SHELL);
       expect(exploreAgent?.tools).not.toContain(ToolNames.GREP);

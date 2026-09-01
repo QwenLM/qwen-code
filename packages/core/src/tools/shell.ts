@@ -90,6 +90,7 @@ import {
   type ReadTextFileResponse,
 } from '../services/fileSystemService.js';
 import { createPatchSmart, getDiffStat } from './diffOptions.js';
+import type { FunctionDeclaration } from '@google/genai';
 
 const debugLogger = createDebugLogger('SHELL');
 const DEFAULT_SHELL_OUTPUT_THRESHOLD = 30_000;
@@ -4995,7 +4996,7 @@ function getShellToolDescription(config: Config): string {
     ? `- File search commands are provided by Qwen Code for this Bash invocation:
   - Use \`rg --files\` for ignore-aware filename searches, then pipe that list to another \`rg\` when you need to filter it by pattern.
   - Use \`rg\` for content search. It respects the configured .gitignore, .qwenignore, and custom ignore files by default.
-  - Do not use positive \`-g\`/\`--glob\` or \`-t\`/\`--type\` filters when ignore behavior matters; ripgrep treats them as explicit overrides of ignore rules.
+  - Do not use positive \`-g\`/\`--glob\` filters when ignore behavior matters; ripgrep treats them as explicit overrides of ignore rules.
   - Use \`grep\` when POSIX grep syntax is specifically useful.
   - Use \`find\` for metadata predicates such as type, size, permissions, and timestamps; use \`rg --files\` when ignore behavior matters.
   - Continue to use ${ToolNames.READ_FILE}, ${ToolNames.EDIT}, and ${ToolNames.WRITE_FILE} for reading, editing, and creating files.
@@ -5079,6 +5080,13 @@ export class ShellTool extends BaseDeclarativeTool<
 
   override get maxOutputChars(): number {
     return getShellOutputThreshold(this.config);
+  }
+
+  override get schema(): FunctionDeclaration {
+    return {
+      ...super.schema,
+      description: getShellToolDescription(this.config),
+    };
   }
 
   constructor(private readonly config: Config) {

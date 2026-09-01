@@ -82,6 +82,8 @@ build_bfs_macos() {
     perl -pi -e \
       's/#define BFS_HAS_PIPE2 true/#define BFS_HAS_PIPE2 false/; s/#define BFS_HAS_POSIX_SPAWN_ADDFCHDIR true/#define BFS_HAS_POSIX_SPAWN_ADDFCHDIR false/' \
       gen/config.h
+    grep -q '#define BFS_HAS_PIPE2 false' gen/config.h
+    grep -q '#define BFS_HAS_POSIX_SPAWN_ADDFCHDIR false' gen/config.h
     make -j"$(sysctl -n hw.logicalcpu)"
     strip -S bin/bfs
   )

@@ -11212,7 +11212,9 @@ describe('setApprovalMode with folder trust', () => {
     });
 
     it('uses Bash search instead of registering grep and glob', async () => {
-      vi.mocked(resolveBashSearchAvailability).mockResolvedValue(true);
+      vi.mocked(resolveBashSearchAvailability).mockImplementation(
+        async (_config, canHostSearch = true) => canHostSearch,
+      );
       const config = new Config(baseParams);
       await config.initialize();
 
@@ -11224,6 +11226,7 @@ describe('setApprovalMode with folder trust', () => {
       ).mock.calls;
       expect(deferred.some((call) => call[0] === ToolNames.GREP)).toBe(true);
       expect(deferred.some((call) => call[0] === ToolNames.GLOB)).toBe(true);
+      expect(resolveBashSearchAvailability).toHaveBeenCalledWith(config, true);
       expect(canUseRipgrep).not.toHaveBeenCalled();
     });
 
@@ -11257,9 +11260,11 @@ describe('setApprovalMode with folder trust', () => {
       const calls = (ToolRegistry.prototype.registerFactory as Mock).mock.calls;
       expect(calls.some((call) => call[0] === ToolNames.GREP)).toBe(true);
       expect(calls.some((call) => call[0] === ToolNames.GLOB)).toBe(true);
-      expect(config.getToolRegistry().getAllToolNames()).not.toContain(
-        ToolNames.SHELL,
-      );
+      expect(calls.some((call) => call[0] === ToolNames.SHELL)).toBe(false);
+      const deferred = (
+        ToolRegistry.prototype.registerPermissionDeferredFactory as Mock
+      ).mock.calls;
+      expect(deferred.some((call) => call[0] === ToolNames.SHELL)).toBe(false);
       expect(resolveBashSearchAvailability).toHaveBeenCalledWith(config, false);
     });
 
@@ -11276,9 +11281,7 @@ describe('setApprovalMode with folder trust', () => {
       const calls = (ToolRegistry.prototype.registerFactory as Mock).mock.calls;
       expect(calls.some((call) => call[0] === ToolNames.GREP)).toBe(true);
       expect(calls.some((call) => call[0] === ToolNames.GLOB)).toBe(true);
-      expect(config.getToolRegistry().getAllToolNames()).not.toContain(
-        ToolNames.SHELL,
-      );
+      expect(config.getDisabledTools()).toContain(ToolNames.SHELL);
       expect(resolveBashSearchAvailability).toHaveBeenCalledWith(config, false);
     });
 

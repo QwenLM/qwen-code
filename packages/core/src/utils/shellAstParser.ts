@@ -26,6 +26,7 @@ import {
   classifySedCommandSafety,
   hasShellPatternExpansion,
 } from './shell-safety-rules.js';
+import { scanUgrepOptions } from './ugrep-options.js';
 
 export type ShellCommandSafety = 'read-only' | 'write' | 'unknown';
 type Safety = ShellCommandSafety;
@@ -789,44 +790,7 @@ function evaluateOutputOption(args: string[], long = true, short = true) {
 }
 
 function evaluateGrepSafety(args: string[]): ShellCommandSafety {
-  const options = beforeTerminator(args);
-  if (options.some((arg) => /^--save-config(?:=|$)/.test(arg))) {
-    return 'write';
-  }
-  if (
-    options.some((arg) =>
-      /^(?:---|--(?:config|filter|pager|query|view)(?:=|$))/.test(arg),
-    )
-  ) {
-    return 'unknown';
-  }
-  const shortOptionsWithValues = new Set([
-    'A',
-    'B',
-    'C',
-    'D',
-    'd',
-    'e',
-    'f',
-    'g',
-    'J',
-    'K',
-    'M',
-    'm',
-    'N',
-    'O',
-    't',
-    'Z',
-    '?',
-  ]);
-  for (const arg of options) {
-    if (!arg.startsWith('-') || arg.startsWith('--')) continue;
-    for (const option of arg.slice(1)) {
-      if (option === 'Q') return 'unknown';
-      if (shortOptionsWithValues.has(option)) break;
-    }
-  }
-  return 'read-only';
+  return scanUgrepOptions(args).safety;
 }
 
 function evaluateGitSafety(args: string[]): ShellCommandSafety {

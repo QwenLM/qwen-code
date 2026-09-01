@@ -377,8 +377,13 @@ function testDesktopReleaseSigningWorkflow() {
     'Node.js must not receive microphone access',
   );
   assert.match(
+    searchToolsSigningBlock,
+    /-print -quit \| grep -q \./,
+    'search-tool signing must gate on at least one Darwin binary',
+  );
+  assert.match(
     workflow,
-    /Vendor directory not found at \$vendor_dir/,
+    /No macOS search binaries found at \$vendor_dir/,
     'missing search binaries must be visible in release logs',
   );
   assert.match(

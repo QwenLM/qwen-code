@@ -1216,6 +1216,31 @@ describe('ShellTool', () => {
       expect(result.llmContent).toContain(entry.outputPath);
     });
 
+    it('injects Bash search tools into background commands', async () => {
+      mockWrapWithBashSearchTools.mockReturnValue('wrapped npm start');
+      const invocation = shellTool.build({
+        command: 'npm start',
+        is_background: true,
+      });
+
+      await invocation.execute(mockAbortSignal);
+
+      expect(mockWrapWithBashSearchTools).toHaveBeenCalledWith(
+        'npm start',
+        mockConfig,
+        '/test/dir',
+      );
+      expect(mockShellExecutionService).toHaveBeenCalledWith(
+        'wrapped npm start',
+        '/test/dir',
+        expect.any(Function),
+        expect.any(AbortSignal),
+        false,
+        expect.objectContaining({}),
+        { streamStdout: true },
+      );
+    });
+
     it('settles a background entry as completed when the process exits cleanly', async () => {
       const registry = mockConfig.getBackgroundShellRegistry();
       const invocation = shellTool.build({
@@ -7543,6 +7568,23 @@ describe('ShellTool', () => {
       expect(shellTool.description).toContain('`rg --files`');
       expect(shellTool.description).toContain('injected rg, grep, and find');
       expect(shellTool.description).not.toContain(
+        'Content search: Use grep_search',
+      );
+    });
+
+    it('regenerates the model-facing description when availability changes', () => {
+      mockIsBashSearchAvailable.mockReturnValue(true);
+      const shellTool = new ShellTool(mockConfig);
+      expect(shellTool.schema.description).toContain(
+        'injected rg, grep, and find',
+      );
+
+      mockIsBashSearchAvailable.mockReturnValue(false);
+
+      expect(shellTool.schema.description).not.toContain(
+        'injected rg, grep, and find',
+      );
+      expect(shellTool.schema.description).toContain(
         'Content search: Use grep_search',
       );
     });

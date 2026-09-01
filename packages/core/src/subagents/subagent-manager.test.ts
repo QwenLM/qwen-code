@@ -27,6 +27,11 @@ vi.mock('os');
 // Mock yaml parser - use vi.hoisted for proper hoisting
 const mockParseYaml = vi.hoisted(() => vi.fn());
 const mockStringifyYaml = vi.hoisted(() => vi.fn());
+const mockIsBashSearchAvailable = vi.hoisted(() => vi.fn(() => false));
+
+vi.mock('../utils/bash-search-tools.js', () => ({
+  isBashSearchAvailable: mockIsBashSearchAvailable,
+}));
 
 vi.mock('../utils/yaml-parser.js', () => ({
   parse: mockParseYaml,
@@ -120,6 +125,7 @@ describe('SubagentManager', () => {
 
     // Reset and setup mocks
     vi.clearAllMocks();
+    mockIsBashSearchAvailable.mockReturnValue(false);
     mockValidateConfig.mockReturnValue({
       isValid: true,
       errors: [],
@@ -1993,6 +1999,23 @@ bad`);
       // After refresh, listing should only show builtin
       const subagents = await safeManager.listSubagents();
       expect(subagents.every((s) => s.level === 'builtin')).toBe(true);
+    });
+  });
+
+  describe('builtin search surface', () => {
+    it('threads the active Config into builtin agent resolution', async () => {
+      const dedicated = await manager.loadSubagent('Explore', 'builtin');
+      expect(dedicated?.tools).toEqual(
+        expect.arrayContaining([ToolNames.GREP, ToolNames.GLOB]),
+      );
+
+      mockIsBashSearchAvailable.mockReturnValue(true);
+      const bash = await manager.loadSubagent('Explore', 'builtin');
+
+      expect(mockIsBashSearchAvailable).toHaveBeenLastCalledWith(mockConfig);
+      expect(bash?.tools).not.toContain(ToolNames.GREP);
+      expect(bash?.tools).not.toContain(ToolNames.GLOB);
+      expect(bash?.systemPrompt).toContain('`rg --files`');
     });
   });
 

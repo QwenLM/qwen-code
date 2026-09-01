@@ -43,6 +43,28 @@ describe('buildTeammatePromptAddendum', () => {
     expect(prompt).not.toContain('grep_search, glob');
   });
 
+  it('keeps dedicated search guidance when the teammate has no Shell', () => {
+    mockIsBashSearchAvailable.mockReturnValue(true);
+
+    const prompt = buildTeammatePromptAddendum('worker', 'team', 'leader', {
+      canUseShellSearch: false,
+    });
+
+    expect(prompt).toContain('grep_search, glob');
+    expect(prompt).not.toContain('run_shell_command with `rg`');
+  });
+
+  it('uses Bash search guidance in plan mode when available', () => {
+    mockIsBashSearchAvailable.mockReturnValue(true);
+
+    const prompt = buildTeammatePromptAddendum('planner', 'team', 'leader', {
+      planModeRequired: true,
+    });
+
+    expect(prompt).toContain('other available read-only investigation tools');
+    expect(prompt).not.toContain('grep_search, glob');
+  });
+
   it('marks read-only tasks complete before the turn-ending report', () => {
     const prompt = buildTeammatePromptAddendum('reader', 'team', 'leader', {
       readOnly: true,

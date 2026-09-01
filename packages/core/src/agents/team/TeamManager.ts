@@ -542,6 +542,15 @@ export class TeamManager {
         };
       }
 
+      const canUseShellSearch =
+        toolConfig === undefined ||
+        (toolConfig.tools.some((tool) =>
+          typeof tool === 'string'
+            ? tool === ToolNames.SHELL
+            : tool.name === ToolNames.SHELL,
+        ) &&
+          !toolConfig.disallowedTools?.includes(ToolNames.SHELL));
+
       // Build system prompt: subagent prompt (if any) or user prompt + team addendum.
       const addendum = buildTeammatePromptAddendum(
         name,
@@ -550,6 +559,7 @@ export class TeamManager {
         {
           planModeRequired: config.planModeRequired,
           readOnly: config.readOnly,
+          canUseShellSearch,
         },
         this.searchConfig,
       );

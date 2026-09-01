@@ -158,6 +158,17 @@ describe('extractShellOperations', () => {
     expect(
       extractShellOperations('grep --save-config needle file.txt', CWD),
     ).toEqual([{ virtualTool: 'write_file', filePath: `${CWD}/.ugrep` }]);
+    expect(
+      extractShellOperations(
+        'grep --save-config= conf.txt needle file.txt',
+        CWD,
+      ),
+    ).toEqual([{ virtualTool: 'write_file', filePath: `${CWD}/conf.txt` }]);
+    expect(
+      extractShellOperations('grep -e --save-config file.txt', CWD),
+    ).not.toContainEqual(
+      expect.objectContaining({ virtualTool: 'write_file' }),
+    );
   });
 
   // ── ls / find ──────────────────────────────────────────────────────────────

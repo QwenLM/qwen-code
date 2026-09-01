@@ -33,6 +33,12 @@ import { formatAgentId } from './teamHelpers.js';
 // call is an observable: a per-agent ContentGenerator is built if and
 // only if the spawn path resolved a dedicated route for the agent.
 const mockCreateContentGenerator = vi.hoisted(() => vi.fn());
+const mockIsBashSearchAvailable = vi.hoisted(() =>
+  vi.fn<(searchConfig?: object) => boolean>(() => false),
+);
+vi.mock('../../utils/bash-search-tools.js', () => ({
+  isBashSearchAvailable: mockIsBashSearchAvailable,
+}));
 vi.mock('../../core/contentGenerator.js', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('../../core/contentGenerator.js')>();
@@ -187,6 +193,7 @@ describe('TeamManager teammate model routing (#10071)', () => {
     mockCreateContentGenerator.mockResolvedValue({
       generateContentStream: vi.fn(),
     });
+    mockIsBashSearchAvailable.mockReturnValue(false);
     (AgentCore as unknown as ReturnType<typeof vi.fn>).mockClear();
 
     leaderConfig = createLeaderConfig(projectDir);
@@ -197,6 +204,7 @@ describe('TeamManager teammate model routing (#10071)', () => {
       backend,
       await writeTeamFileFixture(),
       subagentManager,
+      { searchConfig: leaderConfig },
     );
   });
 
@@ -317,6 +325,57 @@ describe('TeamManager teammate model routing (#10071)', () => {
     );
     expect(modelConfig.model).toBeUndefined();
     expect(runtimeView).toBeUndefined();
+  });
+
+  it('uses the teammate tool surface when selecting search guidance', async () => {
+    mockIsBashSearchAvailable.mockReturnValue(true);
+    await writeAgentDefinition(projectDir, 'shell-less-worker.md', {
+      name: 'shell-less-worker',
+      description: 'A worker without shell access',
+      tools: '[read_file, grep_search, glob]',
+    });
+
+    await teamManager.spawnTeammate({
+      name: 'searcher',
+      agentType: 'shell-less-worker',
+      cwd: projectDir,
+    });
+
+    const MockAgentCore = AgentCore as unknown as ReturnType<typeof vi.fn>;
+    const { promptConfig, toolConfig } = destructureAgentCoreCall(
+      MockAgentCore.mock.calls.at(-1)!,
+    );
+    const tools = (toolConfig as { tools: string[] }).tools;
+    const systemPrompt = (promptConfig as { systemPrompt: string })
+      .systemPrompt;
+    expect(tools).not.toContain('run_shell_command');
+    expect(systemPrompt).toContain('grep_search, glob');
+    expect(systemPrompt).not.toContain('run_shell_command with `rg`');
+  });
+
+  it('threads the leader Config into teammate search guidance', async () => {
+    mockIsBashSearchAvailable.mockImplementation(
+      (searchConfig) => searchConfig === leaderConfig,
+    );
+
+    await teamManager.spawnTeammate({
+      name: 'searcher',
+      prompt: 'Search the repository.',
+      cwd: projectDir,
+    });
+
+    const MockAgentCore = AgentCore as unknown as ReturnType<typeof vi.fn>;
+    const { promptConfig } = destructureAgentCoreCall(
+      MockAgentCore.mock.calls.at(-1)!,
+    );
+    const systemPrompt = (promptConfig as { systemPrompt: string })
+      .systemPrompt;
+    expect(
+      mockIsBashSearchAvailable.mock.calls.some(
+        ([searchConfig]) => searchConfig === leaderConfig,
+      ),
+    ).toBe(true);
+    expect(systemPrompt).toContain('run_shell_command with `rg`');
   });
 
   it('keeps the leader route for inherit selectors', async () => {

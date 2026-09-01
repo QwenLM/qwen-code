@@ -35,6 +35,7 @@ import nodePath from 'node:path';
 import os from 'node:os';
 import { stripShellWrapper } from '../utils/shell-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { scanUgrepOptions } from '../utils/ugrep-options.js';
 import { splitCompoundCommandSegments } from './rule-parser.js';
 
 const shellSemanticsDebugLogger = createDebugLogger('SHELL_SEMANTICS');
@@ -871,21 +872,13 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
   // ── Grep / search commands ────────────────────────────────────────────────
 
   grep: (args, cwd) => {
-    const terminatorIndex = args.indexOf('--');
-    const options = args.slice(
-      0,
-      terminatorIndex < 0 ? args.length : terminatorIndex,
-    );
-    const saveConfig = options.find((arg) => /^--save-config(?:=|$)/.test(arg));
-    if (saveConfig) {
-      const equalsIndex = saveConfig.indexOf('=');
-      const target =
-        equalsIndex < 0 ? '.ugrep' : saveConfig.slice(equalsIndex + 1);
-      if (target && target !== '-') {
+    const { saveConfigTarget } = scanUgrepOptions(args);
+    if (saveConfigTarget) {
+      if (saveConfigTarget !== '-') {
         return [
           {
             virtualTool: 'write_file',
-            filePath: resolvePath(target, cwd),
+            filePath: resolvePath(saveConfigTarget, cwd),
           },
         ];
       }

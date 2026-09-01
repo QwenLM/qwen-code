@@ -85,18 +85,17 @@ The injected `rg` defaults mirror the current RipGrep tool:
   that custom negations cannot override `.qwenignore` exclusions.
 
 Within one ignore file, negation follows normal gitignore semantics. Across
-separate custom/Qwen ignore files, the native commands use last-match
-precedence, with `.qwenignore` passed last. This is the one intentional edge
-difference from the dedicated tools, whose in-process parser treats each
-ignore source independently and unions their exclusions; the native CLIs do
-not expose that composition mode.
+separate custom/Qwen ignore files, all search surfaces use last-match
+precedence, with `.qwenignore` passed last.
 
-Positive ripgrep glob and type filters explicitly override ignore rules. The
+Positive ripgrep glob filters explicitly override ignore rules. The
 prompt therefore uses `rg --files | rg PATTERN` for filename filtering instead
 of `rg --files -g PATTERN` when ignore behavior matters.
 
-Bundled ugrep receives `--ignore-files` for nested `.gitignore` files and an
-absolute `--ignore-files=PATH` for every existing Qwen/custom ignore file.
+Bundled ugrep receives `--ignore-files` for nested `.gitignore` files. Existing
+Qwen/custom ignore files are concatenated in order through one Bash process
+substitution so ugrep applies the same cross-file precedence as ripgrep and the
+dedicated tools.
 
 bfs has no gitignore parser or ignore-file option. Injecting prune expressions
 would not preserve gitignore negation and nested-file semantics. The prompt

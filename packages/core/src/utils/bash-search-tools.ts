@@ -12,6 +12,11 @@ import { DEFAULT_FILE_FILTERING_OPTIONS } from './file-filtering-options.js';
 import { getQwenIgnoreFileNames } from './qwenIgnoreParser.js';
 import { resolveHealthyBuiltinRipgrep } from './ripgrepUtils.js';
 import { escapeShellArg, getShellConfiguration } from './shell-utils.js';
+import {
+  UGREP_LONG_OPTIONS_WITH_REQUIRED_VALUES,
+  UGREP_SHORT_OPTIONS_WITH_REQUIRED_VALUES,
+} from './ugrep-options.js';
+import { parse } from 'shell-quote';
 
 type SearchBinary = 'bfs' | 'ugrep';
 
@@ -34,8 +39,10 @@ function getBundledSearchBinary(ripgrep: string, binary: SearchBinary): string {
   return path.join(vendorDirectory, binary, platformDirectory, binary);
 }
 
-function hasSingleWorkspaceRoot(config: Config): boolean {
-  return config.getWorkspaceContext?.().getDirectories().length === 1;
+function hasSingleWorkspaceRoot(config: object): boolean {
+  return (
+    (config as Config).getWorkspaceContext?.().getDirectories().length === 1
+  );
 }
 
 async function resolveBundledSearchBinaries(): Promise<BundledSearchBinaries | null> {
@@ -106,7 +113,13 @@ export function isBashSearchAvailable(config?: object): boolean {
   while (current) {
     const available = availabilityByConfig.get(current);
     if (available !== undefined) {
-      return available && bundled !== undefined && bundled !== null;
+      return (
+        available &&
+        bundled !== undefined &&
+        bundled !== null &&
+        config !== undefined &&
+        hasSingleWorkspaceRoot(config)
+      );
     }
     current = Object.getPrototypeOf(current) as object | null;
   }
@@ -122,6 +135,7 @@ export function _resetBashSearchToolsForTest(): void {
 function getIgnoreFiles(
   config: Config,
   cwd: string,
+  command: string,
   customIgnoreFiles: string[] | undefined,
 ): string[] {
   const workspaceRoot = config.getWorkspaceContext?.().getDirectories()[0];
@@ -134,6 +148,36 @@ function getIgnoreFiles(
     relative.startsWith(`..${path.sep}`) ||
     (relative !== '' && path.isAbsolute(relative))
   ) {
+    return [];
+  }
+  try {
+    const referencesOutsideWorkspace = parse(command).some((token) => {
+      let tokenValue: string;
+      if (typeof token === 'string') {
+        tokenValue = token;
+      } else if ('pattern' in token) {
+        tokenValue = token.pattern;
+      } else {
+        return 'op' in token && (token.op === '(' || token.op === '<(');
+      }
+      const value = tokenValue.includes('=')
+        ? tokenValue.slice(tokenValue.indexOf('=') + 1)
+        : tokenValue;
+      if (value === '~' || value.startsWith(`~${path.sep}`)) {
+        return true;
+      }
+      const resolved = path.resolve(cwd, value);
+      const tokenRelative = path.relative(workspaceRoot, resolved);
+      return (
+        tokenRelative === '..' ||
+        tokenRelative.startsWith(`..${path.sep}`) ||
+        (tokenRelative !== '' && path.isAbsolute(tokenRelative))
+      );
+    });
+    if (referencesOutsideWorkspace) {
+      return [];
+    }
+  } catch {
     return [];
   }
   const names = getQwenIgnoreFileNames(customIgnoreFiles);
@@ -154,14 +198,26 @@ function shellFunction(name: string, command: string, args: string[]): string {
 
 function grepFunction(command: string, args: string[]): string {
   const defaults = args.length > 0 ? ` ${args.join(' ')}` : '';
+  const valueOptions = UGREP_SHORT_OPTIONS_WITH_REQUIRED_VALUES.map((option) =>
+    option === '?' ? "'?'" : option,
+  ).join('|');
+  const longValueOptions = UGREP_LONG_OPTIONS_WITH_REQUIRED_VALUES.join('|');
   return `grep() {
-  local qwen_grep_arg qwen_grep_option qwen_grep_short
+  local qwen_grep_arg qwen_grep_option qwen_grep_short qwen_grep_consume_next=0
   for qwen_grep_arg in "$@"; do
+    if [[ "$qwen_grep_consume_next" -eq 1 ]]; then
+      qwen_grep_consume_next=0
+      continue
+    fi
     case "$qwen_grep_arg" in
       --) break ;;
       --config|--config=*|---*|--filter|--filter=*|--pager|--pager=*|--save-config|--save-config=*|--view|--view=*|--query|--query=*)
         printf '%s\\n' 'grep: this option is disabled by Qwen Code' >&2
         return 2
+        ;;
+      ${longValueOptions})
+        qwen_grep_consume_next=1
+        continue
         ;;
     esac
     case "$qwen_grep_arg" in
@@ -175,7 +231,12 @@ function grepFunction(command: string, args: string[]): string {
               printf '%s\\n' 'grep: this option is disabled by Qwen Code' >&2
               return 2
               ;;
-            A|B|C|D|d|e|f|g|J|K|M|m|N|O|t|Z|'?') break ;;
+            ${valueOptions})
+              if [[ -z "$qwen_grep_short" ]]; then
+                qwen_grep_consume_next=1
+              fi
+              break
+              ;;
           esac
         done
         ;;
@@ -214,7 +275,7 @@ export function wrapWithBashSearchTools(
       DEFAULT_FILE_FILTERING_OPTIONS.customIgnoreFiles,
   };
   const ignoreFiles = filtering.respectQwenIgnore
-    ? getIgnoreFiles(config, cwd, filtering.customIgnoreFiles)
+    ? getIgnoreFiles(config, cwd, command, filtering.customIgnoreFiles)
     : [];
 
   const rgArgs = [
@@ -229,10 +290,17 @@ export function wrapWithBashSearchTools(
   if (filtering.respectGitIgnore) {
     grepArgs.push('--ignore-files');
   }
+  const escapedIgnoreFiles: string[] = [];
   for (const ignoreFile of ignoreFiles) {
     const escaped = escapeShellArg(ignoreFile, 'bash');
     rgArgs.push('--ignore-file', escaped);
-    grepArgs.push(`--ignore-files=${escaped}`);
+    escapedIgnoreFiles.push(escaped);
+  }
+  if (escapedIgnoreFiles.length > 0) {
+    const combined = escapedIgnoreFiles
+      .map((file) => `cat ${file}; printf '\\n'`)
+      .join('; ');
+    grepArgs.push(`--ignore-files=<(${combined})`);
   }
 
   const functions = [

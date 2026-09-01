@@ -9,8 +9,10 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import type { Config } from '../config/config.js';
+import { BuiltinAgentRegistry } from '../subagents/builtin-agents.js';
+import { ToolNames } from '../tools/tool-names.js';
 import { resolveHealthyBuiltinRipgrep } from './ripgrepUtils.js';
-import { getShellConfiguration } from './shell-utils.js';
+import { escapeShellArg, getShellConfiguration } from './shell-utils.js';
 import {
   _resetBashSearchToolsForTest,
   isBashSearchAvailable,
@@ -42,9 +44,9 @@ describe('Bash search tools', () => {
 
   beforeEach(async () => {
     _resetBashSearchToolsForTest();
-    projectRoot = await mkdtemp(path.join(os.tmpdir(), 'qwen-search-project-'));
+    projectRoot = await mkdtemp(path.join(os.tmpdir(), 'qwen search project-'));
     secondRoot = await mkdtemp(path.join(os.tmpdir(), 'qwen-search-second-'));
-    vendorRoot = await mkdtemp(path.join(os.tmpdir(), 'qwen-search-vendor-'));
+    vendorRoot = await mkdtemp(path.join(os.tmpdir(), 'qwen search vendor-'));
     vi.mocked(os.platform).mockReturnValue('linux');
     vi.mocked(getShellConfiguration).mockReturnValue({
       executable: 'bash',
@@ -120,14 +122,17 @@ describe('Bash search tools', () => {
     expect(command).toContain('rg()');
     expect(command).toContain('grep()');
     expect(command).toContain('find()');
-    expect(command).toContain(`/ripgrep/${PLATFORM_DIRECTORY}/rg`);
-    expect(command).toContain(`/ugrep/${PLATFORM_DIRECTORY}/ugrep`);
-    expect(command).toContain(`/bfs/${PLATFORM_DIRECTORY}/bfs`);
+    expect(command).toContain(path.join('ripgrep', PLATFORM_DIRECTORY, 'rg'));
+    expect(command).toContain(path.join('ugrep', PLATFORM_DIRECTORY, 'ugrep'));
+    expect(command).toContain(path.join('bfs', PLATFORM_DIRECTORY, 'bfs'));
     expect(command).toContain('--hidden');
     expect(command).toContain('--glob \\!.git');
     expect(command).toContain('--no-require-git');
     expect(command).toContain('--exclude-dir=.git');
     expect(command).toContain('--ignore-files');
+    expect(command).toContain(
+      `--ignore-file ${escapeShellArg(path.join(projectRoot, '.agentignore'), 'bash')}`,
+    );
     expect(command).toContain('this option is disabled by Qwen Code');
     expect(command.indexOf('.agentignore')).toBeLessThan(
       command.indexOf('.qwenignore'),
@@ -238,6 +243,47 @@ describe('Bash search tools', () => {
     );
   });
 
+  it('invalidates cached availability when the workspace becomes multi-root', async () => {
+    const directories = [projectRoot];
+    const config = createConfig({ directories });
+
+    expect(await resolveBashSearchAvailability(config)).toBe(true);
+    expect(
+      BuiltinAgentRegistry.getBuiltinAgent('Explore', config)?.tools,
+    ).not.toContain(ToolNames.GREP);
+    directories.push(secondRoot);
+
+    expect(isBashSearchAvailable(config)).toBe(false);
+    expect(
+      BuiltinAgentRegistry.getBuiltinAgent('Explore', config)?.tools,
+    ).toEqual(expect.arrayContaining([ToolNames.GREP, ToolNames.GLOB]));
+    expect(wrapWithBashSearchTools('rg needle .', config, projectRoot)).toBe(
+      'rg needle .',
+    );
+  });
+
+  it('rechecks ripgrep opt-outs before wrapping a command', async () => {
+    let useRipgrep = true;
+    let useBuiltinRipgrep = true;
+    const config = {
+      ...createConfig(),
+      getUseRipgrep: () => useRipgrep,
+      getUseBuiltinRipgrep: () => useBuiltinRipgrep,
+    } as Config;
+
+    expect(await resolveBashSearchAvailability(config)).toBe(true);
+    useRipgrep = false;
+    expect(wrapWithBashSearchTools('rg needle .', config, projectRoot)).toBe(
+      'rg needle .',
+    );
+
+    useRipgrep = true;
+    useBuiltinRipgrep = false;
+    expect(wrapWithBashSearchTools('rg needle .', config, projectRoot)).toBe(
+      'rg needle .',
+    );
+  });
+
   it('honors disabled Git and Qwen ignore settings', async () => {
     await writeFile(path.join(projectRoot, '.qwenignore'), 'private.txt\n');
     const config = createConfig({
@@ -253,6 +299,39 @@ describe('Bash search tools', () => {
     expect(command).not.toContain('--ignore-files');
   });
 
+  it('honors Git ignore while Qwen ignore is disabled', async () => {
+    await writeFile(path.join(projectRoot, '.qwenignore'), 'private.txt\n');
+    const config = createConfig({
+      respectGitIgnore: true,
+      respectQwenIgnore: false,
+    });
+
+    expect(await resolveBashSearchAvailability(config)).toBe(true);
+    const command = wrapWithBashSearchTools('rg needle .', config, projectRoot);
+
+    expect(command).toContain('--no-require-git');
+    expect(command).toContain('--ignore-files');
+    expect(command).not.toContain('--ignore-file ');
+    expect(command).not.toContain('--ignore-files=');
+    expect(command).not.toContain('.qwenignore');
+  });
+
+  it('honors Qwen ignore while Git ignore is disabled', async () => {
+    await writeFile(path.join(projectRoot, '.qwenignore'), 'private.txt\n');
+    const config = createConfig({
+      respectGitIgnore: false,
+      respectQwenIgnore: true,
+    });
+
+    expect(await resolveBashSearchAvailability(config)).toBe(true);
+    const command = wrapWithBashSearchTools('rg needle .', config, projectRoot);
+
+    expect(command).toContain('--no-ignore-vcs');
+    expect(command).toContain('--ignore-file ');
+    expect(command).toContain('--ignore-files=');
+    expect(command).toContain('.qwenignore');
+  });
+
   it('does not load Qwen ignore files outside the workspace', async () => {
     await Promise.all([
       writeFile(path.join(projectRoot, '.agentignore'), 'agent-only.txt\n'),
@@ -265,5 +344,24 @@ describe('Bash search tools', () => {
 
     expect(command).not.toContain('.agentignore');
     expect(command).not.toContain('.qwenignore');
+    expect(command).toContain('rg()');
+    expect(command).toContain('grep()');
+    expect(command).toContain('find()');
+  });
+
+  it('does not apply workspace ignore files to dynamically expanded paths', async () => {
+    await writeFile(path.join(projectRoot, '.qwenignore'), 'private.txt\n');
+    const config = createConfig();
+
+    expect(await resolveBashSearchAvailability(config)).toBe(true);
+    for (const searchPath of ['~/other', '$(pwd)/other']) {
+      const command = wrapWithBashSearchTools(
+        `rg needle ${searchPath}`,
+        config,
+        projectRoot,
+      );
+      expect(command).not.toContain('.qwenignore');
+      expect(command).toContain('rg()');
+    }
   });
 });

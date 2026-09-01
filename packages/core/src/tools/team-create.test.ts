@@ -94,6 +94,9 @@ describe('TeamCreateTool', () => {
     expect(result.llmContent).toContain('created');
     expect(config.setTeamManager).toHaveBeenCalled();
     expect(config.setTeamContext).toHaveBeenCalled();
+    const manager = vi.mocked(config.setTeamManager).mock
+      .calls[0]?.[0] as unknown as { searchConfig?: object } | undefined;
+    expect(manager?.searchConfig).toBe(config);
   });
 
   it('includes description when provided', async () => {
