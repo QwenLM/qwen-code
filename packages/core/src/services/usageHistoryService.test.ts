@@ -4,11 +4,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, beforeEach, describe, it, expect } from 'vitest';
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+
+const { debugMock } = vi.hoisted(() => ({ debugMock: vi.fn() }));
+
+vi.mock('../utils/debugLogger.js', () => ({
+  createDebugLogger: () => ({ debug: debugMock }),
+}));
+
 import {
   metricsToUsageRecord,
   aggregateUsage,
@@ -400,6 +407,7 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
   let originalQwenHome: string | undefined;
 
   beforeEach(() => {
+    debugMock.mockClear();
     tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-usage-history-'));
     originalQwenHome = process.env['QWEN_HOME'];
     process.env['QWEN_HOME'] = path.join(tmpHome, '.qwen');
@@ -806,7 +814,7 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
   });
 
   it.skipIf(process.platform === 'win32')(
-    'withLive: skips non-regular transcript entries (a FIFO cannot wedge the replay)',
+    'withLive: skips and logs non-regular transcript entries',
     async () => {
       // A FIFO passing the `*.jsonl` name filter must be skipped before any
       // read: opening it would block forever (no writer ever arrives) and
@@ -817,9 +825,22 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
       const fifoPath = planted('sess-fifo');
       const mkfifo = spawnSync('mkfifo', [fifoPath], { stdio: 'inherit' });
       expect(mkfifo.status).toBe(0);
+      const danglingPath = planted('dangling');
+      fs.symlinkSync(
+        path.join(path.dirname(danglingPath), 'missing'),
+        danglingPath,
+      );
 
       const merged = await loadUsageHistoryWithLive();
       expect(merged.map((r) => r.sessionId)).toEqual(['sess-real']);
+      expect(debugMock).toHaveBeenCalledWith(
+        `rebuildFromSessionJsonl: skipping non-regular entry ${fifoPath}`,
+      );
+      expect(debugMock).toHaveBeenCalledWith(
+        expect.stringContaining(
+          `rebuildFromSessionJsonl: cannot stat ${danglingPath}`,
+        ),
+      );
     },
   );
 });

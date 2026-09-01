@@ -432,7 +432,12 @@ async function rebuildFromSessionJsonl(
         // special file) passing the name filter would block open() forever
         // and wedge the whole rebuild — the daemon's usage dashboard serves
         // from this path.
-        if (!stats.isFile()) continue;
+        if (!stats.isFile()) {
+          debugLogger.debug(
+            `rebuildFromSessionJsonl: skipping non-regular entry ${filePath}`,
+          );
+          continue;
+        }
 
         // Bound the scan when merging live sessions into a persisted history:
         // skip transcripts untouched before `sinceMs`.
