@@ -5,7 +5,7 @@
  */
 
 import {
-  readAgentViewSessionState,
+  readAgentViewSessionStateForControl,
   sanitizeSessionId,
 } from '../agent-view/supervisor-store.js';
 import { requireValidWorkerToken } from '../agent-view/supervisor-process.js';
@@ -45,7 +45,7 @@ export async function isManagedAgentViewResumeBlocked(
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<boolean> {
   if (await isSessionWorker(sessionId, env)) return false;
-  const state = await readAgentViewSessionState(sessionId);
+  const state = await readAgentViewSessionStateForControl(sessionId);
   // Block during ownership transitions too: /background adopt writes
   // 'adopting', spawns the --resume worker, and only patches 'managed'
   // afterwards; 'removing' may still have a live host or durable cleanup to
@@ -68,7 +68,7 @@ export async function isManagedAgentViewContinueBlocked(
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<boolean> {
   if (await isSessionWorker(sessionId, env)) return false;
-  const state = await readAgentViewSessionState(sessionId);
+  const state = await readAgentViewSessionStateForControl(sessionId);
   return (
     (state?.ownership === 'managed' &&
       state.processState !== 'exited' &&
@@ -91,7 +91,7 @@ export async function releaseExitedManagedSessionForContinue(
   // Same strict predicate as the /resume block: a lone marker must not
   // suppress the release in an ordinary foreground session.
   if (await isSessionWorker(sessionId, env)) return true;
-  const state = await readAgentViewSessionState(sessionId);
+  const state = await readAgentViewSessionStateForControl(sessionId);
   if (state?.ownership === 'adopting') return false;
   if (state?.ownership !== 'managed' && state?.ownership !== 'removing') {
     return true;

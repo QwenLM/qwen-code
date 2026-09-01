@@ -24,7 +24,7 @@ const mockRelease = vi.hoisted(() =>
 );
 
 vi.mock('../agent-view/supervisor-store.js', () => ({
-  readAgentViewSessionState: mockReadAgentViewSessionState,
+  readAgentViewSessionStateForControl: mockReadAgentViewSessionState,
   sanitizeSessionId: (sessionId: string) => sessionId.toLowerCase(),
 }));
 
@@ -333,6 +333,25 @@ describe('managed Agent View resume guards', () => {
     await expect(
       releaseExitedManagedSessionForContinue('session-1'),
     ).rejects.toThrow('temporarily unreadable');
+  });
+
+  it('fails closed when managed session state is temporarily unreadable', async () => {
+    mockReadAgentViewSessionState.mockRejectedValue(
+      new Error(
+        'Agent View session session-1 is temporarily unreadable. Retry the operation.',
+      ),
+    );
+
+    await expect(isManagedAgentViewResumeBlocked('session-1')).rejects.toThrow(
+      'temporarily unreadable',
+    );
+    await expect(
+      isManagedAgentViewContinueBlocked('session-1'),
+    ).rejects.toThrow('temporarily unreadable');
+    await expect(
+      releaseExitedManagedSessionForContinue('session-1'),
+    ).rejects.toThrow('temporarily unreadable');
+    expect(mockRelease).not.toHaveBeenCalled();
   });
 
   it('does not start the supervisor to release ownership when the gate is disabled', async () => {

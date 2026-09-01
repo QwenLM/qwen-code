@@ -53,6 +53,7 @@ import {
   readAgentViewActivity,
   readAgentViewRosterStrict,
   readAgentViewSessionState,
+  readAgentViewSessionStateForControl,
   readAgentViewWorker,
   redactAgentViewActivity,
   redactAgentViewWorker,
@@ -1293,7 +1294,10 @@ class AgentViewSupervisorProcessHandler
     return this.withAttachSetupLock(sessionId, () =>
       this.withPromptQueueLock(sessionId, () =>
         this.workers.withHostSetupLock(sessionId, async () => {
-          let state = await readAgentViewSessionState(sessionId, this.store);
+          let state = await readAgentViewSessionStateForControl(
+            sessionId,
+            this.store,
+          );
           if (!state) {
             throw new Error(`No Agent View session found for ${sessionId}.`);
           }

@@ -4360,6 +4360,29 @@ describe('Agent View supervisor process helpers', () => {
     await fs.rm(globalDir, { recursive: true, force: true });
   });
 
+  it('fails closed when release finds a session directory without readable state', async () => {
+    const globalDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-agent-view-store-'),
+    );
+    const sessionId = '123e4567-e89b-42d3-a456-426614174000';
+    await fs.mkdir(
+      getAgentViewSessionPaths(sessionId, { globalDir }).sessionDir,
+      {
+        recursive: true,
+      },
+    );
+    const handler = createAgentViewSupervisorHandler({
+      globalDir,
+      platform: 'linux',
+    });
+
+    await expect(handler.release?.({ sessionId })).rejects.toThrow(
+      'temporarily unreadable',
+    );
+
+    await fs.rm(globalDir, { recursive: true, force: true });
+  });
+
   it('releases an exited session after healing a stale attach', async () => {
     const globalDir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'qwen-agent-view-store-'),

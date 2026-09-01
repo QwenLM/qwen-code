@@ -252,6 +252,34 @@ export async function readAgentViewSessionState(
   return normalizeSessionState(raw, path.basename(paths.sessionDir));
 }
 
+export async function readAgentViewSessionStateForControl(
+  sessionId: string,
+  options: StoreOptions = {},
+): Promise<AgentViewSessionStateFile | undefined> {
+  const paths = getAgentViewSessionPaths(sessionId, options);
+  let raw: JsonRecord | undefined;
+  try {
+    raw = await readJsonRecordForConditionalWrite(paths.statePath);
+    if (raw === undefined) {
+      await fs.access(paths.sessionDir);
+      throw new Error('Session directory exists without state.');
+    }
+  } catch (error) {
+    if (isNodeError(error) && error.code === 'ENOENT') {
+      return undefined;
+    }
+    throw new Error(
+      `Agent View session ${sessionId} is temporarily unreadable. Retry the operation.`,
+      { cause: error },
+    );
+  }
+  const state = normalizeSessionState(raw, path.basename(paths.sessionDir));
+  if (state) return state;
+  throw new Error(
+    `Agent View session ${sessionId} is temporarily unreadable. Retry the operation.`,
+  );
+}
+
 export async function writeAgentViewSessionState(
   state: AgentViewSessionStateFile,
   options: StoreOptions = {},

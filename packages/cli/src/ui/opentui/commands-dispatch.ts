@@ -738,6 +738,14 @@ export class OpenTuiSlashDispatcher {
                 }
                 return { kind: 'handled' };
               }
+              case 'agent_view_detach':
+                this.addMessage({
+                  type: MessageType.INFO,
+                  content:
+                    'Agent View detach is not yet available in the OpenTUI renderer.',
+                  timestamp: new Date(),
+                });
+                return { kind: 'handled' };
               case 'dialog': {
                 if (result.dialog === 'resume') {
                   if (result.sessionId) {
