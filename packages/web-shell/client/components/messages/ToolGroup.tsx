@@ -65,6 +65,7 @@ import {
   isShellToolName,
   localizeAgentTypeName,
   toolContainsCallId,
+  isWorkflowToolName,
 } from './toolFormatting';
 import { useI18n } from '../../i18n';
 import { useTranscriptRenderMode } from '../../transcriptRenderMode';
@@ -139,7 +140,7 @@ function hasDetailView(tool: ACPToolCall): boolean {
     name === 'readfile' ||
     isSkillToolName(name) ||
     isAskUserQuestionToolName(tool.toolName) ||
-    name === 'workflow'
+    isWorkflowToolName(name)
   );
 }
 
@@ -1142,7 +1143,7 @@ export const ToolLine = memo(function ToolLine({
   // Set once the user explicitly toggles this row, so auto-collapse-on-
   // completion never silently overrides their choice.
   const userToggledRef = useRef(false);
-  const isWorkflow = tool.toolName.toLowerCase() === 'workflow';
+  const isWorkflow = isWorkflowToolName(tool.toolName);
 
   useEffect(
     () => {
@@ -1737,9 +1738,7 @@ export const ToolGroup = memo(function ToolGroup({
     : undefined;
   const singleMcpAppResourceUri = singleMcpApp?.resourceUri;
   const hasMcpApp = tools.some((tool) => getMcpAppDisplay(tool.rawOutput));
-  const hasWorkflow = tools.some(
-    (tool) => tool.toolName.toLowerCase() === 'workflow',
-  );
+  const hasWorkflow = tools.some((tool) => isWorkflowToolName(tool.toolName));
   const hasForegroundActiveTool = tools.some(
     (tool) =>
       isActiveToolStatus(tool.status) && !isBackgroundSubAgentToolCall(tool),

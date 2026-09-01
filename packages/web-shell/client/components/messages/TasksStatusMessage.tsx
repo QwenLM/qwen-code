@@ -1467,15 +1467,14 @@ function TaskDetail({
   }
 
   if (task.kind === 'workflow' && task.tokensSpent > 0) {
+    // Subtitle only: compactFields is read from `headerContent`, which
+    // short-circuits to null for workflow tasks before it looks at the
+    // array — a compact entry here renders in no state.
     subtitleParts.push(
       t('tasks.detail.tokens', {
         count: formatContextTokens(task.tokensSpent),
       }),
     );
-    compactFields.push({
-      label: t('tasks.detail.tokenCount'),
-      value: formatContextTokens(task.tokensSpent),
-    });
   }
 
   if (task.kind === 'agent' && task.stats?.toolUses !== undefined) {

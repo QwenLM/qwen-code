@@ -385,9 +385,10 @@
   min-width: 0;
 }
 
-/* The controls come from the task panel with its own classes; restate only
-   the geometry here so they sit flush with the strip. Colour is left to the
-   owner so the danger/primary variants keep their meaning. */
+/* The controls come from the task panel with its own classes. Geometry is
+   restated here so they sit flush with the strip, and every non-primary
+   variant is deliberately flattened to a neutral outline so the strip reads
+   as one toolbar — only [data-tone='primary'] keeps the owner's colour. */
 .toolbarActions button {
   min-height: 26px;
   padding: 3px 10px;
@@ -529,7 +530,6 @@
 
 .edge[data-path-emphasis='related'] {
   stroke-width: 2px;
-  opacity: 1;
 }
 
 .edge[data-path-emphasis='dimmed'] {
@@ -578,7 +578,6 @@
     var(--workflow-node-accent) 6%,
     var(--background)
   );
-  opacity: 1;
 }
 
 .node[data-status='running'] {
@@ -594,9 +593,13 @@
   --workflow-node-accent: var(--error-color);
 }
 
+/* No `opacity: 1` here: the queued/cancelled, related and dimmed rules
+   below have the same specificity and come later, so they win wherever they
+   co-occur, and nothing lowers opacity otherwise. Making an approval hold
+   full opacity through those states would be a deliberate change — raise
+   the specificity or move the rule past them. */
 .node[data-workflow-approval] {
   --workflow-node-accent: var(--warning-color);
-  opacity: 1;
 }
 
 .node[data-status='queued'],

@@ -380,6 +380,17 @@ function getStringArg(
   return typeof value === 'string' ? value.trim().replace(/\n/g, ' ') : '';
 }
 
+/**
+ * Like every other is*ToolName helper, normalizes case so callers can pass
+ * the raw wire name. One predicate on purpose: ToolGroup gates the detail
+ * view, the ToolLine route and the collapsed keep-mounted behaviour on
+ * this, and three hand-inlined copies could diverge on a rename with no
+ * compile error — routing would then disagree with mounting.
+ */
+export function isWorkflowToolName(name: string): boolean {
+  return name.toLowerCase() === 'workflow';
+}
+
 export function isShellToolName(name: string): boolean {
   const normalized = name.toLowerCase();
   return (
