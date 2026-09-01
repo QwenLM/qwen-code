@@ -317,13 +317,14 @@ export async function buildSessionAgentsStatus(
 ): Promise<ServeSessionAgentsStatus> {
   const projectDir = config.storage.getProjectDir();
   const dir = getSubagentSessionDir(projectDir, sessionId);
+  const cacheKey = `${dir}\0${sessionId}`;
   const agents = new Map<string, ServeSessionAgentTaskStatus>();
   const metaSignatures = new Map<string, string>();
   let directoryMtimeNs: bigint | undefined;
   let files: string[] = [];
   try {
     directoryMtimeNs = (await fs.promises.stat(dir, { bigint: true })).mtimeNs;
-    const cached = agentSidecarCache.get(dir);
+    const cached = agentSidecarCache.get(cacheKey);
     const cachedSidecarsUnchanged =
       cached?.directoryMtimeNs === directoryMtimeNs &&
       (
@@ -429,8 +430,8 @@ export async function buildSessionAgentsStatus(
   if (directoryMtimeNs !== undefined && files.length > 0) {
     const tasks = retainAgentTasks([...agents.values()]);
     const retainedIds = new Set(tasks.map((task) => task.id));
-    agentSidecarCache.delete(dir);
-    agentSidecarCache.set(dir, {
+    agentSidecarCache.delete(cacheKey);
+    agentSidecarCache.set(cacheKey, {
       directoryMtimeNs,
       tasks,
       metaSignatures: new Map(

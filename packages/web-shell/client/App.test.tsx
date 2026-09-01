@@ -3789,6 +3789,34 @@ describe('task activity key', () => {
     ).not.toBeNull();
   });
 
+  it('keeps current-session task tabs when the restore snapshot fails', async () => {
+    mockSessionActions.getTasks.mockRejectedValueOnce(new Error('offline'));
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/tmp/project\0session-1': {
+          open: true,
+          activeTabId: 'monitor:monitor-1',
+          tabs: [
+            {
+              id: 'monitor:monitor-1',
+              kind: 'monitor',
+              title: 'watch server log',
+              taskId: 'monitor-1',
+            },
+          ],
+        },
+      }),
+    );
+
+    const { container } = renderApp();
+    await flush();
+
+    expect(
+      container.querySelector('button[title="watch server log"]'),
+    ).not.toBeNull();
+  });
+
   it('keeps a tab and panel opened while restored tasks are still loading', async () => {
     const tasks =
       deferred<Awaited<ReturnType<typeof mockSessionActions.getTasks>>>();
@@ -6338,6 +6366,43 @@ describe('artifact panel fullscreen', () => {
 });
 
 describe('environment agent tasks', () => {
+  it('stops reporting cached inventory after its consumers close', async () => {
+    mockConnection.capabilities.features = ['session_agents'];
+    mockWorkspace.client.sessionAgents.mockResolvedValue({
+      v: 1,
+      sessionId: 'session-1',
+      tasks: [
+        {
+          kind: 'agent',
+          id: 'stored-agent',
+          label: 'reviewer: inspect history',
+          description: 'inspect history',
+          status: 'running',
+          startTime: 1_000,
+          runtimeMs: 1_000,
+          subagentType: 'reviewer',
+          isBackgrounded: true,
+        },
+      ],
+    });
+    const onAgentTasksChange = vi.fn();
+    const { container } = renderApp({ onAgentTasksChange });
+    await flush();
+
+    const toggle = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Toggle environment information"]',
+    );
+    act(() => toggle?.click());
+    await flush();
+    expect(onAgentTasksChange).toHaveBeenLastCalledWith([
+      expect.objectContaining({ id: 'stored-agent', status: 'running' }),
+    ]);
+
+    act(() => toggle?.click());
+    await flush();
+    expect(onAgentTasksChange).toHaveBeenLastCalledWith([]);
+  });
+
   it('reports transcript agent tasks without enabling the overview panel', async () => {
     testState.messages = [
       {

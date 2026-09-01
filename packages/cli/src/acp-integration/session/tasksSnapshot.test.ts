@@ -204,6 +204,46 @@ describe('buildSessionAgentsStatus', () => {
     }
   });
 
+  it('does not share cached sidecars between colliding session directories', async () => {
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-status-'));
+    const sessionDir = path.join(projectDir, 'subagents', 'feat_x');
+    try {
+      fs.mkdirSync(sessionDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(sessionDir, 'agent-stored.meta.json'),
+        JSON.stringify({
+          agentId: 'stored',
+          agentType: 'general-purpose',
+          description: 'stored agent',
+          parentSessionId: 'feat.x',
+          parentAgentId: null,
+          createdAt: '2026-08-26T00:00:00.000Z',
+          status: 'completed',
+          isBackgrounded: true,
+        }),
+      );
+
+      expect(
+        (
+          await buildSessionAgentsStatus(
+            'feat.x',
+            configWith([], [], projectDir),
+          )
+        ).tasks,
+      ).toHaveLength(1);
+      expect(
+        (
+          await buildSessionAgentsStatus(
+            'feat_x',
+            configWith([], [], projectDir),
+          )
+        ).tasks,
+      ).toEqual([]);
+    } finally {
+      fs.rmSync(projectDir, { recursive: true, force: true });
+    }
+  });
+
   it('freezes a persisted paused agent duration at its last update', async () => {
     const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-status-'));
     const sessionDir = path.join(projectDir, 'subagents', 'session-1');

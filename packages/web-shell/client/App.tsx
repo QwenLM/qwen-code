@@ -2583,6 +2583,7 @@ function findToolCall(
 function transcriptEventsToMessages(events: readonly DaemonEvent[]): Message[] {
   let state = createDaemonTranscriptState({
     maxBlocks: Math.max(2_000, events.length),
+    maxRetainedBytes: Number.POSITIVE_INFINITY,
   });
   for (const event of events) {
     state = reduceDaemonTranscriptEvents(state, normalizeDaemonEvent(event));
@@ -5232,7 +5233,7 @@ export function App({
           (!tab.sessionId || tab.sessionId === connection.sessionId),
       );
       const taskSnapshot = needsTasks
-        ? await sessionActions.getTasks({ silent: true }).catch(() => undefined)
+        ? await sessionActions.getTasks({ silent: true }).catch(() => null)
         : undefined;
       const restoreInputs = artifactPanelRestoreInputsRef.current;
       const restoredTabs = (
@@ -5359,6 +5360,16 @@ export function App({
                   const task = taskSnapshot?.tasks.find(
                     (item) => item.kind === tab.kind && item.id === tab.taskId,
                   );
+                  if (taskSnapshot === null) {
+                    return {
+                      id: tab.id,
+                      kind: 'pending',
+                      title: tab.title,
+                      targetKind: tab.kind,
+                      sourceSessionId: connection.sessionId!,
+                      taskId: tab.taskId,
+                    };
+                  }
                   if (!task || task.kind !== tab.kind) return undefined;
                   const { taskId: _taskId, ...rest } = tab;
                   return { ...rest, task, sessionActions } as ArtifactPanelTab;
@@ -6173,6 +6184,7 @@ export function App({
       getEnvironmentAgentTasks(
         messages,
         sessionAgentsSupported &&
+          (environmentNeedsAgents || workflowTabActive) &&
           sessionAgentInventory &&
           sessionAgentInventory.sessionKey === logicalSessionKey
           ? sessionAgentInventory.tasks
@@ -6181,9 +6193,11 @@ export function App({
     [
       logicalSessionKey,
       messages,
+      environmentNeedsAgents,
       sessionAgentInventory,
       sessionAgentsSupported,
       sessionTasks,
+      workflowTabActive,
     ],
   );
   const [sessionAgentTrace, setSessionAgentTrace] = useState<{

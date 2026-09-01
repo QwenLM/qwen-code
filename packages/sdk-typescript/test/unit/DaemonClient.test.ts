@@ -1897,6 +1897,14 @@ describe('DaemonClient', () => {
       expect(
         calls.every((call) => call.headers['x-qwen-client-id'] === 'client-1'),
       ).toBe(true);
+
+      const relativeClient = new DaemonClient({ baseUrl: '/proxy', fetch });
+      await relativeClient.sessionAgentTrace('with/slash', {
+        rootAgentId: 'root-1',
+      });
+      expect(calls.at(-1)?.url).toBe(
+        '/proxy/session/with%2Fslash/agent-trace?rootAgentId=root-1',
+      );
     });
   });
 

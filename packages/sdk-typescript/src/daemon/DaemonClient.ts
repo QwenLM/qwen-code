@@ -3374,14 +3374,13 @@ export class DaemonClient {
       signal?: AbortSignal;
     } = {},
   ): Promise<DaemonAgentTrace> {
-    const url = new URL(
-      `${this.baseUrl}/session/${urlEncode(sessionId)}/agent-trace`,
-    );
+    const query = new URLSearchParams();
     if (opts.rootAgentId) {
-      url.searchParams.set('rootAgentId', opts.rootAgentId);
+      query.set('rootAgentId', opts.rootAgentId);
     }
+    const suffix = query.size > 0 ? `?${query}` : '';
     return await this.fetchWithTimeout(
-      url.toString(),
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/agent-trace${suffix}`,
       { headers: this.headers({}, opts.clientId), signal: opts.signal },
       async (res) => {
         if (!res.ok) {
