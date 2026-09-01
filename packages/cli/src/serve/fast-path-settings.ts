@@ -31,7 +31,7 @@ import {
 } from '../config/trust-precedence.js';
 import { publishPendingCompileCache } from '../config/compile-cache.js';
 import type { Settings } from '../config/settingsSchema.js';
-import { resolveEnvVarsInObject } from '../utils/envVarResolver.js';
+import { resolveEnvVarsInObject } from '@qwen-code/qwen-code-core/envVarResolver';
 
 type ServeFastPathPolicy = Pick<
   NonNullable<Settings['policy']>,

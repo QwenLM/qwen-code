@@ -128,6 +128,7 @@ import {
   buildChangedAgentsReminder,
   buildChangedMcpToolsReminder,
   buildChangedSkillsReminder,
+  buildMcpServerInstructionsReminderFromEntries,
   getDirectoryContextString,
   getInitialChatHistory,
   getStartupContextLength,
@@ -431,6 +432,8 @@ export class LlmClient {
   private announcedMcpToolNames = new Set<string>();
   private pendingAddedMcpTools = new Map<string, DeferredToolSummary>();
   private pendingRemovedMcpToolNames = new Set<string>();
+  private announcedMcpServerInstructions = new Map<string, string>();
+  private pendingMcpServerInstructions = new Map<string, string>();
   private warnedAboutUnreachableEagerTools = false;
   // Dedup state for the per-turn skill/command "now available" delta reminders
   // (drainSkillAndCommandReminders). Keys are "skill:<name>" / "cmd:<name>". The
@@ -1055,6 +1058,9 @@ export class LlmClient {
     const tools: Tool[] = [{ functionDeclarations: toolDeclarations }];
     this.getChat().setTools(tools);
     this.queueAddedMcpToolsReminder(deferredTools ?? []);
+    this.queueMcpServerInstructionsReminder(
+      toolRegistry.getMcpServerInstructions(),
+    );
     recordStartupEvent('gemini_tools_updated', {
       toolCount: toolDeclarations.length,
       deferredCount: deferredTools?.length ?? 0,
@@ -1753,6 +1759,52 @@ export class LlmClient {
     this.pendingRemovedMcpToolNames.clear();
   }
 
+  private rememberAnnouncedMcpServerInstructions(
+    instructions: ReadonlyMap<string, string>,
+  ): void {
+    this.announcedMcpServerInstructions = new Map(instructions);
+    this.pendingMcpServerInstructions.clear();
+  }
+
+  private queueMcpServerInstructionsReminder(
+    instructions: ReadonlyMap<string, string>,
+  ): void {
+    this.pendingMcpServerInstructions.clear();
+    for (const serverName of this.announcedMcpServerInstructions.keys()) {
+      if (!instructions.has(serverName)) {
+        this.announcedMcpServerInstructions.delete(serverName);
+      }
+    }
+    for (const [serverName, text] of instructions) {
+      if (
+        text.trim().length > 0 &&
+        this.announcedMcpServerInstructions.get(serverName) !== text
+      ) {
+        this.pendingMcpServerInstructions.set(serverName, text);
+      }
+    }
+  }
+
+  private drainPendingMcpServerInstructionsReminder(): void {
+    if (this.pendingMcpServerInstructions.size === 0) {
+      return;
+    }
+    const reminder = buildMcpServerInstructionsReminderFromEntries(
+      this.pendingMcpServerInstructions,
+    );
+    if (!reminder) {
+      return;
+    }
+    this.getChat().addHistory({
+      role: 'user',
+      parts: [{ text: reminder }],
+    });
+    for (const [serverName, text] of this.pendingMcpServerInstructions) {
+      this.announcedMcpServerInstructions.set(serverName, text);
+    }
+    this.pendingMcpServerInstructions.clear();
+  }
+
   private queueAddedMcpToolsReminder(
     deferredTools: readonly DeferredToolSummary[],
   ): void {
@@ -2112,6 +2164,9 @@ export class LlmClient {
       const deferredTools = profiler.timeSync('deferred_reminder_setup', () => {
         const resolved = this.resolveDeferredToolsForReminder(deferredSummary);
         this.rememberAnnouncedDeferredTools(resolved);
+        this.rememberAnnouncedMcpServerInstructions(
+          toolRegistry.getMcpServerInstructions(),
+        );
         return resolved;
       });
       deferredReminderCount = deferredTools?.length ?? 0;
@@ -3571,6 +3626,14 @@ export class LlmClient {
           messageType === SendMessageType.Cron)
       ) {
         try {
+          this.drainPendingMcpServerInstructionsReminder();
+        } catch (error) {
+          debugLogger.warn(
+            'drainPendingMcpServerInstructionsReminder failed',
+            error,
+          );
+        }
+        try {
           this.drainPendingAddedMcpToolsReminder();
         } catch (error) {
           debugLogger.warn('drainPendingAddedMcpToolsReminder failed', error);
@@ -3713,6 +3776,43 @@ export class LlmClient {
       }
 
       if (messageType === SendMessageType.ToolResult) {
+        // Record executed tool results for stateful read tools (task_list)
+        // so the loop guards can distinguish productive re-polling — the
+        // shared task board changed between identical calls — from a stuck
+        // loop (issue #9450). A detection here (the result-aware global
+        // duplicate count) halts the turn exactly like the event-loop
+        // guards below.
+        for (const part of requestToSend) {
+          if (
+            typeof part !== 'object' ||
+            part === null ||
+            !('functionResponse' in part)
+          ) {
+            continue;
+          }
+          const functionResponseId = (part as Part).functionResponse?.id;
+          if (!functionResponseId) continue;
+          if (
+            this.loopDetector.recordToolResultByCallId(functionResponseId, [
+              part as Part,
+            ])
+          ) {
+            for (const goalEvent of await finalizeInterruptedGoalTurn()) {
+              yield goalEvent;
+            }
+            const loopType = this.loopDetector.getLastLoopType();
+            yield {
+              type: LlmEventType.LoopDetected,
+              ...(loopType && { value: { loopType } }),
+            };
+            await arenaAgentClient?.reportError('Loop detected');
+            this.lastApiCompletionTimestamp = Date.now();
+            endCurrentInteraction('error', 'loop detected', 'loop_detected');
+            this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
+            this.fireLoopDetectedStopFailure(loopType);
+            return turn;
+          }
+        }
         const toolResultMemory =
           await this.consumeManagedAutoMemoryRecall('tool_result');
         if (toolResultMemory?.prompt) {
@@ -3811,6 +3911,15 @@ export class LlmClient {
       const resultStream = turn.run(model, requestToSend, signal);
       let didUpdateIdeContextState = false;
       let steerInputSettled = false;
+      // callIds already fed to the loop guards this attempt. Mirrors the
+      // execution-side dedup (coreToolScheduler.dedupeRequestsByCallId / the
+      // interactive duplicate-call-id suppression), which collapses
+      // provider-duplicate emissions into one executed call and one result:
+      // feeding the guards once per call id keeps request counts and result
+      // evidence on the same population (main-session twin of the agent-core
+      // fix, issue #9450). Id-less requests are never deduped. Cleared on
+      // retry/fallback alongside the attempt's accumulated state.
+      const loopGuardFedCallIds = new Set<string>();
       try {
         for await (const event of resultStream) {
           if (!steerInputSettled) {
@@ -3830,6 +3939,7 @@ export class LlmClient {
             event.type === LlmEventType.ModelFallback
           ) {
             hasToolCalls = false;
+            loopGuardFedCallIds.clear();
             const preserveText =
               event.type === LlmEventType.Retry &&
               event.isContinuation === true;
@@ -3850,11 +3960,28 @@ export class LlmClient {
             didUpdateIdeContextState = true;
           }
 
+          // A provider-duplicate emission of an already-fed call id executes
+          // once (the schedulers collapse it), so feed the loop guards once —
+          // counting both emissions would leave the request counters one ahead
+          // of the executed result evidence and fail-safe-halt a productive
+          // stateful poller (issue #9450). The event itself still flows to
+          // consumers below; only the guard feed is deduped.
+          let duplicateLoopGuardRequest = false;
+          if (event.type === LlmEventType.ToolCallRequest) {
+            const fedCallId = event.value.callId;
+            if (fedCallId) {
+              duplicateLoopGuardRequest = loopGuardFedCallIds.has(fedCallId);
+              loopGuardFedCallIds.add(fedCallId);
+            }
+          }
+
           // Always-on safety checks (consecutive-identical tool-call guard,
           // shell inspection stagnation, and per-turn tool-call cap). These fire
           // before the skipLoopDetection gate so they cannot be bypassed by
           // configuration.
-          const alwaysOnLoop = this.loopDetector.checkAlwaysOnSafeties(event);
+          const alwaysOnLoop =
+            !duplicateLoopGuardRequest &&
+            this.loopDetector.checkAlwaysOnSafeties(event);
           if (alwaysOnLoop) {
             // Drop every tool call collected before the guard fired so the run
             // halts here instead of spawning a continuation that re-trips it.
@@ -3892,6 +4019,7 @@ export class LlmClient {
           // relaxes the heuristics (see nonInteractiveCli.ts).
           const skipLoopDetection = this.config.getSkipLoopDetection();
           const heuristicLoop =
+            !duplicateLoopGuardRequest &&
             !skipLoopDetection &&
             this.loopDetector.addAndCheckHeuristicLoops(event);
           if (heuristicLoop) {

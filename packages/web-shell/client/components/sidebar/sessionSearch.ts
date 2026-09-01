@@ -6,17 +6,20 @@
 
 import type { DaemonSessionSummary } from '@qwen-code/sdk/daemon';
 
-// Sidebar search matches git context beyond the label: PR number (with or
-// without '#'), branch name, and worktree slug. `query` must already be
-// lowercased.
+// Sidebar search matches git context beyond the label: PR number and the
+// numbers of the issues a bound PR closes (with or without '#'), branch name,
+// and worktree slug. `query` must already be lowercased.
 export function sessionMatchesGitQuery(
   session: DaemonSessionSummary,
   query: string,
 ): boolean {
-  const prs = session.prs ?? [];
-  for (const pr of prs) {
-    const prText = String(pr.number);
-    if (query === prText || query === `#${prText}`) return true;
+  const matchesNumber = (number: number): boolean =>
+    query === String(number) || query === `#${number}`;
+  for (const pr of session.prs ?? []) {
+    if (matchesNumber(pr.number)) return true;
+    if ((pr.issues ?? []).some((issue) => matchesNumber(issue.number))) {
+      return true;
+    }
   }
   const candidates = [
     session.branch?.name,

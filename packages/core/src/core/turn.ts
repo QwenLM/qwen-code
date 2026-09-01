@@ -412,11 +412,14 @@ export function isCompressionFailureStatus(
 /**
  * Why an auto-compaction fired. Drives the user-facing notice so a
  * screenshot-overflow trigger isn't mislabeled as "approached the token
- * limit". Undefined on NOOP / failure paths and for callers that don't set it.
+ * limit" and a 413-driven compaction isn't mislabeled as a token overflow
+ * (#10380). Undefined on NOOP / failure paths and for callers that don't
+ * set it.
  */
 export type CompactionTriggerReason =
   | 'token_limit'
   | 'image_overflow'
+  | 'payload_overflow'
   | 'manual';
 
 export interface ChatCompressionInfo {

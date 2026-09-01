@@ -65,6 +65,7 @@ let bindings = new Map();
 let activeExec = null;
 let operationChain = Promise.resolve();
 let shuttingDown = false;
+let pendingCancelExecId = null;
 
 const timers = new Map();
 /** Upper bound on concurrently live sandbox timers (see scheduleTimer). */
@@ -131,6 +132,13 @@ function describeThrown(error) {
       MAX_ERROR_CHARS,
     ),
   };
+}
+
+class CellCancelledError extends Error {
+  constructor() {
+    super('Execution was cancelled.');
+    this.name = 'AbortError';
+  }
 }
 
 function formatValue(value) {
@@ -390,7 +398,7 @@ function scheduleTimer(callback, delay, repeat) {
   const handle = repeat
     ? hostSetInterval(invoke, safeDelay)
     : hostSetTimeout(invoke, safeDelay);
-  timers.set(timerId, { handle, repeat });
+  timers.set(timerId, { handle, repeat, execId });
   return timerId;
 }
 
@@ -406,6 +414,103 @@ function cancelTimer(timerId) {
 function clearAllTimers() {
   for (const [timerId] of timers) cancelTimer(timerId);
 }
+
+function clearTimersForExec(execId) {
+  for (const [timerId, timer] of timers) {
+    if (timer.execId === execId) cancelTimer(timerId);
+  }
+}
+
+function trackCancellationBarrier(exec, value) {
+  if (activeExec !== exec) return value;
+  const barrier = Promise.resolve(value);
+  exec.cancellationBarriers.add(barrier);
+  void barrier.then(
+    () => exec.cancellationBarriers.delete(barrier),
+    () => exec.cancellationBarriers.delete(barrier),
+  );
+  // The callee must receive the real terminal value so it can classify an
+  // already-dispatched operation as committed, refused, or failed. The cell
+  // transform independently guards the caller's `await`, preventing user code
+  // from continuing after cancellation while the kernel drains this barrier.
+  return barrier;
+}
+
+function guardCancellationContinuation(exec, value) {
+  const awaited = Promise.resolve(value);
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let cancelled = false;
+    const settle = (callback, result) => {
+      if (settled || cancelled) return;
+      settled = true;
+      exec.abortController.signal.removeEventListener('abort', onAbort);
+      callback(result);
+    };
+    // Do not reject into user code: a cell could catch that rejection and run
+    // catch/finally side effects after the host had reported cancellation.
+    // Leaving only this guarded continuation pending makes cancellation
+    // uncatchable while the outer execution controller settles the cell.
+    const onAbort = () => {
+      cancelled = true;
+      exec.abortController.signal.removeEventListener('abort', onAbort);
+    };
+    if (exec.cancelRequested) {
+      onAbort();
+    } else {
+      exec.abortController.signal.addEventListener('abort', onAbort, {
+        once: true,
+      });
+    }
+    void awaited.then(
+      (result) => settle(resolve, result),
+      (error) => settle(reject, error),
+    );
+  });
+}
+
+function guardAsyncIterable(exec, iterable) {
+  const asyncFactory = iterable?.[Symbol.asyncIterator];
+  const syncFactory = iterable?.[Symbol.iterator];
+  const factory = asyncFactory ?? syncFactory;
+  if (typeof factory !== 'function') return iterable;
+  return {
+    [Symbol.asyncIterator]() {
+      const iterator = factory.call(iterable);
+      const guarded = {
+        next: (...args) =>
+          guardCancellationContinuation(exec, iterator.next(...args)),
+      };
+      if (typeof iterator.return === 'function') {
+        guarded.return = (...args) =>
+          guardCancellationContinuation(exec, iterator.return(...args));
+      }
+      if (typeof iterator.throw === 'function') {
+        guarded.throw = (...args) =>
+          guardCancellationContinuation(exec, iterator.throw(...args));
+      }
+      return guarded;
+    },
+  };
+}
+
+// A successful cell may intentionally leave an async timer callback behind.
+// Its transformed `await` still reads nodeRepl.signal after the originating
+// cell has finished, when there is no active execution to cancel. Return a
+// real, never-aborted signal whose guard helpers are transparent in that
+// state, rather than breaking persistent background work with an undefined
+// signal. Its properties are immutable just like the per-cell helpers below.
+const idleSignal = new globalThis.AbortController().signal;
+Object.defineProperty(idleSignal, 'waitUntil', {
+  value: (value) => Promise.resolve(value),
+});
+Object.defineProperty(idleSignal, 'guardAwait', {
+  value: (value) => Promise.resolve(value),
+});
+Object.defineProperty(idleSignal, 'guardAsyncIterable', {
+  value: (value) => value,
+});
+Object.freeze(idleSignal);
 
 function heapStatus() {
   const memory = process.memoryUsage();
@@ -524,6 +629,9 @@ const runtime = {
       arrayBuffersBytes: intrinsicNumber(raw.arrayBuffersBytes),
     });
   },
+  get signal() {
+    return bridge.currentSignal();
+  },
 };
 
 deepFreeze(runtime);
@@ -627,6 +735,11 @@ function createContext(name) {
     heapStatus() {
       return JSON.stringify(heapStatus());
     },
+    currentSignal() {
+      const execId = currentExecId();
+      if (!activeExec || activeExec.execId !== execId) return idleSignal;
+      return activeExec.abortController.signal;
+    },
     scheduleTimer,
     cancelTimer,
   });
@@ -726,14 +839,24 @@ function readSuccessfulBindings(module, bindingExports) {
 async function handleExec(message) {
   if (!config || !loader) throw new Error('kernel is not initialized');
   if (activeExec) throw new Error('kernel received overlapping executions');
+  if (
+    pendingCancelExecId !== null &&
+    pendingCancelExecId !== message.execId
+  ) {
+    pendingCancelExecId = null;
+  }
   const expected = sortedBindingDescriptors();
   if (!sameBindings(message.previousBindings, expected)) {
     throw new Error('host and kernel binding snapshots are out of sync');
   }
   const nextBindingKinds = bindingKinds(message.bindingExports);
 
-  activeExec = {
+  const exec = {
     execId: message.execId,
+    abortController: new globalThis.AbortController(),
+    cancel: null,
+    cancelRequested: false,
+    cancellationBarriers: new Set(),
     rawTextBytes: 0,
     textEventCount: 0,
     rawTextTruncated: false,
@@ -741,6 +864,16 @@ async function handleExec(message) {
     imageChars: 0,
     imagesDropped: 0,
   };
+  Object.defineProperty(exec.abortController.signal, 'waitUntil', {
+    value: (value) => trackCancellationBarrier(exec, value),
+  });
+  Object.defineProperty(exec.abortController.signal, 'guardAwait', {
+    value: (value) => guardCancellationContinuation(exec, value),
+  });
+  Object.defineProperty(exec.abortController.signal, 'guardAsyncIterable', {
+    value: (value) => guardAsyncIterable(exec, value),
+  });
+  activeExec = exec;
   let cellModule = null;
   try {
     await asyncContext.run({ execId: message.execId }, async () => {
@@ -757,7 +890,37 @@ async function handleExec(message) {
         bindings,
       );
       cellModule = cell.module;
-      await cell.evaluate();
+      let rejectCancellation;
+      const cancellation = new Promise((_, reject) => {
+        rejectCancellation = reject;
+      });
+      activeExec.cancel = () => {
+        if (
+          activeExec?.execId !== message.execId ||
+          activeExec.cancelRequested
+        ) {
+          return;
+        }
+        activeExec.cancelRequested = true;
+        activeExec.abortController.abort();
+        clearTimersForExec(message.execId);
+        const barriers = [...activeExec.cancellationBarriers];
+        if (barriers.length === 0) {
+          rejectCancellation(new CellCancelledError());
+          return;
+        }
+        void Promise.allSettled(barriers).then(() => {
+          rejectCancellation(new CellCancelledError());
+        });
+      };
+      if (pendingCancelExecId === message.execId) {
+        pendingCancelExecId = null;
+        activeExec.cancel();
+      }
+      const evaluation = cell.evaluate({ timeout: message.timeoutMs });
+      void evaluation.catch(() => undefined);
+      await Promise.race([evaluation, cancellation]);
+      if (activeExec.cancelRequested) throw new CellCancelledError();
       bindings = readSuccessfulBindings(cell.module, message.bindingExports);
     });
     send({
@@ -769,7 +932,23 @@ async function handleExec(message) {
       imagesDropped: activeExec.imagesDropped,
     });
   } catch (error) {
-    if (cellModule) {
+    const status =
+      error instanceof CellCancelledError
+        ? 'cancelled'
+        : error?.code === 'ERR_SCRIPT_EXECUTION_TIMEOUT'
+          ? 'timeout'
+          : 'error';
+    if (status === 'cancelled' || status === 'timeout') {
+      exec.cancelRequested = true;
+      if (!exec.abortController.signal.aborted) exec.abortController.abort();
+      clearTimersForExec(message.execId);
+      // Cancellable native APIs register their terminal promise through
+      // signal.waitUntil. The JavaScript continuation stops immediately, but
+      // the cell is not reported terminal until already-dispatched native work
+      // has reached a known final state.
+      await Promise.allSettled([...exec.cancellationBarriers]);
+    }
+    if (status === 'error' && cellModule) {
       const partial = readPartialSnapshot(
         cellModule,
         message.snapshotExportName,
@@ -781,7 +960,7 @@ async function handleExec(message) {
     send({
       type: 'execResult',
       execId: message.execId,
-      status: 'error',
+      status,
       bindingNames: sortedBindingNames(),
       rawTextTruncated: activeExec.rawTextTruncated,
       imagesDropped: activeExec.imagesDropped,
@@ -792,6 +971,14 @@ async function handleExec(message) {
   } finally {
     activeExec = null;
   }
+}
+
+function handleCancel(message) {
+  if (activeExec?.execId === message.execId) {
+    activeExec.cancel?.();
+    return;
+  }
+  pendingCancelExecId = message.execId;
 }
 
 function handleAddModuleRoot(message) {
@@ -844,6 +1031,10 @@ function routeMessage(message) {
   }
   if (message.type === 'shutdown') {
     shutdown();
+    return;
+  }
+  if (message.type === 'cancel') {
+    handleCancel(message);
     return;
   }
   operationChain = operationChain
