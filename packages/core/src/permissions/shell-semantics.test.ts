@@ -884,7 +884,9 @@ describe('extractShellOperationsAcrossCommand', () => {
     ]);
   });
 
-  it('does not carry child-shell state into the parent command', () => {
+  it('treats a shell-fed heredoc body as executed commands', () => {
+    // A body fed to a child shell runs there, so for risk extraction its
+    // lines are real commands and move the tracked cwd (#9417).
     expect(
       extractShellOperationsAcrossCommand(
         ['bash <<EOF', 'cd /tmp', 'EOF', 'echo > .qwen/settings.json'].join(
@@ -893,7 +895,7 @@ describe('extractShellOperationsAcrossCommand', () => {
         '/repo',
       ),
     ).toEqual([
-      { virtualTool: 'write_file', filePath: '/repo/.qwen/settings.json' },
+      { virtualTool: 'write_file', filePath: '/tmp/.qwen/settings.json' },
     ]);
   });
 
@@ -925,6 +927,81 @@ describe('extractShellOperationsAcrossCommand', () => {
     ).toEqual([
       { virtualTool: 'write_file', filePath: '/repo/.qwen/settings.json' },
     ]);
+  });
+
+  it('keeps the body visible when a bare dot sources a receiver override', () => {
+    // `.` is the POSIX source builtin: the file can redefine `cat`, so the
+    // body is real commands and must move the tracked cwd (#9417).
+    expect(
+      extractShellOperationsAcrossCommand(
+        [
+          '. /tmp/evil',
+          'cat <<EOF',
+          'cd /tmp',
+          'EOF',
+          'echo > settings.json',
+        ].join('\n'),
+        '/repo',
+      ),
+    ).toEqual([{ virtualTool: 'write_file', filePath: '/tmp/settings.json' }]);
+  });
+
+  it('keeps the body visible for interpreter and persisting receivers', () => {
+    // Interpreters run the body as a program; tee can persist it to a file
+    // that is executed later. Neither may strip it from view (#9417).
+    for (const opener of ['python <<EOF', 'node <<EOF']) {
+      expect(
+        extractShellOperationsAcrossCommand(
+          [opener, 'cd /tmp', 'EOF', 'echo > settings.json'].join('\n'),
+          '/repo',
+        ),
+      ).toEqual([
+        { virtualTool: 'write_file', filePath: '/tmp/settings.json' },
+      ]);
+    }
+    // tee's own write to the named file is itself a tracked operation, and
+    // the body still moves the cwd afterwards.
+    expect(
+      extractShellOperationsAcrossCommand(
+        ['tee /tmp/s.sh <<EOF', 'cd /tmp', 'EOF', 'echo > settings.json'].join(
+          '\n',
+        ),
+        '/repo',
+      ),
+    ).toEqual([
+      { virtualTool: 'write_file', filePath: '/tmp/s.sh' },
+      { virtualTool: 'write_file', filePath: '/tmp/settings.json' },
+    ]);
+  });
+
+  it('keeps the body visible when a pipe follows the delimiter', () => {
+    // `cat <<EOF | bash` feeds the body to the shell after the pipe, so the
+    // body is executed commands, not stdin data (#9417).
+    expect(
+      extractShellOperationsAcrossCommand(
+        ['cat <<EOF | bash', 'cd /tmp', 'EOF', 'echo > settings.json'].join(
+          '\n',
+        ),
+        '/repo',
+      ),
+    ).toEqual([{ virtualTool: 'write_file', filePath: '/tmp/settings.json' }]);
+  });
+
+  it('keeps the body visible across a line-continuation splice', () => {
+    // bash joins `bash -s \` with the next line before reading, a splice this
+    // parser does not model, so every later line stays visible (#9417).
+    expect(
+      extractShellOperationsAcrossCommand(
+        [
+          'bash -s \\',
+          'cat <<EOF',
+          'cd /tmp',
+          'EOF',
+          'echo > settings.json',
+        ].join('\n'),
+        '/repo',
+      ),
+    ).toEqual([{ virtualTool: 'write_file', filePath: '/tmp/settings.json' }]);
   });
 
   it('handles `cd --` and other POSIX flag forms before the target', () => {

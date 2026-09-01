@@ -10,6 +10,7 @@ import { parse } from 'shell-quote';
 import {
   getShellConfiguration,
   GitWorktreeService,
+  heredocSafetyForStateTracking,
   isWithinRoot,
   projectHeredocBodiesForStateTracking,
   realpathNearestExistingAsync,
@@ -293,7 +294,7 @@ const CMD_REWRITE_SYNTAX_DENIAL =
 const WINDOWS_UNMODELLED_SYNTAX_DENIAL =
   'Daemon shell guard denied a shell command containing Windows shell syntax it cannot evaluate before execution.';
 const UNMODELLED_HEREDOC_DENIAL =
-  'Daemon shell guard denied a shell command whose heredoc structure it cannot evaluate before execution.';
+  'Daemon shell guard denied a shell command containing heredoc structure it cannot evaluate before execution.';
 const UNRESOLVED_TARGET_DENIAL_PREFIX =
   'Daemon shell guard denied a mutating Git command with an unresolvable repository location: ';
 const OUTSIDE_TARGET_DENIAL_PREFIX =
@@ -2498,15 +2499,18 @@ async function evaluateCommandWithCwd(
   // Heredocs are a POSIX shell construct: on the Windows lanes the marker
   // line's body lines are separate commands, so stripping them would hide
   // commands the executed text really runs. Everywhere else the projection
-  // neutralizes heredoc bodies instead of deleting them (#9417).
-  const strippedCommand = windowsNative
-    ? command
-    : projectHeredocBodiesForStateTracking(command);
-  if (strippedCommand === null) {
-    return {
-      denial: { allowed: false, reason: UNMODELLED_HEREDOC_DENIAL },
-      cwdAfter: trackedCwd,
-    };
+  // neutralizes inert heredoc bodies instead of deleting them (#9417), and
+  // anything whose receiver or structure the parser cannot prove inert is
+  // denied outright rather than scanned further.
+  let strippedCommand = command;
+  if (!windowsNative) {
+    if (!heredocSafetyForStateTracking(command).safe) {
+      return {
+        denial: { allowed: false, reason: UNMODELLED_HEREDOC_DENIAL },
+        cwdAfter: trackedCwd,
+      };
+    }
+    strippedCommand = projectHeredocBodiesForStateTracking(command);
   }
   if (containsCmdRewriteSyntax(strippedCommand, platformNow, shellNow)) {
     return {
