@@ -629,6 +629,7 @@ describe('SystemMessage — inline images', () => {
     expect(onImagePreview).toHaveBeenCalledWith(
       'data:image/png;base64,base64data',
       'User uploaded image 1',
+      undefined,
     );
   });
 
