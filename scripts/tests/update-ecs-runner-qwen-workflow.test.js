@@ -53,10 +53,18 @@ function stepBody(name) {
 const updateJobName =
   workflow.match(/\n {2}update:\n {4}name: '([^']*)'/)?.[1] ?? '';
 const poolPrefix = updateJobName.replace(/\$\{\{.*\}\}$/, '');
-const pools = (workflow.match(/\n\s+runner: \[([^\]]*)\]/)?.[1] ?? '')
-  .split(',')
-  .map((entry) => entry.trim().replace(/^'|'$/g, ''))
-  .filter(Boolean);
+
+// Both layouts, because CI runs `prettier --write .` before this suite and
+// prettier reflows the inline matrix array onto its own lines. A parser that
+// reads only the checked-in layout passes locally and finds zero pools there.
+function parsePools(text) {
+  return (text.match(/\n\s+runner:\s*\[([^\]]*)\]/)?.[1] ?? '')
+    .split(',')
+    .map((entry) => entry.trim().replace(/^'|'$/g, ''))
+    .filter(Boolean);
+}
+
+const pools = parsePools(workflow);
 
 function jobsFixture({
   failed = [],
@@ -181,6 +189,17 @@ describe('ECS runner qwen update workflow', () => {
     expect(updateJobName).toContain('${{ matrix.runner }}');
     expect(poolPrefix).not.toBe('');
     expect(pools.length).toBeGreaterThan(0);
+    // Whichever way the matrix array is laid out — CI reformats it before the
+    // suite runs — the pools have to come back the same.
+    expect(parsePools("\n        runner: ['a-1', 'a-2']\n")).toEqual([
+      'a-1',
+      'a-2',
+    ]);
+    expect(
+      parsePools(
+        "\n        runner:\n          [\n            'a-1',\n            'a-2',\n          ]\n",
+      ),
+    ).toEqual(['a-1', 'a-2']);
     expect(reportScript).toContain(`startswith("${poolPrefix}")`);
     expect(reportScript).toContain(`sub("^${poolPrefix}"; "")`);
   });
