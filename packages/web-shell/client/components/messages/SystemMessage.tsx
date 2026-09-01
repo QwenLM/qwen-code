@@ -1,4 +1,4 @@
-import { memo, useCallback, useState } from 'react';
+import { memo, useCallback } from 'react';
 import {
   CheckIcon,
   CircleCheckIcon,
@@ -12,6 +12,7 @@ import {
   warnClipboardWriteFailure,
   writeClipboardText,
 } from '../../utils/clipboard';
+import { useCopiedFlash } from '../../hooks/useCopiedFlash';
 import {
   ContextUsageMessage,
   parseContextUsageMessage,
@@ -112,15 +113,14 @@ export const SystemMessage = memo(function SystemMessage({
   onRetryClick,
 }: SystemMessageProps) {
   const { t } = useI18n();
-  const [copied, setCopied] = useState(false);
+  const [copied, flashCopied] = useCopiedFlash();
   const handleCopy = useCallback(() => {
     void writeClipboardText(content)
       .then(() => {
-        setCopied(true);
-        window.setTimeout(() => setCopied(false), 2000);
+        flashCopied();
       })
       .catch(warnClipboardWriteFailure);
-  }, [content]);
+  }, [content, flashCopied]);
   if (source === 'mid_turn_message_injected') {
     return (
       <UserMessage
