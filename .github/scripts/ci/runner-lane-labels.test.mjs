@@ -472,20 +472,12 @@ function laneTestPlan(file, text) {
                 const producers = (jobAssemblies.get(producerJob) ?? []).filter(
                   (a) => a.name === outName,
                 );
+                const audit = publishAudit(producerJob, outName);
                 if (
-                  (jobOpaqueWrites.get(producerJob) ?? new Set()).has(outName)
+                  producers.length === 0 &&
+                  audit.accepted === 0 &&
+                  !audit.malformedPublish
                 ) {
-                  problem(
-                    `${file}: ${origin} consumes a runner set with an unreadable write`,
-                    `job '${producerJob}' assigns '${outName}' in a shape ` +
-                      `the assembly scan cannot read (command substitution, ` +
-                      `variable copy, or a continuation), so a scannable ` +
-                      `literal beside it cannot vouch for what actually ` +
-                      `feeds the output — the guard fails closed.`,
-                  );
-                  continue;
-                }
-                if (producers.length === 0) {
                   problem(
                     `${file}: ${origin} consumes a runner set with no checkable producer`,
                     `'${operand}' reads output '${outName}' of job ` +
@@ -493,6 +485,41 @@ function laneTestPlan(file, text) {
                       `${outName}='["…"]' assignment the assembly scan can ` +
                       `vouch for — the lane behind the indirection is ` +
                       `unchecked, so the guard fails closed.`,
+                  );
+                  continue;
+                }
+                if (audit.malformedPublish || audit.accepted === 0) {
+                  problem(
+                    `${file}: ${origin} consumes a runner set with an unreadable write`,
+                    `job '${producerJob}' must publish '${outName}' to ` +
+                      `$GITHUB_OUTPUT through exactly ` +
+                      `echo "${outName}=\${${outName}}" — any other ` +
+                      `publish shape (a different variable, a literal, a ` +
+                      `transformed expansion, or no readable write at all) ` +
+                      `routes a value this guard never read, so it fails ` +
+                      `closed.`,
+                  );
+                  continue;
+                }
+                if (audit.opaque) {
+                  problem(
+                    `${file}: ${origin} consumes a runner set with an unreadable write`,
+                    `job '${producerJob}' also writes '${outName}' in a ` +
+                      `shape the scan cannot read (export/declare, an ` +
+                      `inline or appended assignment, printf -v, …) — a ` +
+                      `scannable literal beside an unreadable write cannot ` +
+                      `vouch for what actually reached the output, so the ` +
+                      `guard fails closed.`,
+                  );
+                  continue;
+                }
+                if (producers.length === 0) {
+                  problem(
+                    `${file}: ${origin} consumes a runner set with no checkable producer`,
+                    `'${operand}' reads output '${outName}' of job ` +
+                      `'${producerJob}', whose publish write forwards a ` +
+                      `variable no scannable literal ever assigns — the ` +
+                      `guard fails closed.`,
                   );
                   continue;
                 }
@@ -639,29 +666,60 @@ function laneTestPlan(file, text) {
   // unreadable: when one exists for a consumed name, a scannable literal
   // beside it cannot vouch for what actually reached $GITHUB_OUTPUT.
   const jobAssemblies = new Map();
-  const jobOpaqueWrites = new Map();
+  const jobRunText = new Map();
   for (const [jobName, job] of Object.entries(doc?.jobs ?? {})) {
     const assemblies = [];
-    const opaque = new Set();
+    const texts = [];
     for (const step of Array.isArray(job?.steps) ? job.steps : []) {
       if (typeof step?.run !== 'string') {
         continue;
       }
       assemblies.push(...runnerSetAssignments(step.run));
-      for (const line of step.run.split('\n')) {
-        const write = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)=/);
-        if (
-          write &&
-          !/^\s*[A-Za-z_][A-Za-z0-9_]*=(['"])\[[^\n]*?\]\1\s*(?:#.*)?$/.test(
-            line,
-          )
-        ) {
-          opaque.add(write[1]);
-        }
-      }
+      texts.push(step.run);
     }
     jobAssemblies.set(jobName, assemblies);
-    jobOpaqueWrites.set(jobName, opaque);
+    jobRunText.set(jobName, texts.join('\n'));
+  }
+
+  // The structural anchor for the consumer vouch: no value can reach a
+  // needs-output consumer except through the line that writes
+  // `<name>=…` into $GITHUB_OUTPUT. So the guard requires exactly that
+  // write to exist in the named job, with a payload that is EXACTLY the
+  // same-named variable — and then requires every other write to that
+  // variable to be a scannable literal. Shell write shapes are not
+  // enumerated: after removing the scannable literals and the accepted
+  // publish line, ANY残 remaining `<name>=`/`+=`/`printf -v <name>` text
+  // is an unreadable write and fails closed.
+  function publishAudit(jobName, outName) {
+    const textOf = jobRunText.get(jobName) ?? '';
+    const lines = textOf.split('\n');
+    const literalShape = new RegExp(
+      `^\\s*${outName}=(['"])\\[[^\\n]*?\\]\\1\\s*(?:#.*)?$`,
+    );
+    const acceptedPublish = new RegExp(
+      `^\\s*echo\\s+"${outName}=\\$\\{?${outName}\\}?"\\s*>>\\s*"?\\$\\{?GITHUB_OUTPUT\\}?"?\\s*$`,
+    );
+    let accepted = 0;
+    let malformedPublish = false;
+    const residual = [];
+    for (const line of lines) {
+      if (literalShape.test(line)) {
+        continue;
+      }
+      if (acceptedPublish.test(line)) {
+        accepted += 1;
+        continue;
+      }
+      if (line.includes(`${outName}=`) && /GITHUB_OUTPUT/.test(line)) {
+        malformedPublish = true;
+        continue;
+      }
+      residual.push(line);
+    }
+    const opaque = new RegExp(
+      `(^|[^$\\w{])${outName}\\s*\\+?=|-v\\s+${outName}(?![\\w-])`,
+    ).test(residual.join('\n'));
+    return { accepted, malformedPublish, opaque };
   }
 
   for (const [jobName, job] of Object.entries(doc?.jobs ?? {})) {
@@ -923,7 +981,8 @@ describe('laneTestPlan fail-closed behavior', () => {
   // by a producer assignment the assembly scan can read in the same file.
   const consumer = `'\${{ fromJSON(needs.a.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'`;
   const producer = (q) =>
-    `    steps:\n      - run: |-\n          ubuntu_runner=${q}["self-hosted", "linux", "x64", "ecs-qwen"]${q}\n`;
+    `    steps:\n      - run: |-\n          ubuntu_runner=${q}["self-hosted", "linux", "x64", "ecs-qwen"]${q}\n` +
+    `          echo "ubuntu_runner=\${ubuntu_runner}" >> "\${GITHUB_OUTPUT}"\n`;
 
   it('accepts the consumer shape when its producer assignment is present', () => {
     const plan = laneTestPlan('probe.yml', wrap(consumer, producer("'")));
@@ -948,7 +1007,8 @@ describe('laneTestPlan fail-closed behavior', () => {
       'probe.yml',
       wrap(
         consumer,
-        `    steps:\n      - run: |-\n          ubuntu_runner="["self-hosted", "linux", "x64", "ecs-invented"]"\n`,
+        `    steps:\n      - run: |-\n          ubuntu_runner="["self-hosted", "linux", "x64", "ecs-invented"]"\n` +
+          `          echo "ubuntu_runner=\${ubuntu_runner}" >> "\${GITHUB_OUTPUT}"\n`,
       ),
     );
     assert.equal(problems.length, 1);
@@ -1024,7 +1084,41 @@ describe('laneTestPlan fail-closed behavior', () => {
         consumer,
         `    steps:\n      - run: |-\n` +
           `          ubuntu_runner='["self-hosted", "linux", "x64", "ecs-qwen"]'\n` +
-          `          ubuntu_runner="$(jq -r .runner config.json)"\n`,
+          `          ubuntu_runner="$(jq -r .runner config.json)"\n` +
+          `          echo "ubuntu_runner=\${ubuntu_runner}" >> "\${GITHUB_OUTPUT}"\n`,
+      ),
+    );
+    assert.equal(problems.length, 1);
+    assert.match(blob(problems[0]), /unreadable write/);
+  });
+
+  // R9: the vouch is anchored on the $GITHUB_OUTPUT publish write — no
+  // value reaches the consumer except through it, so a publish from a
+  // different variable, or any reassignment shape beside the accepted
+  // wiring, fails closed.
+  it('fails closed when the consumed output is written from a differently-named variable', () => {
+    const { problems } = laneTestPlan(
+      'probe.yml',
+      wrap(
+        consumer,
+        `    steps:\n      - run: |-\n` +
+          `          ubuntu_runner='["self-hosted", "linux", "x64", "ecs-qwen"]'\n` +
+          `          echo "ubuntu_runner=$other_var" >> "\${GITHUB_OUTPUT}"\n`,
+      ),
+    );
+    assert.equal(problems.length, 1);
+    assert.match(blob(problems[0]), /unreadable write/);
+  });
+
+  it('fails closed when the consumed name is reassigned via export', () => {
+    const { problems } = laneTestPlan(
+      'probe.yml',
+      wrap(
+        consumer,
+        `    steps:\n      - run: |-\n` +
+          `          ubuntu_runner='["self-hosted", "linux", "x64", "ecs-qwen"]'\n` +
+          `          export ubuntu_runner='["self-hosted", "linux", "x64", "ecs-invented"]'\n` +
+          `          echo "ubuntu_runner=\${ubuntu_runner}" >> "\${GITHUB_OUTPUT}"\n`,
       ),
     );
     assert.equal(problems.length, 1);
