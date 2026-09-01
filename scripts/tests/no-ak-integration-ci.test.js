@@ -128,7 +128,7 @@ describe('no-AK integration CI wiring', () => {
     }
   });
 
-  it('caps every Vitest pool to one ECS runner share', () => {
+  it('uses a tunable max for every Vitest pool on ECS', () => {
     const workflow = readFileSync(
       path.join(ROOT, '.github/workflows/ci.yml'),
       'utf8',
@@ -138,14 +138,14 @@ describe('no-AK integration CI wiring', () => {
       'Run tests and generate reports',
     );
 
-    for (const [name, limit] of [
-      ['VITEST_MAX_THREADS', '4'],
-      ['VITEST_MIN_THREADS', '1'],
-      ['VITEST_MAX_FORKS', '4'],
-      ['VITEST_MIN_FORKS', '1'],
-    ]) {
+    for (const name of ['VITEST_MAX_THREADS', 'VITEST_MAX_FORKS']) {
       expect(testStep).toContain(
-        `${name}: "\${{ startsWith(runner.name, 'ecs-qwen-') && '${limit}' || '' }}"`,
+        `${name}: "\${{ startsWith(runner.name, 'ecs-qwen-') && (vars.QWEN_CI_VITEST_MAX_WORKERS || '4') || '' }}"`,
+      );
+    }
+    for (const name of ['VITEST_MIN_THREADS', 'VITEST_MIN_FORKS']) {
+      expect(testStep).toContain(
+        `${name}: "\${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"`,
       );
     }
   });

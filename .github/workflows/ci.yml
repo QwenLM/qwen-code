@@ -652,12 +652,11 @@ jobs:
           NO_COLOR: true
           HOME: '${{ runner.temp }}/qwen-ci-home'
           USERPROFILE: '${{ runner.temp }}/qwen-ci-home'
-          # Every ecs-qwen runner sees the whole 128-core host. A percentage
-          # therefore multiplies across its 32 registrations instead of
-          # limiting one runner to its four-core share.
-          VITEST_MAX_THREADS: "${{ startsWith(runner.name, 'ecs-qwen-') && '4' || '' }}"
+          # Bound each Vitest process on the shared ECS host. Operators can
+          # tune the maximum without changing this workflow.
+          VITEST_MAX_THREADS: "${{ startsWith(runner.name, 'ecs-qwen-') && (vars.QWEN_CI_VITEST_MAX_WORKERS || '4') || '' }}"
           VITEST_MIN_THREADS: "${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"
-          VITEST_MAX_FORKS: "${{ startsWith(runner.name, 'ecs-qwen-') && '4' || '' }}"
+          VITEST_MAX_FORKS: "${{ startsWith(runner.name, 'ecs-qwen-') && (vars.QWEN_CI_VITEST_MAX_WORKERS || '4') || '' }}"
           VITEST_MIN_FORKS: "${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"
           OPENAI_API_KEY: ''
           DASHSCOPE_API_KEY: ''

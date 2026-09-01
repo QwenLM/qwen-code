@@ -413,14 +413,14 @@ describe('package scripts', () => {
     );
     expect(workspaceTestStep).toContain('npm run test:release');
     expect(workspaceTestStep).not.toContain('npm run test:ci');
-    for (const [name, limit] of [
-      ['VITEST_MAX_THREADS', '4'],
-      ['VITEST_MIN_THREADS', '1'],
-      ['VITEST_MAX_FORKS', '4'],
-      ['VITEST_MIN_FORKS', '1'],
-    ]) {
+    for (const name of ['VITEST_MAX_THREADS', 'VITEST_MAX_FORKS']) {
       expect(workspaceTestStep).toContain(
-        `${name}: "\${{ startsWith(runner.name, 'ecs-qwen-') && '${limit}' || '' }}"`,
+        `${name}: "\${{ startsWith(runner.name, 'ecs-qwen-') && (vars.QWEN_CI_VITEST_MAX_WORKERS || '4') || '' }}"`,
+      );
+    }
+    for (const name of ['VITEST_MIN_THREADS', 'VITEST_MIN_FORKS']) {
+      expect(workspaceTestStep).toContain(
+        `${name}: "\${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"`,
       );
     }
   });
