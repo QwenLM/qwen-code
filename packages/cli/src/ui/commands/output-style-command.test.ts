@@ -80,6 +80,9 @@ describe('outputStyleCommand', () => {
       expect.objectContaining({ name: 'Concise' }),
     );
     expect(refreshSystemInstruction).toHaveBeenCalled();
+    expect(setOutputStyle.mock.invocationCallOrder[0]!).toBeLessThan(
+      refreshSystemInstruction.mock.invocationCallOrder[0]!,
+    );
     expect(setValue).toHaveBeenCalledWith(
       SettingScope.User,
       'general.outputStyle',
@@ -94,9 +97,14 @@ describe('outputStyleCommand', () => {
   });
 
   it('clears the style with "default" and persists the literal', async () => {
+    setOutputStyle(getBuiltInOutputStyle('Concise'));
+    setOutputStyle.mockClear();
     const res = await outputStyleCommand.action!(context, 'default');
     expect(setOutputStyle).toHaveBeenCalledWith(undefined);
     expect(refreshSystemInstruction).toHaveBeenCalled();
+    expect(setOutputStyle.mock.invocationCallOrder[0]!).toBeLessThan(
+      refreshSystemInstruction.mock.invocationCallOrder[0]!,
+    );
     expect(setValue).toHaveBeenCalledWith(
       SettingScope.User,
       'general.outputStyle',
@@ -172,6 +180,25 @@ describe('outputStyleCommand', () => {
     );
   });
 
+  it('persists to user settings when an untrusted workspace owns the key', async () => {
+    context.services.settings = {
+      setValue,
+      isTrusted: false,
+      user: { settings: {} },
+      workspace: { settings: { general: { outputStyle: 'Concise' } } },
+    } as never;
+
+    await outputStyleCommand.action!(context, 'Learning');
+
+    expect(setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'general.outputStyle',
+      'Learning',
+      undefined,
+      { throwOnWriteFailure: true },
+    );
+  });
+
   it('honors a policy that forbids workspace settings writes', async () => {
     context.services.settings = {
       setValue,
@@ -207,6 +234,29 @@ describe('outputStyleCommand', () => {
     );
     expect((res as { content: string }).content).not.toContain(
       'system prompt is replaced',
+    );
+    expect(setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'general.outputStyle',
+      'Learning',
+      undefined,
+      { throwOnWriteFailure: true },
+    );
+    expect(setOutputStyle).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'Learning' }),
+    );
+  });
+
+  it('reports an effective style in a non-interactive run', async () => {
+    setOutputStyle(getBuiltInOutputStyle('Concise'));
+
+    const res = await outputStyleCommand.action!(
+      { ...context, executionMode: 'non_interactive' },
+      '',
+    );
+
+    expect((res as { content: string }).content).toContain(
+      'Current output style: {{current}}',
     );
   });
 

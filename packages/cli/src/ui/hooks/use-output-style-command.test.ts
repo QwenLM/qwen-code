@@ -146,5 +146,11 @@ describe('useOutputStyleCommand', () => {
       }),
       expect.any(Number),
     );
+    const [item] = addItem.mock.calls[0];
+    expect(recordSlashCommand).toHaveBeenCalledWith({
+      phase: 'result',
+      rawCommand: '/output-style',
+      outputHistoryItems: [item],
+    });
   });
 });
