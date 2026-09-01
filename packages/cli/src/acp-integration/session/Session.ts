@@ -111,6 +111,7 @@ import {
   getPlanModeSystemReminder,
   getArenaSystemReminder,
   getOutputStyleTurnReminder,
+  getOptInToolNotFoundMessage,
   resolveMainSessionOutputStyle,
   wrapSystemReminder,
   getStartupContextLength,
@@ -2155,10 +2156,25 @@ export class Session implements SessionContext {
       ? STANDALONE_SLASH_COMMAND_POLICY
       : undefined;
     this.runtimeBaseDir = config.storage.getRuntimeBaseDir();
-    const todoStopGuardEnabled =
-      this.settings.merged.experimental?.todoStopGuard === true &&
+    const todoStopGuardConfigured =
+      this.settings.merged.experimental?.todoStopGuard === true;
+    const todoStopGuardModeAllowed =
+      todoStopGuardConfigured &&
       !this.config.getBareMode() &&
       !this.config.isSafeMode();
+    const todoWriteEnabled =
+      this.settings.merged.tools?.todoWrite?.enabled === true;
+    const todoStopGuardEnabled =
+      todoStopGuardConfigured && todoStopGuardModeAllowed && todoWriteEnabled;
+    if (
+      todoStopGuardConfigured &&
+      todoStopGuardModeAllowed &&
+      !todoWriteEnabled
+    ) {
+      debugLogger.warn(
+        'experimental.todoStopGuard requires tools.todoWrite.enabled; the Todo Stop Guard is disabled.',
+      );
+    }
     this.todoStopGuard = new DaemonTodoStopGuard(todoStopGuardEnabled);
     const configuredGuardMode =
       process.env[ENV_ACP_REPEATED_TOOL_FAILURE_GUARD];
@@ -11263,8 +11279,15 @@ export class Session implements SessionContext {
     const tool = toolRegistry.getTool(toolName);
 
     if (!tool) {
+      const optInToolMessage = await getOptInToolNotFoundMessage(
+        this.config,
+        toolName,
+        (canonicalName) => Boolean(toolRegistry.getTool(canonicalName)),
+      );
       return earlyErrorResponse(
-        new Error(`Tool "${toolName}" not found in registry.`),
+        new Error(
+          optInToolMessage ?? `Tool "${toolName}" not found in registry.`,
+        ),
         toolName,
         {
           status: 'error',

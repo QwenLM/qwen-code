@@ -6936,6 +6936,8 @@ describe('CoreToolScheduler', () => {
         getMessageBus: vi.fn().mockReturnValue(undefined),
         getDisableAllHooks: vi.fn().mockReturnValue(true),
         getDisabledTools: vi.fn().mockReturnValue(new Set<string>()),
+        getPermissionManager: vi.fn().mockReturnValue(null),
+        isTodoWriteEnabled: vi.fn().mockReturnValue(false),
       } as unknown as Config;
 
       const scheduler = new CoreToolScheduler({
@@ -6950,9 +6952,106 @@ describe('CoreToolScheduler', () => {
           await (scheduler as any).getToolNotFoundMessage(name);
         expect(message).toContain('disabled by default');
         expect(message).toContain('tools.todoWrite.enabled');
-        expect(message).toContain('restart Qwen Code');
+        expect(message).toMatch(/restart Qwen Code/i);
         expect(message).not.toContain('Did you mean');
       }
+    });
+
+    it('should name both controls when todo_write is disabled twice', async () => {
+      const mockToolRegistry = {
+        getAllToolNames: () => ['glob', 'read_file'],
+        getTool: () => undefined,
+        ensureTool: async () => undefined,
+      } as unknown as ToolRegistry;
+
+      const mockConfig = {
+        getToolRegistry: () => mockToolRegistry,
+        getDisabledTools: vi
+          .fn()
+          .mockReturnValue(new Set<string>(['todo_write'])),
+        getPermissionManager: vi.fn().mockReturnValue(null),
+        isTodoWriteEnabled: vi.fn().mockReturnValue(false),
+      } as unknown as Config;
+
+      const scheduler = new CoreToolScheduler({
+        config: mockConfig,
+        getPreferredEditor: () => 'vscode',
+        onEditorClose: vi.fn(),
+      });
+
+      for (const name of ['todo_write', 'TodoWrite']) {
+        const message =
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          await (scheduler as any).getToolNotFoundMessage(name);
+        expect(message).toContain('disabled for this workspace');
+        expect(message).toContain('tools.todoWrite.enabled');
+        expect(message).toMatch(/restart Qwen Code/i);
+        expect(message).not.toContain('only controls');
+      }
+    });
+
+    it('should attribute enabled todo_write to the workspace toggle', async () => {
+      const mockToolRegistry = {
+        getAllToolNames: () => ['glob', 'read_file'],
+        getTool: () => undefined,
+        ensureTool: async () => undefined,
+      } as unknown as ToolRegistry;
+
+      const mockConfig = {
+        getToolRegistry: () => mockToolRegistry,
+        getDisabledTools: vi
+          .fn()
+          .mockReturnValue(new Set<string>(['todo_write'])),
+        getPermissionManager: vi.fn().mockReturnValue(null),
+        isTodoWriteEnabled: vi.fn().mockReturnValue(true),
+      } as unknown as Config;
+
+      const scheduler = new CoreToolScheduler({
+        config: mockConfig,
+        getPreferredEditor: () => 'vscode',
+        onEditorClose: vi.fn(),
+      });
+
+      for (const name of ['todo_write', 'TodoWrite']) {
+        const message =
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          await (scheduler as any).getToolNotFoundMessage(name);
+        expect(message).toContain('disabled for this workspace');
+        expect(message).not.toContain('disabled by default');
+      }
+    });
+
+    it('should attribute enabled todo_write to the core tools allowlist', async () => {
+      const mockToolRegistry = {
+        getAllToolNames: () => ['glob', 'read_file'],
+        getTool: () => undefined,
+        ensureTool: async () => undefined,
+      } as unknown as ToolRegistry;
+
+      const mockConfig = {
+        getToolRegistry: () => mockToolRegistry,
+        getDisabledTools: vi.fn().mockReturnValue(new Set<string>()),
+        getPermissionManager: vi.fn().mockReturnValue({
+          findMatchingDenyRule: vi.fn().mockReturnValue(undefined),
+          isToolDisabledByCoreToolsAllowList: vi.fn().mockReturnValue(true),
+        }),
+        isTodoWriteEnabled: vi.fn().mockReturnValue(true),
+      } as unknown as Config;
+
+      const scheduler = new CoreToolScheduler({
+        config: mockConfig,
+        getPreferredEditor: () => 'vscode',
+        onEditorClose: vi.fn(),
+      });
+
+      const message =
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await (scheduler as any).getToolNotFoundMessage('todo_write');
+      expect(message).toContain('core tools allowlist');
+      expect(message).toContain('tools.core');
+      expect(message).not.toContain(
+        'Enable it with the tools.todoWrite.enabled',
+      );
     });
 
     it('should not claim list_directory is disabled when an alias is used for a registered tool', async () => {

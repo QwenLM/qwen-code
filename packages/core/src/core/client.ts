@@ -361,8 +361,8 @@ type MainSessionPromptConfig = Pick<
   | 'getExperimentalZedIntegration'
   | 'getInputFormat'
   | 'isInteractive'
-> &
-  Partial<Pick<Config, 'isTodoWriteEnabled'>>;
+  | 'isTodoWriteEnabled'
+>;
 
 export function getMainSessionBaseSystemPrompt(
   config: MainSessionPromptConfig,
@@ -380,7 +380,7 @@ export function getMainSessionBaseSystemPrompt(
         // `getOutputStyle()` directly — a prompt override carries no style
         // section, and a session must not be reminded of one it lacks.
         resolveMainSessionOutputStyle(config),
-        config.isTodoWriteEnabled?.() ?? false,
+        config.isTodoWriteEnabled(),
       );
 }
 

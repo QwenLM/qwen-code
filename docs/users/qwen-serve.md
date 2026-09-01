@@ -308,6 +308,11 @@ restart the daemon:
 {
   "experimental": {
     "todoStopGuard": true
+  },
+  "tools": {
+    "todoWrite": {
+      "enabled": true
+    }
   }
 }
 ```

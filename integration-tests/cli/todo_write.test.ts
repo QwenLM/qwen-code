@@ -6,64 +6,40 @@
 
 import { afterEach, describe, it, expect, vi } from 'vitest';
 import {
-  CONTAINER_SANDBOX_NO_PROXY,
-  fakeServerHostOptions,
-  IS_CONTAINER_SANDBOX,
+  runForcedToolCallScenario,
   TestRig,
   printDebugInfo,
   validateModelOutput,
 } from '../test-helper.js';
-import { fakeToolCall, startFakeOpenAIServer } from '../fake-openai-server.js';
-import { join } from 'node:path';
+import { fakeToolCall } from '../fake-openai-server.js';
 
 async function runForcedTodoCall(rig: TestRig) {
-  let streamingRequestIndex = 0;
-  const fakeServer = await startFakeOpenAIServer(({ body }) => {
-    if (body['stream'] !== true) {
-      return { content: '{"selected_memories":[]}' };
-    }
-    if (streamingRequestIndex++ === 0) {
-      return {
-        toolCalls: [
-          fakeToolCall('todo_write', {
-            todos: [{ id: '1', content: 'Verify Todo', status: 'pending' }],
-          }),
-        ],
-      };
-    }
-    return { content: 'done' };
-  }, fakeServerHostOptions());
+  return runForcedToolCallScenario({
+    rig,
+    toolCall: fakeToolCall('todo_write', {
+      todos: [{ id: '1', content: 'Verify Todo', status: 'pending' }],
+    }),
+    prompt: 'Complete the requested action.',
+    finalResponse: 'done',
+  });
+}
 
-  const noProxy = IS_CONTAINER_SANDBOX
-    ? CONTAINER_SANDBOX_NO_PROXY
-    : '127.0.0.1,localhost';
-  vi.stubEnv('OPENAI_API_KEY', 'fake-key');
-  vi.stubEnv('OPENAI_BASE_URL', fakeServer.baseUrl);
-  vi.stubEnv('OPENAI_MODEL', 'fake-model');
-  vi.stubEnv('QWEN_MODEL', 'fake-model');
-  vi.stubEnv('QWEN_HOME', join(rig.testDir!, '.qwen-home'));
-  vi.stubEnv('QWEN_RUNTIME_DIR', join(rig.testDir!, '.qwen-home'));
-  vi.stubEnv('NO_PROXY', noProxy);
-  vi.stubEnv('no_proxy', noProxy);
-
-  try {
-    await rig.run(
-      'Complete the requested action.',
-      '--auth-type',
-      'openai',
-      '--model',
-      'fake-model',
-      '--openai-base-url',
-      fakeServer.baseUrl,
-      '--openai-api-key',
-      'fake-key',
-    );
-    return fakeServer.requests
-      .filter(({ body }) => body['stream'] === true)
-      .map(({ body }) => body);
-  } finally {
-    await fakeServer.close();
-  }
+function inspectTodoRequests(requests: Array<Record<string, unknown>>) {
+  const initialRequest = requests[0];
+  const tools = (initialRequest?.['tools'] ?? []) as Array<{
+    function?: { name?: string };
+  }>;
+  const systemMessage = (
+    (initialRequest?.['messages'] ?? []) as Array<{
+      role?: string;
+      content?: unknown;
+    }>
+  ).find(({ role }) => role === 'system');
+  return {
+    tools,
+    baseSystemPrompt: String(systemMessage?.content).split('\n\n---\n\n', 1)[0],
+    toolResultRequest: JSON.stringify(requests[1]),
+  };
 }
 
 describe('todo_write', () => {
@@ -76,20 +52,8 @@ describe('todo_write', () => {
     await rig.setup('should not declare todo_write by default');
 
     const requests = await runForcedTodoCall(rig);
-    const initialRequest = requests[0];
-    const tools = (initialRequest?.['tools'] ?? []) as Array<{
-      function?: { name?: string };
-    }>;
-    const systemMessage = (
-      (initialRequest?.['messages'] ?? []) as Array<{
-        role?: string;
-        content?: unknown;
-      }>
-    ).find(({ role }) => role === 'system');
-    const baseSystemPrompt = String(systemMessage?.content).split(
-      '\n\n---\n\n',
-      1,
-    )[0];
+    const { tools, baseSystemPrompt, toolResultRequest } =
+      inspectTodoRequests(requests);
     const toolDescriptionsWithTodo = tools
       .filter((tool) => JSON.stringify(tool).includes('todo_write'))
       .map((tool) => tool.function?.name);
@@ -100,8 +64,8 @@ describe('todo_write', () => {
     expect(baseSystemPrompt).not.toContain('todo_write');
     expect(toolDescriptionsWithTodo).toEqual([]);
     expect(requests.length).toBeGreaterThanOrEqual(2);
-    expect(JSON.stringify(requests[1])).toContain('disabled by default');
-    expect(JSON.stringify(requests[1])).toContain('tools.todoWrite.enabled');
+    expect(toolResultRequest).toContain('disabled by default');
+    expect(toolResultRequest).toContain('tools.todoWrite.enabled');
   });
 
   it('should declare and execute todo_write when enabled', async () => {
@@ -111,21 +75,8 @@ describe('todo_write', () => {
     });
 
     const requests = await runForcedTodoCall(rig);
-    const initialRequest = requests[0];
-    const tools = (initialRequest?.['tools'] ?? []) as Array<{
-      function?: { name?: string };
-    }>;
-    const systemMessage = (
-      (initialRequest?.['messages'] ?? []) as Array<{
-        role?: string;
-        content?: unknown;
-      }>
-    ).find(({ role }) => role === 'system');
-    const baseSystemPrompt = String(systemMessage?.content).split(
-      '\n\n---\n\n',
-      1,
-    )[0];
-    const toolResultRequest = JSON.stringify(requests[1]);
+    const { tools, baseSystemPrompt, toolResultRequest } =
+      inspectTodoRequests(requests);
 
     expect(tools.map((tool) => tool.function?.name)).toContain('todo_write');
     expect(baseSystemPrompt).toContain('# Task Management');
