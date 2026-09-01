@@ -14,6 +14,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { findEnvFiles, preResolveHomeEnvOverrides } from './environment.js';
 import {
+  cloneLoadedSettings,
   getSystemDefaultsPath,
   getSystemSettingsPath,
   getUserSettingsPath,
@@ -234,6 +235,17 @@ export function loadSettingsCached(workspaceDir: string): LoadedSettings {
   }
 
   return settings;
+}
+
+/**
+ * Returns a session-owned copy of a cached snapshot. Project relocation
+ * mutates its LoadedSettings in place, so daemon sessions must never receive
+ * the cache entry itself or share nested settings objects with siblings.
+ */
+export function loadSettingsCachedForSession(
+  workspaceDir: string,
+): LoadedSettings {
+  return cloneLoadedSettings(loadSettingsCached(workspaceDir));
 }
 
 export function clearSettingsCacheForTesting(): void {

@@ -29,6 +29,7 @@ import { isInternalSecretEnvVar } from './sanitize-child-env.js';
 export function resolveEnvVarsInString(
   value: string,
   customEnv?: Record<string, string>,
+  environment: Readonly<NodeJS.ProcessEnv> = process.env,
 ): string {
   const envVarRegex = /\$(?:(\w+)|{([^}]+)})/g; // Find $VAR_NAME or ${VAR_NAME}
   return value.replace(envVarRegex, (match, varName1, varName2) => {
@@ -39,8 +40,8 @@ export function resolveEnvVarsInString(
     if (customEnv && typeof customEnv[varName] === 'string') {
       return customEnv[varName];
     }
-    if (process && process.env && typeof process.env[varName] === 'string') {
-      return process.env[varName]!;
+    if (typeof environment[varName] === 'string') {
+      return environment[varName]!;
     }
     return match;
   });
@@ -68,8 +69,14 @@ export function resolveEnvVarsInString(
 export function resolveEnvVarsInObject<T>(
   obj: T,
   customEnv?: Record<string, string>,
+  environment: Readonly<NodeJS.ProcessEnv> = process.env,
 ): T {
-  return resolveEnvVarsInObjectInternal(obj, new WeakSet(), customEnv);
+  return resolveEnvVarsInObjectInternal(
+    obj,
+    new WeakSet(),
+    customEnv,
+    environment,
+  );
 }
 
 /**
@@ -83,6 +90,7 @@ function resolveEnvVarsInObjectInternal<T>(
   obj: T,
   visited: WeakSet<object>,
   customEnv?: Record<string, string>,
+  environment: Readonly<NodeJS.ProcessEnv> = process.env,
 ): T {
   if (
     obj === null ||
@@ -94,7 +102,7 @@ function resolveEnvVarsInObjectInternal<T>(
   }
 
   if (typeof obj === 'string') {
-    return resolveEnvVarsInString(obj, customEnv) as unknown as T;
+    return resolveEnvVarsInString(obj, customEnv, environment) as unknown as T;
   }
 
   if (Array.isArray(obj)) {
@@ -106,7 +114,7 @@ function resolveEnvVarsInObjectInternal<T>(
 
     visited.add(obj);
     const result = obj.map((item) =>
-      resolveEnvVarsInObjectInternal(item, visited, customEnv),
+      resolveEnvVarsInObjectInternal(item, visited, customEnv, environment),
     ) as unknown as T;
     visited.delete(obj);
     return result;
@@ -127,6 +135,7 @@ function resolveEnvVarsInObjectInternal<T>(
           newObj[key],
           visited,
           customEnv,
+          environment,
         );
       }
     }

@@ -535,6 +535,7 @@ export class LoadedSettings {
     corruptedPath: string | undefined = undefined,
     wasRecovered: boolean = false,
     workspaceSettingsActive: boolean = true,
+    environment: Readonly<NodeJS.ProcessEnv> = process.env,
   ) {
     this.system = system;
     this.systemDefaults = systemDefaults;
@@ -546,19 +547,21 @@ export class LoadedSettings {
     this.corruptedPath = corruptedPath;
     this.wasRecovered = wasRecovered;
     this.workspaceSettingsActive = workspaceSettingsActive;
+    this.environment = Object.freeze({ ...environment });
     this._merged = this.computeMergedSettings();
   }
 
-  readonly system: SettingsFile;
-  readonly systemDefaults: SettingsFile;
-  readonly user: SettingsFile;
-  readonly workspace: SettingsFile;
-  readonly isTrusted: boolean;
-  readonly migratedInMemoryScopes: Set<SettingScope>;
-  readonly migrationWarnings: string[];
-  readonly corruptedPath: string | undefined;
-  readonly wasRecovered: boolean;
-  readonly workspaceSettingsActive: boolean;
+  system: SettingsFile;
+  systemDefaults: SettingsFile;
+  user: SettingsFile;
+  workspace: SettingsFile;
+  isTrusted: boolean;
+  migratedInMemoryScopes: Set<SettingScope>;
+  migrationWarnings: string[];
+  corruptedPath: string | undefined;
+  wasRecovered: boolean;
+  workspaceSettingsActive: boolean;
+  environment: Readonly<NodeJS.ProcessEnv>;
   corruptionDialogDismissed: boolean = false;
 
   private _merged: Settings;
@@ -667,6 +670,60 @@ export class LoadedSettings {
     this._merged = this.computeMergedSettings();
   }
 
+  replaceWith(next: LoadedSettings): LoadedSettings {
+    const previous = new LoadedSettings(
+      this.system,
+      this.systemDefaults,
+      this.user,
+      this.workspace,
+      this.isTrusted,
+      this.migratedInMemoryScopes,
+      this.migrationWarnings,
+      this.corruptedPath,
+      this.wasRecovered,
+      this.workspaceSettingsActive,
+      this.environment,
+    );
+    this.system = next.system;
+    this.systemDefaults = next.systemDefaults;
+    this.user = next.user;
+    this.workspace = next.workspace;
+    this.isTrusted = next.isTrusted;
+    this.migratedInMemoryScopes = next.migratedInMemoryScopes;
+    this.migrationWarnings = next.migrationWarnings;
+    this.corruptedPath = next.corruptedPath;
+    this.wasRecovered = next.wasRecovered;
+    this.workspaceSettingsActive = next.workspaceSettingsActive;
+    this.environment = next.environment;
+    this._merged = next.merged;
+    return previous;
+  }
+
+  persistInMemoryMigrations(): void {
+    for (const scope of this.migratedInMemoryScopes) {
+      const file = this.forScope(scope);
+      try {
+        const written = updateSettingsFilePreservingFormat(
+          file.path,
+          file.originalSettings,
+          true,
+        );
+        if (written) {
+          this.migratedInMemoryScopes.delete(scope);
+        } else {
+          debugLogger.error(
+            `Failed to persist migrated settings: ${file.path}`,
+          );
+        }
+      } catch (error) {
+        debugLogger.error(
+          `Failed to persist migrated settings: ${file.path}`,
+          error,
+        );
+      }
+    }
+  }
+
   reloadScopeFromDisk(scope: SettingScope): boolean {
     const file = this.forScope(scope);
     if (scope === SettingScope.Workspace && !this.workspaceSettingsActive) {
@@ -687,11 +744,22 @@ export class LoadedSettings {
       }
 
       const content = fs.readFileSync(file.path, 'utf-8');
-      const parsed = JSON.parse(stripJsonComments(content));
+      let parsed = JSON.parse(stripJsonComments(content));
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        // A scope loaded read-only (the `/cd` reloader) was migrated in
+        // memory and never written back, so the file on disk is still in
+        // its legacy layout. Re-parsing it raw here would undo that
+        // migration on the first hot-reload after the move.
+        if (this.migratedInMemoryScopes.has(scope) && needsMigration(parsed)) {
+          parsed = runMigrations(parsed, scope).settings;
+        }
         const resolved = resolveEnvVarsInObject(
           parsed as Settings,
-          getHomeEnvFallbackVars((message) => debugLogger.warn(message)),
+          getHomeEnvFallbackVars(
+            (message) => debugLogger.warn(message),
+            this.environment,
+          ),
+          this.environment,
         );
         file.settings = resolved;
         file.originalSettings = structuredClone(parsed) as Settings;
@@ -734,11 +802,17 @@ export class LoadedSettings {
   }
 
   /**
-   * Get user-level hooks from user settings (not merged with workspace).
+   * Get non-workspace hooks with the same precedence as merged settings.
    * These hooks should always be loaded regardless of folder trust.
    */
   getUserHooks(): Record<string, unknown> | undefined {
-    return this.user.settings.hooks;
+    return mergeSettings(
+      this.system.settings,
+      this.systemDefaults.settings,
+      this.user.settings,
+      {},
+      true,
+    ).hooks;
   }
 
   /**
@@ -752,6 +826,30 @@ export class LoadedSettings {
     }
     return this.workspace.settings.hooks;
   }
+}
+
+export function cloneLoadedSettings(settings: LoadedSettings): LoadedSettings {
+  const cloneFile = (file: SettingsFile): SettingsFile => ({
+    settings: structuredClone(file.settings),
+    originalSettings: structuredClone(file.originalSettings),
+    path: file.path,
+    rawJson: file.rawJson,
+  });
+  const clone = new LoadedSettings(
+    cloneFile(settings.system),
+    cloneFile(settings.systemDefaults),
+    cloneFile(settings.user),
+    cloneFile(settings.workspace),
+    settings.isTrusted,
+    new Set(settings.migratedInMemoryScopes),
+    [...settings.migrationWarnings],
+    settings.corruptedPath,
+    settings.wasRecovered,
+    settings.workspaceSettingsActive,
+    settings.environment,
+  );
+  clone.corruptionDialogDismissed = settings.corruptionDialogDismissed;
+  return clone;
 }
 
 /**
@@ -828,6 +926,8 @@ export const CORRUPTED_SUFFIX = '.corrupted';
  */
 export interface LoadSettingsOptions {
   consumeCorruptionEnvVars?: boolean;
+  environment?: Readonly<NodeJS.ProcessEnv>;
+  readOnly?: boolean;
   skipLoadEnvironment?: boolean;
   skipWorkspaceSettings?: boolean;
   workspaceTrusted?: boolean;
@@ -846,6 +946,9 @@ export function loadSettings(
   // lazy `getUserSettingsPath()` / `Storage.getGlobalQwenDir()` getters
   // return the post-bootstrap value.
   preResolveHomeEnvOverrides();
+  const resolutionEnvironment = Object.freeze({
+    ...(opts.environment ?? process.env),
+  });
   const userSettingsPath = getUserSettingsPath();
   const qwenHomeRedirectWarning =
     detectQwenHomeRedirectWithoutMigration(userSettingsPath);
@@ -901,6 +1004,13 @@ export function loadSettings(
         try {
           rawSettings = JSON.parse(stripJsonComments(content));
         } catch (parseError: unknown) {
+          if (opts.readOnly) {
+            settingsErrors.push({
+              message: getErrorMessage(parseError),
+              path: filePath,
+            });
+            return { settings: {} };
+          }
           // ===== JSON parse failed — enter corruption recovery =====
           // Strategy: save corrupted file as .corrupted → reset to empty →
           // show dialog in UI. Never crash due to a corrupted settings file.
@@ -992,6 +1102,10 @@ export function loadSettings(
         let migrationWarnings: string[] | undefined;
 
         const persistSettingsObject = (warningPrefix: string) => {
+          if (opts.readOnly) {
+            migratedInMemoryScopes.add(scope);
+            return;
+          }
           try {
             // Use sync mode to remove deprecated keys (zombie key prevention)
             // while preserving comments and formatting from the original file.
@@ -1027,7 +1141,8 @@ export function loadSettings(
             persistSettingsObject('Error migrating settings file on disk');
           } else if (
             (hasLegacyNumericVersion || hasInvalidVersion) &&
-            !corruptedSaved
+            !corruptedSaved &&
+            !opts.readOnly
           ) {
             // Migration was deemed needed but nothing executed. Normalize version metadata
             // to avoid repeated no-op checks on startup.
@@ -1039,13 +1154,17 @@ export function loadSettings(
           }
         } else if (
           (!hasVersionKey || hasInvalidVersion || hasLegacyNumericVersion) &&
-          !corruptedSaved
+          !corruptedSaved &&
+          !opts.readOnly
         ) {
           // No migration needed/executable, but version metadata is missing or invalid.
           // Normalize it to current version to avoid repeated startup work.
           // Skip if we just recovered from corruption — the next startup will
           // handle normalization, avoiding an unnecessary writeWithBackupSync
           // that would create a .orig file from the freshly reset settings.
+          // A readOnly (`/cd` prepare) load is observation-only: stamping
+          // `$version` in memory without writing it would make the first
+          // hot reload re-parse an un-stamped file into a different shape.
           settingsObject[SETTINGS_VERSION_KEY] = SETTINGS_VERSION;
           persistSettingsObject('Error normalizing settings version on disk');
         }
@@ -1103,25 +1222,33 @@ export function loadSettings(
   const workspaceOriginalSettings = structuredClone(workspaceResult.settings);
 
   // Resolve ${VAR} placeholders in settings using home .env as fallback.
-  // getHomeEnvFallbackVars() excludes keys already in process.env, so
-  // effective precedence is: process.env > home .env > unresolved placeholder.
-  // The resolver checks customEnv before process.env, but since customEnv
-  // never contains a process.env key, process.env always wins.
-  const homeEnvFallback = getHomeEnvFallbackVars((message) =>
-    debugLogger.warn(message),
+  // getHomeEnvFallbackVars() excludes keys already in the captured resolution
+  // environment, so effective precedence is: startup environment > home .env
+  // > unresolved placeholder. Target project env files are applied later and
+  // must not influence settings expansion.
+  const homeEnvFallback = getHomeEnvFallbackVars(
+    (message) => debugLogger.warn(message),
+    resolutionEnvironment,
   );
   systemSettings = resolveEnvVarsInObject(
     systemResult.settings,
     homeEnvFallback,
+    resolutionEnvironment,
   );
   systemDefaultSettings = resolveEnvVarsInObject(
     systemDefaultsResult.settings,
     homeEnvFallback,
+    resolutionEnvironment,
   );
-  userSettings = resolveEnvVarsInObject(userResult.settings, homeEnvFallback);
+  userSettings = resolveEnvVarsInObject(
+    userResult.settings,
+    homeEnvFallback,
+    resolutionEnvironment,
+  );
   workspaceSettings = resolveEnvVarsInObject(
     workspaceResult.settings,
     homeEnvFallback,
+    resolutionEnvironment,
   );
 
   // Support legacy theme names
@@ -1218,6 +1345,7 @@ export function loadSettings(
     userResult.corruptedPath,
     userResult.wasRecovered ?? false,
     workspaceSettingsActive,
+    resolutionEnvironment,
   );
 }
 

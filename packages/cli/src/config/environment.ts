@@ -220,6 +220,7 @@ export function isFileSourcedEnvKey(key: string): boolean {
  */
 export function getHomeEnvFallbackVars(
   onReadError?: (message: string) => void,
+  environment: Readonly<NodeJS.ProcessEnv> = process.env,
 ): Record<string, string> {
   const globalQwenDir = Storage.getGlobalQwenDir();
   const candidates = [path.join(globalQwenDir, '.env')];
@@ -227,7 +228,7 @@ export function getHomeEnvFallbackVars(
   // from a shared home .env. getUserLevelEnvPaths() always includes ~/.env
   // because loadEnvironment() populates process.env independently — the two
   // scopes are intentionally different.
-  if (!process.env['QWEN_HOME']) {
+  if (!environment['QWEN_HOME']) {
     candidates.push(path.join(path.dirname(globalQwenDir), '.env'));
   }
 
@@ -239,7 +240,7 @@ export function getHomeEnvFallbackVars(
     try {
       const parsed = dotenv.parse(fs.readFileSync(candidate, 'utf-8'));
       for (const key in parsed) {
-        if (Object.hasOwn(parsed, key) && !Object.hasOwn(process.env, key)) {
+        if (Object.hasOwn(parsed, key) && !Object.hasOwn(environment, key)) {
           result[key] ??= parsed[key]!;
         }
       }
