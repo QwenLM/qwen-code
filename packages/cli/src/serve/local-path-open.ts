@@ -129,7 +129,11 @@ function isExecutableFile(file: string): boolean {
   }
 }
 
-export async function openPathLocally(path: string): Promise<void> {
+// `timeoutMs` exists for tests; production callers use the default.
+export async function openPathLocally(
+  path: string,
+  timeoutMs?: number,
+): Promise<void> {
   try {
     if (process.platform === 'darwin') {
       await execFileAsync('open', [path], { timeout: OPEN_TIMEOUT_MS });
@@ -142,7 +146,7 @@ export async function openPathLocally(path: string): Promise<void> {
       // no longer exists — darwin/linux fail that case in the launcher, so
       // probe first here.
       assertPathExists(path);
-      await spawnAndIgnoreExitCode('explorer.exe', [path]);
+      await spawnAndIgnoreExitCode('explorer.exe', [path], { timeoutMs });
       return;
     }
 
@@ -169,7 +173,11 @@ function assertPathExists(path: string): void {
   }
 }
 
-export async function openTerminalLocally(path: string): Promise<void> {
+// `timeoutMs` exists for tests; production callers use the default.
+export async function openTerminalLocally(
+  path: string,
+  timeoutMs?: number,
+): Promise<void> {
   try {
     if (process.platform === 'darwin') {
       await execFileAsync('open', ['-a', 'Terminal', path], {
@@ -182,14 +190,14 @@ export async function openTerminalLocally(path: string): Promise<void> {
       // Same deleted-directory honesty as the folder open: wt.exe ignores a
       // missing -d target and opens its default profile directory.
       assertPathExists(path);
-      await spawnWindowsTerminal(path);
+      await spawnWindowsTerminal(path, timeoutMs);
       return;
     }
 
     if (process.platform === 'linux') {
       // win32 parity: a deleted directory must not report a successful open.
       assertPathExists(path);
-      await spawnLinuxTerminal(path);
+      await spawnLinuxTerminal(path, timeoutMs);
       return;
     }
   } catch (error) {
@@ -206,9 +214,12 @@ export async function openTerminalLocally(path: string): Promise<void> {
 
 // wt.exe (Windows Terminal) is absent on older installs; fall back to a
 // PowerShell-launched cmd window.
-async function spawnWindowsTerminal(path: string): Promise<void> {
+async function spawnWindowsTerminal(
+  path: string,
+  timeoutMs?: number,
+): Promise<void> {
   try {
-    await spawnAndIgnoreExitCode('wt.exe', ['-d', path]);
+    await spawnAndIgnoreExitCode('wt.exe', ['-d', path], { timeoutMs });
   } catch {
     // The directory travels as the child's working directory, never through
     // a parsed command line: cmd.exe `start` disagrees with CreateProcess
@@ -224,12 +235,15 @@ async function spawnWindowsTerminal(path: string): Promise<void> {
         '-Command',
         'Start-Process cmd.exe -WorkingDirectory "$env:QWEN_LOCAL_OPEN_DIR"',
       ],
-      { QWEN_LOCAL_OPEN_DIR: path },
+      { extraEnv: { QWEN_LOCAL_OPEN_DIR: path }, timeoutMs },
     );
   }
 }
 
-async function spawnLinuxTerminal(path: string): Promise<void> {
+async function spawnLinuxTerminal(
+  path: string,
+  timeoutMs?: number,
+): Promise<void> {
   const env = process.env;
   // The capability probe runs once at boot; a display that went away since
   // must not report a successful open now.
@@ -244,21 +258,18 @@ async function spawnLinuxTerminal(path: string): Promise<void> {
   }
   const name = terminal.split(/[\\/]/).pop();
   if (name === 'gnome-terminal') {
-    await spawnLongLived(terminal, [`--working-directory=${path}`]);
+    await spawnLongLived(terminal, [`--working-directory=${path}`], timeoutMs);
     return;
   }
   if (name === 'konsole') {
-    await spawnLongLived(terminal, ['--workdir', path]);
+    await spawnLongLived(terminal, ['--workdir', path], timeoutMs);
     return;
   }
-  await spawnLongLived(terminal, [
-    '-e',
-    'sh',
-    '-c',
-    'cd "$1" && exec "${SHELL:-/bin/sh}"',
-    'sh',
-    path,
-  ]);
+  await spawnLongLived(
+    terminal,
+    ['-e', 'sh', '-c', 'cd "$1" && exec "${SHELL:-/bin/sh}"', 'sh', path],
+    timeoutMs,
+  );
 }
 
 // explorer.exe / wt.exe commonly exit 1 even when they did open the folder,
@@ -267,8 +278,9 @@ async function spawnLinuxTerminal(path: string): Promise<void> {
 function spawnAndIgnoreExitCode(
   command: string,
   args: readonly string[],
-  extraEnv?: Record<string, string>,
+  options: { extraEnv?: Record<string, string>; timeoutMs?: number } = {},
 ): Promise<void> {
+  const { extraEnv, timeoutMs = OPEN_TIMEOUT_MS } = options;
   return new Promise((resolve, reject) => {
     const child = spawn(command, [...args], {
       stdio: 'ignore',
@@ -276,8 +288,8 @@ function spawnAndIgnoreExitCode(
     });
     const timer = setTimeout(() => {
       child.kill();
-      reject(new Error(`${command} did not exit within 10s`));
-    }, OPEN_TIMEOUT_MS);
+      reject(new Error(`${command} did not exit within ${timeoutMs}ms`));
+    }, timeoutMs);
     child.once('error', (error) => {
       clearTimeout(timer);
       reject(error);
@@ -295,6 +307,7 @@ function spawnAndIgnoreExitCode(
 function spawnLongLived(
   command: string,
   args: readonly string[],
+  timeoutMs = OPEN_TIMEOUT_MS,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, [...args], {
@@ -303,8 +316,8 @@ function spawnLongLived(
     });
     const timer = setTimeout(() => {
       child.kill();
-      reject(new Error(`${command} did not spawn within 10s`));
-    }, OPEN_TIMEOUT_MS);
+      reject(new Error(`${command} did not spawn within ${timeoutMs}ms`));
+    }, timeoutMs);
     child.once('error', (error) => {
       clearTimeout(timer);
       reject(error);

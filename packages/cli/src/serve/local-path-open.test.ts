@@ -556,44 +556,28 @@ describe('spawn helper contracts', () => {
     await expect(openPathLocally(existingDir)).resolves.toBeUndefined();
   });
 
-  it('kills and rejects a hung GUI launcher after 10s', async () => {
-    vi.useFakeTimers();
-    try {
-      setPlatform('win32');
-      const child = { once: vi.fn(), kill: vi.fn(), unref: vi.fn() };
-      spawnMock.mockReturnValue(child);
+  it('kills and rejects a hung GUI launcher', async () => {
+    setPlatform('win32');
+    const child = { once: vi.fn(), kill: vi.fn(), unref: vi.fn() };
+    spawnMock.mockReturnValue(child);
 
-      const pending = openPathLocally(existingDir);
-      const expectation = await expect(pending).rejects.toBeInstanceOf(
-        LocalPathOpenUnavailableError,
-      );
-      await vi.advanceTimersByTimeAsync(10_000);
-      await expectation;
-      expect(child.kill).toHaveBeenCalled();
-    } finally {
-      vi.useRealTimers();
-    }
+    await expect(openPathLocally(existingDir, 5)).rejects.toBeInstanceOf(
+      LocalPathOpenUnavailableError,
+    );
+    expect(child.kill).toHaveBeenCalled();
   });
 
-  it('kills and rejects a hung terminal spawn after 10s', async () => {
-    vi.useFakeTimers();
-    try {
-      setPlatform('linux');
-      vi.stubEnv('PATH', gnomeTerminalDir);
-      vi.stubEnv('DISPLAY', ':0');
-      const child = { once: vi.fn(), kill: vi.fn(), unref: vi.fn() };
-      spawnMock.mockReturnValue(child);
+  it('kills and rejects a hung terminal spawn', async () => {
+    setPlatform('linux');
+    vi.stubEnv('PATH', gnomeTerminalDir);
+    vi.stubEnv('DISPLAY', ':0');
+    const child = { once: vi.fn(), kill: vi.fn(), unref: vi.fn() };
+    spawnMock.mockReturnValue(child);
 
-      const pending = openTerminalLocally(existingDir);
-      const expectation = await expect(pending).rejects.toBeInstanceOf(
-        LocalPathOpenUnavailableError,
-      );
-      await vi.advanceTimersByTimeAsync(10_000);
-      await expectation;
-      expect(child.kill).toHaveBeenCalled();
-    } finally {
-      vi.useRealTimers();
-    }
+    await expect(openTerminalLocally(existingDir, 5)).rejects.toBeInstanceOf(
+      LocalPathOpenUnavailableError,
+    );
+    expect(child.kill).toHaveBeenCalled();
   });
 
   it('inherits the daemon environment alongside the injected directory', async () => {
