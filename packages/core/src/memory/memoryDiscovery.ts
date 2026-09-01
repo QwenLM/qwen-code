@@ -48,6 +48,7 @@ async function getMemoryFilePathsInternal(
   extensionContextFilePaths: string[] = [],
   folderTrust: boolean,
   implicitDiscoveryEnabled: boolean = true,
+  contextFileNames: readonly string[] = getAllMemoryFilenames(),
 ): Promise<string[]> {
   const dirs = new Set<string>(
     implicitDiscoveryEnabled
@@ -70,6 +71,7 @@ async function getMemoryFilePathsInternal(
         extensionContextFilePaths,
         folderTrust,
         implicitDiscoveryEnabled,
+        contextFileNames,
       ),
     );
 
@@ -98,9 +100,10 @@ async function getMemoryFilePathsInternalForEachDir(
   extensionContextFilePaths: string[] = [],
   folderTrust: boolean,
   implicitDiscoveryEnabled: boolean = true,
+  contextFileNames: readonly string[] = getAllMemoryFilenames(),
 ): Promise<string[]> {
   const allPaths = new Set<string>();
-  const memoryFilenames = getAllMemoryFilenames();
+  const memoryFilenames = contextFileNames;
 
   for (const memoryFilename of memoryFilenames) {
     const resolvedHome = path.resolve(userHomePath);
@@ -206,7 +209,7 @@ async function getMemoryFilePathsInternalForEachDir(
   const finalPaths = Array.from(allPaths);
 
   logger.debug(
-    `Final ordered ${getAllMemoryFilenames()} paths to read: ${JSON.stringify(
+    `Final ordered ${contextFileNames} paths to read: ${JSON.stringify(
       finalPaths,
     )}`,
   );
@@ -429,6 +432,7 @@ export interface LoadServerHierarchicalMemoryResponse {
 
 export interface LoadServerHierarchicalMemoryOptions {
   explicitOnly?: boolean;
+  contextFileNames?: readonly string[];
   loadReason?: Exclude<InstructionLoadReason, 'include'>;
   onInstructionsLoaded?: (
     notification: InstructionsLoadedNotification,
@@ -516,6 +520,7 @@ export async function loadServerHierarchicalMemory(
     extensionContextFilePaths,
     folderTrust,
     implicitDiscoveryEnabled,
+    options.contextFileNames,
   );
 
   // Resolve project root once — needed both for the QWEN.local.md slot
@@ -591,7 +596,7 @@ export async function loadServerHierarchicalMemory(
     // (/memory count vs announcement list) may differ; aligning them at
     // the display site is deferred as a follow-up.
     const memoryFilenames = new Set([
-      ...getAllMemoryFilenames(),
+      ...(options.contextFileNames ?? getAllMemoryFilenames()),
       LOCAL_CONTEXT_FILENAME,
     ]);
     const memoryItems = contentsWithPaths.filter((item) =>

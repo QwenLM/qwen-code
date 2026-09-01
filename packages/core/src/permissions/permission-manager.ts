@@ -287,6 +287,32 @@ export class PermissionManager {
     }
   }
 
+  reloadForProjectChange(): void {
+    const wasStripped = this.strippedAllowRules !== undefined;
+    if (this.strippedAllowRules?.session.length) {
+      this.sessionRules.allow = [
+        ...this.sessionRules.allow,
+        ...this.strippedAllowRules.session,
+      ];
+    }
+    this.strippedAllowRules = undefined;
+    this.coreToolsAllowList = null;
+    // `initialize()` re-derives the `tools.eager` allowlist unconditionally
+    // (array → active list, anything else → null), so it needs no reset.
+    try {
+      this.initialize();
+    } catch (error) {
+      this.persistentRules = { allow: [], ask: [], deny: [] };
+      if (wasStripped && !this.strippedAllowRules) {
+        this.stripDangerousRulesForAutoMode();
+      }
+      throw error;
+    }
+    if (wasStripped && !this.strippedAllowRules) {
+      this.stripDangerousRulesForAutoMode();
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // Core evaluation
   // ---------------------------------------------------------------------------

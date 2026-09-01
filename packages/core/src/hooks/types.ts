@@ -38,6 +38,8 @@ export enum HookEventName {
   UserPromptExpansion = 'UserPromptExpansion',
   // SessionStart - When a new session is started
   SessionStart = 'SessionStart',
+  // CwdChanged - After the session changes its working directory
+  CwdChanged = 'CwdChanged',
   // Stop - Right before Claude concludes its response
   Stop = 'Stop',
   // MessageDisplay - Fires repeatedly as the assistant's reply streams, before Stop
@@ -265,6 +267,11 @@ export interface HookInput {
   cwd: string;
   hook_event_name: string;
   timestamp: string;
+}
+
+export interface CwdChangedInput extends HookInput {
+  old_cwd: string;
+  new_cwd: string;
 }
 
 export type InstructionMemoryType = 'user' | 'project' | 'local' | 'extension';

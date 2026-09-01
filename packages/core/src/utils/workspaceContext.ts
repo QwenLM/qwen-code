@@ -213,11 +213,14 @@ export class WorkspaceContext {
     }
   }
 
-  applyRootDirectories(resolved: ResolvedWorkspaceDirectories): void {
+  applyRootDirectories(
+    resolved: ResolvedWorkspaceDirectories,
+    replacedDirectories: ReadonlySet<string> = this.initialDirectories,
+  ): void {
     const newDirectories = new Set(resolved.directories);
     const newInitialDirectories = new Set(resolved.initialDirectories);
     for (const existing of this.directories) {
-      if (!this.initialDirectories.has(existing)) {
+      if (!replacedDirectories.has(existing)) {
         newDirectories.add(existing);
       }
     }

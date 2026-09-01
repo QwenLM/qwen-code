@@ -1104,6 +1104,54 @@ describe('HookRegistry', () => {
       expect(registry.getAllHooks()).toEqual(before);
     });
 
+    it('drops configured hooks on a fail-closed reload failure', async () => {
+      mockConfig.getUserHooks = vi.fn().mockReturnValue({
+        [HookEventName.PreToolUse]: [
+          {
+            matcher: 'Bash',
+            hooks: [
+              {
+                type: HookType.Command,
+                command: 'echo user',
+                name: 'user-hook',
+              },
+            ],
+          },
+        ],
+      });
+
+      const registry = new HookRegistry(mockConfig);
+      await registry.initialize();
+      registry.addAgentHooks(
+        {
+          [HookEventName.PreToolUse]: [
+            {
+              matcher: 'Bash',
+              hooks: [
+                {
+                  type: HookType.Command,
+                  command: 'echo agent',
+                  name: 'agent-hook',
+                },
+              ],
+            },
+          ],
+        },
+        'agent:test:fail-closed',
+      );
+      mockConfig.getUserHooks = vi.fn(() => {
+        throw new Error('reload failed');
+      });
+
+      await expect(
+        registry.reloadConfiguredHooks({ failClosed: true }),
+      ).rejects.toThrow('reload failed');
+
+      expect(registry.getAllHooks().map((entry) => entry.source)).toEqual([
+        HooksConfigSource.Session,
+      ]);
+    });
+
     it('silently keeps entries when the hooks payload is empty', async () => {
       const registry = new HookRegistry(mockConfig);
       await registry.initialize();

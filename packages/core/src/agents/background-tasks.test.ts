@@ -826,6 +826,39 @@ describe('BackgroundTaskRegistry', () => {
       expect(registry.get('bg-3')).toBeUndefined();
     });
 
+    it('applies updated limits and drains newly available slots', async () => {
+      registry = new BackgroundTaskRegistry({
+        maxConcurrentBackgroundAgents: 1,
+      });
+      registry.register(makeRegistration('bg-1'));
+      const reservationPromise = registry.waitForBackgroundSlot(
+        new AbortController().signal,
+      );
+      expect(registry.getQueuedCount()).toBe(1);
+
+      registry.setConcurrencyLimits({ maxConcurrentBackgroundAgents: 2 });
+
+      expect(registry.getMaxConcurrentBackgroundAgents()).toBe(2);
+      expect(await reservationPromise).toBeDefined();
+      expect(registry.getQueuedCount()).toBe(0);
+    });
+
+    it('replaces the per-model caps instead of merging them', () => {
+      // `/cd` swaps the map wholesale: a project without
+      // `maxParallelAgentsByModel` must not keep throttling the previous
+      // project's models.
+      registry = new BackgroundTaskRegistry({
+        maxConcurrentBackgroundAgents: 4,
+        maxConcurrentBackgroundAgentsByModel: { 'some-model': 1 },
+      });
+      registry.register(makeRegistration('bg-1', { model: 'some-model' }));
+      expect(registry.canStartBackgroundAgent('some-model')).toBe(false);
+
+      registry.setConcurrencyLimits({ maxConcurrentBackgroundAgents: 2 });
+
+      expect(registry.canStartBackgroundAgent('some-model')).toBe(true);
+    });
+
     it('allows replacing the same running background agent at the cap', () => {
       registry = new BackgroundTaskRegistry({
         maxConcurrentBackgroundAgents: 1,

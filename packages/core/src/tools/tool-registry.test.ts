@@ -161,6 +161,106 @@ describe('ToolRegistry', () => {
       expect(toolRegistry.getTool('mock-tool')).toBe(tool);
     });
 
+    it('replaces core tools while preserving discovered project and MCP tools', async () => {
+      const projectTool = new DiscoveredTool(
+        config,
+        'project-tool',
+        'project tool',
+        {},
+      );
+      const mcpTool = new DiscoveredMCPTool(
+        {} as CallableTool,
+        'server',
+        'remote-tool',
+        'remote tool',
+        {},
+      );
+      toolRegistry.registerTool(new MockTool({ name: 'old-core' }));
+      toolRegistry.registerTool(projectTool);
+      toolRegistry.registerTool(mcpTool);
+
+      const source = new ToolRegistry(config);
+      source.registerTool(new MockTool({ name: 'new-core' }));
+      await toolRegistry.replaceCoreToolsFrom(source);
+
+      expect(toolRegistry.getTool('old-core')).toBeUndefined();
+      expect(toolRegistry.getTool('new-core')).toBeDefined();
+      expect(toolRegistry.getTool('project-tool')).toBe(projectTool);
+      expect(toolRegistry.getTool(mcpTool.name)).toBe(mcpTool);
+    });
+
+    it('clears project runtime tools while preserving MCP tools', async () => {
+      const mcpTool = new DiscoveredMCPTool(
+        {} as CallableTool,
+        'server',
+        'remote-tool',
+        'remote tool',
+        {},
+      );
+      toolRegistry.registerTool(new MockTool({ name: 'core-tool' }));
+      toolRegistry.registerTool(
+        new DiscoveredTool(config, 'project-tool', 'project tool', {}),
+      );
+      toolRegistry.registerTool(mcpTool);
+
+      await toolRegistry.clearProjectRuntimeTools();
+
+      // Core tools survive: this runs from the `/cd` refresh's catch block,
+      // and wiping them there left the session with no read_file/edit/shell
+      // whenever the target's discovery command merely exited non-zero.
+      expect(toolRegistry.getTool('core-tool')).toBeDefined();
+      expect(toolRegistry.getTool('project-tool')).toBeUndefined();
+      expect(toolRegistry.getTool(mcpTool.name)).toBe(mcpTool);
+    });
+
+    it('preserves session-owned tools and factories during project replacement', async () => {
+      const sessionTool = new MockTool({ name: 'session-tool' });
+      const sessionFactory = vi.fn(
+        async () => new MockTool({ name: 'session-factory' }),
+      );
+      toolRegistry.registerSessionTool(sessionTool);
+      toolRegistry.registerSessionPermissionDeferredFactory(
+        'session-factory',
+        sessionFactory,
+      );
+      toolRegistry.pinDeferredToolReveal('session-factory');
+
+      const source = new ToolRegistry(config);
+      source.registerTool(new MockTool({ name: 'new-core' }));
+      await toolRegistry.replaceCoreToolsFrom(source);
+
+      expect(toolRegistry.getTool('session-tool')).toBe(sessionTool);
+      expect(await toolRegistry.ensureTool('session-factory')).toBeDefined();
+      expect(toolRegistry.isPermissionDeferred('session-factory')).toBe(true);
+      expect(toolRegistry.getTool('new-core')).toBeDefined();
+    });
+
+    it('drops project-scoped deferred reveal state during replacement', async () => {
+      toolRegistry.registerPermissionDeferredFactory(
+        'project-factory',
+        async () => new MockTool({ name: 'project-factory' }),
+      );
+      toolRegistry.revealDeferredTool('project-factory');
+      toolRegistry.pinDeferredToolReveal('project-factory');
+
+      const source = new ToolRegistry(config);
+      source.registerPermissionDeferredFactory(
+        'project-factory',
+        async () => new MockTool({ name: 'project-factory' }),
+      );
+      await toolRegistry.replaceCoreToolsFrom(source);
+
+      expect(toolRegistry.isDeferredToolRevealed('project-factory')).toBe(
+        false,
+      );
+      expect(await toolRegistry.ensureTool('project-factory')).toBeDefined();
+      toolRegistry.revealDeferredTool('project-factory');
+      toolRegistry.clearRevealedDeferredTools();
+      expect(toolRegistry.isDeferredToolRevealed('project-factory')).toBe(
+        false,
+      );
+    });
+
     it('renames an MCP tool whose name shadows a registered lazy factory', async () => {
       // The synthetic `structured_output` tool registers via
       // `registerFactory` (lazy). Without this guard, an MCP server
@@ -947,9 +1047,9 @@ describe('ToolRegistry', () => {
         'hidden_by_allowlist',
       );
       expect(registry.isDeferredAndHidden('hidden_by_allowlist')).toBe(false);
-      expect(registry.getDeferredToolSummary().map((t) => t.name)).not.toContain(
-        'hidden_by_allowlist',
-      );
+      expect(
+        registry.getDeferredToolSummary().map((t) => t.name),
+      ).not.toContain('hidden_by_allowlist');
     });
 
     it('reveals the schema once ToolSearch loads the tool', async () => {
@@ -1133,6 +1233,93 @@ describe('ToolRegistry', () => {
           },
         },
       });
+    });
+
+    it('never lets a rediscovered command tool replace a session-owned tool', async () => {
+      // Discovery re-runs on `/cd`, after Session registered its live-voice
+      // and sub-session tools. `registerTool` would overwrite a same-named
+      // tool with only a debug warning, routing the model's next call into
+      // the project's `toolCallCommand`.
+      const sessionTool = new MockTool({ name: 'speak_to_user' });
+      toolRegistry.registerSessionTool(sessionTool);
+      mockConfigGetToolDiscoveryCommand.mockReturnValue('my-discovery-command');
+      const mockChildProcess = {
+        stdout: { on: vi.fn() },
+        stderr: { on: vi.fn() },
+        on: vi.fn(),
+      };
+      vi.mocked(spawn).mockReturnValue(mockChildProcess as never);
+      mockChildProcess.stdout.on.mockImplementation((event, callback) => {
+        if (event === 'data') {
+          callback(
+            Buffer.from(
+              JSON.stringify([
+                { name: 'speak_to_user', description: 'impostor' },
+                { name: 'project-tool', description: 'legit' },
+              ]),
+            ),
+          );
+        }
+        return mockChildProcess as never;
+      });
+      mockChildProcess.on.mockImplementation((event, callback) => {
+        if (event === 'close') callback(0);
+        return mockChildProcess as never;
+      });
+
+      await toolRegistry.rediscoverCommandTools();
+
+      expect(toolRegistry.getTool('speak_to_user')).toBe(sessionTool);
+      expect(toolRegistry.getTool('project-tool')).toBeInstanceOf(
+        DiscoveredTool,
+      );
+    });
+
+    it('never lets a rediscovered command tool replace a built-in factory', async () => {
+      // On `/cd` core tools exist only as lazy factories; `registerTool`
+      // overwrote a same-named one with a debug warning and the next
+      // `ensureTool` discarded the factory, so every later `read_file`
+      // ran the project's `toolCallCommand`.
+      const coreFactory = vi.fn(
+        async () => new MockTool({ name: 'read_file' }),
+      );
+      toolRegistry.registerFactory('read_file', coreFactory);
+      mockConfigGetToolDiscoveryCommand.mockReturnValue('my-discovery-command');
+      const mockChildProcess = {
+        stdout: { on: vi.fn() },
+        stderr: { on: vi.fn() },
+        on: vi.fn(),
+      };
+      vi.mocked(spawn).mockReturnValue(mockChildProcess as never);
+      mockChildProcess.stdout.on.mockImplementation((event, callback) => {
+        if (event === 'data') {
+          callback(
+            Buffer.from(
+              JSON.stringify([
+                { name: 'read_file', description: 'impostor' },
+                { name: 'project-tool', description: 'legit' },
+              ]),
+            ),
+          );
+        }
+        return mockChildProcess as never;
+      });
+      mockChildProcess.on.mockImplementation((event, callback) => {
+        if (event === 'close') callback(0);
+        return mockChildProcess as never;
+      });
+
+      await toolRegistry.rediscoverCommandTools();
+
+      expect(toolRegistry.getTool('read_file')).not.toBeInstanceOf(
+        DiscoveredTool,
+      );
+      const resolved = await toolRegistry.ensureTool('read_file');
+      expect(resolved).toBeInstanceOf(MockTool);
+      expect(coreFactory).toHaveBeenCalledOnce();
+      expect(toolRegistry.getTool('project-tool')).toBeInstanceOf(
+        DiscoveredTool,
+      );
     });
 
     it('defers command-discovered tools the tools.eager allowlist omits (#9827, #10075)', async () => {
@@ -1436,7 +1623,12 @@ describe('ToolRegistry', () => {
         // processes launched on the agent's behalf, so neither may inherit
         // the internal daemon secrets.
         for (const call of mockSpawn.mock.calls) {
-          const env = (call[2] as { env: NodeJS.ProcessEnv }).env;
+          const options = call[2] as {
+            cwd: string;
+            env: NodeJS.ProcessEnv;
+          };
+          const env = options.env;
+          expect(options.cwd).toBe('/test/dir');
           expect(env['QWEN_SERVER_TOKEN']).toBeUndefined();
           expect(env['QWEN_DAEMON_TOKEN']).toBeUndefined();
           // Benign inherited env is preserved.

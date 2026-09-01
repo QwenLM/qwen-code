@@ -1752,6 +1752,132 @@ describe('PermissionManager', () => {
       expect(await pm.evaluate({ toolName: 'agent' })).toBe('default');
     });
 
+    it('replaces project rules while preserving session rules', async () => {
+      let projectAllow = ['read_file'];
+      const config = makeConfig({});
+      config.getPermissionsAllow = () => projectAllow;
+      const manager = new PermissionManager(config);
+      manager.initialize();
+      manager.addSessionAllowRule('write_file');
+
+      projectAllow = ['glob'];
+      manager.reloadForProjectChange();
+
+      expect(await manager.evaluate({ toolName: 'read_file' })).toBe('default');
+      expect(await manager.evaluate({ toolName: 'glob' })).toBe('allow');
+      expect(await manager.evaluate({ toolName: 'write_file' })).toBe('allow');
+    });
+
+    it('replaces the core-tool allowlist on a project change', async () => {
+      let coreTools = ['read_file'];
+      const config = makeConfig({});
+      config.getCoreTools = () => coreTools;
+      const manager = new PermissionManager(config);
+      manager.initialize();
+      expect(await manager.isToolEnabled('read_file')).toBe(true);
+      expect(await manager.isToolEnabled('run_shell_command')).toBe(false);
+
+      coreTools = ['run_shell_command'];
+      manager.reloadForProjectChange();
+
+      expect(await manager.isToolEnabled('read_file')).toBe(false);
+      expect(await manager.isToolEnabled('run_shell_command')).toBe(true);
+    });
+
+    it('keeps AUTO-stashed session grants across a project change', async () => {
+      // In AUTO mode a dangerous session grant lives in the stash, not in
+      // `sessionRules.allow`. A reload that cleared the stash without first
+      // re-attaching it lost the grant for the rest of the session: the
+      // re-strip found nothing, and leaving AUTO later restored nothing.
+      const manager = new PermissionManager(
+        makeConfig({ permissionsAllow: [], approvalMode: 'auto' }),
+      );
+      manager.initialize();
+      manager.addSessionAllowRule('Bash(npx *)');
+      expect(manager.getStrippedDangerousRules()?.session).toHaveLength(1);
+
+      manager.reloadForProjectChange();
+
+      expect(manager.getStrippedDangerousRules()?.session).toHaveLength(1);
+      manager.restoreDangerousRules();
+      expect(
+        await manager.evaluate({
+          toolName: 'run_shell_command',
+          command: 'npx vitest',
+        }),
+      ).toBe('allow');
+    });
+
+    it('keeps an AUTO override stripped when the base mode is default', async () => {
+      const manager = new PermissionManager(
+        makeConfig({ permissionsAllow: ['Bash'], approvalMode: 'default' }),
+      );
+      manager.initialize();
+      manager.stripDangerousRulesForAutoMode();
+
+      manager.reloadForProjectChange();
+
+      expect(manager.getStrippedDangerousRules()).toBeDefined();
+      expect(
+        await manager.evaluate({
+          toolName: 'run_shell_command',
+          command: 'rm -rf /tmp/project-output',
+        }),
+      ).not.toBe('allow');
+      manager.restoreDangerousRules();
+      expect(
+        await manager.evaluate({
+          toolName: 'run_shell_command',
+          command: 'rm -rf /tmp/project-output',
+        }),
+      ).toBe('allow');
+    });
+
+    it('fails closed when project permission reloading throws', async () => {
+      const config = makeConfig({ permissionsAllow: [], approvalMode: 'auto' });
+      const manager = new PermissionManager(config);
+      manager.initialize();
+      manager.addSessionAllowRule('Bash(npx *)');
+      config.getCoreTools = () => 'Bash' as unknown as string[];
+
+      expect(() => manager.reloadForProjectChange()).toThrow(TypeError);
+      expect(manager.getStrippedDangerousRules()).toBeDefined();
+      expect(
+        await manager.evaluate({
+          toolName: 'run_shell_command',
+          command: 'npx vitest',
+        }),
+      ).not.toBe('allow');
+    });
+
+    it('drops old persistent grants when permission reloading throws', async () => {
+      let shouldThrow = false;
+      const config = makeConfig({ approvalMode: 'default' });
+      config.getPermissionsAllow = () => {
+        if (shouldThrow) throw new Error('settings unavailable');
+        return ['Bash(npx *)'];
+      };
+      const manager = new PermissionManager(config);
+      manager.initialize();
+      expect(
+        await manager.evaluate({
+          toolName: 'run_shell_command',
+          command: 'npx vitest',
+        }),
+      ).toBe('allow');
+
+      shouldThrow = true;
+      expect(() => manager.reloadForProjectChange()).toThrow(
+        'settings unavailable',
+      );
+      expect(
+        await manager.evaluate({
+          toolName: 'run_shell_command',
+          command: 'npx vitest',
+        }),
+      ).toBe('ask');
+    });
+
     it('matches a legacy truncated MCP permission alias', async () => {
       const rawName = `mcp__server__${'x'.repeat(80)}`;
       const legacyName = rawName.slice(0, 28) + '___' + rawName.slice(-32);

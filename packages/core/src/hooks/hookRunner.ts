@@ -518,6 +518,13 @@ export class HookRunner {
     this.httpRunner.updateAllowedUrls(allowedUrls);
   }
 
+  updateHttpSecurity(
+    allowedUrls: string[],
+    allowPrivateNetworkHosts: boolean,
+  ): void {
+    this.httpRunner.updateSecurity(allowedUrls, allowPrivateNetworkHosts);
+  }
+
   /**
    * Execute a single hook
    * @param hookConfig Hook configuration

@@ -526,11 +526,11 @@ export class BackgroundTaskRegistry {
     symbol,
     BackgroundSlotClaim
   >();
-  private readonly maxConcurrentBackgroundAgents: number;
+  private maxConcurrentBackgroundAgents!: number;
   // Per-model concurrency caps keyed by concrete model ID. Empty when no
   // `agents.maxParallelAgentsByModel` is configured, in which case only the
   // global cap is enforced.
-  private readonly maxConcurrentBackgroundAgentsByModel: Map<string, number>;
+  private maxConcurrentBackgroundAgentsByModel!: Map<string, number>;
   private notificationCallback?: BackgroundNotificationCallback;
   private registerCallback?: BackgroundRegisterCallback;
   private statusChangeCallback?: BackgroundStatusChangeCallback;
@@ -538,6 +538,18 @@ export class BackgroundTaskRegistry {
   private approvalChangeCallback?: BackgroundApprovalChangeCallback;
 
   constructor(options: BackgroundTaskRegistryOptions = {}) {
+    // One validation path for construction and `/cd` reload, so the two
+    // cannot enforce different caps. Draining the (empty) wait queue is a
+    // no-op here.
+    this.setConcurrencyLimits(options);
+  }
+
+  /**
+   * Replaces both concurrency caps wholesale — the per-model map is NOT
+   * merged with the previous one — and hands newly available slots to
+   * queued waiters. Called on construction and after `/cd`.
+   */
+  setConcurrencyLimits(options: BackgroundTaskRegistryOptions = {}): void {
     const configured =
       options.maxConcurrentBackgroundAgents ?? MAX_CONCURRENT_BACKGROUND_AGENTS;
     this.maxConcurrentBackgroundAgents =
@@ -547,6 +559,7 @@ export class BackgroundTaskRegistry {
     this.maxConcurrentBackgroundAgentsByModel = normalizePerModelConcurrency(
       options.maxConcurrentBackgroundAgentsByModel,
     );
+    this.drainWaitQueue();
   }
 
   /**

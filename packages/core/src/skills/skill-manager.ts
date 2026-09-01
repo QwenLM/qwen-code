@@ -537,6 +537,13 @@ export class SkillManager {
     }
   }
 
+  async refreshForProjectChange(): Promise<void> {
+    await this.refreshCache();
+    if (this.watchStarted) {
+      this.updateWatchersFromCache();
+    }
+  }
+
   /**
    * Whether the given skill is currently eligible to appear in the SkillTool
    * listing. Unconditional skills are always eligible; conditional skills

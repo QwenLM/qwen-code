@@ -400,6 +400,36 @@ describe('WorkspaceContext with real filesystem', () => {
       expect(workspaceContext.removeDirectory(runtimeDir)).toBe(true);
       expect(workspaceContext.removeDirectory(nextRoot)).toBe(false);
     });
+
+    it('should replace managed include directories while preserving runtime additions', () => {
+      const managedDir = path.join(tempDir, 'managed-include');
+      const runtimeDir = path.join(tempDir, 'runtime-added');
+      const nextRoot = path.join(tempDir, 'next-project');
+      const nextManagedDir = path.join(tempDir, 'next-managed-include');
+      for (const directory of [
+        managedDir,
+        runtimeDir,
+        nextRoot,
+        nextManagedDir,
+      ]) {
+        fs.mkdirSync(directory, { recursive: true });
+      }
+
+      const workspaceContext = new WorkspaceContext(cwd, [managedDir]);
+      const previousManaged = new Set(workspaceContext.getDirectories());
+      workspaceContext.addDirectory(runtimeDir);
+
+      workspaceContext.applyRootDirectories(
+        WorkspaceContext.resolveRootDirectories(nextRoot, [nextManagedDir]),
+        previousManaged,
+      );
+
+      expect(workspaceContext.getDirectories()).toEqual([
+        nextRoot,
+        nextManagedDir,
+        runtimeDir,
+      ]);
+    });
   });
 });
 

@@ -90,8 +90,8 @@ export class HookSystem {
     debugLogger.debug('Hook system initialized successfully');
   }
 
-  async reload(): Promise<void> {
-    await this.hookRegistry.reloadConfiguredHooks();
+  async reload(options: { failClosed?: boolean } = {}): Promise<void> {
+    await this.hookRegistry.reloadConfiguredHooks(options);
     debugLogger.debug('Hook system reloaded successfully');
   }
 
@@ -255,6 +255,21 @@ export class HookSystem {
     );
     return result.finalOutput
       ? createHookOutput('SessionStart', result.finalOutput)
+      : undefined;
+  }
+
+  async fireCwdChangedEvent(
+    oldCwd: string,
+    newCwd: string,
+    signal?: AbortSignal,
+  ): Promise<DefaultHookOutput | undefined> {
+    const result = await this.hookEventHandler.fireCwdChangedEvent(
+      oldCwd,
+      newCwd,
+      signal,
+    );
+    return result.finalOutput
+      ? createHookOutput('CwdChanged', result.finalOutput)
       : undefined;
   }
 
@@ -767,5 +782,12 @@ export class HookSystem {
    */
   updateAllowedHttpUrls(allowedUrls: string[]): void {
     this.hookRunner.updateAllowedHttpUrls(allowedUrls);
+  }
+
+  updateHttpSecurity(
+    allowedUrls: string[],
+    allowPrivateNetworkHosts: boolean,
+  ): void {
+    this.hookRunner.updateHttpSecurity(allowedUrls, allowPrivateNetworkHosts);
   }
 }

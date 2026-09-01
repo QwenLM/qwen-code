@@ -85,7 +85,9 @@ export class HookRegistry {
     );
   }
 
-  async reloadConfiguredHooks(): Promise<void> {
+  async reloadConfiguredHooks(
+    options: { failClosed?: boolean } = {},
+  ): Promise<void> {
     const previousEntries = this.entries;
     const enabledSnapshot = new Map(
       previousEntries.map((entry) => [
@@ -107,7 +109,7 @@ export class HookRegistry {
         }
       }
     } catch (err) {
-      this.entries = previousEntries;
+      this.entries = options.failClosed ? agentEntries : previousEntries;
       throw err;
     }
 

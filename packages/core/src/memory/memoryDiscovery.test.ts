@@ -152,6 +152,35 @@ describe('loadServerHierarchicalMemory', () => {
     });
   });
 
+  it('uses request-scoped context filenames instead of process-global state', async () => {
+    await createTestFile(
+      path.join(projectRoot, DEFAULT_CONTEXT_FILENAME),
+      'global-name content',
+    );
+    await createTestFile(
+      path.join(projectRoot, 'PROJECT-B.md'),
+      'project-b content',
+    );
+
+    const result = await loadServerHierarchicalMemory(
+      cwd,
+      [projectRoot],
+      new FileDiscoveryService(projectRoot),
+      [],
+      DEFAULT_FOLDER_TRUST,
+      'tree',
+      [],
+      {
+        contextFileNames: ['PROJECT-B.md'],
+        explicitOnly: true,
+      },
+    );
+
+    expect(result.fileCount).toBe(1);
+    expect(result.memoryContent).toContain('project-b content');
+    expect(result.memoryContent).not.toContain('global-name content');
+  });
+
   it('should skip implicit global, project, and rule discovery in explicit-only mode', async () => {
     await createTestFile(
       path.join(homedir, QWEN_DIR, DEFAULT_CONTEXT_FILENAME),

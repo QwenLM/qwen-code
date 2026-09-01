@@ -847,6 +847,43 @@ describe('HookEventHandler', () => {
     });
   });
 
+  describe('fireCwdChangedEvent', () => {
+    it('uses the new cwd in the base payload and includes both paths', async () => {
+      vi.mocked(mockConfig.getWorkingDir).mockReturnValue('/project-b');
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(
+        createMockExecutionPlan([
+          {
+            type: HookType.Command,
+            command: 'echo test',
+            source: HooksConfigSource.Project,
+          },
+        ]),
+      );
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      await hookEventHandler.fireCwdChangedEvent('/project-a', '/project-b');
+
+      expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
+        HookEventName.CwdChanged,
+        undefined,
+      );
+      const input = (mockHookRunner.executeHooksParallel as Mock).mock
+        .calls[0][2] as {
+        cwd: string;
+        old_cwd: string;
+        new_cwd: string;
+      };
+      expect(input).toMatchObject({
+        cwd: '/project-b',
+        old_cwd: '/project-a',
+        new_cwd: '/project-b',
+      });
+    });
+  });
+
   describe('fireSessionEndEvent', () => {
     it('should execute hooks for SessionEnd event', async () => {
       const mockPlan = createMockExecutionPlan([]);
