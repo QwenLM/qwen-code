@@ -113,7 +113,7 @@ describe('assertTarArchiveLinksAreSafe', () => {
         }),
       );
       const archive = path.join(root, 'links.tar');
-      await tar.c({ cwd: root, file: archive }, links);
+      await tar.c({ sync: true, cwd: root, file: archive }, links);
 
       await expect(assertTarArchiveLinksAreSafe(archive)).rejects.toThrow(
         'more than 100 unsupported link entries',
@@ -135,7 +135,10 @@ describe('assertTarArchiveLinksAreSafe', () => {
       const tailBytes = 20 * 1024 * 1024;
       await fs.writeFile(path.join(root, 'tail.bin'), randomBytes(tailBytes));
       const archive = path.join(root, 'abort-links.tar');
-      await tar.c({ cwd: root, file: archive }, [...links, 'tail.bin']);
+      await tar.c({ sync: true, cwd: root, file: archive }, [
+        ...links,
+        'tail.bin',
+      ]);
 
       let bytesRead = 0;
       streamProbe.onReadStream = (filePath, options, original) => {
@@ -315,7 +318,10 @@ describe('assertTarArchiveLinksAreSafe', () => {
         await fs.writeFile(path.join(root, 'CLAUDE.md'), '# guide\n');
         await fs.symlink('CLAUDE.md', path.join(root, 'AGENTS.md'));
         const archive = path.join(root, 'superpowers.tar');
-        await tar.c({ cwd: root, file: archive }, ['CLAUDE.md', 'AGENTS.md']);
+        await tar.c({ sync: true, cwd: root, file: archive }, [
+          'CLAUDE.md',
+          'AGENTS.md',
+        ]);
 
         await expect(
           assertTarArchiveLinksAreSafe(archive, undefined, allowLinks),
@@ -354,7 +360,10 @@ describe('assertTarArchiveLinksAreSafe', () => {
         await fs.writeFile(path.join(root, 'real.md'), 'x\n');
         await fs.symlink('../real.md', path.join(root, 'docs', 'link.md'));
         const archive = path.join(root, 'nested.tar');
-        await tar.c({ cwd: root, file: archive }, ['real.md', 'docs']);
+        await tar.c({ sync: true, cwd: root, file: archive }, [
+          'real.md',
+          'docs',
+        ]);
 
         await expect(
           assertTarArchiveLinksAreSafe(archive, undefined, allowLinks),
@@ -367,7 +376,7 @@ describe('assertTarArchiveLinksAreSafe', () => {
       async () => {
         await fs.symlink('../../etc/hosts', path.join(root, 'escape'));
         const archive = path.join(root, 'escape.tar');
-        await tar.c({ cwd: root, file: archive }, ['escape']);
+        await tar.c({ sync: true, cwd: root, file: archive }, ['escape']);
 
         await expect(
           assertTarArchiveLinksAreSafe(archive, undefined, allowLinks),
@@ -633,7 +642,7 @@ describe('assertTarArchiveLinksAreSafe', () => {
         await fs.writeFile(path.join(source, 'dir', 'target'), '');
         await fs.symlink('target', path.join(source, 'dir\\copy'));
         const archive = path.join(root, 'backslash-entry-size.tar');
-        await tar.c({ cwd: source, file: archive }, [
+        await tar.c({ sync: true, cwd: source, file: archive }, [
           'target',
           'dir',
           'dir\\copy',
@@ -695,7 +704,7 @@ describe('assertTarArchiveLinksAreSafe', () => {
       async () => {
         await fs.symlink('/etc/passwd', path.join(root, 'absolute'));
         const archive = path.join(root, 'absolute.tar');
-        await tar.c({ cwd: root, file: archive }, ['absolute']);
+        await tar.c({ sync: true, cwd: root, file: archive }, ['absolute']);
 
         await expect(
           assertTarArchiveLinksAreSafe(archive, undefined, allowLinks),
@@ -708,7 +717,7 @@ describe('assertTarArchiveLinksAreSafe', () => {
       async () => {
         await fs.symlink('C:\\Windows\\system32', path.join(root, 'drive'));
         const archive = path.join(root, 'drive.tar');
-        await tar.c({ cwd: root, file: archive }, ['drive']);
+        await tar.c({ sync: true, cwd: root, file: archive }, ['drive']);
 
         await expect(
           assertTarArchiveLinksAreSafe(archive, undefined, allowLinks),
@@ -725,7 +734,10 @@ describe('assertTarArchiveLinksAreSafe', () => {
           path.join(root, 'hard.txt'),
         );
         const archive = path.join(root, 'hard.tar');
-        await tar.c({ cwd: root, file: archive }, ['original.txt', 'hard.txt']);
+        await tar.c({ sync: true, cwd: root, file: archive }, [
+          'original.txt',
+          'hard.txt',
+        ]);
 
         await expect(
           assertTarArchiveLinksAreSafe(archive, undefined, allowLinks),
@@ -739,7 +751,10 @@ describe('assertTarArchiveLinksAreSafe', () => {
         await fs.writeFile(path.join(root, 'CLAUDE.md'), '# guide\n');
         await fs.symlink('CLAUDE.md', path.join(root, 'AGENTS.md'));
         const archive = path.join(root, 'default.tar');
-        await tar.c({ cwd: root, file: archive }, ['CLAUDE.md', 'AGENTS.md']);
+        await tar.c({ sync: true, cwd: root, file: archive }, [
+          'CLAUDE.md',
+          'AGENTS.md',
+        ]);
 
         await expect(assertTarArchiveLinksAreSafe(archive)).rejects.toThrow(
           'unsupported link entry',
