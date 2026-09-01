@@ -26,6 +26,15 @@ describe('Web Shell sandbox framing', () => {
     expect(loopbackSandboxOrigins('127.0.0.1:4170').join(' ')).not.toContain(
       '[::1]',
     );
+    expect(loopbackSandboxOrigins('127.0.0.2:4170')).toContain(
+      'http://127.0.0.2:4170',
+    );
+    expect(loopbackSandboxOrigins('127.0.0.2:4170')).not.toContain(
+      'http://127.0.0.2:*',
+    );
+    expect(loopbackSandboxOrigins('example.com:4170')).not.toContain(
+      'example.com',
+    );
   });
 
   it('allows only the daemon loopback port in frame-src', () => {

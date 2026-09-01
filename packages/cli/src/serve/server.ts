@@ -36,10 +36,13 @@ import {
   allowOriginCors,
   bearerAuth,
   createMutationGate,
+  findNonLoopbackHttpOrigin,
   hostAllowlist,
+  isTrustedLoopbackMode,
   MutableOriginAllowlist,
   parseAllowOriginPatterns,
 } from './auth.js';
+import { isLoopbackBind } from './loopback-binds.js';
 import {
   CredentialStore,
   listenerIdentityOf,
@@ -80,6 +83,7 @@ import {
   type ServeAuthProviderInstallResult,
   type ServeChannelSelection,
   type ChannelWebhookConfigSource,
+  type ServeModelProviderRuntimeSyncResult,
   type ServeOptions,
 } from './types.js';
 import { acpChildExtraArgs } from './acp-child-extra-args.js';
@@ -131,6 +135,7 @@ import {
   createRequestedSessionIdAdmission,
   requestedSessionIdPersistenceExists,
 } from './session-id-admission.js';
+import { sessionAttachmentsRoots } from './session-attachments-root.js';
 import {
   registerScheduledTasksRoutes,
   registerWorkspaceQualifiedScheduledTasksRoutes,
@@ -150,6 +155,10 @@ import {
   registerWorkspaceStatusRoutes,
 } from './routes/workspace-status.js';
 import {
+  registerWorkspaceQualifiedRuntimeRoutes,
+  registerWorkspaceRuntimeRoutes,
+} from './routes/workspace-runtime.js';
+import {
   createDaemonWorkspaceService,
   type DaemonWorkspaceService,
   type DaemonWorkspaceServiceDeps,
@@ -163,6 +172,7 @@ import {
   registerWorkspaceQualifiedSettingsRoutes,
   registerWorkspaceSettingsRoutes,
 } from './routes/workspace-settings.js';
+import { registerUserLanguageRoutes } from './routes/user-language.js';
 import {
   getActiveSseCount,
   registerSseEventsRoutes,
@@ -219,6 +229,7 @@ import {
   type WorkspaceRuntime,
   type WorkspaceRuntimeEnvMetadata,
 } from './workspace-registry.js';
+import { supportsWorkspaceRuntimeLifecycle } from './workspace-runtime-coordinator.js';
 import { isInternalWorkspaceRuntime } from './workspace-runtime-visibility.js';
 import {
   createWorkspaceRuntimeSessionService,
@@ -245,6 +256,7 @@ import {
   type WorkspaceManagementHandle,
   type WorkspaceRuntimeRemovalController,
 } from './routes/workspace-management.js';
+import { isNativeDirectoryPickerAvailable } from './native-directory-picker.js';
 import type { WorkspaceRegistrationStore } from './workspace-registration-store.js';
 import {
   registerWorkspaceGitRoutes,
@@ -293,6 +305,7 @@ import {
 import { loadChannelsConfig } from '../commands/channel/runtime.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { loadSettings, SettingScope } from '../config/settings.js';
+import { getModelProvidersOwnerScope } from '../config/modelProvidersScope.js';
 import { registerLiveRoutes } from './routes/live.js';
 import { registerLiveSetupRoutes } from './routes/live-setup.js';
 import { LiveHostCoordinator } from './live/live-host-coordinator.js';
@@ -590,6 +603,12 @@ export interface ServeAppDeps {
   ) => Promise<void>;
   sessionArtifactsPersistenceAvailable?: boolean;
   /**
+   * Test/embed override for the native directory picker probe. Production
+   * evaluates `isNativeDirectoryPickerAvailable()`; tests pin this so the
+   * capability wiring is assertable on headless hosts too.
+   */
+  nativeDirectoryPickerAvailable?: boolean;
+  /**
    * Reverse tool channel (issue #5626, Phase 2). Shared sender registry that
    * bridges the daemon WS (per-connection `ClientMcpRegistrar`) and the ACP
    * child's `client_mcp/message` ext-method. `runQwenServe` constructs ONE and
@@ -737,6 +756,18 @@ export function createServeApp(
   getPort: () => number = () => opts.port,
   deps: ServeAppDeps = {},
 ): Application {
+  const tokenConfigured =
+    typeof opts.token === 'string' && opts.token.length > 0;
+  if (opts.requireAuth === true && !tokenConfigured) {
+    throw new Error(
+      'createServeApp: requireAuth requires a non-empty bearer token.',
+    );
+  }
+  const trustedLoopbackMode = isTrustedLoopbackMode({
+    loopbackBind: isLoopbackBind(opts.hostname),
+    tokenConfigured,
+    requireAuth: opts.requireAuth === true,
+  });
   const sessionRestoreTimeoutMs = resolveSessionRestoreTimeoutMs(opts);
   // The scheduled-task helpers retain an outer watchdog for injected bridges.
   // A value above the timer ceiling is their explicit no-watchdog sentinel.
@@ -854,10 +885,9 @@ export function createServeApp(
       injected: deps.fsFactory,
       trusted: false,
     });
-  const tokenConfigured =
-    typeof opts.token === 'string' && opts.token.length > 0;
   const sessionShellCommandEnabled =
-    opts.enableSessionShell === true && tokenConfigured;
+    opts.enableSessionShell === true &&
+    (tokenConfigured || trustedLoopbackMode);
   // Reverse tool channel (issue #5626, Phase 2). Process-scoped registry that
   // bridges the daemon WS (per-connection `ClientMcpRegistrar`) and the ACP
   // child's `client_mcp/message` ext-method. Prefer the registry `runQwenServe`
@@ -1016,6 +1046,18 @@ export function createServeApp(
       acpHttpEnabled: acpHttpEnabledAtBoot,
       workspaceRuntimeRemovalAvailable:
         deps.workspaceRuntimeRemoval !== undefined,
+      nativeDirectoryPickerAvailable:
+        deps.nativeDirectoryPickerAvailable ??
+        isNativeDirectoryPickerAvailable(),
+      workspaceRuntimeAvailable: () => {
+        const runtimes = workspaceRegistry.list();
+        return (
+          runtimes.length > 0 &&
+          runtimes.every((runtime) =>
+            supportsWorkspaceRuntimeLifecycle(runtime.bridge),
+          )
+        );
+      },
       workspaceTrustHotReloadAvailable:
         deps.workspaceTrustHotReloadAvailable === true,
       isPrimaryWorkspaceTrusted: () => isPrimaryWorkspaceTrusted(),
@@ -1057,14 +1099,16 @@ export function createServeApp(
     ? createWorkspaceSessionOwnerIndex()
     : undefined;
   const acpChildArgs = acpChildExtraArgs(opts);
+  const attachmentsRoots = sessionAttachmentsRoots(
+    boundWorkspace,
+    Storage.getRuntimeBaseDir(),
+  );
   const bridge =
     injectedWorkspaceRegistry?.primary.bridge ??
     deps.bridge ??
     createAcpSessionBridge({
-      sessionAttachmentsRoot: path.join(
-        new Storage(boundWorkspace).getProjectTempDir(),
-        'attachments',
-      ),
+      sessionAttachmentsRoot: attachmentsRoots.root,
+      sessionAttachmentsFallbackRoot: attachmentsRoots.fallback,
       maxSessions: opts.maxSessions,
       ...(totalSessionAdmission
         ? { freshSessionAdmission: totalSessionAdmission.admit }
@@ -1141,7 +1185,7 @@ export function createServeApp(
       }),
     );
 
-  installSelfOriginStripMiddleware(app, getPort);
+  installSelfOriginStripMiddleware(app, getPort, opts.hostname);
 
   // Park the factory on `app.locals` so route handlers can pick it up
   // via `req.app.locals.fsFactory` without re-threading the value
@@ -1838,7 +1882,7 @@ export function createServeApp(
   // returned, so the no-`--allow-origin` posture is unchanged, and there is
   // one middleware to reason about instead of two interchangeable ones.
   // Pattern parsing happens in `run-qwen-serve.ts` for validation; here we
-  // still keep the wildcard/no-token invariant for embedded callers that
+  // still keep the tokenless origin restrictions for embedded callers that
   // construct the app directly.
   const parsedAllowOrigins = parseAllowOriginPatterns(opts.allowOrigins ?? []);
   if (parsedAllowOrigins.allowAny && !opts.token) {
@@ -1847,6 +1891,16 @@ export function createServeApp(
         `configured. '*' admits any cross-origin browser to the API; ` +
         `without a token, any local page can drive the daemon. Set a ` +
         `token or list specific origins instead of '*'.`,
+    );
+  }
+  const nonLoopbackHttpOrigin = findNonLoopbackHttpOrigin(parsedAllowOrigins);
+  if (nonLoopbackHttpOrigin && !opts.token) {
+    throw new Error(
+      `Refusing to start with --allow-origin ${JSON.stringify(
+        nonLoopbackHttpOrigin,
+      )} but no bearer token configured. Non-loopback HTTP(S) browser ` +
+        `origins can drive the full operator API, including code execution ` +
+        `as the daemon user. Set a token or use a loopback origin.`,
     );
   }
   // One CORS middleware for both deployments, over a set that can change.
@@ -1894,11 +1948,11 @@ export function createServeApp(
   // Serve the Web Shell static assets (/ and /assets) BEFORE bearerAuth. The
   // static shell carries no secrets and a browser cannot attach an
   // Authorization header to a `<script src>` subresource or an address-bar
-  // navigation, so gating it would just break the UI — the front-end's own
-  // API calls still carry the bearer (getDaemonAuthHeaders) and every API
-  // route below stays token-gated. The SPA deep-link fallback is registered
-  // LATER (after all API routes, see mountWebShellSpaFallback) so authed
-  // routes win over the shell. Exact `/session/:id` document navigations are
+  // navigation, so gating it would just break the UI. The front end attaches
+  // a configured bearer via getDaemonAuthHeaders; token-less trusted-loopback
+  // calls use listener authority. The SPA deep-link fallback is registered
+  // LATER (after all API routes, see mountWebShellSpaFallback) so API routes
+  // win over the shell. Exact `/session/:id` document navigations are
   // mounted here too because a browser refresh cannot attach the bearer header
   // before the shell loads. The assets dir is resolved by the caller
   // (runQwenServe) and injected via deps.webShellDir; `--no-web` sets
@@ -1990,11 +2044,12 @@ export function createServeApp(
 
   installJsonBodyParser(app);
 
-  // Mutation-route gate factory. Non-strict mode is passthrough;
-  // `{ strict: true }` requires a token even on loopback defaults.
+  // Mutation-route gate factory. Trusted primary loopback requests have
+  // operator authority; strict routes otherwise require verified credentials.
   const mutate = createMutationGate({
     tokenConfigured,
     requireAuth: opts.requireAuth === true,
+    trustedLoopbackMode,
   });
 
   app.use(
@@ -2026,6 +2081,52 @@ export function createServeApp(
   );
 
   const buildWorkspaceCtx = createBuildWorkspaceCtx(primaryBoundWorkspace);
+  const syncModelProvidersRuntime = async (
+    route: string,
+  ): Promise<ServeModelProviderRuntimeSyncResult> => {
+    const trusted = isPrimaryWorkspaceTrusted();
+    const settings = loadSettings(primaryBoundWorkspace, {
+      skipLoadEnvironment: true,
+      skipWorkspaceSettings: !trusted,
+      workspaceTrusted: trusted,
+    });
+    const scope = getModelProvidersOwnerScope(settings) ?? SettingScope.User;
+    const primaryContext = buildWorkspaceCtx(route);
+    const secondaryRuntimes =
+      scope === SettingScope.User
+        ? workspaceRegistry.listAll().filter((runtime) => !runtime.primary)
+        : [];
+    const [primaryResult, ...secondaryResults] = await Promise.allSettled([
+      primaryWorkspace.reloadModelProviders(primaryContext),
+      ...secondaryRuntimes.map((runtime) =>
+        runtime.workspaceService.reloadModelProviders({
+          ...primaryContext,
+          workspaceCwd: runtime.workspaceCwd,
+        }),
+      ),
+    ]);
+
+    if (primaryResult.status === 'rejected') throw primaryResult.reason;
+    if (
+      primaryResult.value.status === 'failed' ||
+      secondaryResults.some(
+        (result) =>
+          result.status === 'rejected' || result.value.status === 'failed',
+      )
+    ) {
+      return { status: 'failed' };
+    }
+    if (
+      primaryResult.value.status === 'applied' ||
+      secondaryResults.some(
+        (result) =>
+          result.status === 'fulfilled' && result.value.status === 'applied',
+      )
+    ) {
+      return { status: 'applied' };
+    }
+    return { status: 'deferred' };
+  };
 
   const acpHandleRef: { current?: AcpHttpHandle } = {};
   const workspaceRememberLane = new WorkspaceRememberTaskLane(
@@ -2089,6 +2190,7 @@ export function createServeApp(
     maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession,
     sessionRestoreTimeoutMs,
     languageCodes,
+    daemonEnv: daemonEnvAtBoot,
   });
 
   if (liveVoiceSurfaceAvailable) {
@@ -2170,6 +2272,18 @@ export function createServeApp(
   });
   registerWorkspaceQualifiedStatusRoutes(app, {
     workspaceRegistry,
+    sendBridgeError,
+  });
+  registerWorkspaceRuntimeRoutes(app, {
+    workspaceRegistry,
+    mutate,
+    safeBody,
+    sendBridgeError,
+  });
+  registerWorkspaceQualifiedRuntimeRoutes(app, {
+    workspaceRegistry,
+    mutate,
+    safeBody,
     sendBridgeError,
   });
   registerWorkspaceGitRoutes(app, {
@@ -2509,6 +2623,25 @@ export function createServeApp(
       },
       invalidateServeFeaturesCache,
     });
+    // Process-global user-level language sync (issue #10234). Registered
+    // under the same `persistSetting` availability gate as the workspace
+    // settings routes and advertised as the conditional
+    // `user_language_sync` capability.
+    registerUserLanguageRoutes(app, {
+      boundWorkspace: primaryBoundWorkspace,
+      mutate,
+      safeBody,
+      languageCodes,
+      persistSetting: async (...args) => {
+        await persistSetting(...args);
+      },
+      workspaceRegistry,
+      parseAndValidateClientId: (req, res) =>
+        parseAndValidateWorkspaceClientId(req, res, [
+          primaryBridge,
+          ...workspaceRegistry.list().map((runtime) => runtime.bridge),
+        ]),
+    });
   }
   registerWorkspacePermissionsRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
@@ -2565,6 +2698,8 @@ export function createServeApp(
       broadcastSettingsChanged,
       parseAndValidateClientId: (req, res) =>
         parseAndValidateWorkspaceClientId(req, res, primaryBridge),
+      syncModelProvidersRuntime: () =>
+        syncModelProvidersRuntime('DELETE /workspace/models'),
     });
   }
 
@@ -2599,6 +2734,8 @@ export function createServeApp(
     boundWorkspace: primaryBoundWorkspace,
     allowPrivateAuthBaseUrl: opts.allowPrivateAuthBaseUrl === true,
     installAuthProvider: deps.installAuthProvider,
+    syncModelProvidersRuntime: () =>
+      syncModelProvidersRuntime('POST /workspace/auth/provider'),
     captureGenerationAssertion: capturePrimaryGenerationAssertion,
   });
 
@@ -2640,6 +2777,7 @@ export function createServeApp(
       service: standaloneSessionService,
       mutate,
       sendBridgeError,
+      isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
     });
     standaloneSessionsAvailable = true;
   }
@@ -3125,6 +3263,7 @@ export function createServeApp(
     isDaemonDraining: deps.isChannelControlDraining,
     webShellAvailable: Boolean(webShellDir),
     primaryBindHostname: opts.hostname,
+    trustedLoopbackMode,
   });
 
   // Web Shell SPA deep-link fallback — registered AFTER every API route (and

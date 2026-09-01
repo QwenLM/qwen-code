@@ -139,6 +139,19 @@ function hasDetailView(tool: ACPToolCall): boolean {
   );
 }
 
+function isEditToolName(toolName: string): boolean {
+  // Like every other is*ToolName helper, normalize case here so callers can
+  // pass the raw wire name.
+  const name = toolName.toLowerCase();
+  return (
+    name === 'edit' ||
+    name === 'editfile' ||
+    name === 'write' ||
+    name === 'write_file' ||
+    name === 'writefile'
+  );
+}
+
 export function extractDiff(tool: ACPToolCall): string {
   const rawFileDiff = getRawFileDiff(tool);
   if (rawFileDiff) return rawFileDiff;
@@ -317,7 +330,10 @@ export function fencedCodeBlock(language: string, code: string): string {
 
 function ExpandedEditContent({ tool }: { tool: ACPToolCall }) {
   const diff = useMemo(() => extractDiff(tool), [tool]);
-  const text = useMemo(() => extractText(tool) || '', [tool]);
+  const text = useMemo(
+    () => (tool.content ? extractText(tool) || '' : ''),
+    [tool],
+  );
   if (!diff && !text) return null;
   return (
     <div className={styles.expandedEdit}>
@@ -1067,13 +1083,24 @@ export const ToolLine = memo(function ToolLine({
   const transcriptRenderMode = useTranscriptRenderMode();
   const subagentDetails = useSubagentDetails();
   const monitorDetails = useMonitorDetails();
+  const { hostOwnsEditDiffPreview } = useWebShellCustomization();
   const monitorDetailsAvailable = monitorDetails !== undefined;
   const mcpApp = getMcpAppDisplay(tool.rawOutput);
   const isForcedExpanded = forceExpanded || Boolean(mcpApp);
+  const hasApproval = approval?.toolCallId === tool.callId;
+  const isHostOwnedEditApproval = Boolean(
+    hostOwnsEditDiffPreview &&
+      hasApproval &&
+      approval?.hasDiffPreview &&
+      isEditToolName(approval?.toolName ?? tool.toolName),
+  );
+  const locksPendingEditApproval = isHostOwnedEditApproval;
   const [monitorDetailsUnavailable, setMonitorDetailsUnavailable] =
     useState(false);
   const [expanded, setExpanded] = useState(
-    () => isForcedExpanded || (!summaryOnly && shouldAutoExpand(tool)),
+    () =>
+      isForcedExpanded ||
+      (!summaryOnly && shouldAutoExpand(tool) && !locksPendingEditApproval),
   );
   const monitorDetailsRequestRef = useRef<object | null>(null);
   // Set once the user explicitly toggles this row, so auto-collapse-on-
@@ -1082,7 +1109,10 @@ export const ToolLine = memo(function ToolLine({
 
   useEffect(
     () => {
-      setExpanded(isForcedExpanded || (!summaryOnly && shouldAutoExpand(tool)));
+      setExpanded(
+        isForcedExpanded ||
+          (!summaryOnly && shouldAutoExpand(tool) && !locksPendingEditApproval),
+      );
       setMonitorDetailsUnavailable(false);
       monitorDetailsRequestRef.current = null;
       // A new tool identity resets the manual latch.
@@ -1091,6 +1121,7 @@ export const ToolLine = memo(function ToolLine({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [
       isForcedExpanded,
+      locksPendingEditApproval,
       monitorDetailsAvailable,
       summaryOnly,
       tool.callId,
@@ -1098,17 +1129,24 @@ export const ToolLine = memo(function ToolLine({
     ],
   );
   const isAgent = isSubAgentToolCall(tool);
-  const hasApproval = approval && approval.toolCallId === tool.callId;
   const hasSubToolApproval =
     !hasApproval &&
     approval?.toolCallId &&
     isAgent &&
     toolContainsCallId(tool, approval.toolCallId);
+  const waitingForApproval = Boolean(
+    isHostOwnedEditApproval ||
+      (hostOwnsEditDiffPreview &&
+        hasSubToolApproval &&
+        approval?.hasDiffPreview &&
+        isEditToolName(approval.toolName ?? '')),
+  );
   const isRunningTool = isActiveToolStatus(tool.status);
   const showsLiveElapsed =
     isRunningTool &&
     !isShellToolName(tool.toolName) &&
-    !isWebFetchToolName(tool.toolName);
+    !isWebFetchToolName(tool.toolName) &&
+    !waitingForApproval;
   const now = useSharedNow(showsLiveElapsed);
 
   // Collapse a regular tool to its one-line summary once it completes
@@ -1142,7 +1180,7 @@ export const ToolLine = memo(function ToolLine({
           : t('subagent.running');
     const runningMeta = [
       progressLabel,
-      isBackground && !isComplete ? '' : info.elapsed,
+      isBackground && !isComplete ? '' : waitingForApproval ? '' : info.elapsed,
     ]
       .filter(Boolean)
       .join(' · ');
@@ -1162,7 +1200,13 @@ export const ToolLine = memo(function ToolLine({
     // is the single source of interaction.
     const approvalPending = !!hasApproval;
     const panel = (
-      <SubAgentPanel tool={tool} hideHeader defaultExpanded inline />
+      <SubAgentPanel
+        tool={tool}
+        approval={hostOwnsEditDiffPreview ? approval : undefined}
+        hideHeader
+        defaultExpanded
+        inline
+      />
     );
     if (subagentDetails && !hideHeader) {
       const rowContent = (
@@ -1261,7 +1305,9 @@ export const ToolLine = memo(function ToolLine({
     : fullDescription;
   const displayName = localizeToolDisplayName(tool.toolName, t);
   const elapsed =
-    isShellToolName(tool.toolName) || isWebFetchToolName(tool.toolName)
+    waitingForApproval ||
+    isShellToolName(tool.toolName) ||
+    isWebFetchToolName(tool.toolName)
       ? ''
       : formatElapsed(tool.startTime, isRunningTool ? now : tool.endTime);
 
@@ -1285,17 +1331,21 @@ export const ToolLine = memo(function ToolLine({
     name === 'glob';
   const isRead = name === 'read' || name === 'read_file' || name === 'readfile';
   // Every regular tool row expands on demand. Content controls only what the
-  // expanded card shows, never whether the user can open or close it.
+  // expanded card shows, never whether the user can open or close it —
+  // except while an opted-in host owns this pending Edit's diff preview.
   // When a long description is expanded we move it out of the header into a
   // wrapped block below, so the header drops its single-line copy.
   const descExpandable = !isTodo && isDescriptionExpandable(description);
-  const expandable = !isForcedExpanded;
+  const expandable = !isForcedExpanded && !locksPendingEditApproval;
   const interactive = opensMonitorDetails || expandable;
+  const toggleExpanded = () => {
+    userToggledRef.current = true;
+    setExpanded((value) => !value);
+  };
   const fallbackToMonitorInline = () => {
     setMonitorDetailsUnavailable(true);
     if (!expandable) return;
-    userToggledRef.current = true;
-    setExpanded((value) => !value);
+    toggleExpanded();
   };
   const tryOpenMonitorDetails = () => {
     if (!monitorDetails) return;
@@ -1358,8 +1408,7 @@ export const ToolLine = memo(function ToolLine({
                     tryOpenMonitorDetails();
                     return;
                   }
-                  userToggledRef.current = true;
-                  setExpanded((value) => !value);
+                  toggleExpanded();
                 }
               : undefined
           }
@@ -1372,8 +1421,7 @@ export const ToolLine = memo(function ToolLine({
                     tryOpenMonitorDetails();
                     return;
                   }
-                  userToggledRef.current = true;
-                  setExpanded((value) => !value);
+                  toggleExpanded();
                 }
               : undefined
           }

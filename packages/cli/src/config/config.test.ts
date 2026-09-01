@@ -8,6 +8,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
+  GOAL_DEFAULT_TOKEN_BUDGET,
+  GOAL_TOKEN_BUDGET_CAP,
   ToolNames,
   DEFAULT_QWEN_MODEL,
   OutputFormat,
@@ -1259,6 +1261,56 @@ describe('loadCliConfig', () => {
     });
   });
 
+  describe('model.goalTokenBudget', () => {
+    it('carries the setting into the Goal budget grant', async () => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+
+      const config = await loadCliConfig(
+        { model: { goalTokenBudget: 1_234 } },
+        argv,
+      );
+
+      expect(config.getGoalTokenBudgetGrant()).toBe(1_234);
+    });
+
+    it('uses -1 as the unlimited sentinel', async () => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+
+      const config = await loadCliConfig(
+        { model: { goalTokenBudget: -1 } },
+        argv,
+      );
+
+      expect(config.getGoalTokenBudgetGrant()).toBe(Number.POSITIVE_INFINITY);
+    });
+
+    it.each([
+      0,
+      -2,
+      1.5,
+      GOAL_TOKEN_BUDGET_CAP + 1,
+      '5000' as unknown as number,
+    ])('rejects invalid settings value %s at startup', async (value) => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+
+      await expect(
+        loadCliConfig({ model: { goalTokenBudget: value } }, argv),
+      ).rejects.toThrow(/settings\.json: model\.goalTokenBudget/);
+    });
+
+    it('arms the built-in default when the setting is unset', async () => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+
+      const config = await loadCliConfig({}, argv);
+
+      expect(config.getGoalTokenBudgetGrant()).toBe(GOAL_DEFAULT_TOKEN_BUDGET);
+    });
+  });
+
   it('should use configured context file name when settings.context.fileName is set', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
@@ -2054,6 +2106,33 @@ describe('loadCliConfig', () => {
     );
 
     expect(config.getSessionId()).toBe(sessionId.toLowerCase());
+  });
+
+  it('skips the occupancy check for a daemon-generated sessionId', async () => {
+    const sessionId = '123e4567-e89b-12d3-a456-426614174000';
+    // A failing occupancy scan (EACCES/EMFILE/EIO fail closed) must not
+    // reject an internally generated fresh UUID on the id-less creation hot
+    // path — the check exists for caller-chosen ids only.
+    mockSessionServiceInstance.findSessionIdIgnoringCase.mockRejectedValue(
+      new Error('EACCES: chats/archive unreadable'),
+    );
+
+    const config = await loadCliConfig(
+      {},
+      { sessionId, sessionIdGenerated: true } as CliArgs,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      true,
+    );
+
+    expect(config.getSessionId()).toBe(sessionId);
+    expect(
+      mockSessionServiceInstance.findSessionIdIgnoringCase,
+    ).not.toHaveBeenCalled();
   });
 
   it('should use internal sandbox session ID without treating it as a new session', async () => {

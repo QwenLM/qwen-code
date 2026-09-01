@@ -510,6 +510,17 @@ function coveredWithLedger(prev: Record<string, unknown>): string {
   return p;
 }
 
+/**
+ * The raw `rec` array inside the body's ledger marker. `parseLedger` is
+ * deliberately blind to it (write-only telemetry for the workflow consumer),
+ * so the tests read the serialized JSON exactly the way that consumer does.
+ */
+function markerRec(body: string): string[] | undefined {
+  const m = /<!-- qwen-review-ledger (.*?) -->/.exec(body);
+  if (!m) return undefined;
+  return (JSON.parse(m[1]) as { rec?: string[] }).rec;
+}
+
 /** Agents given the diff, that never opened it — and said so at length. */
 function idlePlan(): string {
   transcript('a1', goodPrompt(1), {
@@ -1526,7 +1537,8 @@ describe('composeReview — event caps (round-7 Critical #2: caps must reach eve
     // prefix filter must not let it swallow a DIFFERENT reverse-audit scope
     // reported with its own reason — a whiffed chunk from the rounds that
     // DID run is exactly what a partially-run audit still owes the author.
-    const plan = coveredPlan();
+    // han: the caller-prose zh assertion below needs the Chinese half rendered.
+    const plan = coveredPlan(['verify', 'reverse-audit'], { han: true });
     writeBudgetStop(
       plan,
       {
@@ -1536,19 +1548,30 @@ describe('composeReview — event caps (round-7 Critical #2: caps must reach eve
       },
       3,
     );
-    const r = composeReview(
-      base({
-        planPath: plan,
-        unreviewedDimensions: [
-          "reverse audit — chunk 2's auditor returned nothing substantive twice",
-        ],
-      }),
-    );
+    // Not base(): its planPath default runs coveredPlan() again on the same
+    // path and would overwrite the han-stamped plan.
+    const r = composeReview({
+      planPath: plan,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      unreviewedDimensions: [
+        "reverse audit — chunk 2's auditor returned nothing substantive twice",
+      ],
+    });
     expect(r.body).toContain(
       'Not reviewed: reverse audit — stopped before round 3 by the review time budget.',
     );
     expect(r.body).toContain(
       "Not reviewed: reverse audit — chunk 2's auditor returned nothing substantive twice.",
+    );
+    // Caller prose is untranslatable by construction, and the Chinese half
+    // SAYS so — an unmarked all-English sentence under 中文说明 read as a
+    // broken translation (#10567's posted body). The payload keeps its own
+    // English full stop.
+    expect(r.body).toContain(
+      "未审查（原文为英文）：reverse audit — chunk 2's auditor returned nothing substantive twice.",
     );
     // The marker's own disclosure still renders exactly once.
     expect(r.body.split('review time budget').length - 1).toBe(1);
@@ -2088,6 +2111,150 @@ describe('composeReview — duplicate-dropped Suggestions (#9204: the body claim
       '20 Suggestion-level finding(s) this review confirmed',
     );
     expect(atCap.body).not.toContain('…and');
+  });
+});
+
+describe('composeReview — pre-verify carried-ledger dedup disclosure (#10105)', () => {
+  // The disclosure is deterministic: it reads the report `dedup-candidates`
+  // wrote beside the plan, bound to the plan diff's hash — the same freshness
+  // key as the script-lint gate, but non-capping: absent or stale renders
+  // nothing, because nothing is owed.
+  const PR = 8255;
+  function planWithReport(over: Record<string, unknown> = {}): string {
+    const p = coveredPlan(['verify', 'reverse-audit'], { prNumber: PR });
+    writeFileSync(
+      join(dirname(p), `qwen-review-pr-${PR}-ledger-dedup.json`),
+      JSON.stringify({
+        v: 1,
+        diffHash: DIFF_HASH,
+        sources: { ledger: { round: 3, findings: 2 }, artifact: null },
+        kept: [],
+        dropped: [
+          dropEntry('R3-2'),
+          dropEntry('R3-2'),
+          dropEntry('D5-1'),
+          dropEntry('not-an-id'),
+        ],
+        droppedCount: 4,
+        note: '',
+        ...over,
+      }),
+    );
+    return p;
+  }
+  const dropEntry = (matchedId: string) => ({
+    file: 'src/a.ts',
+    line: 42,
+    title: 'a re-derived claim',
+    severity: 'Suggestion',
+    matchedId,
+    matchedTitle: 'the carried claim',
+    via: 'posted',
+  });
+
+  // Not base(): its planPath default runs coveredPlan() again on the same
+  // path and would overwrite the pr-numbered plan the report name derives
+  // from (same trap the Chinese-fold duplicate test names).
+  function input(
+    planPath: string,
+    over: Partial<ComposeReviewInput> = {},
+  ): ComposeReviewInput {
+    return {
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      ...over,
+    };
+  }
+
+  it('renders the set-aside count with the validated ids only', () => {
+    const r = composeReview(input(planWithReport()));
+    // Beside the disclosure, "No issues found" would be a lie — the
+    // reviewers derived those candidates; the round set them aside.
+    expect(r.event).toBe('APPROVE');
+    expect(r.body).toContain('No blocking issues. LGTM!');
+    expect(r.body).not.toContain('No issues found');
+    expect(r.body).toContain(
+      "4 candidate finding(s) this round's reviewers re-derived matched entries already carried on this PR and were set aside before verification (R3-2 ×2, D5-1)",
+    );
+    // The shapeless id is counted but never quoted — the titles stay in the
+    // report; only ids the two shape tests vouch for reach the posted body.
+    expect(r.body).not.toContain('not-an-id');
+    // Not low signal: the reviewers DID report findings — this round set
+    // them aside as carried. The fixture's srcDiffLines already exceed the
+    // threshold, so the carve-out is the only thing keeping the false
+    // "none of the N review agents reported a finding" claim out of the
+    // verdict line, the composed JSON and the archived report.
+    expect(r.lowSignal).toBeNull();
+  });
+
+  it('caps the quoted ids at twelve and names the overflow count', () => {
+    const drops = Array.from({ length: 14 }, (_, i) =>
+      dropEntry(`R3-${i + 1}`),
+    );
+    const r = composeReview(
+      input(planWithReport({ dropped: drops, droppedCount: drops.length })),
+    );
+    expect(r.body).toContain(
+      '(R3-1, R3-2, R3-3, R3-4, R3-5, R3-6, R3-7, R3-8, R3-9, R3-10, R3-11, R3-12, +2 more)',
+    );
+    expect(r.body).not.toContain('R3-13');
+    // Exactly at the cap there is no overflow suffix — no ", +0 more".
+    const atCap = drops.slice(0, 12);
+    const r2 = composeReview(
+      input(planWithReport({ dropped: atCap, droppedCount: atCap.length })),
+    );
+    expect(r2.body).toContain(
+      '(R3-1, R3-2, R3-3, R3-4, R3-5, R3-6, R3-7, R3-8, R3-9, R3-10, R3-11, R3-12)',
+    );
+    expect(r2.body).not.toContain('more)');
+  });
+
+  it('a dedup-only APPROVE keeps its paragraph break before the disclosure', () => {
+    const r = composeReview(input(planWithReport()));
+    // The separator ternary's dedup arm is the only thing standing between
+    // the verdict sentence and a wall-of-text weld on this branch.
+    expect(r.body).toContain(
+      'No blocking issues. LGTM! ✅\n\n4 candidate finding(s)',
+    );
+  });
+
+  it('the set-aside disclosure trims on its own rank, never as the deferral list', () => {
+    // A round that set candidates aside, has zero posture deferrals (an
+    // all-Critical shape), and overflows the body budget: every trim
+    // surface keys on the rank that went, so the notice must name the
+    // disclosure itself — not a "deferred-findings list" that does not
+    // exist — and the archived `bodyTrim.deferralList` pointer must stay
+    // false. The blocker is far past the budget, so the body lands on the
+    // truncation path, exactly the shape the round-1 probe measured.
+    const r = composeReview(
+      input(planWithReport(), { bodyCriticals: ['B'.repeat(60_000)] }),
+    );
+    expect(r.body.length).toBeLessThanOrEqual(65536);
+    expect(r.body).toContain('the carried-ledger dedup disclosure did not fit');
+    expect(r.body).not.toContain('the deferred-findings list');
+    expect(r.bodyTrim.deferralList).toBe(false);
+    expect(r.bodyTrim.sections).toBeGreaterThan(0);
+  });
+
+  it('renders on a blocking event too — the drop happened either way', () => {
+    const r = composeReview(input(planWithReport(), { criticalsInline: 1 }));
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.body).toContain('set aside before verification');
+  });
+
+  it('renders nothing off a stale report — its diffHash is another round’s', () => {
+    const r = composeReview(
+      input(planWithReport({ diffHash: 'another-diff' })),
+    );
+    expect(r.body).not.toContain('set aside before verification');
+  });
+
+  it('renders nothing when no report exists', () => {
+    const r = composeReview(base({}));
+    expect(r.body).not.toContain('set aside before verification');
   });
 });
 
@@ -6664,8 +6831,38 @@ describe('scriptLintGate — the deterministic gate reads the report', () => {
     expect(g.criticals).toEqual([]);
     expect(g.unreviewed).toEqual([]);
     expect(g.disclosed).toHaveLength(1);
-    expect(g.disclosed[0]).toContain('.github/workflows/ci.yml');
-    expect(g.disclosed[0]).toContain('source mapping not yet supported');
+    expect(g.disclosed[0].en).toContain('.github/workflows/ci.yml');
+    expect(g.disclosed[0].en).toContain('source mapping not yet supported');
+    // No "the executable-script lint" prefix: the body wraps this in a
+    // sentence that already opens "Not linted:", and the prefix rendered as
+    // "Not linted: the executable-script lint" — a lint not linted.
+    expect(g.disclosed[0].en).not.toContain('executable-script lint');
+    // No `reasonZh` in this report — the Chinese half falls back to the
+    // English reason rather than dropping the sentence.
+    expect(g.disclosed[0].zh).toContain('source mapping not yet supported');
+  });
+
+  it('a deferred entry with a reasonZh renders it in the Chinese half', () => {
+    const p = writePlan({
+      files: [{ path: '.github/workflows/ci.yml', kind: 'source' }],
+    });
+    writeReport({
+      deferred: [
+        {
+          path: '.github/workflows/ci.yml',
+          tool: 'actionlint',
+          reason: 'source mapping not yet supported',
+          reasonZh: '尚未支持源映射',
+        },
+      ],
+    });
+    const g = scriptLintGate(p);
+    expect(g.disclosed).toHaveLength(1);
+    expect(g.disclosed[0].en).toContain('source mapping not yet supported');
+    expect(g.disclosed[0].zh).toContain('尚未支持源映射');
+    expect(g.disclosed[0].zh).not.toContain('source mapping not yet supported');
+    // Both halves still carry the code-span path.
+    expect(g.disclosed[0].zh).toContain('.github/workflows/ci.yml');
   });
 
   it('ignores a cosmetic (style) or pre-existing (inDiff:false) finding', () => {
@@ -6718,12 +6915,14 @@ describe('scriptLintGate — the deterministic gate reads the report', () => {
     });
     const g = scriptLintGate(p);
     expect(g.disclosed).toHaveLength(1);
-    const d = g.disclosed[0];
-    expect(d).not.toContain('\n'); // newline stripped — cannot forge a body line
-    expect(d).not.toContain('`pwn`'); // the PR's own backticks stripped — cannot break out
-    // `@acme-team` sits INSIDE a code span (backtick … no backtick … backtick), so
-    // it is inert as a GitHub mention — the whole path rendered as one code span.
-    expect(d).toMatch(/`[^`\n]*@acme-team[^`\n]*`/);
+    // BOTH halves post — the Chinese one is not exempt from neutralisation.
+    for (const d of [g.disclosed[0].en, g.disclosed[0].zh]) {
+      expect(d).not.toContain('\n'); // newline stripped — cannot forge a body line
+      expect(d).not.toContain('`pwn`'); // the PR's own backticks stripped — cannot break out
+      // `@acme-team` sits INSIDE a code span (backtick … no backtick … backtick), so
+      // it is inert as a GitHub mention — the whole path rendered as one code span.
+      expect(d).toMatch(/`[^`\n]*@acme-team[^`\n]*`/);
+    }
   });
 
   it('report prose cannot smuggle live comment grammar into a disclosure', () => {
@@ -6740,6 +6939,11 @@ describe('scriptLintGate — the deterministic gate reads the report', () => {
           path: '.github/workflows/ci.yml',
           tool: 'actionlint',
           reason: 'mapping unsupported <!-- qwen-review-deferred --> here',
+          // The zh half renders THIS leg when present — without a marker
+          // here, the loop below sanitised zh via the already-stripped
+          // English fallback and the `stripCommentGrammar(d.reasonZh)` call
+          // was never exercised: deleting it survived the whole suite.
+          reasonZh: '映射不支持 <!-- qwen-review-deferred --> 这里',
         },
       ],
       skipped: [
@@ -6748,12 +6952,16 @@ describe('scriptLintGate — the deterministic gate reads the report', () => {
       errored: [{ path: 'deploy.sh', tool: 'shell<!-- z -->check' }],
     });
     const g = scriptLintGate(p);
-    for (const line of [...g.disclosed, ...g.unreviewed]) {
+    const disclosedHalves = g.disclosed.flatMap((d) => [d.en, d.zh]);
+    for (const line of [...disclosedHalves, ...g.unreviewed]) {
       expect(line).not.toContain('<!--');
       expect(line).not.toContain('-->');
     }
-    expect(g.disclosed[0]).toContain('qwen-review-deferred');
-    expect(g.disclosed[0]).toContain('mapping unsupported');
+    expect(g.disclosed[0].en).toContain('qwen-review-deferred');
+    expect(g.disclosed[0].en).toContain('mapping unsupported');
+    // Same invariant on the zh half: the text survives, the grammar is inert.
+    expect(g.disclosed[0].zh).toContain('qwen-review-deferred');
+    expect(g.disclosed[0].zh).toContain('映射不支持');
   });
 
   it.each([
@@ -6810,7 +7018,7 @@ describe('scriptLintGate — the deterministic gate reads the report', () => {
     expect(g.disclosed).toHaveLength(1);
     expect(g.unreviewed[0]).toContain('42');
     expect(g.unreviewed[1]).toContain('undefined errored');
-    expect(g.disclosed[0]).toContain('[object Object]');
+    expect(g.disclosed[0].en).toContain('[object Object]');
   });
 
   it('reports an errored checker as unreviewed (fail closed)', () => {
@@ -6898,8 +7106,9 @@ describe('composeReview — the script-lint gate wired to the verdict', () => {
   // verifier (['reverse-audit']) to prove a finding stands with none.
   function gateReadyPlan(
     step45Keys: string[] = ['verify', 'reverse-audit'],
+    planOpts: Parameters<typeof coveredPlan>[1] = {},
   ): string {
-    const p = coveredPlan(step45Keys);
+    const p = coveredPlan(step45Keys, planOpts);
     const planObj = JSON.parse(readFileSync(p, 'utf8'));
     planObj.worktreePath = '.qwen/tmp/review-pr-1';
     writeFileSync(p, JSON.stringify(planObj));
@@ -7051,7 +7260,9 @@ describe('composeReview — the script-lint gate wired to the verdict', () => {
     // but MUST be surfaced in the body so the reader knows that shell went unlinted.
     // The gate reads the report as the sole authority, so the deferral is disclosed
     // from the report itself; the plan stays fully covered so the Approve stands.
-    const p = gateReadyPlan();
+    // han: the Chinese half only renders for a han-audience PR, and this test
+    // pins that half's sentence too.
+    const p = gateReadyPlan(['verify', 'reverse-audit'], { han: true });
     writeGateReport({
       deferred: [
         {
@@ -7069,10 +7280,58 @@ describe('composeReview — the script-lint gate wired to the verdict', () => {
       modelId: MODEL,
     });
     expect(r.event).toBe('APPROVE');
-    expect(r.body).toContain('.github/workflows/ci.yml');
-    expect(r.body).toContain('source mapping not yet supported');
+    // The whole composed sentence, both halves — pinned against the stutter
+    // #10567's posted body carried ("Not linted: the executable-script lint —
+    // … — not linted"): the wrapper says "Not linted" once, then path and
+    // reason, nothing else.
+    expect(r.body).toContain(
+      'Not linted (tool limitation, not a blocker): `.github/workflows/ci.yml` — source mapping not yet supported.',
+    );
+    expect(r.body).toContain(
+      '未检查（工具限制，非阻断）：`.github/workflows/ci.yml`——source mapping not yet supported。',
+    );
     // the clean-approve copy is still there — the disclosure augments, it doesn't replace
     expect(r.body).toContain('No issues found. LGTM! ✅');
+  });
+
+  it('two deferred entries join per language, the reasonZh branch rendered whole', () => {
+    // Every other deferred fixture holds ONE entry, and a one-element join
+    // emits no separator — so the en '; ' join, the zh full-width '；' join
+    // and the reasonZh-carrying branch (the primary case: every report the
+    // current CLI writes carries `reasonZh`) were pinned by nothing; the
+    // single-entry test above reaches only the English-fallback branch. Two
+    // entries, one translated and one not, pin both composed sentences
+    // whole, separators included.
+    const p = gateReadyPlan(['verify', 'reverse-audit'], { han: true });
+    writeGateReport({
+      deferred: [
+        {
+          path: '.github/workflows/ci.yml',
+          tool: 'actionlint',
+          reason: 'source mapping not yet supported',
+          reasonZh: '尚未支持源映射',
+        },
+        {
+          path: '.github/workflows/release.yml',
+          tool: 'actionlint',
+          reason: 'source mapping not yet supported',
+        },
+      ],
+    });
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('APPROVE');
+    expect(r.body).toContain(
+      'Not linted (tool limitation, not a blocker): `.github/workflows/ci.yml` — source mapping not yet supported; `.github/workflows/release.yml` — source mapping not yet supported.',
+    );
+    expect(r.body).toContain(
+      '未检查（工具限制，非阻断）：`.github/workflows/ci.yml`——尚未支持源映射；`.github/workflows/release.yml`——source mapping not yet supported。',
+    );
   });
 });
 
@@ -13052,6 +13311,35 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     });
     expect(r.body).not.toContain('Convergence:');
     expect(r.recommendations).toBeUndefined();
+    expect(markerRec(r.body)).toBeUndefined();
+  });
+
+  it('republishes the matched codes in the ledger marker, off the same derivation (#10107)', () => {
+    // The marker is the one surface an OUTSIDE consumer can reach — the
+    // takeover loop reads the posted review body, not the composed result —
+    // and the codes it carries must be the SAME set the result carries and
+    // the paragraph renders from, or the loop would wire actions to a round
+    // the human-readable half does not describe.
+    const planPath = coveredWithLedger({
+      v: 1,
+      round: 4,
+      posted: 9,
+      fresh: 1,
+      findings: [{ id: 'R2-1', sev: 'S', file: 'src/a.ts', title: 'x' }],
+    });
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      draftedComments: [
+        { path: 'src/a.ts', line: 1, body: '**[Suggestion]** again' },
+      ],
+    });
+    const codes = (r.recommendations ?? []).map((x) => x.code);
+    expect(codes.length).toBeGreaterThan(0);
+    expect(markerRec(r.body)).toEqual(codes);
   });
 
   it('discloses a posture that is engaged in name and not in effect', () => {

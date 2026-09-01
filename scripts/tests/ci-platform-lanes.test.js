@@ -40,6 +40,55 @@ const LANES = ['test_macos', 'test_windows'];
 const PUSH_JOBS = ['classify_pr', 'test'];
 const condOf = (job) => String(ci.jobs[job].if ?? '');
 
+// The extended ceilings are scoped to the ECS pool: `runs-on` falls back to
+// ubuntu-latest for fork PRs from untrusted authors and when
+// MAINTAINER_ECS_RUNNER_DISABLED=true, so those hosted paths keep the
+// pre-contention ceiling. Evaluate the real timeout expression for both
+// routings instead of pinning a bare number -- the same
+// substitute-then-evaluate technique
+// `.github/scripts/ci-runner-routing.test.mjs` uses on `runs-on` -- so a
+// regression to an unconditional ceiling fails here instead of reading as a
+// passing constant.
+const ECS_RUNNER = '["self-hosted", "linux", "x64", "ecs-qwen"]';
+const HOSTED_RUNNER = '["ubuntu-latest"]';
+const timeoutMinutesOn = (job, ubuntuRunner) => {
+  // The same `|| '["ubuntu-latest"]'` default the runs-on expression carries:
+  // a missing output (classify_pr skipped) is the hosted routing.
+  const effective = ubuntuRunner || HOSTED_RUNNER;
+  let expr = String(ci.jobs[job]['timeout-minutes'])
+    .replace(/^\$\{\{\s*/, '')
+    .replace(/\s*\}\}$/, '')
+    .replace(
+      /contains\(needs\.classify_pr\.outputs\.ubuntu_runner \|\| '\["ubuntu-latest"\]', 'ecs-qwen'\)/g,
+      String(effective.includes('ecs-qwen')),
+    )
+    .replace(/fromJSON\(/g, '(');
+  if (/needs\.|contains\(|fromJSON\(/.test(expr)) {
+    throw new Error(
+      `${job} timeout carries a term this guard does not model: ${expr}`,
+    );
+  }
+  return Number(new Function(`return (${expr});`)());
+};
+
+it('keeps the shared Linux test lane above its contention budget on ECS', () => {
+  expect(timeoutMinutesOn('test', ECS_RUNNER)).toBe(120);
+});
+
+it('keeps the shared Linux test lane on its pre-contention ceiling when hosted', () => {
+  expect(timeoutMinutesOn('test', HOSTED_RUNNER)).toBe(60);
+  expect(timeoutMinutesOn('test', '')).toBe(60);
+});
+
+it('keeps the no-AK gate above its dependency-install budget on ECS', () => {
+  expect(timeoutMinutesOn('integration_no_ak', ECS_RUNNER)).toBe(60);
+});
+
+it('keeps the no-AK gate on its pre-contention ceiling when hosted', () => {
+  expect(timeoutMinutesOn('integration_no_ak', HOSTED_RUNNER)).toBe(30);
+  expect(timeoutMinutesOn('integration_no_ak', '')).toBe(30);
+});
+
 // One helper for both "an <event> run reaches exactly these jobs" invariants.
 //
 // It decides by EVALUATING each gate for the event, not by looking for tokens
@@ -377,6 +426,12 @@ describe('platform lanes — the retired sensitivity classifier', () => {
 });
 
 describe('GitHub helper tests', () => {
+  it('includes the disk-pressure contract suite', () => {
+    expect(ci.env.HELPER_TESTS).toContain(
+      '.github/scripts/ci-disk-pressure.test.mjs',
+    );
+  });
+
   it('runs every invocation serially', () => {
     const helperSteps = Object.values(ci.jobs)
       .flatMap((job) => job.steps ?? [])

@@ -139,9 +139,9 @@ export class SessionArchivingError extends Error {
  *
  * `restore_in_progress` is the ordinary case: a restore is running and the
  * caller can retry shortly. `awaiting_abandoned_cleanup` means the public
- * caller already received a timeout, but the non-cancellable ACP request (and
- * its cleanup) has not settled yet — retrying at the ordinary cadence just
- * re-hits the fence, so clients must back off much further.
+ * caller already received a timeout, but the non-cancellable ACP registration
+ * request (and its cleanup) has not settled yet — retrying at the ordinary
+ * cadence just re-hits the fence, so clients must back off much further.
  */
 export type RestoreInProgressReason =
   | 'restore_in_progress'
@@ -182,7 +182,7 @@ export class RestoreInProgressError extends Error {
         : `session/${activeAction}`;
     super(
       reason === 'awaiting_abandoned_cleanup'
-        ? `Session "${sessionId}" timed out during ${activeTarget} and its abandoned restore has not settled yet; retry ${retryTarget} once cleanup completes`
+        ? `Session "${sessionId}" timed out during ${activeTarget} and its abandoned registration has not settled yet; retry ${retryTarget} once cleanup completes`
         : activeAction === 'spawn'
           ? `Session "${sessionId}" is already being registered by ${activeTarget}; retry ${retryTarget} after it completes`
           : `Session "${sessionId}" is already being restored via ${activeTarget}; retry ${retryTarget} after it completes`,
@@ -348,7 +348,7 @@ export class SessionShellDisabledError extends Error {
 
 /**
  * Thrown when a direct daemon shell command has no client id bound to the
- * addressed session. The bearer token authenticates the caller to the daemon;
+ * addressed session. Deployment policy authorizes the caller to the daemon;
  * this error means the caller has not proven ownership of the session.
  */
 export class SessionShellClientRequiredError extends Error {
@@ -623,32 +623,34 @@ export class SessionBusyError extends Error {
 export class WorkspaceDrainingError extends Error {
   readonly code = 'workspace_draining';
   readonly workspaceCwd: string;
-  constructor(workspaceCwd: string) {
+  override readonly cause: unknown;
+  constructor(workspaceCwd: string, cause?: unknown) {
     super(`Workspace ${JSON.stringify(workspaceCwd)} is being removed`);
     this.name = 'WorkspaceDrainingError';
     this.workspaceCwd = workspaceCwd;
+    this.cause = cause;
   }
 }
 
 /**
- * Why a channel is closed to new session work. `restore_cleanup_failed`: the
- * cleanup of a timed-out restore failed, so the child's state is unknown.
- * `restore_settlement_overdue`: an abandoned restore blew past its settlement
- * grace period, so the child still holds work the bridge can neither cancel
- * nor account for. Both keep existing sessions usable and clear once the
- * channel drains and is recycled.
+ * Why a channel is closed to new session work. Cleanup failures mean the
+ * child's state is unknown; settlement-overdue states mean the child still
+ * holds work the bridge can neither cancel nor account for. Existing sessions
+ * remain usable. Cleanup-failed states last until channel recycle;
+ * settlement-overdue states may clear when the abandoned request settles.
  */
 export type BridgeChannelUnavailableReason =
   | 'restore_cleanup_failed'
-  | 'restore_settlement_overdue';
+  | 'restore_settlement_overdue'
+  | 'new_session_cleanup_failed'
+  | 'new_session_settlement_overdue';
 
 export class BridgeChannelQuarantinedError extends Error {
   readonly reason: BridgeChannelUnavailableReason;
   /**
-   * How long the caller should wait before retrying fresh session work. This
-   * state persists until the workspace channel drains, which is at least a
-   * restore budget away — the ordinary 5-second cadence would poll identical
-   * 503s, and a fresh id never reaches the 409 that carries the real hint.
+   * How long the caller should wait before retrying fresh session work. The
+   * operation-budget-derived hint avoids polling these longer-lived states at
+   * the ordinary 5-second cadence.
    */
   readonly retryAfterSeconds: number;
 
@@ -659,7 +661,11 @@ export class BridgeChannelQuarantinedError extends Error {
     super(
       reason === 'restore_settlement_overdue'
         ? 'The ACP channel is unavailable for new sessions while an abandoned session restore has not settled'
-        : 'The ACP channel is unavailable for new sessions while timed-out restore cleanup is pending',
+        : reason === 'new_session_settlement_overdue'
+          ? 'The ACP channel is unavailable for new sessions while an abandoned session initialization has not settled'
+          : reason === 'new_session_cleanup_failed'
+            ? 'The ACP channel is unavailable for new sessions while timed-out session initialization cleanup is pending'
+            : 'The ACP channel is unavailable for new sessions while timed-out restore cleanup is pending',
     );
     this.name = 'BridgeChannelQuarantinedError';
     this.reason = reason;

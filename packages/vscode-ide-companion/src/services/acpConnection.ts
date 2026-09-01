@@ -476,7 +476,9 @@ export class AcpConnection {
       throw new Error('No active ACP session');
     }
     const promptBlocks =
-      typeof prompt === 'string' ? [{ type: 'text', text: prompt }] : prompt;
+      typeof prompt === 'string'
+        ? [{ type: 'text' as const, text: prompt }]
+        : prompt;
     const response: PromptResponse = await conn.prompt({
       sessionId: this.sessionId,
       prompt: promptBlocks,
