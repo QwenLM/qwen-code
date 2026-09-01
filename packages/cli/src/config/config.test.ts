@@ -1724,6 +1724,21 @@ describe('loadCliConfig', () => {
       expect(config.getOutputStyle()?.name).toBe('Concise');
     });
 
+    it('lets a zero-width-only --output-style fall through to the setting', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      // `trim()` leaves U+200B in place, so a guard written on it alone would
+      // count this as given and drop the setting with no warning — the same
+      // input the user cannot tell apart from `--output-style ''`.
+      process.argv = ['node', 'script.js', '--output-style', '\u200b'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig(
+        { general: { outputStyle: 'Concise' } },
+        argv,
+      );
+      expect(config.getOutputStyle()?.name).toBe('Concise');
+      expect(errorSpy).not.toHaveBeenCalled();
+    });
+
     it('does not fall back to the setting when the flag names an unknown style', async () => {
       vi.spyOn(console, 'error').mockImplementation(() => {});
       process.argv = ['node', 'script.js', '--output-style', 'Verbose'];

@@ -158,7 +158,11 @@ export interface CliArgs {
   promptInteractive: string | undefined;
   systemPrompt: string | undefined;
   appendSystemPrompt: string | undefined;
-  outputStyle: string | undefined;
+  // Repeatable at runtime: yargs collects a repeated `--output-style` into an
+  // array despite `type: 'string'`, so the declaration carries the honest
+  // shape rather than leaving a reader to find out via `.trim is not a
+  // function`. `resolveOutputStyle` takes `unknown` and narrows.
+  outputStyle: string | string[] | undefined;
   yolo: boolean | undefined;
   bare: boolean | undefined;
   safeMode?: boolean | undefined;
@@ -1310,10 +1314,17 @@ export function resolveOutputStyle(
   }
   // An empty flag (`--output-style ""`) is treated as not given, so it falls
   // through to the setting; `default` is the explicit way to select no style.
+  // "Empty" is judged on the same normalization the matcher uses below: ES
+  // `trim()` strips whitespace but almost no `\p{Cf}`, so a value made purely
+  // of zero-width/format characters would otherwise count as given and
+  // silently discard the setting, while the visually identical `""` falls
+  // through.
+  const flagName =
+    typeof flagValue === 'string'
+      ? sanitizeOutputStyleName(flagValue)
+      : undefined;
   const flagGiven =
-    flagValue !== undefined &&
-    flagValue !== null &&
-    !(typeof flagValue === 'string' && flagValue.trim() === '');
+    flagValue !== undefined && flagValue !== null && flagName !== '';
   const raw = flagGiven ? flagValue : settingsStyle;
   if (raw === undefined || raw === null) {
     return undefined;
@@ -1325,7 +1336,12 @@ export function resolveOutputStyle(
     );
     return undefined;
   }
-  const name = sanitizeOutputStyleName(raw);
+  // The flag path already sanitized above to decide "given"; reuse it rather
+  // than normalizing the same value twice.
+  const name =
+    flagGiven && flagName !== undefined
+      ? flagName
+      : sanitizeOutputStyleName(raw);
   if (!name || name.toLowerCase() === 'default') {
     return undefined;
   }
