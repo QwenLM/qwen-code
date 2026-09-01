@@ -2481,11 +2481,13 @@ describe('DingtalkChannel status cards', () => {
     expect(appendOutput).not.toHaveBeenCalled();
   });
 
-  it('projects lifecycle phases into the matching status card', () => {
-    const channel = createChannel();
+  it('projects granular lifecycle phases into matching reactions and status cards', async () => {
+    const channel = createChannel({}, { displayLanguage: 'zh-CN' });
     const registerRun = vi.fn();
     const startStatusCard = vi.fn();
     const updateStatusCardPhase = vi.fn();
+    const attachReaction = vi.fn().mockResolvedValue(undefined);
+    const recallReaction = vi.fn().mockResolvedValue(undefined);
     (
       channel as unknown as {
         interactionPresenter: {
@@ -2500,6 +2502,18 @@ describe('DingtalkChannel status cards', () => {
       startStatusCard,
       updateStatusCardPhase,
     };
+    (
+      channel as unknown as {
+        attachReaction: typeof attachReaction;
+        recallReaction: typeof recallReaction;
+      }
+    ).attachReaction = attachReaction;
+    (
+      channel as unknown as {
+        attachReaction: typeof attachReaction;
+        recallReaction: typeof recallReaction;
+      }
+    ).recallReaction = recallReaction;
     (
       channel as unknown as { inboundCardOwners: Map<string, unknown> }
     ).inboundCardOwners.set('message-1', {
@@ -2516,24 +2530,49 @@ describe('DingtalkChannel status cards', () => {
     } satisfies LifecycleBase;
     const lifecycle = getLifecycleHook(channel);
 
+    seedSeenMessage(channel, 'message-1');
     lifecycle({ ...base, type: 'started' });
-    lifecycle({
-      ...base,
-      type: 'tool_call',
-      toolCall: {
-        sessionId: 'session-1',
-        toolCallId: 'tool-1',
-        kind: 'run_shell_command',
-        title: 'Shell: grep SECRET /private/project/config',
-        description: 'Read /private/project/config and grep SECRET',
-        status: 'in_progress',
-      },
-    });
+    await vi.waitFor(() => expect(attachReaction).toHaveBeenCalledTimes(2));
+    for (const [kind, expectedCalls] of [
+      ['fetch', 3],
+      ['delete', 4],
+      ['move', 5],
+      ['think', 6],
+      ['switch_mode', 7],
+    ]) {
+      lifecycle({
+        ...base,
+        type: 'tool_call',
+        toolCall: {
+          sessionId: 'session-1',
+          toolCallId: `tool-${kind}`,
+          kind,
+          title: 'Hidden tool title',
+          status: 'in_progress',
+        },
+      });
+      await vi.waitFor(() =>
+        expect(attachReaction).toHaveBeenCalledTimes(expectedCalls),
+      );
+    }
     lifecycle({ ...base, type: 'text_chunk', chunk: 'Answer' });
+    await vi.waitFor(() => expect(attachReaction).toHaveBeenCalledTimes(8));
 
     expect(updateStatusCardPhase.mock.calls).toEqual([
-      ['run-1', 'running'],
+      ['run-1', 'fetching'],
+      ['run-1', 'deleting'],
+      ['run-1', 'moving'],
+      ['run-1', 'thinking'],
+      ['run-1', 'switching'],
       ['run-1', 'replying'],
+    ]);
+    expect(attachReaction.mock.calls.slice(2).map(([, , tag]) => tag)).toEqual([
+      { name: '🌐 获取中', emotionId: '34019', backgroundId: 'im_bg_6' },
+      { name: '🗑️ 删除中', emotionId: '34019', backgroundId: 'im_bg_6' },
+      { name: '📦 移动中', emotionId: '34019', backgroundId: 'im_bg_6' },
+      { name: '🤔 思考中', emotionId: '34019', backgroundId: 'im_bg_6' },
+      { name: '🔄 切换模式中', emotionId: '34019', backgroundId: 'im_bg_6' },
+      { name: '✍️ 回复中', emotionId: '34019', backgroundId: 'im_bg_6' },
     ]);
   });
 

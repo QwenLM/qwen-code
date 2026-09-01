@@ -197,6 +197,65 @@ describe('StatusCardController', () => {
     expect(contents.at(-1)).toBe('🔎 Searching\n\nsecond');
   });
 
+  it('projects granular phases without replacing the card body or source prefix', async () => {
+    vi.useFakeTimers();
+    const { client, controller } = createHarness({ language: 'zh-CN' });
+
+    controller.replace(
+      segment('segment-1', { sourceLabel: '[review]' }),
+      target,
+      '\\[review\\]\n\nanswer',
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    const outTrackId = vi.mocked(client.openOrUpdateStream).mock.calls[0]![0]
+      .outTrackId;
+    vi.mocked(client.openOrUpdateStream).mockClear();
+
+    for (const phase of [
+      'fetching',
+      'deleting',
+      'moving',
+      'switching',
+    ] as const) {
+      await controller.updateRunPhase('run-1', phase);
+    }
+
+    expect(vi.mocked(client.openOrUpdateStream).mock.calls).toEqual([
+      [
+        {
+          outTrackId,
+          key: 'content',
+          content: '🌐 获取中\n\n\\[review\\]\n\nanswer',
+          finalize: false,
+        },
+      ],
+      [
+        {
+          outTrackId,
+          key: 'content',
+          content: '🗑️ 删除中\n\n\\[review\\]\n\nanswer',
+          finalize: false,
+        },
+      ],
+      [
+        {
+          outTrackId,
+          key: 'content',
+          content: '📦 移动中\n\n\\[review\\]\n\nanswer',
+          finalize: false,
+        },
+      ],
+      [
+        {
+          outTrackId,
+          key: 'content',
+          content: '🔄 切换模式中\n\n\\[review\\]\n\nanswer',
+          finalize: false,
+        },
+      ],
+    ]);
+  });
+
   it('hides streamed image paths in status snapshots', async () => {
     vi.useFakeTimers();
     const { client, controller } = createHarness();

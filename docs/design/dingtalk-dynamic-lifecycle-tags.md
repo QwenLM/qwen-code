@@ -16,6 +16,23 @@ Reaction operations for one inbound message use a desired-state drain. A newer p
 
 The same lifecycle mapping drives a replaceable first line in the interactive response card body. A newly created card starts at `🤔 Thinking`; tool activity replaces that line with the mapped phase before any response text exists, and the first response chunk changes it to `✍️ Replying`. While a response streams, its content appears below that phase line. Duplicate phase events are coalesced.
 
+## ACP tool-kind projection contract
+
+| ACP kind           | Phase       | English             | Chinese         |
+| ------------------ | ----------- | ------------------- | --------------- |
+| `read`             | `reading`   | `📖 Reading`        | `📖 读取中`     |
+| `edit`             | `editing`   | `🛠️ Editing`        | `🛠️ 编辑中`     |
+| `delete`           | `deleting`  | `🗑️ Deleting`       | `🗑️ 删除中`     |
+| `move`             | `moving`    | `📦 Moving`         | `📦 移动中`     |
+| `search`           | `searching` | `🔎 Searching`      | `🔎 搜索中`     |
+| `execute`          | `running`   | `🖥️ Running`        | `🖥️ 执行中`     |
+| `think`            | `thinking`  | `🤔 Thinking`       | `🤔 思考中`     |
+| `fetch`            | `fetching`  | `🌐 Fetching`       | `🌐 获取中`     |
+| `switch_mode`      | `switching` | `🔄 Switching mode` | `🔄 切换模式中` |
+| `other` or unknown | `working`   | `🛠️ Working`        | `🛠️ 处理中`     |
+
+The projection first exactly matches standard ACP kinds, then uses legacy and third-party Bridge aliases. `other` remains the final fallback. Reactions and active card bodies use the same localized phase label. Distinguishing ACP `Agent` from `Other` requires new protocol metadata; the current protocol normalizes both to `other`. This version does not change the tool-title display policy.
+
 The running card's `statusLine` contains only the configured model and elapsed time. On completion, the process line is removed from the body so only the final assistant response remains; the existing terminal state, model, and elapsed time stay in `statusLine`. Tool titles, descriptions, paths, commands, parameters, output, and model reasoning are never added to lifecycle events or card content.
 
 Phase and terminal labels use the effective Qwen display language after environment override, configured-language selection, and `auto` system-language detection. Presentation language never changes the agent prompt or tool-call schema.
