@@ -217,6 +217,11 @@ export const DEFAULT_COMMAND_OPTIONS = {
     description:
       'Append instructions to the main session system prompt for this run. Can be combined with --system-prompt.',
   },
+  'output-style': {
+    type: 'string' as const,
+    description:
+      'Output style for this run, for example "Concise" or "Explanatory". Overrides the general.outputStyle setting; "default" selects no style.',
+  },
   sandbox: {
     alias: 's',
     type: 'boolean' as const,
