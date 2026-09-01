@@ -51,7 +51,8 @@ describe('Web Shell MCP App development proxy', () => {
 
 describe('Web Shell standalone session development proxy', () => {
   it('proxies standalone session routes to the daemon', () => {
-    expect(loadConfig().server?.proxy?.['/standalone']).toBeDefined();
+    const proxy = loadConfig().server?.proxy;
+    expect(proxy?.['/standalone/sessions']).toBe(proxy?.['/session']);
   });
 });
 

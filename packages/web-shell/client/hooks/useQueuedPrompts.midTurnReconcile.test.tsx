@@ -462,7 +462,7 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
         pendingPrompts: Array<{
           promptId: string;
           text: string;
-          state: 'running';
+          state: 'queued';
         }>;
       }>();
       sdkMock.actions.getPendingPrompts.mockReturnValueOnce(pending.promise);
@@ -498,7 +498,7 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
             {
               promptId: 'm-complete',
               text: 'finish me',
-              state: 'running',
+              state: 'queued',
             },
           ],
         });
@@ -506,6 +506,165 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
       });
 
       expect(harness.result().queuedPrompts).toEqual([]);
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('does not restore an errored prompt from an older pending response', async () => {
+    sdkMock.actions.getMidTurnMessages.mockResolvedValue({
+      messages: [{ messageId: 'm-error', text: 'fail me' }],
+      settledMessageIds: [],
+      promotedMessageIds: [],
+    });
+    const harness = createHarness();
+    try {
+      await harness.render({ streamingState: 'responding' });
+      const pending = deferred<{
+        pendingPrompts: Array<{
+          promptId: string;
+          text: string;
+          state: 'queued';
+        }>;
+      }>();
+      sdkMock.actions.getPendingPrompts.mockReturnValueOnce(pending.promise);
+
+      await act(async () => {
+        sdkMock.publishPendingEvents([
+          {
+            type: 'pending_prompt_started',
+            originatorClientId: CLIENT_ID,
+            data: {
+              sessionId: 'session-a',
+              promptId: 'm-error',
+              text: 'fail me',
+            },
+          },
+        ]);
+        await Promise.resolve();
+      });
+      await act(async () => {
+        sdkMock.publishPendingEvents([
+          {
+            type: 'turn_error',
+            data: {
+              sessionId: 'session-a',
+              promptId: 'm-error',
+            },
+          },
+        ]);
+      });
+      await act(async () => {
+        pending.resolve({
+          pendingPrompts: [
+            {
+              promptId: 'm-error',
+              text: 'fail me',
+              state: 'queued',
+            },
+          ],
+        });
+        await Promise.resolve();
+      });
+
+      expect(harness.result().queuedPrompts).toEqual([]);
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('does not restore a settled prompt from an older mid-turn snapshot', async () => {
+    const harness = createHarness();
+    try {
+      await harness.render({ streamingState: 'responding' });
+      const snapshot = deferred<{
+        messages: Array<{ messageId: string; text: string }>;
+        settledMessageIds: string[];
+        promotedMessageIds: string[];
+      }>();
+      sdkMock.actions.getMidTurnMessages.mockReturnValueOnce(snapshot.promise);
+      await harness.render({ streamingState: 'idle' });
+
+      await act(async () => {
+        sdkMock.publishPendingEvents([
+          {
+            type: 'pending_prompt_started',
+            originatorClientId: CLIENT_ID,
+            data: {
+              sessionId: 'session-a',
+              promptId: 'm-settled',
+              text: 'already settled',
+            },
+          },
+        ]);
+        await Promise.resolve();
+      });
+      await act(async () => {
+        sdkMock.publishPendingEvents([
+          {
+            type: 'turn_complete',
+            data: {
+              sessionId: 'session-a',
+              promptId: 'm-settled',
+            },
+          },
+        ]);
+      });
+      await act(async () => {
+        snapshot.resolve({
+          messages: [{ messageId: 'm-settled', text: 'already settled' }],
+          settledMessageIds: [],
+          promotedMessageIds: [],
+        });
+        await Promise.resolve();
+      });
+
+      expect(harness.result().queuedPrompts).toEqual([]);
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('keeps a row visible when deletion loses a race with prompt start', async () => {
+    sdkMock.actions.getMidTurnMessages.mockResolvedValue({
+      messages: [{ messageId: 'm-removing', text: 'remove me' }],
+      settledMessageIds: [],
+      promotedMessageIds: [],
+    });
+    const removal = deferred<{ removed: boolean }>();
+    sdkMock.actions.removeMidTurnMessage.mockReturnValueOnce(removal.promise);
+    const harness = createHarness();
+    try {
+      await harness.render({ streamingState: 'responding' });
+      const row = harness.result().queuedPrompts[0]!;
+      await act(async () => {
+        harness.result().removeQueuedPrompt(row.id);
+        await Promise.resolve();
+      });
+      expect(harness.result().queuedPrompts[0]?.isRemoving).toBe(true);
+
+      await act(async () => {
+        sdkMock.publishPendingEvents([
+          {
+            type: 'pending_prompt_started',
+            originatorClientId: 'client-before-reload',
+            data: {
+              sessionId: 'session-a',
+              promptId: 'm-removing',
+              text: 'remove me',
+            },
+          },
+        ]);
+        await Promise.resolve();
+      });
+      expect(harness.result().queuedPrompts).toHaveLength(1);
+
+      await act(async () => {
+        removal.resolve({ removed: false });
+        await Promise.resolve();
+      });
+
+      expect(harness.reportError).toHaveBeenCalledOnce();
     } finally {
       await harness.dispose();
     }

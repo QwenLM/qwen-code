@@ -502,8 +502,10 @@ export function useQueuedPrompts({
   const removeDaemonOwnedPrompt = useCallback((promptId: string) => {
     const next = queuedPromptsRef.current.filter(
       (prompt) =>
-        prompt.serverPromptId !== promptId &&
-        prompt.midTurnMessageId !== promptId,
+        prompt.isEditing ||
+        prompt.isRemoving ||
+        (prompt.serverPromptId !== promptId &&
+          prompt.midTurnMessageId !== promptId),
     );
     if (next.length === queuedPromptsRef.current.length) return;
     queuedPromptsRef.current = next;
