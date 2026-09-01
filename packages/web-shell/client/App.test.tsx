@@ -399,7 +399,7 @@ const {
       promptImages: undefined as
         | { data: string; media_type: string }[]
         | undefined,
-      promptStatus: 'idle' as 'idle' | 'waiting' | 'responding',
+      promptStatus: 'idle' as 'idle' | 'waiting' | 'streaming',
       streamingState: 'idle' as StreamingState,
       sessionHasActivePrompt: false,
       blocks: [] as unknown[],
@@ -869,6 +869,20 @@ vi.mock('./components/MessageList', async () => {
     );
   }
   return {
+    getLastTurnStartMessageId: (
+      messages: Array<{ id?: string; role?: string }>,
+    ) => {
+      for (let index = messages.length - 1; index >= 0; index -= 1) {
+        const message = messages[index];
+        if (
+          message?.id &&
+          (message.role === 'user' || message.role === 'user_shell')
+        ) {
+          return message.id;
+        }
+      }
+      return null;
+    },
     MessageList: React.forwardRef(function MessageList(
       props: {
         messages?: Array<{
@@ -20534,6 +20548,123 @@ describe('App session callbacks', () => {
     });
   });
 
+  it('waits for connection catch-up before reporting artifacts ready', async () => {
+    mockConnection.capabilities = {
+      ...mockConnection.capabilities,
+      features: ['session_artifacts'],
+    };
+    mockConnection.catchingUp = true;
+    const restoreLoad = deferred<{ artifacts: DaemonSessionArtifact[] }>();
+    mockSessionActions.loadArtifacts.mockReturnValueOnce(restoreLoad.promise);
+    const onSessionArtifactsReady = vi.fn();
+    const { rerender } = renderApp({ onSessionArtifactsReady });
+    await act(async () => {
+      restoreLoad.resolve({ artifacts: [] });
+      await restoreLoad.promise;
+    });
+
+    expect(onSessionArtifactsReady).not.toHaveBeenCalled();
+
+    mockConnection.catchingUp = false;
+    rerender();
+    await flush();
+    await flush();
+
+    expect(onSessionArtifactsReady).toHaveBeenCalledOnce();
+    expect(onSessionArtifactsReady.mock.calls[0]?.[0]).toMatchObject({
+      reason: 'restore',
+      sessionId: 'session-1',
+      artifacts: [],
+    });
+  });
+
+  it('reports every ready event queued while connection catch-up is active', async () => {
+    mockConnection.capabilities = {
+      ...mockConnection.capabilities,
+      features: ['session_artifacts'],
+    };
+    mockConnection.catchingUp = true;
+    mockSessionActions.loadArtifacts.mockResolvedValue({ artifacts: [] });
+    const onSessionArtifactsReady = vi.fn();
+    const { rerender } = renderApp({ onSessionArtifactsReady });
+    await flush();
+    await flush();
+
+    testState.messages = [
+      { id: 'user-turn-1', role: 'user', content: 'first turn' },
+    ] as Message[];
+    testState.promptStatus = 'streaming';
+    rerender();
+    testState.promptStatus = 'idle';
+    rerender();
+    await flush();
+
+    testState.messages = [
+      ...testState.messages,
+      { id: 'user-turn-2', role: 'user', content: 'second turn' },
+    ] as Message[];
+    testState.promptStatus = 'streaming';
+    rerender();
+    testState.promptStatus = 'idle';
+    rerender();
+    await flush();
+
+    expect(onSessionArtifactsReady).not.toHaveBeenCalled();
+    mockConnection.catchingUp = false;
+    rerender();
+
+    await vi.waitFor(() => {
+      expect(onSessionArtifactsReady).toHaveBeenCalledTimes(3);
+    });
+    expect(
+      onSessionArtifactsReady.mock.calls.map(([snapshot]) =>
+        snapshot.reason === 'turn_complete'
+          ? `${snapshot.reason}:${snapshot.turnId}`
+          : snapshot.reason,
+      ),
+    ).toEqual([
+      'restore',
+      'turn_complete:user-turn-1',
+      'turn_complete:user-turn-2',
+    ]);
+  });
+
+  it('reports the user-shell turn id after a shell command settles', async () => {
+    mockConnection.capabilities = {
+      ...mockConnection.capabilities,
+      features: ['session_artifacts'],
+    };
+    mockSessionActions.loadArtifacts.mockResolvedValue({ artifacts: [] });
+    const onSessionArtifactsReady = vi.fn();
+    const { rerender } = renderApp({ onSessionArtifactsReady });
+    await flush();
+    await flush();
+    expect(onSessionArtifactsReady).toHaveBeenCalledOnce();
+
+    testState.promptStatus = 'waiting';
+    rerender();
+    testState.messages = [
+      {
+        id: 'shell-turn-1',
+        role: 'user_shell',
+        command: 'npm test',
+        output: 'passed',
+      },
+    ] as Message[];
+    testState.promptStatus = 'idle';
+    rerender();
+    await flush();
+    await flush();
+
+    expect(onSessionArtifactsReady).toHaveBeenCalledTimes(2);
+    expect(onSessionArtifactsReady.mock.calls[1]?.[0]).toMatchObject({
+      reason: 'turn_complete',
+      sessionId: 'session-1',
+      turnId: 'shell-turn-1',
+      artifacts: [],
+    });
+  });
+
   it('reports turn artifacts only after the post-turn refresh settles', async () => {
     mockConnection.capabilities = {
       ...mockConnection.capabilities,
@@ -20578,7 +20709,7 @@ describe('App session callbacks', () => {
     await flush();
     expect(onSessionArtifactsReady).toHaveBeenCalledOnce();
 
-    testState.promptStatus = 'responding';
+    testState.promptStatus = 'streaming';
     rerender();
     testState.promptStatus = 'idle';
     rerender();
@@ -20589,7 +20720,7 @@ describe('App session callbacks', () => {
       ...testState.messages,
       { id: 'user-turn-2', role: 'user', content: 'queued follow-up' },
     ] as Message[];
-    testState.promptStatus = 'responding';
+    testState.promptStatus = 'streaming';
     rerender();
 
     await act(async () => {

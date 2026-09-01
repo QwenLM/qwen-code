@@ -224,7 +224,7 @@ function getLastMessage(messages: Message[]): Message | undefined {
   return messages[messages.length - 1];
 }
 
-function getLastTurnStartMessageId(messages: Message[]): string | null {
+export function getLastTurnStartMessageId(messages: Message[]): string | null {
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
     if (msg && isTurnStartMessage(msg)) return msg.id;

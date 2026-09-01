@@ -69,7 +69,11 @@ import {
 } from './constants/sessions';
 import { extractPendingPermission } from './adapters/transcriptAdapter';
 import { isRetryableTurnErrorKind } from './adapters/transcriptToMessages';
-import { MessageList, type MessageListHandle } from './components/MessageList';
+import {
+  getLastTurnStartMessageId,
+  MessageList,
+  type MessageListHandle,
+} from './components/MessageList';
 import { SubagentDetailsProvider } from './subagentDetailsContext';
 import { MonitorDetailsProvider } from './monitorDetailsContext';
 import { findMonitorTaskForTool } from './utils/monitorTasks';
@@ -991,16 +995,6 @@ export type WebShellSessionArtifactsSnapshot =
       /** User turn captured before the asynchronous artifact refresh started. */
       turnId: string;
     });
-
-function getLatestUserTurnId(messages: readonly Message[]): string | undefined {
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index];
-    if (message?.role === 'user' || message?.role === 'user_shell') {
-      return message.id;
-    }
-  }
-  return undefined;
-}
 
 export type WebShellComposerPlaceholderState = ComposerPlaceholderState;
 
@@ -2940,8 +2934,14 @@ export function App({
     [messages, recapMessage],
   );
   const activeArtifactTurnId = useMemo(
-    () => getLatestUserTurnId(displayMessages),
+    () => getLastTurnStartMessageId(displayMessages) ?? undefined,
     [displayMessages],
+  );
+  const activeArtifactTurnIsShell = useMemo(
+    () =>
+      displayMessages.find((message) => message.id === activeArtifactTurnId)
+        ?.role === 'user_shell',
+    [activeArtifactTurnId, displayMessages],
   );
   useEffect(() => {
     const failed = failedPromptRef.current;
@@ -3000,9 +3000,10 @@ export function App({
   const {
     artifacts,
     ready: artifactsReady,
+    consumeReady: consumeArtifactsReady,
     loading: artifactsLoading,
     error: artifactsError,
-  } = useSessionArtifacts(activeArtifactTurnId);
+  } = useSessionArtifacts(activeArtifactTurnId, activeArtifactTurnIsShell);
   const [artifactPanelExtraArtifacts, setArtifactPanelExtraArtifacts] =
     useState<DaemonSessionArtifact[]>([]);
   const [paneArtifactSnapshots, setPaneArtifactSnapshots] = useState<
@@ -3131,10 +3132,13 @@ export function App({
   const lastNotifiedArtifactsReadySequenceRef = useRef(0);
   useEffect(() => {
     const sessionId = connection.sessionId;
+    if (!artifactsReady) return;
+    if (!onSessionArtifactsReady) {
+      consumeArtifactsReady(artifactsReady.sequence);
+      return;
+    }
     if (
-      !onSessionArtifactsReady ||
       !sessionId ||
-      !artifactsReady ||
       connection.loadingTranscript ||
       connection.catchingUp ||
       lastNotifiedArtifactsReadySequenceRef.current === artifactsReady.sequence
@@ -3158,6 +3162,7 @@ export function App({
         artifactsByTurn,
       });
     }
+    consumeArtifactsReady(artifactsReady.sequence);
   }, [
     artifacts,
     artifactsByTurn,
@@ -3165,6 +3170,7 @@ export function App({
     connection.catchingUp,
     connection.loadingTranscript,
     connection.sessionId,
+    consumeArtifactsReady,
     onSessionArtifactsReady,
   ]);
   const fileChangesByTurn = useMemo(

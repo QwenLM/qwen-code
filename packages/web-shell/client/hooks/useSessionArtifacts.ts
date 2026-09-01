@@ -28,6 +28,7 @@ export interface SessionArtifactsState {
   artifacts: DaemonSessionArtifact[];
   artifactById: ReadonlyMap<string, DaemonSessionArtifact>;
   ready: SequencedSessionArtifactsReady | null;
+  consumeReady: (sequence: number) => void;
   loading: boolean;
   error: string | null;
   refresh: () => Promise<void>;
@@ -35,6 +36,7 @@ export interface SessionArtifactsState {
 
 export function useSessionArtifacts(
   activeTurnId?: string,
+  activeTurnIsShell = false,
 ): SessionArtifactsState {
   const actions = useActions();
   const connection = useConnection();
@@ -53,17 +55,28 @@ export function useSessionArtifacts(
   const [artifacts, setArtifacts] = useState<DaemonSessionArtifact[]>([]);
   const [loading, setLoading] = useState(false);
   const readySequenceRef = useRef(0);
-  const [readyState, setReadyState] = useState<
-    (SequencedSessionArtifactsReady & { owner: typeof owner }) | undefined
+  const [readyQueueState, setReadyQueueState] = useState<
+    | {
+        owner: typeof owner;
+        events: SequencedSessionArtifactsReady[];
+      }
+    | undefined
   >(undefined);
   const pendingReadyRef = useRef<
-    (SessionArtifactsReady & { owner: typeof owner }) | undefined
-  >(undefined);
+    Array<SessionArtifactsReady & { owner: typeof owner }>
+  >([]);
   const requestIdRef = useRef(0);
   const loadedOwnerRef = useRef<typeof owner | undefined>(undefined);
   const loadingOwnerRef = useRef<typeof owner | undefined>(undefined);
   const previousPromptStatusRef = useRef({ owner, promptStatus });
-  const activeTurnRef = useRef({ owner, turnId: activeTurnId });
+  const activeTurnRef = useRef({
+    owner,
+    baselineTurnId: activeTurnId,
+    turnId: undefined as string | undefined,
+    turnIsShell: false,
+    sawStreaming: false,
+  });
+  const previousActiveTurnRef = useRef({ owner, turnId: activeTurnId });
   const previousArtifactsVersionRef = useRef(artifactsVersion);
 
   const refresh = useCallback(async () => {
@@ -89,24 +102,35 @@ export function useSessionArtifacts(
       // The artifacts panel treats a failed refresh as an empty error state.
     } finally {
       if (requestIdRef.current === requestId && owner.isCurrent()) {
-        if (succeeded && pendingReadyRef.current?.owner === owner) {
-          const pendingReady = pendingReadyRef.current;
-          readySequenceRef.current += 1;
-          setReadyState(
-            pendingReady.reason === 'turn_complete'
-              ? {
-                  owner,
-                  reason: pendingReady.reason,
-                  sequence: readySequenceRef.current,
-                  turnId: pendingReady.turnId,
-                }
-              : {
-                  owner,
-                  reason: pendingReady.reason,
-                  sequence: readySequenceRef.current,
-                },
+        if (succeeded) {
+          const pending = pendingReadyRef.current.filter(
+            (event) => event.owner === owner,
           );
-          pendingReadyRef.current = undefined;
+          if (pending.length > 0) {
+            pendingReadyRef.current = pendingReadyRef.current.filter(
+              (event) => event.owner !== owner,
+            );
+            const events = pending.map((event) => {
+              readySequenceRef.current += 1;
+              return event.reason === 'turn_complete'
+                ? {
+                    reason: event.reason,
+                    sequence: readySequenceRef.current,
+                    turnId: event.turnId,
+                  }
+                : {
+                    reason: event.reason,
+                    sequence: readySequenceRef.current,
+                  };
+            });
+            setReadyQueueState((current) => ({
+              owner,
+              events: [
+                ...(current?.owner === owner ? current.events : []),
+                ...events,
+              ],
+            }));
+          }
         }
         setLoading(false);
       }
@@ -116,37 +140,89 @@ export function useSessionArtifacts(
   refreshRef.current = refresh;
 
   useEffect(() => {
-    pendingReadyRef.current = { owner, reason: 'restore' };
+    pendingReadyRef.current = [{ owner, reason: 'restore' }];
+    setReadyQueueState(undefined);
     void refresh();
   }, [owner, refresh]);
 
   useEffect(() => {
     const previous = previousPromptStatusRef.current;
+    const previousActiveTurn = previousActiveTurnRef.current;
     previousPromptStatusRef.current = { owner, promptStatus };
-    const capturedTurn = activeTurnRef.current;
+    previousActiveTurnRef.current = { owner, turnId: activeTurnId };
+    let capturedTurn = activeTurnRef.current;
     if (
       promptStatus !== 'idle' &&
-      (previous.owner !== owner ||
-        previous.promptStatus === 'idle' ||
-        (capturedTurn.owner === owner && capturedTurn.turnId === undefined))
+      (previous.owner !== owner || previous.promptStatus === 'idle')
     ) {
-      activeTurnRef.current = { owner, turnId: activeTurnId };
+      capturedTurn = {
+        owner,
+        baselineTurnId:
+          previousActiveTurn.owner === owner
+            ? previousActiveTurn.turnId
+            : undefined,
+        turnId: undefined,
+        turnIsShell: false,
+        sawStreaming: false,
+      };
+    }
+    if (promptStatus !== 'idle' && capturedTurn.owner === owner) {
+      if (
+        capturedTurn.turnId === undefined &&
+        activeTurnId !== undefined &&
+        activeTurnId !== capturedTurn.baselineTurnId
+      ) {
+        capturedTurn = {
+          ...capturedTurn,
+          turnId: activeTurnId,
+          turnIsShell: activeTurnIsShell,
+        };
+      }
+      if (promptStatus === 'streaming') {
+        capturedTurn = { ...capturedTurn, sawStreaming: true };
+      }
+      activeTurnRef.current = capturedTurn;
     }
     if (
       previous.owner === owner &&
       previous.promptStatus !== 'idle' &&
       promptStatus === 'idle'
     ) {
+      if (
+        capturedTurn.owner === owner &&
+        capturedTurn.turnId === undefined &&
+        activeTurnIsShell &&
+        activeTurnId !== undefined &&
+        activeTurnId !== capturedTurn.baselineTurnId
+      ) {
+        capturedTurn = {
+          ...capturedTurn,
+          turnId: activeTurnId,
+          turnIsShell: true,
+        };
+      }
       const completedTurnId =
-        activeTurnRef.current.owner === owner
-          ? activeTurnRef.current.turnId
+        capturedTurn.owner === owner &&
+        (capturedTurn.sawStreaming || capturedTurn.turnIsShell)
+          ? (capturedTurn.turnId ?? capturedTurn.baselineTurnId)
           : undefined;
-      pendingReadyRef.current = completedTurnId
-        ? { owner, reason: 'turn_complete', turnId: completedTurnId }
-        : undefined;
+      if (completedTurnId) {
+        pendingReadyRef.current.push({
+          owner,
+          reason: 'turn_complete',
+          turnId: completedTurnId,
+        });
+      }
+      activeTurnRef.current = {
+        owner,
+        baselineTurnId: activeTurnId,
+        turnId: undefined,
+        turnIsShell: false,
+        sawStreaming: false,
+      };
       void refreshRef.current();
     }
-  }, [activeTurnId, owner, promptStatus]);
+  }, [activeTurnId, activeTurnIsShell, owner, promptStatus]);
 
   useEffect(() => {
     const previous = previousArtifactsVersionRef.current;
@@ -173,22 +249,30 @@ export function useSessionArtifacts(
 
   const visibleArtifacts =
     loadedOwnerRef.current === owner ? artifacts : EMPTY_ARTIFACTS;
+  const ready =
+    supportsArtifacts && readyQueueState?.owner === owner
+      ? (readyQueueState.events[0] ?? null)
+      : null;
+  const consumeReady = useCallback(
+    (sequence: number) => {
+      setReadyQueueState((current) =>
+        current?.owner === owner
+          ? {
+              owner,
+              events: current.events.filter(
+                (event) => event.sequence > sequence,
+              ),
+            }
+          : current,
+      );
+    },
+    [owner],
+  );
   return {
     artifacts: visibleArtifacts,
     artifactById,
-    ready:
-      !supportsArtifacts || readyState?.owner !== owner
-        ? null
-        : readyState.reason === 'turn_complete'
-          ? {
-              reason: readyState.reason,
-              sequence: readyState.sequence,
-              turnId: readyState.turnId,
-            }
-          : {
-              reason: readyState.reason,
-              sequence: readyState.sequence,
-            },
+    ready,
+    consumeReady,
     loading: loading && loadingOwnerRef.current === owner,
     error: null,
     refresh,
