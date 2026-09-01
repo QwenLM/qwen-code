@@ -465,20 +465,34 @@ function laneTestPlan(file, text) {
                 continue;
               }
               const needsRef = operand.match(
-                /^needs\.[A-Za-z0-9_-]+\.outputs\.([A-Za-z0-9_-]+)$/,
+                /^needs\.([A-Za-z0-9_-]+)\.outputs\.([A-Za-z0-9_-]+)$/,
               );
               if (needsRef) {
-                const producers = assemblies.filter(
-                  (a) => a.name === needsRef[1],
+                const [, producerJob, outName] = needsRef;
+                const producers = (jobAssemblies.get(producerJob) ?? []).filter(
+                  (a) => a.name === outName,
                 );
+                if (
+                  (jobOpaqueWrites.get(producerJob) ?? new Set()).has(outName)
+                ) {
+                  problem(
+                    `${file}: ${origin} consumes a runner set with an unreadable write`,
+                    `job '${producerJob}' assigns '${outName}' in a shape ` +
+                      `the assembly scan cannot read (command substitution, ` +
+                      `variable copy, or a continuation), so a scannable ` +
+                      `literal beside it cannot vouch for what actually ` +
+                      `feeds the output — the guard fails closed.`,
+                  );
+                  continue;
+                }
                 if (producers.length === 0) {
                   problem(
                     `${file}: ${origin} consumes a runner set with no checkable producer`,
-                    `'${operand}' reads output '${needsRef[1]}', but this ` +
-                      `file has no whole-line ${needsRef[1]}='["…"]' ` +
-                      `assignment the assembly scan can vouch for — the ` +
-                      `lane behind the indirection is unchecked, so the ` +
-                      `guard fails closed.`,
+                    `'${operand}' reads output '${outName}' of job ` +
+                      `'${producerJob}', but that job has no whole-line ` +
+                      `${outName}='["…"]' assignment the assembly scan can ` +
+                      `vouch for — the lane behind the indirection is ` +
+                      `unchecked, so the guard fails closed.`,
                   );
                   continue;
                 }
@@ -595,13 +609,6 @@ function laneTestPlan(file, text) {
     return null;
   }
 
-  // Computed up front so a consumer arm (fromJSON over a needs-output
-  // operand) can resolve the referenced output NAME to a producing
-  // assignment in this same file. Assemblies carrying self-hosted are
-  // always judged; a hosted-only or empty assembly is judged when (and
-  // only when) a consumer names it — an unconsumed hosted assignment in
-  // some script is not this guard's jurisdiction.
-  const assemblies = runnerSetAssignments(text);
   const judgedAssemblies = new Set();
   function judgeAssembly(a, why) {
     if (judgedAssemblies.has(a)) {
@@ -623,6 +630,40 @@ function laneTestPlan(file, text) {
     return { problems, lanes, oks };
   }
 
+  // Assemblies are attributed to the JOB whose run bodies contain them — a
+  // consumer reads needs.<job>.outputs.<name>, and only that job's writes
+  // can feed the output, so a same-named literal in another job is a decoy,
+  // not a producer. Alongside the scannable literals, every OTHER
+  // assignment line to the same variable (command substitution, variable
+  // copy, a continuation of a multi-line assembly) is recorded as
+  // unreadable: when one exists for a consumed name, a scannable literal
+  // beside it cannot vouch for what actually reached $GITHUB_OUTPUT.
+  const jobAssemblies = new Map();
+  const jobOpaqueWrites = new Map();
+  for (const [jobName, job] of Object.entries(doc?.jobs ?? {})) {
+    const assemblies = [];
+    const opaque = new Set();
+    for (const step of Array.isArray(job?.steps) ? job.steps : []) {
+      if (typeof step?.run !== 'string') {
+        continue;
+      }
+      assemblies.push(...runnerSetAssignments(step.run));
+      for (const line of step.run.split('\n')) {
+        const write = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)=/);
+        if (
+          write &&
+          !/^\s*[A-Za-z_][A-Za-z0-9_]*=(['"])\[[^\n]*?\]\1\s*(?:#.*)?$/.test(
+            line,
+          )
+        ) {
+          opaque.add(write[1]);
+        }
+      }
+    }
+    jobAssemblies.set(jobName, assemblies);
+    jobOpaqueWrites.set(jobName, opaque);
+  }
+
   for (const [jobName, job] of Object.entries(doc?.jobs ?? {})) {
     if (!job || typeof job !== 'object') {
       continue;
@@ -641,9 +682,11 @@ function laneTestPlan(file, text) {
     checkValue(runsOn, job, `jobs.${jobName}.runs-on`);
   }
 
-  for (const a of assemblies) {
-    if (bracketTokens(a.raw).some((l) => l.toLowerCase() === 'self-hosted')) {
-      judgeAssembly(a, '');
+  for (const perJob of jobAssemblies.values()) {
+    for (const a of perJob) {
+      if (bracketTokens(a.raw).some((l) => l.toLowerCase() === 'self-hosted')) {
+        judgeAssembly(a, '');
+      }
     }
   }
 
@@ -878,7 +921,7 @@ describe('laneTestPlan fail-closed behavior', () => {
 
   // R6-1: a consumer arm (fromJSON over an indirect operand) is vouched only
   // by a producer assignment the assembly scan can read in the same file.
-  const consumer = `'\${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'`;
+  const consumer = `'\${{ fromJSON(needs.a.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'`;
   const producer = (q) =>
     `    steps:\n      - run: |-\n          ubuntu_runner=${q}["self-hosted", "linux", "x64", "ecs-qwen"]${q}\n`;
 
@@ -929,7 +972,7 @@ describe('laneTestPlan fail-closed behavior', () => {
     const { problems } = laneTestPlan(
       'probe.yml',
       wrap(
-        `'\${{ fromJSON((needs.classify_pr.outputs.ubuntu_runner) || ''["ubuntu-latest"]'') }}'`,
+        `'\${{ fromJSON((needs.a.outputs.ubuntu_runner) || ''["ubuntu-latest"]'') }}'`,
       ),
     );
     assert.equal(problems.length, 1);
@@ -959,6 +1002,33 @@ describe('laneTestPlan fail-closed behavior', () => {
     );
     assert.equal(problems.length, 1);
     assert.match(blob(problems[0]), /unreadable fromJSON operand/);
+  });
+
+  // R8: producer resolution is attributed to the JOB the consumer names.
+  it('fails closed on a cross-job same-named decoy assembly', () => {
+    const { problems } = laneTestPlan(
+      'probe.yml',
+      wrap(consumer) +
+        `  decoy:\n    runs-on: ubuntu-latest\n    steps:\n` +
+        `      - run: |-\n` +
+        `          ubuntu_runner='["self-hosted", "linux", "x64", "ecs-qwen"]'\n`,
+    );
+    assert.equal(problems.length, 1);
+    assert.match(blob(problems[0]), /no checkable producer/);
+  });
+
+  it('fails closed when the consumed name also has an unreadable write', () => {
+    const { problems } = laneTestPlan(
+      'probe.yml',
+      wrap(
+        consumer,
+        `    steps:\n      - run: |-\n` +
+          `          ubuntu_runner='["self-hosted", "linux", "x64", "ecs-qwen"]'\n` +
+          `          ubuntu_runner="$(jq -r .runner config.json)"\n`,
+      ),
+    );
+    assert.equal(problems.length, 1);
+    assert.match(blob(problems[0]), /unreadable write/);
   });
 
   // R7-1: prefix exemptions are end-anchored; a comma'd string is one
