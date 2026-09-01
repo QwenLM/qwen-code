@@ -401,6 +401,12 @@ describe('release workflow', () => {
       expect(checkout.with.ref, id).toBe(
         '${{ needs.prepare.outputs.release_sha }}',
       );
+      // The ref expression only resolves when the consumer declares prepare
+      // in needs; without the edge it evaluates to '' and checkout silently
+      // falls back to the event ref (the moving branch tip at fetch time).
+      expect([].concat(releaseYaml.jobs[id].needs ?? []), id).toContain(
+        'prepare',
+      );
     }
   });
 
@@ -497,11 +503,48 @@ describe('release workflow', () => {
     expect(quality.steps[0].run).toContain(
       'if [[ "${result}" != \'success\' ]]',
     );
+    // Pin the full result mapping, not just the loop's shape: dropping one
+    // loop entry or remapping an env var to another job's result must fail
+    // here instead of letting a failed component publish.
+    expect(quality.steps[0].env).toEqual({
+      STATIC_RESULT: '${{ needs.quality_static.result }}',
+      BUILD_RESULT: '${{ needs.quality_build.result }}',
+      TYPECHECK_RESULT: '${{ needs.quality_typecheck.result }}',
+      WORKSPACE_TEST_RESULT: '${{ needs.workspace_tests.result }}',
+      SCRIPT_TEST_RESULT: '${{ needs.quality_scripts.result }}',
+    });
+    for (const name of [
+      'STATIC_RESULT',
+      'BUILD_RESULT',
+      'TYPECHECK_RESULT',
+      'WORKSPACE_TEST_RESULT',
+      'SCRIPT_TEST_RESULT',
+    ]) {
+      expect(quality.steps[0].run, name).toContain('"${' + name + '}"');
+    }
     expect(releaseYaml.jobs.notify_failure.if).toContain(
       "needs.quality.result == 'failure'",
     );
     expect(releaseYaml.jobs.publish.needs).toContain('quality');
     expect(releaseYaml.jobs.publish.needs).not.toContain('workspace_tests');
+  });
+
+  it('keeps every component quality job behind the force_skip_tests gate', () => {
+    // The aggregate's gate alone is not enough: an emergency
+    // `force_skip_tests: 'true'` dispatch must skip each component lane
+    // directly too, otherwise a red lane still runs and blocks the very
+    // release the override exists to unblock.
+    for (const id of [
+      'quality_static',
+      'quality_build',
+      'quality_typecheck',
+      'workspace_tests',
+      'quality_scripts',
+    ]) {
+      expect(releaseYaml.jobs[id].if, id).toContain(
+        "github.event.inputs.force_skip_tests != 'true'",
+      );
+    }
   });
 
   it('keeps workspace cleanup from inspecting or signaling host processes', () => {
