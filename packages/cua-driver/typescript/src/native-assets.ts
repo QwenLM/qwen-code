@@ -5,12 +5,12 @@ import { fileURLToPath } from "node:url"
 
 export const CUA_SDK_NATIVE_DIR_ENV = "QWEN_CUA_SDK_NATIVE_DIR"
 export const CUA_SDK_CACHE_DIR_ENV = "QWEN_CUA_SDK_CACHE_DIR"
-export const CUA_SDK_RELEASE_BASE_URL_ENV =
-  "QWEN_CUA_SDK_RELEASE_BASE_URL"
+export const CUA_SDK_RELEASE_BASE_URL_ENV = "QWEN_CUA_SDK_RELEASE_BASE_URL"
 
 export interface CuaSdkNativeTarget {
   archive: string
   cacheKey: string
+  companions: string[]
   library: string
   runtime: string
 }
@@ -24,7 +24,9 @@ export function cuaSdkPackageRoot(): string {
 export function cuaSdkVersion(): string {
   const manifest = JSON.parse(
     readFileSync(join(packageRoot, "package.json"), "utf8"),
-  ) as { version?: unknown }
+  ) as {
+    version?: unknown
+  }
   if (typeof manifest.version !== "string" || manifest.version.length === 0) {
     throw new Error("@qwen-code/cua-sdk package version is unavailable")
   }
@@ -41,6 +43,7 @@ export function nativeTarget(
     return {
       archive: `cua-driver-rs-${version}-darwin-universal-binary.tar.gz`,
       cacheKey: "darwin-universal",
+      companions: [],
       library: "libcua_driver_sdk.dylib",
       runtime,
     }
@@ -53,14 +56,13 @@ export function nativeTarget(
       platform === process.platform &&
       report?.header?.glibcVersionRuntime === undefined
     ) {
-      throw new Error(
-        "@qwen-code/cua-sdk currently requires glibc on Linux",
-      )
+      throw new Error("@qwen-code/cua-sdk currently requires glibc on Linux")
     }
     const releaseArch = arch === "arm64" ? "arm64" : "x86_64"
     return {
       archive: `cua-driver-rs-${version}-linux-${releaseArch}-binary.tar.gz`,
       cacheKey: `linux-${releaseArch}`,
+      companions: [],
       library: "libcua_driver_sdk.so",
       runtime,
     }
@@ -70,6 +72,7 @@ export function nativeTarget(
     return {
       archive: `cua-driver-rs-${version}-windows-${releaseArch}-binary.zip`,
       cacheKey: `windows-${releaseArch}`,
+      companions: ["qwen-cua-driver-uia.exe"],
       library: "cua_driver_sdk.dll",
       runtime,
     }
@@ -115,7 +118,8 @@ export function hasNativePayload(
 ): boolean {
   return (
     existsSync(join(directory, target.library)) &&
-    existsSync(join(directory, target.runtime))
+    existsSync(join(directory, target.runtime)) &&
+    target.companions.every((filename) => existsSync(join(directory, filename)))
   )
 }
 
@@ -144,7 +148,7 @@ export function resolveNativeDirectory(
     if (!hasNativePayload(directory, target)) {
       throw new Error(
         `${CUA_SDK_NATIVE_DIR_ENV}=${directory} does not contain ` +
-          `${target.library} and ${target.runtime}`,
+          [target.library, target.runtime, ...target.companions].join(", "),
       )
     }
     return directory
