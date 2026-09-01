@@ -30,6 +30,7 @@ const { skillsState, workspaceState } = vi.hoisted(() => ({
   },
   workspaceState: {
     current: {
+      workspaceCwd: '/workspace/demo',
       capabilities: {
         features: ['workspace_skill_settings_toggle'],
       },
@@ -52,11 +53,15 @@ const { I18nProvider } = await import('../../i18n');
 let container: HTMLDivElement;
 let root: Root;
 
-async function renderPage(): Promise<void> {
+async function renderPage(workspaceCwd?: string): Promise<void> {
   await act(async () => {
     root.render(
       <I18nProvider language="en">
-        <SkillsManagerPage onClose={vi.fn()} onUseSkill={vi.fn()} />
+        <SkillsManagerPage
+          onClose={vi.fn()}
+          onUseSkill={vi.fn()}
+          workspaceCwd={workspaceCwd}
+        />
       </I18nProvider>,
     );
   });
@@ -205,6 +210,30 @@ describe('SkillsManagerPage', () => {
       disabledSkill.name,
       true,
       { clientId: 'client-1' },
+    );
+  });
+
+  it('omits the active workspace client id for a selected workspace', async () => {
+    skillsState.current.skills = [
+      {
+        kind: 'skill',
+        status: 'disabled',
+        name: 'review',
+        description: 'Review code',
+        level: 'user',
+        modelInvocable: true,
+        disabledReason: 'default',
+      },
+    ];
+
+    await renderPage('/workspace/secondary');
+    await openDisabledSkill('review');
+    await enableSelectedSkill();
+
+    expect(skillsState.current.setEnabled).toHaveBeenCalledWith(
+      'review',
+      true,
+      { clientId: undefined },
     );
   });
 

@@ -1066,16 +1066,25 @@ export function createDaemonWorkspaceService(
     ): Promise<WorkspaceSkillMutationResult> {
       assertActiveGeneration();
       const normalizedName = requestedSkillName.trim().toLowerCase();
+      const exactName = requestedSkillName.trim();
       const status =
         opts?.refreshRuntime === false
           ? await getWorkspaceSkillsConfigStatus()
           : await getWorkspaceSkillsStatus();
-      const skill = status.skills.find(
+      const expectedLevel = scope === 'workspace' ? 'project' : 'user';
+      const matches = status.skills.filter(
         (candidate) => candidate.name.trim().toLowerCase() === normalizedName,
       );
-      if (!skill) throw new WorkspaceSkillNotFoundError(requestedSkillName);
-      const expectedLevel = scope === 'workspace' ? 'project' : 'user';
-      if (skill.level !== expectedLevel || !skill.installedPath) {
+      const scopedMatches = matches.filter(
+        (candidate) => candidate.level === expectedLevel,
+      );
+      const skill =
+        scopedMatches.find((candidate) => candidate.name === exactName) ??
+        (scopedMatches.length === 1 ? scopedMatches[0] : undefined);
+      if (!skill && matches.length === 0) {
+        throw new WorkspaceSkillNotFoundError(requestedSkillName);
+      }
+      if (!skill?.installedPath) {
         throw new WorkspaceSkillManagementError(
           'skill_not_managed',
           'Skill is not managed in the requested scope',

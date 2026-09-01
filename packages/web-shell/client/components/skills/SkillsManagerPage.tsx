@@ -250,7 +250,10 @@ export function SkillsManagerPage({
     setNotice(null);
     try {
       const result = await setEnabled(skill.name, enabled, {
-        clientId: connection.clientId,
+        clientId:
+          workspaceCwd === undefined || workspaceCwd === workspace.workspaceCwd
+            ? connection.clientId
+            : undefined,
       });
       const refreshed = await reloadConfig();
       const refreshedSkill = refreshed?.skills.find(

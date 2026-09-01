@@ -77,6 +77,8 @@ export class WorkspaceRuntimeCoordinator {
 
   private skillsReconcileDeferred = false;
 
+  private skillsRefreshRetryRevision: number | undefined;
+
   private skillsTail: Promise<void> = Promise.resolve();
 
   private skillsQueuedWork = 0;
@@ -169,7 +171,9 @@ export class WorkspaceRuntimeCoordinator {
       );
     } catch (error) {
       this.assertAcceptingWork(error);
-      if (!(error instanceof WorkspaceRuntimeStillStartingError)) throw error;
+      if (!(error instanceof WorkspaceRuntimeStillStartingError)) {
+        throw new WorkspaceRuntimeInitializationError(error);
+      }
     }
     const finalStatus = this.status();
     if (!finalStatus.runtimeLive) {
@@ -192,6 +196,7 @@ export class WorkspaceRuntimeCoordinator {
 
   reconcileSkillsConfiguration(): 'deferred' | 'reconciling' {
     this.skillsRevision += 1;
+    this.skillsRefreshRetryRevision = undefined;
     return this.scheduleSkillsReconciliation();
   }
 
@@ -219,23 +224,24 @@ export class WorkspaceRuntimeCoordinator {
     };
     void this.queueSkillsWork(async () => {
       if (revision !== this.skillsRevision) return;
-      const result =
-        await this.bridge.invokeWorkspaceCommand<ServeWorkspaceSkillsRefreshResult>(
-          SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh,
-          { cwd: this.runtime.workspaceCwd, reason: 'all' },
-        );
-      if ((result.configsFailed ?? 0) > 0) {
-        throw new Error('Skills runtime refresh failed');
-      }
+      await this.refreshSkillsRevision(revision);
       await this.prepareSkillsRevision(revision);
     }).catch((error: unknown) => {
       if (this.draining && !this.disposed) this.skillsReconcileDeferred = true;
+      if (
+        !this.draining &&
+        !this.disposed &&
+        revision === this.skillsRevision
+      ) {
+        this.skillsRefreshRetryRevision = revision;
+      }
       this.recordSkillsError(revision, snapshot.runtimeEpoch, error);
     });
     return 'reconciling';
   }
 
   private prepareSkills(): Promise<void> {
+    const revision = this.skillsRevision;
     return this.queueSkillsWork(async () => {
       const status = this.status();
       if (
@@ -244,8 +250,25 @@ export class WorkspaceRuntimeCoordinator {
       ) {
         return;
       }
-      await this.prepareSkillsRevision(this.skillsRevision);
+      if (this.skillsRefreshRetryRevision === revision) {
+        await this.refreshSkillsRevision(revision);
+      }
+      await this.prepareSkillsRevision(revision);
     });
+  }
+
+  private async refreshSkillsRevision(revision: number): Promise<void> {
+    const result =
+      await this.bridge.invokeWorkspaceCommand<ServeWorkspaceSkillsRefreshResult>(
+        SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh,
+        { cwd: this.runtime.workspaceCwd, reason: 'all' },
+      );
+    if ((result.configsFailed ?? 0) > 0) {
+      throw new Error('Skills runtime refresh failed');
+    }
+    if (revision === this.skillsRefreshRetryRevision) {
+      this.skillsRefreshRetryRevision = undefined;
+    }
   }
 
   private queueSkillsWork<T>(run: () => Promise<T>): Promise<T> {

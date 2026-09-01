@@ -216,6 +216,98 @@ describe('WorkspaceRuntimeCoordinator', () => {
     });
   });
 
+  it('wraps a hard preheat failure during Skills preparation', async () => {
+    const harness = makeRuntime();
+    harness.preheat
+      .mockImplementationOnce(async () => {
+        harness.setSnapshot({
+          state: 'idle',
+          runtimeLive: true,
+          runtimeEpoch: 1,
+        });
+        queueMicrotask(() =>
+          harness.setSnapshot({ state: 'cold', runtimeLive: false }),
+        );
+      })
+      .mockRejectedValueOnce(new Error('spawn failed'));
+
+    await expect(
+      getWorkspaceRuntimeCoordinator(harness.runtime).ensure(),
+    ).rejects.toBeInstanceOf(WorkspaceRuntimeInitializationError);
+  });
+
+  it('retries a failed Skills refresh before certifying its revision', async () => {
+    const harness = makeRuntime();
+    harness.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 1 });
+    harness.invokeWorkspaceCommand.mockResolvedValueOnce({
+      sessionsRefreshed: 0,
+      sessionsFailed: 0,
+      configsRefreshed: 0,
+      configsFailed: 1,
+    });
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+
+    coordinator.reconcileSkillsConfiguration();
+    await vi.waitFor(() =>
+      expect(coordinator.status().capabilities?.skills?.state).toBe('error'),
+    );
+
+    await expect(coordinator.ensure()).resolves.toMatchObject({
+      capabilities: { skills: { state: 'ready', revision: 1 } },
+    });
+    expect(harness.invokeWorkspaceCommand).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not certify a revision that changed while preparation was queued', async () => {
+    const harness = makeRuntime();
+    harness.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 1 });
+    let releaseFirst!: () => void;
+    let releaseSecond!: () => void;
+    harness.invokeWorkspaceCommand
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            releaseFirst = () =>
+              resolve({
+                sessionsRefreshed: 0,
+                sessionsFailed: 0,
+                configsRefreshed: 1,
+                configsFailed: 0,
+              });
+          }),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            releaseSecond = () =>
+              resolve({
+                sessionsRefreshed: 0,
+                sessionsFailed: 0,
+                configsRefreshed: 1,
+                configsFailed: 0,
+              });
+          }),
+      );
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+
+    coordinator.reconcileSkillsConfiguration();
+    await vi.waitFor(() =>
+      expect(harness.invokeWorkspaceCommand).toHaveBeenCalledOnce(),
+    );
+    const ensure = coordinator.ensure();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    coordinator.reconcileSkillsConfiguration();
+    releaseFirst();
+
+    await expect(ensure).resolves.toMatchObject({
+      capabilities: { skills: { state: 'starting', revision: 2 } },
+    });
+    releaseSecond();
+    await vi.waitFor(() =>
+      expect(coordinator.status().capabilities?.skills?.state).toBe('ready'),
+    );
+  });
+
   it('renews the warm window on every ensure call', async () => {
     const harness = makeRuntime();
     harness.setSnapshot({

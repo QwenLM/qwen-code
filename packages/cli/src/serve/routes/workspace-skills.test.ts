@@ -145,7 +145,7 @@ function createHarness(trusted = true, runtimeLive = false) {
     installSkillConfig: (workspaceCwd, request) =>
       installWorkspaceSkill(workspaceCwd, request),
     deleteSkillConfig: (workspaceCwd, scope, skillName, installedPath) =>
-      deleteWorkspaceSkill(workspaceCwd, skillName, scope, installedPath),
+      deleteWorkspaceSkill(workspaceCwd, scope, skillName, installedPath),
     parseAndValidateClientId: () => 'client-1',
   });
   registerWorkspaceQualifiedSkillsRoutes(app, {
@@ -218,8 +218,35 @@ describe('workspace Skill management routes', () => {
     );
     expect(harness.deleteWorkspaceSkill).toHaveBeenCalledWith(
       '/workspace',
-      'configured',
       'global',
+      'configured',
+      '/global/skills/configured/SKILL.md',
+    );
+  });
+
+  it('prefers an exact-case configured Skill when names differ only by case', async () => {
+    const harness = createHarness();
+    const configured = harness.configStatus.skills.find(
+      (skill) => skill.level === 'user',
+    )!;
+    harness.configStatus.skills = [
+      {
+        ...configured,
+        name: 'Configured',
+        installedPath: '/global/skills/Configured/SKILL.md',
+      },
+      configured,
+    ];
+
+    const response = await request(harness.app).delete(
+      '/workspace/config/skills/configured?scope=global',
+    );
+
+    expect(response.status).toBe(200);
+    expect(harness.deleteWorkspaceSkill).toHaveBeenCalledWith(
+      '/workspace',
+      'global',
+      'configured',
       '/global/skills/configured/SKILL.md',
     );
   });
@@ -397,6 +424,9 @@ describe('workspace Skill management routes', () => {
         originatorClientId: 'client-1',
       }),
       body,
+    );
+    expect(harness.invalidateSkillsConfigStatus).toHaveBeenCalledWith(
+      '/workspace',
     );
   });
 

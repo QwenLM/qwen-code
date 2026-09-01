@@ -297,7 +297,12 @@ async function deleteConfiguredSkill(
     );
   }
   const expectedLevel = scope === 'workspace' ? 'project' : 'user';
-  const skill = matches.find((candidate) => candidate.level === expectedLevel);
+  const scopedMatches = matches.filter(
+    (candidate) => candidate.level === expectedLevel,
+  );
+  const skill =
+    scopedMatches.find((candidate) => candidate.name === skillName.trim()) ??
+    (scopedMatches.length === 1 ? scopedMatches[0] : undefined);
   if (!skill?.installedPath) {
     throw new WorkspaceSkillManagementError(
       'skill_not_managed',
@@ -450,6 +455,7 @@ export function registerWorkspaceSkillsRoutes(
             buildWorkspaceCtx(installRoute, clientId),
             input,
           );
+        invalidateGlobalConfigStatus(deps.workspaceRuntime.workspaceCwd);
         res.status(200).json(result);
       } catch (err) {
         if (!sendSkillManagementError(res, err))
@@ -482,6 +488,7 @@ export function registerWorkspaceSkillsRoutes(
             skillName,
             scope,
           );
+        invalidateGlobalConfigStatus(deps.workspaceRuntime.workspaceCwd);
         res.status(200).json(result);
       } catch (err) {
         if (!sendSkillManagementError(res, err))
@@ -505,6 +512,7 @@ export function registerWorkspaceSkillsRoutes(
             input.skillNames,
             input.enabled,
           );
+        invalidateGlobalConfigStatus(deps.workspaceRuntime.workspaceCwd);
         res.status(200).json(result);
       } catch (err) {
         deps.sendBridgeError(res, err, { route: batchRoute });
@@ -527,6 +535,7 @@ export function registerWorkspaceSkillsRoutes(
             input.skillName,
             input.enabled,
           );
+        invalidateGlobalConfigStatus(deps.workspaceRuntime.workspaceCwd);
         res.status(200).json(result);
       } catch (err) {
         deps.sendBridgeError(res, err, { route });
