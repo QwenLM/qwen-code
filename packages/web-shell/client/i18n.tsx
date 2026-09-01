@@ -54,6 +54,15 @@ const EN: Messages = {
   'branchPicker.createdBranch': (v) => `Created branch ${v?.branch ?? ''}`,
   'branchPicker.pushSuccess': 'Pushed successfully',
   'branchPicker.pullSuccess': 'Updated successfully',
+  'branchPicker.pullBlocked': 'Update blocked by uncommitted changes',
+  'branchPicker.pullStash': 'Stash Changes and Update',
+  'branchPicker.pullDiscard': 'Discard Changes and Update…',
+  'branchPicker.pullDiscardConfirm':
+    'Discard ALL uncommitted changes (including untracked files)? This cannot be undone.',
+  'branchPicker.pullDiscardGo': 'Discard and Update',
+  'branchPicker.pullStashConflict': (v) =>
+    `Updated, but restoring your stashed changes failed. They are kept in stash entry ${String(v?.sha ?? '').slice(0, 12) || '(see git stash list)'} — resolve any conflict markers, then restore it manually.`,
+  'branchPicker.cancel': 'Cancel',
   'branchPicker.hint.upToDate': 'Up to date',
   'branchPicker.hint.noUpstream': 'No upstream',
   'branchPicker.hint.upstreamGone': 'Upstream gone',
@@ -3273,6 +3282,15 @@ const ZH: Messages = {
   'branchPicker.createdBranch': (v) => `已创建分支 ${v?.branch ?? ''}`,
   'branchPicker.pushSuccess': '推送成功',
   'branchPicker.pullSuccess': '更新成功',
+  'branchPicker.pullBlocked': '存在未提交的修改，无法更新',
+  'branchPicker.pullStash': 'Stash 修改并更新',
+  'branchPicker.pullDiscard': '放弃修改并更新…',
+  'branchPicker.pullDiscardConfirm':
+    '将放弃所有未提交的修改（包括未跟踪文件），此操作无法撤销。',
+  'branchPicker.pullDiscardGo': '放弃并更新',
+  'branchPicker.pullStashConflict': (v) =>
+    `更新成功，但恢复 Stash 中的修改失败。修改仍保留在 Stash 条目 ${String(v?.sha ?? '').slice(0, 12) || '（见 git stash list）'} 中 —— 请先解决冲突标记，再手动恢复。`,
+  'branchPicker.cancel': '取消',
   'branchPicker.hint.upToDate': '已是最新',
   'branchPicker.hint.noUpstream': '无上游分支',
   'branchPicker.hint.upstreamGone': '上游分支已不存在',
