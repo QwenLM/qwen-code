@@ -13,7 +13,14 @@
  * into dist/runtime/ here. resolveKernelPath() and the wasm loader probe
  * ./runtime/ relative to the compiled module, so this layout works in dist.
  */
-import { cpSync, existsSync, mkdirSync, rmSync } from 'node:fs';
+import {
+  chmodSync,
+  cpSync,
+  existsSync,
+  mkdirSync,
+  rmSync,
+  statSync,
+} from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
@@ -100,5 +107,14 @@ for (const required of [
     );
   }
 }
+
+// 6. Restore the execute bit on the bin entry. npm's bin-link chmods
+//    dist/index.js at install time, but step 0 deletes that exact file and tsc
+//    re-emits it as 0644, so after any rebuild node_modules/.bin/node-repl-mcp
+//    points at a non-executable target and spawning it fails with EACCES before
+//    the shebang is ever read. OR the exec bits into the existing mode instead
+//    of setting 0o755, so a deliberately-private checkout stays private.
+const binEntry = path.join(here, 'dist', 'index.js');
+chmodSync(binEntry, statSync(binEntry).mode | 0o111);
 
 console.log(`node-repl-mcp: runtime assets copied to ${distRuntime}`);
