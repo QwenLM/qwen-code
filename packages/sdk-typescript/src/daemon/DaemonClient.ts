@@ -241,6 +241,7 @@ import type {
 import { parseSseStream } from './sse.js';
 import {
   DaemonStandaloneCreationOutcomeUnknownError,
+  STANDALONE_SESSION_OPTIONS_CAPABILITY,
   STANDALONE_SESSIONS_CAPABILITY,
   isStandaloneCreationOutcomeUnknown,
   isStandaloneSessionNotFoundError,
@@ -252,6 +253,7 @@ import {
   parseStandaloneLookup,
   parseStandaloneMetadataResult,
   parseStandaloneSession,
+  parseStandaloneSessionOptions,
   parseUnarchiveStandaloneSessionsResult,
   type CreateStandaloneSessionOptions,
   type DaemonArchiveStandaloneSessionsResult,
@@ -261,6 +263,7 @@ import {
   type DaemonStandaloneDirectoryResult,
   type DaemonStandaloneMetadataResult,
   type DaemonStandaloneSession,
+  type DaemonStandaloneSessionOptions,
   type DaemonStandaloneSessionListOptions,
   type DaemonStandaloneSessionListPage,
   type DaemonStandaloneSessionLookup,
@@ -2642,6 +2645,17 @@ export class DaemonClient {
   }
 
   // -- Sessions ----------------------------------------------------------
+
+  async getStandaloneSessionOptions(): Promise<DaemonStandaloneSessionOptions> {
+    await this.requireCapability(STANDALONE_SESSION_OPTIONS_CAPABILITY);
+    const route = 'GET /standalone/session-options';
+    const response = await this.jsonRequest<unknown>(
+      '/standalone/session-options',
+      route,
+      { mode: 'rest' },
+    );
+    return parseStandaloneSessionOptions(response, route);
+  }
 
   async createStandaloneSession(
     options: CreateStandaloneSessionOptions = {},
